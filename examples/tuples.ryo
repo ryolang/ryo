@@ -1,0 +1,54 @@
+# Anonymous structs & tuple sugar: one grouping type — the anonymous
+# struct. `(17, "alice")` is positional sugar for {0=17, 1="alice"}.
+
+fn divmod(a: int, b: int) -> {q: int, r: int}:
+	return {q=a / b, r=a % b}
+
+fn flip(pair: (int, int)) -> (int, int):
+	return (pair.1, pair.0)
+
+struct Point:
+	x: int
+	y: int
+
+fn main():
+	# Multi-return: one shape crosses the function boundary.
+	(q, r) = divmod(17, 5)
+	print(q)
+	print("\n")
+	print(r)
+	print("\n")
+
+	# Named destructuring: bare names bind their own fields.
+	{quot, rem} = divmod(17, 5)
+	print(quot)
+	print("\n")
+
+	# `_` skips a field: it is destroyed, never bound.
+	{again, _} = divmod(17, 5)
+	print(again)
+	print("\n")
+
+	# Positional access on tuple sugar.
+	pair = (17, "alice")
+	print(pair.0)
+	print("\n")
+
+	# Single-element sugar keeps the trailing comma, in code and print.
+	one = (7,)
+	print(one)
+	print("\n")
+
+	# Graduation: an anonymous shape becomes a named struct explicitly.
+	p = Point{x=q, y=r}
+	print(p)
+	print("\n")
+
+	# Equality is structural — every field type here is Eq-capable.
+	assert((1, 2) == (1, 2), "same shape, same values")
+	assert((1, 2) != (2, 1), "positional order matters")
+	assert(flip((3, 9)) == (9, 3), "flip swaps the fields")
+
+	# print of a returned shape renders the named fields.
+	print(divmod(17, 5))
+	print("\n")

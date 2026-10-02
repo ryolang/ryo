@@ -28,6 +28,26 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ## 🟡 Correctness / Hygiene
 
+### I-202 — User bindings named `__ryo_destructure_N` collide with compiler temps in destructuring lowering
+
+**Files:** `ryo-frontend/src/sema/stmt.rs` (`analyze_destructure`, `fcx_temp_name`), `ryo-frontend/src/sema/expr.rs` (temp lookup ahead of the scope walk), `ryo-frontend/src/sema/mod.rs` (`destructure_temps` side table)
+
+**Summary:** Nested destructuring patterns mint compiler-temp bindings named `__ryo_destructure_N`; astgen guarantees the temps don't collide with each other, but nothing stops a user from declaring a binding with the same name in the same body — and the variable-level `__ryo_` reservation only fires for function names and reserved builtins, not plain bindings. Sema's expression lookup checks the `destructure_temps` side table before the user scope, and the table persists for the whole body. Demonstrated (2026-10-02):
+
+```ryo
+fn f() -> {p: int, q: {u: int, v: int}}:
+	return {p=1, q={u=2, v=3}}
+
+fn main():
+	__ryo_destructure_0 = 5
+	(a, (b, c)) = f()          # mints __ryo_destructure_0 for the inner pattern
+	print(__ryo_destructure_0) # prints {u=2, v=3} — the temp hijacked the binding
+```
+
+The user's `5` is shadowed by the struct temp; depending on ordering either the destructure or the user reads see the wrong value. Reachable only by deliberately writing the reserved-looking prefix, so exposure is small — but the prefix is not actually reserved at binding level today, so nothing warns the user.
+
+**Resolution:** Reject user bindings starting with `__ryo_destructure_` (a binding-level check in `analyze_destructure`'s binding path is too narrow — the declaration paths need it too), or give the temps a namespace user source can never spell. Fold into the same pass that retires the per-body side table if that happens first.
+
 ### I-201 — Process-wide argv state has no isolation contract; concurrent hosted executions can mix generations
 
 **Files:** `runtime/src/lib.rs` (ARGC/ARGV globals, `ryo_rt_init`, `ryo_process_argc`, `ryo_process_argv`), `ryo-backend/src/codegen/mod.rs` (entry shim emitting the init call), `ryo-backend/src/codegen/jit.rs` (trampoline and runtime symbol table)
@@ -73,14 +93,8 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-018 — `TypeId` is a newtype, not a typed enum
 
 **Files:** `ryo-core/src/types.rs` (`TypeId`)
-**Summary:** The UIR/TIR pipeline redesign originally called for `TypeId` to become an `enum { Void = 0, Bool = 1, ..., Error = 4, Dynamic(NonZeroU32) }` so primitive matches are exhaustive at compile time and the `pool.int()` accessor disappears. The design allowed a fallback to a plain `Copy` newtype if the enum encoding fights the borrow checker, which is what we shipped. Cost: the `TypeKind::Tuple` arm we added in `cranelift_type_for` and a couple of sema sites are not statically guaranteed to be covered when a new primitive lands.
+**Summary:** The UIR/TIR pipeline redesign originally called for `TypeId` to become an `enum { Void = 0, Bool = 1, ..., Error = 4, Dynamic(NonZeroU32) }` so primitive matches are exhaustive at compile time and the `pool.int()` accessor disappears. The design allowed a fallback to a plain `Copy` newtype if the enum encoding fights the borrow checker, which is what we shipped. Cost: the `TypeKind::AnonStruct` arm we added in `cranelift_type_for` and a couple of sema sites are not statically guaranteed to be covered when a new primitive lands.
 **Resolution:** Re-attempt the enum encoding using `repr(u32)` + `Dynamic(NonZeroU32)` once the borrow-checker pain points (mostly around `pool.kind` returning a value that contains a `TypeId`) are characterised. Low priority — the matches we have today still go through `TypeKind`, which *is* exhaustive, so the gap is small.
-
-### I-019 — `tuple_elements_vec` allocates a `Vec` per call
-
-**Files:** `ryo-core/src/types.rs` (`tuple_elements_vec`)
-**Summary:** The accessor copies the element-id slice out of `extra` rather than returning a borrowed view, because `TypeId` is not `#[repr(transparent)]` over `u32` and the unsafe transmute to `&[TypeId]` would be UB without it. Today the function is called only by `Display` for diagnostics and by tests; not a hot path.
-**Resolution:** Tag `TypeId` with `#[repr(transparent)]` and expose `tuple_elements(id) -> &[TypeId]` alongside the copying accessor. Migrate non-perf-critical callers to it lazily. Defer until tuple codegen lands and the accessor shows up in a profile.
 
 ### I-021 — `bool` lowered as `types::I8` will mis-ABI across FFI boundaries
 

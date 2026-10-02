@@ -64,8 +64,7 @@ pub enum DiagCode {
     InfiniteSize,
     /// `#[derive(Eq)]` on a struct with a field whose type is not
     /// Eq-capable (M9.1): the scalar primitives are, a struct is only
-    /// with its own `#[derive(Eq)]`, and views / tuples / the rest
-    /// are not.
+    /// with its own `#[derive(Eq)]`, and views / the rest are not.
     DeriveFieldNotEq,
 
     // --- sema ---
