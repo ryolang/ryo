@@ -595,8 +595,11 @@ fn gen_function_def(
 /// field to a synthesized `__ryo_destructure_N` temp and recurses,
 /// emitting the sub-pattern's own `Destructure` over a `Var` read of
 /// that temp as the following statement. Sema resolves the temp
-/// through its own side table (never the user scope), so user code
-/// cannot collide with the name.
+/// through its own side table, checked before the user scope and
+/// persisting for the whole body — so a user binding spelled
+/// `__ryo_destructure_N` in the same body is shadowed by the temp.
+/// The `__ryo_` prefix is reserved for function names and builtins,
+/// not plain bindings, so nothing warns the user today.
 fn lower_destructure_pattern(
     b: &mut UirBuilder,
     ast: &ast::Ast,
