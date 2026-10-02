@@ -754,7 +754,7 @@ pub(crate) fn check_print_args(
             sema.uir.span(view.args[0]),
             DiagCode::TypeMismatch,
             format!(
-                "{builtin}() argument must be str, strview, bytes, bytesview, int, float, bool, or struct, got {}",
+                "{builtin}() argument must be str, strview, bytes, bytesview, int, float, bool, struct, or tuple, got {}",
                 sema.pool.display(arg_ty)
             ),
         ));

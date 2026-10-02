@@ -269,6 +269,22 @@ fn print_with_borrow_arg_rejected() {
 }
 
 #[test]
+fn print_rejected_type_message_lists_accepted_types() {
+    // `print(print("x"))` — the inner print is `void`, not a printable
+    // type; the TypeMismatch message pins the full accept set (M10
+    // added anonymous structs / tuples).
+    let (_tirs, diags, _pool) = run_with_errors("fn main():\n\tprint(print(\"x\"))\n");
+    assert!(
+        any_code(&diags, DiagCode::TypeMismatch),
+        "print(void) must be rejected; got {diags:?}"
+    );
+    assert_eq!(
+        first_msg(&diags),
+        "print() argument must be str, strview, bytes, bytesview, int, float, bool, struct, or tuple, got void"
+    );
+}
+
+#[test]
 fn conversion_builtin_with_borrow_arg_rejected() {
     // `int_to_str(&c)` — conversion builtins are not `inout` either.
     let (_tirs, diags, _pool) =
