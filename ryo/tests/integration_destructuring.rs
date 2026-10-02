@@ -296,3 +296,35 @@ fn field_move_still_forbidden() {
         stderr
     );
 }
+
+#[test]
+fn destructure_failed_struct_definition_recovers() {
+    // A struct whose definition failed (unknown field type) leaves the
+    // declared type undefined; a variable annotated with it carries that
+    // raw TypeId. Destructuring it must recover with the original
+    // diagnostic instead of panicking in `struct_view` (the guard
+    // mirrors expression-level field access).
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code =
+        "struct Bad:\n\tx: Nope\n\nfn main():\n\tb: Bad = Bad{x = 1}\n\t{x} = b\n\tprint(x)\n";
+    let test_file = create_test_file(temp_dir.path(), "undefined_struct.ryo", code);
+
+    let output = run_ryo_command(&["run", "undefined_struct.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        !output.status.success(),
+        "the failed struct definition must fail compilation"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown type: 'Nope'"),
+        "the original field-type diagnostic must survive, got: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "destructuring must not panic on an undefined struct, got: {}",
+        stderr
+    );
+}
