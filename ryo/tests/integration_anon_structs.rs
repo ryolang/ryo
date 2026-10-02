@@ -211,3 +211,58 @@ fn graduation_fixit_message() {
         stderr
     );
 }
+
+// ---- M10: structural equality (`==` / `!=`) ----
+
+#[test]
+fn anon_eq_nested_shape_jit() {
+    // A shape nested in a shape compares recursively: the memberwise
+    // path descends into the inner shape's fields (the same
+    // recursion named structs get from their derived Eq).
+    assert_ryo_output(
+        "anon_eq_nested",
+        "fn main():\n\tp = {a=1, n={v=2}}\n\tq = {a=1, n={v=2}}\n\tr = {a=1, n={v=3}}\n\tprint(p == q)\n\tprint(\"\\n\")\n\tprint(p == r)\n\tprint(\"\\n\")\n\tprint(p != r)\n\tprint(\"\\n\")\n",
+        "true\nfalse\ntrue\n",
+    );
+}
+
+#[test]
+fn anon_eq_nan_field_never_equals_jit() {
+    // IEEE: NaN != NaN, so fcmp eq on a NaN field is false even when
+    // both operands are the very same value — the same documented NaN
+    // behavior as named structs (M9.1). NaN is built arithmetically:
+    // float division does not trap (0.0 / 0.0).
+    assert_ryo_output(
+        "anon_eq_nan",
+        "fn main():\n\tp = {x=0.0 / 0.0, y=1.0}\n\tprint(p == p)\n\tprint(\"\\n\")\n\tprint(p != p)\n\tprint(\"\\n\")\n",
+        "false\ntrue\n",
+    );
+}
+
+#[test]
+fn anon_ordering_rejected() {
+    // Shapes have no ordering: `p < q` hits the same
+    // UnsupportedOperator arm as named structs.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tp = {x=1}\n\tq = {x=2}\n\tprint(p < q)\n";
+    let test_file = create_test_file(temp_dir.path(), "anon_ordering.ryo", code);
+
+    let output = run_ryo_command(&["run", "anon_ordering.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        !output.status.success(),
+        "ordering on a shape must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0015"),
+        "should emit E0015 (UnsupportedOperator), got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("ordering operator '<' not supported"),
+        "error should carry the unsupported-operator message, got: {}",
+        stderr
+    );
+}

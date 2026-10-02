@@ -16,10 +16,11 @@ fn tuple_sugar_roundtrip() {
     // `(int, str)` in the return type and `{0: int, 1: str}` are one
     // structural type: annotating `zero` with the paren spelling
     // compiles only if the shapes dedup (a mismatch fails
-    // compilation). The `==` line lands with Task 8 (equality).
+    // compilation). The `==` line is the Task 8 structural equality:
+    // two independently-built values of the one shape compare equal.
     assert_ryo_output(
         "tuple_sugar_roundtrip",
-        "fn pair() -> (int, str):\n\treturn (17, \"alice\")\n\nfn main():\n\tp = pair()\n\tzero: (int, str) = {0=17, 1=\"alice\"}\n\tprint(p.0)\n\tprint(\"\\n\")\n\tprint(zero.1)\n\tprint(\"\\n\")\n\t# assert p == zero -- enabled in task 8 (equality)\n",
+        "fn pair() -> (int, str):\n\treturn (17, \"alice\")\n\nfn main():\n\tp = pair()\n\tzero: (int, str) = {0=17, 1=\"alice\"}\n\tprint(p.0)\n\tprint(\"\\n\")\n\tprint(zero.1)\n\tprint(\"\\n\")\n\tassert(p == zero, \"pair() roundtrips through the one shape\")\n",
         "17\nalice\n",
     );
 }

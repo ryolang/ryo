@@ -1101,7 +1101,46 @@ pub(crate) fn check_binary_op(
                     fcx.builder.unreachable(sema.pool.error_type(), span)
                 }
             }
-            TypeKind::Void | TypeKind::Never | TypeKind::AnonStruct | TypeKind::View(_) => {
+            // M10: anonymous struct equality is structural — a shape
+            // is Eq-capable exactly when every field is
+            // (`is_eq_capable`, computed recursively; there is no
+            // stored flag and no opt-in attribute). Same memberwise
+            // lowering as named structs: the shared StructEq/StructNe
+            // codegen path reads the fields through `struct_view`,
+            // which anon structs populate too. One diagnostic per
+            // offending field, mirroring M9.1's derive validation.
+            TypeKind::AnonStruct => {
+                let view = sema.pool.struct_view(kind_ty);
+                let mut capable = true;
+                for f in &view.fields {
+                    if sema.pool.is_eq_capable(f.ty) {
+                        continue;
+                    }
+                    capable = false;
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::AnonFieldNotEq,
+                        format!(
+                            "binary operator `{}` requires field '{}' of type '{}' to be Eq-capable",
+                            bin_op_symbol(tag),
+                            sema.pool.str(f.name),
+                            sema.pool.display(f.ty),
+                        ),
+                    ));
+                }
+                if capable {
+                    let tir_tag = match tag {
+                        InstTag::Eq => TirTag::StructEq,
+                        InstTag::NotEq => TirTag::StructNe,
+                        _ => unreachable!(),
+                    };
+                    fcx.builder
+                        .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
+                } else {
+                    fcx.builder.unreachable(sema.pool.error_type(), span)
+                }
+            }
+            TypeKind::Void | TypeKind::Never | TypeKind::View(_) => {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,
