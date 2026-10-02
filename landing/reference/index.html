@@ -178,6 +178,7 @@
                 <a href="#booleans">Booleans &amp; Logic</a>
                 <a href="#strings">Strings</a>
                 <a href="#structs">Structs</a>
+                <a href="#tuples">Anonymous Structs &amp; Tuples</a>
               </nav>
             </div>
 
@@ -916,6 +917,205 @@ fn main():
                   <code>area(rect)</code> above.
                 </p>
               </div>
+            </div>
+          </section>
+
+          <!-- =================================================== -->
+          <section id="tuples">
+            <h2>
+              Anonymous Structs &amp; Tuples
+              <a class="anchor" href="#tuples" aria-label="Permalink">#</a>
+            </h2>
+            <p>
+              Ryo has exactly one ad-hoc grouping type — the
+              <strong>anonymous struct</strong>. Tuples are positional
+              sugar over it: <code>(17, "alice")</code> is the same value
+              as <code>{0=17, 1="alice"}</code>, one structural type, not
+              two. Reach for an anonymous shape when data is local and
+              transient (multi-return, unpacking); once a shape crosses a
+              boundary or carries domain meaning, give it a name.
+            </p>
+
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">tuples.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">fn divmod(a: int, b: int) -&gt; {q: int, r: int}:
+	return {q=a / b, r=a % b}
+
+struct Point:
+	x: int
+	y: int
+
+fn main():
+	# one shape crosses the boundary; two ways to take it apart
+	(q, r) = divmod(17, 5)        # positional: binds in field order
+	print(q)                      # 3
+	{quot, _} = divmod(17, 5)     # named: quot = q, r is dropped
+	print(quot)                   # 3
+
+	pair = (17, "alice")          # sugar for {0=17, 1="alice"}
+	print(pair.0)                 # 17
+	print(pair)                   # (17, "alice")
+
+	point = Point{x=q, y=r}       # graduation: explicit construction
+	assert((1, 2) == (1, 2), "structural equality, no opt-in")
+	print(divmod(17, 5))          # {q=3, r=2}</code></pre>
+            </div>
+
+            <h3>Forms</h3>
+            <div class="ref-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Syntax</th>
+                    <th>Meaning</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>{x=1, y=2}</code></td>
+                    <td>Anonymous struct literal — fields are names</td>
+                  </tr>
+                  <tr>
+                    <td><code>(17, "alice")</code>, <code>(7,)</code></td>
+                    <td>
+                      Tuple sugar for fields named <code>"0"</code> /
+                      <code>"1"</code>; a one-element tuple keeps the
+                      trailing comma
+                    </td>
+                  </tr>
+                  <tr>
+                    <td>
+                      <code>{q: int, r: int}</code>,
+                      <code>(int, str)</code>
+                    </td>
+                    <td>
+                      Type literals — return types, parameters,
+                      annotations
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>pair.0</code></td>
+                    <td>
+                      Positional access; chained access takes parens —
+                      <code>(pair.0).1</code>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>(q, r) = expr</code></td>
+                    <td>
+                      Destructuring — paren-less
+                      <code>q, r = expr</code> also works; every field
+                      must be bound or <code>_</code>-ed
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>{quot, _}</code>, <code>{x = ex}</code></td>
+                    <td>
+                      Named patterns: bare names bind their own field (or
+                      the next uncovered one); renames name the field; a
+                      <code>_</code> field is destroyed, not bound
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>{x, y} = point</code></td>
+                    <td>
+                      Named structs destructure by field name — positional
+                      patterns on them are rejected
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h3>Printing &amp; Equality</h3>
+            <p>
+              Debug rendering is always on and mirrors the literal
+              syntax: all-positional shapes print in paren sugar —
+              <code>(3, 1)</code>, <code>(3,)</code> — while any named
+              field switches to braces — <code>{x=1, y=2}</code> — with
+              <code>str</code> fields quoted. <code>==</code> /
+              <code>!=</code> compare memberwise with no opt-in whenever
+              every field type is Eq-capable; float fields use IEEE
+              <code>==</code>, so a shape containing NaN never equals
+              itself.
+            </p>
+
+            <h3>Diagnostics</h3>
+            <div class="ref-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Code</th>
+                    <th>Meaning</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>E0109</code></td>
+                    <td>
+                      <code>{}</code> is reserved for the future empty map
+                      literal — there is no empty anonymous struct
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>E0110</code></td>
+                    <td>
+                      <code>pair.0.1</code> reads as <code>pair . 0.1</code>
+                      — chain positional access with parens:
+                      <code>(pair.0).1</code>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>E0111</code></td>
+                    <td>
+                      <code>()</code> is not a value — <code>void</code>
+                      is the unit type; write <code>none</code> or
+                      <code>(x,)</code>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>E0112</code></td>
+                    <td>
+                      <code>(a) = x</code> needs the trailing comma —
+                      <code>(a,)</code> — or write plain
+                      <code>a = x</code>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>E0113</code></td>
+                    <td>
+                      Positional pattern count mismatch — "expected 2
+                      fields, found 3 bindings"
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>E0114</code></td>
+                    <td>
+                      Pattern names a field the struct doesn't have, or
+                      leaves one unbound — bind it or write
+                      <code>_</code>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>E0115</code></td>
+                    <td>
+                      Named structs destructure by field name — use the
+                      brace pattern (<code>{x, y}</code>), not
+                      <code>(x, y)</code>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>E0116</code></td>
+                    <td>
+                      <code>==</code> on a shape with a non-Eq-capable
+                      field — the error names the field
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </section>
 
@@ -1682,10 +1882,6 @@ fn main():
                       <code>io_*</code>)
                     </td>
                     <td><span class="pill">Milestone 9.2</span></td>
-                  </tr>
-                  <tr>
-                    <td>Tuples</td>
-                    <td><span class="pill">Milestone 10</span></td>
                   </tr>
                   <tr>
                     <td>Enums (algebraic data types)</td>
