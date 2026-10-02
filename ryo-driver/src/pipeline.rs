@@ -435,6 +435,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::UnknownAttribute => "E0108",
         DiagCode::EmptyAnonStruct => "E0109",
         DiagCode::ChainedPositionalAccess => "E0110",
+        DiagCode::UnitParen => "E0111",
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::InvalidCharacter => "E0102",
         DiagCode::UnknownEscape => "E0103",
@@ -859,6 +860,7 @@ mod tests {
             (DiagCode::UnknownAttribute, "E0108"),
             (DiagCode::EmptyAnonStruct, "E0109"),
             (DiagCode::ChainedPositionalAccess, "E0110"),
+            (DiagCode::UnitParen, "E0111"),
             (DiagCode::ConstEvalFailure, "E0200"),
             (DiagCode::CycleInComptime, "E0201"),
             (DiagCode::GenericInstantiation, "E0202"),
@@ -934,6 +936,7 @@ mod tests {
                 | DiagCode::UnknownAttribute
                 | DiagCode::EmptyAnonStruct
                 | DiagCode::ChainedPositionalAccess
+                | DiagCode::UnitParen
                 | DiagCode::TooManyDiagnostics
                 | DiagCode::InvalidCharacter
                 | DiagCode::UnknownEscape
