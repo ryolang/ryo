@@ -6,6 +6,67 @@ use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, TypeId, TypeKind, ViewKind};
 use ryo_core::uir::{InstData, InstRef, InstTag, Span, StructLitView, Uir};
 
+/// Resolve a user-spelled variable read. The `__ryo_` namespace belongs
+/// to compiler-generated temporaries (nested-destructuring temps,
+/// runtime shims), which astgen emits as `TempVar` — never `Var` — so
+/// a `__ryo_` spelling here is USER source, and since every declaration
+/// path rejects the prefix there is nothing legitimate it can refer
+/// to: reject the read before it can reach any compiler side table.
+/// Otherwise walk the block scopes; unknown names are a compile error
+/// (spec §3, Variables).
+fn resolve_var_read(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    name: StringId,
+    span: Span,
+) -> TirRef {
+    if sema.pool.str(name).starts_with("__ryo_") {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ReservedIdentifier,
+            format!(
+                "identifiers starting with '__ryo_' are reserved for the compiler runtime: '{}'",
+                sema.pool.str(name),
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    match scope.lookup(name) {
+        Some(t) => fcx.builder.var(name, t, span),
+        None => {
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::UndefinedVariable,
+                format!("undefined variable: '{}'", sema.pool.str(name)),
+            ));
+            fcx.builder.unreachable(sema.pool.error_type(), span)
+        }
+    }
+}
+
+/// Resolve a compiler-generated temporary read (see [`InstTag::TempVar`]).
+/// Only astgen's nested-destructuring lowering emits that tag, always
+/// as the statement immediately after the one that bound the temp, so
+/// the table must contain it — a miss is a compiler bug, reported
+/// rather than panicked.
+fn resolve_temp_read(sema: &mut Sema<'_>, fcx: &mut FuncCtx, name: StringId, span: Span) -> TirRef {
+    match fcx.destructure_temps.get(&name).copied() {
+        Some(t) => fcx.builder.var(name, t, span),
+        None => {
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::UndefinedVariable,
+                format!(
+                    "internal compiler error: unbound destructuring temporary '{}'",
+                    sema.pool.str(name),
+                ),
+            ));
+            fcx.builder.unreachable(sema.pool.error_type(), span)
+        }
+    }
+}
+
 /// Expression-position analysis. A `never`-typed result (e.g. a
 /// `panic` call) is rejected: `panic` may only appear as a bare
 /// statement, never where a value is required (return operand,
@@ -72,26 +133,14 @@ pub(crate) fn analyze_expr_allow_never(
                 InstData::Var(s) => s,
                 _ => unreachable!("Var must carry InstData::Var"),
             };
-            // M10: nested-destructuring temps resolve before any scope
-            // lookup — they are compiler-internal (`__ryo_` prefix, side
-            // table, minted per body) and their single use site sits
-            // immediately after the statement that binds them, so a
-            // user variable with the same spelling elsewhere is
-            // unaffected.
-            let temp_ty = fcx.destructure_temps.get(&name).copied();
-            match temp_ty.or_else(|| scope.lookup(name)) {
-                Some(t) => fcx.builder.var(name, t, span),
-                None => {
-                    // block-scoped name resolution; unknown names are a
-                    // compile error (spec §3, Variables)
-                    sema.sink.emit(Diag::error(
-                        span,
-                        DiagCode::UndefinedVariable,
-                        format!("undefined variable: '{}'", sema.pool.str(name)),
-                    ));
-                    fcx.builder.unreachable(sema.pool.error_type(), span)
-                }
-            }
+            resolve_var_read(sema, fcx, scope, name, span)
+        }
+        InstTag::TempVar => {
+            let name = match inst.data {
+                InstData::Var(s) => s,
+                _ => unreachable!("TempVar must carry InstData::Var"),
+            };
+            resolve_temp_read(sema, fcx, name, span)
         }
         InstTag::Add
         | InstTag::Sub

@@ -149,6 +149,14 @@ pub enum InstTag {
     /// a local/param read or a diagnostic.
     Var,
 
+    /// Compiler-generated temporary read. Only astgen's nested-
+    /// destructuring lowering emits this (see [`InstTag::Destructure`]);
+    /// the payload is [`InstData::Var`] like [`InstTag::Var`], but sema
+    /// resolves it exclusively through the destructuring-temp side
+    /// table — never the user scope — so source-level `Var` references
+    /// can neither observe nor collide with compiler temporaries.
+    TempVar,
+
     // Binary arithmetic / comparison. Both operands in `data.bin_op`.
     Add,
     Sub,
@@ -274,7 +282,7 @@ pub enum InstData {
     Float(f64),
     Str(StringId),
     Bool(bool),
-    /// Identifier name for [`InstTag::Var`].
+    /// Identifier name for [`InstTag::Var`] and [`InstTag::TempVar`].
     Var(StringId),
     /// Single operand, used by unary ops, [`InstTag::Return`], and
     /// [`InstTag::ExprStmt`].
@@ -638,6 +646,12 @@ impl UirBuilder {
 
     pub fn var_ref(&mut self, name: StringId, span: Span) -> InstRef {
         self.push(InstTag::Var, InstData::Var(name), span)
+    }
+
+    /// Emits a read of a compiler-generated temporary (nested-
+    /// destructuring lowering only); see [`InstTag::TempVar`].
+    pub fn temp_var_ref(&mut self, name: StringId, span: Span) -> InstRef {
+        self.push(InstTag::TempVar, InstData::Var(name), span)
     }
 
     pub fn unary(&mut self, tag: InstTag, operand: InstRef, span: Span) -> InstRef {

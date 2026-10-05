@@ -614,15 +614,11 @@ fn gen_function_def(
 /// A nested pattern element (possible only inside a positional
 /// pattern) cannot be expressed in one flat plan: astgen binds the
 /// field to a synthesized `__ryo_destructure_N` temp and recurses,
-/// emitting the sub-pattern's own `Destructure` over a `Var` read of
-/// that temp as the following statement. Sema resolves the temp
-/// through its own side table, checked before the user scope and
-/// persisting for the whole body — so a user binding spelled
-/// `__ryo_destructure_N` in the same body is shadowed by the temp.
-/// Sema closes that hole: every user declaration path (variables,
-/// parameters, loop variables, pattern bindings, function names)
-/// rejects the `__ryo_` prefix with ReservedIdentifier, so user
-/// source can never introduce a temp-colliding name.
+/// emitting the sub-pattern's own `Destructure` over a `TempVar` read
+/// of that temp as the following statement. `TempVar` is its own UIR
+/// tag, so the read resolves only through sema's destructuring-temp
+/// side table — never the user scope — and a user-spelled `Var`
+/// reference cannot observe or hijack the temp.
 fn lower_destructure_pattern(
     b: &mut UirBuilder,
     ast: &ast::Ast,
@@ -658,7 +654,7 @@ fn lower_destructure_pattern(
             }
             out.push(b.destructure(value, true, &plan, span));
             for (elem, temp, elem_span) in nested {
-                let elem_value = b.var_ref(temp, elem_span);
+                let elem_value = b.temp_var_ref(temp, elem_span);
                 lower_destructure_pattern(b, ast, pool, elem, elem_value, elem_span, out);
             }
         }
@@ -1021,6 +1017,33 @@ mod tests {
             matches!(uir.inst(inner).tag, InstTag::Var),
             "borrow operand should be a Var read"
         );
+    }
+
+    #[test]
+    fn nested_destructure_reads_temp_as_tempvar() {
+        // The sub-pattern's value read must carry the TempVar tag —
+        // the provenance that keeps user `Var` references away from
+        // the compiler temp table (they reject the `__ryo_` prefix
+        // instead of resolving through it).
+        let (uir, pool) = parse_and_lower("fn main():\n\t(a, (b, c)) = (1, (2, 3))\n").unwrap();
+        let main = body_named(&uir, &pool, "main");
+        let stmts = uir.body_stmts(main);
+        assert_eq!(
+            stmts.len(),
+            2,
+            "nested lowering emits the sub-pattern as its own statement"
+        );
+        let sub = uir.destructure_view(stmts[1]);
+        let value = uir.inst(sub.value);
+        assert!(
+            matches!(value.tag, InstTag::TempVar),
+            "sub-pattern value must be a TempVar read, got {:?}",
+            value.tag
+        );
+        match value.data {
+            InstData::Var(name) => assert_eq!(pool.str(name), "__ryo_destructure_0"),
+            other => panic!("TempVar must carry InstData::Var, got {other:?}"),
+        }
     }
 
     #[test]

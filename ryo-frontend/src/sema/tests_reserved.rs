@@ -1,10 +1,10 @@
 //! Reserved-name enforcement — sema tests: the `__ryo_` prefix and the
 //! `range` builtin are rejected at EVERY user binding-declaration path
 //! (function name, variable, parameter, loop variable, pattern
-//! binding, rename target). The prefix reservation is what makes the
-//! destructuring temp side table sound: user source can never mint a
-//! name the compiler also mints, so the temp lookup that resolves
-//! before the scope walk can never hijack a user binding.
+//! binding, rename target) and at the read path too: compiler
+//! temporaries resolve only through the `TempVar` UIR tag and sema's
+//! side table, so a user `Var` reference spelling `__ryo_...` has
+//! nothing legitimate to resolve to and is rejected outright.
 
 use super::tests::*;
 use super::*;
@@ -65,5 +65,36 @@ fn destructure_temp_hijack_program_rejected() {
     assert!(
         any_code(&diags, DiagCode::ReservedIdentifier),
         "the hijack program must be rejected, got: {diags:?}"
+    );
+}
+
+#[test]
+fn reserved_prefix_rejected_on_reads() {
+    // Declaration paths are only half the hole. A READ of a temp name
+    // used to resolve straight into the compiler's side table: a real
+    // nested destructure mints `__ryo_destructure_0`, so this program
+    // compiled and bound the temp's value (the (2, 3) tuple) to `x`.
+    let src = "fn main():\n\t(a, (b, c)) = (1, (2, 3))\n\tx = __ryo_destructure_0\n\tprint(b)\n";
+    let diags = run_with_errors(src).1;
+    assert!(
+        any_code(&diags, DiagCode::ReservedIdentifier),
+        "reading a compiler temp must reject the '__ryo_' prefix, got: {diags:?}"
+    );
+    assert!(
+        !any_code(&diags, DiagCode::UndefinedVariable),
+        "the rejected read must not cascade as undefined-variable, got: {diags:?}"
+    );
+}
+
+#[test]
+fn nested_destructure_temps_still_resolve() {
+    // Positive control: generated TempVar reads keep working — a plain
+    // nested destructure still compiles cleanly and binds through the
+    // side table.
+    let result = run("fn main():\n\t(a, (b, c)) = (1, (2, 3))\n\tassert(b == 2, \"b bind\")\n");
+    assert!(
+        result.is_ok(),
+        "nested destructure must still compile, got: {:?}",
+        result.err()
     );
 }
