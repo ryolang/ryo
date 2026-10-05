@@ -368,13 +368,15 @@ fn field_access_chain(ast: &mut Ast, root: Ident, fields: &[Ident]) -> ExprId {
     target
 }
 
-fn assign_or_decl_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+fn assign_or_decl_parser<'a, I>(
+    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     assign_target_parser()
         .then_ignore(just(Token::Assign))
-        .then(expression_parser())
+        .then(expr)
         .map_with(|((target, fields), value), e: &mut Mx<'a, '_, I>| {
             let span = e.span();
             if fields.is_empty() {
@@ -387,7 +389,9 @@ where
         .boxed()
 }
 
-fn compound_assign_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+fn compound_assign_parser<'a, I>(
+    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -401,7 +405,7 @@ where
 
     assign_target_parser()
         .then(op)
-        .then(expression_parser())
+        .then(expr)
         .map_with(|(((target, fields), op), value), e: &mut Mx<'a, '_, I>| {
             let span = e.span();
             if fields.is_empty() {
@@ -457,7 +461,14 @@ fn bind_pattern(state: &mut ParseState, name: StringId, span: SimpleSpan) -> Pat
 /// statement), the pattern nodes pushed before the failure stay in
 /// the arenas as unreachable orphans — deliberate (the `Inspector`
 /// hooks on `Ast` are no-ops; see `statement_list`).
-fn destructure_stmt_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+///
+/// `value` is the right-hand-side expression grammar: the caller's
+/// shared expression parser (see `top_level_statement_parser`), so
+/// this rule does not construct — and later drop — full expression
+/// grammars of its own on every `program_parser()` call.
+fn destructure_stmt_parser<'a, I>(
+    value: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -543,7 +554,7 @@ where
                 .collect::<Vec<_>>(),
         )
         .then_ignore(just(Token::Assign))
-        .then(expression_parser())
+        .then(value.clone())
         .map_with(|((first, rest), value), e: &mut Mx<'a, '_, I>| {
             let span = e.span();
             let start = first.1.start;
@@ -563,7 +574,7 @@ where
     // by `= value`.
     let shaped = choice((anon, positional))
         .then_ignore(just(Token::Assign))
-        .then(expression_parser())
+        .then(value.clone())
         .map_with(|(target, value), e: &mut Mx<'a, '_, I>| {
             let span = e.span();
             e.state().destructure(target, value, span)
@@ -574,7 +585,7 @@ where
         .ignore_then(bind_target)
         .then_ignore(just(Token::RParen))
         .then_ignore(just(Token::Assign))
-        .then(expression_parser())
+        .then(value)
         .validate(|value, e: &mut Mx<'a, '_, I>, emitter| {
             emitter.emit(Rich::custom(e.span(), ParseDiag::SingleElemDestructuring));
             value
@@ -588,13 +599,15 @@ where
 }
 
 /// Statements valid inside a function body.
-fn body_statement_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+fn body_statement_parser<'a, I>(
+    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     recursive(|body_stmt| {
         let return_stmt = just(Token::Return)
-            .ignore_then(expression_parser().or_not())
+            .ignore_then(expr.clone().or_not())
             .map_with(|expr, e: &mut Mx<'a, '_, I>| {
                 let span = e.span();
                 e.state().return_stmt(expr, span)
@@ -611,7 +624,7 @@ where
         });
 
         let while_stmt = just(Token::While)
-            .ignore_then(expression_parser())
+            .ignore_then(expr.clone())
             .then_ignore(just(Token::Colon))
             .then(indented_block(body_stmt.clone()))
             .map_with(|(cond, body), e: &mut Mx<'a, '_, I>| {
@@ -635,7 +648,7 @@ where
             )
             .then_ignore(just(Token::LParen))
             .then(
-                expression_parser()
+                expr.clone()
                     .separated_by(just(Token::Comma))
                     .collect::<Vec<_>>(),
             )
@@ -660,7 +673,7 @@ where
                 Ok(e.state().for_range(var, iterator, start, end, &body, span))
             });
 
-        let expr_stmt = expression_parser().map_with(|expr, e: &mut Mx<'a, '_, I>| {
+        let expr_stmt = expr.clone().map_with(|expr, e: &mut Mx<'a, '_, I>| {
             let span = e.span();
             e.state().expr_stmt(expr, span)
         });
@@ -675,12 +688,12 @@ where
         // `expr_stmt` — so it must claim those lines before any of
         // them can misparse a trailing `= value` as garbage.
         choice((
-            destructure_stmt_parser(),
+            destructure_stmt_parser(expr.clone()),
             return_stmt,
-            compound_assign_parser(),
-            assign_or_decl_parser(),
-            var_decl_parser(),
-            if_stmt_parser(body_stmt),
+            compound_assign_parser(expr.clone()),
+            assign_or_decl_parser(expr.clone()),
+            var_decl_parser(expr.clone()),
+            if_stmt_parser(body_stmt, expr),
             while_stmt,
             for_range_stmt,
             break_stmt,
@@ -693,6 +706,7 @@ where
 
 fn if_stmt_parser<'a, I>(
     body_stmt: impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a,
+    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
 ) -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
@@ -701,7 +715,7 @@ where
 
     let elif_branch = skip_newlines()
         .ignore_then(just(Token::Elif))
-        .ignore_then(expression_parser())
+        .ignore_then(expr.clone())
         .then_ignore(just(Token::Colon))
         .then(block.clone());
 
@@ -711,7 +725,7 @@ where
         .ignore_then(block.clone());
 
     just(Token::If)
-        .ignore_then(expression_parser())
+        .ignore_then(expr)
         .then_ignore(just(Token::Colon))
         .then(block)
         .then(elif_branch.repeated().collect::<Vec<_>>())
@@ -920,7 +934,16 @@ where
     // get wrapped into the synthesized implicit-main body by
     // astgen. This is what makes Pythonic flat scripts feel
     // natural — no `_ = ...` binding required.
-    let expr_stmt = expression_parser().map_with(|expr, e: &mut Mx<'a, '_, I>| {
+    //
+    // The expression grammar is built ONCE per `program_parser()`
+    // and shared (an `Rc` clone of the `Recursive` handle) by every
+    // rule that needs it — function bodies included. Building a full
+    // expression grammar allocates the whole combinator tree (and
+    // drops it again after the parse), so per-rule
+    // `expression_parser()` calls are a measurable fixed cost on
+    // every parse.
+    let expr = expression_parser();
+    let expr_stmt = expr.clone().map_with(|expr, e: &mut Mx<'a, '_, I>| {
         let span = e.span();
         e.state().expr_stmt(expr, span)
     });
@@ -935,9 +958,9 @@ where
     choice((
         attributed_struct_decl_parser(),
         struct_decl_parser(),
-        function_def_parser(),
-        destructure_stmt_parser(),
-        var_decl_parser(),
+        function_def_parser(expr.clone()),
+        destructure_stmt_parser(expr.clone()),
+        var_decl_parser(expr.clone()),
         expr_stmt,
     ))
     .boxed()
@@ -1040,7 +1063,9 @@ where
     })
 }
 
-fn function_def_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+fn function_def_parser<'a, I>(
+    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -1078,7 +1103,7 @@ where
 
     let return_type = just(Token::Arrow).ignore_then(type_expr_parser()).or_not();
 
-    let body = indented_block(body_statement_parser());
+    let body = indented_block(body_statement_parser(expr));
 
     just(Token::Fn)
         .ignore_then(ident)
@@ -1096,7 +1121,9 @@ where
         .boxed()
 }
 
-fn var_decl_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+fn var_decl_parser<'a, I>(
+    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -1111,7 +1138,7 @@ where
         .then(ident)
         .then(type_annotation)
         .then_ignore(just(Token::Assign))
-        .then(expression_parser())
+        .then(expr)
         .map_with(
             |(((mutable, name), type_annotation), initializer), e: &mut Mx<'a, '_, I>| {
                 let span = e.span();
