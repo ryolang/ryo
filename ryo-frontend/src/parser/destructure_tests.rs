@@ -139,9 +139,11 @@ fn destructure_wildcard_parses() {
 #[test]
 fn single_paren_not_a_pattern() {
     // `(a) = x` is the classic mistake: a one-element parenthesized
-    // destructuring without the trailing comma. The parser reports the
-    // targeted message and recovers the line to an Error statement.
-    let (ok, ast, errs, _pool) = lex_and_parse_recovering("(a) = x\n");
+    // destructuring without the trailing comma. The parser reports
+    // the targeted message and recovers the line to a PLAIN binding
+    // of `a` — so downstream uses of `a` resolve instead of cascading
+    // one 'undefined variable' per use.
+    let (ok, ast, errs, pool) = lex_and_parse_recovering("(a) = x\n");
     assert!(ok, "the broken line recovers to a partial program");
     assert_eq!(errs.len(), 1, "expected one diagnostic: {errs:?}");
     match errs[0].reason() {
@@ -154,10 +156,12 @@ fn single_paren_not_a_pattern() {
         }
         other => panic!("expected SingleElemDestructuring, got {other:?}"),
     }
-    assert!(
-        is_error_stmt(&ast, only_stmt(&ast)),
-        "the line must recover to an Error statement"
-    );
+    match &ast.stmt(only_stmt(&ast)).kind {
+        StmtKind::AssignOrDecl { target, .. } => {
+            assert_eq!(pool.str(target.name), "a", "recovery must bind the name");
+        }
+        other => panic!("expected the line to recover to a plain binding, got {other:?}"),
+    }
 
     // `(a)` WITHOUT `=` stays a plain parenthesized expression statement.
     let (ast, _pool) = lex_and_parse("(a)\n").unwrap();

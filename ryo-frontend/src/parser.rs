@@ -578,19 +578,26 @@ where
             e.state().destructure(target, value, span)
         });
 
-    // `(a) = x`: one binding, no trailing comma, followed by `=`.
+    // `(a) = x`: one binding, no trailing comma, followed by `=`. The
+    // shape is a targeted error (E0112), but recover as a PLAIN
+    // binding of `a` rather than an error statement: downstream uses
+    // of `a` then resolve instead of cascading one 'undefined
+    // variable' per use — E0112 already fails the build.
     let single_no_comma = just(Token::LParen)
         .ignore_then(bind_target)
         .then_ignore(just(Token::RParen))
         .then_ignore(just(Token::Assign))
         .then(value)
-        .validate(|value, e: &mut Mx<'a, '_, I>, emitter| {
-            emitter.emit(Rich::custom(e.span(), ParseDiag::SingleElemDestructuring));
-            value
-        })
-        .map_with(|_, e: &mut Mx<'a, '_, I>| {
+        .validate(
+            |((name, name_span), value), e: &mut Mx<'a, '_, I>, emitter| {
+                emitter.emit(Rich::custom(e.span(), ParseDiag::SingleElemDestructuring));
+                ((name, name_span), value)
+            },
+        )
+        .map_with(|((name, name_span), value), e: &mut Mx<'a, '_, I>| {
             let span = e.span();
-            e.state().error_stmt(span)
+            let target = Ident::new(name, name_span);
+            e.state().assign_or_decl(target, value, span)
         });
 
     choice((paren_less, shaped, single_no_comma)).boxed()

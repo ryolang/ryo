@@ -86,6 +86,40 @@ fn destructure_named_struct_positional_rejected() {
 }
 
 #[test]
+fn destructure_single_paren_recovers_without_cascade() {
+    // `(a) = x` is E0112 at parse time; the parser recovers the line
+    // to a plain binding of `a`, so the rest of the body resolves
+    // instead of cascading one 'undefined variable' per use.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\t(a) = (1,)\n\tprint(a)\n";
+    let test_file = create_test_file(temp_dir.path(), "single_paren.ryo", code);
+
+    let output = run_ryo_command(&["run", "single_paren.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        !output.status.success(),
+        "the single-paren form must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0112"),
+        "should emit E0112, got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("single-element destructuring needs a trailing comma"),
+        "error should be the targeted message, got: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("E0010"),
+        "the recovered binding must not cascade undefined-variable, got: {}",
+        stderr
+    );
+}
+
+#[test]
 fn destructure_wildcard_moves() {
     // `_` fields are destroyed inline (freed exactly once); the bound
     // field moves out as a fresh owner.
@@ -181,6 +215,11 @@ fn destructure_arity_error() {
     assert!(
         stderr.contains("expected 2 fields, found 3 bindings"),
         "error should pin the expected/found counts, got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("no field left to bind"),
+        "error should name the binding with no field left, got: {}",
         stderr
     );
 }
