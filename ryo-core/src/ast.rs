@@ -605,9 +605,7 @@ pub enum TypeExprKind {
     /// `(int, str)` — positional sugar over an anonymous struct (M10),
     /// ≡ `{0: int, 1: str}`. The element list lives in the
     /// `type_expr_lists` side arena; resolution interns the `"0"`,
-    /// `"1"`, … names before pool dedup. Defined here (Task 4); the
-    /// parser only starts producing this variant when the paren syntax
-    /// wires up in Task 5.
+    /// `"1"`, … names before pool dedup.
     Positional(TypeExprList),
 }
 

@@ -1490,11 +1490,10 @@ mod type_literal_tests {
 
     #[test]
     fn positional_type_expr_resolves_to_same_type_as_anon_fields() {
-        // `TypeExprKind::Positional` is defined here; the parser only
-        // starts producing it when the `(int, str)` sugar lands. Its
-        // resolution must intern the "0"/"1" names and dedup against
-        // the spelled-out `{0: int, 1: str}` form — tuple sugar and
-        // brace spelling are one structural TypeId.
+        // `TypeExprKind::Positional` resolution must intern the
+        // "0"/"1" names and dedup against the spelled-out
+        // `{0: int, 1: str}` form — tuple sugar and brace spelling
+        // are one structural TypeId.
         let mut pool = InternPool::new();
         let f = pool.intern_str("f");
         let g = pool.intern_str("g");
