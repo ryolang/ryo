@@ -726,22 +726,45 @@ fn analyze_field_access(
         Some(f) => fcx.builder.field_access(obj, f.idx, f.ty, span),
         None => {
             let sview = sema.pool.struct_view(oty);
-            // An anon struct's interned name is the "" sentinel; name
-            // the shape by its structural display instead.
+            // Name the owner with its kind: the paren/brace display is
+            // concise but assumes the reader already knows the type
+            // notation — "tuple" / "anonymous struct" is the search
+            // term that gets them to the reference. An anon struct's
+            // interned name is the "" sentinel, so its display stands
+            // in for the name.
             let owner = match sema.pool.kind(oty) {
-                TypeKind::AnonStruct => sema.pool.display(oty).to_string(),
-                _ => sema.pool.str(sview.name).to_string(),
+                TypeKind::AnonStruct if sema.pool.is_tuple_sugar(oty) => {
+                    format!("tuple '{}'", sema.pool.display(oty))
+                }
+                TypeKind::AnonStruct => {
+                    format!("anonymous struct '{}'", sema.pool.display(oty))
+                }
+                _ => format!("'{}'", sema.pool.str(sview.name)),
             };
-            sema.sink.emit(Diag::error(
+            let diag = Diag::error(
                 span,
                 DiagCode::UnknownField,
                 format!(
-                    "'{}' has no field '{}' (fields: {})",
+                    "{} has no field '{}' (fields: {})",
                     owner,
                     sema.pool.str(field),
                     field_list(sema.pool, &sview),
                 ),
-            ));
+            );
+            // With exactly one candidate there is no guessing: point
+            // straight at it.
+            let diag = if sview.fields.len() == 1 {
+                diag.with_note(
+                    None,
+                    format!(
+                        "the only valid field is '{}'",
+                        sema.pool.str(sview.fields[0].name),
+                    ),
+                )
+            } else {
+                diag
+            };
+            sema.sink.emit(diag);
             fcx.builder.unreachable(sema.pool.error_type(), span)
         }
     }

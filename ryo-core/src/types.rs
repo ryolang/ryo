@@ -1014,6 +1014,22 @@ impl InternPool {
         }
     }
 
+    /// True when `id` is an anonymous struct whose fields are exactly
+    /// `"0"`, `"1"`, … `"n-1"` in written order — the tuple-sugar
+    /// paren form. The same predicate drives [`InternPool::display`]'s
+    /// `(int, str)` vs `{x: int}` rendering, and sema uses it to name
+    /// the kind in unknown-field diagnostics.
+    pub fn is_tuple_sugar(&self, id: TypeId) -> bool {
+        if !matches!(self.kind(id), TypeKind::AnonStruct) {
+            return false;
+        }
+        let view = self.struct_view(id);
+        view.fields
+            .iter()
+            .enumerate()
+            .all(|(i, field)| self.str(field.name) == i.to_string())
+    }
+
     /// Returns a `Display` adapter that renders `id` using `self`.
     pub fn display(&self, id: TypeId) -> DisplayType<'_> {
         DisplayType { pool: self, id }
@@ -1051,13 +1067,10 @@ impl fmt::Display for DisplayType<'_> {
             TypeKind::AnonStruct => {
                 let view = self.pool.struct_view(self.id);
                 // Tuple-sugar paren form only when the fields are
-                // exactly "0", "1", … "n-1" in written order; any
-                // other shape renders braces.
-                let paren_form = view
-                    .fields
-                    .iter()
-                    .enumerate()
-                    .all(|(i, field)| self.pool.str(field.name) == i.to_string());
+                // exactly "0", "1", … "n-1" in written order (see
+                // [`InternPool::is_tuple_sugar`]); any other shape
+                // renders braces.
+                let paren_form = self.pool.is_tuple_sugar(self.id);
                 let opener = if paren_form { "(" } else { "{" };
                 let closer = if paren_form { ")" } else { "}" };
                 write!(f, "{opener}")?;

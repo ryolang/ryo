@@ -98,6 +98,65 @@ fn field_access_unknown_field() {
 }
 
 #[test]
+fn field_access_unknown_field_names_the_shape_kind() {
+    // The message names the kind so the reader has the reference
+    // vocabulary: "tuple" and "anonymous struct" are searchable, the
+    // bare paren/brace display is not. Named structs keep the
+    // original wording — the type name already says everything.
+    let cases: &[(&str, &str)] = &[
+        (
+            "fn main():\n\tz = (\"zero\",)\n\ty = z.1\n",
+            "tuple '(str,)' has no field '1'",
+        ),
+        (
+            "fn main():\n\tp = {x=1}\n\ty = p.q\n",
+            "anonymous struct '{x: int}' has no field 'q'",
+        ),
+        (
+            "struct Point:\n\tx: int\n\nfn main():\n\tp = Point{x=1}\n\ty = p.z\n",
+            "'Point' has no field 'z'",
+        ),
+    ];
+    for (src, expected) in cases {
+        let (_t, diags, _p) = run_with_errors(src);
+        let diag = diags
+            .iter()
+            .find(|d| d.code == DiagCode::UnknownField)
+            .unwrap_or_else(|| panic!("expected E0038 for {src:?}, got {diags:?}"));
+        assert!(
+            diag.message.contains(expected),
+            "message should contain {expected:?}, got {:?}",
+            diag.message,
+        );
+    }
+
+    // Single candidate: the note points straight at it, no guessing.
+    let (_t, diags, _p) = run_with_errors("fn main():\n\tz = (\"zero\",)\n\ty = z.1\n");
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::UnknownField)
+        .expect("E0038");
+    assert!(
+        diag.notes
+            .iter()
+            .any(|n| n.message.contains("the only valid field is '0'")),
+        "expected a single-candidate note, got {diags:?}",
+    );
+
+    // Multiple candidates: no note — the field list in the message
+    // already carries the information.
+    let (_t, diags, _p) = run_with_errors("fn main():\n\tz = (1, 2)\n\ty = z.5\n");
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::UnknownField)
+        .expect("E0038");
+    assert!(
+        diag.notes.is_empty(),
+        "multi-field shapes must not get the note, got {diags:?}",
+    );
+}
+
+#[test]
 fn field_access_on_non_struct_is_error() {
     let src = "fn main():\n\tx = 1\n\ty = x.foo\n";
     let (_t, diags, _p) = run_with_errors(src);
