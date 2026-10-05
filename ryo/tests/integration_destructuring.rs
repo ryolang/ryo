@@ -326,6 +326,83 @@ fn field_move_anon_names_the_shape() {
 }
 
 #[test]
+fn failed_destructure_registers_error_typed_bindings() {
+    // A destructure that fails shape validation still introduces its
+    // pattern names (error-typed): a later use points back at the
+    // failed statement instead of cascading 'undefined variable'.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\t(a, b) = 5\n\tprint(a)\n";
+    let test_file = create_test_file(temp_dir.path(), "not_a_struct_use.ryo", code);
+
+    let output = run_ryo_command(&["run", "not_a_struct_use.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0041"),
+        "should emit E0041 (NotAStruct), got: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("undefined variable"),
+        "later uses of the pattern names must not cascade, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn arity_failed_destructure_registers_bindings() {
+    // Same contract on the positional-arity path, where shape
+    // validation binds nothing before recovering.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\t(a, b, c) = (1, 2)\n\tprint(a)\n";
+    let test_file = create_test_file(temp_dir.path(), "arity_use.ryo", code);
+
+    let output =
+        run_ryo_command(&["run", "arity_use.ryo"], &test_file).expect("Failed to run ryo command");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0113"),
+        "should emit E0113 (DestructureArity), got: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("undefined variable"),
+        "later uses of the pattern names must not cascade, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn void_destructure_names_first_user_binding() {
+    // The void/never diagnostic names the first USER binding — never
+    // a compiler temp — and the nested sub-pattern fails silently
+    // instead of leaking `__ryo_destructure_N` as an undefined name.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn p():\n\tprint(1)\n\nfn main():\n\t((a, b), c) = p()\n";
+    let test_file = create_test_file(temp_dir.path(), "void_temp_first.ryo", code);
+
+    let output = run_ryo_command(&["run", "void_temp_first.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot bind 'c' to a 'void' value"),
+        "the message should name the first user binding, got: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("__ryo_destructure"),
+        "compiler temp names must never surface, got: {}",
+        stderr
+    );
+}
+
+#[test]
 fn destructure_failed_struct_definition_recovers() {
     // A struct whose definition failed (unknown field type) leaves the
     // declared type undefined; a variable annotated with it carries that

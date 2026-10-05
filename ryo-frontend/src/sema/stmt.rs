@@ -649,17 +649,41 @@ fn analyze_destructure(
     let fail = |sema: &mut Sema<'_>, fcx: &mut FuncCtx| -> TirRef {
         fcx.builder.unreachable(sema.pool.error_type(), span)
     };
+    // Recovery with the docstring contract below: a failed destructure
+    // declares nothing, but its names must still resolve — user binds
+    // with the error type so later uses point back at this statement
+    // instead of cascading an 'undefined variable' per use, temps in
+    // the side table so the nested sub-pattern's own statement fails
+    // silently. User names insert only when absent: a failed pattern
+    // never actually shadowed a same-named outer binding.
+    let fail_registered = |sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope| -> TirRef {
+        for (_, bind) in &view.plan {
+            let Some(name) = bind else { continue };
+            if sema.pool.str(*name) == "_" {
+                continue;
+            }
+            if fcx_temp_name(sema, *name) {
+                fcx.destructure_temps.insert(*name, sema.pool.error_type());
+            } else if !scope.contains_in_current(*name) {
+                scope.insert_binding(*name, sema.pool.error_type(), false);
+            }
+        }
+        fail(sema, fcx)
+    };
 
     if sema.pool.is_error(value_ty) {
-        return fail(sema, fcx);
+        return fail_registered(sema, fcx, scope);
     }
+    // Name the void/never diagnostic after the first USER binding —
+    // leading with a compiler temp would leak `__ryo_destructure_N`
+    // into a user-facing message.
     let first_bind = view
         .plan
         .iter()
-        .find_map(|(_, bind)| *bind)
+        .find_map(|(_, bind)| bind.filter(|b| !fcx_temp_name(sema, *b)))
         .unwrap_or_else(|| sema.pool.intern_str("_"));
     if check_bindable_value(sema, first_bind, value_ty, sema.uir.span(view.value)) {
-        return fail(sema, fcx);
+        return fail_registered(sema, fcx, scope);
     }
     let kind = sema.pool.kind(value_ty);
     if !matches!(
@@ -674,14 +698,14 @@ fn analyze_destructure(
                 sema.pool.display(value_ty),
             ),
         ));
-        return fail(sema, fcx);
+        return fail_registered(sema, fcx, scope);
     }
     if matches!(kind, ryo_core::types::TypeKind::Struct) && !sema.pool.is_defined_struct(value_ty) {
         // Declared but never defined (cycle / unknown field type) —
         // astgen already diagnosed it. Recover without touching
         // `struct_view`, which panics on undefined structs. (Anon
         // structs are interned whole; they are always defined.)
-        return fail(sema, fcx);
+        return fail_registered(sema, fcx, scope);
     }
     let shape = sema.pool.struct_view(value_ty);
 
@@ -892,7 +916,12 @@ fn analyze_destructure(
     }
 
     if had_error {
-        return fail(sema, fcx);
+        // Shape validation failed (arity, unknown/duplicate field,
+        // coverage): the loop above bound only the fields that
+        // validated — register every remaining plan name so later
+        // uses still resolve (already-inserted names keep their
+        // error-typed or validated binding).
+        return fail_registered(sema, fcx, scope);
     }
 
     // ---- Emit: owner tokens (bound fields, plan order) then the
