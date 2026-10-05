@@ -48,13 +48,19 @@ fn fmt_type_expr<'p>(texpr: &TypeExpr, ast: &Ast, pool: &'p InternPool) -> Cow<'
             Cow::Owned(format!("{{{fields}}}"))
         }
         TypeExprKind::Positional(elems) => {
-            let elems = ast
-                .type_expr_list(*elems)
+            let list = ast.type_expr_list(*elems);
+            let rendered = list
                 .iter()
                 .map(|ty| fmt_type_expr(ty, ast, pool).into_owned())
                 .collect::<Vec<_>>()
                 .join(", ");
-            Cow::Owned(format!("({elems})"))
+            // A one-element tuple keeps the trailing comma (`(int,)`);
+            // `(int)` would read as a parenthesized type, not a tuple.
+            if list.len() == 1 {
+                Cow::Owned(format!("({rendered},)"))
+            } else {
+                Cow::Owned(format!("({rendered})"))
+            }
         }
     }
 }
@@ -654,6 +660,41 @@ Program (0..0)
               └── Literal(Int(2)) (0..0)
 ";
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn positional_type_renders_tuple_sugar() {
+        // `(int,)` keeps the trailing comma — without it the form is
+        // ambiguous with a parenthesized type; multi-element and empty
+        // forms render plain.
+        let mut pool = InternPool::new();
+        let mut ast = Ast::new();
+        let int_name = ident(&mut pool, "int").name;
+        let str_name = ident(&mut pool, "str").name;
+        let one = ast.type_expr_positional(&[TypeExpr::new(int_name, span(0, 0))], span(0, 0));
+        let two = ast.type_expr_positional(
+            &[
+                TypeExpr::new(int_name, span(0, 0)),
+                TypeExpr::new(str_name, span(0, 0)),
+            ],
+            span(0, 0),
+        );
+        let empty = ast.type_expr_positional(&[], span(0, 0));
+        let f_one = ast.function_def(ident(&mut pool, "f_one"), &[], Some(one), &[], span(0, 0));
+        let f_two = ast.function_def(ident(&mut pool, "f_two"), &[], Some(two), &[], span(0, 0));
+        let f_empty = ast.function_def(
+            ident(&mut pool, "f_empty"),
+            &[],
+            Some(empty),
+            &[],
+            span(0, 0),
+        );
+        ast.set_top_level(vec![f_one, f_two, f_empty]);
+
+        let out = render_program(&ast, &pool);
+        assert!(out.contains("returns: (int,)"), "one-elem: {out}");
+        assert!(out.contains("returns: (int, str)"), "two-elem: {out}");
+        assert!(out.contains("returns: ()"), "empty: {out}");
     }
 
     #[test]
