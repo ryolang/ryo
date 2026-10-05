@@ -298,6 +298,34 @@ fn field_move_still_forbidden() {
 }
 
 #[test]
+fn field_move_anon_names_the_shape() {
+    // M10: the same E0043 against an anonymous struct names the
+    // structural shape, not the empty sentinel name.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tpair = (17, \"alice\")\n\ts = pair.1\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "field_move_anon.ryo", code);
+
+    let output = run_ryo_command(&["run", "field_move_anon.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        !output.status.success(),
+        "expression-level field moves must stay forbidden"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0043"),
+        "should emit E0043 (MoveOutOfField), got: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("cannot move field `1` out of `(int, str)`"),
+        "error should pin the anonymous shape in the message, got: {}",
+        stderr
+    );
+}
+
+#[test]
 fn destructure_failed_struct_definition_recovers() {
     // A struct whose definition failed (unknown field type) leaves the
     // declared type undefined; a variable annotated with it carries that

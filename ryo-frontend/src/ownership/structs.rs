@@ -156,7 +156,10 @@ pub(crate) fn check_field_move_out(
     let sview = pool.struct_view(obj_ty);
     let field = sview.fields[field_index as usize];
     let field_name = pool.str(field.name);
-    let struct_name = pool.str(sview.name);
+    // `display` renders the bare name for named structs and the full
+    // shape (`(int, str)`, `{q: int, r: int}`) for anonymous ones —
+    // `sview.name` is the empty sentinel for anon shapes.
+    let struct_display = pool.display(obj_ty);
     let base = struct_base_name(tir, object);
     let borrow_form = match base {
         Some(name) => format!("f({}.{field_name})", pool.str(name)),
@@ -166,7 +169,7 @@ pub(crate) fn check_field_move_out(
         span,
         DiagCode::MoveOutOfField,
         format!(
-            "cannot move field `{field_name}` out of `{struct_name}`; \
+            "cannot move field `{field_name}` out of `{struct_display}`; \
              borrow it (`{borrow_form}`) or move the whole struct"
         ),
     ));
