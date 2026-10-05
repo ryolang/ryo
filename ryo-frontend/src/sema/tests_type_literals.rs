@@ -181,3 +181,86 @@ fn named_expected_anon_found_graduation_fixit() {
         note_text(d)
     );
 }
+
+#[test]
+fn one_element_tuple_comma_note_at_boundaries() {
+    // The `(x)` vs `(x,)` pitfall: expected `(T,)`, found `T`. All
+    // three annotation positions funnel through the same TypeMismatch
+    // enrichment, so each gets the comma note.
+    let cases: &[&str] = &[
+        // return boundary
+        "fn f() -> (str,):\n\treturn \"zero\"\n\nfn main():\n\tprint(f())\n",
+        // call-argument boundary (the parenthesized-grouping spelling)
+        "fn g(x: (str,)):\n\tprint(x)\n\nfn main():\n\tg((\"zero\"))\n",
+        // var-annotation boundary
+        "fn main():\n\tz: (str,) = \"zero\"\n\tprint(z)\n",
+    ];
+    for src in cases {
+        let (_t, diags, _p) = run_with_errors(src);
+        let m = mismatch_diags(&diags);
+        assert_eq!(
+            m.len(),
+            1,
+            "expected one mismatch for {src:?}, got {diags:?}"
+        );
+        assert!(
+            note_text(m[0]).contains("write (value,) instead of (value)"),
+            "expected the one-element-tuple note for {src:?}, got {}",
+            note_text(m[0]),
+        );
+    }
+}
+
+#[test]
+fn one_element_tuple_comma_note_not_a_false_positive() {
+    // A two-field expected shape is a genuine arity mismatch, and a
+    // wrong-typed value is a genuine type mismatch — neither is the
+    // comma pitfall, so neither gets the note.
+    let cases: &[&str] = &[
+        "fn f() -> (str, str):\n\treturn \"zero\"\n\nfn main():\n\tprint(f())\n",
+        "fn f() -> (str,):\n\treturn 5\n\nfn main():\n\tprint(f())\n",
+    ];
+    for src in cases {
+        let (_t, diags, _p) = run_with_errors(src);
+        let m = mismatch_diags(&diags);
+        assert_eq!(
+            m.len(),
+            1,
+            "expected one mismatch for {src:?}, got {diags:?}"
+        );
+        assert!(
+            !note_text(m[0]).contains("trailing comma"),
+            "note must not suggest the comma for {src:?}, got {}",
+            note_text(m[0]),
+        );
+    }
+}
+
+#[test]
+fn positional_access_on_non_struct_points_at_the_comma() {
+    // `z = ("zero")` groups: z is str. The positional access is the
+    // tell, and the note connects it back to the missing comma.
+    let src = "fn main():\n\tz = (\"zero\")\n\tprint(z.0)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let d = diags
+        .iter()
+        .find(|d| d.code == DiagCode::NotAStruct)
+        .expect("E0041");
+    assert!(
+        d.notes.iter().any(|n| n.message.contains("trailing comma")),
+        "expected the comma note, got {diags:?}",
+    );
+
+    // Named-key access on a non-struct carries no tuple suspicion —
+    // no note.
+    let src = "fn main():\n\tz = \"zero\"\n\tprint(z.len)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let d = diags
+        .iter()
+        .find(|d| d.code == DiagCode::NotAStruct)
+        .expect("E0041");
+    assert!(
+        d.notes.is_empty(),
+        "named-key access must not get the comma note, got {diags:?}",
+    );
+}

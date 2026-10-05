@@ -1,15 +1,17 @@
-//! TypeMismatch enrichment for struct-kinded types (M10 §9 message
-//! bar): a field-level diff note when both sides are named or
-//! anonymous structs, plus the graduation fix-it when the expected
-//! side is a named struct and the found side is an anonymous shape.
+//! TypeMismatch enrichment (M10 §9 message bar): a field-level diff
+//! note when both sides are named or anonymous structs, the graduation
+//! fix-it when the expected side is a named struct and the found side
+//! is an anonymous shape, and the one-element-tuple comma note when a
+//! one-field anonymous struct is expected and the found side is
+//! exactly its field type.
 
 use ryo_core::diag::{Diag, DiagNote};
 use ryo_core::types::{InternPool, TypeId, TypeKind};
 
-/// Attach the struct-shape diff notes (if any) to an already-built
+/// Attach the shape-mismatch notes (if any) to an already-built
 /// TypeMismatch diagnostic. Every mismatch site can call this
-/// unconditionally — non-struct types yield no notes, so existing
-/// messages for primitives etc. are untouched.
+/// unconditionally — each note is conditional on the shape pairing, so
+/// unrelated mismatches (primitives etc.) are untouched.
 pub(crate) fn with_struct_shape_notes(
     mut diag: Diag,
     pool: &InternPool,
@@ -20,24 +22,47 @@ pub(crate) fn with_struct_shape_notes(
     diag
 }
 
-/// Field-level diff between two struct-kinded types:
+/// Notes for a TypeMismatch pairing:
 ///
-/// - Same field count: one note per position whose (name, type) pair
-///   differs. A name diff reads `fields differ at position N:
-///   expected 'rr', found 'r'; did you mean 'r'?` — the found name is
-///   the one the value actually carries, so the suggestion aligns the
-///   annotation to it. A type diff names the field: `field 'q':
-///   expected 'int', found 'str'`.
-/// - Different field count: the found shape's missing/extra fields
-///   are named (the full shapes already render in the main message).
-/// - Graduation: expected named struct + found anonymous shape gets
-///   `help: construct explicitly: \`Name{f=…, …}\`` — the real struct
-///   name and its real field names, in declaration order.
+/// - One-element-tuple pitfall: expected is a one-field anonymous
+///   struct `(T,)` and found is exactly `T`. The value reached the
+///   boundary as a plain `(x)` grouping — or a bare identifier that
+///   needs wrapping — either way the trailing comma is the fix:
+///   `write (value,) instead of (value)`.
+/// - Field-level diff between two struct-kinded types:
+///   - Same field count: one note per position whose (name, type) pair
+///     differs. A name diff reads `fields differ at position N:
+///     expected 'rr', found 'r'; did you mean 'r'?` — the found name is
+///     the one the value actually carries, so the suggestion aligns the
+///     annotation to it. A type diff names the field: `field 'q':
+///     expected 'int', found 'str'`.
+///   - Different field count: the found shape's missing/extra fields
+///     are named (the full shapes already render in the main message).
+///   - Graduation: expected named struct + found anonymous shape gets
+///     `help: construct explicitly: \`Name{f=…, …}\`` — the real struct
+///     name and its real field names, in declaration order.
 fn struct_shape_notes(pool: &InternPool, expected: TypeId, found: TypeId) -> Vec<DiagNote> {
+    let mut notes = Vec::new();
+
+    // The one-element-tuple note comes FIRST and is checked before
+    // the struct-kinded gate below, because its found side is
+    // typically a primitive (`(str,)` expected, `str` found).
+    if matches!(pool.kind(expected), TypeKind::AnonStruct) {
+        let expected_view = pool.struct_view(expected);
+        if expected_view.fields.len() == 1 && expected_view.fields[0].ty == found {
+            notes.push(DiagNote {
+                span: None,
+                message: "a one-element tuple needs the trailing comma: \
+                          write (value,) instead of (value)"
+                    .to_string(),
+            });
+        }
+    }
+
     let struct_kinded =
         |ty: TypeId| matches!(pool.kind(ty), TypeKind::Struct | TypeKind::AnonStruct);
     if !struct_kinded(expected) || !struct_kinded(found) {
-        return Vec::new();
+        return notes;
     }
     // A declared-but-undefined struct (failed definition) has no
     // readable layout; the original diagnostic already explains the
@@ -45,11 +70,10 @@ fn struct_shape_notes(pool: &InternPool, expected: TypeId, found: TypeId) -> Vec
     if (matches!(pool.kind(expected), TypeKind::Struct) && !pool.is_defined_struct(expected))
         || (matches!(pool.kind(found), TypeKind::Struct) && !pool.is_defined_struct(found))
     {
-        return Vec::new();
+        return notes;
     }
     let ev = pool.struct_view(expected);
     let fv = pool.struct_view(found);
-    let mut notes = Vec::new();
     if ev.fields.len() == fv.fields.len() {
         for (i, (ef, ff)) in ev.fields.iter().zip(&fv.fields).enumerate() {
             if ef.name == ff.name && ef.ty == ff.ty {

@@ -708,11 +708,27 @@ fn analyze_field_access(
     }
     let is_struct = matches!(sema.pool.kind(oty), TypeKind::Struct | TypeKind::AnonStruct);
     if !is_struct {
-        sema.sink.emit(Diag::error(
+        // A numeric key on a non-struct is never legitimate — and it
+        // is the signature of the one-element-tuple pitfall: `z.0`
+        // where `z` was declared `("zero")` (a grouping, not a tuple).
+        // Point back at the comma rather than leaving the reader to
+        // connect it.
+        let key = sema.pool.str(field);
+        let is_positional_key = !key.is_empty() && key.chars().all(|c| c.is_ascii_digit());
+        let diag = Diag::error(
             span,
             DiagCode::NotAStruct,
             format!("type '{}' has no fields", sema.pool.display(oty)),
-        ));
+        );
+        let diag = if is_positional_key {
+            diag.with_note(
+                None,
+                "if you meant a one-element tuple, the declaration needs a trailing comma: (x,)",
+            )
+        } else {
+            diag
+        };
+        sema.sink.emit(diag);
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
     if matches!(sema.pool.kind(oty), TypeKind::Struct) && !sema.pool.is_defined_struct(oty) {
