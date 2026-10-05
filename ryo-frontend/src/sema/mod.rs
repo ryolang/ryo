@@ -601,6 +601,9 @@ pub(crate) struct FuncCtx {
 mod tests;
 #[cfg(test)]
 mod tests_bytes;
+
+#[cfg(test)]
+mod tests_destructure;
 #[cfg(test)]
 mod tests_reserved;
 #[cfg(test)]
