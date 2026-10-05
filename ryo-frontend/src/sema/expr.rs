@@ -757,7 +757,15 @@ fn analyze_field_access(
                 }
                 _ => format!("'{}'", sema.pool.str(sview.name)),
             };
-            let diag = Diag::error(
+            // With exactly one candidate there is no guessing: point
+            // straight at it. A numeric key against a NAMED struct is
+            // the graduation stumble — tuple users reach for
+            // positional access on a type that only has names.
+            let key_is_positional = {
+                let key = sema.pool.str(field);
+                !key.is_empty() && key.chars().all(|c| c.is_ascii_digit())
+            };
+            let mut diag = Diag::error(
                 span,
                 DiagCode::UnknownField,
                 format!(
@@ -767,19 +775,22 @@ fn analyze_field_access(
                     field_list(sema.pool, &sview),
                 ),
             );
-            // With exactly one candidate there is no guessing: point
-            // straight at it.
-            let diag = if sview.fields.len() == 1 {
-                diag.with_note(
+            if sview.fields.len() == 1 {
+                diag = diag.with_note(
                     None,
                     format!(
                         "the only valid field is '{}'",
                         sema.pool.str(sview.fields[0].name),
                     ),
-                )
-            } else {
-                diag
-            };
+                );
+            }
+            if matches!(sema.pool.kind(oty), TypeKind::Struct) && key_is_positional {
+                diag = diag.with_note(
+                    None,
+                    "named structs are accessed by field name — positional \
+                     access is tuple sugar for anonymous shapes",
+                );
+            }
             sema.sink.emit(diag);
             fcx.builder.unreachable(sema.pool.error_type(), span)
         }

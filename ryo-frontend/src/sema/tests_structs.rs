@@ -446,3 +446,23 @@ fn anon_eq_field_not_eq_capable() {
         "binary operator `==` requires field 'v' of type 'Inner' to be Eq-capable"
     );
 }
+
+#[test]
+fn positional_key_on_named_struct_gets_a_teaching_note() {
+    // The graduation stumble: positional access on a named struct.
+    // The note teaches the rule instead of leaving the field list to
+    // speak for itself.
+    let src =
+        "struct Point:\n\tx: int\n\ty: int\n\nfn main():\n\tp = Point{x=1, y=2}\n\tprint(p.0)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let d = diags
+        .iter()
+        .find(|d| d.code == DiagCode::UnknownField)
+        .expect("E0038");
+    assert!(
+        d.notes
+            .iter()
+            .any(|n| n.message.contains("accessed by field name")),
+        "expected the field-name note, got: {diags:?}"
+    );
+}
