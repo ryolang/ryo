@@ -619,8 +619,10 @@ fn gen_function_def(
 /// through its own side table, checked before the user scope and
 /// persisting for the whole body — so a user binding spelled
 /// `__ryo_destructure_N` in the same body is shadowed by the temp.
-/// The `__ryo_` prefix is reserved for function names and builtins,
-/// not plain bindings, so nothing warns the user today.
+/// Sema closes that hole: every user declaration path (variables,
+/// parameters, loop variables, pattern bindings, function names)
+/// rejects the `__ryo_` prefix with ReservedIdentifier, so user
+/// source can never introduce a temp-colliding name.
 fn lower_destructure_pattern(
     b: &mut UirBuilder,
     ast: &ast::Ast,

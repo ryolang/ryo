@@ -1,7 +1,7 @@
 //! Statement analysis — split from `mod.rs`; see module docs there.
 
 use super::{
-    ConstInt, FuncCtx, Scope, Sema, analyze_expr, analyze_expr_allow_never, check_reserved_builtin,
+    ConstInt, FuncCtx, Scope, Sema, analyze_expr, analyze_expr_allow_never, check_reserved_name,
     const_eval_int, with_struct_shape_notes,
 };
 use ryo_core::ast::CompoundOp;
@@ -44,7 +44,7 @@ pub(crate) fn analyze_stmt(
                         sema.pool.str(view.name),
                     ),
                 ));
-            } else if check_reserved_builtin(
+            } else if check_reserved_name(
                 sema,
                 view.name,
                 span,
@@ -198,7 +198,7 @@ pub(crate) fn analyze_stmt(
                         value_ty
                     };
 
-                    if check_reserved_builtin(
+                    if check_reserved_name(
                         sema,
                         view.name,
                         span,
@@ -265,7 +265,7 @@ pub(crate) fn analyze_stmt(
             let var_name = view.var_name;
 
             fcx.loop_depth += 1;
-            let is_reserved = check_reserved_builtin(
+            let is_reserved = check_reserved_name(
                 sema,
                 var_name,
                 span,
@@ -896,7 +896,7 @@ fn analyze_destructure(
             continue;
         }
         if !is_temp
-            && check_reserved_builtin(
+            && check_reserved_name(
                 sema,
                 name,
                 span,

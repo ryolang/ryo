@@ -1097,12 +1097,6 @@ fn assert_desugars_to_if_with_panic() {
     );
 }
 
-#[test]
-fn reserved_ryo_prefix_rejected() {
-    let errors = run_with_errors("fn __ryo_hack():\n\tprint(\"nope\")\n").1;
-    assert!(any_code(&errors, DiagCode::ReservedIdentifier));
-}
-
 // ---- M8c1: mutability + assignment ----
 
 #[test]

@@ -360,18 +360,10 @@ impl<'a> Sema<'a> {
     /// worklist; the rest of the driver doesn't need to know.
     fn resolve_signatures(&mut self) {
         for body in &self.uir.func_bodies {
-            let name = self.pool.str(body.name);
-            if name.starts_with("__ryo_") {
-                self.sink.emit(Diag::error(
-                    body.span,
-                    DiagCode::ReservedIdentifier,
-                    format!(
-                        "identifiers starting with '__ryo_' are reserved for the compiler runtime: '{}'",
-                        name,
-                    ),
-                ));
-            }
-            check_reserved_builtin(
+            // check_reserved_name rejects the '__ryo_' prefix alongside
+            // "range" — the standalone prefix block that lived here is
+            // folded into that one reservation.
+            check_reserved_name(
                 self,
                 body.name,
                 body.span,
@@ -472,6 +464,18 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
         // An `inout` parameter is mutable inside the callee body (like a
         // `mut` local); `move` and borrowed params are immutable.
         let is_mutable = param.mode == ParamMode::Inout;
+        // Parameters are a user binding form like any other: the
+        // '__ryo_' prefix and reserved builtins are rejected here too
+        // (the error-typed binding keeps the body's uses suppressed).
+        if check_reserved_name(
+            sema,
+            param.name,
+            param.span,
+            "is a reserved builtin and cannot be used as a parameter name",
+        ) {
+            scope.insert_binding(param.name, sema.pool.error_type(), is_mutable);
+            continue;
+        }
         scope.insert_binding(param.name, param.ty, is_mutable);
     }
 
@@ -597,6 +601,8 @@ pub(crate) struct FuncCtx {
 mod tests;
 #[cfg(test)]
 mod tests_bytes;
+#[cfg(test)]
+mod tests_reserved;
 #[cfg(test)]
 mod tests_structs;
 #[cfg(test)]

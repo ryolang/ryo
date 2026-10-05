@@ -28,26 +28,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ## 🟡 Correctness / Hygiene
 
-### I-202 — User bindings named `__ryo_destructure_N` collide with compiler temps in destructuring lowering
-
-**Files:** `ryo-frontend/src/sema/stmt.rs` (`analyze_destructure`, `fcx_temp_name`), `ryo-frontend/src/sema/expr.rs` (temp lookup ahead of the scope walk), `ryo-frontend/src/sema/mod.rs` (`destructure_temps` side table)
-
-**Summary:** Nested destructuring patterns mint compiler-temp bindings named `__ryo_destructure_N`; astgen guarantees the temps don't collide with each other, but nothing stops a user from declaring a binding with the same name in the same body — and the variable-level `__ryo_` reservation only fires for function names and reserved builtins, not plain bindings. Sema's expression lookup checks the `destructure_temps` side table before the user scope, and the table persists for the whole body. Demonstrated (2026-10-02):
-
-```ryo
-fn f() -> {p: int, q: {u: int, v: int}}:
-	return {p=1, q={u=2, v=3}}
-
-fn main():
-	__ryo_destructure_0 = 5
-	(a, (b, c)) = f()          # mints __ryo_destructure_0 for the inner pattern
-	print(__ryo_destructure_0) # prints {u=2, v=3} — the temp hijacked the binding
-```
-
-The user's `5` is shadowed by the struct temp; depending on ordering either the destructure or the user reads see the wrong value. Reachable only by deliberately writing the reserved-looking prefix, so exposure is small — but the prefix is not actually reserved at binding level today, so nothing warns the user.
-
-**Resolution:** Reject user bindings starting with `__ryo_destructure_` (a binding-level check in `analyze_destructure`'s binding path is too narrow — the declaration paths need it too), or give the temps a namespace user source can never spell. Fold into the same pass that retires the per-body side table if that happens first.
-
 ### I-201 — Process-wide argv state has no isolation contract; concurrent hosted executions can mix generations
 
 **Files:** `runtime/src/lib.rs` (ARGC/ARGV globals, `ryo_rt_init`, `ryo_process_argc`, `ryo_process_argv`), `ryo-backend/src/codegen/mod.rs` (entry shim emitting the init call), `ryo-backend/src/codegen/jit.rs` (trampoline and runtime symbol table)
