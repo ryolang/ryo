@@ -738,11 +738,39 @@ fn analyze_destructure(
         } else if view.plan.len() != shape.fields.len() {
             let n = shape.fields.len();
             let m = view.plan.len();
+            // Name the offending side so the user isn't left counting:
+            // extra bindings with no field left, or shape fields the
+            // pattern leaves unbound.
+            let detail = if m > n {
+                let extra = view
+                    .plan
+                    .iter()
+                    .skip(n)
+                    .filter_map(|(_, b)| *b)
+                    .map(|b| format!("'{}'", sema.pool.str(b)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("no field left to bind {extra}")
+            } else {
+                let uncovered = shape
+                    .fields
+                    .iter()
+                    .skip(m)
+                    .map(|f| format!("'{}'", sema.pool.str(f.name)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let (s, is, it) = if n - m == 1 {
+                    ("", "is", "it")
+                } else {
+                    ("s", "are", "them")
+                };
+                format!("field{s} {uncovered} {is} not covered — bind {it} or write `_`")
+            };
             sema.sink.emit(Diag::error(
                 span,
                 DiagCode::DestructureArity,
                 format!(
-                    "expected {n} fields, found {m} binding{}",
+                    "expected {n} fields, found {m} binding{} — {detail}",
                     if m == 1 { "" } else { "s" },
                 ),
             ));
@@ -804,16 +832,16 @@ fn analyze_destructure(
             };
             let Some(field) = field else {
                 // More bindings than fields — the positional reading
-                // of the arity rule.
+                // of the arity rule. Name the binding that ran out of
+                // fields (renames error above; only puns reach here).
                 let n = shape.fields.len();
-                let m = view.plan.iter().filter(|(_, b)| b.is_some()).count();
+                let offender = bind
+                    .map(|b| format!("'{}'", sema.pool.str(b)))
+                    .unwrap_or_else(|| "`_`".to_string());
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::DestructureArity,
-                    format!(
-                        "expected {n} fields, found {m} binding{}",
-                        if m == 1 { "" } else { "s" },
-                    ),
+                    format!("expected {n} fields — no field left to bind {offender}"),
                 ));
                 had_error = true;
                 continue;
@@ -836,14 +864,16 @@ fn analyze_destructure(
             fields.push((field.idx, bind, field.ty));
         }
         // Full coverage: every field is bound, wildcarded, or rest-
-        // covered above — anything still uncovered is an error.
+        // covered above — anything still uncovered is an error. Skipped
+        // when an entry already errored: the coverage set of a broken
+        // pattern is derived noise on top of the real diagnostic.
         let missing: Vec<StringId> = shape
             .fields
             .iter()
             .filter(|f| !covered.contains(&f.idx))
             .map(|f| f.name)
             .collect();
-        if !missing.is_empty() {
+        if !missing.is_empty() && !had_error {
             let names = missing
                 .iter()
                 .map(|n| format!("`{}`", sema.pool.str(*n)))
