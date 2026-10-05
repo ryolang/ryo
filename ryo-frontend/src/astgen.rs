@@ -153,6 +153,27 @@ impl TypeResolver {
             }
             pairs.push((fname, fty));
         }
+        // Structural identity keys on field names in order; a repeated
+        // name would intern a shape whose layout and field lookups
+        // disagree. Diagnose every repeat — same code and message as
+        // the value-literal path — and absorb the type.
+        let mut seen: Vec<StringId> = Vec::with_capacity(pairs.len());
+        let mut duplicate = false;
+        for &(fname, ref ftexpr) in fields {
+            if seen.contains(&fname) {
+                sink.emit(Diag::error(
+                    ftexpr.span,
+                    DiagCode::DuplicateStructField,
+                    format!("field '{}' is specified more than once", pool.str(fname)),
+                ));
+                duplicate = true;
+            } else {
+                seen.push(fname);
+            }
+        }
+        if duplicate {
+            return pool.error_type();
+        }
         // A field that failed to resolve — or names a struct whose
         // definition failed — has no layout, and `anon_struct`
         // computes layout eagerly (a structural type cannot be

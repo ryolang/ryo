@@ -50,6 +50,24 @@ fn type_literal_var_annotation_checks() {
 }
 
 #[test]
+fn type_literal_duplicate_fields_rejected() {
+    // A repeated field name has no structural meaning — diagnosed
+    // exactly like the value literal's duplicate, and the annotation
+    // absorbs to the error sentinel.
+    let src = "fn f() -> {q: int, q: int}:\n\treturn 1\n";
+    let (_t, diags, _pool) = run_with_errors(src);
+    assert!(
+        any_code(&diags, DiagCode::DuplicateStructField),
+        "got {diags:?}"
+    );
+    let d = diags
+        .iter()
+        .find(|d| d.code == DiagCode::DuplicateStructField)
+        .unwrap();
+    assert_eq!(d.message, "field 'q' is specified more than once");
+}
+
+#[test]
 fn type_literal_numeric_keys_match_tuple_sugar() {
     // The brace spelling with numeric keys IS the paren sugar's
     // structural type, so a tuple value satisfies the annotation.
