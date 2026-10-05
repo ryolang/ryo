@@ -384,8 +384,8 @@ pair = (17, "alice")              # ≡ {0=17, 1="alice"}
 print(f"{pair.0}")                # positional access
 
 # named destructuring: punning and renaming
-{q, r}       = divmod(17, 5)
-{x = quot}   = divmod(17, 5)
+{q, r}            = divmod(17, 5)
+{q = quot, r = _} = divmod(17, 5)
 
 # match patterns
 match point:

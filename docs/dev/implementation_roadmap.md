@@ -1537,8 +1537,8 @@ fn divmod(a: int, b: int) -> {q: int, r: int}:
  return {q=a / b, r=a % b}
 
 fn main():
- (q, r) = divmod(10, 3)       # positional sugar
- {x = quot} = divmod(10, 3)   # named rename
+ (q, r) = divmod(10, 3)              # positional sugar
+ {q = quot, r = _} = divmod(10, 3)   # named rename
  pair = (17, "alice")         # ≡ {0=17, 1="alice"}
  # q = 3, r = 1, quot = 3
 ```
