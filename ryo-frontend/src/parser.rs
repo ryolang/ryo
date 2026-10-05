@@ -337,9 +337,10 @@ where
 }
 
 /// Assignment target: a bare identifier or a `.field` path rooted at
-/// one (`p`, `p.x`, `a.b.c`). The segments are folded into a
+/// one (`p`, `p.x`, `a.b.c`, `pair.0`). The segments are folded into a
 /// `FieldAccess` chain by the caller; an empty segment list keeps the
-/// bare-identifier path byte-identical to before M9.
+/// bare-identifier path byte-identical to before M9. Field keys accept
+/// positional (`IntLit`) hops, canonicalized like expression access.
 fn assign_target_parser<'a, I>() -> impl Parser<'a, I, (Ident, Vec<Ident>), PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
@@ -348,10 +349,7 @@ where
         .map_with(|s, e: &mut Mx<'a, '_, I>| Ident::new(s, e.span()))
         .then(
             just(Token::Dot)
-                .ignore_then(
-                    select! { Token::Ident(f) => f }
-                        .map_with(|f, e: &mut Mx<'a, '_, I>| Ident::new(f, e.span())),
-                )
+                .ignore_then(field_key_ident())
                 .repeated()
                 .collect::<Vec<_>>(),
         )
@@ -1168,6 +1166,25 @@ where
         .map_with(|n, e: &mut Mx<'a, '_, I>| positional_field_name(n, &mut e.state().pool)))
 }
 
+/// A field key as an `Ident` (name + span attached): an identifier, or
+/// an integer literal canonicalized to its numeric value (a positional
+/// key). For parsers that build `FieldAccess` chains — assignment
+/// targets and `&` borrow targets — rather than struct-literal field
+/// lists.
+fn field_key_ident<'a, I>() -> impl Parser<'a, I, Ident, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    select! { Token::Ident(name) => name }
+        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()))
+        .or(
+            select! { Token::IntLit(n) => n }.map_with(|n, e: &mut Mx<'a, '_, I>| {
+                let name = positional_field_name(n, &mut e.state().pool);
+                Ident::new(name, e.span())
+            }),
+        )
+}
+
 fn expression_parser<'a, I>() -> impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
@@ -1270,10 +1287,7 @@ where
                 .ignore_then(ident_expr)
                 .then(
                     just(Token::Dot)
-                        .ignore_then(
-                            select! { Token::Ident(name) => name }
-                                .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span())),
-                        )
+                        .ignore_then(field_key_ident())
                         .repeated()
                         .collect::<Vec<_>>(),
                 )

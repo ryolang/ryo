@@ -1901,3 +1901,63 @@ fn positional_type_sugar_single_element() {
     assert_eq!(elems.len(), 1);
     assert_eq!(pool.str(type_name(&elems[0]).0), "int");
 }
+
+#[test]
+fn pos_field_assign_target_parses() {
+    // `p.0 = v` — positional WRITE shares the read side's field-key
+    // syntax: the hop canonicalizes to its numeric value, so tuple and
+    // anonymous-struct fields are assignable by position. (Assignment
+    // is a body statement; top level is declarations only.)
+    let (ast, pool) = lex_and_parse("fn main():\n\tp.0 = 2\n").unwrap();
+    let def = fn_def(&ast, only_stmt(&ast));
+    let target = match &ast.stmt(fn_body(&ast, def)[0]).kind {
+        StmtKind::FieldAssign { target, .. } => *target,
+        other => panic!("expected FieldAssign, got {other:?}"),
+    };
+    let (root, field) = match ast.expr(target).kind {
+        ExprKind::FieldAccess { object, field } => (object, field),
+        other => panic!("expected FieldAccess target, got {other:?}"),
+    };
+    assert_eq!(pool.str(field.name), "0");
+    match ast.expr(root).kind {
+        ExprKind::Ident(name) => assert_eq!(pool.str(name), "p"),
+        other => panic!("expected Ident root, got {other:?}"),
+    }
+
+    // Leading zeros canonicalize exactly like expression access.
+    let (ast, pool) = lex_and_parse("fn main():\n\tpair.007 = 1\n").unwrap();
+    let def = fn_def(&ast, only_stmt(&ast));
+    let target = match &ast.stmt(fn_body(&ast, def)[0]).kind {
+        StmtKind::FieldAssign { target, .. } => *target,
+        other => panic!("expected FieldAssign, got {other:?}"),
+    };
+    match ast.expr(target).kind {
+        ExprKind::FieldAccess { field, .. } => assert_eq!(pool.str(field.name), "7"),
+        other => panic!("expected FieldAccess target, got {other:?}"),
+    }
+}
+
+#[test]
+fn pos_field_borrow_target_parses() {
+    // `&t.0` — the inout borrow target folds the positional hop INTO
+    // the borrow (`&(t.0)`, never `(&t).0`).
+    let (ast, pool) = lex_and_parse("x = f(&t.0)\n").unwrap();
+    let init = decl_init(&ast);
+    let arg = match ast.expr(init).kind {
+        ExprKind::Call(_, args) => ast.expr_list(args)[0],
+        other => panic!("expected Call, got {other:?}"),
+    };
+    let inner = match ast.expr(arg).kind {
+        ExprKind::Borrow(inner) => inner,
+        other => panic!("expected Borrow arg, got {other:?}"),
+    };
+    let (root, field) = match ast.expr(inner).kind {
+        ExprKind::FieldAccess { object, field } => (object, field),
+        other => panic!("expected &t.0 to borrow the field access, got {other:?}"),
+    };
+    assert_eq!(pool.str(field.name), "0");
+    match ast.expr(root).kind {
+        ExprKind::Ident(name) => assert_eq!(pool.str(name), "t"),
+        other => panic!("expected Ident root, got {other:?}"),
+    }
+}

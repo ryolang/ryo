@@ -1004,6 +1004,21 @@ fn main():
                     </td>
                   </tr>
                   <tr>
+                    <td><code>pair.0 = 42</code></td>
+                    <td>
+                      Assign a positional field — the binding must be
+                      <code>mut</code>; compound forms like
+                      <code>pair.0 += 1</code> work too
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>f(&amp;pair.0)</code></td>
+                    <td>
+                      A positional field is a valid <code>inout</code> borrow
+                      target — the callee mutates it in place
+                    </td>
+                  </tr>
+                  <tr>
                     <td><code>(q, r) = expr</code></td>
                     <td>
                       Destructuring — paren-less
