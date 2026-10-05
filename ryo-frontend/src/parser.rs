@@ -991,9 +991,11 @@ where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     recursive(|ty| {
-        let field = select! { Token::Ident(name) => name }
-            .then_ignore(just(Token::Colon))
-            .then(ty.clone());
+        // `field_key`, not a bare Ident: brace type literals accept
+        // numeric keys (`{0: int}`) with the same canonicalization
+        // as value literals, so the brace form spells the same
+        // structural type as the `(int, str)` paren sugar.
+        let field = field_key().then_ignore(just(Token::Colon)).then(ty.clone());
         let anon = field
             .separated_by(just(Token::Comma))
             .allow_trailing()

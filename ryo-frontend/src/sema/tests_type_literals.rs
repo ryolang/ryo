@@ -50,6 +50,14 @@ fn type_literal_var_annotation_checks() {
 }
 
 #[test]
+fn type_literal_numeric_keys_match_tuple_sugar() {
+    // The brace spelling with numeric keys IS the paren sugar's
+    // structural type, so a tuple value satisfies the annotation.
+    let src = "fn f() -> {0: int, 1: str}:\n\treturn (1, \"a\")\n\nfn main():\n\tprint(f())\n";
+    assert!(run(src).is_ok());
+}
+
+#[test]
 fn type_literal_view_field_rejected() {
     // Rule 6 holds inside type literals too: a view-typed field is a
     // projection and is rejected with the same ViewFieldType diagnostic

@@ -1733,6 +1733,19 @@ fn type_literal_in_return_type() {
 }
 
 #[test]
+fn type_literal_numeric_keys() {
+    // Brace type literals accept numeric keys with the value literal's
+    // canonicalization — `{0: int, 1: str}` is the same structural
+    // type as the `(int, str)` paren sugar.
+    let (ast, pool) = lex_and_parse("fn f() -> {0: int, 1: str}:\n\treturn (1, \"a\")\n").unwrap();
+    let f = fn_def(&ast, only_stmt(&ast));
+    let fields = anon_type_fields(&ast, f.return_type.as_ref().unwrap());
+    assert_eq!(fields.len(), 2);
+    assert_eq!(pool.str(fields[0].0), "0");
+    assert_eq!(pool.str(fields[1].0), "1");
+}
+
+#[test]
 fn type_literal_in_param() {
     let (ast, pool) =
         lex_and_parse("fn dist(p: {x: float, y: float}) -> float:\n\treturn p.x\n").unwrap();
