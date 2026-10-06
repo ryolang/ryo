@@ -337,3 +337,195 @@ fn all_terminating_nested_if_arm_does_not_poison_join() {
         "an all-terminating arm contributes no Moved state to the join; got: {diags:?}"
     );
 }
+
+#[test]
+fn elif_reseat_every_arm_suppresses_redundant_exit_frees() {
+    // I-197: `mut s` declared before an if/elif, reseated with a heap
+    // value in EVERY arm, read again after the chain. Each arm value's
+    // last use is inside its arm, so the raw last-use anchors re-anchor
+    // to the branch exit — but every such Free lowers through the
+    // binding's home-slot redirect, and the slot holds exactly one
+    // buffer per path. The pre-branch owner's own last-use Free
+    // (anchored after the post-branch read, also slot-redirected)
+    // covers all paths, so the per-arm exit Frees must be suppressed.
+    // Before the suppression pass, both arm values kept exit Frees: a
+    // double-free of the slot, and — because the non-last-write target
+    // fails codegen's stale-target redirect filter — stale arm-local
+    // cached values in the merge block (Cranelift verifier error).
+    let src = "\
+fn make(tag: int) -> str:
+\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+
+fn main():
+\tmut s = make(0)
+\tif false:
+\t\ts = make(1)
+\t\tprint(s)
+\telif true:
+\t\ts = make(2)
+\t\tprint(s)
+\tprint(s)
+";
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "no errors expected: {diags:?}"
+    );
+    let idx = tirs
+        .iter()
+        .position(|t| pool.str(t.name) == "main")
+        .unwrap();
+    let sc = take_function_sidecar(&mut sidecar, idx);
+    let tir = &tirs[idx];
+
+    // Identify the producers: make(0) (pre-branch), make(1) and make(2)
+    // (the arm reseats), by walk order of fat Call initializers/values.
+    let calls: Vec<TirRef> = (1..tir.instructions.len())
+        .map(|i| TirRef::from_raw(i as u32))
+        .filter(|&r| tir.inst(r).tag == ryo_core::tir::TirTag::Call)
+        .collect();
+    let [make0, make1, make2, ..] = calls.as_slice() else {
+        panic!("expected at least 3 calls, got {calls:?}");
+    };
+
+    // Both reassign Frees survive (they release the displaced pre-branch
+    // buffer inside each arm).
+    assert_eq!(
+        sc.free_on_reassign.iter().flatten().count(),
+        2,
+        "both arm reassigns must keep their displacement Free"
+    );
+
+    // The arm reseated values must have NO Free of their own — the
+    // merge-seated pre-branch owner's Free releases the slot on every
+    // path.
+    for reseat in [*make1, *make2] {
+        assert!(
+            sc.free_schedule.iter().all(|fp| fp.target != reseat),
+            "reseated value %{:?} must not keep its own Free; schedule: {:?}",
+            reseat,
+            sc.free_schedule
+        );
+    }
+    // Exactly one Free for the pre-branch owner, anchored after the
+    // post-branch read (a Var), so codegen's binding-path redirect
+    // frees the path-correct slot content.
+    let owner_frees: Vec<_> = sc
+        .free_schedule
+        .iter()
+        .filter(|fp| fp.target == *make0)
+        .collect();
+    assert_eq!(
+        owner_frees.len(),
+        1,
+        "exactly one Free for the pre-branch owner; schedule: {:?}",
+        sc.free_schedule
+    );
+    assert_eq!(
+        tir.inst(owner_frees[0].after).tag,
+        ryo_core::tir::TirTag::Var,
+        "owner Free anchors after the post-branch read"
+    );
+}
+
+#[test]
+fn returning_arm_reseat_epilogue_skips_superseded_owner() {
+    // Companion to the I-197 suppression: arms that reseat a pre-branch
+    // binding and then `return`. The return epilogue must free the
+    // RESEATED value at the return, but not the pre-reassign owner —
+    // the arm's reassign already released it via `free_on_reassign`,
+    // so an epilogue Free for it double-frees (runtime trap). Only the
+    // fall-through path still owns the pre-branch buffer; its Free is
+    // the last-use Free after the post-branch read.
+    let src = "\
+fn make(tag: int) -> str:
+\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+
+fn f(c1: bool, c2: bool):
+\tmut s = make(0)
+\tif c1:
+\t\ts = make(1)
+\t\tprint(s)
+\t\treturn
+\telif c2:
+\t\ts = make(2)
+\t\tprint(s)
+\t\treturn
+\tprint(s)
+
+fn main():
+\tf(true, false)
+";
+    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "no errors expected: {diags:?}"
+    );
+    let idx = tirs.iter().position(|t| pool.str(t.name) == "f").unwrap();
+    let sc = take_function_sidecar(&mut sidecar, idx);
+    let tir = &tirs[idx];
+
+    let make_name = pool.intern_str("make");
+    let calls: Vec<TirRef> = (1..tir.instructions.len())
+        .map(|i| TirRef::from_raw(i as u32))
+        .filter(|&r| {
+            tir.inst(r).tag == ryo_core::tir::TirTag::Call && tir.call_view(r).name == make_name
+        })
+        .collect();
+    let [make0, make1, make2] = calls.as_slice() else {
+        panic!("expected 3 make calls, got {calls:?}");
+    };
+    let returns: Vec<TirRef> = (1..tir.instructions.len())
+        .map(|i| TirRef::from_raw(i as u32))
+        .filter(|&r| {
+            matches!(
+                tir.inst(r).tag,
+                ryo_core::tir::TirTag::Return | ryo_core::tir::TirTag::ReturnVoid
+            )
+        })
+        .collect();
+    assert_eq!(returns.len(), 2, "expected 2 returns, got {returns:?}");
+
+    // The pre-reassign owner keeps NO Free anchored at either return —
+    // the arm reassigns released it. (Its only Free is the last-use
+    // Free after the post-branch read.)
+    for ret in &returns {
+        assert!(
+            sc.free_schedule
+                .iter()
+                .all(|fp| fp.after != *ret || fp.target != *make0),
+            "pre-reassign owner must not be freed at a return whose path reseated it"
+        );
+    }
+    // Each reseated value IS freed at its own return.
+    for (reseat, ret) in [(*make1, returns[0]), (*make2, returns[1])] {
+        assert!(
+            sc.free_schedule
+                .iter()
+                .any(|fp| fp.after == ret && fp.target == reseat),
+            "reseated value %{reseat:?} must be freed at its return {ret:?}"
+        );
+    }
+    // The fall-through path still frees the pre-branch owner after the
+    // post-branch read.
+    let owner_frees: Vec<_> = sc
+        .free_schedule
+        .iter()
+        .filter(|fp| fp.target == *make0)
+        .collect();
+    assert_eq!(
+        owner_frees.len(),
+        1,
+        "exactly one Free for the pre-branch owner; schedule: {:?}",
+        sc.free_schedule
+    );
+    assert_eq!(
+        tir.inst(owner_frees[0].after).tag,
+        ryo_core::tir::TirTag::Var,
+        "owner Free anchors after the post-branch read"
+    );
+}
