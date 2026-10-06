@@ -1398,6 +1398,91 @@ fn suppress_redundant_exit_frees(
             drop.insert(i);
         }
     }
+    // Pass 1b (I-205): an exit Free whose target was ALREADY released by
+    // a reassign displacement before the exit must not keep targeting
+    // that owner. Codegen's binding-path redirect filter
+    // (`last == target || !all_free_targets.contains(last)`) rejects
+    // the redirect for such a stale target, and the cached-value
+    // fallback frees the displacement-released buffer a second time on
+    // every path where the reassign ran (valgrind: Invalid free). The
+    // exit Free's job on every path is "release the slot's current
+    // content", which is exactly the redirect — so re-aim the Free at
+    // the binding's LAST WRITE, for which the filter passes
+    // unconditionally. On paths where the reassign ran the redirect
+    // frees the reseated buffer (which has no other Free on the
+    // fall-through), on the others it frees the pre-branch buffer.
+    //
+    // Conservative by construction: only branch exits (loop exits
+    // interact with break-anchored Frees), only when a displacing
+    // reassign precedes the exit, and only when every Free of the last
+    // write either shares THIS exit anchor (pass 2 dedups the pair) or
+    // is Return-anchored INSIDE the exit's subtree (those paths never
+    // reach the merge, so the redirect cannot double-free with them).
+    // Any other anchor could fire before the exit on a reaching path
+    // and make the redirect a double free — leave the schedule as-is.
+    let displaced_targets: HashSet<TirRef> =
+        sidecar.free_on_reassign.iter().flatten().copied().collect();
+    for i in 0..sidecar.free_schedule.len() {
+        if drop.contains(&i) {
+            continue;
+        }
+        let fp = &sidecar.free_schedule[i];
+        // A last-use Free conditionally re-anchored by `last_use_anchor`
+        // lands on a branch statement whose subtree does NOT contain the
+        // target (unlike the arm-value exit Frees in `candidates`), so
+        // this scan is schedule-wide.
+        if fp.branch.is_some() || tir.inst(fp.after).tag != TirTag::IfStmt {
+            continue;
+        }
+        let Some(binding) = binding_of(fp.target) else {
+            continue;
+        };
+        if !displaced_targets.contains(&fp.target) {
+            continue;
+        }
+        let after = fp.after;
+        let displaced_before_exit = reassign_orders.get(&binding).is_some_and(|assigns| {
+            assigns
+                .iter()
+                .any(|&r| order[r.index()] < order[after.index()])
+        });
+        if !displaced_before_exit {
+            continue;
+        }
+        let Some(last_write) = last_write_target(binding) else {
+            continue;
+        };
+        if last_write == fp.target {
+            continue;
+        }
+        // A same-binding Free already at this anchor lowers through the
+        // same home-slot redirect and covers this anchor's paths — this
+        // one is redundant (and retargeting would mint a double
+        // redirect).
+        let redundant_at_anchor = sidecar.free_schedule.iter().enumerate().any(|(j, fp2)| {
+            j != i
+                && !drop.contains(&j)
+                && fp2.branch.is_none()
+                && fp2.after == after
+                && binding_of(fp2.target) == Some(binding)
+        });
+        if redundant_at_anchor {
+            drop.insert(i);
+            continue;
+        }
+        let redirect_safe = sidecar
+            .free_schedule
+            .iter()
+            .filter(|fp2| fp2.target == last_write)
+            .all(|fp2| {
+                fp2.after == after
+                    || (tir.contains_reachable(after, fp2.after)
+                        && matches!(tir.inst(fp2.after).tag, TirTag::Return | TirTag::ReturnVoid))
+            });
+        if redirect_safe {
+            sidecar.free_schedule[i].target = last_write;
+        }
+    }
     // Pass 2: same (binding, exit) anchor — keep one Free, preferring
     // the Free whose target is the binding's last write (codegen's
     // redirect filter then passes unconditionally), then the

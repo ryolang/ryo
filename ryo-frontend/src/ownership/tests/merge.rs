@@ -533,3 +533,103 @@ fn main():
         "owner Free anchors after the post-branch read"
     );
 }
+
+#[test]
+fn reseat_fallthrough_exit_free_targets_last_write() {
+    // I-205: pre-branch `mut` binding, conditional reseat, read inside a
+    // LATER branch's arm, fall-through exit. The pre-branch owner's
+    // last-use Free re-anchors to the later branch's exit, but the
+    // owner was ALREADY released by the reassign's displacement Free on
+    // the taken paths — codegen's stale-target redirect filter then
+    // rejects the redirect and the cached-value fallback double-frees
+    // (valgrind: Invalid free). The exit Free must instead target the
+    // binding's LAST WRITE so the redirect filter passes and the slot's
+    // path-correct content is freed exactly once on every path.
+    let src = "\
+fn make(tag: int) -> str:
+\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+
+fn f(c1: bool, c2: bool) -> int:
+\tmut s = make(0)
+\tif c1:
+\t\ts = make(1)
+\tif c2:
+\t\tprint(s)
+\t\treturn 0
+\treturn 1
+
+fn main():
+\tf(true, false)
+";
+    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "no errors expected: {diags:?}"
+    );
+    let idx = tirs.iter().position(|t| pool.str(t.name) == "f").unwrap();
+    let sc = take_function_sidecar(&mut sidecar, idx);
+    let tir = &tirs[idx];
+
+    let make_name = pool.intern_str("make");
+    let calls: Vec<TirRef> = (1..tir.instructions.len())
+        .map(|i| TirRef::from_raw(i as u32))
+        .filter(|&r| {
+            tir.inst(r).tag == ryo_core::tir::TirTag::Call && tir.call_view(r).name == make_name
+        })
+        .collect();
+    let [make0, make1] = calls.as_slice() else {
+        panic!("expected exactly 2 make calls, got {calls:?}");
+    };
+    let ifs: Vec<TirRef> = (1..tir.instructions.len())
+        .map(|i| TirRef::from_raw(i as u32))
+        .filter(|&r| tir.inst(r).tag == ryo_core::tir::TirTag::IfStmt)
+        .collect();
+    let [if1, if2] = ifs.as_slice() else {
+        panic!("expected exactly 2 if statements, got {ifs:?}");
+    };
+
+    // The reassign's displacement Free releases the pre-branch owner.
+    assert!(
+        sc.free_on_reassign.iter().flatten().any(|&t| t == *make0),
+        "the reassign must displace the pre-branch owner: {:?}",
+        sc.free_on_reassign
+    );
+
+    // No Free may target the pre-branch owner anywhere: the taken paths
+    // released it at the reassign store, the not-taken paths release it
+    // through the exit Free's redirect (as the slot's current content).
+    assert!(
+        sc.free_schedule.iter().all(|fp| fp.target != *make0),
+        "pre-branch owner must not keep its own Free; schedule: {:?}",
+        sc.free_schedule
+    );
+
+    // Exactly one Free anchors at the later branch's exit, and it
+    // targets the binding's LAST WRITE (the reseated value), so
+    // codegen's redirect filter (`last == target`) passes and frees the
+    // slot's current content — the reseated buffer on taken paths, the
+    // pre-branch buffer otherwise.
+    let exit_frees: Vec<_> = sc
+        .free_schedule
+        .iter()
+        .filter(|fp| fp.after == *if2)
+        .collect();
+    assert_eq!(
+        exit_frees.len(),
+        1,
+        "exactly one Free at the later branch exit; schedule: {:?}",
+        sc.free_schedule
+    );
+    assert_eq!(
+        exit_frees[0].target, *make1,
+        "exit Free must target the binding's last write so the redirect passes"
+    );
+    // The first branch (the reseat) keeps no exit Free of its own.
+    assert!(
+        sc.free_schedule.iter().all(|fp| fp.after != *if1),
+        "no exit Free at the reseating branch; schedule: {:?}",
+        sc.free_schedule
+    );
+}

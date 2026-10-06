@@ -1154,3 +1154,24 @@ fn loop_reassign_heap_early_return_runs_clean() {
         "0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!|1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!|1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
     );
 }
+
+#[test]
+fn reseat_fallthrough_skipped_read_arm_runs_clean() {
+    // I-205: pre-branch `mut` binding, conditional reseat, read inside a
+    // later branch's arm, fall-through exit. The pre-branch owner's
+    // last-use Free re-anchors to the later branch's exit, but the
+    // reassign's displacement Free already released that buffer on the
+    // taken paths — codegen's stale-target redirect filter rejected the
+    // redirect and the cached-value fallback double-freed (valgrind:
+    // Invalid free on f(true, false)). The exit Free now targets the
+    // binding's last write so the redirect frees the slot's path-correct
+    // content exactly once on every path. Under plain execution the
+    // double free is silent; the valgrind fixture
+    // (valgrind_reseat_fallthrough_skipped_read_arm) is the regression
+    // guard.
+    assert_ryo_output(
+        "reseat_fallthrough_skipped_read_arm.ryo",
+        "fn make(tag: int) -> str:\n\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\nfn f(c1: bool, c2: bool) -> int:\n\tmut s = make(0)\n\tif c1:\n\t\ts = make(1)\n\tif c2:\n\t\tprint(s)\n\t\treturn 0\n\treturn 1\n\nfn main():\n\tf(true, true)\n\tf(false, true)\n\tf(true, false)\n\tf(false, false)\n\tprint(\"done\\n\")\n",
+        "1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaadone\n",
+    );
+}
