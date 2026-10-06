@@ -366,7 +366,7 @@ fn main():
 \t\tprint(s)
 \tprint(s)
 ";
-    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
+    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
     assert!(
         diags
             .iter()
@@ -381,13 +381,17 @@ fn main():
     let tir = &tirs[idx];
 
     // Identify the producers: make(0) (pre-branch), make(1) and make(2)
-    // (the arm reseats), by walk order of fat Call initializers/values.
+    // (the arm reseats). Filter by callee name — the program also calls
+    // print, which must not be mistaken for a make.
+    let make_name = pool.intern_str("make");
     let calls: Vec<TirRef> = (1..tir.instructions.len())
         .map(|i| TirRef::from_raw(i as u32))
-        .filter(|&r| tir.inst(r).tag == ryo_core::tir::TirTag::Call)
+        .filter(|&r| {
+            tir.inst(r).tag == ryo_core::tir::TirTag::Call && tir.call_view(r).name == make_name
+        })
         .collect();
-    let [make0, make1, make2, ..] = calls.as_slice() else {
-        panic!("expected at least 3 calls, got {calls:?}");
+    let [make0, make1, make2] = calls.as_slice() else {
+        panic!("expected exactly 3 make calls, got {calls:?}");
     };
 
     // Both reassign Frees survive (they release the displaced pre-branch
