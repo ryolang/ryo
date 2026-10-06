@@ -1250,8 +1250,7 @@ impl Ast {
 
     /// Positional type expression `(int, str)` (M10); the element
     /// list is copied into the `type_expr_lists` side arena in
-    /// written order. The parser starts producing this in Task 5 —
-    /// until then only hand-built ASTs (and tests) reach it.
+    /// written order.
     pub fn type_expr_positional(&mut self, elems: &[TypeExpr], span: SimpleSpan) -> TypeExpr {
         let elems = self.push_type_expr_list(elems);
         TypeExpr {
