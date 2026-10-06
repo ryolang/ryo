@@ -2,7 +2,7 @@
 
 use super::{
     FuncCtx, Scope, Sema, emit_builtin_call, emit_bytes_materialize, emit_str_materialize,
-    materialize_name,
+    materialize_name, with_struct_shape_notes,
 };
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::tir::{ParamMode, TirRef};
@@ -41,7 +41,7 @@ pub(crate) fn check_call(
         return emit_builtin_call(sema, fcx, scope, view, arg_tirs, span, builtin);
     }
 
-    if check_reserved_builtin(
+    if check_reserved_name(
         sema,
         name_id,
         span,
@@ -179,16 +179,21 @@ pub(crate) fn check_call(
             };
             let actual = fcx.builder.ty_of(arg_tir);
             if !sema.pool.compatible(actual, exp_ty) {
-                sema.sink.emit(Diag::error(
-                    sema.uir.span(*arg_uir),
-                    DiagCode::TypeMismatch,
-                    format!(
-                        "call to '{}': argument {} has type '{}', expected '{}'",
-                        sema.pool.str(name_id),
-                        idx + 1,
-                        sema.pool.display(actual),
-                        sema.pool.display(exp_ty),
+                sema.sink.emit(with_struct_shape_notes(
+                    Diag::error(
+                        sema.uir.span(*arg_uir),
+                        DiagCode::TypeMismatch,
+                        format!(
+                            "call to '{}': argument {} has type '{}', expected '{}'",
+                            sema.pool.str(name_id),
+                            idx + 1,
+                            sema.pool.display(actual),
+                            sema.pool.display(exp_ty),
+                        ),
                     ),
+                    sema.pool,
+                    exp_ty,
+                    actual,
                 ));
             }
 
@@ -270,7 +275,7 @@ pub(crate) fn borrow_target_reason(
     }
 }
 
-pub(crate) fn check_reserved_builtin(
+pub(crate) fn check_reserved_name(
     sema: &mut Sema<'_>,
     name_id: StringId,
     span: Span,
@@ -278,14 +283,34 @@ pub(crate) fn check_reserved_builtin(
 ) -> bool {
     // `RESERVED_NAMES` is exactly `["range"]`; the comparison is a
     // `StringId` equality against the id interned at `Sema::new`.
-    // `pool.str` is only reached on the diagnostic path.
-    if name_id != sema.names.range {
-        return false;
+    // `pool.str` is only reached on the diagnostic paths.
+    if name_id == sema.names.range {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ReservedBuiltinName,
+            format!("'{}' {}", sema.pool.str(name_id), message),
+        ));
+        return true;
     }
-    sema.sink.emit(Diag::error(
-        span,
-        DiagCode::ReservedBuiltinName,
-        format!("'{}' {}", sema.pool.str(name_id), message),
-    ));
-    true
+    // Compiler-internal names (destructuring temps, runtime shims)
+    // all live under `__ryo_`. Rejecting the prefix at EVERY user
+    // declaration path — variable, parameter, loop variable,
+    // pattern binding, function name — means user source can never
+    // introduce a name the compiler also mints, so the temp side
+    // table that resolves before the scope walk can never hijack a
+    // user binding. Same code and message as the function-name
+    // reservation in `resolve_signatures`.
+    let name = sema.pool.str(name_id);
+    if name.starts_with("__ryo_") {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ReservedIdentifier,
+            format!(
+                "identifiers starting with '__ryo_' are reserved for the compiler runtime: '{}'",
+                name,
+            ),
+        ));
+        return true;
+    }
+    false
 }

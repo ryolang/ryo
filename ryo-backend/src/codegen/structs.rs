@@ -185,7 +185,7 @@ impl<M: Module> Codegen<M> {
             TypeKind::View(_) => {
                 Err("view struct field reached codegen; sema Rule 6 rejects it".to_string())
             }
-            TypeKind::Struct => {
+            TypeKind::Struct | TypeKind::AnonStruct => {
                 let src = Self::eval_inst_struct(builder, ctx, v)?;
                 let dst = if offset == 0 {
                     base
@@ -213,7 +213,11 @@ impl<M: Module> Codegen<M> {
         debug_assert!(
             !matches!(
                 ctx.pool.kind(field_ty),
-                TypeKind::Str | TypeKind::Bytes | TypeKind::View(_) | TypeKind::Struct
+                TypeKind::Str
+                    | TypeKind::Bytes
+                    | TypeKind::View(_)
+                    | TypeKind::Struct
+                    | TypeKind::AnonStruct
             ),
             "non-scalar field reached the scalar FieldAccess path"
         );
@@ -285,7 +289,7 @@ impl<M: Module> Codegen<M> {
                         "view struct field reached codegen; sema Rule 6 rejects it".to_string()
                     );
                 }
-                TypeKind::Struct => {
+                TypeKind::Struct | TypeKind::AnonStruct => {
                     let s = if field.offset == 0 {
                         src
                     } else {
@@ -353,7 +357,7 @@ impl<M: Module> Codegen<M> {
                 builder.ins().call(free_ref, &[ptr, cap]);
                 Ok(())
             }
-            TypeKind::Struct => {
+            TypeKind::Struct | TypeKind::AnonStruct => {
                 let addr = if offset == 0 {
                     base
                 } else {
@@ -509,7 +513,7 @@ impl<M: Module> Codegen<M> {
             TypeKind::View(_) => {
                 return Err("view struct field reached codegen; sema Rule 6 rejects it".to_string());
             }
-            TypeKind::Struct => {
+            TypeKind::Struct | TypeKind::AnonStruct => {
                 let src = Self::eval_inst_struct(builder, ctx, view.value)?;
                 if drop_old {
                     Self::emit_field_drop(builder, ctx, field_addr, 0, field_ty)?;
@@ -575,7 +579,7 @@ impl<M: Module> Codegen<M> {
         } else {
             ctx.tir.inst(target).ty
         };
-        if !matches!(ctx.pool.kind(ty), TypeKind::Struct) {
+        if !matches!(ctx.pool.kind(ty), TypeKind::Struct | TypeKind::AnonStruct) {
             return Ok(false);
         }
         let addr = match Self::free_binding_name(ctx, target)
@@ -695,7 +699,9 @@ impl<M: Module> Codegen<M> {
                     let call = builder.ins().call(eq_ref, &[lvp, lvl, rvp, rvl]);
                     builder.inst_results(call)[0]
                 }
-                TypeKind::Struct => {
+                // Nested nominal or anonymous (M10) shapes both recurse:
+                // `struct_view` reads either payload.
+                TypeKind::Struct | TypeKind::AnonStruct => {
                     Self::emit_struct_eq(builder, ctx, lhs_field, rhs_field, field.ty, false)?
                 }
                 TypeKind::View(_) => {
@@ -741,11 +747,16 @@ impl<M: Module> Codegen<M> {
     /// punctuation and field names come from read-only .rodata while
     /// each field value renders into a temp slot, is pushed, and is
     /// freed immediately (the push copies the bytes first, and
-    /// `ryo_str_free` is a runtime no-op for inline/static caps). str
-    /// fields are quoted and borrowed straight out of the struct — the
-    /// struct keeps owning them, so no free fires. Nested structs
-    /// recurse; the nested repr temp frees after its push into the
-    /// enclosing result.
+    /// `ryo_str_free` is a runtime no-op for inline/static caps).
+    /// str fields are quoted and borrowed straight out of the struct —
+    /// the struct keeps owning them, so no free fires. Anonymous
+    /// structs (M10) render with no name prefix, and an anon shape
+    /// whose fields are exactly `"0"`, `"1"`, … `"n-1"` in written
+    /// order — the tuple spelling — renders in paren form instead:
+    /// `(v0, v1)`, single field `(v,)`; any other anon shape renders
+    /// braces with names (`{0=1, x=2}`). Nested structs recurse; the
+    /// nested repr temp frees after its push into the enclosing
+    /// result.
     pub(crate) fn emit_debug_repr(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -753,6 +764,17 @@ impl<M: Module> Codegen<M> {
         ty: TypeId,
     ) -> Result<Value, String> {
         let view = ctx.pool.struct_view(ty);
+        // Anon structs intern the "" sentinel as their name.
+        let anon = ctx.pool.str(view.name).is_empty();
+        // Tuple-sugar paren form: same predicate as the pool's type
+        // display — every field name is its index in decimal. Mixed
+        // shapes (`{0=1, x=2}`) fall through to braces.
+        let paren_form = anon
+            && view
+                .fields
+                .iter()
+                .enumerate()
+                .all(|(i, field)| ctx.pool.str(field.name).parse::<usize>() == Ok(i));
         let slot = builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             STR_SLOT_SIZE,
@@ -771,14 +793,18 @@ impl<M: Module> Codegen<M> {
             .ins()
             .store(MemFlagsData::trusted(), zero64, result, 16);
 
-        Self::push_debug_name(builder, ctx, result, view.name)?;
-        Self::push_debug_static(builder, ctx, result, "{")?;
+        if !anon {
+            Self::push_debug_name(builder, ctx, result, view.name)?;
+        }
+        Self::push_debug_static(builder, ctx, result, if paren_form { "(" } else { "{" })?;
         for (i, field) in view.fields.iter().enumerate() {
             if i > 0 {
                 Self::push_debug_static(builder, ctx, result, ", ")?;
             }
-            Self::push_debug_name(builder, ctx, result, field.name)?;
-            Self::push_debug_static(builder, ctx, result, "=")?;
+            if !paren_form {
+                Self::push_debug_name(builder, ctx, result, field.name)?;
+                Self::push_debug_static(builder, ctx, result, "=")?;
+            }
             let field_addr = if field.offset == 0 {
                 addr
             } else {
@@ -800,8 +826,11 @@ impl<M: Module> Codegen<M> {
                     Self::emit_debug_push_result(builder, ctx, result, tmp_addr, p, l, c)?;
                 }
                 TypeKind::Str => {
-                    // Quoted, raw (unescaped) content — borrowed from
-                    // the struct, which keeps owning the field.
+                    // Borrowed straight out of the struct (which keeps
+                    // owning the field), raw (unescaped) content,
+                    // quoted — named and anonymous structs alike
+                    // (M10: the anon repr matches named structs and
+                    // Python container repr).
                     let (p, l, c) = Self::emit_debug_field_triple(builder, ctx, field_addr);
                     let (vp, vl) =
                         Self::emit_fat_bytes_ptr_len(builder, ctx, p, l, c, Some(field_addr))?;
@@ -821,7 +850,7 @@ impl<M: Module> Codegen<M> {
                     )?;
                     Self::emit_debug_push_result(builder, ctx, result, tmp_addr, p, l, c)?;
                 }
-                TypeKind::Struct => {
+                TypeKind::Struct | TypeKind::AnonStruct => {
                     let nested = Self::emit_debug_repr(builder, ctx, field_addr, field.ty)?;
                     let (p, l, c) = Self::emit_debug_field_triple(builder, ctx, nested);
                     let (vp, vl) =
@@ -847,7 +876,11 @@ impl<M: Module> Codegen<M> {
                 }
             }
         }
-        Self::push_debug_static(builder, ctx, result, "}")?;
+        // A single-field paren form needs the trailing comma: `(v,)`.
+        if paren_form && view.fields.len() == 1 {
+            Self::push_debug_static(builder, ctx, result, ",")?;
+        }
+        Self::push_debug_static(builder, ctx, result, if paren_form { ")" } else { "}" })?;
         Ok(result)
     }
 
@@ -971,5 +1004,139 @@ impl<M: Module> Codegen<M> {
         let text = ctx.pool.str(name);
         let data_id = store_string(name, text, ctx.module, ctx.data_ctx, ctx.string_data)?;
         Self::push_debug_data(builder, ctx, result, data_id, text.len())
+    }
+
+    /// Destructuring assignment (M10): `pattern = rhs`. The rhs value is
+    /// its slot address; per plan field the arm either moves the field
+    /// out into the fresh binding's slot — 24-byte header copy for
+    /// `str`/`bytes`, field-wise copy for nested structs (never byte-wise:
+    /// the ASan rule), scalar store for Copy fields — or, for a wildcard,
+    /// destroys the field inline (`emit_field_drop`). The ownership pass
+    /// scheduled NOTHING for the wildcard fields and no whole-struct Free
+    /// for the shell; the only scheduled Frees target the bound fields'
+    /// owner tokens, which lower through the bindings registered here.
+    pub(crate) fn emit_destructure(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Result<Terminator, String> {
+        let view = ctx.tir.destructure_view(r);
+        let owners = ctx.tir.destructure_bound_owner_refs(r);
+        let rhs_addr = Self::eval_inst_struct(builder, ctx, view.rhs)?;
+        let shape = ctx.pool.struct_view(ctx.tir.inst(view.rhs).ty);
+        let mut owner_idx = 0;
+        for field in &view.fields {
+            let sf = shape.fields[field.field_index as usize];
+            let field_addr = if sf.offset == 0 {
+                rhs_addr
+            } else {
+                builder.ins().iadd_imm_s(rhs_addr, i64::from(sf.offset))
+            };
+            match field.bind {
+                None => {
+                    if ctx.pool.needs_drop(sf.ty) {
+                        Self::emit_field_drop(builder, ctx, field_addr, 0, sf.ty)?;
+                    }
+                }
+                Some(name) => {
+                    let token = owners[owner_idx];
+                    owner_idx += 1;
+                    Self::bind_destructured_field(builder, ctx, name, field_addr, sf.ty, token)?;
+                }
+            }
+        }
+        Ok(Terminator::None)
+    }
+
+    /// Register one destructured-field binding: copy the field's value
+    /// out of the rhs slot into storage the binding owns, in the same
+    /// shape `VarDecl` produces (fat SSA triples for `str`/`bytes`, a
+    /// slot address for structs, a scalar `Variable` for Copy fields) so
+    /// every later read / scheduled free finds the binding where it
+    /// expects it. The field's owner token (`token`) caches the same
+    /// value: the token instruction is never evaluated, and the
+    /// end-of-statement free sweep gates on a cached repr for the
+    /// Free's target before firing a sub-expression-anchored Free.
+    fn bind_destructured_field(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        name: StringId,
+        field_addr: Value,
+        field_ty: TypeId,
+        token: TirRef,
+    ) -> Result<(), String> {
+        match ctx.pool.kind(field_ty) {
+            TypeKind::Str | TypeKind::Bytes => {
+                let ptr = builder
+                    .ins()
+                    .load(ctx.int_type, MemFlagsData::trusted(), field_addr, 0);
+                let len = builder
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), field_addr, 8);
+                let cap = builder
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), field_addr, 16);
+                let var_ptr = builder.declare_var(ctx.int_type);
+                let var_len = builder.declare_var(types::I64);
+                let var_cap = builder.declare_var(types::I64);
+                builder.def_var(var_ptr, ptr);
+                builder.def_var(var_len, len);
+                builder.def_var(var_cap, cap);
+                Self::write_slot(
+                    &mut ctx.fat_locals,
+                    &mut ctx.fat_locals_undo,
+                    name,
+                    Some(super::FatLocals {
+                        ptr: var_ptr,
+                        len: var_len,
+                        cap: var_cap,
+                        home: None,
+                        home_inline: false,
+                    }),
+                );
+                Self::cache_repr(
+                    ctx,
+                    token,
+                    if matches!(ctx.pool.kind(field_ty), TypeKind::Bytes) {
+                        ValueRepr::Bytes { ptr, len, cap }
+                    } else {
+                        ValueRepr::Str { ptr, len, cap }
+                    },
+                );
+                Ok(())
+            }
+            TypeKind::View(_) => {
+                Err("view struct field reached codegen; sema Rule 6 rejects it".to_string())
+            }
+            TypeKind::Struct | TypeKind::AnonStruct => {
+                let slot = Self::struct_slot(builder, ctx, field_ty);
+                let dst = builder.ins().stack_addr(ctx.int_type, slot, 0);
+                Self::emit_struct_copy(builder, ctx, dst, field_addr, field_ty)?;
+                let var = builder.declare_var(ctx.int_type);
+                builder.def_var(var, dst);
+                Self::write_slot(
+                    &mut ctx.struct_locals,
+                    &mut ctx.struct_locals_undo,
+                    name,
+                    Some(var),
+                );
+                Self::cache_repr(ctx, token, ValueRepr::Struct { addr: dst });
+                Ok(())
+            }
+            _ => {
+                let cl_ty = cranelift_type_for(field_ty, ctx.pool, ctx.int_type);
+                let val = builder
+                    .ins()
+                    .load(cl_ty, MemFlagsData::trusted(), field_addr, 0);
+                let var = builder.declare_var(cl_ty);
+                builder.def_var(var, val);
+                // Defensive: a same-scope redefinition must not inherit a
+                // stale fact from the shadowed binding (mirrors VarDecl).
+                Self::write_slot(&mut ctx.range_facts, &mut ctx.range_facts_undo, name, None);
+                Self::write_slot(&mut ctx.locals, &mut ctx.locals_undo, name, Some(var));
+                Self::cache_repr(ctx, token, ValueRepr::Scalar(val));
+                Ok(())
+            }
+        }
     }
 }

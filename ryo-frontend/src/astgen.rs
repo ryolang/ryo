@@ -21,7 +21,7 @@
 use chumsky::span::{SimpleSpan, Span as _};
 use ryo_core::ast;
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
-use ryo_core::types::{InternPool, StringId, StructFlags, TypeId};
+use ryo_core::types::{InternPool, StringId, StructFlags, TypeId, TypeKind};
 use ryo_core::uir::{InstRef, InstTag, Uir, UirBuilder, UirParam, UirStructDecl, UirStructField};
 use std::collections::HashMap;
 
@@ -94,7 +94,104 @@ impl TypeResolver {
             || name == p.float
     }
 
-    fn resolve(
+    /// Resolve any type expression: a plain (or legacy `&name`) name,
+    /// an anonymous struct type literal `{q: int, r: int}` (M10), or
+    /// the positional form `(int, str)` (M10, ≡ `{0: int, 1: str}`).
+    fn resolve_type(
+        &self,
+        texpr: &ast::TypeExpr,
+        ast: &ast::Ast,
+        pool: &mut InternPool,
+        sink: &mut DiagSink,
+    ) -> TypeId {
+        match &texpr.kind {
+            ast::TypeExprKind::Name { name, is_view } => {
+                self.resolve_name(*name, *is_view, texpr.span, pool, sink)
+            }
+            ast::TypeExprKind::Anon { fields } => {
+                let fields = ast.type_field_list(*fields);
+                self.resolve_anon_fields(fields, ast, pool, sink)
+            }
+            ast::TypeExprKind::Positional(elems) => {
+                // (int, str) is sugar over {0: int, 1: str}: intern
+                // the positional names before pool dedup so every
+                // spelling of the shape lands on one TypeId.
+                let elems = ast.type_expr_list(*elems);
+                let mut fields = Vec::with_capacity(elems.len());
+                for (i, elem) in elems.iter().enumerate() {
+                    let name = pool.intern_str(&i.to_string());
+                    fields.push((name, *elem));
+                }
+                self.resolve_anon_fields(&fields, ast, pool, sink)
+            }
+        }
+    }
+
+    /// `{q: int, r: int}` (and its positional equivalent): resolve
+    /// each field's type, reject view-typed fields through the M9
+    /// `ViewFieldType` path (Rule 6 — views cannot live in struct
+    /// fields), and intern the structural type in written order.
+    fn resolve_anon_fields(
+        &self,
+        fields: &[(StringId, ast::TypeExpr)],
+        ast: &ast::Ast,
+        pool: &mut InternPool,
+        sink: &mut DiagSink,
+    ) -> TypeId {
+        let mut pairs: Vec<(StringId, TypeId)> = Vec::with_capacity(fields.len());
+        for &(fname, ref ftexpr) in fields {
+            let fty = self.resolve_type(ftexpr, ast, pool, sink);
+            if pool.is_view(fty) {
+                sink.emit(Diag::error(
+                    ftexpr.span,
+                    DiagCode::ViewFieldType,
+                    format!(
+                        "struct fields must be owned values; '{}' is a projection (Rule 6)",
+                        pool.display(fty)
+                    ),
+                ));
+            }
+            pairs.push((fname, fty));
+        }
+        // Structural identity keys on field names in order; a repeated
+        // name would intern a shape whose layout and field lookups
+        // disagree. Diagnose every repeat — same code and message as
+        // the value-literal path — and absorb the type.
+        let mut seen: Vec<StringId> = Vec::with_capacity(pairs.len());
+        let mut duplicate = false;
+        for &(fname, ref ftexpr) in fields {
+            if seen.contains(&fname) {
+                sink.emit(Diag::error(
+                    ftexpr.span,
+                    DiagCode::DuplicateStructField,
+                    format!("field '{}' is specified more than once", pool.str(fname)),
+                ));
+                duplicate = true;
+            } else {
+                seen.push(fname);
+            }
+        }
+        if duplicate {
+            return pool.error_type();
+        }
+        // A field that failed to resolve — or names a struct whose
+        // definition failed — has no layout, and `anon_struct`
+        // computes layout eagerly (a structural type cannot be
+        // referenced before every field is interned). Interning the
+        // shape would panic in `size_align`; absorb the failure
+        // instead. The original diagnostic is already in the sink and
+        // `compatible` treats the error sentinel as matching anything
+        // downstream.
+        if pairs.iter().any(|&(_, fty)| {
+            pool.is_error(fty)
+                || (matches!(pool.kind(fty), TypeKind::Struct) && !pool.is_defined_struct(fty))
+        }) {
+            return pool.error_type();
+        }
+        pool.anon_struct(&pairs)
+    }
+
+    fn resolve_name(
         &self,
         name: StringId,
         is_view: bool,
@@ -298,6 +395,27 @@ struct StructDefiner<'a> {
     resolved: HashMap<StringId, Vec<UirStructField>>,
 }
 
+/// Collect the named type references in a struct field's type
+/// expression, recursing into anonymous type literals (M10): both
+/// `start: (int, int)` (no references) and `data: {next: Node, v: int}`
+/// (`Node`) matter to the define DFS — a by-value self-reference
+/// through an anonymous field type is still infinite-size.
+fn named_refs_in(texpr: &ast::TypeExpr, ast: &ast::Ast, out: &mut Vec<(StringId, bool, Span)>) {
+    match &texpr.kind {
+        ast::TypeExprKind::Name { name, is_view } => out.push((*name, *is_view, texpr.span)),
+        ast::TypeExprKind::Anon { fields } => {
+            for (_, ft) in ast.type_field_list(*fields) {
+                named_refs_in(ft, ast, out);
+            }
+        }
+        ast::TypeExprKind::Positional(elems) => {
+            for ft in ast.type_expr_list(*elems) {
+                named_refs_in(ft, ast, out);
+            }
+        }
+    }
+}
+
 impl StructDefiner<'_> {
     /// Define one struct's fields in dependency order, depth-first.
     ///
@@ -314,50 +432,57 @@ impl StructDefiner<'_> {
         let mut fields: Vec<UirStructField> = Vec::new();
         let mut failed = false;
         for &(fname, texpr) in decl_fields {
-            // Order/cycle handling applies only to by-value struct
-            // fields; primitives resolve without layout recursion,
-            // and `&name` view syntax is a targeted migration error
-            // handled by `resolve` below.
-            if !texpr.is_view
-                && !self.types.is_primitive(texpr.name)
-                && let Some(&fty) = self.types.struct_types.get(&texpr.name)
-            {
-                match self.states[&texpr.name] {
+            // Field types are full type expressions: a plain name, or
+            // an anonymous type literal (`start: (int, int)`, `data:
+            // {next: Node}`). The by-value cycle/ordering walk must
+            // follow named struct references ANYWHERE inside the
+            // expression — a self-reference through an anonymous field
+            // type has no finite layout either.
+            let mut refs = Vec::new();
+            named_refs_in(&texpr, self.ast, &mut refs);
+            for &(rname, is_view, rspan) in &refs {
+                // Order/cycle handling applies only to by-value struct
+                // fields; primitives resolve without layout recursion,
+                // and `&name` view syntax is a targeted migration error
+                // handled by `resolve_type` below.
+                if is_view
+                    || self.types.is_primitive(rname)
+                    || !self.types.struct_types.contains_key(&rname)
+                {
+                    continue;
+                }
+                let fty = self.types.struct_types[&rname];
+                match self.states[&rname] {
                     DefState::InProgress => {
                         sink.emit(Diag::error(
-                            texpr.span,
+                            rspan,
                             DiagCode::InfiniteSize,
                             format!(
                                 "struct '{}' cannot contain itself by value: field '{}' has \
                                  type '{}', which would make its size infinite",
-                                pool.str(name),
+                                pool.str(rname),
                                 pool.str(fname),
-                                pool.str(texpr.name),
+                                pool.str(rname),
                             ),
                         ));
                         failed = true;
-                        continue;
                     }
                     DefState::Pending => {
-                        self.define(texpr.name, pool, sink);
+                        self.define(rname, pool, sink);
                         if !pool.is_defined_struct(fty) {
                             // The dependency failed its own
                             // definition; defining `name` against it
                             // would have no valid layout.
                             failed = true;
-                            continue;
                         }
                     }
                     DefState::Defined => {}
                     DefState::Failed => {
                         failed = true;
-                        continue;
                     }
                 }
             }
-            let fty = self
-                .types
-                .resolve(texpr.name, texpr.is_view, texpr.span, pool, sink);
+            let fty = self.types.resolve_type(&texpr, self.ast, pool, sink);
             if pool.is_error(fty) {
                 failed = true;
             }
@@ -458,20 +583,14 @@ fn gen_function_def(
         .iter()
         .map(|p| UirParam {
             name: p.name.name,
-            ty: types.resolve(
-                p.type_annotation.name,
-                p.type_annotation.is_view,
-                p.type_annotation.span,
-                pool,
-                sink,
-            ),
+            ty: types.resolve_type(&p.type_annotation, ast, pool, sink),
             mode: p.mode,
             span: p.span,
         })
         .collect();
 
     let return_type = match &func.return_type {
-        Some(ty) => types.resolve(ty.name, ty.is_view, ty.span, pool, sink),
+        Some(ty) => types.resolve_type(ty, ast, pool, sink),
         None => pool.void(),
     };
 
@@ -508,6 +627,75 @@ fn gen_function_def(
     );
 }
 
+/// Lower a destructuring pattern (M10) to `InstTag::Destructure`
+/// plan(s). Each pattern level becomes one instruction whose plan
+/// entries are `(selector, bind)` pairs — positional patterns select
+/// by canonical field index, brace patterns by field name, and a
+/// `None` bind is a wildcard (the field is destroyed, not bound).
+///
+/// A nested pattern element (possible only inside a positional
+/// pattern) cannot be expressed in one flat plan: astgen binds the
+/// field to a synthesized `__ryo_destructure_N` temp and recurses,
+/// emitting the sub-pattern's own `Destructure` over a `TempVar` read
+/// of that temp as the following statement. `TempVar` is its own UIR
+/// tag, so the read resolves only through sema's destructuring-temp
+/// side table — never the user scope — and a user-spelled `Var`
+/// reference cannot observe or hijack the temp.
+fn lower_destructure_pattern(
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+    pool: &mut InternPool,
+    pattern: ast::PatternId,
+    value: InstRef,
+    span: Span,
+    out: &mut Vec<InstRef>,
+) {
+    let pat = ast.pattern(pattern);
+    match &pat.kind {
+        ast::PatternKind::Positional(list) => {
+            let mut plan: Vec<(u32, Option<StringId>)> = Vec::new();
+            // Nested elements recurse as their own statements, which
+            // must FOLLOW the enclosing Destructure (it binds the temp
+            // their `Var` rhs resolves through) — collect and lower
+            // them after this level's instruction is emitted.
+            let mut nested: Vec<(ast::PatternId, StringId, Span)> = Vec::new();
+            for (i, elem) in ast.pattern_list(*list).iter().enumerate() {
+                let elem_pat = ast.pattern(*elem);
+                match &elem_pat.kind {
+                    ast::PatternKind::Bind(ident) => {
+                        plan.push((i as u32, Some(ident.name)));
+                    }
+                    ast::PatternKind::Wildcard => plan.push((i as u32, None)),
+                    ast::PatternKind::Anon { .. } | ast::PatternKind::Positional(_) => {
+                        let n = b.next_destructure_temp();
+                        let temp = pool.intern_str(&format!("__ryo_destructure_{n}"));
+                        plan.push((i as u32, Some(temp)));
+                        nested.push((*elem, temp, elem_pat.span));
+                    }
+                }
+            }
+            out.push(b.destructure(value, true, &plan, span));
+            for (elem, temp, elem_span) in nested {
+                let elem_value = b.temp_var_ref(temp, elem_span);
+                lower_destructure_pattern(b, ast, pool, elem, elem_value, elem_span, out);
+            }
+        }
+        ast::PatternKind::Anon { fields } => {
+            let mut plan: Vec<(u32, Option<StringId>)> = Vec::new();
+            for field in ast.pattern_field_list(*fields) {
+                // A field named `_` is a wildcard (binds nothing); a
+                // rename whose target is `_` likewise skips the field.
+                let wildcard = pool.str(field.name) == "_" || pool.str(field.binding.name) == "_";
+                plan.push((field.name.raw(), (!wildcard).then_some(field.binding.name)));
+            }
+            out.push(b.destructure(value, false, &plan, span));
+        }
+        ast::PatternKind::Wildcard | ast::PatternKind::Bind(_) => {
+            unreachable!("parser guarantees a destructure target is a shaped pattern")
+        }
+    }
+}
+
 fn gen_stmt(
     b: &mut UirBuilder,
     ast: &ast::Ast,
@@ -524,7 +712,7 @@ fn gen_stmt(
             let ty = decl
                 .type_annotation
                 .as_ref()
-                .map(|ann| types.resolve(ann.name, ann.is_view, ann.span, pool, sink));
+                .map(|ann| types.resolve_type(ann, ast, pool, sink));
             let r = b.var_decl(decl.name.name, decl.mutable, ty, initializer, span);
             out.push(r);
         }
@@ -569,6 +757,10 @@ fn gen_stmt(
             let value_ref = gen_expr(b, ast, *value);
             let r = b.compound_field_assign(target_ref, *op, value_ref, span);
             out.push(r);
+        }
+        ast::StmtKind::Destructure { target, value } => {
+            let value_ref = gen_expr(b, ast, *value);
+            lower_destructure_pattern(b, ast, pool, *target, value_ref, span, out);
         }
         ast::StmtKind::IfStmt(if_stmt) => {
             let cond = gen_expr(b, ast, if_stmt.cond);
@@ -729,16 +921,21 @@ fn gen_expr(b: &mut UirBuilder, ast: &ast::Ast, expr: ast::ExprId) -> InstRef {
             let index_ref = gen_expr(b, ast, index);
             b.index(base_ref, index_ref, span)
         }
-        // Struct literal `Name{field=value, ...}` (M9). The field
+        // Struct literal `Name{field=value, ...}` (M9) or the
+        // anonymous `{field=value, ...}` (M10). The field
         // initializers stay in source order; sema canonicalizes them
-        // against the declaration in `uir.struct_decls`.
+        // against the declaration in `uir.struct_decls` (named) or
+        // infers the structural type from the field values
+        // (anonymous — the UIR name slot carries the
+        // `UIR_ANON_STRUCT_NAME` sentinel).
         ast::ExprKind::StructLiteral(lit) => {
             let fields: Vec<(StringId, InstRef)> = ast
                 .struct_field_inits(lit.fields)
                 .iter()
                 .map(|&(fname, e)| (fname, gen_expr(b, ast, e)))
                 .collect();
-            b.struct_lit(lit.name.name, &fields, span)
+            let name = lit.name.map(|ident| ident.name);
+            b.struct_lit(name, &fields, span)
         }
         // Field access `object.field` (M9); chains fold left in the
         // AST, so each access lowers against its own object.
@@ -753,12 +950,12 @@ fn gen_expr(b: &mut UirBuilder, ast: &ast::Ast, expr: ast::ExprId) -> InstRef {
 mod tests {
     use super::*;
     use crate::lexer::lex;
-    use crate::parser::program_parser;
+    use crate::parser::{ParseState, program_parser};
     use chumsky::Parser;
     use chumsky::input::Input;
     use ryo_core::uir::InstData;
 
-    fn parse_and_lower(input: &str) -> Result<(Uir, InternPool), Vec<Diag>> {
+    pub(super) fn parse_and_lower(input: &str) -> Result<(Uir, InternPool), Vec<Diag>> {
         // Phase-2 lex pipeline: logos + indent + intern in one
         // pass; identifiers come back as `StringId`. Lex diagnostics
         // go through `DiagSink` like every other stage, so assert
@@ -772,11 +969,12 @@ mod tests {
             lex_sink.into_diags()
         );
         let token_stream = tokens[..].split_token_span((0..input.len()).into());
-        let mut ast = ryo_core::ast::Ast::new();
+        let mut state = ParseState::new(pool);
         program_parser()
-            .parse_with_state(token_stream, &mut ast)
+            .parse_with_state(token_stream, &mut state)
             .into_result()
             .expect("parse ok");
+        let (ast, mut pool) = state.into_parts();
 
         let mut sink = DiagSink::new();
         let uir = generate(&ast, &mut pool, &mut sink);
@@ -788,7 +986,11 @@ mod tests {
     }
 
     /// Find a function body by name through the `InternPool`.
-    fn body_named<'a>(uir: &'a Uir, pool: &InternPool, name: &str) -> &'a ryo_core::uir::FuncBody {
+    pub(super) fn body_named<'a>(
+        uir: &'a Uir,
+        pool: &InternPool,
+        name: &str,
+    ) -> &'a ryo_core::uir::FuncBody {
         let id = pool.find_str(name).expect("name should be interned");
         uir.func_bodies
             .iter()
@@ -837,6 +1039,33 @@ mod tests {
             matches!(uir.inst(inner).tag, InstTag::Var),
             "borrow operand should be a Var read"
         );
+    }
+
+    #[test]
+    fn nested_destructure_reads_temp_as_tempvar() {
+        // The sub-pattern's value read must carry the TempVar tag —
+        // the provenance that keeps user `Var` references away from
+        // the compiler temp table (they reject the `__ryo_` prefix
+        // instead of resolving through it).
+        let (uir, pool) = parse_and_lower("fn main():\n\t(a, (b, c)) = (1, (2, 3))\n").unwrap();
+        let main = body_named(&uir, &pool, "main");
+        let stmts = uir.body_stmts(main);
+        assert_eq!(
+            stmts.len(),
+            2,
+            "nested lowering emits the sub-pattern as its own statement"
+        );
+        let sub = uir.destructure_view(stmts[1]);
+        let value = uir.inst(sub.value);
+        assert!(
+            matches!(value.tag, InstTag::TempVar),
+            "sub-pattern value must be a TempVar read, got {:?}",
+            value.tag
+        );
+        match value.data {
+            InstData::Var(name) => assert_eq!(pool.str(name), "__ryo_destructure_0"),
+            other => panic!("TempVar must carry InstData::Var, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1184,7 +1413,7 @@ mod tests {
         let stmts = uir.body_stmts(main);
         let decl = uir.var_decl_view(stmts[0]);
         let lit = uir.struct_lit_view(decl.initializer);
-        assert_eq!(pool.str(lit.name), "Point");
+        assert_eq!(lit.name.map(|n| pool.str(n)), Some("Point"));
         assert_eq!(lit.fields.len(), 1);
         assert_eq!(pool.str(lit.fields[0].0), "x");
         let q = uir.var_decl_view(stmts[1]);
@@ -1201,6 +1430,30 @@ mod tests {
     fn mutual_struct_value_cycle_is_diagnosed() {
         let err = parse_and_lower("struct A:\n\tb: B\n\nstruct B:\n\ta: A\n").unwrap_err();
         assert!(err.iter().any(|d| d.code == DiagCode::InfiniteSize));
+    }
+
+    #[test]
+    fn value_cycle_through_anon_field_type_is_diagnosed() {
+        // A self-reference hidden inside an anonymous field type is
+        // still by-value and still infinite-size: `data: {next: Node,
+        // v: int}` must trip the same E0005 as a plain `next: Node`.
+        let err = parse_and_lower("struct Node:\n\tdata: {next: Node, v: int}\n").unwrap_err();
+        assert!(err.iter().any(|d| d.code == DiagCode::InfiniteSize));
+    }
+
+    #[test]
+    fn anon_field_type_in_struct_decl_resolves() {
+        // Struct fields take full type expressions; the declaration's
+        // resolved field type is the structural anonymous struct.
+        let src = "struct Line:\n\tstart: (int, int)\n\nfn main():\n\tl = Line{start=(0, 0)}\n";
+        let (uir, pool) = parse_and_lower(src).unwrap();
+        let decl = &uir.struct_decls[0];
+        assert_eq!(decl.fields.len(), 1);
+        assert!(
+            matches!(pool.kind(decl.fields[0].ty), TypeKind::AnonStruct),
+            "field type must be the anonymous struct, got {:?}",
+            pool.kind(decl.fields[0].ty)
+        );
     }
 
     #[test]
@@ -1272,5 +1525,68 @@ mod tests {
             }
         }
         assert_eq!(slices, 1, "b[0:1] must stay a Slice");
+    }
+}
+
+#[cfg(test)]
+mod type_literal_tests {
+    use super::tests::{body_named, parse_and_lower};
+    use super::*;
+    use ryo_core::types::TypeKind;
+
+    #[test]
+    fn positional_type_expr_resolves_to_same_type_as_anon_fields() {
+        // `TypeExprKind::Positional` resolution must intern the
+        // "0"/"1" names and dedup against the spelled-out
+        // `{0: int, 1: str}` form — tuple sugar and brace spelling
+        // are one structural TypeId.
+        let mut pool = InternPool::new();
+        let f = pool.intern_str("f");
+        let g = pool.intern_str("g");
+        let int = pool.intern_str("int");
+        let str_ = pool.intern_str("str");
+        let zero = pool.intern_str("0");
+        let one = pool.intern_str("1");
+        let mut ast = ast::Ast::new();
+        let int_ty = ast::TypeExpr::new(int, synthetic_span());
+        let str_ty = ast::TypeExpr::new(str_, synthetic_span());
+        let positional = ast.type_expr_positional(&[int_ty, str_ty], synthetic_span());
+        let anon = ast.type_expr_anon(&[(zero, int_ty), (one, str_ty)], synthetic_span());
+        let body = ast.return_stmt(None, synthetic_span());
+        let f_ident = ast::Ident::new(f, synthetic_span());
+        let g_ident = ast::Ident::new(g, synthetic_span());
+        let f_def = ast.function_def(f_ident, &[], Some(positional), &[body], synthetic_span());
+        let g_def = ast.function_def(g_ident, &[], Some(anon), &[body], synthetic_span());
+        ast.set_top_level(vec![f_def, g_def]);
+
+        let mut sink = DiagSink::new();
+        let uir = generate(&ast, &mut pool, &mut sink);
+        assert!(!sink.has_errors(), "diags: {:?}", sink.into_diags());
+
+        let positional_ret = body_named(&uir, &pool, "f").return_type;
+        let anon_ret = body_named(&uir, &pool, "g").return_type;
+        assert_eq!(
+            positional_ret, anon_ret,
+            "positional and brace spellings are one TypeId"
+        );
+        assert!(matches!(pool.kind(positional_ret), TypeKind::AnonStruct));
+        let view = pool.struct_view(positional_ret);
+        let names: Vec<&str> = view.fields.iter().map(|f| pool.str(f.name)).collect();
+        assert_eq!(names, ["0", "1"]);
+        assert_eq!(view.fields[0].ty, pool.int());
+        assert_eq!(view.fields[1].ty, pool.str_());
+    }
+
+    #[test]
+    fn anon_type_literal_annotation_lowers_to_structural_type() {
+        // `dm: {q: int, r: int} = ...` resolves the annotation to the
+        // same anon TypeId the equivalent literal would infer.
+        let (uir, pool) = parse_and_lower("fn main():\n\tdm: {q: int, r: int} = {q=1, r=2}\n")
+            .expect("type literal annotation should resolve");
+        let main = body_named(&uir, &pool, "main");
+        let v = uir.var_decl_view(uir.body_stmts(main)[0]);
+        let ty = v.ty.expect("annotation must produce a declared type");
+        assert!(matches!(pool.kind(ty), TypeKind::AnonStruct));
+        assert_eq!(pool.display(ty).to_string(), "{q: int, r: int}");
     }
 }

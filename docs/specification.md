@@ -384,8 +384,8 @@ pair = (17, "alice")              # ≡ {0=17, 1="alice"}
 print(f"{pair.0}")                # positional access
 
 # named destructuring: punning and renaming
-{q, r}       = divmod(17, 5)
-{x = quot}   = divmod(17, 5)
+{q, r}            = divmod(17, 5)
+{q = quot, r = _} = divmod(17, 5)
 
 # match patterns
 match point:
@@ -398,6 +398,9 @@ match point:
 - **Usage rule:** crossing a boundary (public API, package, long-term storage) or carrying domain meaning → named; local/transient (multi-return, unpacking, throwaway shapes) → anonymous. A lint flags anonymous structs returned from public functions of other packages.
 - **`{}` is reserved** for the future empty map literal (Python intuition). There is no empty anonymous struct — use `none`.
 - Single-element tuple keeps Python's trailing comma: `(x,)`. Trailing commas allowed in all literals.
+- **Debug Representation:** Always-on — every anonymous struct prints via a synthesized debug string, exactly like named structs (§4.5); `print()` accepts any such value. The rendering mirrors the literal syntax: a shape whose fields are all positional renders paren sugar — `(3, 1)`, `(3,)` — while a shape with any named field renders braces with the names — `{x=1, y=2}`. `str` fields render quoted: `{x=1, y="a"}`.
+- **Equality:** `==` / `!=` compare memberwise with no opt-in, available whenever every field type is Eq-capable (§4.5's predicate — primitives, `str`, `bytes`, Eq-capable structs — computed recursively from the fields); otherwise the comparison is a compile error. Float fields use IEEE `==`, so a shape containing NaN never equals itself.
+- **Destructuring:** Full coverage — every field must be bound or explicitly `_`-ed; `_`-ed fields are destroyed at the statement, never bound. The bindings a pattern declares are fresh and immutable, and each moves its field out of the source value — the source is consumed whole. Positional patterns bind in canonical field order; brace patterns bind by field name, where a bare name that matches no remaining field binds the next uncovered field in declaration order, while renames (`{x = quot}`) name their field and stay strict. Named structs destructure with brace patterns, by field name; positional patterns on named structs are rejected.
 - *(Rationale: one product-type mechanism instead of two — no second ABI/ownership path, no positional swap-bug class (`(int, str)` vs `(str, int)`); the Python-familiar `(a, b)` literal/unpack syntax survives as sugar; named groupings gain self-documenting returns (`result.q` over `result.0`).)*
 
 ### 4.4 Slice Types (Scope-Locked Views)

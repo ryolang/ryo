@@ -748,12 +748,13 @@ pub(crate) fn check_print_args(
             | TypeKind::Float
             | TypeKind::Bool
             | TypeKind::Struct
+            | TypeKind::AnonStruct
     ) {
         sema.sink.emit(Diag::error(
             sema.uir.span(view.args[0]),
             DiagCode::TypeMismatch,
             format!(
-                "{builtin}() argument must be str, strview, bytes, bytesview, int, float, bool, or struct, got {}",
+                "{builtin}() argument must be str, strview, bytes, bytesview, int, float, bool, struct, or tuple, got {}",
                 sema.pool.display(arg_ty)
             ),
         ));
@@ -803,7 +804,11 @@ fn emit_print_like(
             owned_args = vec![repr];
             &owned_args
         }
-        TypeKind::Int | TypeKind::Float | TypeKind::Bool | TypeKind::Struct => {
+        TypeKind::Int
+        | TypeKind::Float
+        | TypeKind::Bool
+        | TypeKind::Struct
+        | TypeKind::AnonStruct => {
             let repr = fcx.builder.push_typed(
                 TirTag::DebugRepr,
                 TirData::UnOp(arg_tirs[0]),

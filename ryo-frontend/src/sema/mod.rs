@@ -55,6 +55,8 @@ mod builtins;
 pub(crate) use builtins::*;
 mod call;
 pub(crate) use call::*;
+mod diff;
+pub(crate) use diff::*;
 mod expr;
 pub(crate) use expr::*;
 mod stmt;
@@ -358,18 +360,10 @@ impl<'a> Sema<'a> {
     /// worklist; the rest of the driver doesn't need to know.
     fn resolve_signatures(&mut self) {
         for body in &self.uir.func_bodies {
-            let name = self.pool.str(body.name);
-            if name.starts_with("__ryo_") {
-                self.sink.emit(Diag::error(
-                    body.span,
-                    DiagCode::ReservedIdentifier,
-                    format!(
-                        "identifiers starting with '__ryo_' are reserved for the compiler runtime: '{}'",
-                        name,
-                    ),
-                ));
-            }
-            check_reserved_builtin(
+            // check_reserved_name rejects the '__ryo_' prefix alongside
+            // "range" — the standalone prefix block that lived here is
+            // folded into that one reservation.
+            check_reserved_name(
                 self,
                 body.name,
                 body.span,
@@ -470,6 +464,18 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
         // An `inout` parameter is mutable inside the callee body (like a
         // `mut` local); `move` and borrowed params are immutable.
         let is_mutable = param.mode == ParamMode::Inout;
+        // Parameters are a user binding form like any other: the
+        // '__ryo_' prefix and reserved builtins are rejected here too
+        // (the error-typed binding keeps the body's uses suppressed).
+        if check_reserved_name(
+            sema,
+            param.name,
+            param.span,
+            "is a reserved builtin and cannot be used as a parameter name",
+        ) {
+            scope.insert_binding(param.name, sema.pool.error_type(), is_mutable);
+            continue;
+        }
         scope.insert_binding(param.name, param.ty, is_mutable);
     }
 
@@ -544,6 +550,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
         inst_map: vec![None; sema.uir.instructions.len()],
         return_type: body.return_type,
         loop_depth: 0,
+        destructure_temps: HashMap::new(),
     };
 
     let mut stmt_refs: Vec<TirRef> = Vec::with_capacity(sema.uir.body_stmts(body).len());
@@ -583,11 +590,23 @@ pub(crate) struct FuncCtx {
     inst_map: Vec<Option<TirRef>>,
     return_type: TypeId,
     loop_depth: u32,
+    /// M10: compiler-temp bindings synthesized by astgen for nested
+    /// destructuring patterns (`__ryo_destructure_N`). Kept OUT of the
+    /// user scope: user code can never collide with or observe them,
+    /// and the `Var` arm resolves them before any scope lookup.
+    destructure_temps: HashMap<StringId, TypeId>,
 }
 
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_bytes;
+
+#[cfg(test)]
+mod tests_destructure;
+#[cfg(test)]
+mod tests_reserved;
 #[cfg(test)]
 mod tests_structs;
+#[cfg(test)]
+mod tests_type_literals;

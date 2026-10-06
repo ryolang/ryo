@@ -33,7 +33,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 9 — Structs ✅ COMPLETE](#milestone-9-structs--complete)
 - [x] [Milestone 9.1 — Synthesized Eq & Debug for Structs ✅ COMPLETE](#milestone-91-synthesized-eq--debug-for-structs--complete)
 - [x] [Milestone 9.2 — Throwaway CLI Intrinsics (`process_*`, `io_*`) ✅ COMPLETE](#milestone-92-throwaway-cli-intrinsics-process_-io_--complete) *(no dependencies; slots in alongside the core cluster)*
-- [ ] [Milestone 10 — Tuples](#milestone-10-tuples)
+- [x] [Milestone 10 — Tuples ✅ COMPLETE](#milestone-10-tuples-tuple-sugar-over-anonymous-structs--complete)
 - [ ] [Milestone 11 — Enums (Algebraic Data Types) [alpha]](#milestone-11-enums-algebraic-data-types-alpha)
 - [ ] [Milestone 12 — Pattern Matching [alpha]](#milestone-12-pattern-matching-alpha)
 - [ ] [Milestone 13 — Error Types & Unions [alpha]](#milestone-13-error-types--unions-alpha)
@@ -1500,9 +1500,11 @@ fn main():
 - **Revisit when the runtime consumes flags:** M9.2's entry shim passes argv through untouched — `process_argc`/`process_argv` see every argument. Once the runtime itself needs flags (the v0.2 runtime profile split `--profile=core`, the debug-mode `shared[T]` cycle detector, future scheduler settings), `ryo_rt_init` must partition argv into runtime-reserved flags and program args, and the intrinsics settle on the post-partition view. Design the reserved-flag scheme then — the natural landing point is the M22 migration to `process.args() -> list[str]`. Note the `core` embedding flavour has *no* argv at all (`process.*`/`io.*` are hosted-only; a core library has no `main`, the host calls exported functions) — M9.2's shim sits entirely inside the hosted `is_main` special-case, so nothing needs gating until the v0.2 profile split lands.
 - Dependencies: none beyond what exists today (`never` type, `void`, and the extern runtime ABI all shipped)
 
-### Milestone 10: Tuples (Tuple Sugar over Anonymous Structs)
+### Milestone 10: Tuples (Tuple Sugar over Anonymous Structs) ✅ COMPLETE
 
 **Goal:** Ad-hoc grouping and multiple return values via the single grouping type adopted in D11
+
+**Status:** ✅ COMPLETE (2026-10-02, branch `feat/milestone-10-tuples` — [PR #175](https://github.com/ryolang/ryo/pull/175))
 
 > **Decision (adopted 2026-07-22, final spec §10, D11):** This milestone's Decision Review is **resolved**. Ryo has exactly one ad-hoc grouping type — the **anonymous struct** (`{x=1, y=2}`, type literal `{q: int, r: int}`) — and tuples are **positional sugar** over it: `(17, "alice")` ≡ `{0=17, 1="alice"}`, keeping the Python-familiar surface (literal, `(q, r) = divmod(...)` unpacking, `pair.0` access, `(x,)` trailing comma). There is no separate tuple type, ABI, or ownership path. Named-struct construction moves to braces (`Point{x=1, y=2}` — the Brace Law), as do named enum payloads (`Variant{field=value}`); positional enum payloads keep parens. Identity is structural, exact-match only; no implicit coercion to named types. `{}` stays reserved for the future empty map literal. This milestone folds into **Milestone 9** (shared construction/layout machinery — anonymous structs need no declarations or defaults); what remains here is only the **sugar layer** (parser forms + destructuring), estimated far smaller than a standalone tuple type.
 >
@@ -1515,7 +1517,16 @@ fn main():
 - Parse destructuring: positional `(q, r) = f()` (paren-less allowed), named punning `{q, r} = f()`, rename `{x = quot} = f()`
 - Type system: structural identity, exact match only (no subtyping/width rules); no implicit coercion to named structs
 - Codegen: reuse M9 struct layout for `{...}` values; positional access `pair.0`; destructuring in assignments
-- Write tests: anonymous literals, sugar round-trips (`(17, "a")` ≡ `{0=17, 1="a"}`), destructuring forms, match patterns `{x=0, y=_}` / `(0, _)`, structural mismatch errors
+- Write tests: anonymous literals, sugar round-trips (`(17, "a")` ≡ `{0=17, 1="a"}`), destructuring forms, structural mismatch errors
+  - match patterns `{x=0, y=_}` / `(0, _)` — **deferred to M12**: literal patterns are M12's feature; M10 ships binding patterns only
+
+**Shipped (2026-10-02):**
+
+- Anonymous struct value literals `{x=1, y=2}` (incl. numeric field keys `{0=17}`) and type literals `{q: int, r: int}` — structural identity, exact match, field-diff diagnostics with did-you-mean and the named-graduation fix-it
+- Tuple sugar: `(a, b)` / `(x,)` literals ≡ positional fields `"0"`/`"1"`, `(int, str)` type sugar, `.0` positional access (chained access parenthesized — E0110), E0109 (`{}` reserved) / E0111 (`()` is not a value) / E0112 (single-element destructuring needs the trailing comma)
+- Destructuring statements: positional / paren-less / brace forms, renames, full coverage (every field bound or `_`-ed — E0113/E0114), `_` fields destroyed inline, named structs destructuring by field name (positional patterns on named structs rejected — E0115), nested patterns, immutable fresh bindings
+- Always-on Debug for anonymous shapes: all-positional forms render paren sugar (`(3, 1)`, `(3,)`), named fields render braces, `str` fields quote; structural `==` / `!=` gated on every field being Eq-capable (E0116), floats IEEE
+- Wildcard drops and loop destructures verified leak-clean under the Linux ASan/Valgrind gate; `examples/tuples.ryo` shipped
 
 **Visible Progress:** Functions return multiple values with self-documenting or Python-familiar syntax
 
@@ -1526,8 +1537,8 @@ fn divmod(a: int, b: int) -> {q: int, r: int}:
  return {q=a / b, r=a % b}
 
 fn main():
- (q, r) = divmod(10, 3)       # positional sugar
- {x = quot} = divmod(10, 3)   # named rename
+ (q, r) = divmod(10, 3)              # positional sugar
+ {q = quot, r = _} = divmod(10, 3)   # named rename
  pair = (17, "alice")         # ≡ {0=17, 1="alice"}
  # q = 3, r = 1, quot = 3
 ```
@@ -1536,8 +1547,8 @@ fn main():
 
 - One grouping type only (D11): no separate tuple type, ABI, or ownership path; `Type::Tuple` interning stubs in `types.rs` are removed or repurposed
 - `void` remains the unit type (there is no empty anonymous struct; `{}` is reserved for the future empty map literal)
-- Lint: anonymous structs returned from public functions of other packages get a "consider naming this shape" style lint (tooling, not semantics)
-- Match patterns accept both forms: `{x=0, y=_}` and `(0, _)`
+- Lint: anonymous structs returned from public functions of other packages get a "consider naming this shape" style lint (tooling, not semantics) — **deferred to M6**: "public functions of other packages" needs the module system
+- Match patterns accept both forms: `{x=0, y=_}` and `(0, _)` — **deferred to M12** with the rest of literal-pattern matching
 - Dependencies: Milestone 9 (anonymous structs share the struct machinery)
 
 ### Milestone 11: Enums (Algebraic Data Types) [alpha]
@@ -2173,6 +2184,8 @@ fn main():
 - `bytes.from_list([...])` becomes expressible here (deferred from M8.4.2 — it needs list literals to exist)
 - **String iteration (sequencing, with spec §4.7):** `char` (§4.2, Unicode scalar value — Milestone 17.2) lands first; `.chars()` is a decoding iterator over it; `.char_count()` is the explicit-O(n) convenience — `.len()` stays byte length, so no linear scan hides behind constant-looking syntax. `s.chars().collect() -> list[char]` is the decode-once-then-index escape hatch (explicit allocation).
 - **String `for` shape:** `for (offset, c) in text.chars():` — each step yields the byte offset (aligned with slice bounds, for `text[start:i]`-style scanning) and the decoded `char` (for classification). No silent U+FFFD: `str` is valid UTF-8 by construction, so decoding is total — the Go ergonomics without the Go error-swallowing.
+- **Key hashability is a predicate, not a protocol — open decision, needed before non-primitive map keys (Draft — v0.2+).** Equality already models the pattern: memberwise `==` gated by the compile-time Eq-capable predicate (spec §4.5), computed recursively from the fields with no user-written code, compile error when a field isn't Eq-capable. Hashing should mirror it exactly: a value is hashable iff every field type is hashable, enforced at the call site as a compile error naming the offending field — never Python's runtime `unhashable type`. What actually needs deciding: Ryo values can mutate through `mut` bindings, including struct/tuple fields (M10 positional writes), which changes their content — and therefore their hash — after insertion. Candidates: **(a) snapshot at insertion** — the map owns its key (copy for Copy shapes, move/clone for owning ones), so mutating the original afterwards cannot corrupt the table; composes with the copy-on-write note above and with the ownership pass. **(b) transitive immutability as a capability** — only deeply immutable types are hashable, and a `mut` binding of a hashable type cannot be used as a key; hashability becomes a type property, at the cost of refusing legitimate read-only uses. Python never faced the question (tuples are deeply immutable, which is exactly why they are the dict-key idiom); Rust's `Hash`+`Eq` split answers it for interior mutability only. Pick before `map[K, V]` accepts struct/tuple keys — the hardcoded `map[str, int]` doesn't hit the question, but the decision shapes the map's ownership contract.
+- **Heterogeneous + dynamically-sized data = enum + collection — the intended idiom, and an open `any` question for Phase 5 (Draft — v0.2+).** "A sequence of different-typed elements of unknown length" decomposes into two needs the type system answers separately: heterogeneity via a sum type, unknown size via a collection. The intended idiom is `list[EnumType]` / `map[str, EnumType]`: the union is a declared enum (§4.8 — named payloads keep braces, positional payloads keep parens), the dynamism is `list[T]`/`map[K, V]`. This covers the closed-set use cases — ASTs (`Expr = Literal | Binary(op, lhs, rhs) | Call(...)`), JSON (`Json = Null | Bool(bool) | … | Arr(list[Json])` — recursion through the generic collection), document/UI models, event and message streams (the Go-inspired concurrency story answers this better than Go: an exhaustive `match` on a message enum instead of `interface{}` type assertions). It also mirrors the D11 ruling: one structural product type (anonymous structs) paired with one nominal sum type (enums). Sequencing: the full recursive pattern (`list[Json]`) needs generic collections — Phase 5 (Traits & Generics), since M22 hardcodes instantiations. What this idiom cannot express is an OPEN set (variants added by third parties later — plugin systems; truly schema-less external data). The escape hatch is type erasure — an `any`/top type carrying runtime type tags with checked downcasts — at the cost of RTTI, mandatory boxing, and lost static guarantees. Whether Ryo wants an `any` at all is a deliberate Phase 5 decision, not a default; schema-less JSON is often better served by schema-driven codegen. Deliberately rejected: structural union types (`list[A | B]`, the TypeScript approach — breaks the D11 symmetry and adds implicit-coercion surface) and growing/dynamic tuples (contradicts the static-shape ruling at the root of M10).
 
 ### Milestone 23: RAII & Drop (Compiler Intrinsic)
 

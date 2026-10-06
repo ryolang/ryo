@@ -255,12 +255,14 @@ The AST is a pair of typed arenas (`exprs` / `stmts`), not a pointer tree:
 ### 3. Add Parser Rule (ryo-frontend/src/parser.rs)
 Use Chumsky combinators: `just(Token::X)` for exact match, `.then()` for sequence, `.or_not()` for optional, `.repeated()` for repetition. The parser is stateful: the `Ast` arenas are the chumsky state (`extra::Full<_, Ast, _>`, entered via `parse_with_state`), so node-producing combinators push through `e.state()` and yield `ExprId` / `StmtId` (annotate the closure param as `e: &mut Mx<'a, '_, I>` so `e.state()` type-checks). Use `foldl_with` when folding needs state.
 ```rust
-let my_feature = just(Token::Keyword).ignore_then(expression_parser())
+let my_feature = just(Token::Keyword).ignore_then(expr.clone())
     .map_with(|expr, e: &mut Mx<'a, '_, I>| {
         let span = e.span();
         e.state().my_feature(expr, span)
     });
 ```
+
+⚠️ Never call `expression_parser()` inside a statement rule — take the shared parser as a parameter (see "Parser Grammar Construction").
 
 ### 4. Add UIR Instruction (ryo-core/src/uir.rs)
 UIR is **untyped**. Add a tag to the `Inst` tag enum (and a payload in `InstData` if needed). For variable-size payloads (arg lists, body statement lists), encode them into the `extra: Vec<u32>` arena and reference them via `ExtraRange`. Add a span entry parallel to the instruction. Avoid nesting: each sub-expression is its own `InstRef`.
@@ -288,6 +290,14 @@ cargo test
 
 ### 9. Update the Tree-sitter Grammar
 Language-grammar changes (new keywords, literals, operators, statement forms) must also land in the editor grammar: the `tree-sitter-ryo` repo (standalone sibling checkout — regenerate the parser, extend `queries/highlights.scm`, add corpus tests). Without this, editor highlighting silently drifts from the language.
+
+### Parser Grammar Construction
+
+Grammar builders like `expression_parser()` construct the full parser graph eagerly on every call (`recursive()` allocates a fresh slot each time). Calling one inside a rule that `program_parser()` instantiates per parse multiplies that fixed cost for every parse of every file. Example: the M10 destructuring rule called it 3× at 2 instantiation sites — 6 full grammar builds per parse (~20% slower parse_snippet); fixed in 8ff1ab7 by building the grammar once in `top_level_statement_parser` and threading it into rules as an `expr: impl Parser<...> + Clone` parameter (`Rc` clones are cheap).
+
+- **Adding a rule:** take the shared expression parser as a parameter; never build your own.
+- **Reviewing:** any new `expression_parser()` call site in `parser.rs` is a red flag.
+- **Verifying:** `cargo bench -p ryo-frontend -- parse_snippet` (A/B against the base commit; CodSpeed CI tracks these benches).
 
 ## Error Handling
 

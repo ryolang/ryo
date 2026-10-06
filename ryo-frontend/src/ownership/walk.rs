@@ -1,13 +1,13 @@
 //! Forward statement/expression walk — split from `mod.rs`.
 
 use super::{
-    BranchState, Owner, OwnerState, Ownership, PromoCandidate, ReseatDrop, analyze_for_range,
-    analyze_while_loop, body_must_terminate, check_field_move_out, check_field_target_projected,
-    check_source_projected, consume_struct_lit_fields, consumed_binding_name, drain_dying_views,
-    field_path_of, format_binding, needs_tracking, owner_name_for_diag, owner_sort_key, param_idx,
-    projection_root, prune_branch_dead_projections, push_unique, record_return_epilogue,
-    refine_view_liveness_for_arm, register_projection, resolve_view_alias, restore_view_last_use,
-    rule7_owner_name, struct_base_name, struct_root,
+    BranchState, Owner, OwnerState, Ownership, PromoCandidate, ReseatDrop, analyze_destructure,
+    analyze_for_range, analyze_while_loop, body_must_terminate, check_field_move_out,
+    check_field_target_projected, check_source_projected, consume_struct_lit_fields,
+    consumed_binding_name, drain_dying_views, field_path_of, format_binding, needs_tracking,
+    owner_name_for_diag, owner_sort_key, param_idx, projection_root, prune_branch_dead_projections,
+    push_unique, record_return_epilogue, refine_view_liveness_for_arm, register_projection,
+    resolve_view_alias, restore_view_last_use, rule7_owner_name, struct_base_name, struct_root,
 };
 use crate::builtins::{is_borrowed_scalar_param, view_borrow_params};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
@@ -120,6 +120,11 @@ pub(crate) fn analyze_stmt(
             if needs_tracking(inst.ty, pool) {
                 sidecar.field_free_on_reassign[stmt.index()] = Some(view.target);
             }
+        }
+        TirTag::Destructure => {
+            // M10: whole-pattern destructuring — the one sanctioned
+            // field-move site. See `ownership/structs.rs`.
+            analyze_destructure(tir, pool, own, sink, sidecar, stmt);
         }
         TirTag::ExprStmt => {
             if let TirData::UnOp(o) = inst.data {

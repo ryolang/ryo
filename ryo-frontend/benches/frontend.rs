@@ -10,7 +10,7 @@ use chumsky::Parser;
 use chumsky::input::Input;
 use ryo_core::types::InternPool;
 use ryo_frontend::lexer::{self, Span, Token};
-use ryo_frontend::parser::program_parser;
+use ryo_frontend::parser::{ParseState, program_parser};
 
 fn main() {
     divan::main();
@@ -78,11 +78,12 @@ fn parse(src: &str) {
     let tokens = lexer::lex(src, &mut pool, &mut sink);
     assert!(!sink.has_errors(), "lex should succeed");
     let token_stream = tokens[..].split_token_span((0..src.len()).into());
-    let mut ast = ryo_core::ast::Ast::new();
+    let mut state = ParseState::new(pool);
     program_parser()
-        .parse_with_state(token_stream, &mut ast)
+        .parse_with_state(token_stream, &mut state)
         .into_result()
         .expect("parse should succeed");
+    let (ast, _pool) = state.into_parts();
     divan::black_box(&ast);
 }
 
@@ -129,11 +130,12 @@ fn parse_program(src: &str) -> (ryo_core::ast::Ast, InternPool) {
     let tokens = lexer::lex(src, &mut pool, &mut sink);
     assert!(!sink.has_errors(), "lex should succeed");
     let token_stream = tokens[..].split_token_span((0..src.len()).into());
-    let mut ast = ryo_core::ast::Ast::new();
+    let mut state = ParseState::new(pool);
     program_parser()
-        .parse_with_state(token_stream, &mut ast)
+        .parse_with_state(token_stream, &mut state)
         .into_result()
         .expect("parse should succeed");
+    let (ast, pool) = state.into_parts();
     (ast, pool)
 }
 

@@ -4,7 +4,7 @@ use super::arith::{DIV_OVERFLOW_MSG, DIV_ZERO_MSG, MOD_OVERFLOW_MSG, MOD_ZERO_MS
 use super::bytes::store_string;
 use super::{
     Codegen, FunctionContext, OVERFLOW_MSG, STR_SLOT_SIZE, Terminator, ValueRepr,
-    cranelift_type_for, is_fat_type, ranges,
+    cranelift_type_for, is_fat_type, is_struct_type, ranges,
 };
 use cranelift::codegen::ir::{BlockArg, FuncRef, MemFlagsData, StackSlot};
 use cranelift::prelude::*;
@@ -972,7 +972,7 @@ impl<M: Module> Codegen<M> {
                         )?;
                         ValueRepr::Str { ptr, len, cap }
                     }
-                    TypeKind::Struct => {
+                    TypeKind::Struct | TypeKind::AnonStruct => {
                         // emit_debug_repr allocates its own result slot; a
                         // caller-provided out_slot would silently be ignored.
                         debug_assert!(
@@ -1545,7 +1545,7 @@ impl<M: Module> Codegen<M> {
             let arg_ty = ctx.tir.inst(*arg).ty;
             if mode == ParamMode::Inout {
                 if matches!(ctx.tir.inst(*arg).data, TirData::FieldAccess { .. })
-                    || matches!(ctx.pool.kind(arg_ty), TypeKind::Struct)
+                    || is_struct_type(arg_ty, ctx.pool)
                 {
                     // M9 inout field path (`&p.x`) or whole-struct inout
                     // (`&p`): the pointee already lives in the root
@@ -1623,9 +1623,10 @@ impl<M: Module> Codegen<M> {
                 let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, *arg)?;
                 arg_values.push(ptr);
                 arg_values.push(len);
-            } else if matches!(ctx.pool.kind(arg_ty), TypeKind::Struct) {
-                // M9 struct arg: a single slot address — the existing
-                // slot for Borrow, a fresh field-wise copy for Move/Copy.
+            } else if is_struct_type(arg_ty, ctx.pool) {
+                // M9 named / M10 anon struct arg: a single slot
+                // address — the existing slot for Borrow, a fresh
+                // field-wise copy for Move/Copy.
                 let addr = Self::emit_struct_call_arg(builder, ctx, *arg, mode)?;
                 arg_values.push(addr);
             } else {
@@ -1692,10 +1693,10 @@ impl<M: Module> Codegen<M> {
             return Ok(ptr); // dummy scalar — consumers use eval_inst_fat
         }
 
-        if matches!(ctx.pool.kind(ret_ty), TypeKind::Struct) {
-            // M9 sret: allocate the struct's slot, prepend its address
-            // to the args, and treat the slot as the result (mirrors
-            // the fat sret path above).
+        if is_struct_type(ret_ty, ctx.pool) {
+            // M9 named / M10 anon sret: allocate the struct's slot,
+            // prepend its address to the args, and treat the slot as
+            // the result (mirrors the fat sret path above).
             let slot = Self::struct_slot(builder, ctx, ret_ty);
             let out = builder.ins().stack_addr(ctx.int_type, slot, 0);
 

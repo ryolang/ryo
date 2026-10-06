@@ -2,13 +2,16 @@
 //!
 //! Built on chumsky over the lexer's `Token` type. Identifiers,
 //! type names, and string literals come pre-interned as `StringId`
-//! handles, so the parser only ever copies handles out of tokens —
-//! no `to_string` allocations, no `&'a str` slicing into source.
+//! handles — the parser only copies handles out of those tokens.
+//! The one exception is positional field keys (`{0=17}`, `pair.0`):
+//! the canonical field name is the numeric VALUE in decimal (`007`
+//! → `"7"`), a string the lexer never sees, so the parse state
+//! carries the intern pool to mint it (see [`ParseState`]).
 //!
-//! The parser builds directly into the [`Ast`] arenas: the `Ast` is
-//! threaded as chumsky parser state (`extra::Full<_, Ast, _>`,
-//! entered via `parse_with_state`), and node-producing combinators
-//! push `Expr`/`Stmt` values through `e.state()` inside
+//! The parser builds directly into the [`Ast`] arenas: the state
+//! threaded through `parse_with_state` is [`ParseState`], which
+//! derefs to the `Ast`, and node-producing combinators push
+//! `Expr`/`Stmt` values through `e.state()` inside
 //! `map_with`/`foldl_with` closures, yielding [`ExprId`]s /
 //! [`StmtId`]s. The arenas are append-only: a backtracking
 //! alternative that pushed nodes before failing leaves them behind
@@ -28,13 +31,73 @@ use crate::lexer::Token;
 use ryo_core::ast::*;
 use ryo_core::diag::ParseDiag;
 use ryo_core::tir::ParamMode;
-use ryo_core::types::StringId;
+use ryo_core::types::{InternPool, StringId};
+
+/// Chumsky parse state: the [`Ast`] arenas under construction plus
+/// the compilation's intern pool. Identifiers and string literals
+/// arrive pre-interned from the lexer, but positional field keys
+/// mint NEW strings — the canonical decimal field name — so the
+/// state carries the pool to intern them.
+///
+/// [`Deref`]/[`DerefMut`] to `Ast` keep the existing
+/// `e.state().<builder>(...)` call sites unchanged.
+#[derive(Debug)]
+pub struct ParseState {
+    ast: Ast,
+    pool: InternPool,
+}
+
+impl ParseState {
+    /// Fresh arenas over the lexer's pool (ownership moves back out
+    /// through [`ParseState::into_parts`]).
+    pub fn new(pool: InternPool) -> Self {
+        ParseState {
+            ast: Ast::new(),
+            pool,
+        }
+    }
+
+    pub fn into_parts(self) -> (Ast, InternPool) {
+        (self.ast, self.pool)
+    }
+}
+
+impl std::ops::Deref for ParseState {
+    type Target = Ast;
+    fn deref(&self) -> &Self::Target {
+        &self.ast
+    }
+}
+
+impl std::ops::DerefMut for ParseState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.ast
+    }
+}
+
+// The `Inspector` hooks stay no-ops — the rewind-truncation rationale
+// lives on the `Ast` impl in `ryo-core` (snapshotting at every
+// choice/repeated boundary cost ~20% of parse time; orphan nodes are
+// unreachable from `top_level`).
+impl<'src, I: chumsky::input::Input<'src>> chumsky::inspector::Inspector<'src, I> for ParseState {
+    type Checkpoint = ();
+
+    fn on_token(&mut self, _: &I::Token) {}
+
+    fn on_save<'parse>(&self, _: &chumsky::input::Cursor<'src, 'parse, I>) -> Self::Checkpoint {}
+
+    fn on_rewind<'parse>(
+        &mut self,
+        _: &chumsky::input::Checkpoint<'src, 'parse, I, Self::Checkpoint>,
+    ) {
+    }
+}
 
 /// Parser extra: `Rich` errors carrying a typed [`ParseDiag`] payload
 /// (chumsky 0.13's `RichReason::Custom(C)` parameter), the [`Ast`]
 /// arena as state, no context. Every grammar rule below is
 /// parameterized over it.
-type PExtra<'a> = extra::Full<Rich<'a, Token, SimpleSpan, ParseDiag>, Ast, ()>;
+type PExtra<'a> = extra::Full<Rich<'a, Token, SimpleSpan, ParseDiag>, ParseState, ()>;
 
 /// `MapExtra` with our extra config. Annotating `map_with` closure
 /// parameters with it pins the `E` type parameter that `e.state()`
@@ -274,9 +337,10 @@ where
 }
 
 /// Assignment target: a bare identifier or a `.field` path rooted at
-/// one (`p`, `p.x`, `a.b.c`). The segments are folded into a
+/// one (`p`, `p.x`, `a.b.c`, `pair.0`). The segments are folded into a
 /// `FieldAccess` chain by the caller; an empty segment list keeps the
-/// bare-identifier path byte-identical to before M9.
+/// bare-identifier path byte-identical to before M9. Field keys accept
+/// positional (`IntLit`) hops, canonicalized like expression access.
 fn assign_target_parser<'a, I>() -> impl Parser<'a, I, (Ident, Vec<Ident>), PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
@@ -285,10 +349,7 @@ where
         .map_with(|s, e: &mut Mx<'a, '_, I>| Ident::new(s, e.span()))
         .then(
             just(Token::Dot)
-                .ignore_then(
-                    select! { Token::Ident(f) => f }
-                        .map_with(|f, e: &mut Mx<'a, '_, I>| Ident::new(f, e.span())),
-                )
+                .ignore_then(field_key_ident())
                 .repeated()
                 .collect::<Vec<_>>(),
         )
@@ -305,13 +366,15 @@ fn field_access_chain(ast: &mut Ast, root: Ident, fields: &[Ident]) -> ExprId {
     target
 }
 
-fn assign_or_decl_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+fn assign_or_decl_parser<'a, I>(
+    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     assign_target_parser()
         .then_ignore(just(Token::Assign))
-        .then(expression_parser())
+        .then(expr)
         .map_with(|((target, fields), value), e: &mut Mx<'a, '_, I>| {
             let span = e.span();
             if fields.is_empty() {
@@ -324,7 +387,9 @@ where
         .boxed()
 }
 
-fn compound_assign_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+fn compound_assign_parser<'a, I>(
+    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -338,7 +403,7 @@ where
 
     assign_target_parser()
         .then(op)
-        .then(expression_parser())
+        .then(expr)
         .map_with(|(((target, fields), op), value), e: &mut Mx<'a, '_, I>| {
             let span = e.span();
             if fields.is_empty() {
@@ -351,14 +416,203 @@ where
         .boxed()
 }
 
+/// Push a bind-or-wildcard pattern node: `_` lexes as an ordinary
+/// identifier, so the wildcard is recognized by name here.
+fn bind_pattern(state: &mut ParseState, name: StringId, span: SimpleSpan) -> PatternId {
+    if state.pool.str(name) == "_" {
+        state.pattern_wildcard(span)
+    } else {
+        state.pattern_bind(Ident::new(name, span), span)
+    }
+}
+
+/// A destructuring statement `pattern = value` (M10). One parse per
+/// form, ordered choice, no `attempt()` — the alternatives are
+/// disjoint after their first token and a failing alternative rewinds
+/// without pushing arena nodes (the same mechanism as the existing
+/// Ident-led statements):
+///
+/// - paren-less `a, b = e` — bindings only; the comma after the first
+///   binding distinguishes the form from plain `a = e`, which stays
+///   `assign_or_decl` (`destructure` is tried first in the statement
+///   dispatch, so the paren-less form claims `Ident ,` lines before
+///   `assign_or_decl` sees them);
+/// - parenthesized `(a, b) = e`, `(a,) = e` — a positional pattern;
+///   the mandatory comma inside the parens distinguishes the form
+///   from a parenthesized-expression statement, and nested elements
+///   like `(a, (b, c))` parse through the recursive pattern handle;
+/// - braced `{q, r} = e`, `{x = quot} = e` — an anonymous field
+///   pattern; the `= value` after the closing brace distinguishes it
+///   from an anonymous struct literal expression statement, so bare
+///   `{x=1}` keeps its meaning (a failed `shaped` alternative rewinds
+///   before the `=` and `expr_stmt` claims the line);
+/// - `(a) = x` — a one-element parenthesized pattern without the
+///   trailing comma is unspellable (`(a)` is an expression), so the
+///   shape parses whole and reports the targeted
+///   `SingleElemDestructuring` diagnostic, recovering the line to an
+///   `Error` statement — the `MisplacedAttribute` shape, so the
+///   message stands alone instead of degrading into a generic
+///   "expected newline" tail error.
+///
+/// Note: when `shaped` parses a well-formed pattern that turns out
+/// not to be followed by `=` (a bare `(a, b)` or `{x=1}` expression
+/// statement), the pattern nodes pushed before the failure stay in
+/// the arenas as unreachable orphans — deliberate (the `Inspector`
+/// hooks on `Ast` are no-ops; see `statement_list`).
+///
+/// `value` is the right-hand-side expression grammar: the caller's
+/// shared expression parser (see `top_level_statement_parser`), so
+/// this rule does not construct — and later drop — full expression
+/// grammars of its own on every `program_parser()` call.
+fn destructure_stmt_parser<'a, I>(
+    value: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    // The recursive pattern handle. `Recursive` (declare/define, what
+    // `recursive()` is sugar for) is what lets the anon and
+    // positional sub-parsers be shared between the full pattern
+    // grammar — positional elements recurse through `pat` — and the
+    // statement forms below.
+    let mut pat = Recursive::declare();
+
+    // A bare binding target: an identifier, or `_` (by name). Yields
+    // the name with its span; the pattern node is pushed by the
+    // consumer, which decides between `bind` and the paren-less form.
+    let bind_target = select! { Token::Ident(name) => name }
+        .map_with(|name, e: &mut Mx<'a, '_, I>| (name, e.span()));
+
+    let bind = bind_target
+        .map_with(|(name, span), e: &mut Mx<'a, '_, I>| bind_pattern(e.state(), name, span));
+
+    // One field of an anonymous pattern: a pun (`q`), a wildcard
+    // field (`_`), or a rename (`x = quot`). A field named `_` binds
+    // nothing, so renaming it (`{_ = x}`) is rejected. Yields the
+    // scalar `PatternField`; the arena push happens at `pattern_anon`.
+    let field = bind_target
+        .then(just(Token::Assign).ignore_then(bind_target).or_not())
+        .try_map_with(|((name, span), rename), e: &mut Mx<'a, '_, I>| {
+            if e.state().pool.str(name) == "_" && rename.is_some() {
+                return Err(Rich::custom(
+                    span,
+                    ParseDiag::Message("wildcard field `_` binds nothing; drop the `= ...`".into()),
+                ));
+            }
+            let binding = match rename {
+                Some((bind_name, bind_span)) => Ident::new(bind_name, bind_span),
+                None => Ident::new(name, span),
+            };
+            Ok(PatternField { name, binding })
+        });
+
+    let anon = field
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::LBrace), just(Token::RBrace))
+        .map_with(|fields, e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            e.state().pattern_anon(&fields, span)
+        });
+
+    // Positional pattern: the comma after the first element is
+    // mandatory — exactly like the value-side tuple sugar and the
+    // positional type sugar, `(a)` never parses here.
+    let positional = pat
+        .clone()
+        .then_ignore(just(Token::Comma))
+        .then(
+            pat.clone()
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>(),
+        )
+        .delimited_by(just(Token::LParen), just(Token::RParen))
+        .map_with(|(first, rest), e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            let mut elems = Vec::with_capacity(rest.len() + 1);
+            elems.push(first);
+            elems.extend(rest);
+            e.state().pattern_positional(&elems, span)
+        });
+
+    pat.define(choice((positional.clone(), anon, bind)).boxed());
+
+    // Paren-less form: `a, b = e`. Bindings only — nesting belongs to
+    // the parenthesized form.
+    let paren_less = bind_target
+        .then_ignore(just(Token::Comma))
+        .then(
+            bind_target
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(just(Token::Assign))
+        .then(value.clone())
+        .map_with(|((first, rest), value), e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            let start = first.1.start;
+            let end = rest.last().map(|(_, s)| s.end).unwrap_or(first.1.end);
+            let mut elems = Vec::with_capacity(rest.len() + 1);
+            elems.push(bind_pattern(e.state(), first.0, first.1));
+            for (name, sp) in rest {
+                elems.push(bind_pattern(e.state(), name, sp));
+            }
+            let target = e
+                .state()
+                .pattern_positional(&elems, SimpleSpan::new((), start..end));
+            e.state().destructure(target, value, span)
+        });
+
+    // Braced / parenthesized forms: a self-delimiting pattern followed
+    // by `= value`.
+    let shaped = choice((anon, positional))
+        .then_ignore(just(Token::Assign))
+        .then(value.clone())
+        .map_with(|(target, value), e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            e.state().destructure(target, value, span)
+        });
+
+    // `(a) = x`: one binding, no trailing comma, followed by `=`. The
+    // shape is a targeted error (E0112), but recover as a PLAIN
+    // binding of `a` rather than an error statement: downstream uses
+    // of `a` then resolve instead of cascading one 'undefined
+    // variable' per use — E0112 already fails the build.
+    let single_no_comma = just(Token::LParen)
+        .ignore_then(bind_target)
+        .then_ignore(just(Token::RParen))
+        .then_ignore(just(Token::Assign))
+        .then(value)
+        .validate(
+            |((name, name_span), value), e: &mut Mx<'a, '_, I>, emitter| {
+                emitter.emit(Rich::custom(e.span(), ParseDiag::SingleElemDestructuring));
+                ((name, name_span), value)
+            },
+        )
+        .map_with(|((name, name_span), value), e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            let target = Ident::new(name, name_span);
+            e.state().assign_or_decl(target, value, span)
+        });
+
+    choice((paren_less, shaped, single_no_comma)).boxed()
+}
+
 /// Statements valid inside a function body.
-fn body_statement_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+fn body_statement_parser<'a, I>(
+    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     recursive(|body_stmt| {
         let return_stmt = just(Token::Return)
-            .ignore_then(expression_parser().or_not())
+            .ignore_then(expr.clone().or_not())
             .map_with(|expr, e: &mut Mx<'a, '_, I>| {
                 let span = e.span();
                 e.state().return_stmt(expr, span)
@@ -375,7 +629,7 @@ where
         });
 
         let while_stmt = just(Token::While)
-            .ignore_then(expression_parser())
+            .ignore_then(expr.clone())
             .then_ignore(just(Token::Colon))
             .then(indented_block(body_stmt.clone()))
             .map_with(|(cond, body), e: &mut Mx<'a, '_, I>| {
@@ -399,7 +653,7 @@ where
             )
             .then_ignore(just(Token::LParen))
             .then(
-                expression_parser()
+                expr.clone()
                     .separated_by(just(Token::Comma))
                     .collect::<Vec<_>>(),
             )
@@ -424,7 +678,7 @@ where
                 Ok(e.state().for_range(var, iterator, start, end, &body, span))
             });
 
-        let expr_stmt = expression_parser().map_with(|expr, e: &mut Mx<'a, '_, I>| {
+        let expr_stmt = expr.clone().map_with(|expr, e: &mut Mx<'a, '_, I>| {
             let span = e.span();
             e.state().expr_stmt(expr, span)
         });
@@ -432,12 +686,19 @@ where
         // Boxed to keep the concrete type small: this parser is stored
         // inside `Recursive`, which keeps the full type in its symbol
         // names (see the note in `expression_parser`).
+        //
+        // `destructure_stmt_parser` leads the choice: its forms start
+        // with `Ident ,`, `(`, or `{` — the same leading tokens as
+        // `compound_assign` / `assign_or_decl` / `var_decl` /
+        // `expr_stmt` — so it must claim those lines before any of
+        // them can misparse a trailing `= value` as garbage.
         choice((
+            destructure_stmt_parser(expr.clone()),
             return_stmt,
-            compound_assign_parser(),
-            assign_or_decl_parser(),
-            var_decl_parser(),
-            if_stmt_parser(body_stmt),
+            compound_assign_parser(expr.clone()),
+            assign_or_decl_parser(expr.clone()),
+            var_decl_parser(expr.clone()),
+            if_stmt_parser(body_stmt, expr),
             while_stmt,
             for_range_stmt,
             break_stmt,
@@ -450,6 +711,7 @@ where
 
 fn if_stmt_parser<'a, I>(
     body_stmt: impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a,
+    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
 ) -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
@@ -458,7 +720,7 @@ where
 
     let elif_branch = skip_newlines()
         .ignore_then(just(Token::Elif))
-        .ignore_then(expression_parser())
+        .ignore_then(expr.clone())
         .then_ignore(just(Token::Colon))
         .then(block.clone());
 
@@ -468,7 +730,7 @@ where
         .ignore_then(block.clone());
 
     just(Token::If)
-        .ignore_then(expression_parser())
+        .ignore_then(expr)
         .then_ignore(just(Token::Colon))
         .then(block)
         .then(elif_branch.repeated().collect::<Vec<_>>())
@@ -677,7 +939,16 @@ where
     // get wrapped into the synthesized implicit-main body by
     // astgen. This is what makes Pythonic flat scripts feel
     // natural — no `_ = ...` binding required.
-    let expr_stmt = expression_parser().map_with(|expr, e: &mut Mx<'a, '_, I>| {
+    //
+    // The expression grammar is built ONCE per `program_parser()`
+    // and shared (an `Rc` clone of the `Recursive` handle) by every
+    // rule that needs it — function bodies included. Building a full
+    // expression grammar allocates the whole combinator tree (and
+    // drops it again after the parse), so per-rule
+    // `expression_parser()` calls are a measurable fixed cost on
+    // every parse.
+    let expr = expression_parser();
+    let expr_stmt = expr.clone().map_with(|expr, e: &mut Mx<'a, '_, I>| {
         let span = e.span();
         e.state().expr_stmt(expr, span)
     });
@@ -685,12 +956,16 @@ where
     // `struct` opens with a unique keyword, so trying it first is
     // safe and keeps speculation cheap. An attributed struct starts
     // with `#[` (attribute groups before `struct`, M9.1) and fails
-    // just as cheaply anywhere else.
+    // just as cheaply anywhere else. Destructuring statements
+    // (`a, b = e`, `(a, b) = e`, `{q, r} = e`, M10) overlap only with
+    // `var_decl` / `expr_stmt` (both Ident/`(`/`{`-led), so they sit
+    // before those two but after the keyword-led forms.
     choice((
         attributed_struct_decl_parser(),
         struct_decl_parser(),
-        function_def_parser(),
-        var_decl_parser(),
+        function_def_parser(expr.clone()),
+        destructure_stmt_parser(expr.clone()),
+        var_decl_parser(expr.clone()),
         expr_stmt,
     ))
     .boxed()
@@ -703,15 +978,12 @@ where
     top_level_statement_parser().boxed()
 }
 
-/// Type annotation: a plain name (`str`, `int`, ...) or the legacy
-/// `&name` view form (M8.4 pre-Q5). Post-M8.4.1 the `&` form is retired
-/// syntax — it survives here only so astgen can emit the targeted
-/// migration error. The view alternative comes first so the `&` is
-/// consumed before the plain form can reject it.
-///
-/// Yields a plain `TypeExpr` value, not a node: annotations are
-/// packed into their parent node's `extra` header.
-fn type_expr_parser<'a, I>() -> impl Parser<'a, I, TypeExpr, PExtra<'a>> + Clone + 'a
+/// A plain-name type expression: `str`, `int`, `Point`, or the legacy
+/// `&name` view form (M8.4 pre-Q5). Struct declaration fields use
+/// this rule — they stay name-only — while the compound anonymous
+/// form is added on top in [`type_expr_parser`] for the function
+/// signature / variable annotation positions.
+fn named_type_expr_parser<'a, I>() -> impl Parser<'a, I, TypeExpr, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -720,10 +992,85 @@ where
         .map_with(|name, e: &mut Mx<'a, '_, I>| TypeExpr::view(name, e.span()));
     let plain = select! { Token::Ident(name) => name }
         .map_with(|name, e: &mut Mx<'a, '_, I>| TypeExpr::new(name, e.span()));
+    // The view alternative comes first so the `&` is consumed before
+    // the plain form can reject it.
     view.or(plain).boxed()
 }
 
-fn function_def_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+/// Type annotation: a plain name (`str`, `int`, ...), the legacy
+/// `&name` view form (M8.4 pre-Q5), a compound anonymous struct
+/// type literal `{q: int, r: int}` (M10), or the positional sugar
+/// `(int, str)` (M10, ≡ `{0: int, 1: str}`). Post-M8.4.1 the `&`
+/// form is retired syntax — it survives here only so astgen can
+/// emit the targeted migration error.
+///
+/// The alternatives are token-disjoint: the name form opens with an
+/// identifier (or `&`), the compound form with `{`, the positional
+/// form with `(`; chumsky rewinds a failed alternative without
+/// consuming input. `{}` stays reserved for the future empty map
+/// literal, exactly like the value literal: diagnosed here and
+/// recovered as an empty field list so the rest of the file still
+/// parses.
+///
+/// Yields a plain `TypeExpr` value, not a node: annotations are
+/// packed into their parent node's `extra` header.
+fn type_expr_parser<'a, I>() -> impl Parser<'a, I, TypeExpr, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    recursive(|ty| {
+        // `field_key`, not a bare Ident: brace type literals accept
+        // numeric keys (`{0: int}`) with the same canonicalization
+        // as value literals, so the brace form spells the same
+        // structural type as the `(int, str)` paren sugar.
+        let field = field_key().then_ignore(just(Token::Colon)).then(ty.clone());
+        let anon = field
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace))
+            .validate(|fields, e: &mut Mx<'a, '_, I>, emitter| {
+                if fields.is_empty() {
+                    emitter.emit(Rich::custom(e.span(), ParseDiag::EmptyAnonStruct));
+                }
+                fields
+            })
+            .map_with(|fields, e: &mut Mx<'a, '_, I>| {
+                let span = e.span();
+                e.state().type_expr_anon(&fields, span)
+            });
+        // Positional sugar `(int, str)` — ≡ `{0: int, 1: str}`. The
+        // comma is mandatory even for one element (`(int,)`), so the
+        // plain `(int)` spelling never parses here (and stays a
+        // syntax error, exactly as before this form existed). Mirrors
+        // the value atom: one parse, no speculation — the first
+        // element parses once, then the comma decides. Yields
+        // `TypeExprKind::Positional`; astgen's resolve path interns
+        // the "0"/"1" names pre-dedup.
+        let positional = ty
+            .clone()
+            .then_ignore(just(Token::Comma))
+            .then(
+                ty.clone()
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>(),
+            )
+            .delimited_by(just(Token::LParen), just(Token::RParen))
+            .map_with(|(first, rest), e: &mut Mx<'a, '_, I>| {
+                let span = e.span();
+                let mut elems = Vec::with_capacity(rest.len() + 1);
+                elems.push(first);
+                elems.extend(rest);
+                e.state().type_expr_positional(&elems, span)
+            });
+        named_type_expr_parser().or(anon).or(positional).boxed()
+    })
+}
+
+fn function_def_parser<'a, I>(
+    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -761,7 +1108,7 @@ where
 
     let return_type = just(Token::Arrow).ignore_then(type_expr_parser()).or_not();
 
-    let body = indented_block(body_statement_parser());
+    let body = indented_block(body_statement_parser(expr));
 
     just(Token::Fn)
         .ignore_then(ident)
@@ -779,7 +1126,9 @@ where
         .boxed()
 }
 
-fn var_decl_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+fn var_decl_parser<'a, I>(
+    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -794,7 +1143,7 @@ where
         .then(ident)
         .then(type_annotation)
         .then_ignore(just(Token::Assign))
-        .then(expression_parser())
+        .then(expr)
         .map_with(
             |(((mutable, name), type_annotation), initializer), e: &mut Mx<'a, '_, I>| {
                 let span = e.span();
@@ -803,6 +1152,44 @@ where
             },
         )
         .boxed()
+}
+
+/// Canonical field name for a positional key: the numeric VALUE in
+/// decimal, so `{0=17}` and `pair.007` both name field `"0"` / `"7"`
+/// (the literal text is irrelevant). This is the one string the
+/// lexer cannot pre-intern — canonicalization happens at parse time
+/// against the state's pool.
+fn positional_field_name(n: i64, pool: &mut InternPool) -> StringId {
+    pool.intern_str(&n.to_string())
+}
+
+/// A struct-literal field key: an identifier, or an integer literal
+/// canonicalized to its numeric value (a positional key).
+fn field_key<'a, I>() -> impl Parser<'a, I, StringId, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    select! { Token::Ident(name) => name }.or(select! { Token::IntLit(n) => n }
+        .map_with(|n, e: &mut Mx<'a, '_, I>| positional_field_name(n, &mut e.state().pool)))
+}
+
+/// A field key as an `Ident` (name + span attached): an identifier, or
+/// an integer literal canonicalized to its numeric value (a positional
+/// key). For parsers that build `FieldAccess` chains — assignment
+/// targets and `&` borrow targets — rather than struct-literal field
+/// lists.
+fn field_key_ident<'a, I>() -> impl Parser<'a, I, Ident, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    select! { Token::Ident(name) => name }
+        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()))
+        .or(
+            select! { Token::IntLit(n) => n }.map_with(|n, e: &mut Mx<'a, '_, I>| {
+                let name = positional_field_name(n, &mut e.state().pool);
+                Ident::new(name, e.span())
+            }),
+        )
 }
 
 fn expression_parser<'a, I>() -> impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a
@@ -842,7 +1229,14 @@ where
             // disambiguates, so the two alternatives cannot both
             // consume input. Field order stays in source order —
             // sema canonicalizes against the declaration.
-            let field_init = select! { Token::Ident(name) => name }
+            //
+            // Field keys are identifiers or integer literals: a
+            // positional key canonicalizes to its numeric value
+            // (`{0=17, 1="alice"}` names fields "0", "1" — the brace
+            // spelling of tuple sugar). Named literals with numeric
+            // keys parse the same way and are rejected later, in
+            // sema, as unknown fields.
+            let field_init = field_key()
                 .then_ignore(just(Token::Assign))
                 .then(expr.clone());
 
@@ -850,6 +1244,7 @@ where
                 .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()))
                 .then(
                     field_init
+                        .clone()
                         .separated_by(just(Token::Comma))
                         .allow_trailing()
                         .collect::<Vec<_>>()
@@ -857,7 +1252,30 @@ where
                 )
                 .map_with(|(name, fields), e: &mut Mx<'a, '_, I>| {
                     let span = e.span();
-                    e.state().struct_literal(name, &fields, span)
+                    e.state().struct_literal(Some(name), &fields, span)
+                });
+
+            // Anonymous struct literal `{field=value, ...}` (M10):
+            // the same field list with no `Name` in front — the shape
+            // is the identity. Tried after `struct_literal`; the two
+            // open with different tokens, so they cannot both
+            // consume input. `{}` stays reserved for the future
+            // empty map literal: diagnosed, and recovered as an
+            // empty literal so the rest of the file still parses.
+            let anon_struct_literal = field_init
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace))
+                .validate(|fields, e: &mut Mx<'a, '_, I>, emitter| {
+                    if fields.is_empty() {
+                        emitter.emit(Rich::custom(e.span(), ParseDiag::EmptyAnonStruct));
+                    }
+                    fields
+                })
+                .map_with(|fields, e: &mut Mx<'a, '_, I>| {
+                    let span = e.span();
+                    e.state().struct_literal(None, &fields, span)
                 });
 
             let ident_expr =
@@ -876,10 +1294,7 @@ where
                 .ignore_then(ident_expr)
                 .then(
                     just(Token::Dot)
-                        .ignore_then(
-                            select! { Token::Ident(name) => name }
-                                .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span())),
-                        )
+                        .ignore_then(field_key_ident())
                         .repeated()
                         .collect::<Vec<_>>(),
                 )
@@ -897,16 +1312,79 @@ where
                     e.state().borrow(target, span)
                 });
 
-            let parenthesized = expr
-                .clone()
-                .delimited_by(just(Token::LParen), just(Token::RParen));
+            // `(e)` stays a plain parenthesized expression — the inner
+            // node is returned as-is, exactly like the historical
+            // `delimited_by(LParen, RParen)` form. `(e, …)` —
+            // including the single-element `(e,)` — is tuple sugar
+            // over the anonymous struct literal: `(17, "alice")` ≡
+            // `{0=17, 1="alice"}`, fields "0", "1", … minted in
+            // written order against the state's pool (the same
+            // canonicalization as numeric brace keys). `()` is the
+            // unit: diagnosed (UnitParen — `void` is the unit type)
+            // and recovered as an empty anonymous literal, exactly
+            // like `{}` (E0109).
+            //
+            // Single parse, no speculation: after `(` either `)`
+            // matches immediately or the first expression parses
+            // once, then `,` vs `)` disambiguates tuple from paren.
+            // A failed alternative never leaves orphan arena nodes
+            // behind (the Ast checkpoint hooks are deliberate no-ops
+            // — see `successful_parses_leave_no_orphan_nodes`).
+            let paren_or_tuple = just(Token::LParen)
+                .ignore_then(
+                    just(Token::RParen).to(None).or(expr
+                        .clone()
+                        .then(
+                            just(Token::Comma)
+                                .ignore_then(
+                                    expr.clone()
+                                        .separated_by(just(Token::Comma))
+                                        .allow_trailing()
+                                        .collect::<Vec<_>>(),
+                                )
+                                .then_ignore(just(Token::RParen))
+                                .map(Some)
+                                .or(just(Token::RParen).to(None)),
+                        )
+                        .map(Some)),
+                )
+                .validate(|body, e: &mut Mx<'a, '_, I>, emitter| {
+                    if body.is_none() {
+                        emitter.emit(Rich::custom(e.span(), ParseDiag::UnitParen));
+                    }
+                    body
+                })
+                .map_with(|body, e: &mut Mx<'a, '_, I>| match body {
+                    None => {
+                        // Recovered `()`: an empty anonymous literal.
+                        // Sema tolerates the empty field list silently
+                        // (the E0109 contract), so E0111 stands alone.
+                        let span = e.span();
+                        e.state().struct_literal(None, &[], span)
+                    }
+                    Some((first, None)) => first,
+                    Some((first, Some(rest))) => {
+                        let span = e.span();
+                        let mut fields = Vec::with_capacity(rest.len() + 1);
+                        fields.push((positional_field_name(0, &mut e.state().pool), first));
+                        for (i, value) in rest.into_iter().enumerate() {
+                            let index = i64::try_from(i)
+                                .expect("tuple arity fits i64")
+                                .checked_add(1)
+                                .expect("tuple arity fits i64");
+                            fields.push((positional_field_name(index, &mut e.state().pool), value));
+                        }
+                        e.state().struct_literal(None, &fields, span)
+                    }
+                });
 
             borrow
                 .or(call)
                 .or(struct_literal)
+                .or(anon_struct_literal)
                 .or(ident_expr)
                 .or(literal)
-                .or(parenthesized)
+                .or(paren_or_tuple)
         };
 
         // Postfix operators: method calls (`s.len()`), field access
@@ -916,6 +1394,9 @@ where
         enum PostfixOp {
             Method(StringId, Vec<ExprId>, SimpleSpan),
             Field(Ident, SimpleSpan),
+            /// A diagnosed stray float after `.` (`pair.0.1`): the
+            /// receiver is kept unchanged.
+            Missing,
             Slice(Option<ExprId>, Option<ExprId>, SimpleSpan),
             Index(ExprId, SimpleSpan),
         }
@@ -933,15 +1414,43 @@ where
                 PostfixOp::Method(method, args, e.span())
             });
 
-        // Field access `p.x` (M9). Tried after `method_op`: the method
-        // rule has the longer required match (parens), so chumsky
-        // backtracks to this one when no `(` follows the name.
+        // Field access `p.x` (M9) and positional access `pair.0`
+        // (M10). Tried after `method_op`: the method rule has the
+        // longer required match (parens), so chumsky backtracks to
+        // this one when no `(` follows the name.
+        //
+        // A chained positional access can only be spelled with the
+        // inner access parenthesized — `(pair.0).1`. Bare
+        // `pair.0.1` lexes as `pair . <float 0.1>`: maximal munch
+        // eats `0.1` whole, and the merged float lands exactly where
+        // the field key would be. The stray float is consumed, the
+        // well-formed receiver is kept, and the diagnostic points at
+        // the float with the parenthesized spelling.
+        enum AccessKey {
+            Named(Ident),
+            Positional(Ident),
+            StrayFloat(SimpleSpan),
+        }
+        let named_key = select! { Token::Ident(name) => name }
+            .map_with(|name, e: &mut Mx<'a, '_, I>| AccessKey::Named(Ident::new(name, e.span())));
+        let positional_key =
+            select! { Token::IntLit(n) => n }.map_with(|n, e: &mut Mx<'a, '_, I>| {
+                let name = positional_field_name(n, &mut e.state().pool);
+                AccessKey::Positional(Ident::new(name, e.span()))
+            });
+        let stray_float_key = select! { Token::FloatLit(_) => () }
+            .map_with(|_, e: &mut Mx<'a, '_, I>| AccessKey::StrayFloat(e.span()));
         let field_op = just(Token::Dot)
-            .ignore_then(
-                select! { Token::Ident(name) => name }
-                    .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span())),
-            )
-            .map_with(|field, e: &mut Mx<'a, '_, I>| PostfixOp::Field(field, e.span()));
+            .ignore_then(named_key.or(positional_key).or(stray_float_key))
+            .validate(|key, e: &mut Mx<'a, '_, I>, emitter| match key {
+                AccessKey::StrayFloat(fspan) => {
+                    emitter.emit(Rich::custom(fspan, ParseDiag::ChainedPositionalAccess));
+                    PostfixOp::Missing
+                }
+                AccessKey::Named(field) | AccessKey::Positional(field) => {
+                    PostfixOp::Field(field, e.span())
+                }
+            });
 
         // One bracket parse, no speculation: the optional leading
         // expression is parsed exactly once, then `:` (slice) vs `]`
@@ -986,6 +1495,7 @@ where
                             field,
                             SimpleSpan::new((), start..span.end),
                         ),
+                        PostfixOp::Missing => receiver,
                         PostfixOp::Slice(lo, hi, span) => {
                             e.state()
                                 .slice(receiver, lo, hi, SimpleSpan::new((), start..span.end))
@@ -1171,3 +1681,6 @@ where
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod destructure_tests;

@@ -64,8 +64,7 @@ pub enum DiagCode {
     InfiniteSize,
     /// `#[derive(Eq)]` on a struct with a field whose type is not
     /// Eq-capable (M9.1): the scalar primitives are, a struct is only
-    /// with its own `#[derive(Eq)]`, and views / tuples / the rest
-    /// are not.
+    /// with its own `#[derive(Eq)]`, and views / the rest are not.
     DeriveFieldNotEq,
 
     // --- sema ---
@@ -166,6 +165,28 @@ pub enum DiagCode {
     /// fields must be owned values, not projections.
     ViewFieldType,
 
+    // --- sema: destructuring (M10) ---
+    /// A positional destructuring pattern binds a different number of
+    /// fields than the struct has (`(q, r, s) = pair`). The message
+    /// pins the expected and found counts.
+    DestructureArity,
+    /// A brace destructuring pattern disagrees with the struct's
+    /// fields per-field (M10): the pattern names a field the struct
+    /// does not have, or leaves a declared field unbound (`{q} =
+    /// divmod(...)` missing `r`). The message names the field(s) and
+    /// teaches the `_` fix.
+    DestructureUnknownField,
+    /// A positional pattern used on a named struct (M10): named
+    /// structs destructure by field name — their fields aren't
+    /// `"0"`/`"1"`. The message suggests the brace pattern spelling.
+    DestructurePositionalOnNamed,
+    /// `==` / `!=` applied to an anonymous struct shape (M10) with a
+    /// field whose type is not Eq-capable (M9.1's predicate). Shape
+    /// equality is structural — Eq-capability is computed recursively
+    /// from the fields, there is no opt-in attribute — so the
+    /// diagnostic names the offending field and its type.
+    AnonFieldNotEq,
+
     // --- ownership (M8.1b) ---
     /// Use of a value after it has been moved.
     UseAfterMove,
@@ -211,6 +232,30 @@ pub enum DiagCode {
     /// A `struct` declaration whose body is missing: `struct Name:`
     /// not followed by an indented field block (M9).
     EmptyStructBody,
+    /// Empty braces `{}` (M10): reserved for the future empty map
+    /// literal — there is no empty anonymous struct (`void` is the
+    /// unit type). The message names the reservation and what to
+    /// write instead (`none`, or a named / non-empty struct literal).
+    EmptyAnonStruct,
+    /// A float literal continued a positional field-access chain:
+    /// `pair.0.1` lexes as `pair . <float 0.1>` (maximal munch eats
+    /// `0.1` whole), so the chained access can only be spelled with
+    /// the inner access parenthesized — `(pair.0).1`. The parser
+    /// keeps the well-formed receiver and the diagnostic suggests the
+    /// parenthesized form.
+    ChainedPositionalAccess,
+    /// Empty parentheses `()` (M10): the unit type is `void`, so
+    /// there is no empty tuple. The message names `void` as the unit
+    /// and suggests `none` for the unit value or a one-element tuple
+    /// `(x,)`. The parser recovers the expression as an empty
+    /// anonymous literal, exactly like `{}` (E0109), so the
+    /// diagnostic stands alone.
+    UnitParen,
+    /// `(a) = x` (M10): a one-element parenthesized destructuring
+    /// without the trailing comma. The message names the fix —
+    /// `(a,)` — and the plain spelling `a = x`; the parser recovers
+    /// the line to an Error statement so the diagnostic stands alone.
+    SingleElemDestructuring,
     /// An unrecognized `#[...]` attribute (M9.1): the attribute name is
     /// not one of the known forms (`derive(Eq)`, `repr(C)`), its
     /// argument list does not match, or it is attached to something
@@ -369,6 +414,20 @@ pub enum ParseDiag {
     EmptyBrackets,
     /// `struct Name:` with no indented field block (M9).
     EmptyStructBody,
+    /// Empty braces `{}` (M10): reserved for the future empty map
+    /// literal.
+    EmptyAnonStruct,
+    /// A float literal continued a positional field-access chain
+    /// (`pair.0.1` lexes as `pair . <float 0.1>`).
+    ChainedPositionalAccess,
+    /// Empty parentheses `()` (M10): the unit type is `void` — write
+    /// `none` for the unit value, or a one-element tuple `(x,)`.
+    /// Recovered as an empty anonymous struct literal, like `{}`.
+    UnitParen,
+    /// `(a) = x` (M10): a one-element parenthesized destructuring
+    /// needs the trailing comma — `(a,)` — or the plain spelling
+    /// `a = x`. The line recovers to an Error statement.
+    SingleElemDestructuring,
     /// `#[name(args)]` that is not one of the recognized attribute
     /// forms (M9.1): `derive(Eq)` or `repr(C)`. Carries the attribute
     /// head and arguments as interned ids; render them through the
@@ -396,6 +455,10 @@ impl ParseDiag {
             ParseDiag::RangeArity { .. } => DiagCode::RangeArity,
             ParseDiag::EmptyBrackets => DiagCode::EmptyBrackets,
             ParseDiag::EmptyStructBody => DiagCode::EmptyStructBody,
+            ParseDiag::EmptyAnonStruct => DiagCode::EmptyAnonStruct,
+            ParseDiag::ChainedPositionalAccess => DiagCode::ChainedPositionalAccess,
+            ParseDiag::UnitParen => DiagCode::UnitParen,
+            ParseDiag::SingleElemDestructuring => DiagCode::SingleElemDestructuring,
             ParseDiag::UnknownAttribute { .. } | ParseDiag::MisplacedAttribute => {
                 DiagCode::UnknownAttribute
             }
@@ -446,6 +509,23 @@ impl std::fmt::Display for ParseDiag {
             ParseDiag::EmptyStructBody => f.write_str(
                 "struct declaration has no fields: \
                  indent at least one `name: type` field line",
+            ),
+            ParseDiag::EmptyAnonStruct => f.write_str(
+                "empty braces are reserved for the future empty map literal; \
+                 write `none` for the unit value, or construct a named \
+                 struct (`Point{x=1, y=2}`)",
+            ),
+            ParseDiag::ChainedPositionalAccess => f.write_str(
+                "chained positional access needs parentheses — `pair.0.1` \
+                 lexes `0.1` as a single float literal; write `(pair.0).1`",
+            ),
+            ParseDiag::UnitParen => f.write_str(
+                "empty parentheses are the unit type `void`; write `none` \
+                 for the unit value, or a one-element tuple `(x,)`",
+            ),
+            ParseDiag::SingleElemDestructuring => f.write_str(
+                "single-element destructuring needs a trailing comma — \
+                 `(a,)` — or write plain `a = x`",
             ),
             ParseDiag::UnknownAttribute { .. } => f.write_str(
                 "unknown attribute; known attributes: \

@@ -14,7 +14,7 @@ use ryo_core::ownership::OwnershipSidecar;
 use ryo_core::tir::Tir;
 use ryo_core::types::InternPool;
 use ryo_frontend::lexer;
-use ryo_frontend::parser::program_parser;
+use ryo_frontend::parser::{ParseState, program_parser};
 use target_lexicon::Triple;
 
 fn analyze(src: &str) -> (Vec<Tir>, InternPool, OwnershipSidecar) {
@@ -23,11 +23,12 @@ fn analyze(src: &str) -> (Vec<Tir>, InternPool, OwnershipSidecar) {
     let tokens = lexer::lex(src, &mut pool, &mut sink);
     assert!(!sink.has_errors(), "lex should succeed");
     let token_stream = tokens[..].split_token_span((0..src.len()).into());
-    let mut ast = ryo_core::ast::Ast::new();
+    let mut state = ParseState::new(pool);
     program_parser()
-        .parse_with_state(token_stream, &mut ast)
+        .parse_with_state(token_stream, &mut state)
         .into_result()
         .expect("parse should succeed");
+    let (ast, mut pool) = state.into_parts();
     let mut astgen_sink = ryo_core::diag::DiagSink::new();
     let uir = ryo_frontend::astgen::generate(&ast, &mut pool, &mut astgen_sink);
     let mut sema_sink = ryo_core::diag::DiagSink::new();

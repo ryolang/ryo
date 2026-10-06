@@ -65,14 +65,8 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-018 — `TypeId` is a newtype, not a typed enum
 
 **Files:** `ryo-core/src/types.rs` (`TypeId`)
-**Summary:** The UIR/TIR pipeline redesign originally called for `TypeId` to become an `enum { Void = 0, Bool = 1, ..., Error = 4, Dynamic(NonZeroU32) }` so primitive matches are exhaustive at compile time and the `pool.int()` accessor disappears. The design allowed a fallback to a plain `Copy` newtype if the enum encoding fights the borrow checker, which is what we shipped. Cost: the `TypeKind::Tuple` arm we added in `cranelift_type_for` and a couple of sema sites are not statically guaranteed to be covered when a new primitive lands.
+**Summary:** The UIR/TIR pipeline redesign originally called for `TypeId` to become an `enum { Void = 0, Bool = 1, ..., Error = 4, Dynamic(NonZeroU32) }` so primitive matches are exhaustive at compile time and the `pool.int()` accessor disappears. The design allowed a fallback to a plain `Copy` newtype if the enum encoding fights the borrow checker, which is what we shipped. Cost: the `TypeKind::AnonStruct` arm we added in `cranelift_type_for` and a couple of sema sites are not statically guaranteed to be covered when a new primitive lands.
 **Resolution:** Re-attempt the enum encoding using `repr(u32)` + `Dynamic(NonZeroU32)` once the borrow-checker pain points (mostly around `pool.kind` returning a value that contains a `TypeId`) are characterised. Low priority — the matches we have today still go through `TypeKind`, which *is* exhaustive, so the gap is small.
-
-### I-019 — `tuple_elements_vec` allocates a `Vec` per call
-
-**Files:** `ryo-core/src/types.rs` (`tuple_elements_vec`)
-**Summary:** The accessor copies the element-id slice out of `extra` rather than returning a borrowed view, because `TypeId` is not `#[repr(transparent)]` over `u32` and the unsafe transmute to `&[TypeId]` would be UB without it. Today the function is called only by `Display` for diagnostics and by tests; not a hot path.
-**Resolution:** Tag `TypeId` with `#[repr(transparent)]` and expose `tuple_elements(id) -> &[TypeId]` alongside the copying accessor. Migrate non-perf-critical callers to it lazily. Defer until tuple codegen lands and the accessor shows up in a profile.
 
 ### I-021 — `bool` lowered as `types::I8` will mis-ABI across FFI boundaries
 
@@ -212,6 +206,14 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `.github/workflows/ci.yml` (new build/test lane), `build-support/src/lib.rs` (archive per `TARGET`, already correct), cargo config for the musl linker, `docs/dev/implementation_roadmap.md`
 **Summary:** AOT binaries are statically musl-linked since `f7afe7e`, but the compiler binary itself stays host-glibc on Linux — so `ryo run` (JIT) still allocates through the host glibc while `ryo build` binaries use musl malloc. The two flavors can diverge on memory bugs (observed 2026-09-28: the loop-exit double-free family crashed under glibc JIT on both macOS and Linux while a musl AOT binary ran clean — likely heap-layout luck, but it made JIT-vs-AOT behavior inconsistent). Linking `ryo` for `aarch64/x86_64-unknown-linux-musl` is cheap: both targets are Rust tier-2 with std, and the pinned Zig toolchain can serve as the musl linker (`-C linker="zig cc" -C link-args=-target <arch>-linux-musl`), with the runtime staticlib already rebuilding per `TARGET` through `build-support`. Benefits: one allocator story across JIT and AOT, and a static compiler binary that runs on any Linux regardless of host glibc (the playground/container story). Caveats: (1) Valgrind's musl support is partial and ASan effectively doesn't support musl — the `asan_smoke`/`valgrind_smoke` lanes need the glibc build, so musl is an additional flavor, not a replacement; (2) musl mallocng is slower under allocation-heavy multithreaded load (the caveat recorded in I-157) — if it shows up in profiles the answer is a custom allocator in `ryo-runtime`; (3) needs a CI musl build+test lane and a distribution decision.
 **Resolution:** Add a CI job building the workspace for `aarch64-unknown-linux-musl` (zig cc as linker) with a smoke `cargo test` subset that avoids sanitizer lanes; measure the compiler's own build+bench suite against the glibc build; if acceptable, make the musl compiler the published Linux artifact while CI keeps glibc for sanitizer coverage. Record the decision in the roadmap next to the musl AOT note.
+
+### I-203 — Consequential diagnostics pile onto a primary error (noise on the error path)
+
+**Files:** `ryo-frontend/src/ownership/` (W0001 walk), `ryo-frontend/src/sema/expr.rs` (struct-literal shape check), `ryo-driver/src/pipeline.rs` (stage sequencing after earlier errors)
+
+**Summary:** Three observed instances of one pattern — a derived diagnostic on top of the real error. (1) W0001 "declared but never used" fires for a binding whose only use was an expression that failed to compile (`pair = (17, "alice"); print(pair.2)` warns about `pair` alongside E0038). Verified error-path artifact: successful programs with genuinely write-only bindings stay silent, and clean uses produce no warning. (2) A struct literal with one bad field reports a consequential "missing field(s)" error in addition to (and before) the real one: `Point{z=1, x=2}` → E0039 missing 'y' then E0038 unknown 'z'; likewise `Point{x=1, x=2}` → E0039 + E0040. (3) After E0005 rejects a recursive struct definition, using the struct in a literal re-reports E0001 "unknown struct" — field *access* on a failed struct already recovers quietly (`sema/expr.rs` FieldAccess arm), the literal site does not. The destructure-pattern variant of (2) was fixed on `feat/milestone-10-tuples` (coverage error suppressed once a pattern entry fails); the literal-side shape check is M9 code.
+
+**Resolution:** Gate warnings on "no errors so far" for the current compilation unit (standard practice), so W-lints never pile onto a failing build; sweep warning-only tests to prove clean programs are unchanged. In the struct-literal shape check, skip the missing-fields error when any field already errored (unknown/duplicate). Extend the FieldAccess declared-but-failed recovery to the struct-literal path.
 
 ---
 
@@ -426,6 +428,14 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** `fn sum(inout x: int, inout y: int)` that only reads x and y compiles with no warning, so the `inout` is a false mutation contract: the call site needs `&`, Rule-7 consumes the arguments as mutable borrows (making otherwise-fine calls collide — `sum(&p.a, &p.b)` trips E0032 from I-195 even though nothing is written), and signature readers believe mutation happens when it does not. Alpha-tester observation on the disjoint-fields repro's own `sum`. Precedent: the W-family `RedundantMove` warning ("`move` on a Copy-typed parameter — accepted, but redundant") — same shape: accepted, but the annotation lies. Repro: `bug_reports/bug_inout_never_mutated.ryo`.
 
 **Resolution:** After walking a callee body, emit a W-code at the signature for each `inout` param with no recorded write: "parameter `x` is never mutated — declare it as a plain (borrowed) parameter", with a fix-it dropping `inout` and the call-site `&`. Writes that must suppress it: assignment/compound assignment to the param or its fields, `str_push`/`bytes_push`-style inout builtins on it, re-passing as `&param` to another inout param, writes through a view rooted in it. Conservative toward silence per the W-lint philosophy. Nested/hidden writes behind calls the param is *immutably* passed to do not count (a read is a read).
+
+### I-204 — Top-level assignment surfaces a raw chumsky expectation dump (E0100)
+
+**Files:** `ryo-frontend/src/parser.rs` (`top_level_statement_parser` statement set)
+
+**Summary:** Assignment is a body statement only; at the top level `q.x = 7` — named or positional target, the latter new with M10 — fails the top-level statement choice and surfaces chumsky's generic "found '=' expected '.', '[', …, something else, or end of input". No mention of assignment or function bodies. Observed during the M10 DX review (2026-10-06).
+
+**Resolution:** Add an explicit top-level alternative that recognizes an assignment-target shape (`ident (.field)*` followed by `=` or a compound-assign op) and fails with a targeted message such as "assignment is only valid inside a function body", before the generic error path renders. Mind the choice-order and recovery constraints documented on the statement parsers.
 
 ---
 

@@ -4,7 +4,68 @@ use super::{FuncCtx, Scope, Sema, check_call};
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, TypeId, TypeKind, ViewKind};
-use ryo_core::uir::{InstData, InstRef, InstTag, Span, Uir};
+use ryo_core::uir::{InstData, InstRef, InstTag, Span, StructLitView, Uir};
+
+/// Resolve a user-spelled variable read. The `__ryo_` namespace belongs
+/// to compiler-generated temporaries (nested-destructuring temps,
+/// runtime shims), which astgen emits as `TempVar` — never `Var` — so
+/// a `__ryo_` spelling here is USER source, and since every declaration
+/// path rejects the prefix there is nothing legitimate it can refer
+/// to: reject the read before it can reach any compiler side table.
+/// Otherwise walk the block scopes; unknown names are a compile error
+/// (spec §3, Variables).
+fn resolve_var_read(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    name: StringId,
+    span: Span,
+) -> TirRef {
+    if sema.pool.str(name).starts_with("__ryo_") {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ReservedIdentifier,
+            format!(
+                "identifiers starting with '__ryo_' are reserved for the compiler runtime: '{}'",
+                sema.pool.str(name),
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    match scope.lookup(name) {
+        Some(t) => fcx.builder.var(name, t, span),
+        None => {
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::UndefinedVariable,
+                format!("undefined variable: '{}'", sema.pool.str(name)),
+            ));
+            fcx.builder.unreachable(sema.pool.error_type(), span)
+        }
+    }
+}
+
+/// Resolve a compiler-generated temporary read (see [`InstTag::TempVar`]).
+/// Only astgen's nested-destructuring lowering emits that tag, always
+/// as the statement immediately after the one that bound the temp, so
+/// the table must contain it — a miss is a compiler bug, reported
+/// rather than panicked.
+fn resolve_temp_read(sema: &mut Sema<'_>, fcx: &mut FuncCtx, name: StringId, span: Span) -> TirRef {
+    match fcx.destructure_temps.get(&name).copied() {
+        Some(t) => fcx.builder.var(name, t, span),
+        None => {
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::UndefinedVariable,
+                format!(
+                    "internal compiler error: unbound destructuring temporary '{}'",
+                    sema.pool.str(name),
+                ),
+            ));
+            fcx.builder.unreachable(sema.pool.error_type(), span)
+        }
+    }
+}
 
 /// Expression-position analysis. A `never`-typed result (e.g. a
 /// `panic` call) is rejected: `panic` may only appear as a bare
@@ -72,19 +133,14 @@ pub(crate) fn analyze_expr_allow_never(
                 InstData::Var(s) => s,
                 _ => unreachable!("Var must carry InstData::Var"),
             };
-            match scope.lookup(name) {
-                Some(t) => fcx.builder.var(name, t, span),
-                None => {
-                    // block-scoped name resolution; unknown names are a
-                    // compile error (spec §3, Variables)
-                    sema.sink.emit(Diag::error(
-                        span,
-                        DiagCode::UndefinedVariable,
-                        format!("undefined variable: '{}'", sema.pool.str(name)),
-                    ));
-                    fcx.builder.unreachable(sema.pool.error_type(), span)
-                }
-            }
+            resolve_var_read(sema, fcx, scope, name, span)
+        }
+        InstTag::TempVar => {
+            let name = match inst.data {
+                InstData::Var(s) => s,
+                _ => unreachable!("TempVar must carry InstData::Var"),
+            };
+            resolve_temp_read(sema, fcx, name, span)
         }
         InstTag::Add
         | InstTag::Sub
@@ -450,12 +506,15 @@ fn analyze_borrow(
     analyze_expr(sema, fcx, scope, inner)
 }
 
-/// Struct literal `Name{field = value, ...}` (M9). Validates the
+/// Struct literal `Name{field = value, ...}` (M9) or the anonymous
+/// `{field = value, ...}` (M10). The named path validates the
 /// literal against the declaration registered in `sema.struct_types`
 /// (unknown / duplicated / missing / mistyped fields each get their
 /// own diagnostic; analysis continues past all of them) and emits a
 /// canonical-order TIR `StructLit`. Slots with no valid initializer
-/// recover with an error-typed `Unreachable`.
+/// recover with an error-typed `Unreachable`. The anonymous path
+/// infers the structural type from the field values — see
+/// [`analyze_anon_struct_lit`].
 fn analyze_struct_lit(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -464,14 +523,17 @@ fn analyze_struct_lit(
     span: Span,
 ) -> TirRef {
     let view = sema.uir.struct_lit_view(r);
-    let Some(&sty) = sema.struct_types.get(&view.name) else {
+    let Some(name) = view.name else {
+        return analyze_anon_struct_lit(sema, fcx, scope, &view, span);
+    };
+    let Some(&sty) = sema.struct_types.get(&name) else {
         // Not a registered struct: either never declared, or declared
         // but left undefined by astgen (cycle / unknown field type —
         // already diagnosed). Recover with the error sentinel.
         sema.sink.emit(Diag::error(
             span,
             DiagCode::UnknownType,
-            format!("unknown struct: '{}'", sema.pool.str(view.name)),
+            format!("unknown struct: '{}'", sema.pool.str(name)),
         ));
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     };
@@ -556,9 +618,78 @@ fn analyze_struct_lit(
     fcx.builder.struct_lit(sty, &fields, span)
 }
 
-/// Field access `object.field` (M9). Resolves the field against the
-/// object's struct type and emits a TIR `FieldAccess` carrying the
-/// canonical declaration-order field index and the field type.
+/// Anonymous struct literal `{field = value, ...}` (M10). There is no
+/// declaration to validate against — the type is structural, inferred
+/// from the initializers: each field's type is its value's type, and
+/// the ordered (name, type) pairs intern via [`InternPool::anon_struct`].
+/// The TIR emission then matches the named path: canonical (here:
+/// written) order, duplicates diagnosed with `DuplicateStructField`,
+/// and a view-typed initializer rejected with `ViewFieldType` (Rule 6
+/// — views cannot live in struct fields). A field whose initializer
+/// failed to type-check poisons the whole literal: an error-typed
+/// field has no layout, so no anon type can be interned for it.
+fn analyze_anon_struct_lit(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    view: &StructLitView,
+    span: Span,
+) -> TirRef {
+    let error_ty = sema.pool.error_type();
+    let mut fields: Vec<(StringId, TypeId, TirRef)> = Vec::with_capacity(view.fields.len());
+    let mut poisoned = false;
+    for (fname, value_ref) in &view.fields {
+        let fspan = sema.uir.span(*value_ref);
+        if fields.iter().any(|(n, _, _)| n == fname) {
+            sema.sink.emit(Diag::error(
+                fspan,
+                DiagCode::DuplicateStructField,
+                format!(
+                    "field '{}' is specified more than once",
+                    sema.pool.str(*fname)
+                ),
+            ));
+            // Same recovery as the named path: analyze the duplicate's
+            // initializer so its own errors still surface.
+            analyze_expr(sema, fcx, scope, *value_ref);
+            continue;
+        }
+        let value = analyze_expr(sema, fcx, scope, *value_ref);
+        let vty = fcx.builder.ty_of(value);
+        if sema.pool.is_error(vty) {
+            poisoned = true;
+        }
+        if sema.pool.is_view(vty) {
+            sema.sink.emit(Diag::error(
+                fspan,
+                DiagCode::ViewFieldType,
+                format!(
+                    "struct fields must be owned values; '{}' is a projection (Rule 6)",
+                    sema.pool.display(vty)
+                ),
+            ));
+        }
+        fields.push((*fname, vty, value));
+    }
+    if poisoned {
+        return fcx.builder.unreachable(error_ty, span);
+    }
+    let pairs: Vec<(StringId, TypeId)> = fields.iter().map(|&(n, t, _)| (n, t)).collect();
+    let sty = sema.pool.anon_struct(&pairs);
+    // The anon type's canonical order is the written order.
+    let values: Vec<(u32, TirRef)> = fields
+        .into_iter()
+        .enumerate()
+        .map(|(i, (_, _, v))| (i as u32, v))
+        .collect();
+    fcx.builder.struct_lit(sty, &values, span)
+}
+
+/// Field access `object.field` (M9; anonymous structs read fields
+/// identically, M10). Resolves the field against the object's struct
+/// type and emits a TIR `FieldAccess` carrying the canonical
+/// field index (declaration order for named structs, written order
+/// for anonymous ones) and the field type.
 fn analyze_field_access(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -575,35 +706,92 @@ fn analyze_field_access(
     if sema.pool.is_error(oty) {
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
-    let is_struct = matches!(sema.pool.kind(oty), TypeKind::Struct);
+    let is_struct = matches!(sema.pool.kind(oty), TypeKind::Struct | TypeKind::AnonStruct);
     if !is_struct {
-        sema.sink.emit(Diag::error(
+        // A numeric key on a non-struct is never legitimate — and it
+        // is the signature of the one-element-tuple pitfall: `z.0`
+        // where `z` was declared `("zero")` (a grouping, not a tuple).
+        // Point back at the comma rather than leaving the reader to
+        // connect it.
+        let key = sema.pool.str(field);
+        let is_positional_key = !key.is_empty() && key.chars().all(|c| c.is_ascii_digit());
+        let diag = Diag::error(
             span,
             DiagCode::NotAStruct,
             format!("type '{}' has no fields", sema.pool.display(oty)),
-        ));
+        );
+        let diag = if is_positional_key {
+            diag.with_note(
+                None,
+                "if you meant a one-element tuple, the declaration needs a trailing comma: (x,)",
+            )
+        } else {
+            diag
+        };
+        sema.sink.emit(diag);
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
-    if !sema.pool.is_defined_struct(oty) {
+    if matches!(sema.pool.kind(oty), TypeKind::Struct) && !sema.pool.is_defined_struct(oty) {
         // Declared but never defined (cycle / unknown field type) —
         // astgen already diagnosed it. Recover without touching
-        // `struct_view`, which panics on undefined structs.
+        // `struct_view`, which panics on undefined structs. (Anon
+        // structs are interned whole; they are always defined.)
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
     match sema.pool.struct_field(oty, field) {
         Some(f) => fcx.builder.field_access(obj, f.idx, f.ty, span),
         None => {
             let sview = sema.pool.struct_view(oty);
-            sema.sink.emit(Diag::error(
+            // Name the owner with its kind: the paren/brace display is
+            // concise but assumes the reader already knows the type
+            // notation — "tuple" / "anonymous struct" is the search
+            // term that gets them to the reference. An anon struct's
+            // interned name is the "" sentinel, so its display stands
+            // in for the name.
+            let owner = match sema.pool.kind(oty) {
+                TypeKind::AnonStruct if sema.pool.is_tuple_sugar(oty) => {
+                    format!("tuple '{}'", sema.pool.display(oty))
+                }
+                TypeKind::AnonStruct => {
+                    format!("anonymous struct '{}'", sema.pool.display(oty))
+                }
+                _ => format!("'{}'", sema.pool.str(sview.name)),
+            };
+            // With exactly one candidate there is no guessing: point
+            // straight at it. A numeric key against a NAMED struct is
+            // the graduation stumble — tuple users reach for
+            // positional access on a type that only has names.
+            let key_is_positional = {
+                let key = sema.pool.str(field);
+                !key.is_empty() && key.chars().all(|c| c.is_ascii_digit())
+            };
+            let mut diag = Diag::error(
                 span,
                 DiagCode::UnknownField,
                 format!(
-                    "'{}' has no field '{}' (fields: {})",
-                    sema.pool.str(sview.name),
+                    "{} has no field '{}' (fields: {})",
+                    owner,
                     sema.pool.str(field),
                     field_list(sema.pool, &sview),
                 ),
-            ));
+            );
+            if sview.fields.len() == 1 {
+                diag = diag.with_note(
+                    None,
+                    format!(
+                        "the only valid field is '{}'",
+                        sema.pool.str(sview.fields[0].name),
+                    ),
+                );
+            }
+            if matches!(sema.pool.kind(oty), TypeKind::Struct) && key_is_positional {
+                diag = diag.with_note(
+                    None,
+                    "named structs are accessed by field name — positional \
+                     access is tuple sugar for anonymous shapes",
+                );
+            }
+            sema.sink.emit(diag);
             fcx.builder.unreachable(sema.pool.error_type(), span)
         }
     }
@@ -1012,7 +1200,46 @@ pub(crate) fn check_binary_op(
                     fcx.builder.unreachable(sema.pool.error_type(), span)
                 }
             }
-            TypeKind::Void | TypeKind::Never | TypeKind::Tuple | TypeKind::View(_) => {
+            // M10: anonymous struct equality is structural — a shape
+            // is Eq-capable exactly when every field is
+            // (`is_eq_capable`, computed recursively; there is no
+            // stored flag and no opt-in attribute). Same memberwise
+            // lowering as named structs: the shared StructEq/StructNe
+            // codegen path reads the fields through `struct_view`,
+            // which anon structs populate too. One diagnostic per
+            // offending field, mirroring M9.1's derive validation.
+            TypeKind::AnonStruct => {
+                let view = sema.pool.struct_view(kind_ty);
+                let mut capable = true;
+                for f in &view.fields {
+                    if sema.pool.is_eq_capable(f.ty) {
+                        continue;
+                    }
+                    capable = false;
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::AnonFieldNotEq,
+                        format!(
+                            "binary operator `{}` requires field '{}' of type '{}' to be Eq-capable",
+                            bin_op_symbol(tag),
+                            sema.pool.str(f.name),
+                            sema.pool.display(f.ty),
+                        ),
+                    ));
+                }
+                if capable {
+                    let tir_tag = match tag {
+                        InstTag::Eq => TirTag::StructEq,
+                        InstTag::NotEq => TirTag::StructNe,
+                        _ => unreachable!(),
+                    };
+                    fcx.builder
+                        .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
+                } else {
+                    fcx.builder.unreachable(sema.pool.error_type(), span)
+                }
+            }
+            TypeKind::Void | TypeKind::Never | TypeKind::View(_) => {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,
@@ -1063,7 +1290,7 @@ pub(crate) fn check_binary_op(
             TypeKind::Bool
             | TypeKind::Void
             | TypeKind::Never
-            | TypeKind::Tuple
+            | TypeKind::AnonStruct
             | TypeKind::Struct
             | TypeKind::Bytes
             | TypeKind::View(_) => {

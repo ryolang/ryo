@@ -13,12 +13,57 @@
 //! `{prefix}{"│   " | "    "}` depending on whether the node was the
 //! last child of its parent.
 
-use crate::ast::{Ast, ExprId, ExprKind, FunctionDef, IfStmt, Literal, StmtId, StmtKind, VarDecl};
+use crate::ast::{
+    Ast, ExprId, ExprKind, FunctionDef, IfStmt, Literal, PatternId, PatternKind, StmtId, StmtKind,
+    TypeExpr, TypeExprKind, VarDecl,
+};
 use crate::tir::ParamMode;
 use crate::types::InternPool;
 use std::borrow::Cow;
 use std::fmt;
 use std::fmt::Write as _;
+
+/// Render a type expression back to source-shaped text: a plain name
+/// as-is, an anonymous struct literal as `{q: int, r: int}`, a
+/// positional form as `(int, str)` (the AST-level mirror of the
+/// pool's structural display, which needs a `TypeId` this layer
+/// doesn't have).
+fn fmt_type_expr<'p>(texpr: &TypeExpr, ast: &Ast, pool: &'p InternPool) -> Cow<'p, str> {
+    match &texpr.kind {
+        TypeExprKind::Name { name, is_view } => {
+            let name = pool.str(*name);
+            if *is_view {
+                Cow::Owned(format!("&{name}"))
+            } else {
+                Cow::Borrowed(name)
+            }
+        }
+        TypeExprKind::Anon { fields } => {
+            let fields = ast
+                .type_field_list(*fields)
+                .iter()
+                .map(|(name, ty)| format!("{}: {}", pool.str(*name), fmt_type_expr(ty, ast, pool)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Cow::Owned(format!("{{{fields}}}"))
+        }
+        TypeExprKind::Positional(elems) => {
+            let list = ast.type_expr_list(*elems);
+            let rendered = list
+                .iter()
+                .map(|ty| fmt_type_expr(ty, ast, pool).into_owned())
+                .collect::<Vec<_>>()
+                .join(", ");
+            // A one-element tuple keeps the trailing comma (`(int,)`);
+            // `(int)` would read as a parenthesized type, not a tuple.
+            if list.len() == 1 {
+                Cow::Owned(format!("({rendered},)"))
+            } else {
+                Cow::Owned(format!("({rendered})"))
+            }
+        }
+    }
+}
 
 /// Render the full program as an indented tree.
 pub fn render_program(ast: &Ast, pool: &InternPool) -> String {
@@ -74,6 +119,7 @@ fn write_stmt_inline(out: &mut String, ast: &Ast, stmt: StmtId) -> fmt::Result {
         StmtKind::CompoundAssign { .. } => "CompoundAssign",
         StmtKind::FieldAssign { .. } => "FieldAssign",
         StmtKind::CompoundFieldAssign { .. } => "CompoundFieldAssign",
+        StmtKind::Destructure { .. } => "Destructure",
         StmtKind::WhileLoop { .. } => "WhileLoop",
         StmtKind::ForRange { .. } => "ForRange",
         StmtKind::Break => "Break",
@@ -125,7 +171,7 @@ fn write_stmt_children(
                     "{}├── field: {}: {}",
                     inner,
                     pool.str(*field_name),
-                    pool.str(field_ty.name)
+                    fmt_type_expr(field_ty, ast, pool)
                 )?;
             }
             Ok(())
@@ -164,6 +210,12 @@ fn write_stmt_children(
             writeln!(out, "{}CompoundFieldAssign: {:?}", prefix, op)?;
             let inner = format!("{}  ", prefix);
             write_expr(out, ast, *target, &inner, false, "target: ", pool)?;
+            write_expr(out, ast, *value, &inner, true, "value: ", pool)
+        }
+        StmtKind::Destructure { target, value } => {
+            writeln!(out, "{}Destructure", prefix)?;
+            let inner = format!("{}  ", prefix);
+            write_pattern(out, ast, *target, &inner, false, "target: ", pool)?;
             write_expr(out, ast, *value, &inner, true, "value: ", pool)
         }
         StmtKind::WhileLoop { cond, body } => {
@@ -218,11 +270,16 @@ fn write_function_def(
             inner,
             mode_prefix,
             pool.str(param.name.name),
-            pool.str(param.type_annotation.name),
+            fmt_type_expr(&param.type_annotation, ast, pool),
         )?;
     }
     if let Some(ret_ty) = &func.return_type {
-        writeln!(out, "{}├── returns: {}", inner, pool.str(ret_ty.name))?;
+        writeln!(
+            out,
+            "{}├── returns: {}",
+            inner,
+            fmt_type_expr(ret_ty, ast, pool)
+        )?;
     }
     write_block(
         out,
@@ -310,7 +367,7 @@ fn write_var_decl(
             out,
             "{}├── type: {} ({}..{})",
             new_prefix,
-            pool.str(ty.name),
+            fmt_type_expr(ty, ast, pool),
             ty.span.start,
             ty.span.end
         )?;
@@ -352,7 +409,11 @@ fn write_expr(
         ExprKind::Slice { .. } => Cow::Borrowed("Slice"),
         ExprKind::Index { .. } => Cow::Borrowed("Index"),
         ExprKind::StructLiteral(lit) => {
-            Cow::Owned(format!("StructLiteral({})", pool.str(lit.name.name)))
+            let name = match lit.name {
+                Some(ident) => pool.str(ident.name),
+                None => "anonymous",
+            };
+            Cow::Owned(format!("StructLiteral({name})"))
         }
         ExprKind::FieldAccess { field, .. } => {
             Cow::Owned(format!("FieldAccess(.{})", pool.str(field.name)))
@@ -437,6 +498,65 @@ fn write_expr_args(
         write_expr(out, ast, arg, prefix, i == args.len() - 1, "", pool)?;
     }
     Ok(())
+}
+
+/// Render a destructuring pattern subtree (M10) in the same
+/// tree-drawing style as [`write_expr`].
+fn write_pattern(
+    out: &mut String,
+    ast: &Ast,
+    pat: PatternId,
+    prefix: &str,
+    is_last: bool,
+    label: &str,
+    pool: &InternPool,
+) -> fmt::Result {
+    let pattern = ast.pattern(pat);
+    let name: Cow<'static, str> = match &pattern.kind {
+        PatternKind::Wildcard => Cow::Borrowed("Wildcard"),
+        PatternKind::Bind(ident) => Cow::Owned(format!("Bind({})", pool.str(ident.name))),
+        PatternKind::Anon { .. } => Cow::Borrowed("Anon"),
+        PatternKind::Positional(_) => Cow::Borrowed("Positional"),
+    };
+    writeln!(
+        out,
+        "{}{}{}{} ({}..{})",
+        prefix,
+        connector(is_last),
+        label,
+        name,
+        pattern.span.start,
+        pattern.span.end
+    )?;
+    let new_prefix = format!("{}{}", prefix, continuation(is_last));
+    match &pattern.kind {
+        PatternKind::Wildcard | PatternKind::Bind(_) => Ok(()),
+        PatternKind::Anon { fields } => {
+            // Fields are scalar (name, binding) pairs, not nodes:
+            // render one line each, no recursion.
+            let fields = ast.pattern_field_list(*fields);
+            for (i, field) in fields.iter().enumerate() {
+                writeln!(
+                    out,
+                    "{}{}{}: {} ({}..{})",
+                    new_prefix,
+                    connector(i == fields.len() - 1),
+                    pool.str(field.name),
+                    pool.str(field.binding.name),
+                    field.binding.span.start,
+                    field.binding.span.end
+                )?;
+            }
+            Ok(())
+        }
+        PatternKind::Positional(elems) => {
+            let elems = ast.pattern_list(*elems);
+            for (i, &elem) in elems.iter().enumerate() {
+                write_pattern(out, ast, elem, &new_prefix, i == elems.len() - 1, "", pool)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 fn write_optional_bound(
@@ -540,6 +660,41 @@ Program (0..0)
               └── Literal(Int(2)) (0..0)
 ";
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn positional_type_renders_tuple_sugar() {
+        // `(int,)` keeps the trailing comma — without it the form is
+        // ambiguous with a parenthesized type; multi-element and empty
+        // forms render plain.
+        let mut pool = InternPool::new();
+        let mut ast = Ast::new();
+        let int_name = ident(&mut pool, "int").name;
+        let str_name = ident(&mut pool, "str").name;
+        let one = ast.type_expr_positional(&[TypeExpr::new(int_name, span(0, 0))], span(0, 0));
+        let two = ast.type_expr_positional(
+            &[
+                TypeExpr::new(int_name, span(0, 0)),
+                TypeExpr::new(str_name, span(0, 0)),
+            ],
+            span(0, 0),
+        );
+        let empty = ast.type_expr_positional(&[], span(0, 0));
+        let f_one = ast.function_def(ident(&mut pool, "f_one"), &[], Some(one), &[], span(0, 0));
+        let f_two = ast.function_def(ident(&mut pool, "f_two"), &[], Some(two), &[], span(0, 0));
+        let f_empty = ast.function_def(
+            ident(&mut pool, "f_empty"),
+            &[],
+            Some(empty),
+            &[],
+            span(0, 0),
+        );
+        ast.set_top_level(vec![f_one, f_two, f_empty]);
+
+        let out = render_program(&ast, &pool);
+        assert!(out.contains("returns: (int,)"), "one-elem: {out}");
+        assert!(out.contains("returns: (int, str)"), "two-elem: {out}");
+        assert!(out.contains("returns: ()"), "empty: {out}");
     }
 
     #[test]

@@ -98,6 +98,65 @@ fn field_access_unknown_field() {
 }
 
 #[test]
+fn field_access_unknown_field_names_the_shape_kind() {
+    // The message names the kind so the reader has the reference
+    // vocabulary: "tuple" and "anonymous struct" are searchable, the
+    // bare paren/brace display is not. Named structs keep the
+    // original wording — the type name already says everything.
+    let cases: &[(&str, &str)] = &[
+        (
+            "fn main():\n\tz = (\"zero\",)\n\ty = z.1\n",
+            "tuple '(str,)' has no field '1'",
+        ),
+        (
+            "fn main():\n\tp = {x=1}\n\ty = p.q\n",
+            "anonymous struct '{x: int}' has no field 'q'",
+        ),
+        (
+            "struct Point:\n\tx: int\n\nfn main():\n\tp = Point{x=1}\n\ty = p.z\n",
+            "'Point' has no field 'z'",
+        ),
+    ];
+    for (src, expected) in cases {
+        let (_t, diags, _p) = run_with_errors(src);
+        let diag = diags
+            .iter()
+            .find(|d| d.code == DiagCode::UnknownField)
+            .unwrap_or_else(|| panic!("expected E0038 for {src:?}, got {diags:?}"));
+        assert!(
+            diag.message.contains(expected),
+            "message should contain {expected:?}, got {:?}",
+            diag.message,
+        );
+    }
+
+    // Single candidate: the note points straight at it, no guessing.
+    let (_t, diags, _p) = run_with_errors("fn main():\n\tz = (\"zero\",)\n\ty = z.1\n");
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::UnknownField)
+        .expect("E0038");
+    assert!(
+        diag.notes
+            .iter()
+            .any(|n| n.message.contains("the only valid field is '0'")),
+        "expected a single-candidate note, got {diags:?}",
+    );
+
+    // Multiple candidates: no note — the field list in the message
+    // already carries the information.
+    let (_t, diags, _p) = run_with_errors("fn main():\n\tz = (1, 2)\n\ty = z.5\n");
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::UnknownField)
+        .expect("E0038");
+    assert!(
+        diag.notes.is_empty(),
+        "multi-field shapes must not get the note, got {diags:?}",
+    );
+}
+
+#[test]
 fn field_access_on_non_struct_is_error() {
     let src = "fn main():\n\tx = 1\n\ty = x.foo\n";
     let (_t, diags, _p) = run_with_errors(src);
@@ -345,4 +404,65 @@ fn derived_struct_with_mixed_eq_capable_fields_compares_clean() {
     // derived struct resolve with no diagnostics.
     let src = "#[derive(Eq)] struct Inner:\n\tv: int\n\n#[derive(Eq)] struct P:\n\ta: int\n\tb: float\n\tc: str\n\td: bool\n\te: bytes\n\tinner: Inner\n\nfn main():\n\tp = P{a=1, b=2.0, c=\"x\", d=true, e=b\"yz\", inner=Inner{v=3}}\n\tq = P{a=1, b=2.0, c=\"x\", d=true, e=b\"yz\", inner=Inner{v=3}}\n\tr = p == q\n\ts = p != q\n";
     assert!(run(src).is_ok());
+}
+
+#[test]
+fn anon_eq_structural() {
+    // M10: `==` / `!=` on anonymous structs lower to the shared
+    // StructEq/StructNe tags — Eq-capability is structural (every
+    // field Eq-capable, computed recursively), so no attribute gates
+    // the operator. A nested shape compares through the same
+    // memberwise path as a nested derived struct.
+    let src = "fn main():\n\tp = {x=1, y=2.0, s=\"a\", n={v=3}}\n\tq = {x=1, y=2.0, s=\"a\", n={v=3}}\n\tr = p == q\n\ts = p != q\n";
+    let (tirs, pool) = run(src).expect("sema ok");
+    let main = tir_named(&tirs, &pool, "main");
+    let eq = main
+        .instructions
+        .iter()
+        .find(|i| i.tag == TirTag::StructEq)
+        .expect("p == q must lower to a StructEq inst");
+    assert_eq!(eq.ty, pool.bool_(), "StructEq result must be bool");
+    let ne = main
+        .instructions
+        .iter()
+        .find(|i| i.tag == TirTag::StructNe)
+        .expect("p != q must lower to a StructNe inst");
+    assert_eq!(ne.ty, pool.bool_(), "StructNe result must be bool");
+}
+
+#[test]
+fn anon_eq_field_not_eq_capable() {
+    // A shape with a non-Eq field — a struct without `#[derive(Eq)]`
+    // — is not Eq-capable: the operator is rejected with
+    // AnonFieldNotEq naming the offending field and its type.
+    let src = "struct Inner:\n\tx: int\n\nfn main():\n\tp = {v=Inner{x=1}, w=2}\n\tq = {v=Inner{x=1}, w=2}\n\tr = p == q\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::AnonFieldNotEq)
+        .expect("AnonFieldNotEq must fire");
+    assert_eq!(
+        diag.message,
+        "binary operator `==` requires field 'v' of type 'Inner' to be Eq-capable"
+    );
+}
+
+#[test]
+fn positional_key_on_named_struct_gets_a_teaching_note() {
+    // The graduation stumble: positional access on a named struct.
+    // The note teaches the rule instead of leaving the field list to
+    // speak for itself.
+    let src =
+        "struct Point:\n\tx: int\n\ty: int\n\nfn main():\n\tp = Point{x=1, y=2}\n\tprint(p.0)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let d = diags
+        .iter()
+        .find(|d| d.code == DiagCode::UnknownField)
+        .expect("E0038");
+    assert!(
+        d.notes
+            .iter()
+            .any(|n| n.message.contains("accessed by field name")),
+        "expected the field-name note, got: {diags:?}"
+    );
 }

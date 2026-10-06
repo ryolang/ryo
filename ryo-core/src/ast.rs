@@ -27,6 +27,20 @@
 //! - `struct_field_inits: Vec<(StringId, ExprId)>` — side arena for
 //!   struct literal field initializers, in source order, behind a
 //!   [`StructFieldInitList`] range.
+//! - `type_field_lists: Vec<(StringId, TypeExpr)>` / `type_expr_lists:
+//!   Vec<TypeExpr>` — side arenas for compound type expressions
+//!   (M10): the field list of an anonymous type literal `{q: int,
+//!   r: int}` behind a [`TypeFieldList`], and the element list of a
+//!   positional type expression `(int, str)` behind a [`TypeExprList`].
+//! - `patterns: Vec<Pattern>` — indexed by [`PatternId`], same sentinel
+//!   convention as [`ExprId`]. Destructuring patterns (M10): `_`, a
+//!   binding, `{q, r}` / `{x = quot}` field patterns, positional
+//!   `(a, b)`.
+//! - `pattern_lists: Vec<PatternId>` / `pattern_field_lists:
+//!   Vec<PatternField>` — side arenas for compound patterns: the
+//!   element list of a [`PatternKind::Positional`] behind a
+//!   [`PatternList`], and the field list of a [`PatternKind::Anon`]
+//!   behind a [`PatternFieldList`].
 //! - `top_level: Vec<StmtId>` — the program's statements in source
 //!   order; everything below is reached by following ids out of them.
 //!
@@ -34,11 +48,12 @@
 //! payload ([`ExprKind`]/[`StmtKind`]); consumers write ordinary
 //! exhaustive `match`es and follow child ids through
 //! [`Ast::expr`]/[`Ast::stmt`]/[`Ast::expr_list`]/
-//! [`Ast::stmt_list`]/[`Ast::elif_list`]. Payload structs (`Ident`,
-//! `TypeExpr`, `Param`, `VarDecl`, `FunctionDef`, `IfStmt`,
-//! `ElifBranch`) are carried inline in the variants — only *nodes*
-//! are arena-allocated. Every variable-length node list lives in a
-//! side arena, with one deliberate exception:
+//! [`Ast::stmt_list`]/[`Ast::elif_list`]/[`Ast::pattern`]/
+//! [`Ast::pattern_list`]/[`Ast::pattern_field_list`]. Payload structs
+//! (`Ident`, `TypeExpr`, `Param`, `VarDecl`, `FunctionDef`, `IfStmt`,
+//! `ElifBranch`, `PatternField`) are carried inline in the variants —
+//! only *nodes* are arena-allocated. Every variable-length node list
+//! lives in a side arena, with one deliberate exception:
 //! [`FunctionDef::params`] stays an inline `Vec<Param>` because
 //! params are scalar metadata, not nodes.
 //!
@@ -51,9 +66,10 @@
 //!
 //! ## Parser-state integration
 //!
-//! The parser builds directly into the arenas with `Ast` as the
-//! chumsky state object; see the `Inspector` impl at the bottom of
-//! this file for rewind truncation.
+//! The parser builds directly into the arenas with the `Ast` as the
+//! arena half of the chumsky state object (the parser-state wrapper
+//! in `ryo-frontend` pairs it with the intern pool); see the
+//! `Inspector` impl at the bottom of this file for rewind truncation.
 
 use crate::tir::ParamMode;
 use crate::types::StringId;
@@ -103,6 +119,24 @@ impl StmtId {
     }
 
     /// Array index into `stmts`.
+    pub fn index(self) -> usize {
+        self.0.get() as usize
+    }
+}
+
+/// Index into [`Ast::patterns`]. Same layout and sentinel convention
+/// as [`ExprId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PatternId(NonZeroU32);
+
+impl PatternId {
+    /// Convert from a `usize` array index; see [`ExprId::from_index`].
+    fn from_index(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("PatternId index out of range (>= 2^32)");
+        PatternId(NonZeroU32::new(raw).expect("PatternId index must be >= 1"))
+    }
+
+    /// Array index into `patterns`.
     pub fn index(self) -> usize {
         self.0.get() as usize
     }
@@ -186,6 +220,70 @@ impl StructFieldInitList {
     }
 }
 
+/// A `[offset, offset+len)` slice of the `type_field_lists` side
+/// arena — the `q: int` field list of an anonymous struct type
+/// literal `{q: int, r: int}` (M10), in written order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypeFieldList {
+    offset: u32,
+    len: u32,
+}
+
+impl TypeFieldList {
+    fn as_range(self) -> std::ops::Range<usize> {
+        let start = self.offset as usize;
+        start..start + self.len as usize
+    }
+}
+
+/// A `[offset, offset+len)` slice of the `type_expr_lists` side
+/// arena — the element list of a positional type expression
+/// `(int, str)` (M10), in written order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypeExprList {
+    offset: u32,
+    len: u32,
+}
+
+impl TypeExprList {
+    fn as_range(self) -> std::ops::Range<usize> {
+        let start = self.offset as usize;
+        start..start + self.len as usize
+    }
+}
+
+/// A `[offset, offset+len)` slice of the `pattern_lists` side arena —
+/// the element list of a [`PatternKind::Positional`] pattern `(a, b)`,
+/// in written order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PatternList {
+    offset: u32,
+    len: u32,
+}
+
+impl PatternList {
+    fn as_range(self) -> std::ops::Range<usize> {
+        let start = self.offset as usize;
+        start..start + self.len as usize
+    }
+}
+
+/// A `[offset, offset+len)` slice of the `pattern_field_lists` side
+/// arena — the field list of a [`PatternKind::Anon`] pattern
+/// `{q, r}` / `{x = quot}`, in written order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PatternFieldList {
+    offset: u32,
+    len: u32,
+}
+
+impl PatternFieldList {
+    fn as_range(self) -> std::ops::Range<usize> {
+        let start = self.offset as usize;
+        start..start + self.len as usize
+    }
+}
+
 // ---------- Expressions ----------
 
 /// A single expression: kind plus inline source span.
@@ -230,9 +328,12 @@ pub enum ExprKind {
         base: ExprId,
         index: ExprId,
     },
-    /// Struct literal `Name{field=value, ...}` (M9). The field
+    /// Struct literal `Name{field=value, ...}` (M9) or the anonymous
+    /// form `{field=value, ...}` (M10). `None` = anonymous: the shape
+    /// is the identity, there is no declared name. The field
     /// initializers live in the `struct_field_inits` side arena, in
-    /// source order (sema canonicalizes against the declaration).
+    /// source order (sema canonicalizes named literals against the
+    /// declaration).
     StructLiteral(StructLiteral),
     /// Field access `object.field` (M9). Chains fold left:
     /// `a.b.c` is `FieldAccess(FieldAccess(a, b), c)`.
@@ -251,6 +352,57 @@ pub enum Literal {
     Bytes(StringId),
     Bool(bool),
     Float(f64),
+}
+
+// ---------- Patterns ----------
+
+/// A single destructuring pattern: kind plus inline source span.
+/// Mirrors [`Expr`]: the arena node carries its span, and consumers
+/// match on `ast.pattern(id).kind`.
+///
+/// Grammar (M10): `_`, a binding, `{q, r}` / `{x = quot}` field
+/// patterns, and positional `(a, b)` — including the statement-level
+/// paren-less form `a, b = e`, which the parser desugars into a
+/// positional pattern. Literal/variant patterns are M12 work.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pattern {
+    pub kind: PatternKind,
+    pub span: SimpleSpan,
+}
+
+/// The kind of a destructuring pattern. Child lists are
+/// [`PatternList`] / [`PatternFieldList`] ranges into the
+/// `pattern_lists` / `pattern_field_lists` side arenas; like
+/// [`ExprKind`], every payload field is `Copy`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PatternKind {
+    /// `_` — binds nothing, skips the field/element. `_` lexes as an
+    /// ordinary identifier; the parser recognizes it by name.
+    Wildcard,
+    /// A fresh binding for one field/element (`a`).
+    Bind(Ident),
+    /// `{q, r}` / `{x = quot}` — an anonymous struct shape: bare
+    /// fields are puns (field `q` binds local `q`), `name = binding`
+    /// renames. The field list lives in the `pattern_field_lists`
+    /// side arena, in written order.
+    Anon { fields: PatternFieldList },
+    /// `(a, b)` — a positional shape; elements are full patterns, so
+    /// nesting like `(a, (b, c))` parses. The element list lives in
+    /// the `pattern_lists` side arena, in written order.
+    Positional(PatternList),
+}
+
+/// One field of a [`PatternKind::Anon`] pattern. A pun (`{q, r}`)
+/// records the same identifier as the field name and the binding; a
+/// rename (`{x = quot}`) binds field `x` to the local `quot`. A field
+/// named `_` is a wildcard: it binds nothing (recognized by name, the
+/// same rule as [`PatternKind::Wildcard`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PatternField {
+    /// The struct field being destructured.
+    pub name: StringId,
+    /// The local the field binds into.
+    pub binding: Ident,
 }
 
 // ---------- Statements ----------
@@ -297,6 +449,14 @@ pub enum StmtKind {
     CompoundFieldAssign {
         target: ExprId,
         op: CompoundOp,
+        value: ExprId,
+    },
+    /// Destructuring assignment `pattern = value` (M10): `(a, b) = e`,
+    /// `a, b = e`, `{q, r} = e`, `{x = quot} = e`. The pattern lives
+    /// in the `patterns` arena; the parser guarantees it is not a bare
+    /// binding (plain `a = e` stays [`StmtKind::AssignOrDecl`]).
+    Destructure {
+        target: PatternId,
         value: ExprId,
     },
     WhileLoop {
@@ -366,12 +526,14 @@ pub struct StructDef {
     pub attrs: StructAttrs,
 }
 
-/// A struct literal `Name{field=value, ...}` (M9). All fields are
-/// `Copy` handles; the field initializers live in the
+/// A struct literal `Name{field=value, ...}` (M9) or the anonymous
+/// `{field=value, ...}` (M10). `name` is `None` for the anonymous
+/// form — its type identity is the field shape, not a declared name.
+/// All fields are `Copy` handles; the field initializers live in the
 /// `struct_field_inits` side arena, in source order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StructLiteral {
-    pub name: Ident,
+    pub name: Option<Ident>,
     pub fields: StructFieldInitList,
 }
 
@@ -413,38 +575,58 @@ impl Ident {
     }
 }
 
-/// A type expression. Currently just a name like `int`, `bool`, etc.,
-/// plus the `is_view` flag for legacy `&name` view syntax (M8.4
-/// pre-Q5) — post-M8.4.1 that syntax only feeds the targeted
-/// migration error in astgen.
+/// A type expression: a plain (or legacy `&name`) name, an anonymous
+/// struct type literal `{q: int, r: int}` (M10), or the positional
+/// sugar form `(int, str)` (M10, ≡ `{0: int, 1: str}`).
 ///
-/// Field order keeps the struct at 24 bytes: `span` (16 B, align 8)
-/// first, then `name` (4 B) and `is_view` (1 B) pack into the tail
-/// padding. Declaring `name` before `span` would grow it to 32 B.
+/// 32 bytes: `span` (16 B, align 8) plus `kind` (12 B — an 8-byte
+/// list-range payload plus the discriminant, 4-byte aligned).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypeExpr {
     pub span: SimpleSpan,
-    pub name: StringId,
-    /// Legacy `&name` view-syntax flag (M8.4 pre-Q5): the annotation used
-    /// the retired `&` prefix. Post-M8.4.1 this only feeds astgen's
-    /// targeted migration error; it never constructs a view type.
-    pub is_view: bool,
+    pub kind: TypeExprKind,
+}
+
+/// The payload of a [`TypeExpr`]. Compound forms keep their child
+/// lists in the `type_field_lists` / `type_expr_lists` side arenas,
+/// mirroring the `struct_field_decls` discipline: a variant stores a
+/// range handle, never an owned `Vec`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeExprKind {
+    /// A type name like `int`, `bool`, or `Point`, plus the legacy
+    /// `&name` view flag (M8.4 pre-Q5) — post-M8.4.1 the `&` form only
+    /// feeds astgen's targeted migration error; it never constructs a
+    /// view type.
+    Name { name: StringId, is_view: bool },
+    /// `{q: int, r: int}` — an anonymous struct type literal (M10).
+    /// The field list lives in the `type_field_lists` side arena, in
+    /// written order.
+    Anon { fields: TypeFieldList },
+    /// `(int, str)` — positional sugar over an anonymous struct (M10),
+    /// ≡ `{0: int, 1: str}`. The element list lives in the
+    /// `type_expr_lists` side arena; resolution interns the `"0"`,
+    /// `"1"`, … names before pool dedup.
+    Positional(TypeExprList),
 }
 
 impl TypeExpr {
     pub fn new(name: StringId, span: SimpleSpan) -> Self {
         TypeExpr {
             span,
-            name,
-            is_view: false,
+            kind: TypeExprKind::Name {
+                name,
+                is_view: false,
+            },
         }
     }
 
     pub fn view(name: StringId, span: SimpleSpan) -> Self {
         TypeExpr {
             span,
-            name,
-            is_view: true,
+            kind: TypeExprKind::Name {
+                name,
+                is_view: true,
+            },
         }
     }
 }
@@ -555,6 +737,11 @@ pub struct Ast {
     elifs: Vec<ElifBranch>,
     struct_field_decls: Vec<(StringId, TypeExpr)>,
     struct_field_inits: Vec<(StringId, ExprId)>,
+    type_field_lists: Vec<(StringId, TypeExpr)>,
+    type_expr_lists: Vec<TypeExpr>,
+    patterns: Vec<Pattern>,
+    pattern_lists: Vec<PatternId>,
+    pattern_field_lists: Vec<PatternField>,
     top_level: Vec<StmtId>,
     /// Span covering the first through last top-level statement;
     /// `0..0` for an empty program. Kept for the pretty-printer's
@@ -588,6 +775,14 @@ impl Ast {
             elifs: Vec::new(),
             struct_field_decls: Vec::new(),
             struct_field_inits: Vec::new(),
+            type_field_lists: Vec::new(),
+            type_expr_lists: Vec::new(),
+            patterns: vec![Pattern {
+                kind: PatternKind::Wildcard,
+                span: SimpleSpan::new((), 0..0),
+            }],
+            pattern_lists: Vec::new(),
+            pattern_field_lists: Vec::new(),
             top_level: Vec::new(),
             span: SimpleSpan::new((), 0..0),
         }
@@ -638,6 +833,42 @@ impl Ast {
     /// range, in source order.
     pub fn struct_field_inits(&self, list: StructFieldInitList) -> &[(StringId, ExprId)] {
         &self.struct_field_inits[list.as_range()]
+    }
+
+    /// The fields behind a [`TypeFieldList`] range — the `name: type`
+    /// pairs of an anonymous struct type literal — in written order.
+    pub fn type_field_list(&self, list: TypeFieldList) -> &[(StringId, TypeExpr)] {
+        &self.type_field_lists[list.as_range()]
+    }
+
+    /// The elements behind a [`TypeExprList`] range — the element
+    /// types of a positional type expression `(int, str)` — in
+    /// written order.
+    pub fn type_expr_list(&self, list: TypeExprList) -> &[TypeExpr] {
+        &self.type_expr_lists[list.as_range()]
+    }
+
+    /// Lookup a destructuring pattern by id.
+    pub fn pattern(&self, id: PatternId) -> &Pattern {
+        &self.patterns[id.index()]
+    }
+
+    /// Source span attached to a destructuring pattern.
+    pub fn pattern_span(&self, id: PatternId) -> SimpleSpan {
+        self.patterns[id.index()].span
+    }
+
+    /// The element slice behind a [`PatternList`] range — the
+    /// elements of a [`PatternKind::Positional`] pattern — in written
+    /// order.
+    pub fn pattern_list(&self, list: PatternList) -> &[PatternId] {
+        &self.pattern_lists[list.as_range()]
+    }
+
+    /// The field slice behind a [`PatternFieldList`] range — the
+    /// fields of a [`PatternKind::Anon`] pattern — in written order.
+    pub fn pattern_field_list(&self, list: PatternFieldList) -> &[PatternField] {
+        &self.pattern_field_lists[list.as_range()]
     }
 
     /// The program's top-level statements in source order.
@@ -771,6 +1002,68 @@ impl Ast {
             offset,
             len: u32::try_from(items.len())
                 .expect("AST struct field init list length exceeded u32::MAX"),
+        }
+    }
+
+    /// Copy an anonymous struct type literal's field list into the
+    /// `type_field_lists` side arena; see [`Self::push_expr_list`]
+    /// for the checked-conversion rationale.
+    fn push_type_field_list(&mut self, items: &[(StringId, TypeExpr)]) -> TypeFieldList {
+        let offset = u32::try_from(self.type_field_lists.len())
+            .expect("AST type_field_lists arena exceeded u32::MAX");
+        self.type_field_lists.extend_from_slice(items);
+        TypeFieldList {
+            offset,
+            len: u32::try_from(items.len()).expect("AST type field list length exceeded u32::MAX"),
+        }
+    }
+
+    /// Copy a positional type expression's element list into the
+    /// `type_expr_lists` side arena; see [`Self::push_expr_list`]
+    /// for the checked-conversion rationale.
+    fn push_type_expr_list(&mut self, items: &[TypeExpr]) -> TypeExprList {
+        let offset = u32::try_from(self.type_expr_lists.len())
+            .expect("AST type_expr_lists arena exceeded u32::MAX");
+        self.type_expr_lists.extend_from_slice(items);
+        TypeExprList {
+            offset,
+            len: u32::try_from(items.len()).expect("AST type expr list length exceeded u32::MAX"),
+        }
+    }
+
+    /// Push a pattern with its span and return its id; see
+    /// [`Self::push_expr`]. Slot 0 of `patterns` is the reserved
+    /// sentinel.
+    fn push_pattern(&mut self, kind: PatternKind, span: SimpleSpan) -> PatternId {
+        let idx = self.patterns.len();
+        self.patterns.push(Pattern { kind, span });
+        PatternId::from_index(idx)
+    }
+
+    /// Copy a positional pattern's element list into the
+    /// `pattern_lists` side arena; see [`Self::push_expr_list`] for
+    /// the checked-conversion rationale.
+    fn push_pattern_list(&mut self, items: &[PatternId]) -> PatternList {
+        let offset = u32::try_from(self.pattern_lists.len())
+            .expect("AST pattern_lists arena exceeded u32::MAX");
+        self.pattern_lists.extend_from_slice(items);
+        PatternList {
+            offset,
+            len: u32::try_from(items.len()).expect("AST pattern list length exceeded u32::MAX"),
+        }
+    }
+
+    /// Copy an anonymous pattern's field list into the
+    /// `pattern_field_lists` side arena; see [`Self::push_expr_list`]
+    /// for the checked-conversion rationale.
+    fn push_pattern_field_list(&mut self, items: &[PatternField]) -> PatternFieldList {
+        let offset = u32::try_from(self.pattern_field_lists.len())
+            .expect("AST pattern_field_lists arena exceeded u32::MAX");
+        self.pattern_field_lists.extend_from_slice(items);
+        PatternFieldList {
+            offset,
+            len: u32::try_from(items.len())
+                .expect("AST pattern field list length exceeded u32::MAX"),
         }
     }
 
@@ -921,12 +1214,13 @@ impl Ast {
         )
     }
 
-    /// Struct literal `Name{field=value, ...}` (M9); the field
-    /// initializers are copied into the `struct_field_inits` side
-    /// arena in source order.
+    /// Struct literal `Name{field=value, ...}` (M9) or the anonymous
+    /// `{field=value, ...}` (M10); pass `None` for the anonymous
+    /// form. The field initializers are copied into the
+    /// `struct_field_inits` side arena in source order.
     pub fn struct_literal(
         &mut self,
-        name: Ident,
+        name: Option<Ident>,
         fields: &[(StringId, ExprId)],
         span: SimpleSpan,
     ) -> ExprId {
@@ -935,6 +1229,66 @@ impl Ast {
             ExprKind::StructLiteral(StructLiteral { name, fields }),
             span,
         )
+    }
+
+    /// Anonymous struct type literal `{q: int, r: int}` (M10); the
+    /// field list is copied into the `type_field_lists` side arena in
+    /// written order. Yields the inline [`TypeExpr`] value — type
+    /// expressions are packed into their parent node's payload, not
+    /// arena-allocated.
+    pub fn type_expr_anon(
+        &mut self,
+        fields: &[(StringId, TypeExpr)],
+        span: SimpleSpan,
+    ) -> TypeExpr {
+        let fields = self.push_type_field_list(fields);
+        TypeExpr {
+            span,
+            kind: TypeExprKind::Anon { fields },
+        }
+    }
+
+    /// Positional type expression `(int, str)` (M10); the element
+    /// list is copied into the `type_expr_lists` side arena in
+    /// written order.
+    pub fn type_expr_positional(&mut self, elems: &[TypeExpr], span: SimpleSpan) -> TypeExpr {
+        let elems = self.push_type_expr_list(elems);
+        TypeExpr {
+            span,
+            kind: TypeExprKind::Positional(elems),
+        }
+    }
+
+    /// `_` wildcard pattern (M10): binds nothing.
+    pub fn pattern_wildcard(&mut self, span: SimpleSpan) -> PatternId {
+        self.push_pattern(PatternKind::Wildcard, span)
+    }
+
+    /// A fresh binding pattern `name` (M10).
+    pub fn pattern_bind(&mut self, name: Ident, span: SimpleSpan) -> PatternId {
+        self.push_pattern(PatternKind::Bind(name), span)
+    }
+
+    /// `{q, r}` / `{x = quot}` anonymous struct pattern (M10); the
+    /// field list is copied into the `pattern_field_lists` side arena
+    /// in written order.
+    pub fn pattern_anon(&mut self, fields: &[PatternField], span: SimpleSpan) -> PatternId {
+        let fields = self.push_pattern_field_list(fields);
+        self.push_pattern(PatternKind::Anon { fields }, span)
+    }
+
+    /// `(a, b)` positional pattern (M10) — also the shape the parser
+    /// builds for the paren-less `a, b = e` statement form; the
+    /// element list is copied into the `pattern_lists` side arena in
+    /// written order.
+    pub fn pattern_positional(&mut self, elems: &[PatternId], span: SimpleSpan) -> PatternId {
+        let elems = self.push_pattern_list(elems);
+        self.push_pattern(PatternKind::Positional(elems), span)
+    }
+
+    /// Destructuring assignment `pattern = value` (M10).
+    pub fn destructure(&mut self, target: PatternId, value: ExprId, span: SimpleSpan) -> StmtId {
+        self.push_stmt(StmtKind::Destructure { target, value }, span)
     }
 
     /// Field access `object.field` (M9).
@@ -1050,7 +1404,9 @@ impl Ast {
 
 /// Chumsky parser-state implementation: the parser builds directly
 /// into the arenas via `map_with`/`foldl_with` closures that call
-/// `e.state()`, with the `Ast` itself as the state object.
+/// `e.state()`; the `Ast` is the arena half of the parser state
+/// (see `ParseState` in `ryo-frontend`'s parser, which pairs it
+/// with the intern pool).
 ///
 /// The `Inspector` hooks are deliberately no-ops. A failed
 /// alternative (`or`/`choice` backtracking, `repeated` iteration
@@ -1131,9 +1487,11 @@ mod tests {
 
     #[test]
     fn type_expr_stays_small() {
-        // `span` (16 B) + `name` (4 B) + `is_view` (1 B) must pack
-        // into 24 B — see the field-order note on `TypeExpr`.
-        assert_eq!(std::mem::size_of::<TypeExpr>(), 24);
+        // `span` (16 B) + `kind` (12 B: an 8-byte list-range payload
+        // plus the discriminant, 4-byte aligned) must pack into 32 B —
+        // see the field-order note on `TypeExpr`.
+        assert_eq!(std::mem::size_of::<TypeExpr>(), 32);
+        assert_eq!(std::mem::size_of::<TypeExprKind>(), 12);
     }
 
     #[test]
@@ -1224,7 +1582,10 @@ mod tests {
                 assert_eq!(def.name.name, f);
                 assert_eq!(def.params, vec![param]);
                 assert_eq!(
-                    def.return_type.map(|t| (t.name, t.is_view)),
+                    def.return_type.map(|t| match t.kind {
+                        TypeExprKind::Name { name, is_view } => (name, is_view),
+                        other => panic!("expected Name return type, got {other:?}"),
+                    }),
                     Some((str_, false))
                 );
                 assert_eq!(ast.stmt_list(def.body), &[body_stmt]);
