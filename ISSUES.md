@@ -28,6 +28,33 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ## 🟡 Correctness / Hygiene
 
+### I-205 — Double free on fall-through exit after a taken conditional reseat when a later branch's read arm is skipped
+
+**Files:** `ryo-frontend/src/ownership/loops.rs` (`last_use_anchor`), `ryo-frontend/src/ownership/mod.rs` (free scheduling, `suppress_redundant_exit_frees` cover rules), `ryo-backend/src/codegen.rs` (binding-path redirect + stale-target fallback)
+
+**Summary:** A pre-branch `mut` binding that is conditionally reseated and later read inside another branch's arm double-frees the pre-reassign buffer when the reassign is taken and the read arm is skipped. Minimal repro (valgrind `ryo run` reports `Invalid free()` in `ryo_str_free`; the block is the `make` concat buffer, freed twice from adjacent generated sites):
+
+```ryo
+fn make(tag: int) -> str:
+	return int_to_str(tag) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn f(c1: bool, c2: bool) -> int:
+	mut s = make(0)
+	if c1:
+		s = make(1)
+	if c2:
+		print(s)
+		return 0
+	return 1
+
+fn main():
+	f(true, false)
+```
+
+Verified present on main (`9bdeda9`) and on the I-197 branch; the other three call combinations are clean. The free schedule for `f`: `free_on_reassign` at the reseating Assign releases the pre-branch owner on the taken path; the pre-branch owner's last-use Free (read inside the `c2` arm) is re-anchored by `last_use_anchor` to the `c2` branch's exit; the reseated value's only Free anchors at the in-arm `return 0`. On `c1=true, c2=false` the exit Free lowers through codegen's binding-path redirect, but the stale-target filter (`last == target || !all_free_targets.contains(last)`) rejects the redirect — the binding's last write is the reseated value, itself a free target — and the fallback frees the cached pre-branch value, already released by the displacement Free. The redirect it rejected would have been correct on both paths (frees the slot's current content: the reseated buffer on the taken path, the pre-branch buffer otherwise — and the reseated buffer has no other free on the fall-through, so the filter's fallback also leaves a latent leak-shaped gap). Root-cause candidates: the re-anchored last-use Free not being suppressed for an owner already released by `free_on_reassign` (compare the anchor-order suppression at the last-use pass), or the stale-target filter lacking a "target already displacement-freed" exemption.
+
+**Resolution:** Reproduce under the schedule-pin harness first (assert the pre-branch owner's free at the later branch exit is either suppressed or lowers through the redirect), then fix in the ownership pass (preferred — keep codegen's filter) and add the repro to the valgrind fixtures. The I-197 review round investigated this area: the suggested must-fire gates on the exit-free cover and the epilogue superseded check were refuted with counterexamples (the merge machinery — arm-gated dead drops, displacement frees, redirect frees — is path-compositional), so this entry is the actual defect in the same neighborhood.
+
 ### I-201 — Process-wide argv state has no isolation contract; concurrent hosted executions can mix generations
 
 **Files:** `runtime/src/lib.rs` (ARGC/ARGV globals, `ryo_rt_init`, `ryo_process_argc`, `ryo_process_argv`), `ryo-backend/src/codegen/mod.rs` (entry shim emitting the init call), `ryo-backend/src/codegen/jit.rs` (trampoline and runtime symbol table)
