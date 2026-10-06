@@ -560,3 +560,15 @@ fn valgrind_nested_reseat_then_shadow_leak() {
         "nested_reseat_then_shadow_leak",
     );
 }
+
+#[test]
+fn valgrind_reseat_fallthrough_skipped_read_arm() {
+    // I-205: taken conditional reseat + skipped read arm + fall-through
+    // exit double-freed the displacement-released pre-branch buffer
+    // (codegen's cached-value fallback after the stale-target redirect
+    // filter rejected the redirect).
+    run_valgrind_smoke_allocating(
+        common::find_fixture("reseat_fallthrough_skipped_read_arm"),
+        "reseat_fallthrough_skipped_read_arm",
+    );
+}

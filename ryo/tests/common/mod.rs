@@ -1126,6 +1126,36 @@ fn main():
 \tprint(\"done\\n\")
 ",
     ),
+    (
+        // I-205: taken conditional reseat + later branch whose read arm
+        // is skipped + fall-through exit. The pre-branch owner's
+        // re-anchored last-use Free used to target the displacement-
+        // released owner; codegen's stale-target filter rejected the
+        // redirect and the cached-value fallback double-freed (valgrind
+        // Invalid free). The exit Free must target the binding's last
+        // write so the redirect frees the slot's path-correct content.
+        "reseat_fallthrough_skipped_read_arm",
+        "\
+fn make(tag: int) -> str:
+\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+
+fn f(c1: bool, c2: bool) -> int:
+\tmut s = make(0)
+\tif c1:
+\t\ts = make(1)
+\tif c2:
+\t\tprint(s)
+\t\treturn 0
+\treturn 1
+
+fn main():
+\tf(true, true)
+\tf(false, true)
+\tf(true, false)
+\tf(false, false)
+\tprint(\"done\\n\")
+",
+    ),
 ];
 
 // Test-helper module, not `cfg(test)`-gated, so clippy.toml's

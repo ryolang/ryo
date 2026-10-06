@@ -963,54 +963,19 @@ fn analyze_function(
     warn_redundant_to_bytes(tir, pool, synth, &own, &order, &last_use, sink);
 
     // Convert honored reseat records into arm-gated
-    // `ConditionalDeadDrop`s. A record is honored when a pending entry
-    // for one of its reseated owners survived to the drain — i.e. the
-    // reassigned value is never read afterwards — so the pre-branch
-    // buffer would leak on the paths where the reassign did not happen.
-    // (Reads-after clear the pending entry by name, so honored records
-    // never collide with the last-use machinery.) Deduped by record:
-    // several pending entries can match one record.
-    //
-    // The pending owner must belong to the SAME binding as the record's
-    // pre-branch owner. A same-named shadow declared inside an arm
-    // re-binds the record's name: the arm-end owner (and its pending
-    // entry) then belongs to the shadow binding, and honoring the
-    // record on it minted a dead drop against the OUTER binding's home
-    // slot — a slot the outer owner's own Free already released, so the
-    // drop double-freed the slot's current buffer on every path where
-    // it fired. The shadow's reseat value needs no fall-through drop
-    // either: the shadow binding does not exist on the arms where its
-    // reassign never ran.
-    let binding_of_owner = |o: &Owner| -> Option<TirRef> {
-        match o {
-            Owner::Inst(r) => decl_of_init.get(r).or(assign_value_of.get(r)).copied(),
-            Owner::Param(_) => None,
-        }
-    };
-    let mut honored: HashSet<usize> = HashSet::new();
-    for (owner, (name, _, _)) in &own.pending_dead_store {
-        for (idx, drop) in own.reseat_drops.iter().enumerate() {
-            if drop.name == *name && drop.reseat_owners.contains(owner) {
-                match (binding_of_owner(&drop.pre_owner), binding_of_owner(owner)) {
-                    (Some(pre_binding), Some(owner_binding)) if pre_binding == owner_binding => {
-                        honored.insert(idx);
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-    // Sorted iteration for deterministic sidecar emission order.
-    let mut honored: Vec<usize> = honored.into_iter().collect();
-    honored.sort_unstable();
-    for idx in honored {
-        let drop = &own.reseat_drops[idx];
-        sidecar.conditional_dead_drops.push(ConditionalDeadDrop {
-            if_stmt: drop.if_stmt,
-            target: drop.pre_owner.tirref(&own.param_index),
-            arms: drop.untouched_arms.clone(),
-        });
-    }
+    // `ConditionalDeadDrop`s (see the helper for the honoring rules).
+    convert_honored_reseat_drops(&own, sidecar, &decl_of_init, &assign_value_of);
+
+    // Drop redundant branch-exit Frees of branch-reseated values before
+    // the loop-exit / return-epilogue passes dedup against the schedule.
+    suppress_redundant_exit_frees(
+        tir,
+        sidecar,
+        &order,
+        &decl_of_init,
+        &assign_value_of,
+        &reassign_orders,
+    );
 
     // Loop-exit Frees run LAST so they can inspect the now-complete
     // `free_schedule` and only add jump-anchored Frees for inside-loop
@@ -1059,30 +1024,65 @@ fn schedule_return_epilogue_frees(
         let ancestors: HashSet<TirRef> = ancestor_branches_of(tir, *return_stmt)
             .into_iter()
             .collect();
+        // Bindings whose current value THIS return moves out (recorded
+        // by the walk's consume pass, keyed by the consumed owner — see
+        // below for why the owner named there is not the only one that
+        // must be suppressed).
+        let binding_of = |t: TirRef| -> Option<TirRef> {
+            decl_of_init.get(&t).or(assign_value_of.get(&t)).copied()
+        };
+        let consumed_bindings: HashSet<TirRef> = own
+            .owner_hazards
+            .iter()
+            .filter(|&&(_, site)| site == *return_stmt)
+            .filter_map(|&(o, _)| binding_of(o.tirref(&own.param_index)))
+            .collect();
+        // Epilogue Frees decided for THIS return, staged before they
+        // join `free_schedule`. The binding-covering scan must see
+        // them: two owners of the SAME binding live at one return all
+        // lower through the home-slot redirect, so the first decision
+        // covers the rest — but only if the scan can observe it.
+        let mut staged: Vec<FreePoint> = Vec::new();
         for owner in owners {
             if own.pending_dead_store.contains_key(owner) {
                 continue;
             }
             let r = owner.tirref(&own.param_index);
+            // A return that moves a binding's value hands the home
+            // slot's content to the caller (sret / register copy). The
+            // consume record names the owner the read resolved to —
+            // under a first-wins loop/branch merge that is the
+            // pre-reassign owner, while the buffer physically leaving
+            // is a DIFFERENT, still-`Valid` owner of the same binding
+            // (the in-loop reseated value). Destroying either here
+            // frees the returned buffer: skip every owner of a binding
+            // this return consumes.
+            if binding_of(r).is_some_and(|b| consumed_bindings.contains(&b)) {
+                continue;
+            }
             if !epilogue_emitted.insert((*return_stmt, r)) {
                 continue;
             }
             // A covering Free must fire on a path that REACHES this
-            // return. `collect_jump_path` adds a non-containing
-            // loop/branch's ENTIRE subtree to `on_path` under the
-            // "runs to completion" rule — but a Free anchored at a
-            // terminator jump inside that subtree (a `return`/`break`/
-            // `continue` of its own) never fires on this return's path:
-            // codegen cannot sweep after a terminator, so the anchor
-            // only services its own exit. Excluding terminator anchors
-            // keeps the covering sound; without it a loop-internal
-            // return-anchored Free suppresses this epilogue Free and
-            // codegen's leak-direction assert fires.
+            // return, at an anchor that CAN fire. Two anchor shapes
+            // never do: a terminator jump inside a traversed subtree
+            // (a `return`/`break`/`continue` of its own — codegen
+            // cannot sweep after a terminator, so the anchor only
+            // services its own exit), and — the I-197 dead-anchor
+            // family — any anchor inside THIS return's own operand
+            // subtree: the statement-end sweep that would fire it is
+            // skipped after the Return terminator, so a last-use Free
+            // anchored on the returned expression's reads never fires.
+            // `collect_jump_path` counts both shapes as on-path.
+            // Excluding them keeps the covering sound; without it a
+            // dead anchor suppresses this epilogue Free and codegen's
+            // leak-direction assert fires.
             let fires_on_this_path = |after: TirRef| -> bool {
-                !matches!(
-                    tir.inst(after).tag,
-                    TirTag::Return | TirTag::ReturnVoid | TirTag::Break | TirTag::Continue
-                )
+                !tir.contains_reachable(*return_stmt, after)
+                    && !matches!(
+                        tir.inst(after).tag,
+                        TirTag::Return | TirTag::ReturnVoid | TirTag::Break | TirTag::Continue
+                    )
             };
             let covered = sidecar.free_schedule.iter().any(|fp| {
                 fp.target == r
@@ -1091,6 +1091,40 @@ fn schedule_return_epilogue_frees(
                     && fires_on_this_path(fp.after)
             });
             if covered {
+                continue;
+            }
+            // Superseded-by-reassign: the owner is a value of a binding
+            // that an on-path Assign BEFORE this return reseated away
+            // (to a DIFFERENT value), and that Assign is certain to have
+            // executed — it is not inside a loop the return sits
+            // outside of (a zero-iteration path skips the reassign, so
+            // the owner may still hold this value at the return). The
+            // reassign's displacement Free (`free_on_reassign`) already
+            // released this buffer at the store, so an epilogue Free
+            // here would double-free it. Identity is by binding: a
+            // same-named shadow's reassigns target a different binding
+            // and must not suppress this owner's cleanup.
+            let ret_loops: Vec<TirRef> = own
+                .loop_nesting
+                .ancestors_innermost_first(*return_stmt)
+                .collect();
+            let certainly_executed = |a: TirRef| {
+                on_path.contains(&a)
+                    && !own
+                        .loop_nesting
+                        .ancestors_innermost_first(a)
+                        .any(|l| !ret_loops.contains(&l))
+            };
+            let superseded = binding_of(r).is_some_and(|binding| {
+                reassign_orders.get(&binding).is_some_and(|assigns| {
+                    assigns.iter().any(|&a| {
+                        order[a.index()] < order[return_stmt.index()]
+                            && certainly_executed(a)
+                            && tir.assign_view(a).value != r
+                    })
+                })
+            });
+            if superseded {
                 continue;
             }
             // Binding-covering: codegen's binding-path redirect lowers
@@ -1106,39 +1140,42 @@ fn schedule_return_epilogue_frees(
             // Identity is the declaring VarDecl (never the name): a
             // same-named shadow is a different binding whose frees
             // redirect to a different home slot.
-            let binding_of = |t: TirRef| -> Option<TirRef> {
-                decl_of_init.get(&t).or(assign_value_of.get(&t)).copied()
-            };
             if let Some(binding) = binding_of(r) {
                 // Covered only when the covering Free anchors after
                 // EVERY reassign of the binding — otherwise the return
                 // may hold a value the covering Free did not release.
+                let covers = |fp: &FreePoint| {
+                    binding_of(fp.target) == Some(binding)
+                        && reassign_orders.get(&binding).is_some_and(|v| {
+                            !v.is_empty()
+                                && v.iter().all(|&rr| anchored_after(tir, order, fp.after, rr))
+                        })
+                };
+                // Staged epilogue Frees (anchored at THIS return) skip
+                // the on-path / terminator gates: they are on this
+                // return by construction and Return-anchored epilogue
+                // Frees do fire (codegen emits them before the
+                // terminator). Schedule frees must pass the gates —
+                // an anchor inside this return's own operand subtree
+                // or on a different exit never fires here.
                 let binding_covered = sidecar.free_schedule.iter().any(|fp| {
-                    if !on_path.contains(&fp.after)
-                        || ancestors.contains(&fp.after)
-                        || !fires_on_this_path(fp.after)
-                    {
-                        return false;
-                    }
-                    if binding_of(fp.target) != Some(binding) {
-                        return false;
-                    }
-                    reassign_orders.get(&binding).is_some_and(|v| {
-                        !v.is_empty()
-                            && v.iter().all(|&rr| anchored_after(tir, order, fp.after, rr))
-                    })
-                });
+                    on_path.contains(&fp.after)
+                        && !ancestors.contains(&fp.after)
+                        && fires_on_this_path(fp.after)
+                        && covers(fp)
+                }) || staged.iter().any(covers);
                 if binding_covered {
                     continue;
                 }
             }
-            sidecar.free_schedule.push(FreePoint {
+            staged.push(FreePoint {
                 after: *return_stmt,
                 target: r,
                 span: tir.span(*return_stmt),
                 branch: None,
             });
         }
+        sidecar.free_schedule.append(&mut staged);
     }
 }
 
@@ -1203,6 +1240,297 @@ fn binding_value_maps(tir: &Tir, sidecar: &FunctionSidecar, order: &[u32]) -> Bi
         }
     }
     (reassign_orders, decl_of_init, assign_value_of)
+}
+
+/// Convert honored reseat records into arm-gated `ConditionalDeadDrop`s.
+/// A record is honored when a pending entry for one of its reseated
+/// owners survived to the drain — i.e. the reassigned value is never
+/// read afterwards — so the pre-branch buffer would leak on the paths
+/// where the reassign did not happen. (Reads-after clear the pending
+/// entry by name, so honored records never collide with the last-use
+/// machinery.) Deduped by record: several pending entries can match one
+/// record.
+///
+/// The pending owner must belong to the SAME binding as the record's
+/// pre-branch owner. A same-named shadow declared inside an arm
+/// re-binds the record's name: the arm-end owner (and its pending
+/// entry) then belongs to the shadow binding, and honoring the
+/// record on it minted a dead drop against the OUTER binding's home
+/// slot — a slot the outer owner's own Free already released, so the
+/// drop double-freed the slot's current buffer on every path where
+/// it fired. The shadow's reseat value needs no fall-through drop
+/// either: the shadow binding does not exist on the arms where its
+/// reassign never ran.
+fn convert_honored_reseat_drops(
+    own: &Ownership,
+    sidecar: &mut FunctionSidecar,
+    decl_of_init: &HashMap<TirRef, TirRef>,
+    assign_value_of: &HashMap<TirRef, TirRef>,
+) {
+    let binding_of_owner = |o: &Owner| -> Option<TirRef> {
+        match o {
+            Owner::Inst(r) => decl_of_init.get(r).or(assign_value_of.get(r)).copied(),
+            Owner::Param(_) => None,
+        }
+    };
+    let mut honored: HashSet<usize> = HashSet::new();
+    for (owner, (name, _, _)) in &own.pending_dead_store {
+        for (idx, drop) in own.reseat_drops.iter().enumerate() {
+            if drop.name == *name && drop.reseat_owners.contains(owner) {
+                match (binding_of_owner(&drop.pre_owner), binding_of_owner(owner)) {
+                    (Some(pre_binding), Some(owner_binding)) if pre_binding == owner_binding => {
+                        honored.insert(idx);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    // Sorted iteration for deterministic sidecar emission order.
+    let mut honored: Vec<usize> = honored.into_iter().collect();
+    honored.sort_unstable();
+    for idx in honored {
+        let drop = &own.reseat_drops[idx];
+        sidecar.conditional_dead_drops.push(ConditionalDeadDrop {
+            if_stmt: drop.if_stmt,
+            target: drop.pre_owner.tirref(&own.param_index),
+            arms: drop.untouched_arms.clone(),
+        });
+    }
+}
+
+/// Branch-exit Free redundancy suppression. When a `mut` binding
+/// declared before a branch is reseated inside one or more arms and the
+/// reseated values are read only inside those arms, `last_use_anchor`
+/// re-anchors every such value's last-use Free to the branch exit, and
+/// codegen lowers each through the binding's home-slot redirect ("free
+/// whatever the slot currently holds"). But the slot holds exactly ONE
+/// buffer per path at the exit, so:
+///
+/// * N reseated values across N arms mint N exit Frees that all release
+///   the same slot — N-1 of them are pure double-frees, and the ones
+///   whose target is not the binding's last write fail codegen's
+///   stale-target redirect filter and fall back to cached arm-local
+///   values that do not dominate the merge block (Cranelift verifier
+///   error: "uses value from non-dominating inst").
+/// * A read of the binding AFTER the branch gives the merge-seated
+///   pre-branch owner its own last-use Free, anchored after that read —
+///   also slot-redirected — so it releases exactly the buffer the exit
+///   Frees would, on every path, later and once. Firing the exit Free
+///   additionally frees the slot before the post-branch read (UAF) or
+///   double-frees it with the later Free.
+///
+/// The same argument covers sequential branches (a later branch's exit
+/// Free releases the slot on every path that passed the earlier exit)
+/// and frees displaced meanwhile (`free_on_reassign` frees the displaced
+/// buffer at each reassign store). So an exit-anchored Free of a binding
+/// value is dropped when the same binding has another non-gated,
+/// non-terminator-anchored Free at-or-after the exit, anchored OUTSIDE
+/// the exit's subtree (an in-subtree anchor misses the not-taken /
+/// zero-iteration paths), or when several exit Frees share one (binding,
+/// exit) anchor — in that
+/// case exactly one survives, preferring the Free whose target IS the
+/// binding's last write so codegen's redirect filter
+/// (`last == target || !all_free_targets.contains(last)`) passes
+/// unconditionally. Runs after the last-use / anon-temp / dead-store
+/// passes and before the loop-exit / return-epilogue dedups so those
+/// passes see the final schedule.
+fn suppress_redundant_exit_frees(
+    tir: &Tir,
+    sidecar: &mut FunctionSidecar,
+    order: &[u32],
+    decl_of_init: &HashMap<TirRef, TirRef>,
+    assign_value_of: &HashMap<TirRef, TirRef>,
+    reassign_orders: &HashMap<TirRef, Vec<TirRef>>,
+) {
+    let binding_of = |t: TirRef| decl_of_init.get(&t).or(assign_value_of.get(&t)).copied();
+    let is_exit_anchor = |after: TirRef, target: TirRef| {
+        matches!(
+            tir.inst(after).tag,
+            TirTag::IfStmt | TirTag::WhileLoop | TirTag::ForRange
+        ) && tir.contains_reachable(after, target)
+    };
+    // The binding's program-order-last write: the last reseating
+    // Assign's value, or the declaring VarDecl's initializer.
+    let last_write_target = |binding: TirRef| -> Option<TirRef> {
+        if let Some(assigns) = reassign_orders.get(&binding)
+            && let Some(&slot) = assigns.last()
+        {
+            return Some(tir.assign_view(slot).value);
+        }
+        if tir.inst(binding).tag == TirTag::VarDecl {
+            return Some(tir.var_decl_view(binding).initializer);
+        }
+        None
+    };
+
+    // Exit-anchored Frees of named binding values, in schedule order.
+    let candidates: Vec<(usize, TirRef, TirRef)> = sidecar
+        .free_schedule
+        .iter()
+        .enumerate()
+        .filter(|(_, fp)| fp.branch.is_none() && is_exit_anchor(fp.after, fp.target))
+        .filter_map(|(i, fp)| binding_of(fp.target).map(|b| (i, fp.after, b)))
+        .collect();
+
+    let mut drop: HashSet<usize> = HashSet::new();
+    // Pass 1: an exit Free covered by a same-binding Free anchored
+    // strictly after the exit is redundant on every path. The covering
+    // anchor must lie OUTSIDE the exit's own subtree: an anchor inside
+    // it (an in-arm read, an in-body Assign) fires only on the paths
+    // that reach it — never on the zero-iteration loop path or the
+    // not-taken arms — so it cannot release the buffer the exit Free
+    // would.
+    for &(i, after, binding) in &candidates {
+        let covered = sidecar.free_schedule.iter().enumerate().any(|(j, fp2)| {
+            j != i
+                && !drop.contains(&j)
+                && fp2.branch.is_none()
+                && !matches!(
+                    tir.inst(fp2.after).tag,
+                    TirTag::Return | TirTag::ReturnVoid | TirTag::Break | TirTag::Continue
+                )
+                && binding_of(fp2.target) == Some(binding)
+                && !tir.contains_reachable(after, fp2.after)
+                && anchored_after(tir, order, fp2.after, after)
+        });
+        if covered {
+            drop.insert(i);
+        }
+    }
+    // Pass 1b (I-205): an exit Free whose target was ALREADY released by
+    // a reassign displacement before the exit must not keep targeting
+    // that owner. Codegen's binding-path redirect filter
+    // (`last == target || !all_free_targets.contains(last)`) rejects
+    // the redirect for such a stale target, and the cached-value
+    // fallback frees the displacement-released buffer a second time on
+    // every path where the reassign ran (valgrind: Invalid free). The
+    // exit Free's job on every path is "release the slot's current
+    // content", which is exactly the redirect — so re-aim the Free at
+    // the binding's LAST WRITE, for which the filter passes
+    // unconditionally. On paths where the reassign ran the redirect
+    // frees the reseated buffer (which has no other Free on the
+    // fall-through), on the others it frees the pre-branch buffer.
+    //
+    // Conservative by construction: only branch exits (loop exits
+    // interact with break-anchored Frees), only when a displacing
+    // reassign precedes the exit, and only when every Free of the last
+    // write either shares THIS exit anchor (pass 2 dedups the pair) or
+    // is Return-anchored INSIDE the exit's subtree (those paths never
+    // reach the merge, so the redirect cannot double-free with them).
+    // Any other anchor could fire before the exit on a reaching path
+    // and make the redirect a double free — leave the schedule as-is.
+    let displaced_targets: HashSet<TirRef> =
+        sidecar.free_on_reassign.iter().flatten().copied().collect();
+    for i in 0..sidecar.free_schedule.len() {
+        if drop.contains(&i) {
+            continue;
+        }
+        let fp = &sidecar.free_schedule[i];
+        // A last-use Free conditionally re-anchored by `last_use_anchor`
+        // lands on a branch statement whose subtree does NOT contain the
+        // target (unlike the arm-value exit Frees in `candidates`), so
+        // this scan is schedule-wide.
+        if fp.branch.is_some() || tir.inst(fp.after).tag != TirTag::IfStmt {
+            continue;
+        }
+        let Some(binding) = binding_of(fp.target) else {
+            continue;
+        };
+        if !displaced_targets.contains(&fp.target) {
+            continue;
+        }
+        let after = fp.after;
+        let displaced_before_exit = reassign_orders.get(&binding).is_some_and(|assigns| {
+            assigns
+                .iter()
+                .any(|&r| order[r.index()] < order[after.index()])
+        });
+        if !displaced_before_exit {
+            continue;
+        }
+        let Some(last_write) = last_write_target(binding) else {
+            continue;
+        };
+        if last_write == fp.target {
+            continue;
+        }
+        // A same-binding Free already at this anchor lowers through the
+        // same home-slot redirect and covers this anchor's paths — this
+        // one is redundant (and retargeting would mint a double
+        // redirect).
+        let redundant_at_anchor = sidecar.free_schedule.iter().enumerate().any(|(j, fp2)| {
+            j != i
+                && !drop.contains(&j)
+                && fp2.branch.is_none()
+                && fp2.after == after
+                && binding_of(fp2.target) == Some(binding)
+        });
+        if redundant_at_anchor {
+            drop.insert(i);
+            continue;
+        }
+        let redirect_safe = sidecar
+            .free_schedule
+            .iter()
+            .filter(|fp2| fp2.target == last_write)
+            .all(|fp2| {
+                fp2.after == after
+                    || (tir.contains_reachable(after, fp2.after)
+                        && matches!(tir.inst(fp2.after).tag, TirTag::Return | TirTag::ReturnVoid))
+            });
+        if redirect_safe {
+            sidecar.free_schedule[i].target = last_write;
+        }
+    }
+    // Pass 2: same (binding, exit) anchor — keep one Free, preferring
+    // the Free whose target is the binding's last write (codegen's
+    // redirect filter then passes unconditionally), then the
+    // latest-ranked target, then the latest schedule index.
+    let mut groups: HashMap<(TirRef, TirRef), Vec<usize>> = HashMap::new();
+    for &(i, after, binding) in &candidates {
+        if !drop.contains(&i) {
+            groups.entry((binding, after)).or_default().push(i);
+        }
+    }
+    let mut group_keys: Vec<(TirRef, TirRef)> = groups.keys().copied().collect();
+    group_keys.sort_by_key(|&(binding, after)| (binding.raw(), after.raw()));
+    for key in group_keys {
+        let members = groups[&key].clone();
+        if members.len() < 2 {
+            continue;
+        }
+        let binding = key.0;
+        let keep = last_write_target(binding)
+            .and_then(|lw| {
+                members
+                    .iter()
+                    .copied()
+                    .find(|&m| sidecar.free_schedule[m].target == lw)
+            })
+            .unwrap_or_else(|| {
+                members
+                    .iter()
+                    .copied()
+                    .max_by_key(|&m| (order[sidecar.free_schedule[m].target.index()], m))
+                    .expect("group has members")
+            });
+        for &m in &members {
+            if m != keep {
+                drop.insert(m);
+            }
+        }
+    }
+    if drop.is_empty() {
+        return;
+    }
+    let mut kept = Vec::with_capacity(sidecar.free_schedule.len());
+    for (i, fp) in sidecar.free_schedule.drain(..).enumerate() {
+        if !drop.contains(&i) {
+            kept.push(fp);
+        }
+    }
+    sidecar.free_schedule = kept;
 }
 
 /// True when `anchor` fires at or after `point` in control flow:

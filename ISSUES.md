@@ -36,14 +36,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Resolution:** Before the embedding flavour ships, give hosted execution an explicit isolation contract. Cheapest sound option: whole-execution serialization — an execution-scoped init/exit handshake around the hosted run, with init aborting or blocking while a run is active (for the CLI, exit clears it, keeping sequential runs cheap). The per-execution-context alternative (thread a handle through the trampoline and store argv per execution) is a larger ABI change to the intrinsics' zero-arg signatures. Release/Acquire publication stays as the intra-run init contract either way. Decide the env and stdin policy in the same design: a curated environ/allowlist for `process_env`, and a line cap for `io_read_line` (the cap also belongs to M13.6's buffering work).
 
-### I-197 — Elif-chain + heap-value reassignment in every arm fails to compile (Cranelift verifier error)
-
-**Files:** `ryo-frontend/src/ownership/` (free anchoring across elif merges), `ryo-backend/src/codegen/` (Return-operand-subtree anchors that never fire)
-
-**Summary:** `if c1: s = <heap-value>; print(s) elif c2: s = <heap-value>; print(s)` — valid Ryo, fails at compile time with "Failed to define function: Verifier errors" (found during review of the loop-carried-reassign fix; reproduced on the pre-fix base, so unrelated to that work). Root-cause family: free anchors placed inside a `Return`'s operand subtree never fire (codegen cannot sweep after a terminator — see the documented double-anchor discipline in `ryo-backend/src/codegen/mod.rs`), and the elif merge's reseat bookkeeping can leave the only scheduled free for a buffer on such a dead anchor. Related robustness hazard worth addressing in the same pass: any future suppression of duplicate anchors can reintroduce codegen's leak-direction assert ("frees anchored to unmaterialized instructions were dropped") via exactly this dead-anchor mechanism — the epilogue's covering checks now exclude terminator anchors for this reason.
-
-**Resolution:** Unfiled beyond this entry; needs an ownership-pass audit of elif-merge reseat + anchor placement relative to Return operand subtrees.
-
 ### I-032 — IfStmt is statement-only, no expression-level conditional
 
 **Files:** `ryo-core/src/ast.rs`, `ryo-frontend/src/parser.rs`, `ryo-frontend/src/sema/`, `ryo-backend/src/codegen/`

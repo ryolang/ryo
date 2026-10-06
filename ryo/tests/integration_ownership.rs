@@ -1055,3 +1055,123 @@ fn last_use_in_fallthrough_arm_sibling_returns_runs_clean() {
         "42abcdefghijklmnopqrstuvwxyz0123456789done",
     );
 }
+
+#[test]
+fn elif_heap_reassign_every_arm_read_after_runs_clean() {
+    // I-197: `mut` binding declared before an if/elif chain, reseated
+    // with a heap value in EVERY arm, and read again after the chain.
+    // Each arm's reseated value has its last use inside that arm, so
+    // the last-use pass re-anchored every value's Free to the branch
+    // exit — N frees all lowering through the same home-slot redirect.
+    // The non-last-write targets failed codegen's stale-target redirect
+    // filter and fell back to arm-local cached values that do not
+    // dominate the merge block: "Verifier errors: uses value from
+    // non-dominating inst". The redundant exit Frees are now
+    // suppressed; the merge-seated pre-branch owner's Free (anchored
+    // after the post-branch read, slot-redirected) releases the buffer
+    // on every path.
+    assert_ryo_output(
+        "elif_heap_reassign.ryo",
+        "fn make(tag: int) -> str:\n\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\nfn main():\n\tmut s = make(0)\n\tif false:\n\t\ts = make(1)\n\t\tprint(s)\n\telif true:\n\t\ts = make(2)\n\t\tprint(s)\n\tprint(s)\n",
+        "2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+}
+
+#[test]
+fn if_heap_reassign_read_after_no_garbage() {
+    // Companion UAF shape (same root cause, silently corrupt before):
+    // one arm reseats the binding, which is read again after the
+    // branch. The arm value's exit-anchored Free fired at the merge and
+    // released the slot the post-branch read still needed (garbage
+    // output / double free with the pre-branch owner's Free).
+    assert_ryo_output(
+        "if_heap_reassign_read_after.ryo",
+        "fn make(tag: int) -> str:\n\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\nfn main():\n\tmut s = make(0)\n\tif false:\n\t\ts = make(1)\n\t\tprint(s)\n\tprint(s)\n",
+        "0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+}
+
+#[test]
+fn if_heap_reassign_partial_elif_read_after_no_garbage() {
+    // The elif twin of the partial-reseat shape: only the elif arm
+    // reseats; the binding is read after the chain.
+    assert_ryo_output(
+        "if_elif_heap_reassign_partial.ryo",
+        "fn make(tag: int) -> str:\n\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\nfn main():\n\tmut s = make(0)\n\tif false:\n\t\tprint(s)\n\telif true:\n\t\ts = make(2)\n\t\tprint(s)\n\tprint(s)\n",
+        "2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+}
+
+#[test]
+fn sequential_if_heap_reassign_runs_clean() {
+    // Sequential single-arm reseats of one binding, no read after.
+    // Each reseated value's Free re-anchored to its branch exit; the
+    // later exit's Free (slot-redirected) covers every path that passed
+    // the earlier one, so the earlier exit Frees are suppressed too.
+    assert_ryo_output(
+        "seq_if_heap_reassign.ryo",
+        "fn make(tag: int) -> str:\n\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\nfn main():\n\tmut s = make(0)\n\tif true:\n\t\ts = make(1)\n\t\tprint(s)\n\tif false:\n\t\ts = make(2)\n\t\tprint(s)\n\tprint(\"done\")\n",
+        "1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaadone",
+    );
+}
+
+#[test]
+fn returning_arm_reseat_after_elif_chain_runs_clean() {
+    // I-197 companion: every arm of the if/elif chain reseats the
+    // binding with a heap value and then RETURNS, so no arm reaches the
+    // branch exit. The arm values' exit-anchored Frees never fire on
+    // the return paths; the return epilogue must free each reseated
+    // value at its own return and must NOT free the pre-reassign owner
+    // there — the arm's reassign already released it via the
+    // displacement Free, and an epilogue Free for it double-freed
+    // (runtime abort). Only the fall-through path still owns the
+    // pre-branch buffer, freed after the post-branch read.
+    assert_ryo_output(
+        "returning_arm_reseat.ryo",
+        "fn make(tag: int) -> str:\n\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\nfn f(c1: bool, c2: bool):\n\tmut s = make(0)\n\tif c1:\n\t\ts = make(1)\n\t\tprint(s)\n\t\treturn\n\telif c2:\n\t\ts = make(2)\n\t\tprint(s)\n\t\treturn\n\tprint(s)\n\nfn main():\n\tf(true, false)\n\tprint(\"|\")\n\tf(false, true)\n\tprint(\"|\")\n\tf(false, false)\n\tprint(\"\\n\")\n",
+        "1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|2aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+    );
+}
+
+#[test]
+fn loop_reassign_heap_early_return_runs_clean() {
+    // Heap-valued variant of the early-return-after-loop-reassign
+    // guard: a `mut` binding reseated inside a loop, then returned
+    // directly on one path and read into a concat on another. The
+    // first-wins loop merge seats the pre-loop owner at the return
+    // read, so the walk's consume record names THAT owner while the
+    // buffer physically leaving is the in-loop reseated value — a
+    // still-`Valid` owner of the same binding. The return epilogue
+    // must destroy NEITHER (the slot content hands to the caller), and
+    // the zero-iteration path must still free the pre-loop buffer at
+    // the fallthrough return's slot-redirected Free. Pre-fix the
+    // epilogue freed the reseated value at the direct return (the
+    // caller received freed memory — garbage output, then abort) and
+    // the all-arm-reseat shapes above failed the Cranelift verifier.
+    assert_ryo_output(
+        "loop_reassign_heap_early_ret.ryo",
+        "fn make(tag: int) -> str:\n\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\nfn f(n: int) -> str:\n\tmut s = make(0)\n\tmut i = 0\n\twhile i < n:\n\t\ts = make(1)\n\t\ti += 1\n\tif n > 1:\n\t\treturn s\n\treturn s + \"!\"\n\nfn main():\n\tprint(f(0))\n\tprint(\"|\")\n\tprint(f(1))\n\tprint(\"|\")\n\tprint(f(3))\n\tprint(\"\\n\")\n",
+        "0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!|1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!|1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+    );
+}
+
+#[test]
+fn reseat_fallthrough_skipped_read_arm_runs_clean() {
+    // I-205: pre-branch `mut` binding, conditional reseat, read inside a
+    // later branch's arm, fall-through exit. The pre-branch owner's
+    // last-use Free re-anchors to the later branch's exit, but the
+    // reassign's displacement Free already released that buffer on the
+    // taken paths — codegen's stale-target redirect filter rejected the
+    // redirect and the cached-value fallback double-freed (valgrind:
+    // Invalid free on f(true, false)). The exit Free now targets the
+    // binding's last write so the redirect frees the slot's path-correct
+    // content exactly once on every path. Under plain execution the
+    // double free is silent; the valgrind fixture
+    // (valgrind_reseat_fallthrough_skipped_read_arm) is the regression
+    // guard.
+    assert_ryo_output(
+        "reseat_fallthrough_skipped_read_arm.ryo",
+        "fn make(tag: int) -> str:\n\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\nfn f(c1: bool, c2: bool) -> int:\n\tmut s = make(0)\n\tif c1:\n\t\ts = make(1)\n\tif c2:\n\t\tprint(s)\n\t\treturn 0\n\treturn 1\n\nfn main():\n\tf(true, true)\n\tf(false, true)\n\tf(true, false)\n\tf(false, false)\n\tprint(\"done\\n\")\n",
+        "1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaadone\n",
+    );
+}

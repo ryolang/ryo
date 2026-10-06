@@ -1620,20 +1620,18 @@ fn last_use_in_inline_assert_counts_as_use() {
             }
         })
         .expect("desugared assert if");
-    let frees_for_s: Vec<_> = sidecar.functions[0]
-        .free_schedule
-        .iter()
-        .filter(|fp| fp.target == s_init)
-        .collect();
-    assert_eq!(
-        frees_for_s.len(),
-        1,
-        "exactly one Free for s's owner (no double free); got: {:?}",
-        sidecar.functions[0].free_schedule
+    // I-205: the owner's Free is redundant with the same-binding Free
+    // also parked at the desugared if — a cached-fallback Free of the
+    // (possibly already displaced) buffer could double-free; the
+    // sibling's redirect frees the slot's path-correct content.
+    let schedule = &sidecar.functions[0].free_schedule;
+    assert!(
+        schedule.iter().all(|fp| fp.target != s_init),
+        "s's owner must be covered by the sibling same-binding Free; got: {schedule:?}"
     );
-    assert_eq!(
-        frees_for_s[0].after, assert_if,
-        "Free must anchor after the desugared assert if"
+    assert!(
+        schedule.iter().any(|fp| fp.after == assert_if),
+        "a same-binding Free must anchor after the desugared assert if; got: {schedule:?}"
     );
 }
 
