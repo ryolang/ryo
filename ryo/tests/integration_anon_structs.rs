@@ -266,3 +266,17 @@ fn anon_ordering_rejected() {
         stderr
     );
 }
+
+#[test]
+fn anon_field_types_in_named_struct_jit() {
+    // The last nesting direction: anonymous type literals as named
+    // struct field types. Exercises construction, positional access
+    // through the field, Debug rendering of tuple fields, and the
+    // free path for a heap-owning field inside the anonymous field
+    // type (Label's str, freed with the struct).
+    assert_ryo_output(
+        "anon_field_types",
+        "struct Line:\n\tstart: (int, int)\n\tend: (int, int)\n\nstruct Label:\n\ttext: (str, int)\n\nfn main():\n\tl = Line{start=(0, 0), end=(3, 4)}\n\tprint(l.start.0 + l.end.1)\n\tprint(\"\\n\")\n\tprint(l)\n\tprint(\"\\n\")\n\tlab = Label{text=(\"age\", 42)}\n\tprint(lab.text.0)\n\tprint(lab.text.1)\n\tprint(\"\\n\")\n\tlab2 = Label{text=(\"bob\", 7)}\n\tprint(lab2.text.0)\n\tprint(\"\\n\")\n",
+        "4\nLine{start=(0, 0), end=(3, 4)}\nage42\nbob\n",
+    );
+}

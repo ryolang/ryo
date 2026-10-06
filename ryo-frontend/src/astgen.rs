@@ -395,6 +395,27 @@ struct StructDefiner<'a> {
     resolved: HashMap<StringId, Vec<UirStructField>>,
 }
 
+/// Collect the named type references in a struct field's type
+/// expression, recursing into anonymous type literals (M10): both
+/// `start: (int, int)` (no references) and `data: {next: Node, v: int}`
+/// (`Node`) matter to the define DFS — a by-value self-reference
+/// through an anonymous field type is still infinite-size.
+fn named_refs_in(texpr: &ast::TypeExpr, ast: &ast::Ast, out: &mut Vec<(StringId, bool, Span)>) {
+    match &texpr.kind {
+        ast::TypeExprKind::Name { name, is_view } => out.push((*name, *is_view, texpr.span)),
+        ast::TypeExprKind::Anon { fields } => {
+            for (_, ft) in ast.type_field_list(*fields) {
+                named_refs_in(ft, ast, out);
+            }
+        }
+        ast::TypeExprKind::Positional(elems) => {
+            for ft in ast.type_expr_list(*elems) {
+                named_refs_in(ft, ast, out);
+            }
+        }
+    }
+}
+
 impl StructDefiner<'_> {
     /// Define one struct's fields in dependency order, depth-first.
     ///
@@ -411,56 +432,57 @@ impl StructDefiner<'_> {
         let mut fields: Vec<UirStructField> = Vec::new();
         let mut failed = false;
         for &(fname, texpr) in decl_fields {
-            // Struct declaration fields stay name-only type
-            // expressions (the parser's `named_type_expr_parser`), so
-            // the by-value cycle walk below only has names to follow.
-            let ast::TypeExprKind::Name { name, is_view } = texpr.kind else {
-                unreachable!("struct declaration fields are name-only type expressions")
-            };
-            // Order/cycle handling applies only to by-value struct
-            // fields; primitives resolve without layout recursion,
-            // and `&name` view syntax is a targeted migration error
-            // handled by `resolve_name` below.
-            if !is_view
-                && !self.types.is_primitive(name)
-                && let Some(&fty) = self.types.struct_types.get(&name)
-            {
-                match self.states[&name] {
+            // Field types are full type expressions: a plain name, or
+            // an anonymous type literal (`start: (int, int)`, `data:
+            // {next: Node}`). The by-value cycle/ordering walk must
+            // follow named struct references ANYWHERE inside the
+            // expression — a self-reference through an anonymous field
+            // type has no finite layout either.
+            let mut refs = Vec::new();
+            named_refs_in(&texpr, self.ast, &mut refs);
+            for &(rname, is_view, rspan) in &refs {
+                // Order/cycle handling applies only to by-value struct
+                // fields; primitives resolve without layout recursion,
+                // and `&name` view syntax is a targeted migration error
+                // handled by `resolve_type` below.
+                if is_view
+                    || self.types.is_primitive(rname)
+                    || !self.types.struct_types.contains_key(&rname)
+                {
+                    continue;
+                }
+                let fty = self.types.struct_types[&rname];
+                match self.states[&rname] {
                     DefState::InProgress => {
                         sink.emit(Diag::error(
-                            texpr.span,
+                            rspan,
                             DiagCode::InfiniteSize,
                             format!(
                                 "struct '{}' cannot contain itself by value: field '{}' has \
                                  type '{}', which would make its size infinite",
-                                pool.str(name),
+                                pool.str(rname),
                                 pool.str(fname),
-                                pool.str(name),
+                                pool.str(rname),
                             ),
                         ));
                         failed = true;
-                        continue;
                     }
                     DefState::Pending => {
-                        self.define(name, pool, sink);
+                        self.define(rname, pool, sink);
                         if !pool.is_defined_struct(fty) {
                             // The dependency failed its own
                             // definition; defining `name` against it
                             // would have no valid layout.
                             failed = true;
-                            continue;
                         }
                     }
                     DefState::Defined => {}
                     DefState::Failed => {
                         failed = true;
-                        continue;
                     }
                 }
             }
-            let fty = self
-                .types
-                .resolve_name(name, is_view, texpr.span, pool, sink);
+            let fty = self.types.resolve_type(&texpr, self.ast, pool, sink);
             if pool.is_error(fty) {
                 failed = true;
             }
@@ -1408,6 +1430,30 @@ mod tests {
     fn mutual_struct_value_cycle_is_diagnosed() {
         let err = parse_and_lower("struct A:\n\tb: B\n\nstruct B:\n\ta: A\n").unwrap_err();
         assert!(err.iter().any(|d| d.code == DiagCode::InfiniteSize));
+    }
+
+    #[test]
+    fn value_cycle_through_anon_field_type_is_diagnosed() {
+        // A self-reference hidden inside an anonymous field type is
+        // still by-value and still infinite-size: `data: {next: Node,
+        // v: int}` must trip the same E0005 as a plain `next: Node`.
+        let err = parse_and_lower("struct Node:\n\tdata: {next: Node, v: int}\n").unwrap_err();
+        assert!(err.iter().any(|d| d.code == DiagCode::InfiniteSize));
+    }
+
+    #[test]
+    fn anon_field_type_in_struct_decl_resolves() {
+        // Struct fields take full type expressions; the declaration's
+        // resolved field type is the structural anonymous struct.
+        let src = "struct Line:\n\tstart: (int, int)\n\nfn main():\n\tl = Line{start=(0, 0)}\n";
+        let (uir, pool) = parse_and_lower(src).unwrap();
+        let decl = &uir.struct_decls[0];
+        assert_eq!(decl.fields.len(), 1);
+        assert!(
+            matches!(pool.kind(decl.fields[0].ty), TypeKind::AnonStruct),
+            "field type must be the anonymous struct, got {:?}",
+            pool.kind(decl.fields[0].ty)
+        );
     }
 
     #[test]

@@ -768,7 +768,7 @@ where
 {
     let field = select! { Token::Ident(name) => name }
         .then_ignore(just(Token::Colon))
-        .then(named_type_expr_parser());
+        .then(type_expr_parser());
 
     // Field lines mirror `statement_list`'s newline structure: at
     // least one newline between fields, blank lines tolerated, and

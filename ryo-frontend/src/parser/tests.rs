@@ -1787,13 +1787,23 @@ fn type_literal_rejects_empty_braces() {
 }
 
 #[test]
-fn type_literal_rejected_in_struct_decl_field() {
-    // Compound type literals live in function signatures and var
-    // annotations; struct declaration fields stay name-only (the M9
-    // define DFS walks named fields for by-value cycles).
+fn type_literal_accepted_in_struct_decl_field() {
+    // Struct declaration fields take full type expressions: anonymous
+    // type literals (M10) in both spellings nest inside named structs,
+    // closing the last nesting gap. The define DFS walks their inner
+    // named references for by-value cycles.
+    let (ast, _pool) = lex_and_parse("struct P:\n\tf: {x: int}\n\tg: (int, str)\n").unwrap();
+    let def = struct_def_stmt(&ast, only_stmt(&ast));
+    let fields = ast.struct_field_decls(def.fields);
     assert!(
-        lex_and_parse("struct P:\n\tf: {x: int}\n").is_err(),
-        "struct decl fields must stay name-only"
+        matches!(fields[0].1.kind, ryo_core::ast::TypeExprKind::Anon { .. }),
+        "brace literal field, got {:?}",
+        fields[0].1.kind
+    );
+    assert!(
+        matches!(fields[1].1.kind, ryo_core::ast::TypeExprKind::Positional(_)),
+        "paren literal field, got {:?}",
+        fields[1].1.kind
     );
 }
 
