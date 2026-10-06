@@ -742,15 +742,30 @@ fn analyze_destructure(
             // extra bindings with no field left, or shape fields the
             // pattern leaves unbound.
             let detail = if m > n {
-                let extra = view
+                // Name the bindings with no field left — but never
+                // compiler temps: a nested element mints
+                // `__ryo_destructure_N`, and leaking one into a
+                // user-facing message reads as a compiler bug.
+                let extra_named = view
                     .plan
                     .iter()
                     .skip(n)
                     .filter_map(|(_, b)| *b)
+                    .filter(|b| !fcx_temp_name(sema, *b))
                     .map(|b| format!("'{}'", sema.pool.str(b)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("no field left to bind {extra}")
+                    .collect::<Vec<_>>();
+                if extra_named.is_empty() {
+                    // Only nested-pattern temps sit past the shape's
+                    // end — count elements instead of naming internals.
+                    let k = m - n;
+                    format!(
+                        "{k} extra pattern element{} {} no field to bind",
+                        if k == 1 { "" } else { "s" },
+                        if k == 1 { "has" } else { "have" },
+                    )
+                } else {
+                    format!("no field left to bind {}", extra_named.join(", "))
+                }
             } else {
                 let uncovered = shape
                     .fields

@@ -67,3 +67,27 @@ fn arity_error_names_the_uncovered_field() {
         d.message
     );
 }
+
+#[test]
+fn arity_error_never_leaks_compiler_temp_names() {
+    // A nested element mints a `__ryo_destructure_N` temp; when the
+    // pattern outruns the shape, the temp can land past the shape's
+    // end. The message must count elements instead of naming the temp.
+    let src = "fn main():\n\t(a, b, (c, d)) = (1, 2)\n\tprint(a)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let d = diags
+        .iter()
+        .find(|d| d.code == DiagCode::DestructureArity)
+        .expect("E0113");
+    assert!(
+        !d.message.contains("__ryo_destructure"),
+        "arity message must not leak compiler temp names, got: {}",
+        d.message
+    );
+    assert!(
+        d.message
+            .contains("1 extra pattern element has no field to bind"),
+        "got: {}",
+        d.message
+    );
+}
