@@ -100,7 +100,9 @@ fn int_to_str_binding_writes_home_directly() {
     // the inline bytes through the home address, so neither a temp
     // slot-out slot nor an extraction scratch slot remains.
     let clif = clif_of("fn main():\n\ts: str = int_to_str(42)\n\tprint(s)\n");
-    let slots = clif.matches("explicit_slot").count();
+    // The I-177 prologue stack check adds its own 8-byte probe slot to
+    // every function; the pin is on the 24-byte data slots.
+    let slots = clif.matches("explicit_slot 24,").count();
     assert_eq!(slots, 1, "only the binding's home slot:\n{clif}");
 }
 
@@ -153,8 +155,8 @@ fn bool_to_str_is_fully_inlined() {
     );
     let clif = clif_of("fn main():\n\ts: str = bool_to_str(true)\n\tprint(s)\n");
     assert!(
-        !clif.contains("explicit_slot"),
-        "no slot at all for the inlined select:\n{clif}"
+        !clif.contains("explicit_slot 24,"),
+        "no data slot at all for the inlined select:\n{clif}"
     );
 }
 
@@ -223,7 +225,9 @@ fn mutable_literal_initialized_binding_gets_home() {
         "static old value + provably-inline new value need no frees"
     );
     let clif = clif_of(src);
-    let slots = clif.matches("explicit_slot").count();
+    // The I-177 prologue stack check adds its own 8-byte probe slot to
+    // every function; the pin is on the 24-byte data slots.
+    let slots = clif.matches("explicit_slot 24,").count();
     assert_eq!(slots, 1, "exactly the binding's home slot:\n{clif}");
 }
 
@@ -239,7 +243,9 @@ fn mutable_bool_to_str_initialized_binding_gets_home() {
         "provably-inline old and new values need no frees"
     );
     let clif = clif_of(src);
-    let slots = clif.matches("explicit_slot").count();
+    // The I-177 prologue stack check adds its own 8-byte probe slot to
+    // every function; the pin is on the 24-byte data slots.
+    let slots = clif.matches("explicit_slot 24,").count();
     assert_eq!(slots, 1, "exactly the binding's home slot:\n{clif}");
 }
 

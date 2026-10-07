@@ -580,6 +580,11 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// path falls through the guard `brif` instead of jumping over
     /// inline panic code.
     panic_blocks: Vec<(&'static str, Block)>,
+    /// Cold block for the prologue stack-limit check (I-177), created
+    /// by `emit_stack_check` at function entry and emitted
+    /// end-of-function beside the deferred panic blocks. One per
+    /// function; `None` before the check is emitted.
+    stack_cold_block: Option<Block>,
 }
 
 impl<M: Module> Codegen<M> {
@@ -1246,7 +1251,15 @@ impl<M: Module> Codegen<M> {
                 guard_msg_data: &mut self.guard_msg_data,
                 runtime_fns: &mut self.runtime_fns,
                 panic_blocks: Vec::new(),
+                stack_cold_block: None,
             };
+
+            // Prologue stack-limit check (I-177), before any body
+            // instruction. For `main` the check runs before the
+            // `ryo_rt_init` shim records the real limit — the static
+            // is still 0 then, and a live SP never compares below 0
+            // unsigned, so it passes trivially.
+            Self::emit_stack_check(&mut builder, &mut ctx)?;
 
             for (idx, param) in tir.params.iter().enumerate() {
                 if is_fat_type(param.ty, pool) {
@@ -1375,6 +1388,7 @@ impl<M: Module> Codegen<M> {
             );
 
             Self::emit_deferred_panic_blocks(&mut builder, &mut ctx)?;
+            Self::emit_stack_cold_block(&mut builder, &mut ctx)?;
 
             builder.finalize(self.module.isa().frontend_config());
         }
