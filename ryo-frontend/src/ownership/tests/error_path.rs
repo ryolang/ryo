@@ -20,3 +20,19 @@ fn w0001_suppressed_when_an_error_already_fired() {
         "W0001 must not pile onto the error path: {diags:?}"
     );
 }
+
+#[test]
+fn w0001_suppressed_when_ownership_pass_emits_the_error() {
+    // `t = s` moves s, so the use-after-move error fires DURING the
+    // ownership walk — after an entry-time quiet capture would have
+    // run. The dead store `dead` must not still warn W0001.
+    let diags = check_src("fn main():\n\ts = \"abc\"\n\tt = s\n\tprint(s)\n\tdead = \"x\"\n");
+    assert!(
+        diags.iter().any(|d| d.code == DiagCode::UseAfterMove),
+        "ownership error must survive: {diags:?}"
+    );
+    assert!(
+        !diags.iter().any(|d| d.code == DiagCode::DeadStore),
+        "W0001 must not pile onto the ownership error: {diags:?}"
+    );
+}

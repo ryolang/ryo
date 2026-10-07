@@ -1066,6 +1066,7 @@ mod tests {
         let mut pool = InternPool::new();
         let (_p, diags) = parse_source("q.0 = 7\n", &mut pool, "<test>")
             .expect("recovery should yield a partial program");
+        assert_eq!(diags.len(), 1, "positional target: {diags:?}");
         assert!(
             diags
                 .iter()
@@ -1076,6 +1077,7 @@ mod tests {
         let mut pool = InternPool::new();
         let (_p, diags) = parse_source("q.x += 1\n", &mut pool, "<test>")
             .expect("recovery should yield a partial program");
+        assert_eq!(diags.len(), 1, "compound assign: {diags:?}");
         assert!(
             diags
                 .iter()

@@ -380,15 +380,9 @@ pub(crate) struct PromoCandidate {
 pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) -> OwnershipSidecar {
     let mut sidecar = OwnershipSidecar::default();
     let synth = frees::SynthCalleeIds::resolve(pool);
-    // An error that already fired makes every derived warning
-    // noise ("declared but never used" for a binding whose use failed
-    // to compile, etc.). Suppress warning-severity emissions for the
-    // whole unit; the pass still runs so the sidecar (frees, anchors)
-    // is complete for tooling that reads it on the error path.
-    let quiet = sink.has_errors();
     for tir in tirs {
         let mut func_sidecar = FunctionSidecar::new(tir.name, tir.instructions.len());
-        analyze_function(tir, pool, &synth, sink, &mut func_sidecar, quiet);
+        analyze_function(tir, pool, &synth, sink, &mut func_sidecar);
         sidecar.functions.push(func_sidecar);
     }
     sidecar
@@ -400,7 +394,6 @@ fn analyze_function(
     synth: &frees::SynthCalleeIds,
     sink: &mut DiagSink,
     sidecar: &mut FunctionSidecar,
-    quiet: bool,
 ) {
     let mut own = Ownership {
         // Name → param-index map, built once so the per-owner lookups
@@ -878,6 +871,16 @@ fn analyze_function(
             }
         }
     }
+
+    // An error that already fired makes every derived warning
+    // noise ("declared but never used" for a binding whose use failed
+    // to compile, etc.). Captured here — after the walk, before any
+    // warning pass runs — so ownership errors emitted while analyzing
+    // this unit silence the warnings below, not just errors that
+    // predated the pass. The pass itself still runs to completion so
+    // the sidecar (frees, anchors) is complete for tooling that reads
+    // it on the error path.
+    let quiet = sink.has_errors();
 
     // Dead-store survivors: emit W0001 and schedule a Free anchored
     // after the declaring instruction. Skip owners already covered by
