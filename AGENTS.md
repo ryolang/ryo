@@ -82,6 +82,8 @@ cargo fmt --check                # Check code formatting style
 
 GitHub Actions runs on pushes to `main` and PRs targeting `main` (see `.github/workflows/ci.yml` for the authoritative job list): the file-length check, `cargo fmt --check`, `cargo clippy --workspace --all-targets`, and `cargo test --workspace` across Linux and macOS (plus a Windows test job, ASan/Valgrind leak checks, and a Miri job over the `ryo-runtime` crate's tests). `RUSTFLAGS=-Dwarnings` is set env-wide, so warnings are errors in every job. All jobs must pass for merge.
 
+**Performance is a CI gate.** CodSpeed comments on PRs report both walltime and simulation (compile-time) regressions. A double-digit regression on a tracked benchmark is a defect: fix it in the PR or record a deliberate decision, never merge silently. Before merging codegen changes, run the affected benchmarks via `benchmarks/<name>/run_benchmarks.sh` and compare against the README's latest checkpoint.
+
 ---
 
 ## Development Workflow
@@ -312,6 +314,8 @@ cargo test -- --nocapture       # Show output
 ```
 
 **Miri (runtime crate) runs with isolation enabled:** `open`, stdin reads, and process spawning are forbidden (stdout/stderr writes are allowed). Gate test bodies that need them behind `if cfg!(miri) { return; }` — subprocess blocks and temp-file I/O — while leaving the in-process unsafe coverage unconditional. The fd-based `read_line_from` path has no Miri coverage for this reason; ASan/Valgrind and normal runs carry it.
+
+**Run Miri locally before pushing runtime changes** (`cargo +nightly miri test -p ryo-runtime`). Miri is installed on the dev machine, and any change to a runtime function that an existing test calls — especially one adding a libc/foreign call — can break the Miri job in ways `cargo test` cannot see (isolation-forbidden foreign calls fail only under Miri's interpreter).
 
 ## Binary Inspection
 
