@@ -41,13 +41,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # The tag records which commit the last release was built from
-          # (dev-YYYYMMDD-<hash> convention). Resolve the tag's actual target
-          # commit from the API rather than parsing the name, so detection
-          # survives a renamed or hand-crafted tag.
+          # (dev-YYYYMMDD-<hash> convention). Resolve the tag ref to the
+          # commit it points at rather than reading the release's
+          # targetCommitish, which can be a branch name instead of a SHA
+          # when the release was not created with --target. Dereference
+          # annotated tags first, like _release-shared.yml does.
           LAST_TAG=$(gh release list --limit 100 --json tagName --jq '[.[].tagName | select(startswith("dev-"))] | .[0] // ""')
           echo "tag_name=${LAST_TAG}" >> "$GITHUB_OUTPUT"
           if [[ -n "$LAST_TAG" ]]; then
-            TAG_SHA=$(gh release view "$LAST_TAG" --json targetCommitish --jq '.targetCommitish')
+            TAG_SHA=$(git ls-remote origin "refs/tags/${LAST_TAG}^{}" | cut -f1)
+            if [ -z "$TAG_SHA" ]; then
+              TAG_SHA=$(git ls-remote origin "refs/tags/${LAST_TAG}" | cut -f1)
+            fi
             echo "tag_sha=${TAG_SHA}" >> "$GITHUB_OUTPUT"
           fi
 
@@ -59,9 +64,11 @@ jobs:
         run: |
           # Never publish a commit whose CI is red — the playground
           # auto-deploys whatever release it sees. Fail closed: pending
-          # check runs also skip, since CI on a fresh merge may still be
-          # running when the nightly fires. This job's own check run is
-          # excluded (it is in_progress while this step runs).
+          # check runs also skip (CI on a fresh merge may still be running
+          # when the nightly fires), and so does an empty result — a commit
+          # with no check runs at all has no CI evidence to stand on. This
+          # job's own check run is excluded (it is in_progress while this
+          # step runs).
           gh api "repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs?per_page=100" \
             --jq '[.check_runs[] | select(.name != "Check for code changes") | {name, status, conclusion}]' \
             > check_runs.json
@@ -71,6 +78,9 @@ jobs:
             echo "ci_ok=false" >> "$GITHUB_OUTPUT"
           elif jq -e 'any(.[]; .status != "completed")' check_runs.json > /dev/null; then
             echo "CI still in progress on ${HEAD_SHA} — skipping release"
+            echo "ci_ok=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$(jq 'length' check_runs.json)" -eq 0 ]]; then
+            echo "No check runs on ${HEAD_SHA} — skipping release"
             echo "ci_ok=false" >> "$GITHUB_OUTPUT"
           else
             echo "CI green on ${HEAD_SHA}"
