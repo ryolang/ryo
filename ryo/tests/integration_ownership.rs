@@ -1058,7 +1058,7 @@ fn last_use_in_fallthrough_arm_sibling_returns_runs_clean() {
 
 #[test]
 fn elif_heap_reassign_every_arm_read_after_runs_clean() {
-    // I-197: `mut` binding declared before an if/elif chain, reseated
+    // `mut` binding declared before an if/elif chain, reseated
     // with a heap value in EVERY arm, and read again after the chain.
     // Each arm's reseated value has its last use inside that arm, so
     // the last-use pass re-anchored every value's Free to the branch
@@ -1117,9 +1117,9 @@ fn sequential_if_heap_reassign_runs_clean() {
 
 #[test]
 fn returning_arm_reseat_after_elif_chain_runs_clean() {
-    // I-197 companion: every arm of the if/elif chain reseats the
-    // binding with a heap value and then RETURNS, so no arm reaches the
-    // branch exit. The arm values' exit-anchored Frees never fire on
+    // Companion to the every-arm reseat case above: every arm of the
+    // if/elif chain reseats the binding with a heap value and then
+    // RETURNS, so no arm reaches the branch exit. The arm values' exit-anchored Frees never fire on
     // the return paths; the return epilogue must free each reseated
     // value at its own return and must NOT free the pre-reassign owner
     // there — the arm's reassign already released it via the
@@ -1157,7 +1157,7 @@ fn loop_reassign_heap_early_return_runs_clean() {
 
 #[test]
 fn reseat_fallthrough_skipped_read_arm_runs_clean() {
-    // I-205: pre-branch `mut` binding, conditional reseat, read inside a
+    // Pre-branch `mut` binding, conditional reseat, read inside a
     // later branch's arm, fall-through exit. The pre-branch owner's
     // last-use Free re-anchors to the later branch's exit, but the
     // reassign's displacement Free already released that buffer on the

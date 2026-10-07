@@ -132,7 +132,7 @@ Ask. Present the trade-off with spec references and let the human decide — the
 
 A subset of these rules is machine-enforced; check before arguing with CI:
 
-- **R5** — `unsafe_code = "deny"` in `[workspace.lints]` (root `Cargo.toml`). All compiler crates opt in; `runtime/` is the curated unsafe boundary. The grandfathered sites carry `#[allow(unsafe_code)]` + SAFETY comment + linked issue (I-127) — copy that pattern exactly if a benchmark ever forces a new one.
+- **R5** — `unsafe_code = "deny"` in `[workspace.lints]` (root `Cargo.toml`). All compiler crates opt in; `runtime/` is the curated unsafe boundary. The grandfathered sites carry `#[allow(unsafe_code)]` + SAFETY comment + an inline explanation of why the exception was granted — copy that pattern exactly if a benchmark ever forces a new one.
 - **R1** — `clippy::disallowed_types` denies `Rc`, `Weak`, `RefCell` workspace-wide (`clippy.toml`).
 - **R7** — `clippy::too_many_lines` denied with `too-many-lines-threshold = 360` (ratchet above today's worst, I-128; lower it as functions split).
 - **R8/R13** — `unwrap_used`, `panic`, `todo`, `unimplemented` are denied workspace-wide; `expect_used` stays allowed pending the per-site audit (I-153). Tests are exempt via `clippy.toml`; build tooling carries file-level `#![allow]`s.

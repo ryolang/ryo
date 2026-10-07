@@ -32,7 +32,7 @@ Hard-won findings from the 2026-08 performance work (Cranelift 0.131 → 0.135.1
 ## References
 
 - Spec: [§18 — Integer Overflow Behavior](../specification.md) (checked arithmetic traps on overflow in all build modes — the policy behind the guard work above)
-- Issues: `ISSUES.md` — I-157, I-161, I-164, I-165 (and resolved I-140/I-141/I-142 in git history)
+- Issues: `ISSUES.md` — I-164, I-165 (the static-musl link evaluation, tiny-runtime-string-op inlining, Cranelift 0.131 → 0.135 upgrade, and value-range guard-elision work this lesson draws on are resolved; their history lives in git)
 - Code: `runtime/src/lib.rs` (`pack_pair`), `ryo-backend/src/codegen/` (`mod.rs`, `expr.rs`)
 - Benchmarks: `benchmarks/fibonacci/README.md` (guard-elision checkpoint), `benchmarks/string_slicing/README.md` (JIT/AOT gap), `benchmarks/string_building/README.md`
 - Upstream: [Cranelift aegraph mid-end](https://cfallin.org/blog/2026/04/09/aegraph/), `cranelift-codegen-meta-0.135.1/src/shared/settings.rs` (flag definitions)

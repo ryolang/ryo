@@ -105,7 +105,7 @@ Non-immediate issues that affect architecture, correctness, or long-term code he
 
 Do **not** create issues for things you're fixing right now — just fix them. Do **not** use GitHub Issues for these; `ISSUES.md` is the single source of truth.
 
-Do **not** cite issue IDs (`I-XXX`) in code or doc comments. Resolved entries are deleted from `ISSUES.md`, so the comment becomes a dangling pointer to context that no longer exists — comments must stand on their own. Put the ID in the commit message instead, where it survives in git history.
+Cite issue IDs (`I-XXX`) in code comments and docs **only while the issue is still open** in `ISSUES.md`. Resolved entries are deleted from `ISSUES.md`, so a reference to one becomes a dangling pointer — when an issue is resolved, replace the reference with a self-contained inline explanation of the concept. Commit messages always carry the ID; they survive in git history.
 
 **Reading issues:** use `scripts/issue.py` (zero-dependency, runs via `uv run`) instead of grepping `ISSUES.md` by hand:
 

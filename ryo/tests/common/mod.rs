@@ -1127,7 +1127,7 @@ fn main():
 ",
     ),
     (
-        // I-205: taken conditional reseat + later branch whose read arm
+        // Taken conditional reseat + later branch whose read arm
         // is skipped + fall-through exit. The pre-branch owner's
         // re-anchored last-use Free used to target the displacement-
         // released owner; codegen's stale-target filter rejected the

@@ -340,7 +340,7 @@ fn all_terminating_nested_if_arm_does_not_poison_join() {
 
 #[test]
 fn elif_reseat_every_arm_suppresses_redundant_exit_frees() {
-    // I-197: `mut s` declared before an if/elif, reseated with a heap
+    // `mut s` declared before an if/elif, reseated with a heap
     // value in EVERY arm, read again after the chain. Each arm value's
     // last use is inside its arm, so the raw last-use anchors re-anchor
     // to the branch exit — but every such Free lowers through the
@@ -436,7 +436,7 @@ fn main():
 
 #[test]
 fn returning_arm_reseat_epilogue_skips_superseded_owner() {
-    // Companion to the I-197 suppression: arms that reseat a pre-branch
+    // Companion to the every-arm suppression above: arms that reseat a pre-branch
     // binding and then `return`. The return epilogue must free the
     // RESEATED value at the return, but not the pre-reassign owner —
     // the arm's reassign already released it via `free_on_reassign`,
@@ -536,7 +536,7 @@ fn main():
 
 #[test]
 fn reseat_fallthrough_exit_free_targets_last_write() {
-    // I-205: pre-branch `mut` binding, conditional reseat, read inside a
+    // Pre-branch `mut` binding, conditional reseat, read inside a
     // LATER branch's arm, fall-through exit. The pre-branch owner's
     // last-use Free re-anchors to the later branch's exit, but the
     // owner was ALREADY released by the reassign's displacement Free on

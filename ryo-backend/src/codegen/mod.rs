@@ -277,7 +277,7 @@ const OVERFLOW_MSG: &str = "integer overflow\n";
 
 /// Declared functions: `FuncId` plus the `Signature` built at
 /// declaration time, so `compile_function` can install it into
-/// `ctx.func` instead of rebuilding it (I-150).
+/// `ctx.func` instead of rebuilding it.
 type DeclaredFunctions = HashMap<StringId, (FuncId, Signature)>;
 
 /// Per-loop codegen state: the Cranelift blocks that `break` and

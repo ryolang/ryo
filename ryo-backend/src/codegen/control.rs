@@ -112,7 +112,7 @@ impl<M: Module> Codegen<M> {
         // The sidecar reference is copied out of `ctx` so the entry
         // can be BORROWED, not cloned: `IfBranchIds` carries the elif
         // Vec, and the old `.clone().unwrap_or_default()` paid a heap
-        // allocation per if even when there was no entry (I-144).
+        // allocation per if even when there was no entry.
         let sidecar = ctx.sidecar;
         let branch_ids = sidecar.if_branches[r.index()].as_ref();
         let then_branch = branch_ids.map(|b| b.then_branch).unwrap_or_default();

@@ -1493,7 +1493,7 @@ fn main():
 
 **Implementation Notes:**
 
-- While touching builtin dispatch, fold in I-034 (intern builtin-name lookup instead of per-call string compare) — adding six intrinsics widens the cost it describes
+- While touching builtin dispatch, fold in builtin-name interning (lookup by interned `StringId` instead of per-call string compare) — adding six intrinsics widens the cost it describes
 - Constraints: compiler intrinsics only — no `extern "C"` in Ryo (`std.sys` is the v0.2 design), no allocator, no modules, no `fs.*` (file I/O waits for M13 error unions, per the std design)
 - Returned `str`s are proper owned heap strings (SSO slot via `write_str_slot`); verify no leaks/double-frees under the existing ASan/Valgrind integration tests
 - Out of scope: general stdin buffering/iteration, UTF-8/encoding error handling, process spawning, the FFI layer
