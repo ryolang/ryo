@@ -343,7 +343,7 @@ fn current_stack_size() -> usize {
 /// frame (`size` never exceeds it in practice), so the subtraction
 /// cannot underflow.
 fn stack_limit_from(base: usize, size: usize) -> usize {
-    base - size + 32 * 1024
+    base.saturating_sub(size).saturating_add(32 * 1024)
 }
 
 /// Message written by `ryo_stack_overflow` before exiting.
