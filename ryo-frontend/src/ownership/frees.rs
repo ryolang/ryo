@@ -280,6 +280,7 @@ pub(crate) fn warn_redundant_materialize(
     own: &Ownership,
     order: &[u32],
     sink: &mut DiagSink,
+    quiet: bool,
 ) {
     let mut sites: Vec<(TirRef, TirRef)> = Vec::new();
     collect_materialize_sites(tir, &tir.body_stmts(), pool, ids, &mut sites);
@@ -339,16 +340,18 @@ pub(crate) fn warn_redundant_materialize(
         } else {
             "str"
         };
-        sink.emit(Diag::warning(
-            tir.span(call),
-            DiagCode::RedundantMaterialize,
-            format!(
-                "`{type_name}(...)` copy never escapes and its source is never mutated — the view can be used directly, without the allocation"
-            ),
-        ));
+        // I-203: derived lint on an already-failing unit — stay silent.
+        if !quiet {
+            sink.emit(Diag::warning(
+                tir.span(call),
+                DiagCode::RedundantMaterialize,
+                format!(
+                    "`{type_name}(...)` copy never escapes and its source is never mutated — the view can be used directly, without the allocation"
+                ),
+            ));
+        }
     }
 }
-
 /// W0004: a bound `b = s.to_bytes()` whose `bytes` result is only ever
 /// read or borrow-passed is a redundant O(n) allocation + copy —
 /// `s.as_bytes()` projects the same bytes as a `bytesview` for free,
@@ -379,6 +382,7 @@ pub(crate) fn warn_redundant_to_bytes(
     order: &[u32],
     last_use: &HashMap<TirRef, TirRef>,
     sink: &mut DiagSink,
+    quiet: bool,
 ) {
     let mut sites: Vec<(TirRef, TirRef)> = Vec::new();
     collect_bound_call_sites(
@@ -448,11 +452,14 @@ pub(crate) fn warn_redundant_to_bytes(
                 continue;
             }
         }
-        sink.emit(Diag::warning(
-            tir.span(call),
-            DiagCode::RedundantToBytes,
-            "this `bytes` is never mutated and never escapes — use `as_bytes()` (zero-copy view) instead of `to_bytes()`".to_string(),
-        ));
+        // I-203: derived lint on an already-failing unit — stay silent.
+        if !quiet {
+            sink.emit(Diag::warning(
+                tir.span(call),
+                DiagCode::RedundantToBytes,
+                "this `bytes` is never mutated and never escapes — use `as_bytes()` (zero-copy view) instead of `to_bytes()`".to_string(),
+            ));
+        }
     }
 }
 
