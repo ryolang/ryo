@@ -23,24 +23,32 @@ from pathlib import Path
 
 ENTRY_RE = re.compile(r"^###\s+(I-(\d+))\s+—\s+(.*)$")
 BOUNDARY_RE = re.compile(r"^(#{1,3}\s|---\s*$)")
+CATEGORY_RE = re.compile(r"^##\s+(\U0001F534|\U0001F7E1|\U0001F7E2)\s+(.*)$")
 
 
 def parse_entries(text):
-    """Yield (issue_id, title, start_line, end_line, body) per `### I-XXX` entry.
+    """Yield (issue_id, title, start_line, end_line, body, category) per `### I-XXX` entry.
 
     start_line/end_line are 1-based and inclusive.
+    category is the section header text (e.g., 'Blocking', 'Correctness / Hygiene', 'Cleanup').
     """
     lines = text.splitlines()
     entries = []
     current = None  # [id, title, start_line_index]
+    current_category = None
 
     def close(end):
         # end is the exclusive 0-based stop; trim trailing blank lines
         while end > current[2] + 1 and not lines[end - 1].strip():
             end -= 1
-        entries.append((current[0], current[1], current[2] + 1, end, lines[current[2]:end]))
+        entries.append((current[0], current[1], current[2] + 1, end, lines[current[2]:end], current_category))
 
     for i, line in enumerate(lines):
+        cat_match = CATEGORY_RE.match(line)
+        if cat_match:
+            current_category = cat_match.group(2).strip()
+            continue
+        
         m = ENTRY_RE.match(line)
         if m:
             if current:
@@ -102,8 +110,16 @@ def main():
         return
 
     if args.list:
-        for issue_id, title, start, end, _ in entries:
+        category_counts = {}
+        for issue_id, title, start, end, _, category in entries:
             print(f"{issue_id} (lines {start}-{end}) — {title}")
+            if category:
+                category_counts[category] = category_counts.get(category, 0) + 1
+        
+        total = len(entries)
+        print(f"\nTotal: {total} issue(s)")
+        for cat, count in sorted(category_counts.items()):
+            print(f"  {cat}: {count}")
         return
 
     if not args.issue:
@@ -113,7 +129,7 @@ def main():
     if issue_id is None:
         sys.exit(f"error: invalid issue id: {args.issue!r}")
 
-    for eid, _title, start, end, body in entries:
+    for eid, _title, start, end, body, _category in entries:
         if eid == issue_id:
             print(f"{args.file}:{start}-{end}")
             print("\n".join(body).strip())
