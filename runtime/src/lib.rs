@@ -304,7 +304,11 @@ unsafe extern "C" {
 /// limit" and falls back to 8 MiB, the common default. Huge-but-finite
 /// values (e.g. RLIM_SAVED_CUR) are limits, not infinity, and pass
 /// through.
+///
+/// Only the `getrlimit` caller is Miri-gated, so under Miri this has
+/// no lib-target caller — the unit tests below still cover it.
 #[cfg(not(windows))]
+#[cfg_attr(miri, allow(dead_code))]
 fn stack_size_from_rlim_cur(rlim_cur: u64) -> usize {
     if rlim_cur == u64::MAX || rlim_cur == 0x7fff_ffff_ffff_ffff {
         8 * 1024 * 1024
