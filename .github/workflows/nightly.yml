@@ -23,6 +23,7 @@ jobs:
     # decision. Publication authority stays in the release job below.
     permissions:
       contents: read
+      checks: read
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
     steps:
@@ -50,6 +51,32 @@ jobs:
             echo "tag_sha=${TAG_SHA}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Check CI status on HEAD
+        id: ci
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          # Never publish a commit whose CI is red — the playground
+          # auto-deploys whatever release it sees. Fail closed: pending
+          # check runs also skip, since CI on a fresh merge may still be
+          # running when the nightly fires. This job's own check run is
+          # excluded (it is in_progress while this step runs).
+          gh api "repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs?per_page=100" \
+            --jq '[.check_runs[] | select(.name != "Check for code changes") | {name, status, conclusion}]' \
+            > check_runs.json
+          cat check_runs.json
+          if jq -e 'any(.[]; .conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled" or .conclusion == "action_required")' check_runs.json > /dev/null; then
+            echo "CI is failing on ${HEAD_SHA} — skipping release"
+            echo "ci_ok=false" >> "$GITHUB_OUTPUT"
+          elif jq -e 'any(.[]; .status != "completed")' check_runs.json > /dev/null; then
+            echo "CI still in progress on ${HEAD_SHA} — skipping release"
+            echo "ci_ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "CI green on ${HEAD_SHA}"
+            echo "ci_ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Compare with current commit
         id: check
         env:
@@ -57,12 +84,16 @@ jobs:
           TAG_SHA: ${{ steps.remote.outputs.tag_sha }}
           HEAD_SHA: ${{ github.sha }}
           FORCE: ${{ inputs.force }}
+          CI_OK: ${{ steps.ci.outputs.ci_ok }}
         run: |
           TAG_SHORT="${TAG_SHA:0:7}"
           HEAD_SHORT="${HEAD_SHA:0:7}"
           if [[ "$FORCE" == "true" ]]; then
             echo "Forced run — releasing regardless of changes"
             echo "should_release=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$CI_OK" != "true" ]]; then
+            echo "Skipping: CI is not green on HEAD ${HEAD_SHORT}"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
           elif [[ -n "$TAG_SHA" && "$TAG_SHA" == "$HEAD_SHA" ]]; then
             echo "No code changes since release $TAG_NAME (tag at ${TAG_SHORT}, HEAD at ${HEAD_SHORT}) — skipping"
             echo "should_release=false" >> "$GITHUB_OUTPUT"
