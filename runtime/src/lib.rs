@@ -15,7 +15,7 @@ extern crate alloc;
 extern crate std;
 
 use core::ffi::{c_char, c_int, c_void};
-use core::sync::atomic::{AtomicIsize, AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicIsize, AtomicPtr, AtomicUsize, Ordering};
 
 const STDIN_FD: c_int = 0;
 const STDOUT_FD: c_int = 1;
@@ -280,6 +280,119 @@ pub unsafe extern "C" fn ryo_exit(code: u64) -> ! {
 static ARGC: AtomicIsize = AtomicIsize::new(0);
 static ARGV: AtomicPtr<c_char> = AtomicPtr::new(core::ptr::null_mut());
 
+/// `RLIMIT_STACK` from `<sys/resource.h>` — verified against the C
+/// header on both Darwin and Linux: it is 3 on both. Miri-gated with
+/// the other libc bits: isolation forbids the `getrlimit` call.
+#[cfg(all(not(windows), not(miri)))]
+const RLIMIT_STACK: c_int = 3;
+
+/// Layout of C `struct rlimit` on 64-bit Darwin and Linux.
+#[cfg(all(not(windows), not(miri)))]
+#[repr(C)]
+struct RLimit {
+    rlim_cur: u64,
+    rlim_max: u64,
+}
+
+#[cfg(all(not(windows), not(miri)))]
+unsafe extern "C" {
+    fn getrlimit(resource: c_int, rlim: *mut RLimit) -> c_int;
+}
+
+/// Map a `getrlimit` `rlim_cur` to a usable stack size. `RLIM_INFINITY`
+/// is u64::MAX on Linux but (1<<63)-1 on Darwin — either means "no
+/// limit" and falls back to 8 MiB, the common default. Huge-but-finite
+/// values (e.g. RLIM_SAVED_CUR) are limits, not infinity, and pass
+/// through.
+///
+/// Only the `getrlimit` caller is Miri-gated, so under Miri this has
+/// no lib-target caller — the unit tests below still cover it.
+#[cfg(not(windows))]
+#[cfg_attr(miri, allow(dead_code))]
+fn stack_size_from_rlim_cur(rlim_cur: u64) -> usize {
+    if rlim_cur == u64::MAX || rlim_cur == 0x7fff_ffff_ffff_ffff {
+        8 * 1024 * 1024
+    } else {
+        rlim_cur as usize
+    }
+}
+
+/// The main thread's stack size: `getrlimit(RLIMIT_STACK)`'s `rlim_cur`
+/// on Unix (`RLIM_INFINITY` or a failed call falls back to 8 MiB, the
+/// common default), 1 MiB fixed on Windows (no `getrlimit`). Under
+/// Miri, isolation forbids the `getrlimit` foreign call, so the size
+/// is the same 8 MiB fallback the unlimited-rlimit path uses — the
+/// exact value is irrelevant to what Miri tests.
+fn current_stack_size() -> usize {
+    #[cfg(miri)]
+    {
+        8 * 1024 * 1024
+    }
+    #[cfg(all(not(windows), not(miri)))]
+    {
+        let mut lim = RLimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `lim` is a valid out-pointer to one rlimit struct;
+        // getrlimit fills both fields for the given resource.
+        let rc = unsafe { getrlimit(RLIMIT_STACK, &mut lim) };
+        if rc == 0 {
+            stack_size_from_rlim_cur(lim.rlim_cur)
+        } else {
+            8 * 1024 * 1024
+        }
+    }
+    #[cfg(windows)]
+    {
+        1024 * 1024
+    }
+}
+
+/// Largest stack size the guard will trust, 1 GiB: larger finite
+/// `RLIMIT_STACK` values are usually bookkeeping artifacts (e.g.
+/// RLIM_SAVED_CUR), and a `size` far above the real mapping would push
+/// the recorded limit below any reachable SP, silently disabling the
+/// guard — so the excess is discarded.
+const MAX_RECORDED_STACK_SIZE: usize = 1 << 30;
+
+/// Lowest allowed stack address for this process: the stack base minus
+/// its (capped) size, plus a 32 KiB margin so the recursive-call check
+/// trips before the OS guard page. Pure; the arithmetic saturates
+/// because even the capped `size` can exceed `base` in exotic
+/// address-space layouts.
+fn stack_limit_from(base: usize, size: usize) -> usize {
+    base.saturating_sub(size.min(MAX_RECORDED_STACK_SIZE))
+        .saturating_add(32 * 1024)
+}
+
+/// Message written by `ryo_stack_overflow` before exiting.
+pub const STACK_OVERFLOW_MSG: &[u8] = b"stack overflow\n";
+
+/// Runtime backing for the codegen stack-limit check (emitted before
+/// recursive calls): write the message to stderr and exit 101 — the
+/// `ryo_panic` contract.
+///
+/// # Safety
+/// Never returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ryo_stack_overflow() -> ! {
+    write_all(
+        STDERR_FD,
+        STACK_OVERFLOW_MSG.as_ptr(),
+        STACK_OVERFLOW_MSG.len(),
+    );
+    // SAFETY: exit never returns.
+    unsafe { exit(101) }
+}
+
+/// The lowest allowed stack address, recorded by `ryo_rt_init`. 0 =
+/// uninitialized — the codegen stack check passes trivially then,
+/// since a real SP is never below 0 unsigned. Codegen reads this
+/// symbol directly; the atomic only guards the one-time store.
+#[unsafe(no_mangle)]
+pub static RYO_STACK_LIMIT: AtomicUsize = AtomicUsize::new(0);
+
 /// Store the C runtime's argv — the `(argc, argv)` passed to `main` —
 /// for the process lifetime. Called once at `main` entry by the
 /// codegen entry shim.
@@ -297,6 +410,14 @@ pub unsafe extern "C" fn ryo_rt_init(argc: c_int, argv: *const *const c_char) {
     // reader see argc but a stale/null ARGV (observable on ARM).
     ARGV.store(argv as *mut c_char, Ordering::Release);
     ARGC.store(argc as isize, Ordering::Release);
+    // Record the main-thread stack limit for the codegen stack-limit
+    // check: this frame's local is a live stack address, so it serves
+    // as the base. Release, matching the ARGV/ARGC publication above.
+    let base = &argc as *const c_int as usize;
+    RYO_STACK_LIMIT.store(
+        stack_limit_from(base, current_stack_size()),
+        Ordering::Release,
+    );
 }
 
 /// Runtime backing for `process_argc() -> int` (M9.2). argv[0] (the

@@ -1068,7 +1068,7 @@ fn schedule_return_epilogue_frees(
             // never do: a terminator jump inside a traversed subtree
             // (a `return`/`break`/`continue` of its own — codegen
             // cannot sweep after a terminator, so the anchor only
-            // services its own exit), and — the I-197 dead-anchor
+            // services its own exit), and — the dead-anchor
             // family — any anchor inside THIS return's own operand
             // subtree: the statement-end sweep that would fire it is
             // skipped after the Return terminator, so a last-use Free
@@ -1398,7 +1398,7 @@ fn suppress_redundant_exit_frees(
             drop.insert(i);
         }
     }
-    // Pass 1b (I-205): an exit Free whose target was ALREADY released by
+    // Pass 1b: an exit Free whose target was ALREADY released by
     // a reassign displacement before the exit must not keep targeting
     // that owner. Codegen's binding-path redirect filter
     // (`last == target || !all_free_targets.contains(last)`) rejects

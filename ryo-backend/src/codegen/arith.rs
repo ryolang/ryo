@@ -5,11 +5,12 @@
 //! 2000-line file-length limit.
 
 use super::{Codegen, FunctionContext, OVERFLOW_MSG, ranges};
-use cranelift::codegen::ir::{InstructionData, Opcode, ValueDef};
+use cranelift::codegen::ir::{InstructionData, MemFlagsData, Opcode, ValueDef};
 use cranelift::prelude::*;
-use cranelift_module::{DataDescription, DataId, Module};
+use cranelift_module::{DataDescription, DataId, Linkage, Module};
 use ryo_core::ast::CompoundOp;
 use ryo_core::tir::TirTag;
+use ryo_core::types::StringId;
 use std::collections::HashMap;
 
 /// Zero-divisor guard messages, written verbatim by `ryo_panic`
@@ -340,6 +341,93 @@ impl<M: Module> Codegen<M> {
                 TrapCode::user(1).expect("user trap code 1 is within Cranelift's encodable range"),
             );
         }
+        Ok(())
+    }
+
+    /// Emit the stack-limit check before a user call to `callee`
+    /// when that call is a call-graph cycle edge (caller and callee in
+    /// the same recursive SCC, see `recursion`): load the
+    /// `RYO_STACK_LIMIT` static and compare the stack pointer against
+    /// it, branching to a deferred cold block when the frame has
+    /// crossed the recorded limit. Calls off every cycle, and repeat
+    /// cycle-edge calls in a block that already ran the check, emit
+    /// nothing — only recursion can grow the stack without bound, so
+    /// non-recursive code pays neither compile time nor run time.
+    ///
+    /// The limit carries a 32 KiB margin below the recorded base, which
+    /// absorbs the bounded frames of non-recursive callees and runtime
+    /// calls below the last check. Before `ryo_rt_init` runs the static
+    /// is 0 and the unsigned compare passes trivially. The cold block
+    /// is NOT emitted here: like the guard panic blocks it is deferred
+    /// to end-of-function (`emit_stack_cold_block`) and shared by every
+    /// check in the function.
+    pub(crate) fn maybe_emit_stack_check(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        callee: StringId,
+    ) -> Result<(), String> {
+        let Some(&caller_scc) = ctx.recursive_sccs.get(&ctx.tir.name) else {
+            return Ok(());
+        };
+        if ctx.recursive_sccs.get(&callee) != Some(&caller_scc) {
+            return Ok(());
+        }
+        if ctx.stack_checked_block.is_some() && builder.current_block() == ctx.stack_checked_block {
+            return Ok(());
+        }
+        // Declaring the imported data object per check is cheap — the
+        // module dedupes by name, so one import symbol per module.
+        let data_id = ctx
+            .module
+            .declare_data("RYO_STACK_LIMIT", Linkage::Import, false, false)
+            .map_err(|e| format!("Failed to declare RYO_STACK_LIMIT: {}", e))?;
+        let gv = ctx.module.declare_data_in_func(data_id, builder.func);
+        // `symbol_value` is this Cranelift version's global-address
+        // instruction: the GV is declared as `GlobalValueData::Symbol`
+        // { name: "RYO_STACK_LIMIT", offset: 0, colocated: false,
+        // tls: false } by `declare_data_in_func`.
+        let limit_ptr = builder.ins().symbol_value(ctx.int_type, gv);
+        let limit = builder
+            .ins()
+            .load(ctx.int_type, MemFlagsData::trusted(), limit_ptr, 0);
+        // `int_type` IS the target pointer type (see `Codegen::from_module`).
+        // The stack pointer is read directly rather than through a probe
+        // stack slot, so the check adds no frame space.
+        let sp = builder.ins().get_stack_pointer(ctx.int_type);
+        let cmp = builder.ins().icmp(IntCC::UnsignedLessThan, sp, limit);
+        let cold = *ctx
+            .stack_cold_block
+            .get_or_insert_with(|| builder.create_block());
+        let ok = builder.create_block();
+        builder.ins().brif(cmp, cold, &[], ok, &[]);
+        // `ok` has exactly one predecessor (the brif above), so it seals
+        // immediately; the cold block is sealed when emitted.
+        builder.seal_block(ok);
+        builder.switch_to_block(ok);
+        ctx.stack_checked_block = Some(ok);
+        Ok(())
+    }
+
+    /// Emit the deferred stack-check cold block collected in
+    /// `ctx.stack_cold_block` after the function body, beside the
+    /// deferred panic blocks. `ryo_stack_overflow` writes the
+    /// diagnostic and exits (never returns); the trap keeps Cranelift
+    /// honest about the block having a terminator, mirroring the
+    /// never-returning-callee path in `expr.rs`.
+    pub(crate) fn emit_stack_cold_block(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+    ) -> Result<(), String> {
+        let Some(cold) = ctx.stack_cold_block.take() else {
+            return Ok(());
+        };
+        builder.seal_block(cold);
+        builder.switch_to_block(cold);
+        let overflow = Self::declare_runtime_fn(ctx, builder, "ryo_stack_overflow", &[], &[])?;
+        builder.ins().call(overflow, &[]);
+        builder.ins().trap(
+            TrapCode::user(1).expect("user trap code 1 is within Cranelift's encodable range"),
+        );
         Ok(())
     }
 }

@@ -1620,7 +1620,7 @@ fn last_use_in_inline_assert_counts_as_use() {
             }
         })
         .expect("desugared assert if");
-    // I-205: the owner's Free is redundant with the same-binding Free
+    // The owner's Free is redundant with the same-binding Free
     // also parked at the desugared if — a cached-fallback Free of the
     // (possibly already displaced) buffer could double-free; the
     // sibling's redirect frees the slot's path-correct content.

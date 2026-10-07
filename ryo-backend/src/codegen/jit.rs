@@ -13,7 +13,7 @@ use std::ffi::{CString, c_char};
 /// `declare_runtime_fn` (the module-level import cache is keyed on the
 /// same names). Functions whose bodies codegen now inlines (literal
 /// packing, slicing) are deliberately absent.
-fn runtime_symbols() -> [(&'static str, *const u8); 28] {
+fn runtime_symbols() -> [(&'static str, *const u8); 30] {
     [
         ("ryo_str_concat", ryo_runtime::ryo_str_concat as *const u8),
         ("__ryo_str_push", ryo_runtime::__ryo_str_push as *const u8),
@@ -87,6 +87,16 @@ fn runtime_symbols() -> [(&'static str, *const u8); 28] {
         ),
         ("ryo_getenv", ryo_runtime::ryo_getenv as *const u8),
         ("ryo_read_line", ryo_runtime::ryo_read_line as *const u8),
+        // Stack-guard pair: codegen's recursive-call check loads
+        // RYO_STACK_LIMIT and calls ryo_stack_overflow on failure.
+        (
+            "ryo_stack_overflow",
+            ryo_runtime::ryo_stack_overflow as *const u8,
+        ),
+        (
+            "RYO_STACK_LIMIT",
+            core::ptr::addr_of!(ryo_runtime::RYO_STACK_LIMIT) as *const u8,
+        ),
     ]
 }
 
@@ -96,9 +106,13 @@ impl Codegen<JITModule> {
         // folding, algebraic simplification, GVN/LICM) like the AOT path.
         // enable_verifier: debug builds and tests only, same rationale as
         // `aot_shared_flags`.
+        // preserve_frame_pointers: required by Cranelift's x64
+        // `return_call` lowering (tail calls assert on it), and
+        // matches `aot_shared_flags`.
         let mut jit_builder = JITBuilder::with_flags(
             &[
                 ("opt_level", "speed"),
+                ("preserve_frame_pointers", "true"),
                 (
                     "enable_verifier",
                     if cfg!(debug_assertions) {

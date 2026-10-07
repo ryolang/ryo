@@ -1289,3 +1289,49 @@ fn getenv_present_unset_and_long_key() {
         );
     }
 }
+
+#[test]
+fn stack_limit_from_reserves_margin_below_base() {
+    let base = 0x7fff_0000_0000usize;
+    let limit = stack_limit_from(base, 8 * 1024 * 1024);
+    assert!(limit < base);
+    assert_eq!(base - limit, 8 * 1024 * 1024 - 32 * 1024);
+}
+
+#[test]
+fn stack_limit_from_caps_oversized_stack() {
+    // A huge-but-finite rlimit (e.g. RLIM_SAVED_CUR) must not push the
+    // limit below every reachable SP — that would disable the guard.
+    let base = 0x7fff_0000_0000usize;
+    let limit = stack_limit_from(base, MAX_RECORDED_STACK_SIZE);
+    assert!(limit < base);
+    assert_eq!(
+        stack_limit_from(base, MAX_RECORDED_STACK_SIZE * 2),
+        limit,
+        "sizes above the cap must be clamped to it"
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn stack_size_from_rlim_cur_infinity_encodings_fall_back() {
+    // Linux RLIM_INFINITY.
+    assert_eq!(stack_size_from_rlim_cur(u64::MAX), 8 * 1024 * 1024);
+    // Darwin RLIM_INFINITY (2^63 - 1).
+    assert_eq!(
+        stack_size_from_rlim_cur(0x7fff_ffff_ffff_ffff),
+        8 * 1024 * 1024
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn stack_size_from_rlim_cur_finite_values_pass_through() {
+    assert_eq!(stack_size_from_rlim_cur(8 * 1024 * 1024), 8 * 1024 * 1024);
+    // RLIM_SAVED_CUR-style value (Darwin: RLIM_INFINITY - 1) is a
+    // huge-but-finite limit, not infinity — it must pass through.
+    assert_eq!(
+        stack_size_from_rlim_cur(0x7fff_ffff_ffff_fffe),
+        0x7fff_ffff_ffff_fffe
+    );
+}

@@ -82,6 +82,8 @@ cargo fmt --check                # Check code formatting style
 
 GitHub Actions runs on pushes to `main` and PRs targeting `main` (see `.github/workflows/ci.yml` for the authoritative job list): the file-length check, `cargo fmt --check`, `cargo clippy --workspace --all-targets`, and `cargo test --workspace` across Linux and macOS (plus a Windows test job, ASan/Valgrind leak checks, and a Miri job over the `ryo-runtime` crate's tests). `RUSTFLAGS=-Dwarnings` is set env-wide, so warnings are errors in every job. All jobs must pass for merge.
 
+**Performance is a CI gate.** CodSpeed comments on PRs report both walltime and simulation (compile-time) regressions. A double-digit regression on a tracked benchmark is a defect: fix it in the PR or record a deliberate decision, never merge silently. Before merging codegen changes, run the affected benchmarks via `benchmarks/<name>/run_benchmarks.sh` and compare against the README's latest checkpoint.
+
 ---
 
 ## Development Workflow
@@ -103,7 +105,7 @@ Non-immediate issues that affect architecture, correctness, or long-term code he
 
 Do **not** create issues for things you're fixing right now — just fix them. Do **not** use GitHub Issues for these; `ISSUES.md` is the single source of truth.
 
-Do **not** cite issue IDs (`I-XXX`) in code or doc comments. Resolved entries are deleted from `ISSUES.md`, so the comment becomes a dangling pointer to context that no longer exists — comments must stand on their own. Put the ID in the commit message instead, where it survives in git history.
+Cite issue IDs (`I-XXX`) in code comments and docs **only while the issue is still open** in `ISSUES.md`. Resolved entries are deleted from `ISSUES.md`, so a reference to one becomes a dangling pointer — when an issue is resolved, replace the reference with a self-contained inline explanation of the concept. Commit messages always carry the ID; they survive in git history.
 
 **Reading issues:** use `scripts/issue.py` (zero-dependency, runs via `uv run`) instead of grepping `ISSUES.md` by hand:
 
@@ -164,7 +166,7 @@ Source → Lexer → Indent Preprocessor → Parser → AstGen → UIR → Sema 
 The middle-end is split into two flat-arena IRs modeled after Zig's ZIR/AIR:
 
 - **UIR** (`ryo-core/src/uir.rs`) — Untyped IR. Flat `(tag, data)` instruction stream in a program-wide arena, produced by `astgen.rs` from the AST. Sub-expressions are not nested; they live as their own entries reached via `InstRef` indices. Side arenas: `extra: Vec<u32>` for variable-size payloads, `spans` parallel to instructions.
-- **TIR** (`ryo-core/src/tir.rs`) — Typed IR. Same flat shape as UIR but **one arena per function body**, and every instruction carries its resolved `TypeId`. Produced by `sema.rs` from UIR and consumed by `codegen.rs`. Per-function arenas make generic/inline duplication a `Tir::clone` away.
+- **TIR** (`ryo-core/src/tir.rs`) — Typed IR. Same flat shape as UIR but **one arena per function body**, and every instruction carries its resolved `TypeId`. Produced by `sema.rs` from UIR and consumed by `codegen/`. Per-function arenas make generic/inline duplication a `Tir::clone` away.
 
 **Mapping to Zig.** When cross-referencing the Zig compiler source for reference:
 
@@ -206,7 +208,7 @@ See `docs/dev/pipeline_alignment.md` for what remains of the Zig-alignment plan 
 #### 4. Code Generation and Linking Crate (`ryo-backend`)
 | File | Role |
 |------|------|
-| `ryo-backend/src/codegen.rs` | Cranelift IR generation from TIR (JIT and AOT) |
+| `ryo-backend/src/codegen/` | Cranelift IR generation from TIR (JIT and AOT) |
 | `ryo-backend/src/linker.rs` | Executable linking via the managed Zig toolchain |
 | `ryo-backend/src/toolchain.rs` | Zig toolchain download / version pinning / path resolution |
 | `ryo-backend/src/runtime_lib.rs` | Static runtime library extraction and caching |
@@ -280,7 +282,7 @@ ast::StmtKind::MyFeature(expr) => {
 ### 6. Add Sema Case (ryo-frontend/src/sema.rs) → emits TIR
 In `sema::analyze`, type-check the UIR instruction and emit the typed equivalent into the per-function `Tir`. Resolve types via `InternPool`, look up names in the active scope, and push `Diag` values into the `DiagSink` on type errors (analysis continues — do not bail). Every emitted `TypedInst` carries its resolved `TypeId`.
 
-### 7. Add Codegen (ryo-backend/src/codegen.rs)
+### 7. Add Codegen (ryo-backend/src/codegen/)
 Add a match arm in `compile_function()` where `TirInst` variants are dispatched. Use `Self::eval_expr()` to evaluate sub-expressions (which are themselves `TirRef`s into the same per-function arena). Common patterns: `builder.ins().iconst()` for ints, `.f64const()` for floats, `.iadd()`/`.fadd()` for add, `.call()` for calls.
 
 ### 8. Run All Tests
@@ -312,6 +314,8 @@ cargo test -- --nocapture       # Show output
 ```
 
 **Miri (runtime crate) runs with isolation enabled:** `open`, stdin reads, and process spawning are forbidden (stdout/stderr writes are allowed). Gate test bodies that need them behind `if cfg!(miri) { return; }` — subprocess blocks and temp-file I/O — while leaving the in-process unsafe coverage unconditional. The fd-based `read_line_from` path has no Miri coverage for this reason; ASan/Valgrind and normal runs carry it.
+
+**Run Miri locally before pushing runtime changes** (`cargo +nightly miri test -p ryo-runtime`). Miri is installed on the dev machine, and any change to a runtime function that an existing test calls — especially one adding a libc/foreign call — can break the Miri job in ways `cargo test` cannot see (isolation-forbidden foreign calls fail only under Miri's interpreter).
 
 ## Binary Inspection
 
