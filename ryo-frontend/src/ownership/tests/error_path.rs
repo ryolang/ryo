@@ -36,3 +36,21 @@ fn w0001_suppressed_when_ownership_pass_emits_the_error() {
         "W0001 must not pile onto the ownership error: {diags:?}"
     );
 }
+
+#[test]
+fn earlier_function_warning_suppressed_by_later_function_error() {
+    // `a` is analyzed before `main`, so a per-function quiet capture
+    // would emit a's dead-store W0001 before main's use-after-move
+    // error exists. Buffering until all functions finish must suppress
+    // it: one failing function silences warnings unit-wide.
+    let diags =
+        check_src("fn a():\n\tdead = \"x\"\n\nfn main():\n\ts = \"abc\"\n\tt = s\n\tprint(s)\n");
+    assert!(
+        diags.iter().any(|d| d.code == DiagCode::UseAfterMove),
+        "ownership error must survive: {diags:?}"
+    );
+    assert!(
+        !diags.iter().any(|d| d.code == DiagCode::DeadStore),
+        "W0001 from an earlier function must not survive a later error: {diags:?}"
+    );
+}

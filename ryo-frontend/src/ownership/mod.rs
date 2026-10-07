@@ -377,13 +377,27 @@ pub(crate) struct PromoCandidate {
 /// to decide where to emit `ryo_str_free` calls. The TIR itself is
 /// never mutated. The sidecar is positional with `tirs`: entry `i`
 /// belongs to `tirs[i]`.
+///
+/// Warnings (W0001/W0003/W0004) are buffered and flushed only if the
+/// whole unit compiles without errors — an error that fired anywhere,
+/// in any function and from any stage, makes every derived warning
+/// noise ("declared but never used" for a binding whose use failed to
+/// compile, etc.). Analysis itself always runs to completion so the
+/// sidecar (frees, anchors) is complete for tooling that reads it on
+/// the error path.
 pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) -> OwnershipSidecar {
     let mut sidecar = OwnershipSidecar::default();
     let synth = frees::SynthCalleeIds::resolve(pool);
+    let mut warnings = DiagSink::new();
     for tir in tirs {
         let mut func_sidecar = FunctionSidecar::new(tir.name, tir.instructions.len());
-        analyze_function(tir, pool, &synth, sink, &mut func_sidecar);
+        analyze_function(tir, pool, &synth, sink, &mut warnings, &mut func_sidecar);
         sidecar.functions.push(func_sidecar);
+    }
+    if !sink.has_errors() {
+        for d in warnings.into_diags() {
+            sink.emit(d);
+        }
     }
     sidecar
 }
@@ -393,6 +407,7 @@ fn analyze_function(
     pool: &InternPool,
     synth: &frees::SynthCalleeIds,
     sink: &mut DiagSink,
+    warnings: &mut DiagSink,
     sidecar: &mut FunctionSidecar,
 ) {
     let mut own = Ownership {
@@ -872,15 +887,10 @@ fn analyze_function(
         }
     }
 
-    // An error that already fired makes every derived warning
-    // noise ("declared but never used" for a binding whose use failed
-    // to compile, etc.). Captured here — after the walk, before any
-    // warning pass runs — so ownership errors emitted while analyzing
-    // this unit silence the warnings below, not just errors that
-    // predated the pass. The pass itself still runs to completion so
-    // the sidecar (frees, anchors) is complete for tooling that reads
-    // it on the error path.
-    let quiet = sink.has_errors();
+    // Warnings (W0001 below, W0003/W0004 in frees.rs) go to the
+    // `warnings` buffer, never `sink`: `check` flushes the buffer only
+    // when the whole unit is error-free, so an error from any function
+    // — analyzed before or after this one — silences them all.
 
     // Dead-store survivors: emit W0001 and schedule a Free anchored
     // after the declaring instruction. Skip owners already covered by
@@ -905,14 +915,13 @@ fn analyze_function(
         if inout_escape_owners.contains(owner) {
             continue;
         }
-        // Never pile a warning onto an already-failing unit.
-        if !quiet {
-            sink.emit(Diag::warning(
-                *span,
-                DiagCode::DeadStore,
-                format!("value `{}` is declared but never used", pool.str(*name)),
-            ));
-        }
+        // Never pile a warning onto an already-failing unit — `check`
+        // drops this buffer if any error fired anywhere in the unit.
+        warnings.emit(Diag::warning(
+            *span,
+            DiagCode::DeadStore,
+            format!("value `{}` is declared but never used", pool.str(*name)),
+        ));
         if reassign_targets.contains(owner) {
             // Task 6's reassignment-Free already covers this owner;
             // emitting another dead-store Free would double-free.
@@ -967,13 +976,13 @@ fn analyze_function(
     // W0003 case B (M8.4.1.2): redundant bound materializations. Runs
     // after the walk so the escape classification it reuses — final
     // lattice states plus the hazard log — is complete.
-    warn_redundant_materialize(tir, pool, synth, &own, &order, sink, quiet);
+    warn_redundant_materialize(tir, pool, synth, &own, &order, warnings);
 
     // W0004: bound `to_bytes()` copies that never mutate nor escape.
     // Same post-walk shape as W0003 case B, plus the last-use map to
     // bound the window where a receiver hazard collides with the
     // suggested view.
-    warn_redundant_to_bytes(tir, pool, synth, &own, &order, &last_use, sink, quiet);
+    warn_redundant_to_bytes(tir, pool, synth, &own, &order, &last_use, warnings);
 
     // Convert honored reseat records into arm-gated
     // `ConditionalDeadDrop`s (see the helper for the honoring rules).
