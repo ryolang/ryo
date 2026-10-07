@@ -281,19 +281,20 @@ static ARGC: AtomicIsize = AtomicIsize::new(0);
 static ARGV: AtomicPtr<c_char> = AtomicPtr::new(core::ptr::null_mut());
 
 /// `RLIMIT_STACK` from `<sys/resource.h>` — verified against the C
-/// header on both Darwin and Linux: it is 3 on both.
-#[cfg(not(windows))]
+/// header on both Darwin and Linux: it is 3 on both. Miri-gated with
+/// the other libc bits: isolation forbids the `getrlimit` call.
+#[cfg(all(not(windows), not(miri)))]
 const RLIMIT_STACK: c_int = 3;
 
 /// Layout of C `struct rlimit` on 64-bit Darwin and Linux.
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(miri)))]
 #[repr(C)]
 struct RLimit {
     rlim_cur: u64,
     rlim_max: u64,
 }
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(miri)))]
 unsafe extern "C" {
     fn getrlimit(resource: c_int, rlim: *mut RLimit) -> c_int;
 }
@@ -314,9 +315,16 @@ fn stack_size_from_rlim_cur(rlim_cur: u64) -> usize {
 
 /// The main thread's stack size: `getrlimit(RLIMIT_STACK)`'s `rlim_cur`
 /// on Unix (`RLIM_INFINITY` or a failed call falls back to 8 MiB, the
-/// common default), 1 MiB fixed on Windows (no `getrlimit`).
+/// common default), 1 MiB fixed on Windows (no `getrlimit`). Under
+/// Miri, isolation forbids the `getrlimit` foreign call, so the size
+/// is the same 8 MiB fallback the unlimited-rlimit path uses — the
+/// exact value is irrelevant to what Miri tests.
 fn current_stack_size() -> usize {
-    #[cfg(not(windows))]
+    #[cfg(miri)]
+    {
+        8 * 1024 * 1024
+    }
+    #[cfg(all(not(windows), not(miri)))]
     {
         let mut lim = RLimit {
             rlim_cur: 0,
