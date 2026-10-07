@@ -1094,6 +1094,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_broken_only_return_does_not_cascade_missing_return() {
+        // The parser recovers at the statement boundary, so the body
+        // genuinely ends without a return — but that is the parse
+        // error's fault, not the signature's. Exactly the parse
+        // diagnostic may surface; a stacked E0036 would point the user
+        // at the wrong place.
+        let src = "fn f() -> int:\n\treturn 1 +\n";
+        let mut pool = InternPool::new();
+        let (program, parse_diags) = parse_source(src, &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
+        let mut sink = DiagSink::new();
+        for d in parse_diags {
+            sink.emit(d);
+        }
+        let uir = astgen::generate(&program, &mut pool, &mut sink);
+        let _tirs = sema::analyze(&uir, &mut pool, &mut sink, src, Path::new("<test>"));
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "exactly the parse diagnostic may surface: {diags:?}"
+        );
+        assert_eq!(diags[0].code, DiagCode::ParseError);
+    }
+
+    #[test]
     fn one_line_if_body_gets_targeted_message() {
         let mut pool = InternPool::new();
         let (_p, diags) = parse_source(

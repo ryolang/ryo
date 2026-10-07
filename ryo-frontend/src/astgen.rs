@@ -837,9 +837,15 @@ fn gen_stmt(
             out.push(r);
         }
         // Unparseable statement recovered by the parser. The parse
-        // diagnostic was already emitted; lower it to nothing so the
-        // rest of the program still reaches sema.
-        ast::StmtKind::Error => {}
+        // diagnostic was already emitted; lower it to a UIR
+        // `Unreachable` sentinel so sema's TIR `Unreachable`
+        // suppression keeps it from cascading (e.g. a spurious
+        // E0036 missing-return when the broken statement was the
+        // body's only `return`).
+        ast::StmtKind::Error => {
+            let r = b.unreachable(span);
+            out.push(r);
+        }
         // Struct declarations are top-level only and are filtered
         // out before lowering (see `generate`); nothing to lower.
         ast::StmtKind::StructDef(_) => {}
