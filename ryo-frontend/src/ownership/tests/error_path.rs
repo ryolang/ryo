@@ -1,4 +1,4 @@
-//! Error-path lint gating (I-203). Warnings must never pile onto a
+//! Error-path lint gating. Warnings must never pile onto a
 //! failing compilation unit — the primary error is the only message
 //! the user can act on.
 

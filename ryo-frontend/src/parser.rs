@@ -716,7 +716,9 @@ where
 }
 
 /// Block header for `if` / `elif` / `else` / `while` / `for` / `fn`:
-/// the colon plus the two Python-transcription failure shapes (I-205).
+/// the colon plus the two Python-transcription failure shapes:
+/// a same-line statement after the colon, and a statement keyword
+/// where the colon belongs.
 ///
 /// Three token-disjoint arms:
 ///
@@ -753,14 +755,15 @@ where
         .map(|(_, stmts)| stmts);
 
     // Same-line body: diagnose at the colon, swallow the statement.
-    // Dedents never appear mid-line (the indent preprocessor attaches
-    // them after the newline), so swallowing to `<newline>` cannot
-    // eat enclosing-block structure.
+    // The swallow must stop at <indent> as well as <newline>: the
+    // indent preprocessor emits <indent> before the newline when the
+    // following line is deeper-indented, and eating it orphans the
+    // matching <dedent>, mis-nesting every enclosing block.
     let same_line = just(Token::Colon)
         .then(
             empty()
                 .and_is(none_of([Token::Newline, Token::Indent, Token::Dedent]))
-                .then_ignore(none_of([Token::Newline]).repeated()),
+                .then_ignore(none_of([Token::Newline, Token::Indent]).repeated()),
         )
         .then(block.clone().or(empty().to(Vec::new())))
         .validate(move |(_, stmts), e: &mut Mx<'a, '_, I>, emitter| {
@@ -775,12 +778,13 @@ where
         });
 
     // Missing colon: only claim shapes that look like a statement —
-    // anything else keeps the generic colon error.
+    // anything else keeps the generic colon error. Same <indent>
+    // swallow discipline as the same-line arm.
     let missing_colon = select! {
         Token::Return | Token::Break | Token::Continue | Token::If
         | Token::While | Token::For | Token::Ident(_) => ()
     }
-    .then_ignore(none_of([Token::Newline]).repeated())
+    .then_ignore(none_of([Token::Newline, Token::Indent]).repeated())
     .then(block.clone().or(empty().to(Vec::new())))
     .validate(move |(_, stmts), e: &mut Mx<'a, '_, I>, emitter| {
         emitter.emit(Rich::custom(
@@ -1046,7 +1050,7 @@ where
     // statement only. At the top level, recognize the shape —
     // `ident (.field)+` followed by `=` or a compound-assign op —
     // and fail with a targeted message instead of chumsky's raw
-    // expectation dump (I-204). The `at_least(1)` segment guard
+    // expectation dump. The `at_least(1)` segment guard
     // keeps bare `ident = value` a valid top-level var decl
     // (`var_decl_parser`, ahead of us, claims it; the guard is
     // self-defensive regardless of choice order). Deliberately NOT
@@ -1070,8 +1074,11 @@ where
         )))
         // Swallow the RHS through end of line: the diagnostic already
         // explains the statement, and a stray expression tail would
-        // surface as a second generic parse error.
-        .then_ignore(none_of([Token::Newline]).repeated())
+        // surface as a second generic parse error. Stop at <indent>
+        // — eating it would orphan the matching <dedent> of a
+        // deeper-indented following line (same discipline as
+        // block_header's swallows).
+        .then_ignore(none_of([Token::Newline, Token::Indent]).repeated())
         .validate(|_, e: &mut Mx<'a, '_, I>, emitter| {
             emitter.emit(Rich::custom(
                 e.span(),

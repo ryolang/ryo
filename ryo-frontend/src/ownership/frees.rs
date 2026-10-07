@@ -340,7 +340,7 @@ pub(crate) fn warn_redundant_materialize(
         } else {
             "str"
         };
-        // I-203: derived lint on an already-failing unit — stay silent.
+        // Derived lint on an already-failing unit — stay silent.
         if !quiet {
             sink.emit(Diag::warning(
                 tir.span(call),
@@ -453,7 +453,7 @@ pub(crate) fn warn_redundant_to_bytes(
                 continue;
             }
         }
-        // I-203: derived lint on an already-failing unit — stay silent.
+        // Derived lint on an already-failing unit — stay silent.
         if !quiet {
             sink.emit(Diag::warning(
                 tir.span(call),

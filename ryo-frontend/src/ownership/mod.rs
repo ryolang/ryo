@@ -380,7 +380,7 @@ pub(crate) struct PromoCandidate {
 pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) -> OwnershipSidecar {
     let mut sidecar = OwnershipSidecar::default();
     let synth = frees::SynthCalleeIds::resolve(pool);
-    // I-203: an error that already fired makes every derived warning
+    // An error that already fired makes every derived warning
     // noise ("declared but never used" for a binding whose use failed
     // to compile, etc.). Suppress warning-severity emissions for the
     // whole unit; the pass still runs so the sidecar (frees, anchors)
@@ -902,7 +902,7 @@ fn analyze_function(
         if inout_escape_owners.contains(owner) {
             continue;
         }
-        // I-203: never pile a warning onto an already-failing unit.
+        // Never pile a warning onto an already-failing unit.
         if !quiet {
             sink.emit(Diag::warning(
                 *span,

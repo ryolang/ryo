@@ -538,12 +538,12 @@ fn analyze_struct_lit(
     if sema.pool.is_error(sty) {
         // Declared but its definition failed (E0005 infinite size,
         // unknown field type — already diagnosed). Recover quietly,
-        // matching field-access on a failed struct (I-203).
+        // matching field-access on a failed struct.
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
     let sview = sema.pool.struct_view(sty);
     let mut by_index: Vec<Option<TirRef>> = vec![None; sview.fields.len()];
-    // I-203: once any field errored (unknown/duplicate), the literal's
+    // Once any field errored (unknown/duplicate), the literal's
     // shape is untrustworthy — a derived "missing field(s)" error on
     // top is noise. Mistyped-but-present fields do not set this: a
     // type mismatch is not a shape error.

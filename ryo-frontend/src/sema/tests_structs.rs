@@ -57,7 +57,7 @@ fn struct_literal_unknown_and_duplicate_fields() {
 #[test]
 fn bad_field_suppresses_consequential_missing_fields_error() {
     // 'z' is unknown (E0038) and 'y' is absent; the derived
-    // 'missing field(s)' error (E0039) must not pile on (I-203).
+    // 'missing field(s)' error (E0039) must not pile on.
     let unknown = "struct Point:\n\tx: int\n\ty: int\n\nfn main():\n\tp = Point{z=1, x=2}\n";
     let (_t, diags, _p) = run_with_errors(unknown);
     assert_eq!(diags.len(), 1, "expected exactly one error: {diags:?}");
@@ -81,7 +81,7 @@ fn struct_literal_field_type_mismatch() {
 fn literal_of_failed_struct_does_not_re_report_unknown_struct() {
     // E0005 (InfiniteSize) fires in astgen for the recursive struct;
     // a literal use must recover quietly, not re-report E0001
-    // "unknown struct" on top (I-203).
+    // "unknown struct" on top.
     let src = "struct Node:\n\tnext: Node\n\nfn main():\n\tn = Node{}\n";
     let (_t, diags, _p) = run_with_errors(src);
     assert_eq!(diags.len(), 1, "expected exactly one error: {diags:?}");

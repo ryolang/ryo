@@ -1181,6 +1181,24 @@ mod tests {
     }
 
     #[test]
+    fn header_recovery_preserves_indented_structure() {
+        // The line after a one-line-body error is deeper-indented.
+        // The recovery swallow must stop at <indent> (the indent
+        // preprocessor emits it before the newline) so the block
+        // parser can claim the indented body — eating the <indent>
+        // orphans its <dedent> and cascades extra parse errors.
+        for src in [
+            "fn f(n: int) -> int:\n\tif n <= 1: return 1\n\t\tprint(n)\n\treturn n\n",
+            "fn f(n: int) -> int:\n\tif n <= 1 return 1\n\t\tprint(n)\n\treturn n\n",
+        ] {
+            let mut pool = InternPool::new();
+            let (_p, diags) = parse_source(src, &mut pool, "<test>")
+                .expect("recovery should yield a partial program");
+            assert_eq!(diags.len(), 1, "expected one diagnostic: {diags:?}");
+        }
+    }
+
+    #[test]
     fn unknown_attribute_diagnostic_names_the_attribute() {
         // The parser is pool-less, so it reports the unknown attribute
         // as interned ids; the driver must render the spelling (and
