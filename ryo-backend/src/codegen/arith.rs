@@ -344,7 +344,7 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
-    /// Emit the I-177 stack-limit check before a user call to `callee`
+    /// Emit the stack-limit check before a user call to `callee`
     /// when that call is a call-graph cycle edge (caller and callee in
     /// the same recursive SCC, see `recursion`): load the
     /// `RYO_STACK_LIMIT` static and compare the stack pointer against

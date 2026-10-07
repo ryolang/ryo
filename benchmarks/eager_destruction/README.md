@@ -117,7 +117,7 @@ Two codegen changes move the numbers:
 
 ### Checkpoint: tail calls + recursive-call stack check (2026-10-07)
 
-Re-measured on the same machine after codegen began emitting Cranelift `return_call` for the tail-recursive call (I-178) and the stack-limit check moved from every function's prologue to recursive-call cycle edges (I-177), at `0.1.0-dev.20261007+d3ea2bc` (hyperfine `--warmup 3 --shell=none`):
+Re-measured on the same machine after codegen began emitting Cranelift `return_call` for the tail-recursive call and the stack-limit check moved from every function's prologue to recursive-call cycle edges, at `0.1.0-dev.20261007+d3ea2bc` (hyperfine `--warmup 3 --shell=none`):
 
 | Benchmark Candidate | Max RSS | Memory Efficiency (vs Rust Scope-Based) | Mean time | vs fastest |
 |---------------------|---------|------------------------------------------|-----------|------------|

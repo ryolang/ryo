@@ -7,7 +7,7 @@ use cranelift_module::Module;
 use ryo_core::tir::TirRef;
 
 impl<M: Module> Codegen<M> {
-    /// Emit a statement list, threading tail position (I-178): only the
+    /// Emit a statement list, threading tail position: only the
     /// LAST statement of a body/scope inherits `in_tail_position` —
     /// earlier statements fall through to what follows, so a call
     /// there is not a tail call. Loop bodies are always emitted with

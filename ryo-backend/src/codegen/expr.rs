@@ -16,7 +16,7 @@ use std::collections::HashMap;
 /// The result of [`Codegen::marshal_user_call_args`]: the evaluated
 /// ABI-form argument list (with the hidden sret pointer already
 /// prepended when there is one) plus the inout spill slots the caller
-/// must reload once the call returns. The tail-call path (I-178)
+/// must reload once the call returns. The tail-call path
 /// requires `sret.is_none()` and an empty `inout_reloads` — eligibility
 /// rejects sret callees and inout args up front, so a marshalled tail
 /// call never has either.
@@ -1545,7 +1545,7 @@ impl<M: Module> Codegen<M> {
             .ok_or_else(|| format!("Undefined function: '{}'", name_str))?;
 
         let marshalled = Self::marshal_user_call_args(builder, ctx, r, out_slot)?;
-        // I-177: guard recursive (call-graph cycle) calls with the
+        // Guard recursive (call-graph cycle) calls with the
         // stack-limit check, right before the call instruction.
         Self::maybe_emit_stack_check(builder, ctx, name_id)?;
         let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
@@ -1625,7 +1625,7 @@ impl<M: Module> Codegen<M> {
     }
 
     /// Arg marshalling for the user-function call path of
-    /// [`Self::emit_call_slot`], extracted so the I-178 tail-call path
+    /// [`Self::emit_call_slot`], extracted so the tail-call path
     /// can marshal the same way and then emit `return_call` instead of
     /// `call`. Evaluates every arg into its ABI form (scalar value,
     /// fat triple, view pair, struct slot address, or inout spill slot)

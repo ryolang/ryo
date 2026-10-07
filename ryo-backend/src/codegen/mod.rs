@@ -258,14 +258,14 @@ pub struct Codegen<M: Module> {
     /// `None`) only until the first compile.
     name_ids: CodegenNameIds,
     /// Names of functions whose bodies contain a syntactic
-    /// tail-position self-call (I-178), collected by the pre-pass in
+    /// tail-position self-call, collected by the pre-pass in
     /// `prepare_compilation`. `build_signature` compiles marked
     /// functions with `CallConv::Tail` — the only convention from
     /// which Cranelift allows `return_call`. Recomputed per
     /// compilation; empty before the first one.
     tail_candidates: HashSet<StringId>,
     /// Strongly-connected-component id of every function on a
-    /// call-graph cycle (I-177), from `recursion::scan_recursive_sccs`
+    /// call-graph cycle, from `recursion::scan_recursive_sccs`
     /// in `prepare_compilation`. Calls between two functions sharing
     /// an id are the only ones that get the stack-limit check.
     /// Recomputed per compilation; empty before the first one.
@@ -381,7 +381,7 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// needs it to emit the C ABI's int-0 return.
     is_main: bool,
     /// Whether the function being lowered was compiled with
-    /// `CallConv::Tail` (I-178): its name was in `Codegen`'s
+    /// `CallConv::Tail`: its name was in `Codegen`'s
     /// `tail_candidates` when `build_signature` ran. `return_call` is
     /// only legal from a `tail`-convention function, so the tail path
     /// consults this before attempting one.
@@ -601,7 +601,7 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// path falls through the guard `brif` instead of jumping over
     /// inline panic code.
     panic_blocks: Vec<(&'static str, Block)>,
-    /// Cold block for the stack-limit check (I-177), created by the
+    /// Cold block for the stack-limit check, created by the
     /// first `emit_stack_check` in the function and shared by every
     /// later check; emitted end-of-function beside the deferred panic
     /// blocks. `None` while no check has been emitted.
@@ -697,12 +697,12 @@ impl<M: Module> Codegen<M> {
         tirs: &[Tir],
         pool: &InternPool,
     ) -> Result<DeclaredFunctions, String> {
-        // I-178 pre-pass: mark functions whose bodies contain a
+        // Tail-call pre-pass: mark functions whose bodies contain a
         // syntactic tail-position self-call, so `build_signature`
         // compiles them with CallConv::Tail (see
         // `tail::scan_tail_call_candidates` for the scope).
         self.tail_candidates = tail::scan_tail_call_candidates(tirs, self.name_ids.main);
-        // I-177 pre-pass: find the call-graph cycles whose edges get
+        // Stack-check pre-pass: find the call-graph cycles whose edges get
         // the stack-limit check (see `recursion` for the rationale).
         self.recursive_sccs = recursion::scan_recursive_sccs(tirs);
         self.declare_all_functions(tirs, pool)
@@ -979,7 +979,7 @@ impl<M: Module> Codegen<M> {
                 sig.returns.push(AbiParam::new(cl_ty));
             }
         }
-        // I-178: a function the pre-pass marked gets the Tail calling
+        // A function the pre-pass marked gets the Tail calling
         // convention — the only convention from which Cranelift allows
         // `return_call`. Never `main` (the C runtime enters it with the
         // C ABI). A marked function that turns out ineligible at
@@ -1517,7 +1517,7 @@ impl<M: Module> Codegen<M> {
     /// [`Terminator`] — anything other than `Terminator::None` ends the
     /// current block, and the caller stops the body walk on the first
     /// one. `in_tail_position` marks the last statement of a body/scope
-    /// in tail position (I-178): a call operand there may lower to
+    /// in tail position: a call operand there may lower to
     /// `return_call`. `Return` statements are tail contexts regardless
     /// of position.
     fn emit_stmt(
@@ -1685,7 +1685,7 @@ impl<M: Module> Codegen<M> {
                 } else if is_struct_type(ctx.tir.return_type, ctx.pool) {
                     return Self::emit_struct_return(builder, ctx, r, operand);
                 } else {
-                    // I-178: a Return whose operand is a call is a tail
+                    // A Return whose operand is a call is a tail
                     // context regardless of position. An eligible
                     // self-call is emitted as `return_call` (firing the
                     // statement's due frees first) and `emit_return`
@@ -1723,7 +1723,7 @@ impl<M: Module> Codegen<M> {
                     TirData::UnOp(o) => o,
                     _ => unreachable!("ExprStmt must carry TirData::UnOp"),
                 };
-                // I-178: the last statement of a body/scope in tail
+                // The last statement of a body/scope in tail
                 // position whose operand is a call may be an eligible
                 // self-tail-call (e.g. the eager_destruction benchmark's
                 // trailing `recursive(x - 1)`); emit it as `return_call`

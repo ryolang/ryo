@@ -1,4 +1,4 @@
-//! CLIF-level pinning tests for I-178: eligible self-tail-calls lower to
+//! CLIF-level pinning tests for tail-call codegen: eligible self-tail-calls lower to
 //! Cranelift `return_call` (O(1) stack), and a call with a scheduled free
 //! after it silently falls back to `call` + `return`.
 

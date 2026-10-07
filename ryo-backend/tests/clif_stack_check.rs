@@ -1,4 +1,4 @@
-//! Object-symbol pins for the I-177 stack-limit check.
+//! Object-symbol pins for the stack-limit check.
 //! The CLIF text dump renders global-value symbols opaquely, so the
 //! earliest pipeline stage where the callee name survives is the AOT
 //! object's symbol table: every recursive call (a call-graph cycle

@@ -107,7 +107,7 @@ impl Codegen<JITModule> {
         // enable_verifier: debug builds and tests only, same rationale as
         // `aot_shared_flags`.
         // preserve_frame_pointers: required by Cranelift's x64
-        // `return_call` lowering (I-178 tail calls assert on it), and
+        // `return_call` lowering (tail calls assert on it), and
         // matches `aot_shared_flags`.
         let mut jit_builder = JITBuilder::with_flags(
             &[

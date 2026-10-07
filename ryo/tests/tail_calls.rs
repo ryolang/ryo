@@ -1,7 +1,7 @@
-//! E2E for I-178: eligible self-tail-calls run in O(1) stack, so tail
-//! recursion far beyond the old SIGSEGV ceiling completes. 10M frames is
-//! ~50x the depth that used to crash; without `return_call` the I-177
-//! stack check aborts (exit 101) long before the count reaches zero.
+//! E2E for tail-call codegen: eligible self-tail-calls run in O(1) stack, so
+//! tail recursion far beyond the old SIGSEGV ceiling completes. 10M frames is
+//! ~50x the depth that used to crash; without `return_call` the stack-limit
+//! check aborts (exit 101) long before the count reaches zero.
 
 mod common;
 use common::*;

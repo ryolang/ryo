@@ -1,4 +1,4 @@
-//! Call-graph recursion analysis for the I-177 stack-limit check.
+//! Call-graph recursion analysis for the stack-limit check.
 //!
 //! Unbounded stack growth needs an unbounded chain of live frames, and
 //! with direct calls only (Ryo has no function values) every such chain

@@ -1,4 +1,4 @@
-//! Tail-call emission (I-178): the syntactic call-conv pre-pass, the
+//! Tail-call emission: the syntactic call-conv pre-pass, the
 //! precise eligibility predicate over the ownership side-tables, and
 //! the `return_call` emission path. Eligible self-tail-calls run in
 //! O(1) stack; everything else silently falls back to `call` + `return`.
@@ -10,7 +10,7 @@ use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, TypeKind};
 use std::collections::HashSet;
 
-/// Syntactic pre-pass for I-178, run over every TIR body before
+/// Syntactic pre-pass for tail-call emission, run over every TIR body before
 /// declaration: collect the names of functions whose bodies contain a
 /// tail-position self-call, so `build_signature` compiles them with
 /// `CallConv::Tail` — the only convention from which Cranelift allows
@@ -87,7 +87,7 @@ pub(crate) fn scan_tail_call_candidates(tirs: &[Tir], main: Option<StringId>) ->
 
 impl<M: Module> Codegen<M> {
     /// Precise emission-time eligibility for lowering `call_ref` to a
-    /// Cranelift `return_call` (I-178). True iff ALL hold:
+    /// Cranelift `return_call`. True iff ALL hold:
     ///
     /// 1. `call_ref` is a call to the function currently being
     ///    compiled (`func_ids` is keyed by interned name, so a name

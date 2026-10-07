@@ -1,7 +1,7 @@
-//! E2E for the I-177 stack-limit check: unbounded recursion must
+//! E2E for the stack-limit check: unbounded recursion must
 //! abort with the runtime's "stack overflow" diagnostic (exit 101) —
 //! not with an OS guard-page SIGSEGV. The `+ 1` after the recursive
-//! call keeps the call non-tail, so no tail-call rescue (I-178) can
+//! call keeps the call non-tail, so no tail-call rescue can
 //! mask a missing check.
 
 mod common;
