@@ -23,6 +23,7 @@ jobs:
     # decision. Publication authority stays in the release job below.
     permissions:
       contents: read
+      checks: read
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
     steps:
@@ -40,28 +41,74 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # The tag records which commit the last release was built from
-          # (dev-YYYYMMDD-<hash> convention). If its hash matches HEAD, no
-          # code has changed since the last release.
+          # (dev-YYYYMMDD-<hash> convention). Resolve the tag ref to the
+          # commit it points at rather than reading the release's
+          # targetCommitish, which can be a branch name instead of a SHA
+          # when the release was not created with --target. Dereference
+          # annotated tags first, like _release-shared.yml does.
           LAST_TAG=$(gh release list --limit 100 --json tagName --jq '[.[].tagName | select(startswith("dev-"))] | .[0] // ""')
           echo "tag_name=${LAST_TAG}" >> "$GITHUB_OUTPUT"
+          if [[ -n "$LAST_TAG" ]]; then
+            TAG_SHA=$(git ls-remote origin "refs/tags/${LAST_TAG}^{}" | cut -f1)
+            if [ -z "$TAG_SHA" ]; then
+              TAG_SHA=$(git ls-remote origin "refs/tags/${LAST_TAG}" | cut -f1)
+            fi
+            echo "tag_sha=${TAG_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check CI status on HEAD
+        id: ci
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          # Never publish a commit whose CI is red — the playground
+          # auto-deploys whatever release it sees. Fail closed: pending
+          # check runs also skip (CI on a fresh merge may still be running
+          # when the nightly fires), and so does an empty result — a commit
+          # with no check runs at all has no CI evidence to stand on. This
+          # job's own check run is excluded (it is in_progress while this
+          # step runs).
+          gh api "repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs?per_page=100" \
+            --jq '[.check_runs[] | select(.name != "Check for code changes") | {name, status, conclusion}]' \
+            > check_runs.json
+          cat check_runs.json
+          if jq -e 'any(.[]; .conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled" or .conclusion == "action_required")' check_runs.json > /dev/null; then
+            echo "CI is failing on ${HEAD_SHA} — skipping release"
+            echo "ci_ok=false" >> "$GITHUB_OUTPUT"
+          elif jq -e 'any(.[]; .status != "completed")' check_runs.json > /dev/null; then
+            echo "CI still in progress on ${HEAD_SHA} — skipping release"
+            echo "ci_ok=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$(jq 'length' check_runs.json)" -eq 0 ]]; then
+            echo "No check runs on ${HEAD_SHA} — skipping release"
+            echo "ci_ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "CI green on ${HEAD_SHA}"
+            echo "ci_ok=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Compare with current commit
         id: check
         env:
           TAG_NAME: ${{ steps.remote.outputs.tag_name }}
+          TAG_SHA: ${{ steps.remote.outputs.tag_sha }}
           HEAD_SHA: ${{ github.sha }}
           FORCE: ${{ inputs.force }}
+          CI_OK: ${{ steps.ci.outputs.ci_ok }}
         run: |
-          LAST_HASH="${TAG_NAME##*-}"
+          TAG_SHORT="${TAG_SHA:0:7}"
           HEAD_SHORT="${HEAD_SHA:0:7}"
           if [[ "$FORCE" == "true" ]]; then
             echo "Forced run — releasing regardless of changes"
             echo "should_release=true" >> "$GITHUB_OUTPUT"
-          elif [[ -n "$LAST_HASH" && "$LAST_HASH" == "$HEAD_SHORT" ]]; then
-            echo "No code changes since release $TAG_NAME — skipping"
+          elif [[ "$CI_OK" != "true" ]]; then
+            echo "Skipping: CI is not green on HEAD ${HEAD_SHORT}"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$TAG_SHA" && "$TAG_SHA" == "$HEAD_SHA" ]]; then
+            echo "No code changes since release $TAG_NAME (tag at ${TAG_SHORT}, HEAD at ${HEAD_SHORT}) — skipping"
             echo "should_release=false" >> "$GITHUB_OUTPUT"
           else
-            echo "Code changed since the last release (${TAG_NAME:-none} -> ${HEAD_SHORT})"
+            echo "Code changed since the last release (${TAG_NAME:-none} at ${TAG_SHORT:-unknown} -> HEAD ${HEAD_SHORT})"
             echo "should_release=true" >> "$GITHUB_OUTPUT"
           fi
 
