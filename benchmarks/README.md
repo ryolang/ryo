@@ -37,7 +37,7 @@ JIT and AOT land within noise of each other (~1.33–1.34×) because both share 
 
 * **Focus:** Eager memory deallocation at last use (Eager Destruction / ASAP Destruction) vs. scope-based (RAII) destruction under deep recursion.
 * **Languages compared:** Rust (Scope-Based vs. Manual Drop) and Ryo.
-* **Highlights:** Ryo AOT uses nearly **3x less heap memory** than standard Rust and is completely immune to stack overflows under deep recursion because deallocations are automatically and eagerly scheduled *before* nested recursive calls.
+* **Highlights:** Ryo AOT is the fastest arm of the suite (1.7 ms, 1.69–2.00x over the Rust arms and the JIT) at **6.10x less memory** than scope-based Rust (1.36 MB vs 8.30 MB max RSS — checkpoint 2026-10-07 in [`eager_destruction/README.md`](./eager_destruction/README.md)). Eager destruction keeps heap at O(1), and since codegen now emits `return_call` for the tail-recursive call, deep recursion runs in O(1) stack with no depth ceiling: 10,000,000 calls complete where pre-tail-call builds SIGSEGV'd at ~262,000. Non-tail recursion aborts cleanly with a `stack overflow` diagnostic (exit 101) instead of crashing blindly.
 
 ### 3. [String Building Benchmark](./string_building/)
 
