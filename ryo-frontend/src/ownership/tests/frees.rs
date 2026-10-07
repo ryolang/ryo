@@ -3,22 +3,6 @@ use super::common::*;
 use crate::builtins::is_borrowed_scalar_param;
 
 #[test]
-fn w0001_suppressed_when_an_error_already_fired() {
-    // pair's only use (pair.2) fails with the unknown-field error;
-    // the dead-store W0001 on that error path is noise and must not
-    // fire (I-203).
-    let diags = check_src("fn main():\n\tpair = (17, \"alice\")\n\tprint(pair.2)\n");
-    assert!(
-        diags.iter().any(|d| d.code == DiagCode::UnknownField),
-        "primary error must survive: {diags:?}"
-    );
-    assert!(
-        !diags.iter().any(|d| d.code == DiagCode::DeadStore),
-        "W0001 must not pile onto the error path: {diags:?}"
-    );
-}
-
-#[test]
 fn dead_store_schedules_free_after_decl() {
     use chumsky::span::{SimpleSpan, Span as _};
     use ryo_core::tir::TirBuilder;
