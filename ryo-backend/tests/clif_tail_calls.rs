@@ -70,13 +70,47 @@ fn return_call_emitted_for_void_self_tail_call_stmt() {
 }
 
 #[test]
-fn no_return_call_when_drop_follows_call() {
+fn no_return_call_when_arg_carries_drop() {
+    // The concat temp `acc + "x"` is rejected twice over: condition 3
+    // (fat arg, not scalar-only) and condition 4 (the temp's free is
+    // anchored on the consuming Call). Either alone forces the silent
+    // fallback to call + return.
     let clif = clif_of(
         "fn f(n: int, acc: str) -> int:\n\tif n == 0:\n\t\treturn 0\n\treturn f(n - 1, acc + \"x\")\n\nfn main():\n\tprint(f(3, \"a\"))\n",
     );
     assert!(
         !clif.contains("return_call"),
-        "a free scheduled after the call must fall back to call + return:\n{clif}"
+        "a drop anchored on the call (and a fat arg) must fall back to call + return:\n{clif}"
+    );
+}
+
+#[test]
+fn tail_call_sweeps_free_materialized_during_arg_marshalling() {
+    // `s`'s only recursive-path use is the `s.len()` arg read, so its
+    // last-use free is anchored on that read. The read has no cached
+    // repr when tail_call_eligible runs (before marshalling), so the
+    // free passes the pending-sweep mirror — and becomes sweep-eligible
+    // the moment marshalling evaluates the arg. emit_body never sweeps
+    // after a Return terminator, so the tail path must sweep between
+    // marshalling and the return_call; otherwise every recursive frame
+    // leaks the float_to_str buffer (float_to_str is deliberately NOT
+    // provably-inline, so the free is really emitted). float_to_str's
+    // sret shape and len's selects don't matter; the pin is: a `call`
+    // (the free) on the line immediately before the `return_call`.
+    let clif = clif_of(
+        "fn f(x: int, n: int):\n\ts = float_to_str(1.5)\n\tif n == 0:\n\t\treturn\n\tf(s.len(), n - 1)\n\nfn main():\n\tf(0, 3)\n",
+    );
+    assert!(
+        clif.contains("return_call"),
+        "the trailing self-call should be an eligible tail call:\n{clif}"
+    );
+    let free_before_return_call = clif
+        .lines()
+        .zip(clif.lines().skip(1))
+        .any(|(a, b)| a.contains("call") && b.contains("return_call"));
+    assert!(
+        free_before_return_call,
+        "the free materialized during arg marshalling must be swept before the return_call:\n{clif}"
     );
 }
 

@@ -175,17 +175,28 @@ impl<M: Module> Codegen<M> {
     /// caller fall through to the existing `call` + `return` path.
     ///
     /// `anchor` is the enclosing statement (the `Return`, or the
-    /// trailing `ExprStmt`). The ownership pass's return-epilogue
-    /// passes anchor promo frees at every Return/ReturnVoid and the
-    /// fallthrough backstop anchors them at the final body statement,
-    /// documenting that Return arms fire due promo frees BEFORE the
-    /// terminator — a `return_call` is a terminator too, so skipping
-    /// them would leak the promoted buffer. They are fired here, after
-    /// arg marshalling (the args are the values' last use) and before
-    /// the `return_call`. free_schedule frees at the anchor are already
-    /// excluded by `tail_call_eligible` (conditions 4/5), so the
-    /// due-frees call is normally a no-op; firing it keeps the tail
-    /// path a faithful mirror of the plain path.
+    /// trailing `ExprStmt`). Two free families must fire before the
+    /// `return_call`, exactly as the plain path fires them before its
+    /// `return_`:
+    ///
+    /// * Due frees at the anchor: the ownership pass's return-epilogue
+    ///   anchors promo frees at every Return/ReturnVoid and the
+    ///   fallthrough backstop anchors them at the final body statement.
+    /// * Sweep-eligible frees: `tail_call_eligible`'s pending-sweep
+    ///   mirror runs BEFORE arg marshalling, when the call's arg
+    ///   sub-expressions have no cached reprs yet — a last-use free
+    ///   anchored on a `Var` read inside an arg (the normal body-level
+    ///   anchor) becomes sweep-eligible only when marshalling evaluates
+    ///   that arg, and `emit_body` never sweeps after a Return
+    ///   terminator. Sweeping here (frame still alive; the marshalled
+    ///   scalars are the freed values' last use) is the only sound way
+    ///   to keep such a free. The plain path fires exactly this free
+    ///   via the end-of-statement sweep.
+    ///
+    /// free_schedule frees at the anchor itself are already excluded by
+    /// `tail_call_eligible` (conditions 4/5), so the due-frees call is
+    /// normally a no-op; firing it keeps the tail path a faithful
+    /// mirror of the plain path.
     pub(crate) fn try_emit_tail_call(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -213,6 +224,8 @@ impl<M: Module> Codegen<M> {
         );
         Self::emit_due_frees(builder, ctx, anchor)?;
         Self::emit_due_promo_frees(builder, ctx, anchor)?;
+        Self::sweep_due_frees(builder, ctx)?;
+        Self::sweep_due_promo_frees(builder, ctx)?;
         let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
         builder.ins().return_call(callee_ref, &marshalled.values);
         Ok(true)

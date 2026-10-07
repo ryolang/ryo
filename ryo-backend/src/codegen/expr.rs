@@ -1638,6 +1638,10 @@ impl<M: Module> Codegen<M> {
         let view = ctx.tir.call_view(r);
         let name_id = view.name;
         let name_str = ctx.pool.str(name_id);
+        // Defensive duplicate of the undefined-function check: the
+        // tail path (try_emit_tail_call) marshals before its own
+        // func_ids lookup, so the error must surface here, with the
+        // same message. emit_call_slot also checks beforehand.
         let _ = ctx
             .func_ids
             .get(&name_id)
