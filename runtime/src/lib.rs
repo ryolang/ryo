@@ -349,13 +349,21 @@ fn current_stack_size() -> usize {
     }
 }
 
+/// Largest stack size the guard will trust, 1 GiB: larger finite
+/// `RLIMIT_STACK` values are usually bookkeeping artifacts (e.g.
+/// RLIM_SAVED_CUR), and a `size` far above the real mapping would push
+/// the recorded limit below any reachable SP, silently disabling the
+/// guard — so the excess is discarded.
+const MAX_RECORDED_STACK_SIZE: usize = 1 << 30;
+
 /// Lowest allowed stack address for this process: the stack base minus
-/// its size, plus a 32 KiB margin so the recursive-call check trips
-/// before the OS guard page. Pure — `base` is the address of a live stack
-/// frame (`size` never exceeds it in practice), so the subtraction
-/// cannot underflow.
+/// its (capped) size, plus a 32 KiB margin so the recursive-call check
+/// trips before the OS guard page. Pure; the arithmetic saturates
+/// because even the capped `size` can exceed `base` in exotic
+/// address-space layouts.
 fn stack_limit_from(base: usize, size: usize) -> usize {
-    base.saturating_sub(size).saturating_add(32 * 1024)
+    base.saturating_sub(size.min(MAX_RECORDED_STACK_SIZE))
+        .saturating_add(32 * 1024)
 }
 
 /// Message written by `ryo_stack_overflow` before exiting.

@@ -1298,6 +1298,20 @@ fn stack_limit_from_reserves_margin_below_base() {
     assert_eq!(base - limit, 8 * 1024 * 1024 - 32 * 1024);
 }
 
+#[test]
+fn stack_limit_from_caps_oversized_stack() {
+    // A huge-but-finite rlimit (e.g. RLIM_SAVED_CUR) must not push the
+    // limit below every reachable SP — that would disable the guard.
+    let base = 0x7fff_0000_0000usize;
+    let limit = stack_limit_from(base, MAX_RECORDED_STACK_SIZE);
+    assert!(limit < base);
+    assert_eq!(
+        stack_limit_from(base, MAX_RECORDED_STACK_SIZE * 2),
+        limit,
+        "sizes above the cap must be clamped to it"
+    );
+}
+
 #[cfg(not(windows))]
 #[test]
 fn stack_size_from_rlim_cur_infinity_encodings_fall_back() {
