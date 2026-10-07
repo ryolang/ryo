@@ -1,5 +1,6 @@
 # TODO
 
+- add support for https://build-server-protocol.github.io/
 - compare ryo with bend https://github.com/bendlang/bend/blob/main/guide/GUIDE.md
 - slog
 - ir --emit, add support, should we support asm too?
