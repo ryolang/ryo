@@ -230,6 +230,24 @@ fn rich_error_message(e: &Rich<'_, Token, SimpleSpan, ParseDiag>, pool: &InternP
             unreachable!("custom parse errors are converted by the caller")
         }
         RichReason::ExpectedFound { .. } => {
+            // Unclosed argument list: the parser stopped at a line break
+            // while `)` was still a valid continuation. A token dump
+            // ("found '<newline>' expected '.', '[', '*', …") sends the
+            // user to the glossary instead of the paren — name the
+            // problem and the two tokens that would continue the call.
+            let at_line_break = match e.found() {
+                Some(Token::Newline | Token::Dedent) => true,
+                _ => false,
+            };
+            if at_line_break
+                && e.expected().any(|p| match p {
+                    RichPattern::Token(tok) => **tok == Token::RParen,
+                    _ => false,
+                })
+            {
+                return "unclosed argument list: expected ',' or ')' before the end of the line"
+                    .to_string();
+            }
             let found = match e.found() {
                 Some(tok) => format!("found '{}'", render_token_with_pool(tok, pool)),
                 None => "found end of input".to_string(),
@@ -1000,6 +1018,31 @@ mod tests {
         assert!(
             !msg.contains("<id#"),
             "message must not leak opaque handle ids: {msg}"
+        );
+    }
+
+    #[test]
+    fn unclosed_call_gets_a_human_message() {
+        let mut pool = InternPool::new();
+        let (_program, diags) = parse_source(
+            "fn main():\n\ttotal = \"hello\"\n\tprint(int_to_str(total.len())\n\tprint(\"done\")\n",
+            &mut pool,
+            "<test>",
+        )
+        .expect("recovery should yield a partial program");
+        let e0100: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == DiagCode::ParseError)
+            .collect();
+        assert_eq!(e0100.len(), 1, "expected one parse error: {diags:?}");
+        let msg = &e0100[0].message;
+        assert!(
+            msg.contains("unclosed") && msg.contains("')'"),
+            "message should name the problem and the fix: {msg}"
+        );
+        assert!(
+            !msg.contains("<newline>") && !msg.contains("something else"),
+            "message must not leak parser internals: {msg}"
         );
     }
 
