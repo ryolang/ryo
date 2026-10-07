@@ -40,28 +40,34 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # The tag records which commit the last release was built from
-          # (dev-YYYYMMDD-<hash> convention). If its hash matches HEAD, no
-          # code has changed since the last release.
+          # (dev-YYYYMMDD-<hash> convention). Resolve the tag's actual target
+          # commit from the API rather than parsing the name, so detection
+          # survives a renamed or hand-crafted tag.
           LAST_TAG=$(gh release list --limit 100 --json tagName --jq '[.[].tagName | select(startswith("dev-"))] | .[0] // ""')
           echo "tag_name=${LAST_TAG}" >> "$GITHUB_OUTPUT"
+          if [[ -n "$LAST_TAG" ]]; then
+            TAG_SHA=$(gh release view "$LAST_TAG" --json targetCommitish --jq '.targetCommitish')
+            echo "tag_sha=${TAG_SHA}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Compare with current commit
         id: check
         env:
           TAG_NAME: ${{ steps.remote.outputs.tag_name }}
+          TAG_SHA: ${{ steps.remote.outputs.tag_sha }}
           HEAD_SHA: ${{ github.sha }}
           FORCE: ${{ inputs.force }}
         run: |
-          LAST_HASH="${TAG_NAME##*-}"
+          TAG_SHORT="${TAG_SHA:0:7}"
           HEAD_SHORT="${HEAD_SHA:0:7}"
           if [[ "$FORCE" == "true" ]]; then
             echo "Forced run — releasing regardless of changes"
             echo "should_release=true" >> "$GITHUB_OUTPUT"
-          elif [[ -n "$LAST_HASH" && "$LAST_HASH" == "$HEAD_SHORT" ]]; then
-            echo "No code changes since release $TAG_NAME — skipping"
+          elif [[ -n "$TAG_SHA" && "$TAG_SHA" == "$HEAD_SHA" ]]; then
+            echo "No code changes since release $TAG_NAME (tag at ${TAG_SHORT}, HEAD at ${HEAD_SHORT}) — skipping"
             echo "should_release=false" >> "$GITHUB_OUTPUT"
           else
-            echo "Code changed since the last release (${TAG_NAME:-none} -> ${HEAD_SHORT})"
+            echo "Code changed since the last release (${TAG_NAME:-none} at ${TAG_SHORT:-unknown} -> HEAD ${HEAD_SHORT})"
             echo "should_release=true" >> "$GITHUB_OUTPUT"
           fi
 
