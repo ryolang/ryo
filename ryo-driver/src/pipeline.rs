@@ -1047,6 +1047,56 @@ mod tests {
     }
 
     #[test]
+    fn top_level_assignment_gets_targeted_message() {
+        let mut pool = InternPool::new();
+        let (_program, diags) = parse_source(
+            "struct Point:\n\tx: int\n\ty: int\n\nfn main():\n\tq = Point{x=1, y=2}\n\nq.x = 7\n",
+            &mut pool,
+            "<test>",
+        )
+        .expect("recovery should yield a partial program");
+        assert_eq!(diags.len(), 1, "expected one diagnostic: {diags:?}");
+        assert_eq!(diags[0].code, DiagCode::ParseError);
+        assert!(
+            diags[0].message.contains("inside a function body"),
+            "message should explain the rule: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn top_level_assignment_message_covers_positional_and_compound() {
+        let mut pool = InternPool::new();
+        let (_p, diags) =
+            parse_source("q.0 = 7\n", &mut pool, "<test>")
+                .expect("recovery should yield a partial program");
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.message.contains("inside a function body")),
+            "positional target: {diags:?}"
+        );
+
+        let mut pool = InternPool::new();
+        let (_p, diags) =
+            parse_source("q.x += 1\n", &mut pool, "<test>")
+                .expect("recovery should yield a partial program");
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.message.contains("inside a function body")),
+            "compound assign: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn top_level_plain_decl_still_parses() {
+        let mut pool = InternPool::new();
+        parse_source("q = 7\nprint(q)\n", &mut pool, "<test>")
+            .expect("top-level var decls and flat scripts stay valid");
+    }
+
+    #[test]
     fn unknown_attribute_diagnostic_names_the_attribute() {
         // The parser is pool-less, so it reports the unknown attribute
         // as interned ids; the driver must render the spelling (and

@@ -960,12 +960,57 @@ where
     // (`a, b = e`, `(a, b) = e`, `{q, r} = e`, M10) overlap only with
     // `var_decl` / `expr_stmt` (both Ident/`(`/`{`-led), so they sit
     // before those two but after the keyword-led forms.
+    //
+    // Assignment to a field (or positional) target is a body
+    // statement only. At the top level, recognize the shape —
+    // `ident (.field)+` followed by `=` or a compound-assign op —
+    // and fail with a targeted message instead of chumsky's raw
+    // expectation dump (I-204). The `at_least(1)` segment guard
+    // keeps bare `ident = value` a valid top-level var decl
+    // (`var_decl_parser`, ahead of us, claims it; the guard is
+    // self-defensive regardless of choice order). Deliberately NOT
+    // added to `body_statement_parser` — assignments are legal there.
+    let assignment_guard = select! { Token::Ident(s) => s }
+        .map_with(|s, e: &mut Mx<'a, '_, I>| Ident::new(s, e.span()))
+        .then(
+            just(Token::Dot)
+                .ignore_then(field_key_ident())
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .then(choice((
+            just(Token::Assign),
+            just(Token::PlusAssign),
+            just(Token::MinusAssign),
+            just(Token::StarAssign),
+            just(Token::SlashAssign),
+            just(Token::PercentAssign),
+        )))
+        // Swallow the RHS through end of line: the diagnostic already
+        // explains the statement, and a stray expression tail would
+        // surface as a second generic parse error.
+        .then_ignore(none_of([Token::Newline]).repeated())
+        .validate(|_, e: &mut Mx<'a, '_, I>, emitter| {
+            emitter.emit(Rich::custom(
+                e.span(),
+                ParseDiag::Message(
+                    "assignment is only valid inside a function body".to_string(),
+                ),
+            ));
+        })
+        .map_with(|_, e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            e.state().error_stmt(span)
+        });
+
     choice((
         attributed_struct_decl_parser(),
         struct_decl_parser(),
         function_def_parser(expr.clone()),
         destructure_stmt_parser(expr.clone()),
         var_decl_parser(expr.clone()),
+        assignment_guard,
         expr_stmt,
     ))
     .boxed()
