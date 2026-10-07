@@ -748,7 +748,9 @@ where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     // Normal path: colon, required block.
-    let normal = just(Token::Colon).then(block.clone()).map(|(_, stmts)| stmts);
+    let normal = just(Token::Colon)
+        .then(block.clone())
+        .map(|(_, stmts)| stmts);
 
     // Same-line body: diagnose at the colon, swallow the statement.
     // Dedents never appear mid-line (the indent preprocessor attaches
@@ -1073,9 +1075,7 @@ where
         .validate(|_, e: &mut Mx<'a, '_, I>, emitter| {
             emitter.emit(Rich::custom(
                 e.span(),
-                ParseDiag::Message(
-                    "assignment is only valid inside a function body".to_string(),
-                ),
+                ParseDiag::Message("assignment is only valid inside a function body".to_string()),
             ));
         })
         .map_with(|_, e: &mut Mx<'a, '_, I>| {

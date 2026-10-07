@@ -374,6 +374,7 @@ pub(crate) fn warn_redundant_materialize(
 ///    the log), so they always suppress — only moves into a FRESH
 ///    binding (`VarDecl`) are followed;
 ///  - never-read results are W0001 dead-store's jurisdiction.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn warn_redundant_to_bytes(
     tir: &Tir,
     pool: &InternPool,

@@ -235,10 +235,7 @@ fn rich_error_message(e: &Rich<'_, Token, SimpleSpan, ParseDiag>, pool: &InternP
             // ("found '<newline>' expected '.', '[', '*', …") sends the
             // user to the glossary instead of the paren — name the
             // problem and the two tokens that would continue the call.
-            let at_line_break = match e.found() {
-                Some(Token::Newline | Token::Dedent) => true,
-                _ => false,
-            };
+            let at_line_break = matches!(e.found(), Some(Token::Newline | Token::Dedent));
             if at_line_break
                 && e.expected().any(|p| match p {
                     RichPattern::Token(tok) => **tok == Token::RParen,
@@ -1067,9 +1064,8 @@ mod tests {
     #[test]
     fn top_level_assignment_message_covers_positional_and_compound() {
         let mut pool = InternPool::new();
-        let (_p, diags) =
-            parse_source("q.0 = 7\n", &mut pool, "<test>")
-                .expect("recovery should yield a partial program");
+        let (_p, diags) = parse_source("q.0 = 7\n", &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
         assert!(
             diags
                 .iter()
@@ -1078,9 +1074,8 @@ mod tests {
         );
 
         let mut pool = InternPool::new();
-        let (_p, diags) =
-            parse_source("q.x += 1\n", &mut pool, "<test>")
-                .expect("recovery should yield a partial program");
+        let (_p, diags) = parse_source("q.x += 1\n", &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
         assert!(
             diags
                 .iter()
@@ -1164,7 +1159,10 @@ mod tests {
         // shared helper must fire for each, with the keyword
         // interpolated.
         for (src, kw) in [
-            ("fn f(n: int) -> int:\n\twhile n > 0: n -= 1\n\treturn n\n", "while"),
+            (
+                "fn f(n: int) -> int:\n\twhile n > 0: n -= 1\n\treturn n\n",
+                "while",
+            ),
             (
                 "fn f(n: int) -> int:\n\tfor i in range(0, 2): print(i)\n\treturn n\n",
                 "for",
