@@ -26,7 +26,7 @@
 use cranelift::codegen::ir::{
     ArgumentPurpose, MemFlagsData, StackSlot, StackSlotData, StackSlotKind,
 };
-use cranelift::codegen::isa;
+use cranelift::codegen::isa::{self, CallConv};
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
@@ -46,6 +46,7 @@ mod jit;
 mod ranges;
 mod str_ops;
 mod structs;
+mod tail;
 mod views;
 
 /// Fat-owner triple layout (str/bytes, 24 bytes): ptr at 0, len at 8,
@@ -255,6 +256,13 @@ pub struct Codegen<M: Module> {
     /// valid for the duration of that compilation; `Default` (all
     /// `None`) only until the first compile.
     name_ids: CodegenNameIds,
+    /// Names of functions whose bodies contain a syntactic
+    /// tail-position self-call (I-178), collected by the pre-pass in
+    /// `prepare_compilation`. `build_signature` compiles marked
+    /// functions with `CallConv::Tail` — the only convention from
+    /// which Cranelift allows `return_call`. Recomputed per
+    /// compilation; empty before the first one.
+    tail_candidates: HashSet<StringId>,
 }
 
 /// Overflow guard message for the spec §18 checked-arithmetic traps.
@@ -365,6 +373,12 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// `compile_function` from [`CodegenNameIds`]. The ReturnVoid arm
     /// needs it to emit the C ABI's int-0 return.
     is_main: bool,
+    /// Whether the function being lowered was compiled with
+    /// `CallConv::Tail` (I-178): its name was in `Codegen`'s
+    /// `tail_candidates` when `build_signature` ran. `return_call` is
+    /// only legal from a `tail`-convention function, so the tail path
+    /// consults this before attempting one.
+    tail_conv_candidate: bool,
     /// Interned-name ids resolved once per compilation; the per-call
     /// dispatch in `emit_call_slot`, the literal hoisting exclusion,
     /// and the slot-out exclusion all compare `StringId` equality
@@ -600,6 +614,7 @@ impl<M: Module> Codegen<M> {
             guard_msg_data: HashMap::new(),
             runtime_fns: HashMap::new(),
             name_ids: CodegenNameIds::default(),
+            tail_candidates: HashSet::new(),
         }
     }
 }
@@ -664,6 +679,11 @@ impl<M: Module> Codegen<M> {
         tirs: &[Tir],
         pool: &InternPool,
     ) -> Result<DeclaredFunctions, String> {
+        // I-178 pre-pass: mark functions whose bodies contain a
+        // syntactic tail-position self-call, so `build_signature`
+        // compiles them with CallConv::Tail (see
+        // `tail::scan_tail_call_candidates` for the scope).
+        self.tail_candidates = tail::scan_tail_call_candidates(tirs, self.name_ids.main);
         self.declare_all_functions(tirs, pool)
     }
 
@@ -938,6 +958,15 @@ impl<M: Module> Codegen<M> {
                 sig.returns.push(AbiParam::new(cl_ty));
             }
         }
+        // I-178: a function the pre-pass marked gets the Tail calling
+        // convention — the only convention from which Cranelift allows
+        // `return_call`. Never `main` (the C runtime enters it with the
+        // C ABI). A marked function that turns out ineligible at
+        // emission still compiles correctly as a plain Tail-conv
+        // function, so over-marking costs nothing.
+        if !is_main && self.tail_candidates.contains(&tir.name) {
+            sig.call_conv = CallConv::Tail;
+        }
         sig
     }
 
@@ -1209,6 +1238,7 @@ impl<M: Module> Codegen<M> {
                 pool,
                 tir,
                 is_main,
+                tail_conv_candidate: self.tail_candidates.contains(&tir.name),
                 name_ids: ids,
                 locals,
                 locals_undo,
@@ -1346,7 +1376,7 @@ impl<M: Module> Codegen<M> {
             // literal per function, dominating every use.
             Self::hoist_str_literals(&mut builder, &mut ctx)?;
 
-            let body_term = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts())?;
+            let body_term = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts(), true)?;
 
             if body_term == Terminator::None {
                 if is_main {
@@ -1410,79 +1440,6 @@ impl<M: Module> Codegen<M> {
         Ok(ir_text)
     }
 
-    fn emit_body(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        stmts: &[TirRef],
-    ) -> Result<Terminator, String> {
-        let mut terminator = Terminator::None;
-        for &stmt_ref in stmts {
-            if terminator != Terminator::None {
-                break;
-            }
-            terminator = Self::emit_stmt(builder, ctx, stmt_ref)?;
-            // Skip Free emission after terminators (Return / Break /
-            // Continue): the current block is sealed and Cranelift
-            // rejects any instruction after a terminator. Returns also
-            // transfer ownership of the returned value to the caller, so
-            // emitting a Free here would be incorrect anyway. Break and
-            // Continue fire their own Frees before the jump (see
-            // emit_stmt), so skipping here drops nothing.
-            if terminator == Terminator::None {
-                // Anchor-on-stmt Frees first (e.g. dead-store survivors
-                // anchored after a VarDecl), then a sweep that catches
-                // sub-expression-anchored entries whose consumers have
-                // now finished emitting IR.
-                Self::emit_due_frees(builder, ctx, stmt_ref)?;
-                Self::emit_due_promo_frees(builder, ctx, stmt_ref)?;
-                Self::sweep_due_frees(builder, ctx)?;
-                Self::sweep_due_promo_frees(builder, ctx)?;
-            }
-        }
-        Ok(terminator)
-    }
-
-    /// Emit `stmts` with the slot tables scoped: every write the body
-    /// makes to `locals` / `fat_locals` / `view_locals` /
-    /// `struct_locals` (and `range_facts`) is rolled back on exit by
-    /// replaying each table's undo log down to the mark taken here.
-    /// On `?` error nothing is
-    /// restored — the compile is abandoned anyway.
-    fn emit_scoped_body(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        stmts: &[TirRef],
-    ) -> Result<Terminator, String> {
-        let locals_mark = ctx.locals_undo.len();
-        let fat_locals_mark = ctx.fat_locals_undo.len();
-        let view_locals_mark = ctx.view_locals_undo.len();
-        let struct_locals_mark = ctx.struct_locals_undo.len();
-        let range_facts_mark = ctx.range_facts_undo.len();
-        let terminator = Self::emit_body(builder, ctx, stmts)?;
-        Self::restore_slots(&mut ctx.locals, &mut ctx.locals_undo, locals_mark);
-        Self::restore_slots(
-            &mut ctx.fat_locals,
-            &mut ctx.fat_locals_undo,
-            fat_locals_mark,
-        );
-        Self::restore_slots(
-            &mut ctx.view_locals,
-            &mut ctx.view_locals_undo,
-            view_locals_mark,
-        );
-        Self::restore_slots(
-            &mut ctx.struct_locals,
-            &mut ctx.struct_locals_undo,
-            struct_locals_mark,
-        );
-        Self::restore_slots(
-            &mut ctx.range_facts,
-            &mut ctx.range_facts_undo,
-            range_facts_mark,
-        );
-        Ok(terminator)
-    }
-
     /// Store every inout parameter's current `Variable` back through its
     /// caller-provided slot pointer. Called immediately before EVERY
     /// `return_` so mutations are visible to the caller regardless of
@@ -1543,11 +1500,15 @@ impl<M: Module> Codegen<M> {
     /// Emit a top-level statement instruction. Returns the statement's
     /// [`Terminator`] — anything other than `Terminator::None` ends the
     /// current block, and the caller stops the body walk on the first
-    /// one.
+    /// one. `in_tail_position` marks the last statement of a body/scope
+    /// in tail position (I-178): a call operand there may lower to
+    /// `return_call`. `Return` statements are tail contexts regardless
+    /// of position.
     fn emit_stmt(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
+        in_tail_position: bool,
     ) -> Result<Terminator, String> {
         let inst = ctx.tir.inst(r);
         match inst.tag {
@@ -1708,10 +1669,21 @@ impl<M: Module> Codegen<M> {
                 } else if is_struct_type(ctx.tir.return_type, ctx.pool) {
                     return Self::emit_struct_return(builder, ctx, r, operand);
                 } else {
-                    let val = Self::eval_inst(builder, ctx, operand)?;
-                    Self::emit_due_frees(builder, ctx, r)?;
-                    Self::emit_due_promo_frees(builder, ctx, r)?;
-                    Self::emit_return(builder, ctx, &[val])?;
+                    // I-178: a Return whose operand is a call is a tail
+                    // context regardless of position. An eligible
+                    // self-call is emitted as `return_call` (firing the
+                    // statement's due frees first) and `emit_return`
+                    // below is skipped — eligibility proved no inout
+                    // write-back is due and no free is anchored on the
+                    // call or this Return.
+                    let tail_emitted = matches!(ctx.tir.inst(operand).tag, TirTag::Call)
+                        && Self::try_emit_tail_call(builder, ctx, operand, Some(r), r)?;
+                    if !tail_emitted {
+                        let val = Self::eval_inst(builder, ctx, operand)?;
+                        Self::emit_due_frees(builder, ctx, r)?;
+                        Self::emit_due_promo_frees(builder, ctx, r)?;
+                        Self::emit_return(builder, ctx, &[val])?;
+                    }
                 }
                 Ok(Terminator::Return)
             }
@@ -1735,6 +1707,18 @@ impl<M: Module> Codegen<M> {
                     TirData::UnOp(o) => o,
                     _ => unreachable!("ExprStmt must carry TirData::UnOp"),
                 };
+                // I-178: the last statement of a body/scope in tail
+                // position whose operand is a call may be an eligible
+                // self-tail-call (e.g. the eager_destruction benchmark's
+                // trailing `recursive(x - 1)`); emit it as `return_call`
+                // and end the block. Ineligible calls fall through to
+                // the plain evaluation below.
+                if in_tail_position
+                    && matches!(ctx.tir.inst(operand).tag, TirTag::Call)
+                    && Self::try_emit_tail_call(builder, ctx, operand, None, r)?
+                {
+                    return Ok(Terminator::Return);
+                }
                 // Fat-typed operands (bare formatter calls, str(view),
                 // user str/bytes-returning calls) go through the fat entry
                 // point, which caches the triple for the scheduled temp
@@ -1758,7 +1742,7 @@ impl<M: Module> Codegen<M> {
                 }
                 Ok(Terminator::None)
             }
-            TirTag::IfStmt => Self::generate_if_stmt(builder, ctx, r),
+            TirTag::IfStmt => Self::generate_if_stmt(builder, ctx, r, in_tail_position),
             TirTag::Assign => {
                 let view = ctx.tir.assign_view(r);
                 if is_fat_type(inst.ty, ctx.pool) {

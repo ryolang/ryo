@@ -13,6 +13,19 @@ use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, TypeKind, ViewKind};
 use std::collections::HashMap;
 
+/// The result of [`Codegen::marshal_user_call_args`]: the evaluated
+/// ABI-form argument list (with the hidden sret pointer already
+/// prepended when there is one) plus the inout spill slots the caller
+/// must reload once the call returns. The tail-call path (I-178)
+/// requires `sret.is_none()` and an empty `inout_reloads` — eligibility
+/// rejects sret callees and inout args up front, so a marshalled tail
+/// call never has either.
+pub(super) struct MarshalledArgs {
+    pub(super) values: Vec<Value>,
+    pub(super) sret: Option<Value>,
+    pub(super) inout_reloads: Vec<(TirRef, StackSlot)>,
+}
+
 impl<M: Module> Codegen<M> {
     /// Materialize an instruction's value, recursively materializing
     /// operand `TirRef`s as needed. Memoized: a second visit hands
@@ -278,7 +291,9 @@ impl<M: Module> Codegen<M> {
                 Self::emit_call(builder, ctx, r)?
             }
             TirTag::IfStmt => {
-                Self::generate_if_stmt(builder, ctx, r)?;
+                // Expression-level if (a value-producing ternary
+                // shape): never a statement tail context.
+                Self::generate_if_stmt(builder, ctx, r, false)?;
                 builder.ins().iconst(ctx.int_type, 0)
             }
             TirTag::StrLen => {
@@ -1529,7 +1544,107 @@ impl<M: Module> Codegen<M> {
             .map(|(id, _)| *id)
             .ok_or_else(|| format!("Undefined function: '{}'", name_str))?;
 
-        let mut arg_values = Vec::with_capacity(view.args.len() * 3 + 1);
+        let marshalled = Self::marshal_user_call_args(builder, ctx, r, out_slot)?;
+        let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
+        let ret_ty = ctx.tir.inst(r).ty;
+
+        // If the callee returns never (e.g. __ryo_panic), the call is
+        // a terminator. Emit a trap + dead block for subsequent IR.
+        if ctx.pool.is_never(ret_ty) {
+            builder.ins().call(callee_ref, &marshalled.values);
+            // Reload inout slots before the trap: Cranelift models the
+            // callee as an ordinary (returning) call, so the mutations
+            // must be visible on the path where control resumes.
+            Self::reload_inout_args(builder, ctx, &marshalled.inout_reloads)?;
+            builder.ins().trap(
+                TrapCode::user(1).expect("user trap code 1 is within Cranelift's encodable range"),
+            );
+            let dead = builder.create_block();
+            builder.seal_block(dead);
+            builder.switch_to_block(dead);
+            let dummy_ty = cranelift_type_for(ret_ty, ctx.pool, ctx.int_type);
+            return Ok(builder.ins().iconst(dummy_ty, 0));
+        }
+
+        if is_fat_type(ret_ty, ctx.pool) {
+            // sret: the 24-byte slot (or the caller-provided binding
+            // home) was allocated by marshalling; the pointer is already
+            // prepended to `values`.
+            let out = marshalled
+                .sret
+                .expect("fat-returning call must marshal an sret pointer");
+
+            builder.ins().call(callee_ref, &marshalled.values);
+            Self::reload_inout_args(builder, ctx, &marshalled.inout_reloads)?;
+
+            let ptr = builder
+                .ins()
+                .load(ctx.int_type, MemFlagsData::trusted(), out, 0);
+            let len = builder
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), out, 8);
+            let cap = builder
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), out, 16);
+            let repr = if matches!(ctx.pool.kind(ret_ty), TypeKind::Bytes) {
+                ValueRepr::Bytes { ptr, len, cap }
+            } else {
+                ValueRepr::Str { ptr, len, cap }
+            };
+            Self::cache_repr(ctx, r, repr);
+            return Ok(ptr); // dummy scalar — consumers use eval_inst_fat
+        }
+
+        if is_struct_type(ret_ty, ctx.pool) {
+            // M9 named / M10 anon sret: the struct's slot was allocated
+            // by marshalling; the slot address is the result (mirrors
+            // the fat sret path above).
+            let out = marshalled
+                .sret
+                .expect("struct-returning call must marshal an sret pointer");
+
+            builder.ins().call(callee_ref, &marshalled.values);
+            Self::reload_inout_args(builder, ctx, &marshalled.inout_reloads)?;
+
+            Self::cache_repr(ctx, r, ValueRepr::Struct { addr: out });
+            return Ok(out); // dummy scalar — consumers use eval_inst_struct
+        }
+
+        let call = builder.ins().call(callee_ref, &marshalled.values);
+        Self::reload_inout_args(builder, ctx, &marshalled.inout_reloads)?;
+        let results = builder.inst_results(call);
+
+        if results.is_empty() {
+            Ok(builder.ins().iconst(ctx.int_type, 0))
+        } else {
+            Ok(results[0])
+        }
+    }
+
+    /// Arg marshalling for the user-function call path of
+    /// [`Self::emit_call_slot`], extracted so the I-178 tail-call path
+    /// can marshal the same way and then emit `return_call` instead of
+    /// `call`. Evaluates every arg into its ABI form (scalar value,
+    /// fat triple, view pair, struct slot address, or inout spill slot)
+    /// and prepends the hidden sret pointer for fat/struct-returning
+    /// callees. Behavior is identical to the inline sequence it
+    /// replaces.
+    pub(super) fn marshal_user_call_args(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        out_slot: Option<StackSlot>,
+    ) -> Result<MarshalledArgs, String> {
+        let view = ctx.tir.call_view(r);
+        let name_id = view.name;
+        let name_str = ctx.pool.str(name_id);
+        let _ = ctx
+            .func_ids
+            .get(&name_id)
+            .map(|(id, _)| *id)
+            .ok_or_else(|| format!("Undefined function: '{}'", name_str))?;
+
+        let mut values = Vec::with_capacity(view.args.len() * 3 + 1);
         // inout args: spill the current value to a stack slot, pass the
         // slot address, then reload after the call. Scalar spills one
         // field; fat owners spill the fat-pointer triple.
@@ -1553,7 +1668,7 @@ impl<M: Module> Codegen<M> {
                     // the callee mutates in place. No spill, no reload,
                     // no write-back.
                     let addr = Self::inout_pointee_addr(builder, ctx, *arg)?;
-                    arg_values.push(addr);
+                    values.push(addr);
                 } else if is_fat_type(arg_ty, ctx.pool) {
                     let repr = Self::eval_inst_fat(builder, ctx, *arg)?;
                     let (ptr, len, cap) = match repr {
@@ -1576,7 +1691,7 @@ impl<M: Module> Codegen<M> {
                                 Self::kill_fact(ctx, name);
                                 Self::set_home_inline(ctx, name, false);
                             }
-                            arg_values.push(addr);
+                            values.push(addr);
                         }
                         None => {
                             let slot = builder.create_sized_stack_slot(StackSlotData::new(
@@ -1588,7 +1703,7 @@ impl<M: Module> Codegen<M> {
                             builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
                             builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
                             builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
-                            arg_values.push(addr);
+                            values.push(addr);
                             inout_reloads.push((*arg, slot));
                         }
                     }
@@ -1603,16 +1718,16 @@ impl<M: Module> Codegen<M> {
                     let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
                     let cur = Self::eval_inst(builder, ctx, *arg)?;
                     builder.ins().store(MemFlagsData::trusted(), cur, addr, 0);
-                    arg_values.push(addr);
+                    values.push(addr);
                     inout_reloads.push((*arg, slot));
                 }
             } else if is_fat_type(arg_ty, ctx.pool) {
                 let repr = Self::eval_inst_fat(builder, ctx, *arg)?;
                 match repr {
                     ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
-                        arg_values.push(ptr);
-                        arg_values.push(len);
-                        arg_values.push(cap);
+                        values.push(ptr);
+                        values.push(len);
+                        values.push(cap);
                     }
                     _ => unreachable!("fat-typed arg must produce a fat ValueRepr"),
                 }
@@ -1621,44 +1736,26 @@ impl<M: Module> Codegen<M> {
                 // callee's build_signature. Sema has already inserted
                 // ToView for owned-str actuals (§3.4).
                 let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, *arg)?;
-                arg_values.push(ptr);
-                arg_values.push(len);
+                values.push(ptr);
+                values.push(len);
             } else if is_struct_type(arg_ty, ctx.pool) {
                 // M9 named / M10 anon struct arg: a single slot
                 // address — the existing slot for Borrow, a fresh
                 // field-wise copy for Move/Copy.
                 let addr = Self::emit_struct_call_arg(builder, ctx, *arg, mode)?;
-                arg_values.push(addr);
+                values.push(addr);
             } else {
-                arg_values.push(Self::eval_inst(builder, ctx, *arg)?);
+                values.push(Self::eval_inst(builder, ctx, *arg)?);
             }
         }
 
-        let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
-
+        // sret prepend: fat-returning callees write the (ptr, len, cap)
+        // triple through a hidden first pointer (the caller-provided
+        // binding home when there is one); struct-returning callees
+        // write the aggregate through a fresh struct slot. Scalar and
+        // void callees have no sret word.
         let ret_ty = ctx.tir.inst(r).ty;
-
-        // If the callee returns never (e.g. __ryo_panic), the call is
-        // a terminator. Emit a trap + dead block for subsequent IR.
-        if ctx.pool.is_never(ret_ty) {
-            builder.ins().call(callee_ref, &arg_values);
-            // Reload inout slots before the trap: Cranelift models the
-            // callee as an ordinary (returning) call, so the mutations
-            // must be visible on the path where control resumes.
-            Self::reload_inout_args(builder, ctx, &inout_reloads)?;
-            builder.ins().trap(
-                TrapCode::user(1).expect("user trap code 1 is within Cranelift's encodable range"),
-            );
-            let dead = builder.create_block();
-            builder.seal_block(dead);
-            builder.switch_to_block(dead);
-            let dummy_ty = cranelift_type_for(ret_ty, ctx.pool, ctx.int_type);
-            return Ok(builder.ins().iconst(dummy_ty, 0));
-        }
-
-        if is_fat_type(ret_ty, ctx.pool) {
-            // sret: allocate 24-byte slot (or use the caller-provided
-            // binding home), prepend pointer to args
+        let sret = if is_fat_type(ret_ty, ctx.pool) {
             let slot = out_slot.unwrap_or_else(|| {
                 builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
@@ -1667,59 +1764,21 @@ impl<M: Module> Codegen<M> {
                 ))
             });
             let out = builder.ins().stack_addr(ctx.int_type, slot, 0);
-
-            let mut all_args = Vec::with_capacity(arg_values.len() + 1);
-            all_args.push(out);
-            all_args.extend(arg_values);
-
-            builder.ins().call(callee_ref, &all_args);
-            Self::reload_inout_args(builder, ctx, &inout_reloads)?;
-
-            let ptr = builder
-                .ins()
-                .load(ctx.int_type, MemFlagsData::trusted(), out, 0);
-            let len = builder
-                .ins()
-                .load(types::I64, MemFlagsData::trusted(), out, 8);
-            let cap = builder
-                .ins()
-                .load(types::I64, MemFlagsData::trusted(), out, 16);
-            let repr = if matches!(ctx.pool.kind(ret_ty), TypeKind::Bytes) {
-                ValueRepr::Bytes { ptr, len, cap }
-            } else {
-                ValueRepr::Str { ptr, len, cap }
-            };
-            Self::cache_repr(ctx, r, repr);
-            return Ok(ptr); // dummy scalar — consumers use eval_inst_fat
-        }
-
-        if is_struct_type(ret_ty, ctx.pool) {
-            // M9 named / M10 anon sret: allocate the struct's slot,
-            // prepend its address to the args, and treat the slot as
-            // the result (mirrors the fat sret path above).
+            values.insert(0, out);
+            Some(out)
+        } else if is_struct_type(ret_ty, ctx.pool) {
             let slot = Self::struct_slot(builder, ctx, ret_ty);
             let out = builder.ins().stack_addr(ctx.int_type, slot, 0);
-
-            let mut all_args = Vec::with_capacity(arg_values.len() + 1);
-            all_args.push(out);
-            all_args.extend(arg_values);
-
-            builder.ins().call(callee_ref, &all_args);
-            Self::reload_inout_args(builder, ctx, &inout_reloads)?;
-
-            Self::cache_repr(ctx, r, ValueRepr::Struct { addr: out });
-            return Ok(out); // dummy scalar — consumers use eval_inst_struct
-        }
-
-        let call = builder.ins().call(callee_ref, &arg_values);
-        Self::reload_inout_args(builder, ctx, &inout_reloads)?;
-        let results = builder.inst_results(call);
-
-        if results.is_empty() {
-            Ok(builder.ins().iconst(ctx.int_type, 0))
+            values.insert(0, out);
+            Some(out)
         } else {
-            Ok(results[0])
-        }
+            None
+        };
+        Ok(MarshalledArgs {
+            values,
+            sret,
+            inout_reloads,
+        })
     }
 
     /// Consuming-concat fast path: `s = s + suffix` where the ownership

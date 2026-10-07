@@ -7,10 +7,93 @@ use cranelift_module::Module;
 use ryo_core::tir::TirRef;
 
 impl<M: Module> Codegen<M> {
+    /// Emit a statement list, threading tail position (I-178): only the
+    /// LAST statement of a body/scope inherits `in_tail_position` —
+    /// earlier statements fall through to what follows, so a call
+    /// there is not a tail call. Loop bodies are always emitted with
+    /// `false` by their emitters.
+    pub(crate) fn emit_body(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        stmts: &[TirRef],
+        in_tail_position: bool,
+    ) -> Result<Terminator, String> {
+        let mut terminator = Terminator::None;
+        let stmt_count = stmts.len();
+        for (i, &stmt_ref) in stmts.iter().enumerate() {
+            if terminator != Terminator::None {
+                break;
+            }
+            let stmt_tail = in_tail_position && i + 1 == stmt_count;
+            terminator = Self::emit_stmt(builder, ctx, stmt_ref, stmt_tail)?;
+            // Skip Free emission after terminators (Return / Break /
+            // Continue): the current block is sealed and Cranelift
+            // rejects any instruction after a terminator. Returns also
+            // transfer ownership of the returned value to the caller, so
+            // emitting a Free here would be incorrect anyway. Break and
+            // Continue fire their own Frees before the jump (see
+            // emit_stmt), so skipping here drops nothing.
+            if terminator == Terminator::None {
+                // Anchor-on-stmt Frees first (e.g. dead-store survivors
+                // anchored after a VarDecl), then a sweep that catches
+                // sub-expression-anchored entries whose consumers have
+                // now finished emitting IR.
+                Self::emit_due_frees(builder, ctx, stmt_ref)?;
+                Self::emit_due_promo_frees(builder, ctx, stmt_ref)?;
+                Self::sweep_due_frees(builder, ctx)?;
+                Self::sweep_due_promo_frees(builder, ctx)?;
+            }
+        }
+        Ok(terminator)
+    }
+
+    /// Emit `stmts` with the slot tables scoped: every write the body
+    /// makes to `locals` / `fat_locals` / `view_locals` /
+    /// `struct_locals` (and `range_facts`) is rolled back on exit by
+    /// replaying each table's undo log down to the mark taken here.
+    /// On `?` error nothing is
+    /// restored — the compile is abandoned anyway.
+    pub(crate) fn emit_scoped_body(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        stmts: &[TirRef],
+        in_tail_position: bool,
+    ) -> Result<Terminator, String> {
+        let locals_mark = ctx.locals_undo.len();
+        let fat_locals_mark = ctx.fat_locals_undo.len();
+        let view_locals_mark = ctx.view_locals_undo.len();
+        let struct_locals_mark = ctx.struct_locals_undo.len();
+        let range_facts_mark = ctx.range_facts_undo.len();
+        let terminator = Self::emit_body(builder, ctx, stmts, in_tail_position)?;
+        Self::restore_slots(&mut ctx.locals, &mut ctx.locals_undo, locals_mark);
+        Self::restore_slots(
+            &mut ctx.fat_locals,
+            &mut ctx.fat_locals_undo,
+            fat_locals_mark,
+        );
+        Self::restore_slots(
+            &mut ctx.view_locals,
+            &mut ctx.view_locals_undo,
+            view_locals_mark,
+        );
+        Self::restore_slots(
+            &mut ctx.struct_locals,
+            &mut ctx.struct_locals_undo,
+            struct_locals_mark,
+        );
+        Self::restore_slots(
+            &mut ctx.range_facts,
+            &mut ctx.range_facts_undo,
+            range_facts_mark,
+        );
+        Ok(terminator)
+    }
+
     pub(crate) fn generate_if_stmt(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
+        in_tail_position: bool,
     ) -> Result<Terminator, String> {
         let view = ctx.tir.if_stmt_view(r);
         let outer_facts_mark = ctx.range_facts_undo.len();
@@ -71,7 +154,8 @@ impl<M: Module> Codegen<M> {
         // both Ok and Err paths by binding the result first.
         ctx.branch_stack.push(then_branch);
         Self::emit_conditional_dead_drops(builder, ctx, r, then_branch)?;
-        let then_term_result = Self::emit_scoped_body(builder, ctx, &view.then_stmts);
+        let then_term_result =
+            Self::emit_scoped_body(builder, ctx, &view.then_stmts, in_tail_position);
         ctx.branch_stack.pop();
         let then_term = then_term_result?;
         if then_term == Terminator::None {
@@ -129,7 +213,8 @@ impl<M: Module> Codegen<M> {
                 .unwrap_or_default();
             ctx.branch_stack.push(elif_branch_id);
             Self::emit_conditional_dead_drops(builder, ctx, r, elif_branch_id)?;
-            let elif_term_result = Self::emit_scoped_body(builder, ctx, &elif.body);
+            let elif_term_result =
+                Self::emit_scoped_body(builder, ctx, &elif.body, in_tail_position);
             ctx.branch_stack.pop();
             let elif_term = elif_term_result?;
             if elif_term == Terminator::None {
@@ -166,7 +251,8 @@ impl<M: Module> Codegen<M> {
             let else_branch_id = else_branch;
             ctx.branch_stack.push(else_branch_id);
             Self::emit_conditional_dead_drops(builder, ctx, r, else_branch_id)?;
-            let else_term_result = Self::emit_scoped_body(builder, ctx, else_stmts);
+            let else_term_result =
+                Self::emit_scoped_body(builder, ctx, else_stmts, in_tail_position);
             ctx.branch_stack.pop();
             let else_term = else_term_result?;
             if else_term == Terminator::None {
@@ -283,7 +369,7 @@ impl<M: Module> Codegen<M> {
             exit_block,
             continue_target: header_block,
         });
-        let body_term = Self::emit_scoped_body(builder, ctx, &view.body)?;
+        let body_term = Self::emit_scoped_body(builder, ctx, &view.body, false)?;
         ctx.loop_stack.pop();
 
         Self::restore_slots(
@@ -382,7 +468,7 @@ impl<M: Module> Codegen<M> {
         // stored on a later iteration.
         Self::invalidate_home_inline_flags(ctx);
 
-        let body_term = Self::emit_body(builder, ctx, &view.body)?;
+        let body_term = Self::emit_body(builder, ctx, &view.body, false)?;
 
         // Restore locals (loop variable goes out of scope)
         Self::write_slot(
