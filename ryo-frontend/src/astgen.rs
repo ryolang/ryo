@@ -341,17 +341,22 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
 
     // Register defined structs in source order. Structs that failed
     // (cycle, unknown field type) stay declared-but-undefined in the
-    // pool and are left out — the sink already holds their errors.
+    // pool — the sink already holds their errors. They still ride
+    // along as error-typed, field-less decls so sema can tell
+    // "declared but failed" (quiet recovery at use sites) from
+    // "never declared" (E0001).
     for &name in &struct_order {
-        if definer.states[&name] != DefState::Defined {
-            continue;
-        }
-        let (ty, _, span) = struct_entries[&name];
+        let (ty, fields) = if definer.states[&name] != DefState::Defined {
+            (pool.error_type(), Vec::new())
+        } else {
+            let (ty, _, _) = struct_entries[&name];
+            (ty, definer.resolved.remove(&name).unwrap_or_default())
+        };
         b.add_struct_decl(UirStructDecl {
             name,
             ty,
-            fields: definer.resolved.remove(&name).unwrap_or_default(),
-            span,
+            fields,
+            span: struct_entries[&name].2,
         });
     }
 

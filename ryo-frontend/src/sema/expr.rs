@@ -527,9 +527,7 @@ fn analyze_struct_lit(
         return analyze_anon_struct_lit(sema, fcx, scope, &view, span);
     };
     let Some(&sty) = sema.struct_types.get(&name) else {
-        // Not a registered struct: either never declared, or declared
-        // but left undefined by astgen (cycle / unknown field type —
-        // already diagnosed). Recover with the error sentinel.
+        // Never declared — this one is on the user.
         sema.sink.emit(Diag::error(
             span,
             DiagCode::UnknownType,
@@ -537,6 +535,12 @@ fn analyze_struct_lit(
         ));
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     };
+    if sema.pool.is_error(sty) {
+        // Declared but its definition failed (E0005 infinite size,
+        // unknown field type — already diagnosed). Recover quietly,
+        // matching field-access on a failed struct (I-203).
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
     let sview = sema.pool.struct_view(sty);
     let mut by_index: Vec<Option<TirRef>> = vec![None; sview.fields.len()];
     // I-203: once any field errored (unknown/duplicate), the literal's

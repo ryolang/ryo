@@ -78,6 +78,27 @@ fn struct_literal_field_type_mismatch() {
 }
 
 #[test]
+fn literal_of_failed_struct_does_not_re_report_unknown_struct() {
+    // E0005 (InfiniteSize) fires in astgen for the recursive struct;
+    // a literal use must recover quietly, not re-report E0001
+    // "unknown struct" on top (I-203).
+    let src = "struct Node:\n\tnext: Node\n\nfn main():\n\tn = Node{}\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "expected exactly one error: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::InfiniteSize);
+}
+
+#[test]
+fn literal_of_never_declared_struct_still_reports_unknown() {
+    let src = "fn main():\n\tn = Widget{}\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    assert!(
+        any_code(&diags, DiagCode::UnknownType),
+        "never-declared name must still error: {diags:?}"
+    );
+}
+
+#[test]
 fn struct_literal_unknown_name_recovers() {
     let src = "fn main():\n\tp = Nope{x=1.0}\n";
     let (tirs, diags, _p) = run_with_errors(src);
