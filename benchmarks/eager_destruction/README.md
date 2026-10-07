@@ -119,12 +119,12 @@ Two codegen changes move the numbers:
 
 Re-measured on the same machine after codegen began emitting Cranelift `return_call` for the tail-recursive call and the stack-limit check moved from every function's prologue to recursive-call cycle edges, at `0.1.0-dev.20261007+d3ea2bc` (hyperfine `--warmup 3 --shell=none`):
 
-| Benchmark Candidate | Max RSS | Memory Efficiency (vs Rust Scope-Based) | Mean time | vs fastest |
-|---------------------|---------|------------------------------------------|-----------|------------|
-| **Ryo (AOT, Eager)** | **1.36 MB** | **6.10x more efficient** | **1.7 ms ± 0.3 ms** | **1.00x (fastest)** |
-| Ryo (JIT, Eager) | 5.00 MB | 1.66x more efficient | 2.9 ms ± 0.3 ms | 1.69x slower |
-| Rust (Manual Drop) | 6.81 MB | 1.22x more efficient | 3.3 ms ± 0.2 ms | 1.87x slower |
-| Rust (Scope-Based) | 8.30 MB | 1.00x (baseline) | 3.5 ms ± 0.3 ms | 2.00x slower |
+| Benchmark Candidate | Version | Max RSS | Memory Efficiency (vs Rust Scope-Based) | Mean time | vs fastest |
+|---------------------|---------|---------|------------------------------------------|-----------|------------|
+| **Ryo (AOT, Eager)** | `0.1.0-dev.20261007+d3ea2bc` | **1.36 MB** | **6.10x more efficient** | **1.7 ms ± 0.3 ms** | **1.00x (fastest)** |
+| Ryo (JIT, Eager) | `0.1.0-dev.20261007+d3ea2bc` | 5.00 MB | 1.66x more efficient | 2.9 ms ± 0.3 ms | 1.69x slower |
+| Rust (Manual Drop) | 1.98.0 | 6.81 MB | 1.22x more efficient | 3.3 ms ± 0.2 ms | 1.87x slower |
+| Rust (Scope-Based) | 1.98.0 | 8.30 MB | 1.00x (baseline) | 3.5 ms ± 0.3 ms | 2.00x slower |
 
 What moved:
 
