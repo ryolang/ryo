@@ -43,6 +43,11 @@
 //! shared [`DiagSink`]. The driver consults `sink.has_errors()` to
 //! decide whether to proceed to codegen — codegen itself must never
 //! see an `Unreachable`.
+//!
+//! Warnings (W0002/W0003 case A) are buffered on [`Sema`] and flushed
+//! into the sink by `Sema::run` only when the whole unit is
+//! error-free — a warning from an early decl must not pile onto an
+//! error discovered while analyzing a later one.
 
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{ParamMode, Tir, TirBuilder, TirParam, TirRef};
@@ -177,6 +182,12 @@ pub struct Sema<'a> {
     uir: &'a Uir,
     pool: &'a mut InternPool,
     sink: &'a mut DiagSink,
+    /// Buffered warnings (W0002/W0003 case A). `run` flushes these
+    /// into `sink` only if the whole unit analyzed error-free, so a
+    /// warning from an early decl never piles onto an error found
+    /// while analyzing a later one. Errors always go to `sink`
+    /// directly.
+    warnings: Vec<Diag>,
     source: &'a str,
     file_path: &'a Path,
     /// Resolution status, parallel to `uir.func_bodies`.
@@ -263,6 +274,14 @@ impl<'a> Sema<'a> {
         sema.resolve_signatures();
         sema.seed_worklist();
         sema.drive();
+        // Flush buffered warnings only for a clean unit (see the
+        // `warnings` field). Must run before `collect_results`, which
+        // consumes `sema`.
+        if !sema.sink.has_errors() {
+            for d in sema.warnings.drain(..) {
+                sema.sink.emit(d);
+            }
+        }
         sema.collect_results()
     }
 
@@ -310,6 +329,7 @@ impl<'a> Sema<'a> {
             uir,
             pool,
             sink,
+            warnings: Vec::new(),
             source,
             file_path,
             decl_state: vec![DeclState::Unresolved; n],
@@ -493,7 +513,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
         {
             let name = sema.pool.str(param.name).to_string();
             let ty_str = sema.pool.display(param.ty).to_string();
-            sema.sink.emit(Diag::warning(
+            sema.warnings.push(Diag::warning(
                 param.span,
                 DiagCode::RedundantMove,
                 format!(

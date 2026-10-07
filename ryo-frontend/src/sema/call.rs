@@ -140,7 +140,7 @@ pub(crate) fn check_call(
                     _ => sema.pool.bytes(),
                 };
                 if exp_ty == owner_ty {
-                    sema.sink.emit(Diag::warning(
+                    sema.warnings.push(Diag::warning(
                         sema.uir.span(*arg_uir),
                         DiagCode::RedundantMaterialize,
                         format!(

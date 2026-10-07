@@ -455,7 +455,7 @@ pub(crate) fn warn_redundant_materialize_builtin_arg(
         _ => (sema.pool.bytes(), "bytesview"),
     };
     if fcx.builder.ty_of(arg_tir) == owner_ty {
-        sema.sink.emit(Diag::warning(
+        sema.warnings.push(Diag::warning(
             sema.uir.span(arg_uir),
             DiagCode::RedundantMaterialize,
             format!(
