@@ -164,7 +164,7 @@ Source → Lexer → Indent Preprocessor → Parser → AstGen → UIR → Sema 
 The middle-end is split into two flat-arena IRs modeled after Zig's ZIR/AIR:
 
 - **UIR** (`ryo-core/src/uir.rs`) — Untyped IR. Flat `(tag, data)` instruction stream in a program-wide arena, produced by `astgen.rs` from the AST. Sub-expressions are not nested; they live as their own entries reached via `InstRef` indices. Side arenas: `extra: Vec<u32>` for variable-size payloads, `spans` parallel to instructions.
-- **TIR** (`ryo-core/src/tir.rs`) — Typed IR. Same flat shape as UIR but **one arena per function body**, and every instruction carries its resolved `TypeId`. Produced by `sema.rs` from UIR and consumed by `codegen.rs`. Per-function arenas make generic/inline duplication a `Tir::clone` away.
+- **TIR** (`ryo-core/src/tir.rs`) — Typed IR. Same flat shape as UIR but **one arena per function body**, and every instruction carries its resolved `TypeId`. Produced by `sema.rs` from UIR and consumed by `codegen/`. Per-function arenas make generic/inline duplication a `Tir::clone` away.
 
 **Mapping to Zig.** When cross-referencing the Zig compiler source for reference:
 
@@ -206,7 +206,7 @@ See `docs/dev/pipeline_alignment.md` for what remains of the Zig-alignment plan 
 #### 4. Code Generation and Linking Crate (`ryo-backend`)
 | File | Role |
 |------|------|
-| `ryo-backend/src/codegen.rs` | Cranelift IR generation from TIR (JIT and AOT) |
+| `ryo-backend/src/codegen/` | Cranelift IR generation from TIR (JIT and AOT) |
 | `ryo-backend/src/linker.rs` | Executable linking via the managed Zig toolchain |
 | `ryo-backend/src/toolchain.rs` | Zig toolchain download / version pinning / path resolution |
 | `ryo-backend/src/runtime_lib.rs` | Static runtime library extraction and caching |
@@ -280,7 +280,7 @@ ast::StmtKind::MyFeature(expr) => {
 ### 6. Add Sema Case (ryo-frontend/src/sema.rs) → emits TIR
 In `sema::analyze`, type-check the UIR instruction and emit the typed equivalent into the per-function `Tir`. Resolve types via `InternPool`, look up names in the active scope, and push `Diag` values into the `DiagSink` on type errors (analysis continues — do not bail). Every emitted `TypedInst` carries its resolved `TypeId`.
 
-### 7. Add Codegen (ryo-backend/src/codegen.rs)
+### 7. Add Codegen (ryo-backend/src/codegen/)
 Add a match arm in `compile_function()` where `TirInst` variants are dispatched. Use `Self::eval_expr()` to evaluate sub-expressions (which are themselves `TirRef`s into the same per-function arena). Common patterns: `builder.ins().iconst()` for ints, `.f64const()` for floats, `.iadd()`/`.fadd()` for add, `.call()` for calls.
 
 ### 8. Run All Tests
