@@ -1097,6 +1097,92 @@ mod tests {
     }
 
     #[test]
+    fn one_line_if_body_gets_targeted_message() {
+        let mut pool = InternPool::new();
+        let (_p, diags) = parse_source(
+            "fn factorial(n: int) -> int:\n\tif (n <= 1): return 1\n\treturn n * factorial(n - 1)\n",
+            &mut pool,
+            "<test>",
+        )
+        .expect("recovery should yield a partial program");
+        assert_eq!(diags.len(), 1, "expected one diagnostic: {diags:?}");
+        assert_eq!(diags[0].code, DiagCode::ParseError);
+        assert!(
+            diags[0].message.contains("one-line") && diags[0].message.contains("own line"),
+            "message should steer to the fix: {}",
+            diags[0].message
+        );
+        assert!(
+            !diags[0].message.contains("<indent>"),
+            "message must not leak parser internals: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn missing_colon_after_condition_gets_targeted_message() {
+        let mut pool = InternPool::new();
+        let (_p, diags) = parse_source(
+            "fn f(n: int) -> int:\n\tif (n <= 1) return 1\n\treturn n\n",
+            &mut pool,
+            "<test>",
+        )
+        .expect("recovery should yield a partial program");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("expected ':' after the condition")),
+            "missing-colon shape should be named: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn accepted_block_form_stays_silent() {
+        let mut pool = InternPool::new();
+        parse_source(
+            "fn factorial(n: int) -> int:\n\tif (n <= 1):\n\t\treturn 1\n\treturn n * factorial(n - 1)\n\nfn main():\n\tprint(factorial(5))\n",
+            &mut pool,
+            "<test>",
+        )
+        .expect("newline + indented block must parse clean");
+    }
+
+    #[test]
+    fn blank_line_between_header_and_body_is_not_a_one_line_body() {
+        let mut pool = InternPool::new();
+        parse_source(
+            "fn f(n: int) -> int:\n\tif (n <= 1):\n\n\t\treturn 1\n\treturn n\n",
+            &mut pool,
+            "<test>",
+        )
+        .expect("blank-line tolerance must survive");
+    }
+
+    #[test]
+    fn one_line_body_message_covers_all_block_headers() {
+        // Same Python-transcription hazard on every header — the
+        // shared helper must fire for each, with the keyword
+        // interpolated.
+        for (src, kw) in [
+            ("fn f(n: int) -> int:\n\twhile n > 0: n -= 1\n\treturn n\n", "while"),
+            (
+                "fn f(n: int) -> int:\n\tfor i in range(0, 2): print(i)\n\treturn n\n",
+                "for",
+            ),
+        ] {
+            let mut pool = InternPool::new();
+            let (_p, diags) = parse_source(src, &mut pool, "<test>")
+                .expect("recovery should yield a partial program");
+            assert!(
+                diags
+                    .iter()
+                    .any(|d| d.message.contains(&format!("one-line '{kw}'"))),
+                "{kw}: targeted message missing: {diags:?}"
+            );
+        }
+    }
+
+    #[test]
     fn unknown_attribute_diagnostic_names_the_attribute() {
         // The parser is pool-less, so it reports the unknown attribute
         // as interned ids; the driver must render the spelling (and
