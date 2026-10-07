@@ -87,7 +87,7 @@ fn runtime_symbols() -> [(&'static str, *const u8); 30] {
         ),
         ("ryo_getenv", ryo_runtime::ryo_getenv as *const u8),
         ("ryo_read_line", ryo_runtime::ryo_read_line as *const u8),
-        // Stack-guard pair: codegen's prologue check loads
+        // Stack-guard pair: codegen's recursive-call check loads
         // RYO_STACK_LIMIT and calls ryo_stack_overflow on failure.
         (
             "ryo_stack_overflow",
@@ -106,9 +106,13 @@ impl Codegen<JITModule> {
         // folding, algebraic simplification, GVN/LICM) like the AOT path.
         // enable_verifier: debug builds and tests only, same rationale as
         // `aot_shared_flags`.
+        // preserve_frame_pointers: required by Cranelift's x64
+        // `return_call` lowering (I-178 tail calls assert on it), and
+        // matches `aot_shared_flags`.
         let mut jit_builder = JITBuilder::with_flags(
             &[
                 ("opt_level", "speed"),
+                ("preserve_frame_pointers", "true"),
                 (
                     "enable_verifier",
                     if cfg!(debug_assertions) {

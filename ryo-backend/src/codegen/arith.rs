@@ -5,13 +5,12 @@
 //! 2000-line file-length limit.
 
 use super::{Codegen, FunctionContext, OVERFLOW_MSG, ranges};
-use cranelift::codegen::ir::{
-    InstructionData, MemFlagsData, Opcode, StackSlotData, StackSlotKind, ValueDef,
-};
+use cranelift::codegen::ir::{InstructionData, MemFlagsData, Opcode, ValueDef};
 use cranelift::prelude::*;
 use cranelift_module::{DataDescription, DataId, Linkage, Module};
 use ryo_core::ast::CompoundOp;
 use ryo_core::tir::TirTag;
+use ryo_core::types::StringId;
 use std::collections::HashMap;
 
 /// Zero-divisor guard messages, written verbatim by `ryo_panic`
@@ -345,25 +344,39 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
-    /// Emit the I-177 prologue stack check: load the `RYO_STACK_LIMIT`
-    /// static and compare a probe stack-slot address against it,
-    /// branching to a deferred cold block when the frame would cross
-    /// the recorded limit. Called at function entry for every user
-    /// function; main's check runs before `ryo_rt_init` records the
-    /// limit (the static is 0 then — a live SP never compares below 0
-    /// unsigned — so it passes trivially).
+    /// Emit the I-177 stack-limit check before a user call to `callee`
+    /// when that call is a call-graph cycle edge (caller and callee in
+    /// the same recursive SCC, see `recursion`): load the
+    /// `RYO_STACK_LIMIT` static and compare the stack pointer against
+    /// it, branching to a deferred cold block when the frame has
+    /// crossed the recorded limit. Calls off every cycle, and repeat
+    /// cycle-edge calls in a block that already ran the check, emit
+    /// nothing — only recursion can grow the stack without bound, so
+    /// non-recursive code pays neither compile time nor run time.
     ///
-    /// The probe slot address is >= SP at all times, so the unsigned
-    /// compare fires before the OS guard page; the limit carries a
-    /// 32 KiB margin below the recorded base. The cold block is NOT
-    /// emitted here: like the guard panic blocks it is deferred to
-    /// end-of-function (`emit_stack_cold_block`).
-    pub(crate) fn emit_stack_check(
+    /// The limit carries a 32 KiB margin below the recorded base, which
+    /// absorbs the bounded frames of non-recursive callees and runtime
+    /// calls below the last check. Before `ryo_rt_init` runs the static
+    /// is 0 and the unsigned compare passes trivially. The cold block
+    /// is NOT emitted here: like the guard panic blocks it is deferred
+    /// to end-of-function (`emit_stack_cold_block`) and shared by every
+    /// check in the function.
+    pub(crate) fn maybe_emit_stack_check(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
+        callee: StringId,
     ) -> Result<(), String> {
-        // Declaring the imported data object per function is cheap —
-        // the module dedupes by name, so one import symbol per module.
+        let Some(&caller_scc) = ctx.recursive_sccs.get(&ctx.tir.name) else {
+            return Ok(());
+        };
+        if ctx.recursive_sccs.get(&callee) != Some(&caller_scc) {
+            return Ok(());
+        }
+        if ctx.stack_checked_block.is_some() && builder.current_block() == ctx.stack_checked_block {
+            return Ok(());
+        }
+        // Declaring the imported data object per check is cheap — the
+        // module dedupes by name, so one import symbol per module.
         let data_id = ctx
             .module
             .declare_data("RYO_STACK_LIMIT", Linkage::Import, false, false)
@@ -377,22 +390,21 @@ impl<M: Module> Codegen<M> {
         let limit = builder
             .ins()
             .load(ctx.int_type, MemFlagsData::trusted(), limit_ptr, 0);
-        let slot =
-            builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
-        let probe = builder.ins().stack_addr(ctx.int_type, slot, 0);
-        // `int_type` IS the target pointer type (see `Codegen::from_module`),
-        // so the probe address is already an integer of pointer width and
-        // feeds the compare directly (no ptr-to-int opcode in this
-        // Cranelift version).
-        let cmp = builder.ins().icmp(IntCC::UnsignedLessThan, probe, limit);
-        let cold = builder.create_block();
-        ctx.stack_cold_block = Some(cold);
+        // `int_type` IS the target pointer type (see `Codegen::from_module`).
+        // The stack pointer is read directly rather than through a probe
+        // stack slot, so the check adds no frame space.
+        let sp = builder.ins().get_stack_pointer(ctx.int_type);
+        let cmp = builder.ins().icmp(IntCC::UnsignedLessThan, sp, limit);
+        let cold = *ctx
+            .stack_cold_block
+            .get_or_insert_with(|| builder.create_block());
         let ok = builder.create_block();
         builder.ins().brif(cmp, cold, &[], ok, &[]);
         // `ok` has exactly one predecessor (the brif above), so it seals
         // immediately; the cold block is sealed when emitted.
         builder.seal_block(ok);
         builder.switch_to_block(ok);
+        ctx.stack_checked_block = Some(ok);
         Ok(())
     }
 

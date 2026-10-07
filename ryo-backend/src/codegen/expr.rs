@@ -1545,6 +1545,9 @@ impl<M: Module> Codegen<M> {
             .ok_or_else(|| format!("Undefined function: '{}'", name_str))?;
 
         let marshalled = Self::marshal_user_call_args(builder, ctx, r, out_slot)?;
+        // I-177: guard recursive (call-graph cycle) calls with the
+        // stack-limit check, right before the call instruction.
+        Self::maybe_emit_stack_check(builder, ctx, name_id)?;
         let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
         let ret_ty = ctx.tir.inst(r).ty;
 

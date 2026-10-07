@@ -338,8 +338,8 @@ fn current_stack_size() -> usize {
 }
 
 /// Lowest allowed stack address for this process: the stack base minus
-/// its size, plus a 32 KiB margin so the prologue check trips before
-/// the OS guard page. Pure — `base` is the address of a live stack
+/// its size, plus a 32 KiB margin so the recursive-call check trips
+/// before the OS guard page. Pure — `base` is the address of a live stack
 /// frame (`size` never exceeds it in practice), so the subtraction
 /// cannot underflow.
 fn stack_limit_from(base: usize, size: usize) -> usize {
@@ -349,8 +349,9 @@ fn stack_limit_from(base: usize, size: usize) -> usize {
 /// Message written by `ryo_stack_overflow` before exiting.
 pub const STACK_OVERFLOW_MSG: &[u8] = b"stack overflow\n";
 
-/// Runtime backing for the codegen prologue stack check: write the
-/// message to stderr and exit 101 — the `ryo_panic` contract.
+/// Runtime backing for the codegen stack-limit check (emitted before
+/// recursive calls): write the message to stderr and exit 101 — the
+/// `ryo_panic` contract.
 ///
 /// # Safety
 /// Never returns.
@@ -366,7 +367,7 @@ pub unsafe extern "C" fn ryo_stack_overflow() -> ! {
 }
 
 /// The lowest allowed stack address, recorded by `ryo_rt_init`. 0 =
-/// uninitialized — the codegen prologue check passes trivially then,
+/// uninitialized — the codegen stack check passes trivially then,
 /// since a real SP is never below 0 unsigned. Codegen reads this
 /// symbol directly; the atomic only guards the one-time store.
 #[unsafe(no_mangle)]
@@ -389,7 +390,7 @@ pub unsafe extern "C" fn ryo_rt_init(argc: c_int, argv: *const *const c_char) {
     // reader see argc but a stale/null ARGV (observable on ARM).
     ARGV.store(argv as *mut c_char, Ordering::Release);
     ARGC.store(argc as isize, Ordering::Release);
-    // Record the main-thread stack limit for the codegen prologue
+    // Record the main-thread stack limit for the codegen stack-limit
     // check: this frame's local is a live stack address, so it serves
     // as the base. Release, matching the ARGV/ARGC publication above.
     let base = &argc as *const c_int as usize;

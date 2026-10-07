@@ -1,9 +1,11 @@
-//! Object-symbol pin for the I-177 prologue stack check.
+//! Object-symbol pins for the I-177 stack-limit check.
 //! The CLIF text dump renders global-value symbols opaquely, so the
 //! earliest pipeline stage where the callee name survives is the AOT
-//! object's symbol table: every user function's prologue references
-//! the runtime's `ryo_stack_overflow` abort (via the deferred cold
-//! block), so the emitted object must contain that undefined symbol.
+//! object's symbol table: every recursive call (a call-graph cycle
+//! edge) is guarded by a check whose deferred cold block calls the
+//! runtime's `ryo_stack_overflow` abort, so the emitted object must
+//! contain that undefined symbol — and must not when no function is
+//! recursive (non-recursive code carries no check at all).
 
 use chumsky::Parser;
 use chumsky::input::Input;
@@ -58,15 +60,48 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 #[test]
-fn prologue_references_stack_overflow_abort() {
-    // Every user function's prologue loads RYO_STACK_LIMIT and branches
-    // to a cold block calling ryo_stack_overflow on failure. The data
-    // symbol reference does not survive as a name at any earlier stage
-    // inspectable from here, so pin the callee in the object symbol
-    // table instead (same pattern as obj_bytes_dead_drop.rs).
-    let obj = obj_bytes_of("fn f(n: int) -> int:\n\treturn n\n\nfn main():\n\tprint(f(1))\n");
+fn recursive_call_references_stack_overflow_abort() {
+    // The self-call is a cycle edge: it is preceded by a load of
+    // RYO_STACK_LIMIT and a branch to a cold block calling
+    // ryo_stack_overflow. The data symbol reference does not survive
+    // as a name at any earlier stage inspectable from here, so pin the
+    // callee in the object symbol table instead (same pattern as
+    // obj_bytes_dead_drop.rs).
+    let obj = obj_bytes_of(
+        "fn f(n: int) -> int:\n\tif n <= 0:\n\t\treturn 0\n\treturn f(n - 1) + 1\n\n\
+         fn main():\n\tprint(f(1))\n",
+    );
     assert!(
         contains(&obj, b"ryo_stack_overflow"),
-        "prologue stack check must reference ryo_stack_overflow"
+        "recursive call must be guarded by the stack check"
+    );
+}
+
+#[test]
+fn mutual_recursion_references_stack_overflow_abort() {
+    // Cycle edges are found per strongly connected component, so a
+    // mutually recursive pair is guarded even without self-calls.
+    let obj = obj_bytes_of(
+        "fn even(n: int) -> bool:\n\tif n == 0:\n\t\treturn true\n\treturn odd(n - 1)\n\n\
+         fn odd(n: int) -> bool:\n\tif n == 0:\n\t\treturn false\n\treturn even(n - 1)\n\n\
+         fn main():\n\tprint(even(4))\n",
+    );
+    assert!(
+        contains(&obj, b"ryo_stack_overflow"),
+        "mutually recursive calls must be guarded by the stack check"
+    );
+}
+
+#[test]
+fn non_recursive_program_has_no_stack_check() {
+    // No call-graph cycle, so no check and no reference to the abort.
+    let obj = obj_bytes_of(
+        "fn g(n: int) -> int:\n\treturn n * 2\n\n\
+         fn f(n: int) -> int:\n\treturn g(n) + 1\n\n\
+         fn main():\n\tprint(f(1))\n",
+    );
+    assert!(
+        !contains(&obj, b"ryo_stack_overflow"),
+        "non-recursive code must not carry the stack check"
     );
 }

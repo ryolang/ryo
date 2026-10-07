@@ -418,38 +418,27 @@ fn ir_emit_default_is_all_sections() {
     );
 }
 
-/// Slot discipline pin: every explicit stack slot is either a 24-byte
-/// STR_SLOT_SIZE slot or the I-177 prologue stack-check probe (one
-/// 8-byte slot per user function), and the 24-byte count is exactly
-/// `expected` — one per slot-out producer call site
-/// (`emit_slot_out_call` — which doubles as the binding's home when
-/// the result initializes a fat binding), one per inline-extraction
-/// scratch whose operand is neither home-backed nor static
-/// (`emit_fat_bytes_ptr_len` passes home-backed bindings and cap=0
-/// literals through without a spill), and one per promote-on-view site
-/// whose base has no home (`emit_ensure_heap_for_view_base`). The
-/// exact count keeps unexpected slot growth from creeping in
-/// unnoticed.
+/// Slot discipline pin: every explicit stack slot is a 24-byte
+/// STR_SLOT_SIZE slot, and their total count is exactly `expected` —
+/// one per slot-out producer call site (`emit_slot_out_call` — which
+/// doubles as the binding's home when the result initializes a fat
+/// binding), one per inline-extraction scratch whose operand is
+/// neither home-backed nor static (`emit_fat_bytes_ptr_len` passes
+/// home-backed bindings and cap=0 literals through without a spill),
+/// and one per promote-on-view site whose base has no home
+/// (`emit_ensure_heap_for_view_base`). The exact count keeps
+/// unexpected slot growth from creeping in unnoticed.
 fn assert_explicit_24byte_slots(clif: &str, expected: usize) {
     let slot_lines: Vec<&str> = clif
         .lines()
         .filter(|l| l.contains("explicit_slot"))
         .collect();
-    let data_slots: Vec<&str> = slot_lines
-        .iter()
-        .copied()
-        .filter(|l| !l.contains("explicit_slot 8,"))
-        .collect();
-    assert!(
-        slot_lines.len() > data_slots.len(),
-        "the I-177 probe slot must be present: {clif}"
-    );
     assert_eq!(
-        data_slots.len(),
+        slot_lines.len(),
         expected,
         "unexpected explicit-slot count (want {expected}): {clif}"
     );
-    for (i, line) in data_slots.iter().enumerate() {
+    for (i, line) in slot_lines.iter().enumerate() {
         assert!(
             line.contains("explicit_slot 24"),
             "stack slot {i} must be 24 bytes: {clif}"
@@ -591,13 +580,11 @@ fn count_calls_to(region: &str, fns: &[String]) -> usize {
         .count()
 }
 
-/// The CLIF text of a single block: the `blockN`/`blockN(...)` header
-/// line (matched at line start, so `brif` operand references to the
-/// same name don't alias) up to (but not including) the next block
-/// header.
-fn clif_block<'a>(clif: &'a str, name: &str) -> &'a str {
-    let needle = format!("\n{name}");
-    let start = clif.find(&needle).map(|i| i + 1).expect("block present");
+/// The CLIF text of the entry block (the `block0` header — `block0:` or
+/// `block0(v0: i64, ...):` — up to the next block header) of a
+/// single-function dump.
+fn clif_entry_block(clif: &str) -> &str {
+    let start = clif.find("block0").expect("dump has an entry block");
     let rest = &clif[start..];
     match rest[1..].find("\nblock") {
         Some(end) => &rest[..end + 1],
@@ -669,29 +656,16 @@ fn clif_str_literal_materialized_once_per_function() {
         "no runtime call may return the packed u128 pair anymore: {}",
         stdout
     );
-    // The I-177 prologue stack check splits the old entry block:
-    // block0 holds the check itself (one `symbol_value` — the
-    // RYO_STACK_LIMIT address) and ends in the check's `brif`; the
-    // hoisted literals land in block2, its fallthrough continuation,
-    // still before the loop header and dominating every use. Two
-    // distinct literals ("the quick brown fox", "fox") — "fox" appears
-    // at two source sites but must materialize only once.
-    let check_symbol_values = clif_block(&stdout, "block0")
+    // Two distinct literals ("the quick brown fox", "fox") — "fox"
+    // appears at two source sites but must materialize only once, in
+    // the entry block.
+    let entry_symbol_values = clif_entry_block(&stdout)
         .lines()
         .filter(|l| l.contains("symbol_value"))
         .count();
     assert_eq!(
-        check_symbol_values, 1,
-        "block0 holds only the prologue stack check: {}",
-        stdout
-    );
-    let literal_symbol_values = clif_block(&stdout, "block2")
-        .lines()
-        .filter(|l| l.contains("symbol_value"))
-        .count();
-    assert_eq!(
-        literal_symbol_values, 2,
-        "each distinct literal must be materialized exactly once, hoisted ahead of the loop: {}",
+        entry_symbol_values, 2,
+        "each distinct literal must be materialized exactly once, hoisted into the entry block: {}",
         stdout
     );
 }

@@ -44,6 +44,7 @@ mod expr;
 mod frees;
 mod jit;
 mod ranges;
+mod recursion;
 mod str_ops;
 mod structs;
 mod tail;
@@ -263,6 +264,12 @@ pub struct Codegen<M: Module> {
     /// which Cranelift allows `return_call`. Recomputed per
     /// compilation; empty before the first one.
     tail_candidates: HashSet<StringId>,
+    /// Strongly-connected-component id of every function on a
+    /// call-graph cycle (I-177), from `recursion::scan_recursive_sccs`
+    /// in `prepare_compilation`. Calls between two functions sharing
+    /// an id are the only ones that get the stack-limit check.
+    /// Recomputed per compilation; empty before the first one.
+    recursive_sccs: HashMap<StringId, u32>,
 }
 
 /// Overflow guard message for the spec §18 checked-arithmetic traps.
@@ -594,11 +601,21 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// path falls through the guard `brif` instead of jumping over
     /// inline panic code.
     panic_blocks: Vec<(&'static str, Block)>,
-    /// Cold block for the prologue stack-limit check (I-177), created
-    /// by `emit_stack_check` at function entry and emitted
-    /// end-of-function beside the deferred panic blocks. One per
-    /// function; `None` before the check is emitted.
+    /// Cold block for the stack-limit check (I-177), created by the
+    /// first `emit_stack_check` in the function and shared by every
+    /// later check; emitted end-of-function beside the deferred panic
+    /// blocks. `None` while no check has been emitted.
     stack_cold_block: Option<Block>,
+    /// SCC ids of the recursive functions (`Codegen::recursive_sccs`):
+    /// a user call gets the stack-limit check iff caller and callee
+    /// share an id (a call-graph cycle edge).
+    recursive_sccs: &'a HashMap<StringId, u32>,
+    /// Block the last stack-limit check fell through into. The stack
+    /// pointer is fixed for the whole function body, so a check that
+    /// already ran earlier in the current block covers every later
+    /// cycle-edge call in it (e.g. both recursive calls of
+    /// `fibonacci`).
+    stack_checked_block: Option<Block>,
 }
 
 impl<M: Module> Codegen<M> {
@@ -615,6 +632,7 @@ impl<M: Module> Codegen<M> {
             runtime_fns: HashMap::new(),
             name_ids: CodegenNameIds::default(),
             tail_candidates: HashSet::new(),
+            recursive_sccs: HashMap::new(),
         }
     }
 }
@@ -684,6 +702,9 @@ impl<M: Module> Codegen<M> {
         // compiles them with CallConv::Tail (see
         // `tail::scan_tail_call_candidates` for the scope).
         self.tail_candidates = tail::scan_tail_call_candidates(tirs, self.name_ids.main);
+        // I-177 pre-pass: find the call-graph cycles whose edges get
+        // the stack-limit check (see `recursion` for the rationale).
+        self.recursive_sccs = recursion::scan_recursive_sccs(tirs);
         self.declare_all_functions(tirs, pool)
     }
 
@@ -1282,14 +1303,9 @@ impl<M: Module> Codegen<M> {
                 runtime_fns: &mut self.runtime_fns,
                 panic_blocks: Vec::new(),
                 stack_cold_block: None,
+                recursive_sccs: &self.recursive_sccs,
+                stack_checked_block: None,
             };
-
-            // Prologue stack-limit check (I-177), before any body
-            // instruction. For `main` the check runs before the
-            // `ryo_rt_init` shim records the real limit — the static
-            // is still 0 then, and a live SP never compares below 0
-            // unsigned, so it passes trivially.
-            Self::emit_stack_check(&mut builder, &mut ctx)?;
 
             for (idx, param) in tir.params.iter().enumerate() {
                 if is_fat_type(param.ty, pool) {
