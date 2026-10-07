@@ -55,6 +55,22 @@ fn struct_literal_unknown_and_duplicate_fields() {
 }
 
 #[test]
+fn bad_field_suppresses_consequential_missing_fields_error() {
+    // 'z' is unknown (E0038) and 'y' is absent; the derived
+    // 'missing field(s)' error (E0039) must not pile on (I-203).
+    let unknown = "struct Point:\n\tx: int\n\ty: int\n\nfn main():\n\tp = Point{z=1, x=2}\n";
+    let (_t, diags, _p) = run_with_errors(unknown);
+    assert_eq!(diags.len(), 1, "expected exactly one error: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::UnknownField);
+
+    // Same for the duplicate-field shape.
+    let dup = "struct Point:\n\tx: int\n\ty: int\n\nfn main():\n\tp = Point{x=1, x=2}\n";
+    let (_t, diags, _p) = run_with_errors(dup);
+    assert_eq!(diags.len(), 1, "expected exactly one error: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::DuplicateStructField);
+}
+
+#[test]
 fn struct_literal_field_type_mismatch() {
     let src = "struct Point:\n\tx: float\n\nfn main():\n\tp = Point{x=1}\n";
     let (_t, diags, _p) = run_with_errors(src);
