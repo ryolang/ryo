@@ -12,6 +12,8 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 - 🟡 **Correctness/Hygiene** — silent bug or invariant gap; works today, will bite later.
 - 🟢 **Cleanup** — code health, ergonomics, minor.
 
+**Area** names the single component where the fix primarily lands (cross-cutting entries pick the most-represented one): frontend-lexer, frontend-parser, sema, ownership, codegen, runtime, linker-toolchain, driver-cli, core-ir, docs-spec, ci-benchmarks, tooling.
+
 ---
 
 ### I-011 — Manual error enum where `thiserror` would suffice
