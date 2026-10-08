@@ -104,12 +104,16 @@ def locked(issues_file):
 
     Guards against concurrent issue.py invocations (two `file` runs must
     not allocate the same id; a `file` must not interleave with a `delete`).
-    No-op where fcntl is unavailable.
+    The lock is taken on a stable sidecar (issues_file + ".lock"), never on
+    the data file itself: write_atomic() replaces the data file's inode via
+    os.replace, so a flock on the old inode would silently stop protecting
+    the path. No-op where fcntl is unavailable.
     """
     if fcntl is None:
         yield
         return
-    fh = open(issues_file, "r+b")
+    lock_path = issues_file.with_name(issues_file.name + ".lock")
+    fh = open(lock_path, "a+b")
     try:
         fcntl.flock(fh, fcntl.LOCK_EX)
         yield
