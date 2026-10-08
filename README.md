@@ -43,7 +43,7 @@ export PATH="$HOME/.ryo/bin:$PATH"
 ryo --version
 ```
 
-Dev builds are manually triggered and may be unstable. Update with `--force`:
+Dev builds are manually triggered and may be unstable. Update with `--force` (overwrites the existing install without prompting — re-running without it asks first, and refuses non-interactively):
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ryolang/ryo/main/install.sh | sh -s -- --force
 ```
