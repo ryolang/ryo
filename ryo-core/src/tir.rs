@@ -130,18 +130,7 @@ impl TirRef {
 
 // ---------- ExtraRange ----------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExtraRange {
-    pub offset: u32,
-    pub len: u32,
-}
-
-impl ExtraRange {
-    pub fn as_range(self) -> std::ops::Range<usize> {
-        let start = self.offset as usize;
-        start..start + self.len as usize
-    }
-}
+pub use crate::extra::ExtraRange;
 
 // ---------- Instruction tags ----------
 

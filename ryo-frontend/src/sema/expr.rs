@@ -1250,7 +1250,10 @@ pub(crate) fn check_binary_op(
                     fcx.builder.unreachable(sema.pool.error_type(), span)
                 }
             }
-            TypeKind::Void | TypeKind::Never | TypeKind::View(_) => {
+            // M11 placeholder: enum equality/ordering arrive with the
+            // EnumEq/EnumNe lowering; until then enums fall through to
+            // the unsupported-operator diagnostic like other aggregates.
+            TypeKind::Enum | TypeKind::Void | TypeKind::Never | TypeKind::View(_) => {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UnsupportedOperator,
@@ -1304,6 +1307,7 @@ pub(crate) fn check_binary_op(
             | TypeKind::AnonStruct
             | TypeKind::Struct
             | TypeKind::Bytes
+            | TypeKind::Enum
             | TypeKind::View(_) => {
                 sema.sink.emit(Diag::error(
                     span,

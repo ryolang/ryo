@@ -130,8 +130,13 @@ enum Tag {
     /// self-references can be detected; `define_struct` fills `data`
     /// with the index into `extra` of the layout block.
     Struct,
+    /// Nominal enum (M11). Two-phase, exactly like `Tag::Struct`:
+    /// `declare_enum` pushes the item with `data == u32::MAX`;
+    /// `define_enum` fills `data` with the index into `extra` of the
+    /// layout block.
+    Enum,
     // Reserved for later phases — not constructed today:
-    //   Func, Enum, Option, ErrorUnion.
+    //   Func, Option, ErrorUnion.
     // Adding any of those is a new `Tag` variant and a new arm in
     // `kind`/`Display`; storage shape is already in place.
 }
@@ -155,6 +160,10 @@ const ID_NEVER: u32 = 6;
 const ID_STRVIEW: u32 = 7;
 const ID_BYTES: u32 = 8;
 const ID_BYTESVIEW: u32 = 9;
+
+/// Byte size of the `i32` discriminant every enum value carries at
+/// offset 0 (M11 spec §2).
+const ENUM_TAG_SIZE: u32 = 4;
 
 // ---------- Public TypeKind facade ----------
 
@@ -197,6 +206,9 @@ pub enum TypeKind {
     /// Nominal struct (M9). Identity is the declared name; layout and
     /// fields are read back via [`InternPool::struct_view`].
     Struct,
+    /// Nominal enum (M11). Identity is the declared name; variants and
+    /// layout are read back via [`InternPool::enum_view`].
+    Enum,
 }
 
 /// The CLOSED set of projection kinds (final spec §3.1, D1).
@@ -318,6 +330,123 @@ pub struct StructField {
     pub idx: u32,
 }
 
+/// Payload shape of an enum variant (M11).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum VariantKind {
+    /// `Red` — no payload.
+    Unit,
+    /// `Success(int)` — positional payload; field names are the
+    /// synthesized `"0"`, `"1"`, … strings (astgen interns them).
+    Tuple,
+    /// `Error(code: int)` — named fields, exactly like a struct body.
+    Named,
+}
+
+impl VariantKind {
+    fn to_raw(self) -> u32 {
+        self as u32
+    }
+
+    fn from_raw(raw: u32) -> Self {
+        match raw {
+            0 => VariantKind::Unit,
+            1 => VariantKind::Tuple,
+            2 => VariantKind::Named,
+            _ => unreachable!("invalid VariantKind word in enum payload"),
+        }
+    }
+}
+
+/// Input description of one enum variant, passed to
+/// [`InternPool::define_enum`]. Tuple-variant fields carry the
+/// synthesized names `"0"`, `"1"`, … so all payload handling is uniform.
+#[derive(Clone, Debug)]
+pub struct EnumVariantDef {
+    pub name: StringId,
+    pub kind: VariantKind,
+    pub fields: Vec<(StringId, TypeId)>,
+}
+
+/// Borrowed read-back view of one enum variant (M11). `fields` borrows
+/// the pool's `enum_fields` side arena, so decoding allocates nothing.
+#[derive(Clone, Debug)]
+pub struct EnumVariantView<'a> {
+    pub name: StringId,
+    pub kind: VariantKind,
+    /// Byte offset of the variant's payload from the enum base.
+    pub offset: u32,
+    /// Payload fields in declaration order, offsets absolute from the
+    /// enum base.
+    pub fields: &'a [StructField],
+}
+
+/// Borrowed read-back view of a defined enum's interned payload (M11),
+/// returned by [`InternPool::enum_view`].
+pub struct EnumView<'a> {
+    pool: &'a InternPool,
+    /// Index into `extra` of the layout block.
+    start: usize,
+}
+
+impl<'a> EnumView<'a> {
+    pub fn name(&self) -> StringId {
+        StringId::from_raw(self.pool.extra[self.start])
+    }
+
+    pub fn size_align(&self) -> (u32, u32) {
+        (
+            self.pool.extra[self.start + 2],
+            self.pool.extra[self.start + 3],
+        )
+    }
+
+    /// True when every payload field of every variant is Copy.
+    pub fn is_copy(&self) -> bool {
+        StructFlags::unpack(self.pool.extra[self.start + 4]).0
+    }
+
+    /// `#[derive(Eq)]` was present on the declaration (same flag word
+    /// as structs; M9.1 semantics apply verbatim to enums).
+    pub fn is_eq(&self) -> bool {
+        StructFlags::unpack(self.pool.extra[self.start + 4])
+            .1
+            .derive_eq
+    }
+
+    pub fn len(&self) -> usize {
+        self.pool.extra[self.start + 1] as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Variants in declaration order.
+    pub fn variants(&self) -> impl Iterator<Item = EnumVariantView<'a>> + '_ {
+        let pool = self.pool;
+        let n = self.len();
+        let mut vcur = self.start + 6; // header(5 words) + fields_base(1)
+        let mut fcur = pool.extra[self.start + 5] as usize;
+        (0..n).map(move |_| {
+            let name = StringId::from_raw(pool.extra[vcur]);
+            let kind = VariantKind::from_raw(pool.extra[vcur + 1]);
+            let offset = pool.extra[vcur + 2];
+            let n_fields = pool.extra[vcur + 3] as usize;
+            let fields = &pool.enum_fields[fcur..fcur + n_fields];
+            // Skip this variant's interleaved `[field_name, field_type]` pairs.
+            vcur += 4 + 2 * n_fields;
+            fcur += n_fields;
+            EnumVariantView {
+                name,
+                kind,
+                offset,
+                fields,
+            }
+        })
+    }
+}
+
 // ---------- Pool ----------
 
 /// Interned types and strings, modelled on Zig's `InternPool.zig`.
@@ -350,6 +479,14 @@ pub struct InternPool {
     /// Unlike `type_dedup` this is a plain map — the key is the
     /// `StringId` handle itself, no arena probing needed.
     struct_names: std::collections::HashMap<StringId, TypeId>,
+
+    /// Nominal dedup for enums (M11); same identity rule as
+    /// `struct_names`. Cross-kind collisions are rejected upstream.
+    enum_names: std::collections::HashMap<StringId, TypeId>,
+
+    /// Decoded enum payload fields (M11), appended per variant in
+    /// declaration order; `enum_view` borrows slices of this arena.
+    enum_fields: Vec<StructField>,
 
     /// Single shared `BuildHasher` so probe-time and resize-time
     /// hashes match. `DefaultHashBuilder` is hashbrown's default
@@ -446,6 +583,8 @@ impl InternPool {
             strings: Vec::new(),
             string_dedup: HashTable::new(),
             struct_names: std::collections::HashMap::new(),
+            enum_names: std::collections::HashMap::new(),
+            enum_fields: Vec::new(),
             hasher: DefaultHashBuilder::default(),
         };
         // Order matters: must match ID_VOID..ID_ERROR.
@@ -530,6 +669,7 @@ impl InternPool {
             },
             Tag::AnonStruct => TypeKind::AnonStruct,
             Tag::Struct => TypeKind::Struct,
+            Tag::Enum => TypeKind::Enum,
         }
     }
 
@@ -591,6 +731,7 @@ impl InternPool {
             // panics in `struct_view` (trusted-producer contract:
             // define before querying).
             TypeKind::Struct | TypeKind::AnonStruct => self.struct_view(ty).is_copy,
+            TypeKind::Enum => self.enum_view(ty).is_copy(),
             _ => false,
         }
     }
@@ -610,6 +751,9 @@ impl InternPool {
             // `define_struct`. Same trusted-producer contract as
             // `is_copy` — define before querying.
             TypeKind::Struct => self.struct_view(ty).is_eq(),
+            // Enums (M11): the same flag recorded by `define_enum`;
+            // sema gates the derive like it does for structs.
+            TypeKind::Enum => self.enum_view(ty).is_eq(),
             TypeKind::AnonStruct => self
                 .struct_view(ty)
                 .fields
@@ -896,10 +1040,145 @@ impl InternPool {
             .find(|f| f.name == field)
     }
 
+    // ----- Enums (M11) -----
+
+    /// Reserve the identity of an enum by name. Deduped: declaring
+    /// the same name twice returns the same `TypeId` — two-phase,
+    /// exactly like [`InternPool::declare_struct`]: `data == u32::MAX`
+    /// until `define_enum` fills the payload.
+    pub fn declare_enum(&mut self, name: StringId) -> TypeId {
+        if let Some(&id) = self.enum_names.get(&name) {
+            return id;
+        }
+        let id = TypeId(
+            u32::try_from(self.items.len())
+                .expect("type pool overflow: more than u32::MAX types interned"),
+        );
+        self.items.push(Item {
+            tag: Tag::Enum,
+            data: u32::MAX,
+        });
+        self.enum_names.insert(name, id);
+        id
+    }
+
+    /// Fill a declared enum's payload: variant directory, computed
+    /// layout, and the inferred Copy flag. Layout (M11 spec §2): `i32`
+    /// tag at offset 0; each variant's payload is a struct layout
+    /// placed at `align_up(4, payload_align)` — a payload of at most
+    /// one word packs right after the tag; `size = align_up(end_of_
+    /// largest_payload, max(4, max_variant_align))`. Offsets are
+    /// absolute; payload types must be fully defined first.
+    ///
+    /// Extra block at `data`: `[name, n_variants, size, align, flags,
+    /// fields_base]`, then per variant `[name, kind, offset, n_fields]`
+    /// then per field `[field_name, field_type]`. `flags` is
+    /// `flags.pack(is_copy)` — `define_struct`'s word verbatim, so
+    /// `#[derive(Eq)]` rides bit 1. `fields_base` indexes the
+    /// `enum_fields` side arena, which holds the full `StructField`
+    /// records so `enum_view` borrows slices, never a per-decode `Vec`.
+    ///
+    /// Trusted-producer contract: panics on an undefined or
+    /// already-defined id, zero variants, or duplicate variant names
+    /// (astgen pre-validates all three).
+    pub fn define_enum(
+        &mut self,
+        id: TypeId,
+        name: StringId,
+        variants: &[EnumVariantDef],
+        flags: StructFlags,
+    ) {
+        let item = self.items[id.0 as usize];
+        debug_assert!(matches!(item.tag, Tag::Enum));
+        assert!(item.data == u32::MAX, "define_enum: enum already defined");
+        assert!(!variants.is_empty(), "enum needs at least one variant");
+        let mut seen = std::collections::HashSet::with_capacity(variants.len());
+        for v in variants {
+            assert!(seen.insert(v.name), "duplicate variant name");
+        }
+
+        // Pass 1: per-variant payload layout (struct rules) plus the enum-wide accumulation.
+        let mut end = ENUM_TAG_SIZE; // end of the largest payload
+        let mut max_align = ENUM_TAG_SIZE; // enum align >= tag align
+        let mut is_copy = true;
+        let mut offsets = Vec::with_capacity(variants.len());
+        let mut field_offsets = Vec::with_capacity(variants.len());
+        for v in variants {
+            let mut payload_end = 0u32;
+            let mut payload_align = 1u32;
+            let mut rel_offsets = Vec::with_capacity(v.fields.len());
+            for &(_, fty) in &v.fields {
+                let (fsize, falign) = self.size_align(fty);
+                payload_end = payload_end.next_multiple_of(falign);
+                rel_offsets.push(payload_end);
+                payload_end = payload_end
+                    .checked_add(fsize)
+                    .expect("enum payload layout overflow: size exceeds u32::MAX");
+                payload_align = payload_align.max(falign);
+                is_copy &= self.is_copy(fty);
+            }
+            let payload_size = payload_end.next_multiple_of(payload_align);
+            let offset = if payload_size <= 2 * ENUM_TAG_SIZE {
+                ENUM_TAG_SIZE // word-sized payload shares the tag's slot
+            } else {
+                ENUM_TAG_SIZE.next_multiple_of(payload_align)
+            };
+            let vend = offset
+                .checked_add(payload_size)
+                .expect("enum layout overflow");
+            end = end.max(vend);
+            max_align = max_align.max(payload_align);
+            offsets.push(offset);
+            field_offsets.push(rel_offsets);
+        }
+        let size = end.next_multiple_of(max_align);
+
+        // Pass 2: header + directory in `extra`, full field records in the side arena.
+        let data = u32::try_from(self.extra.len())
+            .expect("extra arena overflow: more than u32::MAX u32 entries");
+        let fields_base = u32::try_from(self.enum_fields.len()).expect("enum fields overflow");
+        self.extra.extend_from_slice(&[
+            name.raw(),
+            u32::try_from(variants.len()).expect("enum variant count overflow"),
+            size,
+            max_align,
+            flags.pack(is_copy),
+            fields_base,
+        ]);
+        for ((v, offset), rel_offsets) in variants.iter().zip(&offsets).zip(&field_offsets) {
+            let n_fields = u32::try_from(v.fields.len()).expect("enum field count overflow");
+            self.extra
+                .extend_from_slice(&[v.name.raw(), v.kind.to_raw(), *offset, n_fields]);
+            for (idx, ((fname, fty), rel)) in v.fields.iter().zip(rel_offsets).enumerate() {
+                self.extra.extend_from_slice(&[fname.raw(), fty.raw()]);
+                self.enum_fields.push(StructField {
+                    name: *fname,
+                    ty: *fty,
+                    offset: *offset + rel,
+                    idx: u32::try_from(idx).expect("enum payload field index overflow"),
+                });
+            }
+        }
+        self.items[id.0 as usize].data = data;
+    }
+
+    /// Read back a defined enum's payload. Same trusted-producer
+    /// contract as `struct_view`: define before querying.
+    pub fn enum_view(&self, id: TypeId) -> EnumView<'_> {
+        let item = self.items[id.0 as usize];
+        debug_assert!(matches!(item.tag, Tag::Enum));
+        debug_assert!(item.data != u32::MAX, "enum_view on undefined enum");
+        EnumView {
+            pool: self,
+            start: item.data as usize,
+        }
+    }
+
     /// `(size, align)` in bytes for types with a fixed layout:
     /// bool (1,1); int/float (8,8); str/bytes (24,8); view (16,8);
     /// struct (M9 nominal / M10 anon) → the layout stored at
-    /// define/intern time.
+    /// define/intern time; enum (M11) → the layout computed by
+    /// `define_enum`.
     pub fn size_align(&self, ty: TypeId) -> (u32, u32) {
         match self.kind(ty) {
             TypeKind::Bool => (1, 1),
@@ -910,16 +1189,22 @@ impl InternPool {
                 let v = self.struct_view(ty);
                 (v.size, v.align)
             }
+            TypeKind::Enum => self.enum_view(ty).size_align(),
             other => unreachable!("size_align: no layout for {other:?}"),
         }
     }
 
     /// True for types that own heap state and must be dropped:
-    /// `str`/`bytes`, or a struct that is not Copy.
+    /// `str`/`bytes`, a struct that is not Copy, or an enum with any
+    /// needs-drop field in any variant (M11).
     pub fn needs_drop(&self, ty: TypeId) -> bool {
         match self.kind(ty) {
             TypeKind::Str | TypeKind::Bytes => true,
             TypeKind::Struct | TypeKind::AnonStruct => !self.struct_view(ty).is_copy,
+            TypeKind::Enum => self
+                .enum_view(ty)
+                .variants()
+                .any(|v| v.fields.iter().any(|f| self.needs_drop(f.ty))),
             _ => false,
         }
     }
@@ -1099,6 +1384,10 @@ impl fmt::Display for DisplayType<'_> {
             TypeKind::Struct => {
                 let view = self.pool.struct_view(self.id);
                 write!(f, "{}", self.pool.str(view.name))
+            }
+            TypeKind::Enum => {
+                let view = self.pool.enum_view(self.id);
+                write!(f, "{}", self.pool.str(view.name()))
             }
         }
     }
@@ -1598,5 +1887,113 @@ mod tests {
         assert_eq!(view.fields[1].offset, 16);
         assert_eq!((view.size, view.align), (32, 8));
         assert!(view.is_copy); // nested Copy struct stays Copy
+    }
+
+    fn unit_variant(name: StringId) -> EnumVariantDef {
+        EnumVariantDef {
+            name,
+            kind: VariantKind::Unit,
+            fields: vec![],
+        }
+    }
+
+    fn tuple_variant(name: StringId, fields: Vec<(StringId, TypeId)>) -> EnumVariantDef {
+        EnumVariantDef {
+            name,
+            kind: VariantKind::Tuple,
+            fields,
+        }
+    }
+
+    fn named_variant(name: StringId, fields: Vec<(StringId, TypeId)>) -> EnumVariantDef {
+        EnumVariantDef {
+            name,
+            kind: VariantKind::Named,
+            fields,
+        }
+    }
+
+    const EQ_FLAGS: StructFlags = StructFlags {
+        derive_eq: true,
+        repr_c: false,
+    };
+
+    #[test]
+    fn enum_unit_variants_layout_copy_nominal_and_eq_flag() {
+        // (a)+(c) unit variants are (4,4) Copy; distinct nominal ids.
+        let mut pool = InternPool::new();
+        let color = pool.intern_str("Color");
+        let red = pool.intern_str("Red");
+        let green = pool.intern_str("Green");
+        let blue = pool.intern_str("Blue");
+        let id = pool.declare_enum(color);
+        assert_eq!(id, pool.declare_enum(color)); // nominal dedup
+        let r = unit_variant(red);
+        let g = unit_variant(green);
+        let b = unit_variant(blue);
+        pool.define_enum(id, color, &[r.clone(), g, b], StructFlags::default());
+        assert_eq!(pool.size_align(id), (4, 4));
+        assert!(pool.is_copy(id));
+        assert_eq!(pool.display(id).to_string(), "Color");
+        // Same variant shape under a different name: nominal identity.
+        let shade = pool.intern_str("Shade");
+        let other = pool.declare_enum(shade);
+        pool.define_enum(other, shade, &[r], EQ_FLAGS);
+        assert_ne!(id, other);
+        assert!(pool.enum_view(other).is_eq());
+    }
+
+    #[test]
+    fn enum_mixed_payload_layout_offsets() {
+        // (b) Result{Success(int), Error(str)}: word payload packs after the tag.
+        let mut pool = InternPool::new();
+        let result = pool.intern_str("Result");
+        let (success, error) = (pool.intern_str("Success"), pool.intern_str("Error"));
+        let f0 = pool.intern_str("0");
+        let (int, str_) = (pool.int(), pool.str_());
+        let id = pool.declare_enum(result);
+        let s = tuple_variant(success, vec![(f0, int)]);
+        let e = tuple_variant(error, vec![(f0, str_)]);
+        pool.define_enum(id, result, &[s, e], StructFlags::default());
+        assert!(!pool.is_copy(id));
+        assert!(pool.needs_drop(id));
+        assert_eq!(pool.size_align(id), (32, 8));
+        let variants: Vec<_> = pool.enum_view(id).variants().collect();
+        assert_eq!(variants[0].offset, 4);
+        assert_eq!((variants[1].name, variants[1].offset), (error, 8));
+        assert_eq!(variants[1].fields[0].offset, 8);
+    }
+
+    #[test]
+    fn enum_view_iterates_variants_offsets_and_tuple_index_names() {
+        // (d)+(f) synthesized "0"/"1" tuple names; decl-order offsets.
+        let mut pool = InternPool::new();
+        let shape = pool.intern_str("Shape");
+        let (rect, pair) = (pool.intern_str("Rectangle"), pool.intern_str("Pair"));
+        let (w, h) = (pool.intern_str("w"), pool.intern_str("h"));
+        let (n0, n1) = (pool.intern_str("0"), pool.intern_str("1"));
+        let (int, str_, float) = (pool.int(), pool.str_(), pool.float());
+        let id = pool.declare_enum(shape);
+        let rv = named_variant(rect, vec![(w, float), (h, float)]);
+        let pv = tuple_variant(pair, vec![(n0, int), (n1, str_)]);
+        pool.define_enum(id, shape, &[rv, pv], StructFlags::default());
+        // Pair's 32-byte payload aligns to 8, pushing the enum to 40.
+        assert_eq!(pool.size_align(id), (40, 8));
+        let variants: Vec<_> = pool.enum_view(id).variants().collect();
+        assert_eq!(variants[0].kind, VariantKind::Named);
+        assert_eq!(variants[0].offset, 8);
+        assert_eq!(variants[0].fields[1].offset, 16);
+        assert_eq!(variants[1].offset, 8);
+        assert_eq!(variants[1].fields[0].name, n0);
+        assert_eq!(variants[1].fields[1].name, n1);
+    }
+
+    #[test]
+    #[should_panic(expected = "at least one variant")]
+    fn enum_define_with_zero_variants_panics() {
+        let mut pool = InternPool::new();
+        let name = pool.intern_str("Empty");
+        let id = pool.declare_enum(name);
+        pool.define_enum(id, name, &[], StructFlags::default());
     }
 }
