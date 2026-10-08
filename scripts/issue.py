@@ -321,16 +321,23 @@ COMMANDS = {"next": cmd_next, "list": cmd_list, "file": cmd_file, "delete": cmd_
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", nargs="?", help="issue id (I-032 or 32) or subcommand: next, list, file, delete")
-    ap.add_argument("target", nargs="?", help="issue id, for: delete")
-    ap.add_argument("--title", help="file: entry title")
-    ap.add_argument("--severity", help="file: Blocking / Correctness / Hygiene / Cleanup")
-    ap.add_argument("--area", help="file: compiler area (see --help for the list); also list: filter by area")
-    ap.add_argument("--files", help="file: affected files field")
-    ap.add_argument("--summary", help="file: summary field")
-    ap.add_argument("--resolution", help="file: resolution field")
-    ap.add_argument("--yes", action="store_true", help="delete: skip the confirmation prompt")
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        usage="%(prog)s [-h] [--file FILE] <issue-id | next | list | file | delete> [target] [flags]",
+    )
+    ap.add_argument("command", nargs="?", metavar="command",
+                    help="an issue id (I-032 or 32) to print, or a subcommand: next, list, file, delete")
+    ap.add_argument("target", nargs="?", metavar="target", help="issue id (only with: delete)")
+    file_opts = ap.add_argument_group("file options (prompted when omitted)")
+    file_opts.add_argument("--title", help="entry title")
+    file_opts.add_argument("--severity", help="Blocking / Correctness / Hygiene / Cleanup")
+    file_opts.add_argument("--area", help="one of: " + " / ".join(AREAS) + "; with 'list', filter by area")
+    file_opts.add_argument("--files", help="affected files field")
+    file_opts.add_argument("--summary", help="summary field")
+    file_opts.add_argument("--resolution", help="resolution field")
+    del_opts = ap.add_argument_group("delete options")
+    del_opts.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     ap.add_argument("--file", default="ISSUES.md", type=Path, help="Path to ISSUES.md (default: ./ISSUES.md)")
     args = ap.parse_args()
 
@@ -347,7 +354,8 @@ def main():
     elif args.command:
         cmd_show(entries, args.file, args)
     else:
-        ap.error("give an issue id or a subcommand: next, list, file, delete")
+        ap.print_help()
+        sys.exit(2)
 
 
 if __name__ == "__main__":
