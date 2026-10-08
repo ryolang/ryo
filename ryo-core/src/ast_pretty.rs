@@ -15,10 +15,10 @@
 
 use crate::ast::{
     Ast, ExprId, ExprKind, FunctionDef, IfStmt, Literal, PatternId, PatternKind, StmtId, StmtKind,
-    TypeExpr, TypeExprKind, VarDecl,
+    TypeExpr, TypeExprKind, VarDecl, VariantArgs,
 };
 use crate::tir::ParamMode;
-use crate::types::InternPool;
+use crate::types::{InternPool, VariantKind};
 use std::borrow::Cow;
 use std::fmt;
 use std::fmt::Write as _;
@@ -112,6 +112,7 @@ fn write_stmt_inline(out: &mut String, ast: &Ast, stmt: StmtId) -> fmt::Result {
         StmtKind::VarDecl(_) => "VarDecl",
         StmtKind::FunctionDef(_) => "FunctionDef",
         StmtKind::StructDef(_) => "StructDef",
+        StmtKind::EnumDef(_) => "EnumDef",
         StmtKind::Return(_) => "Return",
         StmtKind::ExprStmt(_) => "ExprStmt",
         StmtKind::IfStmt(_) => "IfStmt",
@@ -173,6 +174,35 @@ fn write_stmt_children(
                     pool.str(*field_name),
                     fmt_type_expr(field_ty, ast, pool)
                 )?;
+            }
+            Ok(())
+        }
+        StmtKind::EnumDef(def) => {
+            writeln!(out, "{}EnumDef: {}", prefix, pool.str(def.name.name))?;
+            let inner = format!("{}  ", prefix);
+            for variant in ast.enum_variants(def.variants) {
+                let shape = match variant.payload.kind {
+                    VariantKind::Unit => "unit",
+                    VariantKind::Tuple => "tuple",
+                    VariantKind::Named => "named",
+                };
+                write!(
+                    out,
+                    "{}├── variant: {} ({})",
+                    inner,
+                    pool.str(variant.name.name),
+                    shape
+                )?;
+                let fields = ast.struct_field_decls(variant.payload.fields);
+                for (field_name, field_ty) in fields {
+                    write!(
+                        out,
+                        " {}: {}",
+                        pool.str(*field_name),
+                        fmt_type_expr(field_ty, ast, pool)
+                    )?;
+                }
+                writeln!(out)?;
             }
             Ok(())
         }
@@ -418,6 +448,11 @@ fn write_expr(
         ExprKind::FieldAccess { field, .. } => {
             Cow::Owned(format!("FieldAccess(.{})", pool.str(field.name)))
         }
+        ExprKind::VariantConstruct(c) => Cow::Owned(format!(
+            "VariantConstruct({}.{})",
+            pool.str(c.enum_name.name),
+            pool.str(c.variant.name)
+        )),
     };
 
     writeln!(
@@ -484,6 +519,31 @@ fn write_expr(
         ExprKind::FieldAccess { object, .. } => {
             write_expr(out, ast, object, &new_prefix, true, "object: ", pool)
         }
+        ExprKind::VariantConstruct(c) => match &c.args {
+            Some(VariantArgs {
+                positional: Some(list),
+                ..
+            }) => write_expr_args(out, ast, ast.expr_list(*list), &new_prefix, pool),
+            Some(VariantArgs {
+                named: Some(inits), ..
+            }) => {
+                let inits = ast.struct_field_inits(*inits);
+                for (i, (name, value)) in inits.iter().enumerate() {
+                    let label = format!("{}: ", pool.str(*name));
+                    write_expr(
+                        out,
+                        ast,
+                        *value,
+                        &new_prefix,
+                        i == inits.len() - 1,
+                        &label,
+                        pool,
+                    )?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        },
     }
 }
 

@@ -183,9 +183,10 @@ fn parse_source(
             RichReason::Custom(pd) => {
                 let diag = Diag::error(span, pd.code(), pd.message(pool));
                 let diag = match pd {
-                    ParseDiag::MisplacedAttribute => {
-                        diag.with_note(None, "attributes are only supported on struct definitions")
-                    }
+                    ParseDiag::MisplacedAttribute => diag.with_note(
+                        None,
+                        "attributes are only supported on struct and enum definitions",
+                    ),
                     _ => diag,
                 };
                 sink.emit(diag);
@@ -456,6 +457,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::DestructureUnknownField => "E0114",
         DiagCode::DestructurePositionalOnNamed => "E0115",
         DiagCode::AnonFieldNotEq => "E0116",
+        DiagCode::ReprCOnEnum => "E0117",
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::InvalidCharacter => "E0102",
         DiagCode::UnknownEscape => "E0103",
@@ -900,6 +902,7 @@ mod tests {
             (DiagCode::DestructureUnknownField, "E0114"),
             (DiagCode::DestructurePositionalOnNamed, "E0115"),
             (DiagCode::AnonFieldNotEq, "E0116"),
+            (DiagCode::ReprCOnEnum, "E0117"),
             (DiagCode::ConstEvalFailure, "E0200"),
             (DiagCode::CycleInComptime, "E0201"),
             (DiagCode::GenericInstantiation, "E0202"),
@@ -981,6 +984,7 @@ mod tests {
                 | DiagCode::DestructureUnknownField
                 | DiagCode::DestructurePositionalOnNamed
                 | DiagCode::AnonFieldNotEq
+                | DiagCode::ReprCOnEnum
                 | DiagCode::TooManyDiagnostics
                 | DiagCode::InvalidCharacter
                 | DiagCode::UnknownEscape
@@ -1320,10 +1324,10 @@ mod tests {
             diag.message
         );
         assert!(
-            diag.notes
-                .iter()
-                .any(|n| n.message == "attributes are only supported on struct definitions"),
-            "note should explain that attributes need a struct definition: {:?}",
+            diag.notes.iter().any(
+                |n| n.message == "attributes are only supported on struct and enum definitions"
+            ),
+            "note should explain that attributes need a struct or enum definition: {:?}",
             diag.notes
         );
     }

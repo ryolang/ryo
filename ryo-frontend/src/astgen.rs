@@ -849,6 +849,12 @@ fn gen_stmt(
         // Struct declarations are top-level only and are filtered
         // out before lowering (see `generate`); nothing to lower.
         ast::StmtKind::StructDef(_) => {}
+        // Enum declarations (M11) parse but do not lower yet — the
+        // declare/define DFS lands with the enum UIR task. The
+        // top-level pass pushes every non-struct statement into
+        // `top_level`, so a program using enums reaches this arm;
+        // fail loudly rather than silently drop the declaration.
+        ast::StmtKind::EnumDef(_) => unreachable!("enum declarations do not lower yet (M11)"),
     }
 }
 
@@ -953,6 +959,12 @@ fn gen_expr(b: &mut UirBuilder, ast: &ast::Ast, expr: ast::ExprId) -> InstRef {
         ast::ExprKind::FieldAccess { object, field } => {
             let obj = gen_expr(b, ast, object);
             b.field_access(obj, field.name, span)
+        }
+        // Variant construction (M11) lowers to `Inst::EnumLit` in a
+        // later M11 task; until then fail loudly rather than silently
+        // miscompile.
+        ast::ExprKind::VariantConstruct(_) => {
+            unreachable!("enum variant construction does not lower yet (M11)")
         }
     }
 }

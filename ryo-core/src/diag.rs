@@ -259,8 +259,13 @@ pub enum DiagCode {
     /// An unrecognized `#[...]` attribute (M9.1): the attribute name is
     /// not one of the known forms (`derive(Eq)`, `repr(C)`), its
     /// argument list does not match, or it is attached to something
-    /// other than a struct definition.
+    /// other than a struct or enum definition (enums widened in M11,
+    /// the I-193 slice).
     UnknownAttribute,
+    /// `#[repr(C)]` on an `enum` definition (M11): pinned layout is a
+    /// struct feature; the only attribute an enum may carry is
+    /// `#[derive(Eq)]`. The message names the allowed attribute.
+    ReprCOnEnum,
 
     /// Emitted by `DiagSink::into_diags` when the sink dropped
     /// diagnostics past `MAX_DIAGS`. Distinct from `ParseError` so
@@ -437,12 +442,16 @@ pub enum ParseDiag {
         name: crate::types::StringId,
         args: Vec<crate::types::StringId>,
     },
-    /// A well-formed attribute whose target is not a struct definition
-    /// (M9.1). The `Display`/message text is the headline only; the
-    /// driver's Custom→Diag conversion attaches the mandated
-    /// explanation ("attributes are only supported on struct
-    /// definitions") as a structured `DiagNote`.
+    /// A well-formed attribute whose target is not a type definition
+    /// (M9.1, widened to enums in M11). The `Display`/message text is
+    /// the headline only; the driver's Custom→Diag conversion attaches
+    /// the mandated explanation ("attributes are only supported on
+    /// struct and enum definitions") as a structured `DiagNote`.
     MisplacedAttribute,
+    /// `#[repr(C)]` on an `enum` definition (M11): pinned layout is a
+    /// struct feature. The message names the allowed attribute —
+    /// `#[derive(Eq)]`.
+    ReprCOnEnum,
     /// Escape hatch for one-off messages (e.g. lexer diagnostics
     /// re-wrapped as parser errors in tests).
     Message(String),
@@ -462,6 +471,7 @@ impl ParseDiag {
             ParseDiag::UnknownAttribute { .. } | ParseDiag::MisplacedAttribute => {
                 DiagCode::UnknownAttribute
             }
+            ParseDiag::ReprCOnEnum => DiagCode::ReprCOnEnum,
             ParseDiag::Message(_) => DiagCode::ParseError,
         }
     }
@@ -532,6 +542,10 @@ impl std::fmt::Display for ParseDiag {
                  derive(Eq), repr(C)",
             ),
             ParseDiag::MisplacedAttribute => f.write_str("unexpected attribute"),
+            ParseDiag::ReprCOnEnum => f.write_str(
+                "#[repr(C)] is not supported on enum definitions; \
+                 the only attribute allowed on an enum is #[derive(Eq)]",
+            ),
             ParseDiag::Message(msg) => f.write_str(msg),
         }
     }

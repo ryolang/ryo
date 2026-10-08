@@ -393,9 +393,9 @@ fn misplaced_attribute_before_fn_is_rejected() {
     match errs[0].reason() {
         RichReason::Custom(pd @ ParseDiag::MisplacedAttribute) => {
             // Headline only — the driver attaches the mandated
-            // "attributes are only supported on struct definitions"
-            // sentence as a structured note (pinned end-to-end in
-            // ryo-driver's pipeline tests).
+            // "attributes are only supported on struct and enum
+            // definitions" sentence as a structured note (pinned
+            // end-to-end in ryo-driver's pipeline tests).
             assert!(
                 pd.to_string().contains("unexpected attribute"),
                 "diagnostic should headline the misplaced attribute, got: {pd}"
@@ -1527,7 +1527,7 @@ fn reachable_node_counts(ast: &Ast) -> (usize, usize) {
             StmtKind::Break | StmtKind::Continue | StmtKind::Error => {}
             // Field declarations are scalar metadata in a side
             // arena, not node children — nothing reachable to follow.
-            StmtKind::StructDef(_) => {}
+            StmtKind::StructDef(_) | StmtKind::EnumDef(_) => {}
         }
         while let Some(expr) = expr_work.pop() {
             if expr_seen[expr.index()] {
@@ -1571,6 +1571,20 @@ fn reachable_node_counts(ast: &Ast) -> (usize, usize) {
                 ExprKind::FieldAccess { object, .. } => {
                     expr_work.push(object);
                 }
+                ExprKind::VariantConstruct(c) => match &c.args {
+                    Some(VariantArgs {
+                        positional: Some(list),
+                        ..
+                    }) => expr_work.extend_from_slice(ast.expr_list(*list)),
+                    Some(VariantArgs {
+                        named: Some(inits), ..
+                    }) => {
+                        for &(_, value) in ast.struct_field_inits(*inits) {
+                            expr_work.push(value);
+                        }
+                    }
+                    _ => {}
+                },
             }
         }
     }

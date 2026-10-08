@@ -31,7 +31,7 @@ use crate::lexer::Token;
 use ryo_core::ast::*;
 use ryo_core::diag::ParseDiag;
 use ryo_core::tir::ParamMode;
-use ryo_core::types::{InternPool, StringId};
+use ryo_core::types::{InternPool, StringId, VariantKind};
 
 /// Chumsky parse state: the [`Ast`] arenas under construction plus
 /// the compilation's intern pool. Identifiers and string literals
@@ -934,88 +934,10 @@ where
         .boxed()
 }
 
-/// A `struct` declaration preceded by one or more attribute groups
-/// (M9.1). Only `#[derive(Eq)]` and `#[repr(C)]` are known; anything
-/// else emits `ParseDiag::UnknownAttribute` naming the attribute.
-/// Attributes followed by something other than `struct` emit
-/// `ParseDiag::MisplacedAttribute` and recover to an `Error` node, so
-/// the misplaced line reports once and the following statement still
-/// parses.
-fn attributed_struct_decl_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
-where
-    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
-{
-    // Attribute groups stack vertically (blank lines tolerated); the
-    // newlines before each group and before `struct` belong to this
-    // alternative only when what follows is another group or `struct`
-    // — chumsky rewinds a failed alternative, so on the misplaced path
-    // the statement list keeps the line-ending newline and recovers
-    // cleanly.
-    let attrs = skip_newlines()
-        .ignore_then(attr_group_parser())
-        .repeated()
-        .at_least(1)
-        .collect::<Vec<_>>();
-
-    attrs
-        .then(
-            skip_newlines()
-                .ignore_then(just(Token::Struct))
-                .ignore_then(struct_tail_parser())
-                .map(Some)
-                .or(empty().to(None)),
-        )
-        .validate(|(attrs, tail), e: &mut Mx<'a, '_, I>, emitter| {
-            // The parser is pool-less, so the attribute vocabulary is
-            // recognized by the fixed well-known ids (see
-            // `StringId::ATTR_*`): exactly `derive(Eq)` / `repr(C)`.
-            let mut bits = StructAttrs::default();
-            let mut all_known = true;
-            for (name, args, span) in &attrs {
-                let recognized = if *name == StringId::ATTR_DERIVE
-                    && args.as_deref() == Some(&[StringId::ATTR_EQ])
-                {
-                    bits.derive_eq = true;
-                    true
-                } else if *name == StringId::ATTR_REPR
-                    && args.as_deref() == Some(&[StringId::ATTR_C])
-                {
-                    bits.repr_c = true;
-                    true
-                } else {
-                    false
-                };
-                if !recognized {
-                    all_known = false;
-                    emitter.emit(Rich::custom(
-                        *span,
-                        ParseDiag::UnknownAttribute {
-                            name: *name,
-                            args: args.clone().unwrap_or_default(),
-                        },
-                    ));
-                }
-            }
-            // Misplaced only piles on when the attributes themselves
-            // were fine — an unknown attribute already explains the
-            // line.
-            if tail.is_none() && all_known {
-                emitter.emit(Rich::custom(e.span(), ParseDiag::MisplacedAttribute));
-            }
-            (bits, tail)
-        })
-        .map_with(|(bits, tail), e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
-            match tail {
-                Some((name, fields)) => e.state().struct_def(name, &fields, bits, span),
-                None => e.state().error_stmt(span),
-            }
-        })
-        .boxed()
-}
-
-/// Top-level statements: struct declarations, function defs, and
+/// Top-level statements: struct/enum declarations, function defs, and
 /// var decls (plus bare expression statements for flat scripts).
+/// Attribute placement lives in `enums::attributed_type_decl_parser`
+/// (M9.1, widened to enums in M11).
 fn top_level_statement_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
@@ -1038,10 +960,11 @@ where
         e.state().expr_stmt(expr, span)
     });
 
-    // `struct` opens with a unique keyword, so trying it first is
-    // safe and keeps speculation cheap. An attributed struct starts
-    // with `#[` (attribute groups before `struct`, M9.1) and fails
-    // just as cheaply anywhere else. Destructuring statements
+    // `struct` / `enum` open with unique keywords, so trying them
+    // first is safe and keeps speculation cheap. An attributed
+    // declaration starts with `#[` (attribute groups before the
+    // declaration, M9.1, widened to enums in M11) and fails just as
+    // cheaply anywhere else. Destructuring statements
     // (`a, b = e`, `(a, b) = e`, `{q, r} = e`, M10) overlap only with
     // `var_decl` / `expr_stmt` (both Ident/`(`/`{`-led), so they sit
     // before those two but after the keyword-led forms.
@@ -1091,8 +1014,9 @@ where
         });
 
     choice((
-        attributed_struct_decl_parser(),
+        enums::attributed_type_decl_parser(),
         struct_decl_parser(),
+        enums::enum_decl_parser(),
         function_def_parser(expr.clone()),
         destructure_stmt_parser(expr.clone()),
         var_decl_parser(expr.clone()),
@@ -1509,6 +1433,7 @@ where
                 });
 
             borrow
+                .or(enums::variant_construct_atom(expr.clone()))
                 .or(call)
                 .or(struct_literal)
                 .or(anon_struct_literal)
@@ -1809,8 +1734,13 @@ where
     })
 }
 
+mod enums;
+
 #[cfg(test)]
 mod tests;
 
 #[cfg(test)]
 mod destructure_tests;
+
+#[cfg(test)]
+mod enum_tests;
