@@ -1,4 +1,0 @@
-# panic.ryo
-
-fn main():
-	crash = 1/0

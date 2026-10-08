@@ -32,6 +32,9 @@ site/
 *.o
 output_executable
 
+# issue.py advisory lock sidecar (scripts/issue.py locked())
+ISSUES.md.lock
+
 # Superpowers (agent-generated plans/specs)
 docs/superpowers/
 

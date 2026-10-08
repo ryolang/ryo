@@ -99,7 +99,7 @@ IMPORTANT: Never author Claude on commits nor PRs.
 
 ## Issue Tracking
 
-Non-immediate issues that affect architecture, correctness, or long-term code health go in `ISSUES.md`. Create an entry when you identify a problem that won't be resolved in the current session but must be addressed for better architecture or sustainability. Use the next sequential `I-XXX` number, put it on the appropriate severity block (Blocking / Correctness / Cleanup), and include Files, Summary, and Resolution fields.
+Non-immediate issues that affect architecture, correctness, or long-term code health go in `ISSUES.md`. Create an entry when you identify a problem that won't be resolved in the current session but must be addressed for better architecture or sustainability. Use the next sequential `I-XXX` number, set its `**Severity:**` field (Blocking / Correctness / Hygiene / Cleanup), set its `**Area:**` field to one component (frontend-lexer, frontend-parser, sema, ownership, codegen, runtime, linker-toolchain, driver-cli, core-ir, docs-spec, ci-benchmarks, tooling — cross-cutting issues take the component where the fix primarily lands), and include Files, Summary, and Resolution fields.
 
 **Never reuse an `I-XXX` number, even after its entry is deleted.** IDs are cited in commit messages and live on in git history; a reused number silently retargets those references to a different issue. Deleted numbers stay retired — the next entry always takes the highest number ever used + 1.
 
@@ -107,12 +107,16 @@ Do **not** create issues for things you're fixing right now — just fix them. D
 
 Cite issue IDs (`I-XXX`) in code comments and docs **only while the issue is still open** in `ISSUES.md`. Resolved entries are deleted from `ISSUES.md`, so a reference to one becomes a dangling pointer — when an issue is resolved, replace the reference with a self-contained inline explanation of the concept. Commit messages always carry the ID; they survive in git history.
 
-**Reading issues:** use `scripts/issue.py` (zero-dependency, runs via `uv run`) instead of grepping `ISSUES.md` by hand:
+**Reading and editing issues:** use `scripts/issue.py` (zero-dependency, runs via `uv run`) instead of grepping `ISSUES.md` by hand:
 
 ```bash
 uv run scripts/issue.py I-032     # full entry text, prefixed with its line range
-uv run scripts/issue.py --next    # next issue id to use (highest ever, from the file + git history, + 1)
-uv run scripts/issue.py --list    # all ids, line ranges, and titles
+uv run scripts/issue.py next      # next issue id to use (highest ever, from the file + git history, + 1)
+uv run scripts/issue.py list      # all ids, line ranges, and titles
+uv run scripts/issue.py file --title "..." --severity cleanup --area codegen --files "..." --summary "..." --resolution "..."
+                                  # append a new entry (fields prompted if omitted; --severity/--area accept short aliases)
+uv run scripts/issue.py delete I-032 --yes
+                                  # remove an entry (asks to confirm without --yes; the id stays retired)
 ```
 
 ---
@@ -303,7 +307,7 @@ Grammar builders like `expression_parser()` construct the full parser graph eage
 
 ## Error Handling
 
-Middle-end stages emit structured `Diag` values (see `ryo-core/src/diag.rs`). `astgen::generate` and `sema::analyze` accumulate diagnostics through a `DiagSink` so analysis can continue past the first error; `parse_source` (in `ryo-driver/src/pipeline.rs`) builds `Diag` values directly from `chumsky::error::Rich` and renders them inline (no sink — the parser stops at the first round of errors anyway). All three converge on the same Ariadne-backed `render_diags` and surface as a single `CompilerError::Diagnostics(Vec<Diag>)` from the passes that use the sink (and from `parse_source` when parsing fails). Other stages still use string-typed `CompilerError` variants: `IoError`, `CodegenError`, `LinkError`, `ToolchainError`, `ExecutionError`.
+Middle-end stages emit structured `Diag` values (see `ryo-core/src/diag.rs`). `astgen::generate` and `sema::analyze` accumulate diagnostics through a `DiagSink` so analysis can continue past the first error; `parse_source` (in `ryo-driver/src/pipeline.rs`) shares the same model. `lexer::lex` never fails hard — it recovers so the parser still sees a well-formed token stream — and the parser synchronizes at statement boundaries, yielding a diagnostic plus a partial AST with `Error` placeholder nodes (R10), so one syntax error never suppresses diagnostics for the rest of the file. The only early bail is an indentation failure, where the token stream is empty and parsing would be meaningless. All stages converge on the same Ariadne-backed `render_diags` and surface as a single `CompilerError::Diagnostics(Vec<Diag>)`. Other stages still use string-typed `CompilerError` variants: `IoError`, `CodegenError`, `LinkError`, `ToolchainError`, `ExecutionError`.
 
 ## Testing
 

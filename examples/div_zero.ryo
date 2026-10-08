@@ -1,0 +1,9 @@
+# div_zero.ryo - Integer division guard panics at runtime on a zero divisor.
+# (A literal `1 / 0` is rejected at compile time, E0037 -- use variables to
+# reach the runtime guard. Float division is different: see float_zero_div.ryo
+# for the IEEE behavior.)
+
+fn main():
+	x = 1
+	y = 0
+	crash = x / y

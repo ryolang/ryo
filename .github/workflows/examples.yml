@@ -61,8 +61,10 @@ jobs:
         run: |
           for file in examples/*.ryo; do
             echo "=== Running $file ==="
-            if [[ "$file" == *"panic.ryo" ]]; then
-              # Expect panic.ryo to exit with non-zero
+            if [[ "$file" == *"panic.ryo" || "$file" == *"div_zero.ryo" ]]; then
+              # panic.ryo (explicit panic()) and div_zero.ryo (integer
+              # division guard) are intentional-panic examples: expect
+              # non-zero
               if ./target/release/ryo run "$file"; then
                 echo "Error: $file was expected to panic but succeeded"
                 exit 1
