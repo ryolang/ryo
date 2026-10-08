@@ -670,7 +670,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Summary:** The M9.2 `read_line_from` function reads stdin in 128-byte chunks. When it finds the first `\n` in a chunk, it returns only the bytes up to that newline and **frees the entire buffer**, discarding any remaining bytes in the chunk. Crucially, the file position has already advanced by the full chunk size (not the line length), so subsequent `io_read_line()` calls skip the discarded data. Example: piping a file where lines 1-3 fit in the first 128-byte read will return line 1, then jump to the byte position after the chunk, skipping lines 2-3. Demonstrated by `cat README.md | cargo run -- run examples/echo.ryo` which loses the second and third lines of the file. Related: the oracle example documents this as "piping all answers at once starves it."
 
-**Resolution:** Fix in **Milestone 13.6** (buffering work). Either (a) preserve the unread portion of the chunk between calls by maintaining buffer state, or (b) seek the file position back to `start + pos + 1` after extracting the line. Option (a) also enables proper buffering; option (b) is a minimal fix. After this lands, remove the workaround note from `examples/oracle.ryo`.
+**Resolution:** Fix in **Milestone 13.6** (buffering work). Preserve the unread portion of the chunk between calls by maintaining buffer state — the proper fix, and the one that also enables real buffering. (The minimal alternative, seeking the file position back after extracting the line, is not viable for piped stdin: pipes are not seekable.) After this lands, remove the workaround note from `examples/oracle.ryo`.
 
 ---
 
