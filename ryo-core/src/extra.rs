@@ -19,13 +19,16 @@ impl ExtraRange {
     }
 }
 
-/// Layout in `extra` for [`crate::uir::InstTag::EnumLit`] (M11):
+/// Layout in `extra` for [`crate::uir::InstTag::EnumLit`] and
+/// [`crate::tir::TirTag::EnumLit`] (M11) — both IRs share the wire
+/// (UIR stores `InstRef.raw()` in the value slots, TIR stores
+/// `TirRef.raw()`):
 ///
 /// ```text
 ///   [0]  ty:      u32  (TypeId.raw())
 ///   [1]  variant: u32  (declaration-order variant index)
 ///   [2]  argc:    u32
-///   [3..3+2*argc] per arg: [field_idx: u32, value: InstRef.raw()]
+///   [3..3+2*argc] per arg: [field_idx: u32, value: ref raw()]
 /// ```
 ///
 /// Unlike the name-keyed `struct_lit` layout, enum args are keyed by
