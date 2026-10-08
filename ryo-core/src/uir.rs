@@ -55,7 +55,7 @@
 
 use crate::ast::CompoundOp;
 use crate::tir::ParamMode;
-use crate::types::{InternPool, StringId, TypeId};
+use crate::types::{InternPool, StringId, TypeId, VariantKind};
 use chumsky::span::{SimpleSpan, Span as _};
 use std::num::NonZeroU32;
 
@@ -114,6 +114,7 @@ impl InstRef {
 // ---------- ExtraRange ----------
 
 pub use crate::extra::ExtraRange;
+pub use crate::extra::enum_lit_extra;
 
 // ---------- Instruction tags ----------
 
@@ -232,6 +233,15 @@ pub enum InstTag {
     /// are in source order; sema canonicalizes them against the
     /// declaration.
     StructLit,
+
+    /// Enum variant construction `Name::Variant(args...)` (M11).
+    /// Variable payload in `extra` — see [`enum_lit_extra`]. The
+    /// enum type and declaration-order variant index head the
+    /// payload; args are `(field_idx, value)` pairs keyed by
+    /// declaration-order payload-field index (tuple variants use the
+    /// synthesized `"0"`, `"1"`, … names). Unit variants encode
+    /// `argc = 0`.
+    EnumLit,
 
     /// Field access `object.field` (M9); see [`InstData::FieldAccess`].
     FieldAccess,
@@ -370,6 +380,43 @@ pub struct UirStructField {
     pub span: Span,
 }
 
+// ---------- Enum declarations (M11) ----------
+
+/// An enum declaration registered by astgen, with variant payload
+/// field types already resolved through the `InternPool`. Metadata,
+/// not an instruction: sema reads this table to type-check
+/// [`InstTag::EnumLit`].
+#[derive(Debug, Clone)]
+pub struct UirEnumDecl {
+    pub name: StringId,
+    /// The enum's nominal type, declared and defined in the pool
+    /// by astgen's two-phase pass.
+    pub ty: TypeId,
+    /// Variants in declaration order.
+    pub variants: Vec<UirEnumVariant>,
+    pub span: Span,
+}
+
+/// One variant of a [`UirEnumDecl`].
+#[derive(Debug, Clone)]
+pub struct UirEnumVariant {
+    pub name: StringId,
+    pub kind: VariantKind,
+    /// Payload fields in declaration order. Tuple-variant fields
+    /// carry the synthesized `"0"`, `"1"`, … names (astgen interns
+    /// them) so all payload handling is uniform.
+    pub fields: Vec<UirEnumField>,
+    pub span: Span,
+}
+
+/// One payload field of a [`UirEnumVariant`].
+#[derive(Debug, Clone, Copy)]
+pub struct UirEnumField {
+    pub name: StringId,
+    pub ty: TypeId,
+    pub span: Span,
+}
+
 // ---------- Top-level UIR ----------
 
 #[derive(Debug, Clone)]
@@ -381,6 +428,9 @@ pub struct Uir {
     /// Struct declarations in source order (M9). Side table — struct
     /// decls lower to no instructions.
     pub struct_decls: Vec<UirStructDecl>,
+    /// Enum declarations in source order (M11). Side table — enum
+    /// decls lower to no instructions.
+    pub enum_decls: Vec<UirEnumDecl>,
 }
 
 impl Default for Uir {
@@ -404,6 +454,7 @@ impl Uir {
             spans: vec![placeholder_span],
             func_bodies: Vec::new(),
             struct_decls: Vec::new(),
+            enum_decls: Vec::new(),
         }
     }
 
@@ -993,6 +1044,34 @@ impl UirBuilder {
         )
     }
 
+    /// Emits an `EnumLit` `Name::Variant(args...)` (M11) with the
+    /// enum type, declaration-order variant index, and
+    /// `(field_idx, value)` arg pairs packed into `extra`. `field_idx`
+    /// selects the payload field within the variant; unit variants
+    /// pass `&[]`.
+    pub fn enum_lit(
+        &mut self,
+        ty: TypeId,
+        variant: u32,
+        args: &[(u32, InstRef)],
+        span: Span,
+    ) -> InstRef {
+        let offset = self.extra_offset();
+        self.uir.extra.push(ty.raw());
+        self.uir.extra.push(variant);
+        self.uir.extra.push(Self::len_u32(args.len()));
+        for &(field_idx, value) in args {
+            self.uir.extra.push(field_idx);
+            self.uir.extra.push(value.raw());
+        }
+        let len = Self::len_u32(enum_lit_extra::ARGS + 2 * args.len());
+        self.push(
+            InstTag::EnumLit,
+            InstData::Extra(ExtraRange { offset, len }),
+            span,
+        )
+    }
+
     /// Emits a `FieldAccess` `object.field` (M9).
     pub fn field_access(&mut self, object: InstRef, field: StringId, span: Span) -> InstRef {
         self.push(
@@ -1045,6 +1124,13 @@ impl UirBuilder {
     /// to check struct literals and field accesses.
     pub fn add_struct_decl(&mut self, decl: UirStructDecl) {
         self.uir.struct_decls.push(decl);
+    }
+
+    /// Register a resolved enum declaration in the side table (M11).
+    /// Enum decls are metadata, not instructions — sema reads them
+    /// to check enum-literal construction.
+    pub fn add_enum_decl(&mut self, decl: UirEnumDecl) {
+        self.uir.enum_decls.push(decl);
     }
 }
 
@@ -1116,6 +1202,15 @@ pub struct MethodCallView {
 pub struct StructLitView {
     pub name: Option<StringId>,
     pub fields: Vec<(StringId, InstRef)>,
+}
+
+/// Decoded view of an [`InstTag::EnumLit`] payload (M11). `variant`
+/// is the declaration-order variant index; `args` are
+/// `(field_idx, value)` pairs in source order.
+pub struct EnumLitView {
+    pub ty: TypeId,
+    pub variant: u32,
+    pub args: Vec<(u32, InstRef)>,
 }
 
 pub struct ElifView {
@@ -1316,6 +1411,25 @@ impl Uir {
             ));
         }
         StructLitView { name, fields }
+    }
+
+    pub fn enum_lit_view(&self, r: InstRef) -> EnumLitView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, InstTag::EnumLit));
+        let range = match inst.data {
+            InstData::Extra(rng) => rng,
+            _ => unreachable!("EnumLit must carry InstData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        let ty = TypeId::from_raw(slice[enum_lit_extra::TY]);
+        let variant = slice[enum_lit_extra::VARIANT];
+        let n = slice[enum_lit_extra::ARGC] as usize;
+        let mut args = Vec::with_capacity(n);
+        for i in 0..n {
+            let base = enum_lit_extra::ARGS + 2 * i;
+            args.push((slice[base], InstRef::from_raw(slice[base + 1])));
+        }
+        EnumLitView { ty, variant, args }
     }
 
     pub fn if_stmt_view(&self, r: InstRef) -> IfStmtView {
@@ -1626,6 +1740,144 @@ mod tests {
         let view = uir.struct_lit_view(lit);
         assert_eq!(view.name, None);
         assert_eq!(view.fields, vec![(x, one)]);
+    }
+
+    #[test]
+    fn add_enum_decl_round_trips_name_variants_fields() {
+        let mut pool = InternPool::new();
+        let shape = pool.intern_str("Shape");
+        let circle = pool.intern_str("Circle");
+        let pair = pool.intern_str("Pair");
+        let (n0, n1) = (pool.intern_str("0"), pool.intern_str("1"));
+        let rect = pool.intern_str("Rect");
+        let (w, h) = (pool.intern_str("w"), pool.intern_str("h"));
+        let (int_ty, float_ty) = (pool.int(), pool.float());
+        let enum_ty = pool.declare_enum(shape);
+
+        let mut b = UirBuilder::new();
+        b.add_enum_decl(UirEnumDecl {
+            name: shape,
+            ty: enum_ty,
+            variants: vec![
+                UirEnumVariant {
+                    name: circle,
+                    kind: VariantKind::Unit,
+                    fields: vec![],
+                    span: sp(),
+                },
+                UirEnumVariant {
+                    name: pair,
+                    kind: VariantKind::Tuple,
+                    fields: vec![
+                        UirEnumField {
+                            name: n0,
+                            ty: int_ty,
+                            span: sp(),
+                        },
+                        UirEnumField {
+                            name: n1,
+                            ty: float_ty,
+                            span: sp(),
+                        },
+                    ],
+                    span: sp(),
+                },
+                UirEnumVariant {
+                    name: rect,
+                    kind: VariantKind::Named,
+                    fields: vec![
+                        UirEnumField {
+                            name: w,
+                            ty: float_ty,
+                            span: sp(),
+                        },
+                        UirEnumField {
+                            name: h,
+                            ty: float_ty,
+                            span: sp(),
+                        },
+                    ],
+                    span: sp(),
+                },
+            ],
+            span: sp(),
+        });
+
+        let uir = b.finish();
+        assert_eq!(uir.enum_decls.len(), 1);
+        let decl = &uir.enum_decls[0];
+        assert_eq!(decl.name, shape);
+        assert_eq!(decl.ty, enum_ty);
+        assert_eq!(decl.variants.len(), 3);
+
+        assert_eq!(decl.variants[0].name, circle);
+        assert_eq!(decl.variants[0].kind, VariantKind::Unit);
+        assert!(decl.variants[0].fields.is_empty());
+
+        assert_eq!(decl.variants[1].name, pair);
+        assert_eq!(decl.variants[1].kind, VariantKind::Tuple);
+        assert_eq!(decl.variants[1].fields.len(), 2);
+        assert_eq!(decl.variants[1].fields[0].name, n0);
+        assert_eq!(decl.variants[1].fields[0].ty, int_ty);
+        assert_eq!(decl.variants[1].fields[1].name, n1);
+        assert_eq!(decl.variants[1].fields[1].ty, float_ty);
+
+        assert_eq!(decl.variants[2].name, rect);
+        assert_eq!(decl.variants[2].kind, VariantKind::Named);
+        assert_eq!(decl.variants[2].fields.len(), 2);
+        assert_eq!(decl.variants[2].fields[0].name, w);
+        assert_eq!(decl.variants[2].fields[0].ty, float_ty);
+        assert_eq!(decl.variants[2].fields[1].name, h);
+        assert_eq!(decl.variants[2].fields[1].ty, float_ty);
+    }
+
+    #[test]
+    fn enum_lit_round_trips_through_extra() {
+        let mut pool = InternPool::new();
+        let shape = pool.intern_str("Shape");
+        let enum_ty = pool.declare_enum(shape);
+
+        let mut b = UirBuilder::new();
+        let w = b.float_literal(3.0, sp());
+        let h = b.float_literal(4.0, sp());
+        let lit = b.enum_lit(enum_ty, 1, &[(0, w), (1, h)], sp());
+
+        let uir = b.finish();
+        let view = uir.enum_lit_view(lit);
+        assert_eq!(view.ty, enum_ty);
+        assert_eq!(view.variant, 1);
+        assert_eq!(view.args, vec![(0, w), (1, h)]);
+
+        // Wire layout is pinned: [TY, VARIANT, ARGC, (FIELD_IDX, REF) x ARGC].
+        let inst = uir.inst(lit);
+        let range = match inst.data {
+            InstData::Extra(rng) => rng,
+            other => panic!("expected InstData::Extra, got {:?}", other),
+        };
+        let slice = &uir.extra[range.as_range()];
+        assert_eq!(slice[enum_lit_extra::TY], enum_ty.raw());
+        assert_eq!(slice[enum_lit_extra::VARIANT], 1);
+        assert_eq!(slice[enum_lit_extra::ARGC], 2);
+        assert_eq!(slice[enum_lit_extra::ARGS], 0);
+        assert_eq!(slice[enum_lit_extra::ARGS + 1], w.raw());
+        assert_eq!(slice[enum_lit_extra::ARGS + 2], 1);
+        assert_eq!(slice[enum_lit_extra::ARGS + 3], h.raw());
+    }
+
+    #[test]
+    fn enum_lit_unit_variant_round_trips_empty_args() {
+        let mut pool = InternPool::new();
+        let shape = pool.intern_str("Shape");
+        let enum_ty = pool.declare_enum(shape);
+
+        let mut b = UirBuilder::new();
+        let lit = b.enum_lit(enum_ty, 0, &[], sp());
+
+        let uir = b.finish();
+        let view = uir.enum_lit_view(lit);
+        assert_eq!(view.ty, enum_ty);
+        assert_eq!(view.variant, 0);
+        assert!(view.args.is_empty());
     }
 
     #[test]

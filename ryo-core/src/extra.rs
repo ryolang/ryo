@@ -18,3 +18,24 @@ impl ExtraRange {
         start..start + self.len as usize
     }
 }
+
+/// Layout in `extra` for [`crate::uir::InstTag::EnumLit`] (M11):
+///
+/// ```text
+///   [0]  ty:      u32  (TypeId.raw())
+///   [1]  variant: u32  (declaration-order variant index)
+///   [2]  argc:    u32
+///   [3..3+2*argc] per arg: [field_idx: u32, value: InstRef.raw()]
+/// ```
+///
+/// Unlike the name-keyed `struct_lit` layout, enum args are keyed by
+/// declaration-order payload-field index: tuple variants carry the
+/// synthesized `"0"`, `"1"`, … names, so an index keeps the wire
+/// format name-free and uniform across unit/tuple/named variants.
+/// Unit variants encode `argc = 0` (no trailing pairs).
+pub mod enum_lit_extra {
+    pub const TY: usize = 0;
+    pub const VARIANT: usize = 1;
+    pub const ARGC: usize = 2;
+    pub const ARGS: usize = 3;
+}
