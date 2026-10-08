@@ -66,6 +66,16 @@ pub enum DiagCode {
     /// Eq-capable (M9.1): the scalar primitives are, a struct is only
     /// with its own `#[derive(Eq)]`, and views / the rest are not.
     DeriveFieldNotEq,
+    /// An `enum` declaration with no variants (M11). The empty body
+    /// parses — the diagnostic is astgen's, not the parser's — and
+    /// the definition is abandoned (the pool's `define_enum` panics
+    /// on an empty variant list; this is the pre-validation).
+    EmptyEnum,
+    /// Two variants of one `enum` share a name (M11). Every duplicate
+    /// occurrence is diagnosed and the definition abandoned (the
+    /// pool's `define_enum` panics on duplicate variant names; this
+    /// is the pre-validation).
+    DuplicateVariant,
 
     // --- sema ---
     /// A user-defined function or variable uses the `__ryo_` prefix,
