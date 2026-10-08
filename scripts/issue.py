@@ -6,13 +6,22 @@
 # NOTE: Rewrite this script in Ryo once the language supports everything it
 # needs: reading files from disk, regular expressions (or equivalent string
 # scanning), CLI argument parsing, and process exit codes.
-"""Print an issue entry (or the latest issue id) from ISSUES.md.
+"""File, inspect, and delete issue entries in ISSUES.md.
 
 Usage:
-    uv run scripts/issue.py I-032        # full text of issue I-032
-    uv run scripts/issue.py 32           # same (bare numbers ok)
-    uv run scripts/issue.py --next       # next issue id to use (highest ever + 1)
-    uv run scripts/issue.py --list       # all issue ids with titles
+    uv run scripts/issue.py I-032          # full text of issue I-032
+    uv run scripts/issue.py 32             # same (bare numbers ok)
+    uv run scripts/issue.py next           # next issue id (highest ever + 1)
+    uv run scripts/issue.py list           # all ids, line ranges, and titles
+    uv run scripts/issue.py file ...       # append a new entry (see --help)
+    uv run scripts/issue.py delete I-032   # remove an entry (asks to confirm)
+
+Subcommands: next, list, file, delete. Anything else in the first position is
+treated as an issue id to print.
+
+`file` takes --title/--severity/--files/--summary/--resolution; any field not
+given on the command line is prompted for interactively (so agents should pass
+everything as flags; plain `file` with no flags walks a human through it).
 """
 
 import argparse
@@ -23,38 +32,46 @@ from pathlib import Path
 
 ENTRY_RE = re.compile(r"^###\s+(I-(\d+))\s+—\s+(.*)$")
 BOUNDARY_RE = re.compile(r"^(#{1,3}\s|---\s*$)")
-CATEGORY_RE = re.compile(r"^##\s+(\U0001F534|\U0001F7E1|\U0001F7E2)\s+(.*)$")
+SEVERITY_RE = re.compile(r"^\*\*Severity:\*\*\s*(.+?)\s*$")
+
+SEVERITIES = ("Blocking", "Correctness / Hygiene", "Cleanup")
+SEVERITY_ALIASES = {
+    "blocking": "Blocking",
+    "correctness": "Correctness / Hygiene",
+    "hygiene": "Correctness / Hygiene",
+    "correctness/hygiene": "Correctness / Hygiene",
+    "correctness / hygiene": "Correctness / Hygiene",
+    "cleanup": "Cleanup",
+}
+
+FIELDS = ("title", "severity", "files", "summary", "resolution")
 
 
 def parse_entries(text):
-    """Yield (issue_id, title, start_line, end_line, body, category) per `### I-XXX` entry.
+    """Yield (issue_id, title, start_line, end_line, body, severity) per entry.
 
-    start_line/end_line are 1-based and inclusive.
-    category is the section header text (e.g., 'Blocking', 'Correctness / Hygiene', 'Cleanup').
+    start_line/end_line are 1-based and inclusive; body is the entry's lines
+    including the heading; severity comes from the entry's **Severity:** field
+    (None if the entry predates the field).
     """
     lines = text.splitlines()
     entries = []
     current = None  # [id, title, start_line_index]
-    current_category = None
 
     def close(end):
         # end is the exclusive 0-based stop; trim trailing blank lines
         while end > current[2] + 1 and not lines[end - 1].strip():
             end -= 1
-        entries.append((current[0], current[1], current[2] + 1, end, lines[current[2]:end], current_category))
+        body = lines[current[2]:end]
+        severity = None
+        for line in body:
+            m = SEVERITY_RE.match(line)
+            if m:
+                severity = m.group(1)
+                break
+        entries.append((current[0], current[1], current[2] + 1, end, body, severity))
 
     for i, line in enumerate(lines):
-        cat_match = CATEGORY_RE.match(line)
-        if cat_match:
-            # A category heading ends the open entry: the heading and
-            # anything between belong to neither the entry's body nor
-            # its category.
-            if current:
-                close(i)
-                current = None
-            current_category = cat_match.group(2).strip()
-            continue
-        
         m = ENTRY_RE.match(line)
         if m:
             if current:
@@ -82,7 +99,7 @@ def max_id_ever(entries, issues_file):
     the file alone can under-report. Scan added/removed entry headings in the
     file's history; fall back to the live file (with a warning) if git fails.
     """
-    highest = max(int(e[0][2:]) for e in entries)
+    highest = max((int(e[0][2:]) for e in entries), default=0)
     try:
         log = subprocess.run(
             ["git", "log", "-p", "--format=", "--", str(issues_file)],
@@ -96,11 +113,153 @@ def max_id_ever(entries, issues_file):
     return highest
 
 
+def cmd_next(entries, issues_file, _args):
+    print(f"I-{max_id_ever(entries, issues_file) + 1:03d}")
+
+
+def cmd_list(entries, issues_file, _args):
+    severity_counts = {}
+    for issue_id, title, start, end, _, severity in entries:
+        print(f"{issue_id} (lines {start}-{end}) — {title}")
+        if severity:
+            severity_counts[severity] = severity_counts.get(severity, 0) + 1
+
+    print(f"\nTotal: {len(entries)} issue(s)")
+    for sev in SEVERITIES:
+        if sev in severity_counts:
+            print(f"  {sev}: {severity_counts[sev]}")
+    unknown = len(entries) - sum(severity_counts.values())
+    if unknown:
+        print(f"  (no severity field): {unknown}")
+
+
+def cmd_show(entries, issues_file, args):
+    issue_id = normalize_id(args.command)
+    if issue_id is None:
+        sys.exit(f"error: invalid issue id: {args.command!r}")
+
+    for eid, _title, start, end, body, _severity in entries:
+        if eid == issue_id:
+            print(f"{issues_file}:{start}-{end}")
+            print("\n".join(body).strip())
+            return
+    sys.exit(f"error: {issue_id} not found in {issues_file}")
+
+
+def prompt_field(name):
+    if not sys.stdin.isatty():
+        sys.exit(f"error: --{name} is required (non-interactive stdin; pass it as a flag)")
+    label = "severity (Blocking / Correctness / Hygiene / Cleanup)" if name == "severity" else name
+    value = input(f"{label}: ").strip()
+    if not value:
+        sys.exit(f"error: {name} cannot be empty")
+    return value
+
+
+def cmd_file(entries, issues_file, args):
+    values = {}
+    for field in FIELDS:
+        value = getattr(args, field)
+        if value is None:
+            value = prompt_field(field)
+        if field == "severity":
+            canonical = SEVERITY_ALIASES.get(value.lower())
+            if canonical is None:
+                sys.exit(f"error: invalid severity {value!r} (expected one of: {', '.join(SEVERITIES)})")
+            value = canonical
+        values[field] = value
+
+    issue_id = f"I-{max_id_ever(entries, issues_file) + 1:03d}"
+    entry = (
+        f"### {issue_id} — {values['title']}\n"
+        f"\n"
+        f"**Severity:** {values['severity']}\n"
+        f"\n"
+        f"**Files:** {values['files']}\n"
+        f"\n"
+        f"**Summary:** {values['summary']}\n"
+        f"\n"
+        f"**Resolution:** {values['resolution']}\n"
+    )
+
+    text = issues_file.read_text(encoding="utf-8")
+    anchor = "## Cross-References"
+    idx = text.find(anchor)
+    if idx != -1:
+        # insert before the trailing cross-references section, keeping its
+        # preceding "---" separator as the new entry's own
+        head, tail = text[:idx], text[idx:]
+        head = head.rstrip("\n")
+        if not head.endswith("---"):
+            head += "\n\n---"
+        text = head + "\n\n" + entry + "\n---\n\n" + tail
+    else:
+        text = text.rstrip("\n") + "\n\n---\n\n" + entry
+
+    issues_file.write_text(text, encoding="utf-8")
+    line_no = text[:text.find(f"### {issue_id}")].count("\n") + 1
+    print(f"filed {issue_id} at {issues_file}:{line_no}")
+
+
+def cmd_delete(entries, issues_file, args):
+    if args.target is None:
+        sys.exit("error: delete needs an issue id, e.g. delete I-032")
+    issue_id = normalize_id(args.target)
+    if issue_id is None:
+        sys.exit(f"error: invalid issue id: {args.target!r}")
+
+    match = next((e for e in entries if e[0] == issue_id), None)
+    if match is None:
+        sys.exit(f"error: {issue_id} not found in {issues_file}")
+    _eid, title, start, end, _body, _severity = match
+
+    if not args.yes:
+        if not sys.stdin.isatty():
+            sys.exit("error: refusing to delete without confirmation (pass --yes)")
+        answer = input(f"delete {issue_id} — {title}? [y/N] ")
+        if answer.strip().lower() not in ("y", "yes"):
+            print("aborted")
+            return
+
+    lines = issues_file.read_text(encoding="utf-8").splitlines()
+    # entry occupies lines[start-1:end]; also swallow its trailing separator
+    # and blank lines, or its leading separator if it is the last entry
+    del_end = end
+    while del_end < len(lines) and not lines[del_end].strip():
+        del_end += 1
+    if del_end < len(lines) and lines[del_end].strip() == "---":
+        del_end += 1
+        while del_end < len(lines) and not lines[del_end].strip():
+            del_end += 1
+    else:
+        del_start = start - 1
+        while del_start > 0 and not lines[del_start - 1].strip():
+            del_start -= 1
+        if del_start > 0 and lines[del_start - 1].strip() == "---":
+            del_start -= 1
+        start = del_start + 1
+
+    remaining = lines[:start - 1] + lines[del_end:]
+    # collapse any separator gap left at the seam
+    seam = "\n".join(remaining)
+    seam = re.sub(r"---\n(?:\n---\n)+", "---\n", seam)
+    issues_file.write_text(seam.rstrip("\n") + "\n", encoding="utf-8")
+    print(f"deleted {issue_id} (id stays retired; do not reuse it)")
+
+
+COMMANDS = {"next": cmd_next, "list": cmd_list, "file": cmd_file, "delete": cmd_delete}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("issue", nargs="?", help="Issue id, e.g. I-032 or 32")
-    ap.add_argument("--next", action="store_true", help="Print the next issue id to use (highest ever + 1)")
-    ap.add_argument("--list", action="store_true", help="List all issue ids and titles")
+    ap.add_argument("command", nargs="?", help="issue id (I-032 or 32) or subcommand: next, list, file, delete")
+    ap.add_argument("target", nargs="?", help="issue id, for: delete")
+    ap.add_argument("--title", help="file: entry title")
+    ap.add_argument("--severity", help="file: Blocking / Correctness / Hygiene / Cleanup")
+    ap.add_argument("--files", help="file: affected files field")
+    ap.add_argument("--summary", help="file: summary field")
+    ap.add_argument("--resolution", help="file: resolution field")
+    ap.add_argument("--yes", action="store_true", help="delete: skip the confirmation prompt")
     ap.add_argument("--file", default="ISSUES.md", type=Path, help="Path to ISSUES.md (default: ./ISSUES.md)")
     args = ap.parse_args()
 
@@ -108,39 +267,16 @@ def main():
         sys.exit(f"error: {args.file} not found")
 
     entries = parse_entries(args.file.read_text(encoding="utf-8"))
-    if not entries:
+    if not entries and args.command != "file":
         sys.exit(f"error: no issue entries found in {args.file}")
 
-    if args.next:
-        print(f"I-{max_id_ever(entries, args.file) + 1:03d}")
-        return
-
-    if args.list:
-        category_counts = {}
-        for issue_id, title, start, end, _, category in entries:
-            print(f"{issue_id} (lines {start}-{end}) — {title}")
-            if category:
-                category_counts[category] = category_counts.get(category, 0) + 1
-        
-        total = len(entries)
-        print(f"\nTotal: {total} issue(s)")
-        for cat, count in sorted(category_counts.items()):
-            print(f"  {cat}: {count}")
-        return
-
-    if not args.issue:
-        ap.error("give an issue id, or use --next / --list")
-
-    issue_id = normalize_id(args.issue)
-    if issue_id is None:
-        sys.exit(f"error: invalid issue id: {args.issue!r}")
-
-    for eid, _title, start, end, body, _category in entries:
-        if eid == issue_id:
-            print(f"{args.file}:{start}-{end}")
-            print("\n".join(body).strip())
-            return
-    sys.exit(f"error: {issue_id} not found in {args.file}")
+    handler = COMMANDS.get(args.command) if args.command else None
+    if handler is not None:
+        handler(entries, args.file, args)
+    elif args.command:
+        cmd_show(entries, args.file, args)
+    else:
+        ap.error("give an issue id or a subcommand: next, list, file, delete")
 
 
 if __name__ == "__main__":

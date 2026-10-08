@@ -99,7 +99,7 @@ IMPORTANT: Never author Claude on commits nor PRs.
 
 ## Issue Tracking
 
-Non-immediate issues that affect architecture, correctness, or long-term code health go in `ISSUES.md`. Create an entry when you identify a problem that won't be resolved in the current session but must be addressed for better architecture or sustainability. Use the next sequential `I-XXX` number, put it on the appropriate severity block (Blocking / Correctness / Cleanup), and include Files, Summary, and Resolution fields.
+Non-immediate issues that affect architecture, correctness, or long-term code health go in `ISSUES.md`. Create an entry when you identify a problem that won't be resolved in the current session but must be addressed for better architecture or sustainability. Use the next sequential `I-XXX` number, set its `**Severity:**` field (Blocking / Correctness / Hygiene / Cleanup), and include Files, Summary, and Resolution fields.
 
 **Never reuse an `I-XXX` number, even after its entry is deleted.** IDs are cited in commit messages and live on in git history; a reused number silently retargets those references to a different issue. Deleted numbers stay retired — the next entry always takes the highest number ever used + 1.
 
@@ -107,12 +107,16 @@ Do **not** create issues for things you're fixing right now — just fix them. D
 
 Cite issue IDs (`I-XXX`) in code comments and docs **only while the issue is still open** in `ISSUES.md`. Resolved entries are deleted from `ISSUES.md`, so a reference to one becomes a dangling pointer — when an issue is resolved, replace the reference with a self-contained inline explanation of the concept. Commit messages always carry the ID; they survive in git history.
 
-**Reading issues:** use `scripts/issue.py` (zero-dependency, runs via `uv run`) instead of grepping `ISSUES.md` by hand:
+**Reading and editing issues:** use `scripts/issue.py` (zero-dependency, runs via `uv run`) instead of grepping `ISSUES.md` by hand:
 
 ```bash
 uv run scripts/issue.py I-032     # full entry text, prefixed with its line range
-uv run scripts/issue.py --next    # next issue id to use (highest ever, from the file + git history, + 1)
-uv run scripts/issue.py --list    # all ids, line ranges, and titles
+uv run scripts/issue.py next      # next issue id to use (highest ever, from the file + git history, + 1)
+uv run scripts/issue.py list      # all ids, line ranges, and titles
+uv run scripts/issue.py file --title "..." --severity cleanup --files "..." --summary "..." --resolution "..."
+                                  # append a new entry (fields prompted if omitted; --severity accepts blocking/hygiene/cleanup)
+uv run scripts/issue.py delete I-032 --yes
+                                  # remove an entry (asks to confirm without --yes; the id stays retired)
 ```
 
 ---
