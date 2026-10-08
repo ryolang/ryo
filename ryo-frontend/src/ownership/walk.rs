@@ -2,12 +2,13 @@
 
 use super::{
     BranchState, Owner, OwnerState, Ownership, PromoCandidate, ReseatDrop, analyze_destructure,
-    analyze_for_range, analyze_while_loop, body_must_terminate, check_field_move_out,
-    check_field_target_projected, check_source_projected, consume_struct_lit_fields,
-    consumed_binding_name, drain_dying_views, field_path_of, format_binding, needs_tracking,
-    owner_name_for_diag, owner_sort_key, param_idx, projection_root, prune_branch_dead_projections,
-    push_unique, record_return_epilogue, refine_view_liveness_for_arm, register_projection,
-    resolve_view_alias, restore_view_last_use, rule7_owner_name, struct_base_name, struct_root,
+    analyze_enum_lit, analyze_for_range, analyze_while_loop, body_must_terminate,
+    check_field_move_out, check_field_target_projected, check_source_projected,
+    consume_struct_lit_fields, consumed_binding_name, drain_dying_views, field_path_of,
+    format_binding, needs_tracking, owner_name_for_diag, owner_sort_key, param_idx,
+    projection_root, prune_branch_dead_projections, push_unique, record_return_epilogue,
+    refine_view_liveness_for_arm, register_projection, resolve_view_alias, restore_view_last_use,
+    rule7_owner_name, struct_base_name, struct_root,
 };
 use crate::builtins::{is_borrowed_scalar_param, view_borrow_params};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
@@ -1085,6 +1086,12 @@ pub(crate) fn visit_expr(
             }
             consume_struct_lit_fields(tir, pool, own, sink, r);
         }
+        // ---- Enum variant construction (M11) ----
+        // Whole-value model: an enum value is ONE `Owner`, exactly like
+        // a struct — see `analyze_enum_lit` in `structs.rs` (the payload
+        // is `TirData::Extra`, which `recurse_operands` never descends
+        // into, so this arm is the only walk of the payload args).
+        TirTag::EnumLit => analyze_enum_lit(tir, pool, own, sink, sidecar, r),
         TirTag::Call => {
             // A str-returning call (e.g. `int_to_str`) is a producer.
             if needs_tracking(inst.ty, pool) {
@@ -1647,8 +1654,9 @@ pub(crate) fn recurse_operands(
         // CompoundFieldAssign) have bespoke decoders and per-tag
         // handling elsewhere; their operands are deliberately not
         // descended into here so we avoid double-visits. `StructLit`
-        // (M9) is also `Extra`-shaped; its field values are walked and
-        // consumed by `visit_expr`'s `StructLit` arm, not here.
+        // (M9) and `EnumLit` (M11) are also `Extra`-shaped; their
+        // field/payload values are walked and consumed by
+        // `visit_expr`'s `StructLit`/`EnumLit` arms, not here.
         TirData::Extra(_) => {}
         TirData::None
         | TirData::Int(_)
