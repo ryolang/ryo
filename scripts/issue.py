@@ -26,10 +26,17 @@ pass everything as flags; plain `file` with no flags walks a human through it).
 """
 
 import argparse
+import os
 import re
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # non-POSIX (Windows dev VMs): no advisory locks available
+    fcntl = None
 
 ENTRY_RE = re.compile(r"^###\s+(I-(\d+))\s+—\s+(.*)$")
 BOUNDARY_RE = re.compile(r"^(#{1,3}\s|---\s*$)")
@@ -89,6 +96,33 @@ AREA_ALIASES = {
 }
 
 FIELDS = ("title", "severity", "area", "files", "summary", "resolution")
+
+
+@contextmanager
+def locked(issues_file):
+    """Exclusive advisory lock around a read-modify-write of issues_file.
+
+    Guards against concurrent issue.py invocations (two `file` runs must
+    not allocate the same id; a `file` must not interleave with a `delete`).
+    No-op where fcntl is unavailable.
+    """
+    if fcntl is None:
+        yield
+        return
+    fh = open(issues_file, "r+b")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+    finally:
+        fh.close()
+
+
+def write_atomic(issues_file, text):
+    """Write via a same-directory temp file + rename so a crash mid-write
+    cannot leave a truncated ISSUES.md behind."""
+    tmp = issues_file.with_name(f"{issues_file.name}.tmp.{os.getpid()}")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, issues_file)
 
 
 def parse_entries(text):
@@ -220,7 +254,7 @@ def prompt_field(name):
     return value
 
 
-def cmd_file(entries, issues_file, args):
+def cmd_file(_entries, issues_file, args):
     values = {}
     for field in FIELDS:
         value = getattr(args, field)
@@ -236,11 +270,11 @@ def cmd_file(entries, issues_file, args):
             if canonical is None:
                 sys.exit(f"error: invalid area {value!r} (expected one of: {', '.join(AREAS)})")
             value = canonical
+        if "\n" in value or "\r" in value:
+            sys.exit(f"error: --{field} must be a single line (no newline characters)")
         values[field] = value
 
-    issue_id = f"I-{max_id_ever(entries, issues_file) + 1:03d}"
-    entry = (
-        f"### {issue_id} — {values['title']}\n"
+    entry_body = (
         f"\n"
         f"**Severity:** {values['severity']}\n"
         f"**Area:** {values['area']}\n"
@@ -252,36 +286,40 @@ def cmd_file(entries, issues_file, args):
         f"**Resolution:** {values['resolution']}\n"
     )
 
-    text = issues_file.read_text(encoding="utf-8")
-    anchor = "## Cross-References"
-    idx = text.find(anchor)
-    if idx != -1:
-        # insert before the trailing cross-references section, keeping its
-        # preceding "---" separator as the new entry's own
-        head, tail = text[:idx], text[idx:]
-        head = head.rstrip("\n")
-        if not head.endswith("---"):
-            head += "\n\n---"
-        text = head + "\n\n" + entry + "\n---\n\n" + tail
-    else:
-        text = text.rstrip("\n") + "\n\n---\n\n" + entry
-
-    issues_file.write_text(text, encoding="utf-8")
+    with locked(issues_file):
+        # reread under the lock: the id must come from the freshest file,
+        # not the entries parsed before a concurrent invocation ran
+        text = issues_file.read_text(encoding="utf-8")
+        issue_id = f"I-{max_id_ever(parse_entries(text), issues_file) + 1:03d}"
+        entry = f"### {issue_id} — {values['title']}\n" + entry_body
+        anchor = "## Cross-References"
+        idx = text.find(anchor)
+        if idx != -1:
+            # insert before the trailing cross-references section, keeping its
+            # preceding "---" separator as the new entry's own
+            head, tail = text[:idx], text[idx:]
+            head = head.rstrip("\n")
+            if not head.endswith("---"):
+                head += "\n\n---"
+            text = head + "\n\n" + entry + "\n---\n\n" + tail
+        else:
+            text = text.rstrip("\n") + "\n\n---\n\n" + entry
+        write_atomic(issues_file, text)
     line_no = text[:text.find(f"### {issue_id}")].count("\n") + 1
     print(f"filed {issue_id} at {issues_file}:{line_no}")
 
 
-def cmd_delete(entries, issues_file, args):
+def cmd_delete(_entries, issues_file, args):
     if args.target is None:
         sys.exit("error: delete needs an issue id, e.g. delete I-032")
     issue_id = normalize_id(args.target)
     if issue_id is None:
         sys.exit(f"error: invalid issue id: {args.target!r}")
 
-    match = next((e for e in entries if e[0] == issue_id), None)
+    match = next((e for e in _entries if e[0] == issue_id), None)
     if match is None:
         sys.exit(f"error: {issue_id} not found in {issues_file}")
-    _eid, title, start, end, _body, _severity, _area = match
+    title = match[1]
 
     if not args.yes:
         if not sys.stdin.isatty():
@@ -291,29 +329,38 @@ def cmd_delete(entries, issues_file, args):
             print("aborted")
             return
 
-    lines = issues_file.read_text(encoding="utf-8").splitlines()
-    # entry occupies lines[start-1:end]; also swallow its trailing separator
-    # and blank lines, or its leading separator if it is the last entry
-    del_end = end
-    while del_end < len(lines) and not lines[del_end].strip():
-        del_end += 1
-    if del_end < len(lines) and lines[del_end].strip() == "---":
-        del_end += 1
+    with locked(issues_file):
+        # reread under the lock: line numbers shift if a concurrent
+        # invocation filed or deleted an entry after our startup parse
+        text = issues_file.read_text(encoding="utf-8")
+        match = next((e for e in parse_entries(text) if e[0] == issue_id), None)
+        if match is None:
+            sys.exit(f"error: {issue_id} not found in {issues_file} (deleted concurrently?)")
+        _eid, _title, start, end, _body, _severity, _area = match
+
+        lines = text.splitlines()
+        # entry occupies lines[start-1:end]; also swallow its trailing separator
+        # and blank lines, or its leading separator if it is the last entry
+        del_end = end
         while del_end < len(lines) and not lines[del_end].strip():
             del_end += 1
-    else:
-        del_start = start - 1
-        while del_start > 0 and not lines[del_start - 1].strip():
-            del_start -= 1
-        if del_start > 0 and lines[del_start - 1].strip() == "---":
-            del_start -= 1
-        start = del_start + 1
+        if del_end < len(lines) and lines[del_end].strip() == "---":
+            del_end += 1
+            while del_end < len(lines) and not lines[del_end].strip():
+                del_end += 1
+        else:
+            del_start = start - 1
+            while del_start > 0 and not lines[del_start - 1].strip():
+                del_start -= 1
+            if del_start > 0 and lines[del_start - 1].strip() == "---":
+                del_start -= 1
+            start = del_start + 1
 
-    remaining = lines[:start - 1] + lines[del_end:]
-    # collapse any separator gap left at the seam
-    seam = "\n".join(remaining)
-    seam = re.sub(r"---\n(?:\n---\n)+", "---\n", seam)
-    issues_file.write_text(seam.rstrip("\n") + "\n", encoding="utf-8")
+        remaining = lines[:start - 1] + lines[del_end:]
+        # collapse any separator gap left at the seam
+        seam = "\n".join(remaining)
+        seam = re.sub(r"---\n(?:\n---\n)+", "---\n", seam)
+        write_atomic(issues_file, seam.rstrip("\n") + "\n")
     print(f"deleted {issue_id} (id stays retired; do not reuse it)")
 
 
