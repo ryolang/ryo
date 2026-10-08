@@ -44,10 +44,11 @@
 //! decide whether to proceed to codegen — codegen itself must never
 //! see an `Unreachable`.
 //!
-//! Warnings (W0002/W0003 case A) are buffered on [`Sema`] and flushed
-//! into the sink by `Sema::run` only when the whole unit is
-//! error-free — a warning from an early decl must not pile onto an
-//! error discovered while analyzing a later one.
+//! Warnings (W0002/W0003 case A) are buffered on [`Sema`] and returned
+//! to the caller, which flushes them only when the whole unit —
+//! including the ownership pass — is error-free. A warning from an
+//! early decl must not pile onto an error discovered by any later
+//! stage.
 
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{ParamMode, Tir, TirBuilder, TirParam, TirRef};
@@ -162,8 +163,9 @@ impl<'a> Scope<'a> {
 /// Analyze `uir` and emit one [`Tir`] per function body.
 ///
 /// Thin wrapper around [`Sema::run`] kept as the stable façade
-/// callers (the pipeline driver, tests) use. Equivalent to
-/// `Sema::run(uir, pool, sink)` but spelled the way it always was.
+/// callers (tests, benches) use. Flushes the buffered warnings into
+/// `sink` when the unit is error-free — see [`analyze_buffered`] for
+/// the deferred variant the pipeline driver uses.
 pub fn analyze(
     uir: &Uir,
     pool: &mut InternPool,
@@ -171,6 +173,26 @@ pub fn analyze(
     source: &str,
     file_path: &Path,
 ) -> Vec<Tir> {
+    let (tirs, warnings) = analyze_buffered(uir, pool, sink, source, file_path);
+    if !sink.has_errors() {
+        for d in warnings {
+            sink.emit(d);
+        }
+    }
+    tirs
+}
+
+/// Like [`analyze`], but returns the buffered warnings (W0002/W0003
+/// case A) instead of flushing them, so the caller can hold them past
+/// later pipeline stages (ownership) and emit them only when the whole
+/// unit — every stage — is error-free.
+pub fn analyze_buffered(
+    uir: &Uir,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+    source: &str,
+    file_path: &Path,
+) -> (Vec<Tir>, Vec<Diag>) {
     Sema::run(uir, pool, sink, source, file_path)
 }
 
@@ -182,11 +204,11 @@ pub struct Sema<'a> {
     uir: &'a Uir,
     pool: &'a mut InternPool,
     sink: &'a mut DiagSink,
-    /// Buffered warnings (W0002/W0003 case A). `run` flushes these
-    /// into `sink` only if the whole unit analyzed error-free, so a
-    /// warning from an early decl never piles onto an error found
-    /// while analyzing a later one. Errors always go to `sink`
-    /// directly.
+    /// Buffered warnings (W0002/W0003 case A). `Sema::run` returns
+    /// them to the caller instead of emitting, so a warning from an
+    /// early decl never piles onto an error found by a later stage
+    /// (ownership); the caller flushes them only when the whole unit
+    /// is error-free. Errors always go to `sink` directly.
     warnings: Vec<Diag>,
     source: &'a str,
     file_path: &'a Path,
@@ -261,28 +283,25 @@ fn collect_call_arg_refs(uir: &Uir) -> Vec<bool> {
 
 impl<'a> Sema<'a> {
     /// Drive sema to fixpoint and return one [`Tir`] per UIR
-    /// function body, in source order.
+    /// function body (source order) alongside the buffered warnings.
+    /// The caller decides when to flush the warnings — see
+    /// [`analyze`] (immediate) and [`analyze_buffered`] (deferred).
     pub fn run(
         uir: &'a Uir,
         pool: &'a mut InternPool,
         sink: &'a mut DiagSink,
         source: &'a str,
         file_path: &'a Path,
-    ) -> Vec<Tir> {
+    ) -> (Vec<Tir>, Vec<Diag>) {
         let mut sema = Sema::new(uir, pool, sink, source, file_path);
         sema.register_structs();
         sema.resolve_signatures();
         sema.seed_worklist();
         sema.drive();
-        // Flush buffered warnings only for a clean unit (see the
-        // `warnings` field). Must run before `collect_results`, which
-        // consumes `sema`.
-        if !sema.sink.has_errors() {
-            for d in sema.warnings.drain(..) {
-                sema.sink.emit(d);
-            }
-        }
-        sema.collect_results()
+        // Take the warnings before `collect_results`, which consumes
+        // `sema`.
+        let warnings = std::mem::take(&mut sema.warnings);
+        (sema.collect_results(), warnings)
     }
 
     fn new(

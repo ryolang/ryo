@@ -46,6 +46,12 @@ def parse_entries(text):
     for i, line in enumerate(lines):
         cat_match = CATEGORY_RE.match(line)
         if cat_match:
+            # A category heading ends the open entry: the heading and
+            # anything between belong to neither the entry's body nor
+            # its category.
+            if current:
+                close(i)
+                current = None
             current_category = cat_match.group(2).strip()
             continue
         

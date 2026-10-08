@@ -538,8 +538,15 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     // returns a well-formed TIR even with errors (Unreachable
     // slots), and `--emit=tir` deliberately prints that partial
     // TIR — the whole point of the flag is debugging sema.
-    let tirs = sema::analyze(&uir, &mut pool, &mut sink, &input, file);
+    let (tirs, sema_warnings) = sema::analyze_buffered(&uir, &mut pool, &mut sink, &input, file);
     let sidecar = ryo_frontend::ownership::check(&tirs, &pool, &mut sink);
+    // Sema warnings flush only after ownership has run: an ownership
+    // error must suppress them exactly like a sema error would.
+    if !sink.has_errors() {
+        for d in sema_warnings {
+            sink.emit(d);
+        }
+    }
 
     if want.tir {
         display_tir(&tirs, &pool);
@@ -654,8 +661,15 @@ fn lower_and_analyze(
     // Run sema even if astgen emitted errors: the Error sentinel
     // keeps cascades in check, and surfacing every problem in one
     // run is the whole point of the structured-diagnostics phase.
-    let tirs = sema::analyze(&uir, pool, &mut sink, input, file_path);
+    // Sema warnings are buffered and flushed after ownership so an
+    // ownership error suppresses them exactly like a sema error.
+    let (tirs, sema_warnings) = sema::analyze_buffered(&uir, pool, &mut sink, input, file_path);
     let sidecar = ryo_frontend::ownership::check(&tirs, pool, &mut sink);
+    if !sink.has_errors() {
+        for d in sema_warnings {
+            sink.emit(d);
+        }
+    }
     // Single tail block: render-if-non-empty, Err iff any errors.
     // Same shape as `ir_command` so warnings (`W0001` DeadStore,
     // `W0002` RedundantMove, …) surface on the success path
@@ -1117,6 +1131,39 @@ mod tests {
             "exactly the parse diagnostic may surface: {diags:?}"
         );
         assert_eq!(diags[0].code, DiagCode::ParseError);
+    }
+
+    #[test]
+    fn sema_warnings_suppressed_by_ownership_errors() {
+        // Cross-stage ordering hole: fn a's W0002 (redundant move on a
+        // Copy param) is a sema-stage warning, and fn main's
+        // use-after-move error only fires during the ownership pass —
+        // after sema has already flushed. The deferred flush must drop
+        // the warning: one failing stage silences warnings unit-wide.
+        let src = "fn a(move x: int) -> int:\n\treturn x\n\nfn main():\n\ts = \"abc\"\n\tt = s\n\tprint(s)\n";
+        let mut pool = InternPool::new();
+        let (program, parse_diags) =
+            parse_source(src, &mut pool, "<test>").expect("source should parse cleanly");
+        assert!(parse_diags.is_empty());
+        let mut sink = DiagSink::new();
+        let uir = astgen::generate(&program, &mut pool, &mut sink);
+        let (tirs, sema_warnings) =
+            sema::analyze_buffered(&uir, &mut pool, &mut sink, src, Path::new("<test>"));
+        let _sidecar = ryo_frontend::ownership::check(&tirs, &pool, &mut sink);
+        if !sink.has_errors() {
+            for d in sema_warnings {
+                sink.emit(d);
+            }
+        }
+        let diags = sink.into_diags();
+        assert!(
+            diags.iter().any(|d| d.code == DiagCode::UseAfterMove),
+            "ownership error must survive: {diags:?}"
+        );
+        assert!(
+            !diags.iter().any(|d| d.code == DiagCode::RedundantMove),
+            "sema warning must not pile onto a later ownership error: {diags:?}"
+        );
     }
 
     #[test]
