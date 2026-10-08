@@ -274,7 +274,7 @@ fn print_with_borrow_arg_rejected() {
 fn print_rejected_type_message_lists_accepted_types() {
     // `print(print("x"))` — the inner print is `void`, not a printable
     // type; the TypeMismatch message pins the full accept set (M10
-    // added anonymous structs / tuples).
+    // added anonymous structs / tuples; M11 added enums).
     let (_tirs, diags, _pool) = run_with_errors("fn main():\n\tprint(print(\"x\"))\n");
     assert!(
         any_code(&diags, DiagCode::TypeMismatch),
@@ -282,7 +282,7 @@ fn print_rejected_type_message_lists_accepted_types() {
     );
     assert_eq!(
         first_msg(&diags),
-        "print() argument must be str, strview, bytes, bytesview, int, float, bool, struct, or tuple, got void"
+        "print() argument must be str, strview, bytes, bytesview, int, float, bool, struct, enum, or tuple, got void"
     );
 }
 

@@ -255,9 +255,11 @@ pub enum TirTag {
     /// is passed to an owned borrow parameter. `TirData::UnOp`.
     ViewAsOwner,
 
-    /// `print()`-gate rewrite (M9.1): `int`/`float`/`bool`/struct args
-    /// render via their Debug repr (`print(x)` → `print(DebugRepr(x))`,
-    /// like bytes → `__ryo_bytes_repr`). Borrows operand; owned `str` out.
+    /// `print()`-gate rewrite (M9.1): `int`/`float`/`bool`/struct/enum
+    /// args render via their Debug repr (`print(x)` → `print(DebugRepr(x))`,
+    /// like bytes → `__ryo_bytes_repr`). The operand kind rides on the
+    /// operand's type (M11 enums included) — no payload bits of its own.
+    /// Borrows operand; owned `str` out.
     DebugRepr,
 
     /// `return <expr>`. Operand in `TirData::UnOp`.

@@ -749,12 +749,13 @@ pub(crate) fn check_print_args(
             | TypeKind::Bool
             | TypeKind::Struct
             | TypeKind::AnonStruct
+            | TypeKind::Enum
     ) {
         sema.sink.emit(Diag::error(
             sema.uir.span(view.args[0]),
             DiagCode::TypeMismatch,
             format!(
-                "{builtin}() argument must be str, strview, bytes, bytesview, int, float, bool, struct, or tuple, got {}",
+                "{builtin}() argument must be str, strview, bytes, bytesview, int, float, bool, struct, enum, or tuple, got {}",
                 sema.pool.display(arg_ty)
             ),
         ));
@@ -769,9 +770,9 @@ pub(crate) fn check_print_args(
 /// rewrites. M8.4.2: bytes/bytesview renders the escaped repr — rewrite
 /// to `<builtin>(__ryo_bytes_repr(arg))` so the repr temp is a normal
 /// ownership-tracked str producer (a codegen-synthesized temp would
-/// never be freed). M9.1: int/float/bool/struct renders the Debug repr —
-/// rewrite to `<builtin>(DebugRepr(arg))` for the same reason
-/// (DebugRepr borrows its operand; its str result is a normal owned
+/// never be freed). M9.1 (+M11 enums): int/float/bool/struct/enum renders
+/// the Debug repr — rewrite to `<builtin>(DebugRepr(arg))` for the same
+/// reason (DebugRepr borrows its operand; its str result is a normal owned
 /// temp).
 fn emit_print_like(
     sema: &mut Sema<'_>,
@@ -808,7 +809,8 @@ fn emit_print_like(
         | TypeKind::Float
         | TypeKind::Bool
         | TypeKind::Struct
-        | TypeKind::AnonStruct => {
+        | TypeKind::AnonStruct
+        | TypeKind::Enum => {
             let repr = fcx.builder.push_typed(
                 TirTag::DebugRepr,
                 TirData::UnOp(arg_tirs[0]),

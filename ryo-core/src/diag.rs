@@ -175,6 +175,30 @@ pub enum DiagCode {
     /// fields must be owned values, not projections.
     ViewFieldType,
 
+    // --- sema: enums (M11) ---
+    /// `EnumName.Variant` access named a type that is not an enum (M11) —
+    /// today a struct name used with enum access syntax. The message
+    /// names the type and its actual kind.
+    UnknownEnum,
+    /// A variant access or construction named a variant the enum does
+    /// not declare (M11). The message names the enum and the variant.
+    UnknownVariant,
+    /// A variant construction omitted one or more declared payload
+    /// fields (M11). The message names the missing field(s), the
+    /// variant, and the enum.
+    MissingVariantFields,
+    /// A variant construction initialized the same payload field twice
+    /// (M11). Reachable via duplicate named arguments, which astgen
+    /// lowers as repeated field-index pairs. The message names the
+    /// field, the variant, and the enum.
+    DuplicateVariantField,
+    /// A variant construction argument selected a payload field the
+    /// variant does not declare (M11) — today the positional-overflow
+    /// shape (`Circle(1.0, 2.0)` on a one-field variant); a typo'd
+    /// *named* field is frontlined by astgen before sema runs. The
+    /// message names the field, the variant, and the enum.
+    UnknownVariantField,
+
     // --- sema: destructuring (M10) ---
     /// A positional destructuring pattern binds a different number of
     /// fields than the struct has (`(q, r, s) = pair`). The message

@@ -235,6 +235,13 @@ pub struct Sema<'a> {
     /// types). Struct literals and field accesses resolve against
     /// this table.
     struct_types: HashMap<StringId, TypeId>,
+    /// Enum name → interned enum type (M11), populated from
+    /// `uir.enum_decls` (which carries failed enums as error-typed,
+    /// variant-less decls, exactly like structs — astgen already
+    /// diagnosed duplicates / cycles / bad payloads). Variant
+    /// constructions and bare `EnumName.Variant` unit accesses resolve
+    /// against this table.
+    enum_types: HashMap<StringId, TypeId>,
     /// Interned ids for the names compared on hot paths (builtin
     /// dispatch, materialize intercepts, reserved names). Built once
     /// in `Sema::new`.
@@ -295,6 +302,7 @@ impl<'a> Sema<'a> {
     ) -> (Vec<Tir>, Vec<Diag>) {
         let mut sema = Sema::new(uir, pool, sink, source, file_path);
         sema.register_structs();
+        sema.register_enums();
         sema.resolve_signatures();
         sema.seed_worklist();
         sema.drive();
@@ -357,6 +365,7 @@ impl<'a> Sema<'a> {
             signatures: HashMap::with_capacity(n),
             results,
             struct_types: HashMap::new(),
+            enum_types: HashMap::new(),
             names,
             builtin_by_id,
             call_arg_refs: collect_call_arg_refs(uir),
@@ -387,6 +396,37 @@ impl<'a> Sema<'a> {
                 }
             }
             self.struct_types.entry(decl.name).or_insert(decl.ty);
+        }
+    }
+
+    /// Populate `enum_types` from `uir.enum_decls` (M11) and validate
+    /// payload field types. First-wins on a duplicate name — astgen
+    /// already emitted `DuplicateDeclaration` and kept the first decl's
+    /// `TypeId`. Failed enums ride along error-typed and variant-less
+    /// (their own diagnostic is already in the sink), so the field
+    /// check only runs on defined enums.
+    ///
+    /// Rule 6 / E3 applies verbatim to payload fields (spec §2): they
+    /// must be owned values — a view-typed field (`strview`,
+    /// `bytesview`) is rejected at its own span, exactly like struct
+    /// fields in [`Sema::register_structs`].
+    fn register_enums(&mut self) {
+        for decl in &self.uir.enum_decls {
+            for variant in &decl.variants {
+                for field in &variant.fields {
+                    if self.pool.is_view(field.ty) {
+                        self.sink.emit(Diag::error(
+                            field.span,
+                            DiagCode::ViewFieldType,
+                            format!(
+                                "enum payload fields must be owned values; '{}' is a projection (Rule 6)",
+                                self.pool.display(field.ty),
+                            ),
+                        ));
+                    }
+                }
+            }
+            self.enum_types.entry(decl.name).or_insert(decl.ty);
         }
     }
 
@@ -643,6 +683,8 @@ mod tests_bytes;
 
 #[cfg(test)]
 mod tests_destructure;
+#[cfg(test)]
+mod tests_enums;
 #[cfg(test)]
 mod tests_reserved;
 #[cfg(test)]

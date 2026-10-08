@@ -445,6 +445,11 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::DuplicateStructField => "E0040",
         DiagCode::NotAStruct => "E0041",
         DiagCode::ViewFieldType => "E0042",
+        DiagCode::UnknownEnum => "E0118",
+        DiagCode::UnknownVariant => "E0119",
+        DiagCode::MissingVariantFields => "E0120",
+        DiagCode::DuplicateVariantField => "E0121",
+        DiagCode::UnknownVariantField => "E0122",
         DiagCode::ParseError => "E0100",
         DiagCode::ChainedComparison => "E0104",
         DiagCode::RangeArity => "E0105",
@@ -888,6 +893,11 @@ mod tests {
             (DiagCode::DuplicateStructField, "E0040"),
             (DiagCode::NotAStruct, "E0041"),
             (DiagCode::ViewFieldType, "E0042"),
+            (DiagCode::UnknownEnum, "E0118"),
+            (DiagCode::UnknownVariant, "E0119"),
+            (DiagCode::MissingVariantFields, "E0120"),
+            (DiagCode::DuplicateVariantField, "E0121"),
+            (DiagCode::UnknownVariantField, "E0122"),
             (DiagCode::MoveOutOfField, "E0043"),
             (DiagCode::ParseError, "E0100"),
             (DiagCode::TooManyDiagnostics, "E0101"),
@@ -975,6 +985,11 @@ mod tests {
                 | DiagCode::DuplicateStructField
                 | DiagCode::NotAStruct
                 | DiagCode::ViewFieldType
+                | DiagCode::UnknownEnum
+                | DiagCode::UnknownVariant
+                | DiagCode::MissingVariantFields
+                | DiagCode::DuplicateVariantField
+                | DiagCode::UnknownVariantField
                 | DiagCode::CycleInResolution
                 | DiagCode::ParseError
                 | DiagCode::ChainedComparison
