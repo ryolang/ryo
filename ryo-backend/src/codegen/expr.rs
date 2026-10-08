@@ -4,7 +4,7 @@ use super::arith::{DIV_OVERFLOW_MSG, DIV_ZERO_MSG, MOD_OVERFLOW_MSG, MOD_ZERO_MS
 use super::bytes::store_string;
 use super::{
     Codegen, FunctionContext, OVERFLOW_MSG, STR_SLOT_SIZE, Terminator, ValueRepr,
-    cranelift_type_for, is_fat_type, is_struct_type, ranges,
+    cranelift_type_for, is_enum_type, is_fat_type, is_struct_type, ranges,
 };
 use cranelift::codegen::ir::{BlockArg, FuncRef, MemFlagsData, StackSlot};
 use cranelift::prelude::*;
@@ -38,16 +38,18 @@ impl<M: Module> Codegen<M> {
         if let Some(repr) = Self::cached_repr(ctx, r) {
             return match repr {
                 ValueRepr::Scalar(v) => Ok(v),
-                // Fat/view-typed values have no scalar stand-in.
+                // Fat/view/aggregate-typed values have no scalar stand-in.
                 // A multi-word repr reaching the scalar entry point
                 // means a consumer forgot to gate through eval_inst_fat
-                // / eval_inst_view — reject loudly instead of silently
-                // handing out the data pointer.
+                // / eval_inst_view / eval_inst_struct / eval_inst_enum —
+                // reject loudly instead of silently handing out the
+                // data pointer.
                 ValueRepr::Str { .. }
                 | ValueRepr::Bytes { .. }
                 | ValueRepr::View { .. }
-                | ValueRepr::Struct { .. } => Err(format!(
-                    "eval_inst: fat/view/struct-typed inst %{} reached the scalar entry point; use eval_inst_fat / eval_inst_view / eval_inst_struct",
+                | ValueRepr::Struct { .. }
+                | ValueRepr::Enum { .. } => Err(format!(
+                    "eval_inst: fat/view/struct/enum-typed inst %{} reached the scalar entry point; use eval_inst_fat / eval_inst_view / eval_inst_struct / eval_inst_enum",
                     r.index()
                 )),
             };
@@ -330,6 +332,21 @@ impl<M: Module> Codegen<M> {
                 let rv = Self::eval_inst_struct(builder, ctx, rhs)?;
                 let ty = ctx.tir.inst(lhs).ty;
                 Self::emit_struct_eq(builder, ctx, lv, rv, ty, inst.tag == TirTag::StructNe)?
+            }
+            TirTag::EnumEq | TirTag::EnumNe => {
+                let (lhs, rhs) = match inst.data {
+                    TirData::BinOp { lhs, rhs } => (lhs, rhs),
+                    _ => unreachable!("EnumEq/EnumNe must carry TirData::BinOp"),
+                };
+                // Operands are enum values: materialize their slot
+                // addresses (never the scalar entry — enums are
+                // memory-first), then compare the i32 tags and the
+                // active variant's payload. The comparison borrows
+                // both operands.
+                let lv = Self::eval_inst_enum(builder, ctx, lhs)?;
+                let rv = Self::eval_inst_enum(builder, ctx, rhs)?;
+                let ty = ctx.tir.inst(lhs).ty;
+                Self::emit_enum_eq(builder, ctx, lv, rv, ty, inst.tag == TirTag::EnumNe)?
             }
             TirTag::BytesIndex => {
                 let (base, index) = match inst.data {
@@ -876,11 +893,12 @@ impl<M: Module> Codegen<M> {
                 }
             }
             TirTag::DebugRepr => {
-                // M9.1 print() gate: render the operand's Debug
+                // M9.1/M11 print() gate: render the operand's Debug
                 // representation into a fresh owned str. Primitive
                 // operands render bare through the ryo_*_to_str
                 // family (no braces); struct operands recurse through
-                // `emit_debug_repr` (structs.rs). The cached triple
+                // `emit_debug_repr` (structs.rs); enum operands through
+                // `eval_enum_debug_repr` (enums.rs). The cached triple
                 // feeds print's `eval_str_or_view_parts` like any
                 // other str temp, and the ownership pass's scheduled
                 // Free releases the buffer after the statement.
@@ -915,6 +933,34 @@ impl<M: Module> Codegen<M> {
                         );
                         let addr = Self::eval_inst_struct(builder, ctx, operand)?;
                         let repr_addr = Self::emit_debug_repr(builder, ctx, addr, operand_ty)?;
+                        let ptr =
+                            builder
+                                .ins()
+                                .load(ctx.int_type, MemFlagsData::trusted(), repr_addr, 0);
+                        let len =
+                            builder
+                                .ins()
+                                .load(types::I64, MemFlagsData::trusted(), repr_addr, 8);
+                        let cap =
+                            builder
+                                .ins()
+                                .load(types::I64, MemFlagsData::trusted(), repr_addr, 16);
+                        ValueRepr::Str { ptr, len, cap }
+                    }
+                    TypeKind::Enum => {
+                        // M11: enum operands render through the
+                        // tag-dispatched enum Debug repr (unit
+                        // `Color.Red`, tuple `Result.Success(5)`,
+                        // named `Shape.Rectangle{...}`). The repr
+                        // allocates its own result slot; a
+                        // caller-provided out_slot would silently be
+                        // ignored.
+                        debug_assert!(
+                            out_slot.is_none(),
+                            "DebugRepr enum operand manages its own repr slot"
+                        );
+                        let addr = Self::eval_inst_enum(builder, ctx, operand)?;
+                        let repr_addr = Self::eval_enum_debug_repr(builder, ctx, addr, operand_ty)?;
                         let ptr =
                             builder
                                 .ins()
@@ -1478,6 +1524,21 @@ impl<M: Module> Codegen<M> {
             return Ok(out); // dummy scalar — consumers use eval_inst_struct
         }
 
+        if is_enum_type(ret_ty, ctx.pool) {
+            // M11 enum sret: the enum's slot was allocated by
+            // marshalling; the slot address is the result (mirrors the
+            // struct sret path above).
+            let out = marshalled
+                .sret
+                .expect("enum-returning call must marshal an sret pointer");
+
+            builder.ins().call(callee_ref, &marshalled.values);
+            Self::reload_inout_args(builder, ctx, &marshalled.inout_reloads)?;
+
+            Self::cache_repr(ctx, r, ValueRepr::Enum { addr: out });
+            return Ok(out); // dummy scalar — consumers use eval_inst_enum
+        }
+
         let call = builder.ins().call(callee_ref, &marshalled.values);
         Self::reload_inout_args(builder, ctx, &marshalled.inout_reloads)?;
         let results = builder.inst_results(call);
@@ -1533,12 +1594,13 @@ impl<M: Module> Codegen<M> {
             if mode == ParamMode::Inout {
                 if matches!(ctx.tir.inst(*arg).data, TirData::FieldAccess { .. })
                     || is_struct_type(arg_ty, ctx.pool)
+                    || is_enum_type(arg_ty, ctx.pool)
                 {
-                    // M9 inout field path (`&p.x`) or whole-struct inout
-                    // (`&p`): the pointee already lives in the root
-                    // struct's stack slot — pass its address directly so
-                    // the callee mutates in place. No spill, no reload,
-                    // no write-back.
+                    // M9 inout field path (`&p.x`), whole-struct inout
+                    // (`&p`), or whole-enum inout (M11, `&e`): the
+                    // pointee already lives in the caller's stack slot —
+                    // pass its address directly so the callee mutates
+                    // in place. No spill, no reload, no write-back.
                     let addr = Self::inout_pointee_addr(builder, ctx, *arg)?;
                     values.push(addr);
                 } else if is_fat_type(arg_ty, ctx.pool) {
@@ -1616,6 +1678,12 @@ impl<M: Module> Codegen<M> {
                 // field-wise copy for Move/Copy.
                 let addr = Self::emit_struct_call_arg(builder, ctx, *arg, mode)?;
                 values.push(addr);
+            } else if is_enum_type(arg_ty, ctx.pool) {
+                // M11 enum arg: a single slot address — the existing
+                // slot for Borrow, a fresh tag + active-payload copy
+                // for Move/Copy.
+                let addr = Self::emit_enum_call_arg(builder, ctx, *arg, mode)?;
+                values.push(addr);
             } else {
                 values.push(Self::eval_inst(builder, ctx, *arg)?);
             }
@@ -1640,6 +1708,11 @@ impl<M: Module> Codegen<M> {
             Some(out)
         } else if is_struct_type(ret_ty, ctx.pool) {
             let slot = Self::struct_slot(builder, ctx, ret_ty);
+            let out = builder.ins().stack_addr(ctx.int_type, slot, 0);
+            values.insert(0, out);
+            Some(out)
+        } else if is_enum_type(ret_ty, ctx.pool) {
+            let slot = Self::enum_slot(builder, ctx, ret_ty);
             let out = builder.ins().stack_addr(ctx.int_type, slot, 0);
             values.insert(0, out);
             Some(out)

@@ -38,6 +38,7 @@ mod arith;
 mod builtins;
 mod bytes;
 mod control;
+mod decls;
 mod enums;
 mod expr;
 mod frees;
@@ -50,6 +51,8 @@ mod tail;
 mod views;
 
 pub(crate) use structs::{is_fat_type, is_struct_type};
+
+pub(crate) use enums::is_enum_type;
 
 /// Fat-owner triple layout (str/bytes, 24 bytes): ptr at 0, len at 8,
 /// cap at 16. Derived from `RyoStrFat`, not re-hardcoded.
@@ -283,6 +286,14 @@ pub(crate) enum ValueRepr {
     Struct {
         addr: Value,
     },
+    /// Enum value (M11): the address of the value's stack slot,
+    /// exactly like structs — the i32 discriminant and the active
+    /// variant's payload share one slot (`pool.enum_view` layout), and
+    /// tag-dispatched copies and drops go through this pointer (see
+    /// `codegen/enums.rs`).
+    Enum {
+        addr: Value,
+    },
 }
 
 impl ValueRepr {
@@ -294,6 +305,7 @@ impl ValueRepr {
             ValueRepr::Bytes { .. } => panic!("expected Scalar, got Bytes"),
             ValueRepr::View { .. } => panic!("expected Scalar, got View"),
             ValueRepr::Struct { .. } => panic!("expected Scalar, got Struct"),
+            ValueRepr::Enum { .. } => panic!("expected Scalar, got Enum"),
         }
     }
 }
@@ -864,7 +876,8 @@ impl<M: Module> Codegen<M> {
             let is_main = ids.main == Some(tir.name);
             let returns_fat = !is_main && is_fat_type(tir.return_type, pool);
             let returns_struct = !is_main && is_struct_type(tir.return_type, pool);
-            let has_sret = returns_fat || returns_struct;
+            let returns_enum = !is_main && is_enum_type(tir.return_type, pool);
+            let has_sret = returns_fat || returns_struct || returns_enum;
             let mut block_idx: usize = if has_sret { 1 } else { 0 };
             let sret_ptr = if has_sret {
                 Some(builder.block_params(entry_block)[0])
@@ -921,12 +934,12 @@ impl<M: Module> Codegen<M> {
                                 home_inline: false,
                             }),
                         );
-                    } else if is_struct_type(param.ty, pool) {
-                        // Struct inout pointee (M9 named / M10 anon):
-                        // mutations happen in place through the
-                        // caller's slot — bind the pointer directly
-                        // and skip the write-back table (there is
-                        // nothing to store back).
+                    } else if is_struct_type(param.ty, pool) || is_enum_type(param.ty, pool) {
+                        // Struct (M9 named / M10 anon) and enum (M11)
+                        // inout pointees: mutations happen in place
+                        // through the caller's slot — bind the pointer
+                        // directly and skip the write-back table (there
+                        // is nothing to store back).
                         let var = builder.declare_var(int_type);
                         builder.def_var(var, ptr);
                         Self::write_slot(
@@ -983,10 +996,12 @@ impl<M: Module> Codegen<M> {
                         }),
                     );
                     block_idx += 2;
-                } else if is_struct_type(param.ty, pool) {
-                    // Struct param (M9 named / M10 anon): a single
-                    // pointer to the caller-side slot (borrow) or to a
-                    // transferred field-wise copy (move/copy).
+                } else if is_struct_type(param.ty, pool) || is_enum_type(param.ty, pool) {
+                    // Struct (M9 named / M10 anon) and enum (M11)
+                    // params: a single pointer to the caller-side slot
+                    // (borrow) or to a transferred field-wise copy
+                    // (move/copy). Enum bindings share the
+                    // family-agnostic `struct_locals` table.
                     let var = builder.declare_var(int_type);
                     builder.def_var(var, builder.block_params(entry_block)[block_idx]);
                     Self::write_slot(
@@ -1135,6 +1150,12 @@ impl<M: Module> Codegen<M> {
                     let var = Self::read_slot(&ctx.struct_locals, param.name)
                         .expect("every struct param gets a struct_locals entry above");
                     ctx.param_values[idx] = Some(ValueRepr::Struct {
+                        addr: builder.use_var(var),
+                    });
+                } else if is_enum_type(param.ty, pool) {
+                    let var = Self::read_slot(&ctx.struct_locals, param.name)
+                        .expect("every enum param gets a struct_locals entry above");
+                    ctx.param_values[idx] = Some(ValueRepr::Enum {
                         addr: builder.use_var(var),
                     });
                 }
@@ -1331,140 +1352,10 @@ impl<M: Module> Codegen<M> {
     ) -> Result<Terminator, String> {
         let inst = ctx.tir.inst(r);
         match inst.tag {
-            TirTag::VarDecl => {
-                let view = ctx.tir.var_decl_view(r);
-                if is_fat_type(inst.ty, ctx.pool) {
-                    // Producer-into-home: a slot-out producer
-                    // initializer (runtime producer call, concat, or
-                    // fat-returning user call) writes the binding's
-                    // canonical 24-byte home slot directly — no temp
-                    // slot, no reload-to-SSA, no second spill slot.
-                    // All later reads/writes go through the home.
-                    // Mutable bindings get a home even when the
-                    // initializer is not a producer: only they can be
-                    // reassigned, and a later slot-out reassign then
-                    // writes the home directly (and the home-provenance
-                    // free elision applies) instead of paying a temp
-                    // slot + triple store at every reassign.
-                    let produces_slot =
-                        structs::writes_out_slot_ids(ctx.tir, &ctx.name_ids, view.initializer);
-                    let home = if produces_slot || view.mutable {
-                        Some(builder.create_sized_stack_slot(StackSlotData::new(
-                            StackSlotKind::ExplicitSlot,
-                            STR_SLOT_SIZE,
-                            3,
-                        )))
-                    } else {
-                        None
-                    };
-                    let repr = Self::eval_inst_fat_slot(
-                        builder,
-                        ctx,
-                        view.initializer,
-                        home.filter(|_| produces_slot),
-                    )?;
-                    match repr {
-                        ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
-                            let var_ptr = builder.declare_var(ctx.int_type);
-                            let var_len = builder.declare_var(types::I64);
-                            let var_cap = builder.declare_var(types::I64);
-                            // Home-backed bindings keep the triple in the
-                            // slot only; the SSA Variables stay unused.
-                            // A non-producer initializer needs the triple
-                            // stored into the home by hand.
-                            match home {
-                                Some(home) if !produces_slot => {
-                                    let addr = builder.ins().stack_addr(ctx.int_type, home, 0);
-                                    builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
-                                    builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
-                                    builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
-                                }
-                                Some(_) => {}
-                                None => {
-                                    builder.def_var(var_ptr, ptr);
-                                    builder.def_var(var_len, len);
-                                    builder.def_var(var_cap, cap);
-                                }
-                            }
-                            let home_inline = home.is_some()
-                                && Self::home_value_provably_inline(
-                                    ctx,
-                                    builder.func,
-                                    view.initializer,
-                                    cap,
-                                );
-                            Self::write_slot(
-                                &mut ctx.fat_locals,
-                                &mut ctx.fat_locals_undo,
-                                view.name,
-                                Some(FatLocals {
-                                    ptr: var_ptr,
-                                    len: var_len,
-                                    cap: var_cap,
-                                    home,
-                                    home_inline,
-                                }),
-                            );
-                        }
-                        _ => unreachable!("fat-typed initializer should produce a fat ValueRepr"),
-                    }
-                    return Ok(Terminator::None);
-                }
-                if ctx.pool.is_view(inst.ty) {
-                    let repr = Self::eval_inst_view(builder, ctx, view.initializer)?;
-                    match repr {
-                        ValueRepr::View { ptr, len } => {
-                            let var_ptr = builder.declare_var(ctx.int_type);
-                            let var_len = builder.declare_var(types::I64);
-                            builder.def_var(var_ptr, ptr);
-                            builder.def_var(var_len, len);
-                            Self::write_slot(
-                                &mut ctx.view_locals,
-                                &mut ctx.view_locals_undo,
-                                view.name,
-                                Some(ViewLocals {
-                                    ptr: var_ptr,
-                                    len: var_len,
-                                }),
-                            );
-                        }
-                        _ => unreachable!("view-typed initializer should produce ValueRepr::View"),
-                    }
-                    // Same defensive fact removal as the scalar path
-                    // below: a same-scope redefinition must not inherit
-                    // a stale fact from the shadowed binding.
-                    Self::write_slot(
-                        &mut ctx.range_facts,
-                        &mut ctx.range_facts_undo,
-                        view.name,
-                        None,
-                    );
-                    return Ok(Terminator::None);
-                }
-                if matches!(
-                    ctx.pool.kind(inst.ty),
-                    TypeKind::Struct | TypeKind::AnonStruct
-                ) {
-                    return Self::emit_struct_var_decl(builder, ctx, r);
-                }
-                let val = Self::eval_inst(builder, ctx, view.initializer)?;
-                // The variable's resolved type lives in the VarDecl
-                // inst's `ty` slot directly — no side-table lookup.
-                let cl_ty = cranelift_type_for(inst.ty, ctx.pool, ctx.int_type);
-                let var = builder.declare_var(cl_ty);
-                builder.def_var(var, val);
-                // Defensive: a same-scope redefinition must not inherit
-                // a stale fact from the shadowed binding. (No seeding
-                // from constant initializers — explicit non-goal.)
-                Self::write_slot(
-                    &mut ctx.range_facts,
-                    &mut ctx.range_facts_undo,
-                    view.name,
-                    None,
-                );
-                Self::write_slot(&mut ctx.locals, &mut ctx.locals_undo, view.name, Some(var));
-                Ok(Terminator::None)
-            }
+            // Variable declaration — family dispatch lives in
+            // decls.rs (keeps this dispatcher under the
+            // small-function ratchet).
+            TirTag::VarDecl => Self::emit_var_decl(builder, ctx, r),
             TirTag::Return => {
                 let operand = match inst.data {
                     TirData::UnOp(o) => o,
@@ -1487,6 +1378,8 @@ impl<M: Module> Codegen<M> {
                     Self::emit_return(builder, ctx, &[])?;
                 } else if is_struct_type(ctx.tir.return_type, ctx.pool) {
                     return Self::emit_struct_return(builder, ctx, r, operand);
+                } else if is_enum_type(ctx.tir.return_type, ctx.pool) {
+                    return Self::emit_enum_return(builder, ctx, r, operand);
                 } else {
                     // A Return whose operand is a call is a tail
                     // context regardless of position. An eligible
@@ -1556,162 +1449,18 @@ impl<M: Module> Codegen<M> {
                     // struct-returning call): materialize so the call
                     // is emitted; scheduled temp Frees handle the drop.
                     let _ = Self::eval_inst_struct(builder, ctx, operand)?;
+                } else if matches!(ctx.pool.kind(operand_ty), TypeKind::Enum) {
+                    // Bare enum-valued statement (e.g. a discarded
+                    // enum-returning call): materialize so the call is
+                    // emitted; scheduled temp Frees handle the drop.
+                    let _ = Self::eval_inst_enum(builder, ctx, operand)?;
                 } else {
                     let _ = Self::eval_inst(builder, ctx, operand)?;
                 }
                 Ok(Terminator::None)
             }
             TirTag::IfStmt => Self::generate_if_stmt(builder, ctx, r, in_tail_position),
-            TirTag::Assign => {
-                let view = ctx.tir.assign_view(r);
-                if is_fat_type(inst.ty, ctx.pool) {
-                    // Consuming reassign-concat fast path: the ownership
-                    // pass proved the lhs binding dies at this reassign, so
-                    // codegen appends in place and skips the
-                    // free_on_reassign free below by never reaching it.
-                    if let Some(concat_ref) = ctx.sidecar.consumed_concat_lhs[r.index()] {
-                        return Self::emit_consuming_concat_assign(builder, ctx, r, concat_ref);
-                    }
-                    // `read_slot` copies the FatLocals out (three Cranelift
-                    // `Variable` newtypes + home), so no table borrow
-                    // survives into the free declaration below, which
-                    // needs &mut ctx.module.
-                    let locals = Self::read_slot(&ctx.fat_locals, view.name).ok_or_else(|| {
-                        format!(
-                            "Undefined fat variable in assign: '{}'",
-                            ctx.pool.str(view.name)
-                        )
-                    })?;
-                    let is_bytes = matches!(ctx.pool.kind(inst.ty), TypeKind::Bytes);
-                    // Home-backed target whose RHS cannot reference the
-                    // binding: free the old buffer FIRST, then let the
-                    // producer write the home directly (free-before-
-                    // overwrite). An RHS that reads the binding (e.g. a
-                    // non-consuming `s = s + "x"`) takes the eval-then-
-                    // free-then-store order instead — freeing first
-                    // would be a use-after-free.
-                    let direct = locals.home.is_some()
-                        && structs::writes_out_slot_ids(ctx.tir, &ctx.name_ids, view.value)
-                        && !Self::expr_refs_name(ctx.tir, view.value, view.name);
-                    let mut old_freed = false;
-                    // Elision, same predicate as the scheduled-free
-                    // path: when the home's CURRENT contents are
-                    // provably free-noop (`locals.home_inline`), the
-                    // old-value free is a guaranteed no-op either way.
-                    if direct
-                        && !locals.home_inline
-                        && ctx.sidecar.free_on_reassign[r.index()].is_some()
-                    {
-                        let (old_ptr, old_cap) =
-                            Self::emit_fat_load_ptr_cap(builder, ctx, view.name)
-                                .expect("fat_locals entry read above");
-                        if !Self::is_static_cap_zero(builder.func, old_cap) {
-                            let free_ref = if is_bytes {
-                                Self::declare_bytes_free(ctx, builder)?
-                            } else {
-                                Self::declare_str_free(ctx, builder)?
-                            };
-                            builder.ins().call(free_ref, &[old_ptr, old_cap]);
-                        }
-                        old_freed = true;
-                    }
-                    let repr = Self::eval_inst_fat_slot(
-                        builder,
-                        ctx,
-                        view.value,
-                        if direct { locals.home } else { None },
-                    )?;
-                    let (ptr, len, cap) = match repr {
-                        ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
-                            (ptr, len, cap)
-                        }
-                        _ => unreachable!("fat-typed assign should produce a fat ValueRepr"),
-                    };
-                    // Free the old allocation before overwriting locals.
-                    // sidecar.free_on_reassign[r] is set whenever the
-                    // ownership pass observed a Valid old owner at this
-                    // Assign. The old (ptr, cap) live in the binding's
-                    // current storage (home slot or FatLocals Variables)
-                    // — NOT in inst_values[old_owner], which holds the
-                    // literal's original (ptr, cap) at its emission point
-                    // and may be stale across reassigns.
-                    if !old_freed
-                        && ctx.sidecar.free_on_reassign[r.index()].is_some()
-                        && !(locals.home.is_some() && locals.home_inline)
-                    {
-                        let (old_ptr, old_cap) =
-                            Self::emit_fat_load_ptr_cap(builder, ctx, view.name)
-                                .expect("fat_locals entry read above");
-                        if !Self::is_static_cap_zero(builder.func, old_cap) {
-                            let free_ref = if is_bytes {
-                                Self::declare_bytes_free(ctx, builder)?
-                            } else {
-                                Self::declare_str_free(ctx, builder)?
-                            };
-                            builder.ins().call(free_ref, &[old_ptr, old_cap]);
-                        }
-                    }
-                    match locals.home {
-                        // In direct mode the producer already wrote the
-                        // home; only the aliasing fallback stores here.
-                        Some(home) if !direct => {
-                            let addr = builder.ins().stack_addr(ctx.int_type, home, 0);
-                            builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
-                            builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
-                            builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
-                        }
-                        Some(_) => {}
-                        None => {
-                            builder.def_var(locals.ptr, ptr);
-                            builder.def_var(locals.len, len);
-                            builder.def_var(locals.cap, cap);
-                        }
-                    }
-                    if locals.home.is_some() {
-                        let inline =
-                            Self::home_value_provably_inline(ctx, builder.func, view.value, cap);
-                        Self::set_home_inline(ctx, view.name, inline);
-                    }
-                    Self::kill_fact(ctx, view.name);
-                    return Ok(Terminator::None);
-                }
-                if ctx.pool.is_view(inst.ty) {
-                    let repr = Self::eval_inst_view(builder, ctx, view.value)?;
-                    let ValueRepr::View { ptr, len } = repr else {
-                        unreachable!("view-typed assign should produce ValueRepr::View");
-                    };
-                    let locals = Self::read_slot(&ctx.view_locals, view.name).ok_or_else(|| {
-                        format!(
-                            "Undefined strview variable in assign: '{}'",
-                            ctx.pool.str(view.name)
-                        )
-                    })?;
-                    // Views are borrows — no free-on-reassign; just
-                    // reseat the pair.
-                    builder.def_var(locals.ptr, ptr);
-                    builder.def_var(locals.len, len);
-                    Self::kill_fact(ctx, view.name);
-                    return Ok(Terminator::None);
-                }
-                if matches!(
-                    ctx.pool.kind(inst.ty),
-                    TypeKind::Struct | TypeKind::AnonStruct
-                ) {
-                    return Self::emit_struct_assign(builder, ctx, r);
-                }
-                let val = Self::eval_inst(builder, ctx, view.value)?;
-                // Kill AFTER evaluating the RHS: `x = x + 1` must still
-                // see the old fact while its right-hand side is emitted.
-                Self::kill_fact(ctx, view.name);
-                let var = Self::read_slot(&ctx.locals, view.name).ok_or_else(|| {
-                    format!(
-                        "Undefined variable in assign: '{}'",
-                        ctx.pool.str(view.name)
-                    )
-                })?;
-                builder.def_var(var, val);
-                Ok(Terminator::None)
-            }
+            TirTag::Assign => Self::emit_assign(builder, ctx, r),
             TirTag::CompoundAssign => {
                 let view = ctx.tir.compound_assign_view(r);
                 let rhs = Self::eval_inst(builder, ctx, view.value)?;

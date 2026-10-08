@@ -301,8 +301,12 @@ impl<M: Module> Codegen<M> {
         let mut bytes_free_ref: Option<FuncRef> = None;
         for (idx, target) in pending {
             ctx.freed_at[idx] = true;
-            // M9: struct-typed targets route to the recursive field
-            // drop; everything below is the str/bytes path.
+            // M11: enum-typed targets route to the tag-dispatched
+            // payload drop; M9 structs to the recursive field drop;
+            // everything below is the str/bytes path.
+            if Self::try_emit_enum_free(builder, ctx, target)? {
+                continue;
+            }
             if Self::try_emit_struct_free(builder, ctx, target)? {
                 continue;
             }
@@ -428,6 +432,12 @@ impl<M: Module> Codegen<M> {
                         target.index()
                     ));
                 }
+                ValueRepr::Enum { .. } => {
+                    return Err(format!(
+                        "ownership pass scheduled Free for enum %{} but try_emit_enum_free did not claim it",
+                        target.index()
+                    ));
+                }
             }
         }
         ctx.pending_sweep.retain(|&idx| !ctx.freed_at[idx]);
@@ -472,6 +482,11 @@ impl<M: Module> Codegen<M> {
             let Some(name) = Self::free_binding_name(ctx, target) else {
                 continue;
             };
+            // M11: enum bindings drop the active variant's needs-drop
+            // fields (tag-dispatched).
+            if Self::try_emit_enum_dead_drop(builder, ctx, name, target)? {
+                continue;
+            }
             // M9: struct bindings drop their needs-drop fields.
             if Self::try_emit_struct_dead_drop(builder, ctx, name, target)? {
                 continue;

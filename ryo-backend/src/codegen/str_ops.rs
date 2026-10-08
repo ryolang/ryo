@@ -320,10 +320,12 @@ impl<M: Module> Codegen<M> {
                 Self::emit_fat_bytes_ptr_len(builder, ctx, ptr, len, cap, inline_addr)
             }
             ValueRepr::View { ptr, len } => Ok((ptr, len)),
-            ValueRepr::Scalar(_) | ValueRepr::Struct { .. } => Err(format!(
-                "eval_str_or_view_parts: instruction at %{} is not a fat/view value",
-                r.index()
-            )),
+            ValueRepr::Scalar(_) | ValueRepr::Struct { .. } | ValueRepr::Enum { .. } => {
+                Err(format!(
+                    "eval_str_or_view_parts: instruction at %{} is not a fat/view value",
+                    r.index()
+                ))
+            }
         }
     }
 
