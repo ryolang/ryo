@@ -1,0 +1,18 @@
+# echo.ryo - Read from stdin and print each line (like cat)
+#
+# Usage:
+#     echo "Hello" | cargo run -- run examples/echo.ryo
+#     cat README.md | cargo run -- run examples/echo.ryo
+#
+# NOTE: io_read_line reads stdin in 128-byte chunks and returns only the
+# first line of each chunk, discarding the rest (I-202, open). Piping a
+# multi-line file at once therefore loses every line but the first.
+# Use interactively or line-by-line until I-202 lands with M13.6.
+# See examples/oracle.ryo for the same limitation.
+#
+fn main():
+	while true:
+		line = io_read_line()
+		if line == "":
+			break
+		print(line + "\n")
