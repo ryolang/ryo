@@ -338,7 +338,7 @@ def main():
         sys.exit(f"error: {args.file} not found")
 
     entries = parse_entries(args.file.read_text(encoding="utf-8"))
-    if not entries and args.command != "file":
+    if not entries and args.command not in ("file", "next", "list"):
         sys.exit(f"error: no issue entries found in {args.file}")
 
     handler = COMMANDS.get(args.command) if args.command else None
