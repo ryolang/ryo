@@ -99,7 +99,7 @@ IMPORTANT: Never author Claude on commits nor PRs.
 
 ## Issue Tracking
 
-Non-immediate issues that affect architecture, correctness, or long-term code health go in `ISSUES.md`. Create an entry when you identify a problem that won't be resolved in the current session but must be addressed for better architecture or sustainability. Use the next sequential `I-XXX` number, set its `**Severity:**` field (Blocking / Correctness / Hygiene / Cleanup), and include Files, Summary, and Resolution fields.
+Non-immediate issues that affect architecture, correctness, or long-term code health go in `ISSUES.md`. Create an entry when you identify a problem that won't be resolved in the current session but must be addressed for better architecture or sustainability. Use the next sequential `I-XXX` number, set its `**Severity:**` field (Blocking / Correctness / Hygiene / Cleanup), set its `**Area:**` field to one component (frontend-lexer, frontend-parser, sema, ownership, codegen, runtime, linker-toolchain, driver-cli, core-ir, docs-spec, ci-benchmarks, tooling — cross-cutting issues take the component where the fix primarily lands), and include Files, Summary, and Resolution fields.
 
 **Never reuse an `I-XXX` number, even after its entry is deleted.** IDs are cited in commit messages and live on in git history; a reused number silently retargets those references to a different issue. Deleted numbers stay retired — the next entry always takes the highest number ever used + 1.
 
@@ -113,8 +113,8 @@ Cite issue IDs (`I-XXX`) in code comments and docs **only while the issue is sti
 uv run scripts/issue.py I-032     # full entry text, prefixed with its line range
 uv run scripts/issue.py next      # next issue id to use (highest ever, from the file + git history, + 1)
 uv run scripts/issue.py list      # all ids, line ranges, and titles
-uv run scripts/issue.py file --title "..." --severity cleanup --files "..." --summary "..." --resolution "..."
-                                  # append a new entry (fields prompted if omitted; --severity accepts blocking/hygiene/cleanup)
+uv run scripts/issue.py file --title "..." --severity cleanup --area codegen --files "..." --summary "..." --resolution "..."
+                                  # append a new entry (fields prompted if omitted; --severity/--area accept short aliases)
 uv run scripts/issue.py delete I-032 --yes
                                   # remove an entry (asks to confirm without --yes; the id stays retired)
 ```

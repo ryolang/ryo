@@ -19,9 +19,10 @@ Usage:
 Subcommands: next, list, file, delete. Anything else in the first position is
 treated as an issue id to print.
 
-`file` takes --title/--severity/--files/--summary/--resolution; any field not
-given on the command line is prompted for interactively (so agents should pass
-everything as flags; plain `file` with no flags walks a human through it).
+`file` takes --title/--severity/--area/--files/--summary/--resolution; any field
+not given on the command line is prompted for interactively (so agents should
+pass everything as flags; plain `file` with no flags walks a human through it).
+`list --area <area>` filters the listing by area.
 """
 
 import argparse
@@ -32,7 +33,9 @@ from pathlib import Path
 
 ENTRY_RE = re.compile(r"^###\s+(I-(\d+))\s+—\s+(.*)$")
 BOUNDARY_RE = re.compile(r"^(#{1,3}\s|---\s*$)")
-SEVERITY_RE = re.compile(r"^\*\*Severity:\*\*\s*(.+?)\s*$")
+FIELD_RE = r"^\*\*{}\:\*\*\s*(.+?)\s*$"
+SEVERITY_RE = re.compile(FIELD_RE.format("Severity"))
+AREA_RE = re.compile(FIELD_RE.format("Area"))
 
 SEVERITIES = ("Blocking", "Correctness / Hygiene", "Cleanup")
 SEVERITY_ALIASES = {
@@ -44,15 +47,56 @@ SEVERITY_ALIASES = {
     "cleanup": "Cleanup",
 }
 
-FIELDS = ("title", "severity", "files", "summary", "resolution")
+AREAS = (
+    "frontend-lexer", "frontend-parser", "sema", "ownership", "codegen",
+    "runtime", "linker-toolchain", "driver-cli", "core-ir", "docs-spec",
+    "ci-benchmarks", "tooling",
+)
+AREA_ALIASES = {
+    "lexer": "frontend-lexer",
+    "frontend-lexer": "frontend-lexer",
+    "parser": "frontend-parser",
+    "frontend-parser": "frontend-parser",
+    "ast": "frontend-parser",
+    "sema": "sema",
+    "semantic": "sema",
+    "builtins": "sema",
+    "ownership": "ownership",
+    "borrowck": "ownership",
+    "codegen": "codegen",
+    "backend": "codegen",
+    "runtime": "runtime",
+    "linker": "linker-toolchain",
+    "toolchain": "linker-toolchain",
+    "linker-toolchain": "linker-toolchain",
+    "driver": "driver-cli",
+    "cli": "driver-cli",
+    "driver-cli": "driver-cli",
+    "core": "core-ir",
+    "uir": "core-ir",
+    "tir": "core-ir",
+    "core-ir": "core-ir",
+    "diag": "core-ir",
+    "docs": "docs-spec",
+    "spec": "docs-spec",
+    "docs-spec": "docs-spec",
+    "ci": "ci-benchmarks",
+    "benchmarks": "ci-benchmarks",
+    "ci-benchmarks": "ci-benchmarks",
+    "codspeed": "ci-benchmarks",
+    "tooling": "tooling",
+    "scripts": "tooling",
+}
+
+FIELDS = ("title", "severity", "area", "files", "summary", "resolution")
 
 
 def parse_entries(text):
-    """Yield (issue_id, title, start_line, end_line, body, severity) per entry.
+    """Yield (issue_id, title, start_line, end_line, body, severity, area).
 
     start_line/end_line are 1-based and inclusive; body is the entry's lines
-    including the heading; severity comes from the entry's **Severity:** field
-    (None if the entry predates the field).
+    including the heading; severity/area come from the entry's **Severity:** /
+    **Area:** fields (None if an entry predates the field).
     """
     lines = text.splitlines()
     entries = []
@@ -63,13 +107,16 @@ def parse_entries(text):
         while end > current[2] + 1 and not lines[end - 1].strip():
             end -= 1
         body = lines[current[2]:end]
-        severity = None
+        severity = area = None
         for line in body:
             m = SEVERITY_RE.match(line)
             if m:
                 severity = m.group(1)
-                break
-        entries.append((current[0], current[1], current[2] + 1, end, body, severity))
+                continue
+            m = AREA_RE.match(line)
+            if m:
+                area = m.group(1)
+        entries.append((current[0], current[1], current[2] + 1, end, body, severity, area))
 
     for i, line in enumerate(lines):
         m = ENTRY_RE.match(line)
@@ -117,20 +164,34 @@ def cmd_next(entries, issues_file, _args):
     print(f"I-{max_id_ever(entries, issues_file) + 1:03d}")
 
 
-def cmd_list(entries, issues_file, _args):
+def cmd_list(entries, issues_file, args):
+    area_filter = AREA_ALIASES.get(args.area.lower()) if args.area else None
+    if args.area and area_filter is None:
+        sys.exit(f"error: invalid area {args.area!r} (expected one of: {', '.join(AREAS)})")
+
     severity_counts = {}
-    for issue_id, title, start, end, _, severity in entries:
+    area_counts = {}
+    shown = 0
+    for issue_id, title, start, end, _, severity, area in entries:
+        if area_filter and area != area_filter:
+            continue
         print(f"{issue_id} (lines {start}-{end}) — {title}")
+        shown += 1
         if severity:
             severity_counts[severity] = severity_counts.get(severity, 0) + 1
+        if area:
+            area_counts[area] = area_counts.get(area, 0) + 1
 
-    print(f"\nTotal: {len(entries)} issue(s)")
+    print(f"\nTotal: {shown} issue(s)")
     for sev in SEVERITIES:
         if sev in severity_counts:
             print(f"  {sev}: {severity_counts[sev]}")
-    unknown = len(entries) - sum(severity_counts.values())
-    if unknown:
-        print(f"  (no severity field): {unknown}")
+    for a in AREAS:
+        if a in area_counts:
+            print(f"  {a}: {area_counts[a]}")
+    unclassified = shown - sum(area_counts.values())
+    if unclassified:
+        print(f"  (no area field): {unclassified}")
 
 
 def cmd_show(entries, issues_file, args):
@@ -138,7 +199,7 @@ def cmd_show(entries, issues_file, args):
     if issue_id is None:
         sys.exit(f"error: invalid issue id: {args.command!r}")
 
-    for eid, _title, start, end, body, _severity in entries:
+    for eid, _title, start, end, body, _severity, _area in entries:
         if eid == issue_id:
             print(f"{issues_file}:{start}-{end}")
             print("\n".join(body).strip())
@@ -149,8 +210,11 @@ def cmd_show(entries, issues_file, args):
 def prompt_field(name):
     if not sys.stdin.isatty():
         sys.exit(f"error: --{name} is required (non-interactive stdin; pass it as a flag)")
-    label = "severity (Blocking / Correctness / Hygiene / Cleanup)" if name == "severity" else name
-    value = input(f"{label}: ").strip()
+    labels = {
+        "severity": "severity (Blocking / Correctness / Hygiene / Cleanup)",
+        "area": f"area ({' / '.join(AREAS)})",
+    }
+    value = input(f"{labels.get(name, name)}: ").strip()
     if not value:
         sys.exit(f"error: {name} cannot be empty")
     return value
@@ -167,6 +231,11 @@ def cmd_file(entries, issues_file, args):
             if canonical is None:
                 sys.exit(f"error: invalid severity {value!r} (expected one of: {', '.join(SEVERITIES)})")
             value = canonical
+        elif field == "area":
+            canonical = AREA_ALIASES.get(value.lower())
+            if canonical is None:
+                sys.exit(f"error: invalid area {value!r} (expected one of: {', '.join(AREAS)})")
+            value = canonical
         values[field] = value
 
     issue_id = f"I-{max_id_ever(entries, issues_file) + 1:03d}"
@@ -174,6 +243,7 @@ def cmd_file(entries, issues_file, args):
         f"### {issue_id} — {values['title']}\n"
         f"\n"
         f"**Severity:** {values['severity']}\n"
+        f"**Area:** {values['area']}\n"
         f"\n"
         f"**Files:** {values['files']}\n"
         f"\n"
@@ -211,7 +281,7 @@ def cmd_delete(entries, issues_file, args):
     match = next((e for e in entries if e[0] == issue_id), None)
     if match is None:
         sys.exit(f"error: {issue_id} not found in {issues_file}")
-    _eid, title, start, end, _body, _severity = match
+    _eid, title, start, end, _body, _severity, _area = match
 
     if not args.yes:
         if not sys.stdin.isatty():
@@ -256,6 +326,7 @@ def main():
     ap.add_argument("target", nargs="?", help="issue id, for: delete")
     ap.add_argument("--title", help="file: entry title")
     ap.add_argument("--severity", help="file: Blocking / Correctness / Hygiene / Cleanup")
+    ap.add_argument("--area", help="file: compiler area (see --help for the list); also list: filter by area")
     ap.add_argument("--files", help="file: affected files field")
     ap.add_argument("--summary", help="file: summary field")
     ap.add_argument("--resolution", help="file: resolution field")
