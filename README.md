@@ -7,6 +7,7 @@
     <img src="https://img.shields.io/github/actions/workflow/status/ryolang/ryo/ci.yml?branch=main&style=for-the-badge" alt="Build">
     <img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="License">
     <a href="https://app.codspeed.io/ryolang/ryo?utm_source=badge"><img src="https://img.shields.io/endpoint?url=https://codspeed.io/badge.json&style=for-the-badge" alt="CodSpeed"/></a>
+    <a href="https://play.ryolang.org/"><img src="https://img.shields.io/badge/playground-%E2%96%B6%20try%20ryo-yellow?style=for-the-badge" alt="Playground"/></a>
   </p>
 </div>
 
@@ -28,6 +29,8 @@ fn main():
 cargo run -- run examples/hello.ryo
 ```
 
+No install needed — run this in your browser: [play.ryolang.org](https://play.ryolang.org/)
+
 More examples in [`examples/`](examples/). For what the compiler implements today and what's next, see the [Implementation Roadmap](docs/dev/implementation_roadmap.md).
 
 ## Installation
@@ -40,7 +43,7 @@ export PATH="$HOME/.ryo/bin:$PATH"
 ryo --version
 ```
 
-Dev builds are manually triggered and may be unstable. Update with `--force`:
+Dev builds are manually triggered and may be unstable. Update with `--force` (overwrites the existing install without prompting — re-running without it asks first, and refuses non-interactively):
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ryolang/ryo/main/install.sh | sh -s -- --force
 ```

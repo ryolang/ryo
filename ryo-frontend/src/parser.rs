@@ -630,8 +630,11 @@ where
 
         let while_stmt = just(Token::While)
             .ignore_then(expr.clone())
-            .then_ignore(just(Token::Colon))
-            .then(indented_block(body_stmt.clone()))
+            .then(block_header(
+                "while",
+                "the condition",
+                indented_block(body_stmt.clone()),
+            ))
             .map_with(|(cond, body), e: &mut Mx<'a, '_, I>| {
                 let span = e.span();
                 e.state().while_loop(cond, &body, span)
@@ -658,8 +661,11 @@ where
                     .collect::<Vec<_>>(),
             )
             .then_ignore(just(Token::RParen))
-            .then_ignore(just(Token::Colon))
-            .then(indented_block(body_stmt.clone()))
+            .then(block_header(
+                "for",
+                "the for clause",
+                indented_block(body_stmt.clone()),
+            ))
             .try_map_with(|(((var, iterator), args), body), e: &mut Mx<'a, '_, I>| {
                 if args.len() != 2 {
                     return Err(Rich::custom(
@@ -709,6 +715,88 @@ where
     })
 }
 
+/// Block header for `if` / `elif` / `else` / `while` / `for` / `fn`:
+/// the colon plus the two Python-transcription failure shapes:
+/// a same-line statement after the colon, and a statement keyword
+/// where the colon belongs.
+///
+/// Three token-disjoint arms:
+///
+///  1. `:` then a *required* indented block — the normal path,
+///     byte-identical to the old `just(Token::Colon).then(block)`.
+///     An absent block fails the whole statement exactly as before:
+///     the error paths below must not make a body-less header parse
+///     as an empty body.
+///  2. `:` then a statement on the same line — emit "Ryo doesn't
+///     support one-line '…' bodies" spanning the colon and the
+///     swallowed statement, then recover with the block when one
+///     exists or an empty body. One mistake, one diagnostic. Fires
+///     only when the token after the colon is not `<newline>` /
+///     `<indent>` / `<dedent>` — the indent preprocessor emits
+///     `<indent>` *before* the newline at block starts, so those
+///     three tokens mark every legitimate non-statement position.
+///  3. No `:` and a statement-start keyword sits where the colon
+///     belongs — emit "expected ':' after …" at that token and
+///     recover the same way. Any other missing-colon shape fails
+///     here so the generic error machinery reports as before.
+///
+/// Yields the body statements.
+fn block_header<'a, I>(
+    keyword: &'static str,
+    after: &'static str,
+    block: impl Parser<'a, I, Vec<StmtId>, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, Vec<StmtId>, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    // Normal path: colon, required block.
+    let normal = just(Token::Colon)
+        .then(block.clone())
+        .map(|(_, stmts)| stmts);
+
+    // Same-line body: diagnose at the colon, swallow the statement.
+    // The swallow must stop at <indent> as well as <newline>: the
+    // indent preprocessor emits <indent> before the newline when the
+    // following line is deeper-indented, and eating it orphans the
+    // matching <dedent>, mis-nesting every enclosing block.
+    let same_line = just(Token::Colon)
+        .then(
+            empty()
+                .and_is(none_of([Token::Newline, Token::Indent, Token::Dedent]))
+                .then_ignore(none_of([Token::Newline, Token::Indent]).repeated()),
+        )
+        .then(block.clone().or(empty().to(Vec::new())))
+        .validate(move |(_, stmts), e: &mut Mx<'a, '_, I>, emitter| {
+            emitter.emit(Rich::custom(
+                e.span(),
+                ParseDiag::Message(format!(
+                    "Ryo doesn't support one-line '{keyword}' bodies — \
+                     put the statement on its own line, indented"
+                )),
+            ));
+            stmts
+        });
+
+    // Missing colon: only claim shapes that look like a statement —
+    // anything else keeps the generic colon error. Same <indent>
+    // swallow discipline as the same-line arm.
+    let missing_colon = select! {
+        Token::Return | Token::Break | Token::Continue | Token::If
+        | Token::While | Token::For | Token::Ident(_) => ()
+    }
+    .then_ignore(none_of([Token::Newline, Token::Indent]).repeated())
+    .then(block.clone().or(empty().to(Vec::new())))
+    .validate(move |(_, stmts), e: &mut Mx<'a, '_, I>, emitter| {
+        emitter.emit(Rich::custom(
+            e.span(),
+            ParseDiag::Message(format!("expected ':' after {after}")),
+        ));
+        stmts
+    });
+
+    choice((normal, same_line, missing_colon)).boxed()
+}
+
 fn if_stmt_parser<'a, I>(
     body_stmt: impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a,
     expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
@@ -721,18 +809,15 @@ where
     let elif_branch = skip_newlines()
         .ignore_then(just(Token::Elif))
         .ignore_then(expr.clone())
-        .then_ignore(just(Token::Colon))
-        .then(block.clone());
+        .then(block_header("elif", "the condition", block.clone()));
 
     let else_block = skip_newlines()
         .ignore_then(just(Token::Else))
-        .ignore_then(just(Token::Colon))
-        .ignore_then(block.clone());
+        .ignore_then(block_header("else", "else", block.clone()));
 
     just(Token::If)
         .ignore_then(expr)
-        .then_ignore(just(Token::Colon))
-        .then(block)
+        .then(block_header("if", "the condition", block))
         .then(elif_branch.repeated().collect::<Vec<_>>())
         .then(else_block.or_not())
         .map_with(
@@ -960,12 +1045,58 @@ where
     // (`a, b = e`, `(a, b) = e`, `{q, r} = e`, M10) overlap only with
     // `var_decl` / `expr_stmt` (both Ident/`(`/`{`-led), so they sit
     // before those two but after the keyword-led forms.
+    //
+    // Assignment to a field (or positional) target is a body
+    // statement only. At the top level, recognize the shape —
+    // `ident (.field)+` followed by `=` or a compound-assign op —
+    // and fail with a targeted message instead of chumsky's raw
+    // expectation dump. The `at_least(1)` segment guard
+    // keeps bare `ident = value` a valid top-level var decl
+    // (`var_decl_parser`, ahead of us, claims it; the guard is
+    // self-defensive regardless of choice order). Deliberately NOT
+    // added to `body_statement_parser` — assignments are legal there.
+    let assignment_guard = select! { Token::Ident(s) => s }
+        .map_with(|s, e: &mut Mx<'a, '_, I>| Ident::new(s, e.span()))
+        .then(
+            just(Token::Dot)
+                .ignore_then(field_key_ident())
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .then(choice((
+            just(Token::Assign),
+            just(Token::PlusAssign),
+            just(Token::MinusAssign),
+            just(Token::StarAssign),
+            just(Token::SlashAssign),
+            just(Token::PercentAssign),
+        )))
+        // Swallow the RHS through end of line: the diagnostic already
+        // explains the statement, and a stray expression tail would
+        // surface as a second generic parse error. Stop at <indent>
+        // — eating it would orphan the matching <dedent> of a
+        // deeper-indented following line (same discipline as
+        // block_header's swallows).
+        .then_ignore(none_of([Token::Newline, Token::Indent]).repeated())
+        .validate(|_, e: &mut Mx<'a, '_, I>, emitter| {
+            emitter.emit(Rich::custom(
+                e.span(),
+                ParseDiag::Message("assignment is only valid inside a function body".to_string()),
+            ));
+        })
+        .map_with(|_, e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            e.state().error_stmt(span)
+        });
+
     choice((
         attributed_struct_decl_parser(),
         struct_decl_parser(),
         function_def_parser(expr.clone()),
         destructure_stmt_parser(expr.clone()),
         var_decl_parser(expr.clone()),
+        assignment_guard,
         expr_stmt,
     ))
     .boxed()
@@ -1114,8 +1245,7 @@ where
         .ignore_then(ident)
         .then(params)
         .then(return_type)
-        .then_ignore(just(Token::Colon))
-        .then(body)
+        .then(block_header("fn", "the signature", body))
         .map_with(
             |(((name, params), return_type), body), e: &mut Mx<'a, '_, I>| {
                 let span = e.span();

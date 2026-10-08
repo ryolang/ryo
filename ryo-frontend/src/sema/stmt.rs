@@ -107,6 +107,13 @@ pub(crate) fn analyze_stmt(
             }
             fcx.builder.return_void(sema.pool.void(), span)
         }
+        InstTag::Unreachable => {
+            // Parser-recovery sentinel (R10): the parse diagnostic was
+            // already emitted. Lower to the TIR error sentinel so
+            // flow analysis (e.g. the E0036 missing-return check)
+            // suppresses cascading diagnostics for the broken body.
+            fcx.builder.unreachable(sema.pool.error_type(), span)
+        }
         InstTag::ExprStmt => {
             let operand = match inst.data {
                 InstData::UnOp(o) => o,

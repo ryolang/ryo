@@ -65,7 +65,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 
 ### Phase 5: Post-v0.1.0 Extensions (v0.2+)
 
-Deferred features tracked separately — see Phase 5 section for the full list (REPL/JIT, Concurrency Runtime, Closures, FFI, Traits & Generics, Try/Catch, F-strings, Stack Traces polish, Benchmarking & Doc Generation, Constrained/Distinct Types, Contracts, Copy Elision, Stdlib Allocation Optimizations, Cancellation Model, Named Parameters, etc.).
+Deferred features tracked separately — see Phase 5 section for the full list (REPL/JIT, Concurrency Runtime, Closures, FFI, Traits & Generics, Try/Catch, F-strings, Stack Traces polish, Benchmarking & Doc Generation, Constrained/Distinct Types, Contracts, Copy Elision, Stdlib Allocation Optimizations, Cancellation Model, Named Parameters, LSP/Editor Tooling, etc.).
 
 **From the final slicing & memory-model spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md` §14), the gap register (`docs/dev/ryo-missing-features-and-gaps.md`), and the view-materialization record (`docs/dev/ryo-view-materialization.md`):**
 
@@ -76,6 +76,7 @@ Deferred features tracked separately — see Phase 5 section for the full list (
 | Runtime profile split (`core`/`hosted`, `--profile=core`) | v0.2 | D9; stdlib layering, no backend changes |
 | `bytes.copy_into(bview, &buf)` (no-alloc view materialization) | v0.2 | needed by the `core` no-alloc profile and the FFI buffer idiom (`cstr.from`) — land with/before FFI; destination is a fixed-capacity `[N]u8` (fixed arrays land with M21); design in `ryo-view-materialization.md` §3 |
 | Machine-applicable diagnostic suggestions (E0034 ViewEscape → `str(view)` materialize fix) | v0.2 | needs Diag suggestion-payload machinery that doesn't exist yet; design in `docs/experimental/ryo-agent-interface-proposal.md` and `ryo-view-materialization.md` §4 |
+| LSP / editor tooling server | v0.2+ | rides both rows above: `Diag` is already LSP-shaped (severity, stable `DiagCode`, byte spans, notes), so squiggles + codes + related info need no new diagnostic machinery — only the structured emission channel (`ryo check --json=v1` / library API per `docs/experimental/ryo-agent-interface-proposal.md` §2), a line index over the `byte_to_char_offsets` table in `render_diags` (negotiate UTF-8 positions), in-memory virtual files (`didOpen`, unsaved buffers), and debounced recheck; quick-fix code actions come free once the suggestion payload lands; the R9/R10 continue-past-errors design already yields the full per-version diagnostic set an editor wants |
 | Bounded operator overloading (`Add`… traits) | v0.2–v0.3 | D10; concrete types first, generic traits with user generics |
 | `unsafe` policy implementation (manifest gating, `SAFETY:` enforcement, `ryo audit`) | v0.2 | D4; lands with FFI/unsafe work; binding-author reference detail in `unsafe.md` |
 | Volatile MMIO intrinsics | v0.2 | GAP-3; `core` profile intrinsic package |

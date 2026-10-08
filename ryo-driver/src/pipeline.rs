@@ -230,6 +230,21 @@ fn rich_error_message(e: &Rich<'_, Token, SimpleSpan, ParseDiag>, pool: &InternP
             unreachable!("custom parse errors are converted by the caller")
         }
         RichReason::ExpectedFound { .. } => {
+            // Unclosed argument list: the parser stopped at a line break
+            // while `)` was still a valid continuation. A token dump
+            // ("found '<newline>' expected '.', '[', '*', …") sends the
+            // user to the glossary instead of the paren — name the
+            // problem and the two tokens that would continue the call.
+            let at_line_break = matches!(e.found(), Some(Token::Newline | Token::Dedent));
+            if at_line_break
+                && e.expected().any(|p| match p {
+                    RichPattern::Token(tok) => **tok == Token::RParen,
+                    _ => false,
+                })
+            {
+                return "unclosed argument list: expected ',' or ')' before the end of the line"
+                    .to_string();
+            }
             let found = match e.found() {
                 Some(tok) => format!("found '{}'", render_token_with_pool(tok, pool)),
                 None => "found end of input".to_string(),
@@ -523,8 +538,15 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     // returns a well-formed TIR even with errors (Unreachable
     // slots), and `--emit=tir` deliberately prints that partial
     // TIR — the whole point of the flag is debugging sema.
-    let tirs = sema::analyze(&uir, &mut pool, &mut sink, &input, file);
+    let (tirs, sema_warnings) = sema::analyze_buffered(&uir, &mut pool, &mut sink, &input, file);
     let sidecar = ryo_frontend::ownership::check(&tirs, &pool, &mut sink);
+    // Sema warnings flush only after ownership has run: an ownership
+    // error must suppress them exactly like a sema error would.
+    if !sink.has_errors() {
+        for d in sema_warnings {
+            sink.emit(d);
+        }
+    }
 
     if want.tir {
         display_tir(&tirs, &pool);
@@ -639,8 +661,15 @@ fn lower_and_analyze(
     // Run sema even if astgen emitted errors: the Error sentinel
     // keeps cascades in check, and surfacing every problem in one
     // run is the whole point of the structured-diagnostics phase.
-    let tirs = sema::analyze(&uir, pool, &mut sink, input, file_path);
+    // Sema warnings are buffered and flushed after ownership so an
+    // ownership error suppresses them exactly like a sema error.
+    let (tirs, sema_warnings) = sema::analyze_buffered(&uir, pool, &mut sink, input, file_path);
     let sidecar = ryo_frontend::ownership::check(&tirs, pool, &mut sink);
+    if !sink.has_errors() {
+        for d in sema_warnings {
+            sink.emit(d);
+        }
+    }
     // Single tail block: render-if-non-empty, Err iff any errors.
     // Same shape as `ir_command` so warnings (`W0001` DeadStore,
     // `W0002` RedundantMove, …) surface on the success path
@@ -1001,6 +1030,247 @@ mod tests {
             !msg.contains("<id#"),
             "message must not leak opaque handle ids: {msg}"
         );
+    }
+
+    #[test]
+    fn unclosed_call_gets_a_human_message() {
+        let mut pool = InternPool::new();
+        let (_program, diags) = parse_source(
+            "fn main():\n\ttotal = \"hello\"\n\tprint(int_to_str(total.len())\n\tprint(\"done\")\n",
+            &mut pool,
+            "<test>",
+        )
+        .expect("recovery should yield a partial program");
+        let e0100: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == DiagCode::ParseError)
+            .collect();
+        assert_eq!(e0100.len(), 1, "expected one parse error: {diags:?}");
+        let msg = &e0100[0].message;
+        assert!(
+            msg.contains("unclosed") && msg.contains("')'"),
+            "message should name the problem and the fix: {msg}"
+        );
+        assert!(
+            !msg.contains("<newline>") && !msg.contains("something else"),
+            "message must not leak parser internals: {msg}"
+        );
+    }
+
+    #[test]
+    fn top_level_assignment_gets_targeted_message() {
+        let mut pool = InternPool::new();
+        let (_program, diags) = parse_source(
+            "struct Point:\n\tx: int\n\ty: int\n\nfn main():\n\tq = Point{x=1, y=2}\n\nq.x = 7\n",
+            &mut pool,
+            "<test>",
+        )
+        .expect("recovery should yield a partial program");
+        assert_eq!(diags.len(), 1, "expected one diagnostic: {diags:?}");
+        assert_eq!(diags[0].code, DiagCode::ParseError);
+        assert!(
+            diags[0].message.contains("inside a function body"),
+            "message should explain the rule: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn top_level_assignment_message_covers_positional_and_compound() {
+        let mut pool = InternPool::new();
+        let (_p, diags) = parse_source("q.0 = 7\n", &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
+        assert_eq!(diags.len(), 1, "positional target: {diags:?}");
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.message.contains("inside a function body")),
+            "positional target: {diags:?}"
+        );
+
+        let mut pool = InternPool::new();
+        let (_p, diags) = parse_source("q.x += 1\n", &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
+        assert_eq!(diags.len(), 1, "compound assign: {diags:?}");
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.message.contains("inside a function body")),
+            "compound assign: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn top_level_plain_decl_still_parses() {
+        let mut pool = InternPool::new();
+        parse_source("q = 7\nprint(q)\n", &mut pool, "<test>")
+            .expect("top-level var decls and flat scripts stay valid");
+    }
+
+    #[test]
+    fn parse_broken_only_return_does_not_cascade_missing_return() {
+        // The parser recovers at the statement boundary, so the body
+        // genuinely ends without a return — but that is the parse
+        // error's fault, not the signature's. Exactly the parse
+        // diagnostic may surface; a stacked E0036 would point the user
+        // at the wrong place.
+        let src = "fn f() -> int:\n\treturn 1 +\n";
+        let mut pool = InternPool::new();
+        let (program, parse_diags) = parse_source(src, &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
+        let mut sink = DiagSink::new();
+        for d in parse_diags {
+            sink.emit(d);
+        }
+        let uir = astgen::generate(&program, &mut pool, &mut sink);
+        let _tirs = sema::analyze(&uir, &mut pool, &mut sink, src, Path::new("<test>"));
+        let diags = sink.into_diags();
+        assert_eq!(
+            diags.len(),
+            1,
+            "exactly the parse diagnostic may surface: {diags:?}"
+        );
+        assert_eq!(diags[0].code, DiagCode::ParseError);
+    }
+
+    #[test]
+    fn sema_warnings_suppressed_by_ownership_errors() {
+        // Cross-stage ordering hole: fn a's W0002 (redundant move on a
+        // Copy param) is a sema-stage warning, and fn main's
+        // use-after-move error only fires during the ownership pass —
+        // after sema has already flushed. The deferred flush must drop
+        // the warning: one failing stage silences warnings unit-wide.
+        let src = "fn a(move x: int) -> int:\n\treturn x\n\nfn main():\n\ts = \"abc\"\n\tt = s\n\tprint(s)\n";
+        let mut pool = InternPool::new();
+        let (program, parse_diags) =
+            parse_source(src, &mut pool, "<test>").expect("source should parse cleanly");
+        assert!(parse_diags.is_empty());
+        let mut sink = DiagSink::new();
+        let uir = astgen::generate(&program, &mut pool, &mut sink);
+        let (tirs, sema_warnings) =
+            sema::analyze_buffered(&uir, &mut pool, &mut sink, src, Path::new("<test>"));
+        let _sidecar = ryo_frontend::ownership::check(&tirs, &pool, &mut sink);
+        if !sink.has_errors() {
+            for d in sema_warnings {
+                sink.emit(d);
+            }
+        }
+        let diags = sink.into_diags();
+        assert!(
+            diags.iter().any(|d| d.code == DiagCode::UseAfterMove),
+            "ownership error must survive: {diags:?}"
+        );
+        assert!(
+            !diags.iter().any(|d| d.code == DiagCode::RedundantMove),
+            "sema warning must not pile onto a later ownership error: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn one_line_if_body_gets_targeted_message() {
+        let mut pool = InternPool::new();
+        let (_p, diags) = parse_source(
+            "fn factorial(n: int) -> int:\n\tif (n <= 1): return 1\n\treturn n * factorial(n - 1)\n",
+            &mut pool,
+            "<test>",
+        )
+        .expect("recovery should yield a partial program");
+        assert_eq!(diags.len(), 1, "expected one diagnostic: {diags:?}");
+        assert_eq!(diags[0].code, DiagCode::ParseError);
+        assert!(
+            diags[0].message.contains("one-line") && diags[0].message.contains("own line"),
+            "message should steer to the fix: {}",
+            diags[0].message
+        );
+        assert!(
+            !diags[0].message.contains("<indent>"),
+            "message must not leak parser internals: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn missing_colon_after_condition_gets_targeted_message() {
+        let mut pool = InternPool::new();
+        let (_p, diags) = parse_source(
+            "fn f(n: int) -> int:\n\tif (n <= 1) return 1\n\treturn n\n",
+            &mut pool,
+            "<test>",
+        )
+        .expect("recovery should yield a partial program");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("expected ':' after the condition")),
+            "missing-colon shape should be named: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn accepted_block_form_stays_silent() {
+        let mut pool = InternPool::new();
+        parse_source(
+            "fn factorial(n: int) -> int:\n\tif (n <= 1):\n\t\treturn 1\n\treturn n * factorial(n - 1)\n\nfn main():\n\tprint(factorial(5))\n",
+            &mut pool,
+            "<test>",
+        )
+        .expect("newline + indented block must parse clean");
+    }
+
+    #[test]
+    fn blank_line_between_header_and_body_is_not_a_one_line_body() {
+        let mut pool = InternPool::new();
+        parse_source(
+            "fn f(n: int) -> int:\n\tif (n <= 1):\n\n\t\treturn 1\n\treturn n\n",
+            &mut pool,
+            "<test>",
+        )
+        .expect("blank-line tolerance must survive");
+    }
+
+    #[test]
+    fn one_line_body_message_covers_all_block_headers() {
+        // Same Python-transcription hazard on every header — the
+        // shared helper must fire for each, with the keyword
+        // interpolated.
+        for (src, kw) in [
+            (
+                "fn f(n: int) -> int:\n\twhile n > 0: n -= 1\n\treturn n\n",
+                "while",
+            ),
+            (
+                "fn f(n: int) -> int:\n\tfor i in range(0, 2): print(i)\n\treturn n\n",
+                "for",
+            ),
+        ] {
+            let mut pool = InternPool::new();
+            let (_p, diags) = parse_source(src, &mut pool, "<test>")
+                .expect("recovery should yield a partial program");
+            assert!(
+                diags
+                    .iter()
+                    .any(|d| d.message.contains(&format!("one-line '{kw}'"))),
+                "{kw}: targeted message missing: {diags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn header_recovery_preserves_indented_structure() {
+        // The line after a one-line-body error is deeper-indented.
+        // The recovery swallow must stop at <indent> (the indent
+        // preprocessor emits it before the newline) so the block
+        // parser can claim the indented body — eating the <indent>
+        // orphans its <dedent> and cascades extra parse errors.
+        for src in [
+            "fn f(n: int) -> int:\n\tif n <= 1: return 1\n\t\tprint(n)\n\treturn n\n",
+            "fn f(n: int) -> int:\n\tif n <= 1 return 1\n\t\tprint(n)\n\treturn n\n",
+        ] {
+            let mut pool = InternPool::new();
+            let (_p, diags) = parse_source(src, &mut pool, "<test>")
+                .expect("recovery should yield a partial program");
+            assert_eq!(diags.len(), 1, "expected one diagnostic: {diags:?}");
+        }
     }
 
     #[test]

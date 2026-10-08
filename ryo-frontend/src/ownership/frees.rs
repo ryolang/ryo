@@ -348,7 +348,6 @@ pub(crate) fn warn_redundant_materialize(
         ));
     }
 }
-
 /// W0004: a bound `b = s.to_bytes()` whose `bytes` result is only ever
 /// read or borrow-passed is a redundant O(n) allocation + copy —
 /// `s.as_bytes()` projects the same bytes as a `bytesview` for free,

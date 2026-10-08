@@ -527,9 +527,7 @@ fn analyze_struct_lit(
         return analyze_anon_struct_lit(sema, fcx, scope, &view, span);
     };
     let Some(&sty) = sema.struct_types.get(&name) else {
-        // Not a registered struct: either never declared, or declared
-        // but left undefined by astgen (cycle / unknown field type —
-        // already diagnosed). Recover with the error sentinel.
+        // Never declared — this one is on the user.
         sema.sink.emit(Diag::error(
             span,
             DiagCode::UnknownType,
@@ -537,11 +535,23 @@ fn analyze_struct_lit(
         ));
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     };
+    if sema.pool.is_error(sty) {
+        // Declared but its definition failed (E0005 infinite size,
+        // unknown field type — already diagnosed). Recover quietly,
+        // matching field-access on a failed struct.
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
     let sview = sema.pool.struct_view(sty);
     let mut by_index: Vec<Option<TirRef>> = vec![None; sview.fields.len()];
+    // Once any field errored (unknown/duplicate), the literal's
+    // shape is untrustworthy — a derived "missing field(s)" error on
+    // top is noise. Mistyped-but-present fields do not set this: a
+    // type mismatch is not a shape error.
+    let mut field_errored = false;
     for (fname, value_ref) in view.fields {
         let fspan = sema.uir.span(value_ref);
         let Some(field) = sema.pool.struct_field(sty, fname) else {
+            field_errored = true;
             sema.sink.emit(Diag::error(
                 fspan,
                 DiagCode::UnknownField,
@@ -558,6 +568,7 @@ fn analyze_struct_lit(
             continue;
         };
         if by_index[field.idx as usize].is_some() {
+            field_errored = true;
             sema.sink.emit(Diag::error(
                 fspan,
                 DiagCode::DuplicateStructField,
@@ -593,7 +604,7 @@ fn analyze_struct_lit(
         .filter(|(_, slot)| slot.is_none())
         .map(|(f, _)| format!("'{}'", sema.pool.str(f.name)))
         .collect();
-    if !missing.is_empty() {
+    if !missing.is_empty() && !field_errored {
         sema.sink.emit(Diag::error(
             span,
             DiagCode::MissingStructFields,

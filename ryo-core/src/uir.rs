@@ -263,6 +263,13 @@ pub enum InstTag {
     /// becomes its own `Destructure` over a synthesized
     /// `__ryo_destructure_N` temp bound by the enclosing one.
     Destructure,
+
+    /// Placeholder for a statement the parser recovered from (R10:
+    /// `StmtKind::Error`). No operands. Sema lowers it to a TIR
+    /// `Unreachable` with the error type, so downstream flow analysis
+    /// (e.g. the E0036 missing-return check) suppresses cascading
+    /// diagnostics the same way it does for sema-internal errors.
+    Unreachable,
     // Reserved for the comptime milestone:
     //   ComptimeBlock, Decl.
 }
@@ -938,6 +945,13 @@ impl UirBuilder {
 
     pub fn continue_stmt(&mut self, span: Span) -> InstRef {
         self.push(InstTag::Continue, InstData::None, span)
+    }
+
+    /// Parser-recovery placeholder (`StmtKind::Error`, R10). Sema
+    /// lowers it to a TIR `Unreachable` so flow analysis suppresses
+    /// cascading diagnostics.
+    pub fn unreachable(&mut self, span: Span) -> InstRef {
+        self.push(InstTag::Unreachable, InstData::None, span)
     }
 
     /// Emits a `MethodCall` with receiver, name, and arg list packed into `extra`.

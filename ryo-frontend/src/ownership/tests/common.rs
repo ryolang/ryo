@@ -63,7 +63,7 @@ pub(super) fn check_src_full(
     let (ast, mut pool) = state.into_parts();
     let mut sink = DiagSink::new();
     let uir = crate::astgen::generate(&ast, &mut pool, &mut sink);
-    let tirs = crate::sema::analyze(
+    let (tirs, sema_warnings) = crate::sema::analyze_buffered(
         &uir,
         &mut pool,
         &mut sink,
@@ -71,6 +71,13 @@ pub(super) fn check_src_full(
         std::path::Path::new("<test>"),
     );
     let sidecar = check(&tirs, &pool, &mut sink);
+    // Match the driver's deferred flush: sema warnings surface only
+    // when the whole unit (including the ownership pass) is clean.
+    if !sink.has_errors() {
+        for d in sema_warnings {
+            sink.emit(d);
+        }
+    }
     (sink.into_diags(), sidecar, tirs, pool)
 }
 
