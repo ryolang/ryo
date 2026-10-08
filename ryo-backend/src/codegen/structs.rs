@@ -1,5 +1,8 @@
 //! Struct codegen (M9) — split from `expr.rs`/`mod.rs` to keep every
 //! file under the 2000-line CI cap (`scripts/check_file_length.sh`).
+//! Also home to the aggregate machinery every emitter shares: the
+//! fat/struct type predicates, the slot-out runtime-call family, and
+//! `build_signature`'s aggregate ABI.
 //!
 //! Memory-first model: every struct value lives in a stack slot of
 //! `size`/`align` from `pool.struct_view`; `ValueRepr::Struct` carries
@@ -9,15 +12,19 @@
 //! FIELD-WISE, never byte-wise — a block copy would read uninitialized
 //! padding bytes, which the ASan/Valgrind suites flag.
 
-use cranelift::codegen::ir::{MemFlagsData, StackSlot, StackSlotData, StackSlotKind};
+use cranelift::codegen::ir::{
+    ArgumentPurpose, MemFlagsData, StackSlot, StackSlotData, StackSlotKind,
+};
+use cranelift::codegen::isa::CallConv;
 use cranelift::prelude::*;
 use cranelift_module::{DataId, Module};
-use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
-use ryo_core::types::{StringId, TypeId, TypeKind};
+use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
+use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 
 use super::bytes::store_string;
 use super::{
-    Codegen, FunctionContext, STR_SLOT_SIZE, Terminator, ValueRepr, cranelift_type_for, ranges,
+    Codegen, CodegenNameIds, FunctionContext, STR_SLOT_SIZE, Terminator, ValueRepr,
+    cranelift_type_for, ranges,
 };
 
 impl<M: Module> Codegen<M> {
@@ -1138,5 +1145,196 @@ impl<M: Module> Codegen<M> {
                 Ok(())
             }
         }
+    }
+}
+
+/// Returns `true` if `ty` is a 24-byte fat owner (`str` or `bytes`,
+/// M8.4.2) in the pool.
+///
+/// Callers use this to gate multi-value (fat-pointer) paths before
+/// reaching `cranelift_type_for`, where a fat type is a caller bug.
+pub(crate) fn is_fat_type(ty: TypeId, pool: &InternPool) -> bool {
+    matches!(pool.kind(ty), TypeKind::Str | TypeKind::Bytes)
+}
+
+/// True for the aggregate struct kinds — M9 named and M10 anonymous.
+/// Their values are memory-first (stack-slot addresses,
+/// `ValueRepr::Struct`), so params/returns ride the slot-address /
+/// sret ABI and these types must never reach `cranelift_type_for`.
+pub(crate) fn is_struct_type(ty: TypeId, pool: &InternPool) -> bool {
+    matches!(pool.kind(ty), TypeKind::Struct | TypeKind::AnonStruct)
+}
+
+/// True when instruction `r` produces its fat result through a
+/// slot-out call (`emit_slot_out_call` or user-call sret) and can
+/// therefore write a caller-provided home slot directly. Concat and
+/// every fat-returning call qualify — except codegen-inlined builtins
+/// (`CodegenNameIds::bool_to_str`), which never touch a slot.
+pub(super) fn writes_out_slot_ids(tir: &Tir, ids: &CodegenNameIds, r: TirRef) -> bool {
+    match tir.inst(r).tag {
+        TirTag::StrConcat | TirTag::BytesConcat => true,
+        TirTag::Call => ids.bool_to_str != Some(tir.call_view(r).name),
+        _ => false,
+    }
+}
+
+/// `#[cfg(test)]` three-arg form of [`writes_out_slot_ids`]: resolves
+/// the ids from the pool per call (test-only, so the probe cost is
+/// irrelevant) and exists because the unit test in `tests.rs` pins
+/// this exact signature.
+#[cfg(test)]
+pub(crate) fn writes_out_slot(tir: &Tir, pool: &InternPool, r: TirRef) -> bool {
+    writes_out_slot_ids(tir, &CodegenNameIds::resolve(pool), r)
+}
+
+impl<M: Module> Codegen<M> {
+    pub(super) fn build_signature(&self, tir: &Tir, pool: &InternPool, is_main: bool) -> Signature {
+        let mut sig = self.module.make_signature();
+        for param in &tir.params {
+            if param.mode == ParamMode::Inout {
+                // Mutable borrow: pass a single pointer to the caller's
+                // slot, regardless of pointee type (scalar or fat owner).
+                sig.params.push(AbiParam::new(self.int_type));
+            } else if is_fat_type(param.ty, pool) {
+                // Fat owner (str/bytes): 3-word ABI.
+                sig.params.push(AbiParam::new(self.int_type)); // ptr
+                sig.params.push(AbiParam::new(types::I64)); // len
+                sig.params.push(AbiParam::new(types::I64)); // cap
+            } else if pool.is_view(param.ty) {
+                // `strview` view: 2-word ABI (ptr, len) — no cap word (M8.4).
+                sig.params.push(AbiParam::new(self.int_type)); // ptr
+                sig.params.push(AbiParam::new(types::I64)); // len
+            } else if is_struct_type(param.ty, pool) {
+                // Struct (M9 named / M10 anonymous): a single pointer to
+                // the value's stack slot, regardless of mode
+                // (borrow/move/copy).
+                sig.params.push(AbiParam::new(self.int_type));
+            } else {
+                let cl_ty = cranelift_type_for(param.ty, pool, self.int_type);
+                sig.params.push(AbiParam::new(cl_ty));
+            }
+        }
+        // C-ABI shim for `main`: Ryo's `fn main()` is void and takes no
+        // Ryo params (sema rejects a parametrized main), but the host
+        // C runtime (crt0 via zig cc, or our JIT trampoline) enters
+        // `main` with C's `(argc, argv)`. C's argc is a 32-bit `int`,
+        // but the Cranelift ABI word is pointer-sized (`i64`): works on
+        // x86-64/aarch64/Windows because a 32-bit argument arrives
+        // zero-extended in its register, so the low half the C side
+        // reads is exact. Push the two entry params — argc, then argv,
+        // in C order — before the int return word; `compile_function`
+        // reads them from the entry block to call `ryo_rt_init`, and
+        // falls through to an explicit `return 0` since Ryo's return
+        // type is void.
+        // `is_main` is resolved by `declare_all_functions` from the
+        // interned-id cache.
+        if is_main {
+            sig.params.push(AbiParam::new(self.int_type));
+            sig.params
+                .push(AbiParam::new(self.module.isa().pointer_type()));
+            sig.returns.push(AbiParam::new(self.int_type));
+        } else if tir.return_type != pool.void() {
+            if is_fat_type(tir.return_type, pool) || is_struct_type(tir.return_type, pool) {
+                // sret: hidden pointer prepended to regular params, no IR-level return.
+                sig.params.insert(
+                    0,
+                    AbiParam::special(self.int_type, ArgumentPurpose::StructReturn),
+                );
+            } else {
+                let cl_ty = cranelift_type_for(tir.return_type, pool, self.int_type);
+                sig.returns.push(AbiParam::new(cl_ty));
+            }
+        }
+        // A function the pre-pass marked gets the Tail calling
+        // convention — the only convention from which Cranelift allows
+        // `return_call`. Never `main` (the C runtime enters it with the
+        // C ABI). A marked function that turns out ineligible at
+        // emission still compiles correctly as a plain Tail-conv
+        // function, so over-marking costs nothing.
+        if !is_main && self.tail_candidates.contains(&tir.name) {
+            sig.call_conv = CallConv::Tail;
+        }
+        sig
+    }
+
+    /// Call a slot-out runtime producer: allocate a 24-byte slot (or
+    /// use the caller-provided `out_slot` — a fat binding's canonical
+    /// home when the result initializes one), pass its address as
+    /// arg 0, then load the tagged (ptr, len, cap) triple. The runtime
+    /// writes the full slot (SSO tag, headroom cap) — codegen never
+    /// derives cap anymore.
+    ///
+    /// The reload loads run either way: their values feed the
+    /// `ValueRepr` cache the free sweep keys on. For a home-backed
+    /// binding they are short-lived (never `def_var`'d), so regalloc
+    /// never grows a second spill slot next to the home.
+    pub(crate) fn emit_slot_out_call(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        fn_name: &'static str,
+        args: &[(Type, Value)],
+        out_slot: Option<StackSlot>,
+    ) -> Result<(Value, Value, Value), String> {
+        Self::emit_slot_out_call_impl(builder, ctx, fn_name, args, out_slot, true)
+    }
+
+    /// `emit_slot_out_call` for runtime producers whose out-slot is the
+    /// LAST parameter instead of the first — the spec pins out-last for
+    /// `ryo_process_argv(i, out)` and `ryo_getenv(key_ptr, key_len,
+    /// out)`, whose signatures the runtime's own tests call directly.
+    /// Slot sizing, `out_slot` honoring, and the tagged-triple reload
+    /// are identical to [`Self::emit_slot_out_call`]; only the
+    /// parameter position differs, so both delegate to one
+    /// implementation.
+    pub(crate) fn emit_slot_out_call_out_last(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        fn_name: &'static str,
+        args: &[(Type, Value)],
+        out_slot: Option<StackSlot>,
+    ) -> Result<(Value, Value, Value), String> {
+        Self::emit_slot_out_call_impl(builder, ctx, fn_name, args, out_slot, false)
+    }
+
+    fn emit_slot_out_call_impl(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        fn_name: &'static str,
+        args: &[(Type, Value)],
+        out_slot: Option<StackSlot>,
+        out_first: bool,
+    ) -> Result<(Value, Value, Value), String> {
+        let slot = out_slot.unwrap_or_else(|| {
+            builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                STR_SLOT_SIZE,
+                3,
+            ))
+        });
+        let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+        let mut param_tys = Vec::with_capacity(args.len() + 1);
+        let mut call_args = Vec::with_capacity(args.len() + 1);
+        if out_first {
+            param_tys.push(ctx.int_type);
+            call_args.push(addr);
+        }
+        param_tys.extend(args.iter().map(|(ty, _)| *ty));
+        call_args.extend(args.iter().map(|(_, v)| *v));
+        if !out_first {
+            param_tys.push(ctx.int_type);
+            call_args.push(addr);
+        }
+        let func_ref = Self::declare_runtime_fn(ctx, builder, fn_name, &param_tys, &[])?;
+        builder.ins().call(func_ref, &call_args);
+        let ptr = builder
+            .ins()
+            .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);
+        let len = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), addr, 8);
+        let cap = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), addr, 16);
+        Ok((ptr, len, cap))
     }
 }

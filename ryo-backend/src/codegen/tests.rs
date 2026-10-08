@@ -34,11 +34,11 @@ fn writes_out_slot_matches_codegen_inlined_builtins() {
 
     for (inlined, call) in inlined_calls {
         assert!(
-            !writes_out_slot(&tir, &pool, call),
+            !structs::writes_out_slot(&tir, &pool, call),
             "inlined builtin {inlined} must not be treated as a slot-out producer"
         );
     }
-    assert!(writes_out_slot(&tir, &pool, producer_call));
+    assert!(structs::writes_out_slot(&tir, &pool, producer_call));
 }
 
 #[test]

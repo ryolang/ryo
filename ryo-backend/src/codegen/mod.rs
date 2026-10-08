@@ -23,10 +23,8 @@
 //!    / inline expansion lands. Zig calls the analogous mapping
 //!    in `Air.zig` "liveness"; we don't need full liveness yet.
 
-use cranelift::codegen::ir::{
-    ArgumentPurpose, MemFlagsData, StackSlot, StackSlotData, StackSlotKind,
-};
-use cranelift::codegen::isa::{self, CallConv};
+use cranelift::codegen::ir::{MemFlagsData, StackSlot, StackSlotData, StackSlotKind};
+use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
@@ -40,6 +38,7 @@ mod arith;
 mod builtins;
 mod bytes;
 mod control;
+mod enums;
 mod expr;
 mod frees;
 mod jit;
@@ -49,6 +48,8 @@ mod str_ops;
 mod structs;
 mod tail;
 mod views;
+
+pub(crate) use structs::{is_fat_type, is_struct_type};
 
 /// Fat-owner triple layout (str/bytes, 24 bytes): ptr at 0, len at 8,
 /// cap at 16. Derived from `RyoStrFat`, not re-hardcoded.
@@ -71,23 +72,6 @@ pub(crate) enum Terminator {
     Continue,
 }
 
-/// Returns `true` if `ty` is a 24-byte fat owner (`str` or `bytes`,
-/// M8.4.2) in the pool.
-///
-/// Callers use this to gate multi-value (fat-pointer) paths before
-/// reaching `cranelift_type_for`, where a fat type is a caller bug.
-pub(crate) fn is_fat_type(ty: TypeId, pool: &InternPool) -> bool {
-    matches!(pool.kind(ty), TypeKind::Str | TypeKind::Bytes)
-}
-
-/// True for the aggregate struct kinds — M9 named and M10 anonymous.
-/// Their values are memory-first (stack-slot addresses,
-/// `ValueRepr::Struct`), so params/returns ride the slot-address /
-/// sret ABI and these types must never reach `cranelift_type_for`.
-pub(crate) fn is_struct_type(ty: TypeId, pool: &InternPool) -> bool {
-    matches!(pool.kind(ty), TypeKind::Struct | TypeKind::AnonStruct)
-}
-
 /// Builtins whose fat result codegen materializes inline — no runtime
 /// call, no slot-out write. `writes_out_slot` must exclude exactly
 /// these: the inlined arm in `eval_inst_fat_slot` ignores its
@@ -96,7 +80,7 @@ pub(crate) fn is_struct_type(ty: TypeId, pool: &InternPool) -> bool {
 /// Keeping the set wrong in the other direction (listing a builtin
 /// that is NOT inlined) is harmless — it only forgoes the home.
 ///
-/// Test-only: the production exclusion lives in [`writes_out_slot_ids`]
+/// Test-only: the production exclusion lives in `writes_out_slot_ids`
 /// as an interned-id compare, and the unit test below iterates this
 /// table to assert both stay in agreement.
 #[cfg(test)]
@@ -163,28 +147,6 @@ impl CodegenNameIds {
             bytes_repr: pool.find_str("__ryo_bytes_repr"),
         }
     }
-}
-
-/// True when instruction `r` produces its fat result through a
-/// slot-out call (`emit_slot_out_call` or user-call sret) and can
-/// therefore write a caller-provided home slot directly. Concat and
-/// every fat-returning call qualify — except codegen-inlined builtins
-/// (`CodegenNameIds::bool_to_str`), which never touch a slot.
-fn writes_out_slot_ids(tir: &Tir, ids: &CodegenNameIds, r: TirRef) -> bool {
-    match tir.inst(r).tag {
-        TirTag::StrConcat | TirTag::BytesConcat => true,
-        TirTag::Call => ids.bool_to_str != Some(tir.call_view(r).name),
-        _ => false,
-    }
-}
-
-/// `#[cfg(test)]` three-arg form of [`writes_out_slot_ids`]: resolves
-/// the ids from the pool per call (test-only, so the probe cost is
-/// irrelevant) and exists because the unit test in `tests.rs` pins
-/// this exact signature.
-#[cfg(test)]
-pub(crate) fn writes_out_slot(tir: &Tir, pool: &InternPool, r: TirRef) -> bool {
-    writes_out_slot_ids(tir, &CodegenNameIds::resolve(pool), r)
 }
 
 /// Map a TIR type to the corresponding Cranelift IR type.
@@ -732,99 +694,6 @@ impl<M: Module> Codegen<M> {
         }
     }
 
-    /// Read the free-target → binding-name map. Param sentinel refs
-    /// are served from `free_binding_param_names`; real instruction
-    /// refs from `free_binding_names`. Same dispatch shape as
-    /// `cached_repr`.
-    pub(crate) fn free_binding_name(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<StringId> {
-        if let Some(idx) = r.as_param_index() {
-            ctx.free_binding_param_names[idx as usize]
-        } else {
-            ctx.free_binding_names.get(r.index()).copied().flatten()
-        }
-    }
-
-    /// Read the free-target → BINDING identity map: the declaring
-    /// `VarDecl`'s `TirRef` for initializer targets, the
-    /// `sidecar.assign_binding` entry for `Assign` value targets. A fat
-    /// param's binding identity IS its own sentinel ref (params are
-    /// never shadowed). Same dispatch shape as `free_binding_name`;
-    /// `emit_frees` consults it so the redirect's "most recent write"
-    /// lookup is per-binding, not per-name (a same-named shadow is a
-    /// different binding and must not clobber the outer binding's
-    /// lineage).
-    pub(crate) fn free_binding_of(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<TirRef> {
-        if r.as_param_index().is_some() {
-            Some(r)
-        } else {
-            ctx.free_binding_of_insts.get(r.index()).copied().flatten()
-        }
-    }
-
-    /// True if any instruction reachable from `root` (transitive
-    /// operands and nested body statements) is a `Var` read of `name`.
-    /// Conservative aliasing probe for the producer-into-home Assign
-    /// path: an RHS that mentions the target binding (including a
-    /// shadowed same-name read — the probe cannot distinguish shadowing)
-    /// forbids the free-before-overwrite order.
-    fn expr_refs_name(tir: &Tir, root: TirRef, name: StringId) -> bool {
-        let mut stack = vec![root];
-        while let Some(r) = stack.pop() {
-            if let TirData::Var(n) = tir.inst(r).data
-                && n == name
-            {
-                return true;
-            }
-            tir.walk_operands(r, &mut |_parent, child, _kind| stack.push(child));
-        }
-        false
-    }
-
-    /// Provenance of a freshly stored home value: true iff the value
-    /// is provably free-noop — a provably-inline producer result or a
-    /// static (cap == 0) literal — so a later free on the home may be
-    /// elided.
-    fn home_value_provably_inline(
-        ctx: &FunctionContext<'_, M>,
-        func: &cranelift::codegen::ir::Function,
-        value: TirRef,
-        cap: Value,
-    ) -> bool {
-        Self::provably_inline_producer(ctx, value) || Self::is_static_cap_zero(func, cap)
-    }
-
-    /// Set the home-provenance flag on a fat binding. No-op for
-    /// home-less bindings (the flag is meaningless without a home).
-    pub(crate) fn set_home_inline(ctx: &mut FunctionContext<'_, M>, name: StringId, inline: bool) {
-        if let Some(mut fl) = Self::read_slot(&ctx.fat_locals, name)
-            && fl.home.is_some()
-            && fl.home_inline != inline
-        {
-            fl.home_inline = inline;
-            Self::write_slot(
-                &mut ctx.fat_locals,
-                &mut ctx.fat_locals_undo,
-                name,
-                Some(fl),
-            );
-        }
-    }
-
-    /// Clear every home-provenance flag. Called at control-flow joins
-    /// (if merges, loop headers and exits): the home slot is memory,
-    /// so stores inside an arm or iteration persist while the scoped
-    /// table restore reverts the flag — a join must not trust
-    /// pre-branch provenance.
-    pub(crate) fn invalidate_home_inline_flags(ctx: &mut FunctionContext<'_, M>) {
-        let flagged: Vec<StringId> = (0..ctx.fat_locals.len())
-            .filter(|&i| ctx.fat_locals[i].is_some_and(|fl| fl.home.is_some() && fl.home_inline))
-            .map(|i| StringId::from_raw(u32::try_from(i).expect("StringId index out of range")))
-            .collect();
-        for name in flagged {
-            Self::set_home_inline(ctx, name, false);
-        }
-    }
-
     /// Compile every function in `tirs` and return `main`'s `FuncId`
     /// together with the rendered CLIF text. The text is only
     /// produced when `dump_ir` is set (an `--emit=clif`-style
@@ -923,75 +792,6 @@ impl<M: Module> Codegen<M> {
             func_ids.insert(tir.name, (func_id, sig));
         }
         Ok(func_ids)
-    }
-
-    fn build_signature(&self, tir: &Tir, pool: &InternPool, is_main: bool) -> Signature {
-        let mut sig = self.module.make_signature();
-        for param in &tir.params {
-            if param.mode == ParamMode::Inout {
-                // Mutable borrow: pass a single pointer to the caller's
-                // slot, regardless of pointee type (scalar or fat owner).
-                sig.params.push(AbiParam::new(self.int_type));
-            } else if is_fat_type(param.ty, pool) {
-                // Fat owner (str/bytes): 3-word ABI.
-                sig.params.push(AbiParam::new(self.int_type)); // ptr
-                sig.params.push(AbiParam::new(types::I64)); // len
-                sig.params.push(AbiParam::new(types::I64)); // cap
-            } else if pool.is_view(param.ty) {
-                // `strview` view: 2-word ABI (ptr, len) — no cap word (M8.4).
-                sig.params.push(AbiParam::new(self.int_type)); // ptr
-                sig.params.push(AbiParam::new(types::I64)); // len
-            } else if is_struct_type(param.ty, pool) {
-                // Struct (M9 named / M10 anonymous): a single pointer to
-                // the value's stack slot, regardless of mode
-                // (borrow/move/copy).
-                sig.params.push(AbiParam::new(self.int_type));
-            } else {
-                let cl_ty = cranelift_type_for(param.ty, pool, self.int_type);
-                sig.params.push(AbiParam::new(cl_ty));
-            }
-        }
-        // C-ABI shim for `main`: Ryo's `fn main()` is void and takes no
-        // Ryo params (sema rejects a parametrized main), but the host
-        // C runtime (crt0 via zig cc, or our JIT trampoline) enters
-        // `main` with C's `(argc, argv)`. C's argc is a 32-bit `int`,
-        // but the Cranelift ABI word is pointer-sized (`i64`): works on
-        // x86-64/aarch64/Windows because a 32-bit argument arrives
-        // zero-extended in its register, so the low half the C side
-        // reads is exact. Push the two entry params — argc, then argv,
-        // in C order — before the int return word; `compile_function`
-        // reads them from the entry block to call `ryo_rt_init`, and
-        // falls through to an explicit `return 0` since Ryo's return
-        // type is void.
-        // `is_main` is resolved by `declare_all_functions` from the
-        // interned-id cache.
-        if is_main {
-            sig.params.push(AbiParam::new(self.int_type));
-            sig.params
-                .push(AbiParam::new(self.module.isa().pointer_type()));
-            sig.returns.push(AbiParam::new(self.int_type));
-        } else if tir.return_type != pool.void() {
-            if is_fat_type(tir.return_type, pool) || is_struct_type(tir.return_type, pool) {
-                // sret: hidden pointer prepended to regular params, no IR-level return.
-                sig.params.insert(
-                    0,
-                    AbiParam::special(self.int_type, ArgumentPurpose::StructReturn),
-                );
-            } else {
-                let cl_ty = cranelift_type_for(tir.return_type, pool, self.int_type);
-                sig.returns.push(AbiParam::new(cl_ty));
-            }
-        }
-        // A function the pre-pass marked gets the Tail calling
-        // convention — the only convention from which Cranelift allows
-        // `return_call`. Never `main` (the C runtime enters it with the
-        // C ABI). A marked function that turns out ineligible at
-        // emission still compiles correctly as a plain Tail-conv
-        // function, so over-marking costs nothing.
-        if !is_main && self.tail_candidates.contains(&tir.name) {
-            sig.call_conv = CallConv::Tail;
-        }
-        sig
     }
 
     fn compile_function(
@@ -1547,7 +1347,7 @@ impl<M: Module> Codegen<M> {
                     // free elision applies) instead of paying a temp
                     // slot + triple store at every reassign.
                     let produces_slot =
-                        writes_out_slot_ids(ctx.tir, &ctx.name_ids, view.initializer);
+                        structs::writes_out_slot_ids(ctx.tir, &ctx.name_ids, view.initializer);
                     let home = if produces_slot || view.mutable {
                         Some(builder.create_sized_stack_slot(StackSlotData::new(
                             StackSlotKind::ExplicitSlot,
@@ -1791,7 +1591,7 @@ impl<M: Module> Codegen<M> {
                     // free-then-store order instead — freeing first
                     // would be a use-after-free.
                     let direct = locals.home.is_some()
-                        && writes_out_slot_ids(ctx.tir, &ctx.name_ids, view.value)
+                        && structs::writes_out_slot_ids(ctx.tir, &ctx.name_ids, view.value)
                         && !Self::expr_refs_name(ctx.tir, view.value, view.name);
                     let mut old_freed = false;
                     // Elision, same predicate as the scheduled-free
