@@ -17,6 +17,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-011 — Manual error enum where `thiserror` would suffice
 
 **Severity:** Correctness / Hygiene
+**Area:** core-ir
 
 **Files:** `ryo-core/src/errors.rs` (33 lines)
 **Summary:** Hand-rolled `enum CompilerError` with manual `Display` and `From<io::Error>` impls. `thiserror` would cut ~20 lines and make variants more uniform.
@@ -27,6 +28,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-018 — `TypeId` is a newtype, not a typed enum
 
 **Severity:** Correctness / Hygiene
+**Area:** core-ir
 
 **Files:** `ryo-core/src/types.rs` (`TypeId`)
 **Summary:** The UIR/TIR pipeline redesign originally called for `TypeId` to become an `enum { Void = 0, Bool = 1, ..., Error = 4, Dynamic(NonZeroU32) }` so primitive matches are exhaustive at compile time and the `pool.int()` accessor disappears. The design allowed a fallback to a plain `Copy` newtype if the enum encoding fights the borrow checker, which is what we shipped. Cost: the `TypeKind::AnonStruct` arm we added in `cranelift_type_for` and a couple of sema sites are not statically guaranteed to be covered when a new primitive lands.
@@ -37,6 +39,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-021 — `bool` lowered as `types::I8` will mis-ABI across FFI boundaries
 
 **Severity:** Correctness / Hygiene
+**Area:** codegen
 
 **Files:** `ryo-backend/src/codegen/mod.rs` (`cranelift_type_for`)
 **Summary:** `TypeKind::Bool` maps to Cranelift `I8`. Fine for internal logic, but C ABIs typically pass `_Bool` zero/sign-extended to a full register (often i32 on SysV, register-width on Win64). Passing or returning our raw `I8` across an FFI call would leave the upper bits undefined from the callee's perspective.
@@ -47,6 +50,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-024 — Single `float` type, no `float32` / `float64` distinction
 
 **Severity:** Correctness / Hygiene
+**Area:** core-ir
 
 **Files:** `ryo-core/src/types.rs` (`Tag::Float`, `TypeKind::Float`), `ryo-backend/src/codegen/mod.rs` (`cranelift_type_for`)
 **Summary:** M7 ships one float type (`float`), lowered to Cranelift `F64`. Matches today's `int` (one width, machine-word). Users who need 32-bit floats for memory, GPU work, or C interop have no surface syntax to ask for one.
@@ -57,6 +61,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-025 — No implicit `int` ↔ `float` promotion or conversion functions
 
 **Severity:** Correctness / Hygiene
+**Area:** sema
 
 **Files:** `ryo-frontend/src/sema/expr.rs` (`check_binary_op` mixed-type branch)
 **Summary:** `1 + 2.0` is a hard `TypeMismatch` error; users must spell every conversion explicitly, but there are no conversion intrinsics yet either — `int(x)` and `float(x)` don't exist. The result is that mixed numeric arithmetic is currently *unspellable*. Acceptable today (no programs need it), but blocks any real numeric workload.
@@ -67,6 +72,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-026 — Float modulo (`%` on `float`) rejected
 
 **Severity:** Correctness / Hygiene
+**Area:** sema
 
 **Files:** `ryo-frontend/src/sema/expr.rs` (`check_binary_op` is_modulo branch)
 **Summary:** `1.0 % 2.0` produces `"modulo operator '%' not supported for type 'float'"`. The plan deferred this because `fmod` has surprising semantics on negatives and on NaN, and there is no concrete user demand yet.
@@ -77,6 +83,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-027 — Restricted float literal grammar
 
 **Severity:** Correctness / Hygiene
+**Area:** frontend-lexer
 
 **Files:** `ryo-frontend/src/lexer.rs` (`RawToken::Float` regex `[0-9]+\.[0-9]+`)
 **Summary:** Float literals must have digits on both sides of the dot. None of `.5`, `5.`, `1e10`, `1.5e-3`, `1_000_000.0` parse. Sufficient for M7's example programs but obviously incomplete.
@@ -87,6 +94,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-029 — AST loses `Eq` because `Literal::Float` carries an `f64`
 
 **Severity:** Correctness / Hygiene
+**Area:** frontend-parser
 
 **Files:** `ryo-core/src/ast.rs` (`Literal`, `Expression`, `Statement`, `Program`, `StmtKind`, `ExprKind`, `VarDecl`, `FunctionDef`)
 **Summary:** `Literal::Float(f64)` cannot derive `Eq` (NaN ≠ NaN), and `Eq` derivation propagates up the containment chain, so every AST struct that transitively holds a `Literal` had to drop the `Eq` derive. No consumer hashes or `Eq`-compares AST nodes today, so the change is currently invisible.
@@ -97,6 +105,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-032 — IfStmt is statement-only, no expression-level conditional
 
 **Severity:** Correctness / Hygiene
+**Area:** frontend-parser
 
 **Files:** `ryo-core/src/ast.rs`, `ryo-frontend/src/parser.rs`, `ryo-frontend/src/sema/`, `ryo-backend/src/codegen/`
 **Summary:** `if`/`elif`/`else` is a statement (`StmtKind::IfStmt`), not an expression. There is no way to write `x = if cond: a else: b` (ternary/conditional expression). The spec envisions `if` as an expression in certain contexts. Current codegen emits void for IfStmt and uses no phi-merge for values across branches.
@@ -107,6 +116,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-033 — Variables declared inside if/elif/else branches are not visible after the statement
 
 **Severity:** Correctness / Hygiene
+**Area:** sema
 
 **Files:** `ryo-frontend/src/sema/stmt.rs` (`analyze_block`)
 **Summary:** Each branch of an if/elif/else creates a child scope. Variables declared inside a branch are dropped when the branch scope ends. There is no "variable promotion" — even if all branches declare `x: int`, `x` is not available after the if statement. This is the correct scoping semantics for now, but may surprise users expecting Python-style scoping where if-branches don't create a new scope.
@@ -117,6 +127,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-037 — Panic/Assert mechanism lacks `#file` / `#line` intrinsic expansion
 
 **Severity:** Correctness / Hygiene
+**Area:** sema
 
 **Files:** `ryo-frontend/src/sema/builtins.rs`, `ryo-backend/src/codegen/expr.rs`
 **Summary:** The `panic` implementation bakes the source location (line, column) directly into a unique formatted string literal per call site at compile time. If a user asserts in ten places, the binary interns ten distinct copies of the assertion string format.
@@ -127,6 +138,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-038 — Assert checks cannot be stripped in Release mode
 
 **Severity:** Correctness / Hygiene
+**Area:** sema
 
 **Files:** `ryo-frontend/src/sema/`, `ryo-backend/src/codegen/`
 **Summary:** Ryo has no mechanism to strip `assert` checks in `--release` configurations. The condition evaluates and branches at runtime unconditionally.
@@ -137,6 +149,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-039 — `panic` provides no stack unwinding or stack traces
 
 **Severity:** Correctness / Hygiene
+**Area:** codegen
 
 **Files:** `ryo-backend/src/codegen/expr.rs` (`__ryo_panic` call emission)
 **Summary:** A panic terminates execution instantly (`exit(101)`) and prints only the line/col of the `panic()` or `assert()` call site. If a shared utility function calls `panic`, the user gets no traceback to the caller.
@@ -148,6 +161,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-040 — `for-range` arity: only 2-arg form supported
 
 **Severity:** Correctness / Hygiene
+**Area:** frontend-parser
 
 **Files:** `ryo-frontend/src/parser.rs` (for-range parser)
 **Summary:** Python allows `range(stop)` (implied start=0) and `range(start, stop, step)`. Ryo's parser strictly enforces `range(start, end)` (exactly 2 arguments). This is documented v0.1 behaviour. Users coming from Python will inevitably try `for i in range(10):` and receive a generic arity error.
@@ -158,6 +172,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-041 — `range` is a syntactic hack, not a function
 
 **Severity:** Correctness / Hygiene
+**Area:** sema
 
 **Files:** `ryo-frontend/src/builtins.rs`, `ryo-frontend/src/sema/`
 **Summary:** `range(0, 5)` is hardcoded as a reserved keyword in semantic analysis rather than a standard library function. If a generic `for element in collection:` loop is implemented in the future, the `range` hardcoding will need to be removed in favor of a true `RangeIterator` protocol.
@@ -168,6 +183,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-042 — For loop codegen needs to be desugared into while loops
 
 **Severity:** Correctness / Hygiene
+**Area:** codegen
 
 **Files:** `ryo-backend/src/codegen/mod.rs` (`generate_for_range` :1377)
 **Summary:** Currently, `for-range` loops have bespoke code generation that manually emits basic blocks, jump instructions, and raw counter increments. When general iterators are added, loops should be desugared during the AST-to-UIR phase into standard `while` loops that call `.next()`.
@@ -178,6 +194,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-047 — UIR `is_move` field is a pass-through
 
 **Severity:** Correctness / Hygiene
+**Area:** core-ir
 
 **Files:** `ryo-core/src/uir.rs` (`UirParam`), `ryo-frontend/src/astgen.rs`, `ryo-frontend/src/sema/`
 **Summary:** `is_move` is threaded lexer → parser → AST → UIR → TIR. The UIR copy is never read: astgen propagates the AST flag in, sema reads it back out into `TirParam`, and no UIR pass inspects it. UIR is structural lowering with no semantic meaning, so `UirParam::is_move` is dead weight that exists only to bridge two layers it shouldn't.
@@ -188,6 +205,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-073 — Zig download has no integrity verification and races concurrent installs
 
 **Severity:** Correctness / Hygiene
+**Area:** linker-toolchain
 
 **Files:** `ryo-backend/src/toolchain.rs` (`download_zig` :54-112)
 **Summary:** The tarball is streamed HTTPS → XZ → tar with no sha256/signature check even though ziglang.org publishes shasums and `.minisig` files — a supply-chain gap. The fixed temp dir `.zig-{v}-downloading` (:62) lets two concurrent first-runs delete each other's in-flight download (`remove_dir_all` at :67), and `remove_dir_all(&desired_path)` (:101) can delete a working toolchain out from under another running compile.
@@ -198,6 +216,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-076 — `str` ABI is hardcoded to 64-bit layout
 
 **Severity:** Correctness / Hygiene
+**Area:** codegen
 
 **Files:** `ryo-backend/src/codegen/mod.rs` (`STR_SLOT_SIZE`/`VIEW_SLOT_SIZE`/`OFF_PTR`/`OFF_LEN` :40-45), `ryo-backend/src/codegen/expr.rs` (`types::I64` len/cap :1155-1170), `runtime/src/lib.rs` (`RyoStrFat`)
 **Summary:** Every str stack slot hardcodes 24 bytes / align 3 / offsets 0,8,16 (consts at `codegen/mod.rs:40-45`), and `len`/`cap` are hardcoded `types::I64` (`codegen/expr.rs:1155-1170`) while `ptr` is pointer-sized. On a 32-bit target, caller and callee layouts silently mismatch.
@@ -208,6 +227,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-080 — UIR/TIR `extra`-layout modules are duplicated with subtly different layouts
 
 **Severity:** Correctness / Hygiene
+**Area:** core-ir
 
 **Files:** `ryo-core/src/uir.rs` (`var_decl_extra` etc.), `ryo-core/src/tir.rs` (`call_extra` :337-342, `var_decl_extra` :355-362, `assign_extra`/… :370-418)
 **Summary:** tir.rs re-defines near-identical `extra`-layout modules with different layouts: `call_extra` appends a modes tail; `var_decl_extra` drops the `TY` slot (`LEN: 3` vs uir's `4`). Same names, same constants, different meanings — a footgun when editing one side. `ExtraRange` itself is also byte-duplicated (`uir.rs:107-118` vs `tir.rs:87-98`), and `IfStmt` has no layout doc module at all in tir.rs (:677-715).
@@ -218,6 +238,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-091 — UIR/TIR view decoders allocate a `Vec` per decode
 
 **Severity:** Cleanup
+**Area:** core-ir
 
 **Files:** `ryo-core/src/uir.rs` (`call_view` :870-886, `if_stmt_view` :1004-1046, `body_stmts` :344, `while_loop_view` :942, `for_range_view` :956, `method_call_view` :981), `ryo-core/src/tir.rs` (`call_view`), `ryo-backend/src/codegen/expr.rs` (call view args/modes)
 **Summary:** Every accessor decode collects refs out of `extra` into a fresh `Vec<InstRef>`/`Vec<TirRef>`, and `body_stmts()` collects a slice that is already contiguous. Sema and codegen call these in their hottest loops. Multipliers found in the 2026-08 arena-perf review: `Tir::walk_operands` (`tir.rs:1194-1266`) decodes views per visited instruction, so every `collect_reachable` costs several Vec allocs per inst; sema calls `uir.body_stmts(body)` twice per function (`sema/mod.rs:485-486`); ownership calls `tir.body_stmts()` per whole-body-walk query (`ownership/frees.rs:28, :208`, `ownership/loops.rs:67, :128, :249, :307`). Additionally `ExtraRange.len` is write-only metadata (decoders re-derive counts from inline `argc` words) — a second source of truth.
@@ -228,6 +249,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-092 — Sema per-function and per-call allocation churn
 
 **Severity:** Cleanup
+**Area:** sema
 
 **Files:** `ryo-frontend/src/sema/` (`FuncCtx` `mod.rs:515`, `check_call` `call.rs:82-97`, method calls `expr.rs:220`)
 **Summary:** (a) `inst_map` is `vec![None; uir.instructions.len()]` — the program-wide UIR size — allocated per function; (b) `check_call` clones `callee_modes`, `sig.params`, and builds `modes`/`arg_tirs` per call (3-4 allocations); (c) method dispatch does `pool.str(..).to_string()` per method call site, allocated even before the receiver-type check.
@@ -238,6 +260,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-095 — `emit_scoped_body` clones the locals maps per block
 
 **Severity:** Cleanup
+**Area:** codegen
 
 **Files:** `ryo-backend/src/codegen/mod.rs` (:845-847)
 **Summary:** Each if-arm/loop body clones the `locals`, `str_locals`, and `view_locals` HashMaps to get restore-on-exit semantics — O(locals) per block, quadratic-ish on deep nesting. (Entry predates `view_locals`; all three maps are cloned today.)
@@ -248,6 +271,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-096 — `~/.ryo/cache` grows unbounded
 
 **Severity:** Cleanup
+**Area:** linker-toolchain
 
 **Files:** `ryo-backend/src/runtime_lib.rs` (:17-40)
 **Summary:** Runtime archives are cached by content hash and never evicted (42 archives / 556 MB observed on a dev machine). `extract_runtime_to_temp` is a misnomer (persistent cache, not temp) and `cleanup_runtime_temp` is a no-op; stale `.tmp.{pid}` files linger after a kill.
@@ -258,6 +282,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-097 — Embedded runtime archive is ~6 MB
 
 **Severity:** Cleanup
+**Area:** linker-toolchain
 
 **Files:** `ryo-backend/src/runtime_lib.rs` (:5), `runtime/` (build profile)
 **Summary:** `include_bytes!` bakes the full staticlib into the compiler binary. The archive has been `no_std` since the runtime migration (std, and the `_Unwind_*` link wart with it, is gone), but it still bundles all of core's precompiled objects, which is what keeps it large. Measured 2026-08-24 (aarch64-apple-darwin): 6.06 MB debug / 5.81 MB release.
@@ -268,6 +293,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-100 — CodSpeed AOT lanes are unverified and masked by `allow-empty`; no backend benchmarks
 
 **Severity:** Cleanup
+**Area:** ci-benchmarks
 
 **Files:** `.github/workflows/codspeed.yml` (:53-111), `codspeed.yml` (repo root), `ryo-frontend/benches/frontend.rs`
 **Summary:** Correction of the earlier text: the AOT lanes DO have registered benchmarks — `codspeed.yml` (root, since e7efcc4) maps `fibonacci-aot` and `eager-destruction-aot` to the compiled binaries, and `codspeed run` executes `codspeed.yml` entries per the [CodSpeed CLI docs](https://codspeed.io/docs/cli). The walltime lane (`codspeed-macro`) and the memory lane (`ubuntu-latest`, eBPF-capable) should both report data, and the memory lane is the closest thing to automated validation of the "2× less heap" claim that exists. Real gaps: (1) both lanes set `allow-empty: true`, so any future drift (renamed binary, broken config, deleted `codspeed.yml`) silently degrades them to measuring nothing again — the same silent-skip failure mode the valgrind smoke suite had; (2) ~~no Cranelift-codegen/linking instrumented benchmarks~~ — addressed: `ryo-backend/benches/backend.rs` (simulation-mode codegen benches over the JIT module, run by the `backend-benchmarks` job); linking remains unmeasured; (3) the 2× ratio itself is computed by hand from `benchmarks/eager_destruction/run_benchmarks.sh`, not asserted anywhere.
@@ -278,6 +304,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-102 — Smoke suites duplicate work across lanes and fixture builds
 
 **Severity:** Cleanup
+**Area:** ci-benchmarks
 
 **Files:** `ryo/tests/asan_smoke.rs`, `ryo/tests/valgrind_smoke.rs`, `ryo/tests/common/mod.rs`, `.github/workflows/ci.yml` (:83)
 **Summary:** Both suites iterate the same 11 fixtures (`common/mod.rs:81-210`), compiling+linking each twice per full run; each `build_and_link` also shells out to `ryo toolchain status --path` to find zig (:10-22). `cargo test --workspace` in the test lane already includes `asan_smoke`, so it runs twice on ubuntu (test lane + dedicated asan lane); valgrind "runs" (silently skips when the binary is absent) in lanes without valgrind.
@@ -288,6 +315,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-104 — `ryo-core` depends on chumsky solely for `SimpleSpan`
 
 **Severity:** Cleanup
+**Area:** core-ir
 
 **Files:** `ryo-core/src/diag.rs` (:18-20), `ryo-core/Cargo.toml`
 **Summary:** The "core" IR/types crate pulls in a parser crate for one span type, coupling every consumer of `ryo-core` to chumsky's release cycle.
@@ -298,6 +326,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-109 — No instruction→function reverse mapping in UIR
 
 **Severity:** Cleanup
+**Area:** core-ir
 
 **Files:** `ryo-core/src/uir.rs` (`func_bodies` :272, :279-284)
 **Summary:** `func_bodies` lists only top-level statement refs; given an arbitrary `InstRef` you cannot tell which function owns it without walking every body. Any pass wanting per-function slices of the shared arena (diagnostics, per-function codegen, future incremental sema) re-derives this by traversal.
@@ -308,6 +337,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-111 — Lexer token boilerplate is four touch points per variant
 
 **Severity:** Cleanup
+**Area:** frontend-lexer
 
 **Files:** `ryo-frontend/src/lexer.rs` (`RawToken` :176-300, `Token` :30-103, `intern_token` :392-495, `Display` :105-170)
 **Summary:** Adding a token means editing `RawToken`, `Token`, the giant manual `intern_token` match, and `Display` (plus the parser downstream) — ~45 non-payload variants of pure boilerplate.
@@ -318,6 +348,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-128 — Pass entry points far exceed the R7 size discipline
 
 **Severity:** Cleanup
+**Area:** ownership
 
 **Files:** measured by brace-depth scan, tests excluded — worst offenders (refs refreshed 2026-08-24, post-split): `ryo-frontend/src/ownership/walk.rs` `visit_expr` :782 (~424 raw / 298 code lines), `analyze_if_stmt` :507 (210 code); `ryo-frontend/src/ownership/mod.rs` `analyze_function` :286; `ryo-frontend/src/sema/stmt.rs` `analyze_stmt` :14 (360 code lines — at the ratchet); `ryo-frontend/src/sema/expr.rs` `analyze_expr_allow_never` :37 (~322 raw), `check_binary_op` :439 (~265); `ryo-frontend/src/sema/builtins.rs` `emit_builtin_call` :10 (~225); `ryo-frontend/src/sema/call.rs` `check_call` :12 (~220); `ryo-backend/src/codegen/expr.rs` `eval_inst` :18, `eval_inst_str` :829, `emit_call`; `ryo-backend/src/codegen/mod.rs` `emit_stmt` :909, `compile_function` :549; `ryo-frontend/src/parser.rs` `expression_parser`; `ryo-core/src/uir.rs` `write_inst` :1106 and the same pattern in `ryo-core/src/tir.rs`
 **Summary:** R7 targets functions under 50 lines so a human reviewer can hold each one in their head. Sixteen functions sit between ~150 and ~410 lines, almost all of them giant per-tag dispatch `match`es in the hottest passes. These are the files every milestone touches; review cost and merge-conflict surface scale with their length. (Distinct from the since-resolved per-function CLIF-render cost problem, which tracked a *content* problem inside one of these functions, not size.)
@@ -328,6 +359,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-135 — Rule-7 call-arg partition duplicates the view look-through logic
 
 **Severity:** Cleanup
+**Area:** ownership
 
 **Files:** `ryo-frontend/src/ownership/walk.rs` (:934-936 — owner partition, :1029-1030 — E0031 span search)
 **Summary:** The `mode == Borrow && tag == ViewAsOwner → projection_root else underlying_owner` look-through is written out twice, near-verbatim, in two helpers that must agree for the P6'/E4 rules to stay coherent. A change to one side (e.g. a new look-through case) silently desynchronizes the diagnostic span search from the ownership partition.
@@ -338,6 +370,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-145 — Ownership materializes the full states map per break/continue
 
 **Severity:** Cleanup
+**Area:** ownership
 
 **Files:** `ryo-frontend/src/ownership/loops.rs` (`schedule_break_continue_frees` :753, per-jump snapshot :546)
 **Summary:** Every break/continue jump clones the entire `own.states` map into a sorted `Vec`, then builds `on_path`/`covers_this_jump`/`free_inside_loop` sets and scans the whole `free_schedule` — all per jump, though the snapshot is constant within a loop body walk. The per-loop invariants are precomputed once per loop (`LoopExitCtx`); this per-jump residue remains.
@@ -348,6 +381,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-147 — `emit_builtin_call` allocates mode Vecs per builtin call
 
 **Severity:** Cleanup
+**Area:** sema
 
 **Files:** `ryo-frontend/src/sema/builtins.rs` (:22)
 **Summary:** Every `print`/`panic`/`assert`/conversion call site builds `vec![ParamMode::Borrow; arg_tirs.len()]` and clones it — two allocations per builtin call though builtin arities and modes are statically known. Adjacent to I-092(b), which covers `check_call` but not the builtin path.
@@ -358,6 +392,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-148 — Per-argument callee-name string lookups in the ownership pass
 
 **Severity:** Cleanup
+**Area:** ownership
 
 **Files:** `ryo-frontend/src/ownership/walk.rs` (`is_borrowed_scalar_param` call :847, `view_borrow_params` call :917), `ryo-frontend/src/builtins.rs` (:128-148), `ryo-backend/src/codegen/frees.rs` (`provably_inline_producer`)
 **Summary:** `is_borrowed_scalar_param` runs `pool.str(name_id)` plus two linear `&'static str` table scans *per argument of every call*, though the result depends only on the callee; `view_borrow_params` repeats it per borrow-mode Call arg. Same string-compare class as the resolved builtin-name-interning issue, but the per-arg (not per-call) repetition is a new facet.
@@ -368,6 +403,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-149 — Lexer allocates a `String` per escape-free string literal
 
 **Severity:** Cleanup
+**Area:** frontend-lexer
 
 **Files:** `ryo-frontend/src/lexer.rs` (`unescape` :425-491, called at :542)
 **Summary:** Every string literal gets an owned `String` from `unescape` even when it contains no escapes — the common case. Per string literal.
@@ -378,6 +414,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-152 — Parser builds a throwaway `Vec` per call/params node before the arena copy
 
 **Severity:** Cleanup
+**Area:** frontend-parser
 
 **Files:** `ryo-frontend/src/parser.rs` (:604-615, :650-661, :534-538, :436-446)
 **Summary:** Call args, method args, params, and elif branches are `collect::<Vec<_>>()`ed into a temporary, copied into the AST side arena by the builder, then dropped — a double buffer per node. Partly inherent to chumsky's `IterParser`; impact is small next to the win the arena already delivered.
@@ -388,6 +425,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-153 — `expect_used` audit before promoting to deny
 
 **Severity:** Cleanup
+**Area:** ownership
 
 **Files:** the `cargo clippy --all-targets -- -W clippy::expect_used` hit list (`ryo-frontend/src/ownership/`, `ryo-core/src/ast.rs`, `ryo-core/src/types.rs`, `ryo-core/src/uir.rs`, `ryo-core/src/tir.rs` are the dense ones)
 **Summary:** `expect_used` is the one panic-family lint still at `allow` in `[workspace.lints.clippy]` (`panic`/`todo`/`unimplemented`/`unwrap_used` are denied). 70 sites fire at last count, 56 of them outside `ryo/tests/`; many are deliberate arena-boundary guards (`from_index`, side-arena overflow checks) — legitimate invariant enforcement, not laziness.
@@ -398,6 +436,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-154 — No way to name infinity (or NaN) in Ryo source
 
 **Severity:** Correctness / Hygiene
+**Area:** sema
 
 **Files:** `ryo-frontend/src/lexer.rs` (`RawToken::Float` regex, cf. I-027), `ryo-frontend/src/builtins.rs`, `ryo-frontend/src/sema/`, `docs/specification.md`
 **Summary:** There is no source-level spelling for IEEE infinity or NaN. The float literal grammar (`[0-9]+\.[0-9]+`, I-027) cannot express either — infinity has no decimal spelling, and the grammar has no exponent notation. IEEE edge cases are reachable at runtime (`1.0 / 0.0` yields `+inf`, see `examples/float_zero_div.ryo`) but can only be *detected* indirectly via identities like `x > 0.0 and x * 2.0 == x`, which is opaque and fragile. Almost no language spells infinity as a literal (Rust, Go, Python, C all use named constants), so this is a naming gap, not a grammar gap.
@@ -408,6 +447,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-164 — Guard-elision extensions deferred from the value-range work
 
 **Severity:** Cleanup
+**Area:** codegen
 
 **Files:** `ryo-backend/src/codegen/expr.rs` (checked-op helpers, `emit_div_guard`), `ryo-backend/src/codegen/mod.rs` (if/while emission)
 **Summary:** The value-range fact map behind the landed overflow-guard elision (commit `d6aee06`) deliberately scopes to guards on `+`/`-`/`*`/unary `-` seeded from bare `var <cmp> const` conditions. Four cheap extensions were identified during that work and deferred, each independent and small once the fact map exists: (a) div/mod zero-guard elision — when the divisor's range excludes 0, the `emit_div_guard` branch is provably unreachable; (b) `BoolAnd`/`BoolOr` decomposition — `x > 0 && y > 0` can seed both sides on the true path (De Morgan on the false path); (c) `VarDecl` constant seeding — `x = 5` records a point fact, useful once real programs (not just fib) are the yardstick; (d) loop-exit facts — a `while` condition's false path holds at the exit block, but only for condition variables never reassigned in the body.
@@ -418,6 +458,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-165 — Surviving overflow guards lower to unfused `cset`+`tst`+`b.ne`; needs upstream Cranelift flag-forwarding
 
 **Severity:** Cleanup
+**Area:** codegen
 
 **Files:** upstream Cranelift (`cranelift/codegen` aarch64 + x64 lowering of `*_overflow` flag results feeding `brif`/`trapnz`); Ryo side already emits the fusible shape (`ryo-backend/src/codegen/arith.rs` checked-op helpers)
 **Summary:** Ryo's spec §18 checked arithmetic emits an overflow guard per integer `+`/`-`/`*`. Each guard lowers on aarch64 to `adds` + `cset xN, vs` + `tst wN, #0xff` + `b.ne` — three extra instructions where Swift/LLVM emit the fused `adds` + `b.vs`. In `benchmarks/collatz` this costs +6 instructions per loop iteration (three checked ops), the largest share of the residual ~1.3x gap to equally-checked Swift (disassembly breakdown, 2026-09-22, in that README). Re-scoped 2026-09-22: an earlier revision of this entry blamed Ryo's CLIF shape (flag materialized into an SSA bool, branch separated from the op) and pointed at branch-to-trap folding. A controlled experiment (minimal CLIF compiled with the pinned Cranelift 0.135.2, aarch64) disproved that: Ryo already emits `brif` directly on the `sadd_overflow` flag result with no intermediate bool, and even a raw `trapnz` on the flag result still lowers to `adds` + `cset` + `tst` + `b.ne` + `udf`. Cranelift's aarch64 backend materializes the overflow flag into a register inside the `*_overflow` lowering itself and has no flag-forwarding into any branch, trap or otherwise. x86-64 has the same shape (`seto` + `test` + `jne` instead of a single `jo`). Re-verified 2026-09-29 on Cranelift 0.136.1 (disassembly diff of `benchmarks/collatz` and `benchmarks/fibonacci` across the bump): upstream PRs #14228 (opportunistic value defs) and #14254 landed exactly this flag-forwarding, but only for `uadd_overflow`, `umul_overflow`, and `smul_overflow`. Ryo's `*` guards now fuse (the collatz `3*n+1` guard dropped its `cset`+`tst`, going from `smulh`+`cmp`+`cset`+`tst`+`b.ne` to `smulh`+`cmp`+`b.ne`); `sadd_overflow`/`ssub_overflow` still lower unfused (`adds`/`subs` + `cset` + `tst` + `b.ne`), so `+`/`-` guards keep the +3-instruction sequence.
@@ -428,6 +469,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-166 — Sema does not reject constant `INT_MIN / -1` at compile time
 
 **Severity:** Cleanup
+**Area:** sema
 
 **Files:** `ryo-frontend/src/sema.rs` (the literal-zero division check), `ryo-backend/src/codegen/expr.rs` (`emit_div_guard`)
 **Summary:** The codegen division guard panics at runtime on `x / 0` and `x % 0`, with `INT_MIN / -1` and `INT_MIN % -1` covered by the signed-overflow guard fix; but sema only rejects the literal-zero-divisor form at compile time. The constant case `INT_MIN / -1` (dividend a known `i64::MIN` constant, divisor the literal expression `-1` — a unary minus, not a literal) still compiles and only fails when executed. Deferred from the runtime-guard fix as likely not worth it: the shape is rare and the runtime guard covers correctness.
@@ -438,6 +480,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-167 — Systematic audit of the runtime FFI boundary beyond the known gaps
 
 **Severity:** Cleanup
+**Area:** runtime
 
 **Files:** `runtime/src/lib.rs` (all `#[unsafe(no_mangle)]` entry points)
 **Summary:** Two robustness gaps at the C-ABI boundary were fixed directly (conflated abort modes for OOM vs capacity overflow, and debug-only null checks on `ryo_print` / `ryo_panic` / the slice path), but they were found by inspection, not by a systematic pass. Other entry points may have similar under-checked inputs: untrusted `len`/`cap` values that flow into `write_all`/`memcpy`/allocation size arithmetic, raw pointers beyond the three known sites, and panic/abort paths whose exit codes or messages are load-bearing for codegen assumptions.
@@ -448,6 +491,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-168 — Hyphenated `ryo-*.md` doc names violate the lowercase-underscore convention
 
 **Severity:** Cleanup
+**Area:** docs-spec
 
 **Files:** `docs/dev/` (`ryo-incremental-compilation.md`, `ryo-context-and-otel-proposal.md`, `ryo-std-data-proposal.md`, `ryo-proposal-review-issues.md`, `ryo-missing-features-and-gaps.md`, `ryo-view-materialization.md`, `ryo-slicing-and-memory-model-final-spec.md`, `ryo-compiler-llm-instructions.md`), plus every doc that links to them
 **Summary:** The repo convention is lowercase with underscores for docs (special files like `README.md` excepted). The eight `ryo-*-*.md` files under `docs/dev/` use hyphens instead. `notes.md` was renamed to `NOTES.md` as the cheap half of this cleanup; the hyphenated set was scoped out because each rename must also update every inbound link (`AGENTS.md`, `ISSUES.md`, the roadmap, and the docs/dev README index at minimum).
@@ -458,6 +502,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-172 — Consuming struct update has no ergonomic form: move + mutate + return dance, no update sugar, no clone
 
 **Severity:** Cleanup
+**Area:** ownership
 
 **Files:** `ryo-frontend/src/ownership/structs.rs` (`check_field_move_out`, E0043), `docs/specification.md` (§5.1 ownership rules; §4.5 struct literals; the operator-uniqueness rule reserving `..` for type bounds), `benchmarks/struct_records/` (the motivating measurement)
 **Summary:** Updating one field of an owned struct into a new value — the everyday "record update" — currently takes three statements: `mut q = p; q.age = q.age + 1; return q` (with a `move` parameter, since parameters borrow by default). Moving a single field out is rejected (E0043: fields move only with the whole struct), and there is no clone builtin, so the shorter `Person{name=p.name, age=p.age+1}` shape is inexpressible. The struct_records benchmark quantified the trap: the natural transliteration that re-derives the field costs ~1.8x walltime versus the move+mutate form (36.9 ms → 20.1 ms, commit `cb462b1`), so users who don't know the idiom write measurably slow code. Two candidate fixes exist but both are deferred design decisions: (a) struct-update syntax sugar — note Rust's `..p` spelling collides with the spec's operator-uniqueness rule (`..` is reserved for type bounds), so a different spelling would be needed; (b) same-type duplication via the `Clone` trait already designed for the v0.2/v0.3 trait milestone (see `docs/dev/ryo-view-materialization.md` §2), which would also cover the harder duplicate-and-modify case where the original must survive.
@@ -468,6 +513,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-174 — Benchmark runner mechanism is copy-pasted across 11 suites; centralize into a shared framework
 
 **Severity:** Cleanup
+**Area:** ci-benchmarks
 
 **Files:** `benchmarks/*/run_benchmarks.sh` (11 copies, ~1,030 lines total), `benchmarks/README.md` (idiomatic/checkpoint conventions), `codspeed.yml`, `.github/workflows/codspeed.yml`
 **Summary:** Every benchmark suite carries its own `run_benchmarks.sh`, and they are literally copies: the struct_records_reuse and struct_records_inout scripts were created by `sed`-substituting the suite name into the struct_records one. Each copy re-implements the same mechanism — prerequisite checks, `cargo build --release`, per-language compile lines, the compiler-version banner, the macOS/Linux `measure_mem` switch, the hyperfine invocation — with the suite-specific part (which arms exist, build commands, run commands) interleaved rather than declared. Drift is already visible: only some suites have Go or Python arms, the version-banner formats differ subtly, the table format and Version-column convention live only in prose in the global README, and adding a suite means another 100-line fork (two were added on 2026-09-11). The same duplication extends to registration: a new suite must be added to the root `codspeed.yml` exec list *and* both AOT build lists in `.github/workflows/codspeed.yml` by hand.
@@ -478,6 +524,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-183 — View-liveness back-edge merge is one-pass first-wins; reads inside a loop are attributed to the pre-loop slice
 
 **Severity:** Cleanup
+**Area:** ownership
 
 **Files:** `ryo-frontend/src/ownership/views.rs` (`collect_view_liveness` / `view_liveness_loop_body` back-edge merge :603-621), `ryo-frontend/src/ownership/mod.rs` (promo scheduling fallback that compensates :700-731)
 **Summary:** The view-liveness pre-pass walks a loop body once and merges back-edge bindings first-wins, so a read of a view binding inside or after a loop is attributed to the binding's *pre-loop* slice inst, leaving an in-loop rebinding slice with no recorded last use. Consumers of `view_last_use` that release memory must compensate conservatively: the promotion-free scheduler anchors in-loop bound-never-read candidates at function end (over-liveness, sound) instead of at the true last read. The pre-loop slice's buffer can likewise be kept alive past its real last use.
@@ -488,6 +535,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-184 — Promote-on-view spill slot is re-written and re-checked every loop iteration for a loop-invariant base
 
 **Severity:** Cleanup
+**Area:** codegen
 
 **Files:** `ryo-backend/src/codegen/views.rs` (`emit_ensure_heap_for_view_base` promo-slot path)
 **Summary:** When a view's base owner was promoted (heap-buffered for aliasing), every slice/view derivation re-emits the spill sequence: store the owner (ptr, len, cap) triple plus a spilled flag into a stack slot, then load and branch on the flag — even when the base is loop-invariant and the slot contents never change. In `benchmarks/string_slicing`'s `count_fox` this is ~12 extra aarch64 instructions per scan iteration (measured by disassembly, 2026-09-17), a large share of the remaining gap to Rust after the slice/eq inlining work.
@@ -498,6 +546,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-185 — `x % 2^k == 0` comparisons lower through the full signed-remainder sequence
 
 **Severity:** Cleanup
+**Area:** codegen
 
 **Files:** `ryo-backend/src/codegen/expr.rs` (`TirTag::IMod` lowering), `ryo-backend/src/codegen/arith.rs` (`CompoundOp::Mod`)
 **Summary:** Cranelift's egraph rewrites `srem x, 2^k` into the sign-corrected remainder sequence (on aarch64: `lsr`/`add`/`and`/`sub` + `cbz`, 5 instructions) and has no rule folding `srem x, 2^k == 0` into a bit test — but the comparison is sign-invariant: `x % 2^k == 0` iff `(x & (2^k - 1)) == 0` for negative `x` too. In `benchmarks/collatz` the `n % 2 == 0` parity check is ~4 of the ~9 extra per-iteration instructions vs Swift (LLVM emits a single `tst x, #1`; measured by disassembly, 2026-09-22 — see that README's gap breakdown).
@@ -508,6 +557,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-186 — No function inlining; small hot callees pay full call overhead
 
 **Severity:** Cleanup
+**Area:** sema
 
 **Files:** `ryo-frontend/src/` (TIR-level inlining pass, post-sema alongside ownership), `ryo-backend/src/codegen/mod.rs` (call sites)
 **Summary:** Cranelift has no inliner by design, so every Ryo function call is a real call. In `benchmarks/collatz`, `collatz_steps` is called once per seed (1M calls), each paying an `stp x29, x30` frame setup/teardown that Rust and LLVM eliminate by inlining the callee into the caller's loop (disassembly, 2026-09-22). Minor for collatz (~ms), but it also blocks cross-function constant propagation and guard elision in general.
@@ -518,6 +568,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-188 — Call-heavy workloads pay full call+guard overhead per token; no inlining anywhere in the backend
 
 **Severity:** Cleanup
+**Area:** codegen
 
 **Files:** `ryo-backend/src/codegen.rs` (function-call emission), `benchmarks/json_validate/` (evidence)
 **Summary:** `benchmarks/json_validate` (recursive-descent JSON validator; 2.95 MB document, 12 validation passes; measured 2026-09-23, M3 Pro): Rust 5.0 ms, Go 41.0 ms, Swift 58.2 ms, Ryo AOT 98.4 ms (19.7x vs Rust), Ryo JIT 118.2 ms, Python 2350 ms — same byte-identical algorithm in all languages. The validator is a deep per-token call tree (`parse_value` → `parse_object`/`parse_array` → `parse_value` …) and Cranelift has no inliner, so every byte pays a real call+return, and each position update additionally pays the spec §18 checked-arithmetic guard (which lowers unfused per I-165). Flat-loop benchmarks amortize both costs (`string_slicing` sits at ~1.7x vs Rust); call-heavy workloads compound them. The measured ordering (Rust < Swift < Go < Ryo) tracks inlining capability exactly.
@@ -528,6 +579,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-189 — W0004 shared-loop clause matches post-loop reads by name
 
 **Severity:** Cleanup
+**Area:** ownership
 
 **Files:** `ryo-frontend/src/ownership/frees.rs` (`chain_outlives_loop_iteration`)
 **Summary:** Conservative miss in the `RedundantToBytes` lint's shared-loop clause, resolving toward no-warning (the lint's stated philosophy), so users merely miss a valid `as_bytes()` hint: `chain_outlives_loop_iteration` matches post-loop reads of the binding by NAME, so a same-named shadowed binding read after the loop also suppresses (in-loop copy `b = s.to_bytes()` read only inside the loop, then a fresh `b` declared and read after it). The name match is load-bearing — dropping it breaks the legitimate `mut`-binding-reassigned-in-loop suppression because the loop merge seats the post-loop read on a different owner than the in-loop copy chain (same reseating imprecision as the loop-merge owner work). (The entry's other half — a straight-line receiver hazard ranked after the copy's last use — is fixed: hazards now suppress only up to the chain's last read.)
@@ -538,6 +590,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-191 — W0001 unused-value warning only fires for Move-typed bindings
 
 **Severity:** Correctness / Hygiene
+**Area:** ownership
 
 **Files:** `ryo-frontend/src/ownership/walk.rs` (VarDecl/Assign arms), `ryo-frontend/src/ownership/mod.rs:69` (`needs_tracking` gate)
 **Summary:** The "declared but never used" warning (W0001, `DiagCode::DeadStore`) registers a binding into `pending_dead_store` only when `needs_tracking(ty)` (i.e. `is_move_type(ty)`) holds, so Copy-typed locals (`int`/`float`/`bool`) are walked as `OwnerState::NotTracked` and never checked. Function parameters are never checked at all (any type), and view-typed locals register a projection but no dead-store entry. Reproduced from `bug_reports/bug_w0001_unused_var_only_move_types.ryo` (2026-09-24 build, still present at `87ea62b`). Result: the user gets a warning for `unused_str` but silence for `unused_int` in the same function.
@@ -548,6 +601,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-192 — Evaluate linking the `ryo` compiler binary itself against musl
 
 **Severity:** Correctness / Hygiene
+**Area:** ci-benchmarks
 
 **Files:** `.github/workflows/ci.yml` (new build/test lane), `build-support/src/lib.rs` (archive per `TARGET`, already correct), cargo config for the musl linker, `docs/dev/implementation_roadmap.md`
 **Summary:** AOT binaries are statically musl-linked since `f7afe7e`, but the compiler binary itself stays host-glibc on Linux — so `ryo run` (JIT) still allocates through the host glibc while `ryo build` binaries use musl malloc. The two flavors can diverge on memory bugs (observed 2026-09-28: the loop-exit double-free family crashed under glibc JIT on both macOS and Linux while a musl AOT binary ran clean — likely heap-layout luck, but it made JIT-vs-AOT behavior inconsistent). Linking `ryo` for `aarch64/x86_64-unknown-linux-musl` is cheap: both targets are Rust tier-2 with std, and the pinned Zig toolchain can serve as the musl linker (`-C linker="zig cc" -C link-args=-target <arch>-linux-musl`), with the runtime staticlib already rebuilding per `TARGET` through `build-support`. Benefits: one allocator story across JIT and AOT, and a static compiler binary that runs on any Linux regardless of host glibc (the playground/container story). Caveats: (1) Valgrind's musl support is partial and ASan effectively doesn't support musl — the `asan_smoke`/`valgrind_smoke` lanes need the glibc build, so musl is an additional flavor, not a replacement; (2) musl mallocng is slower under allocation-heavy multithreaded load (the caveat recorded in the resolved static-musl evaluation) — if it shows up in profiles the answer is a custom allocator in `ryo-runtime`; (3) needs a CI musl build+test lane and a distribution decision.
@@ -558,6 +612,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-193 — Attributes only parse on struct definitions; functions and other items cannot carry them
 
 **Severity:** Blocking
+**Area:** frontend-parser
 
 **Files:** `ryo-frontend/src/parser.rs` (attribute placement rule), `ryo-frontend/src/lexer.rs`, `ryo-core/src/diag.rs` (E0108 note text), `docs/specification.md` (§2, §19)
 
@@ -570,6 +625,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-195 — E0032 rejects disjoint field borrows: Rule-7 overlap check resolves `&p.x` to the root owner, no path sensitivity
 
 **Severity:** Correctness / Hygiene
+**Area:** ownership
 
 **Files:** `ryo-frontend/src/ownership/walk.rs` (`inout_owner`, the `inout_uses` Rule-7 partition), `ryo-frontend/src/ownership/structs.rs` (`struct_root`), `bug_reports/bug_e0032_disjoint_field_borrows.ryo` (repro)
 
@@ -582,6 +638,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-196 — Lint: warn when an `inout` parameter is never mutated in the callee (pass by borrow instead)
 
 **Severity:** Correctness / Hygiene
+**Area:** ownership
 
 **Files:** `ryo-core/src/diag.rs` (new W-code, next in the W0001–W0004 family), `ryo-frontend/src/ownership/walk.rs` (inout params are already keyed `Owner::Param(name)` — the walk can classify writes vs reads per param), `landing/reference/index.html` (diagnostics table, when shipped)
 
@@ -594,6 +651,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-201 — Process-wide argv state has no isolation contract; concurrent hosted executions can mix generations
 
 **Severity:** Correctness / Hygiene
+**Area:** runtime
 
 **Files:** `runtime/src/lib.rs` (ARGC/ARGV globals, `ryo_rt_init`, `ryo_process_argc`, `ryo_process_argv`), `ryo-backend/src/codegen/mod.rs` (entry shim emitting the init call), `ryo-backend/src/codegen/jit.rs` (trampoline and runtime symbol table)
 
@@ -606,6 +664,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 ### I-202 — `io_read_line` discards data in read buffer, causing input loss when lines are shorter than read chunk size
 
 **Severity:** Correctness / Hygiene
+**Area:** runtime
 
 **Files:** `runtime/src/lib.rs` (`read_line_from`, `ryo_read_line`)
 
