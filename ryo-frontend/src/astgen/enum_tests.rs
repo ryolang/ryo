@@ -2,9 +2,9 @@
 //! with resolved payload types; cross-kind forward references resolve;
 //! by-value cycles, empty enums, and duplicate variants are diagnosed;
 //! variant construction lowers to `EnumLit` with declaration-order
-//! field indices. Split out of `astgen.rs`'s inline tests per the R2
-//! ruling — astgen.rs has no headroom for more inline tests; the
-//! shared lowering helpers live there as `pub(super)`.
+//! field indices. Split out of `astgen.rs`'s inline tests: astgen.rs
+//! sits at the 2000-line CI cap, so new enum tests live here; the
+//! shared lowering helpers remain there as `pub(super)`.
 
 use super::tests::{body_named, parse_and_lower};
 use super::*;

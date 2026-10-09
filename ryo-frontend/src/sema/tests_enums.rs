@@ -56,8 +56,8 @@ fn unit_variant_access_is_typed_enum_lit() {
 
 #[test]
 fn variant_construct_payload_type_mismatch_names_variant_and_field() {
-    // (c) Review-Focus 5: the wrong-typed positional payload diagnostic
-    // names the enum, the variant, and the field.
+    // The wrong-typed positional payload diagnostic names the enum,
+    // the variant, and the field.
     let src = "enum Shape:\n\tCircle(float)\n\nfn main():\n\ts = Shape.Circle(\"x\")\n";
     let (_t, diags, _p) = run_with_errors(src);
     let diag = diags
@@ -75,7 +75,7 @@ fn variant_construct_payload_type_mismatch_names_variant_and_field() {
 
 #[test]
 fn unit_variant_access_unknown_variant_is_diag() {
-    // (c) `Shape.Hexagon` — bare variant access names a variant the enum
+    // `Shape.Hexagon` — bare variant access names a variant the enum
     // does not declare.
     let src = "enum Shape:\n\tCircle(float)\n\nfn main():\n\ts = Shape.Hexagon\n";
     let (_t, diags, _p) = run_with_errors(src);
@@ -93,7 +93,7 @@ fn unit_variant_access_unknown_variant_is_diag() {
 
 #[test]
 fn named_construct_missing_field_names_variant_and_enum() {
-    // (c) `Shape.Rectangle{width=1.0}` omits `height`.
+    // `Shape.Rectangle{width=1.0}` omits `height`.
     let src = "enum Shape:\n\tRectangle(width: float, height: float)\n\nfn main():\n\ts = Shape.Rectangle{width=1.0}\n";
     let (_t, diags, _p) = run_with_errors(src);
     let diag = diags
@@ -112,8 +112,8 @@ fn named_construct_missing_field_names_variant_and_enum() {
 
 #[test]
 fn named_construct_duplicate_field_is_caught_by_sema() {
-    // (c) Task 4 ledger: duplicate named args lower to two idx-0 pairs
-    // with no astgen diagnostic — sema must catch the repeated field.
+    // Duplicate named args lower to two idx-0 pairs with no astgen
+    // diagnostic — sema must catch the repeated field.
     let src = "enum Shape:\n\tRectangle(width: float, height: float)\n\nfn main():\n\ts = Shape.Rectangle{width=1.0, width=2.0}\n";
     let (_t, diags, _p) = run_with_errors(src);
     let diag = diags
@@ -132,7 +132,7 @@ fn named_construct_duplicate_field_is_caught_by_sema() {
 
 #[test]
 fn named_construct_unknown_field_is_frontlined_by_astgen() {
-    // (c) A typo'd named field is diagnosed at astgen (UnknownField,
+    // A typo'd named field is diagnosed at astgen (UnknownField,
     // E0038) and the bad arg is dropped before sema runs; sema then
     // sees `width` uncovered and reports it missing. Both messages
     // together explain the typo.
@@ -155,7 +155,7 @@ fn named_construct_unknown_field_is_frontlined_by_astgen() {
 
 #[test]
 fn positional_construct_overflow_is_unknown_variant_field() {
-    // (c) `Circle(5.0, 3.0)` on a one-field tuple variant: astgen pairs
+    // `Circle(5.0, 3.0)` on a one-field tuple variant: astgen pairs
     // positional args against declaration-order indices without an
     // arity check, so sema rejects the out-of-range index — the
     // UnknownVariantField shape astgen cannot see (named typos are
