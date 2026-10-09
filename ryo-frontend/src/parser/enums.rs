@@ -55,10 +55,13 @@ where
 /// (an init list must open with a field key followed by `=`, so the
 /// positional reading can only claim input the named reading fails
 /// on), and `delimited_by` sits inside each alternative so a failed
-/// named reading backtracks the whole `{...}`. The recovery captures
-/// the receiver hint BEFORE the content parses (nested expressions
-/// overwrite the slot), emits E0127, and the fold promotes the
-/// values as positional arguments.
+/// named reading backtracks the whole `{...}`. The fold emits E0127
+/// (naming the enum from the receiver itself — nested expressions
+/// overwrite the hint slot) and promotes the values as positional
+/// arguments.
+///
+/// Like the other `.`-led ops this parses the tail after the `.`; the
+/// postfix fold consumes the shared `.` (see `postfix_parser`).
 pub(super) fn named_construct_op<'a, I>(
     expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
     field_init: impl Parser<'a, I, (StringId, ExprId), PExtra<'a>> + Clone + 'a,
@@ -84,29 +87,20 @@ where
         .collect::<Vec<ExprId>>()
         .delimited_by(just(Token::LBrace), just(Token::RBrace))
         .map(BraceContent::Positional);
-    just(Token::Dot)
-        .ignore_then(select! { Token::Ident(name) => name }.try_map_with(
-            |name, e: &mut Mx<'a, '_, I>| {
-                if e.state().postfix_head_enum.is_some() {
-                    Ok(Ident::new(name, e.span()))
-                } else {
-                    Err(Rich::custom(e.span(), ParseDiag::ExpectedEnumTypeName))
-                }
-            },
-        ))
-        // Capture the receiver hint BEFORE the content parses.
-        .map_with(|variant, e: &mut Mx<'a, '_, I>| (variant, e.state().postfix_head_enum))
+    select! { Token::Ident(name) => name }
+        .try_map_with(|name, e: &mut Mx<'a, '_, I>| {
+            if e.state().postfix_head_enum.is_some() {
+                Ok(Ident::new(name, e.span()))
+            } else {
+                Err(Rich::custom(e.span(), ParseDiag::ExpectedEnumTypeName))
+            }
+        })
         .then(named_content.or(positional_content))
-        .map_with(|((variant, enum_name), content), e: &mut Mx<'a, '_, I>| {
+        .map_with(|(variant, content), e: &mut Mx<'a, '_, I>| {
             let span = e.span();
             match content {
                 BraceContent::Named(inits) => PostfixOp::NamedConstruct(variant, inits, span),
                 BraceContent::Positional(values) => {
-                    let enum_name = enum_name.expect("brace construct is gated on a type receiver");
-                    e.emit(Rich::custom(
-                        span,
-                        ParseDiag::PositionalArgsInBraces { enum_name },
-                    ));
                     PostfixOp::RecoveredPositionalBraces(variant, values, span)
                 }
             }
@@ -132,16 +126,14 @@ pub(super) fn missing_args_op<'a, I>(
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
-    just(Token::Dot)
-        .ignore_then(select! { Token::Ident(name) => name }.try_map_with(
-            |name, e: &mut Mx<'a, '_, I>| {
-                if e.state().postfix_head_enum.is_some() {
-                    Ok(Ident::new(name, e.span()))
-                } else {
-                    Err(Rich::custom(e.span(), ParseDiag::ExpectedEnumTypeName))
-                }
-            },
-        ))
+    select! { Token::Ident(name) => name }
+        .try_map_with(|name, e: &mut Mx<'a, '_, I>| {
+            if e.state().postfix_head_enum.is_some() {
+                Ok(Ident::new(name, e.span()))
+            } else {
+                Err(Rich::custom(e.span(), ParseDiag::ExpectedEnumTypeName))
+            }
+        })
         .then(just(Token::Sub).not().ignore_then(expr))
         .map_with(|(variant, arg), e: &mut Mx<'a, '_, I>| {
             PostfixOp::RecoveredMissingParens(variant, arg, e.span())
@@ -478,4 +470,28 @@ where
             }
         })
         .boxed()
+}
+
+impl PostfixOp {
+    /// Re-stamp the op's span. The `.`-led ops parse as tails after a
+    /// shared `.` (see `postfix_parser`); the outer parse supplies the
+    /// `.`-inclusive span they carried when each op owned its dot.
+    pub(super) fn with_span(self, new: SimpleSpan) -> Self {
+        match self {
+            PostfixOp::Method(name, args, _) => PostfixOp::Method(name, args, new),
+            PostfixOp::NamedConstruct(name, inits, _) => {
+                PostfixOp::NamedConstruct(name, inits, new)
+            }
+            PostfixOp::RecoveredPositionalBraces(name, values, _) => {
+                PostfixOp::RecoveredPositionalBraces(name, values, new)
+            }
+            PostfixOp::RecoveredMissingParens(name, arg, _) => {
+                PostfixOp::RecoveredMissingParens(name, arg, new)
+            }
+            PostfixOp::Field(field, _) => PostfixOp::Field(field, new),
+            PostfixOp::Missing => PostfixOp::Missing,
+            PostfixOp::Slice(lo, hi, _) => PostfixOp::Slice(lo, hi, new),
+            PostfixOp::Index(index, _) => PostfixOp::Index(index, new),
+        }
+    }
 }

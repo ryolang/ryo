@@ -1342,11 +1342,11 @@ fn postfix_parser<'a, I>(
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
-    let method_op = just(Token::Dot)
-        .ignore_then(
-            select! { Token::Ident(name) => name }
-                .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span())),
-        )
+    // The `.`-led ops parse as tails after one shared `.` (`dot_op`):
+    // every atom ends its postfix loop on a failed op, and one failed
+    // `.` is far cheaper than one per alternative (`with_span` below).
+    let method_op = select! { Token::Ident(name) => name }
+        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()))
         .then(
             enums::paren_arg(expr.clone())
                 .separated_by(just(Token::Comma))
@@ -1386,9 +1386,8 @@ where
     });
     let stray_float_key = select! { Token::FloatLit(_) => () }
         .map_with(|_, e: &mut Mx<'a, '_, I>| AccessKey::StrayFloat(e.span()));
-    let field_op = just(Token::Dot)
-        .ignore_then(named_key.or(positional_key).or(stray_float_key))
-        .validate(|key, e: &mut Mx<'a, '_, I>, emitter| match key {
+    let field_op = named_key.or(positional_key).or(stray_float_key).validate(
+        |key, e: &mut Mx<'a, '_, I>, emitter| match key {
             AccessKey::StrayFloat(fspan) => {
                 emitter.emit(Rich::custom(fspan, ParseDiag::ChainedPositionalAccess));
                 PostfixOp::Missing
@@ -1396,7 +1395,8 @@ where
             AccessKey::Named(field) | AccessKey::Positional(field) => {
                 PostfixOp::Field(field, e.span())
             }
-        });
+        },
+    );
 
     // One bracket parse, no speculation: the optional leading
     // expression is parsed exactly once, then `:` (slice) vs `]`
@@ -1437,15 +1437,17 @@ where
         head
     });
 
-    atom.foldl_with(
-        choice((
+    let dot_op = just(Token::Dot)
+        .ignore_then(choice((
             method_op,
             named_construct_op,
             missing_args_op,
             field_op,
-            bracket_op,
-        ))
-        .repeated(),
+        )))
+        .map_with(|op: PostfixOp, e: &mut Mx<'a, '_, I>| op.with_span(e.span()));
+
+    atom.foldl_with(
+        choice((dot_op, bracket_op)).repeated(),
         |receiver, op, e: &mut Mx<'a, '_, I>| {
             let start = e.state().expr_span(receiver).start;
             let result = match op {
@@ -1539,14 +1541,15 @@ where
                     )
                 }
                 PostfixOp::RecoveredPositionalBraces(variant, values, span) => {
-                    // E0127 fired when the op parsed; promote with
-                    // the values as positional arguments (a named
-                    // variant then gets its own E0123, a tuple
-                    // variant constructs cleanly).
-                    debug_assert!(
-                        type_name_ident(receiver, e).is_some(),
-                        "brace construct is gated on a type receiver"
-                    );
+                    // E0127; promote the values as positional args (a
+                    // named variant then gets its own E0123).
+                    let enum_name = type_name_ident(receiver, e)
+                        .expect("brace construct is gated on a type receiver")
+                        .name;
+                    e.emit(Rich::custom(
+                        span,
+                        ParseDiag::PositionalArgsInBraces { enum_name },
+                    ));
                     let list_start = e.state().expr_lists_len();
                     for &value in &values {
                         e.state().push_expr_list_item(value);
