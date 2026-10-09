@@ -981,6 +981,150 @@ fn main():
 ",
     ),
     (
+        // Enum drop path: a needs-drop enum reassigned in a loop with an
+        // early return. The message is built past the 23-byte SSO cap so
+        // every iteration allocates a fresh heap buffer that the
+        // reassign must free exactly once; the early return moves the
+        // live value out of the loop.
+        "enum_heap_str_payload_loop_early_return",
+        "\
+enum Result:
+	Success(int)
+	Error(message: str)
+
+fn probe() -> Result:
+	mut r = Result.Error{message=int_to_str(42) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}
+	mut i = 0
+	while i < 3:
+		r = Result.Error{message=int_to_str(i) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}
+		if i == 1:
+			return r
+		i += 1
+	return Result.Success(5)
+
+fn main():
+	r = probe()
+	print(r)
+	print(\"\\n\")
+",
+    ),
+    (
+        // Enum drop path: reassigning FROM a heap-payload variant TO a
+        // payload-free variant must free the superseded buffer at the
+        // variant switch (the Success value it leaves behind owns
+        // nothing, so a missed free shows as a leak at exit).
+        "enum_heap_to_success_reassign",
+        "\
+enum Result:
+	Success(int)
+	Error(message: str)
+
+fn probe() -> Result:
+	mut r = Result.Error{message=int_to_str(42) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}
+	r = Result.Success(5)
+	return r
+
+fn main():
+	r = probe()
+	print(r)
+	print(\"\\n\")
+",
+    ),
+    (
+        // Copy enum: Small is is_copy (all payload fields are Copy
+        // types), so assignment copies instead of moving. The copy
+        // happens while the narrow A(int) variant is active and the
+        // largest variant B(float x4) is not — reading or branching on
+        // the inactive payload bytes would flag under memcheck. No heap
+        // traffic: plain leak-check smoke.
+        "enum_copy_narrow_variant_active",
+        "\
+enum Small:
+	A(int)
+	B(float, float, float, float)
+
+fn main():
+	a = Small.A(7)
+	b = a
+	c = a
+	print(a)
+	print(\"\\n\")
+	print(b)
+	print(\"\\n\")
+	print(c)
+	print(\"\\n\")
+	wide = Small.B(1.0, 2.0, 3.0, 4.0)
+	narrow = wide
+	print(wide)
+	print(\"\\n\")
+	print(narrow)
+	print(\"\\n\")
+",
+    ),
+    (
+        // Enum across the parameter ABI: borrow (default), move, inout,
+        // and an sret return. The reseat message is built past the SSO
+        // cap, so heap traffic crosses every edge: the inout write-back
+        // escapes the callee's fresh buffer (which the callee must not
+        // free), the move param hands the value to consume's sret, and
+        // the bump's variant switch frees the payload caller-side.
+        // Caller and callee must each free exactly once.
+        "enum_param_abi",
+        "\
+enum Result:
+	Success(int)
+	Error(message: str)
+
+fn show(r: Result):
+	print(r)
+	print(\"\\n\")
+
+fn reseat(inout r: Result):
+	r = Result.Error{message=int_to_str(7) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}
+
+fn bump(inout r: Result):
+	r = Result.Success(99)
+
+fn consume(move r: Result) -> Result:
+	return r
+
+fn main():
+	mut r = Result.Success(1)
+	show(r)
+	reseat(&r)
+	show(r)
+	mut out = consume(r)
+	show(out)
+	bump(&out)
+	show(out)
+",
+    ),
+    (
+        // Enum nested in struct nested in enum's payload: a heap-built
+        // str (> SSO cap) inside Msg inside Note.Info inside Wrapper.
+        // Construction, whole-value copy (v = w), and drop must free
+        // the payload exactly once at every level.
+        "enum_nested_wrapper",
+        "\
+struct Msg:
+	text: str
+
+enum Note:
+	Info(Msg)
+	Blank
+
+struct Wrapper:
+	inner: Note
+
+fn main():
+	m = Msg{text=int_to_str(7) + \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}
+	w = Wrapper{inner=Note.Info(m)}
+	v = w
+	print(v)
+	print(\"\\n\")
+",
+    ),
+    (
         // Same-name shadow, not-taken reassign path. The inner
         // `mut x` is a different binding: its reassigns must not
         // suppress the outer binding's cleanup. When they did (the

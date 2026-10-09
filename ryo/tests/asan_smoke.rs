@@ -391,3 +391,43 @@ fn asan_struct_eq_bytes_field() {
         "struct_eq_bytes_field",
     );
 }
+
+// M11 enums: heap-backed enum drop paths, leak-checked under ASan.
+// Mirrors the valgrind_enum_* lane in valgrind_smoke.rs.
+
+#[test]
+fn asan_enum_heap_str_payload_loop_early_return() {
+    run_asan_smoke(
+        common::find_fixture("enum_heap_str_payload_loop_early_return"),
+        "enum_heap_str_payload_loop_early_return",
+    );
+}
+
+#[test]
+fn asan_enum_heap_to_success_reassign() {
+    run_asan_smoke(
+        common::find_fixture("enum_heap_to_success_reassign"),
+        "enum_heap_to_success_reassign",
+    );
+}
+
+#[test]
+fn asan_enum_copy_narrow_variant_active() {
+    run_asan_smoke(
+        common::find_fixture("enum_copy_narrow_variant_active"),
+        "enum_copy_narrow_variant_active",
+    );
+}
+
+#[test]
+fn asan_enum_param_abi() {
+    run_asan_smoke(common::find_fixture("enum_param_abi"), "enum_param_abi");
+}
+
+#[test]
+fn asan_enum_nested_wrapper() {
+    run_asan_smoke(
+        common::find_fixture("enum_nested_wrapper"),
+        "enum_nested_wrapper",
+    );
+}
