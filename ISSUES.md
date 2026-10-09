@@ -676,6 +676,19 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-205 — Enum variant positional args misparse nested call inside struct literal
+
+**Severity:** Correctness / Hygiene
+**Area:** frontend-parser
+
+**Files:** ryo-frontend/src/parser/enums.rs, ryo-frontend/src/parser.rs
+
+**Summary:** Positional args of an enum variant construction cannot contain a call expression inside a nested struct literal. Repro: struct Msg: text: str / enum Note: Info(Msg), Blank / n = Note.Info(Msg{text=int_to_str(7) + "x"}) — the parser reports E0122 (variant 'Info' has no field '1') and E0012 (field '0' expected 'Msg', found 'int'); the arg list appears to be split at the nested call's paren rather than balanced-paren delimited. A literal-only nested struct literal (Note.Info(Msg{text="hi"})) parses fine, as does a hoisted binding (m = Msg{...}; Note.Info(m)).
+
+**Resolution:** Parse variant positional args with a balanced-delimiter rule (or the shared expression parser) so nested calls/struct literals group as single args. Add a parser corpus test for Note.Info(Msg{text=int_to_str(7)}).
+
+---
+
 ## Cross-References
 
 - Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md) — latest verified snapshot (2026-08-24); several current entries originated there, and its `I-xxx` citations reflect what was open at the time (older snapshots live in git history).
