@@ -466,6 +466,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::DestructurePositionalOnNamed => "E0115",
         DiagCode::AnonFieldNotEq => "E0116",
         DiagCode::ReprCOnEnum => "E0117",
+        DiagCode::NamedArgInParens => "E0124",
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::InvalidCharacter => "E0102",
         DiagCode::UnknownEscape => "E0103",
@@ -919,6 +920,7 @@ mod tests {
             (DiagCode::DestructurePositionalOnNamed, "E0115"),
             (DiagCode::AnonFieldNotEq, "E0116"),
             (DiagCode::ReprCOnEnum, "E0117"),
+            (DiagCode::NamedArgInParens, "E0124"),
             (DiagCode::ConstEvalFailure, "E0200"),
             (DiagCode::CycleInComptime, "E0201"),
             (DiagCode::GenericInstantiation, "E0202"),
@@ -1009,6 +1011,7 @@ mod tests {
                 | DiagCode::DestructurePositionalOnNamed
                 | DiagCode::AnonFieldNotEq
                 | DiagCode::ReprCOnEnum
+                | DiagCode::NamedArgInParens
                 | DiagCode::TooManyDiagnostics
                 | DiagCode::InvalidCharacter
                 | DiagCode::UnknownEscape
@@ -1414,6 +1417,54 @@ mod tests {
         assert!(
             diags.iter().any(|d| d.code == DiagCode::TypeMismatch),
             "sema diagnostic must co-surface: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn named_arg_in_parens_enum_flavor_message_is_targeted() {
+        // `Shape.Circle(radius=5.0)` (Circle is a tuple variant) used
+        // to render the generic E0100 expected-token dump; the
+        // targeted E0124 names the variant and shows both correct
+        // spellings, as the single error.
+        let mut pool = InternPool::new();
+        let input = "enum Shape:\n\tCircle(float)\n\tRectangle(width: float, height: float)\n\nfn main():\n\tprint(Shape.Circle(radius=5.0))\n";
+        let (_program, diags) = parse_source(input, &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
+        let errors = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1, "expected exactly one error: {diags:?}");
+        let diag = errors[0];
+        assert_eq!(diag.code, DiagCode::NamedArgInParens);
+        assert_eq!(
+            diag.message,
+            "unexpected '=' — 'Circle' takes positional arguments: \
+             Shape.Circle(5.0); named fields use braces on named variants: \
+             Shape.Rectangle{width=1.0}"
+        );
+        assert!(
+            !diag.message.contains("expected '('"),
+            "message must not be a token dump: {}",
+            diag.message
+        );
+    }
+
+    #[test]
+    fn named_arg_in_parens_method_flavor_message() {
+        // The plain-call mirror: `f(a=b)` names no variant and points
+        // at the positional spelling.
+        let mut pool = InternPool::new();
+        let input = "fn main():\n\tf(a=b)\n";
+        let (_program, diags) = parse_source(input, &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
+        let diag = diags
+            .iter()
+            .find(|d| d.code == DiagCode::NamedArgInParens)
+            .expect("named-arg diagnostic must surface");
+        assert_eq!(
+            diag.message,
+            "named arguments are not supported — pass arguments positionally"
         );
     }
 }

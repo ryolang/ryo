@@ -309,6 +309,12 @@ pub enum DiagCode {
     /// struct feature; the only attribute an enum may carry is
     /// `#[derive(Eq)]`. The message names the allowed attribute.
     ReprCOnEnum,
+    /// A `name = value` pair inside a parenthesized argument list
+    /// (M11). Paren lists are positional; named fields belong in the
+    /// brace form on named variants. The variant-construction flavor
+    /// names the enum and variant and shows both correct spellings;
+    /// the plain-call flavor says named arguments are unsupported.
+    NamedArgInParens,
 
     /// Emitted by `DiagSink::into_diags` when the sink dropped
     /// diagnostics past `MAX_DIAGS`. Distinct from `ParseError` so
@@ -495,6 +501,19 @@ pub enum ParseDiag {
     /// struct feature. The message names the allowed attribute —
     /// `#[derive(Eq)]`.
     ReprCOnEnum,
+    /// A `name = value` pair inside a parenthesized argument list
+    /// (`Shape.Circle(radius=5.0)`, `f(a=b)`). Named arguments are
+    /// only valid in the brace form on named enum variants; paren
+    /// lists are positional. Two flavors: variant construction
+    /// (receiver is a bare type-name identifier) carries the enum and
+    /// variant names and shows both correct spellings; a plain call
+    /// carries neither and says named arguments are unsupported. The
+    /// parser recovers by treating the value as a positional
+    /// argument, so a type error in the value still surfaces.
+    NamedArgInParens {
+        enum_name: Option<crate::types::StringId>,
+        variant: Option<crate::types::StringId>,
+    },
     /// Internal guard failure for the enum variant-construction atom's
     /// uppercase-receiver check. The `Rich` error rides a discarded
     /// `Choice` alternative (a lowercase-led receiver parses as an
@@ -522,6 +541,7 @@ impl ParseDiag {
                 DiagCode::UnknownAttribute
             }
             ParseDiag::ReprCOnEnum => DiagCode::ReprCOnEnum,
+            ParseDiag::NamedArgInParens { .. } => DiagCode::NamedArgInParens,
             ParseDiag::ExpectedEnumTypeName => DiagCode::ParseError,
             ParseDiag::Message(_) => DiagCode::ParseError,
         }
@@ -546,6 +566,23 @@ impl ParseDiag {
                     attr.push(')');
                 }
                 format!("unknown attribute '{attr}'; known attributes: derive(Eq), repr(C)")
+            }
+            ParseDiag::NamedArgInParens { enum_name, variant } => {
+                match (enum_name, variant) {
+                    // Variant construction: name the variant and show
+                    // both correct spellings (pool-resolved).
+                    (Some(en), Some(v)) => format!(
+                        "unexpected '=' — '{v}' takes positional arguments: \
+                         {en}.{v}(5.0); named fields use braces on named \
+                         variants: {en}.Rectangle{{width=1.0}}",
+                        en = pool.str(*en),
+                        v = pool.str(*v),
+                    ),
+                    // Plain call (or a bare `Name(...)` atom, which has
+                    // no variant to name).
+                    _ => "named arguments are not supported — pass arguments positionally"
+                        .to_string(),
+                }
             }
             _ => self.to_string(),
         }
@@ -598,6 +635,17 @@ impl std::fmt::Display for ParseDiag {
                  the only attribute allowed on an enum is #[derive(Eq)]",
             ),
             ParseDiag::ExpectedEnumTypeName => f.write_str("expected an enum type name"),
+            ParseDiag::NamedArgInParens { enum_name, variant } => match (enum_name, variant) {
+                // Pool-free fallback: names rendered as placeholders
+                // (the pipeline resolves them through
+                // `ParseDiag::message` whenever a pool is available).
+                (Some(_), Some(_)) => f.write_str(
+                    "unexpected '=' — variant construction takes positional \
+                     arguments (EnumName.Variant(value)); named fields use \
+                     braces on named variants (EnumName.Variant{field=value})",
+                ),
+                _ => f.write_str("named arguments are not supported — pass arguments positionally"),
+            },
             ParseDiag::Message(msg) => f.write_str(msg),
         }
     }

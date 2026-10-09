@@ -124,6 +124,45 @@ where
         .boxed()
 }
 
+/// One element of a parenthesized argument list (a call, or the M11
+/// variant-construction parens that share the method-call shape):
+/// either an ordinary expression, or a recovered `name = value`
+/// named-argument attempt. The marker exists so the enclosing op can
+/// emit the targeted diagnostic (`ParseDiag::NamedArgInParens`) with
+/// full flavor context — the enum and variant names are only known
+/// when the op folds — while passing the VALUE through as a
+/// positional argument: the value stays in the tree (its own type
+/// errors still surface) and the no-orphan invariant holds.
+pub(super) enum ParenArg {
+    Expr(ExprId),
+    NamedSyntax { span: SimpleSpan, value: ExprId },
+}
+
+/// One argument of a parenthesized list. The `name = value` recovery
+/// is tried FIRST: no valid Ryo expression starts with `Ident`
+/// followed by `=` (assignment is a statement form; `==` is a single
+/// token), so the recovery can only claim input the ordinary `expr`
+/// alternative would fail on anyway — `expr` parses the bare name
+/// and then strands the `=`. The value expression parses normally;
+/// the name is consumed onto the marker.
+pub(super) fn paren_arg<'a, I>(
+    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, ParenArg, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    field_key()
+        .then_ignore(just(Token::Assign))
+        .then(expr.clone())
+        .map_with(
+            |(_name, value), e: &mut Mx<'a, '_, I>| ParenArg::NamedSyntax {
+                span: e.span(),
+                value,
+            },
+        )
+        .or(expr.map(ParenArg::Expr))
+}
+
 /// An `enum` declaration: `enum Name:` plus the variant block (M11).
 /// `enum_tail` is threaded in by the caller (grammar construction
 /// rule: built once per program grammar, shared with the attributed

@@ -45,16 +45,18 @@ use ryo_core::types::{InternPool, StringId, VariantKind};
 pub struct ParseState {
     ast: Ast,
     pool: InternPool,
-    /// Receiver-shape hint for the M11 named-variant-construct gate:
-    /// true while the expression the postfix ops are folding is a bare
-    /// uppercase-led identifier (`ExprName.Variant{...}` candidate).
+    /// Receiver-shape hint for the M11 postfix gates: `Some(name)`
+    /// while the expression the postfix ops are folding is a bare
+    /// uppercase-led identifier (`EnumName.Variant{...}` candidates
+    /// and enum-flavor argument-list recovery), `None` otherwise.
     /// The postfix fold sets this after the head atom and re-derives
     /// it after every folded op; only the `.name{`-gated postfix op
-    /// reads it, and only right after such a refresh (the `{` can
-    /// only follow `.name` through that op — a speculative inner
-    /// parse that wrote the hint is always followed by the next fold
-    /// refresh), so the value is never stale at a read.
-    postfix_head_is_type: bool,
+    /// and the paren-arg recovery read it, and only right after such
+    /// a refresh (a `{` / `=` can only follow `.name` through those
+    /// ops — a speculative inner parse that wrote the hint is always
+    /// followed by the next fold refresh), so the value is never
+    /// stale at a read.
+    postfix_head_enum: Option<StringId>,
 }
 
 impl ParseState {
@@ -64,7 +66,7 @@ impl ParseState {
         ParseState {
             ast: Ast::new(),
             pool,
-            postfix_head_is_type: false,
+            postfix_head_enum: None,
         }
     }
 
@@ -1318,8 +1320,10 @@ where
         /// `.name(args)`. The name keeps its token span: an
         /// uppercase-led receiver folds this into a
         /// `VariantConstruct` whose variant span must be the name
-        /// token's, exactly like the standalone form.
-        Method(Ident, Vec<ExprId>, SimpleSpan),
+        /// token's, exactly like the standalone form. Args carry
+        /// the `name = value` recovery markers; the fold emits the
+        /// targeted diagnostic and unwraps them.
+        Method(Ident, Vec<enums::ParenArg>, SimpleSpan),
         /// `.name{inits}` (M11 named variant construction);
         /// emitted only when the receiver gate passes.
         NamedConstruct(Ident, Vec<(StringId, ExprId)>, SimpleSpan),
@@ -1337,7 +1341,7 @@ where
                 .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span())),
         )
         .then(
-            expr.clone()
+            enums::paren_arg(expr.clone())
                 .separated_by(just(Token::Comma))
                 .allow_trailing()
                 .collect::<Vec<_>>()
@@ -1351,7 +1355,7 @@ where
     // Sits between `method_op` and `field_op`: like `method_op`
     // it requires more than `.name`, so `field_op` backtracks
     // here when no `{` follows. The receiver gate reads
-    // `postfix_head_is_type` (set by the postfix fold) BEFORE the
+    // `postfix_head_enum` (set by the postfix fold) BEFORE the
     // `{` is consumed: for a lowercase receiver the alternative
     // fails after `.name` and `field_op` claims the field access,
     // leaving `{...}` unconsumed — `obj.field{...}` keeps its
@@ -1361,7 +1365,7 @@ where
     let named_construct_op = just(Token::Dot)
         .ignore_then(select! { Token::Ident(name) => name }.try_map_with(
             |name, e: &mut Mx<'a, '_, I>| {
-                if e.state().postfix_head_is_type {
+                if e.state().postfix_head_enum.is_some() {
                     Ok(Ident::new(name, e.span()))
                 } else {
                     Err(Rich::custom(e.span(), ParseDiag::ExpectedEnumTypeName))
@@ -1443,17 +1447,16 @@ where
             }
         });
 
-    // Seed the named-construct receiver gate (see
-    // `ParseState::postfix_head_is_type`) from the head atom; the
-    // fold re-derives the hint after every folded op before the
-    // next op parses. In check mode `map_with` skips its closure,
-    // but no rule in this grammar runs an expression in check
-    // mode (check-mode uses are token-level: `and_is`, `not`,
-    // statement-list probing), so the hint cannot go stale at a
-    // read — the brace-gated op only reaches it on an emit-mode
-    // postfix iteration.
+    // Seed the receiver gate (see `ParseState::postfix_head_enum`)
+    // from the head atom; the fold re-derives the hint after every
+    // folded op before the next op parses. In check mode `map_with`
+    // skips its closure, but no rule in this grammar runs an
+    // expression in check mode (check-mode uses are token-level:
+    // `and_is`, `not`, statement-list probing), so the hint cannot
+    // go stale at a read — the gated ops only reach it on an
+    // emit-mode postfix iteration.
     let atom = atom.map_with(|head, e: &mut Mx<'a, '_, I>| {
-        e.state().postfix_head_is_type = type_name_ident(head, e).is_some();
+        e.state().postfix_head_enum = type_name_ident(head, e).map(|id| id.name);
         head
     });
 
@@ -1463,38 +1466,67 @@ where
             let start = e.state().expr_span(receiver).start;
             let result = match op {
                 PostfixOp::Method(method, args, span) => {
-                    if type_name_ident(receiver, e).is_some() {
-                        // R4: a paren call on a bare uppercase-led
-                        // receiver can only be variant construction
-                        // (`Url.parse(x)`); the lowercase mirror
-                        // (`obj.field()`) keeps its method-call
-                        // meaning. The receiver `Ident` node is
-                        // promoted in place (no orphan); args are
-                        // collected, then pushed contiguously and
-                        // sealed (I-205: a start→seal window cannot
-                        // span the arg parses — nested construction
-                        // writes the same arena).
-                        let list_start = e.state().expr_lists_len();
-                        for &arg in &args {
-                            e.state().push_expr_list_item(arg);
+                    let receiver_type = type_name_ident(receiver, e);
+                    // Recover each `name = value` arg with one
+                    // targeted diagnostic (E0124): the enum flavor
+                    // names the enum and variant and shows both
+                    // correct spellings; the method flavor says
+                    // named arguments are unsupported. The value
+                    // passes through as a positional argument so its
+                    // own type errors still surface.
+                    let mut positional = Vec::with_capacity(args.len());
+                    for arg in &args {
+                        match arg {
+                            enums::ParenArg::Expr(id) => positional.push(*id),
+                            enums::ParenArg::NamedSyntax { span: nspan, value } => {
+                                let diag = match &receiver_type {
+                                    Some(enum_id) => ParseDiag::NamedArgInParens {
+                                        enum_name: Some(enum_id.name),
+                                        variant: Some(method.name),
+                                    },
+                                    None => ParseDiag::NamedArgInParens {
+                                        enum_name: None,
+                                        variant: None,
+                                    },
+                                };
+                                e.emit(Rich::custom(*nspan, diag));
+                                positional.push(*value);
+                            }
                         }
-                        let list = e.state().expr_list_from(list_start);
-                        e.state().promote_ident_to_variant_construct(
-                            receiver,
-                            method,
-                            Some(VariantArgs {
-                                positional: Some(list),
-                                named: None,
-                            }),
-                            SimpleSpan::new((), start..span.end),
-                        )
-                    } else {
-                        e.state().method_call(
+                    }
+                    match receiver_type {
+                        Some(_enum_id) => {
+                            // R4: a paren call on a bare uppercase-led
+                            // receiver can only be variant construction
+                            // (`Url.parse(x)`); the lowercase mirror
+                            // (`obj.field()`) keeps its method-call
+                            // meaning. The receiver `Ident` node is
+                            // promoted in place (no orphan); args are
+                            // collected, then pushed contiguously and
+                            // sealed (I-205: a start→seal window cannot
+                            // span the arg parses — nested construction
+                            // writes the same arena).
+                            let list_start = e.state().expr_lists_len();
+                            for &arg in &positional {
+                                e.state().push_expr_list_item(arg);
+                            }
+                            let list = e.state().expr_list_from(list_start);
+                            e.state().promote_ident_to_variant_construct(
+                                receiver,
+                                method,
+                                Some(VariantArgs {
+                                    positional: Some(list),
+                                    named: None,
+                                }),
+                                SimpleSpan::new((), start..span.end),
+                            )
+                        }
+                        None => e.state().method_call(
                             receiver,
                             method.name,
-                            &args,
+                            &positional,
                             SimpleSpan::new((), start..span.end),
-                        )
+                        ),
                     }
                 }
                 PostfixOp::NamedConstruct(variant, inits, span) => {
@@ -1536,7 +1568,7 @@ where
                         .index(receiver, index, SimpleSpan::new((), start..span.end))
                 }
             };
-            e.state().postfix_head_is_type = type_name_ident(result, e).is_some();
+            e.state().postfix_head_enum = type_name_ident(result, e).map(|id| id.name);
             result
         },
     )
@@ -1575,7 +1607,7 @@ where
 
             let call = select! { Token::Ident(name) => name }
                 .then(
-                    expr.clone()
+                    enums::paren_arg(expr.clone())
                         .separated_by(just(Token::Comma))
                         .allow_trailing()
                         .collect::<Vec<_>>()
@@ -1583,6 +1615,26 @@ where
                 )
                 .map_with(|(name, args), e: &mut Mx<'a, '_, I>| {
                     let span = e.span();
+                    // `name = value` in a plain call's parens: named
+                    // arguments are unsupported (method flavor — an
+                    // atom call has no variant to name). The value
+                    // passes through as a positional argument.
+                    let args = args
+                        .into_iter()
+                        .map(|arg| match arg {
+                            enums::ParenArg::Expr(id) => id,
+                            enums::ParenArg::NamedSyntax { span: nspan, value } => {
+                                e.emit(Rich::custom(
+                                    nspan,
+                                    ParseDiag::NamedArgInParens {
+                                        enum_name: None,
+                                        variant: None,
+                                    },
+                                ));
+                                value
+                            }
+                        })
+                        .collect::<Vec<_>>();
                     e.state().call(name, &args, span)
                 });
 

@@ -383,3 +383,68 @@ fn variant_construct_named_with_nested_named_construct_keeps_written_pairs() {
         other => panic!("expected the value to be the nested construct, got {other:?}"),
     }
 }
+#[test]
+fn named_arg_in_parens_method_flavor() {
+    // `f(a=b)`: a plain call's parens are positional — the method
+    // flavor fires once, no names attached.
+    let (ok, _ast, errs, _pool) = lex_and_parse_recovering("fn main():\n\tf(a=b)\n");
+    assert!(ok, "recovery should still produce a partial program");
+    assert_eq!(
+        errs.len(),
+        1,
+        "expected exactly the named-arg diagnostic: {errs:?}"
+    );
+    match errs[0].reason() {
+        RichReason::Custom(ParseDiag::NamedArgInParens { enum_name, variant }) => {
+            assert!(
+                enum_name.is_none() && variant.is_none(),
+                "method flavor carries no names"
+            );
+        }
+        other => panic!("expected NamedArgInParens, got {other:?}"),
+    }
+    assert_eq!(
+        errs[0].reason().to_string(),
+        "named arguments are not supported — pass arguments positionally"
+    );
+}
+
+#[test]
+fn named_arg_in_parens_enum_flavor() {
+    // `Shape.Circle(radius=5.0)`: Circle is a tuple variant, so the
+    // paren list is positional — the enum flavor names the variant
+    // (and the enum), exactly once.
+    let (ok, _ast, errs, pool) = lex_and_parse_recovering(
+        "enum Shape:\n\tCircle(float)\nfn main():\n\tprint(Shape.Circle(radius=5.0))\n",
+    );
+    assert!(ok, "recovery should still produce a partial program");
+    assert_eq!(
+        errs.len(),
+        1,
+        "expected exactly the named-arg diagnostic: {errs:?}"
+    );
+    match errs[0].reason() {
+        RichReason::Custom(ParseDiag::NamedArgInParens { enum_name, variant }) => {
+            let (en, v) = (
+                enum_name.expect("enum name"),
+                variant.expect("variant name"),
+            );
+            assert_eq!(pool.str(en), "Shape");
+            assert_eq!(pool.str(v), "Circle");
+        }
+        other => panic!("expected NamedArgInParens, got {other:?}"),
+    }
+    // The value survives as a positional argument: the recovered
+    // construct is `Shape.Circle(5.0)`, a well-formed construct —
+    // the positional spelling must of course still parse.
+    lex_and_parse("enum Shape:\n\tCircle(float)\nfn main():\n\tx = Shape.Circle(5.0)\n")
+        .expect("positional spelling must still parse");
+}
+
+#[test]
+fn named_arg_recovery_leaves_equality_args_unaffected() {
+    // `f(a == b)`: `==` is a single token, so the `Ident =` recovery
+    // cannot fire; the argument parses as an ordinary comparison.
+    let (_ast, _pool) = lex_and_parse("fn main():\n\tf(a == b)\n")
+        .expect("equality inside an arg list must parse unchanged");
+}
