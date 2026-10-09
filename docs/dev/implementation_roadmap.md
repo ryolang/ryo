@@ -34,7 +34,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 9.1 — Synthesized Eq & Debug for Structs ✅ COMPLETE](#milestone-91-synthesized-eq--debug-for-structs--complete)
 - [x] [Milestone 9.2 — Throwaway CLI Intrinsics (`process_*`, `io_*`) ✅ COMPLETE](#milestone-92-throwaway-cli-intrinsics-process_-io_--complete) *(no dependencies; slots in alongside the core cluster)*
 - [x] [Milestone 10 — Tuples ✅ COMPLETE](#milestone-10-tuples-tuple-sugar-over-anonymous-structs--complete)
-- [ ] [Milestone 11 — Enums (Algebraic Data Types) [alpha]](#milestone-11-enums-algebraic-data-types-alpha)
+- [x] [Milestone 11 — Enums (Algebraic Data Types) ✅ COMPLETE](#milestone-11-enums-algebraic-data-types--complete)
 - [ ] [Milestone 12 — Pattern Matching [alpha]](#milestone-12-pattern-matching-alpha)
 - [ ] [Milestone 13 — Error Types & Unions [alpha]](#milestone-13-error-types--unions-alpha)
 - [ ] [Milestone 13.5 — Default Parameters & Named Arguments](#milestone-135-default-parameters--named-arguments) *(deferred — see sequencing note below)*
@@ -1552,9 +1552,11 @@ fn main():
 - Match patterns accept both forms: `{x=0, y=_}` and `(0, _)` — **deferred to M12** with the rest of literal-pattern matching
 - Dependencies: Milestone 9 (anonymous structs share the struct machinery)
 
-### Milestone 11: Enums (Algebraic Data Types) [alpha]
+### Milestone 11: Enums (Algebraic Data Types) ✅ COMPLETE
 
 **Goal:** Implement enums with variants (sum types / tagged unions)
+
+**Status:** ✅ COMPLETE (2026-10-09, branch `feat/milestone-11-enums`)
 
 **Tasks:**
 
@@ -1580,7 +1582,7 @@ fn main():
 - Extend Codegen: Generate IR for:
   - Enum representation (tag + data)
   - Variant construction
-  - Tag checking (for pattern matching in M9)
+  - Tag checking (for pattern matching in M12)
 - Write tests for enum definition and variant construction
 
 **Visible Progress:** Can define sum types and construct variants
@@ -1594,7 +1596,7 @@ enum Result:
 
 fn divide(a: int, b: int) -> Result:
  if b == 0:
-  return Result.Error("Division by zero")
+  return Result.Error{message="Division by zero"}
  return Result.Success(a / b)
 ```
 
