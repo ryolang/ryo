@@ -1571,7 +1571,7 @@ fn main():
    Blue
 
   enum Shape:
-   Circle(radius: float)
+   Circle(float)
    Rectangle(width: float, height: float)
   ```
 
@@ -1591,7 +1591,7 @@ fn main():
 
 ```ryo
 enum Result:
- Success(value: int)
+ Success(int)
  Error(message: str)
 
 fn divide(a: int, b: int) -> Result:
