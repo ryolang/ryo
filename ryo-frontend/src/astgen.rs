@@ -1267,10 +1267,10 @@ fn gen_expr(
 /// arguments canonicalize against declaration order — pairs stay in source
 /// order, each carrying its declaration-order field index.
 ///
-/// An undeclared enum is `UnknownType`; an unknown variant or payload
-/// field reuses `UnknownField`. A declared-but-failed enum lowers
-/// quietly to the error type (the struct precedent — its own
-/// diagnostic is already in the sink).
+/// An undeclared enum is `UnknownType`; an unknown variant is
+/// `UnknownVariant`; an unknown payload field reuses `UnknownField`. A
+/// declared-but-failed enum lowers quietly to the error type (the
+/// struct precedent — its own diagnostic is already in the sink).
 #[allow(clippy::too_many_arguments)]
 fn lower_variant_construct(
     b: &mut UirBuilder,
@@ -1304,7 +1304,7 @@ fn lower_variant_construct(
     else {
         sink.emit(Diag::error(
             c.variant.span,
-            DiagCode::UnknownField,
+            DiagCode::UnknownVariant,
             format!(
                 "enum '{}' has no variant '{}'",
                 pool.str(enum_name),
