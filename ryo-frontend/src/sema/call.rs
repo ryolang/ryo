@@ -346,15 +346,21 @@ pub(crate) fn check_reserved_name(
 /// Every declared enum that has a variant named `variant`, sorted by
 /// name so the diagnostic text is deterministic (the enum table is a
 /// HashMap). Feeds the "did you forget the enum?" call recovery.
+/// Failed enums ride along error-typed in `enum_types` (see
+/// [`Sema::register_enums`]); `enum_view` would trip its Enum-tag
+/// assert on one, so error types are skipped — their own diagnostic
+/// is already in the sink.
 fn enum_variant_carriers(sema: &Sema<'_>, variant: StringId) -> Vec<StringId> {
     let mut carriers: Vec<StringId> = sema
         .enum_types
         .iter()
         .filter(|(_, ety)| {
-            sema.pool
-                .enum_view(**ety)
-                .variants()
-                .any(|v| v.name == variant)
+            **ety != sema.pool.error_type()
+                && sema
+                    .pool
+                    .enum_view(**ety)
+                    .variants()
+                    .any(|v| v.name == variant)
         })
         .map(|(&ename, _)| ename)
         .collect();

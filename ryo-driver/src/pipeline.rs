@@ -1452,8 +1452,8 @@ mod tests {
         assert_eq!(
             diag.message,
             "unexpected '=' — 'Circle' takes positional arguments: \
-             Shape.Circle(5.0); named fields use braces on named variants: \
-             Shape.Rectangle{width=1.0}"
+             Shape.Circle(...); named fields use braces on named variants: \
+             Shape.Variant{field=value}"
         );
         assert!(
             !diag.message.contains("expected '('"),

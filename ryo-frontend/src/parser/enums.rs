@@ -120,6 +120,12 @@ where
 /// enum-candidate receiver hint so `obj.field <anything>` keeps its
 /// historical parse; sits before `field_op` so the recovery claims
 /// the field access when it fires.
+///
+/// The payload may not begin with `-`: that token continues a binary
+/// expression (`CFG.size - 1` on an uppercase-named value), and the
+/// recovery claiming it would rewrite a subtraction into a phantom
+/// construct — the guard fails the alternative and `field_op` keeps
+/// the field access, so the binary op parses unchanged.
 pub(super) fn missing_args_op<'a, I>(
     expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
 ) -> impl Parser<'a, I, PostfixOp, PExtra<'a>> + Clone + 'a
@@ -136,7 +142,7 @@ where
                 }
             },
         ))
-        .then(expr)
+        .then(just(Token::Sub).not().ignore_then(expr))
         .map_with(|(variant, arg), e: &mut Mx<'a, '_, I>| {
             PostfixOp::RecoveredMissingParens(variant, arg, e.span())
         })

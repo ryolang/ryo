@@ -474,6 +474,22 @@ fn bare_variant_call_names_its_enums() {
 }
 
 #[test]
+fn bare_variant_call_with_failed_enum_does_not_panic() {
+    // `Circle(5.0)` where Shape failed to define (unknown payload
+    // type): `enum_types` carries Shape error-typed, which used to
+    // reach `enum_view` and trip its Enum-tag assert. The carrier
+    // scan skips error types now, so the call falls back to the
+    // plain undefined-function error.
+    let src = "enum Shape:\n\tCircle(nosuchtype)\n\nfn main():\n\tCircle(5.0)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::UndefinedFunction)
+        .expect("undefined-function diag must surface");
+    assert_eq!(diag.message, "undefined function: 'Circle'");
+}
+
+#[test]
 fn struct_name_as_construct_receiver_names_the_brace_form() {
     // `Point.make(1.0)`: a struct name in enum-construct position —
     // structs construct with braces (E0041).

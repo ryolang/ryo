@@ -484,6 +484,31 @@ fn missing_parens_construct_recovers_as_payload_arg() {
 }
 
 #[test]
+fn missing_parens_recovery_yields_to_binary_continuation() {
+    // `x = CFG.size - 1` on an uppercase-named value: `-` continues
+    // the binary expression, so the missing-parens recovery must not
+    // claim it (that rewrote the subtraction into a phantom
+    // construct). The parse stays a subtraction over a field access
+    // with no diagnostic.
+    let (ast, pool) = lex_and_parse("fn main():\n\tx = CFG.size - 1\n")
+        .expect("binary minus after a field access must parse cleanly");
+    let f = fn_def(&ast, only_stmt(&ast));
+    let init = assign_value(&ast, fn_body(&ast, f)[0]);
+    match ast.expr(init).kind {
+        ExprKind::BinaryOp(lhs, BinaryOperator::Sub, rhs) => {
+            let (object, field) = field_access(&ast, lhs);
+            assert_eq!(pool.str(field.name), "size");
+            assert!(matches!(ast.expr(object).kind, ExprKind::Ident(_)));
+            assert!(matches!(
+                ast.expr(rhs).kind,
+                ExprKind::Literal(Literal::Int(1))
+            ));
+        }
+        other => panic!("expected BinaryOp, got {other:?}"),
+    }
+}
+
+#[test]
 fn positional_values_in_braces_recover_with_targeted_diag() {
     // `Shape.Rectangle{1.0, 2.0}` (E0127): values without `name =`
     // are recovered as positional arguments.

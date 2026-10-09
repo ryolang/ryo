@@ -622,8 +622,8 @@ impl ParseDiag {
                     // both correct spellings (pool-resolved).
                     (Some(en), Some(v)) => format!(
                         "unexpected '=' — '{v}' takes positional arguments: \
-                         {en}.{v}(5.0); named fields use braces on named \
-                         variants: {en}.Rectangle{{width=1.0}}",
+                         {en}.{v}(...); named fields use braces on named \
+                         variants: {en}.Variant{{field=value}}",
                         en = pool.str(*en),
                         v = pool.str(*v),
                     ),

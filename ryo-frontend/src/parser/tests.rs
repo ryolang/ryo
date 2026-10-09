@@ -96,7 +96,7 @@ fn for_range(ast: &Ast, stmt: StmtId) -> (Ident, Ident, &[StmtId]) {
 }
 
 /// The value of an `x = <value>` AssignOrDecl statement.
-fn assign_value(ast: &Ast, stmt: StmtId) -> ExprId {
+pub(super) fn assign_value(ast: &Ast, stmt: StmtId) -> ExprId {
     match &ast.stmt(stmt).kind {
         StmtKind::AssignOrDecl { value, .. } => *value,
         other => panic!("expected AssignOrDecl, got {other:?}"),
