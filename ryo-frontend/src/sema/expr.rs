@@ -725,6 +725,22 @@ fn analyze_variant_construct(
         ));
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
+    if kind == VariantKind::Unit && view.positional {
+        // `Color.Red()` — a unit variant takes no payload; the paren
+        // form is the named/tuple construct shape misapplied. Quiet
+        // recovery, matching the Brace Law arm above (E0125).
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::UnitVariantConstructed,
+            format!(
+                "'{}' is a unit variant — construct it as {}.{}",
+                sema.pool.str(vname),
+                sema.pool.str(ename),
+                sema.pool.str(vname),
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
     let mut by_index: Vec<Option<TirRef>> = vec![None; fields.len()];
     // Once any field errored (unknown/duplicate), the construction's
     // shape is untrustworthy — a derived "missing field(s)" error on
@@ -745,17 +761,27 @@ fn analyze_variant_construct(
         }
         let Some(field) = fields.get(fidx as usize) else {
             field_errored = true;
-            sema.sink.emit(Diag::error(
-                fspan,
-                DiagCode::UnknownVariantField,
+            // Extra positional argument on a tuple variant: name the
+            // position, not the synthesized "0"/"1" field index the
+            // developer never wrote (E0122, positional wording).
+            let message = if kind == VariantKind::Tuple {
+                format!(
+                    "found a {} positional argument — '{}' takes {}",
+                    ordinal(fidx as usize + 1),
+                    sema.pool.str(vname),
+                    fields.len(),
+                )
+            } else {
                 format!(
                     "variant '{}' of enum '{}' has no field '{}' (fields: {})",
                     sema.pool.str(vname),
                     sema.pool.str(ename),
                     fidx,
                     field_list(sema.pool, &fields),
-                ),
-            ));
+                )
+            };
+            sema.sink
+                .emit(Diag::error(fspan, DiagCode::UnknownVariantField, message));
             // Still analyze the arg so diagnostics inside it surface.
             analyze_expr(sema, fcx, scope, value_ref);
             continue;
@@ -812,16 +838,29 @@ fn analyze_variant_construct(
         .map(|(f, _)| format!("'{}'", sema.pool.str(f.name)))
         .collect();
     if !missing.is_empty() && !field_errored {
-        sema.sink.emit(Diag::error(
-            span,
-            DiagCode::MissingVariantFields,
+        // Tuple payloads carry synthesized "0"/"1" field names the
+        // user never wrote — word by position count instead (E0120,
+        // positional wording).
+        let message = if kind == VariantKind::Tuple {
+            let total = fields.len();
+            let got = total - missing.len();
+            format!(
+                "'{}' takes {} positional argument{}; got {}",
+                sema.pool.str(vname),
+                total,
+                if total == 1 { "" } else { "s" },
+                got,
+            )
+        } else {
             format!(
                 "missing field(s) {} in variant '{}' of enum '{}' construction",
                 missing.join(", "),
                 sema.pool.str(vname),
                 sema.pool.str(ename),
-            ),
-        ));
+            )
+        };
+        sema.sink
+            .emit(Diag::error(span, DiagCode::MissingVariantFields, message));
     }
     // Canonical declaration order; slots that never got a valid
     // initializer recover with an error-typed Unreachable.
@@ -1110,6 +1149,19 @@ fn analyze_unit_variant_access(
 
 /// Comma-separated quoted field names of a struct or enum payload, for
 /// the "has no field" diagnostics.
+/// English ordinal for a 1-based argument position: "second",
+/// "third", "fourth", then "Nth". Used when an extra positional
+/// argument names its own position ("found a second positional
+/// argument — 'Some' takes 1").
+fn ordinal(n: usize) -> String {
+    match n {
+        2 => "second".to_string(),
+        3 => "third".to_string(),
+        4 => "fourth".to_string(),
+        _ => format!("{n}th"),
+    }
+}
+
 fn field_list(pool: &ryo_core::types::InternPool, fields: &[StructField]) -> String {
     fields
         .iter()
@@ -1161,6 +1213,35 @@ fn lowercase_enum_method_receiver(
                     sema.pool.str(method),
                 )),
             );
+            for &arg in args {
+                analyze_expr(sema, fcx, scope, arg);
+            }
+            return Some(fcx.builder.unreachable(sema.pool.error_type(), span));
+        }
+        // `Point.make(1.0)` — a struct name in enum-construct
+        // position. Structs construct with braces, not `Name(...)`
+        // parens; name the brace spelling with the declared fields.
+        if scope.lookup(name).is_none()
+            && let Some(&sty) = sema.struct_types.get(&name)
+        {
+            let raw = sema.pool.str(name).to_string();
+            let example = {
+                let fields = sema.pool.struct_view(sty).fields;
+                let names = fields
+                    .iter()
+                    .map(|f| format!("{}=...", sema.pool.str(f.name)))
+                    .collect::<Vec<_>>();
+                if names.is_empty() {
+                    "{}".to_string()
+                } else {
+                    format!("{{{}}}", names.join(", "))
+                }
+            };
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::NotAStruct,
+                format!("'{raw}' is a struct, not an enum — construct it as {raw}{example}"),
+            ));
             for &arg in args {
                 analyze_expr(sema, fcx, scope, arg);
             }

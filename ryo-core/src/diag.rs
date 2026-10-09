@@ -315,6 +315,22 @@ pub enum DiagCode {
     /// names the enum and variant and shows both correct spellings;
     /// the plain-call flavor says named arguments are unsupported.
     NamedArgInParens,
+    /// A unit variant constructed with an argument list (M11):
+    /// `Color.Red()`. Unit variants construct bare (`Color.Red`).
+    UnitVariantConstructed,
+    /// A variant construction with the argument list's parens
+    /// missing: `Shape.Circle 5.0`. The parser recovers by treating
+    /// the trailing expression as the payload argument.
+    MissingArgListOnVariant,
+    /// Values inside the brace form without `name =` prefixes (M11):
+    /// `Shape.Rectangle{1.0, 2.0}`. Named payloads write
+    /// `field=value`; positional payloads use the paren form.
+    PositionalArgsInBraces,
+    /// Comma-separated enum variants on one line:
+    /// `enum Color: Red, Green, Blue`. Variants are declared one per
+    /// line in the indented block; there is no comma form. The
+    /// parser recovers by declaring the variants anyway.
+    CommaSeparatedVariants,
 
     /// Emitted by `DiagSink::into_diags` when the sink dropped
     /// diagnostics past `MAX_DIAGS`. Distinct from `ParseError` so
@@ -514,6 +530,27 @@ pub enum ParseDiag {
         enum_name: Option<crate::types::StringId>,
         variant: Option<crate::types::StringId>,
     },
+    /// `Shape.Circle 5.0` — a variant construction with the argument
+    /// list's parens missing (an expression-start token follows the
+    /// variant name on the same line). The parser recovers by parsing
+    /// the trailing expression as the payload argument. Carries the
+    /// enum and variant.
+    MissingArgListOnVariant {
+        enum_name: crate::types::StringId,
+        variant: crate::types::StringId,
+    },
+    /// `Shape.Rectangle{1.0, 2.0}` — values inside the brace form
+    /// without `name =` prefixes. Named payloads write
+    /// `field=value`; positional payloads use the paren form. The
+    /// parser recovers by treating the values as positional
+    /// arguments. Carries the enum (the parser holds no declaration
+    /// table, so the example variant is the placeholder `Variant`).
+    PositionalArgsInBraces { enum_name: crate::types::StringId },
+    /// `enum Color: Red, Green, Blue` — comma-separated variants on
+    /// one line. Variants are declared one per line in the indented
+    /// block; there is no comma form. The parser recovers by
+    /// declaring the variants anyway.
+    CommaSeparatedVariants,
     /// Internal guard failure for the enum variant-construction atom's
     /// uppercase-receiver check. The `Rich` error rides a discarded
     /// `Choice` alternative (a lowercase-led receiver parses as an
@@ -542,6 +579,9 @@ impl ParseDiag {
             }
             ParseDiag::ReprCOnEnum => DiagCode::ReprCOnEnum,
             ParseDiag::NamedArgInParens { .. } => DiagCode::NamedArgInParens,
+            ParseDiag::MissingArgListOnVariant { .. } => DiagCode::MissingArgListOnVariant,
+            ParseDiag::PositionalArgsInBraces { .. } => DiagCode::PositionalArgsInBraces,
+            ParseDiag::CommaSeparatedVariants => DiagCode::CommaSeparatedVariants,
             ParseDiag::ExpectedEnumTypeName => DiagCode::ParseError,
             ParseDiag::Message(_) => DiagCode::ParseError,
         }
@@ -565,7 +605,16 @@ impl ParseDiag {
                     }
                     attr.push(')');
                 }
-                format!("unknown attribute '{attr}'; known attributes: derive(Eq), repr(C)")
+                // `Debug` needs no attribute: pretty-printing is
+                // automatic for every enum.
+                let debug_note = if args.iter().any(|a| pool.str(*a) == "Debug") {
+                    "Debug is automatic for every enum; "
+                } else {
+                    ""
+                };
+                format!(
+                    "unknown attribute '{attr}'; {debug_note}known attributes: derive(Eq), repr(C)"
+                )
             }
             ParseDiag::NamedArgInParens { enum_name, variant } => {
                 match (enum_name, variant) {
@@ -584,6 +633,16 @@ impl ParseDiag {
                         .to_string(),
                 }
             }
+            ParseDiag::MissingArgListOnVariant { enum_name, variant } => format!(
+                "missing argument list — '{v}' takes a positional payload: {en}.{v}(...)",
+                en = pool.str(*enum_name),
+                v = pool.str(*variant),
+            ),
+            ParseDiag::PositionalArgsInBraces { enum_name } => format!(
+                "fields are written name=value (width=1.0); for a positional \
+                 payload use parens: {en}.Variant(...)",
+                en = pool.str(*enum_name),
+            ),
             _ => self.to_string(),
         }
     }
@@ -646,6 +705,20 @@ impl std::fmt::Display for ParseDiag {
                 ),
                 _ => f.write_str("named arguments are not supported — pass arguments positionally"),
             },
+            // Pool-free fallbacks; the pipeline renders the named
+            // spellings through `ParseDiag::message`.
+            ParseDiag::MissingArgListOnVariant { .. } => f.write_str(
+                "missing argument list — 'Variant' takes a positional \
+                 payload: EnumName.Variant(...)",
+            ),
+            ParseDiag::PositionalArgsInBraces { .. } => f.write_str(
+                "fields are written name=value (width=1.0); for a \
+                 positional payload use parens: EnumName.Variant(...)",
+            ),
+            ParseDiag::CommaSeparatedVariants => f.write_str(
+                "enum variants are declared one per line (block form); \
+                 there is no comma form",
+            ),
             ParseDiag::Message(msg) => f.write_str(msg),
         }
     }

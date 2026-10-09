@@ -10,6 +10,138 @@
 use super::*;
 use chumsky::input::ValueInput;
 
+/// Unwrap a parsed paren-arg list for a plain call: recovered
+/// `name = value` args emit the method-flavor diagnostic (a call has
+/// no variant to name) and pass their value through as a positional
+/// argument.
+pub(super) fn unwrap_paren_args<'a, 'b, I>(
+    args: Vec<ParenArg>,
+    e: &mut Mx<'a, 'b, I>,
+) -> Vec<ExprId>
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    args.into_iter()
+        .map(|arg| match arg {
+            ParenArg::Expr(id) => id,
+            ParenArg::NamedSyntax { span, value } => {
+                e.emit(Rich::custom(
+                    span,
+                    ParseDiag::NamedArgInParens {
+                        enum_name: None,
+                        variant: None,
+                    },
+                ));
+                value
+            }
+        })
+        .collect()
+}
+
+/// `EnumName.Variant{...}` — named variant construction (M11).
+/// Sits between the method op and `field_op` in the postfix choice:
+/// like the method op it requires more than `.name`, so `field_op`
+/// backtracks here when no `{` follows. The receiver gate reads
+/// `postfix_head_enum` (set by the postfix fold) BEFORE the `{` is
+/// consumed: for a lowercase receiver the alternative fails after
+/// `.name` and `field_op` claims the field access, leaving `{...}`
+/// unconsumed — `obj.field{...}` keeps its historical
+/// field-access-then-garbage parse (the lowercase pin in
+/// `parser/enum_tests.rs`). `try_map_with` runs the gate in both
+/// emit and check mode.
+///
+/// The content has one recovery: `Shape.Rectangle{1.0, 2.0}` —
+/// values without `name =` prefixes. Named content is tried first
+/// (an init list must open with a field key followed by `=`, so the
+/// positional reading can only claim input the named reading fails
+/// on), and `delimited_by` sits inside each alternative so a failed
+/// named reading backtracks the whole `{...}`. The recovery captures
+/// the receiver hint BEFORE the content parses (nested expressions
+/// overwrite the slot), emits E0127, and the fold promotes the
+/// values as positional arguments.
+pub(super) fn named_construct_op<'a, I>(
+    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+    field_init: impl Parser<'a, I, (StringId, ExprId), PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, PostfixOp, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    enum BraceContent {
+        Named(Vec<(StringId, ExprId)>),
+        Positional(Vec<ExprId>),
+    }
+    let named_content = field_init
+        .clone()
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::LBrace), just(Token::RBrace))
+        .map(BraceContent::Named);
+    let positional_content = expr
+        .clone()
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .collect::<Vec<ExprId>>()
+        .delimited_by(just(Token::LBrace), just(Token::RBrace))
+        .map(BraceContent::Positional);
+    just(Token::Dot)
+        .ignore_then(select! { Token::Ident(name) => name }.try_map_with(
+            |name, e: &mut Mx<'a, '_, I>| {
+                if e.state().postfix_head_enum.is_some() {
+                    Ok(Ident::new(name, e.span()))
+                } else {
+                    Err(Rich::custom(e.span(), ParseDiag::ExpectedEnumTypeName))
+                }
+            },
+        ))
+        // Capture the receiver hint BEFORE the content parses.
+        .map_with(|variant, e: &mut Mx<'a, '_, I>| (variant, e.state().postfix_head_enum))
+        .then(named_content.or(positional_content))
+        .map_with(|((variant, enum_name), content), e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            match content {
+                BraceContent::Named(inits) => PostfixOp::NamedConstruct(variant, inits, span),
+                BraceContent::Positional(values) => {
+                    let enum_name = enum_name.expect("brace construct is gated on a type receiver");
+                    e.emit(Rich::custom(
+                        span,
+                        ParseDiag::PositionalArgsInBraces { enum_name },
+                    ));
+                    PostfixOp::RecoveredPositionalBraces(variant, values, span)
+                }
+            }
+        })
+}
+
+/// `Shape.Circle 5.0` — a variant construction with the argument
+/// list's parens missing: an expression-start token follows the
+/// variant name on the same line (a Newline/Dedent token would sit
+/// between otherwise, failing the trailing `expr`). Gated on the
+/// enum-candidate receiver hint so `obj.field <anything>` keeps its
+/// historical parse; sits before `field_op` so the recovery claims
+/// the field access when it fires.
+pub(super) fn missing_args_op<'a, I>(
+    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, PostfixOp, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    just(Token::Dot)
+        .ignore_then(select! { Token::Ident(name) => name }.try_map_with(
+            |name, e: &mut Mx<'a, '_, I>| {
+                if e.state().postfix_head_enum.is_some() {
+                    Ok(Ident::new(name, e.span()))
+                } else {
+                    Err(Rich::custom(e.span(), ParseDiag::ExpectedEnumTypeName))
+                }
+            },
+        ))
+        .then(expr)
+        .map_with(|(variant, arg), e: &mut Mx<'a, '_, I>| {
+            PostfixOp::RecoveredMissingParens(variant, arg, e.span())
+        })
+}
+
 /// The tail of an `enum` declaration after the `enum` keyword:
 /// `Name:` plus an indented block of variant lines (M11). Yields the
 /// name and the sealed variant list.
@@ -113,11 +245,50 @@ where
         .and_is(require_newlines().then_ignore(just(Token::Indent).not()))
         .to(None);
 
+    // `enum Color: Red, Green, Blue` — the comma form. Variants are
+    // declared one per line in the indented block; there is no comma
+    // form. Recover the line by declaring the variants anyway (unit,
+    // no payloads) with one targeted diagnostic. Requires at least
+    // one comma, so `enum Color: Red` — a single variant name on the
+    // header line — keeps its historical (failing) parse. The token
+    // stream itself proves single-line: a Newline between the names
+    // breaks the `Comma`-separated repetition.
+    let comma_variant = select! { Token::Ident(name) => name }
+        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()))
+        .map_with(|name, e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            let start = e.state().struct_field_decls_len();
+            let fields = e.state().struct_field_decl_list_from(start);
+            e.state().push_enum_variant(
+                name,
+                EnumPayload {
+                    kind: VariantKind::Unit,
+                    fields,
+                },
+                span,
+            );
+        });
+    let comma_variants = comma_variant
+        .then(
+            just(Token::Comma)
+                .ignore_then(comma_variant)
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .map_with(|_, e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            e.emit(Rich::custom(span, ParseDiag::CommaSeparatedVariants));
+            // Same shape as `no_body`: the variants were pushed onto
+            // the arena above; the seal below reads the window.
+            None
+        });
+
     select! { Token::Ident(name) => name }
         .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()))
         .then_ignore(just(Token::Colon))
         .then(empty().map_with(|_, e: &mut Mx<'a, '_, I>| e.state().enum_variants_len()))
-        .then(body.or(no_body))
+        .then(body.or(no_body).or(comma_variants))
         .map_with(|((name, start), _), e: &mut Mx<'a, '_, I>| {
             (name, e.state().enum_variant_list_from(start))
         })

@@ -75,7 +75,7 @@ pub(super) fn lower_variant_construct(
     let variants = &types.enum_variant_fields[&declared];
     let Some(vidx) = variants
         .iter()
-        .position(|&(vname, _)| vname == c.variant.name)
+        .position(|&(vname, _, _)| vname == c.variant.name)
     else {
         sink.emit(Diag::error(
             c.variant.span,
@@ -105,18 +105,33 @@ pub(super) fn lower_variant_construct(
             true
         }
         (None, Some(inits)) => {
-            let field_names = &variants[vidx].1;
+            let kind = variants[vidx].1;
+            let field_names = &variants[vidx].2;
             for &(fname, arg) in ast.struct_field_inits(inits) {
                 let arg_ref = gen_expr(b, ast, arg, types, defined_enums, pool, sink);
                 let Some(fidx) = field_names.iter().position(|&n| n == fname) else {
+                    // A tuple variant under the brace form: the name
+                    // is unknown because the form is wrong — append
+                    // the paren spelling.
+                    let hint = if kind == VariantKind::Tuple {
+                        format!(
+                            "; '{}' is a tuple variant: {}.{}(...)",
+                            pool.str(c.variant.name),
+                            pool.str(enum_name),
+                            pool.str(c.variant.name),
+                        )
+                    } else {
+                        String::new()
+                    };
                     sink.emit(Diag::error(
                         ast.expr_span(arg),
                         DiagCode::UnknownField,
                         format!(
-                            "variant '{}' of enum '{}' has no field '{}'",
+                            "variant '{}' of enum '{}' has no field '{}'{}",
                             pool.str(c.variant.name),
                             pool.str(enum_name),
                             pool.str(fname),
+                            hint,
                         ),
                     ));
                     // Keep the arg reachable for sema under the

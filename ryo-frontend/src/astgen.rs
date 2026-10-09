@@ -21,7 +21,9 @@
 use chumsky::span::{SimpleSpan, Span as _};
 use ryo_core::ast;
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
-use ryo_core::types::{EnumVariantDef, InternPool, StringId, StructFlags, TypeId, TypeKind};
+use ryo_core::types::{
+    EnumVariantDef, InternPool, StringId, StructFlags, TypeId, TypeKind, VariantKind,
+};
 use ryo_core::uir::{
     InstRef, InstTag, Uir, UirBuilder, UirEnumDecl, UirEnumField, UirEnumVariant, UirParam,
     UirStructDecl, UirStructField,
@@ -77,7 +79,7 @@ struct TypeResolver {
     prims: Primitives,
     struct_types: HashMap<StringId, TypeId>,
     enum_types: HashMap<StringId, TypeId>,
-    enum_variant_fields: HashMap<TypeId, Vec<(StringId, Vec<StringId>)>>,
+    enum_variant_fields: HashMap<TypeId, Vec<(StringId, VariantKind, Vec<StringId>)>>,
     main: StringId,
     range: StringId,
 }
@@ -343,24 +345,25 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
     }
 
     // Variant directory for `EnumLit` lowering (see `TypeResolver`).
-    let enum_variant_fields: HashMap<TypeId, Vec<(StringId, Vec<StringId>)>> = enum_entries
-        .iter()
-        .map(|(_, &(ety, def, _))| {
-            let variants = program
-                .enum_variants(def.variants)
-                .iter()
-                .map(|v| {
-                    let names = program
-                        .struct_field_decls(v.payload.fields)
-                        .iter()
-                        .map(|&(fname, _)| fname)
-                        .collect();
-                    (v.name.name, names)
-                })
-                .collect();
-            (ety, variants)
-        })
-        .collect();
+    let enum_variant_fields: HashMap<TypeId, Vec<(StringId, VariantKind, Vec<StringId>)>> =
+        enum_entries
+            .iter()
+            .map(|(_, &(ety, def, _))| {
+                let variants = program
+                    .enum_variants(def.variants)
+                    .iter()
+                    .map(|v| {
+                        let names = program
+                            .struct_field_decls(v.payload.fields)
+                            .iter()
+                            .map(|&(fname, _)| fname)
+                            .collect();
+                        (v.name.name, v.payload.kind, names)
+                    })
+                    .collect();
+                (ety, variants)
+            })
+            .collect();
 
     let types = TypeResolver {
         prims: Primitives::new(pool),

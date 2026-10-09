@@ -236,14 +236,15 @@ fn positional_construct_overflow_is_unknown_variant_field() {
     // positional args against declaration-order indices without an
     // arity check, so sema rejects the out-of-range index — the
     // UnknownVariantField shape astgen cannot see (named typos are
-    // frontlined before this point).
+    // frontlined before this point). The message words the extra
+    // argument by position, not the synthesized "1" field index.
     let src = "enum Shape:\n\tCircle(float)\n\nfn main():\n\ts = Shape.Circle(5.0, 3.0)\n";
     let (_t, diags, _p) = run_with_errors(src);
     let diag = diags
         .iter()
         .find(|d| d.code == DiagCode::UnknownVariantField)
         .expect("UnknownVariantField must fire");
-    for needle in ["enum 'Shape'", "variant 'Circle'", "'1'"] {
+    for needle in ["'Circle'", "second positional argument", "takes 1"] {
         assert!(
             diag.message.contains(needle),
             "message should name {needle}, got {:?}",
@@ -419,4 +420,85 @@ fn lowercase_enum_construct_names_enum_and_points_at_constructor() {
         help
     );
     assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+}
+
+#[test]
+fn tuple_variant_arity_words_by_position_not_synthesized_names() {
+    // `Opt.Some()` / `Opt.Some(1, 2)`: the tuple payload's "0" field
+    // name is synthesized — the messages count positional arguments
+    // instead. Codes unchanged (E0120 / E0122).
+    let src =
+        "enum Opt:\n\tSome(int)\n\tNone\n\nfn main():\n\ta = Opt.Some()\n\tb = Opt.Some(1, 2)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let missing = diags
+        .iter()
+        .find(|d| d.code == DiagCode::MissingVariantFields)
+        .expect("missing-fields diag must fire");
+    assert_eq!(missing.message, "'Some' takes 1 positional argument; got 0");
+    let extra = diags
+        .iter()
+        .find(|d| d.code == DiagCode::UnknownVariantField)
+        .expect("extra-positional diag must fire");
+    assert_eq!(
+        extra.message,
+        "found a second positional argument — 'Some' takes 1"
+    );
+}
+
+#[test]
+fn unit_variant_paren_construct_is_rejected() {
+    // `Color.Red()` was silently accepted; the paren form is the
+    // named/tuple construct shape misapplied (E0125).
+    let src = "enum Color:\n\tRed\n\tGreen\n\nfn main():\n\tc = Color.Red()\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::UnitVariantConstructed);
+    assert_eq!(
+        diags[0].message,
+        "'Red' is a unit variant — construct it as Color.Red"
+    );
+}
+
+#[test]
+fn bare_variant_call_names_its_enums() {
+    // `Some(1)`: the callee is a variant, not a function — name the
+    // enum and show the construct spelling (still E0011).
+    let src = "enum Opt:\n\tSome(int)\n\tNone\n\nfn main():\n\tx = Some(1)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::UndefinedFunction);
+    assert_eq!(
+        diags[0].message,
+        "'Some' is a variant of enum 'Opt' — variants are always constructed as Opt.Some(...)"
+    );
+}
+
+#[test]
+fn struct_name_as_construct_receiver_names_the_brace_form() {
+    // `Point.make(1.0)`: a struct name in enum-construct position —
+    // structs construct with braces (E0041).
+    let src = "struct Point:\n\tx: float\n\nfn main():\n\tp = Point.make(1.0)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::NotAStruct);
+    assert_eq!(
+        diags[0].message,
+        "'Point' is a struct, not an enum — construct it as Point{x=...}"
+    );
+}
+
+#[test]
+fn unknown_field_on_tuple_variant_hints_the_paren_form() {
+    // `Opt.Some{v=1}`: the brace form on a tuple variant — the
+    // unknown-field message appends the paren spelling.
+    let src = "enum Opt:\n\tSome(int)\n\tNone\n\nfn main():\n\tx = Opt.Some{v=1}\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::UnknownField)
+        .expect("unknown-field diag must fire");
+    assert_eq!(
+        diag.message,
+        "variant 'Some' of enum 'Opt' has no field 'v'; 'Some' is a tuple variant: Opt.Some(...)"
+    );
 }

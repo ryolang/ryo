@@ -448,3 +448,111 @@ fn named_arg_recovery_leaves_equality_args_unaffected() {
     let (_ast, _pool) = lex_and_parse("fn main():\n\tf(a == b)\n")
         .expect("equality inside an arg list must parse unchanged");
 }
+
+#[test]
+fn missing_parens_construct_recovers_as_payload_arg() {
+    // `x = Shape.Circle 5.0` (E0126): the trailing same-line
+    // expression is recovered as the payload argument, so the
+    // statement still declares `x` and exactly one diagnostic fires.
+    let (ok, ast, errs, pool) = lex_and_parse_recovering(
+        "enum Shape:\n\tCircle(float)\nfn main():\n\tx = Shape.Circle 5.0\n",
+    );
+    assert!(ok, "recovery should still produce a partial program");
+    assert_eq!(
+        errs.len(),
+        1,
+        "expected exactly the missing-parens diagnostic: {errs:?}"
+    );
+    match errs[0].reason() {
+        RichReason::Custom(ParseDiag::MissingArgListOnVariant { enum_name, variant }) => {
+            assert_eq!(pool.str(*enum_name), "Shape");
+            assert_eq!(pool.str(*variant), "Circle");
+        }
+        other => panic!("expected MissingArgListOnVariant, got {other:?}"),
+    }
+    // The recovered initializer is `Shape.Circle(5.0)`.
+    let stmts = ast.top_level_stmts();
+    let main = fn_body(&ast, fn_def(&ast, stmts[1]));
+    let value = match &ast.stmt(main[0]).kind {
+        StmtKind::AssignOrDecl { value, .. } => *value,
+        other => panic!("expected AssignOrDecl, got {other:?}"),
+    };
+    let c = variant_construct(&ast, value);
+    let args = c.args.expect("construct carries args");
+    let positional = ast.expr_list(args.positional.expect("paren form is positional"));
+    assert_eq!(positional.len(), 1);
+}
+
+#[test]
+fn positional_values_in_braces_recover_with_targeted_diag() {
+    // `Shape.Rectangle{1.0, 2.0}` (E0127): values without `name =`
+    // are recovered as positional arguments.
+    let (ok, ast, errs, pool) = lex_and_parse_recovering(
+        "enum Shape:\n\tRectangle(width: float, height: float)\nfn main():\n\tx = Shape.Rectangle{1.0, 2.0}\n",
+    );
+    assert!(ok, "recovery should still produce a partial program");
+    assert_eq!(
+        errs.len(),
+        1,
+        "expected exactly the brace-form diagnostic: {errs:?}"
+    );
+    match errs[0].reason() {
+        RichReason::Custom(ParseDiag::PositionalArgsInBraces { enum_name }) => {
+            assert_eq!(pool.str(*enum_name), "Shape");
+        }
+        other => panic!("expected PositionalArgsInBraces, got {other:?}"),
+    }
+    let stmts = ast.top_level_stmts();
+    let main = fn_body(&ast, fn_def(&ast, stmts[1]));
+    let value = match &ast.stmt(main[0]).kind {
+        StmtKind::AssignOrDecl { value, .. } => *value,
+        other => panic!("expected AssignOrDecl, got {other:?}"),
+    };
+    let c = variant_construct(&ast, value);
+    let args = c.args.expect("construct carries args");
+    let positional = ast.expr_list(args.positional.expect("recovered as positional"));
+    assert_eq!(positional.len(), 2);
+}
+
+#[test]
+fn comma_separated_variants_recover_the_line() {
+    // `enum Color: Red, Green, Blue` (E0128): the comma form
+    // recovers by declaring the variants anyway — one diagnostic,
+    // three unit variants.
+    let (ok, ast, errs, _pool) =
+        lex_and_parse_recovering("enum Color: Red, Green, Blue\nfn main():\n\tpass_through = 1\n");
+    assert!(ok, "recovery should still produce a partial program");
+    assert_eq!(
+        errs.len(),
+        1,
+        "expected exactly the comma-form diagnostic: {errs:?}"
+    );
+    assert!(
+        matches!(
+            errs[0].reason(),
+            RichReason::Custom(ParseDiag::CommaSeparatedVariants)
+        ),
+        "expected CommaSeparatedVariants, got {:?}",
+        errs[0].reason()
+    );
+    let def = enum_def(&ast, ast.top_level_stmts()[0]);
+    let variants = ast.enum_variants(def.variants);
+    assert_eq!(variants.len(), 3);
+    assert!(variants.iter().all(|v| v.payload.kind == VariantKind::Unit));
+}
+
+#[test]
+fn comma_variant_single_name_keeps_historical_parse() {
+    // `enum Color: Red` — a single variant name on the header line
+    // (no comma) is NOT the comma form; it keeps its historical
+    // failing parse (empty body + astgen's empty-enum diagnostic).
+    let (ok, _ast, errs, _pool) = lex_and_parse_recovering("enum Color: Red\n");
+    assert!(ok, "recovery should still produce a partial program");
+    assert!(
+        errs.iter().all(|e| !matches!(
+            e.reason(),
+            RichReason::Custom(ParseDiag::CommaSeparatedVariants)
+        )),
+        "comma-form diagnostic must not fire without a comma: {errs:?}"
+    );
+}

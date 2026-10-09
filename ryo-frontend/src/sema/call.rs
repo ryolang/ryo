@@ -62,11 +62,39 @@ pub(crate) fn check_call(
     let callee = match sema.name_to_decl.get(&name_id).copied() {
         Some(d) => d,
         None => {
-            sema.sink.emit(Diag::error(
-                span,
-                DiagCode::UndefinedFunction,
-                format!("undefined function: '{}'", sema.pool.str(name_id)),
-            ));
+            // `Some(1)` — the callee name may be an enum variant
+            // written without its enum. Name every enum declaring it
+            // (sorted for a stable message) and show the construct
+            // spelling; still E0011 — the name is no function.
+            let carriers = enum_variant_carriers(sema, name_id);
+            if carriers.is_empty() {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::UndefinedFunction,
+                    format!("undefined function: '{}'", sema.pool.str(name_id)),
+                ));
+            } else {
+                let name = sema.pool.str(name_id).to_string();
+                let mut list = carriers
+                    .iter()
+                    .take(3)
+                    .map(|&e| format!("'{}'", sema.pool.str(e)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if carriers.len() > 3 {
+                    list.push_str(", …");
+                }
+                let first = sema.pool.str(carriers[0]);
+                let plural = if carriers.len() > 1 { "s" } else { "" };
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::UndefinedFunction,
+                    format!(
+                        "'{name}' is a variant of enum{plural} {list} — variants are always \
+                         constructed as {first}.{name}(...)",
+                    ),
+                ));
+            }
             return fcx.builder.unreachable(sema.pool.error_type(), span);
         }
     };
@@ -313,4 +341,23 @@ pub(crate) fn check_reserved_name(
         return true;
     }
     false
+}
+
+/// Every declared enum that has a variant named `variant`, sorted by
+/// name so the diagnostic text is deterministic (the enum table is a
+/// HashMap). Feeds the "did you forget the enum?" call recovery.
+fn enum_variant_carriers(sema: &Sema<'_>, variant: StringId) -> Vec<StringId> {
+    let mut carriers: Vec<StringId> = sema
+        .enum_types
+        .iter()
+        .filter(|(_, ety)| {
+            sema.pool
+                .enum_view(**ety)
+                .variants()
+                .any(|v| v.name == variant)
+        })
+        .map(|(&ename, _)| ename)
+        .collect();
+    carriers.sort_by(|a, b| sema.pool.str(*a).cmp(sema.pool.str(*b)));
+    carriers
 }

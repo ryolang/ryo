@@ -41,7 +41,7 @@ pub(super) fn only_stmt(ast: &Ast) -> StmtId {
     stmts[0]
 }
 
-fn var_decl(ast: &Ast, stmt: StmtId) -> &VarDecl {
+pub(super) fn var_decl(ast: &Ast, stmt: StmtId) -> &VarDecl {
     match &ast.stmt(stmt).kind {
         StmtKind::VarDecl(decl) => decl,
         other => panic!("expected VarDecl, got {other:?}"),

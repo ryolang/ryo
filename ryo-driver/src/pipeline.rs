@@ -467,6 +467,10 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::AnonFieldNotEq => "E0116",
         DiagCode::ReprCOnEnum => "E0117",
         DiagCode::NamedArgInParens => "E0124",
+        DiagCode::UnitVariantConstructed => "E0125",
+        DiagCode::MissingArgListOnVariant => "E0126",
+        DiagCode::PositionalArgsInBraces => "E0127",
+        DiagCode::CommaSeparatedVariants => "E0128",
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::InvalidCharacter => "E0102",
         DiagCode::UnknownEscape => "E0103",
@@ -921,6 +925,10 @@ mod tests {
             (DiagCode::AnonFieldNotEq, "E0116"),
             (DiagCode::ReprCOnEnum, "E0117"),
             (DiagCode::NamedArgInParens, "E0124"),
+            (DiagCode::UnitVariantConstructed, "E0125"),
+            (DiagCode::MissingArgListOnVariant, "E0126"),
+            (DiagCode::PositionalArgsInBraces, "E0127"),
+            (DiagCode::CommaSeparatedVariants, "E0128"),
             (DiagCode::ConstEvalFailure, "E0200"),
             (DiagCode::CycleInComptime, "E0201"),
             (DiagCode::GenericInstantiation, "E0202"),
@@ -1012,6 +1020,10 @@ mod tests {
                 | DiagCode::AnonFieldNotEq
                 | DiagCode::ReprCOnEnum
                 | DiagCode::NamedArgInParens
+                | DiagCode::UnitVariantConstructed
+                | DiagCode::MissingArgListOnVariant
+                | DiagCode::PositionalArgsInBraces
+                | DiagCode::CommaSeparatedVariants
                 | DiagCode::TooManyDiagnostics
                 | DiagCode::InvalidCharacter
                 | DiagCode::UnknownEscape
@@ -1465,6 +1477,90 @@ mod tests {
         assert_eq!(
             diag.message,
             "named arguments are not supported — pass arguments positionally"
+        );
+    }
+
+    #[test]
+    fn missing_parens_construct_message_is_targeted() {
+        // `x = Shape.Circle 5.0`: one E0126 — the trailing
+        // expression is recovered as the payload, so the statement
+        // still declares `x` and no undefined-variable cascade
+        // follows.
+        let mut pool = InternPool::new();
+        let input =
+            "enum Shape:\n\tCircle(float)\n\nfn main():\n\tx = Shape.Circle 5.0\n\tprint(x)\n";
+        let (_program, diags) = parse_source(input, &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
+        let errors = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1, "expected exactly one error: {diags:?}");
+        assert_eq!(errors[0].code, DiagCode::MissingArgListOnVariant);
+        assert_eq!(
+            errors[0].message,
+            "missing argument list — 'Circle' takes a positional payload: Shape.Circle(...)"
+        );
+    }
+
+    #[test]
+    fn positional_values_in_braces_message_is_targeted() {
+        // `Shape.Rectangle{1.0, 2.0}`: E0127 names the field syntax
+        // and the paren form; the named variant then gets its own
+        // E0123 — two one-liners, no token dump.
+        let mut pool = InternPool::new();
+        let input = "enum Shape:\n\tRectangle(width: float, height: float)\n\nfn main():\n\tprint(Shape.Rectangle{1.0, 2.0})\n";
+        let (_program, diags) = parse_source(input, &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
+        // (The named variant then gets its own E0123 from sema — the
+        // Brace Law, covered by the sema suite.)
+        let errors = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1, "expected exactly one error: {diags:?}");
+        assert_eq!(errors[0].code, DiagCode::PositionalArgsInBraces);
+        assert_eq!(
+            errors[0].message,
+            "fields are written name=value (width=1.0); for a positional payload use parens: Shape.Variant(...)"
+        );
+    }
+
+    #[test]
+    fn comma_separated_variants_message_is_targeted() {
+        // `enum Color: Red, Green, Blue`: one E0128; the variants
+        // are declared anyway, so the rest of the file type-checks.
+        let mut pool = InternPool::new();
+        let input = "enum Color: Red, Green, Blue\n\nfn main():\n\tc = Color.Red\n\tprint(c)\n";
+        let (_program, diags) = parse_source(input, &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
+        let errors = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1, "expected exactly one error: {diags:?}");
+        assert_eq!(errors[0].code, DiagCode::CommaSeparatedVariants);
+        assert_eq!(
+            errors[0].message,
+            "enum variants are declared one per line (block form); there is no comma form"
+        );
+    }
+
+    #[test]
+    fn derive_debug_message_notes_it_is_automatic() {
+        // `#[derive(Debug)]`: Debug needs no attribute — the E0108
+        // message says so, alongside the known-attribute list.
+        let mut pool = InternPool::new();
+        let input = "#[derive(Debug)]\nenum Color:\n\tRed\n\nfn main():\n\tpass_through = 1\n";
+        let (_program, diags) = parse_source(input, &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
+        let diag = diags
+            .iter()
+            .find(|d| d.code == DiagCode::UnknownAttribute)
+            .expect("unknown-attribute diagnostic must surface");
+        assert_eq!(
+            diag.message,
+            "unknown attribute 'derive(Debug)'; Debug is automatic for every enum; known attributes: derive(Eq), repr(C)"
         );
     }
 }

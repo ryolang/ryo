@@ -1287,6 +1287,32 @@ where
             }),
         )
 }
+enum PostfixOp {
+    /// `.name(args)`. The name keeps its token span: an
+    /// uppercase-led receiver folds this into a
+    /// `VariantConstruct` whose variant span must be the name
+    /// token's, exactly like the standalone form. Args carry
+    /// the `name = value` recovery markers; the fold emits the
+    /// targeted diagnostic and unwraps them.
+    Method(Ident, Vec<enums::ParenArg>, SimpleSpan),
+    /// `.name{inits}` (M11 named variant construction); emitted
+    /// only when the receiver gate passes.
+    NamedConstruct(Ident, Vec<(StringId, ExprId)>, SimpleSpan),
+    /// `.name{value, ...}` (M11): positional values in the brace
+    /// form; E0127 fired when the op parsed, the values are
+    /// promoted as positional arguments.
+    RecoveredPositionalBraces(Ident, Vec<ExprId>, SimpleSpan),
+    /// `.name <expr-start on the same line>` (M11): a variant
+    /// construction with the parens missing (E0126); the trailing
+    /// expression is recovered as the payload argument.
+    RecoveredMissingParens(Ident, ExprId, SimpleSpan),
+    Field(Ident, SimpleSpan),
+    /// A diagnosed stray float after `.` (`pair.0.1`): the
+    /// receiver is kept unchanged.
+    Missing,
+    Slice(Option<ExprId>, Option<ExprId>, SimpleSpan),
+    Index(ExprId, SimpleSpan),
+}
 
 /// Postfix operators over a finished atom: method calls (`s.len()`),
 /// field access (`p.x`, M9), slice projections `s[start:end]` (M8.4),
@@ -1316,25 +1342,6 @@ fn postfix_parser<'a, I>(
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
-    enum PostfixOp {
-        /// `.name(args)`. The name keeps its token span: an
-        /// uppercase-led receiver folds this into a
-        /// `VariantConstruct` whose variant span must be the name
-        /// token's, exactly like the standalone form. Args carry
-        /// the `name = value` recovery markers; the fold emits the
-        /// targeted diagnostic and unwraps them.
-        Method(Ident, Vec<enums::ParenArg>, SimpleSpan),
-        /// `.name{inits}` (M11 named variant construction);
-        /// emitted only when the receiver gate passes.
-        NamedConstruct(Ident, Vec<(StringId, ExprId)>, SimpleSpan),
-        Field(Ident, SimpleSpan),
-        /// A diagnosed stray float after `.` (`pair.0.1`): the
-        /// receiver is kept unchanged.
-        Missing,
-        Slice(Option<ExprId>, Option<ExprId>, SimpleSpan),
-        Index(ExprId, SimpleSpan),
-    }
-
     let method_op = just(Token::Dot)
         .ignore_then(
             select! { Token::Ident(name) => name }
@@ -1351,38 +1358,8 @@ where
             PostfixOp::Method(method, args, e.span())
         });
 
-    // `EnumName.Variant{...}` — named variant construction (M11).
-    // Sits between `method_op` and `field_op`: like `method_op`
-    // it requires more than `.name`, so `field_op` backtracks
-    // here when no `{` follows. The receiver gate reads
-    // `postfix_head_enum` (set by the postfix fold) BEFORE the
-    // `{` is consumed: for a lowercase receiver the alternative
-    // fails after `.name` and `field_op` claims the field access,
-    // leaving `{...}` unconsumed — `obj.field{...}` keeps its
-    // historical field-access-then-garbage parse (the lowercase
-    // pin in `parser/enum_tests.rs`). `try_map_with` runs the
-    // gate in both emit and check mode.
-    let named_construct_op = just(Token::Dot)
-        .ignore_then(select! { Token::Ident(name) => name }.try_map_with(
-            |name, e: &mut Mx<'a, '_, I>| {
-                if e.state().postfix_head_enum.is_some() {
-                    Ok(Ident::new(name, e.span()))
-                } else {
-                    Err(Rich::custom(e.span(), ParseDiag::ExpectedEnumTypeName))
-                }
-            },
-        ))
-        .then(
-            field_init
-                .clone()
-                .separated_by(just(Token::Comma))
-                .allow_trailing()
-                .collect::<Vec<_>>()
-                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
-        )
-        .map_with(|(variant, inits), e: &mut Mx<'a, '_, I>| {
-            PostfixOp::NamedConstruct(variant, inits, e.span())
-        });
+    let named_construct_op = enums::named_construct_op(expr.clone(), field_init.clone());
+    let missing_args_op = enums::missing_args_op(expr.clone());
 
     // Field access `p.x` (M9) and positional access `pair.0`
     // (M10). Tried after `method_op`: the method rule has the
@@ -1461,7 +1438,14 @@ where
     });
 
     atom.foldl_with(
-        choice((method_op, named_construct_op, field_op, bracket_op)).repeated(),
+        choice((
+            method_op,
+            named_construct_op,
+            missing_args_op,
+            field_op,
+            bracket_op,
+        ))
+        .repeated(),
         |receiver, op, e: &mut Mx<'a, '_, I>| {
             let start = e.state().expr_span(receiver).start;
             let result = match op {
@@ -1554,6 +1538,58 @@ where
                         SimpleSpan::new((), start..span.end),
                     )
                 }
+                PostfixOp::RecoveredPositionalBraces(variant, values, span) => {
+                    // E0127 fired when the op parsed; promote with
+                    // the values as positional arguments (a named
+                    // variant then gets its own E0123, a tuple
+                    // variant constructs cleanly).
+                    debug_assert!(
+                        type_name_ident(receiver, e).is_some(),
+                        "brace construct is gated on a type receiver"
+                    );
+                    let list_start = e.state().expr_lists_len();
+                    for &value in &values {
+                        e.state().push_expr_list_item(value);
+                    }
+                    let list = e.state().expr_list_from(list_start);
+                    e.state().promote_ident_to_variant_construct(
+                        receiver,
+                        variant,
+                        Some(VariantArgs {
+                            positional: Some(list),
+                            named: None,
+                        }),
+                        SimpleSpan::new((), start..span.end),
+                    )
+                }
+                PostfixOp::RecoveredMissingParens(variant, arg, span) => {
+                    // E0126 fires here (enum and variant names are
+                    // fold-time knowledge); the trailing expression
+                    // becomes the payload argument, so a valid payload
+                    // type-checks and the enclosing statement still
+                    // declares its bindings.
+                    let enum_id = type_name_ident(receiver, e)
+                        .expect("missing-parens op is gated on a type receiver");
+                    e.emit(Rich::custom(
+                        SimpleSpan::new((), start..span.end),
+                        ParseDiag::MissingArgListOnVariant {
+                            enum_name: enum_id.name,
+                            variant: variant.name,
+                        },
+                    ));
+                    let list_start = e.state().expr_lists_len();
+                    e.state().push_expr_list_item(arg);
+                    let list = e.state().expr_list_from(list_start);
+                    e.state().promote_ident_to_variant_construct(
+                        receiver,
+                        variant,
+                        Some(VariantArgs {
+                            positional: Some(list),
+                            named: None,
+                        }),
+                        SimpleSpan::new((), start..span.end),
+                    )
+                }
                 PostfixOp::Field(field, span) => {
                     e.state()
                         .field_access(receiver, field, SimpleSpan::new((), start..span.end))
@@ -1617,24 +1653,8 @@ where
                     let span = e.span();
                     // `name = value` in a plain call's parens: named
                     // arguments are unsupported (method flavor — an
-                    // atom call has no variant to name). The value
-                    // passes through as a positional argument.
-                    let args = args
-                        .into_iter()
-                        .map(|arg| match arg {
-                            enums::ParenArg::Expr(id) => id,
-                            enums::ParenArg::NamedSyntax { span: nspan, value } => {
-                                e.emit(Rich::custom(
-                                    nspan,
-                                    ParseDiag::NamedArgInParens {
-                                        enum_name: None,
-                                        variant: None,
-                                    },
-                                ));
-                                value
-                            }
-                        })
-                        .collect::<Vec<_>>();
+                    // atom call has no variant to name).
+                    let args = enums::unwrap_paren_args(args, e);
                     e.state().call(name, &args, span)
                 });
 
