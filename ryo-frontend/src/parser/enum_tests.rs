@@ -294,3 +294,92 @@ fn repr_c_on_struct_still_parses() {
         other => panic!("expected StructDef, got {other:?}"),
     }
 }
+
+#[test]
+fn variant_construct_positional_with_nested_call_keeps_single_arg() {
+    // I-205: a call inside a positional arg writes `expr_lists` while
+    // the enclosing list is gathered. The sealed list must contain
+    // exactly the written args — the nested call's own args must not
+    // interleave into it.
+    let (ast, pool) = lex_and_parse("Opt.Some(int_to_str(7))\n").unwrap();
+    let c = variant_construct(&ast, expr_stmt(&ast, only_stmt(&ast)));
+    assert_eq!(pool.str(c.enum_name.name), "Opt");
+    let args = c.args.expect("construct carries args");
+    let args = ast.expr_list(args.positional.expect("paren form is positional"));
+    assert_eq!(
+        args.len(),
+        1,
+        "one written arg; the nested call's args must not leak in"
+    );
+    // The single arg is the call node, and its own arg list is intact.
+    match &ast.expr(args[0]).kind {
+        ExprKind::Call(name, inner) => {
+            assert_eq!(pool.str(*name), "int_to_str");
+            let inner_args = ast.expr_list(*inner);
+            assert_eq!(inner_args.len(), 1);
+            assert!(matches!(
+                ast.expr(inner_args[0]).kind,
+                ExprKind::Literal(Literal::Int(7))
+            ));
+        }
+        other => panic!("expected the arg to be the call node, got {other:?}"),
+    }
+}
+
+#[test]
+fn variant_construct_positional_with_nested_struct_literal_keeps_single_arg() {
+    // The original I-205 repro shape: the positional arg is a struct
+    // literal whose field value contains a call. The outer list must
+    // seal at exactly one entry; the struct literal's init list is a
+    // separate sealed range.
+    let (ast, pool) = lex_and_parse("Note.Info(Msg{text=int_to_str(7)})\n").unwrap();
+    let c = variant_construct(&ast, expr_stmt(&ast, only_stmt(&ast)));
+    let args = c.args.expect("construct carries args");
+    let args = ast.expr_list(args.positional.expect("paren form is positional"));
+    assert_eq!(args.len(), 1, "one written arg, got {:?}", args);
+    match &ast.expr(args[0]).kind {
+        ExprKind::StructLiteral(lit) => {
+            assert_eq!(pool.str(lit.name.expect("named literal").name), "Msg");
+            let inits = ast.struct_field_inits(lit.fields);
+            assert_eq!(inits.len(), 1);
+            assert_eq!(pool.str(inits[0].0), "text");
+            assert!(
+                matches!(ast.expr(inits[0].1).kind, ExprKind::Call(_, _)),
+                "field value is the call, not the interleaved int"
+            );
+        }
+        other => panic!("expected the arg to be the struct literal, got {other:?}"),
+    }
+}
+
+#[test]
+fn variant_construct_named_with_nested_named_construct_keeps_written_pairs() {
+    // I-205 (named arm): a nested named variant construction inside an
+    // init value writes `struct_field_inits`; the sealed outer list
+    // must contain exactly the written pairs, with the nested pairs on
+    // their own sealed range.
+    let (ast, pool) = lex_and_parse("Outer.Inner{value=Note.Info{text=int_to_str(7)}}\n").unwrap();
+    let c = variant_construct(&ast, expr_stmt(&ast, only_stmt(&ast)));
+    assert_eq!(pool.str(c.enum_name.name), "Outer");
+    assert_eq!(pool.str(c.variant.name), "Inner");
+    let args = c.args.expect("construct carries args");
+    let named = args.named.expect("brace form is named");
+    assert!(args.positional.is_none());
+    let inits = ast.struct_field_inits(named);
+    assert_eq!(
+        inits.len(),
+        1,
+        "one written pair; nested init pairs must not leak in"
+    );
+    assert_eq!(pool.str(inits[0].0), "value");
+    match &ast.expr(inits[0].1).kind {
+        ExprKind::VariantConstruct(inner) => {
+            assert_eq!(pool.str(inner.enum_name.name), "Note");
+            let inner_args = inner.args.expect("inner construct carries args");
+            let inner_inits = ast.struct_field_inits(inner_args.named.expect("brace form"));
+            assert_eq!(inner_inits.len(), 1);
+            assert_eq!(pool.str(inner_inits[0].0), "text");
+        }
+        other => panic!("expected the value to be the nested construct, got {other:?}"),
+    }
+}

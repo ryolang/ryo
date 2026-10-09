@@ -257,10 +257,12 @@ where
 /// guard fails lowercase receivers so `obj.method(...)` keeps its
 /// method-call meaning, and a bare `EnumName.Variant` fails here too
 /// (no args follow), staying an ordinary field access for sema to
-/// reinterpret. Args push straight into the side arenas as parsed
-/// (I-152); the failing guard's error rides a discarded alternative,
-/// so it never surfaces (chumsky's `Choice` keeps alternative errors
-/// only when all fail, and `ident_expr` cannot fail on an identifier).
+/// reinterpret. Args are collected, then pushed contiguously into
+/// the side arenas and sealed (I-205: a start→seal window cannot span
+/// the arg parses — nested construction writes the same arenas); the
+/// failing guard's error rides a discarded alternative, so it never
+/// surfaces (chumsky's `Choice` keeps alternative errors only when all
+/// fail, and `ident_expr` cannot fail on an identifier).
 pub(super) fn variant_construct_atom<'a, I>(
     expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
 ) -> impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a
@@ -287,42 +289,57 @@ where
         }
     });
     let positional = {
-        let arg = expr.clone().map_with(|arg, e: &mut Mx<'a, '_, I>| {
-            e.state().push_expr_list_item(arg);
-        });
         just(Token::LParen)
-            .ignore_then(empty().map_with(|_, e: &mut Mx<'a, '_, I>| e.state().expr_lists_len()))
-            .then(
-                arg.separated_by(just(Token::Comma))
+            .ignore_then(
+                expr.clone()
+                    .separated_by(just(Token::Comma))
                     .allow_trailing()
                     .collect::<Vec<_>>(),
             )
             .then_ignore(just(Token::RParen))
-            .map_with(|(start, _), e: &mut Mx<'a, '_, I>| VariantArgs {
-                positional: Some(e.state().expr_list_from(start)),
-                named: None,
+            .map_with(|args, e: &mut Mx<'a, '_, I>| {
+                // Collect-then-push-contiguously: a start→seal window
+                // over the shared `expr_lists` arena cannot span the
+                // arg parses — a nested call/construct inside an arg
+                // writes the same arena and would interleave into the
+                // open range (I-205). One push site here, after `)`,
+                // also runs only for the winning alternative, so
+                // speculative arg parses leave no orphans. The small
+                // Vec of Copy ids is a deliberate I-152 trade —
+                // correctness over the no-Vec preference.
+                let start = e.state().expr_lists_len();
+                for &arg in &args {
+                    e.state().push_expr_list_item(arg);
+                }
+                VariantArgs {
+                    positional: Some(e.state().expr_list_from(start)),
+                    named: None,
+                }
             })
     };
     let named = {
-        let init = field_key()
-            .then_ignore(just(Token::Assign))
-            .then(expr)
-            .map_with(|(name, value), e: &mut Mx<'a, '_, I>| {
-                e.state().push_struct_field_init_item(name, value);
-            });
+        let init = field_key().then_ignore(just(Token::Assign)).then(expr);
         just(Token::LBrace)
             .ignore_then(
-                empty().map_with(|_, e: &mut Mx<'a, '_, I>| e.state().struct_field_inits_len()),
-            )
-            .then(
                 init.separated_by(just(Token::Comma))
                     .allow_trailing()
                     .collect::<Vec<_>>(),
             )
             .then_ignore(just(Token::RBrace))
-            .map_with(|(start, _), e: &mut Mx<'a, '_, I>| VariantArgs {
-                positional: None,
-                named: Some(e.state().struct_field_init_list_from(start)),
+            .map_with(|inits, e: &mut Mx<'a, '_, I>| {
+                // Same contiguous-push rationale as the positional
+                // arm: a nested struct literal / named construction in
+                // an init value writes `struct_field_inits`; an open
+                // window spanning the init parses would interleave the
+                // pairs (I-205).
+                let start = e.state().struct_field_inits_len();
+                for &(name, value) in &inits {
+                    e.state().push_struct_field_init_item(name, value);
+                }
+                VariantArgs {
+                    positional: None,
+                    named: Some(e.state().struct_field_init_list_from(start)),
+                }
             })
     };
     guard

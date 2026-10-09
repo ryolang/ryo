@@ -147,12 +147,28 @@ fn enum_borrow_move_inout_params_and_sret_return_jit() {
 fn enum_nested_in_struct_construct_move_drop_jit() {
     let pad = "b".repeat(40);
     let code = format!(
-        "struct Msg:\n\ttext: str\n\nenum Note:\n\tInfo(Msg)\n\tBlank\n\nstruct Wrapper:\n\tinner: Note\n\nfn main():\n\tm = Msg{{text=int_to_str(7) + \"{pad}\"}}\n\tw = Wrapper{{inner=Note.Info(m)}}\n\tv = w\n\tprint(v)\n\tprint(\"\\n\")\n"
+        "struct Msg:\n\ttext: str\n\nenum Note:\n\tInfo(Msg)\n\tBlank\n\nstruct Wrapper:\n\tinner: Note\n\nfn main():\n\tw = Wrapper{{inner=Note.Info(Msg{{text=int_to_str(7) + \"{pad}\"}})}}\n\tv = w\n\tprint(v)\n\tprint(\"\\n\")\n"
     );
     assert_ryo_output(
         "enum_nested_wrapper",
         &code,
         &format!("Wrapper{{inner=Note.Info(Msg{{text=\"7{pad}\"}})}}\n"),
+    );
+}
+
+// =============================================================================
+// (f2) I-205: a call inside a positional variant-construct arg groups as
+// a single arg (the outer arg list seals at exactly the written args).
+// The old workaround hoisted the inner literal into a binding; the direct
+// nested form must work.
+// =============================================================================
+
+#[test]
+fn enum_construct_with_call_inside_positional_arg_jit() {
+    assert_ryo_output(
+        "enum_nested_call_arg",
+        "enum Opt:\n\tSome(str)\n\tNone\n\nfn main():\n\to = Opt.Some(int_to_str(7))\n\tprint(o)\n\tprint(\"\\n\")\n",
+        "Opt.Some(\"7\")\n",
     );
 }
 

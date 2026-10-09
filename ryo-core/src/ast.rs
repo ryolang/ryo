@@ -1176,6 +1176,15 @@ impl Ast {
     // The parser records a side arena's length, pushes each list
     // element as it parses, and seals the range from the recorded
     // start — no intermediate `Vec` is collected and re-copied.
+    //
+    // Hazard: a start→seal window over a shared arena CANNOT span
+    // nested construction that writes the same arena — nested complete
+    // lists interleave into the open range (I-205: a call inside a
+    // variant-construct arg polluted the enclosing arg list). Windows
+    // are only safe when the wrapped parses write disjoint arenas
+    // (e.g. enum payload decls, where types never touch the decl
+    // arenas); otherwise collect-then-push-contiguously in one map
+    // after the closing delimiter.
 
     /// Current length of the `expr_lists` side arena; the start
     /// offset for [`Self::expr_list_from`].
