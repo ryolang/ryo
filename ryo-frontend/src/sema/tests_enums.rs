@@ -462,14 +462,43 @@ fn unit_variant_paren_construct_is_rejected() {
 #[test]
 fn bare_variant_call_names_its_enums() {
     // `Some(1)`: the callee is a variant, not a function — name the
-    // enum and show the construct spelling (still E0011).
+    // enum and show the construct spelling (still E0011). Some is a
+    // tuple variant, so the example uses parens.
     let src = "enum Opt:\n\tSome(int)\n\tNone\n\nfn main():\n\tx = Some(1)\n";
     let (_t, diags, _p) = run_with_errors(src);
     assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
     assert_eq!(diags[0].code, DiagCode::UndefinedFunction);
     assert_eq!(
         diags[0].message,
-        "'Some' is a variant of enum 'Opt' — variants are always constructed as Opt.Some(...)"
+        "'Some' is a variant of enum 'Opt' — construct it as Opt.Some(...)"
+    );
+}
+
+#[test]
+fn bare_named_variant_call_shows_brace_form() {
+    // `Some(1)` against a named-payload variant: the example must use
+    // the brace construction, not the paren form.
+    let src = "enum Opt:\n\tSome(value: int)\n\tNone\n\nfn main():\n\tx = Some(1)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::UndefinedFunction);
+    assert_eq!(
+        diags[0].message,
+        "'Some' is a variant of enum 'Opt' — construct it as Opt.Some{field=value}"
+    );
+}
+
+#[test]
+fn bare_unit_variant_call_shows_no_argument_list() {
+    // `Red(1)` against a unit variant: neither parens nor braces —
+    // the example is the bare spelling.
+    let src = "enum Color:\n\tRed\n\tGreen\n\nfn main():\n\tc = Red(1)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::UndefinedFunction);
+    assert_eq!(
+        diags[0].message,
+        "'Red' is a variant of enum 'Color' — construct it as Color.Red"
     );
 }
 

@@ -6,7 +6,7 @@ use super::{
 };
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::tir::{ParamMode, TirRef};
-use ryo_core::types::{StringId, TypeId};
+use ryo_core::types::{StringId, TypeId, VariantKind};
 use ryo_core::uir::{CallView, InstData, InstRef, InstTag, Span};
 
 pub(crate) fn check_call(
@@ -78,20 +78,29 @@ pub(crate) fn check_call(
                 let mut list = carriers
                     .iter()
                     .take(3)
-                    .map(|&e| format!("'{}'", sema.pool.str(e)))
+                    .map(|&(e, _)| format!("'{}'", sema.pool.str(e)))
                     .collect::<Vec<_>>()
                     .join(", ");
                 if carriers.len() > 3 {
                     list.push_str(", …");
                 }
-                let first = sema.pool.str(carriers[0]);
+                let (first, kind) = carriers[0];
+                let first = sema.pool.str(first);
                 let plural = if carriers.len() > 1 { "s" } else { "" };
+                // The example keeps the matched variant's payload
+                // shape: named payloads construct with braces, tuple
+                // payloads with parens, unit variants with no
+                // argument list at all.
+                let example = match kind {
+                    VariantKind::Unit => format!("{first}.{name}"),
+                    VariantKind::Tuple => format!("{first}.{name}(...)"),
+                    VariantKind::Named => format!("{first}.{name}{{field=value}}"),
+                };
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UndefinedFunction,
                     format!(
-                        "'{name}' is a variant of enum{plural} {list} — variants are always \
-                         constructed as {first}.{name}(...)",
+                        "'{name}' is a variant of enum{plural} {list} — construct it as {example}"
                     ),
                 ));
             }
@@ -345,25 +354,29 @@ pub(crate) fn check_reserved_name(
 
 /// Every declared enum that has a variant named `variant`, sorted by
 /// name so the diagnostic text is deterministic (the enum table is a
-/// HashMap). Feeds the "did you forget the enum?" call recovery.
-/// Failed enums ride along error-typed in `enum_types` (see
+/// HashMap), paired with that variant's payload shape so the
+/// "did you forget the enum?" recovery can render the construction
+/// form that actually applies (braces for named payloads, parens for
+/// tuple payloads, no argument list for unit variants). Failed enums
+/// ride along error-typed in `enum_types` (see
 /// [`Sema::register_enums`]); `enum_view` would trip its Enum-tag
 /// assert on one, so error types are skipped — their own diagnostic
 /// is already in the sink.
-fn enum_variant_carriers(sema: &Sema<'_>, variant: StringId) -> Vec<StringId> {
-    let mut carriers: Vec<StringId> = sema
+fn enum_variant_carriers(sema: &Sema<'_>, variant: StringId) -> Vec<(StringId, VariantKind)> {
+    let mut carriers: Vec<(StringId, VariantKind)> = sema
         .enum_types
         .iter()
-        .filter(|(_, ety)| {
-            **ety != sema.pool.error_type()
-                && sema
-                    .pool
-                    .enum_view(**ety)
-                    .variants()
-                    .any(|v| v.name == variant)
+        .filter_map(|(&ename, ety)| {
+            if *ety == sema.pool.error_type() {
+                return None;
+            }
+            sema.pool
+                .enum_view(*ety)
+                .variants()
+                .find(|v| v.name == variant)
+                .map(|v| (ename, v.kind))
         })
-        .map(|(&ename, _)| ename)
         .collect();
-    carriers.sort_by(|a, b| sema.pool.str(*a).cmp(sema.pool.str(*b)));
+    carriers.sort_by(|a, b| sema.pool.str(a.0).cmp(sema.pool.str(b.0)));
     carriers
 }
