@@ -120,6 +120,30 @@ fn unit_variant_access_unknown_variant_is_diag() {
 }
 
 #[test]
+fn unknown_variant_construct_reports_exactly_one_diag() {
+    // `Shape.Hexagon(1.0)` — the parenthesized unknown-variant path
+    // (I-206): astgen's UnknownVariant stands alone. The recovery
+    // EnumLit is error-typed, so sema adds no phantom missing-fields
+    // error naming variant 0 ('Circle'), which the user never wrote.
+    let src = "enum Shape:\n\tCircle(float)\n\nfn main():\n\ts = Shape.Hexagon(1.0)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::UnknownVariant)
+        .expect("UnknownVariant must fire");
+    assert!(
+        diag.message.contains("enum 'Shape'") && diag.message.contains("'Hexagon'"),
+        "got {:?}",
+        diag.message
+    );
+    assert!(
+        !any_code(&diags, DiagCode::MissingVariantFields),
+        "no phantom missing-fields error: {diags:?}"
+    );
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+}
+
+#[test]
 fn named_construct_missing_field_names_variant_and_enum() {
     // `Shape.Rectangle{width=1.0}` omits `height`.
     let src = "enum Shape:\n\tRectangle(width: float, height: float)\n\nfn main():\n\ts = Shape.Rectangle{width=1.0}\n";

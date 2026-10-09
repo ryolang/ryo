@@ -8,6 +8,10 @@
 
 use super::tests::{body_named, parse_and_lower};
 use super::*;
+use crate::lexer::lex;
+use crate::parser::{ParseState, program_parser};
+use chumsky::Parser;
+use chumsky::input::Input;
 use ryo_core::types::VariantKind;
 use ryo_core::uir::InstData;
 
@@ -155,4 +159,41 @@ fn variant_construct_named_canonicalizes_against_decl_order() {
         }
         other => panic!("expected Float args, got {other:?}"),
     }
+}
+
+#[test]
+fn unknown_variant_construct_lowers_recovery_to_error_type() {
+    // `Shape.Hexagon(1.0)` — UnknownVariant fires at astgen, and the
+    // recovery EnumLit is poisoned with the error type so sema cannot
+    // derive a phantom missing-fields error for variant 0 (I-206).
+    // Mirrors `parse_and_lower` but keeps the UIR alongside the diags
+    // (that helper returns Err and discards it).
+    let input = "enum Shape:\n\tCircle(float)\n\ns = Shape.Hexagon(1.0)\n";
+    let mut pool = InternPool::new();
+    let mut lex_sink = DiagSink::new();
+    let tokens = lex(input, &mut pool, &mut lex_sink);
+    assert!(
+        !lex_sink.has_errors(),
+        "lex errors: {:?}",
+        lex_sink.into_diags()
+    );
+    let token_stream = tokens[..].split_token_span((0..input.len()).into());
+    let mut state = ParseState::new(pool);
+    program_parser()
+        .parse_with_state(token_stream, &mut state)
+        .into_result()
+        .expect("parse ok");
+    let (ast, mut pool) = state.into_parts();
+
+    let mut sink = DiagSink::new();
+    let uir = generate(&ast, &mut pool, &mut sink);
+    let diags = sink.into_diags();
+    assert!(
+        diags.iter().any(|d| d.code == DiagCode::UnknownVariant),
+        "UnknownVariant must fire: {diags:?}"
+    );
+    let main = body_named(&uir, &pool, "main");
+    let v = uir.var_decl_view(uir.body_stmts(main)[0]);
+    let lit = uir.enum_lit_view(v.initializer);
+    assert_eq!(lit.ty, pool.error_type(), "recovery node is poisoned");
 }

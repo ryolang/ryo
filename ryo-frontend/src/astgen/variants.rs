@@ -62,7 +62,12 @@ pub(super) fn lower_variant_construct(
                 pool.str(c.variant.name),
             ),
         ));
-        return b.enum_lit(ty, 0, false, &[], span);
+        // Poison the recovery with the error type, matching the
+        // undeclared-enum fallback above: the real type would make this
+        // node byte-identical to a legitimate empty construct of variant
+        // 0, and sema would pile a misleading missing-fields error for
+        // that variant on top of the accurate one just emitted.
+        return b.enum_lit(pool.error_type(), 0, false, &[], span);
     };
     let mut pairs: Vec<(u32, InstRef)> = Vec::new();
     let positional = match (args.positional, args.named) {

@@ -681,19 +681,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-206 — Parenthesized unknown-variant construction double-diagnoses (E0038 + misleading E0120)
-
-**Severity:** Correctness / Hygiene
-**Area:** frontend-parser
-
-**Files:** ryo-frontend/src/astgen.rs (lower_variant_construct), ryo-frontend/src/sema/expr.rs (E0120 site)
-
-**Summary:** Constructing an unknown variant with parens — Result.Unknown(1) — emits two errors: astgen's E0038 ("enum 'Result' has no variant 'Unknown'") and a misleading sema E0120 ("missing field(s) '0' in variant 'Success' of enum 'Result' construction"). Root cause: astgen's recovery for an unknown variant on a declared enum lowers to EnumLit(real_ty, 0, &[]) — byte-identical to a legitimate empty-paren construct of variant 0 — so sema type-checks the recovery node and derives a phantom missing-payload error that names the wrong variant. (The unknown-enum and unknown-payload-field recoveries already lower to the error type and do not double-diagnose.)
-
-**Resolution:** Lower the unknown-variant recovery to pool.error_type() like the unknown-enum path, so sema skips the node and E0038 stands alone. Blocked: astgen.rs is at 1999/2000 lines (file-length ratchet), so the fix waits for an astgen split or shrink that buys headroom.
-
----
-
 ### I-207 — Brace Law asymmetry vs Go-style uniform braces — revisit if alpha reopens syntax
 
 **Severity:** Correctness / Hygiene
