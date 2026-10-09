@@ -89,6 +89,7 @@ impl<M: Module> Codegen<M> {
                     .ok_or_else(|| format!("Undefined enum variable: '{}'", ctx.pool.str(name)))?;
                 builder.use_var(var)
             }
+            TirTag::FieldAccess => Self::field_addr_of(builder, ctx, r)?.0,
             TirTag::Call => {
                 // Enum-returning call: emit_call handles sret and
                 // caches ValueRepr::Enum for r.

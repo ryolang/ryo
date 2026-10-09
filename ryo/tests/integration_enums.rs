@@ -7,8 +7,9 @@ use tempfile::TempDir;
 // M11 Enums — JIT end-to-end tests. An enum value is one whole-value owner
 // (like a struct): construction, move, drop, Debug print, and derived
 // equality all run through the same ownership pass rules. These tests pin
-// the observable behavior; the Valgrind suite (Task 11) runs the
-// heap-backed cases under leak detection.
+// the observable behavior; the heap-backed shapes are re-run under leak
+// detection by the `valgrind_enum_*` smoke tests in valgrind_smoke.rs and
+// their `asan_enum_*` counterparts in asan_smoke.rs.
 // =============================================================================
 
 #[test]
@@ -39,11 +40,28 @@ fn enum_eq_equal_unequal_across_variants_and_payloads_jit() {
 }
 
 // =============================================================================
-// Review Focus 1 — str-payload drop paths through reassignment in a loop
-// with an early return. Both the inline (SSO, no-op free) and the
-// spilled (heap-backed) message shapes must run clean; Task 11 re-runs
-// the heap shape under Valgrind. The Success path carries no heap
-// payload: destroying it frees nothing observable.
+// An enum-typed struct field read (`w.inner`) reaches the enum value
+// through the FieldAccess chain: codegen evaluates the field's slot
+// address (memory-first, like the struct path), and derived `==`
+// compares the loaded enum against a fresh construction.
+// =============================================================================
+
+#[test]
+fn enum_read_from_struct_field_prints_and_compares_jit() {
+    assert_ryo_output(
+        "enum_struct_field_read",
+        "#[derive(Eq)]\nenum Opt:\n\tSome(int)\n\tNone\n\nstruct Wrap:\n\tinner: Opt\n\nfn main():\n\tw = Wrap{inner=Opt.Some(5)}\n\tprint(w.inner)\n\tsame = w.inner == Opt.Some(5)\n\tprint(same)\n\tprint(\"\\n\")\n",
+        "Opt.Some(5)true\n",
+    );
+}
+
+// =============================================================================
+// Str-payload drop paths through reassignment in a loop with an early
+// return. Both the inline (SSO, no-op free) and the spilled (heap-backed)
+// message shapes must run clean; the heap shape is re-run under leak
+// detection by `valgrind_enum_heap_str_payload_loop_early_return` (and its
+// `asan_enum_*` counterpart). The Success path carries no heap payload:
+// destroying it frees nothing observable.
 // =============================================================================
 
 #[test]
@@ -64,8 +82,9 @@ fn enum_heap_str_payload_reassigned_in_loop_early_return_jit() {
     // The spilled shape: `int_to_str(i) + <100+ byte literal>` builds a
     // fresh heap buffer per iteration (a plain literal would be rodata
     // and free nothing). Reassignment must drop the superseded buffer
-    // exactly once per iteration — the leak path Valgrind pins in
-    // Task 11. The early return at i == 1 moves the "1..." value out.
+    // exactly once per iteration — the leak path pinned by
+    // `valgrind_enum_heap_str_payload_loop_early_return`. The early
+    // return at i == 1 moves the "1..." value out.
     let pad = "a".repeat(100);
     let code = format!(
         "enum Result:\n\tSuccess(int)\n\tError(message: str)\n\nfn probe() -> Result:\n\tmut r = Result.Error{{message=int_to_str(42) + \"{pad}\"}}\n\tmut i = 0\n\twhile i < 3:\n\t\tr = Result.Error{{message=int_to_str(i) + \"{pad}\"}}\n\t\tif i == 1:\n\t\t\treturn r\n\t\ti += 1\n\treturn Result.Success(5)\n\nfn main():\n\tr = probe()\n\tprint(r)\n\tprint(\"\\n\")\n"
@@ -82,9 +101,10 @@ fn enum_reassign_from_heap_error_to_success_jit() {
     // The Result.Success(5) path: reassigning FROM Error TO Success
     // drops the Error payload (free-on-reassign on a needs-drop enum).
     // The payload is runtime-built past the 23-byte inline cap so the
-    // variant-switch free is a real ryo_str_free (Valgrind-pinned in
-    // Task 11, not an SSO no-op). The returned Success carries only an
-    // int, so its own destruction frees nothing observable.
+    // variant-switch free is a real ryo_str_free (pinned by
+    // `valgrind_enum_heap_to_success_reassign`, not an SSO no-op). The
+    // returned Success carries only an int, so its own destruction frees
+    // nothing observable.
     let pad = "a".repeat(30);
     let code = format!(
         "enum Result:\n\tSuccess(int)\n\tError(message: str)\n\nfn probe() -> Result:\n\tmut r = Result.Error{{message=int_to_str(42) + \"{pad}\"}}\n\tr = Result.Success(5)\n\treturn r\n\nfn main():\n\tr = probe()\n\tprint(r)\n\tprint(\"\\n\")\n"
@@ -93,11 +113,12 @@ fn enum_reassign_from_heap_error_to_success_jit() {
 }
 
 // =============================================================================
-// Review Focus 2 — Copy enum: `Small` is `is_copy` (every payload field
-// is a Copy type), so assignment copies instead of moving. The copy
-// happens while the narrow `A(int)` variant is active and the largest
-// variant `B(f32 x4)` is not — a full-object read would touch the
-// inactive payload bytes (Valgrind flags the uninit read in Task 11).
+// Copy enum: `Small` is `is_copy` (every payload field is a Copy type),
+// so assignment copies instead of moving. The copy happens while the
+// narrow `A(int)` variant is active and the largest variant
+// `B(float ×4)` is not — a full-object read would touch the inactive
+// payload bytes (memcheck flags the uninit read in
+// `valgrind_enum_copy_narrow_variant_active`).
 // =============================================================================
 
 #[test]
@@ -110,10 +131,11 @@ fn enum_copy_variant_copied_while_narrow_variant_active_jit() {
 }
 
 // =============================================================================
-// Review Focus 3 — enum values across the parameter ABI: borrow (default),
-// `move`, and `inout`, plus sret returns. Payload "mutation" is whole-
-// value reassignment to a different variant. Caller and callee each free
-// exactly once (Valgrind pins the heap payloads in Task 11).
+// Enum values across the parameter ABI: borrow (default), `move`, and
+// `inout`, plus sret returns. Payload "mutation" is whole-value
+// reassignment to a different variant. Caller and callee each free
+// exactly once (pinned by `valgrind_enum_param_abi` under memcheck and
+// ASan).
 // =============================================================================
 
 #[test]
@@ -124,7 +146,7 @@ fn enum_borrow_move_inout_params_and_sret_return_jit() {
     // must not free), `consume` moves the heap-backed value through a
     // move param and returns it by sret, and `bump`'s variant switch
     // frees that payload caller-side. Caller and callee each free
-    // exactly once (Valgrind pins the heap payloads in Task 11).
+    // exactly once (pinned by `valgrind_enum_param_abi`).
     let pad = "a".repeat(30);
     let code = format!(
         "enum Result:\n\tSuccess(int)\n\tError(message: str)\n\nfn show(r: Result):\n\tprint(r)\n\tprint(\"\\n\")\n\nfn reseat(inout r: Result):\n\tr = Result.Error{{message=int_to_str(7) + \"{pad}\"}}\n\nfn bump(inout r: Result):\n\tr = Result.Success(99)\n\nfn consume(move r: Result) -> Result:\n\treturn r\n\nfn main():\n\tmut r = Result.Success(1)\n\tshow(r)\n\treseat(&r)\n\tshow(r)\n\tmut out = consume(r)\n\tshow(out)\n\tbump(&out)\n\tshow(out)\n"
@@ -136,11 +158,11 @@ fn enum_borrow_move_inout_params_and_sret_return_jit() {
 }
 
 // =============================================================================
-// Review Focus 4 — an enum holding a struct holding a heap str, itself
-// nested in a struct: construct, move, drop. The heap-built str (> SSO)
-// makes drop completeness observable at every level under Valgrind in
-// Task 11 (each payload freed exactly once; destruction order is not
-// asserted here).
+// An enum holding a struct holding a heap str, itself nested in a
+// struct: construct, move, drop. The heap-built str (> SSO) makes drop
+// completeness observable at every level under
+// `valgrind_enum_nested_wrapper` (each payload freed exactly once;
+// destruction order is not asserted here).
 // =============================================================================
 
 #[test]
@@ -157,9 +179,9 @@ fn enum_nested_in_struct_construct_move_drop_jit() {
 }
 
 // =============================================================================
-// (f2) I-205: a call inside a positional variant-construct arg groups as
-// a single arg (the outer arg list seals at exactly the written args).
-// The old workaround hoisted the inner literal into a binding; the direct
+// A call inside a positional variant-construct arg groups as a single
+// arg (the outer arg list seals at exactly the written args). The old
+// workaround hoisted the inner literal into a binding; the direct
 // nested form must work.
 // =============================================================================
 
