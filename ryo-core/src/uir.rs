@@ -1204,13 +1204,26 @@ pub struct StructLitView {
     pub fields: Vec<(StringId, InstRef)>,
 }
 
-/// Decoded view of an [`InstTag::EnumLit`] payload (M11). `variant`
-/// is the declaration-order variant index; `args` are
-/// `(field_idx, value)` pairs in source order.
-pub struct EnumLitView {
+/// Decoded view of an [`InstTag::EnumLit`] payload (M11). Borrows the
+/// `extra` arena directly — decoding allocates nothing (contrast with
+/// [`StructLitView`]'s owned `Vec`); `fields()` yields `(field_index,
+/// value)` pairs keyed by declaration-order payload-field index, in
+/// source order.
+pub struct EnumLitView<'a> {
     pub ty: TypeId,
-    pub variant: u32,
-    pub args: Vec<(u32, InstRef)>,
+    pub variant_index: u32,
+    args: &'a [u32],
+}
+
+impl EnumLitView<'_> {
+    /// `(field_index, value)` pairs, in source order.
+    pub fn fields(&self) -> impl Iterator<Item = (u32, InstRef)> + '_ {
+        self.args
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[field_idx, raw]| (field_idx, InstRef::from_raw(raw)))
+    }
 }
 
 pub struct ElifView {
@@ -1413,7 +1426,7 @@ impl Uir {
         StructLitView { name, fields }
     }
 
-    pub fn enum_lit_view(&self, r: InstRef) -> EnumLitView {
+    pub fn enum_lit_view(&self, r: InstRef) -> EnumLitView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, InstTag::EnumLit));
         let range = match inst.data {
@@ -1422,14 +1435,14 @@ impl Uir {
         };
         let slice = &self.extra[range.as_range()];
         let ty = TypeId::from_raw(slice[enum_lit_extra::TY]);
-        let variant = slice[enum_lit_extra::VARIANT];
+        let variant_index = slice[enum_lit_extra::VARIANT];
         let n = slice[enum_lit_extra::ARGC] as usize;
-        let mut args = Vec::with_capacity(n);
-        for i in 0..n {
-            let base = enum_lit_extra::ARGS + 2 * i;
-            args.push((slice[base], InstRef::from_raw(slice[base + 1])));
+        let args = &slice[enum_lit_extra::ARGS..enum_lit_extra::ARGS + 2 * n];
+        EnumLitView {
+            ty,
+            variant_index,
+            args,
         }
-        EnumLitView { ty, variant, args }
     }
 
     pub fn if_stmt_view(&self, r: InstRef) -> IfStmtView {
@@ -1845,8 +1858,8 @@ mod tests {
         let uir = b.finish();
         let view = uir.enum_lit_view(lit);
         assert_eq!(view.ty, enum_ty);
-        assert_eq!(view.variant, 1);
-        assert_eq!(view.args, vec![(0, w), (1, h)]);
+        assert_eq!(view.variant_index, 1);
+        assert_eq!(view.fields().collect::<Vec<_>>(), vec![(0, w), (1, h)]);
 
         // Wire layout is pinned: [TY, VARIANT, ARGC, (FIELD_IDX, REF) x ARGC].
         let inst = uir.inst(lit);
@@ -1876,8 +1889,8 @@ mod tests {
         let uir = b.finish();
         let view = uir.enum_lit_view(lit);
         assert_eq!(view.ty, enum_ty);
-        assert_eq!(view.variant, 0);
-        assert!(view.args.is_empty());
+        assert_eq!(view.variant_index, 0);
+        assert_eq!(view.fields().count(), 0);
     }
 
     #[test]

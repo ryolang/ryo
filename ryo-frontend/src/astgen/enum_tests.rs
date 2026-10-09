@@ -117,10 +117,11 @@ fn variant_construct_positional_lowers_to_enum_lit() {
     assert!(matches!(uir.inst(v.initializer).tag, InstTag::EnumLit));
     let lit = uir.enum_lit_view(v.initializer);
     assert_eq!(lit.ty, uir.enum_decls[0].ty);
-    assert_eq!(lit.variant, 0, "Circle is the first declared variant");
-    assert_eq!(lit.args.len(), 1);
-    assert_eq!(lit.args[0].0, 0, "positional arg 0 maps to field idx 0");
-    match uir.inst(lit.args[0].1).data {
+    assert_eq!(lit.variant_index, 0, "Circle is the first declared variant");
+    let args: Vec<_> = lit.fields().collect();
+    assert_eq!(args.len(), 1);
+    assert_eq!(args[0].0, 0, "positional arg 0 maps to field idx 0");
+    match uir.inst(args[0].1).data {
         InstData::Float(f) => assert_eq!(f, 5.0),
         other => panic!("expected Float arg, got {other:?}"),
     }
@@ -137,11 +138,12 @@ fn variant_construct_named_canonicalizes_against_decl_order() {
     let main = body_named(&uir, &pool, "main");
     let v = uir.var_decl_view(uir.body_stmts(main)[0]);
     let lit = uir.enum_lit_view(v.initializer);
-    assert_eq!(lit.variant, 0);
-    assert_eq!(lit.args.len(), 2);
-    assert_eq!(lit.args[0].0, 1, "height is payload field 1");
-    assert_eq!(lit.args[1].0, 0, "width is payload field 0");
-    match (uir.inst(lit.args[0].1).data, uir.inst(lit.args[1].1).data) {
+    assert_eq!(lit.variant_index, 0);
+    let args: Vec<_> = lit.fields().collect();
+    assert_eq!(args.len(), 2);
+    assert_eq!(args[0].0, 1, "height is payload field 1");
+    assert_eq!(args[1].0, 0, "width is payload field 0");
+    match (uir.inst(args[0].1).data, uir.inst(args[1].1).data) {
         (InstData::Float(h), InstData::Float(w)) => {
             assert_eq!(h, 2.0);
             assert_eq!(w, 1.0);

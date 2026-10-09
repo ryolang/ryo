@@ -669,14 +669,14 @@ fn analyze_variant_construct(
     let (ename, variant_index, vname, fields) = {
         let eview = sema.pool.enum_view(ety);
         let mut variants = eview.variants();
-        let Some(variant) = variants.nth(view.variant as usize) else {
+        let Some(variant) = variants.nth(view.variant_index as usize) else {
             // astgen only writes indices from its own directory — this
             // is producer corruption, not user input. Recover quietly.
             return fcx.builder.unreachable(sema.pool.error_type(), span);
         };
         (
             eview.name(),
-            view.variant,
+            view.variant_index,
             variant.name,
             variant.fields.to_vec(),
         )
@@ -686,7 +686,7 @@ fn analyze_variant_construct(
     // shape is untrustworthy — a derived "missing field(s)" error on
     // top is noise (the struct-literal precedent).
     let mut field_errored = false;
-    for (fidx, value_ref) in view.args {
+    for (fidx, value_ref) in view.fields() {
         let fspan = sema.uir.span(value_ref);
         let Some(field) = fields.get(fidx as usize) else {
             field_errored = true;
