@@ -1,5 +1,9 @@
 //! Free/dead-drop emission and the provably-inline free elision —
-//! split from `expr.rs`; see module docs in `mod.rs`.
+//! split from `expr.rs`; see module docs in `mod.rs`. Also home to the
+//! free-routing helpers: the binding-lineage accessors
+//! (`free_binding_name` / `free_binding_of`), the aliasing probe
+//! (`expr_refs_name`), and the fat-home provenance flags
+//! (`set_home_inline` and friends).
 
 use super::{Codegen, CodegenNameIds, FunctionContext, ValueRepr, is_fat_type};
 use cranelift::codegen::ir::{FuncRef, InstructionData, Opcode, ValueDef};
@@ -297,8 +301,12 @@ impl<M: Module> Codegen<M> {
         let mut bytes_free_ref: Option<FuncRef> = None;
         for (idx, target) in pending {
             ctx.freed_at[idx] = true;
-            // M9: struct-typed targets route to the recursive field
-            // drop; everything below is the str/bytes path.
+            // M11: enum-typed targets route to the tag-dispatched
+            // payload drop; M9 structs to the recursive field drop;
+            // everything below is the str/bytes path.
+            if Self::try_emit_enum_free(builder, ctx, target)? {
+                continue;
+            }
             if Self::try_emit_struct_free(builder, ctx, target)? {
                 continue;
             }
@@ -424,6 +432,12 @@ impl<M: Module> Codegen<M> {
                         target.index()
                     ));
                 }
+                ValueRepr::Enum { .. } => {
+                    return Err(format!(
+                        "ownership pass scheduled Free for enum %{} but try_emit_enum_free did not claim it",
+                        target.index()
+                    ));
+                }
             }
         }
         ctx.pending_sweep.retain(|&idx| !ctx.freed_at[idx]);
@@ -468,6 +482,11 @@ impl<M: Module> Codegen<M> {
             let Some(name) = Self::free_binding_name(ctx, target) else {
                 continue;
             };
+            // M11: enum bindings drop the active variant's needs-drop
+            // fields (tag-dispatched).
+            if Self::try_emit_enum_dead_drop(builder, ctx, name, target)? {
+                continue;
+            }
             // M9: struct bindings drop their needs-drop fields.
             if Self::try_emit_struct_dead_drop(builder, ctx, name, target)? {
                 continue;
@@ -620,5 +639,100 @@ impl<M: Module> Codegen<M> {
             &mut last_write,
         );
         (inst_names, param_names, inst_bindings, last_write)
+    }
+}
+
+impl<M: Module> Codegen<M> {
+    /// Read the free-target → binding-name map. Param sentinel refs
+    /// are served from `free_binding_param_names`; real instruction
+    /// refs from `free_binding_names`. Same dispatch shape as
+    /// `cached_repr`.
+    pub(crate) fn free_binding_name(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<StringId> {
+        if let Some(idx) = r.as_param_index() {
+            ctx.free_binding_param_names[idx as usize]
+        } else {
+            ctx.free_binding_names.get(r.index()).copied().flatten()
+        }
+    }
+
+    /// Read the free-target → BINDING identity map: the declaring
+    /// `VarDecl`'s `TirRef` for initializer targets, the
+    /// `sidecar.assign_binding` entry for `Assign` value targets. A fat
+    /// param's binding identity IS its own sentinel ref (params are
+    /// never shadowed). Same dispatch shape as `free_binding_name`;
+    /// `emit_frees` consults it so the redirect's "most recent write"
+    /// lookup is per-binding, not per-name (a same-named shadow is a
+    /// different binding and must not clobber the outer binding's
+    /// lineage).
+    pub(crate) fn free_binding_of(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<TirRef> {
+        if r.as_param_index().is_some() {
+            Some(r)
+        } else {
+            ctx.free_binding_of_insts.get(r.index()).copied().flatten()
+        }
+    }
+
+    /// True if any instruction reachable from `root` (transitive
+    /// operands and nested body statements) is a `Var` read of `name`.
+    /// Conservative aliasing probe for the producer-into-home Assign
+    /// path: an RHS that mentions the target binding (including a
+    /// shadowed same-name read — the probe cannot distinguish shadowing)
+    /// forbids the free-before-overwrite order.
+    pub(super) fn expr_refs_name(tir: &Tir, root: TirRef, name: StringId) -> bool {
+        let mut stack = vec![root];
+        while let Some(r) = stack.pop() {
+            if let TirData::Var(n) = tir.inst(r).data
+                && n == name
+            {
+                return true;
+            }
+            tir.walk_operands(r, &mut |_parent, child, _kind| stack.push(child));
+        }
+        false
+    }
+
+    /// Provenance of a freshly stored home value: true iff the value
+    /// is provably free-noop — a provably-inline producer result or a
+    /// static (cap == 0) literal — so a later free on the home may be
+    /// elided.
+    pub(super) fn home_value_provably_inline(
+        ctx: &FunctionContext<'_, M>,
+        func: &cranelift::codegen::ir::Function,
+        value: TirRef,
+        cap: Value,
+    ) -> bool {
+        Self::provably_inline_producer(ctx, value) || Self::is_static_cap_zero(func, cap)
+    }
+
+    /// Set the home-provenance flag on a fat binding. No-op for
+    /// home-less bindings (the flag is meaningless without a home).
+    pub(crate) fn set_home_inline(ctx: &mut FunctionContext<'_, M>, name: StringId, inline: bool) {
+        if let Some(mut fl) = Self::read_slot(&ctx.fat_locals, name)
+            && fl.home.is_some()
+            && fl.home_inline != inline
+        {
+            fl.home_inline = inline;
+            Self::write_slot(
+                &mut ctx.fat_locals,
+                &mut ctx.fat_locals_undo,
+                name,
+                Some(fl),
+            );
+        }
+    }
+
+    /// Clear every home-provenance flag. Called at control-flow joins
+    /// (if merges, loop headers and exits): the home slot is memory,
+    /// so stores inside an arm or iteration persist while the scoped
+    /// table restore reverts the flag — a join must not trust
+    /// pre-branch provenance.
+    pub(crate) fn invalidate_home_inline_flags(ctx: &mut FunctionContext<'_, M>) {
+        let flagged: Vec<StringId> = (0..ctx.fat_locals.len())
+            .filter(|&i| ctx.fat_locals[i].is_some_and(|fl| fl.home.is_some() && fl.home_inline))
+            .map(|i| StringId::from_raw(u32::try_from(i).expect("StringId index out of range")))
+            .collect();
+        for name in flagged {
+            Self::set_home_inline(ctx, name, false);
+        }
     }
 }

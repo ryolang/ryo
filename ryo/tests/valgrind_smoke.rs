@@ -572,3 +572,45 @@ fn valgrind_reseat_fallthrough_skipped_read_arm() {
         "reseat_fallthrough_skipped_read_arm",
     );
 }
+
+// M11 enums: the heap-backed drop paths from the enum integration
+// suite, leak-checked under Valgrind (the lane that sees Cranelift-
+// emitted frees). Fixtures mirror integration_enums.rs; see the
+// fixture comments for the drop path each one pins.
+
+#[test]
+fn valgrind_enum_heap_str_payload_loop_early_return() {
+    run_valgrind_smoke_allocating(
+        common::find_fixture("enum_heap_str_payload_loop_early_return"),
+        "enum_heap_str_payload_loop_early_return",
+    );
+}
+
+#[test]
+fn valgrind_enum_heap_to_success_reassign() {
+    run_valgrind_smoke_allocating(
+        common::find_fixture("enum_heap_to_success_reassign"),
+        "enum_heap_to_success_reassign",
+    );
+}
+
+#[test]
+fn valgrind_enum_copy_narrow_variant_active() {
+    run_valgrind_smoke(
+        common::find_fixture("enum_copy_narrow_variant_active"),
+        "enum_copy_narrow_variant_active",
+    );
+}
+
+#[test]
+fn valgrind_enum_param_abi() {
+    run_valgrind_smoke_allocating(common::find_fixture("enum_param_abi"), "enum_param_abi");
+}
+
+#[test]
+fn valgrind_enum_nested_wrapper() {
+    run_valgrind_smoke_allocating(
+        common::find_fixture("enum_nested_wrapper"),
+        "enum_nested_wrapper",
+    );
+}

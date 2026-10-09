@@ -2,8 +2,9 @@
 
 use super::{FuncCtx, Scope, Sema, check_call};
 use ryo_core::diag::{Diag, DiagCode};
+use ryo_core::extra::enum_lit_extra;
 use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
-use ryo_core::types::{StringId, TypeId, TypeKind, ViewKind};
+use ryo_core::types::{StringId, StructField, TypeId, TypeKind, VariantKind, ViewKind};
 use ryo_core::uir::{InstData, InstRef, InstTag, Span, StructLitView, Uir};
 
 /// Resolve a user-spelled variable read. The `__ryo_` namespace belongs
@@ -278,6 +279,17 @@ pub(crate) fn analyze_expr_allow_never(
         }
         InstTag::MethodCall => {
             let view = sema.uir.method_call_view(r);
+            if let Some(recovery) = lowercase_enum_method_receiver(
+                sema,
+                fcx,
+                scope,
+                view.receiver,
+                view.name,
+                &view.args,
+                span,
+            ) {
+                return recovery;
+            }
             let receiver_tir = analyze_expr(sema, fcx, scope, view.receiver);
             let receiver_ty = fcx.builder.ty_of(receiver_tir);
             let ids = sema.names;
@@ -463,6 +475,7 @@ pub(crate) fn analyze_expr_allow_never(
         }
         InstTag::Borrow => analyze_borrow(sema, fcx, scope, r, inst.data, span),
         InstTag::StructLit => analyze_struct_lit(sema, fcx, scope, r, span),
+        InstTag::EnumLit => analyze_variant_construct(sema, fcx, scope, r, span),
         InstTag::FieldAccess => analyze_field_access(sema, fcx, scope, r, span),
         // UIR trusted-producer contract (see the `uir.rs` module
         // header): astgen is the only producer, so a non-expression tag
@@ -559,7 +572,7 @@ fn analyze_struct_lit(
                     "'{}' has no field '{}' (fields: {})",
                     sema.pool.str(sview.name),
                     sema.pool.str(fname),
-                    field_list(sema.pool, &sview),
+                    field_list(sema.pool, &sview.fields),
                 ),
             ));
             // Still analyze the initializer so diagnostics inside it
@@ -627,6 +640,241 @@ fn analyze_struct_lit(
         })
         .collect();
     fcx.builder.struct_lit(sty, &fields, span)
+}
+
+/// Variant construction `EnumName.Variant(args...)` (M11). The UIR
+/// `EnumLit` carries the enum type, the declaration-order variant
+/// index, the source form (astgen-recorded `positional` flag — without
+/// it the flat pairs are indistinguishable from in-order brace
+/// construction), and `(field_idx, value)` pairs — positional args
+/// keyed by position, named args already canonicalized to
+/// declaration-order indices by astgen (in source order; duplicates
+/// included). Payload typing mirrors [`analyze_struct_lit`]: each arg
+/// checks against its declared field, the emitted TIR `EnumLit` carries
+/// canonical declaration-order pairs, and slots with no valid
+/// initializer recover with an error-typed `Unreachable`.
+///
+/// Layering with astgen's frontline checks: an undeclared enum name,
+/// an unknown variant name, and a typo'd *named* field are all
+/// diagnosed during lowering (and the bad args dropped), so this arm
+/// recovers quietly on the error type and never re-reports them. What
+/// remains for sema: the Brace Law gate on named payloads (parens on a
+/// named variant is rejected with the brace spelling), out-of-range
+/// positional indices, duplicate fields (duplicate named args lower to
+/// repeated indices with no astgen diagnostic), missing fields, and
+/// per-field type mismatches.
+fn analyze_variant_construct(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    span: Span,
+) -> TirRef {
+    let view = sema.uir.enum_lit_view(r);
+    let ety = view.ty;
+    if sema.pool.is_error(ety) {
+        // astgen diagnosed: UnknownType for a never-declared enum, the
+        // definition's own diagnostic for a failed one. Quiet recovery,
+        // matching struct literals of failed structs.
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    // Decode the variant directory up front: EnumVariantView borrows the
+    // pool, and the arg loop below needs `&mut Sema` for analysis and
+    // diagnostics. Construction sites are cold, so the small owned copy
+    // is fine.
+    let (ename, variant_index, vname, kind, fields) = {
+        let eview = sema.pool.enum_view(ety);
+        let mut variants = eview.variants();
+        let Some(variant) = variants.nth(view.variant_index as usize) else {
+            // astgen only writes indices from its own directory — this
+            // is producer corruption, not user input. Recover quietly.
+            return fcx.builder.unreachable(sema.pool.error_type(), span);
+        };
+        (
+            eview.name(),
+            view.variant_index,
+            variant.name,
+            variant.kind,
+            variant.fields.to_vec(),
+        )
+    };
+    if view.positional && kind == VariantKind::Named {
+        // Brace Law (D11): named payloads construct with braces only —
+        // one way per shape, symmetric with structs. The pairs alone
+        // can't distinguish this from in-order brace construction
+        // (`Rectangle{width=1.0, height=2.0}` lowers identically), so
+        // astgen records the source form on the wire. Quiet recovery:
+        // the args are not type-checked, matching the other
+        // construction-error paths.
+        let brace_form = fields
+            .iter()
+            .map(|f| format!("{}=...", sema.pool.str(f.name)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::PositionalConstructOnNamedVariant,
+            format!(
+                "variant '{}' of enum '{}' has named fields — construct it as {}.{}{{{}}}",
+                sema.pool.str(vname),
+                sema.pool.str(ename),
+                sema.pool.str(ename),
+                sema.pool.str(vname),
+                brace_form,
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    if kind == VariantKind::Unit && view.positional {
+        // `Color.Red()` — a unit variant takes no payload; the paren
+        // form is the named/tuple construct shape misapplied. Quiet
+        // recovery, matching the Brace Law arm above (E0125).
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::UnitVariantConstructed,
+            format!(
+                "'{}' is a unit variant — construct it as {}.{}",
+                sema.pool.str(vname),
+                sema.pool.str(ename),
+                sema.pool.str(vname),
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    let mut by_index: Vec<Option<TirRef>> = vec![None; fields.len()];
+    // Once any field errored (unknown/duplicate), the construction's
+    // shape is untrustworthy — a derived "missing field(s)" error on
+    // top is noise (the struct-literal precedent).
+    let mut field_errored = false;
+    for (fidx, value_ref) in view.fields() {
+        let fspan = sema.uir.span(value_ref);
+        if fidx == enum_lit_extra::ORPHANED_FIELD {
+            // A braced field astgen didn't recognize (E0038 already
+            // emitted). The arg is lowered only so its own
+            // diagnostics surface; it binds nothing. The construct's
+            // shape is untrustworthy — suppress the derived
+            // missing-fields error, matching the unknown/duplicate
+            // field recoveries below.
+            field_errored = true;
+            analyze_expr(sema, fcx, scope, value_ref);
+            continue;
+        }
+        let Some(field) = fields.get(fidx as usize) else {
+            field_errored = true;
+            // Extra positional argument on a tuple variant: name the
+            // position, not the synthesized "0"/"1" field index the
+            // developer never wrote (E0122, positional wording).
+            let message = if kind == VariantKind::Tuple {
+                format!(
+                    "found a {} positional argument — '{}' takes {}",
+                    ordinal(fidx as usize + 1),
+                    sema.pool.str(vname),
+                    fields.len(),
+                )
+            } else {
+                format!(
+                    "variant '{}' of enum '{}' has no field '{}' (fields: {})",
+                    sema.pool.str(vname),
+                    sema.pool.str(ename),
+                    fidx,
+                    field_list(sema.pool, &fields),
+                )
+            };
+            sema.sink
+                .emit(Diag::error(fspan, DiagCode::UnknownVariantField, message));
+            // Still analyze the arg so diagnostics inside it surface.
+            analyze_expr(sema, fcx, scope, value_ref);
+            continue;
+        };
+        if by_index[fidx as usize].is_some() {
+            field_errored = true;
+            sema.sink.emit(Diag::error(
+                fspan,
+                DiagCode::DuplicateVariantField,
+                format!(
+                    "field '{}' is specified more than once in variant '{}' of enum '{}'",
+                    sema.pool.str(field.name),
+                    sema.pool.str(vname),
+                    sema.pool.str(ename),
+                ),
+            ));
+            analyze_expr(sema, fcx, scope, value_ref);
+            continue;
+        }
+        let value = analyze_expr(sema, fcx, scope, value_ref);
+        let vty = fcx.builder.ty_of(value);
+        if !sema.pool.compatible(vty, field.ty) {
+            // Tuple payloads carry synthesized "0"/"1" field names the
+            // user never wrote — name the argument position instead
+            // (1-based, matching how developers count call arguments).
+            let message = if kind == VariantKind::Tuple {
+                format!(
+                    "positional argument {} of variant '{}' of enum '{}': expected '{}', found '{}'",
+                    fidx + 1,
+                    sema.pool.str(vname),
+                    sema.pool.str(ename),
+                    sema.pool.display(field.ty),
+                    sema.pool.display(vty),
+                )
+            } else {
+                format!(
+                    "field '{}' of variant '{}' of enum '{}': expected '{}', found '{}'",
+                    sema.pool.str(field.name),
+                    sema.pool.str(vname),
+                    sema.pool.str(ename),
+                    sema.pool.display(field.ty),
+                    sema.pool.display(vty),
+                )
+            };
+            sema.sink
+                .emit(Diag::error(fspan, DiagCode::TypeMismatch, message));
+        }
+        by_index[fidx as usize] = Some(value);
+    }
+    let missing: Vec<String> = fields
+        .iter()
+        .zip(&by_index)
+        .filter(|(_, slot)| slot.is_none())
+        .map(|(f, _)| format!("'{}'", sema.pool.str(f.name)))
+        .collect();
+    if !missing.is_empty() && !field_errored {
+        // Tuple payloads carry synthesized "0"/"1" field names the
+        // user never wrote — word by position count instead (E0120,
+        // positional wording).
+        let message = if kind == VariantKind::Tuple {
+            let total = fields.len();
+            let got = total - missing.len();
+            format!(
+                "'{}' takes {} positional argument{}; got {}",
+                sema.pool.str(vname),
+                total,
+                if total == 1 { "" } else { "s" },
+                got,
+            )
+        } else {
+            format!(
+                "missing field(s) {} in variant '{}' of enum '{}' construction",
+                missing.join(", "),
+                sema.pool.str(vname),
+                sema.pool.str(ename),
+            )
+        };
+        sema.sink
+            .emit(Diag::error(span, DiagCode::MissingVariantFields, message));
+    }
+    // Canonical declaration order; slots that never got a valid
+    // initializer recover with an error-typed Unreachable.
+    let error_ty = sema.pool.error_type();
+    let args: Vec<(u32, TirRef)> = by_index
+        .into_iter()
+        .enumerate()
+        .map(|(i, slot)| {
+            let v = slot.unwrap_or_else(|| fcx.builder.unreachable(error_ty, span));
+            (i as u32, v)
+        })
+        .collect();
+    fcx.builder
+        .enum_lit(ety, variant_index, view.positional, &args, span)
 }
 
 /// Anonymous struct literal `{field = value, ...}` (M10). There is no
@@ -712,6 +960,36 @@ fn analyze_field_access(
         InstData::FieldAccess { object, field } => (object, field),
         _ => unreachable!("FieldAccess must carry InstData::FieldAccess"),
     };
+    // M11: `EnumName.Variant` — the parser keeps the bare spelling as a
+    // FieldAccess, and sema reinterprets it when the object is an
+    // unbound identifier that names an enum type (a bound variable of
+    // the same name wins, matching ordinary shadowing). An identifier
+    // that names a struct keeps its field-access meaning; one that
+    // names nothing falls through to the usual undefined-variable path.
+    if let InstTag::Var = sema.uir.inst(object).tag {
+        let name = match sema.uir.inst(object).data {
+            InstData::Var(name) => name,
+            _ => unreachable!("Var must carry InstData::Var"),
+        };
+        if scope.lookup(name).is_none() {
+            if let Some(&ety) = sema.enum_types.get(&name) {
+                return analyze_unit_variant_access(sema, fcx, ety, field, span);
+            }
+            if sema.struct_types.contains_key(&name) {
+                // `Point.Red` where Point is a struct: the enum-specific
+                // wording beats the misleading "undefined variable".
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::UnknownEnum,
+                    format!(
+                        "unknown enum: '{}' is a struct, not an enum",
+                        sema.pool.str(name),
+                    ),
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+        }
+    }
     let obj = analyze_expr(sema, fcx, scope, object);
     let oty = fcx.builder.ty_of(obj);
     if sema.pool.is_error(oty) {
@@ -783,7 +1061,7 @@ fn analyze_field_access(
                     "{} has no field '{}' (fields: {})",
                     owner,
                     sema.pool.str(field),
-                    field_list(sema.pool, &sview),
+                    field_list(sema.pool, &sview.fields),
                 ),
             );
             if sview.fields.len() == 1 {
@@ -808,15 +1086,169 @@ fn analyze_field_access(
     }
 }
 
-/// Comma-separated quoted field names of a struct, for the
-/// "has no field" diagnostics.
-fn field_list(pool: &ryo_core::types::InternPool, sview: &ryo_core::types::StructView) -> String {
-    sview
-        .fields
+/// Bare `EnumName.Variant` access (M11): the unit-variant value path.
+/// The enum type is already resolved by the caller (which guarantees
+/// the object ident named an enum, not a variable); a unit member
+/// lowers to a zero-arg `EnumLit`. A payload-carrying variant is a
+/// constructor pattern, not a value — TypeMismatch names both, with a
+/// help note pointing at the construction spelling. An unknown member
+/// is `UnknownVariant` (astgen's construction lowering already covers
+/// the parenthesized spelling, so no double-report is possible here).
+fn analyze_unit_variant_access(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    ety: TypeId,
+    field: StringId,
+    span: Span,
+) -> TirRef {
+    if sema.pool.is_error(ety) {
+        // Declared but its definition failed — astgen already
+        // diagnosed it. Quiet recovery, matching failed struct types.
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    let (ename, variant_index, vname, kind) = {
+        let eview = sema.pool.enum_view(ety);
+        let variants: Vec<(StringId, VariantKind)> =
+            eview.variants().map(|v| (v.name, v.kind)).collect();
+        let Some(index) = variants.iter().position(|&(name, _)| name == field) else {
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::UnknownVariant,
+                format!(
+                    "enum '{}' has no variant '{}'",
+                    sema.pool.str(eview.name()),
+                    sema.pool.str(field),
+                ),
+            ));
+            return fcx.builder.unreachable(sema.pool.error_type(), span);
+        };
+        let (vname, kind) = variants[index];
+        (eview.name(), index as u32, vname, kind)
+    };
+    if kind != VariantKind::Unit {
+        sema.sink.emit(
+            Diag::error(
+                span,
+                DiagCode::TypeMismatch,
+                format!(
+                    "variant '{}' of enum '{}' has a payload and cannot be used as a bare value",
+                    sema.pool.str(vname),
+                    sema.pool.str(ename),
+                ),
+            )
+            .with_help(format!(
+                "construct it: {}.{}(...)",
+                sema.pool.str(ename),
+                sema.pool.str(vname),
+            )),
+        );
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    fcx.builder.enum_lit(ety, variant_index, false, &[], span)
+}
+
+/// Comma-separated quoted field names of a struct or enum payload, for
+/// the "has no field" diagnostics.
+/// English ordinal for a 1-based argument position: "second",
+/// "third", "fourth", then "Nth". Used when an extra positional
+/// argument names its own position ("found a second positional
+/// argument — 'Some' takes 1").
+fn ordinal(n: usize) -> String {
+    match n {
+        2 => "second".to_string(),
+        3 => "third".to_string(),
+        4 => "fourth".to_string(),
+        _ => format!("{n}th"),
+    }
+}
+
+fn field_list(pool: &ryo_core::types::InternPool, fields: &[StructField]) -> String {
+    fields
         .iter()
         .map(|f| format!("'{}'", pool.str(f.name)))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// M11: `color.red(5)` where `color` is an enum — the parser only
+/// claims uppercase-led receivers for variant construction (spec §1
+/// PascalCase convention; a lowercase receiver keeps its method-call
+/// meaning), so a lowercase-named enum lands in the method-call path
+/// with its *type* as the receiver. Name the enum and point at the
+/// constructor spelling instead of the misleading "undefined
+/// variable". A bound variable of the same name still wins, matching
+/// the FieldAccess reinterpretation. Returns the error-typed
+/// recovery TIR when the check fired, `None` to continue ordinary
+/// method analysis.
+fn lowercase_enum_method_receiver(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    receiver: InstRef,
+    method: StringId,
+    args: &[InstRef],
+    span: Span,
+) -> Option<TirRef> {
+    if let InstTag::Var = sema.uir.inst(receiver).tag {
+        let name = match sema.uir.inst(receiver).data {
+            InstData::Var(name) => name,
+            _ => unreachable!("Var must carry InstData::Var"),
+        };
+        if scope.lookup(name).is_none() && sema.enum_types.contains_key(&name) {
+            let raw = sema.pool.str(name);
+            let mut chars = raw.chars();
+            let pascal = match chars.next() {
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            };
+            sema.sink.emit(
+                Diag::error(
+                    span,
+                    DiagCode::UnknownEnum,
+                    format!("'{raw}' is an enum, not a value"),
+                )
+                .with_help(format!(
+                    "types are PascalCase by convention: declare the enum as \
+                     '{pascal}' and construct '{pascal}.{}(...)'",
+                    sema.pool.str(method),
+                )),
+            );
+            for &arg in args {
+                analyze_expr(sema, fcx, scope, arg);
+            }
+            return Some(fcx.builder.unreachable(sema.pool.error_type(), span));
+        }
+        // `Point.make(1.0)` — a struct name in enum-construct
+        // position. Structs construct with braces, not `Name(...)`
+        // parens; name the brace spelling with the declared fields.
+        if scope.lookup(name).is_none()
+            && let Some(&sty) = sema.struct_types.get(&name)
+        {
+            let raw = sema.pool.str(name).to_string();
+            let example = {
+                let fields = sema.pool.struct_view(sty).fields;
+                let names = fields
+                    .iter()
+                    .map(|f| format!("{}=...", sema.pool.str(f.name)))
+                    .collect::<Vec<_>>();
+                if names.is_empty() {
+                    "{}".to_string()
+                } else {
+                    format!("{{{}}}", names.join(", "))
+                }
+            };
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::NotAStruct,
+                format!("'{raw}' is a struct, not an enum — construct it as {raw}{example}"),
+            ));
+            for &arg in args {
+                analyze_expr(sema, fcx, scope, arg);
+            }
+            return Some(fcx.builder.unreachable(sema.pool.error_type(), span));
+        }
+    }
+    None
 }
 
 /// Unknown receiver method: the generalized "X has no method 'Y'"
@@ -1250,6 +1682,40 @@ pub(crate) fn check_binary_op(
                     fcx.builder.unreachable(sema.pool.error_type(), span)
                 }
             }
+            // M11: enum equality is opt-in via `#[derive(Eq)]`, exactly
+            // like M9.1 structs — the same EqDeriveRequired gate and
+            // fix-it note. The derive flag is sufficient: astgen's
+            // DeriveFieldNotEq check already rejected any payload field
+            // that is not Eq-capable (per variant) before the enum was
+            // defined, so a defined enum with the flag compares safely.
+            // Codegen lowers EnumEq/EnumNe as discriminant compare plus
+            // a tag-switch field-wise payload compare.
+            TypeKind::Enum => {
+                if sema.pool.enum_view(kind_ty).is_eq() {
+                    let tir_tag = match tag {
+                        InstTag::Eq => TirTag::EnumEq,
+                        InstTag::NotEq => TirTag::EnumNe,
+                        _ => unreachable!(),
+                    };
+                    fcx.builder
+                        .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
+                } else {
+                    let name = sema.pool.display(kind_ty).to_string();
+                    sema.sink.emit(
+                        Diag::error(
+                            span,
+                            DiagCode::EqDeriveRequired,
+                            format!(
+                                "binary operator `{}` requires `{}` to be `Eq`",
+                                bin_op_symbol(tag),
+                                name,
+                            ),
+                        )
+                        .with_help(format!("add `#[derive(Eq)]` to `{name}`")),
+                    );
+                    fcx.builder.unreachable(sema.pool.error_type(), span)
+                }
+            }
             TypeKind::Void | TypeKind::Never | TypeKind::View(_) => {
                 sema.sink.emit(Diag::error(
                     span,
@@ -1304,6 +1770,7 @@ pub(crate) fn check_binary_op(
             | TypeKind::AnonStruct
             | TypeKind::Struct
             | TypeKind::Bytes
+            | TypeKind::Enum
             | TypeKind::View(_) => {
                 sema.sink.emit(Diag::error(
                     span,

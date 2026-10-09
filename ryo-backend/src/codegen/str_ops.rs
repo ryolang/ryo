@@ -16,7 +16,7 @@ use cranelift::prelude::*;
 use cranelift_module::Module;
 use ryo_core::tir::{TirData, TirRef, TirTag};
 
-use super::{Codegen, FunctionContext};
+use super::{Codegen, FunctionContext, ValueRepr};
 
 /// Upper size bound for the inline byte-compare specialization of
 /// `==`/`!=` against a string literal.
@@ -281,5 +281,63 @@ impl<M: Module> Codegen<M> {
         builder.seal_block(merge_block);
         builder.switch_to_block(merge_block);
         builder.block_params(merge_block)[0]
+    }
+}
+
+impl<M: Module> Codegen<M> {
+    /// Evaluate a `str`/`bytes`/`strview`/`bytesview`-typed operand and
+    /// hand back its `(ptr, len)` words regardless of representation —
+    /// owned triple or borrowed view pair (M8.4/M8.4.2). Owned triples
+    /// extract through the SSO-aware `emit_fat_bytes_ptr_len`, which
+    /// spills a tagged-inline value's words to a fresh scratch slot and
+    /// passes heap/static values through unchanged. Consumers that
+    /// only need the viewed bytes (`print`, `StrLen`, `StrCmpEq/Ne`,
+    /// `BytesCmpEq/Ne`, the `__ryo_str_push` suffix, the bytes
+    /// conversion calls) use this; anything needing the cap must stay
+    /// on `eval_inst_fat`.
+    ///
+    /// TRANSIENT CONSUMERS ONLY: for an inline value the returned ptr
+    /// addresses a scratch slot private to this extraction. View-
+    /// creating ops (slice, ToView) must not use it.
+    pub(super) fn eval_str_or_view_parts(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Result<(Value, Value), String> {
+        let ty = ctx.tir.inst(r).ty;
+        if ctx.pool.is_view(ty) {
+            let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, r)? else {
+                unreachable!("eval_inst_view must produce ValueRepr::View");
+            };
+            return Ok((ptr, len));
+        }
+        match Self::eval_inst_fat(builder, ctx, r)? {
+            ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
+                // A home-backed Var's inline bytes already sit in the
+                // home slot — extract against that address, no spill.
+                let inline_addr =
+                    Self::local_name_of(ctx, r).and_then(|n| Self::fat_home_addr(builder, ctx, n));
+                Self::emit_fat_bytes_ptr_len(builder, ctx, ptr, len, cap, inline_addr)
+            }
+            ValueRepr::View { ptr, len } => Ok((ptr, len)),
+            ValueRepr::Scalar(_) | ValueRepr::Struct { .. } | ValueRepr::Enum { .. } => {
+                Err(format!(
+                    "eval_str_or_view_parts: instruction at %{} is not a fat/view value",
+                    r.index()
+                ))
+            }
+        }
+    }
+
+    /// The `len` word of a `str`/`bytes`/`strview`/`bytesview`-typed
+    /// operand, from either representation (M8.4/M8.4.2). Backs the
+    /// `StrLen` arm.
+    pub(super) fn eval_str_or_view_len(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Result<Value, String> {
+        let (_, len) = Self::eval_str_or_view_parts(builder, ctx, r)?;
+        Ok(len)
     }
 }

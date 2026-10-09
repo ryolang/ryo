@@ -23,10 +23,8 @@
 //!    / inline expansion lands. Zig calls the analogous mapping
 //!    in `Air.zig` "liveness"; we don't need full liveness yet.
 
-use cranelift::codegen::ir::{
-    ArgumentPurpose, MemFlagsData, StackSlot, StackSlotData, StackSlotKind,
-};
-use cranelift::codegen::isa::{self, CallConv};
+use cranelift::codegen::ir::{MemFlagsData, StackSlot, StackSlotData, StackSlotKind};
+use cranelift::codegen::isa;
 use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
@@ -40,6 +38,8 @@ mod arith;
 mod builtins;
 mod bytes;
 mod control;
+mod decls;
+mod enums;
 mod expr;
 mod frees;
 mod jit;
@@ -49,6 +49,10 @@ mod str_ops;
 mod structs;
 mod tail;
 mod views;
+
+pub(crate) use structs::{is_fat_type, is_struct_type};
+
+pub(crate) use enums::is_enum_type;
 
 /// Fat-owner triple layout (str/bytes, 24 bytes): ptr at 0, len at 8,
 /// cap at 16. Derived from `RyoStrFat`, not re-hardcoded.
@@ -71,23 +75,6 @@ pub(crate) enum Terminator {
     Continue,
 }
 
-/// Returns `true` if `ty` is a 24-byte fat owner (`str` or `bytes`,
-/// M8.4.2) in the pool.
-///
-/// Callers use this to gate multi-value (fat-pointer) paths before
-/// reaching `cranelift_type_for`, where a fat type is a caller bug.
-pub(crate) fn is_fat_type(ty: TypeId, pool: &InternPool) -> bool {
-    matches!(pool.kind(ty), TypeKind::Str | TypeKind::Bytes)
-}
-
-/// True for the aggregate struct kinds — M9 named and M10 anonymous.
-/// Their values are memory-first (stack-slot addresses,
-/// `ValueRepr::Struct`), so params/returns ride the slot-address /
-/// sret ABI and these types must never reach `cranelift_type_for`.
-pub(crate) fn is_struct_type(ty: TypeId, pool: &InternPool) -> bool {
-    matches!(pool.kind(ty), TypeKind::Struct | TypeKind::AnonStruct)
-}
-
 /// Builtins whose fat result codegen materializes inline — no runtime
 /// call, no slot-out write. `writes_out_slot` must exclude exactly
 /// these: the inlined arm in `eval_inst_fat_slot` ignores its
@@ -96,7 +83,7 @@ pub(crate) fn is_struct_type(ty: TypeId, pool: &InternPool) -> bool {
 /// Keeping the set wrong in the other direction (listing a builtin
 /// that is NOT inlined) is harmless — it only forgoes the home.
 ///
-/// Test-only: the production exclusion lives in [`writes_out_slot_ids`]
+/// Test-only: the production exclusion lives in `writes_out_slot_ids`
 /// as an interned-id compare, and the unit test below iterates this
 /// table to assert both stay in agreement.
 #[cfg(test)]
@@ -165,28 +152,6 @@ impl CodegenNameIds {
     }
 }
 
-/// True when instruction `r` produces its fat result through a
-/// slot-out call (`emit_slot_out_call` or user-call sret) and can
-/// therefore write a caller-provided home slot directly. Concat and
-/// every fat-returning call qualify — except codegen-inlined builtins
-/// (`CodegenNameIds::bool_to_str`), which never touch a slot.
-fn writes_out_slot_ids(tir: &Tir, ids: &CodegenNameIds, r: TirRef) -> bool {
-    match tir.inst(r).tag {
-        TirTag::StrConcat | TirTag::BytesConcat => true,
-        TirTag::Call => ids.bool_to_str != Some(tir.call_view(r).name),
-        _ => false,
-    }
-}
-
-/// `#[cfg(test)]` three-arg form of [`writes_out_slot_ids`]: resolves
-/// the ids from the pool per call (test-only, so the probe cost is
-/// irrelevant) and exists because the unit test in `tests.rs` pins
-/// this exact signature.
-#[cfg(test)]
-pub(crate) fn writes_out_slot(tir: &Tir, pool: &InternPool, r: TirRef) -> bool {
-    writes_out_slot_ids(tir, &CodegenNameIds::resolve(pool), r)
-}
-
 /// Map a TIR type to the corresponding Cranelift IR type.
 ///
 /// `Int` uses the target's pointer-sized integer (i64 on 64-bit).
@@ -226,6 +191,9 @@ fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) ->
         }
         // Struct codegen (aggregate layout) lands in a later M9 task.
         TypeKind::Struct => unreachable!("cranelift_type_for: struct TypeId reached codegen"),
+        // Enums (M11) are slot-allocated aggregates exactly like
+        // structs; the memory-first paths gate before scalar mapping.
+        TypeKind::Enum => unreachable!("cranelift_type_for: enum TypeId reached codegen"),
     }
 }
 
@@ -318,6 +286,14 @@ pub(crate) enum ValueRepr {
     Struct {
         addr: Value,
     },
+    /// Enum value (M11): the address of the value's stack slot,
+    /// exactly like structs — the i32 discriminant and the active
+    /// variant's payload share one slot (`pool.enum_view` layout), and
+    /// tag-dispatched copies and drops go through this pointer (see
+    /// `codegen/enums.rs`).
+    Enum {
+        addr: Value,
+    },
 }
 
 impl ValueRepr {
@@ -329,6 +305,7 @@ impl ValueRepr {
             ValueRepr::Bytes { .. } => panic!("expected Scalar, got Bytes"),
             ValueRepr::View { .. } => panic!("expected Scalar, got View"),
             ValueRepr::Struct { .. } => panic!("expected Scalar, got Struct"),
+            ValueRepr::Enum { .. } => panic!("expected Scalar, got Enum"),
         }
     }
 }
@@ -729,99 +706,6 @@ impl<M: Module> Codegen<M> {
         }
     }
 
-    /// Read the free-target → binding-name map. Param sentinel refs
-    /// are served from `free_binding_param_names`; real instruction
-    /// refs from `free_binding_names`. Same dispatch shape as
-    /// `cached_repr`.
-    pub(crate) fn free_binding_name(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<StringId> {
-        if let Some(idx) = r.as_param_index() {
-            ctx.free_binding_param_names[idx as usize]
-        } else {
-            ctx.free_binding_names.get(r.index()).copied().flatten()
-        }
-    }
-
-    /// Read the free-target → BINDING identity map: the declaring
-    /// `VarDecl`'s `TirRef` for initializer targets, the
-    /// `sidecar.assign_binding` entry for `Assign` value targets. A fat
-    /// param's binding identity IS its own sentinel ref (params are
-    /// never shadowed). Same dispatch shape as `free_binding_name`;
-    /// `emit_frees` consults it so the redirect's "most recent write"
-    /// lookup is per-binding, not per-name (a same-named shadow is a
-    /// different binding and must not clobber the outer binding's
-    /// lineage).
-    pub(crate) fn free_binding_of(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<TirRef> {
-        if r.as_param_index().is_some() {
-            Some(r)
-        } else {
-            ctx.free_binding_of_insts.get(r.index()).copied().flatten()
-        }
-    }
-
-    /// True if any instruction reachable from `root` (transitive
-    /// operands and nested body statements) is a `Var` read of `name`.
-    /// Conservative aliasing probe for the producer-into-home Assign
-    /// path: an RHS that mentions the target binding (including a
-    /// shadowed same-name read — the probe cannot distinguish shadowing)
-    /// forbids the free-before-overwrite order.
-    fn expr_refs_name(tir: &Tir, root: TirRef, name: StringId) -> bool {
-        let mut stack = vec![root];
-        while let Some(r) = stack.pop() {
-            if let TirData::Var(n) = tir.inst(r).data
-                && n == name
-            {
-                return true;
-            }
-            tir.walk_operands(r, &mut |_parent, child, _kind| stack.push(child));
-        }
-        false
-    }
-
-    /// Provenance of a freshly stored home value: true iff the value
-    /// is provably free-noop — a provably-inline producer result or a
-    /// static (cap == 0) literal — so a later free on the home may be
-    /// elided.
-    fn home_value_provably_inline(
-        ctx: &FunctionContext<'_, M>,
-        func: &cranelift::codegen::ir::Function,
-        value: TirRef,
-        cap: Value,
-    ) -> bool {
-        Self::provably_inline_producer(ctx, value) || Self::is_static_cap_zero(func, cap)
-    }
-
-    /// Set the home-provenance flag on a fat binding. No-op for
-    /// home-less bindings (the flag is meaningless without a home).
-    pub(crate) fn set_home_inline(ctx: &mut FunctionContext<'_, M>, name: StringId, inline: bool) {
-        if let Some(mut fl) = Self::read_slot(&ctx.fat_locals, name)
-            && fl.home.is_some()
-            && fl.home_inline != inline
-        {
-            fl.home_inline = inline;
-            Self::write_slot(
-                &mut ctx.fat_locals,
-                &mut ctx.fat_locals_undo,
-                name,
-                Some(fl),
-            );
-        }
-    }
-
-    /// Clear every home-provenance flag. Called at control-flow joins
-    /// (if merges, loop headers and exits): the home slot is memory,
-    /// so stores inside an arm or iteration persist while the scoped
-    /// table restore reverts the flag — a join must not trust
-    /// pre-branch provenance.
-    pub(crate) fn invalidate_home_inline_flags(ctx: &mut FunctionContext<'_, M>) {
-        let flagged: Vec<StringId> = (0..ctx.fat_locals.len())
-            .filter(|&i| ctx.fat_locals[i].is_some_and(|fl| fl.home.is_some() && fl.home_inline))
-            .map(|i| StringId::from_raw(u32::try_from(i).expect("StringId index out of range")))
-            .collect();
-        for name in flagged {
-            Self::set_home_inline(ctx, name, false);
-        }
-    }
-
     /// Compile every function in `tirs` and return `main`'s `FuncId`
     /// together with the rendered CLIF text. The text is only
     /// produced when `dump_ir` is set (an `--emit=clif`-style
@@ -922,75 +806,6 @@ impl<M: Module> Codegen<M> {
         Ok(func_ids)
     }
 
-    fn build_signature(&self, tir: &Tir, pool: &InternPool, is_main: bool) -> Signature {
-        let mut sig = self.module.make_signature();
-        for param in &tir.params {
-            if param.mode == ParamMode::Inout {
-                // Mutable borrow: pass a single pointer to the caller's
-                // slot, regardless of pointee type (scalar or fat owner).
-                sig.params.push(AbiParam::new(self.int_type));
-            } else if is_fat_type(param.ty, pool) {
-                // Fat owner (str/bytes): 3-word ABI.
-                sig.params.push(AbiParam::new(self.int_type)); // ptr
-                sig.params.push(AbiParam::new(types::I64)); // len
-                sig.params.push(AbiParam::new(types::I64)); // cap
-            } else if pool.is_view(param.ty) {
-                // `strview` view: 2-word ABI (ptr, len) — no cap word (M8.4).
-                sig.params.push(AbiParam::new(self.int_type)); // ptr
-                sig.params.push(AbiParam::new(types::I64)); // len
-            } else if is_struct_type(param.ty, pool) {
-                // Struct (M9 named / M10 anonymous): a single pointer to
-                // the value's stack slot, regardless of mode
-                // (borrow/move/copy).
-                sig.params.push(AbiParam::new(self.int_type));
-            } else {
-                let cl_ty = cranelift_type_for(param.ty, pool, self.int_type);
-                sig.params.push(AbiParam::new(cl_ty));
-            }
-        }
-        // C-ABI shim for `main`: Ryo's `fn main()` is void and takes no
-        // Ryo params (sema rejects a parametrized main), but the host
-        // C runtime (crt0 via zig cc, or our JIT trampoline) enters
-        // `main` with C's `(argc, argv)`. C's argc is a 32-bit `int`,
-        // but the Cranelift ABI word is pointer-sized (`i64`): works on
-        // x86-64/aarch64/Windows because a 32-bit argument arrives
-        // zero-extended in its register, so the low half the C side
-        // reads is exact. Push the two entry params — argc, then argv,
-        // in C order — before the int return word; `compile_function`
-        // reads them from the entry block to call `ryo_rt_init`, and
-        // falls through to an explicit `return 0` since Ryo's return
-        // type is void.
-        // `is_main` is resolved by `declare_all_functions` from the
-        // interned-id cache.
-        if is_main {
-            sig.params.push(AbiParam::new(self.int_type));
-            sig.params
-                .push(AbiParam::new(self.module.isa().pointer_type()));
-            sig.returns.push(AbiParam::new(self.int_type));
-        } else if tir.return_type != pool.void() {
-            if is_fat_type(tir.return_type, pool) || is_struct_type(tir.return_type, pool) {
-                // sret: hidden pointer prepended to regular params, no IR-level return.
-                sig.params.insert(
-                    0,
-                    AbiParam::special(self.int_type, ArgumentPurpose::StructReturn),
-                );
-            } else {
-                let cl_ty = cranelift_type_for(tir.return_type, pool, self.int_type);
-                sig.returns.push(AbiParam::new(cl_ty));
-            }
-        }
-        // A function the pre-pass marked gets the Tail calling
-        // convention — the only convention from which Cranelift allows
-        // `return_call`. Never `main` (the C runtime enters it with the
-        // C ABI). A marked function that turns out ineligible at
-        // emission still compiles correctly as a plain Tail-conv
-        // function, so over-marking costs nothing.
-        if !is_main && self.tail_candidates.contains(&tir.name) {
-            sig.call_conv = CallConv::Tail;
-        }
-        sig
-    }
-
     fn compile_function(
         &mut self,
         tir: &Tir,
@@ -1061,7 +876,8 @@ impl<M: Module> Codegen<M> {
             let is_main = ids.main == Some(tir.name);
             let returns_fat = !is_main && is_fat_type(tir.return_type, pool);
             let returns_struct = !is_main && is_struct_type(tir.return_type, pool);
-            let has_sret = returns_fat || returns_struct;
+            let returns_enum = !is_main && is_enum_type(tir.return_type, pool);
+            let has_sret = returns_fat || returns_struct || returns_enum;
             let mut block_idx: usize = if has_sret { 1 } else { 0 };
             let sret_ptr = if has_sret {
                 Some(builder.block_params(entry_block)[0])
@@ -1118,12 +934,12 @@ impl<M: Module> Codegen<M> {
                                 home_inline: false,
                             }),
                         );
-                    } else if is_struct_type(param.ty, pool) {
-                        // Struct inout pointee (M9 named / M10 anon):
-                        // mutations happen in place through the
-                        // caller's slot — bind the pointer directly
-                        // and skip the write-back table (there is
-                        // nothing to store back).
+                    } else if is_struct_type(param.ty, pool) || is_enum_type(param.ty, pool) {
+                        // Struct (M9 named / M10 anon) and enum (M11)
+                        // inout pointees: mutations happen in place
+                        // through the caller's slot — bind the pointer
+                        // directly and skip the write-back table (there
+                        // is nothing to store back).
                         let var = builder.declare_var(int_type);
                         builder.def_var(var, ptr);
                         Self::write_slot(
@@ -1180,10 +996,12 @@ impl<M: Module> Codegen<M> {
                         }),
                     );
                     block_idx += 2;
-                } else if is_struct_type(param.ty, pool) {
-                    // Struct param (M9 named / M10 anon): a single
-                    // pointer to the caller-side slot (borrow) or to a
-                    // transferred field-wise copy (move/copy).
+                } else if is_struct_type(param.ty, pool) || is_enum_type(param.ty, pool) {
+                    // Struct (M9 named / M10 anon) and enum (M11)
+                    // params: a single pointer to the caller-side slot
+                    // (borrow) or to a transferred field-wise copy
+                    // (move/copy). Enum bindings share the
+                    // family-agnostic `struct_locals` table.
                     let var = builder.declare_var(int_type);
                     builder.def_var(var, builder.block_params(entry_block)[block_idx]);
                     Self::write_slot(
@@ -1332,6 +1150,12 @@ impl<M: Module> Codegen<M> {
                     let var = Self::read_slot(&ctx.struct_locals, param.name)
                         .expect("every struct param gets a struct_locals entry above");
                     ctx.param_values[idx] = Some(ValueRepr::Struct {
+                        addr: builder.use_var(var),
+                    });
+                } else if is_enum_type(param.ty, pool) {
+                    let var = Self::read_slot(&ctx.struct_locals, param.name)
+                        .expect("every enum param gets a struct_locals entry above");
+                    ctx.param_values[idx] = Some(ValueRepr::Enum {
                         addr: builder.use_var(var),
                     });
                 }
@@ -1528,140 +1352,10 @@ impl<M: Module> Codegen<M> {
     ) -> Result<Terminator, String> {
         let inst = ctx.tir.inst(r);
         match inst.tag {
-            TirTag::VarDecl => {
-                let view = ctx.tir.var_decl_view(r);
-                if is_fat_type(inst.ty, ctx.pool) {
-                    // Producer-into-home: a slot-out producer
-                    // initializer (runtime producer call, concat, or
-                    // fat-returning user call) writes the binding's
-                    // canonical 24-byte home slot directly — no temp
-                    // slot, no reload-to-SSA, no second spill slot.
-                    // All later reads/writes go through the home.
-                    // Mutable bindings get a home even when the
-                    // initializer is not a producer: only they can be
-                    // reassigned, and a later slot-out reassign then
-                    // writes the home directly (and the home-provenance
-                    // free elision applies) instead of paying a temp
-                    // slot + triple store at every reassign.
-                    let produces_slot =
-                        writes_out_slot_ids(ctx.tir, &ctx.name_ids, view.initializer);
-                    let home = if produces_slot || view.mutable {
-                        Some(builder.create_sized_stack_slot(StackSlotData::new(
-                            StackSlotKind::ExplicitSlot,
-                            STR_SLOT_SIZE,
-                            3,
-                        )))
-                    } else {
-                        None
-                    };
-                    let repr = Self::eval_inst_fat_slot(
-                        builder,
-                        ctx,
-                        view.initializer,
-                        home.filter(|_| produces_slot),
-                    )?;
-                    match repr {
-                        ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
-                            let var_ptr = builder.declare_var(ctx.int_type);
-                            let var_len = builder.declare_var(types::I64);
-                            let var_cap = builder.declare_var(types::I64);
-                            // Home-backed bindings keep the triple in the
-                            // slot only; the SSA Variables stay unused.
-                            // A non-producer initializer needs the triple
-                            // stored into the home by hand.
-                            match home {
-                                Some(home) if !produces_slot => {
-                                    let addr = builder.ins().stack_addr(ctx.int_type, home, 0);
-                                    builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
-                                    builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
-                                    builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
-                                }
-                                Some(_) => {}
-                                None => {
-                                    builder.def_var(var_ptr, ptr);
-                                    builder.def_var(var_len, len);
-                                    builder.def_var(var_cap, cap);
-                                }
-                            }
-                            let home_inline = home.is_some()
-                                && Self::home_value_provably_inline(
-                                    ctx,
-                                    builder.func,
-                                    view.initializer,
-                                    cap,
-                                );
-                            Self::write_slot(
-                                &mut ctx.fat_locals,
-                                &mut ctx.fat_locals_undo,
-                                view.name,
-                                Some(FatLocals {
-                                    ptr: var_ptr,
-                                    len: var_len,
-                                    cap: var_cap,
-                                    home,
-                                    home_inline,
-                                }),
-                            );
-                        }
-                        _ => unreachable!("fat-typed initializer should produce a fat ValueRepr"),
-                    }
-                    return Ok(Terminator::None);
-                }
-                if ctx.pool.is_view(inst.ty) {
-                    let repr = Self::eval_inst_view(builder, ctx, view.initializer)?;
-                    match repr {
-                        ValueRepr::View { ptr, len } => {
-                            let var_ptr = builder.declare_var(ctx.int_type);
-                            let var_len = builder.declare_var(types::I64);
-                            builder.def_var(var_ptr, ptr);
-                            builder.def_var(var_len, len);
-                            Self::write_slot(
-                                &mut ctx.view_locals,
-                                &mut ctx.view_locals_undo,
-                                view.name,
-                                Some(ViewLocals {
-                                    ptr: var_ptr,
-                                    len: var_len,
-                                }),
-                            );
-                        }
-                        _ => unreachable!("view-typed initializer should produce ValueRepr::View"),
-                    }
-                    // Same defensive fact removal as the scalar path
-                    // below: a same-scope redefinition must not inherit
-                    // a stale fact from the shadowed binding.
-                    Self::write_slot(
-                        &mut ctx.range_facts,
-                        &mut ctx.range_facts_undo,
-                        view.name,
-                        None,
-                    );
-                    return Ok(Terminator::None);
-                }
-                if matches!(
-                    ctx.pool.kind(inst.ty),
-                    TypeKind::Struct | TypeKind::AnonStruct
-                ) {
-                    return Self::emit_struct_var_decl(builder, ctx, r);
-                }
-                let val = Self::eval_inst(builder, ctx, view.initializer)?;
-                // The variable's resolved type lives in the VarDecl
-                // inst's `ty` slot directly — no side-table lookup.
-                let cl_ty = cranelift_type_for(inst.ty, ctx.pool, ctx.int_type);
-                let var = builder.declare_var(cl_ty);
-                builder.def_var(var, val);
-                // Defensive: a same-scope redefinition must not inherit
-                // a stale fact from the shadowed binding. (No seeding
-                // from constant initializers — explicit non-goal.)
-                Self::write_slot(
-                    &mut ctx.range_facts,
-                    &mut ctx.range_facts_undo,
-                    view.name,
-                    None,
-                );
-                Self::write_slot(&mut ctx.locals, &mut ctx.locals_undo, view.name, Some(var));
-                Ok(Terminator::None)
-            }
+            // Variable declaration — family dispatch lives in
+            // decls.rs (keeps this dispatcher under the
+            // small-function ratchet).
+            TirTag::VarDecl => Self::emit_var_decl(builder, ctx, r),
             TirTag::Return => {
                 let operand = match inst.data {
                     TirData::UnOp(o) => o,
@@ -1684,6 +1378,8 @@ impl<M: Module> Codegen<M> {
                     Self::emit_return(builder, ctx, &[])?;
                 } else if is_struct_type(ctx.tir.return_type, ctx.pool) {
                     return Self::emit_struct_return(builder, ctx, r, operand);
+                } else if is_enum_type(ctx.tir.return_type, ctx.pool) {
+                    return Self::emit_enum_return(builder, ctx, r, operand);
                 } else {
                     // A Return whose operand is a call is a tail
                     // context regardless of position. An eligible
@@ -1753,162 +1449,18 @@ impl<M: Module> Codegen<M> {
                     // struct-returning call): materialize so the call
                     // is emitted; scheduled temp Frees handle the drop.
                     let _ = Self::eval_inst_struct(builder, ctx, operand)?;
+                } else if matches!(ctx.pool.kind(operand_ty), TypeKind::Enum) {
+                    // Bare enum-valued statement (e.g. a discarded
+                    // enum-returning call): materialize so the call is
+                    // emitted; scheduled temp Frees handle the drop.
+                    let _ = Self::eval_inst_enum(builder, ctx, operand)?;
                 } else {
                     let _ = Self::eval_inst(builder, ctx, operand)?;
                 }
                 Ok(Terminator::None)
             }
             TirTag::IfStmt => Self::generate_if_stmt(builder, ctx, r, in_tail_position),
-            TirTag::Assign => {
-                let view = ctx.tir.assign_view(r);
-                if is_fat_type(inst.ty, ctx.pool) {
-                    // Consuming reassign-concat fast path: the ownership
-                    // pass proved the lhs binding dies at this reassign, so
-                    // codegen appends in place and skips the
-                    // free_on_reassign free below by never reaching it.
-                    if let Some(concat_ref) = ctx.sidecar.consumed_concat_lhs[r.index()] {
-                        return Self::emit_consuming_concat_assign(builder, ctx, r, concat_ref);
-                    }
-                    // `read_slot` copies the FatLocals out (three Cranelift
-                    // `Variable` newtypes + home), so no table borrow
-                    // survives into the free declaration below, which
-                    // needs &mut ctx.module.
-                    let locals = Self::read_slot(&ctx.fat_locals, view.name).ok_or_else(|| {
-                        format!(
-                            "Undefined fat variable in assign: '{}'",
-                            ctx.pool.str(view.name)
-                        )
-                    })?;
-                    let is_bytes = matches!(ctx.pool.kind(inst.ty), TypeKind::Bytes);
-                    // Home-backed target whose RHS cannot reference the
-                    // binding: free the old buffer FIRST, then let the
-                    // producer write the home directly (free-before-
-                    // overwrite). An RHS that reads the binding (e.g. a
-                    // non-consuming `s = s + "x"`) takes the eval-then-
-                    // free-then-store order instead — freeing first
-                    // would be a use-after-free.
-                    let direct = locals.home.is_some()
-                        && writes_out_slot_ids(ctx.tir, &ctx.name_ids, view.value)
-                        && !Self::expr_refs_name(ctx.tir, view.value, view.name);
-                    let mut old_freed = false;
-                    // Elision, same predicate as the scheduled-free
-                    // path: when the home's CURRENT contents are
-                    // provably free-noop (`locals.home_inline`), the
-                    // old-value free is a guaranteed no-op either way.
-                    if direct
-                        && !locals.home_inline
-                        && ctx.sidecar.free_on_reassign[r.index()].is_some()
-                    {
-                        let (old_ptr, old_cap) =
-                            Self::emit_fat_load_ptr_cap(builder, ctx, view.name)
-                                .expect("fat_locals entry read above");
-                        if !Self::is_static_cap_zero(builder.func, old_cap) {
-                            let free_ref = if is_bytes {
-                                Self::declare_bytes_free(ctx, builder)?
-                            } else {
-                                Self::declare_str_free(ctx, builder)?
-                            };
-                            builder.ins().call(free_ref, &[old_ptr, old_cap]);
-                        }
-                        old_freed = true;
-                    }
-                    let repr = Self::eval_inst_fat_slot(
-                        builder,
-                        ctx,
-                        view.value,
-                        if direct { locals.home } else { None },
-                    )?;
-                    let (ptr, len, cap) = match repr {
-                        ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
-                            (ptr, len, cap)
-                        }
-                        _ => unreachable!("fat-typed assign should produce a fat ValueRepr"),
-                    };
-                    // Free the old allocation before overwriting locals.
-                    // sidecar.free_on_reassign[r] is set whenever the
-                    // ownership pass observed a Valid old owner at this
-                    // Assign. The old (ptr, cap) live in the binding's
-                    // current storage (home slot or FatLocals Variables)
-                    // — NOT in inst_values[old_owner], which holds the
-                    // literal's original (ptr, cap) at its emission point
-                    // and may be stale across reassigns.
-                    if !old_freed
-                        && ctx.sidecar.free_on_reassign[r.index()].is_some()
-                        && !(locals.home.is_some() && locals.home_inline)
-                    {
-                        let (old_ptr, old_cap) =
-                            Self::emit_fat_load_ptr_cap(builder, ctx, view.name)
-                                .expect("fat_locals entry read above");
-                        if !Self::is_static_cap_zero(builder.func, old_cap) {
-                            let free_ref = if is_bytes {
-                                Self::declare_bytes_free(ctx, builder)?
-                            } else {
-                                Self::declare_str_free(ctx, builder)?
-                            };
-                            builder.ins().call(free_ref, &[old_ptr, old_cap]);
-                        }
-                    }
-                    match locals.home {
-                        // In direct mode the producer already wrote the
-                        // home; only the aliasing fallback stores here.
-                        Some(home) if !direct => {
-                            let addr = builder.ins().stack_addr(ctx.int_type, home, 0);
-                            builder.ins().store(MemFlagsData::trusted(), ptr, addr, 0);
-                            builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
-                            builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
-                        }
-                        Some(_) => {}
-                        None => {
-                            builder.def_var(locals.ptr, ptr);
-                            builder.def_var(locals.len, len);
-                            builder.def_var(locals.cap, cap);
-                        }
-                    }
-                    if locals.home.is_some() {
-                        let inline =
-                            Self::home_value_provably_inline(ctx, builder.func, view.value, cap);
-                        Self::set_home_inline(ctx, view.name, inline);
-                    }
-                    Self::kill_fact(ctx, view.name);
-                    return Ok(Terminator::None);
-                }
-                if ctx.pool.is_view(inst.ty) {
-                    let repr = Self::eval_inst_view(builder, ctx, view.value)?;
-                    let ValueRepr::View { ptr, len } = repr else {
-                        unreachable!("view-typed assign should produce ValueRepr::View");
-                    };
-                    let locals = Self::read_slot(&ctx.view_locals, view.name).ok_or_else(|| {
-                        format!(
-                            "Undefined strview variable in assign: '{}'",
-                            ctx.pool.str(view.name)
-                        )
-                    })?;
-                    // Views are borrows — no free-on-reassign; just
-                    // reseat the pair.
-                    builder.def_var(locals.ptr, ptr);
-                    builder.def_var(locals.len, len);
-                    Self::kill_fact(ctx, view.name);
-                    return Ok(Terminator::None);
-                }
-                if matches!(
-                    ctx.pool.kind(inst.ty),
-                    TypeKind::Struct | TypeKind::AnonStruct
-                ) {
-                    return Self::emit_struct_assign(builder, ctx, r);
-                }
-                let val = Self::eval_inst(builder, ctx, view.value)?;
-                // Kill AFTER evaluating the RHS: `x = x + 1` must still
-                // see the old fact while its right-hand side is emitted.
-                Self::kill_fact(ctx, view.name);
-                let var = Self::read_slot(&ctx.locals, view.name).ok_or_else(|| {
-                    format!(
-                        "Undefined variable in assign: '{}'",
-                        ctx.pool.str(view.name)
-                    )
-                })?;
-                builder.def_var(var, val);
-                Ok(Terminator::None)
-            }
+            TirTag::Assign => Self::emit_assign(builder, ctx, r),
             TirTag::CompoundAssign => {
                 let view = ctx.tir.compound_assign_view(r);
                 let rhs = Self::eval_inst(builder, ctx, view.value)?;

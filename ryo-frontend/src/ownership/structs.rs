@@ -1,8 +1,13 @@
-//! M9 struct ownership helpers — split from `walk.rs`.
+//! M9 struct ownership helpers — split from `walk.rs`; M11 adds
+//! enum variant construction, whose payload consumption mirrors the
+//! `StructLit` rules below.
 //!
 //! A struct value is ONE `Owner`: a whole-struct move moves every
 //! field at once, so the lattice shape is unchanged from `str`/`bytes`.
-//! What structs add is field-level rules:
+//! M11 extends the same whole-value model to enums: an enum value is
+//! ONE `Owner`, and an `EnumLit` consumes each needs-drop payload arg
+//! like a `StructLit` consumes its fields — no new sidecar kinds. What
+//! structs add is field-level rules:
 //!
 //! * a `StructLit` consumes each needs-drop field value under the
 //!   normal rules (`Person{name=s}` MOVES `s`);
@@ -122,6 +127,72 @@ pub(crate) fn consume_struct_lit_fields(
     }
 }
 
+/// `visit_expr`'s `EnumLit` arm (M11), split out of `walk.rs` (the
+/// workspace's small-function lint keeps `visit_expr` under the line
+/// budget). Whole-value model: an enum value is ONE `Owner`, exactly
+/// like a struct, so this mirrors the `StructLit` arm — a needs-drop
+/// enum literal materializes a fresh owner, and its payload args are
+/// walked and consumed only here (the payload is `TirData::Extra`,
+/// which `recurse_operands` never descends into). A Copy enum skips
+/// the lattice entirely; its payload args are Copy too, so the consume
+/// is a no-op on them. M11 has no payload-access syntax, so no
+/// field-level guard applies to the payload args.
+pub(crate) fn analyze_enum_lit(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    sidecar: &mut FunctionSidecar,
+    lit: TirRef,
+) {
+    if needs_tracking(tir.inst(lit).ty, pool) {
+        own.states.insert(Owner::Inst(lit), OwnerState::Valid);
+        Ownership::dense_set(&mut own.origin, lit, None);
+        own.temp_owners.insert(Owner::Inst(lit));
+    }
+    for (_, value) in tir.enum_lit_view(lit).fields() {
+        visit_expr(tir, pool, own, sink, sidecar, value);
+    }
+    consume_enum_lit_fields(tir, pool, own, sink, lit);
+}
+
+/// Consume each needs-drop payload arg of an `EnumLit` (M11) under the
+/// normal rules, mirroring [`consume_struct_lit_fields`]: a bound
+/// source moves (`Opt.Some(s)` invalidates `s`), a fresh temp is
+/// stamped `Moved` so the anon-temp free pass leaves it to the
+/// whole-enum free. A needs-drop payload arg that is itself a
+/// needs-drop `FieldAccess` trips the `MoveOutOfField` guard inside
+/// `consume_underlying`, exactly like a struct field value. Copy-typed
+/// payload args just evaluate. `lit` is the `EnumLit` instruction,
+/// recorded as the consume site.
+pub(crate) fn consume_enum_lit_fields(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    lit: TirRef,
+) {
+    for (_, value) in tir.enum_lit_view(lit).fields() {
+        if !needs_tracking(tir.inst(value).ty, pool) {
+            continue;
+        }
+        let span = tir.span(value);
+        let consumed_name = consumed_binding_name(tir, value);
+        // P2 freeze (final spec §3.2): the consume moves the owner.
+        check_source_projected(
+            tir,
+            pool,
+            own,
+            sink,
+            underlying_owner(own, value),
+            span,
+            "move",
+            consumed_name,
+        );
+        consume_for_assignment(tir, pool, own, sink, value, span, consumed_name, lit);
+    }
+}
+
 /// Consuming-context field read guard (M9): a needs-drop field read in
 /// a consuming position (var-decl init, assign RHS, return, move-mode
 /// call argument) cannot move — the field's value leaves through the
@@ -150,6 +221,10 @@ pub(crate) fn check_field_move_out(
     // Sema guarantees the object is a struct (named or anonymous); a
     // poisoned (error-typed) chain already has a sema diagnostic, so
     // don't add noise — the normal consume path no-ops on it.
+    // M11 needs no `TypeKind::Enum` arm here: the whole-value model has
+    // no payload access, so no partial-move read of an enum exists and
+    // no `MoveOutOfField`-analog is reachable — M12's bindings bring
+    // payload access (and with it the enum arm of this guard).
     if !matches!(pool.kind(obj_ty), TypeKind::Struct | TypeKind::AnonStruct) {
         return false;
     }

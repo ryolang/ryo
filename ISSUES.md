@@ -234,6 +234,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `ryo-core/src/uir.rs` (`var_decl_extra` etc.), `ryo-core/src/tir.rs` (`call_extra` :337-342, `var_decl_extra` :355-362, `assign_extra`/… :370-418)
 **Summary:** tir.rs re-defines near-identical `extra`-layout modules with different layouts: `call_extra` appends a modes tail; `var_decl_extra` drops the `TY` slot (`LEN: 3` vs uir's `4`). Same names, same constants, different meanings — a footgun when editing one side. `ExtraRange` itself is also byte-duplicated (`uir.rs:107-118` vs `tir.rs:87-98`), and `IfStmt` has no layout doc module at all in tir.rs (:677-715).
 **Resolution:** Unify the shared pieces (`ExtraRange` at minimum) in one module; rename or document the layout differences explicitly; add the missing `if_stmt_extra` doc module.
+**Update (2026-10-09, Milestone 11):** `ExtraRange` is now unified in `ryo-core/src/extra.rs`, and the M11 enum encodings (`enum_lit_extra`, `EnumLitView`) were born on the shared type with no per-IR duplication. The layout documentation gaps above remain open.
 
 ---
 
@@ -245,6 +246,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `ryo-core/src/uir.rs` (`call_view` :870-886, `if_stmt_view` :1004-1046, `body_stmts` :344, `while_loop_view` :942, `for_range_view` :956, `method_call_view` :981), `ryo-core/src/tir.rs` (`call_view`), `ryo-backend/src/codegen/expr.rs` (call view args/modes)
 **Summary:** Every accessor decode collects refs out of `extra` into a fresh `Vec<InstRef>`/`Vec<TirRef>`, and `body_stmts()` collects a slice that is already contiguous. Sema and codegen call these in their hottest loops. Multipliers found in the 2026-08 arena-perf review: `Tir::walk_operands` (`tir.rs:1194-1266`) decodes views per visited instruction, so every `collect_reachable` costs several Vec allocs per inst; sema calls `uir.body_stmts(body)` twice per function (`sema/mod.rs:485-486`); ownership calls `tir.body_stmts()` per whole-body-walk query (`ownership/frees.rs:28, :208`, `ownership/loops.rs:67, :128, :249, :307`). Additionally `ExtraRange.len` is write-only metadata (decoders re-derive counts from inline `argc` words) — a second source of truth.
 **Resolution:** Return borrowed slices (`&[InstRef]` over `extra`) or `impl Iterator` from the views; `body_stmts` can be a slice iter directly. Add `assert_eq!(size_of::<Inst>(), 24)` before any `InstData` refactor.
+**Update (2026-10-09, Milestone 11):** The M11 enum view decoders (`EnumLitView` in `uir.rs`/`tir.rs`) borrow the `extra` arena (`&[u32]`) and iterate fields with no per-decode `Vec`. The legacy view decoders listed above still collect; entry stays open for them.
 
 ---
 
@@ -355,6 +357,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** measured by brace-depth scan, tests excluded — worst offenders (refs refreshed 2026-08-24, post-split): `ryo-frontend/src/ownership/walk.rs` `visit_expr` :782 (~424 raw / 298 code lines), `analyze_if_stmt` :507 (210 code); `ryo-frontend/src/ownership/mod.rs` `analyze_function` :286; `ryo-frontend/src/sema/stmt.rs` `analyze_stmt` :14 (360 code lines — at the ratchet); `ryo-frontend/src/sema/expr.rs` `analyze_expr_allow_never` :37 (~322 raw), `check_binary_op` :439 (~265); `ryo-frontend/src/sema/builtins.rs` `emit_builtin_call` :10 (~225); `ryo-frontend/src/sema/call.rs` `check_call` :12 (~220); `ryo-backend/src/codegen/expr.rs` `eval_inst` :18, `eval_inst_str` :829, `emit_call`; `ryo-backend/src/codegen/mod.rs` `emit_stmt` :909, `compile_function` :549; `ryo-frontend/src/parser.rs` `expression_parser`; `ryo-core/src/uir.rs` `write_inst` :1106 and the same pattern in `ryo-core/src/tir.rs`
 **Summary:** R7 targets functions under 50 lines so a human reviewer can hold each one in their head. Sixteen functions sit between ~150 and ~410 lines, almost all of them giant per-tag dispatch `match`es in the hottest passes. These are the files every milestone touches; review cost and merge-conflict surface scale with their length. (Distinct from the since-resolved per-function CLIF-render cost problem, which tracked a *content* problem inside one of these functions, not size.)
 **Resolution:** Split the entry points into one helper per tag/arm family (`lower_match_expr`-style naming per R7), keeping the dispatch match as a thin table. Do it opportunistically when a function is next touched for a feature — starting with `visit_expr` and `analyze_stmt`, the two worst — rather than as one big-bang refactor. `clippy::too_many_lines` is denied workspace-wide with `too-many-lines-threshold = 360` as a ratchet; lower the threshold towards 50 as functions split.
+**Update (2026-10-09, Milestone 11):** Ahead of the enum codegen work the aggregate machinery moved out of the two ratchet-saturated codegen files into per-domain homes — `structs.rs`, `frees.rs`, `str_ops.rs`, and a new `enums.rs` — and the enum arms emit through per-variant helpers. The frontend giants listed above are untouched; entry stays open.
 
 ---
 
@@ -421,6 +424,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `ryo-frontend/src/parser.rs` (:604-615, :650-661, :534-538, :436-446)
 **Summary:** Call args, method args, params, and elif branches are `collect::<Vec<_>>()`ed into a temporary, copied into the AST side arena by the builder, then dropped — a double buffer per node. Partly inherent to chumsky's `IterParser`; impact is small next to the win the arena already delivered.
 **Resolution:** A custom collector writing straight into the arena (chumsky 0.12 collects via `FromIterator`, so an arena-append adapter is feasible), or accept as-is. Measure before bothering.
+**Update (2026-10-09, Milestone 11):** Enum variant-construct args (`ryo-frontend/src/parser/enums.rs`) push straight into the AST side arenas as parsed — no intermediate `Vec`. The call/method-arg and params sites listed above still collect; entry stays open.
 
 ---
 
@@ -611,7 +615,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-193 — Attributes only parse on struct definitions; functions and other items cannot carry them
+### I-193 — Attributes only parse on struct and enum definitions; functions and other items cannot carry them
 
 **Severity:** Blocking
 **Area:** frontend-parser
@@ -621,6 +625,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** Milestone 9.1 introduced `#[...]` attributes restricted to struct definitions; an attribute before a function or any other item is a compile error (E0108, "attributes are only supported on struct definitions"). Roadmap features that need function attributes — the testing framework's `#[test]`, contracts (`#[pre]`/`#[post]`), `#[no_mangle]` (spec §19) — are blocked until placement widens. The groundwork is already M26-ready: the lexer exposes `#[` everywhere and the parser's attribute *contents* are generic (`ident` + optional parenthesized comma-list), so the change is the placement rule, per-name recognition with per-item validation, and the E0108 message.
 
 **Resolution:** Lands with Milestone 26 (the general attribute system) at the earliest; a narrower interim step (e.g. `#[test]` only) would widen the placement rule for functions without the full system.
+**Update (2026-10-09, Milestone 11):** Placement widened to enum definitions and the E0108 text now reads "attributes are only supported on struct and enum definitions". Functions and other items are still rejected; the rest of this entry stays open.
 
 ---
 
@@ -673,6 +678,32 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** The M9.2 `read_line_from` function reads stdin in 128-byte chunks. When it finds the first `\n` in a chunk, it returns only the bytes up to that newline and **frees the entire buffer**, discarding any remaining bytes in the chunk. Crucially, the file position has already advanced by the full chunk size (not the line length), so subsequent `io_read_line()` calls skip the discarded data. Example: piping a file where lines 1-3 fit in the first 128-byte read will return line 1, then jump to the byte position after the chunk, skipping lines 2-3. Demonstrated by `cat README.md | cargo run -- run examples/echo.ryo` which loses the second and third lines of the file. Related: the oracle example documents this as "piping all answers at once starves it."
 
 **Resolution:** Fix in **Milestone 13.6** (buffering work). Preserve the unread portion of the chunk between calls by maintaining buffer state — the proper fix, and the one that also enables real buffering. (The minimal alternative, seeking the file position back after extracting the line, is not viable for piped stdin: pipes are not seekable.) After this lands, remove the workaround note from `examples/oracle.ryo`.
+
+---
+
+### I-207 — Brace Law asymmetry vs Go-style uniform braces — revisit if alpha reopens syntax
+
+**Severity:** Correctness / Hygiene
+**Area:** docs-spec
+
+**Files:** docs/specification.md (D11), landing/reference/index.html (#enums)
+
+**Summary:** Enum named payloads declare with parens + 'name: Type' (Rectangle(width: float)) but construct with braces + 'name=value' (Rectangle{width=1.0}). The asymmetry is frozen for alpha (D11), but it is a Rust/Swift idiom, not the simplest option: Go uses one brace+name syntax for both declaration and construction (type Point struct{ X, Y float64 } / Point{X: 1}). DX review against the 'as simple as Go' bar flagged this as the remaining declaration/construction visual mismatch; the landing Forms table mitigates in the meantime.
+
+**Resolution:** Revisit only if alpha ever reopens enum syntax: benchmark Go's uniform-brace declaration/construction against the current D11 form, including how tuple variants would render. Until then the landing Forms table owns the teachability; no code action.
+
+---
+
+### I-208 — Lowercase type names half-work: enum defines and unit-accesses fine, payload construction redirects
+
+**Severity:** Correctness / Hygiene
+**Area:** frontend-parser
+
+**Files:** ryo-frontend/src/parser/enums.rs (uppercase receiver gate), ryo-frontend/src/sema/expr.rs (lowercase_enum_method_receiver)
+
+**Summary:** User-defined types are PascalCase by documented convention (docs/AGENTS.md), but the convention is enforced selectively: a lowercase enum (enum color: red(v: int)) defines without complaint, and unit access color.red works; only payload construction (color.red(5)) redirects — after the M11 fix with an enum-aware diagnostic and PascalCase hint, but still a use-site surprise for a definition the compiler accepted. Structs have no equivalent enforcement anywhere, so the two type kinds also differ from each other. DX review against the 'as simple as Go' bar: Go never half-accepts — its naming convention is enforced by style tooling and review culture (staticcheck, revive), not the compiler, and lowercase types are fully first-class; the language never accepts a definition and then surprises you at a use site.
+
+**Resolution:** Pick one: (a) enforce PascalCase user-defined type names uniformly at declaration (structs and enums) with a clear convention error — cheap, makes the documented convention a rule, removes the half-working state; or (b) make naming irrelevant by moving disambiguation fully to sema — parse every X.Y(...) as a method call and reinterpret as EnumLit when X resolves to an enum type (the X.Y{...} brace form is already unambiguous at parse), which makes lowercase types fully first-class at the cost of parser+sema churn in the postfix machinery. Recommended: (a) now if the convention is the policy; (b) when the parser architecture next needs touching anyway.
 
 ---
 

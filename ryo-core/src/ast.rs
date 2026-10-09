@@ -23,10 +23,12 @@
 //!   chain, behind an [`ElifList`] range.
 //! - `struct_field_decls: Vec<(StringId, TypeExpr)>` — side arena
 //!   for struct declaration field lists, in declaration order,
-//!   behind a [`StructFieldDeclList`] range.
+//!   behind a [`StructFieldDeclList`] range. Enum variant payloads
+//!   (M11) share this arena.
 //! - `struct_field_inits: Vec<(StringId, ExprId)>` — side arena for
 //!   struct literal field initializers, in source order, behind a
-//!   [`StructFieldInitList`] range.
+//!   [`StructFieldInitList`] range. Enum named-payload construction
+//!   (M11) shares this arena.
 //! - `type_field_lists: Vec<(StringId, TypeExpr)>` / `type_expr_lists:
 //!   Vec<TypeExpr>` — side arenas for compound type expressions
 //!   (M10): the field list of an anonymous type literal `{q: int,
@@ -36,6 +38,9 @@
 //!   convention as [`ExprId`]. Destructuring patterns (M10): `_`, a
 //!   binding, `{q, r}` / `{x = quot}` field patterns, positional
 //!   `(a, b)`.
+//! - `enum_variants: Vec<EnumVariantDecl>` — side arena for enum
+//!   declaration variant lists (M11), in declaration order, behind an
+//!   [`EnumVariantDeclList`] range.
 //! - `pattern_lists: Vec<PatternId>` / `pattern_field_lists:
 //!   Vec<PatternField>` — side arenas for compound patterns: the
 //!   element list of a [`PatternKind::Positional`] behind a
@@ -72,7 +77,7 @@
 //! `Inspector` impl at the bottom of this file for rewind truncation.
 
 use crate::tir::ParamMode;
-use crate::types::StringId;
+use crate::types::{StringId, VariantKind};
 use chumsky::span::{SimpleSpan, Span as _};
 use std::fmt;
 use std::num::NonZeroU32;
@@ -284,6 +289,21 @@ impl PatternFieldList {
     }
 }
 
+/// A `[offset, offset+len)` slice of the `enum_variants` side arena —
+/// an `enum` declaration's variant list, in declaration order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnumVariantDeclList {
+    offset: u32,
+    len: u32,
+}
+
+impl EnumVariantDeclList {
+    fn as_range(self) -> std::ops::Range<usize> {
+        let start = self.offset as usize;
+        start..start + self.len as usize
+    }
+}
+
 // ---------- Expressions ----------
 
 /// A single expression: kind plus inline source span.
@@ -341,6 +361,14 @@ pub enum ExprKind {
         object: ExprId,
         field: Ident,
     },
+    /// Enum variant construction `EnumName.Variant(...)` (positional
+    /// payload) or `EnumName.Variant{...}` (named payload) (M11). The
+    /// parser only builds this node when the receiver is a bare
+    /// uppercase-led identifier — the spec §1 PascalCase type
+    /// convention — so `obj.method(...)` keeps its meaning; bare
+    /// `EnumName.Variant` stays [`ExprKind::FieldAccess`] (sema
+    /// reinterprets it as a unit-variant value).
+    VariantConstruct(VariantConstruct),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -425,6 +453,9 @@ pub enum StmtKind {
     /// `struct Name:` declaration (M9). The field list lives in the
     /// `struct_field_decls` side arena, in declaration order.
     StructDef(StructDef),
+    /// `enum Name:` declaration (M11). The variant list lives in the
+    /// `enum_variants` side arena, in declaration order.
+    EnumDef(EnumDef),
     Return(Option<ExprId>),
     ExprStmt(ExprId),
     IfStmt(IfStmt),
@@ -526,6 +557,48 @@ pub struct StructDef {
     pub attrs: StructAttrs,
 }
 
+/// Attributes parsed off an `enum` declaration (M11, the I-193 slice):
+/// only `#[derive(Eq)]` is accepted. `#[repr(C)]` on an enum is
+/// rejected at the parse stage (E0117) — pinned layout is a struct
+/// feature — so unlike [`StructAttrs`] there is no `repr_c` bit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EnumAttrs {
+    /// `#[derive(Eq)]` — synthesize tag + payload `==` / `!=`.
+    pub derive_eq: bool,
+}
+
+/// An `enum` declaration (M11). All fields are `Copy` handles; the
+/// variant list lives in the `enum_variants` side arena, in
+/// declaration order. An empty body parses (the empty-enum diagnostic
+/// is astgen's, not the parser's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnumDef {
+    pub name: Ident,
+    pub variants: EnumVariantDeclList,
+    pub attrs: EnumAttrs,
+}
+
+/// One variant line of an `enum` declaration (M11). All fields are
+/// `Copy` handles; unit variants carry an empty `fields` range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnumVariantDecl {
+    pub name: Ident,
+    pub payload: EnumPayload,
+    pub span: SimpleSpan,
+}
+
+/// The payload of an enum variant (M11). Named payloads
+/// (`Rectangle(width: float)`) store their `name: type` decls in the
+/// `struct_field_decls` arena; tuple payloads (`Circle(float)`) store
+/// their bare types in the same arena under synthesized `"0"`, `"1"`,
+/// … names (the M10 tuple-sugar convention), so all payload handling
+/// downstream is uniform. Unit variants store an empty range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnumPayload {
+    pub kind: VariantKind,
+    pub fields: StructFieldDeclList,
+}
+
 /// A struct literal `Name{field=value, ...}` (M9) or the anonymous
 /// `{field=value, ...}` (M10). `name` is `None` for the anonymous
 /// form — its type identity is the field shape, not a declared name.
@@ -535,6 +608,29 @@ pub struct StructDef {
 pub struct StructLiteral {
     pub name: Option<Ident>,
     pub fields: StructFieldInitList,
+}
+
+/// Enum variant construction (M11): `Shape.Circle(5.0)` positional or
+/// `Shape.Rectangle{width=1.0}` named. All fields are `Copy` handles;
+/// the argument lists live in the `expr_lists` (positional) and
+/// `struct_field_inits` (named) side arenas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VariantConstruct {
+    pub enum_name: Ident,
+    pub variant: Ident,
+    /// `None` reserves the unit spelling for sema's reinterpretation
+    /// of bare `EnumName.Variant`; the parser always passes `Some`.
+    pub args: Option<VariantArgs>,
+}
+
+/// The argument payload of a [`VariantConstruct`]: a parenthesized
+/// positional list or a braced named-init list. Exactly one of the two
+/// is `Some` (braces are construction-only per the Brace Law, D11;
+/// declarations name payload fields with parens).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VariantArgs {
+    pub positional: Option<ExprList>,
+    pub named: Option<StructFieldInitList>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -742,6 +838,7 @@ pub struct Ast {
     patterns: Vec<Pattern>,
     pattern_lists: Vec<PatternId>,
     pattern_field_lists: Vec<PatternField>,
+    enum_variants: Vec<EnumVariantDecl>,
     top_level: Vec<StmtId>,
     /// Span covering the first through last top-level statement;
     /// `0..0` for an empty program. Kept for the pretty-printer's
@@ -783,6 +880,7 @@ impl Ast {
             }],
             pattern_lists: Vec::new(),
             pattern_field_lists: Vec::new(),
+            enum_variants: Vec::new(),
             top_level: Vec::new(),
             span: SimpleSpan::new((), 0..0),
         }
@@ -869,6 +967,12 @@ impl Ast {
     /// fields of a [`PatternKind::Anon`] pattern — in written order.
     pub fn pattern_field_list(&self, list: PatternFieldList) -> &[PatternField] {
         &self.pattern_field_lists[list.as_range()]
+    }
+
+    /// The variant declarations behind an [`EnumVariantDeclList`]
+    /// range — an `enum` declaration's variants — in declaration order.
+    pub fn enum_variants(&self, list: EnumVariantDeclList) -> &[EnumVariantDecl] {
+        &self.enum_variants[list.as_range()]
     }
 
     /// The program's top-level statements in source order.
@@ -1067,6 +1171,133 @@ impl Ast {
         }
     }
 
+    // ---- Arena-first parse-time builders (I-152) ----
+    //
+    // The parser records a side arena's length, pushes each list
+    // element as it parses, and seals the range from the recorded
+    // start — no intermediate `Vec` is collected and re-copied.
+    //
+    // Hazard: a start→seal window over a shared arena CANNOT span
+    // nested construction that writes the same arena — nested complete
+    // lists interleave into the open range (I-205: a call inside a
+    // variant-construct arg polluted the enclosing arg list). Windows
+    // are only safe when the wrapped parses write disjoint arenas
+    // (e.g. enum payload decls, where types never touch the decl
+    // arenas); otherwise collect-then-push-contiguously in one map
+    // after the closing delimiter.
+
+    /// Current length of the `expr_lists` side arena; the start
+    /// offset for [`Self::expr_list_from`].
+    pub fn expr_lists_len(&self) -> usize {
+        self.expr_lists.len()
+    }
+
+    /// Parse-time push of one expression into `expr_lists`.
+    pub fn push_expr_list_item(&mut self, id: ExprId) {
+        self.expr_lists.push(id);
+    }
+
+    /// Seal an [`ExprList`] from a start offset recorded with
+    /// [`Self::expr_lists_len`]. Checked conversions — an AST whose
+    /// arena offsets or list lengths exceed `u32` is rejected rather
+    /// than silently truncated.
+    pub fn expr_list_from(&self, start: usize) -> ExprList {
+        assert!(
+            start <= self.expr_lists.len(),
+            "expr_list_from: start offset beyond the arena end"
+        );
+        ExprList {
+            offset: u32::try_from(start).expect("AST expr_lists arena exceeded u32::MAX"),
+            len: u32::try_from(self.expr_lists.len() - start)
+                .expect("AST expr list length exceeded u32::MAX"),
+        }
+    }
+
+    /// Current length of the `struct_field_decls` side arena; the
+    /// start offset for [`Self::struct_field_decl_list_from`].
+    pub fn struct_field_decls_len(&self) -> usize {
+        self.struct_field_decls.len()
+    }
+
+    /// Parse-time push of one `name: type` decl into
+    /// `struct_field_decls`.
+    pub fn push_struct_field_decl(&mut self, name: StringId, ty: TypeExpr) {
+        self.struct_field_decls.push((name, ty));
+    }
+
+    /// Seal a [`StructFieldDeclList`] from a start offset recorded
+    /// with [`Self::struct_field_decls_len`]; see
+    /// [`Self::expr_list_from`] for the checked-conversion rationale.
+    pub fn struct_field_decl_list_from(&self, start: usize) -> StructFieldDeclList {
+        assert!(
+            start <= self.struct_field_decls.len(),
+            "struct_field_decl_list_from: start offset beyond the arena end"
+        );
+        StructFieldDeclList {
+            offset: u32::try_from(start).expect("AST struct_field_decls arena exceeded u32::MAX"),
+            len: u32::try_from(self.struct_field_decls.len() - start)
+                .expect("AST struct field decl list length exceeded u32::MAX"),
+        }
+    }
+
+    /// Current length of the `struct_field_inits` side arena; the
+    /// start offset for [`Self::struct_field_init_list_from`].
+    pub fn struct_field_inits_len(&self) -> usize {
+        self.struct_field_inits.len()
+    }
+
+    /// Parse-time push of one `name = value` init into
+    /// `struct_field_inits`.
+    pub fn push_struct_field_init_item(&mut self, name: StringId, value: ExprId) {
+        self.struct_field_inits.push((name, value));
+    }
+
+    /// Seal a [`StructFieldInitList`] from a start offset recorded
+    /// with [`Self::struct_field_inits_len`]; see
+    /// [`Self::expr_list_from`] for the checked-conversion rationale.
+    pub fn struct_field_init_list_from(&self, start: usize) -> StructFieldInitList {
+        assert!(
+            start <= self.struct_field_inits.len(),
+            "struct_field_init_list_from: start offset beyond the arena end"
+        );
+        StructFieldInitList {
+            offset: u32::try_from(start).expect("AST struct_field_inits arena exceeded u32::MAX"),
+            len: u32::try_from(self.struct_field_inits.len() - start)
+                .expect("AST struct field init list length exceeded u32::MAX"),
+        }
+    }
+
+    /// Current length of the `enum_variants` side arena; the start
+    /// offset for [`Self::enum_variant_list_from`].
+    pub fn enum_variants_len(&self) -> usize {
+        self.enum_variants.len()
+    }
+
+    /// Parse-time push of one variant declaration into
+    /// `enum_variants`.
+    pub fn push_enum_variant(&mut self, name: Ident, payload: EnumPayload, span: SimpleSpan) {
+        self.enum_variants.push(EnumVariantDecl {
+            name,
+            payload,
+            span,
+        });
+    }
+
+    /// Seal an [`EnumVariantDeclList`] from a start offset recorded
+    /// with [`Self::enum_variants_len`]; see [`Self::expr_list_from`]
+    /// for the checked-conversion rationale.
+    pub fn enum_variant_list_from(&self, start: usize) -> EnumVariantDeclList {
+        assert!(
+            start <= self.enum_variants.len(),
+            "enum_variant_list_from: start offset beyond the arena end"
+        );
+        EnumVariantDeclList {
+            offset: u32::try_from(start).expect("AST enum_variants arena exceeded u32::MAX"),
+            len: u32::try_from(self.enum_variants.len() - start)
+                .expect("AST enum variant list length exceeded u32::MAX"),
+        }
+    }
+
     pub fn literal(&mut self, lit: Literal, span: SimpleSpan) -> ExprId {
         self.push_expr(ExprKind::Literal(lit), span)
     }
@@ -1214,6 +1445,28 @@ impl Ast {
         )
     }
 
+    /// `enum Name:` declaration (M11); the variant list must already
+    /// live in the `enum_variants` arena — the parser pushes each
+    /// variant with [`Self::push_enum_variant`] and seals the range
+    /// with [`Self::enum_variant_list_from`], so no owned `Vec`
+    /// crosses this API (I-152).
+    pub fn enum_def(
+        &mut self,
+        name: Ident,
+        variants: EnumVariantDeclList,
+        attrs: EnumAttrs,
+        span: SimpleSpan,
+    ) -> StmtId {
+        self.push_stmt(
+            StmtKind::EnumDef(EnumDef {
+                name,
+                variants,
+                attrs,
+            }),
+            span,
+        )
+    }
+
     /// Struct literal `Name{field=value, ...}` (M9) or the anonymous
     /// `{field=value, ...}` (M10); pass `None` for the anonymous
     /// form. The field initializers are copied into the
@@ -1229,6 +1482,57 @@ impl Ast {
             ExprKind::StructLiteral(StructLiteral { name, fields }),
             span,
         )
+    }
+
+    /// Enum variant construction `EnumName.Variant(...)` /
+    /// `EnumName.Variant{...}` (M11). The argument lists must already
+    /// live in the `expr_lists` / `struct_field_inits` arenas — the
+    /// parser pushes each argument as it parses and seals the range
+    /// after, so no owned `Vec` crosses this API (I-152).
+    pub fn variant_construct(
+        &mut self,
+        enum_name: Ident,
+        variant: Ident,
+        args: Option<VariantArgs>,
+        span: SimpleSpan,
+    ) -> ExprId {
+        self.push_expr(
+            ExprKind::VariantConstruct(VariantConstruct {
+                enum_name,
+                variant,
+                args,
+            }),
+            span,
+        )
+    }
+
+    /// Promote a bare `Ident` expression node in place into an enum
+    /// variant construction (M11). The parser's postfix fold
+    /// recognizes `EnumName.Variant(...)` / `{...}` only after the
+    /// receiver atom has been pushed as an `Ident` node; rewriting
+    /// that node — rather than pushing a fresh `VariantConstruct` —
+    /// keeps the receiver reachable and preserves the no-orphan arena
+    /// invariant the parser's example-file sweep checks. The receiver
+    /// node's span (the enum name's token span) becomes the
+    /// construct's `enum_name.span`.
+    pub fn promote_ident_to_variant_construct(
+        &mut self,
+        id: ExprId,
+        variant: Ident,
+        args: Option<VariantArgs>,
+        span: SimpleSpan,
+    ) -> ExprId {
+        let node = &mut self.exprs[id.index()];
+        let ExprKind::Ident(enum_name) = node.kind else {
+            unreachable!("variant construct receiver must be a bare ident node");
+        };
+        node.kind = ExprKind::VariantConstruct(VariantConstruct {
+            enum_name: Ident::new(enum_name, node.span),
+            variant,
+            args,
+        });
+        node.span = span;
+        id
     }
 
     /// Anonymous struct type literal `{q: int, r: int}` (M10); the

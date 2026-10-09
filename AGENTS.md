@@ -82,7 +82,7 @@ cargo fmt --check                # Check code formatting style
 
 GitHub Actions runs on pushes to `main` and PRs targeting `main` (see `.github/workflows/ci.yml` for the authoritative job list): the file-length check, `cargo fmt --check`, `cargo clippy --workspace --all-targets`, and `cargo test --workspace` across Linux and macOS (plus a Windows test job, ASan/Valgrind leak checks, and a Miri job over the `ryo-runtime` crate's tests). `RUSTFLAGS=-Dwarnings` is set env-wide, so warnings are errors in every job. All jobs must pass for merge.
 
-**Performance is a CI gate.** CodSpeed comments on PRs report both walltime and simulation (compile-time) regressions. A double-digit regression on a tracked benchmark is a defect: fix it in the PR or record a deliberate decision, never merge silently. Before merging codegen changes, run the affected benchmarks via `benchmarks/<name>/run_benchmarks.sh` and compare against the README's latest checkpoint.
+**Performance is a CI gate.** CodSpeed comments on PRs report both walltime and simulation (compile-time) regressions. A double-digit regression on a tracked benchmark is a defect: fix it in the PR or record a deliberate decision, never merge silently. Before merging codegen changes, run the affected benchmarks via `benchmarks/<name>/run_benchmarks.sh` and compare against the README's latest checkpoint. Local walltime A/B can miss compile-time regressions that the simulation metric isolates — trust the CodSpeed gate for compile-time claims.
 
 ---
 
@@ -304,6 +304,7 @@ Grammar builders like `expression_parser()` construct the full parser graph eage
 - **Adding a rule:** take the shared expression parser as a parameter; never build your own.
 - **Reviewing:** any new `expression_parser()` call site in `parser.rs` is a red flag.
 - **Verifying:** `cargo bench -p ryo-frontend -- parse_snippet` (A/B against the base commit; CodSpeed CI tracks these benches).
+- **Hot choices pay for failed alternatives.** In chumsky every failed alternative in a `choice()` costs `Rich`-merging bookkeeping, and the postfix loop ends *every* expression with a failed op — so adding a `.`-led op as a naked alternative to the postfix choice taxed every expression in every program (two enum ops regressed `parse_large` ~10% even in enum-free code; fixed in 2830679 by parsing one shared `.` and choosing among tails). New postfix-shaped syntax enters through the shared `dot_op` discriminator, never as an extra raw alternative. When you factor a shared prefix out of ops, spans contract to the tail — re-stamp them (`PostfixOp::with_span`) or every diagnostic underline shifts.
 
 ## Error Handling
 

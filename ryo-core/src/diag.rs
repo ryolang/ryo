@@ -66,6 +66,16 @@ pub enum DiagCode {
     /// Eq-capable (M9.1): the scalar primitives are, a struct is only
     /// with its own `#[derive(Eq)]`, and views / the rest are not.
     DeriveFieldNotEq,
+    /// An `enum` declaration with no variants (M11). The empty body
+    /// parses — the diagnostic is astgen's, not the parser's — and
+    /// the definition is abandoned (the pool's `define_enum` panics
+    /// on an empty variant list; this is the pre-validation).
+    EmptyEnum,
+    /// Two variants of one `enum` share a name (M11). Every duplicate
+    /// occurrence is diagnosed and the definition abandoned (the
+    /// pool's `define_enum` panics on duplicate variant names; this
+    /// is the pre-validation).
+    DuplicateVariant,
 
     // --- sema ---
     /// A user-defined function or variable uses the `__ryo_` prefix,
@@ -165,6 +175,39 @@ pub enum DiagCode {
     /// fields must be owned values, not projections.
     ViewFieldType,
 
+    // --- sema: enums (M11) ---
+    /// `EnumName.Variant` access named a type that is not an enum (M11) —
+    /// today a struct name used with enum access syntax. The message
+    /// names the type and its actual kind.
+    UnknownEnum,
+    /// A variant access or construction named a variant the enum does
+    /// not declare (M11). The message names the enum and the variant.
+    UnknownVariant,
+    /// A variant construction omitted one or more declared payload
+    /// fields (M11). The message names the missing field(s), the
+    /// variant, and the enum.
+    MissingVariantFields,
+    /// A variant construction initialized the same payload field twice
+    /// (M11). Reachable via duplicate named arguments, which astgen
+    /// lowers as repeated field-index pairs. The message names the
+    /// field, the variant, and the enum.
+    DuplicateVariantField,
+    /// A variant construction argument selected a payload field the
+    /// variant does not declare (M11) — today the positional-overflow
+    /// shape (`Circle(1.0, 2.0)` on a one-field variant); a typo'd
+    /// *named* field is frontlined by astgen before sema runs. The
+    /// message names the field, the variant, and the enum.
+    UnknownVariantField,
+    /// A variant construction used the parenthesized positional form on
+    /// a variant with named fields (M11, Brace Law D11: named payloads
+    /// construct with braces only — one way per shape, symmetric with
+    /// structs). Astgen records the source form on the `EnumLit` wire
+    /// because the flat `(field_idx, value)` pairs are otherwise
+    /// identical to in-order brace construction. The message names the
+    /// variant and the enum and shows the brace spelling with the
+    /// declared field names.
+    PositionalConstructOnNamedVariant,
+
     // --- sema: destructuring (M10) ---
     /// A positional destructuring pattern binds a different number of
     /// fields than the struct has (`(q, r, s) = pair`). The message
@@ -259,8 +302,35 @@ pub enum DiagCode {
     /// An unrecognized `#[...]` attribute (M9.1): the attribute name is
     /// not one of the known forms (`derive(Eq)`, `repr(C)`), its
     /// argument list does not match, or it is attached to something
-    /// other than a struct definition.
+    /// other than a struct or enum definition (enums widened in M11,
+    /// the I-193 slice).
     UnknownAttribute,
+    /// `#[repr(C)]` on an `enum` definition (M11): pinned layout is a
+    /// struct feature; the only attribute an enum may carry is
+    /// `#[derive(Eq)]`. The message names the allowed attribute.
+    ReprCOnEnum,
+    /// A `name = value` pair inside a parenthesized argument list
+    /// (M11). Paren lists are positional; named fields belong in the
+    /// brace form on named variants. The variant-construction flavor
+    /// names the enum and variant and shows both correct spellings;
+    /// the plain-call flavor says named arguments are unsupported.
+    NamedArgInParens,
+    /// A unit variant constructed with an argument list (M11):
+    /// `Color.Red()`. Unit variants construct bare (`Color.Red`).
+    UnitVariantConstructed,
+    /// A variant construction with the argument list's parens
+    /// missing: `Shape.Circle 5.0`. The parser recovers by treating
+    /// the trailing expression as the payload argument.
+    MissingArgListOnVariant,
+    /// Values inside the brace form without `name =` prefixes (M11):
+    /// `Shape.Rectangle{1.0, 2.0}`. Named payloads write
+    /// `field=value`; positional payloads use the paren form.
+    PositionalArgsInBraces,
+    /// Comma-separated enum variants on one line:
+    /// `enum Color: Red, Green, Blue`. Variants are declared one per
+    /// line in the indented block; there is no comma form. The
+    /// parser recovers by declaring the variants anyway.
+    CommaSeparatedVariants,
 
     /// Emitted by `DiagSink::into_diags` when the sink dropped
     /// diagnostics past `MAX_DIAGS`. Distinct from `ParseError` so
@@ -437,12 +507,57 @@ pub enum ParseDiag {
         name: crate::types::StringId,
         args: Vec<crate::types::StringId>,
     },
-    /// A well-formed attribute whose target is not a struct definition
-    /// (M9.1). The `Display`/message text is the headline only; the
-    /// driver's Custom→Diag conversion attaches the mandated
-    /// explanation ("attributes are only supported on struct
-    /// definitions") as a structured `DiagNote`.
+    /// A well-formed attribute whose target is not a type definition
+    /// (M9.1, widened to enums in M11). The `Display`/message text is
+    /// the headline only; the driver's Custom→Diag conversion attaches
+    /// the mandated explanation ("attributes are only supported on
+    /// struct and enum definitions") as a structured `DiagNote`.
     MisplacedAttribute,
+    /// `#[repr(C)]` on an `enum` definition (M11): pinned layout is a
+    /// struct feature. The message names the allowed attribute —
+    /// `#[derive(Eq)]`.
+    ReprCOnEnum,
+    /// A `name = value` pair inside a parenthesized argument list
+    /// (`Shape.Circle(radius=5.0)`, `f(a=b)`). Named arguments are
+    /// only valid in the brace form on named enum variants; paren
+    /// lists are positional. Two flavors: variant construction
+    /// (receiver is a bare type-name identifier) carries the enum and
+    /// variant names and shows both correct spellings; a plain call
+    /// carries neither and says named arguments are unsupported. The
+    /// parser recovers by treating the value as a positional
+    /// argument, so a type error in the value still surfaces.
+    NamedArgInParens {
+        enum_name: Option<crate::types::StringId>,
+        variant: Option<crate::types::StringId>,
+    },
+    /// `Shape.Circle 5.0` — a variant construction with the argument
+    /// list's parens missing (an expression-start token follows the
+    /// variant name on the same line). The parser recovers by parsing
+    /// the trailing expression as the payload argument. Carries the
+    /// enum and variant.
+    MissingArgListOnVariant {
+        enum_name: crate::types::StringId,
+        variant: crate::types::StringId,
+    },
+    /// `Shape.Rectangle{1.0, 2.0}` — values inside the brace form
+    /// without `name =` prefixes. Named payloads write
+    /// `field=value`; positional payloads use the paren form. The
+    /// parser recovers by treating the values as positional
+    /// arguments. Carries the enum (the parser holds no declaration
+    /// table, so the example variant is the placeholder `Variant`).
+    PositionalArgsInBraces { enum_name: crate::types::StringId },
+    /// `enum Color: Red, Green, Blue` — comma-separated variants on
+    /// one line. Variants are declared one per line in the indented
+    /// block; there is no comma form. The parser recovers by
+    /// declaring the variants anyway.
+    CommaSeparatedVariants,
+    /// Internal guard failure for the enum variant-construction atom's
+    /// uppercase-receiver check. The `Rich` error rides a discarded
+    /// `Choice` alternative (a lowercase-led receiver parses as an
+    /// ordinary identifier instead), so this payload never surfaces in
+    /// a rendered diagnostic; it is a unit variant so the per-attempt
+    /// failure allocates nothing.
+    ExpectedEnumTypeName,
     /// Escape hatch for one-off messages (e.g. lexer diagnostics
     /// re-wrapped as parser errors in tests).
     Message(String),
@@ -462,6 +577,12 @@ impl ParseDiag {
             ParseDiag::UnknownAttribute { .. } | ParseDiag::MisplacedAttribute => {
                 DiagCode::UnknownAttribute
             }
+            ParseDiag::ReprCOnEnum => DiagCode::ReprCOnEnum,
+            ParseDiag::NamedArgInParens { .. } => DiagCode::NamedArgInParens,
+            ParseDiag::MissingArgListOnVariant { .. } => DiagCode::MissingArgListOnVariant,
+            ParseDiag::PositionalArgsInBraces { .. } => DiagCode::PositionalArgsInBraces,
+            ParseDiag::CommaSeparatedVariants => DiagCode::CommaSeparatedVariants,
+            ParseDiag::ExpectedEnumTypeName => DiagCode::ParseError,
             ParseDiag::Message(_) => DiagCode::ParseError,
         }
     }
@@ -484,8 +605,44 @@ impl ParseDiag {
                     }
                     attr.push(')');
                 }
-                format!("unknown attribute '{attr}'; known attributes: derive(Eq), repr(C)")
+                // `Debug` needs no attribute: pretty-printing is
+                // automatic for every enum.
+                let debug_note = if args.iter().any(|a| pool.str(*a) == "Debug") {
+                    "Debug is automatic for every enum; "
+                } else {
+                    ""
+                };
+                format!(
+                    "unknown attribute '{attr}'; {debug_note}known attributes: derive(Eq), repr(C)"
+                )
             }
+            ParseDiag::NamedArgInParens { enum_name, variant } => {
+                match (enum_name, variant) {
+                    // Variant construction: name the variant and show
+                    // both correct spellings (pool-resolved).
+                    (Some(en), Some(v)) => format!(
+                        "unexpected '=' — '{v}' takes positional arguments: \
+                         {en}.{v}(...); named fields use braces on named \
+                         variants: {en}.Variant{{field=value}}",
+                        en = pool.str(*en),
+                        v = pool.str(*v),
+                    ),
+                    // Plain call (or a bare `Name(...)` atom, which has
+                    // no variant to name).
+                    _ => "named arguments are not supported — pass arguments positionally"
+                        .to_string(),
+                }
+            }
+            ParseDiag::MissingArgListOnVariant { enum_name, variant } => format!(
+                "missing argument list — '{v}' takes a positional payload: {en}.{v}(...)",
+                en = pool.str(*enum_name),
+                v = pool.str(*variant),
+            ),
+            ParseDiag::PositionalArgsInBraces { enum_name } => format!(
+                "fields are written name=value (width=1.0); for a positional \
+                 payload use parens: {en}.Variant(...)",
+                en = pool.str(*enum_name),
+            ),
             _ => self.to_string(),
         }
     }
@@ -532,6 +689,36 @@ impl std::fmt::Display for ParseDiag {
                  derive(Eq), repr(C)",
             ),
             ParseDiag::MisplacedAttribute => f.write_str("unexpected attribute"),
+            ParseDiag::ReprCOnEnum => f.write_str(
+                "#[repr(C)] is not supported on enum definitions; \
+                 the only attribute allowed on an enum is #[derive(Eq)]",
+            ),
+            ParseDiag::ExpectedEnumTypeName => f.write_str("expected an enum type name"),
+            ParseDiag::NamedArgInParens { enum_name, variant } => match (enum_name, variant) {
+                // Pool-free fallback: names rendered as placeholders
+                // (the pipeline resolves them through
+                // `ParseDiag::message` whenever a pool is available).
+                (Some(_), Some(_)) => f.write_str(
+                    "unexpected '=' — variant construction takes positional \
+                     arguments (EnumName.Variant(value)); named fields use \
+                     braces on named variants (EnumName.Variant{field=value})",
+                ),
+                _ => f.write_str("named arguments are not supported — pass arguments positionally"),
+            },
+            // Pool-free fallbacks; the pipeline renders the named
+            // spellings through `ParseDiag::message`.
+            ParseDiag::MissingArgListOnVariant { .. } => f.write_str(
+                "missing argument list — 'Variant' takes a positional \
+                 payload: EnumName.Variant(...)",
+            ),
+            ParseDiag::PositionalArgsInBraces { .. } => f.write_str(
+                "fields are written name=value (width=1.0); for a \
+                 positional payload use parens: EnumName.Variant(...)",
+            ),
+            ParseDiag::CommaSeparatedVariants => f.write_str(
+                "enum variants are declared one per line (block form); \
+                 there is no comma form",
+            ),
             ParseDiag::Message(msg) => f.write_str(msg),
         }
     }

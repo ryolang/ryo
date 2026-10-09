@@ -1,5 +1,8 @@
 //! Struct codegen (M9) — split from `expr.rs`/`mod.rs` to keep every
 //! file under the 2000-line CI cap (`scripts/check_file_length.sh`).
+//! Also home to the aggregate machinery every emitter shares: the
+//! fat/struct type predicates, the slot-out runtime-call family, and
+//! `build_signature`'s aggregate ABI.
 //!
 //! Memory-first model: every struct value lives in a stack slot of
 //! `size`/`align` from `pool.struct_view`; `ValueRepr::Struct` carries
@@ -9,15 +12,20 @@
 //! FIELD-WISE, never byte-wise — a block copy would read uninitialized
 //! padding bytes, which the ASan/Valgrind suites flag.
 
-use cranelift::codegen::ir::{MemFlagsData, StackSlot, StackSlotData, StackSlotKind};
+use cranelift::codegen::ir::{
+    ArgumentPurpose, MemFlagsData, StackSlot, StackSlotData, StackSlotKind,
+};
+use cranelift::codegen::isa::CallConv;
 use cranelift::prelude::*;
 use cranelift_module::{DataId, Module};
-use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
-use ryo_core::types::{StringId, TypeId, TypeKind};
+use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
+use ryo_core::types::{InternPool, StringId, StructField, TypeId, TypeKind};
 
 use super::bytes::store_string;
+use super::enums::is_enum_type;
 use super::{
-    Codegen, FunctionContext, STR_SLOT_SIZE, Terminator, ValueRepr, cranelift_type_for, ranges,
+    Codegen, CodegenNameIds, FunctionContext, STR_SLOT_SIZE, Terminator, ValueRepr,
+    cranelift_type_for, ranges,
 };
 
 impl<M: Module> Codegen<M> {
@@ -119,8 +127,9 @@ impl<M: Module> Codegen<M> {
     }
 
     /// Address of an inout argument's pointee: a field path (`&p.x`)
-    /// resolves through the FieldAccess chain, a whole struct to its
-    /// slot. Passed directly to the callee, which mutates in place —
+    /// resolves through the FieldAccess chain, an enum value (M11) to
+    /// its slot via the enum entry point, a whole struct to its slot.
+    /// Passed directly to the callee, which mutates in place —
     /// no spill, no reload, no write-back entry.
     pub(crate) fn inout_pointee_addr(
         builder: &mut FunctionBuilder,
@@ -129,6 +138,8 @@ impl<M: Module> Codegen<M> {
     ) -> Result<Value, String> {
         if matches!(ctx.tir.inst(r).data, TirData::FieldAccess { .. }) {
             Ok(Self::field_addr_of(builder, ctx, r)?.0)
+        } else if is_enum_type(ctx.tir.inst(r).ty, ctx.pool) {
+            Self::eval_inst_enum(builder, ctx, r)
         } else {
             Self::eval_inst_struct(builder, ctx, r)
         }
@@ -153,9 +164,12 @@ impl<M: Module> Codegen<M> {
 
     /// Store value `v` of type `field_ty` at `base + offset`. Scalars
     /// store directly; str/bytes store the (ptr, len, cap) triple;
-    /// nested structs copy field-wise; view fields are rejected by
-    /// sema (Rule 6) and never reach here.
-    fn store_field_value(
+    /// nested structs copy field-wise; nested enums copy tag + active
+    /// payload; view fields are rejected by sema (Rule 6) and never
+    /// reach here. Shared with enum payload stores (M11) — enum
+    /// variant fields carry pool-absolute offsets, which the same
+    /// `base + offset` addressing handles.
+    pub(crate) fn store_field_value(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         base: Value,
@@ -193,6 +207,15 @@ impl<M: Module> Codegen<M> {
                     builder.ins().iadd_imm_s(base, i64::from(offset))
                 };
                 Self::emit_struct_copy(builder, ctx, dst, src, field_ty)
+            }
+            TypeKind::Enum => {
+                let src = Self::eval_inst_enum(builder, ctx, v)?;
+                let dst = if offset == 0 {
+                    base
+                } else {
+                    builder.ins().iadd_imm_s(base, i64::from(offset))
+                };
+                Self::emit_enum_copy(builder, ctx, dst, src, field_ty)
             }
             _ => {
                 let val = Self::eval_inst(builder, ctx, v)?;
@@ -253,7 +276,9 @@ impl<M: Module> Codegen<M> {
     /// Field-wise struct copy (M9): NEVER a byte-wise block copy —
     /// reading uninitialized padding fails the ASan/Valgrind suites.
     /// Sizes and offsets are compile-time constants, so this unrolls
-    /// statically into one load+store per scalar field.
+    /// statically into one `emit_field_copy` per field. Enum payload
+    /// copies (M11) reuse `emit_field_copy` with their pool-absolute
+    /// field offsets.
     pub(crate) fn emit_struct_copy(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -263,53 +288,80 @@ impl<M: Module> Codegen<M> {
     ) -> Result<(), String> {
         let view = ctx.pool.struct_view(ty);
         for field in &view.fields {
-            let off = i32::try_from(field.offset).expect("struct field offset exceeds i32");
-            match ctx.pool.kind(field.ty) {
-                TypeKind::Str | TypeKind::Bytes => {
-                    let ptr = builder
-                        .ins()
-                        .load(ctx.int_type, MemFlagsData::trusted(), src, off);
-                    let len = builder
-                        .ins()
-                        .load(types::I64, MemFlagsData::trusted(), src, off + 8);
-                    let cap =
-                        builder
-                            .ins()
-                            .load(types::I64, MemFlagsData::trusted(), src, off + 16);
-                    builder.ins().store(MemFlagsData::trusted(), ptr, dst, off);
-                    builder
-                        .ins()
-                        .store(MemFlagsData::trusted(), len, dst, off + 8);
-                    builder
-                        .ins()
-                        .store(MemFlagsData::trusted(), cap, dst, off + 16);
-                }
-                TypeKind::View(_) => {
-                    return Err(
-                        "view struct field reached codegen; sema Rule 6 rejects it".to_string()
-                    );
-                }
-                TypeKind::Struct | TypeKind::AnonStruct => {
-                    let s = if field.offset == 0 {
-                        src
-                    } else {
-                        builder.ins().iadd_imm_s(src, i64::from(field.offset))
-                    };
-                    let d = if field.offset == 0 {
-                        dst
-                    } else {
-                        builder.ins().iadd_imm_s(dst, i64::from(field.offset))
-                    };
-                    Self::emit_struct_copy(builder, ctx, d, s, field.ty)?;
-                }
-                _ => {
-                    let cl_ty = cranelift_type_for(field.ty, ctx.pool, ctx.int_type);
-                    let v = builder.ins().load(cl_ty, MemFlagsData::trusted(), src, off);
-                    builder.ins().store(MemFlagsData::trusted(), v, dst, off);
-                }
-            }
+            Self::emit_field_copy(builder, ctx, dst, src, field)?;
         }
         Ok(())
+    }
+
+    /// Copy one field from `src` to `dst` (struct or enum bases,
+    /// addressed by the field's pool-computed offset — absolute for
+    /// enum variant fields, so both callers pass the aggregate base).
+    /// str/bytes copy the fat triple; nested structs and enums recurse
+    /// field-wise (never bytes); scalars load+store.
+    pub(crate) fn emit_field_copy(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        dst: Value,
+        src: Value,
+        field: &StructField,
+    ) -> Result<(), String> {
+        let off = i32::try_from(field.offset).expect("struct field offset exceeds i32");
+        match ctx.pool.kind(field.ty) {
+            TypeKind::Str | TypeKind::Bytes => {
+                let ptr = builder
+                    .ins()
+                    .load(ctx.int_type, MemFlagsData::trusted(), src, off);
+                let len = builder
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), src, off + 8);
+                let cap = builder
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), src, off + 16);
+                builder.ins().store(MemFlagsData::trusted(), ptr, dst, off);
+                builder
+                    .ins()
+                    .store(MemFlagsData::trusted(), len, dst, off + 8);
+                builder
+                    .ins()
+                    .store(MemFlagsData::trusted(), cap, dst, off + 16);
+                Ok(())
+            }
+            TypeKind::View(_) => {
+                Err("view struct field reached codegen; sema Rule 6 rejects it".to_string())
+            }
+            TypeKind::Struct | TypeKind::AnonStruct => {
+                let s = if field.offset == 0 {
+                    src
+                } else {
+                    builder.ins().iadd_imm_s(src, i64::from(field.offset))
+                };
+                let d = if field.offset == 0 {
+                    dst
+                } else {
+                    builder.ins().iadd_imm_s(dst, i64::from(field.offset))
+                };
+                Self::emit_struct_copy(builder, ctx, d, s, field.ty)
+            }
+            TypeKind::Enum => {
+                let s = if field.offset == 0 {
+                    src
+                } else {
+                    builder.ins().iadd_imm_s(src, i64::from(field.offset))
+                };
+                let d = if field.offset == 0 {
+                    dst
+                } else {
+                    builder.ins().iadd_imm_s(dst, i64::from(field.offset))
+                };
+                Self::emit_enum_copy(builder, ctx, d, s, field.ty)
+            }
+            _ => {
+                let cl_ty = cranelift_type_for(field.ty, ctx.pool, ctx.int_type);
+                let v = builder.ins().load(cl_ty, MemFlagsData::trusted(), src, off);
+                builder.ins().store(MemFlagsData::trusted(), v, dst, off);
+                Ok(())
+            }
+        }
     }
 
     /// Recursive field destruction (M9): for each needs-drop field,
@@ -332,8 +384,10 @@ impl<M: Module> Codegen<M> {
     }
 
     /// Drop one needs-drop field at `base + offset`: str/bytes load
-    /// (ptr, cap) and call the family free; a nested struct recurses.
-    fn emit_field_drop(
+    /// (ptr, cap) and call the family free; a nested struct or enum
+    /// recurses (whole-struct field destruction / tag-dispatched enum
+    /// drop, M11). Shared with enum payload drops.
+    pub(crate) fn emit_field_drop(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         base: Value,
@@ -365,8 +419,18 @@ impl<M: Module> Codegen<M> {
                 };
                 Self::emit_struct_drop(builder, ctx, addr, field_ty)
             }
+            TypeKind::Enum => {
+                let addr = if offset == 0 {
+                    base
+                } else {
+                    builder.ins().iadd_imm_s(base, i64::from(offset))
+                };
+                Self::emit_enum_drop(builder, ctx, addr, field_ty)
+            }
             other => {
-                unreachable!("needs_drop field of kind {other:?} is neither str/bytes nor struct")
+                unreachable!(
+                    "needs_drop field of kind {other:?} is neither str/bytes nor aggregate"
+                )
             }
         }
     }
@@ -520,6 +584,13 @@ impl<M: Module> Codegen<M> {
                 }
                 Self::emit_struct_copy(builder, ctx, field_addr, src, field_ty)?;
             }
+            TypeKind::Enum => {
+                let src = Self::eval_inst_enum(builder, ctx, view.value)?;
+                if drop_old {
+                    Self::emit_field_drop(builder, ctx, field_addr, 0, field_ty)?;
+                }
+                Self::emit_enum_copy(builder, ctx, field_addr, src, field_ty)?;
+            }
             _ => {
                 debug_assert!(
                     !drop_old,
@@ -610,27 +681,30 @@ impl<M: Module> Codegen<M> {
         name: StringId,
         target: TirRef,
     ) -> Result<bool, String> {
-        let Some(var) = Self::read_slot(&ctx.struct_locals, name) else {
-            return Ok(false);
-        };
-        let addr = builder.use_var(var);
         // Conditional dead drops only fire for locals; a param-sentinel
         // target would panic the arena index below.
         debug_assert!(!target.is_param());
         let ty = ctx.tir.inst(target).ty;
+        // Kind gate: enum bindings share the `struct_locals` table —
+        // the enum dead-drop routing (`try_emit_enum_dead_drop`) claims
+        // those targets first; reaching here with one is a dispatch bug.
+        if !matches!(ctx.pool.kind(ty), TypeKind::Struct | TypeKind::AnonStruct) {
+            return Ok(false);
+        }
+        let Some(var) = Self::read_slot(&ctx.struct_locals, name) else {
+            return Ok(false);
+        };
+        let addr = builder.use_var(var);
         Self::emit_struct_drop(builder, ctx, addr, ty)?;
         Ok(true)
     }
 
-    /// Memberwise struct equality (M9.1): one comparison per field pair
-    /// in declaration order — int/bool fields `icmp eq` on the loaded
-    /// values, float fields `fcmp eq` (IEEE, no fast-math: a NaN field
-    /// makes the struct never equal itself), str/bytes fields the
-    /// runtime content compare on both extracted `(ptr, len)` pairs,
-    /// nested structs recurse. The per-field results AND-reduce with
-    /// `band` — equality has no side effects, so a branchless chain
-    /// beats short-circuit branching. `negate` flips the final i8 for
-    /// `!=`. Both operands are borrowed, never consumed.
+    /// Memberwise struct equality (M9.1): one `emit_field_eq` per field
+    /// pair in declaration order, AND-reduced with `band` — equality
+    /// has no side effects, so a branchless chain beats short-circuit
+    /// branching. `negate` flips the final i8 for `!=`. Both operands
+    /// are borrowed, never consumed. Enum payload equality (M11)
+    /// reuses `emit_field_eq` per active-variant field.
     pub(crate) fn emit_struct_eq(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -652,71 +726,7 @@ impl<M: Module> Codegen<M> {
             } else {
                 builder.ins().iadd_imm_s(rhs_addr, i64::from(field.offset))
             };
-            let field_kind = ctx.pool.kind(field.ty);
-            let field_eq = match field_kind {
-                TypeKind::Int | TypeKind::Bool => {
-                    let cl_ty = cranelift_type_for(field.ty, ctx.pool, ctx.int_type);
-                    let lv = builder
-                        .ins()
-                        .load(cl_ty, MemFlagsData::trusted(), lhs_field, 0);
-                    let rv = builder
-                        .ins()
-                        .load(cl_ty, MemFlagsData::trusted(), rhs_field, 0);
-                    builder.ins().icmp(IntCC::Equal, lv, rv)
-                }
-                TypeKind::Float => {
-                    let lv = builder
-                        .ins()
-                        .load(types::F64, MemFlagsData::trusted(), lhs_field, 0);
-                    let rv = builder
-                        .ins()
-                        .load(types::F64, MemFlagsData::trusted(), rhs_field, 0);
-                    builder.ins().fcmp(FloatCC::Equal, lv, rv)
-                }
-                k @ (TypeKind::Str | TypeKind::Bytes) => {
-                    let is_bytes = matches!(k, TypeKind::Bytes);
-                    let (lp, ll, lc) = Self::emit_debug_field_triple(builder, ctx, lhs_field);
-                    let (rp, rl, rc) = Self::emit_debug_field_triple(builder, ctx, rhs_field);
-                    // Inline (SSO) fields keep their bytes in the struct
-                    // slot: extract against the slot address as the
-                    // inline home, exactly like the repr path.
-                    let (lvp, lvl) =
-                        Self::emit_fat_bytes_ptr_len(builder, ctx, lp, ll, lc, Some(lhs_field))?;
-                    let (rvp, rvl) =
-                        Self::emit_fat_bytes_ptr_len(builder, ctx, rp, rl, rc, Some(rhs_field))?;
-                    let fn_name = if is_bytes {
-                        "ryo_bytes_eq"
-                    } else {
-                        "ryo_str_eq"
-                    };
-                    let eq_ref = Self::declare_runtime_fn(
-                        ctx,
-                        builder,
-                        fn_name,
-                        &[ctx.int_type, types::I64, ctx.int_type, types::I64],
-                        &[types::I8],
-                    )?;
-                    let call = builder.ins().call(eq_ref, &[lvp, lvl, rvp, rvl]);
-                    builder.inst_results(call)[0]
-                }
-                // Nested nominal or anonymous (M10) shapes both recurse:
-                // `struct_view` reads either payload.
-                TypeKind::Struct | TypeKind::AnonStruct => {
-                    Self::emit_struct_eq(builder, ctx, lhs_field, rhs_field, field.ty, false)?
-                }
-                TypeKind::View(_) => {
-                    return Err(
-                        "view struct field reached codegen; sema Rule 6 rejects it".to_string()
-                    );
-                }
-                other => {
-                    return Err(format!(
-                        "emit_struct_eq: field '{}' of '{}' has non-comparable type kind {other:?}",
-                        ctx.pool.str(field.name),
-                        ctx.pool.str(view.name),
-                    ));
-                }
-            };
+            let field_eq = Self::emit_field_eq(builder, ctx, lhs_field, rhs_field, field)?;
             acc = Some(match acc {
                 None => field_eq,
                 Some(prev) => builder.ins().band(prev, field_eq),
@@ -734,6 +744,86 @@ impl<M: Module> Codegen<M> {
             Ok(builder.ins().icmp(IntCC::Equal, result, zero))
         } else {
             Ok(result)
+        }
+    }
+
+    /// Compare one field pair at the given already-offset addresses:
+    /// int/bool fields `icmp eq` on the loaded values, float fields
+    /// `fcmp eq` (IEEE, no fast-math: a NaN field makes the aggregate
+    /// never equal itself), str/bytes fields the runtime content
+    /// compare on both extracted `(ptr, len)` pairs, nested structs
+    /// and enums (M11) recurse. Shared by struct memberwise equality
+    /// and enum per-variant payload equality.
+    pub(crate) fn emit_field_eq(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        lhs_field: Value,
+        rhs_field: Value,
+        field: &StructField,
+    ) -> Result<Value, String> {
+        let field_kind = ctx.pool.kind(field.ty);
+        match field_kind {
+            TypeKind::Int | TypeKind::Bool => {
+                let cl_ty = cranelift_type_for(field.ty, ctx.pool, ctx.int_type);
+                let lv = builder
+                    .ins()
+                    .load(cl_ty, MemFlagsData::trusted(), lhs_field, 0);
+                let rv = builder
+                    .ins()
+                    .load(cl_ty, MemFlagsData::trusted(), rhs_field, 0);
+                Ok(builder.ins().icmp(IntCC::Equal, lv, rv))
+            }
+            TypeKind::Float => {
+                let lv = builder
+                    .ins()
+                    .load(types::F64, MemFlagsData::trusted(), lhs_field, 0);
+                let rv = builder
+                    .ins()
+                    .load(types::F64, MemFlagsData::trusted(), rhs_field, 0);
+                Ok(builder.ins().fcmp(FloatCC::Equal, lv, rv))
+            }
+            k @ (TypeKind::Str | TypeKind::Bytes) => {
+                let is_bytes = matches!(k, TypeKind::Bytes);
+                let (lp, ll, lc) = Self::emit_debug_field_triple(builder, ctx, lhs_field);
+                let (rp, rl, rc) = Self::emit_debug_field_triple(builder, ctx, rhs_field);
+                // Inline (SSO) fields keep their bytes in the struct
+                // slot: extract against the slot address as the
+                // inline home, exactly like the repr path.
+                let (lvp, lvl) =
+                    Self::emit_fat_bytes_ptr_len(builder, ctx, lp, ll, lc, Some(lhs_field))?;
+                let (rvp, rvl) =
+                    Self::emit_fat_bytes_ptr_len(builder, ctx, rp, rl, rc, Some(rhs_field))?;
+                let fn_name = if is_bytes {
+                    "ryo_bytes_eq"
+                } else {
+                    "ryo_str_eq"
+                };
+                let eq_ref = Self::declare_runtime_fn(
+                    ctx,
+                    builder,
+                    fn_name,
+                    &[ctx.int_type, types::I64, ctx.int_type, types::I64],
+                    &[types::I8],
+                )?;
+                let call = builder.ins().call(eq_ref, &[lvp, lvl, rvp, rvl]);
+                Ok(builder.inst_results(call)[0])
+            }
+            // Nested nominal or anonymous (M10) shapes and enums (M11)
+            // both recurse: `struct_view` reads either struct payload,
+            // and `emit_enum_eq` dispatches on the discriminant.
+            TypeKind::Struct | TypeKind::AnonStruct => {
+                Self::emit_struct_eq(builder, ctx, lhs_field, rhs_field, field.ty, false)
+            }
+            TypeKind::Enum => {
+                Self::emit_enum_eq(builder, ctx, lhs_field, rhs_field, field.ty, false)
+            }
+            TypeKind::View(_) => {
+                Err("view struct field reached codegen; sema Rule 6 rejects it".to_string())
+            }
+            other => Err(format!(
+                "emit_field_eq: field '{}' has non-comparable type kind {other:?}",
+                ctx.pool.str(field.name),
+            )),
         }
     }
 
@@ -810,71 +900,8 @@ impl<M: Module> Codegen<M> {
             } else {
                 builder.ins().iadd_imm_s(addr, i64::from(field.offset))
             };
-            match ctx.pool.kind(field.ty) {
-                TypeKind::Int | TypeKind::Float | TypeKind::Bool => {
-                    let cl_ty = cranelift_type_for(field.ty, ctx.pool, ctx.int_type);
-                    let v = builder
-                        .ins()
-                        .load(cl_ty, MemFlagsData::trusted(), field_addr, 0);
-                    let (fn_name, param_ty) = match ctx.pool.kind(field.ty) {
-                        TypeKind::Int => ("ryo_int_to_str", ctx.int_type),
-                        TypeKind::Float => ("ryo_float_to_str", types::F64),
-                        _ => ("ryo_bool_to_str", types::I8),
-                    };
-                    let (tmp_addr, p, l, c) =
-                        Self::emit_debug_render(builder, ctx, fn_name, &[(param_ty, v)])?;
-                    Self::emit_debug_push_result(builder, ctx, result, tmp_addr, p, l, c)?;
-                }
-                TypeKind::Str => {
-                    // Borrowed straight out of the struct (which keeps
-                    // owning the field), raw (unescaped) content,
-                    // quoted — named and anonymous structs alike
-                    // (M10: the anon repr matches named structs and
-                    // Python container repr).
-                    let (p, l, c) = Self::emit_debug_field_triple(builder, ctx, field_addr);
-                    let (vp, vl) =
-                        Self::emit_fat_bytes_ptr_len(builder, ctx, p, l, c, Some(field_addr))?;
-                    Self::push_debug_static(builder, ctx, result, "\"")?;
-                    Self::emit_debug_push(builder, ctx, result, vp, vl)?;
-                    Self::push_debug_static(builder, ctx, result, "\"")?;
-                }
-                TypeKind::Bytes => {
-                    let (p, l, c) = Self::emit_debug_field_triple(builder, ctx, field_addr);
-                    let (vp, vl) =
-                        Self::emit_fat_bytes_ptr_len(builder, ctx, p, l, c, Some(field_addr))?;
-                    let (tmp_addr, p, l, c) = Self::emit_debug_render(
-                        builder,
-                        ctx,
-                        "__ryo_bytes_repr",
-                        &[(ctx.int_type, vp), (types::I64, vl)],
-                    )?;
-                    Self::emit_debug_push_result(builder, ctx, result, tmp_addr, p, l, c)?;
-                }
-                TypeKind::Struct | TypeKind::AnonStruct => {
-                    let nested = Self::emit_debug_repr(builder, ctx, field_addr, field.ty)?;
-                    let (p, l, c) = Self::emit_debug_field_triple(builder, ctx, nested);
-                    let (vp, vl) =
-                        Self::emit_fat_bytes_ptr_len(builder, ctx, p, l, c, Some(nested))?;
-                    Self::emit_debug_push(builder, ctx, result, vp, vl)?;
-                    // The nested repr temp is fully copied into the
-                    // enclosing result — release it (a no-op when the
-                    // nested render stayed inline).
-                    let free_ref = Self::declare_str_free(ctx, builder)?;
-                    builder.ins().call(free_ref, &[p, c]);
-                }
-                TypeKind::View(_) => {
-                    return Err(
-                        "view struct field reached codegen; sema Rule 6 rejects it".to_string()
-                    );
-                }
-                other => {
-                    return Err(format!(
-                        "emit_debug_repr: field '{}' of '{}' has non-renderable type kind {other:?}",
-                        ctx.pool.str(field.name),
-                        ctx.pool.str(view.name),
-                    ));
-                }
-            }
+            Self::emit_debug_field_value(builder, ctx, result, field_addr, field.ty)
+                .map_err(|e| format!("emit_debug_repr: {e}"))?;
         }
         // A single-field paren form needs the trailing comma: `(v,)`.
         if paren_form && view.fields.len() == 1 {
@@ -882,6 +909,89 @@ impl<M: Module> Codegen<M> {
         }
         Self::push_debug_static(builder, ctx, result, if paren_form { ")" } else { "}" })?;
         Ok(result)
+    }
+
+    /// Render one aggregate field's Debug value at its (already
+    /// addressed) slot address and push it onto `result` — the value
+    /// half of `emit_debug_repr`'s field loop, shared with enum
+    /// payload rendering (M11). str fields are quoted and borrowed
+    /// straight out of the aggregate (which keeps owning the field);
+    /// nested structs recurse through `emit_debug_repr`; nested enums
+    /// through `eval_enum_debug_repr`; rendered temps free after their
+    /// push (a no-op when the render stayed inline).
+    pub(crate) fn emit_debug_field_value(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        result: Value,
+        field_addr: Value,
+        field_ty: TypeId,
+    ) -> Result<(), String> {
+        match ctx.pool.kind(field_ty) {
+            TypeKind::Int | TypeKind::Float | TypeKind::Bool => {
+                let cl_ty = cranelift_type_for(field_ty, ctx.pool, ctx.int_type);
+                let v = builder
+                    .ins()
+                    .load(cl_ty, MemFlagsData::trusted(), field_addr, 0);
+                let (fn_name, param_ty) = match ctx.pool.kind(field_ty) {
+                    TypeKind::Int => ("ryo_int_to_str", ctx.int_type),
+                    TypeKind::Float => ("ryo_float_to_str", types::F64),
+                    _ => ("ryo_bool_to_str", types::I8),
+                };
+                let (tmp_addr, p, l, c) =
+                    Self::emit_debug_render(builder, ctx, fn_name, &[(param_ty, v)])?;
+                Self::emit_debug_push_result(builder, ctx, result, tmp_addr, p, l, c)
+            }
+            TypeKind::Str => {
+                // Borrowed straight out of the aggregate (which keeps
+                // owning the field), raw (unescaped) content,
+                // quoted — named and anonymous structs alike
+                // (M10: the anon repr matches named structs and
+                // Python container repr).
+                let (p, l, c) = Self::emit_debug_field_triple(builder, ctx, field_addr);
+                let (vp, vl) =
+                    Self::emit_fat_bytes_ptr_len(builder, ctx, p, l, c, Some(field_addr))?;
+                Self::push_debug_static(builder, ctx, result, "\"")?;
+                Self::emit_debug_push(builder, ctx, result, vp, vl)?;
+                Self::push_debug_static(builder, ctx, result, "\"")
+            }
+            TypeKind::Bytes => {
+                let (p, l, c) = Self::emit_debug_field_triple(builder, ctx, field_addr);
+                let (vp, vl) =
+                    Self::emit_fat_bytes_ptr_len(builder, ctx, p, l, c, Some(field_addr))?;
+                let (tmp_addr, p, l, c) = Self::emit_debug_render(
+                    builder,
+                    ctx,
+                    "__ryo_bytes_repr",
+                    &[(ctx.int_type, vp), (types::I64, vl)],
+                )?;
+                Self::emit_debug_push_result(builder, ctx, result, tmp_addr, p, l, c)
+            }
+            TypeKind::Struct | TypeKind::AnonStruct => {
+                let nested = Self::emit_debug_repr(builder, ctx, field_addr, field_ty)?;
+                let (p, l, c) = Self::emit_debug_field_triple(builder, ctx, nested);
+                let (vp, vl) = Self::emit_fat_bytes_ptr_len(builder, ctx, p, l, c, Some(nested))?;
+                Self::emit_debug_push(builder, ctx, result, vp, vl)?;
+                // The nested repr temp is fully copied into the
+                // enclosing result — release it (a no-op when the
+                // nested render stayed inline).
+                let free_ref = Self::declare_str_free(ctx, builder)?;
+                builder.ins().call(free_ref, &[p, c]);
+                Ok(())
+            }
+            TypeKind::Enum => {
+                let nested = Self::eval_enum_debug_repr(builder, ctx, field_addr, field_ty)?;
+                let (p, l, c) = Self::emit_debug_field_triple(builder, ctx, nested);
+                let (vp, vl) = Self::emit_fat_bytes_ptr_len(builder, ctx, p, l, c, Some(nested))?;
+                Self::emit_debug_push(builder, ctx, result, vp, vl)?;
+                let free_ref = Self::declare_str_free(ctx, builder)?;
+                builder.ins().call(free_ref, &[p, c]);
+                Ok(())
+            }
+            TypeKind::View(_) => {
+                Err("view struct field reached codegen; sema Rule 6 rejects it".to_string())
+            }
+            other => Err(format!("field has non-renderable type kind {other:?}",)),
+        }
     }
 
     /// Load the (ptr, len, cap) triple stored at a struct field's
@@ -982,8 +1092,9 @@ impl<M: Module> Codegen<M> {
     }
 
     /// Push a compiler-static text piece (punctuation): deduped per
-    /// module through the guard-message data cache.
-    fn push_debug_static(
+    /// module through the guard-message data cache. Shared with enum
+    /// Debug rendering (M11).
+    pub(crate) fn push_debug_static(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         result: Value,
@@ -995,7 +1106,8 @@ impl<M: Module> Codegen<M> {
 
     /// Push a field name: deduped per module through the interned
     /// string-literal data cache, keyed on the field's `StringId`.
-    fn push_debug_name(
+    /// Shared with enum Debug rendering (M11: enum and variant names).
+    pub(crate) fn push_debug_name(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         result: Value,
@@ -1123,6 +1235,21 @@ impl<M: Module> Codegen<M> {
                 Self::cache_repr(ctx, token, ValueRepr::Struct { addr: dst });
                 Ok(())
             }
+            TypeKind::Enum => {
+                let slot = Self::enum_slot(builder, ctx, field_ty);
+                let dst = builder.ins().stack_addr(ctx.int_type, slot, 0);
+                Self::emit_enum_copy(builder, ctx, dst, field_addr, field_ty)?;
+                let var = builder.declare_var(ctx.int_type);
+                builder.def_var(var, dst);
+                Self::write_slot(
+                    &mut ctx.struct_locals,
+                    &mut ctx.struct_locals_undo,
+                    name,
+                    Some(var),
+                );
+                Self::cache_repr(ctx, token, ValueRepr::Enum { addr: dst });
+                Ok(())
+            }
             _ => {
                 let cl_ty = cranelift_type_for(field_ty, ctx.pool, ctx.int_type);
                 let val = builder
@@ -1138,5 +1265,199 @@ impl<M: Module> Codegen<M> {
                 Ok(())
             }
         }
+    }
+}
+
+/// Returns `true` if `ty` is a 24-byte fat owner (`str` or `bytes`,
+/// M8.4.2) in the pool.
+///
+/// Callers use this to gate multi-value (fat-pointer) paths before
+/// reaching `cranelift_type_for`, where a fat type is a caller bug.
+pub(crate) fn is_fat_type(ty: TypeId, pool: &InternPool) -> bool {
+    matches!(pool.kind(ty), TypeKind::Str | TypeKind::Bytes)
+}
+
+/// True for the aggregate struct kinds — M9 named and M10 anonymous.
+/// Their values are memory-first (stack-slot addresses,
+/// `ValueRepr::Struct`), so params/returns ride the slot-address /
+/// sret ABI and these types must never reach `cranelift_type_for`.
+pub(crate) fn is_struct_type(ty: TypeId, pool: &InternPool) -> bool {
+    matches!(pool.kind(ty), TypeKind::Struct | TypeKind::AnonStruct)
+}
+
+/// True when instruction `r` produces its fat result through a
+/// slot-out call (`emit_slot_out_call` or user-call sret) and can
+/// therefore write a caller-provided home slot directly. Concat and
+/// every fat-returning call qualify — except codegen-inlined builtins
+/// (`CodegenNameIds::bool_to_str`), which never touch a slot.
+pub(super) fn writes_out_slot_ids(tir: &Tir, ids: &CodegenNameIds, r: TirRef) -> bool {
+    match tir.inst(r).tag {
+        TirTag::StrConcat | TirTag::BytesConcat => true,
+        TirTag::Call => ids.bool_to_str != Some(tir.call_view(r).name),
+        _ => false,
+    }
+}
+
+/// `#[cfg(test)]` three-arg form of [`writes_out_slot_ids`]: resolves
+/// the ids from the pool per call (test-only, so the probe cost is
+/// irrelevant) and exists because the unit test in `tests.rs` pins
+/// this exact signature.
+#[cfg(test)]
+pub(crate) fn writes_out_slot(tir: &Tir, pool: &InternPool, r: TirRef) -> bool {
+    writes_out_slot_ids(tir, &CodegenNameIds::resolve(pool), r)
+}
+
+impl<M: Module> Codegen<M> {
+    pub(super) fn build_signature(&self, tir: &Tir, pool: &InternPool, is_main: bool) -> Signature {
+        let mut sig = self.module.make_signature();
+        for param in &tir.params {
+            if param.mode == ParamMode::Inout {
+                // Mutable borrow: pass a single pointer to the caller's
+                // slot, regardless of pointee type (scalar or fat owner).
+                sig.params.push(AbiParam::new(self.int_type));
+            } else if is_fat_type(param.ty, pool) {
+                // Fat owner (str/bytes): 3-word ABI.
+                sig.params.push(AbiParam::new(self.int_type)); // ptr
+                sig.params.push(AbiParam::new(types::I64)); // len
+                sig.params.push(AbiParam::new(types::I64)); // cap
+            } else if pool.is_view(param.ty) {
+                // `strview` view: 2-word ABI (ptr, len) — no cap word (M8.4).
+                sig.params.push(AbiParam::new(self.int_type)); // ptr
+                sig.params.push(AbiParam::new(types::I64)); // len
+            } else if is_struct_type(param.ty, pool) || is_enum_type(param.ty, pool) {
+                // Struct (M9 named / M10 anonymous) and enum (M11)
+                // params: a single pointer to the value's stack slot,
+                // regardless of mode (borrow/move/copy).
+                sig.params.push(AbiParam::new(self.int_type));
+            } else {
+                let cl_ty = cranelift_type_for(param.ty, pool, self.int_type);
+                sig.params.push(AbiParam::new(cl_ty));
+            }
+        }
+        // C-ABI shim for `main`: Ryo's `fn main()` is void and takes no
+        // Ryo params (sema rejects a parametrized main), but the host
+        // C runtime (crt0 via zig cc, or our JIT trampoline) enters
+        // `main` with C's `(argc, argv)`. C's argc is a 32-bit `int`,
+        // but the Cranelift ABI word is pointer-sized (`i64`): works on
+        // x86-64/aarch64/Windows because a 32-bit argument arrives
+        // zero-extended in its register, so the low half the C side
+        // reads is exact. Push the two entry params — argc, then argv,
+        // in C order — before the int return word; `compile_function`
+        // reads them from the entry block to call `ryo_rt_init`, and
+        // falls through to an explicit `return 0` since Ryo's return
+        // type is void.
+        // `is_main` is resolved by `declare_all_functions` from the
+        // interned-id cache.
+        if is_main {
+            sig.params.push(AbiParam::new(self.int_type));
+            sig.params
+                .push(AbiParam::new(self.module.isa().pointer_type()));
+            sig.returns.push(AbiParam::new(self.int_type));
+        } else if tir.return_type != pool.void() {
+            if is_fat_type(tir.return_type, pool)
+                || is_struct_type(tir.return_type, pool)
+                || is_enum_type(tir.return_type, pool)
+            {
+                // sret: hidden pointer prepended to regular params, no IR-level return.
+                sig.params.insert(
+                    0,
+                    AbiParam::special(self.int_type, ArgumentPurpose::StructReturn),
+                );
+            } else {
+                let cl_ty = cranelift_type_for(tir.return_type, pool, self.int_type);
+                sig.returns.push(AbiParam::new(cl_ty));
+            }
+        }
+        // A function the pre-pass marked gets the Tail calling
+        // convention — the only convention from which Cranelift allows
+        // `return_call`. Never `main` (the C runtime enters it with the
+        // C ABI). A marked function that turns out ineligible at
+        // emission still compiles correctly as a plain Tail-conv
+        // function, so over-marking costs nothing.
+        if !is_main && self.tail_candidates.contains(&tir.name) {
+            sig.call_conv = CallConv::Tail;
+        }
+        sig
+    }
+
+    /// Call a slot-out runtime producer: allocate a 24-byte slot (or
+    /// use the caller-provided `out_slot` — a fat binding's canonical
+    /// home when the result initializes one), pass its address as
+    /// arg 0, then load the tagged (ptr, len, cap) triple. The runtime
+    /// writes the full slot (SSO tag, headroom cap) — codegen never
+    /// derives cap anymore.
+    ///
+    /// The reload loads run either way: their values feed the
+    /// `ValueRepr` cache the free sweep keys on. For a home-backed
+    /// binding they are short-lived (never `def_var`'d), so regalloc
+    /// never grows a second spill slot next to the home.
+    pub(crate) fn emit_slot_out_call(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        fn_name: &'static str,
+        args: &[(Type, Value)],
+        out_slot: Option<StackSlot>,
+    ) -> Result<(Value, Value, Value), String> {
+        Self::emit_slot_out_call_impl(builder, ctx, fn_name, args, out_slot, true)
+    }
+
+    /// `emit_slot_out_call` for runtime producers whose out-slot is the
+    /// LAST parameter instead of the first — the spec pins out-last for
+    /// `ryo_process_argv(i, out)` and `ryo_getenv(key_ptr, key_len,
+    /// out)`, whose signatures the runtime's own tests call directly.
+    /// Slot sizing, `out_slot` honoring, and the tagged-triple reload
+    /// are identical to [`Self::emit_slot_out_call`]; only the
+    /// parameter position differs, so both delegate to one
+    /// implementation.
+    pub(crate) fn emit_slot_out_call_out_last(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        fn_name: &'static str,
+        args: &[(Type, Value)],
+        out_slot: Option<StackSlot>,
+    ) -> Result<(Value, Value, Value), String> {
+        Self::emit_slot_out_call_impl(builder, ctx, fn_name, args, out_slot, false)
+    }
+
+    fn emit_slot_out_call_impl(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        fn_name: &'static str,
+        args: &[(Type, Value)],
+        out_slot: Option<StackSlot>,
+        out_first: bool,
+    ) -> Result<(Value, Value, Value), String> {
+        let slot = out_slot.unwrap_or_else(|| {
+            builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                STR_SLOT_SIZE,
+                3,
+            ))
+        });
+        let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+        let mut param_tys = Vec::with_capacity(args.len() + 1);
+        let mut call_args = Vec::with_capacity(args.len() + 1);
+        if out_first {
+            param_tys.push(ctx.int_type);
+            call_args.push(addr);
+        }
+        param_tys.extend(args.iter().map(|(ty, _)| *ty));
+        call_args.extend(args.iter().map(|(_, v)| *v));
+        if !out_first {
+            param_tys.push(ctx.int_type);
+            call_args.push(addr);
+        }
+        let func_ref = Self::declare_runtime_fn(ctx, builder, fn_name, &param_tys, &[])?;
+        builder.ins().call(func_ref, &call_args);
+        let ptr = builder
+            .ins()
+            .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);
+        let len = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), addr, 8);
+        let cap = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), addr, 16);
+        Ok((ptr, len, cap))
     }
 }

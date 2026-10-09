@@ -183,9 +183,10 @@ fn parse_source(
             RichReason::Custom(pd) => {
                 let diag = Diag::error(span, pd.code(), pd.message(pool));
                 let diag = match pd {
-                    ParseDiag::MisplacedAttribute => {
-                        diag.with_note(None, "attributes are only supported on struct definitions")
-                    }
+                    ParseDiag::MisplacedAttribute => diag.with_note(
+                        None,
+                        "attributes are only supported on struct and enum definitions",
+                    ),
                     _ => diag,
                 };
                 sink.emit(diag);
@@ -403,6 +404,8 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::MainSignature => "E0004",
         DiagCode::InfiniteSize => "E0005",
         DiagCode::DeriveFieldNotEq => "E0006",
+        DiagCode::EmptyEnum => "E0008",
+        DiagCode::DuplicateVariant => "E0009",
         DiagCode::EqDeriveRequired => "E0007",
         DiagCode::UndefinedVariable => "E0010",
         DiagCode::UndefinedFunction => "E0011",
@@ -442,6 +445,12 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::DuplicateStructField => "E0040",
         DiagCode::NotAStruct => "E0041",
         DiagCode::ViewFieldType => "E0042",
+        DiagCode::UnknownEnum => "E0118",
+        DiagCode::UnknownVariant => "E0119",
+        DiagCode::MissingVariantFields => "E0120",
+        DiagCode::DuplicateVariantField => "E0121",
+        DiagCode::UnknownVariantField => "E0122",
+        DiagCode::PositionalConstructOnNamedVariant => "E0123",
         DiagCode::ParseError => "E0100",
         DiagCode::ChainedComparison => "E0104",
         DiagCode::RangeArity => "E0105",
@@ -456,6 +465,12 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::DestructureUnknownField => "E0114",
         DiagCode::DestructurePositionalOnNamed => "E0115",
         DiagCode::AnonFieldNotEq => "E0116",
+        DiagCode::ReprCOnEnum => "E0117",
+        DiagCode::NamedArgInParens => "E0124",
+        DiagCode::UnitVariantConstructed => "E0125",
+        DiagCode::MissingArgListOnVariant => "E0126",
+        DiagCode::PositionalArgsInBraces => "E0127",
+        DiagCode::CommaSeparatedVariants => "E0128",
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::InvalidCharacter => "E0102",
         DiagCode::UnknownEscape => "E0103",
@@ -848,6 +863,8 @@ mod tests {
             (DiagCode::MainSignature, "E0004"),
             (DiagCode::InfiniteSize, "E0005"),
             (DiagCode::DeriveFieldNotEq, "E0006"),
+            (DiagCode::EmptyEnum, "E0008"),
+            (DiagCode::DuplicateVariant, "E0009"),
             (DiagCode::EqDeriveRequired, "E0007"),
             (DiagCode::UndefinedVariable, "E0010"),
             (DiagCode::UndefinedFunction, "E0011"),
@@ -882,6 +899,12 @@ mod tests {
             (DiagCode::DuplicateStructField, "E0040"),
             (DiagCode::NotAStruct, "E0041"),
             (DiagCode::ViewFieldType, "E0042"),
+            (DiagCode::UnknownEnum, "E0118"),
+            (DiagCode::UnknownVariant, "E0119"),
+            (DiagCode::MissingVariantFields, "E0120"),
+            (DiagCode::DuplicateVariantField, "E0121"),
+            (DiagCode::UnknownVariantField, "E0122"),
+            (DiagCode::PositionalConstructOnNamedVariant, "E0123"),
             (DiagCode::MoveOutOfField, "E0043"),
             (DiagCode::ParseError, "E0100"),
             (DiagCode::TooManyDiagnostics, "E0101"),
@@ -900,6 +923,12 @@ mod tests {
             (DiagCode::DestructureUnknownField, "E0114"),
             (DiagCode::DestructurePositionalOnNamed, "E0115"),
             (DiagCode::AnonFieldNotEq, "E0116"),
+            (DiagCode::ReprCOnEnum, "E0117"),
+            (DiagCode::NamedArgInParens, "E0124"),
+            (DiagCode::UnitVariantConstructed, "E0125"),
+            (DiagCode::MissingArgListOnVariant, "E0126"),
+            (DiagCode::PositionalArgsInBraces, "E0127"),
+            (DiagCode::CommaSeparatedVariants, "E0128"),
             (DiagCode::ConstEvalFailure, "E0200"),
             (DiagCode::CycleInComptime, "E0201"),
             (DiagCode::GenericInstantiation, "E0202"),
@@ -928,6 +957,8 @@ mod tests {
                 | DiagCode::MainSignature
                 | DiagCode::InfiniteSize
                 | DiagCode::DeriveFieldNotEq
+                | DiagCode::EmptyEnum
+                | DiagCode::DuplicateVariant
                 | DiagCode::EqDeriveRequired
                 | DiagCode::UndefinedVariable
                 | DiagCode::UndefinedFunction
@@ -966,6 +997,12 @@ mod tests {
                 | DiagCode::DuplicateStructField
                 | DiagCode::NotAStruct
                 | DiagCode::ViewFieldType
+                | DiagCode::UnknownEnum
+                | DiagCode::UnknownVariant
+                | DiagCode::MissingVariantFields
+                | DiagCode::DuplicateVariantField
+                | DiagCode::UnknownVariantField
+                | DiagCode::PositionalConstructOnNamedVariant
                 | DiagCode::CycleInResolution
                 | DiagCode::ParseError
                 | DiagCode::ChainedComparison
@@ -981,6 +1018,12 @@ mod tests {
                 | DiagCode::DestructureUnknownField
                 | DiagCode::DestructurePositionalOnNamed
                 | DiagCode::AnonFieldNotEq
+                | DiagCode::ReprCOnEnum
+                | DiagCode::NamedArgInParens
+                | DiagCode::UnitVariantConstructed
+                | DiagCode::MissingArgListOnVariant
+                | DiagCode::PositionalArgsInBraces
+                | DiagCode::CommaSeparatedVariants
                 | DiagCode::TooManyDiagnostics
                 | DiagCode::InvalidCharacter
                 | DiagCode::UnknownEscape
@@ -1320,10 +1363,10 @@ mod tests {
             diag.message
         );
         assert!(
-            diag.notes
-                .iter()
-                .any(|n| n.message == "attributes are only supported on struct definitions"),
-            "note should explain that attributes need a struct definition: {:?}",
+            diag.notes.iter().any(
+                |n| n.message == "attributes are only supported on struct and enum definitions"
+            ),
+            "note should explain that attributes need a struct or enum definition: {:?}",
             diag.notes
         );
     }
@@ -1386,6 +1429,138 @@ mod tests {
         assert!(
             diags.iter().any(|d| d.code == DiagCode::TypeMismatch),
             "sema diagnostic must co-surface: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn named_arg_in_parens_enum_flavor_message_is_targeted() {
+        // `Shape.Circle(radius=5.0)` (Circle is a tuple variant) used
+        // to render the generic E0100 expected-token dump; the
+        // targeted E0124 names the variant and shows both correct
+        // spellings, as the single error.
+        let mut pool = InternPool::new();
+        let input = "enum Shape:\n\tCircle(float)\n\tRectangle(width: float, height: float)\n\nfn main():\n\tprint(Shape.Circle(radius=5.0))\n";
+        let (_program, diags) = parse_source(input, &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
+        let errors = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1, "expected exactly one error: {diags:?}");
+        let diag = errors[0];
+        assert_eq!(diag.code, DiagCode::NamedArgInParens);
+        assert_eq!(
+            diag.message,
+            "unexpected '=' — 'Circle' takes positional arguments: \
+             Shape.Circle(...); named fields use braces on named variants: \
+             Shape.Variant{field=value}"
+        );
+        assert!(
+            !diag.message.contains("expected '('"),
+            "message must not be a token dump: {}",
+            diag.message
+        );
+    }
+
+    #[test]
+    fn named_arg_in_parens_method_flavor_message() {
+        // The plain-call mirror: `f(a=b)` names no variant and points
+        // at the positional spelling.
+        let mut pool = InternPool::new();
+        let input = "fn main():\n\tf(a=b)\n";
+        let (_program, diags) = parse_source(input, &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
+        let diag = diags
+            .iter()
+            .find(|d| d.code == DiagCode::NamedArgInParens)
+            .expect("named-arg diagnostic must surface");
+        assert_eq!(
+            diag.message,
+            "named arguments are not supported — pass arguments positionally"
+        );
+    }
+
+    #[test]
+    fn missing_parens_construct_message_is_targeted() {
+        // `x = Shape.Circle 5.0`: one E0126 — the trailing
+        // expression is recovered as the payload, so the statement
+        // still declares `x` and no undefined-variable cascade
+        // follows.
+        let mut pool = InternPool::new();
+        let input =
+            "enum Shape:\n\tCircle(float)\n\nfn main():\n\tx = Shape.Circle 5.0\n\tprint(x)\n";
+        let (_program, diags) = parse_source(input, &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
+        let errors = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1, "expected exactly one error: {diags:?}");
+        assert_eq!(errors[0].code, DiagCode::MissingArgListOnVariant);
+        assert_eq!(
+            errors[0].message,
+            "missing argument list — 'Circle' takes a positional payload: Shape.Circle(...)"
+        );
+    }
+
+    #[test]
+    fn positional_values_in_braces_message_is_targeted() {
+        // `Shape.Rectangle{1.0, 2.0}`: E0127 names the field syntax
+        // and the paren form; the named variant then gets its own
+        // E0123 — two one-liners, no token dump.
+        let mut pool = InternPool::new();
+        let input = "enum Shape:\n\tRectangle(width: float, height: float)\n\nfn main():\n\tprint(Shape.Rectangle{1.0, 2.0})\n";
+        let (_program, diags) = parse_source(input, &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
+        // (The named variant then gets its own E0123 from sema — the
+        // Brace Law, covered by the sema suite.)
+        let errors = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1, "expected exactly one error: {diags:?}");
+        assert_eq!(errors[0].code, DiagCode::PositionalArgsInBraces);
+        assert_eq!(
+            errors[0].message,
+            "fields are written name=value (width=1.0); for a positional payload use parens: Shape.Variant(...)"
+        );
+    }
+
+    #[test]
+    fn comma_separated_variants_message_is_targeted() {
+        // `enum Color: Red, Green, Blue`: one E0128; the variants
+        // are declared anyway, so the rest of the file type-checks.
+        let mut pool = InternPool::new();
+        let input = "enum Color: Red, Green, Blue\n\nfn main():\n\tc = Color.Red\n\tprint(c)\n";
+        let (_program, diags) = parse_source(input, &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
+        let errors = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1, "expected exactly one error: {diags:?}");
+        assert_eq!(errors[0].code, DiagCode::CommaSeparatedVariants);
+        assert_eq!(
+            errors[0].message,
+            "enum variants are declared one per line (block form); there is no comma form"
+        );
+    }
+
+    #[test]
+    fn derive_debug_message_notes_it_is_automatic() {
+        // `#[derive(Debug)]`: Debug needs no attribute — the E0108
+        // message says so, alongside the known-attribute list.
+        let mut pool = InternPool::new();
+        let input = "#[derive(Debug)]\nenum Color:\n\tRed\n\nfn main():\n\tpass_through = 1\n";
+        let (_program, diags) = parse_source(input, &mut pool, "<test>")
+            .expect("recovery should yield a partial program");
+        let diag = diags
+            .iter()
+            .find(|d| d.code == DiagCode::UnknownAttribute)
+            .expect("unknown-attribute diagnostic must surface");
+        assert_eq!(
+            diag.message,
+            "unknown attribute 'derive(Debug)'; Debug is automatic for every enum; known attributes: derive(Eq), repr(C)"
         );
     }
 }

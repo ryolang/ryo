@@ -130,18 +130,8 @@ impl TirRef {
 
 // ---------- ExtraRange ----------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExtraRange {
-    pub offset: u32,
-    pub len: u32,
-}
-
-impl ExtraRange {
-    pub fn as_range(self) -> std::ops::Range<usize> {
-        let start = self.offset as usize;
-        start..start + self.len as usize
-    }
-}
+pub use crate::extra::ExtraRange;
+pub use crate::extra::enum_lit_extra;
 
 // ---------- Instruction tags ----------
 
@@ -205,6 +195,13 @@ pub enum TirTag {
     /// Memberwise struct inequality (M9.1). Payload in `TirData::BinOp`; result `bool`.
     StructNe,
 
+    /// Discriminant-and-payload enum equality (M11). Payload in
+    /// `TirData::BinOp`; result `bool`.
+    EnumEq,
+    /// Discriminant-and-payload enum inequality (M11). Payload in
+    /// `TirData::BinOp`; result `bool`.
+    EnumNe,
+
     /// Read the `len` field of a str fat pointer. `TirData::UnOp`.
     StrLen,
 
@@ -258,9 +255,11 @@ pub enum TirTag {
     /// is passed to an owned borrow parameter. `TirData::UnOp`.
     ViewAsOwner,
 
-    /// `print()`-gate rewrite (M9.1): `int`/`float`/`bool`/struct args
-    /// render via their Debug repr (`print(x)` → `print(DebugRepr(x))`,
-    /// like bytes → `__ryo_bytes_repr`). Borrows operand; owned `str` out.
+    /// `print()`-gate rewrite (M9.1): `int`/`float`/`bool`/struct/enum
+    /// args render via their Debug repr (`print(x)` → `print(DebugRepr(x))`,
+    /// like bytes → `__ryo_bytes_repr`). The operand kind rides on the
+    /// operand's type (M11 enums included) — no payload bits of its own.
+    /// Borrows operand; owned `str` out.
     DebugRepr,
 
     /// `return <expr>`. Operand in `TirData::UnOp`.
@@ -303,6 +302,15 @@ pub enum TirTag {
     /// canonical (declaration-order) field order; `TypedInst.ty` is
     /// the struct type.
     StructLit,
+
+    /// Enum variant construction `Name::Variant(args...)` (M11).
+    /// Variable payload in `extra` — see [`enum_lit_extra`]. The
+    /// enum type and declaration-order variant index head the
+    /// payload; args are `(field_idx, value)` pairs keyed by
+    /// declaration-order payload-field index (tuple variants use the
+    /// synthesized `"0"`, `"1"`, … names). Unit variants encode
+    /// `argc = 0`; `TypedInst.ty` is the enum type.
+    EnumLit,
 
     /// Field access `object.field` (M9). Payload in
     /// `TirData::FieldAccess` (object + canonical field index);
@@ -740,6 +748,8 @@ impl TirBuilder {
                 | TirTag::BytesIndex
                 | TirTag::StructEq
                 | TirTag::StructNe
+                | TirTag::EnumEq
+                | TirTag::EnumNe
                 | TirTag::FAdd
                 | TirTag::FSub
                 | TirTag::FMul
@@ -1039,6 +1049,44 @@ impl TirBuilder {
         )
     }
 
+    /// Emit an `EnumLit` `Name::Variant(args...)` (M11). `args` are
+    /// `(field_idx, value)` pairs; `field_idx` selects the payload
+    /// field within the variant (tuple variants use the synthesized
+    /// `"0"`, `"1"`, … names). `ty` is the enum type; `variant` is
+    /// the declaration-order variant index. Unit variants pass `&[]`.
+    /// `positional` records the construction's source form for
+    /// diagnostics; codegen ignores it (wire parity with UIR's
+    /// [`enum_lit_extra::FLAG_POSITIONAL`]).
+    pub fn enum_lit(
+        &mut self,
+        ty: TypeId,
+        variant: u32,
+        positional: bool,
+        args: &[(u32, TirRef)],
+        span: Span,
+    ) -> TirRef {
+        let offset = self.extra_offset();
+        self.extra.push(ty.raw());
+        self.extra.push(variant);
+        self.extra.push(Self::len_u32(args.len()));
+        self.extra.push(if positional {
+            enum_lit_extra::FLAG_POSITIONAL
+        } else {
+            0
+        });
+        for &(field_idx, value) in args {
+            self.extra.push(field_idx);
+            self.extra.push(value.raw());
+        }
+        let len = Self::len_u32(enum_lit_extra::ARGS + 2 * args.len());
+        self.push(
+            TirTag::EnumLit,
+            ty,
+            TirData::Extra(ExtraRange { offset, len }),
+            span,
+        )
+    }
+
     /// Emit a `FieldAccess` (M9). `field_index` is the canonical
     /// declaration-order index; `ty` is the field type.
     pub fn field_access(
@@ -1195,6 +1243,31 @@ pub struct ForRangeView {
 pub struct StructLitView {
     pub ty: TypeId,
     pub fields: Vec<(u32, TirRef)>,
+}
+
+/// Decoded view of a [`TirTag::EnumLit`] payload (M11). Borrows the
+/// `extra` arena directly — decoding allocates nothing (contrast with
+/// [`StructLitView`]'s owned `Vec`); `fields()` yields `(field_index,
+/// value)` pairs keyed by declaration-order payload-field index, in
+/// the order sema encoded them.
+pub struct EnumLitView<'a> {
+    pub ty: TypeId,
+    pub variant_index: u32,
+    /// Construction's source form as sema recorded it (wire parity
+    /// with UIR; codegen and ownership ignore it).
+    pub positional: bool,
+    args: &'a [u32],
+}
+
+impl EnumLitView<'_> {
+    /// `(field_index, value)` pairs, in the order sema encoded them.
+    pub fn fields(&self) -> impl Iterator<Item = (u32, TirRef)> + '_ {
+        self.args
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[field_idx, raw]| (field_idx, TirRef::from_raw(raw)))
+    }
 }
 
 impl Tir {
@@ -1369,6 +1442,27 @@ impl Tir {
             .collect();
         StructLitView { ty, fields }
     }
+
+    pub fn enum_lit_view(&self, r: TirRef) -> EnumLitView<'_> {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, TirTag::EnumLit));
+        let range = match inst.data {
+            TirData::Extra(rng) => rng,
+            _ => unreachable!("EnumLit must carry TirData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        let ty = TypeId::from_raw(slice[enum_lit_extra::TY]);
+        let variant_index = slice[enum_lit_extra::VARIANT];
+        let positional = slice[enum_lit_extra::FLAGS] & enum_lit_extra::FLAG_POSITIONAL != 0;
+        let n = slice[enum_lit_extra::ARGC] as usize;
+        let args = &slice[enum_lit_extra::ARGS..enum_lit_extra::ARGS + 2 * n];
+        EnumLitView {
+            ty,
+            variant_index,
+            positional,
+            args,
+        }
+    }
 }
 
 fn read_ref_list(slice: &[u32], pos: &mut usize) -> Vec<TirRef> {
@@ -1447,6 +1541,11 @@ impl Tir {
                 }
                 TirTag::StructLit => {
                     for &(_, value) in &self.struct_lit_view(r).fields {
+                        f(r, value, ChildKind::Operand);
+                    }
+                }
+                TirTag::EnumLit => {
+                    for (_, value) in self.enum_lit_view(r).fields() {
                         f(r, value, ChildKind::Operand);
                     }
                 }

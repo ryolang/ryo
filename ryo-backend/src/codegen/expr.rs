@@ -4,7 +4,7 @@ use super::arith::{DIV_OVERFLOW_MSG, DIV_ZERO_MSG, MOD_OVERFLOW_MSG, MOD_ZERO_MS
 use super::bytes::store_string;
 use super::{
     Codegen, FunctionContext, OVERFLOW_MSG, STR_SLOT_SIZE, Terminator, ValueRepr,
-    cranelift_type_for, is_fat_type, is_struct_type, ranges,
+    cranelift_type_for, is_enum_type, is_fat_type, is_struct_type, ranges,
 };
 use cranelift::codegen::ir::{BlockArg, FuncRef, MemFlagsData, StackSlot};
 use cranelift::prelude::*;
@@ -38,16 +38,18 @@ impl<M: Module> Codegen<M> {
         if let Some(repr) = Self::cached_repr(ctx, r) {
             return match repr {
                 ValueRepr::Scalar(v) => Ok(v),
-                // Fat/view-typed values have no scalar stand-in.
+                // Fat/view/aggregate-typed values have no scalar stand-in.
                 // A multi-word repr reaching the scalar entry point
                 // means a consumer forgot to gate through eval_inst_fat
-                // / eval_inst_view — reject loudly instead of silently
-                // handing out the data pointer.
+                // / eval_inst_view / eval_inst_struct / eval_inst_enum —
+                // reject loudly instead of silently handing out the
+                // data pointer.
                 ValueRepr::Str { .. }
                 | ValueRepr::Bytes { .. }
                 | ValueRepr::View { .. }
-                | ValueRepr::Struct { .. } => Err(format!(
-                    "eval_inst: fat/view/struct-typed inst %{} reached the scalar entry point; use eval_inst_fat / eval_inst_view / eval_inst_struct",
+                | ValueRepr::Struct { .. }
+                | ValueRepr::Enum { .. } => Err(format!(
+                    "eval_inst: fat/view/struct/enum-typed inst %{} reached the scalar entry point; use eval_inst_fat / eval_inst_view / eval_inst_struct / eval_inst_enum",
                     r.index()
                 )),
             };
@@ -331,6 +333,21 @@ impl<M: Module> Codegen<M> {
                 let ty = ctx.tir.inst(lhs).ty;
                 Self::emit_struct_eq(builder, ctx, lv, rv, ty, inst.tag == TirTag::StructNe)?
             }
+            TirTag::EnumEq | TirTag::EnumNe => {
+                let (lhs, rhs) = match inst.data {
+                    TirData::BinOp { lhs, rhs } => (lhs, rhs),
+                    _ => unreachable!("EnumEq/EnumNe must carry TirData::BinOp"),
+                };
+                // Operands are enum values: materialize their slot
+                // addresses (never the scalar entry — enums are
+                // memory-first), then compare the i32 tags and the
+                // active variant's payload. The comparison borrows
+                // both operands.
+                let lv = Self::eval_inst_enum(builder, ctx, lhs)?;
+                let rv = Self::eval_inst_enum(builder, ctx, rhs)?;
+                let ty = ctx.tir.inst(lhs).ty;
+                Self::emit_enum_eq(builder, ctx, lv, rv, ty, inst.tag == TirTag::EnumNe)?
+            }
             TirTag::BytesIndex => {
                 let (base, index) = match inst.data {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
@@ -500,87 +517,6 @@ impl<M: Module> Codegen<M> {
     ) -> Option<Value> {
         let home = Self::read_slot(&ctx.fat_locals, name)?.home?;
         Some(builder.ins().stack_addr(ctx.int_type, home, 0))
-    }
-
-    /// Call a slot-out runtime producer: allocate a 24-byte slot (or
-    /// use the caller-provided `out_slot` — a fat binding's canonical
-    /// home when the result initializes one), pass its address as
-    /// arg 0, then load the tagged (ptr, len, cap) triple. The runtime
-    /// writes the full slot (SSO tag, headroom cap) — codegen never
-    /// derives cap anymore.
-    ///
-    /// The reload loads run either way: their values feed the
-    /// `ValueRepr` cache the free sweep keys on. For a home-backed
-    /// binding they are short-lived (never `def_var`'d), so regalloc
-    /// never grows a second spill slot next to the home.
-    pub(crate) fn emit_slot_out_call(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        fn_name: &'static str,
-        args: &[(Type, Value)],
-        out_slot: Option<StackSlot>,
-    ) -> Result<(Value, Value, Value), String> {
-        Self::emit_slot_out_call_impl(builder, ctx, fn_name, args, out_slot, true)
-    }
-
-    /// `emit_slot_out_call` for runtime producers whose out-slot is the
-    /// LAST parameter instead of the first — the spec pins out-last for
-    /// `ryo_process_argv(i, out)` and `ryo_getenv(key_ptr, key_len,
-    /// out)`, whose signatures the runtime's own tests call directly.
-    /// Slot sizing, `out_slot` honoring, and the tagged-triple reload
-    /// are identical to [`Self::emit_slot_out_call`]; only the
-    /// parameter position differs, so both delegate to one
-    /// implementation.
-    pub(crate) fn emit_slot_out_call_out_last(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        fn_name: &'static str,
-        args: &[(Type, Value)],
-        out_slot: Option<StackSlot>,
-    ) -> Result<(Value, Value, Value), String> {
-        Self::emit_slot_out_call_impl(builder, ctx, fn_name, args, out_slot, false)
-    }
-
-    fn emit_slot_out_call_impl(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        fn_name: &'static str,
-        args: &[(Type, Value)],
-        out_slot: Option<StackSlot>,
-        out_first: bool,
-    ) -> Result<(Value, Value, Value), String> {
-        let slot = out_slot.unwrap_or_else(|| {
-            builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                STR_SLOT_SIZE,
-                3,
-            ))
-        });
-        let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-        let mut param_tys = Vec::with_capacity(args.len() + 1);
-        let mut call_args = Vec::with_capacity(args.len() + 1);
-        if out_first {
-            param_tys.push(ctx.int_type);
-            call_args.push(addr);
-        }
-        param_tys.extend(args.iter().map(|(ty, _)| *ty));
-        call_args.extend(args.iter().map(|(_, v)| *v));
-        if !out_first {
-            param_tys.push(ctx.int_type);
-            call_args.push(addr);
-        }
-        let func_ref = Self::declare_runtime_fn(ctx, builder, fn_name, &param_tys, &[])?;
-        builder.ins().call(func_ref, &call_args);
-        let ptr = builder
-            .ins()
-            .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);
-        let len = builder
-            .ins()
-            .load(types::I64, MemFlagsData::trusted(), addr, 8);
-        let cap = builder
-            .ins()
-            .load(types::I64, MemFlagsData::trusted(), addr, 16);
-        Ok((ptr, len, cap))
     }
 
     /// Extract a readable `(ptr, len)` for the byte content of a fat
@@ -957,11 +893,12 @@ impl<M: Module> Codegen<M> {
                 }
             }
             TirTag::DebugRepr => {
-                // M9.1 print() gate: render the operand's Debug
+                // M9.1/M11 print() gate: render the operand's Debug
                 // representation into a fresh owned str. Primitive
                 // operands render bare through the ryo_*_to_str
                 // family (no braces); struct operands recurse through
-                // `emit_debug_repr` (structs.rs). The cached triple
+                // `emit_debug_repr` (structs.rs); enum operands through
+                // `eval_enum_debug_repr` (enums.rs). The cached triple
                 // feeds print's `eval_str_or_view_parts` like any
                 // other str temp, and the ownership pass's scheduled
                 // Free releases the buffer after the statement.
@@ -996,6 +933,34 @@ impl<M: Module> Codegen<M> {
                         );
                         let addr = Self::eval_inst_struct(builder, ctx, operand)?;
                         let repr_addr = Self::emit_debug_repr(builder, ctx, addr, operand_ty)?;
+                        let ptr =
+                            builder
+                                .ins()
+                                .load(ctx.int_type, MemFlagsData::trusted(), repr_addr, 0);
+                        let len =
+                            builder
+                                .ins()
+                                .load(types::I64, MemFlagsData::trusted(), repr_addr, 8);
+                        let cap =
+                            builder
+                                .ins()
+                                .load(types::I64, MemFlagsData::trusted(), repr_addr, 16);
+                        ValueRepr::Str { ptr, len, cap }
+                    }
+                    TypeKind::Enum => {
+                        // M11: enum operands render through the
+                        // tag-dispatched enum Debug repr (unit
+                        // `Color.Red`, tuple `Result.Success(5)`,
+                        // named `Shape.Rectangle{...}`). The repr
+                        // allocates its own result slot; a
+                        // caller-provided out_slot would silently be
+                        // ignored.
+                        debug_assert!(
+                            out_slot.is_none(),
+                            "DebugRepr enum operand manages its own repr slot"
+                        );
+                        let addr = Self::eval_inst_enum(builder, ctx, operand)?;
+                        let repr_addr = Self::eval_enum_debug_repr(builder, ctx, addr, operand_ty)?;
                         let ptr =
                             builder
                                 .ins()
@@ -1112,60 +1077,6 @@ impl<M: Module> Codegen<M> {
         };
         Self::cache_repr(ctx, r, repr);
         Ok(repr)
-    }
-
-    /// Evaluate a `str`/`bytes`/`strview`/`bytesview`-typed operand and
-    /// hand back its `(ptr, len)` words regardless of representation —
-    /// owned triple or borrowed view pair (M8.4/M8.4.2). Owned triples
-    /// extract through the SSO-aware `emit_fat_bytes_ptr_len`, which
-    /// spills a tagged-inline value's words to a fresh scratch slot and
-    /// passes heap/static values through unchanged. Consumers that
-    /// only need the viewed bytes (`print`, `StrLen`, `StrCmpEq/Ne`,
-    /// `BytesCmpEq/Ne`, the `__ryo_str_push` suffix, the bytes
-    /// conversion calls) use this; anything needing the cap must stay
-    /// on `eval_inst_fat`.
-    ///
-    /// TRANSIENT CONSUMERS ONLY: for an inline value the returned ptr
-    /// addresses a scratch slot private to this extraction. View-
-    /// creating ops (slice, ToView) must not use it.
-    pub(super) fn eval_str_or_view_parts(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        r: TirRef,
-    ) -> Result<(Value, Value), String> {
-        let ty = ctx.tir.inst(r).ty;
-        if ctx.pool.is_view(ty) {
-            let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, r)? else {
-                unreachable!("eval_inst_view must produce ValueRepr::View");
-            };
-            return Ok((ptr, len));
-        }
-        match Self::eval_inst_fat(builder, ctx, r)? {
-            ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
-                // A home-backed Var's inline bytes already sit in the
-                // home slot — extract against that address, no spill.
-                let inline_addr =
-                    Self::local_name_of(ctx, r).and_then(|n| Self::fat_home_addr(builder, ctx, n));
-                Self::emit_fat_bytes_ptr_len(builder, ctx, ptr, len, cap, inline_addr)
-            }
-            ValueRepr::View { ptr, len } => Ok((ptr, len)),
-            ValueRepr::Scalar(_) | ValueRepr::Struct { .. } => Err(format!(
-                "eval_str_or_view_parts: instruction at %{} is not a fat/view value",
-                r.index()
-            )),
-        }
-    }
-
-    /// The `len` word of a `str`/`bytes`/`strview`/`bytesview`-typed
-    /// operand, from either representation (M8.4/M8.4.2). Backs the
-    /// `StrLen` arm.
-    fn eval_str_or_view_len(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        r: TirRef,
-    ) -> Result<Value, String> {
-        let (_, len) = Self::eval_str_or_view_parts(builder, ctx, r)?;
-        Ok(len)
     }
 
     /// Materialize every distinct string/bytes literal exactly once, in
@@ -1613,6 +1524,21 @@ impl<M: Module> Codegen<M> {
             return Ok(out); // dummy scalar — consumers use eval_inst_struct
         }
 
+        if is_enum_type(ret_ty, ctx.pool) {
+            // M11 enum sret: the enum's slot was allocated by
+            // marshalling; the slot address is the result (mirrors the
+            // struct sret path above).
+            let out = marshalled
+                .sret
+                .expect("enum-returning call must marshal an sret pointer");
+
+            builder.ins().call(callee_ref, &marshalled.values);
+            Self::reload_inout_args(builder, ctx, &marshalled.inout_reloads)?;
+
+            Self::cache_repr(ctx, r, ValueRepr::Enum { addr: out });
+            return Ok(out); // dummy scalar — consumers use eval_inst_enum
+        }
+
         let call = builder.ins().call(callee_ref, &marshalled.values);
         Self::reload_inout_args(builder, ctx, &marshalled.inout_reloads)?;
         let results = builder.inst_results(call);
@@ -1668,12 +1594,13 @@ impl<M: Module> Codegen<M> {
             if mode == ParamMode::Inout {
                 if matches!(ctx.tir.inst(*arg).data, TirData::FieldAccess { .. })
                     || is_struct_type(arg_ty, ctx.pool)
+                    || is_enum_type(arg_ty, ctx.pool)
                 {
-                    // M9 inout field path (`&p.x`) or whole-struct inout
-                    // (`&p`): the pointee already lives in the root
-                    // struct's stack slot — pass its address directly so
-                    // the callee mutates in place. No spill, no reload,
-                    // no write-back.
+                    // M9 inout field path (`&p.x`), whole-struct inout
+                    // (`&p`), or whole-enum inout (M11, `&e`): the
+                    // pointee already lives in the caller's stack slot —
+                    // pass its address directly so the callee mutates
+                    // in place. No spill, no reload, no write-back.
                     let addr = Self::inout_pointee_addr(builder, ctx, *arg)?;
                     values.push(addr);
                 } else if is_fat_type(arg_ty, ctx.pool) {
@@ -1751,6 +1678,12 @@ impl<M: Module> Codegen<M> {
                 // field-wise copy for Move/Copy.
                 let addr = Self::emit_struct_call_arg(builder, ctx, *arg, mode)?;
                 values.push(addr);
+            } else if is_enum_type(arg_ty, ctx.pool) {
+                // M11 enum arg: a single slot address — the existing
+                // slot for Borrow, a fresh tag + active-payload copy
+                // for Move/Copy.
+                let addr = Self::emit_enum_call_arg(builder, ctx, *arg, mode)?;
+                values.push(addr);
             } else {
                 values.push(Self::eval_inst(builder, ctx, *arg)?);
             }
@@ -1775,6 +1708,11 @@ impl<M: Module> Codegen<M> {
             Some(out)
         } else if is_struct_type(ret_ty, ctx.pool) {
             let slot = Self::struct_slot(builder, ctx, ret_ty);
+            let out = builder.ins().stack_addr(ctx.int_type, slot, 0);
+            values.insert(0, out);
+            Some(out)
+        } else if is_enum_type(ret_ty, ctx.pool) {
+            let slot = Self::enum_slot(builder, ctx, ret_ty);
             let out = builder.ins().stack_addr(ctx.int_type, slot, 0);
             values.insert(0, out);
             Some(out)

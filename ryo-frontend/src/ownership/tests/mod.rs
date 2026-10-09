@@ -1,5 +1,6 @@
 mod common;
 mod concat;
+mod enums;
 mod error_path;
 mod frees;
 mod frees_w0004;
