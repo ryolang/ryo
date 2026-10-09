@@ -1054,10 +1054,14 @@ impl TirBuilder {
     /// field within the variant (tuple variants use the synthesized
     /// `"0"`, `"1"`, … names). `ty` is the enum type; `variant` is
     /// the declaration-order variant index. Unit variants pass `&[]`.
+    /// `positional` records the construction's source form for
+    /// diagnostics; codegen ignores it (wire parity with UIR's
+    /// [`enum_lit_extra::FLAG_POSITIONAL`]).
     pub fn enum_lit(
         &mut self,
         ty: TypeId,
         variant: u32,
+        positional: bool,
         args: &[(u32, TirRef)],
         span: Span,
     ) -> TirRef {
@@ -1065,6 +1069,11 @@ impl TirBuilder {
         self.extra.push(ty.raw());
         self.extra.push(variant);
         self.extra.push(Self::len_u32(args.len()));
+        self.extra.push(if positional {
+            enum_lit_extra::FLAG_POSITIONAL
+        } else {
+            0
+        });
         for &(field_idx, value) in args {
             self.extra.push(field_idx);
             self.extra.push(value.raw());
@@ -1244,6 +1253,9 @@ pub struct StructLitView {
 pub struct EnumLitView<'a> {
     pub ty: TypeId,
     pub variant_index: u32,
+    /// Construction's source form as sema recorded it (wire parity
+    /// with UIR; codegen and ownership ignore it).
+    pub positional: bool,
     args: &'a [u32],
 }
 
@@ -1441,11 +1453,13 @@ impl Tir {
         let slice = &self.extra[range.as_range()];
         let ty = TypeId::from_raw(slice[enum_lit_extra::TY]);
         let variant_index = slice[enum_lit_extra::VARIANT];
+        let positional = slice[enum_lit_extra::FLAGS] & enum_lit_extra::FLAG_POSITIONAL != 0;
         let n = slice[enum_lit_extra::ARGC] as usize;
         let args = &slice[enum_lit_extra::ARGS..enum_lit_extra::ARGS + 2 * n];
         EnumLitView {
             ty,
             variant_index,
+            positional,
             args,
         }
     }

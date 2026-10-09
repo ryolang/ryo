@@ -118,6 +118,7 @@ fn variant_construct_positional_lowers_to_enum_lit() {
     let lit = uir.enum_lit_view(v.initializer);
     assert_eq!(lit.ty, uir.enum_decls[0].ty);
     assert_eq!(lit.variant_index, 0, "Circle is the first declared variant");
+    assert!(lit.positional, "parens form records the positional flag");
     let args: Vec<_> = lit.fields().collect();
     assert_eq!(args.len(), 1);
     assert_eq!(args[0].0, 0, "positional arg 0 maps to field idx 0");
@@ -139,6 +140,10 @@ fn variant_construct_named_canonicalizes_against_decl_order() {
     let v = uir.var_decl_view(uir.body_stmts(main)[0]);
     let lit = uir.enum_lit_view(v.initializer);
     assert_eq!(lit.variant_index, 0);
+    assert!(
+        !lit.positional,
+        "braces form leaves the positional flag clear"
+    );
     let args: Vec<_> = lit.fields().collect();
     assert_eq!(args.len(), 2);
     assert_eq!(args[0].0, 1, "height is payload field 1");

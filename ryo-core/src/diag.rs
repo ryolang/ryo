@@ -198,6 +198,15 @@ pub enum DiagCode {
     /// *named* field is frontlined by astgen before sema runs. The
     /// message names the field, the variant, and the enum.
     UnknownVariantField,
+    /// A variant construction used the parenthesized positional form on
+    /// a variant with named fields (M11, Brace Law D11: named payloads
+    /// construct with braces only — one way per shape, symmetric with
+    /// structs). Astgen records the source form on the `EnumLit` wire
+    /// because the flat `(field_idx, value)` pairs are otherwise
+    /// identical to in-order brace construction. The message names the
+    /// variant and the enum and shows the brace spelling with the
+    /// declared field names.
+    PositionalConstructOnNamedVariant,
 
     // --- sema: destructuring (M10) ---
     /// A positional destructuring pattern binds a different number of

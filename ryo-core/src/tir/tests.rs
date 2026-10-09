@@ -373,16 +373,17 @@ fn enum_lit_round_trips_through_extra() {
     let mut b = TirBuilder::new(shape, vec![], pool.void(), sp());
     let w = b.float_const(3.0, float_ty, sp());
     let h = b.float_const(4.0, float_ty, sp());
-    let lit = b.enum_lit(enum_ty, 1, &[(0, w), (1, h)], sp());
+    let lit = b.enum_lit(enum_ty, 1, false, &[(0, w), (1, h)], sp());
     let tir = b.finish(&[lit]);
 
     let view = tir.enum_lit_view(lit);
     assert_eq!(view.ty, enum_ty);
     assert_eq!(view.variant_index, 1);
+    assert!(!view.positional);
     assert_eq!(view.fields().collect::<Vec<_>>(), vec![(0, w), (1, h)]);
     assert_eq!(tir.inst(lit).ty, enum_ty);
 
-    // Wire layout is pinned: [TY, VARIANT, ARGC, (FIELD_IDX, REF) x ARGC].
+    // Wire layout is pinned: [TY, VARIANT, FLAGS, ARGC, (FIELD_IDX, REF) x ARGC].
     let inst = tir.inst(lit);
     let TirData::Extra(rng) = inst.data else {
         panic!("expected TirData::Extra, got {:?}", inst.data);
@@ -390,11 +391,29 @@ fn enum_lit_round_trips_through_extra() {
     let slice = &tir.extra[rng.as_range()];
     assert_eq!(slice[enum_lit_extra::TY], enum_ty.raw());
     assert_eq!(slice[enum_lit_extra::VARIANT], 1);
+    assert_eq!(slice[enum_lit_extra::FLAGS], 0);
     assert_eq!(slice[enum_lit_extra::ARGC], 2);
     assert_eq!(slice[enum_lit_extra::ARGS], 0);
     assert_eq!(slice[enum_lit_extra::ARGS + 1], w.raw());
     assert_eq!(slice[enum_lit_extra::ARGS + 2], 1);
     assert_eq!(slice[enum_lit_extra::ARGS + 3], h.raw());
+}
+
+#[test]
+fn enum_lit_positional_flag_round_trips() {
+    let mut pool = InternPool::new();
+    let shape = pool.intern_str("Shape");
+    let enum_ty = pool.declare_enum(shape);
+    let float_ty = pool.float();
+
+    let mut b = TirBuilder::new(shape, vec![], pool.void(), sp());
+    let v = b.float_const(5.0, float_ty, sp());
+    let lit = b.enum_lit(enum_ty, 0, true, &[(0, v)], sp());
+    let tir = b.finish(&[lit]);
+
+    let view = tir.enum_lit_view(lit);
+    assert!(view.positional, "parenthesized form sets the flag");
+    assert_eq!(view.fields().collect::<Vec<_>>(), vec![(0, v)]);
 }
 
 #[test]
@@ -404,12 +423,13 @@ fn enum_lit_unit_variant_round_trips_empty_args() {
     let enum_ty = pool.declare_enum(shape);
 
     let mut b = TirBuilder::new(shape, vec![], pool.void(), sp());
-    let lit = b.enum_lit(enum_ty, 0, &[], sp());
+    let lit = b.enum_lit(enum_ty, 0, false, &[], sp());
     let tir = b.finish(&[lit]);
 
     let view = tir.enum_lit_view(lit);
     assert_eq!(view.ty, enum_ty);
     assert_eq!(view.variant_index, 0);
+    assert!(!view.positional);
     assert_eq!(view.fields().count(), 0);
 }
 
@@ -423,14 +443,14 @@ fn walk_operands_visits_enum_lit_fields_and_enum_eq_ne_operands() {
     let mut b = TirBuilder::new(shape, vec![], pool.void(), sp());
     let w = b.float_const(3.0, float_ty, sp());
     let h = b.float_const(4.0, float_ty, sp());
-    let lit = b.enum_lit(enum_ty, 1, &[(0, w), (1, h)], sp());
+    let lit = b.enum_lit(enum_ty, 1, false, &[(0, w), (1, h)], sp());
     // Fresh refs per comparison: the body is tree-shaped, so no
     // instruction may feed two parents.
-    let a = b.enum_lit(enum_ty, 0, &[], sp());
-    let c = b.enum_lit(enum_ty, 0, &[], sp());
+    let a = b.enum_lit(enum_ty, 0, false, &[], sp());
+    let c = b.enum_lit(enum_ty, 0, false, &[], sp());
     let eq = b.binary(TirTag::EnumEq, pool.bool_(), a, c, sp());
-    let d = b.enum_lit(enum_ty, 1, &[], sp());
-    let e = b.enum_lit(enum_ty, 1, &[], sp());
+    let d = b.enum_lit(enum_ty, 1, false, &[], sp());
+    let e = b.enum_lit(enum_ty, 1, false, &[], sp());
     let ne = b.binary(TirTag::EnumNe, pool.bool_(), d, e, sp());
     let tir = b.finish(&[lit, eq, ne]);
 

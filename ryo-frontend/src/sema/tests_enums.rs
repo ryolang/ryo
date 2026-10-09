@@ -55,22 +55,50 @@ fn unit_variant_access_is_typed_enum_lit() {
 }
 
 #[test]
-fn variant_construct_payload_type_mismatch_names_variant_and_field() {
+fn variant_construct_payload_type_mismatch_names_variant_and_position() {
     // The wrong-typed positional payload diagnostic names the enum,
-    // the variant, and the field.
+    // the variant, and the 1-based argument position — the user wrote
+    // a positional argument, not the synthesized "0" field name.
     let src = "enum Shape:\n\tCircle(float)\n\nfn main():\n\ts = Shape.Circle(\"x\")\n";
     let (_t, diags, _p) = run_with_errors(src);
     let diag = diags
         .iter()
         .find(|d| d.code == DiagCode::TypeMismatch)
         .expect("payload type mismatch must fire");
-    for needle in ["enum 'Shape'", "variant 'Circle'", "field '0'"] {
+    for needle in ["enum 'Shape'", "variant 'Circle'", "positional argument 1"] {
         assert!(
             diag.message.contains(needle),
             "message should name {needle}, got {:?}",
             diag.message
         );
     }
+}
+
+#[test]
+fn named_variant_positional_construct_is_rejected_with_brace_hint() {
+    // Brace Law (D11): `Shape.Rectangle(1.0, 2.0)` — parens on a
+    // named-field variant — is one diagnostic naming the enum, the
+    // variant, and the brace construction spelling with the declared
+    // field names. The in-order brace form stays legal (covered by
+    // `variant_construct_all_three_shapes_type_checks`).
+    let src = "enum Shape:\n\tRectangle(width: float, height: float)\n\nfn main():\n\ts = Shape.Rectangle(1.0, 2.0)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::PositionalConstructOnNamedVariant)
+        .expect("PositionalConstructOnNamedVariant must fire");
+    for needle in [
+        "enum 'Shape'",
+        "variant 'Rectangle'",
+        "Shape.Rectangle{width=..., height=...}",
+    ] {
+        assert!(
+            diag.message.contains(needle),
+            "message should name {needle}, got {:?}",
+            diag.message
+        );
+    }
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
 }
 
 #[test]

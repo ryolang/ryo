@@ -28,7 +28,8 @@ impl ExtraRange {
 ///   [0]  ty:      u32  (TypeId.raw())
 ///   [1]  variant: u32  (declaration-order variant index)
 ///   [2]  argc:    u32
-///   [3..3+2*argc] per arg: [field_idx: u32, value: ref raw()]
+///   [3]  flags:   u32  (FLAG_* bits)
+///   [4..4+2*argc] per arg: [field_idx: u32, value: ref raw()]
 /// ```
 ///
 /// Unlike the name-keyed `struct_lit` layout, enum args are keyed by
@@ -40,5 +41,12 @@ pub mod enum_lit_extra {
     pub const TY: usize = 0;
     pub const VARIANT: usize = 1;
     pub const ARGC: usize = 2;
-    pub const ARGS: usize = 3;
+    pub const FLAGS: usize = 3;
+    pub const ARGS: usize = 4;
+
+    /// Source used the parenthesized positional form `Variant(args)`,
+    /// set by astgen; the braced named form clears it. Sema reads it
+    /// to enforce the Brace Law on named payloads (D11: named variants
+    /// construct with braces only); downstream TIR consumers ignore it.
+    pub const FLAG_POSITIONAL: u32 = 1;
 }

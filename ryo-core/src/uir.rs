@@ -1048,11 +1048,14 @@ impl UirBuilder {
     /// enum type, declaration-order variant index, and
     /// `(field_idx, value)` arg pairs packed into `extra`. `field_idx`
     /// selects the payload field within the variant; unit variants
-    /// pass `&[]`.
+    /// pass `&[]`. `positional` records the source form: astgen sets it
+    /// for the parenthesized form so sema can enforce the Brace Law on
+    /// named payloads (see [`enum_lit_extra::FLAG_POSITIONAL`]).
     pub fn enum_lit(
         &mut self,
         ty: TypeId,
         variant: u32,
+        positional: bool,
         args: &[(u32, InstRef)],
         span: Span,
     ) -> InstRef {
@@ -1060,6 +1063,11 @@ impl UirBuilder {
         self.uir.extra.push(ty.raw());
         self.uir.extra.push(variant);
         self.uir.extra.push(Self::len_u32(args.len()));
+        self.uir.extra.push(if positional {
+            enum_lit_extra::FLAG_POSITIONAL
+        } else {
+            0
+        });
         for &(field_idx, value) in args {
             self.uir.extra.push(field_idx);
             self.uir.extra.push(value.raw());
@@ -1212,6 +1220,9 @@ pub struct StructLitView {
 pub struct EnumLitView<'a> {
     pub ty: TypeId,
     pub variant_index: u32,
+    /// Source used the parenthesized positional form (astgen-recorded;
+    /// see [`enum_lit_extra::FLAG_POSITIONAL`]).
+    pub positional: bool,
     args: &'a [u32],
 }
 
@@ -1436,11 +1447,13 @@ impl Uir {
         let slice = &self.extra[range.as_range()];
         let ty = TypeId::from_raw(slice[enum_lit_extra::TY]);
         let variant_index = slice[enum_lit_extra::VARIANT];
+        let positional = slice[enum_lit_extra::FLAGS] & enum_lit_extra::FLAG_POSITIONAL != 0;
         let n = slice[enum_lit_extra::ARGC] as usize;
         let args = &slice[enum_lit_extra::ARGS..enum_lit_extra::ARGS + 2 * n];
         EnumLitView {
             ty,
             variant_index,
+            positional,
             args,
         }
     }
@@ -1853,15 +1866,16 @@ mod tests {
         let mut b = UirBuilder::new();
         let w = b.float_literal(3.0, sp());
         let h = b.float_literal(4.0, sp());
-        let lit = b.enum_lit(enum_ty, 1, &[(0, w), (1, h)], sp());
+        let lit = b.enum_lit(enum_ty, 1, false, &[(0, w), (1, h)], sp());
 
         let uir = b.finish();
         let view = uir.enum_lit_view(lit);
         assert_eq!(view.ty, enum_ty);
         assert_eq!(view.variant_index, 1);
+        assert!(!view.positional, "braced named form clears the flag");
         assert_eq!(view.fields().collect::<Vec<_>>(), vec![(0, w), (1, h)]);
 
-        // Wire layout is pinned: [TY, VARIANT, ARGC, (FIELD_IDX, REF) x ARGC].
+        // Wire layout is pinned: [TY, VARIANT, FLAGS, ARGC, (FIELD_IDX, REF) x ARGC].
         let inst = uir.inst(lit);
         let range = match inst.data {
             InstData::Extra(rng) => rng,
@@ -1870,11 +1884,28 @@ mod tests {
         let slice = &uir.extra[range.as_range()];
         assert_eq!(slice[enum_lit_extra::TY], enum_ty.raw());
         assert_eq!(slice[enum_lit_extra::VARIANT], 1);
+        assert_eq!(slice[enum_lit_extra::FLAGS], 0);
         assert_eq!(slice[enum_lit_extra::ARGC], 2);
         assert_eq!(slice[enum_lit_extra::ARGS], 0);
         assert_eq!(slice[enum_lit_extra::ARGS + 1], w.raw());
         assert_eq!(slice[enum_lit_extra::ARGS + 2], 1);
         assert_eq!(slice[enum_lit_extra::ARGS + 3], h.raw());
+    }
+
+    #[test]
+    fn enum_lit_positional_flag_round_trips() {
+        let mut pool = InternPool::new();
+        let shape = pool.intern_str("Shape");
+        let enum_ty = pool.declare_enum(shape);
+
+        let mut b = UirBuilder::new();
+        let v = b.float_literal(5.0, sp());
+        let lit = b.enum_lit(enum_ty, 0, true, &[(0, v)], sp());
+
+        let uir = b.finish();
+        let view = uir.enum_lit_view(lit);
+        assert!(view.positional, "parenthesized form sets the flag");
+        assert_eq!(view.fields().collect::<Vec<_>>(), vec![(0, v)]);
     }
 
     #[test]
@@ -1884,12 +1915,13 @@ mod tests {
         let enum_ty = pool.declare_enum(shape);
 
         let mut b = UirBuilder::new();
-        let lit = b.enum_lit(enum_ty, 0, &[], sp());
+        let lit = b.enum_lit(enum_ty, 0, false, &[], sp());
 
         let uir = b.finish();
         let view = uir.enum_lit_view(lit);
         assert_eq!(view.ty, enum_ty);
         assert_eq!(view.variant_index, 0);
+        assert!(!view.positional);
         assert_eq!(view.fields().count(), 0);
     }
 

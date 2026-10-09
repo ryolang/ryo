@@ -249,7 +249,7 @@ fn enum_move_into_function_consumes_value_jit() {
 fn enum_forward_and_cross_kind_references_jit() {
     assert_ryo_output(
         "enum_forward_refs",
-        "struct Holder:\n\titem: Envelope\n\nenum Envelope:\n\tSealed(body: Letter)\n\tEmpty\n\nenum Letter:\n\tWritten(page: Page)\n\tIlliterate\n\nstruct Page:\n\twords: str\n\nfn main():\n\tpg = Page{words=\"hello\"}\n\tl = Letter.Written(pg)\n\te = Envelope.Sealed(l)\n\th = Holder{item=e}\n\tprint(h)\n\tprint(\"\\n\")\n",
+        "struct Holder:\n\titem: Envelope\n\nenum Envelope:\n\tSealed(body: Letter)\n\tEmpty\n\nenum Letter:\n\tWritten(page: Page)\n\tIlliterate\n\nstruct Page:\n\twords: str\n\nfn main():\n\tpg = Page{words=\"hello\"}\n\tl = Letter.Written{page=pg}\n\te = Envelope.Sealed{body=l}\n\th = Holder{item=e}\n\tprint(h)\n\tprint(\"\\n\")\n",
         "Holder{item=Envelope.Sealed{body=Letter.Written{page=Page{words=\"hello\"}}}}\n",
     );
 }

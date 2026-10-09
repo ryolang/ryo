@@ -643,21 +643,25 @@ fn analyze_struct_lit(
 
 /// Variant construction `EnumName.Variant(args...)` (M11). The UIR
 /// `EnumLit` carries the enum type, the declaration-order variant
-/// index, and `(field_idx, value)` pairs — positional args keyed by
-/// position, named args already canonicalized to declaration-order
-/// indices by astgen (in source order; duplicates included). Payload
-/// typing mirrors [`analyze_struct_lit`]: each arg checks against its
-/// declared field, the emitted TIR `EnumLit` carries canonical
-/// declaration-order pairs, and slots with no valid initializer
-/// recover with an error-typed `Unreachable`.
+/// index, the source form (astgen-recorded `positional` flag — without
+/// it the flat pairs are indistinguishable from in-order brace
+/// construction), and `(field_idx, value)` pairs — positional args
+/// keyed by position, named args already canonicalized to
+/// declaration-order indices by astgen (in source order; duplicates
+/// included). Payload typing mirrors [`analyze_struct_lit`]: each arg
+/// checks against its declared field, the emitted TIR `EnumLit` carries
+/// canonical declaration-order pairs, and slots with no valid
+/// initializer recover with an error-typed `Unreachable`.
 ///
 /// Layering with astgen's frontline checks: an undeclared enum name,
 /// an unknown variant name, and a typo'd *named* field are all
 /// diagnosed during lowering (and the bad args dropped), so this arm
 /// recovers quietly on the error type and never re-reports them. What
-/// remains for sema: out-of-range positional indices, duplicate
-/// fields (duplicate named args lower to repeated indices with no
-/// astgen diagnostic), missing fields, and per-field type mismatches.
+/// remains for sema: the Brace Law gate on named payloads (parens on a
+/// named variant is rejected with the brace spelling), out-of-range
+/// positional indices, duplicate fields (duplicate named args lower to
+/// repeated indices with no astgen diagnostic), missing fields, and
+/// per-field type mismatches.
 fn analyze_variant_construct(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -677,7 +681,7 @@ fn analyze_variant_construct(
     // pool, and the arg loop below needs `&mut Sema` for analysis and
     // diagnostics. Construction sites are cold, so the small owned copy
     // is fine.
-    let (ename, variant_index, vname, fields) = {
+    let (ename, variant_index, vname, kind, fields) = {
         let eview = sema.pool.enum_view(ety);
         let mut variants = eview.variants();
         let Some(variant) = variants.nth(view.variant_index as usize) else {
@@ -689,9 +693,37 @@ fn analyze_variant_construct(
             eview.name(),
             view.variant_index,
             variant.name,
+            variant.kind,
             variant.fields.to_vec(),
         )
     };
+    if view.positional && kind == VariantKind::Named {
+        // Brace Law (D11): named payloads construct with braces only —
+        // one way per shape, symmetric with structs. The pairs alone
+        // can't distinguish this from in-order brace construction
+        // (`Rectangle{width=1.0, height=2.0}` lowers identically), so
+        // astgen records the source form on the wire. Quiet recovery:
+        // the args are not type-checked, matching the other
+        // construction-error paths.
+        let brace_form = fields
+            .iter()
+            .map(|f| format!("{}=...", sema.pool.str(f.name)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::PositionalConstructOnNamedVariant,
+            format!(
+                "variant '{}' of enum '{}' has named fields — construct it as {}.{}{{{}}}",
+                sema.pool.str(vname),
+                sema.pool.str(ename),
+                sema.pool.str(ename),
+                sema.pool.str(vname),
+                brace_form,
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
     let mut by_index: Vec<Option<TirRef>> = vec![None; fields.len()];
     // Once any field errored (unknown/duplicate), the construction's
     // shape is untrustworthy — a derived "missing field(s)" error on
@@ -734,9 +766,19 @@ fn analyze_variant_construct(
         let value = analyze_expr(sema, fcx, scope, value_ref);
         let vty = fcx.builder.ty_of(value);
         if !sema.pool.compatible(vty, field.ty) {
-            sema.sink.emit(Diag::error(
-                fspan,
-                DiagCode::TypeMismatch,
+            // Tuple payloads carry synthesized "0"/"1" field names the
+            // user never wrote — name the argument position instead
+            // (1-based, matching how developers count call arguments).
+            let message = if kind == VariantKind::Tuple {
+                format!(
+                    "positional argument {} of variant '{}' of enum '{}': expected '{}', found '{}'",
+                    fidx + 1,
+                    sema.pool.str(vname),
+                    sema.pool.str(ename),
+                    sema.pool.display(field.ty),
+                    sema.pool.display(vty),
+                )
+            } else {
                 format!(
                     "field '{}' of variant '{}' of enum '{}': expected '{}', found '{}'",
                     sema.pool.str(field.name),
@@ -744,8 +786,10 @@ fn analyze_variant_construct(
                     sema.pool.str(ename),
                     sema.pool.display(field.ty),
                     sema.pool.display(vty),
-                ),
-            ));
+                )
+            };
+            sema.sink
+                .emit(Diag::error(fspan, DiagCode::TypeMismatch, message));
         }
         by_index[fidx as usize] = Some(value);
     }
@@ -778,7 +822,8 @@ fn analyze_variant_construct(
             (i as u32, v)
         })
         .collect();
-    fcx.builder.enum_lit(ety, variant_index, &args, span)
+    fcx.builder
+        .enum_lit(ety, variant_index, view.positional, &args, span)
 }
 
 /// Anonymous struct literal `{field = value, ...}` (M10). There is no
@@ -1048,7 +1093,7 @@ fn analyze_unit_variant_access(
         );
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
-    fcx.builder.enum_lit(ety, variant_index, &[], span)
+    fcx.builder.enum_lit(ety, variant_index, false, &[], span)
 }
 
 /// Comma-separated quoted field names of a struct or enum payload, for

@@ -450,6 +450,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::MissingVariantFields => "E0120",
         DiagCode::DuplicateVariantField => "E0121",
         DiagCode::UnknownVariantField => "E0122",
+        DiagCode::PositionalConstructOnNamedVariant => "E0123",
         DiagCode::ParseError => "E0100",
         DiagCode::ChainedComparison => "E0104",
         DiagCode::RangeArity => "E0105",
@@ -898,6 +899,7 @@ mod tests {
             (DiagCode::MissingVariantFields, "E0120"),
             (DiagCode::DuplicateVariantField, "E0121"),
             (DiagCode::UnknownVariantField, "E0122"),
+            (DiagCode::PositionalConstructOnNamedVariant, "E0123"),
             (DiagCode::MoveOutOfField, "E0043"),
             (DiagCode::ParseError, "E0100"),
             (DiagCode::TooManyDiagnostics, "E0101"),
@@ -990,6 +992,7 @@ mod tests {
                 | DiagCode::MissingVariantFields
                 | DiagCode::DuplicateVariantField
                 | DiagCode::UnknownVariantField
+                | DiagCode::PositionalConstructOnNamedVariant
                 | DiagCode::CycleInResolution
                 | DiagCode::ParseError
                 | DiagCode::ChainedComparison
