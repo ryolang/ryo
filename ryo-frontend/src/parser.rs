@@ -45,6 +45,16 @@ use ryo_core::types::{InternPool, StringId, VariantKind};
 pub struct ParseState {
     ast: Ast,
     pool: InternPool,
+    /// Receiver-shape hint for the M11 named-variant-construct gate:
+    /// true while the expression the postfix ops are folding is a bare
+    /// uppercase-led identifier (`ExprName.Variant{...}` candidate).
+    /// The postfix fold sets this after the head atom and re-derives
+    /// it after every folded op; only the `.name{`-gated postfix op
+    /// reads it, and only right after such a refresh (the `{` can
+    /// only follow `.name` through that op — a speculative inner
+    /// parse that wrote the hint is always followed by the next fold
+    /// refresh), so the value is never stale at a read.
+    postfix_head_is_type: bool,
 }
 
 impl ParseState {
@@ -54,6 +64,7 @@ impl ParseState {
         ParseState {
             ast: Ast::new(),
             pool,
+            postfix_head_is_type: false,
         }
     }
 
@@ -364,6 +375,31 @@ fn field_access_chain(ast: &mut Ast, root: Ident, fields: &[Ident]) -> ExprId {
         target = ast.field_access(target, *field, span);
     }
     target
+}
+
+/// If `expr` is a bare identifier led by an uppercase ASCII byte —
+/// the spec §1 PascalCase type convention — return it as an
+/// [`Ident`]. This is the M11 disambiguation (R4): only such a
+/// receiver can open enum variant construction, so
+/// `Url.parse(x)`/`Shape.Rectangle{..}` construct while
+/// `obj.field(...)` stays an ordinary method call. Reads the intern
+/// pool, so it takes `MapExtra`, not just the `Ast`.
+fn type_name_ident<'a, 'b, I>(expr: ExprId, e: &mut Mx<'a, 'b, I>) -> Option<Ident>
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    let name = match e.state().expr(expr).kind {
+        ExprKind::Ident(name) => name,
+        _ => return None,
+    };
+    let is_type_name = e
+        .state()
+        .pool
+        .str(name)
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_uppercase);
+    is_type_name.then(|| Ident::new(name, e.state().expr_span(expr)))
 }
 
 fn assign_or_decl_parser<'a, I>(
@@ -955,6 +991,10 @@ where
     // `expression_parser()` calls are a measurable fixed cost on
     // every parse.
     let expr = expression_parser();
+    // The enum-decl tail embeds `type_expr_parser()` subtrees; build it
+    // once here and share it between the plain and attributed
+    // enum-declaration rules (same build-once discipline as `expr`).
+    let enum_tail = enums::enum_tail_parser();
     let expr_stmt = expr.clone().map_with(|expr, e: &mut Mx<'a, '_, I>| {
         let span = e.span();
         e.state().expr_stmt(expr, span)
@@ -1014,9 +1054,9 @@ where
         });
 
     choice((
-        enums::attributed_type_decl_parser(),
+        enums::attributed_type_decl_parser(enum_tail.clone()),
         struct_decl_parser(),
-        enums::enum_decl_parser(),
+        enums::enum_decl_parser(enum_tail),
         function_def_parser(expr.clone()),
         destructure_stmt_parser(expr.clone()),
         var_decl_parser(expr.clone()),
@@ -1246,11 +1286,279 @@ where
         )
 }
 
+/// Postfix operators over a finished atom: method calls (`s.len()`),
+/// field access (`p.x`, M9), slice projections `s[start:end]` (M8.4),
+/// scalar indexing `s[i]` (M8.4.2), and — folded at apply time — M11
+/// enum variant construction. Either slice bound may be omitted
+/// (`s[start:]`, `s[:end]`, `s[:]`); `s[]` is rejected.
+///
+/// `EnumName.Variant(...)` / `EnumName.Variant{...}` share their token
+/// shapes with method calls and field accesses, so instead of adding
+/// an atom-level alternative (tried for every identifier in a
+/// program), the receiver is re-examined when the op is folded: only
+/// a bare uppercase-led receiver constructs (R4 — see
+/// `type_name_ident`). The paren form reuses the `method_op` parse
+/// and swaps the node at fold time; the brace form is its own op,
+/// gated on `postfix_head_is_type` BEFORE the `{` is consumed so a
+/// lowercase receiver keeps its historical
+/// field-access-then-garbage parse.
+///
+/// Extracted from `expression_parser` (which takes the shared `expr`
+/// handle, the shared `field_init`, and the atom parser as
+/// parameters) to stay under the `too_many_lines` ratchet (R2).
+fn postfix_parser<'a, I>(
+    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+    field_init: impl Parser<'a, I, (StringId, ExprId), PExtra<'a>> + Clone + 'a,
+    atom: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    enum PostfixOp {
+        /// `.name(args)`. The name keeps its token span: an
+        /// uppercase-led receiver folds this into a
+        /// `VariantConstruct` whose variant span must be the name
+        /// token's, exactly like the standalone form.
+        Method(Ident, Vec<ExprId>, SimpleSpan),
+        /// `.name{inits}` (M11 named variant construction);
+        /// emitted only when the receiver gate passes.
+        NamedConstruct(Ident, Vec<(StringId, ExprId)>, SimpleSpan),
+        Field(Ident, SimpleSpan),
+        /// A diagnosed stray float after `.` (`pair.0.1`): the
+        /// receiver is kept unchanged.
+        Missing,
+        Slice(Option<ExprId>, Option<ExprId>, SimpleSpan),
+        Index(ExprId, SimpleSpan),
+    }
+
+    let method_op = just(Token::Dot)
+        .ignore_then(
+            select! { Token::Ident(name) => name }
+                .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span())),
+        )
+        .then(
+            expr.clone()
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LParen), just(Token::RParen)),
+        )
+        .map_with(|(method, args), e: &mut Mx<'a, '_, I>| {
+            PostfixOp::Method(method, args, e.span())
+        });
+
+    // `EnumName.Variant{...}` — named variant construction (M11).
+    // Sits between `method_op` and `field_op`: like `method_op`
+    // it requires more than `.name`, so `field_op` backtracks
+    // here when no `{` follows. The receiver gate reads
+    // `postfix_head_is_type` (set by the postfix fold) BEFORE the
+    // `{` is consumed: for a lowercase receiver the alternative
+    // fails after `.name` and `field_op` claims the field access,
+    // leaving `{...}` unconsumed — `obj.field{...}` keeps its
+    // historical field-access-then-garbage parse (the lowercase
+    // pin in `parser/enum_tests.rs`). `try_map_with` runs the
+    // gate in both emit and check mode.
+    let named_construct_op = just(Token::Dot)
+        .ignore_then(select! { Token::Ident(name) => name }.try_map_with(
+            |name, e: &mut Mx<'a, '_, I>| {
+                if e.state().postfix_head_is_type {
+                    Ok(Ident::new(name, e.span()))
+                } else {
+                    Err(Rich::custom(e.span(), ParseDiag::ExpectedEnumTypeName))
+                }
+            },
+        ))
+        .then(
+            field_init
+                .clone()
+                .separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+        )
+        .map_with(|(variant, inits), e: &mut Mx<'a, '_, I>| {
+            PostfixOp::NamedConstruct(variant, inits, e.span())
+        });
+
+    // Field access `p.x` (M9) and positional access `pair.0`
+    // (M10). Tried after `method_op`: the method rule has the
+    // longer required match (parens), so chumsky backtracks to
+    // this one when no `(` follows the name.
+    //
+    // A chained positional access can only be spelled with the
+    // inner access parenthesized — `(pair.0).1`. Bare
+    // `pair.0.1` lexes as `pair . <float 0.1>`: maximal munch
+    // eats `0.1` whole, and the merged float lands exactly where
+    // the field key would be. The stray float is consumed, the
+    // well-formed receiver is kept, and the diagnostic points at
+    // the float with the parenthesized spelling.
+    enum AccessKey {
+        Named(Ident),
+        Positional(Ident),
+        StrayFloat(SimpleSpan),
+    }
+    let named_key = select! { Token::Ident(name) => name }
+        .map_with(|name, e: &mut Mx<'a, '_, I>| AccessKey::Named(Ident::new(name, e.span())));
+    let positional_key = select! { Token::IntLit(n) => n }.map_with(|n, e: &mut Mx<'a, '_, I>| {
+        let name = positional_field_name(n, &mut e.state().pool);
+        AccessKey::Positional(Ident::new(name, e.span()))
+    });
+    let stray_float_key = select! { Token::FloatLit(_) => () }
+        .map_with(|_, e: &mut Mx<'a, '_, I>| AccessKey::StrayFloat(e.span()));
+    let field_op = just(Token::Dot)
+        .ignore_then(named_key.or(positional_key).or(stray_float_key))
+        .validate(|key, e: &mut Mx<'a, '_, I>, emitter| match key {
+            AccessKey::StrayFloat(fspan) => {
+                emitter.emit(Rich::custom(fspan, ParseDiag::ChainedPositionalAccess));
+                PostfixOp::Missing
+            }
+            AccessKey::Named(field) | AccessKey::Positional(field) => {
+                PostfixOp::Field(field, e.span())
+            }
+        });
+
+    // One bracket parse, no speculation: the optional leading
+    // expression is parsed exactly once, then `:` (slice) vs `]`
+    // (index) disambiguates — each input parses exactly one way.
+    // Trying slice before index (or vice versa) would push the
+    // leading expression's arena nodes and then fail on the
+    // missing `:`/`]`, leaking orphan nodes.
+    let bracket_op = just(Token::LBracket)
+        .ignore_then(expr.clone().or_not())
+        .then(
+            just(Token::Colon)
+                .ignore_then(expr.clone().or_not())
+                .then_ignore(just(Token::RBracket))
+                .map(Some)
+                .or(just(Token::RBracket).to(None)),
+        )
+        .try_map_with(|(start, end), e: &mut Mx<'a, '_, I>| {
+            let span = e.span();
+            match (start, end) {
+                (start, Some(end)) => Ok(PostfixOp::Slice(start, end, span)),
+                (Some(index), None) => Ok(PostfixOp::Index(index, span)),
+                // `s[]` is rejected — the colon is mandatory for a
+                // slice, the expression for an index.
+                (None, None) => Err(Rich::custom(span, ParseDiag::EmptyBrackets)),
+            }
+        });
+
+    // Seed the named-construct receiver gate (see
+    // `ParseState::postfix_head_is_type`) from the head atom; the
+    // fold re-derives the hint after every folded op before the
+    // next op parses. In check mode `map_with` skips its closure,
+    // but no rule in this grammar runs an expression in check
+    // mode (check-mode uses are token-level: `and_is`, `not`,
+    // statement-list probing), so the hint cannot go stale at a
+    // read — the brace-gated op only reaches it on an emit-mode
+    // postfix iteration.
+    let atom = atom.map_with(|head, e: &mut Mx<'a, '_, I>| {
+        e.state().postfix_head_is_type = type_name_ident(head, e).is_some();
+        head
+    });
+
+    atom.foldl_with(
+        choice((method_op, named_construct_op, field_op, bracket_op)).repeated(),
+        |receiver, op, e: &mut Mx<'a, '_, I>| {
+            let start = e.state().expr_span(receiver).start;
+            let result = match op {
+                PostfixOp::Method(method, args, span) => {
+                    if type_name_ident(receiver, e).is_some() {
+                        // R4: a paren call on a bare uppercase-led
+                        // receiver can only be variant construction
+                        // (`Url.parse(x)`); the lowercase mirror
+                        // (`obj.field()`) keeps its method-call
+                        // meaning. The receiver `Ident` node is
+                        // promoted in place (no orphan); args are
+                        // collected, then pushed contiguously and
+                        // sealed (I-205: a start→seal window cannot
+                        // span the arg parses — nested construction
+                        // writes the same arena).
+                        let list_start = e.state().expr_lists_len();
+                        for &arg in &args {
+                            e.state().push_expr_list_item(arg);
+                        }
+                        let list = e.state().expr_list_from(list_start);
+                        e.state().promote_ident_to_variant_construct(
+                            receiver,
+                            method,
+                            Some(VariantArgs {
+                                positional: Some(list),
+                                named: None,
+                            }),
+                            SimpleSpan::new((), start..span.end),
+                        )
+                    } else {
+                        e.state().method_call(
+                            receiver,
+                            method.name,
+                            &args,
+                            SimpleSpan::new((), start..span.end),
+                        )
+                    }
+                }
+                PostfixOp::NamedConstruct(variant, inits, span) => {
+                    // The parse-time gate already rejected
+                    // non-type receivers; the receiver `Ident`
+                    // node is promoted in place (no orphan).
+                    // Same contiguous-push seal rationale as
+                    // the paren form.
+                    debug_assert!(
+                        type_name_ident(receiver, e).is_some(),
+                        "named construct is gated on a type receiver"
+                    );
+                    let list_start = e.state().struct_field_inits_len();
+                    for &(name, value) in &inits {
+                        e.state().push_struct_field_init_item(name, value);
+                    }
+                    let list = e.state().struct_field_init_list_from(list_start);
+                    e.state().promote_ident_to_variant_construct(
+                        receiver,
+                        variant,
+                        Some(VariantArgs {
+                            positional: None,
+                            named: Some(list),
+                        }),
+                        SimpleSpan::new((), start..span.end),
+                    )
+                }
+                PostfixOp::Field(field, span) => {
+                    e.state()
+                        .field_access(receiver, field, SimpleSpan::new((), start..span.end))
+                }
+                PostfixOp::Missing => receiver,
+                PostfixOp::Slice(lo, hi, span) => {
+                    e.state()
+                        .slice(receiver, lo, hi, SimpleSpan::new((), start..span.end))
+                }
+                PostfixOp::Index(index, span) => {
+                    e.state()
+                        .index(receiver, index, SimpleSpan::new((), start..span.end))
+                }
+            };
+            e.state().postfix_head_is_type = type_name_ident(result, e).is_some();
+            result
+        },
+    )
+}
+
 fn expression_parser<'a, I>() -> impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     recursive(|expr| {
+        // One `key = value` field initializer, shared by the struct
+        // literal atoms and the M11 named-variant-construct postfix
+        // op. Field keys are identifiers or integer literals: a
+        // positional key canonicalizes to its numeric value
+        // (`{0=17, 1="alice"}` names fields "0", "1" — the brace
+        // spelling of tuple sugar). Named literals with numeric
+        // keys parse the same way and are rejected later, in
+        // sema, as unknown fields.
+        let field_init = field_key()
+            .then_ignore(just(Token::Assign))
+            .then(expr.clone());
+
         let atom = {
             let literal = select! {
                 Token::IntLit(n) => Literal::Int(n),
@@ -1283,17 +1591,6 @@ where
             // disambiguates, so the two alternatives cannot both
             // consume input. Field order stays in source order —
             // sema canonicalizes against the declaration.
-            //
-            // Field keys are identifiers or integer literals: a
-            // positional key canonicalizes to its numeric value
-            // (`{0=17, 1="alice"}` names fields "0", "1" — the brace
-            // spelling of tuple sugar). Named literals with numeric
-            // keys parse the same way and are rejected later, in
-            // sema, as unknown fields.
-            let field_init = field_key()
-                .then_ignore(just(Token::Assign))
-                .then(expr.clone());
-
             let struct_literal = select! { Token::Ident(name) => name }
                 .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()))
                 .then(
@@ -1317,6 +1614,7 @@ where
             // empty map literal: diagnosed, and recovered as an
             // empty literal so the rest of the file still parses.
             let anon_struct_literal = field_init
+                .clone()
                 .separated_by(just(Token::Comma))
                 .allow_trailing()
                 .collect::<Vec<_>>()
@@ -1433,7 +1731,6 @@ where
                 });
 
             borrow
-                .or(enums::variant_construct_atom(expr.clone()))
                 .or(call)
                 .or(struct_literal)
                 .or(anon_struct_literal)
@@ -1442,127 +1739,7 @@ where
                 .or(paren_or_tuple)
         };
 
-        // Postfix operators: method calls (`s.len()`), field access
-        // (`p.x`, M9), slice projections `s[start:end]` (M8.4), and
-        // scalar indexing `s[i]` (M8.4.2). Either slice bound may be
-        // omitted (`s[start:]`, `s[:end]`, `s[:]`); `s[]` is rejected.
-        enum PostfixOp {
-            Method(StringId, Vec<ExprId>, SimpleSpan),
-            Field(Ident, SimpleSpan),
-            /// A diagnosed stray float after `.` (`pair.0.1`): the
-            /// receiver is kept unchanged.
-            Missing,
-            Slice(Option<ExprId>, Option<ExprId>, SimpleSpan),
-            Index(ExprId, SimpleSpan),
-        }
-
-        let method_op = just(Token::Dot)
-            .ignore_then(select! { Token::Ident(name) => name })
-            .then(
-                expr.clone()
-                    .separated_by(just(Token::Comma))
-                    .allow_trailing()
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(Token::LParen), just(Token::RParen)),
-            )
-            .map_with(|(method, args), e: &mut Mx<'a, '_, I>| {
-                PostfixOp::Method(method, args, e.span())
-            });
-
-        // Field access `p.x` (M9) and positional access `pair.0`
-        // (M10). Tried after `method_op`: the method rule has the
-        // longer required match (parens), so chumsky backtracks to
-        // this one when no `(` follows the name.
-        //
-        // A chained positional access can only be spelled with the
-        // inner access parenthesized — `(pair.0).1`. Bare
-        // `pair.0.1` lexes as `pair . <float 0.1>`: maximal munch
-        // eats `0.1` whole, and the merged float lands exactly where
-        // the field key would be. The stray float is consumed, the
-        // well-formed receiver is kept, and the diagnostic points at
-        // the float with the parenthesized spelling.
-        enum AccessKey {
-            Named(Ident),
-            Positional(Ident),
-            StrayFloat(SimpleSpan),
-        }
-        let named_key = select! { Token::Ident(name) => name }
-            .map_with(|name, e: &mut Mx<'a, '_, I>| AccessKey::Named(Ident::new(name, e.span())));
-        let positional_key =
-            select! { Token::IntLit(n) => n }.map_with(|n, e: &mut Mx<'a, '_, I>| {
-                let name = positional_field_name(n, &mut e.state().pool);
-                AccessKey::Positional(Ident::new(name, e.span()))
-            });
-        let stray_float_key = select! { Token::FloatLit(_) => () }
-            .map_with(|_, e: &mut Mx<'a, '_, I>| AccessKey::StrayFloat(e.span()));
-        let field_op = just(Token::Dot)
-            .ignore_then(named_key.or(positional_key).or(stray_float_key))
-            .validate(|key, e: &mut Mx<'a, '_, I>, emitter| match key {
-                AccessKey::StrayFloat(fspan) => {
-                    emitter.emit(Rich::custom(fspan, ParseDiag::ChainedPositionalAccess));
-                    PostfixOp::Missing
-                }
-                AccessKey::Named(field) | AccessKey::Positional(field) => {
-                    PostfixOp::Field(field, e.span())
-                }
-            });
-
-        // One bracket parse, no speculation: the optional leading
-        // expression is parsed exactly once, then `:` (slice) vs `]`
-        // (index) disambiguates — each input parses exactly one way.
-        // Trying slice before index (or vice versa) would push the
-        // leading expression's arena nodes and then fail on the
-        // missing `:`/`]`, leaking orphan nodes.
-        let bracket_op = just(Token::LBracket)
-            .ignore_then(expr.clone().or_not())
-            .then(
-                just(Token::Colon)
-                    .ignore_then(expr.clone().or_not())
-                    .then_ignore(just(Token::RBracket))
-                    .map(Some)
-                    .or(just(Token::RBracket).to(None)),
-            )
-            .try_map_with(|(start, end), e: &mut Mx<'a, '_, I>| {
-                let span = e.span();
-                match (start, end) {
-                    (start, Some(end)) => Ok(PostfixOp::Slice(start, end, span)),
-                    (Some(index), None) => Ok(PostfixOp::Index(index, span)),
-                    // `s[]` is rejected — the colon is mandatory for a
-                    // slice, the expression for an index.
-                    (None, None) => Err(Rich::custom(span, ParseDiag::EmptyBrackets)),
-                }
-            });
-
-        let postfix = atom
-            .foldl_with(
-                choice((method_op, field_op, bracket_op)).repeated(),
-                |receiver, op, e: &mut Mx<'a, '_, I>| {
-                    let start = e.state().expr_span(receiver).start;
-                    match op {
-                        PostfixOp::Method(method, args, span) => e.state().method_call(
-                            receiver,
-                            method,
-                            &args,
-                            SimpleSpan::new((), start..span.end),
-                        ),
-                        PostfixOp::Field(field, span) => e.state().field_access(
-                            receiver,
-                            field,
-                            SimpleSpan::new((), start..span.end),
-                        ),
-                        PostfixOp::Missing => receiver,
-                        PostfixOp::Slice(lo, hi, span) => {
-                            e.state()
-                                .slice(receiver, lo, hi, SimpleSpan::new((), start..span.end))
-                        }
-                        PostfixOp::Index(index, span) => {
-                            e.state()
-                                .index(receiver, index, SimpleSpan::new((), start..span.end))
-                        }
-                    }
-                },
-            )
-            .boxed();
+        let postfix = postfix_parser(expr.clone(), field_init.clone(), atom);
 
         let unary_op = choice((
             just(Token::Sub).to(UnaryOperator::Neg),

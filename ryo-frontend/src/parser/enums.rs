@@ -2,10 +2,10 @@
 //! and named payloads; `EnumName.Variant(...)` / `{...}` construction;
 //! and the attribute placement widened to enum definitions (the
 //! I-193 slice). Split out of `parser.rs` to stay under the
-//! file-length limit (R2); the enum variant-construct atom likewise
-//! lives here as a helper the shared expression grammar calls with
-//! its recursive handle (the grammar-construction rule: never build
-//! `expression_parser()` inside a rule).
+//! file-length limit (R2). Variant *construction* does not live here:
+//! it folds out of the shared expression grammar's postfix
+//! method/field ops (see `type_name_ident` in `parser.rs`), so it
+//! costs nothing on the plain-identifier hot path.
 
 use super::*;
 use chumsky::input::ValueInput;
@@ -22,7 +22,11 @@ use chumsky::input::ValueInput;
 /// `enum_variants` as they parse, so no intermediate `Vec` is
 /// collected (I-152). An empty body parses; the empty-enum diagnostic
 /// is astgen's, not the parser's.
-fn enum_tail_parser<'a, I>()
+///
+/// The tail embeds `type_expr_parser()` subtrees, so the grammar
+/// construction rule applies: the caller builds it once and threads
+/// it into both enum-declaration rules (plain and attributed).
+pub(super) fn enum_tail_parser<'a, I>()
 -> impl Parser<'a, I, (Ident, EnumVariantDeclList), PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
@@ -121,12 +125,17 @@ where
 }
 
 /// An `enum` declaration: `enum Name:` plus the variant block (M11).
-pub(super) fn enum_decl_parser<'a, I>() -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+/// `enum_tail` is threaded in by the caller (grammar construction
+/// rule: built once per program grammar, shared with the attributed
+/// form).
+pub(super) fn enum_decl_parser<'a, I>(
+    enum_tail: impl Parser<'a, I, (Ident, EnumVariantDeclList), PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     just(Token::Enum)
-        .ignore_then(enum_tail_parser())
+        .ignore_then(enum_tail)
         .map_with(|(name, variants), e: &mut Mx<'a, '_, I>| {
             let span = e.span();
             e.state()
@@ -144,8 +153,13 @@ where
 /// type declaration emit `ParseDiag::MisplacedAttribute` and recover
 /// to an `Error` node, so the misplaced line reports once and the
 /// following statement still parses.
-pub(super) fn attributed_type_decl_parser<'a, I>()
--> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+///
+/// `enum_tail` is threaded in by the caller (grammar construction
+/// rule: built once per program grammar, shared with the plain
+/// `enum_decl_parser`).
+pub(super) fn attributed_type_decl_parser<'a, I>(
+    enum_tail: impl Parser<'a, I, (Ident, EnumVariantDeclList), PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
@@ -174,7 +188,7 @@ where
             .map(|(name, fields)| Some(AttrTarget::Struct(name, fields))),
         skip_newlines()
             .ignore_then(just(Token::Enum))
-            .ignore_then(enum_tail_parser())
+            .ignore_then(enum_tail)
             .map(|(name, variants)| Some(AttrTarget::Enum(name, variants))),
         empty().to(None),
     ));
@@ -248,107 +262,4 @@ where
             }
         })
         .boxed()
-}
-
-/// The enum variant-construction atom of the shared expression
-/// grammar: `EnumName.Variant(...)` (positional) /
-/// `EnumName.Variant{...}` (named) (M11). Only an uppercase-led
-/// receiver can be an enum type (spec §1 PascalCase convention): the
-/// guard fails lowercase receivers so `obj.method(...)` keeps its
-/// method-call meaning, and a bare `EnumName.Variant` fails here too
-/// (no args follow), staying an ordinary field access for sema to
-/// reinterpret. Args are collected, then pushed contiguously into
-/// the side arenas and sealed (I-205: a start→seal window cannot span
-/// the arg parses — nested construction writes the same arenas); the
-/// failing guard's error rides a discarded alternative, so it never
-/// surfaces (chumsky's `Choice` keeps alternative errors only when all
-/// fail, and `ident_expr` cannot fail on an identifier).
-pub(super) fn variant_construct_atom<'a, I>(
-    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
-) -> impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a
-where
-    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
-{
-    let ident = select! { Token::Ident(name) => name }
-        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()));
-    let guard = ident.try_map_with(|name, e: &mut Mx<'a, '_, I>| {
-        let is_type_name = e
-            .state()
-            .pool
-            .str(name.name)
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_uppercase);
-        if is_type_name {
-            Ok(name)
-        } else {
-            Err(Rich::custom(
-                name.span,
-                ParseDiag::Message("expected an enum type name".into()),
-            ))
-        }
-    });
-    let positional = {
-        just(Token::LParen)
-            .ignore_then(
-                expr.clone()
-                    .separated_by(just(Token::Comma))
-                    .allow_trailing()
-                    .collect::<Vec<_>>(),
-            )
-            .then_ignore(just(Token::RParen))
-            .map_with(|args, e: &mut Mx<'a, '_, I>| {
-                // Collect-then-push-contiguously: a start→seal window
-                // over the shared `expr_lists` arena cannot span the
-                // arg parses — a nested call/construct inside an arg
-                // writes the same arena and would interleave into the
-                // open range (I-205). One push site here, after `)`,
-                // also runs only for the winning alternative, so
-                // speculative arg parses leave no orphans. The small
-                // Vec of Copy ids is a deliberate I-152 trade —
-                // correctness over the no-Vec preference.
-                let start = e.state().expr_lists_len();
-                for &arg in &args {
-                    e.state().push_expr_list_item(arg);
-                }
-                VariantArgs {
-                    positional: Some(e.state().expr_list_from(start)),
-                    named: None,
-                }
-            })
-    };
-    let named = {
-        let init = field_key().then_ignore(just(Token::Assign)).then(expr);
-        just(Token::LBrace)
-            .ignore_then(
-                init.separated_by(just(Token::Comma))
-                    .allow_trailing()
-                    .collect::<Vec<_>>(),
-            )
-            .then_ignore(just(Token::RBrace))
-            .map_with(|inits, e: &mut Mx<'a, '_, I>| {
-                // Same contiguous-push rationale as the positional
-                // arm: a nested struct literal / named construction in
-                // an init value writes `struct_field_inits`; an open
-                // window spanning the init parses would interleave the
-                // pairs (I-205).
-                let start = e.state().struct_field_inits_len();
-                for &(name, value) in &inits {
-                    e.state().push_struct_field_init_item(name, value);
-                }
-                VariantArgs {
-                    positional: None,
-                    named: Some(e.state().struct_field_init_list_from(start)),
-                }
-            })
-    };
-    guard
-        .then_ignore(just(Token::Dot))
-        .then(ident)
-        .then(positional.or(named))
-        .map_with(|((enum_name, variant), args), e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
-            e.state()
-                .variant_construct(enum_name, variant, Some(args), span)
-        })
 }

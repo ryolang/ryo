@@ -486,6 +486,13 @@ pub enum ParseDiag {
     /// struct feature. The message names the allowed attribute —
     /// `#[derive(Eq)]`.
     ReprCOnEnum,
+    /// Internal guard failure for the enum variant-construction atom's
+    /// uppercase-receiver check. The `Rich` error rides a discarded
+    /// `Choice` alternative (a lowercase-led receiver parses as an
+    /// ordinary identifier instead), so this payload never surfaces in
+    /// a rendered diagnostic; it is a unit variant so the per-attempt
+    /// failure allocates nothing.
+    ExpectedEnumTypeName,
     /// Escape hatch for one-off messages (e.g. lexer diagnostics
     /// re-wrapped as parser errors in tests).
     Message(String),
@@ -506,6 +513,7 @@ impl ParseDiag {
                 DiagCode::UnknownAttribute
             }
             ParseDiag::ReprCOnEnum => DiagCode::ReprCOnEnum,
+            ParseDiag::ExpectedEnumTypeName => DiagCode::ParseError,
             ParseDiag::Message(_) => DiagCode::ParseError,
         }
     }
@@ -580,6 +588,7 @@ impl std::fmt::Display for ParseDiag {
                 "#[repr(C)] is not supported on enum definitions; \
                  the only attribute allowed on an enum is #[derive(Eq)]",
             ),
+            ParseDiag::ExpectedEnumTypeName => f.write_str("expected an enum type name"),
             ParseDiag::Message(msg) => f.write_str(msg),
         }
     }

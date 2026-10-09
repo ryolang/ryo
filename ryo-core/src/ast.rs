@@ -1506,6 +1506,35 @@ impl Ast {
         )
     }
 
+    /// Promote a bare `Ident` expression node in place into an enum
+    /// variant construction (M11). The parser's postfix fold
+    /// recognizes `EnumName.Variant(...)` / `{...}` only after the
+    /// receiver atom has been pushed as an `Ident` node; rewriting
+    /// that node — rather than pushing a fresh `VariantConstruct` —
+    /// keeps the receiver reachable and preserves the no-orphan arena
+    /// invariant the parser's example-file sweep checks. The receiver
+    /// node's span (the enum name's token span) becomes the
+    /// construct's `enum_name.span`.
+    pub fn promote_ident_to_variant_construct(
+        &mut self,
+        id: ExprId,
+        variant: Ident,
+        args: Option<VariantArgs>,
+        span: SimpleSpan,
+    ) -> ExprId {
+        let node = &mut self.exprs[id.index()];
+        let ExprKind::Ident(enum_name) = node.kind else {
+            unreachable!("variant construct receiver must be a bare ident node");
+        };
+        node.kind = ExprKind::VariantConstruct(VariantConstruct {
+            enum_name: Ident::new(enum_name, node.span),
+            variant,
+            args,
+        });
+        node.span = span;
+        id
+    }
+
     /// Anonymous struct type literal `{q: int, r: int}` (M10); the
     /// field list is copied into the `type_field_lists` side arena in
     /// written order. Yields the inline [`TypeExpr`] value — type
