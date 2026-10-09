@@ -35,7 +35,9 @@ impl ExtraRange {
 /// Unlike the name-keyed `struct_lit` layout, enum args are keyed by
 /// declaration-order payload-field index: tuple variants carry the
 /// synthesized `"0"`, `"1"`, … names, so an index keeps the wire
-/// format name-free and uniform across unit/tuple/named variants.
+/// format name-free and uniform across unit/tuple/named variants. A
+/// `field_idx` of [`ORPHANED_FIELD`] marks a braced arg whose name
+/// astgen did not recognize (E0038 already emitted); it binds nothing.
 /// Unit variants encode `argc = 0` (no trailing pairs).
 pub mod enum_lit_extra {
     pub const TY: usize = 0;
@@ -49,4 +51,11 @@ pub mod enum_lit_extra {
     /// to enforce the Brace Law on named payloads (D11: named variants
     /// construct with braces only); downstream TIR consumers ignore it.
     pub const FLAG_POSITIONAL: u32 = 1;
+
+    /// `field_idx` sentinel for a braced named argument whose field
+    /// astgen does not recognize: the pair's value is lowered (so sema
+    /// analyzes it and its own diagnostics surface), but it binds no
+    /// declared field — sema suppresses the derived missing-fields
+    /// error the dropped binding would otherwise trigger.
+    pub const ORPHANED_FIELD: u32 = u32::MAX;
 }

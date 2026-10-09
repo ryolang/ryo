@@ -197,3 +197,27 @@ fn unknown_variant_construct_lowers_recovery_to_error_type() {
     let lit = uir.enum_lit_view(v.initializer);
     assert_eq!(lit.ty, pool.error_type(), "recovery node is poisoned");
 }
+
+#[test]
+fn non_enum_uppercase_paren_receiver_lowers_to_method_call() {
+    // `S.len()` — the parser promotes every uppercase-led
+    // `Name.name(args)` to VariantConstruct; with no enum named S,
+    // astgen restores the pre-M11 method-call lowering instead of
+    // failing with UnknownType (an uppercase-led value keeps its
+    // method call).
+    let src = "S = \"hi\"\nprint(S.len())\n";
+    let (uir, pool) = parse_and_lower(src).unwrap();
+    let idx = uir
+        .instructions
+        .iter()
+        .position(|i| i.tag == InstTag::MethodCall)
+        .expect("paren form on a non-enum receiver lowers to MethodCall");
+    let view = uir.method_call_view(InstRef::from_raw(idx as u32));
+    let recv = match uir.inst(view.receiver).data {
+        InstData::Var(name) => name,
+        other => panic!("expected Var receiver, got {other:?}"),
+    };
+    assert_eq!(pool.str(recv), "S");
+    assert_eq!(pool.str(view.name), "len");
+    assert!(view.args.is_empty());
+}

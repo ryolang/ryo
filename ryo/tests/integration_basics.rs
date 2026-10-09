@@ -64,6 +64,19 @@ fn test_print_empty_string() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
 }
 
+#[test]
+fn test_uppercase_value_method_call() {
+    // M11 regression: the parser promotes every `Uppercase.name(args)`
+    // to VariantConstruct, which turned `S.len()` on an uppercase-led
+    // str value into `unknown type: 'S'`. Astgen restores the
+    // method-call lowering when no enum matches the receiver.
+    assert_ryo_output(
+        "uppercase_value_method_call",
+        "fn main():\n\tS = \"hi\"\n\tprint(S.len())\n\tprint(\"\\n\")\n",
+        "2\n",
+    );
+}
+
 // ============================================================================
 // Milestone 4: Functions & Calls
 // ============================================================================

@@ -184,25 +184,50 @@ fn named_construct_duplicate_field_is_caught_by_sema() {
 
 #[test]
 fn named_construct_unknown_field_is_frontlined_by_astgen() {
-    // A typo'd named field is diagnosed at astgen (UnknownField,
-    // E0038) and the bad arg is dropped before sema runs; sema then
-    // sees `width` uncovered and reports it missing. Both messages
-    // together explain the typo.
+    // A typo'd named field is diagnosed at astgen (UnknownField, E0038)
+    // — and stands alone: the dropped pair rides the wire as an
+    // ORPHANED_FIELD arg so sema analyzes it but binds nothing, and
+    // the derived missing-fields error for `width` is suppressed (the
+    // construct's shape is untrustworthy, matching the duplicate-field
+    // recovery). One diagnostic, naming the typo.
     let src = "enum Shape:\n\tRectangle(width: float, height: float)\n\nfn main():\n\ts = Shape.Rectangle{widht=1.0, height=2.0}\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::UnknownField)
+        .expect("astgen frontlines the unknown field name");
+    assert!(
+        diag.message.contains("'widht'"),
+        "message should name the typo, got {:?}",
+        diag.message
+    );
+    assert!(
+        !any_code(&diags, DiagCode::MissingVariantFields),
+        "no phantom missing-fields follow-up: {diags:?}"
+    );
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+}
+
+#[test]
+fn named_construct_unknown_field_arg_diagnostics_still_surface() {
+    // `{widht=undefined_fn(1)}` — the typo'd field's arg is lowered
+    // (ORPHANED_FIELD) so its own diagnostic surfaces alongside the
+    // UnknownField, with no missing-fields cascade.
+    let src = "enum Shape:\n\tRectangle(width: float, height: float)\n\nfn main():\n\ts = Shape.Rectangle{widht=undefined_fn(1), height=2.0}\n";
     let (_t, diags, _p) = run_with_errors(src);
     assert!(
         any_code(&diags, DiagCode::UnknownField),
-        "astgen frontlines the unknown field name: {diags:?}"
+        "the typo fires UnknownField: {diags:?}"
     );
-    let missing = diags
-        .iter()
-        .find(|d| d.code == DiagCode::MissingVariantFields)
-        .expect("the skipped arg leaves 'width' uncovered");
     assert!(
-        missing.message.contains("'width'"),
-        "got {:?}",
-        missing.message
+        any_code(&diags, DiagCode::UndefinedFunction),
+        "the arg's own diagnostic surfaces: {diags:?}"
     );
+    assert!(
+        !any_code(&diags, DiagCode::MissingVariantFields),
+        "no phantom missing-fields follow-up: {diags:?}"
+    );
+    assert_eq!(diags.len(), 2, "exactly two errors: {diags:?}");
 }
 
 #[test]
@@ -313,13 +338,22 @@ fn construct_of_failed_enum_recovers_quietly() {
 }
 
 #[test]
-fn construct_of_never_declared_enum_still_reports_unknown() {
-    // Undeclared enum name in construction: astgen's UnknownType
-    // (E0001) fires and sema adds nothing on top.
-    let src = "fn main():\n\te = Nope.V(1)\n";
+fn construct_of_undeclared_name_recovers_as_undefined_variable() {
+    // `Shape.Circle(5.0)` where Shape is not a declared enum: the
+    // parser promotes every uppercase-led `Name.variant(args)`, and
+    // astgen restores the pre-M11 method-call lowering for the paren
+    // form. With no value named Shape to bind, sema's ordinary
+    // undefined-variable diagnostic is the accurate one — and the
+    // only one.
+    let src = "fn main():\n\ts = Shape.Circle(5.0)\n";
     let (_t, diags, _p) = run_with_errors(src);
     assert_eq!(diags.len(), 1, "expected exactly one error: {diags:?}");
-    assert_eq!(diags[0].code, DiagCode::UnknownType);
+    assert_eq!(diags[0].code, DiagCode::UndefinedVariable);
+    assert!(
+        diags[0].message.contains("'Shape'"),
+        "got {:?}",
+        diags[0].message
+    );
 }
 
 #[test]

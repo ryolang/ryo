@@ -2,6 +2,7 @@
 
 use super::{FuncCtx, Scope, Sema, check_call};
 use ryo_core::diag::{Diag, DiagCode};
+use ryo_core::extra::enum_lit_extra;
 use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, StructField, TypeId, TypeKind, VariantKind, ViewKind};
 use ryo_core::uir::{InstData, InstRef, InstTag, Span, StructLitView, Uir};
@@ -731,6 +732,17 @@ fn analyze_variant_construct(
     let mut field_errored = false;
     for (fidx, value_ref) in view.fields() {
         let fspan = sema.uir.span(value_ref);
+        if fidx == enum_lit_extra::ORPHANED_FIELD {
+            // A braced field astgen didn't recognize (E0038 already
+            // emitted). The arg is lowered only so its own
+            // diagnostics surface; it binds nothing. The construct's
+            // shape is untrustworthy — suppress the derived
+            // missing-fields error, matching the unknown/duplicate
+            // field recoveries below.
+            field_errored = true;
+            analyze_expr(sema, fcx, scope, value_ref);
+            continue;
+        }
         let Some(field) = fields.get(fidx as usize) else {
             field_errored = true;
             sema.sink.emit(Diag::error(
