@@ -302,3 +302,35 @@ fn struct_name_in_variant_position_is_unknown_enum() {
     assert!(diag.message.contains("'Point'"), "got {:?}", diag.message);
     assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
 }
+
+#[test]
+fn lowercase_enum_construct_names_enum_and_points_at_constructor() {
+    // `color.red(5)` parses as a method call — the variant-construct
+    // rule only claims uppercase-led receivers — and `color` is an
+    // enum type, not a variable. The enum wording beats the misleading
+    // "undefined variable: 'color'" and points at the PascalCase
+    // constructor spelling. (A shadowing variable still wins.)
+    let src = "enum color:\n\tred(v: int)\n\nfn main():\n\tc = color.red(5)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::UnknownEnum)
+        .expect("UnknownEnum must fire");
+    assert!(
+        diag.message.contains("'color'") && diag.message.contains("enum"),
+        "got {:?}",
+        diag.message
+    );
+    let help = diag
+        .notes
+        .iter()
+        .map(|n| n.message.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        help.contains("'Color'") && help.contains("'Color.red(...)'"),
+        "got {:?}",
+        help
+    );
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+}

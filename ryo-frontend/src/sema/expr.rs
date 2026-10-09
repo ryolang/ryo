@@ -278,6 +278,17 @@ pub(crate) fn analyze_expr_allow_never(
         }
         InstTag::MethodCall => {
             let view = sema.uir.method_call_view(r);
+            if let Some(recovery) = lowercase_enum_method_receiver(
+                sema,
+                fcx,
+                scope,
+                view.receiver,
+                view.name,
+                &view.args,
+                span,
+            ) {
+                return recovery;
+            }
             let receiver_tir = analyze_expr(sema, fcx, scope, view.receiver);
             let receiver_ty = fcx.builder.ty_of(receiver_tir);
             let ids = sema.names;
@@ -1048,6 +1059,58 @@ fn field_list(pool: &ryo_core::types::InternPool, fields: &[StructField]) -> Str
         .map(|f| format!("'{}'", pool.str(f.name)))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// M11: `color.red(5)` where `color` is an enum — the parser only
+/// claims uppercase-led receivers for variant construction (spec §1
+/// PascalCase convention; a lowercase receiver keeps its method-call
+/// meaning), so a lowercase-named enum lands in the method-call path
+/// with its *type* as the receiver. Name the enum and point at the
+/// constructor spelling instead of the misleading "undefined
+/// variable". A bound variable of the same name still wins, matching
+/// the FieldAccess reinterpretation. Returns the error-typed
+/// recovery TIR when the check fired, `None` to continue ordinary
+/// method analysis.
+fn lowercase_enum_method_receiver(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    receiver: InstRef,
+    method: StringId,
+    args: &[InstRef],
+    span: Span,
+) -> Option<TirRef> {
+    if let InstTag::Var = sema.uir.inst(receiver).tag {
+        let name = match sema.uir.inst(receiver).data {
+            InstData::Var(name) => name,
+            _ => unreachable!("Var must carry InstData::Var"),
+        };
+        if scope.lookup(name).is_none() && sema.enum_types.contains_key(&name) {
+            let raw = sema.pool.str(name);
+            let mut chars = raw.chars();
+            let pascal = match chars.next() {
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            };
+            sema.sink.emit(
+                Diag::error(
+                    span,
+                    DiagCode::UnknownEnum,
+                    format!("'{raw}' is an enum, not a value"),
+                )
+                .with_help(format!(
+                    "types are PascalCase by convention: declare the enum as \
+                     '{pascal}' and construct '{pascal}.{}(...)'",
+                    sema.pool.str(method),
+                )),
+            );
+            for &arg in args {
+                analyze_expr(sema, fcx, scope, arg);
+            }
+            return Some(fcx.builder.unreachable(sema.pool.error_type(), span));
+        }
+    }
+    None
 }
 
 /// Unknown receiver method: the generalized "X has no method 'Y'"
