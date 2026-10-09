@@ -64,10 +64,9 @@ fn analyze(src: &str) -> (Vec<Tir>, InternPool, ryo_core::ownership::OwnershipSi
 
 /// (a) `EnumLit` emits an i32 tag store at offset 0 followed by
 /// field-wise payload stores at the pool-computed absolute offsets.
-/// The 16-byte `Rectangle` payload sits at offset 8 (natural alignment);
-/// the 8-byte `Circle` payload shares the tag's slot at offset 4 — the
-/// stores must come from `EnumVariantView.offset`, never from natural
-/// alignment assumptions.
+/// The 16-byte `Rectangle` payload sits at offset 8 (natural alignment)
+/// — the stores must come from `EnumVariantView.offset`, never from
+/// natural alignment assumptions.
 #[test]
 fn enum_lit_emits_tag_store_and_payload_stores_at_pool_offsets() {
     let src = "enum Shape:\n\tCircle(float)\n\tRectangle(width: float, height: float)\n\nfn main():\n\ts = Shape.Rectangle{width=1.0, height=2.0}\n";

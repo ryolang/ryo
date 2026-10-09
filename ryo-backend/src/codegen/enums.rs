@@ -112,11 +112,12 @@ impl<M: Module> Codegen<M> {
     /// Enum variant construction `Name::Variant(args...)` (M11):
     /// fresh slot sized by the enum layout, store the i32 discriminant
     /// at offset 0, then store each payload field at its pool-computed
-    /// absolute offset. Small payloads (<= 8 bytes) sit at offset 4
-    /// WITHOUT natural alignment — offsets always come from
-    /// `EnumVariantView`, never from re-deriving the layout. Payload
-    /// stores reuse the struct field-store helper (`store_field_value`)
-    /// so str/bytes triples and nested aggregates store correctly.
+    /// absolute offset. Payloads sit at `align_up(4, payload_align)`
+    /// (natural alignment, no small-payload exception) — offsets always
+    /// come from `EnumVariantView`, never from re-deriving the layout.
+    /// Payload stores reuse the struct field-store helper
+    /// (`store_field_value`) so str/bytes triples and nested aggregates
+    /// store correctly.
     fn emit_enum_lit(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,

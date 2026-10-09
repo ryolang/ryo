@@ -1065,8 +1065,8 @@ impl InternPool {
     /// Fill a declared enum's payload: variant directory, computed
     /// layout, and the inferred Copy flag. Layout (M11 spec §2): `i32`
     /// tag at offset 0; each variant's payload is a struct layout
-    /// placed at `align_up(4, payload_align)` — a payload of at most
-    /// one word packs right after the tag; `size = align_up(end_of_
+    /// placed at `align_up(4, payload_align)` — natural alignment, with
+    /// no small-payload packing exception; `size = align_up(end_of_
     /// largest_payload, max(4, max_variant_align))`. Offsets are
     /// absolute; payload types must be fully defined first.
     ///
@@ -1118,11 +1118,9 @@ impl InternPool {
                 is_copy &= self.is_copy(fty);
             }
             let payload_size = payload_end.next_multiple_of(payload_align);
-            let offset = if payload_size <= 2 * ENUM_TAG_SIZE {
-                ENUM_TAG_SIZE // word-sized payload shares the tag's slot
-            } else {
-                ENUM_TAG_SIZE.next_multiple_of(payload_align)
-            };
+            // Every payload sits at its naturally-aligned offset right
+            // after the tag: align_up(tag size, payload align).
+            let offset = ENUM_TAG_SIZE.next_multiple_of(payload_align);
             let vend = offset
                 .checked_add(payload_size)
                 .expect("enum layout overflow");
@@ -1945,7 +1943,8 @@ mod tests {
 
     #[test]
     fn enum_mixed_payload_layout_offsets() {
-        // (b) Result{Success(int), Error(str)}: word payload packs after the tag.
+        // (b) Result{Success(int), Error(str)}: both payloads align to 8
+        // (align_up(4, payload_align)) — no small-payload packing.
         let mut pool = InternPool::new();
         let result = pool.intern_str("Result");
         let (success, error) = (pool.intern_str("Success"), pool.intern_str("Error"));
@@ -1959,7 +1958,7 @@ mod tests {
         assert!(pool.needs_drop(id));
         assert_eq!(pool.size_align(id), (32, 8));
         let variants: Vec<_> = pool.enum_view(id).variants().collect();
-        assert_eq!(variants[0].offset, 4);
+        assert_eq!(variants[0].offset, 8);
         assert_eq!((variants[1].name, variants[1].offset), (error, 8));
         assert_eq!(variants[1].fields[0].offset, 8);
     }
