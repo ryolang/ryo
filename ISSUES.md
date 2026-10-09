@@ -694,6 +694,32 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-207 — Brace Law asymmetry vs Go-style uniform braces — revisit if alpha reopens syntax
+
+**Severity:** Correctness / Hygiene
+**Area:** docs-spec
+
+**Files:** docs/specification.md (D11), landing/reference/index.html (#enums)
+
+**Summary:** Enum named payloads declare with parens + 'name: Type' (Rectangle(width: float)) but construct with braces + 'name=value' (Rectangle{width=1.0}). The asymmetry is frozen for alpha (D11), but it is a Rust/Swift idiom, not the simplest option: Go uses one brace+name syntax for both declaration and construction (type Point struct{ X, Y float64 } / Point{X: 1}). DX review against the 'as simple as Go' bar flagged this as the remaining declaration/construction visual mismatch; the landing Forms table mitigates in the meantime.
+
+**Resolution:** Revisit only if alpha ever reopens enum syntax: benchmark Go's uniform-brace declaration/construction against the current D11 form, including how tuple variants would render. Until then the landing Forms table owns the teachability; no code action.
+
+---
+
+### I-208 — Lowercase type names half-work: enum defines and unit-accesses fine, payload construction redirects
+
+**Severity:** Correctness / Hygiene
+**Area:** frontend-parser
+
+**Files:** ryo-frontend/src/parser/enums.rs (uppercase receiver gate), ryo-frontend/src/sema/expr.rs (lowercase_enum_method_receiver)
+
+**Summary:** User-defined types are PascalCase by documented convention (docs/AGENTS.md), but the convention is enforced selectively: a lowercase enum (enum color: red(v: int)) defines without complaint, and unit access color.red works; only payload construction (color.red(5)) redirects — after the M11 fix with an enum-aware diagnostic and PascalCase hint, but still a use-site surprise for a definition the compiler accepted. Structs have no equivalent enforcement anywhere, so the two type kinds also differ from each other. DX review against the 'as simple as Go' bar: Go never half-accepts — naming is either convention-only (vet warns, language accepts, lowercase types are fully first-class) or uniformly enforced.
+
+**Resolution:** Pick one: (a) enforce PascalCase user-defined type names uniformly at declaration (structs and enums) with a clear convention error — cheap, makes the documented convention a rule, removes the half-working state; or (b) make naming irrelevant by moving disambiguation fully to sema — parse every X.Y(...) as a method call and reinterpret as EnumLit when X resolves to an enum type (the X.Y{...} brace form is already unambiguous at parse), which makes lowercase types fully first-class at the cost of parser+sema churn in the postfix machinery. Recommended: (a) now if the convention is the policy; (b) when the parser architecture next needs touching anyway.
+
+---
+
 ## Cross-References
 
 - Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md) — latest verified snapshot (2026-08-24); several current entries originated there, and its `I-xxx` citations reflect what was open at the time (older snapshots live in git history).
