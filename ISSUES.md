@@ -234,6 +234,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `ryo-core/src/uir.rs` (`var_decl_extra` etc.), `ryo-core/src/tir.rs` (`call_extra` :337-342, `var_decl_extra` :355-362, `assign_extra`/… :370-418)
 **Summary:** tir.rs re-defines near-identical `extra`-layout modules with different layouts: `call_extra` appends a modes tail; `var_decl_extra` drops the `TY` slot (`LEN: 3` vs uir's `4`). Same names, same constants, different meanings — a footgun when editing one side. `ExtraRange` itself is also byte-duplicated (`uir.rs:107-118` vs `tir.rs:87-98`), and `IfStmt` has no layout doc module at all in tir.rs (:677-715).
 **Resolution:** Unify the shared pieces (`ExtraRange` at minimum) in one module; rename or document the layout differences explicitly; add the missing `if_stmt_extra` doc module.
+**Update (2026-10-09, Milestone 11):** `ExtraRange` is now unified in `ryo-core/src/extra.rs`, and the M11 enum encodings (`enum_lit_extra`, `EnumLitView`) were born on the shared type with no per-IR duplication. The layout documentation gaps above remain open.
 
 ---
 
@@ -245,6 +246,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `ryo-core/src/uir.rs` (`call_view` :870-886, `if_stmt_view` :1004-1046, `body_stmts` :344, `while_loop_view` :942, `for_range_view` :956, `method_call_view` :981), `ryo-core/src/tir.rs` (`call_view`), `ryo-backend/src/codegen/expr.rs` (call view args/modes)
 **Summary:** Every accessor decode collects refs out of `extra` into a fresh `Vec<InstRef>`/`Vec<TirRef>`, and `body_stmts()` collects a slice that is already contiguous. Sema and codegen call these in their hottest loops. Multipliers found in the 2026-08 arena-perf review: `Tir::walk_operands` (`tir.rs:1194-1266`) decodes views per visited instruction, so every `collect_reachable` costs several Vec allocs per inst; sema calls `uir.body_stmts(body)` twice per function (`sema/mod.rs:485-486`); ownership calls `tir.body_stmts()` per whole-body-walk query (`ownership/frees.rs:28, :208`, `ownership/loops.rs:67, :128, :249, :307`). Additionally `ExtraRange.len` is write-only metadata (decoders re-derive counts from inline `argc` words) — a second source of truth.
 **Resolution:** Return borrowed slices (`&[InstRef]` over `extra`) or `impl Iterator` from the views; `body_stmts` can be a slice iter directly. Add `assert_eq!(size_of::<Inst>(), 24)` before any `InstData` refactor.
+**Update (2026-10-09, Milestone 11):** The M11 enum view decoders (`EnumLitView` in `uir.rs`/`tir.rs`) borrow the `extra` arena (`&[u32]`) and iterate fields with no per-decode `Vec`. The legacy view decoders listed above still collect; entry stays open for them.
 
 ---
 
@@ -355,6 +357,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** measured by brace-depth scan, tests excluded — worst offenders (refs refreshed 2026-08-24, post-split): `ryo-frontend/src/ownership/walk.rs` `visit_expr` :782 (~424 raw / 298 code lines), `analyze_if_stmt` :507 (210 code); `ryo-frontend/src/ownership/mod.rs` `analyze_function` :286; `ryo-frontend/src/sema/stmt.rs` `analyze_stmt` :14 (360 code lines — at the ratchet); `ryo-frontend/src/sema/expr.rs` `analyze_expr_allow_never` :37 (~322 raw), `check_binary_op` :439 (~265); `ryo-frontend/src/sema/builtins.rs` `emit_builtin_call` :10 (~225); `ryo-frontend/src/sema/call.rs` `check_call` :12 (~220); `ryo-backend/src/codegen/expr.rs` `eval_inst` :18, `eval_inst_str` :829, `emit_call`; `ryo-backend/src/codegen/mod.rs` `emit_stmt` :909, `compile_function` :549; `ryo-frontend/src/parser.rs` `expression_parser`; `ryo-core/src/uir.rs` `write_inst` :1106 and the same pattern in `ryo-core/src/tir.rs`
 **Summary:** R7 targets functions under 50 lines so a human reviewer can hold each one in their head. Sixteen functions sit between ~150 and ~410 lines, almost all of them giant per-tag dispatch `match`es in the hottest passes. These are the files every milestone touches; review cost and merge-conflict surface scale with their length. (Distinct from the since-resolved per-function CLIF-render cost problem, which tracked a *content* problem inside one of these functions, not size.)
 **Resolution:** Split the entry points into one helper per tag/arm family (`lower_match_expr`-style naming per R7), keeping the dispatch match as a thin table. Do it opportunistically when a function is next touched for a feature — starting with `visit_expr` and `analyze_stmt`, the two worst — rather than as one big-bang refactor. `clippy::too_many_lines` is denied workspace-wide with `too-many-lines-threshold = 360` as a ratchet; lower the threshold towards 50 as functions split.
+**Update (2026-10-09, Milestone 11):** Ahead of the enum codegen work the aggregate machinery moved out of the two ratchet-saturated codegen files into per-domain homes — `structs.rs`, `frees.rs`, `str_ops.rs`, and a new `enums.rs` — and the enum arms emit through per-variant helpers. The frontend giants listed above are untouched; entry stays open.
 
 ---
 
@@ -421,6 +424,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `ryo-frontend/src/parser.rs` (:604-615, :650-661, :534-538, :436-446)
 **Summary:** Call args, method args, params, and elif branches are `collect::<Vec<_>>()`ed into a temporary, copied into the AST side arena by the builder, then dropped — a double buffer per node. Partly inherent to chumsky's `IterParser`; impact is small next to the win the arena already delivered.
 **Resolution:** A custom collector writing straight into the arena (chumsky 0.12 collects via `FromIterator`, so an arena-append adapter is feasible), or accept as-is. Measure before bothering.
+**Update (2026-10-09, Milestone 11):** Enum variant-construct args (`ryo-frontend/src/parser/enums.rs`) push straight into the AST side arenas as parsed — no intermediate `Vec`. The call/method-arg and params sites listed above still collect; entry stays open.
 
 ---
 
@@ -611,7 +615,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-193 — Attributes only parse on struct definitions; functions and other items cannot carry them
+### I-193 — Attributes only parse on struct and enum definitions; functions and other items cannot carry them
 
 **Severity:** Blocking
 **Area:** frontend-parser
@@ -621,6 +625,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** Milestone 9.1 introduced `#[...]` attributes restricted to struct definitions; an attribute before a function or any other item is a compile error (E0108, "attributes are only supported on struct definitions"). Roadmap features that need function attributes — the testing framework's `#[test]`, contracts (`#[pre]`/`#[post]`), `#[no_mangle]` (spec §19) — are blocked until placement widens. The groundwork is already M26-ready: the lexer exposes `#[` everywhere and the parser's attribute *contents* are generic (`ident` + optional parenthesized comma-list), so the change is the placement rule, per-name recognition with per-item validation, and the E0108 message.
 
 **Resolution:** Lands with Milestone 26 (the general attribute system) at the earliest; a narrower interim step (e.g. `#[test]` only) would widen the placement rule for functions without the full system.
+**Update (2026-10-09, Milestone 11):** Placement widened to enum definitions and the E0108 text now reads "attributes are only supported on struct and enum definitions". Functions and other items are still rejected; the rest of this entry stays open.
 
 ---
 
@@ -686,6 +691,19 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** Positional args of an enum variant construction cannot contain a call expression inside a nested struct literal. Repro: struct Msg: text: str / enum Note: Info(Msg), Blank / n = Note.Info(Msg{text=int_to_str(7) + "x"}) — the parser reports E0122 (variant 'Info' has no field '1') and E0012 (field '0' expected 'Msg', found 'int'); the arg list appears to be split at the nested call's paren rather than balanced-paren delimited. A literal-only nested struct literal (Note.Info(Msg{text="hi"})) parses fine, as does a hoisted binding (m = Msg{...}; Note.Info(m)).
 
 **Resolution:** Parse variant positional args with a balanced-delimiter rule (or the shared expression parser) so nested calls/struct literals group as single args. Add a parser corpus test for Note.Info(Msg{text=int_to_str(7)}).
+
+---
+
+### I-206 — Parenthesized unknown-variant construction double-diagnoses (E0038 + misleading E0120)
+
+**Severity:** Correctness / Hygiene
+**Area:** frontend-parser
+
+**Files:** ryo-frontend/src/astgen.rs (lower_variant_construct), ryo-frontend/src/sema/expr.rs (E0120 site)
+
+**Summary:** Constructing an unknown variant with parens — Result.Unknown(1) — emits two errors: astgen's E0038 ("enum 'Result' has no variant 'Unknown'") and a misleading sema E0120 ("missing field(s) '0' in variant 'Success' of enum 'Result' construction"). Root cause: astgen's recovery for an unknown variant on a declared enum lowers to EnumLit(real_ty, 0, &[]) — byte-identical to a legitimate empty-paren construct of variant 0 — so sema type-checks the recovery node and derives a phantom missing-payload error that names the wrong variant. (The unknown-enum and unknown-payload-field recoveries already lower to the error type and do not double-diagnose.)
+
+**Resolution:** Lower the unknown-variant recovery to pool.error_type() like the unknown-enum path, so sema skips the node and E0038 stands alone. Blocked: astgen.rs is at 1999/2000 lines (file-length ratchet), so the fix waits for an astgen split or shrink that buys headroom.
 
 ---
 
