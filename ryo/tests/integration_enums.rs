@@ -78,16 +78,18 @@ fn enum_heap_str_payload_reassigned_in_loop_early_return_jit() {
 }
 
 #[test]
-fn enum_reassign_to_heap_freeing_variant_then_success_jit() {
-    // The Result.Success(5) path: reassigning from Error to Success
-    // drops the Error payload (free-on-reassign on a needs-drop enum);
-    // the returned Success carries only an int, so its own destruction
-    // frees nothing observable.
-    assert_ryo_output(
-        "enum_success_path",
-        "enum Result:\n\tSuccess(int)\n\tError(message: str)\n\nfn probe() -> Result:\n\tmut r = Result.Error{message=\"start\"}\n\tr = Result.Success(5)\n\treturn r\n\nfn main():\n\tr = probe()\n\tprint(r)\n\tprint(\"\\n\")\n",
-        "Result.Success(5)\n",
+fn enum_reassign_from_heap_error_to_success_jit() {
+    // The Result.Success(5) path: reassigning FROM Error TO Success
+    // drops the Error payload (free-on-reassign on a needs-drop enum).
+    // The payload is runtime-built past the 23-byte inline cap so the
+    // variant-switch free is a real ryo_str_free (Valgrind-pinned in
+    // Task 11, not an SSO no-op). The returned Success carries only an
+    // int, so its own destruction frees nothing observable.
+    let pad = "a".repeat(30);
+    let code = format!(
+        "enum Result:\n\tSuccess(int)\n\tError(message: str)\n\nfn probe() -> Result:\n\tmut r = Result.Error{{message=int_to_str(42) + \"{pad}\"}}\n\tr = Result.Success(5)\n\treturn r\n\nfn main():\n\tr = probe()\n\tprint(r)\n\tprint(\"\\n\")\n"
     );
+    assert_ryo_output("enum_success_path", &code, "Result.Success(5)\n");
 }
 
 // =============================================================================
@@ -116,19 +118,29 @@ fn enum_copy_variant_copied_while_narrow_variant_active_jit() {
 
 #[test]
 fn enum_borrow_move_inout_params_and_sret_return_jit() {
-    assert_ryo_output(
-        "enum_param_abi",
-        "enum Result:\n\tSuccess(int)\n\tError(message: str)\n\nfn show(r: Result):\n\tprint(r)\n\tprint(\"\\n\")\n\nfn reseat(inout r: Result):\n\tr = Result.Error{message=\"mutated\"}\n\nfn bump(inout r: Result):\n\tr = Result.Success(99)\n\nfn consume(move r: Result) -> Result:\n\treturn r\n\nfn main():\n\tmut r = Result.Success(1)\n\tshow(r)\n\treseat(&r)\n\tshow(r)\n\tbump(&r)\n\tshow(r)\n\tout = consume(r)\n\tshow(out)\n",
-        "Result.Success(1)\nResult.Error{message=\"mutated\"}\nResult.Success(99)\nResult.Success(99)\n",
+    // `reseat` writes a runtime-built message past the 23-byte inline
+    // cap, so heap traffic crosses every ABI edge here: the inout
+    // write-back escapes the callee's fresh buffer (which the callee
+    // must not free), `consume` moves the heap-backed value through a
+    // move param and returns it by sret, and `bump`'s variant switch
+    // frees that payload caller-side. Caller and callee each free
+    // exactly once (Valgrind pins the heap payloads in Task 11).
+    let pad = "a".repeat(30);
+    let code = format!(
+        "enum Result:\n\tSuccess(int)\n\tError(message: str)\n\nfn show(r: Result):\n\tprint(r)\n\tprint(\"\\n\")\n\nfn reseat(inout r: Result):\n\tr = Result.Error{{message=int_to_str(7) + \"{pad}\"}}\n\nfn bump(inout r: Result):\n\tr = Result.Success(99)\n\nfn consume(move r: Result) -> Result:\n\treturn r\n\nfn main():\n\tmut r = Result.Success(1)\n\tshow(r)\n\treseat(&r)\n\tshow(r)\n\tmut out = consume(r)\n\tshow(out)\n\tbump(&out)\n\tshow(out)\n"
     );
+    let expected = format!(
+        "Result.Success(1)\nResult.Error{{message=\"7{pad}\"}}\nResult.Error{{message=\"7{pad}\"}}\nResult.Success(99)\n"
+    );
+    assert_ryo_output("enum_param_abi", &code, &expected);
 }
 
 // =============================================================================
 // Review Focus 4 — an enum holding a struct holding a heap str, itself
-// nested in a struct: construct, move, drop. Destruction runs
-// innermost-first (the Msg buffer, then the Note, then the Wrapper).
-// The heap-built str (> SSO) makes every drop observable under
-// Valgrind in Task 11.
+// nested in a struct: construct, move, drop. The heap-built str (> SSO)
+// makes drop completeness observable at every level under Valgrind in
+// Task 11 (each payload freed exactly once; destruction order is not
+// asserted here).
 // =============================================================================
 
 #[test]
