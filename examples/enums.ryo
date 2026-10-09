@@ -1,0 +1,38 @@
+#[derive(Eq)]
+enum Color:
+	Red
+	Green
+	Blue
+
+#[derive(Eq)]
+enum Result:
+	Success(int)
+	Error(message: str)
+
+#[derive(Eq)]
+enum Shape:
+	Circle(float)
+	Rectangle(width: float, height: float)
+
+fn main():
+	c = Color.Green
+	assert(c == Color.Green, "derived equality on unit variants")
+	assert(c != Color.Red, "unequal unit variants compare unequal")
+	print(c)
+	print("\n")
+	r = Result.Success(5)
+	assert(r == Result.Success(5), "tuple payload compares by value")
+	assert(r != Result.Error{message="boom"}, "different variants are unequal")
+	print(r)
+	print("\n")
+	e = Result.Error{message="boom"}
+	assert(e == Result.Error{message="boom"}, "named str payload compares by content")
+	print(e)
+	print("\n")
+	s = Shape.Rectangle{width=1.0, height=2.0}
+	assert(s == Shape.Rectangle{width=1.0, height=2.0}, "named payloads compare field-wise")
+	assert(s != Shape.Rectangle{width=1.0, height=3.0}, "differing payload fields are unequal")
+	print(s)
+	print("\n")
+	print(Shape.Circle(5.0))
+	print("\n")
