@@ -37,12 +37,13 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 11 — Enums (Algebraic Data Types) ✅ COMPLETE](#milestone-11-enums-algebraic-data-types--complete)
 - [ ] [Milestone 12 — Pattern Matching [alpha]](#milestone-12-pattern-matching-alpha)
 - [ ] [Milestone 12.5 — Advanced Pattern Matching](#milestone-125-advanced-pattern-matching) *(deferred to v0.2 — post-alpha; holds everything M12 defers)*
+- [ ] [Milestone 12.6 — Match Ownership Completion](#milestone-126-match-ownership-completion) *(deferred to v0.2 — post-alpha; undefined enum/match ownership semantics)*
 - [ ] [Milestone 13 — Error Types & Unions [alpha]](#milestone-13-error-types--unions-alpha)
 - [ ] [Milestone 13.5 — Default Parameters & Named Arguments](#milestone-135-default-parameters--named-arguments) *(deferred — see sequencing note below)*
 - [ ] [Milestone 13.6 — `io_read_line` Gains Error Unions](#milestone-136-io_read_line-gains-error-unions) *(lands directly after M13)*
 - [ ] [Milestone 13.7 — Literal Completeness (Hex/Octal/Binary Ints, Escapes)](#milestone-137-literal-completeness-hexoctalbinary-ints-escapes) *(deferred — no dependencies; slots in anywhere)*
 
-> **Sequencing note (2026-09):** Next-up order is the alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M16** — followed by the rest of Phase 3. M10 is no longer a standalone milestone in effort terms: per D11 its grouping machinery folds into M9, so what ships between M9.1 and M11 is only the positional-sugar layer (parser forms + destructuring, depends on M9). **M12.5, M13.5, and M13.7 are deferred past the core cluster.** M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"), and M9's former dependency on its named-argument parsing is stale — D11 moved struct literals to brace construction with its own grammar. M13.7 has no dependencies and slots in as filler. M13.5 remains v0.1-scope but may slip to v0.2 if the core cluster absorbs the schedule. **M9.2 (throwaway CLI intrinsics)** has no dependencies and slots in alongside the core cluster any time after M9.1; **M13.6** lands directly after M13, before M16, migrating the M9.2 `io_read_line` placeholder to real error unions. **M12.5** (advanced pattern matching — nested patterns, guards, or-patterns, and the rest of M12's deferral register) is v0.2 work, not alpha-gating; the only pattern features alpha needs beyond M12 ship inside M13 (error-union match) and M16 (`?T`/`none` patterns) themselves.
+> **Sequencing note (2026-09):** Next-up order is the alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M16** — followed by the rest of Phase 3. M10 is no longer a standalone milestone in effort terms: per D11 its grouping machinery folds into M9, so what ships between M9.1 and M11 is only the positional-sugar layer (parser forms + destructuring, depends on M9). **M12.5, M12.6, M13.5, and M13.7 are deferred past the core cluster.** M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"), and M9's former dependency on its named-argument parsing is stale — D11 moved struct literals to brace construction with its own grammar. M13.7 has no dependencies and slots in as filler. M13.5 remains v0.1-scope but may slip to v0.2 if the core cluster absorbs the schedule. **M9.2 (throwaway CLI intrinsics)** has no dependencies and slots in alongside the core cluster any time after M9.1; **M13.6** lands directly after M13, before M16, migrating the M9.2 `io_read_line` placeholder to real error unions. **M12.5** (advanced pattern matching — nested patterns, guards, or-patterns, and the rest of M12's deferral register) is v0.2 work, not alpha-gating; the only pattern features alpha needs beyond M12 ship inside M13 (error-union match) and M16 (`?T`/`none` patterns) themselves.
 
 ### Phase 3: Type System & Memory Safety
 
@@ -1683,7 +1684,7 @@ fn describe_color(color: Color) -> str:
 - **Bare irrefutable bind as a whole-arm pattern** — `v:` binding the entire scrutinee (M12 rejects this with a did-you-mean note)
 - **Nominal struct patterns** — `Point{x, y}:` destructure-by-name on named structs (needs a decision on how nominal patterns interact with the Brace Law)
 - **Full structural exhaustiveness for anon/tuple patterns** — cross-arm literal-field coverage (M12 always requires a `_:` arm for anonymous-struct scrutinees)
-- **Borrow-bindings in arms** — bind payload by immutable borrow when the scrutinee is borrowed (M12 emits `E0133` for non-`Copy` fields on borrowed scrutinees); requires reference/view codegen in arm prologues
+- **Borrow-bindings in arms** — bind payload by immutable borrow when the scrutinee is borrowed (M12 emits `E0133` for non-`Copy` fields on borrowed scrutinees); requires reference/view codegen in arm prologues. Binding-mode inference semantics are tracked in M12.6
 - Further ideas (slice patterns, `@` bindings, range patterns) live in [proposals.md](proposals.md) "Pattern Matching Extensions" and fold in here if accepted
 
 **Dependencies:** Milestone 12 (the entire surface builds on its Match IR, exhaustiveness checker, and arm-binding machinery)
@@ -1693,6 +1694,31 @@ fn describe_color(color: Color) -> str:
 **Effort:** ~2-3 weeks (medium)
 
 **Visible Progress:** `match` gains the expressiveness of Rust/Swift pattern matching — deep destructuring in a single arm, guarded arms, compact alternative arms.
+
+### Milestone 12.6: Match Ownership Completion
+
+**Goal:** The ownership semantics M12's move-only core deliberately left undefined: mutable payload bindings, scrutinee liveness rules, and conditional-move merge behavior. Alpha survives without them (each case has a workaround — extract/move/reconstruct, or restructure the match); together they make `match` a complete ownership citizen.
+
+**Status:** ⏳ Deferred — v0.2, post-alpha. Not alpha-gating.
+
+**Items:**
+
+- **Mutable payload bindings (`inout` binds)** — `match opt: Some(inout v): v = f(v)` mutates the payload in place; the scrutinee must be a mutable place (`mut` binding, `inout` param, mutable field path). No surface syntax or semantics defined today; requires mutable-borrow arm prologues (the M8.3 `inout` idiom applied to bindings) plus a conflict rule (while `inout v` is live, no other access to the scrutinee in that arm). Anon/tuple `inout` fields follow the same rule.
+- **Scrutinee liveness & reassignment** — define and enforce: may an arm assign to the scrutinee variable (`match x: _: x = new()`)? Adopt the Rust-shaped rule — legal when no arm borrows from or moves through the scrutinee, `E0033`-family error otherwise — and extend the ownership pass to model it.
+- **Conditional move + reinitialization across arms** — `match opt: Some(v): opt = None` with `opt` used after the match: moved in one arm, re-initialized on every path after the move → valid at the merge. M12's union merge conservatively reports "moved"; this pins the finer lattice (re-init resets per-arm state; merge joins states) with tests. Until then the conservative error is the specified behavior.
+- **Nested-place scrutinees & enum-in-aggregate moves** — `match wrapper.inner:` (partial moves out of a nested place's payload, interaction with the outer owner's remaining-field drops) and moving enums out of struct fields / containers. Requires place-expression scrutinee ownership beyond simple variables; today only variable (and simple owned-temporary) scrutinees are well-defined.
+
+**Cross-references (not claimed here):**
+
+- Immutable borrow-bindings / match ergonomics — pattern surface in M12.5; binding-mode inference semantics land together with or just before this milestone's items
+- `match self:` on `move self` / `inout self` — M17 (Method Implementations) defines the self parameter modes; match rides them
+- Copy elision through the match merge block — tracked in [copy_elision.md](copy_elision.md) (P1 specialization for pattern matching)
+
+**Dependencies:** Milestone 12 (match core), Milestone 8.3 (`inout`, shipped); pairs naturally with M12.5
+
+**Target:** v0.2
+
+**Effort:** ~2 weeks (medium)
 
 ### Milestone 13: Error Types & Unions [alpha]
 
