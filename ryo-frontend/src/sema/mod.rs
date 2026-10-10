@@ -65,6 +65,8 @@ mod diff;
 pub(crate) use diff::*;
 mod expr;
 pub(crate) use expr::*;
+mod match_;
+pub(crate) use match_::*;
 mod stmt;
 pub(crate) use stmt::*;
 
@@ -685,6 +687,8 @@ mod tests_bytes;
 mod tests_destructure;
 #[cfg(test)]
 mod tests_enums;
+#[cfg(test)]
+mod tests_match;
 #[cfg(test)]
 mod tests_reserved;
 #[cfg(test)]

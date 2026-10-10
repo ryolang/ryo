@@ -1,0 +1,893 @@
+//! `match` expression analysis (M12) — pattern resolution and the
+//! E0129-E0136 diagnostic family. Split from `expr.rs` so the parent
+//! file stays under the 2000-line CI gate.
+//!
+//! Task 5 implements RESOLUTION ONLY: the scrutinee type is validated
+//! (E0136), each arm's pattern is resolved against it — literal kinds
+//! (E0131), variant names and payload shapes (E0132, reusing the M11
+//! construction checks E0120/E0121/E0122/E0125), anonymous-struct
+//! shapes (reusing the M10 destructure checks E0113/E0114/E0040) — and
+//! the per-arm results are collected in a [`MatchAnalysis`] scratch
+//! struct for the follow-on tasks. Exhaustiveness (E0129/W0005) lands
+//! in Task 6; arm typing, binding insertion, and the typed TIR
+//! `TirTag::Match` emission (E0133-E0135) land in Task 7.
+//!
+//! Until then, `analyze_match` returns a stub: a `TirTag::Unreachable`
+//! placeholder — `void`-typed when resolution is clean, error-typed
+//! when any diagnostic fired (the §4.5 recovery sentinel; codegen never
+//! runs on a unit with errors). Arm bodies are deliberately NOT
+//! analyzed here: their typing and per-arm scopes are Task 7's job.
+//!
+//! ## Span anchoring
+//!
+//! The UIR match wire carries no per-pattern or per-arm spans (Task 1
+//! deferred arm spans; the AST pattern spans die in astgen). Pattern-
+//! level diagnostics therefore anchor on the arm's BODY span — the
+//! first body instruction's span, the nearest per-arm location
+//! available — reconstructed by [`arm_span`]; scrutinee diagnostics
+//! anchor on the scrutinee expression. If a future wire revision
+//! carries pattern spans, re-anchor here.
+//!
+//! ## Continuity
+//!
+//! One broken arm never suppresses another: every arm is resolved
+//! independently, and an arm that errored records `had_error` so
+//! exhaustiveness (Task 6) excludes it instead of piling derived
+//! diagnostics on top.
+
+use super::{FuncCtx, Scope, Sema, analyze_expr, field_list, ordinal};
+use ryo_core::ast::LitPattern;
+use ryo_core::diag::{Diag, DiagCode};
+use ryo_core::tir::{Discriminant, MatchBinding};
+use ryo_core::types::{StringId, StructField, TypeKind, VariantKind};
+use ryo_core::uir::{
+    InstRef, Span, UirAnonFieldsView, UirArgTarget, UirArmBodyView, UirFieldTarget,
+    UirMatchArmView, UirPatternView, UirVariantArgsView,
+};
+
+/// Resolution results for one `match` expression. Computed by Task 5's
+/// resolution pass; consumed by Task 6 (exhaustiveness walks
+/// [`MatchArmAnalysis::discriminant`]) and Task 7 (arm typing seeds
+/// scopes from [`MatchArmAnalysis::bindings`], then emits the typed
+/// TIR `Match` from the whole analysis). Task 5 itself reads only
+/// `had_error` — to pick the stub's type — which is why the per-arm
+/// payloads carry a targeted dead-code allow below.
+#[allow(dead_code)]
+struct MatchAnalysis {
+    /// The analyzed scrutinee operand.
+    scrutinee: ryo_core::tir::TirRef,
+    /// The scrutinee type arms were resolved against: the real type, or
+    /// the error sentinel when E0136 fired (arms then skip their checks
+    /// quietly — the original diagnostic already explains).
+    scrutinee_ty: ryo_core::types::TypeId,
+    arms: Vec<MatchArmAnalysis>,
+}
+
+/// Resolution results for one arm.
+struct MatchArmAnalysis {
+    /// Reconstructed arm span (see the module header).
+    span: Span,
+    /// The resolved selector: `Some` for wildcard / literal / variant
+    /// arms. `None` for anonymous-shape arms (no M12 discriminant
+    /// exists — structural lowering is M12.5) and for arms whose
+    /// pattern errored. Task 6's coverage walk counts only `Some`
+    /// discriminants, so both exclusions fall out naturally.
+    discriminant: Option<Discriminant>,
+    /// Payload bindings in arm-written order: canonical field index,
+    /// bound name, field type. Literal and wildcard targets bind
+    /// nothing. Task 7 inserts these into the arm scope.
+    bindings: Vec<MatchBinding>,
+    /// Anonymous-shape literal constraints (`{x=0}`, `(0, _)`):
+    /// (canonical field index, literal) in written order. Only
+    /// meaningful for anon arms; Task 7 lowers them to field-equality
+    /// tests.
+    anon_literals: Vec<(u32, LitPattern)>,
+    /// True when the pattern produced a diagnostic. The match-level
+    /// stub becomes error-typed when any arm (or the scrutinee) errored.
+    had_error: bool,
+}
+
+/// The matchable scrutinee kinds (spec §4.6): enums by variant, exact
+/// literals over `int` / `bool` / `str`, and anonymous structs by
+/// shape. Named structs (nominal patterns), floats (literal patterns
+/// deferred with NaN/IEEE), views, `bytes`, and `void` / `never` (no
+/// value to match) are rejected with E0136.
+fn is_matchable(sema: &Sema<'_>, ty: ryo_core::types::TypeId) -> bool {
+    matches!(
+        sema.pool.kind(ty),
+        TypeKind::Enum | TypeKind::Int | TypeKind::Bool | TypeKind::Str | TypeKind::AnonStruct
+    )
+}
+
+/// `match scrutinee:` (M12) — resolution pass; see the module header
+/// for the Task 5 scope and the stub contract.
+pub(crate) fn analyze_match(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    span: Span,
+) -> ryo_core::tir::TirRef {
+    let view = sema.uir.match_view(r);
+    let scrutinee = analyze_expr(sema, fcx, scope, view.scrutinee);
+    let mut scrutinee_ty = fcx.builder.ty_of(scrutinee);
+
+    // E0136: the scrutinee must be a matchable type. An error-typed
+    // scrutinee (its own diagnostic already emitted — e.g. an undefined
+    // name) recovers quietly, matching the struct-literal / enum-lit
+    // failed-type precedent; everything else names the type and lists
+    // what IS matchable, then resolution continues against the error
+    // sentinel so later arms still get shape-checked where possible.
+    let mut had_error = false;
+    if !is_matchable(sema, scrutinee_ty) {
+        if !sema.pool.is_error(scrutinee_ty) {
+            let mut diag = Diag::error(
+                sema.uir.span(view.scrutinee),
+                DiagCode::InvalidMatchScrutinee,
+                format!(
+                    "cannot match on a value of type '{}' — match works on \
+                     enums, int, bool, str, and anonymous structs",
+                    sema.pool.display(scrutinee_ty),
+                ),
+            );
+            if sema.pool.kind(scrutinee_ty) == TypeKind::Float {
+                diag = diag.with_help("float literal patterns are not yet supported");
+            }
+            sema.sink.emit(diag);
+        }
+        had_error = true;
+        scrutinee_ty = sema.pool.error_type();
+    }
+
+    let mut arms = Vec::with_capacity(view.arms.len());
+    for arm in &view.arms {
+        let arm_span = arm_span(sema, &arm.body, span);
+        let analysis = resolve_arm(sema, scrutinee_ty, arm, arm_span);
+        had_error |= analysis.had_error;
+        arms.push(analysis);
+    }
+
+    // Task 6-7 build on this analysis; Task 5 stubs the typed inst.
+    let _analysis = MatchAnalysis {
+        scrutinee,
+        scrutinee_ty,
+        arms,
+    };
+
+    if had_error {
+        fcx.builder.unreachable(sema.pool.error_type(), span)
+    } else {
+        // Clean-resolution stub: void until Task 7 joins the arm types
+        // and emits the real TirTag::Match.
+        fcx.builder.unreachable(sema.pool.void(), span)
+    }
+}
+
+/// Reconstruct an arm's span from its body (the UIR wire carries no
+/// arm/pattern spans — see the module header).
+fn arm_span(sema: &Sema<'_>, body: &UirArmBodyView<'_>, match_span: Span) -> Span {
+    match body {
+        UirArmBodyView::Expr(r) => sema.uir.span(*r),
+        UirArmBodyView::Stmts(words) => words
+            .first()
+            .map(|&w| sema.uir.span(InstRef::from_raw(w)))
+            .unwrap_or(match_span),
+    }
+}
+
+/// Resolve one arm's pattern against the scrutinee type. Every kind
+/// resolves independently — a broken arm never blocks the next.
+fn resolve_arm(
+    sema: &mut Sema<'_>,
+    scrutinee_ty: ryo_core::types::TypeId,
+    arm: &UirMatchArmView<'_>,
+    span: Span,
+) -> MatchArmAnalysis {
+    let mut analysis = MatchArmAnalysis {
+        span,
+        discriminant: None,
+        bindings: Vec::new(),
+        anon_literals: Vec::new(),
+        had_error: false,
+    };
+    // An error-typed scrutinee (E0136 recovery or an already-errored
+    // expression) makes every check uninformative — the arm is excluded
+    // from exhaustiveness and binds nothing.
+    if sema.pool.is_error(scrutinee_ty) {
+        analysis.had_error = true;
+        return analysis;
+    }
+    match &arm.pattern {
+        UirPatternView::Wildcard => {
+            analysis.discriminant = Some(Discriminant::Wildcard);
+        }
+        UirPatternView::Literal(lit) => {
+            resolve_literal(sema, scrutinee_ty, *lit, &mut analysis);
+        }
+        UirPatternView::Variant {
+            enum_name,
+            variant,
+            args,
+        } => {
+            resolve_variant(
+                sema,
+                scrutinee_ty,
+                *enum_name,
+                *variant,
+                *args,
+                &mut analysis,
+            );
+        }
+        UirPatternView::Anon { fields } => {
+            resolve_anon(sema, scrutinee_ty, *fields, &mut analysis);
+        }
+    }
+    analysis
+}
+
+/// The literal's expected type and a human-readable kind name, for the
+/// E0131 both-sides message.
+fn literal_kind(sema: &Sema<'_>, lit: LitPattern) -> (ryo_core::types::TypeId, &'static str) {
+    match lit {
+        LitPattern::Int(_) => (sema.pool.int(), "integer"),
+        LitPattern::Str(_) => (sema.pool.str_(), "string"),
+        LitPattern::Bool(_) => (sema.pool.bool_(), "boolean"),
+    }
+}
+
+/// A literal arm: the literal's kind must equal the scrutinee type
+/// (int/bool/str scrutinees only — enums and anon shapes were gated by
+/// the pattern-kind checks in [`resolve_variant`] / [`resolve_anon`]).
+fn resolve_literal(
+    sema: &mut Sema<'_>,
+    scrutinee_ty: ryo_core::types::TypeId,
+    lit: LitPattern,
+    analysis: &mut MatchArmAnalysis,
+) {
+    let (lit_ty, kind) = literal_kind(sema, lit);
+    if scrutinee_ty != lit_ty {
+        let mut diag = Diag::error(
+            analysis.span,
+            DiagCode::PatternTypeMismatch,
+            format!(
+                "{kind} literal pattern cannot match a scrutinee of type '{}'",
+                sema.pool.display(scrutinee_ty),
+            ),
+        );
+        if sema.pool.kind(scrutinee_ty) == TypeKind::Enum {
+            let ename = sema.pool.enum_view(scrutinee_ty).name();
+            diag = diag.with_help(format!(
+                "enum '{}' values match by variant name",
+                sema.pool.str(ename),
+            ));
+        }
+        sema.sink.emit(diag);
+        analysis.had_error = true;
+        return;
+    }
+    analysis.discriminant = Some(match lit {
+        LitPattern::Int(v) => Discriminant::Int(v),
+        LitPattern::Str(s) => Discriminant::Str(s),
+        LitPattern::Bool(b) => Discriminant::Bool(b),
+    });
+}
+
+/// A variant arm `Red` / `Color.Red` / `Circle(radius)` /
+/// `Coords{x=px}`: resolve the enum (unqualified names against the
+/// SCRUTINEE enum only — never the scope), the variant, and the
+/// payload shape. Payload checks mirror [`super::analyze_variant_construct`]
+/// (M11): full coverage of the payload, `_` to skip a slot, the Brace
+/// Law's one-way-per-shape relaxed on the pattern side — positional
+/// binds over named payloads bind in declaration order (spec §4.6).
+fn resolve_variant(
+    sema: &mut Sema<'_>,
+    scrutinee_ty: ryo_core::types::TypeId,
+    enum_name: Option<StringId>,
+    variant: StringId,
+    args: Option<UirVariantArgsView<'_>>,
+    analysis: &mut MatchArmAnalysis,
+) {
+    if sema.pool.kind(scrutinee_ty) != TypeKind::Enum {
+        sema.sink.emit(Diag::error(
+            analysis.span,
+            DiagCode::PatternTypeMismatch,
+            format!(
+                "variant pattern cannot match a scrutinee of type '{}' — \
+                 variant patterns match enum values",
+                sema.pool.display(scrutinee_ty),
+            ),
+        ));
+        analysis.had_error = true;
+        return;
+    }
+    if let Some(name) = enum_name {
+        match sema.enum_types.get(&name) {
+            Some(&ety) if ety == scrutinee_ty => {}
+            Some(&ety) => {
+                // Qualified path names a real enum that isn't the
+                // scrutinee's — name both enums (E0132).
+                let pattern_en = sema.pool.str(sema.pool.enum_view(ety).name()).to_string();
+                let scrutinee_en = sema
+                    .pool
+                    .str(sema.pool.enum_view(scrutinee_ty).name())
+                    .to_string();
+                sema.sink.emit(Diag::error(
+                    analysis.span,
+                    DiagCode::UnknownMatchVariant,
+                    format!(
+                        "variant pattern '{pattern_en}.{v}' names enum '{pattern_en}', \
+                         but the scrutinee is enum '{scrutinee_en}'",
+                        v = sema.pool.str(variant),
+                    ),
+                ));
+                analysis.had_error = true;
+                return;
+            }
+            None => {
+                // Never-declared (UnknownType, mirroring M11
+                // construction's undeclared-enum handling) or a struct
+                // name (UnknownEnum) — not E0132, which is reserved
+                // for declared-but-different enums.
+                if sema.struct_types.contains_key(&name) {
+                    sema.sink.emit(Diag::error(
+                        analysis.span,
+                        DiagCode::UnknownEnum,
+                        format!("'{}' is a struct, not an enum", sema.pool.str(name),),
+                    ));
+                } else {
+                    sema.sink.emit(Diag::error(
+                        analysis.span,
+                        DiagCode::UnknownType,
+                        format!("unknown type: '{}' in match pattern", sema.pool.str(name)),
+                    ));
+                }
+                analysis.had_error = true;
+                return;
+            }
+        }
+    }
+
+    // Decode the variant directory up front: the view borrows the pool
+    // and the checks below need `&mut Sema` (the construction-site
+    // precedent in analyze_variant_construct).
+    let (ename, variants) = {
+        let eview = sema.pool.enum_view(scrutinee_ty);
+        (
+            eview.name(),
+            eview
+                .variants()
+                .map(|v| (v.name, v.kind, v.fields.to_vec()))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let Some(vidx) = variants.iter().position(|&(n, _, _)| n == variant) else {
+        emit_unknown_variant(sema, ename, variant, &variants, analysis);
+        return;
+    };
+    let (vname, kind, fields) = &variants[vidx];
+    let vname = sema.pool.str(*vname).to_string();
+    let ename = sema.pool.str(ename).to_string();
+
+    let payload_ok = match kind {
+        VariantKind::Unit => {
+            if args.is_some() {
+                sema.sink.emit(Diag::error(
+                    analysis.span,
+                    DiagCode::UnitVariantConstructed,
+                    format!("'{vname}' is a unit variant — match it as {ename}.{vname}"),
+                ));
+                false
+            } else {
+                true
+            }
+        }
+        VariantKind::Tuple => resolve_tuple_payload(sema, &ename, &vname, fields, args, analysis),
+        VariantKind::Named => resolve_named_payload(sema, &ename, &vname, fields, args, analysis),
+    };
+    if payload_ok {
+        analysis.discriminant = Some(Discriminant::Variant(vidx as u32));
+    } else {
+        analysis.had_error = true;
+    }
+}
+
+/// E0132 for an unresolved variant name: names the scrutinee enum and
+/// the identifier, with a did-you-mean help note over the enum's
+/// variant list when a close name exists and a plain variant-list note
+/// otherwise.
+fn emit_unknown_variant(
+    sema: &mut Sema<'_>,
+    ename: StringId,
+    variant: StringId,
+    variants: &[(StringId, VariantKind, Vec<StructField>)],
+    analysis: &mut MatchArmAnalysis,
+) {
+    let ename = sema.pool.str(ename).to_string();
+    let vname = sema.pool.str(variant).to_string();
+    let mut diag = Diag::error(
+        analysis.span,
+        DiagCode::UnknownMatchVariant,
+        format!("enum '{ename}' has no variant '{vname}'"),
+    );
+    let names: Vec<&str> = variants.iter().map(|&(n, _, _)| sema.pool.str(n)).collect();
+    if let Some(suggestion) = did_you_mean(&vname, &names) {
+        diag = diag.with_help(format!("did you mean '{suggestion}'?"));
+    } else {
+        let listed = names
+            .iter()
+            .map(|n| format!("'{n}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        diag = diag.with_note(None, format!("enum '{ename}' declares: {listed}"));
+    }
+    sema.sink.emit(diag);
+    analysis.had_error = true;
+}
+
+/// Positional payload args on a tuple variant (`Circle(radius, _)`):
+/// exact arity — overflow names the offending position (E0122,
+/// mirroring construction), underflow names the counts (E0120).
+/// A brace form on a tuple variant names the user field per arg
+/// (E0122) — tuple payloads have no user-spellable field names.
+fn resolve_tuple_payload(
+    sema: &mut Sema<'_>,
+    ename: &str,
+    vname: &str,
+    fields: &[StructField],
+    args: Option<UirVariantArgsView<'_>>,
+    analysis: &mut MatchArmAnalysis,
+) -> bool {
+    let total = fields.len();
+    let Some(args) = args else {
+        sema.sink.emit(
+            Diag::error(
+                analysis.span,
+                DiagCode::MissingVariantFields,
+                format!(
+                    "'{vname}' takes {} positional argument{}; got 0",
+                    total,
+                    if total == 1 { "" } else { "s" },
+                ),
+            )
+            .with_help(format!(
+                "write {ename}.{vname}({}) to skip fields you don't need",
+                vec!["_"; total].join(", "),
+            )),
+        );
+        return false;
+    };
+    if args.by_position {
+        if args.len() > total {
+            // Extra positional argument: name its position, not the
+            // synthesized "0"/"1" field name (E0122, the construction
+            // wording verbatim).
+            for (i, _) in args.args().enumerate().skip(total) {
+                sema.sink.emit(Diag::error(
+                    analysis.span,
+                    DiagCode::UnknownVariantField,
+                    format!(
+                        "found a {} positional argument — '{vname}' takes {total}",
+                        ordinal(i + 1),
+                    ),
+                ));
+            }
+            return false;
+        }
+        if args.len() < total {
+            sema.sink.emit(
+                Diag::error(
+                    analysis.span,
+                    DiagCode::MissingVariantFields,
+                    format!(
+                        "'{vname}' takes {} positional argument{}; got {}",
+                        total,
+                        if total == 1 { "" } else { "s" },
+                        args.len(),
+                    ),
+                )
+                .with_help(format!(
+                    "write {ename}.{vname}({}) to skip fields you don't need",
+                    vec!["_"; total].join(", "),
+                )),
+            );
+            return false;
+        }
+        for (i, (_, target)) in args.args().enumerate() {
+            if let UirArgTarget::Bind(name) = target {
+                analysis.bindings.push(MatchBinding {
+                    field_index: fields[i].idx,
+                    name,
+                    ty: fields[i].ty,
+                });
+            }
+        }
+        return true;
+    }
+    // Brace form on a tuple variant: no user-spellable field exists.
+    let mut ok = true;
+    if args.is_empty() {
+        sema.sink.emit(
+            Diag::error(
+                analysis.span,
+                DiagCode::MissingVariantFields,
+                format!(
+                    "'{vname}' takes {} positional argument{}; got 0",
+                    total,
+                    if total == 1 { "" } else { "s" },
+                ),
+            )
+            .with_help(format!(
+                "write {ename}.{vname}({}) to skip fields you don't need",
+                vec!["_"; total].join(", "),
+            )),
+        );
+        ok = false;
+    }
+    for (name, _) in args.args() {
+        let fname = name
+            .map(|n| sema.pool.str(n).to_string())
+            .unwrap_or_default();
+        sema.sink.emit(
+            Diag::error(
+                analysis.span,
+                DiagCode::UnknownVariantField,
+                format!("variant '{vname}' of enum '{ename}' has no field '{fname}'"),
+            )
+            .with_help(format!(
+                "'{vname}' is a tuple variant — use the paren form: {ename}.{vname}(...)"
+            )),
+        );
+        ok = false;
+    }
+    ok
+}
+
+/// Named payload args (`Coords{x=px}` / positional-over-named
+/// `Coords(a, b)`, which binds in declaration order per spec §4.6):
+/// unknown fields (E0122), duplicates (E0121), and full coverage
+/// (E0120, `_`-skippable) mirror the construction checks.
+fn resolve_named_payload(
+    sema: &mut Sema<'_>,
+    ename: &str,
+    vname: &str,
+    fields: &[StructField],
+    args: Option<UirVariantArgsView<'_>>,
+    analysis: &mut MatchArmAnalysis,
+) -> bool {
+    let total = fields.len();
+    let Some(args) = args else {
+        let missing = field_list(sema.pool, fields);
+        sema.sink.emit(
+            Diag::error(
+                analysis.span,
+                DiagCode::MissingVariantFields,
+                format!(
+                    "missing field(s) {missing} in match pattern for variant \
+                     '{vname}' of enum '{ename}'",
+                ),
+            )
+            .with_help(format!(
+                "write {ename}.{vname}{{{}}} to skip fields you don't need",
+                fields
+                    .iter()
+                    .map(|f| format!("{}=_", sema.pool.str(f.name)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )),
+        );
+        return false;
+    };
+    if args.by_position {
+        if args.len() > total {
+            for (i, _) in args.args().enumerate().skip(total) {
+                sema.sink.emit(Diag::error(
+                    analysis.span,
+                    DiagCode::UnknownVariantField,
+                    format!(
+                        "found a {} positional argument — '{vname}' takes {total} fields",
+                        ordinal(i + 1),
+                    ),
+                ));
+            }
+            return false;
+        }
+        if args.len() < total {
+            sema.sink.emit(
+                Diag::error(
+                    analysis.span,
+                    DiagCode::MissingVariantFields,
+                    format!("'{vname}' takes {total} fields; got {}", args.len()),
+                )
+                .with_help(format!(
+                    "write {ename}.{vname}({}) to skip fields you don't need",
+                    vec!["_"; total].join(", "),
+                )),
+            );
+            return false;
+        }
+        for (i, (_, target)) in args.args().enumerate() {
+            if let UirArgTarget::Bind(name) = target {
+                analysis.bindings.push(MatchBinding {
+                    field_index: fields[i].idx,
+                    name,
+                    ty: fields[i].ty,
+                });
+            }
+        }
+        return true;
+    }
+    // Brace form: per-arg resolution against the declared fields.
+    let mut covered: Vec<bool> = vec![false; total];
+    // Once any field errored the coverage set is untrustworthy — the
+    // derived missing-fields error is suppressed (the field_errored
+    // precedent in analyze_variant_construct).
+    let mut field_errored = false;
+    for (name, target) in args.args() {
+        let Some(fname) = name else {
+            // Producer invariant: brace args carry their field name.
+            debug_assert!(false, "brace payload arg without a field name");
+            field_errored = true;
+            continue;
+        };
+        let Some(field) = fields.iter().find(|f| f.name == fname) else {
+            sema.sink.emit(Diag::error(
+                analysis.span,
+                DiagCode::UnknownVariantField,
+                format!(
+                    "variant '{vname}' of enum '{ename}' has no field '{}' (fields: {})",
+                    sema.pool.str(fname),
+                    field_list(sema.pool, fields),
+                ),
+            ));
+            field_errored = true;
+            continue;
+        };
+        if covered[field.idx as usize] {
+            sema.sink.emit(Diag::error(
+                analysis.span,
+                DiagCode::DuplicateVariantField,
+                format!(
+                    "field '{}' is specified more than once in variant '{}' of enum '{}'",
+                    sema.pool.str(fname),
+                    vname,
+                    ename,
+                ),
+            ));
+            field_errored = true;
+            continue;
+        }
+        covered[field.idx as usize] = true;
+        if let UirArgTarget::Bind(bind) = target {
+            analysis.bindings.push(MatchBinding {
+                field_index: field.idx,
+                name: bind,
+                ty: field.ty,
+            });
+        }
+    }
+    if field_errored {
+        return false;
+    }
+    let missing_ids: Vec<StringId> = fields
+        .iter()
+        .zip(&covered)
+        .filter(|(_, c)| !**c)
+        .map(|(f, _)| f.name)
+        .collect();
+    if !missing_ids.is_empty() {
+        let missing = missing_ids
+            .iter()
+            .map(|&n| format!("'{}'", sema.pool.str(n)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let first = sema.pool.str(missing_ids[0]).to_string();
+        sema.sink.emit(
+            Diag::error(
+                analysis.span,
+                DiagCode::MissingVariantFields,
+                format!(
+                    "missing field(s) {missing} in match pattern for variant '{}' of enum '{}'",
+                    vname, ename,
+                ),
+            )
+            .with_help(format!("add '{first} = _' to skip fields you don't need")),
+        );
+        return false;
+    }
+    true
+}
+
+/// Anonymous-struct / tuple-sugar arm (`{x=0, y=_}` / `(0, _)`):
+/// mirror the M10 destructure shape checks — exact positional arity
+/// (E0113), known fields (E0114), no duplicates (E0040), full coverage
+/// (E0114) — plus a literal-kind check (E0131) per literal field.
+/// Mirrors rather than shares `analyze_destructure`: the selector
+/// semantics diverge (match anon fields arrive canonicalized — pun and
+/// rename collapsed to one bind case, literals ride inline — and there
+/// are no compiler temps or next-uncovered pun fallbacks to handle).
+fn resolve_anon(
+    sema: &mut Sema<'_>,
+    scrutinee_ty: ryo_core::types::TypeId,
+    fields: UirAnonFieldsView<'_>,
+    analysis: &mut MatchArmAnalysis,
+) {
+    if sema.pool.kind(scrutinee_ty) != TypeKind::AnonStruct {
+        sema.sink.emit(Diag::error(
+            analysis.span,
+            DiagCode::PatternTypeMismatch,
+            format!(
+                "struct pattern cannot match a scrutinee of type '{}' — \
+                 struct patterns match anonymous struct values",
+                sema.pool.display(scrutinee_ty),
+            ),
+        ));
+        analysis.had_error = true;
+        return;
+    }
+    let shape = sema.pool.struct_view(scrutinee_ty);
+    if fields.positional {
+        if fields.len() != shape.fields.len() {
+            let n = shape.fields.len();
+            let m = fields.len();
+            let detail = if m > n {
+                let k = m - n;
+                format!(
+                    "{k} extra pattern element{} {} no field to match",
+                    if k == 1 { "" } else { "s" },
+                    if k == 1 { "has" } else { "have" },
+                )
+            } else {
+                let uncovered = shape
+                    .fields
+                    .iter()
+                    .skip(m)
+                    .map(|f| format!("'{}'", sema.pool.str(f.name)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("field(s) {uncovered} not covered — write '_' or a literal")
+            };
+            sema.sink.emit(Diag::error(
+                analysis.span,
+                DiagCode::DestructureArity,
+                format!(
+                    "expected {n} fields, found {m} element{} — {detail}",
+                    if m == 1 { "" } else { "s" },
+                ),
+            ));
+            analysis.had_error = true;
+            return;
+        }
+        for (i, (_, target)) in fields.fields().enumerate() {
+            let field = &shape.fields[i];
+            resolve_anon_target(sema, field, target, analysis);
+        }
+        return;
+    }
+    // Brace form: selectors are field-name ids; the written order is
+    // the binding order.
+    let mut covered: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut had_shape_error = false;
+    for (selector, target) in fields.fields() {
+        let name = StringId::from_raw(selector);
+        let Some(field) = shape.fields.iter().find(|f| f.name == name) else {
+            sema.sink.emit(Diag::error(
+                analysis.span,
+                DiagCode::DestructureUnknownField,
+                format!(
+                    "struct `{}` has no field `{}`",
+                    sema.pool.display(scrutinee_ty),
+                    sema.pool.str(name),
+                ),
+            ));
+            had_shape_error = true;
+            continue;
+        };
+        if !covered.insert(field.idx) {
+            sema.sink.emit(Diag::error(
+                analysis.span,
+                DiagCode::DuplicateStructField,
+                format!(
+                    "field '{}' is specified more than once",
+                    sema.pool.str(name)
+                ),
+            ));
+            had_shape_error = true;
+            continue;
+        }
+        resolve_anon_target(sema, field, target, analysis);
+    }
+    let missing: Vec<String> = shape
+        .fields
+        .iter()
+        .filter(|f| !covered.contains(&f.idx))
+        .map(|f| format!("`{}`", sema.pool.str(f.name)))
+        .collect();
+    if !missing.is_empty() && !had_shape_error {
+        let (noun, them) = if missing.len() == 1 {
+            ("field", "it")
+        } else {
+            ("fields", "them")
+        };
+        sema.sink.emit(Diag::error(
+            analysis.span,
+            DiagCode::DestructureUnknownField,
+            format!(
+                "match pattern on `{}` does not cover {noun} {} — \
+                 add `{first} = _` for each to skip {them}",
+                sema.pool.display(scrutinee_ty),
+                missing.join(", "),
+                first = sema.pool.str(shape.fields[0].name),
+            ),
+        ));
+        had_shape_error = true;
+    }
+    if had_shape_error || analysis.had_error {
+        analysis.had_error = true;
+    }
+}
+
+/// One anon-shape field target: a bind records a payload binding, a
+/// literal records a field-equality constraint (with an E0131 kind
+/// check against the field's type), a wildcard binds nothing.
+fn resolve_anon_target(
+    sema: &mut Sema<'_>,
+    field: &StructField,
+    target: UirFieldTarget,
+    analysis: &mut MatchArmAnalysis,
+) {
+    match target {
+        UirFieldTarget::Bind(name) => analysis.bindings.push(MatchBinding {
+            field_index: field.idx,
+            name,
+            ty: field.ty,
+        }),
+        UirFieldTarget::Wildcard => {}
+        UirFieldTarget::Literal(lit) => {
+            let (lit_ty, kind) = literal_kind(sema, lit);
+            if lit_ty != field.ty {
+                sema.sink.emit(Diag::error(
+                    analysis.span,
+                    DiagCode::PatternTypeMismatch,
+                    format!(
+                        "{kind} literal pattern cannot match field '{}' of type '{}'",
+                        sema.pool.str(field.name),
+                        sema.pool.display(field.ty),
+                    ),
+                ));
+                analysis.had_error = true;
+                return;
+            }
+            analysis.anon_literals.push((field.idx, lit));
+        }
+    }
+}
+
+/// The closest candidate within an edit distance of 2, if any —
+/// the did-you-mean behind E0132. Identifiers here are short, so a
+/// small bounded Levenshtein beats a fancier similarity metric, and no
+/// new dependency is worth it for one diagnostic.
+fn did_you_mean<'a>(name: &str, candidates: &[&'a str]) -> Option<&'a str> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|c| edit_distance(name, c) <= 2)
+        .min_by_key(|c| edit_distance(name, c))
+}
+
+/// Classic two-row Levenshtein distance over chars.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            cur[j + 1] = (prev[j + 1] + 1)
+                .min(cur[j] + 1)
+                .min(prev[j] + usize::from(ca != cb));
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}

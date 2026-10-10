@@ -471,6 +471,14 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::MissingArgListOnVariant => "E0126",
         DiagCode::PositionalArgsInBraces => "E0127",
         DiagCode::CommaSeparatedVariants => "E0128",
+        DiagCode::NonExhaustiveMatch => "E0129",
+        DiagCode::UnreachableArm => "W0005",
+        DiagCode::PatternTypeMismatch => "E0131",
+        DiagCode::UnknownMatchVariant => "E0132",
+        DiagCode::MoveOutOfBorrowedScrutinee => "E0133",
+        DiagCode::ArmTypeMismatch => "E0134",
+        DiagCode::ArmNoValue => "E0135",
+        DiagCode::InvalidMatchScrutinee => "E0136",
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::InvalidCharacter => "E0102",
         DiagCode::UnknownEscape => "E0103",
@@ -929,6 +937,14 @@ mod tests {
             (DiagCode::MissingArgListOnVariant, "E0126"),
             (DiagCode::PositionalArgsInBraces, "E0127"),
             (DiagCode::CommaSeparatedVariants, "E0128"),
+            (DiagCode::NonExhaustiveMatch, "E0129"),
+            (DiagCode::UnreachableArm, "W0005"),
+            (DiagCode::PatternTypeMismatch, "E0131"),
+            (DiagCode::UnknownMatchVariant, "E0132"),
+            (DiagCode::MoveOutOfBorrowedScrutinee, "E0133"),
+            (DiagCode::ArmTypeMismatch, "E0134"),
+            (DiagCode::ArmNoValue, "E0135"),
+            (DiagCode::InvalidMatchScrutinee, "E0136"),
             (DiagCode::ConstEvalFailure, "E0200"),
             (DiagCode::CycleInComptime, "E0201"),
             (DiagCode::GenericInstantiation, "E0202"),
@@ -1024,6 +1040,14 @@ mod tests {
                 | DiagCode::MissingArgListOnVariant
                 | DiagCode::PositionalArgsInBraces
                 | DiagCode::CommaSeparatedVariants
+                | DiagCode::NonExhaustiveMatch
+                | DiagCode::UnreachableArm
+                | DiagCode::PatternTypeMismatch
+                | DiagCode::UnknownMatchVariant
+                | DiagCode::MoveOutOfBorrowedScrutinee
+                | DiagCode::ArmTypeMismatch
+                | DiagCode::ArmNoValue
+                | DiagCode::InvalidMatchScrutinee
                 | DiagCode::TooManyDiagnostics
                 | DiagCode::InvalidCharacter
                 | DiagCode::UnknownEscape
