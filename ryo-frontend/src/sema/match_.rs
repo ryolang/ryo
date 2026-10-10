@@ -1,20 +1,31 @@
-//! `match` expression analysis (M12) — pattern resolution and the
-//! E0129-E0136 diagnostic family. Split from `expr.rs` so the parent
-//! file stays under the 2000-line CI gate.
+//! `match` expression analysis (M12) — pattern resolution, the
+//! E0129-E0136 diagnostic family, and exhaustiveness checking. Split
+//! from `expr.rs` so the parent file stays under the 2000-line CI gate.
 //!
-//! Task 5 implements RESOLUTION ONLY: the scrutinee type is validated
+//! Task 5 implemented RESOLUTION: the scrutinee type is validated
 //! (E0136), each arm's pattern is resolved against it — literal kinds
 //! (E0131), variant names and payload shapes (E0132, reusing the M11
 //! construction checks E0120/E0121/E0122/E0125), anonymous-struct
 //! shapes (reusing the M10 destructure checks E0113/E0114/E0040) — and
 //! the per-arm results are collected in a [`MatchAnalysis`] scratch
-//! struct for the follow-on tasks. Exhaustiveness (E0129/W0005) lands
-//! in Task 6; arm typing, binding insertion, and the typed TIR
-//! `TirTag::Match` emission (E0133-E0135) land in Task 7.
+//! struct for the follow-on tasks.
 //!
-//! Until then, `analyze_match` returns a stub: a `TirTag::Unreachable`
-//! placeholder — `void`-typed when resolution is clean, error-typed
-//! when any diagnostic fired (the §4.5 recovery sentinel; codegen never
+//! Task 6 adds EXHAUSTIVENESS + REDUNDANCY over the resolved arms:
+//! enum scrutinees cover variant indices (a `u128` bitset up to 128
+//! variants, a `Vec<bool>` fallback above), bool covers its two
+//! literals, int/str/anon-struct scrutinees are uncoverable without a
+//! wildcard arm (anon patterns carry no M12 discriminant — structural
+//! lowering is M12.5). Incomplete coverage without a `_:` arm is
+//! E0129, listing the missing variants in declaration order (or the
+//! kind name); every arm after a wildcard, and every duplicate
+//! discriminant before it, is W0005 (warning severity, buffered like
+//! W0002/W0003 so it never piles onto an error).
+//!
+//! Arm typing, binding insertion, and the typed TIR `TirTag::Match`
+//! emission (E0133-E0135) land in Task 7. Until then, `analyze_match`
+//! returns a stub: a `TirTag::Unreachable` placeholder — `void`-typed
+//! when resolution is clean (warnings included), error-typed when any
+//! error diagnostic fired (the §4.5 recovery sentinel; codegen never
 //! runs on a unit with errors). Arm bodies are deliberately NOT
 //! analyzed here: their typing and per-arm scopes are Task 7's job.
 //!
@@ -32,8 +43,9 @@
 //!
 //! One broken arm never suppresses another: every arm is resolved
 //! independently, and an arm that errored records `had_error` so
-//! exhaustiveness (Task 6) excludes it instead of piling derived
-//! diagnostics on top.
+//! exhaustiveness excludes it instead of piling derived diagnostics on
+//! top (E0129 still fires when the remaining, clean arms leave gaps).
+//! W0005 likewise never suppresses E0129 or any other diagnostic.
 
 use super::{FuncCtx, Scope, Sema, analyze_expr, field_list, ordinal};
 use ryo_core::ast::LitPattern;
@@ -45,13 +57,13 @@ use ryo_core::uir::{
     UirMatchArmView, UirPatternView, UirVariantArgsView,
 };
 
-/// Resolution results for one `match` expression. Computed by Task 5's
-/// resolution pass; consumed by Task 6 (exhaustiveness walks
-/// [`MatchArmAnalysis::discriminant`]) and Task 7 (arm typing seeds
-/// scopes from [`MatchArmAnalysis::bindings`], then emits the typed
-/// TIR `Match` from the whole analysis). Task 5 itself reads only
-/// `had_error` — to pick the stub's type — which is why the per-arm
-/// payloads carry a targeted dead-code allow below.
+/// Resolution + exhaustiveness results for one `match` expression.
+/// Computed by the resolution pass and the [`check_exhaustiveness`]
+/// walk; consumed by Task 7 (arm typing seeds scopes from
+/// [`MatchArmAnalysis::bindings`], then emits the typed TIR `Match`
+/// from the whole analysis). The pass itself reads only `had_error` —
+/// to pick the stub's type — which is why the per-arm payloads carry a
+/// targeted dead-code allow below.
 #[allow(dead_code)]
 struct MatchAnalysis {
     /// The analyzed scrutinee operand.
@@ -61,6 +73,13 @@ struct MatchAnalysis {
     /// quietly — the original diagnostic already explains).
     scrutinee_ty: ryo_core::types::TypeId,
     arms: Vec<MatchArmAnalysis>,
+    /// Task 6: true when every scrutinee value is covered — all enum
+    /// variants / both bool literals marked, or a `_:` arm exists.
+    /// Consumed by Task 7.
+    exhaustive: bool,
+    /// Task 6: true when any arm is `_` (the catch-all). Consumed by
+    /// Task 7.
+    has_wildcard: bool,
 }
 
 /// Resolution results for one arm.
@@ -70,9 +89,13 @@ struct MatchArmAnalysis {
     /// The resolved selector: `Some` for wildcard / literal / variant
     /// arms. `None` for anonymous-shape arms (no M12 discriminant
     /// exists — structural lowering is M12.5) and for arms whose
-    /// pattern errored. Task 6's coverage walk counts only `Some`
+    /// pattern errored. The coverage walk counts only `Some`
     /// discriminants, so both exclusions fall out naturally.
     discriminant: Option<Discriminant>,
+    /// Source-faithful rendering of the pattern (see [`render_pattern`])
+    /// — quoted in W0005's message, since the wire carries no pattern
+    /// spans to slice instead.
+    pattern_text: String,
     /// Payload bindings in arm-written order: canonical field index,
     /// bound name, field type. Literal and wildcard targets bind
     /// nothing. Task 7 inserts these into the arm scope.
@@ -110,6 +133,8 @@ pub(crate) fn analyze_match(
 ) -> ryo_core::tir::TirRef {
     let view = sema.uir.match_view(r);
     let scrutinee = analyze_expr(sema, fcx, scope, view.scrutinee);
+    // E0129's secondary underline when the scrutinee names an enum.
+    let scrutinee_span = sema.uir.span(view.scrutinee);
     let mut scrutinee_ty = fcx.builder.ty_of(scrutinee);
 
     // E0136: the scrutinee must be a matchable type. An error-typed
@@ -147,11 +172,23 @@ pub(crate) fn analyze_match(
         arms.push(analysis);
     }
 
-    // Task 6-7 build on this analysis; Task 5 stubs the typed inst.
+    // Task 6: exhaustiveness + redundancy over the resolved arms. An
+    // error-typed scrutinee (E0136 recovery or an already-errored
+    // expression) skips the walk: E0129 on top of the original
+    // diagnostic would double-report.
+    let exhaustiveness = if sema.pool.is_error(scrutinee_ty) {
+        Exhaustiveness::default()
+    } else {
+        check_exhaustiveness(sema, scrutinee_ty, &arms, span, scrutinee_span)
+    };
+
+    // Task 7 builds on this analysis; Tasks 5-6 stub the typed inst.
     let _analysis = MatchAnalysis {
         scrutinee,
         scrutinee_ty,
         arms,
+        exhaustive: exhaustiveness.exhaustive,
+        has_wildcard: exhaustiveness.has_wildcard,
     };
 
     if had_error {
@@ -175,6 +212,392 @@ fn arm_span(sema: &Sema<'_>, body: &UirArmBodyView<'_>, match_span: Span) -> Spa
     }
 }
 
+// ---------- Exhaustiveness + redundancy (Task 6) ----------
+
+/// The result of the coverage walk, annotated onto [`MatchAnalysis`]
+/// for Task 7.
+#[derive(Default)]
+struct Exhaustiveness {
+    /// Every scrutinee value is covered: full variant/bool coverage, or
+    /// a `_:` arm exists (a wildcard satisfies exhaustiveness even when
+    /// earlier arms were redundant).
+    exhaustive: bool,
+    /// At least one arm is the `_` catch-all.
+    has_wildcard: bool,
+}
+
+/// Bitset over an enum's variant indices: the `u128` fast path covers
+/// enums with up to 128 variants without allocating; wider enums (legal
+/// but pathological) fall back to a `Vec<bool>` — the threshold is
+/// exactly 128, the `u128` width.
+enum VariantBits {
+    Small(u128),
+    Wide(Vec<bool>),
+}
+
+impl VariantBits {
+    fn new(variant_count: usize) -> Self {
+        if variant_count <= 128 {
+            VariantBits::Small(0)
+        } else {
+            VariantBits::Wide(vec![false; variant_count])
+        }
+    }
+
+    /// Mark variant `idx` as covered; returns true when it was
+    /// ALREADY covered (a duplicate discriminant).
+    fn insert(&mut self, idx: usize) -> bool {
+        match self {
+            VariantBits::Small(bits) => {
+                let bit = 1u128 << idx;
+                let duplicate = *bits & bit != 0;
+                *bits |= bit;
+                duplicate
+            }
+            VariantBits::Wide(seen) => {
+                let duplicate = seen[idx];
+                seen[idx] = true;
+                duplicate
+            }
+        }
+    }
+
+    /// Every variant index below `total` is covered.
+    fn all_set(&self, total: usize) -> bool {
+        match self {
+            VariantBits::Small(bits) => (0..total).all(|i| bits >> i & 1 != 0),
+            VariantBits::Wide(seen) => seen.iter().all(|&b| b),
+        }
+    }
+
+    /// The uncovered variant indices below `total`, in declaration
+    /// order (index order).
+    fn missing(&self, total: usize) -> Vec<usize> {
+        (0..total)
+            .filter(|&i| match self {
+                VariantBits::Small(bits) => bits >> i & 1 == 0,
+                VariantBits::Wide(seen) => !seen[i],
+            })
+            .collect()
+    }
+}
+
+/// Coverage scratch per scrutinee kind (spec §4.6). Only `Some`
+/// discriminants reach a `mark` — anon shapes contribute nothing
+/// (M12.5) and errored arms were skipped by the walk — so the int/str
+/// sets double as pure duplicate detection: the value space itself is
+/// uncoverable without a wildcard.
+enum Coverage {
+    /// Enum scrutinee: one bit per variant index.
+    Enum { bits: VariantBits, total: usize },
+    /// bool scrutinee: bit 0 = `true` seen, bit 1 = `false` seen.
+    Bool(u8),
+    /// int scrutinee: literal values seen so far.
+    Int(Vec<i64>),
+    /// str scrutinee: literal values seen so far.
+    Str(Vec<StringId>),
+    /// Anonymous-struct scrutinee: nothing covers a value until a
+    /// wildcard arm (anon patterns carry no M12 discriminant).
+    Struct,
+}
+
+impl Coverage {
+    fn new(sema: &Sema<'_>, ty: ryo_core::types::TypeId) -> Coverage {
+        match sema.pool.kind(ty) {
+            TypeKind::Enum => {
+                let total = sema.pool.enum_view(ty).variants().count();
+                Coverage::Enum {
+                    bits: VariantBits::new(total),
+                    total,
+                }
+            }
+            TypeKind::Bool => Coverage::Bool(0),
+            TypeKind::Int => Coverage::Int(Vec::new()),
+            TypeKind::Str => Coverage::Str(Vec::new()),
+            TypeKind::AnonStruct => Coverage::Struct,
+            // The walk is gated to matchable, non-error scrutinee
+            // types by `analyze_match`.
+            _ => unreachable!("coverage for a non-matchable scrutinee type"),
+        }
+    }
+
+    /// Record a matched discriminant; `Some(true)` when it was already
+    /// covered (redundant). Kinds always agree with the scrutinee type
+    /// here — E0131 gates literal kinds in resolution and errored arms
+    /// never reach the walk.
+    fn mark(&mut self, discriminant: &Discriminant) -> Option<bool> {
+        match (self, discriminant) {
+            (Coverage::Enum { bits, .. }, Discriminant::Variant(i)) => {
+                Some(bits.insert(*i as usize))
+            }
+            (Coverage::Bool(seen), Discriminant::Bool(b)) => {
+                // Bit 0 = `true` seen, bit 1 = `false` seen (the order
+                // the missing list reports them in).
+                let bit = if *b { 1 } else { 2 };
+                let duplicate = *seen & bit != 0;
+                *seen |= bit;
+                Some(duplicate)
+            }
+            (Coverage::Int(seen), Discriminant::Int(v)) => Some(if seen.contains(v) {
+                true
+            } else {
+                seen.push(*v);
+                false
+            }),
+            (Coverage::Str(seen), Discriminant::Str(s)) => Some(if seen.contains(s) {
+                true
+            } else {
+                seen.push(*s);
+                false
+            }),
+            _ => {
+                debug_assert!(
+                    false,
+                    "discriminant kind matches the scrutinee type (E0131 gates)"
+                );
+                None
+            }
+        }
+    }
+
+    /// The scrutinee's value space is fully covered.
+    fn is_full(&self) -> bool {
+        match self {
+            Coverage::Enum { bits, total } => bits.all_set(*total),
+            Coverage::Bool(seen) => *seen == 0b11,
+            // Literal sets can never enumerate int/str; anon patterns
+            // carry no discriminant at all.
+            Coverage::Int(_) | Coverage::Str(_) | Coverage::Struct => false,
+        }
+    }
+}
+
+/// Walk the resolved arms in order: a wildcard arm sets `has_wildcard`
+/// and makes every later arm redundant (W0005); duplicate
+/// discriminants before the wildcard are W0005 on the later arm. When
+/// coverage is incomplete and no wildcard exists, emit E0129 listing
+/// the missing variants in declaration order (or the scrutinee kind).
+/// Warnings buffer through `sema.warnings` like W0002/W0003 — they
+/// flush only when the whole unit is error-free.
+fn check_exhaustiveness(
+    sema: &mut Sema<'_>,
+    scrutinee_ty: ryo_core::types::TypeId,
+    arms: &[MatchArmAnalysis],
+    match_span: Span,
+    scrutinee_span: Span,
+) -> Exhaustiveness {
+    let mut coverage = Coverage::new(sema, scrutinee_ty);
+    let mut has_wildcard = false;
+    for arm in arms {
+        // Errored arms carry their own diagnostic (E0131/E0132/…); a
+        // redundancy note on top would double-report. They contribute
+        // nothing to coverage either way.
+        if arm.had_error {
+            continue;
+        }
+        if has_wildcard {
+            warn_unreachable(sema, arm, "a previous `_` arm matches everything");
+            continue;
+        }
+        match arm.discriminant {
+            None => {
+                // Anon-shape arm: no discriminant to mark (M12.5) and
+                // no wildcard before it — it simply covers nothing.
+            }
+            Some(Discriminant::Wildcard) => has_wildcard = true,
+            Some(ref d) if coverage.mark(d) == Some(true) => {
+                warn_unreachable(sema, arm, "an earlier arm matches the same value");
+            }
+            Some(_) => {}
+        }
+    }
+    let exhaustive = has_wildcard || coverage.is_full();
+    if !exhaustive {
+        emit_non_exhaustive(sema, scrutinee_ty, &coverage, match_span, scrutinee_span);
+    }
+    Exhaustiveness {
+        exhaustive,
+        has_wildcard,
+    }
+}
+
+/// One W0005 per redundant arm, anchored on the arm (see the module
+/// header) with the pattern's source text quoted.
+fn warn_unreachable(sema: &mut Sema<'_>, arm: &MatchArmAnalysis, reason: &str) {
+    sema.warnings.push(Diag::warning(
+        arm.span,
+        DiagCode::UnreachableArm,
+        format!(
+            "unreachable match arm — pattern `{}` can never match: {reason}",
+            arm.pattern_text,
+        ),
+    ));
+}
+
+/// E0129: coverage is incomplete and no `_:` arm exists. The message
+/// lists the missing variants by name in declaration order (bool: the
+/// missing `true`/`false`; int/str/anon: the kind name); the help note
+/// teaches the wildcard arm. Anchored on the match expression; enum
+/// scrutinees get a secondary underline on the scrutinee.
+fn emit_non_exhaustive(
+    sema: &mut Sema<'_>,
+    scrutinee_ty: ryo_core::types::TypeId,
+    coverage: &Coverage,
+    match_span: Span,
+    scrutinee_span: Span,
+) {
+    let mut diag = match coverage {
+        Coverage::Enum { bits, total } => {
+            let names: Vec<String> = {
+                let view = sema.pool.enum_view(scrutinee_ty);
+                let names: Vec<StringId> = view.variants().map(|v| v.name).collect();
+                bits.missing(*total)
+                    .into_iter()
+                    .map(|i| format!("'{}'", sema.pool.str(names[i])))
+                    .collect()
+            };
+            let (noun, verb) = if names.len() == 1 {
+                ("variant", "is")
+            } else {
+                ("variants", "are")
+            };
+            let ename = sema.pool.str(sema.pool.enum_view(scrutinee_ty).name());
+            Diag::error(
+                match_span,
+                DiagCode::NonExhaustiveMatch,
+                format!(
+                    "non-exhaustive match — {noun} {} {verb} not covered",
+                    names.join(", "),
+                ),
+            )
+            .with_note(
+                Some(scrutinee_span),
+                format!("the scrutinee is enum '{ename}' here"),
+            )
+        }
+        Coverage::Bool(seen) => {
+            let mut names = Vec::new();
+            if seen & 1 == 0 {
+                names.push("'true'");
+            }
+            if seen & 2 == 0 {
+                names.push("'false'");
+            }
+            let verb = if names.len() == 1 { "is" } else { "are" };
+            Diag::error(
+                match_span,
+                DiagCode::NonExhaustiveMatch,
+                format!(
+                    "non-exhaustive match — {} {verb} not covered",
+                    names.join(", ")
+                ),
+            )
+        }
+        Coverage::Int(_) => Diag::error(
+            match_span,
+            DiagCode::NonExhaustiveMatch,
+            "non-exhaustive match on 'int' — literal arms cannot cover every integer value",
+        ),
+        Coverage::Str(_) => Diag::error(
+            match_span,
+            DiagCode::NonExhaustiveMatch,
+            "non-exhaustive match on 'str' — literal arms cannot cover every string value",
+        ),
+        Coverage::Struct => Diag::error(
+            match_span,
+            DiagCode::NonExhaustiveMatch,
+            format!(
+                "non-exhaustive match on '{}' — struct patterns cannot cover every value",
+                sema.pool.display(scrutinee_ty),
+            ),
+        ),
+    };
+    diag = diag.with_help("add a `_:` arm");
+    sema.sink.emit(diag);
+}
+
+/// Source-faithful rendering of an arm's pattern for W0005's message.
+/// The UIR wire carries no pattern spans (the module header), so the
+/// quoted text is reconstructed from the resolved wire shape rather
+/// than sliced from the source.
+fn render_pattern(sema: &Sema<'_>, pattern: &UirPatternView<'_>) -> String {
+    match pattern {
+        UirPatternView::Wildcard => "_".to_string(),
+        UirPatternView::Literal(lit) => render_literal(sema, *lit),
+        UirPatternView::Anon { fields } => {
+            let inner: Vec<String> = fields
+                .fields()
+                .map(|(selector, target)| {
+                    let target = match target {
+                        UirFieldTarget::Bind(name) => sema.pool.str(name).to_string(),
+                        UirFieldTarget::Wildcard => "_".to_string(),
+                        UirFieldTarget::Literal(lit) => render_literal(sema, lit),
+                    };
+                    if fields.positional {
+                        target
+                    } else {
+                        format!("{}={target}", sema.pool.str(StringId::from_raw(selector)))
+                    }
+                })
+                .collect();
+            let (open, close) = if fields.positional {
+                ("(", ")")
+            } else {
+                ("{", "}")
+            };
+            format!("{open}{}{close}", inner.join(", "))
+        }
+        UirPatternView::Variant {
+            enum_name,
+            variant,
+            args,
+        } => {
+            let mut text = String::new();
+            if let Some(ename) = enum_name {
+                text.push_str(sema.pool.str(*ename));
+                text.push('.');
+            }
+            text.push_str(sema.pool.str(*variant));
+            if let Some(args) = args {
+                let render_target = |target: UirArgTarget| match target {
+                    UirArgTarget::Bind(name) => sema.pool.str(name).to_string(),
+                    UirArgTarget::Wildcard => "_".to_string(),
+                };
+                if args.by_position {
+                    let inner: Vec<String> = args.args().map(|(_, t)| render_target(t)).collect();
+                    text.push('(');
+                    text.push_str(&inner.join(", "));
+                    text.push(')');
+                } else {
+                    let inner: Vec<String> = args
+                        .args()
+                        .map(|(name, t)| match name {
+                            Some(name) => {
+                                format!("{}={}", sema.pool.str(name), render_target(t))
+                            }
+                            None => render_target(t),
+                        })
+                        .collect();
+                    text.push('{');
+                    text.push_str(&inner.join(", "));
+                    text.push('}');
+                }
+            }
+            text
+        }
+    }
+}
+
+/// One literal's source spelling: decimal int (negatives arrive
+/// pre-folded from the parser), quoted str, bare bool.
+fn render_literal(sema: &Sema<'_>, lit: LitPattern) -> String {
+    match lit {
+        LitPattern::Int(v) => v.to_string(),
+        LitPattern::Str(s) => format!("\"{}\"", sema.pool.str(s)),
+        LitPattern::Bool(b) => if b { "true" } else { "false" }.to_string(),
+    }
+}
+
 /// Resolve one arm's pattern against the scrutinee type. Every kind
 /// resolves independently — a broken arm never blocks the next.
 fn resolve_arm(
@@ -186,6 +609,7 @@ fn resolve_arm(
     let mut analysis = MatchArmAnalysis {
         span,
         discriminant: None,
+        pattern_text: render_pattern(sema, &arm.pattern),
         bindings: Vec::new(),
         anon_literals: Vec::new(),
         had_error: false,
