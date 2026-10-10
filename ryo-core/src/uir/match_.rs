@@ -16,7 +16,8 @@
 //!   per arm (offsets relative to the arm's first word):
 //!   [0]      arm_len:      u32 — words in this arm AFTER the arm_len
 //!                           word itself (pattern payload + body)
-//!   [1]      pattern_kind: u32 (0 = wildcard, 1 = literal, 2 = variant)
+//!   [1]      pattern_kind: u32 (0 = wildcard, 1 = literal, 2 = variant,
+//!            3 = anon)
 //!   [2..]    pattern payload:
 //!     wildcard: (no words)
 //!     literal:  lit_kind u32 (0 = int, 1 = str, 2 = bool), then
@@ -24,6 +25,19 @@
 //!                     (value = (hi << 32) | lo)
 //!               str:  string_id u32 (StringId.raw())
 //!               bool: 0 | 1
+//!     anon:     flags u32 (bit 0 = POSITIONAL — the tuple-sugar
+//!               spelling `(0, _)`, where selectors are element
+//!               indices; clear for `{x=0, y=_}`, where selectors are
+//!               field-name StringId.raw() — the M10 destructure-plan
+//!               selector convention)
+//!               fieldc u32
+//!               per field, variable length, in written order:
+//!                 selector u32
+//!                 target_kind u32 (0 = wildcard, 1 = bind, 2 = literal)
+//!                 wildcard: (no words)
+//!                 bind:   name u32 (StringId.raw())
+//!                 literal: lit_kind u32 + literal value words
+//!                     (same words as the top-level literal)
 //!     variant:  enum_name u32 (0 = unqualified — sema infers the enum;
 //!               else StringId.raw() + 1: raw 0 is a real interned
 //!               string, so the None sentinel lives outside the raw id
@@ -46,8 +60,9 @@
 //! Every arm is length-prefixed, so arms decode independently of their
 //! neighbors and two `Match` instructions share the `extra` arena
 //! without crosstalk. Decoding allocates nothing beyond the view's arm
-//! `Vec` (I-091 discipline): [`UirVariantArgsView`] borrows its wire
-//! slice and yields decoded pairs on demand ([`EnumLitView`][crate::tir::EnumLitView]
+//! `Vec` (I-091 discipline): [`UirVariantArgsView`] and
+//! [`UirAnonFieldsView`] borrow their wire slices and yield decoded
+//! pairs on demand ([`EnumLitView`][crate::tir::EnumLitView]
 //! precedent), and [`UirArmBodyView::Stmts`] is the stmt-refs slice
 //! itself — its `len()` is the slice length, since the decoder already
 //! consumed the count word.
@@ -73,6 +88,7 @@ pub mod match_extra {
     pub const PATTERN_WILDCARD: u32 = 0;
     pub const PATTERN_LITERAL: u32 = 1;
     pub const PATTERN_VARIANT: u32 = 2;
+    pub const PATTERN_ANON: u32 = 3;
 
     /// `PATTERN_LITERAL` payload discriminants (first payload word).
     pub const LIT_INT: u32 = 0;
@@ -95,6 +111,19 @@ pub mod match_extra {
     pub const FLAG_HAS_ARGS: u32 = 1 << 0;
     pub const FLAG_BY_POSITION: u32 = 1 << 1;
 
+    /// Anon payload, relative to the pattern-payload start.
+    pub const A_FLAGS: usize = 0;
+    pub const A_FIELDC: usize = 1;
+    pub const A_FIELDS: usize = 2;
+
+    /// `A_FLAGS` bits.
+    pub const FLAG_POSITIONAL: u32 = 1 << 0;
+
+    /// Per-field target discriminants (the word after the selector).
+    pub const FIELD_WILDCARD: u32 = 0;
+    pub const FIELD_BIND: u32 = 1;
+    pub const FIELD_LITERAL: u32 = 2;
+
     /// Body discriminants (first body word, after the pattern payload).
     pub const BODY_EXPR: u32 = 0;
     pub const BODY_STMTS: u32 = 1;
@@ -114,6 +143,34 @@ pub enum UirArgTarget {
     Bind(StringId),
 }
 
+/// What one field/element of an anonymous-struct or tuple-sugar arm
+/// pattern targets (M12): a name binds the slot, `_` skips it, a
+/// literal matches an exact value. Mirrors the M10-side
+/// [`PatternFieldKind`][crate::ast::PatternFieldKind] pun/rename pair
+/// collapsed to one bind case (the pun's name IS the selector).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UirFieldTarget {
+    /// `{q}` / `{x = quot}` / `(a, ...)` — binds a local under the
+    /// given name.
+    Bind(StringId),
+    /// `{y = _}` / `(a, _)` — binds nothing.
+    Wildcard,
+    /// `{x = 0}` / `(0, ...)` — the slot must equal the literal.
+    Literal(LitPattern),
+}
+
+/// Builder input for one field/element of a [`UirPattern::Anon`]
+/// pattern (M12). `selector` is the field name's interned id for the
+/// brace spelling and the element index for the tuple sugar — the same
+/// selector convention the M10 `Destructure` plan uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UirAnonField {
+    /// `{x = ...}`: `x`'s interned id; `(0, ...)`: the element index.
+    pub selector: u32,
+    /// What the field/element does: bind, skip, or match a literal.
+    pub target: UirFieldTarget,
+}
+
 /// Builder input for the payload args of a [`UirPattern::Variant`]
 /// (M12): `Circle(radius)` is `by_position`, `Coords{x=px}` is named.
 /// [`UirBuilder::match_expr`] copies the pairs into `extra`; the
@@ -125,16 +182,26 @@ pub struct UirVariantArgs<'a> {
 }
 
 /// Builder input for one `match` arm's pattern (M12): `_`, one exact
-/// literal, or one enum variant. Mirrors
-/// [`PatternKind`][crate::ast::PatternKind] restricted to the match-arm
-/// grammar — the M10 bind/anon/positional shapes do not appear here
-/// (struct-pattern arms are follow-up work; see the M12 plan).
+/// literal, an anonymous-struct/tuple-sugar shape with literal fields,
+/// or one enum variant. Mirrors [`PatternKind`][crate::ast::PatternKind]
+/// restricted to the match-arm grammar — bare binds are rejected at
+/// parse (whole-arm) or bind one payload slot (variant args, tuple
+/// elements), and nested patterns inside tuple elements are M12.5
+/// (astgen diagnoses them).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UirPattern<'a> {
     /// `_` — matches anything, binds nothing.
     Wildcard,
     /// `42` / `"quit"` / `true` — one exact literal value.
     Literal(LitPattern),
+    /// `{x=0, y=_}` / the tuple sugar `(0, _)`. `positional` is the
+    /// paren spelling, where `selector`s are element indices instead
+    /// of field-name ids; literal fields ride directly in the pattern
+    /// encoding (never via `InstTag::Destructure`).
+    Anon {
+        positional: bool,
+        fields: &'a [UirAnonField],
+    },
     /// `Option.Some(v)` / `Red` / `Coords{x=px}`. `enum_name` is `None`
     /// for the unqualified spelling (`Red`), leaving the enum for sema
     /// to infer; `args` is `None` for unit variants.
@@ -186,11 +253,62 @@ pub struct UirMatchArmView<'a> {
 pub enum UirPatternView<'a> {
     Wildcard,
     Literal(LitPattern),
+    Anon {
+        fields: UirAnonFieldsView<'a>,
+    },
     Variant {
         enum_name: Option<StringId>,
         variant: StringId,
         args: Option<UirVariantArgsView<'a>>,
     },
+}
+
+/// Decoded view of an anon/tuple arm pattern's fields (M12). Wraps the
+/// variable-length wire region and yields decoded `(selector, target)`
+/// pairs on demand — no allocation per decode
+/// ([`EnumLitView`][crate::tir::EnumLitView] precedent). `positional`
+/// mirrors the builder's flag: `true` when selectors are element
+/// indices (the tuple sugar) rather than field-name ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UirAnonFieldsView<'a> {
+    pub positional: bool,
+    wire: &'a [u32],
+    count: usize,
+}
+
+impl UirAnonFieldsView<'_> {
+    /// Number of fields/elements.
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// `true` when there are no fields.
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// `(selector, target)` pairs in written order; `selector` is the
+    /// field-name id, or the element index when `positional`.
+    pub fn fields(&self) -> impl Iterator<Item = (u32, UirFieldTarget)> + '_ {
+        let mut wire = self.wire;
+        std::iter::from_fn(move || {
+            if wire.is_empty() {
+                return None;
+            }
+            let selector = wire[0];
+            let (target, used) = match wire[1] {
+                match_extra::FIELD_WILDCARD => (UirFieldTarget::Wildcard, 2),
+                match_extra::FIELD_BIND => (UirFieldTarget::Bind(StringId::from_raw(wire[2])), 3),
+                match_extra::FIELD_LITERAL => {
+                    let (lit, words) = decode_lit_at(wire, 2);
+                    (UirFieldTarget::Literal(lit), 2 + words)
+                }
+                other => unreachable!("unknown anon field target kind {other}"),
+            };
+            wire = &wire[used..];
+            Some((selector, target))
+        })
+    }
 }
 
 /// Decoded view of a variant pattern's payload args (M12). Wraps the
@@ -288,20 +406,30 @@ impl UirBuilder {
             UirPattern::Wildcard => self.uir.extra.push(match_extra::PATTERN_WILDCARD),
             UirPattern::Literal(lit) => {
                 self.uir.extra.push(match_extra::PATTERN_LITERAL);
-                match lit {
-                    LitPattern::Int(v) => {
-                        self.uir.extra.push(match_extra::LIT_INT);
-                        let bits = *v as u64;
-                        self.uir.extra.push(bits as u32);
-                        self.uir.extra.push((bits >> 32) as u32);
-                    }
-                    LitPattern::Str(s) => {
-                        self.uir.extra.push(match_extra::LIT_STR);
-                        self.uir.extra.push(s.raw());
-                    }
-                    LitPattern::Bool(b) => {
-                        self.uir.extra.push(match_extra::LIT_BOOL);
-                        self.uir.extra.push(u32::from(*b));
+                self.encode_lit_value(lit);
+            }
+            UirPattern::Anon { positional, fields } => {
+                self.uir.extra.push(match_extra::PATTERN_ANON);
+                self.uir.extra.push(if *positional {
+                    match_extra::FLAG_POSITIONAL
+                } else {
+                    0
+                });
+                self.uir.extra.push(Self::len_u32(fields.len()));
+                for field in *fields {
+                    self.uir.extra.push(field.selector);
+                    match field.target {
+                        UirFieldTarget::Wildcard => {
+                            self.uir.extra.push(match_extra::FIELD_WILDCARD)
+                        }
+                        UirFieldTarget::Bind(name) => {
+                            self.uir.extra.push(match_extra::FIELD_BIND);
+                            self.uir.extra.push(name.raw());
+                        }
+                        UirFieldTarget::Literal(lit) => {
+                            self.uir.extra.push(match_extra::FIELD_LITERAL);
+                            self.encode_lit_value(&lit);
+                        }
                     }
                 }
             }
@@ -336,6 +464,27 @@ impl UirBuilder {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Encode one [`LitPattern`] value (kind word + value words); shared
+    /// by top-level literal arms and anon literal fields.
+    fn encode_lit_value(&mut self, lit: &LitPattern) {
+        match lit {
+            LitPattern::Int(v) => {
+                self.uir.extra.push(match_extra::LIT_INT);
+                let bits = *v as u64;
+                self.uir.extra.push(bits as u32);
+                self.uir.extra.push((bits >> 32) as u32);
+            }
+            LitPattern::Str(s) => {
+                self.uir.extra.push(match_extra::LIT_STR);
+                self.uir.extra.push(s.raw());
+            }
+            LitPattern::Bool(b) => {
+                self.uir.extra.push(match_extra::LIT_BOOL);
+                self.uir.extra.push(u32::from(*b));
             }
         }
     }
@@ -387,6 +536,26 @@ impl Uir {
     }
 }
 
+/// Decode one [`LitPattern`] whose kind word sits at `slice[pos]`;
+/// returns the value and the total words it occupies (kind included).
+fn decode_lit_at(slice: &[u32], pos: usize) -> (LitPattern, usize) {
+    match slice[pos] {
+        match_extra::LIT_INT => {
+            let bits = (slice[pos + 2] as u64) << 32 | slice[pos + 1] as u64;
+            (LitPattern::Int(bits as i64), match_extra::LIT_INT_WORDS)
+        }
+        match_extra::LIT_STR => (
+            LitPattern::Str(StringId::from_raw(slice[pos + 1])),
+            match_extra::LIT_STR_WORDS,
+        ),
+        match_extra::LIT_BOOL => (
+            LitPattern::Bool(slice[pos + 1] != 0),
+            match_extra::LIT_BOOL_WORDS,
+        ),
+        other => unreachable!("unknown match literal kind {other}"),
+    }
+}
+
 /// Decode one length-prefixed arm. `slice` is the full arm —
 /// `arm_len` word first, then exactly `arm_len` payload words — so a
 /// cursor that ends at `slice.len()` is a trusted-producer invariant.
@@ -395,25 +564,34 @@ fn decode_match_arm(slice: &[u32]) -> UirMatchArmView<'_> {
     let pattern = match slice[match_extra::PATTERN_KIND] {
         match_extra::PATTERN_WILDCARD => UirPatternView::Wildcard,
         match_extra::PATTERN_LITERAL => {
-            let lit = match slice[pos] {
-                match_extra::LIT_INT => {
-                    let bits = (slice[pos + 2] as u64) << 32 | slice[pos + 1] as u64;
-                    pos += match_extra::LIT_INT_WORDS;
-                    LitPattern::Int(bits as i64)
-                }
-                match_extra::LIT_STR => {
-                    let s = LitPattern::Str(StringId::from_raw(slice[pos + 1]));
-                    pos += match_extra::LIT_STR_WORDS;
-                    s
-                }
-                match_extra::LIT_BOOL => {
-                    let b = LitPattern::Bool(slice[pos + 1] != 0);
-                    pos += match_extra::LIT_BOOL_WORDS;
-                    b
-                }
-                other => unreachable!("unknown match literal kind {other}"),
-            };
+            let (lit, words) = decode_lit_at(slice, pos);
+            pos += words;
             UirPatternView::Literal(lit)
+        }
+        match_extra::PATTERN_ANON => {
+            let flags = slice[pos + match_extra::A_FLAGS];
+            let fieldc = slice[pos + match_extra::A_FIELDC] as usize;
+            // Fields are variable-length (literal payloads differ), so
+            // scan past them to find where the body starts; the slice
+            // between is the fields view's borrowed wire.
+            let mut scan = pos + match_extra::A_FIELDS;
+            for _ in 0..fieldc {
+                let target_kind = slice[scan + 1];
+                scan += 2; // selector + target_kind
+                match target_kind {
+                    match_extra::FIELD_WILDCARD => {}
+                    match_extra::FIELD_BIND => scan += 1,
+                    match_extra::FIELD_LITERAL => scan += decode_lit_at(slice, scan).1,
+                    other => unreachable!("unknown anon field target kind {other}"),
+                }
+            }
+            let fields = UirAnonFieldsView {
+                positional: flags & match_extra::FLAG_POSITIONAL != 0,
+                wire: &slice[pos + match_extra::A_FIELDS..scan],
+                count: fieldc,
+            };
+            pos = scan;
+            UirPatternView::Anon { fields }
         }
         match_extra::PATTERN_VARIANT => {
             let enum_name = destructure_extra::decode_bind(slice[pos + match_extra::V_ENUM_NAME]);
@@ -727,5 +905,106 @@ mod tests {
             v1_again.arms[1].pattern,
             UirPatternView::Literal(LitPattern::Int(-1))
         );
+    }
+
+    #[test]
+    fn anon_arms_round_trip() {
+        let mut pool = InternPool::new();
+        let x = pool.intern_str("x");
+        let y = pool.intern_str("y");
+        let q = pool.intern_str("q");
+        let quot = pool.intern_str("quot");
+
+        let mut b = UirBuilder::new();
+        let scrut = b.var_ref(q, sp());
+        let e1 = b.int_literal(1, sp());
+        let e2 = b.int_literal(2, sp());
+        // m1: brace anon with a literal and a wildcard field.
+        let brace_fields = [
+            UirAnonField {
+                selector: x.raw(),
+                target: UirFieldTarget::Literal(LitPattern::Int(0)),
+            },
+            UirAnonField {
+                selector: y.raw(),
+                target: UirFieldTarget::Wildcard,
+            },
+        ];
+        // m2: tuple sugar with a bind, a wildcard, and a str literal —
+        // index selectors, exercising every target kind.
+        let paren_fields = [
+            UirAnonField {
+                selector: 0,
+                target: UirFieldTarget::Bind(q),
+            },
+            UirAnonField {
+                selector: 1,
+                target: UirFieldTarget::Wildcard,
+            },
+            UirAnonField {
+                selector: 2,
+                target: UirFieldTarget::Literal(LitPattern::Str(quot)),
+            },
+        ];
+        let m1 = b.match_expr(
+            scrut,
+            &[UirMatchArm {
+                pattern: UirPattern::Anon {
+                    positional: false,
+                    fields: &brace_fields,
+                },
+                body: UirArmBody::Expr(e1),
+            }],
+            sp(),
+        );
+        let m2 = b.match_expr(
+            scrut,
+            &[UirMatchArm {
+                pattern: UirPattern::Anon {
+                    positional: true,
+                    fields: &paren_fields,
+                },
+                body: UirArmBody::Expr(e2),
+            }],
+            sp(),
+        );
+
+        let uir = b.finish();
+
+        let v1 = uir.match_view(m1);
+        match &v1.arms[0].pattern {
+            UirPatternView::Anon { fields } => {
+                assert!(!fields.positional);
+                assert_eq!(fields.len(), 2);
+                assert!(!fields.is_empty());
+                assert_eq!(
+                    fields.fields().collect::<Vec<_>>(),
+                    [
+                        (x.raw(), UirFieldTarget::Literal(LitPattern::Int(0))),
+                        (y.raw(), UirFieldTarget::Wildcard),
+                    ]
+                );
+            }
+            other => panic!("expected anon pattern, got {other:?}"),
+        }
+        assert_eq!(v1.arms[0].body, UirArmBodyView::Expr(e1));
+
+        let v2 = uir.match_view(m2);
+        match &v2.arms[0].pattern {
+            UirPatternView::Anon { fields } => {
+                assert!(fields.positional);
+                assert_eq!(fields.len(), 3);
+                assert_eq!(
+                    fields.fields().collect::<Vec<_>>(),
+                    [
+                        (0, UirFieldTarget::Bind(q)),
+                        (1, UirFieldTarget::Wildcard),
+                        (2, UirFieldTarget::Literal(LitPattern::Str(quot))),
+                    ]
+                );
+            }
+            other => panic!("expected anon pattern, got {other:?}"),
+        }
+        assert_eq!(v2.arms[0].body, UirArmBodyView::Expr(e2));
     }
 }

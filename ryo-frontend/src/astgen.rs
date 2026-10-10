@@ -1287,22 +1287,23 @@ fn gen_expr(
         ast::ExprKind::VariantConstruct(c) => {
             variants::lower_variant_construct(b, ast, c, types, defined_enums, pool, sink, span)
         }
-        // Match expressions (M12) lower to the UIR `Match` wire in the
-        // follow-up task; until then the diagnostic fails the build
-        // and the literal placeholder keeps sema/codegen paths alive
-        // (an `Unreachable` here would panic `analyze_expr`, which
-        // only accepts expression tags).
-        ast::ExprKind::Match { .. } => {
-            sink.emit(Diag::error(
-                span,
-                DiagCode::ParseError,
-                "match expressions are not yet supported",
-            ));
-            b.int_literal(0, span)
-        }
+        // Match expressions (M12) lower to the UIR `Match` wire; see
+        // `astgen/match_.rs` for the pattern/body mapping.
+        ast::ExprKind::Match { scrutinee, arms } => match_::gen_match(
+            b,
+            ast,
+            scrutinee,
+            arms,
+            types,
+            defined_enums,
+            pool,
+            sink,
+            span,
+        ),
     }
 }
 
+mod match_;
 mod variants;
 
 #[cfg(test)]
@@ -1889,6 +1890,9 @@ mod tests {
 
 #[cfg(test)]
 mod enum_tests;
+
+#[cfg(test)]
+mod match_tests;
 
 #[cfg(test)]
 mod type_literal_tests {

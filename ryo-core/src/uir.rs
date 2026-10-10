@@ -1533,8 +1533,9 @@ mod destructure;
 pub use destructure::{UirDestructureView, destructure_extra};
 mod match_;
 pub use match_::{
-    UirArgTarget, UirArmBody, UirArmBodyView, UirMatchArm, UirMatchArmView, UirMatchView,
-    UirPattern, UirPatternView, UirVariantArgs, UirVariantArgsView, match_extra,
+    UirAnonField, UirAnonFieldsView, UirArgTarget, UirArmBody, UirArmBodyView, UirFieldTarget,
+    UirMatchArm, UirMatchArmView, UirMatchView, UirPattern, UirPatternView, UirVariantArgs,
+    UirVariantArgsView, match_extra,
 };
 
 #[cfg(test)]
