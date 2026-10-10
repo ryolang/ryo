@@ -1666,7 +1666,8 @@ fn describe_color(color: Color) -> str:
 - Match is an **expression** (returns a value)
 - All arms must have same return type
 - Exhaustiveness checking at compile time (prevents missing cases)
-- Nested patterns, guards, or-patterns, float-literal patterns, nominal-struct patterns, borrow-bindings, and full structural exhaustiveness for anonymous-struct patterns are **deferred to Milestone 12.5** (v0.2, post-alpha) — see its section for the full deferral register
+- Nested patterns, guards, or-patterns, float-literal patterns, nominal-struct patterns, borrow-bindings, and full structural exhaustiveness for anonymous-struct patterns are **deferred to Milestone 12.5** (v0.2, post-alpha) — see its section for the full deferral register; undefined match-ownership semantics (mutable `inout` binds, scrutinee reassignment, conditional-move merges, nested-place scrutinees) are **deferred to Milestone 12.6**
+- Scope boundary: M12 lands match-only — I-208 (lowercase type names), I-032 (expression-level `if`), and I-195 (disjoint field borrows, needs design sign-off) are triaged as immediate post-M12 follow-ups, not bundled
 - Dependencies: Milestone 11 (enums to match on)
 
 ### Milestone 12.5: Advanced Pattern Matching
