@@ -1824,4 +1824,3 @@ mod enum_tests;
 
 #[cfg(test)]
 mod match_tests;
-
