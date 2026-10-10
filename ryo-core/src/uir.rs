@@ -262,6 +262,11 @@ pub enum InstTag {
     /// `__ryo_destructure_N` temp bound by the enclosing one.
     Destructure,
 
+    /// `match scrutinee:` expression (M12). The scrutinee ref is inline
+    /// in [`InstData::Match`]; the arm list is a variable payload in
+    /// `extra` — see the `uir::match_` module for the wire layout.
+    Match,
+
     /// Placeholder for a statement the parser recovered from (R10:
     /// `StmtKind::Error`). No operands. Sema lowers it to a TIR
     /// `Unreachable` with the error type, so downstream flow analysis
@@ -323,6 +328,13 @@ pub enum InstData {
         value: InstRef,
         plan: ExtraRange,
         by_position: bool,
+    },
+    /// `match scrutinee:` expression (M12): the scrutinee ref plus a
+    /// range into `extra` of the length-prefixed arm list; see the
+    /// `uir::match_` module for the wire layout.
+    Match {
+        scrutinee: InstRef,
+        arms: ExtraRange,
     },
     /// Range into `extra` for variable-size payloads.
     Extra(ExtraRange),
@@ -1519,6 +1531,11 @@ mod dump;
 pub use dump::UirDump;
 mod destructure;
 pub use destructure::{UirDestructureView, destructure_extra};
+mod match_;
+pub use match_::{
+    UirArgTarget, UirArmBody, UirArmBodyView, UirMatchArm, UirMatchArmView, UirMatchView,
+    UirPattern, UirPatternView, UirVariantArgs, UirVariantArgsView, match_extra,
+};
 
 #[cfg(test)]
 mod tests {
