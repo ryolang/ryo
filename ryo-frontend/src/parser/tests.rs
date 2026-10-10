@@ -1585,6 +1585,19 @@ fn reachable_node_counts(ast: &Ast) -> (usize, usize) {
                     }
                     _ => {}
                 },
+                // Match arms hold expressions (scrutinee, Expr bodies)
+                // and statement lists; patterns hold no expressions.
+                ExprKind::Match { scrutinee, arms } => {
+                    expr_work.push(scrutinee);
+                    for arm in ast.match_arms(arms) {
+                        match arm.body {
+                            MatchArmBody::Expr(body) => expr_work.push(body),
+                            MatchArmBody::Stmts(list) => {
+                                stmt_work.extend_from_slice(ast.stmt_list(list));
+                            }
+                        }
+                    }
+                }
             }
         }
     }

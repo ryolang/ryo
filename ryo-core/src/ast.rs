@@ -35,9 +35,17 @@
 //!   r: int}` behind a [`TypeFieldList`], and the element list of a
 //!   positional type expression `(int, str)` behind a [`TypeExprList`].
 //! - `patterns: Vec<Pattern>` — indexed by [`PatternId`], same sentinel
-//!   convention as [`ExprId`]. Destructuring patterns (M10): `_`, a
-//!   binding, `{q, r}` / `{x = quot}` field patterns, positional
-//!   `(a, b)`.
+//!   convention as [`ExprId`]. Destructuring patterns (M10) and match
+//!   patterns (M12): `_`, a binding, `{q, r}` / `{x = quot}` field
+//!   patterns, positional `(a, b)`, literal patterns (`42`,
+//!   `"quit"`), and enum variant patterns (`Option.Some(v)`). The
+//!   pattern node types and their `Ast` builders/readers live in
+//!   [`patterns`].
+//! - `match_arms: Vec<MatchArm>` / `variant_arg_lists:
+//!   Vec<PatternVariantArg>` — side arenas for match expressions
+//!   (M12): the arm list of an [`ExprKind::Match`] behind a
+//!   [`MatchArmList`], and the payload bind list of a
+//!   [`PatternKind::Variant`] behind a [`PatternVariantArgList`].
 //! - `enum_variants: Vec<EnumVariantDecl>` — side arena for enum
 //!   declaration variant lists (M11), in declaration order, behind an
 //!   [`EnumVariantDeclList`] range.
@@ -78,7 +86,11 @@
 
 use crate::tir::ParamMode;
 use crate::types::{StringId, VariantKind};
+
+mod patterns;
+
 use chumsky::span::{SimpleSpan, Span as _};
+pub use patterns::*;
 use std::fmt;
 use std::num::NonZeroU32;
 
@@ -257,38 +269,6 @@ impl TypeExprList {
     }
 }
 
-/// A `[offset, offset+len)` slice of the `pattern_lists` side arena —
-/// the element list of a [`PatternKind::Positional`] pattern `(a, b)`,
-/// in written order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PatternList {
-    offset: u32,
-    len: u32,
-}
-
-impl PatternList {
-    fn as_range(self) -> std::ops::Range<usize> {
-        let start = self.offset as usize;
-        start..start + self.len as usize
-    }
-}
-
-/// A `[offset, offset+len)` slice of the `pattern_field_lists` side
-/// arena — the field list of a [`PatternKind::Anon`] pattern
-/// `{q, r}` / `{x = quot}`, in written order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PatternFieldList {
-    offset: u32,
-    len: u32,
-}
-
-impl PatternFieldList {
-    fn as_range(self) -> std::ops::Range<usize> {
-        let start = self.offset as usize;
-        start..start + self.len as usize
-    }
-}
-
 /// A `[offset, offset+len)` slice of the `enum_variants` side arena —
 /// an `enum` declaration's variant list, in declaration order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -369,6 +349,15 @@ pub enum ExprKind {
     /// `EnumName.Variant` stays [`ExprKind::FieldAccess`] (sema
     /// reinterprets it as a unit-variant value).
     VariantConstruct(VariantConstruct),
+    /// `match scrutinee:` with one or more `pattern: body` arms
+    /// (M12). The arms live in the `match_arms` side arena, in
+    /// written order, behind a [`MatchArmList`]; each arm's pattern is
+    /// a [`PatternId`] into the `patterns` arena (literals, variants,
+    /// wildcards, anonymous, and positional shapes).
+    Match {
+        scrutinee: ExprId,
+        arms: MatchArmList,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -384,54 +373,10 @@ pub enum Literal {
 
 // ---------- Patterns ----------
 
-/// A single destructuring pattern: kind plus inline source span.
-/// Mirrors [`Expr`]: the arena node carries its span, and consumers
-/// match on `ast.pattern(id).kind`.
-///
-/// Grammar (M10): `_`, a binding, `{q, r}` / `{x = quot}` field
-/// patterns, and positional `(a, b)` — including the statement-level
-/// paren-less form `a, b = e`, which the parser desugars into a
-/// positional pattern. Literal/variant patterns are M12 work.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Pattern {
-    pub kind: PatternKind,
-    pub span: SimpleSpan,
-}
-
-/// The kind of a destructuring pattern. Child lists are
-/// [`PatternList`] / [`PatternFieldList`] ranges into the
-/// `pattern_lists` / `pattern_field_lists` side arenas; like
-/// [`ExprKind`], every payload field is `Copy`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PatternKind {
-    /// `_` — binds nothing, skips the field/element. `_` lexes as an
-    /// ordinary identifier; the parser recognizes it by name.
-    Wildcard,
-    /// A fresh binding for one field/element (`a`).
-    Bind(Ident),
-    /// `{q, r}` / `{x = quot}` — an anonymous struct shape: bare
-    /// fields are puns (field `q` binds local `q`), `name = binding`
-    /// renames. The field list lives in the `pattern_field_lists`
-    /// side arena, in written order.
-    Anon { fields: PatternFieldList },
-    /// `(a, b)` — a positional shape; elements are full patterns, so
-    /// nesting like `(a, (b, c))` parses. The element list lives in
-    /// the `pattern_lists` side arena, in written order.
-    Positional(PatternList),
-}
-
-/// One field of a [`PatternKind::Anon`] pattern. A pun (`{q, r}`)
-/// records the same identifier as the field name and the binding; a
-/// rename (`{x = quot}`) binds field `x` to the local `quot`. A field
-/// named `_` is a wildcard: it binds nothing (recognized by name, the
-/// same rule as [`PatternKind::Wildcard`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PatternField {
-    /// The struct field being destructured.
-    pub name: StringId,
-    /// The local the field binds into.
-    pub binding: Ident,
-}
+// Pattern node types (Pattern, PatternKind, PatternField, and the M12
+// literal/variant/match-arm additions) live in `ast/patterns.rs`,
+// split out to stay under the file-length limit (R2); they re-export
+// below through `pub use patterns::*`.
 
 // ---------- Statements ----------
 
@@ -838,6 +783,8 @@ pub struct Ast {
     patterns: Vec<Pattern>,
     pattern_lists: Vec<PatternId>,
     pattern_field_lists: Vec<PatternField>,
+    variant_arg_lists: Vec<PatternVariantArg>,
+    match_arms: Vec<MatchArm>,
     enum_variants: Vec<EnumVariantDecl>,
     top_level: Vec<StmtId>,
     /// Span covering the first through last top-level statement;
@@ -880,6 +827,8 @@ impl Ast {
             }],
             pattern_lists: Vec::new(),
             pattern_field_lists: Vec::new(),
+            variant_arg_lists: Vec::new(),
+            match_arms: Vec::new(),
             enum_variants: Vec::new(),
             top_level: Vec::new(),
             span: SimpleSpan::new((), 0..0),
@@ -946,28 +895,12 @@ impl Ast {
         &self.type_expr_lists[list.as_range()]
     }
 
-    /// Lookup a destructuring pattern by id.
-    pub fn pattern(&self, id: PatternId) -> &Pattern {
-        &self.patterns[id.index()]
-    }
-
-    /// Source span attached to a destructuring pattern.
-    pub fn pattern_span(&self, id: PatternId) -> SimpleSpan {
-        self.patterns[id.index()].span
-    }
-
-    /// The element slice behind a [`PatternList`] range — the
-    /// elements of a [`PatternKind::Positional`] pattern — in written
-    /// order.
-    pub fn pattern_list(&self, list: PatternList) -> &[PatternId] {
-        &self.pattern_lists[list.as_range()]
-    }
-
-    /// The field slice behind a [`PatternFieldList`] range — the
-    /// fields of a [`PatternKind::Anon`] pattern — in written order.
-    pub fn pattern_field_list(&self, list: PatternFieldList) -> &[PatternField] {
-        &self.pattern_field_lists[list.as_range()]
-    }
+    // Lookup a destructuring pattern by id.
+    //
+    // The pattern reader/builder methods (`pattern`, `pattern_list`,
+    // `pattern_anon`, `match_expr`, ...) live in
+    // [`patterns`](crate::ast::patterns) — split out of this file to
+    // stay under the file-length limit (R2).
 
     /// The variant declarations behind an [`EnumVariantDeclList`]
     /// range — an `enum` declaration's variants — in declaration order.
@@ -1135,41 +1068,11 @@ impl Ast {
         }
     }
 
-    /// Push a pattern with its span and return its id; see
-    /// [`Self::push_expr`]. Slot 0 of `patterns` is the reserved
-    /// sentinel.
-    fn push_pattern(&mut self, kind: PatternKind, span: SimpleSpan) -> PatternId {
-        let idx = self.patterns.len();
-        self.patterns.push(Pattern { kind, span });
-        PatternId::from_index(idx)
-    }
-
-    /// Copy a positional pattern's element list into the
-    /// `pattern_lists` side arena; see [`Self::push_expr_list`] for
-    /// the checked-conversion rationale.
-    fn push_pattern_list(&mut self, items: &[PatternId]) -> PatternList {
-        let offset = u32::try_from(self.pattern_lists.len())
-            .expect("AST pattern_lists arena exceeded u32::MAX");
-        self.pattern_lists.extend_from_slice(items);
-        PatternList {
-            offset,
-            len: u32::try_from(items.len()).expect("AST pattern list length exceeded u32::MAX"),
-        }
-    }
-
-    /// Copy an anonymous pattern's field list into the
-    /// `pattern_field_lists` side arena; see [`Self::push_expr_list`]
-    /// for the checked-conversion rationale.
-    fn push_pattern_field_list(&mut self, items: &[PatternField]) -> PatternFieldList {
-        let offset = u32::try_from(self.pattern_field_lists.len())
-            .expect("AST pattern_field_lists arena exceeded u32::MAX");
-        self.pattern_field_lists.extend_from_slice(items);
-        PatternFieldList {
-            offset,
-            len: u32::try_from(items.len())
-                .expect("AST pattern field list length exceeded u32::MAX"),
-        }
-    }
+    // Push a pattern with its span and return its id — and the other
+    // pattern push helpers (`push_pattern_list`,
+    // `push_pattern_field_list`, ...) — live in `ast/patterns.rs`,
+    // split out of this file to stay under the file-length limit
+    // (R2). Slot 0 of `patterns` is the reserved sentinel.
 
     // ---- Arena-first parse-time builders (I-152) ----
     //
@@ -1563,32 +1466,8 @@ impl Ast {
         }
     }
 
-    /// `_` wildcard pattern (M10): binds nothing.
-    pub fn pattern_wildcard(&mut self, span: SimpleSpan) -> PatternId {
-        self.push_pattern(PatternKind::Wildcard, span)
-    }
-
-    /// A fresh binding pattern `name` (M10).
-    pub fn pattern_bind(&mut self, name: Ident, span: SimpleSpan) -> PatternId {
-        self.push_pattern(PatternKind::Bind(name), span)
-    }
-
-    /// `{q, r}` / `{x = quot}` anonymous struct pattern (M10); the
-    /// field list is copied into the `pattern_field_lists` side arena
-    /// in written order.
-    pub fn pattern_anon(&mut self, fields: &[PatternField], span: SimpleSpan) -> PatternId {
-        let fields = self.push_pattern_field_list(fields);
-        self.push_pattern(PatternKind::Anon { fields }, span)
-    }
-
-    /// `(a, b)` positional pattern (M10) — also the shape the parser
-    /// builds for the paren-less `a, b = e` statement form; the
-    /// element list is copied into the `pattern_lists` side arena in
-    /// written order.
-    pub fn pattern_positional(&mut self, elems: &[PatternId], span: SimpleSpan) -> PatternId {
-        let elems = self.push_pattern_list(elems);
-        self.push_pattern(PatternKind::Positional(elems), span)
-    }
+    // The M10/M12 pattern builders (`pattern_wildcard`, `pattern_anon`,
+    // `literal_pattern`, `match_expr`, ...) live in `ast/patterns.rs`.
 
     /// Destructuring assignment `pattern = value` (M10).
     pub fn destructure(&mut self, target: PatternId, value: ExprId, span: SimpleSpan) -> StmtId {

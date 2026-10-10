@@ -902,6 +902,7 @@ fn gen_function_def(
 /// tag, so the read resolves only through sema's destructuring-temp
 /// side table — never the user scope — and a user-spelled `Var`
 /// reference cannot observe or hijack the temp.
+#[allow(clippy::too_many_arguments)]
 fn lower_destructure_pattern(
     b: &mut UirBuilder,
     ast: &ast::Ast,
@@ -909,6 +910,7 @@ fn lower_destructure_pattern(
     pattern: ast::PatternId,
     value: InstRef,
     span: Span,
+    sink: &mut DiagSink,
     out: &mut Vec<InstRef>,
 ) {
     let pat = ast.pattern(pattern);
@@ -933,26 +935,49 @@ fn lower_destructure_pattern(
                         plan.push((i as u32, Some(temp)));
                         nested.push((*elem, temp, elem_pat.span));
                     }
+                    // Literal and variant patterns parse only in match
+                    // arms; the destructure grammar cannot produce them
+                    // (see `parser/match_.rs`).
+                    ast::PatternKind::Literal(_) | ast::PatternKind::Variant { .. } => {
+                        unreachable!("destructure patterns bind or skip only (match arms only)")
+                    }
                 }
             }
             out.push(b.destructure(value, true, &plan, span));
             for (elem, temp, elem_span) in nested {
                 let elem_value = b.temp_var_ref(temp, elem_span);
-                lower_destructure_pattern(b, ast, pool, elem, elem_value, elem_span, out);
+                lower_destructure_pattern(b, ast, pool, elem, elem_value, elem_span, sink, out);
             }
         }
         ast::PatternKind::Anon { fields } => {
             let mut plan: Vec<(u32, Option<StringId>)> = Vec::new();
             for field in ast.pattern_field_list(*fields) {
-                // A field named `_` is a wildcard (binds nothing); a
-                // rename whose target is `_` likewise skips the field.
-                let wildcard = pool.str(field.name) == "_" || pool.str(field.binding.name) == "_";
-                plan.push((field.name.raw(), (!wildcard).then_some(field.binding.name)));
+                let bind = match field.kind {
+                    // A pun binds a local named after the field.
+                    ast::PatternFieldKind::Pun => Some(field.name),
+                    ast::PatternFieldKind::Rename(bind) => Some(bind),
+                    ast::PatternFieldKind::Wildcard => None,
+                    // The destructure grammar cannot produce literal
+                    // fields — they parse only in match arms. Defensive
+                    // rejection rather than a silent skip.
+                    ast::PatternFieldKind::Literal(_) => {
+                        sink.emit(Diag::error(
+                            pat.span,
+                            DiagCode::ParseError,
+                            "literal patterns are valid only in match arms",
+                        ));
+                        None
+                    }
+                };
+                plan.push((field.name.raw(), bind));
             }
             out.push(b.destructure(value, false, &plan, span));
         }
         ast::PatternKind::Wildcard | ast::PatternKind::Bind(_) => {
             unreachable!("parser guarantees a destructure target is a shaped pattern")
+        }
+        ast::PatternKind::Literal(_) | ast::PatternKind::Variant { .. } => {
+            unreachable!("destructure patterns bind or skip only (match arms only)")
         }
     }
 }
@@ -1023,7 +1048,7 @@ fn gen_stmt(
         }
         ast::StmtKind::Destructure { target, value } => {
             let value_ref = gen_expr(b, ast, *value, types, defined_enums, pool, sink);
-            lower_destructure_pattern(b, ast, pool, *target, value_ref, span, out);
+            lower_destructure_pattern(b, ast, pool, *target, value_ref, span, sink, out);
         }
         ast::StmtKind::IfStmt(if_stmt) => {
             let cond = gen_expr(b, ast, if_stmt.cond, types, defined_enums, pool, sink);
@@ -1261,6 +1286,19 @@ fn gen_expr(
         // Variant construction (M11) lowers to `EnumLit`.
         ast::ExprKind::VariantConstruct(c) => {
             variants::lower_variant_construct(b, ast, c, types, defined_enums, pool, sink, span)
+        }
+        // Match expressions (M12) lower to the UIR `Match` wire in the
+        // follow-up task; until then the diagnostic fails the build
+        // and the literal placeholder keeps sema/codegen paths alive
+        // (an `Unreachable` here would panic `analyze_expr`, which
+        // only accepts expression tags).
+        ast::ExprKind::Match { .. } => {
+            sink.emit(Diag::error(
+                span,
+                DiagCode::ParseError,
+                "match expressions are not yet supported",
+            ));
+            b.int_literal(0, span)
         }
     }
 }
