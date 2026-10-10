@@ -335,6 +335,15 @@ pub enum TirTag {
     /// tokens (see [`TirBuilder::destructure`]'s convention) as fresh
     /// owners.
     Destructure,
+
+    /// `match scrutinee:` expression (M12): resolved arms over a typed
+    /// scrutinee. Variable payload in `extra` — see [`match_extra`]
+    /// and the `tir::match_` module for the wire layout.
+    /// `TypedInst.ty` is the match expression's result type (the join
+    /// of the arm bodies). The ownership pass consumes the
+    /// by-move-binding owner tokens (see [`TirBuilder::match_expr`]'s
+    /// convention) the way it does for [`TirTag::Destructure`].
+    Match,
 }
 
 // ---------- Per-argument call convention ----------
@@ -1580,6 +1589,28 @@ impl Tir {
                     // invariant.
                     f(r, self.destructure_view(r).rhs, ChildKind::Operand);
                 }
+                TirTag::Match => {
+                    // M12: the scrutinee is an operand; each arm body is
+                    // announced like an IfStmt branch — an operand for
+                    // an expr arm, body statements for a statement arm.
+                    // The per-by-move-binding owner tokens (FieldAccess
+                    // insts emitted immediately before this instruction)
+                    // are NOT operands: codegen never evaluates them,
+                    // and announcing them would reach the scrutinee
+                    // twice, breaking the tree-shape invariant.
+                    let view = self.match_view(r);
+                    f(r, view.scrutinee, ChildKind::Operand);
+                    for arm in view.arms() {
+                        match arm.body {
+                            MatchBodyView::Expr(e) => f(r, e, ChildKind::Operand),
+                            MatchBodyView::Stmts(_) => {
+                                for s in arm.body.stmts() {
+                                    f(r, s, ChildKind::BodyStmt);
+                                }
+                            }
+                        }
+                    }
+                }
                 TirTag::IfStmt => {
                     let v = self.if_stmt_view(r);
                     f(r, v.cond, ChildKind::Operand);
@@ -1867,3 +1898,9 @@ pub use field_assign::{CompoundFieldAssignView, FieldAssignView};
 
 mod destructure;
 pub use destructure::{DestructureField, DestructureView, destructure_extra};
+
+mod match_;
+pub use match_::{
+    Discriminant, MatchArmView, MatchBinding, MatchBodyView, MatchView, TypedMatchArm,
+    TypedMatchBody, match_extra,
+};
