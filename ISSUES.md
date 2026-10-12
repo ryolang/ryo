@@ -746,6 +746,19 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-212 — Match UIR wire carries no per-arm/pattern spans — pattern diagnostics anchor on the arm body
+
+**Severity:** Correctness / Hygiene
+**Area:** core-ir
+
+**Files:** ryo-core/src/uir.rs, ryo-frontend/src/astgen.rs, ryo-frontend/src/sema/match_.rs
+
+**Summary:** The M12 match wire (UIR match view + TypedMatchArm) records only the match span and per-arm bodies; AST pattern spans die in astgen. Every pattern-level diagnostic (E0131, E0132, E0133, W0005) therefore anchors on the arm's body span via arm_span() — sema/match_.rs module header documents this. Renders read acceptably because the messages quote the pattern, but the underline lands on the body, not the pattern. A future wire revision should carry per-arm header spans (pattern through colon) and sema should re-anchor.
+
+**Resolution:** Add per-arm span (pattern span) to the UIR match wire and the typed TIR match arms; re-anchor E0131/E0132/E0133/W0005 in sema/match_.rs; drop the arm_span() reconstruction.
+
+---
+
 ## Cross-References
 
 - Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md) — latest verified snapshot (2026-08-24); several current entries originated there, and its `I-xxx` citations reflect what was open at the time (older snapshots live in git history).
