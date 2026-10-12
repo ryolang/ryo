@@ -431,3 +431,31 @@ fn asan_enum_nested_wrapper() {
         "enum_nested_wrapper",
     );
 }
+
+// M12 match: heap-backed match drop paths under ASan. Mirrors the
+// valgrind_match_* lane in valgrind_smoke.rs; see the fixture comments
+// in tests/common/mod.rs for the drop path each one pins.
+
+#[test]
+fn asan_match_partial_move_wildcard_drop() {
+    run_asan_smoke(
+        common::find_fixture("match_partial_move_wildcard_drop"),
+        "match_partial_move_wildcard_drop",
+    );
+}
+
+#[test]
+fn asan_match_discarded_value() {
+    run_asan_smoke(
+        common::find_fixture("match_discarded_value"),
+        "match_discarded_value",
+    );
+}
+
+#[test]
+fn asan_match_temporary_drop_once() {
+    run_asan_smoke(
+        common::find_fixture("match_temporary_drop_once"),
+        "match_temporary_drop_once",
+    );
+}

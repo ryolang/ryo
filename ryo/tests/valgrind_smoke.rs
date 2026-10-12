@@ -614,3 +614,35 @@ fn valgrind_enum_nested_wrapper() {
         "enum_nested_wrapper",
     );
 }
+
+// M12 match: the heap-backed match drop paths, leak-checked under
+// Valgrind (the lane that sees Cranelift-emitted frees). The
+// partial-move and temporary-drop fixtures carry real heap traffic
+// (concat-built >SSO-cap payloads), so they use the allocating guard;
+// the discarded-value fixture's arms are static literals (no free
+// traffic by design), so a plain leak-check smoke — same convention as
+// valgrind_enum_copy_narrow_variant_active above.
+
+#[test]
+fn valgrind_match_partial_move_wildcard_drop() {
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_partial_move_wildcard_drop"),
+        "match_partial_move_wildcard_drop",
+    );
+}
+
+#[test]
+fn valgrind_match_discarded_value() {
+    run_valgrind_smoke(
+        common::find_fixture("match_discarded_value"),
+        "match_discarded_value",
+    );
+}
+
+#[test]
+fn valgrind_match_temporary_drop_once() {
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_temporary_drop_once"),
+        "match_temporary_drop_once",
+    );
+}

@@ -1,0 +1,56 @@
+enum Option:
+	Some(value: int)
+	None
+
+enum Color:
+	Red
+	Green
+	Blue
+
+fn unwrap_or(opt: Option, default: int) -> int:
+	match opt:
+		Option.Some(v):
+			return v
+		Option.None:
+			return default
+
+fn describe_color(color: Color) -> str:
+	match color:
+		Color.Red:
+			return "red"
+		Color.Green:
+			return "green"
+		Color.Blue:
+			return "blue"
+
+fn describe_number(n: int) -> str:
+	return match n:
+		0: "zero"
+		42: "the answer"
+		_: "just a number"
+
+fn main():
+	assert(unwrap_or(Option.Some{value=5}, 0) == 5, "unwrap_or extracts the payload")
+	assert(unwrap_or(Option.None, 9) == 9, "unwrap_or falls back to the default")
+	print(unwrap_or(Option.Some{value=5}, 0))
+	print(" ")
+	print(unwrap_or(Option.None, 9))
+	print("\n")
+	assert(describe_color(Color.Red) == "red", "red described")
+	assert(describe_color(Color.Green) == "green", "green described")
+	assert(describe_color(Color.Blue) == "blue", "blue described")
+	print(describe_color(Color.Red))
+	print(" ")
+	print(describe_color(Color.Green))
+	print(" ")
+	print(describe_color(Color.Blue))
+	print("\n")
+	assert(describe_number(0) == "zero", "zero literal arm")
+	assert(describe_number(42) == "the answer", "42 literal arm")
+	assert(describe_number(7) == "just a number", "wildcard arm")
+	print(describe_number(0))
+	print(" ")
+	print(describe_number(42))
+	print(" ")
+	print(describe_number(7))
+	print("\n")

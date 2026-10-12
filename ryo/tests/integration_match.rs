@@ -16,8 +16,10 @@ use tempfile::TempDir;
 // value arm writes via the canonical per-type aggregate writes; mixed
 // never/value matches; all-never termination; discarded non-void matches;
 // and the post-merge drop of an owned needs-drop scrutinee temporary.
-// Leaks/double-frees on the heap-backed shapes are pinned under valgrind
-// by the Task 12 smoke tests.
+// Task 12: the negative sweep (E0131-E0136 each surface on stderr for a
+// reproducing source; E0129 and W0005 are pinned by the Task 10 tests
+// above) — leaks/double-frees on the heap-backed shapes are pinned under
+// ASan/Valgrind by the asan_match_* / valgrind_match_* smoke tests.
 // =============================================================================
 
 #[test]
@@ -440,5 +442,94 @@ fn match_value_arm_binding_read_diagnosed_i210_jit() {
     assert!(
         stderr.contains("I-210"),
         "the diagnosis must name I-210: {stderr}"
+    );
+}
+
+// --- Task 12: negative sweep — every match diagnostic code on stderr ---
+// E0129 (three non-exhaustive shapes) and W0005 (duplicate-arm warning
+// with successful compile) are pinned by the Task 10 tests above; each
+// remaining code gets one focused test here with a minimal reproducing
+// source (the shapes mirror ryo-frontend's sema/tests_match.rs).
+
+/// Compile `code` and assert failure with `code_str` on stderr — the
+/// negative-sweep shared shape (the E0129 tests above inline it).
+fn assert_match_rejected(file_name: &str, code: &str, code_str: &str) {
+    let temp_dir = TempDir::new().expect("temp");
+    let test_file = create_test_file(temp_dir.path(), file_name, code);
+    let output = run_ryo_command(&["run", file_name], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "{code_str} must be rejected. stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(code_str),
+        "stderr must contain {code_str}: {stderr}"
+    );
+}
+
+#[test]
+fn match_literal_kind_mismatch_errors_e0131_jit() {
+    // A string literal arm against an int scrutinee names both sides.
+    assert_match_rejected(
+        "match_e0131.ryo",
+        "fn main():\n\tmatch 5:\n\t\t\"s\": 1\n\t\t_: 0\n",
+        "E0131",
+    );
+}
+
+#[test]
+fn match_unknown_variant_errors_e0132_jit() {
+    // `Orange` is not a Color variant — E0132 names the identifier and
+    // the scrutinee enum.
+    assert_match_rejected(
+        "match_e0132.ryo",
+        "enum Color:\n\tRed\n\tGreen\n\nfn main():\n\tc = Color.Red\n\tmatch c:\n\t\tOrange: 1\n\t\t_: 0\n",
+        "E0132",
+    );
+}
+
+#[test]
+fn match_move_out_of_borrowed_scrutinee_errors_e0133_jit() {
+    // `match &o:` (borrowed scrutinee) with a by-move str payload bind —
+    // E0133 names the binding and its type.
+    assert_match_rejected(
+        "match_e0133.ryo",
+        "enum Opt:\n\tSome(value: str)\n\tNone\n\nfn main():\n\to = Opt.Some{value=\"hi\"}\n\tmatch &o:\n\t\tOpt.Some(v): print(v)\n\t\tOpt.None: print(\"none\")\n",
+        "E0133",
+    );
+}
+
+#[test]
+fn match_arm_type_mismatch_errors_e0134_jit() {
+    // Arms yielding `int` and `str` in one match — E0134 names both arm
+    // types, anchored on the offending body.
+    assert_match_rejected(
+        "match_e0134.ryo",
+        "enum Opt:\n\tSome(value: int)\n\tNone\n\nfn main():\n\to = Opt.Some{value=5}\n\tx = match o:\n\t\tOpt.Some(v): v\n\t\tOpt.None: \"s\"\n",
+        "E0134",
+    );
+}
+
+#[test]
+fn match_falling_statement_arm_in_value_match_errors_e0135_jit() {
+    // `Some(v): x = 5` falls through while the sibling arm produces a
+    // value — E0135 at the falling arm.
+    assert_match_rejected(
+        "match_e0135.ryo",
+        "enum Opt:\n\tSome(value: int)\n\tNone\n\nfn main():\n\tmut x = 0\n\to = Opt.Some{value=5}\n\tmatch o:\n\t\tOpt.Some(v): x = 5\n\t\tOpt.None: 0\n",
+        "E0135",
+    );
+}
+
+#[test]
+fn match_void_scrutinee_errors_e0136_jit() {
+    // A void-returning call produces no value to match on — E0136 names
+    // the scrutinee type and lists what is matchable.
+    assert_match_rejected(
+        "match_e0136.ryo",
+        "fn void_fn():\n\tprint(\"hi\")\n\nfn main():\n\tmatch void_fn():\n\t\t_: 0\n",
+        "E0136",
     );
 }

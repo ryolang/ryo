@@ -1300,6 +1300,95 @@ fn main():
 \tprint(\"done\\n\")
 ",
     ),
+    (
+        // M12 match: partial moves out of a named enum payload, both
+        // directions, on a >SSO-cap heap str (concat-built — plain
+        // literals are cap==0 rodata and leak-invisible). Direction 1
+        // (`Text{msg=t, code=_}`) binds `msg` by move, consuming the
+        // scrutinee; the bound copy frees at its own last use. Direction
+        // 2 (`Text{msg=_, code=c}`) copies the int and leaves `msg`
+        // unbound on a non-consuming arm, so the payload drops through
+        // the scrutinee's whole-value enum drop scheduled after the
+        // match. Either direction leaking or double-freeing fails the
+        // leak check; mirrors the valgrind_match_* lane.
+        "match_partial_move_wildcard_drop",
+        "\
+enum Msg:
+\tText(msg: str, code: int)
+\tQuit
+
+fn main():
+\tpad = \"0123456789012345678901234567890123456789\"
+\tm = Msg.Text{msg=\"first-\" + pad, code=1}
+\tmatch m:
+\t\tText{msg=t, code=_}:
+\t\t\tprint(t)
+\t\t\tprint(\"\\n\")
+\t\tQuit:
+\t\t\tprint(\"quit\\n\")
+\tn = Msg.Text{msg=\"second-\" + pad, code=2}
+\tmatch n:
+\t\tText{msg=_, code=c}:
+\t\t\tprint(int_to_str(c))
+\t\t\tprint(\"\\n\")
+\t\tQuit:
+\t\t\tprint(\"quit\\n\")
+",
+    ),
+    (
+        // M12 match: a value-producing str match used as a bare
+        // statement — the aggregate result slot is written per arm and
+        // discarded unread. Arm literals are static (cap == 0), so no
+        // free traffic is scheduled; the pin is that the slot
+        // write/merge path runs clean end to end (memcheck sees every
+        // store, so a mis-sized slot or bogus merge store still fails).
+        // Both arms execute across the two matches.
+        "match_discarded_value",
+        "\
+fn main():
+\tt = true
+\tmatch t:
+\t\ttrue: \"yes\"
+\t\t_: \"no\"
+\tf = false
+\tmatch f:
+\t\ttrue: \"yes\"
+\t\t_: \"no\"
+\tprint(\"done\\n\")
+",
+    ),
+    (
+        // M12 match: an owned temporary scrutinee with a heap str
+        // payload, no consuming arm — the anon-temp whole-value drop is
+        // scheduled anchored after the Match inst and swept post-merge,
+        // exactly once per path (the Task 11 temporary-drop machinery
+        // the valgrind/ASan lanes pin). `make_msg(1)` exercises the
+        // Text path (a real ryo_str_free of the concat-built payload);
+        // `make_msg(0)` exercises the payload-free Quit path.
+        "match_temporary_drop_once",
+        "\
+enum Msg:
+\tText(body: str)
+\tQuit
+
+fn make_msg(n: int) -> Msg:
+\tif n > 0:
+\t\treturn Msg.Text{body=int_to_str(n) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}
+\treturn Msg.Quit
+
+fn main():
+\tmatch make_msg(1):
+\t\tMsg.Text(_):
+\t\t\tprint(\"text\\n\")
+\t\tMsg.Quit:
+\t\t\tprint(\"quit\\n\")
+\tmatch make_msg(0):
+\t\tMsg.Text(_):
+\t\t\tprint(\"text\\n\")
+\t\tMsg.Quit:
+\t\t\tprint(\"quit\\n\")
+",
+    ),
 ];
 
 // Test-helper module, not `cfg(test)`-gated, so clippy.toml's
