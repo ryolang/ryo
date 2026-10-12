@@ -180,6 +180,7 @@
                 <a href="#structs">Structs</a>
                 <a href="#enums">Enums</a>
                 <a href="#tuples">Anonymous Structs &amp; Tuples</a>
+                <a href="#pattern-matching">Pattern Matching</a>
               </nav>
             </div>
 
@@ -963,8 +964,8 @@ fn main():
                   <code>Circle(float) | Rectangle(float, float) | Dot</code>.
                   Because the compiler knows every alternative up front, it
                   lays every value out as a tag plus payload — and can
-                  require that all alternatives are handled once
-                  <code>match</code> lands with Milestone 12.
+                  require that a <code>match</code> handles every
+                  alternative.
                 </p>
               </div>
             </div>
@@ -1093,14 +1094,13 @@ fn main():
                 <line x1="12" y1="8" x2="12.01" y2="8"></line>
               </svg>
               <div>
-                <p class="callout-title">No pattern matching yet</p>
+                <p class="callout-title">Reading a payload back</p>
                 <p>
-                  Today a variant's payload can be written at
-                  construction and read back only through equality and
-                  Debug — there is no payload accessor. Exhaustive
-                  <code>match</code> lands with Milestone 12, the
+                  A variant's payload can be written at construction and
+                  read back through equality and Debug — but the
                   idiomatic way to branch on a variant and unpack its
-                  data.
+                  data is exhaustive <code>match</code>; see
+                  <a href="#pattern-matching">Pattern Matching</a>.
                 </p>
               </div>
             </div>
@@ -1314,6 +1314,204 @@ fn main():
                     <td>
                       <code>==</code> on a shape with a non-Eq-capable
                       field — the error names the field
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- =================================================== -->
+          <section id="pattern-matching">
+            <h2>
+              Pattern Matching
+              <a class="anchor" href="#pattern-matching" aria-label="Permalink"
+                >#</a
+              >
+            </h2>
+            <p>
+              <code>match</code> is an expression that tests a value (the
+              <em>scrutinee</em>) against a list of patterns and yields
+              the first arm whose pattern matches. Arms are tried in
+              written order, the first match wins, and the compiler
+              checks both coverage and arm types at compile time — an
+              unhandled case is an error, not a runtime surprise.
+            </p>
+
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">match.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">enum Shape:
+	Circle(radius: float)
+	Rectangle(width: float, height: float)
+	Dot
+
+fn area(s: Shape) -&gt; float:
+	return match s:
+		Shape.Circle(r): 3.14159 * r * r
+		Shape.Rectangle(w, h): w * h
+		Shape.Dot: 0.0
+
+fn describe(n: int) -&gt; str:
+	return match n:
+		0: "zero"
+		42: "the answer"
+		_: "just a number"
+
+fn main():
+	print(area(Shape.Circle{radius=1.0}))               # 3.14159
+	print(area(Shape.Rectangle{width=3.0, height=4.0}))  # 12.0
+	print(describe(42))                                 # the answer</code></pre>
+            </div>
+
+            <h3>Patterns</h3>
+            <div class="ref-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Syntax</th>
+                    <th>Meaning</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>Shape.Dot</code></td>
+                    <td>
+                      Unit-variant pattern — matches that variant, binds
+                      nothing
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>Option.Some(v)</code></td>
+                    <td>
+                      Payload bind — the variant's fields bind
+                      positionally; a non-Copy payload
+                      <strong>moves</strong> out of the scrutinee
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>42</code>, <code>true</code>, <code>"hi"</code></td>
+                    <td>
+                      Literal patterns over <code>int</code> /
+                      <code>bool</code> / <code>str</code> — exact match
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>{kind="circle", r}</code></td>
+                    <td>
+                      Anonymous-struct pattern — literal fields guard the
+                      match, bare names bind their fields; a
+                      <code>_:</code> arm is still required
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>_</code></td>
+                    <td>Wildcard — matches anything; the catch-all</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h3>Exhaustiveness</h3>
+            <p>
+              Every possible value of the scrutinee must be covered.
+              Enums need an arm per variant, <code>bool</code> needs both
+              literals, and <code>int</code> / <code>str</code> /
+              anonymous-struct scrutinees always need a
+              <code>_:</code> arm. Incomplete coverage is
+              <strong>E0129</strong> — the error names the missing
+              variants. Because arms run in written order, an arm that
+              can never execute (anything after <code>_:</code>, or a
+              duplicate of an earlier literal) is
+              <strong>W0005</strong>, not a silent dead branch.
+            </p>
+
+            <h3>Ownership</h3>
+            <p>
+              A payload bind of a non-Copy field moves the payload out of
+              the scrutinee — on that arm's path the value is consumed
+              whole, shell included, and unbound fields that own memory
+              are dropped when the arm starts. Matching a borrowed
+              scrutinee (<code>match &amp;opt:</code>) still allows Copy
+              binds, but a by-move bind of a non-Copy field is
+              <strong>E0133</strong>: match an owned value instead, or
+              bind <code>_</code> and read the field another way.
+            </p>
+
+            <h3>Diagnostics</h3>
+            <div class="ref-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Code</th>
+                    <th>Meaning</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>E0129</code></td>
+                    <td>
+                      Non-exhaustive match — names the missing variants
+                      (declaration order); add the missing arms or a
+                      <code>_:</code> arm
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>W0005</code></td>
+                    <td>
+                      Unreachable arm — anything after <code>_:</code>, or
+                      a duplicate of an earlier literal/variant arm
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>E0131</code></td>
+                    <td>
+                      Pattern kind doesn't match the scrutinee type — an
+                      <code>int</code> literal against a
+                      <code>str</code>, a variant pattern against a
+                      non-enum, and so on
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>E0132</code></td>
+                    <td>
+                      Variant pattern names a variant the enum doesn't
+                      declare — with a did-you-mean over the enum's
+                      variants
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>E0133</code></td>
+                    <td>
+                      By-move bind of a non-Copy field out of a borrowed
+                      scrutinee
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>E0134</code></td>
+                    <td>
+                      Arm value types disagree — every value arm must
+                      yield the same type
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>E0135</code></td>
+                    <td>
+                      A value-producing match has an arm whose statement
+                      body falls through without a value — end the arm
+                      with a value or <code>return</code>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>E0136</code></td>
+                    <td>
+                      Unmatchable scrutinee type — match works on enums,
+                      <code>int</code>, <code>bool</code>,
+                      <code>str</code>, and anonymous structs; floats,
+                      named structs, views, <code>bytes</code>, and
+                      <code>void</code> are rejected
                     </td>
                   </tr>
                 </tbody>
@@ -2084,10 +2282,6 @@ fn main():
                       <code>io_*</code>)
                     </td>
                     <td><span class="pill">Milestone 9.2</span></td>
-                  </tr>
-                  <tr>
-                    <td>Pattern matching (<code>match</code>)</td>
-                    <td><span class="pill">Milestone 12</span></td>
                   </tr>
                   <tr>
                     <td>

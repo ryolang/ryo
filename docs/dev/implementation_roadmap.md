@@ -35,7 +35,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 9.2 — Throwaway CLI Intrinsics (`process_*`, `io_*`) ✅ COMPLETE](#milestone-92-throwaway-cli-intrinsics-process_-io_--complete) *(no dependencies; slots in alongside the core cluster)*
 - [x] [Milestone 10 — Tuples ✅ COMPLETE](#milestone-10-tuples-tuple-sugar-over-anonymous-structs--complete)
 - [x] [Milestone 11 — Enums (Algebraic Data Types) ✅ COMPLETE](#milestone-11-enums-algebraic-data-types--complete)
-- [ ] [Milestone 12 — Pattern Matching [alpha]](#milestone-12-pattern-matching-alpha)
+- [x] [Milestone 12 — Pattern Matching [alpha] ✅ COMPLETE](#milestone-12-pattern-matching-alpha--complete)
 - [ ] [Milestone 12.5 — Advanced Pattern Matching](#milestone-125-advanced-pattern-matching) *(deferred to v0.2 — post-alpha; holds everything M12 defers)*
 - [ ] [Milestone 12.6 — Match Ownership Completion](#milestone-126-match-ownership-completion) *(deferred to v0.2 — post-alpha; undefined enum/match ownership semantics)*
 - [ ] [Milestone 13 — Error Types & Unions [alpha]](#milestone-13-error-types--unions-alpha)
@@ -1611,9 +1611,11 @@ fn divide(a: int, b: int) -> Result:
 - String type used for the example above is available since Milestone 8.1
 - Dependencies: Milestone 9 (structs provide foundation for variant data), Milestone 10 (tuples share the variant-payload codegen path)
 
-### Milestone 12: Pattern Matching [alpha]
+### Milestone 12: Pattern Matching [alpha] ✅ COMPLETE
 
 **Goal:** Implement exhaustive pattern matching on enums and literals
+
+**Status:** ✅ COMPLETE (2026-10-13, branch `feat/m12-pattern-matching`)
 
 **Tasks:**
 
@@ -1660,6 +1662,22 @@ fn describe_color(color: Color) -> str:
   Color.Green: return "green"
   Color.Blue: return "blue"
 ```
+
+**Shipped (2026-10-13):**
+
+- `match` expression over enum, `int`/`bool`/`str` literal, and anonymous-struct scrutinees: unit-variant and payload patterns with positional binds (`Option.Some(v)`), literal arms, and a wildcard catch-all; anonymous-struct patterns carry literal-field constraints to codegen as per-arm guard lists (Int/Bool/Str field-equality chains) and always require a `_:` arm — see [pattern_matching.md](pattern_matching.md)
+- Compile-time exhaustiveness — **E0129** names the missing enum variants (declaration order) or the uncovered literal kind; **W0005** flags arms that can never execute (anything after `_:`, duplicate literals/variants), buffered like the other warnings so it never piles onto an error
+- Arm typing: all value arms join to one `TypeId` (E0134); `never`/error arms join freely; arms ending in `return`/`break`/`continue` diverge from the merge via the return|break|continue termination predicate, so `break`/`continue` arms are legal in value-producing matches inside loops (E0135 only fires on a statement arm that falls through in a value match)
+- Move-only payload bindings on the whole-value model: a non-`Copy` bind consumes the scrutinee on its arm's path, unbound needs-drop payload fields drop at arm start, and **E0133** refuses by-move binds out of borrowed scrutinees (`match &opt:`)
+- Merge lowering: scalar results ride one merge-block param, aggregate results a pre-dispatch result slot (the slot address dominates every arm and the merge), void matches jump bare, and a match whose arms all diverge traps; enum scrutinees dispatch on the i32 tag, anon scrutinees on ordered guard conjunctions, literal scrutinees on compare chains
+- `examples/match.ryo` shipped; the Docker ASan/Valgrind sanitizer suite covers the move/partial-move payload paths
+
+**Diverged / Notes:**
+
+- **I-210 containment:** aggregate value arms that *yield owned storage* (heap calls/concats, by-value reads of tracked bindings) are rejected at compile time, naming I-210 — the ownership pass never consumes arm-body results into the match inst, so lowering would alias the result slot with live drop schedules (double-free / dominance-violating reads). The lift (consume in `analyze_match`) and the workaround (mut binding + if/else) are documented in [pattern_matching.md](pattern_matching.md) and `ISSUES.md`
+- **Anon scrutinee guards** ride the TIR wire as a typed per-arm guard list; the `Discriminant::Wildcard` encoding is a coverage marker only — sema-accepted anon syntax always lowers to something codegen can evaluate
+- **`match` in call-argument position** requires the closing `)` on its own line (the indent preprocessor emits dedents only at line boundaries)
+- **Editor grammar:** the tree-sitter grammar for `match` expressions and patterns landed on the tree-sitter-ryo repo's `feat/m12-pattern-matching` branch alongside the compiler work
 
 **Implementation Notes:**
 
@@ -1708,6 +1726,8 @@ fn describe_color(color: Color) -> str:
 - **Scrutinee liveness & reassignment** — define and enforce: may an arm assign to the scrutinee variable (`match x: _: x = new()`)? Adopt the Rust-shaped rule — legal when no arm borrows from or moves through the scrutinee, `E0033`-family error otherwise — and extend the ownership pass to model it.
 - **Conditional move + reinitialization across arms** — `match opt: Some(v): opt = None` with `opt` used after the match: moved in one arm, re-initialized on every path after the move → valid at the merge. M12's union merge conservatively reports "moved"; this pins the finer lattice (re-init resets per-arm state; merge joins states) with tests. Until then the conservative error is the specified behavior.
 - **Nested-place scrutinees & enum-in-aggregate moves** — `match wrapper.inner:` (partial moves out of a nested place's payload, interaction with the outer owner's remaining-field drops) and moving enums out of struct fields / containers. Requires place-expression scrutinee ownership beyond simple variables; today only variable (and simple owned-temporary) scrutinees are well-defined.
+- **M12 ownership-review carry-overs** — five leaks/diagnostics residuals deferred from the M12 implementation review: (1) a never-read by-move bind in a `continue`-ending arm can leak (narrow trigger); (2) `collect_jump_path` sibling-arm over-approximation on returns-in-arms leaks (needs core-TIR headroom); (3) a non-`Var` moved scrutinee reports use-after-move twice; (4) copy-bind shadowing leaks (same convention as the M10 destructuring bind — one entry covers both); (5) Break/Continue-ending arms and match-inside-loop interplay lack committed tests.
+- **Aggregate match value arms (I-210)** — consume each non-`never` value arm's aggregate result into the match inst in `analyze_match` (mirror `analyze_var_decl`'s `consume_for_assignment` + `rebind_to_init`) so the ownership pass stops scheduling drops that alias the result slot; until then codegen rejects the shape at compile time naming I-210 (see `ISSUES.md`). When the lift lands, give the `match_discarded_value` sanitizer fixture a heap-carrying arm — it is structurally leak-insensitive today (static-literal arms only, by design of the rejection).
 
 **Cross-references (not claimed here):**
 
