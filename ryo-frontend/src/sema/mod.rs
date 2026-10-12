@@ -122,6 +122,13 @@ struct FunctionSig {
 struct Binding {
     ty: TypeId,
     mutable: bool,
+    /// True when the binding names a parameter declared with the
+    /// default (borrow) mode — reading it borrows, so a `match` on it
+    /// is a borrowed scrutinee (E0133 gates by-move payload binds).
+    /// Locals, `move` params, and `inout` params are owned places for
+    /// this purpose (`inout` mutation borrows are the ownership pass's
+    /// jurisdiction).
+    borrowed: bool,
 }
 
 pub(crate) struct Scope<'a> {
@@ -137,8 +144,15 @@ impl<'a> Scope<'a> {
         }
     }
 
-    fn insert_binding(&mut self, name: StringId, ty: TypeId, mutable: bool) {
-        self.bindings.insert(name, Binding { ty, mutable });
+    fn insert_binding(&mut self, name: StringId, ty: TypeId, mutable: bool, borrowed: bool) {
+        self.bindings.insert(
+            name,
+            Binding {
+                ty,
+                mutable,
+                borrowed,
+            },
+        );
     }
 
     fn contains_in_current(&self, name: StringId) -> bool {
@@ -157,6 +171,17 @@ impl<'a> Scope<'a> {
             .get(&name)
             .map(|b| (b.ty, b.mutable))
             .or_else(|| self.parent?.lookup_full(name))
+    }
+
+    /// Whether the nearest binding for `name` is a borrowed parameter
+    /// (see [`Binding::borrowed`]); false when unbound. Match scrutinee
+    /// analysis uses this to detect a borrowed scrutinee from a plain
+    /// parameter read, mirroring the `&expr` case.
+    fn lookup_borrowed(&self, name: StringId) -> bool {
+        self.bindings
+            .get(&name)
+            .map(|b| b.borrowed)
+            .unwrap_or_else(|| self.parent.is_some_and(|p| p.lookup_borrowed(name)))
     }
 }
 
@@ -554,10 +579,18 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
             param.span,
             "is a reserved builtin and cannot be used as a parameter name",
         ) {
-            scope.insert_binding(param.name, sema.pool.error_type(), is_mutable);
+            scope.insert_binding(param.name, sema.pool.error_type(), is_mutable, false);
             continue;
         }
-        scope.insert_binding(param.name, param.ty, is_mutable);
+        // The default mode is `Borrow`: such a parameter is a borrowed
+        // binding, which sema's match scrutinee analysis reads back via
+        // `Scope::lookup_borrowed` (E0133's borrowed-scrutinee gate).
+        scope.insert_binding(
+            param.name,
+            param.ty,
+            is_mutable,
+            param.mode == ParamMode::Borrow,
+        );
     }
 
     // W0002: warn on `move` annotations applied to Copy-typed

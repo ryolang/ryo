@@ -1,16 +1,16 @@
-//! M12 `match` sema tests — pattern resolution (E0131-E0136 family) and
-//! exhaustiveness / redundancy (E0129 / W0005). Harness shared with
+//! M12 `match` sema tests — pattern resolution (E0131-E0136 family),
+//! exhaustiveness / redundancy (E0129 / W0005), and arm typing with
+//! typed TIR `Match` emission (E0133-E0135). Harness shared with
 //! `tests.rs` via its `pub(super)` helpers (the 2000-line file cap keeps
 //! these out of `tests.rs`).
 //!
 //! Task 5 scope: scrutinee validation (E0136), literal-kind checks
 //! (E0131), variant resolution (E0132) + payload shape checks (E0120 /
 //! E0121 / E0122 / E0125 reuse), anon/tuple shape checks (E0113 / E0114 /
-//! E0040 reuse), and the resolution-stub return. Task 6 adds
-//! exhaustiveness (E0129) and unreachable-arm warnings (W0005); arm
-//! typing and binding insertion (E0133-E0135, TIR `Match`) land in
-//! Task 7 — the stub tests below pin the interim contract those tasks
-//! replace.
+//! E0040 reuse). Task 6 adds exhaustiveness (E0129) and unreachable-arm
+//! warnings (W0005). Task 7 adds arm typing, per-arm binding scopes, the
+//! E0133-E0135 diagnostics, and the typed `TirTag::Match` emission
+//! (owner tokens + joined result type) the stub tests used to pin.
 
 use super::tests::*;
 use super::*;
@@ -19,14 +19,13 @@ use crate::lexer::lex;
 use crate::parser::{ParseState, program_parser};
 use chumsky::span::Span as _;
 use chumsky::{Parser, input::Input};
-use ryo_core::tir::{TirData, TirTag};
+use ryo_core::ast::LitPattern;
+use ryo_core::tir::{Discriminant, MatchBinding, MatchBodyView, TirData, TirRef, TirTag};
 
-/// The single statement of `main` wrapped around a statement-level
-/// `match`, and the match's stub instruction — every Task 5 path emits
-/// an `Unreachable` placeholder (void when resolution is clean, error
-/// when any diagnostic fired).
-fn match_stub(tir: &ryo_core::tir::Tir) -> ryo_core::tir::TirRef {
-    let stmt = stmt_at(tir, 0);
+/// The operand of the statement at `stmt_idx` of `main` when it is an
+/// expression statement — a statement-position match instruction.
+fn match_stmt_operand(tir: &ryo_core::tir::Tir, stmt_idx: usize) -> TirRef {
+    let stmt = stmt_at(tir, stmt_idx);
     let TirData::UnOp(operand) = tir.inst(stmt).data else {
         panic!(
             "statement-level match must be an ExprStmt, got {:?}",
@@ -36,25 +35,33 @@ fn match_stub(tir: &ryo_core::tir::Tir) -> ryo_core::tir::TirRef {
     operand
 }
 
+/// The initializer of the `x = ...` var decl at `stmt_idx` — the match
+/// expression under test when it sits in value position.
+fn match_in_var_init(tir: &ryo_core::tir::Tir, stmt_idx: usize) -> TirRef {
+    tir.var_decl_view(stmt_at(tir, stmt_idx)).initializer
+}
+
 #[test]
 fn int_match_with_literal_and_wildcard_arms_resolves() {
-    // `match 5:` with an int-literal arm and a wildcard resolves with no
-    // diagnostics; the stub returns void (Task 7 replaces it with the
-    // typed TIR Match).
+    // `match 5:` with an int-literal arm and a wildcard: clean resolution
+    // types as the joined arm type (both arms yield int).
     let src = "fn main():\n\tmatch 5:\n\t\t42: 1\n\t\t_: 0\n";
     let (tirs, pool) = run(src).expect("sema ok");
     let main = tir_named(&tirs, &pool, "main");
-    let stub = match_stub(main);
+    let m = match_stmt_operand(main, 0);
     assert!(
-        matches!(main.inst(stub).tag, TirTag::Unreachable),
-        "stub is an Unreachable placeholder, got {:?}",
-        main.inst(stub).tag
+        matches!(main.inst(m).tag, TirTag::Match),
+        "clean match emits TirTag::Match, got {:?}",
+        main.inst(m).tag
     );
     assert_eq!(
-        main.inst(stub).ty,
-        pool.void(),
-        "clean resolution stubs void until Task 7 emits the typed Match"
+        main.inst(m).ty,
+        pool.int(),
+        "the match types as the joined arm type"
     );
+    let view = main.match_view(m);
+    assert_eq!(view.arm(0).discriminant, Discriminant::Int(42));
+    assert_eq!(view.arm(1).discriminant, Discriminant::Wildcard);
 }
 
 #[test]
@@ -92,7 +99,7 @@ fn void_scrutinee_is_rejected_with_e0136() {
         diag.span
     );
     let main = tir_named(&tirs, &pool, "main");
-    let stub = match_stub(main);
+    let stub = match_stmt_operand(main, 0);
     assert_eq!(
         main.inst(stub).ty,
         pool.error_type(),
@@ -760,14 +767,18 @@ fn arm_after_wildcard_is_w0005_warning() {
     );
     assert_eq!(diags.len(), 1, "exactly one diagnostic: {diags:?}");
 
-    // Warning-only unit: sema succeeds and the stub stays void.
+    // Warning-only unit: sema succeeds and the match still types as the
+    // joined arm type (both arms yield int) — warnings must not poison
+    // the emission.
     let (tirs, pool) = run(src).expect("a redundant arm is a warning, not an error");
     let main = tir_named(&tirs, &pool, "main");
-    assert_eq!(
-        main.inst(match_stub(main)).ty,
-        pool.void(),
-        "warnings must not poison the stub's type"
+    let m = match_stmt_operand(main, 0);
+    assert!(
+        matches!(main.inst(m).tag, TirTag::Match),
+        "warning-only match still emits TirTag::Match, got {:?}",
+        main.inst(m).tag
     );
+    assert_eq!(main.inst(m).ty, pool.int());
 }
 
 #[test]
@@ -935,4 +946,723 @@ fn e0129_still_fires_alongside_redundant_arms() {
         .find(|d| d.code == DiagCode::NonExhaustiveMatch)
         .expect("E0129");
     assert!(e.message.contains("'Green'"), "got {:?}", e.message);
+}
+
+// ---------- Task 7: arm typing (E0133-E0135) + typed TIR Match ----------
+
+#[test]
+fn value_join_emits_typed_match_with_arm_bindings() {
+    // `match opt: Opt.Some(v): v / Opt.None: 0` — the match types as
+    // `int` (the joined arm type) and arm 0 carries its payload binding
+    // on the wire: (field 0, `v`, int) in declaration-order index form.
+    let src = "enum Opt:\n\tSome(value: int)\n\tNone\n\nfn main():\n\to = Opt.Some{value=5}\n\tx = match o:\n\t\tOpt.Some(v): v\n\t\tOpt.None: 0\n";
+    let (tirs, pool) = run(src).expect("typed match compiles");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_in_var_init(main, 1);
+    assert!(matches!(main.inst(m).tag, TirTag::Match));
+    assert_eq!(main.inst(m).ty, pool.int());
+    let view = main.match_view(m);
+    let scrutinee = view.scrutinee;
+    assert!(
+        matches!(main.inst(scrutinee).tag, TirTag::Var),
+        "the scrutinee is the `o` binding's read, got {:?}",
+        main.inst(scrutinee).tag
+    );
+    assert_eq!(view.ty, pool.int());
+    assert_eq!(view.len(), 2);
+    assert_eq!(view.arm(0).discriminant, Discriminant::Variant(0));
+    assert_eq!(view.arm(1).discriminant, Discriminant::Variant(1));
+    let v = pool.find_str("v").expect("`v` interned");
+    assert_eq!(
+        view.arm(0).bindings().collect::<Vec<_>>(),
+        [MatchBinding {
+            field_index: 0,
+            name: v,
+            ty: pool.int(),
+        }],
+        "arm 0 binds field 0 as `v: int`"
+    );
+    assert_eq!(view.arm(1).binding_count(), 0);
+    let MatchBodyView::Expr(arm0_body) = view.arm(0).body else {
+        panic!("arm 0 is an expr body, got {:?}", view.arm(0).body);
+    };
+    assert_eq!(main.inst(arm0_body).ty, pool.int());
+}
+
+#[test]
+fn never_joins_freely_and_statement_arm_bodies_wire_as_stmts() {
+    // A `return` arm contributes `never`: the match still types as int.
+    // The statement-arm body rides the wire as a stmt list (the Return
+    // inst), not an expr operand.
+    let src = "enum Opt:\n\tSome(value: int)\n\tNone\n\nfn f(o: Opt) -> int:\n\tx = match o:\n\t\tOpt.Some(v): return v\n\t\tOpt.None: 0\n\treturn x\n";
+    let (tirs, pool) = run(src).expect("never-arm join compiles");
+    let f = tir_named(&tirs, &pool, "f");
+    let m = match_in_var_init(f, 0);
+    assert_eq!(f.inst(m).ty, pool.int());
+    let view = f.match_view(m);
+    let arm0 = view.arm(0);
+    let stmts: Vec<TirRef> = arm0.body.stmts().collect();
+    assert_eq!(stmts.len(), 1, "single-line `return` arm is one stmt");
+    assert!(
+        matches!(f.inst(stmts[0]).tag, TirTag::Return),
+        "the stmt body is the Return inst, got {:?}",
+        f.inst(stmts[0]).tag
+    );
+    let MatchBodyView::Expr(none_body) = view.arm(1).body else {
+        panic!("arm 1 is an expr body, got {:?}", view.arm(1).body);
+    };
+    assert_eq!(f.inst(none_body).ty, pool.int());
+}
+
+#[test]
+fn all_never_match_types_as_never() {
+    // Every arm returns: the match expression itself is `never`, and a
+    // void function whose body is that match satisfies return-flow
+    // analysis through the ExprStmt-never rule.
+    let src = "enum Opt:\n\tSome(value: int)\n\tNone\n\nfn f(o: Opt) -> int:\n\tmatch o:\n\t\tOpt.Some(v):\n\t\t\treturn v\n\t\tOpt.None:\n\t\t\treturn 0\n";
+    let (tirs, pool) = run(src).expect("all-never match compiles");
+    let f = tir_named(&tirs, &pool, "f");
+    let m = match_stmt_operand(f, 0);
+    assert_eq!(f.inst(m).ty, pool.never(), "all-never match is never");
+}
+
+#[test]
+fn arm_type_mismatch_is_e0134_naming_both_types() {
+    // Arms yielding `int` and `str`: one E0134, primary span on the
+    // offending arm's body, and the errored match recovers with the
+    // error-typed sentinel.
+    let src = "enum Opt:\n\tSome(value: int)\n\tNone\n\nfn main():\n\to = Opt.Some{value=5}\n\tx = match o:\n\t\tOpt.Some(v): v\n\t\tOpt.None: \"s\"\n";
+    let (tirs, diags, pool) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::ArmTypeMismatch)
+        .expect("E0134 must fire");
+    for needle in ["'int'", "'str'"] {
+        assert!(
+            diag.message.contains(needle),
+            "message must name both arm types ({needle}), got {:?}",
+            diag.message
+        );
+    }
+    let body = src.find("\"s\"").expect("the str arm body");
+    assert_eq!(
+        diag.span.start(),
+        body,
+        "E0134 anchors on the offending arm body, got {:?}",
+        diag.span
+    );
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+    // Recovery shape: an errored match is the Unreachable sentinel with
+    // the error type — never a partially-typed Match.
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_in_var_init(main, 1);
+    assert!(
+        matches!(main.inst(m).tag, TirTag::Unreachable),
+        "errored match recovers with Unreachable, got {:?}",
+        main.inst(m).tag
+    );
+    assert_eq!(main.inst(m).ty, pool.error_type());
+}
+
+#[test]
+fn arm_type_mismatch_notes_every_later_offender() {
+    // Three value arms with three types: the primary squiggle lands on
+    // the FIRST offending arm body, a NOTE carries each later one.
+    let src =
+        "fn main():\n\tn = 5\n\tx = match n:\n\t\t0: 1\n\t\t1: \"a\"\n\t\t2: true\n\t\t_: 0\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::ArmTypeMismatch)
+        .expect("E0134 must fire");
+    let first = src.find("\"a\"").expect("the str arm body");
+    assert_eq!(diag.span.start(), first, "primary on the first offender");
+    assert_eq!(diag.notes.len(), 1, "one note for the other arm: {diag:?}");
+    let later = src.find("true\n").expect("the bool arm body");
+    assert_eq!(
+        diag.notes[0].span.map(|s| s.start()),
+        Some(later),
+        "the note anchors on the later offender's body, got {:?}",
+        diag.notes[0]
+    );
+    assert!(
+        diag.notes[0].message.contains("'bool'"),
+        "the note names its arm's type, got {:?}",
+        diag.notes[0].message
+    );
+    assert_eq!(diags.len(), 1, "exactly one diagnostic: {diags:?}");
+}
+
+#[test]
+fn void_expr_arm_in_value_match_is_e0134() {
+    // A void-producing expr arm (a bare `print` call) participates in
+    // the join like any arm type: against value arms it mismatches.
+    let src = "fn main():\n\tn = 5\n\tx = match n:\n\t\t0: 1\n\t\t_: print(\"x\")\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::ArmTypeMismatch)
+        .expect("E0134 must fire for the void arm");
+    for needle in ["'int'", "'void'"] {
+        assert!(
+            diag.message.contains(needle),
+            "message must name {needle}, got {:?}",
+            diag.message
+        );
+    }
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+}
+
+#[test]
+fn falling_statement_arm_in_value_match_is_e0135() {
+    // `Some(v): x = 5` — a statement arm that falls through while the
+    // other arm produces a value: E0135 at the falling arm, suggesting
+    // the fix.
+    let src = "enum Opt:\n\tSome(value: int)\n\tNone\n\nfn main():\n\tmut x = 0\n\to = Opt.Some{value=5}\n\tmatch o:\n\t\tOpt.Some(v): x = 5\n\t\tOpt.None: 0\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::ArmNoValue)
+        .expect("E0135 must fire");
+    let body = src.find("x = 5").expect("the falling arm body");
+    assert_eq!(
+        diag.span.start(),
+        body,
+        "E0135 anchors on the falling arm body, got {:?}",
+        diag.span
+    );
+    assert!(
+        diag.notes
+            .iter()
+            .any(|n| n.message.contains("value") && n.message.contains("return")),
+        "the help must suggest ending with a value or `return`, got {:?}",
+        diag.notes
+    );
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+}
+
+#[test]
+fn all_void_match_allows_fallthrough_and_types_void() {
+    // Every arm produces no value (void expr arm / falling statement
+    // arm): no E0135, and the match types as void. Both arm shapes —
+    // the single-line void call and a block arm that falls through.
+    let src = "fn main():\n\tmatch \"a\":\n\t\t_: print(\"x\")\n";
+    let (tirs, pool) = run(src).expect("void match compiles");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_stmt_operand(main, 0);
+    assert_eq!(main.inst(m).ty, pool.void(), "void arms join to void");
+
+    let src = "fn main():\n\tmatch \"a\":\n\t\t_:\n\t\t\tprint(\"x\")\n";
+    let (tirs, pool) = run(src).expect("fallthrough void match compiles");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_stmt_operand(main, 0);
+    assert_eq!(
+        main.inst(m).ty,
+        pool.void(),
+        "a falling statement arm is legal when no arm produces a value"
+    );
+}
+
+#[test]
+fn borrowed_scrutinee_binding_non_copy_field_is_e0133() {
+    // `match &o:` (M8.2 borrow) with `Some(v):` binding the str payload:
+    // moving a non-Copy field out of a borrow is E0133 — names the
+    // binding and its type, with the workaround help note.
+    let src = "enum Opt:\n\tSome(value: str)\n\tNone\n\nfn main():\n\to = Opt.Some{value=\"hi\"}\n\tmatch &o:\n\t\tOpt.Some(v): print(v)\n\t\tOpt.None: print(\"none\")\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::MoveOutOfBorrowedScrutinee)
+        .expect("E0133 must fire");
+    for needle in ["'v'", "'str'"] {
+        assert!(
+            diag.message.contains(needle),
+            "message must name the binding and its type ({needle}), got {:?}",
+            diag.message
+        );
+    }
+    assert!(
+        !diag.notes.is_empty(),
+        "E0133 must carry the workaround help note: {diag:?}"
+    );
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+}
+
+#[test]
+fn owned_scrutinee_binds_non_copy_field_and_emits_owner_token() {
+    // The same match without `&` is fine: the str binding is a by-move
+    // bind — exactly one FieldAccess owner token immediately before the
+    // Match, keyed on the binding (never evaluated by codegen).
+    let src = "enum Opt:\n\tSome(value: str)\n\tNone\n\nfn main():\n\to = Opt.Some{value=\"hi\"}\n\tmatch o:\n\t\tOpt.Some(v): print(v)\n\t\tOpt.None: print(\"none\")\n";
+    let (tirs, pool) = run(src).expect("owned scrutinee binds by move");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_stmt_operand(main, 1);
+    assert_eq!(main.inst(m).ty, pool.void());
+    let owners = main.match_by_move_owner_refs(m, &pool);
+    assert_eq!(owners.len(), 1, "one owner token for the str binding");
+    let token = owners[0];
+    assert_eq!(token.index(), m.index() - 1, "token immediately precedes");
+    assert!(
+        matches!(main.inst(token).tag, TirTag::FieldAccess),
+        "owner token is a FieldAccess, got {:?}",
+        main.inst(token).tag
+    );
+    assert_eq!(
+        main.inst(token).ty,
+        pool.str_(),
+        "token carries the field type"
+    );
+}
+
+#[test]
+fn copy_bindings_skip_owner_tokens() {
+    // Copy-typed payload binds copy out of the scrutinee — no owner
+    // tokens at all, even on a borrowed scrutinee.
+    let src = "enum Opt:\n\tSome(value: int)\n\tNone\n\nfn main():\n\to = Opt.Some{value=5}\n\tx = match &o:\n\t\tOpt.Some(v): v\n\t\tOpt.None: 0\n";
+    let (tirs, pool) = run(src).expect("Copy payload on a borrow is fine");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_in_var_init(main, 1);
+    assert_eq!(main.inst(m).ty, pool.int());
+    assert!(
+        main.match_by_move_owner_refs(m, &pool).is_empty(),
+        "Copy bindings emit no owner tokens"
+    );
+}
+
+#[test]
+fn wildcard_arm_on_borrow_suppresses_no_binds() {
+    // `Some(_):` on a borrowed scrutinee binds nothing — no E0133, and
+    // no owner tokens or bindings on the wire.
+    let src = "enum Opt:\n\tSome(value: str)\n\tNone\n\nfn main():\n\to = Opt.Some{value=\"hi\"}\n\tmatch &o:\n\t\tOpt.Some(_): print(\"some\")\n\t\tOpt.None: print(\"none\")\n";
+    let (tirs, pool) = run(src).expect("wildcard arm on a borrow is fine");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_stmt_operand(main, 1);
+    assert_eq!(main.inst(m).ty, pool.void());
+    assert_eq!(main.match_view(m).arm(0).binding_count(), 0);
+}
+
+#[test]
+fn borrowed_param_scrutinee_binding_non_copy_is_e0133() {
+    // The other borrowed shape: a plain (borrow-mode) parameter used as
+    // the scrutinee. Binding its non-Copy payload is E0133 without any
+    // `&` marker. (Void function: an errored match's error-typed
+    // recovery does not satisfy return-flow analysis, so a value-
+    // returning fn would cascade a spurious MissingReturn on top.)
+    let src = "enum Opt:\n\tSome(value: str)\n\tNone\n\nfn f(o: Opt):\n\tmatch o:\n\t\tOpt.Some(v): print(v)\n\t\tOpt.None: print(\"\")\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::MoveOutOfBorrowedScrutinee)
+        .expect("E0133 must fire for a borrowed param scrutinee");
+    assert!(
+        diag.message.contains("'v'"),
+        "message names the binding, got {:?}",
+        diag.message
+    );
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+}
+
+#[test]
+fn move_param_scrutinee_binds_non_copy_freely() {
+    // A `move` parameter is owned: the same binding is legal.
+    let src = "enum Opt:\n\tSome(value: str)\n\tNone\n\nfn f(move o: Opt) -> str:\n\tmatch o:\n\t\tOpt.Some(v): return v\n\t\tOpt.None: return \"\"\n";
+    run(src).expect("move param is an owned scrutinee");
+}
+
+#[test]
+fn e0133_fires_per_arm_not_per_match() {
+    // Review-focus pin: one match where arm A binds a Copy field (ok)
+    // and arm B binds a str field (E0133) — exactly one E0133, and the
+    // Copy arm is untouched.
+    let src = "enum Mix:\n\tA(n: int)\n\tB(s: str)\n\nfn main():\n\tm = Mix.A{n=1}\n\tmatch &m:\n\t\tMix.A(n): print(n)\n\t\tMix.B(s): print(s)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    assert_eq!(
+        count_code(&diags, DiagCode::MoveOutOfBorrowedScrutinee),
+        1,
+        "exactly one E0133 for the str-binding arm: {diags:?}"
+    );
+    assert_eq!(diags.len(), 1, "no other diagnostics: {diags:?}");
+}
+
+#[test]
+fn arm_bindings_do_not_leak_past_the_match() {
+    // `v` is visible inside its arm and unresolvable after the match —
+    // the arm scope dies with the arm (E0010-style unresolved name).
+    let src = "enum Opt:\n\tSome(value: int)\n\tNone\n\nfn main():\n\to = Opt.Some{value=5}\n\tx = match o:\n\t\tOpt.Some(v): v + 1\n\t\tOpt.None: 0\n\tprint(v)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::UndefinedVariable)
+        .expect("the post-match reference must not resolve");
+    let use_site = src.rfind("print(v)").expect("the post-match use") + "print(".len();
+    assert_eq!(
+        diag.span.start(),
+        use_site,
+        "the unresolved use anchors on `v`, got {:?}",
+        diag.span
+    );
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+}
+
+#[test]
+fn same_binding_name_in_different_arms_is_allowed() {
+    let src = "enum Two:\n\tA(v: int)\n\tB(v: int)\n\nfn main():\n\tt = Two.A{v=1}\n\tx = match t:\n\t\tTwo.A(v): v\n\t\tTwo.B(v): v * 2\n";
+    let (tirs, pool) = run(src).expect("per-arm scopes never collide");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_in_var_init(main, 1);
+    let view = main.match_view(m);
+    let v = pool.find_str("v").expect("`v` interned");
+    for arm in view.arms() {
+        assert_eq!(
+            arm.bindings().collect::<Vec<_>>(),
+            [MatchBinding {
+                field_index: 0,
+                name: v,
+                ty: pool.int(),
+            }]
+        );
+    }
+}
+
+#[test]
+fn duplicate_binding_name_within_one_arm_is_rejected() {
+    // `P.Both(v, v):` — the same name twice in ONE arm's pattern hits
+    // the duplicate-binding diagnostic (the scope-insertion check), and
+    // the errored match recovers.
+    let src = "enum P:\n\tBoth(a: int, b: int)\n\nfn main():\n\tp = P.Both{a=1, b=2}\n\tx = match p:\n\t\tP.Both(v, v): v\n\t\t_: 0\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::DuplicateDeclaration)
+        .expect("the duplicate binding must fire");
+    assert!(
+        diag.message.contains("'v'"),
+        "message names the duplicated binding, got {:?}",
+        diag.message
+    );
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+}
+
+#[test]
+fn owner_tokens_follow_arm_then_binding_order() {
+    // Two by-move bindings across two arms: the tokens land immediately
+    // before the Match in arm order, then binding order within each arm
+    // — the exact layout `match_by_move_owner_refs` recovers.
+    let src = "enum E:\n\tPair(a: str, b: str)\n\tSolo(s: str)\n\nfn main():\n\te = E.Pair{a=\"a\", b=\"b\"}\n\tx = match e:\n\t\tE.Pair(a, b): 0\n\t\tE.Solo(s): 1\n";
+    let (tirs, pool) = run(src).expect("multi-bind match compiles");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_in_var_init(main, 1);
+    let owners = main.match_by_move_owner_refs(m, &pool);
+    assert_eq!(owners.len(), 3, "one token per by-move binding");
+    for (i, token) in owners.iter().enumerate() {
+        assert_eq!(
+            token.index(),
+            m.index() - 3 + i,
+            "token {i} immediately precedes the Match"
+        );
+        assert!(
+            matches!(main.inst(*token).tag, TirTag::FieldAccess),
+            "token {i} is a FieldAccess, got {:?}",
+            main.inst(*token).tag
+        );
+        assert_eq!(
+            main.inst(*token).ty,
+            pool.str_(),
+            "token {i} carries the field type"
+        );
+    }
+    // The wire order mirrors it: arm 0's bindings (a, b) then arm 1's (s).
+    let a = pool.find_str("a").unwrap();
+    let b = pool.find_str("b").unwrap();
+    let s = pool.find_str("s").unwrap();
+    let view = main.match_view(m);
+    assert_eq!(
+        view.arm(0).bindings().collect::<Vec<_>>(),
+        [
+            MatchBinding {
+                field_index: 0,
+                name: a,
+                ty: pool.str_(),
+            },
+            MatchBinding {
+                field_index: 1,
+                name: b,
+                ty: pool.str_(),
+            },
+        ]
+    );
+    assert_eq!(
+        view.arm(1).bindings().collect::<Vec<_>>(),
+        [MatchBinding {
+            field_index: 0,
+            name: s,
+            ty: pool.str_(),
+        }]
+    );
+}
+
+#[test]
+fn literal_discriminants_round_trip_folded_values() {
+    // Negative ints arrive pre-folded; str/bool literals keep their
+    // folded forms; the wildcard arm is the catch-all encoding.
+    let src =
+        "fn main():\n\tn = 5\n\tx = match n:\n\t\t0: \"zero\"\n\t\t-1: \"neg\"\n\t\t_: \"other\"\n";
+    let (tirs, pool) = run(src).expect("literal arms type");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_in_var_init(main, 1);
+    assert_eq!(main.inst(m).ty, pool.str_());
+    let view = main.match_view(m);
+    assert_eq!(view.arm(0).discriminant, Discriminant::Int(0));
+    assert_eq!(view.arm(1).discriminant, Discriminant::Int(-1));
+    assert_eq!(view.arm(2).discriminant, Discriminant::Wildcard);
+
+    let src = "fn main():\n\tb = true\n\tx = match b:\n\t\ttrue: 1\n\t\tfalse: 0\n";
+    let (tirs, pool) = run(src).expect("bool arms type");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_in_var_init(main, 1);
+    let view = main.match_view(m);
+    assert_eq!(view.arm(0).discriminant, Discriminant::Bool(true));
+    assert_eq!(view.arm(1).discriminant, Discriminant::Bool(false));
+
+    let src = "fn main():\n\ts = \"a\"\n\tx = match s:\n\t\t\"quit\": 1\n\t\t_: 0\n";
+    let (tirs, pool) = run(src).expect("str arms type");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_in_var_init(main, 1);
+    let view = main.match_view(m);
+    let quit = pool.find_str("quit").expect("`quit` interned");
+    assert_eq!(view.arm(0).discriminant, Discriminant::Str(quit));
+}
+
+#[test]
+fn anon_arm_encodes_placeholder_wildcard_discriminant() {
+    // Anon patterns carry no M12 discriminant (structural lowering is
+    // M12.5): the arm binds its targets and rides the wire with the
+    // Wildcard placeholder encoding, documented at the emission site.
+    // A clean M12 anon match necessarily has a real `_:` arm (E0129
+    // otherwise).
+    let src = "fn main():\n\tp = {x=1, y=2}\n\tx = match p:\n\t\t{x=px, y=_}: px\n\t\t_: 0\n";
+    let (tirs, pool) = run(src).expect("anon-arm match compiles");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_in_var_init(main, 1);
+    assert_eq!(main.inst(m).ty, pool.int());
+    let view = main.match_view(m);
+    let px = pool.find_str("px").expect("`px` interned");
+    assert_eq!(
+        view.arm(0).discriminant,
+        Discriminant::Wildcard,
+        "anon arms encode the Wildcard placeholder"
+    );
+    assert_eq!(
+        view.arm(0).bindings().collect::<Vec<_>>(),
+        [MatchBinding {
+            field_index: 0,
+            name: px,
+            ty: pool.int(),
+        }]
+    );
+    assert_eq!(view.arm(1).discriminant, Discriminant::Wildcard);
+    assert_eq!(view.arm(1).binding_count(), 0);
+}
+
+#[test]
+fn statement_arm_block_bodies_analyze_in_the_arm_scope() {
+    // A block arm's statements see the arm bindings; declarations inside
+    // the arm do not leak either.
+    let src = "enum Opt:\n\tSome(value: int)\n\tNone\n\nfn f(o: Opt) -> int:\n\tmatch o:\n\t\tOpt.Some(v):\n\t\t\tw = v + 1\n\t\t\treturn w\n\t\tOpt.None:\n\t\t\treturn 0\n";
+    run(src).expect("block arm bodies analyze against the arm bindings");
+
+    // `w` is arm-scoped: using it in the sibling arm is unresolved.
+    let src = "enum Opt:\n\tSome(value: int)\n\tNone\n\nfn f(o: Opt) -> int:\n\tmatch o:\n\t\tOpt.Some(v):\n\t\t\tw = v + 1\n\t\t\treturn w\n\t\tOpt.None:\n\t\t\treturn w\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    assert!(
+        any_code(&diags, DiagCode::UndefinedVariable),
+        "the sibling arm must not see `w`: {diags:?}"
+    );
+    assert_eq!(
+        count_code(&diags, DiagCode::UndefinedVariable),
+        1,
+        "exactly one unresolved use: {diags:?}"
+    );
+}
+
+#[test]
+fn nested_matches_keep_their_owner_tokens_separate() {
+    // An inner match (with its own by-move binding) inside an outer
+    // match's arm body: each Match's count-back recovery lands on its
+    // own tokens — the inner emission is fully inside the outer arm's
+    // body region.
+    let src = "enum Opt:\n\tSome(value: str)\n\tNone\n\nfn main():\n\ta = Opt.Some{value=\"a\"}\n\tb = Opt.Some{value=\"b\"}\n\tmatch a:\n\t\tOpt.Some(v):\n\t\t\ty = match b:\n\t\t\t\tOpt.Some(w): w\n\t\t\t\tOpt.None: \"\"\n\t\t\tprint(y)\n\t\t\tprint(v)\n\t\tOpt.None:\n\t\t\tprint(\"none\")\n";
+    let (tirs, pool) = run(src).expect("nested matches compile");
+    let main = tir_named(&tirs, &pool, "main");
+    let outer = match_stmt_operand(main, 2);
+    let view = main.match_view(outer);
+    assert_eq!(view.len(), 2);
+    let outer_owners = main.match_by_move_owner_refs(outer, &pool);
+    assert_eq!(outer_owners.len(), 1, "outer match: one by-move bind (v)");
+    assert_eq!(
+        outer_owners[0].index(),
+        outer.index() - 1,
+        "the outer token immediately precedes the outer Match"
+    );
+    // Reach the inner match through the outer arm's stmt list.
+    let arm0_stmts: Vec<TirRef> = view.arm(0).body.stmts().collect();
+    let inner = main.var_decl_view(arm0_stmts[0]).initializer;
+    assert!(
+        matches!(main.inst(inner).tag, TirTag::Match),
+        "the arm's first stmt binds the inner match, got {:?}",
+        main.inst(inner).tag
+    );
+    let inner_owners = main.match_by_move_owner_refs(inner, &pool);
+    assert_eq!(inner_owners.len(), 1, "inner match: one by-move bind (w)");
+    assert_eq!(
+        inner_owners[0].index(),
+        inner.index() - 1,
+        "the inner token immediately precedes the inner Match"
+    );
+    // The inner Match and its token sit before the outer Match in the
+    // arena (emitted during the outer arm's body analysis).
+    assert!(inner.index() < outer.index());
+}
+
+#[test]
+fn diverging_inner_match_makes_the_statement_arm_never() {
+    // A statement arm whose body ends in an all-returning inner match
+    // diverges: the arm is `never`, no E0135, and an all-never outer
+    // match types as never.
+    let src = "enum Opt:\n\tSome(value: int)\n\tNone\n\nfn f(o: Opt) -> int:\n\tmatch o:\n\t\tOpt.Some(v):\n\t\t\tmatch v:\n\t\t\t\t0: return 0\n\t\t\t\t_: return 1\n\t\tOpt.None:\n\t\t\treturn 2\n";
+    let (tirs, pool) = run(src).expect("diverging inner match compiles");
+    let f = tir_named(&tirs, &pool, "f");
+    let outer = match_stmt_operand(f, 0);
+    assert_eq!(
+        f.inst(outer).ty,
+        pool.never(),
+        "every arm diverges (inner all-return match included)"
+    );
+}
+
+// ---------- R12/R13 fix coverage: anon-arm guards, jump-terminated arms ----------
+
+#[test]
+fn anon_arm_literal_guards_reach_the_typed_wire() {
+    // R12: `{x=0, y=py}:` — the literal constraint rides the arm's
+    // guard list; the `y` bind rides the bindings. Both decode from the
+    // typed Match view.
+    let src = "fn main():\n\tp = {x=1, y=2}\n\tr = match p:\n\t\t{x=0, y=py}: py\n\t\t_: 0\n";
+    let (tirs, pool) = run(src).expect("guarded anon arm compiles");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_in_var_init(main, 1);
+    assert_eq!(main.inst(m).ty, pool.int());
+    let view = main.match_view(m);
+    let arm0 = view.arm(0);
+    assert_eq!(
+        arm0.discriminant,
+        Discriminant::Wildcard,
+        "coverage placeholder kept orthogonal to the guards"
+    );
+    assert_eq!(
+        arm0.guards().collect::<Vec<_>>(),
+        [(0, LitPattern::Int(0))],
+        "the literal field constraint reaches the wire"
+    );
+    let py = pool.find_str("py").expect("`py` interned");
+    assert_eq!(
+        arm0.bindings().collect::<Vec<_>>(),
+        [MatchBinding {
+            field_index: 1,
+            name: py,
+            ty: pool.int(),
+        }],
+        "the `y` bind coexists with the guard"
+    );
+    // The wildcard fallback arm carries no guards.
+    assert_eq!(view.arm(1).guard_count(), 0);
+    assert!(view.arm(1).guards().next().is_none());
+}
+
+#[test]
+fn positional_anon_arm_guards_reach_the_typed_wire() {
+    // `(0, _):` — tuple sugar; element 0 is the literal constraint.
+    let src = "fn main():\n\tp = {x=1, y=2}\n\tr = match p:\n\t\t(0, _): 1\n\t\t_: 0\n";
+    let (tirs, pool) = run(src).expect("positional guarded arm compiles");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_in_var_init(main, 1);
+    let view = main.match_view(m);
+    let arm0 = view.arm(0);
+    assert_eq!(arm0.guards().collect::<Vec<_>>(), [(0, LitPattern::Int(0))]);
+    assert_eq!(arm0.binding_count(), 0);
+}
+
+#[test]
+fn non_anon_arms_carry_empty_guard_lists() {
+    // Variant and literal arms encode their matching entirely in the
+    // discriminant — their guard lists are empty.
+    let src = "enum Opt:\n\tSome(value: int)\n\tNone\n\nfn main():\n\to = Opt.Some{value=5}\n\tr = match o:\n\t\tOpt.Some(v): v\n\t\tOpt.None: 0\n";
+    let (tirs, pool) = run(src).expect("variant arms compile");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_in_var_init(main, 1);
+    let view = main.match_view(m);
+    assert_eq!(view.arm(0).guard_count(), 0);
+    assert_eq!(view.arm(1).guard_count(), 0);
+
+    let src = "fn main():\n\tn = 5\n\tr = match n:\n\t\t0: 1\n\t\t_: 0\n";
+    let (tirs, pool) = run(src).expect("literal arms compile");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_in_var_init(main, 1);
+    let view = main.match_view(m);
+    assert_eq!(view.arm(0).guard_count(), 0);
+    assert_eq!(view.arm(1).guard_count(), 0);
+}
+
+#[test]
+fn break_arm_terminates_the_value_match_arm() {
+    // R13: inside a loop, `Some(v): break` is a terminating arm — the
+    // match types as int (never-compatible at the join), no E0135.
+    let src = "enum Opt:\n\tSome(value: int)\n\tNone\n\nfn main():\n\to = Opt.Some{value=5}\n\tmut x = 0\n\twhile true:\n\t\tx = match o:\n\t\t\tOpt.Some(v): break\n\t\t\tOpt.None: 0\n\t\tx += 1\n";
+    let (tirs, pool) = run(src).expect("break arm is terminating");
+    let main = tir_named(&tirs, &pool, "main");
+    let while_stmt = stmt_at(main, 2);
+    let while_body = main.while_loop_view(while_stmt).body;
+    let assign = while_body[0];
+    let m = main.assign_view(assign).value;
+    assert_eq!(main.inst(m).ty, pool.int(), "break arm joins freely");
+    let view = main.match_view(m);
+    let arm0_stmts: Vec<TirRef> = view.arm(0).body.stmts().collect();
+    assert!(
+        matches!(main.inst(arm0_stmts[0]).tag, TirTag::Break),
+        "the break arm body is the Break stmt, got {:?}",
+        main.inst(arm0_stmts[0]).tag
+    );
+}
+
+#[test]
+fn continue_arm_terminates_the_value_match_arm() {
+    let src = "enum Opt:\n\tSome(value: int)\n\tNone\n\nfn main():\n\to = Opt.Some{value=5}\n\tmut x = 0\n\twhile true:\n\t\tx = match o:\n\t\t\tOpt.Some(v): continue\n\t\t\tOpt.None: 0\n\t\tx += 1\n";
+    let (tirs, pool) = run(src).expect("continue arm is terminating");
+    let main = tir_named(&tirs, &pool, "main");
+    let while_stmt = stmt_at(main, 2);
+    let while_body = main.while_loop_view(while_stmt).body;
+    let m = main.assign_view(while_body[0]).value;
+    assert_eq!(main.inst(m).ty, pool.int());
+}
+
+#[test]
+fn fallthrough_assignment_arm_in_loop_is_still_e0135() {
+    // R13's flip side: a statement arm that can REALLY fall through is
+    // still E0135 in a value match, loop or not.
+    let src = "enum Opt:\n\tSome(value: int)\n\tNone\n\nfn main():\n\to = Opt.Some{value=5}\n\tmut x = 0\n\twhile true:\n\t\tx = match o:\n\t\t\tOpt.Some(v): x = 5\n\t\t\tOpt.None: 0\n\t\tx += 1\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::ArmNoValue)
+        .expect("E0135 must still fire for the falling arm");
+    assert!(
+        diag.message.contains("'int'"),
+        "message names the candidate type, got {:?}",
+        diag.message
+    );
+    assert_eq!(
+        count_code(&diags, DiagCode::ArmNoValue),
+        1,
+        "exactly one E0135: {diags:?}"
+    );
 }

@@ -1,6 +1,7 @@
 //! `match` expression analysis (M12) — pattern resolution, the
-//! E0129-E0136 diagnostic family, and exhaustiveness checking. Split
-//! from `expr.rs` so the parent file stays under the 2000-line CI gate.
+//! E0129-E0136 diagnostic family, exhaustiveness checking, and typed
+//! TIR `Match` emission. Split from `expr.rs` so the parent file stays
+//! under the 2000-line CI gate.
 //!
 //! Task 5 implemented RESOLUTION: the scrutinee type is validated
 //! (E0136), each arm's pattern is resolved against it — literal kinds
@@ -21,13 +22,22 @@
 //! discriminant before it, is W0005 (warning severity, buffered like
 //! W0002/W0003 so it never piles onto an error).
 //!
-//! Arm typing, binding insertion, and the typed TIR `TirTag::Match`
-//! emission (E0133-E0135) land in Task 7. Until then, `analyze_match`
-//! returns a stub: a `TirTag::Unreachable` placeholder — `void`-typed
-//! when resolution is clean (warnings included), error-typed when any
-//! error diagnostic fired (the §4.5 recovery sentinel; codegen never
-//! runs on a unit with errors). Arm bodies are deliberately NOT
-//! analyzed here: their typing and per-arm scopes are Task 7's job.
+//! Task 7 adds ARM TYPING and the typed emission: each cleanly
+//! resolved arm is typed in its own child `Scope` seeded with the
+//! payload bindings (E0133 gates by-move binds out of borrowed
+//! scrutinees; the duplicate/reserved binding checks mirror M10
+//! destructure insertion), the arm types are joined — every value arm
+//! must agree on one `TypeId` (E0134), `never`/error arms join freely,
+//! a falling statement arm is legal only when no arm produces a value
+//! (else E0135) — and a clean match emits `TirTag::Match` typed as the
+//! joined result, preceded by one `FieldAccess` owner token per by-move
+//! binding (the convention documented on `TirBuilder::match_expr`).
+//! Anon-pattern arms encode `Discriminant::Wildcard` as a coverage
+//! placeholder (structural lowering is M12.5) and carry their literal
+//! field constraints on the wire as a per-arm GUARD list so codegen
+//! can evaluate them. An errored match recovers with the error-typed
+//! `Unreachable` sentinel (§4.5; codegen never runs on a unit with
+//! errors).
 //!
 //! ## Span anchoring
 //!
@@ -45,40 +55,55 @@
 //! independently, and an arm that errored records `had_error` so
 //! exhaustiveness excludes it instead of piling derived diagnostics on
 //! top (E0129 still fires when the remaining, clean arms leave gaps).
-//! W0005 likewise never suppresses E0129 or any other diagnostic.
+//! W0005 likewise never suppresses E0129 or any other diagnostic. The
+//! same holds into Task 7: a resolution-broken arm is skipped for
+//! typing (its own diagnostic already fired), while its siblings still
+//! type-check, and one E0133 bind never blocks the next arm's binds.
 
-use super::{FuncCtx, Scope, Sema, analyze_expr, field_list, ordinal};
+use super::{
+    FuncCtx, Scope, Sema, analyze_block, analyze_expr, check_reserved_name, field_list, ordinal,
+    with_struct_shape_notes,
+};
 use ryo_core::ast::LitPattern;
 use ryo_core::diag::{Diag, DiagCode};
-use ryo_core::tir::{Discriminant, MatchBinding};
-use ryo_core::types::{StringId, StructField, TypeKind, VariantKind};
+use ryo_core::tir::{Discriminant, MatchBinding, TirRef, TypedMatchArm, TypedMatchBody};
+use ryo_core::types::{StringId, StructField, TypeId, TypeKind, VariantKind};
 use ryo_core::uir::{
-    InstRef, Span, UirAnonFieldsView, UirArgTarget, UirArmBodyView, UirFieldTarget,
-    UirMatchArmView, UirPatternView, UirVariantArgsView,
+    InstData, InstRef, InstTag, Span, UirAnonFieldsView, UirArgTarget, UirArmBodyView,
+    UirFieldTarget, UirMatchArmView, UirPatternView, UirVariantArgsView,
 };
+use std::collections::HashMap;
 
 /// Resolution + exhaustiveness results for one `match` expression.
 /// Computed by the resolution pass and the [`check_exhaustiveness`]
-/// walk; consumed by Task 7 (arm typing seeds scopes from
-/// [`MatchArmAnalysis::bindings`], then emits the typed TIR `Match`
-/// from the whole analysis). The pass itself reads only `had_error` —
-/// to pick the stub's type — which is why the per-arm payloads carry a
-/// targeted dead-code allow below.
+/// walk; consumed by [`type_and_emit_match`] (Task 7), which seeds the
+/// per-arm child scopes from [`MatchArmAnalysis::bindings`] and emits
+/// the typed TIR `Match` from the whole analysis. The exhaustiveness
+/// facts annotate the record for the follow-on tasks — the typed
+/// emission reads only the resolution payloads — which is why they
+/// carry a targeted dead-code allow below. `had_error` is the shared
+/// error flag: set by resolution, grown by typing.
 #[allow(dead_code)]
 struct MatchAnalysis {
+    /// True when resolution already failed (the scrutinee's own
+    /// diagnostic or any arm's pattern error) — the match recovers
+    /// error-typed no matter how typing goes.
+    had_error: bool,
     /// The analyzed scrutinee operand.
-    scrutinee: ryo_core::tir::TirRef,
+    scrutinee: TirRef,
+    /// Task 7: whether the scrutinee is borrowed — an explicit `&expr`
+    /// or a read of a borrow-mode parameter. Gates E0133 at bind time;
+    /// Copy binds and wildcard arms stay legal on borrows.
+    scrutinee_borrowed: bool,
     /// The scrutinee type arms were resolved against: the real type, or
     /// the error sentinel when E0136 fired (arms then skip their checks
     /// quietly — the original diagnostic already explains).
-    scrutinee_ty: ryo_core::types::TypeId,
+    scrutinee_ty: TypeId,
     arms: Vec<MatchArmAnalysis>,
     /// Task 6: true when every scrutinee value is covered — all enum
     /// variants / both bool literals marked, or a `_:` arm exists.
-    /// Consumed by Task 7.
     exhaustive: bool,
-    /// Task 6: true when any arm is `_` (the catch-all). Consumed by
-    /// Task 7.
+    /// Task 6: true when any arm is `_` (the catch-all).
     has_wildcard: bool,
 }
 
@@ -102,11 +127,12 @@ struct MatchArmAnalysis {
     bindings: Vec<MatchBinding>,
     /// Anonymous-shape literal constraints (`{x=0}`, `(0, _)`):
     /// (canonical field index, literal) in written order. Only
-    /// meaningful for anon arms; Task 7 lowers them to field-equality
-    /// tests.
+    /// meaningful for anon arms; field-equality lowering (and the wire
+    /// encoding for it) is M12.5 — M12 keeps them resolution-only.
     anon_literals: Vec<(u32, LitPattern)>,
-    /// True when the pattern produced a diagnostic. The match-level
-    /// stub becomes error-typed when any arm (or the scrutinee) errored.
+    /// True when the pattern produced a diagnostic. The match recovers
+    /// error-typed when any arm (or the scrutinee) errored, and Task 7
+    /// skips the arm's typing so the original error doesn't cascade.
     had_error: bool,
 }
 
@@ -122,19 +148,24 @@ fn is_matchable(sema: &Sema<'_>, ty: ryo_core::types::TypeId) -> bool {
     )
 }
 
-/// `match scrutinee:` (M12) — resolution pass; see the module header
-/// for the Task 5 scope and the stub contract.
+/// `match scrutinee:` (M12) — resolution (Task 5), exhaustiveness
+/// (Task 6), then arm typing + typed `TirTag::Match` emission (Task 7);
+/// see the module header for the split of responsibilities.
 pub(crate) fn analyze_match(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     r: InstRef,
     span: Span,
-) -> ryo_core::tir::TirRef {
-    let view = sema.uir.match_view(r);
-    let scrutinee = analyze_expr(sema, fcx, scope, view.scrutinee);
+) -> TirRef {
+    // Copy the shared UIR reference out of `sema` so the decoded view
+    // survives the `&mut Sema` calls below (the UIR arena is immutable
+    // for the whole analysis).
+    let uir = sema.uir;
+    let view = uir.match_view(r);
+    let (scrutinee, scrutinee_borrowed) = analyze_scrutinee(sema, fcx, scope, view.scrutinee);
     // E0129's secondary underline when the scrutinee names an enum.
-    let scrutinee_span = sema.uir.span(view.scrutinee);
+    let scrutinee_span = uir.span(view.scrutinee);
     let mut scrutinee_ty = fcx.builder.ty_of(scrutinee);
 
     // E0136: the scrutinee must be a matchable type. An error-typed
@@ -147,7 +178,7 @@ pub(crate) fn analyze_match(
     if !is_matchable(sema, scrutinee_ty) {
         if !sema.pool.is_error(scrutinee_ty) {
             let mut diag = Diag::error(
-                sema.uir.span(view.scrutinee),
+                scrutinee_span,
                 DiagCode::InvalidMatchScrutinee,
                 format!(
                     "cannot match on a value of type '{}' — match works on \
@@ -182,22 +213,22 @@ pub(crate) fn analyze_match(
         check_exhaustiveness(sema, scrutinee_ty, &arms, span, scrutinee_span)
     };
 
-    // Task 7 builds on this analysis; Tasks 5-6 stub the typed inst.
-    let _analysis = MatchAnalysis {
-        scrutinee,
-        scrutinee_ty,
-        arms,
-        exhaustive: exhaustiveness.exhaustive,
-        has_wildcard: exhaustiveness.has_wildcard,
-    };
-
-    if had_error {
-        fcx.builder.unreachable(sema.pool.error_type(), span)
-    } else {
-        // Clean-resolution stub: void until Task 7 joins the arm types
-        // and emits the real TirTag::Match.
-        fcx.builder.unreachable(sema.pool.void(), span)
-    }
+    type_and_emit_match(
+        sema,
+        fcx,
+        scope,
+        &view.arms,
+        MatchAnalysis {
+            had_error,
+            scrutinee,
+            scrutinee_borrowed,
+            scrutinee_ty,
+            arms,
+            exhaustive: exhaustiveness.exhaustive,
+            has_wildcard: exhaustiveness.has_wildcard,
+        },
+        span,
+    )
 }
 
 /// Reconstruct an arm's span from its body (the UIR wire carries no
@@ -210,6 +241,351 @@ fn arm_span(sema: &Sema<'_>, body: &UirArmBodyView<'_>, match_span: Span) -> Spa
             .map(|&w| sema.uir.span(InstRef::from_raw(w)))
             .unwrap_or(match_span),
     }
+}
+
+// ---------- Arm typing + typed TIR emission (Task 7) ----------
+
+/// Analyze the scrutinee expression, detecting whether the scrutinee is
+/// BORROWED — E0133's gate. Two shapes: an explicit `&expr` scrutinee
+/// (`match &o:`, M8.2 — a legal borrow position; the match inspects the
+/// value without consuming it), and a bare read of a parameter declared
+/// in the default borrow mode. The `&` marker lowers away, exactly like
+/// `&` at an `inout` call argument: the TIR operand is the inner value.
+fn analyze_scrutinee(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    scrutinee: InstRef,
+) -> (TirRef, bool) {
+    let inst = sema.uir.inst(scrutinee);
+    if inst.tag == InstTag::Borrow {
+        let inner = match inst.data {
+            InstData::Borrow(inner) => inner,
+            _ => unreachable!("Borrow must carry InstData::Borrow"),
+        };
+        return (analyze_expr(sema, fcx, scope, inner), true);
+    }
+    let borrowed = matches!(inst.data, InstData::Var(name) if scope.lookup_borrowed(name));
+    (analyze_expr(sema, fcx, scope, scrutinee), borrowed)
+}
+
+/// One arm's typed body before it is handed to [`TirBuilder::match_expr`].
+enum TypedArmBody {
+    Expr(TirRef),
+    Stmts(Vec<TirRef>),
+}
+
+/// How one arm participates in the result-type join (see
+/// [`type_and_emit_match`] for the rules).
+enum ArmClass {
+    /// Yields a value of the given type (never `void` / `never` /
+    /// error) — the join-candidate pool.
+    Value(TypeId),
+    /// A void-producing expression arm — participates as `void`.
+    VoidExpr,
+    /// A statement arm that can fall through — the E0135 shape; not a
+    /// join participant.
+    FallingStmt,
+    /// Diverges (`never`) or errored — joins freely.
+    Diverges,
+}
+
+/// One fully typed arm: the emission payload plus its join class.
+struct TypedArm {
+    discriminant: Discriminant,
+    bindings: Vec<MatchBinding>,
+    /// Anon-arm literal guards (`{x=0}` constraints), in written order —
+    /// Task 5's resolution payloads, forwarded to the wire verbatim.
+    /// Empty for wildcard / literal / variant arms.
+    guards: Vec<(u32, LitPattern)>,
+    body: TypedArmBody,
+    /// Arm span (the R11 body re-anchor) — the E0134/E0135 anchor.
+    span: Span,
+    class: ArmClass,
+}
+
+/// Task 7: type every cleanly-resolved arm in its own child `Scope`
+/// seeded with the payload bindings, join the arm types, and emit the
+/// typed `TirTag::Match`. On any error — resolution, E0133-E0135, or
+/// the scrutinee's own diagnostic — the match recovers with the
+/// error-typed `Unreachable` sentinel (§4.5), so no partially-typed
+/// `Match` ever reaches codegen.
+///
+/// Join rule (spec §4.6 "all arms must have same return type"): every
+/// value arm must carry the identical `TypeId` — the first value arm's
+/// type is the candidate, and every later arm whose type differs
+/// (including a void-producing expression arm in a value match) is one
+/// E0134, primary span on the FIRST offending arm body, a note per
+/// other offender. `never` and error-typed arms join freely. A
+/// statement arm that falls through is legal only when NO arm produces
+/// a value (the match is `void`) — against a value candidate it is
+/// E0135 at that arm. The match type is the candidate, `never` when
+/// every arm is `never`/errored, and `void` otherwise.
+///
+/// Emission (clean path): one `FieldAccess` owner token per BY-MOVE
+/// binding (`!pool.is_copy(binding.ty)`), in arm order then binding
+/// order, immediately before the `Match` — the convention documented
+/// on `TirBuilder::match_expr` and recovered by
+/// [`Tir::match_by_move_owner_refs`]. Copy bindings copy out of the
+/// scrutinee and skip the token. Anon-pattern arms encode
+/// `Discriminant::Wildcard` as a coverage placeholder (structural
+/// lowering is M12.5) and carry their literal field constraints as the
+/// per-arm GUARD list, in written order — empty for every other arm;
+/// the two encodings are orthogonal by design.
+fn type_and_emit_match(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    uir_arms: &[UirMatchArmView<'_>],
+    mut analysis: MatchAnalysis,
+    span: Span,
+) -> TirRef {
+    let void = sema.pool.void();
+    let mut arms_out: Vec<TypedArm> = Vec::with_capacity(analysis.arms.len());
+    let mut owner_tokens: Vec<(u32, TypeId)> = Vec::new();
+
+    // The UIR arm bodies (borrowed from the immutable UIR arena, kept
+    // across the `&mut Sema` body analyses below) walk in lockstep with
+    // the resolution results — both derive from the same wire order.
+    debug_assert_eq!(
+        uir_arms.len(),
+        analysis.arms.len(),
+        "resolution and typing walk the same arms"
+    );
+
+    for (arm, uir_arm) in analysis.arms.iter().zip(uir_arms) {
+        // A resolution-broken arm carries its own diagnostic and its
+        // shape is untrustworthy — skip its typing so nothing piles on
+        // (it never reaches the wire: the match is error-typed).
+        if arm.had_error {
+            continue;
+        }
+        // The arm's bindings live in a child scope and die with it:
+        // visible inside the arm, unresolvable after the match, free to
+        // collide with names in sibling arms.
+        let mut child_scope = Scope {
+            parent: Some(scope),
+            bindings: HashMap::new(),
+        };
+        let (owners, binding_error) = seed_arm_bindings(
+            sema,
+            &mut child_scope,
+            &arm.bindings,
+            analysis.scrutinee_borrowed,
+            arm.span,
+        );
+        analysis.had_error |= binding_error;
+        owner_tokens.extend(owners);
+
+        let (body, class) = match uir_arm.body {
+            UirArmBodyView::Expr(body_ref) => {
+                let body_tir = analyze_expr(sema, fcx, &child_scope, body_ref);
+                let ty = fcx.builder.ty_of(body_tir);
+                let class = if sema.pool.is_error(ty) || sema.pool.is_never(ty) {
+                    ArmClass::Diverges
+                } else if ty == void {
+                    ArmClass::VoidExpr
+                } else {
+                    ArmClass::Value(ty)
+                };
+                (TypedArmBody::Expr(body_tir), class)
+            }
+            UirArmBodyView::Stmts(_) => {
+                let stmt_refs: Vec<InstRef> = uir_arm.body.stmts().collect();
+                let tirs = analyze_block(sema, fcx, &child_scope, &stmt_refs);
+                // The arm-termination sense (R13): a statement arm ending
+                // in `return`/`break`/`continue` is `never` at the join;
+                // only a body that can really fall through is the E0135
+                // shape.
+                let terminates = fcx.builder.block_definitely_terminates(&tirs, sema.pool);
+                let class = if terminates {
+                    ArmClass::Diverges
+                } else {
+                    ArmClass::FallingStmt
+                };
+                (TypedArmBody::Stmts(tirs), class)
+            }
+        };
+
+        arms_out.push(TypedArm {
+            discriminant: match arm.discriminant {
+                Some(d) => d,
+                None => Discriminant::Wildcard,
+            },
+            bindings: arm.bindings.clone(),
+            guards: arm.anon_literals.clone(),
+            body,
+            span: arm.span,
+            class,
+        });
+    }
+
+    // ---- Join ----
+    let candidate = arms_out.iter().find_map(|arm| match arm.class {
+        ArmClass::Value(ty) => Some(ty),
+        _ => None,
+    });
+    if let Some(expected) = candidate {
+        let mut offenders: Vec<(Span, TypeId)> = Vec::new();
+        for arm in &arms_out {
+            let bad = match arm.class {
+                ArmClass::Value(ty) if ty != expected => Some(ty),
+                ArmClass::VoidExpr => Some(void),
+                _ => None,
+            };
+            if let Some(ty) = bad {
+                offenders.push((arm.span, ty));
+            }
+        }
+        if !offenders.is_empty() {
+            let (primary, first_ty) = offenders[0];
+            let mut diag = with_struct_shape_notes(
+                Diag::error(
+                    primary,
+                    DiagCode::ArmTypeMismatch,
+                    format!(
+                        "match arm type mismatch — expected '{}', found '{}'",
+                        sema.pool.display(expected),
+                        sema.pool.display(first_ty),
+                    ),
+                ),
+                sema.pool,
+                expected,
+                first_ty,
+            );
+            for (note_span, ty) in &offenders[1..] {
+                diag = diag.with_note(
+                    Some(*note_span),
+                    format!("this arm yields '{}'", sema.pool.display(*ty)),
+                );
+            }
+            sema.sink.emit(diag);
+            analysis.had_error = true;
+        }
+        for arm in &arms_out {
+            if matches!(arm.class, ArmClass::FallingStmt) {
+                sema.sink.emit(
+                    Diag::error(
+                        arm.span,
+                        DiagCode::ArmNoValue,
+                        format!(
+                            "match arm falls through without producing a value — \
+                             this match must yield '{}'",
+                            sema.pool.display(expected),
+                        ),
+                    )
+                    .with_help("end the arm with a value or `return`"),
+                );
+                analysis.had_error = true;
+            }
+        }
+    }
+
+    let match_ty = match candidate {
+        Some(expected) => expected,
+        None => {
+            let all_diverge = !arms_out.is_empty()
+                && arms_out
+                    .iter()
+                    .all(|arm| matches!(arm.class, ArmClass::Diverges));
+            if all_diverge { sema.pool.never() } else { void }
+        }
+    };
+
+    if analysis.had_error {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    // ---- Emission: owner tokens, then the Match itself ----
+    for (field_index, ty) in &owner_tokens {
+        fcx.builder
+            .field_access(analysis.scrutinee, *field_index, *ty, span);
+    }
+    let typed_arms: Vec<TypedMatchArm<'_>> = arms_out
+        .iter()
+        .map(|arm| TypedMatchArm {
+            discriminant: arm.discriminant,
+            bindings: &arm.bindings,
+            guards: &arm.guards,
+            body: match &arm.body {
+                TypedArmBody::Expr(body) => TypedMatchBody::Expr(*body),
+                TypedArmBody::Stmts(stmts) => TypedMatchBody::Stmts(stmts),
+            },
+        })
+        .collect();
+    fcx.builder
+        .match_expr(analysis.scrutinee, match_ty, &typed_arms, span)
+}
+
+/// Insert one arm's payload bindings into its child scope, mirroring
+/// `analyze_destructure`'s insertion checks — the same-name collision
+/// (DuplicateDeclaration) and reserved-name rejection — plus the E0133
+/// gate: a non-`Copy` bind out of a BORROWED scrutinee would move out of
+/// the borrow, so it is refused and bound error-typed instead (the arm
+/// body still checks against the error type). Returns the by-move owner
+/// tokens `(field_index, ty)` in binding order — Copy binds copy out of
+/// the scrutinee and need no token.
+fn seed_arm_bindings(
+    sema: &mut Sema<'_>,
+    child_scope: &mut Scope,
+    bindings: &[MatchBinding],
+    borrowed: bool,
+    span: Span,
+) -> (Vec<(u32, TypeId)>, bool) {
+    let mut owners = Vec::new();
+    let mut had_error = false;
+    for binding in bindings {
+        let name = binding.name;
+        if child_scope.contains_in_current(name) {
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::DuplicateDeclaration,
+                format!(
+                    "'{}' is already declared in this scope",
+                    sema.pool.str(name),
+                ),
+            ));
+            child_scope.insert_binding(name, sema.pool.error_type(), false, false);
+            had_error = true;
+            continue;
+        }
+        if check_reserved_name(
+            sema,
+            name,
+            span,
+            "is a reserved builtin and cannot be redefined",
+        ) {
+            child_scope.insert_binding(name, sema.pool.error_type(), false, false);
+            had_error = true;
+            continue;
+        }
+        if borrowed && !sema.pool.is_copy(binding.ty) {
+            sema.sink.emit(
+                Diag::error(
+                    span,
+                    DiagCode::MoveOutOfBorrowedScrutinee,
+                    format!(
+                        "cannot move out of a borrowed match scrutinee — \
+                         binding '{}' has non-Copy type '{}'",
+                        sema.pool.str(name),
+                        sema.pool.display(binding.ty),
+                    ),
+                )
+                .with_help(
+                    "match on an owned value instead, or bind '_' and read \
+                     the field through a helper",
+                ),
+            );
+            child_scope.insert_binding(name, sema.pool.error_type(), false, false);
+            had_error = true;
+            continue;
+        }
+        child_scope.insert_binding(name, binding.ty, false, false);
+        if !sema.pool.is_copy(binding.ty) {
+            owners.push((binding.field_index, binding.ty));
+        }
+    }
+    (owners, had_error)
 }
 
 // ---------- Exhaustiveness + redundancy (Task 6) ----------

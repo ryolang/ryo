@@ -35,7 +35,14 @@
 //!   [b+1..]  per binding, 3 words: field_index u32,
 //!                                  name u32 (StringId.raw()),
 //!                                  ty u32 (TypeId.raw())
-//!   body (immediately after the bindings):
+//!   [g]      guard_count: u32 — anon-arm literal constraints
+//!            (`{x=0}`, `(0, _)`), empty for every other arm
+//!   [g+1..]  per guard, variable length: field_index u32, lit_kind u32
+//!            (0 = int, 1 = str, 2 = bool), then the literal payload:
+//!            int: lo u32, hi u32 (the i64 split, discriminant-style)
+//!            str: string_id u32 (StringId.raw())
+//!            bool: 0 | 1
+//!   body (immediately after the guards):
 //!   [x]      body_kind: u32 (0 = expr, 1 = stmts)
 //!   expr:  [x+1]     expr: TirRef.raw()
 //!   stmts: [x+1]     stmt_count: u32, [x+2..x+2+n] refs:
@@ -54,6 +61,7 @@
 //! [`MatchBodyView::Stmts`] is the stmt-refs slice itself.
 
 use super::{ExtraRange, Span, Tir, TirBuilder, TirData, TirRef, TirTag};
+use crate::ast::LitPattern;
 use crate::types::{InternPool, StringId, TypeId};
 
 /// Layout constants for the [`TirTag::Match`] wire; see the module
@@ -83,7 +91,24 @@ pub mod match_extra {
     /// Words per binding: `field_index`, `name`, `ty`.
     pub const BINDING_LEN: usize = 3;
 
-    /// Body discriminants (first body word, after the bindings).
+    /// Guard list (anon-arm literal constraints), relative to the
+    /// first guard-list word — which sits immediately after the
+    /// bindings and before the body.
+    pub const GUARD_COUNT: usize = 0;
+    /// Per-guard words, relative to the guard's first word.
+    pub const GUARD_FIELD: usize = 0;
+    pub const GUARD_KIND: usize = 1;
+    /// Total words per guard (header + payload).
+    pub const GUARD_INT_WORDS: usize = 4;
+    pub const GUARD_STR_WORDS: usize = 3;
+    pub const GUARD_BOOL_WORDS: usize = 3;
+
+    /// `GUARD_KIND` literal kinds.
+    pub const GUARD_INT: u32 = 0;
+    pub const GUARD_STR: u32 = 1;
+    pub const GUARD_BOOL: u32 = 2;
+
+    /// Body discriminants (first body word, after the guards).
     pub const BODY_EXPR: u32 = 0;
     pub const BODY_STMTS: u32 = 1;
 }
@@ -140,13 +165,22 @@ pub enum TypedMatchBody<'a> {
 }
 
 /// Builder input for one typed match arm (M12): resolved
-/// `discriminant`, payload `bindings`, `body`. Sema lowers each
-/// sema-resolved arm to this; [`TirBuilder::match_expr`] copies every
-/// list into `extra`.
+/// `discriminant`, payload `bindings`, anon-shape literal `guards`, and
+/// `body`. Sema lowers each sema-resolved arm to this;
+/// [`TirBuilder::match_expr`] copies every list into `extra`.
+///
+/// `guards` is the anon-pattern field-equality constraint list
+/// (`{x=0}`, `(0, _)`): `(canonical field index, literal)` in written
+/// order. Empty for wildcard / literal / variant arms — those encode
+/// their matching entirely in the `discriminant`. Kept orthogonal to
+/// the `Discriminant::Wildcard` anon placeholder so coverage semantics
+/// and guard semantics evolve independently (M12.5 lowers guards to
+/// field-equality tests in codegen).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypedMatchArm<'a> {
     pub discriminant: Discriminant,
     pub bindings: &'a [MatchBinding],
+    pub guards: &'a [(u32, LitPattern)],
     pub body: TypedMatchBody<'a>,
 }
 
@@ -216,6 +250,11 @@ pub struct MatchArmView<'a> {
     /// `3 * binding_count` binding words (`field_index, name, ty`
     /// triples).
     bindings: &'a [u32],
+    /// The guard words after the consumed `guard_count` word —
+    /// variable-length `(field_index, kind, payload…)` records, walked
+    /// by [`guards`][MatchArmView::guards].
+    guards: &'a [u32],
+    guard_count: usize,
     pub body: MatchBodyView<'a>,
 }
 
@@ -237,6 +276,21 @@ impl<'a> MatchArmView<'a> {
                 .0
                 .iter(),
         }
+    }
+
+    /// Number of anon-pattern literal guards (`{x=0}` field
+    /// constraints). Zero for wildcard / literal / variant arms.
+    pub fn guard_count(&self) -> usize {
+        self.guard_count
+    }
+
+    /// Guards in written order — `(canonical field index, literal)`
+    /// pairs, decoded lazily with no allocation (the guard words are
+    /// variable-length, so the count rides the view rather than the
+    /// slice). The iterator borrows the wire with lifetime `'a`, the
+    /// [`bindings`][MatchArmView::bindings] discipline.
+    pub fn guards(&self) -> MatchGuardIter<'a> {
+        MatchGuardIter { wire: self.guards }
     }
 }
 
@@ -265,6 +319,47 @@ impl Iterator for MatchBindingsIter<'_> {
 }
 
 impl ExactSizeIterator for MatchBindingsIter<'_> {}
+
+/// Iterator over one arm's decoded anon-pattern literal guards (M12);
+/// see [`MatchArmView::guards`]. Wraps the borrowed guard words and
+/// materializes each `(field_index, LitPattern)` pair on demand —
+/// variable-length records (int payloads are two words), so iteration
+/// walks widths rather than chunking.
+pub struct MatchGuardIter<'a> {
+    wire: &'a [u32],
+}
+
+impl Iterator for MatchGuardIter<'_> {
+    type Item = (u32, LitPattern);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.wire.is_empty() {
+            return None;
+        }
+        let field_index = self.wire[match_extra::GUARD_FIELD];
+        let (lit, used) = match self.wire[match_extra::GUARD_KIND] {
+            match_extra::GUARD_INT => {
+                let lo = self.wire[2] as u64;
+                let hi = self.wire[3] as u64;
+                (
+                    LitPattern::Int((hi << 32 | lo) as i64),
+                    match_extra::GUARD_INT_WORDS,
+                )
+            }
+            match_extra::GUARD_STR => (
+                LitPattern::Str(StringId::from_raw(self.wire[2])),
+                match_extra::GUARD_STR_WORDS,
+            ),
+            match_extra::GUARD_BOOL => (
+                LitPattern::Bool(self.wire[2] != 0),
+                match_extra::GUARD_BOOL_WORDS,
+            ),
+            other => unreachable!("unknown match guard literal kind {other}"),
+        };
+        self.wire = &self.wire[used..];
+        Some((field_index, lit))
+    }
+}
 
 /// Decoded view of a typed match arm's body (M12). `Stmts` borrows the
 /// wire slice of stmt refs directly: the decoder consumed the count
@@ -347,6 +442,26 @@ impl TirBuilder {
                 self.extra.push(b.field_index);
                 self.extra.push(b.name.raw());
                 self.extra.push(b.ty.raw());
+            }
+            self.extra.push(Self::len_u32(arm.guards.len()));
+            for &(field_index, lit) in arm.guards {
+                self.extra.push(field_index);
+                match lit {
+                    LitPattern::Int(v) => {
+                        self.extra.push(match_extra::GUARD_INT);
+                        let bits = v as u64;
+                        self.extra.push(bits as u32);
+                        self.extra.push((bits >> 32) as u32);
+                    }
+                    LitPattern::Str(s) => {
+                        self.extra.push(match_extra::GUARD_STR);
+                        self.extra.push(s.raw());
+                    }
+                    LitPattern::Bool(b) => {
+                        self.extra.push(match_extra::GUARD_BOOL);
+                        self.extra.push(u32::from(b));
+                    }
+                }
             }
             match arm.body {
                 TypedMatchBody::Expr(r) => {
@@ -495,6 +610,20 @@ fn decode_match_arm(slice: &[u32]) -> MatchArmView<'_> {
     let bindings_end = bindings_start + n_bindings * match_extra::BINDING_LEN;
     let bindings = &slice[bindings_start..bindings_end];
     pos = bindings_end;
+    let guard_count = slice[pos + match_extra::GUARD_COUNT] as usize;
+    let guards_start = pos + 1;
+    let mut guards_end = guards_start;
+    for _ in 0..guard_count {
+        // Guards are variable-width — walk the widths to find the body.
+        guards_end += match slice[guards_end + match_extra::GUARD_KIND] {
+            match_extra::GUARD_INT => match_extra::GUARD_INT_WORDS,
+            match_extra::GUARD_STR => match_extra::GUARD_STR_WORDS,
+            match_extra::GUARD_BOOL => match_extra::GUARD_BOOL_WORDS,
+            other => unreachable!("unknown match guard literal kind {other}"),
+        };
+    }
+    let guards = &slice[guards_start..guards_end];
+    pos = guards_end;
     let body = match slice[pos] {
         match_extra::BODY_EXPR => {
             let body = MatchBodyView::Expr(TirRef::from_raw(slice[pos + 1]));
@@ -513,6 +642,8 @@ fn decode_match_arm(slice: &[u32]) -> MatchArmView<'_> {
     MatchArmView {
         discriminant,
         bindings,
+        guards,
+        guard_count,
         body,
     }
 }
@@ -542,6 +673,7 @@ mod tests {
             &[TypedMatchArm {
                 discriminant: Discriminant::Wildcard,
                 bindings: &[],
+                guards: &[],
                 body: TypedMatchBody::Expr(body),
             }],
             sp(),
@@ -569,7 +701,8 @@ mod tests {
         assert_eq!(arms[0], arm);
 
         // Wire header is pinned: [scrutinee, arm_count, arm_len,
-        // disc_kind, binding_count, body_kind, body_ref].
+        // disc_kind, binding_count, guard_count, body_kind, body_ref] —
+        // a binding-less, guard-less wildcard arm is 5 payload words.
         let inst = tir.inst(m);
         let TirData::Extra(rng) = inst.data else {
             panic!("expected TirData::Extra, got {:?}", inst.data);
@@ -577,7 +710,7 @@ mod tests {
         let wire = &tir.extra[rng.as_range()];
         assert_eq!(wire[match_extra::SCRUTINEE], scrut.raw());
         assert_eq!(wire[match_extra::ARM_COUNT], 1);
-        assert_eq!(wire[match_extra::ARMS_START + match_extra::ARM_LEN], 4);
+        assert_eq!(wire[match_extra::ARMS_START + match_extra::ARM_LEN], 5);
         assert_eq!(
             wire[match_extra::ARMS_START + match_extra::DISC_KIND],
             match_extra::DISC_WILDCARD
@@ -616,6 +749,7 @@ mod tests {
             &[TypedMatchArm {
                 discriminant: Discriminant::Variant(1),
                 bindings: &bindings,
+                guards: &[],
                 body: TypedMatchBody::Stmts(&[s1, s2]),
             }],
             sp(),
@@ -681,16 +815,19 @@ mod tests {
                 TypedMatchArm {
                     discriminant: Discriminant::Int(-7),
                     bindings: &[],
+                    guards: &[],
                     body: TypedMatchBody::Expr(e1),
                 },
                 TypedMatchArm {
                     discriminant: Discriminant::Str(quit),
                     bindings: &[],
+                    guards: &[],
                     body: TypedMatchBody::Expr(e2),
                 },
                 TypedMatchArm {
                     discriminant: Discriminant::Bool(true),
                     bindings: &[],
+                    guards: &[],
                     body: TypedMatchBody::Expr(e3),
                 },
             ],
@@ -719,6 +856,81 @@ mod tests {
     }
 
     #[test]
+    fn anon_arm_guards_round_trip_variable_width_literals() {
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let quit = pool.intern_str("quit");
+        let main = pool.intern_str("main");
+        let px = pool.intern_str("px");
+
+        let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+        let scrut = b.var(main, int_ty, sp());
+        let body = b.int_const(1, int_ty, sp());
+        let fallback = b.int_const(0, int_ty, sp());
+        let guards = [
+            (0, LitPattern::Int(-7)),
+            (1, LitPattern::Str(quit)),
+            (2, LitPattern::Bool(true)),
+        ];
+        let anon_bindings = [MatchBinding {
+            field_index: 3,
+            name: px,
+            ty: int_ty,
+        }];
+        let m = b.match_expr(
+            scrut,
+            int_ty,
+            &[
+                TypedMatchArm {
+                    discriminant: Discriminant::Wildcard,
+                    bindings: &anon_bindings,
+                    guards: &guards,
+                    body: TypedMatchBody::Expr(body),
+                },
+                TypedMatchArm {
+                    discriminant: Discriminant::Wildcard,
+                    bindings: &[],
+                    guards: &[],
+                    body: TypedMatchBody::Expr(fallback),
+                },
+            ],
+            sp(),
+        );
+        let tir = b.finish(&[m]);
+
+        let view = tir.match_view(m);
+        let arm0 = view.arm(0);
+        assert_eq!(arm0.guard_count(), 3);
+        assert_eq!(
+            arm0.guards().collect::<Vec<_>>(),
+            [
+                (0, LitPattern::Int(-7)),
+                (1, LitPattern::Str(quit)),
+                (2, LitPattern::Bool(true)),
+            ],
+            "guards decode in written order, negative ints pre-folded"
+        );
+        assert_eq!(
+            arm0.bindings().collect::<Vec<_>>(),
+            [MatchBinding {
+                field_index: 3,
+                name: px,
+                ty: int_ty
+            }],
+            "bindings and guards coexist on one arm"
+        );
+        // The non-anon arm decodes an empty guard list.
+        let arm1 = view.arm(1);
+        assert_eq!(arm1.guard_count(), 0);
+        assert!(arm1.guards().next().is_none());
+        // Guards carry no operand edges — walk_operands sees the
+        // scrutinee plus the two expr bodies only.
+        let mut edges = Vec::new();
+        tir.walk_operands(m, &mut |_parent, child, kind| edges.push((child, kind)));
+        assert_eq!(edges.len(), 3);
+    }
+
+    #[test]
     fn two_match_insts_decode_independently() {
         let mut pool = InternPool::new();
         let int_ty = pool.int();
@@ -738,11 +950,13 @@ mod tests {
                 TypedMatchArm {
                     discriminant: Discriminant::Wildcard,
                     bindings: &[],
+                    guards: &[],
                     body: TypedMatchBody::Expr(e1),
                 },
                 TypedMatchArm {
                     discriminant: Discriminant::Int(-1),
                     bindings: &[],
+                    guards: &[],
                     body: TypedMatchBody::Expr(e2),
                 },
             ],
@@ -765,11 +979,13 @@ mod tests {
                 TypedMatchArm {
                     discriminant: Discriminant::Variant(0),
                     bindings: &[],
+                    guards: &[],
                     body: TypedMatchBody::Stmts(&[st]),
                 },
                 TypedMatchArm {
                     discriminant: Discriminant::Variant(1),
                     bindings: &binding,
+                    guards: &[],
                     body: TypedMatchBody::Expr(e3),
                 },
             ],
@@ -854,11 +1070,13 @@ mod tests {
                 TypedMatchArm {
                     discriminant: Discriminant::Variant(0),
                     bindings: &arm0_bindings,
+                    guards: &[],
                     body: TypedMatchBody::Expr(body1),
                 },
                 TypedMatchArm {
                     discriminant: Discriminant::Variant(1),
                     bindings: &arm1_bindings,
+                    guards: &[],
                     body: TypedMatchBody::Expr(body2),
                 },
             ],

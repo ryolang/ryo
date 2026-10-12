@@ -50,9 +50,9 @@ pub(crate) fn analyze_stmt(
                 span,
                 "is a reserved builtin and cannot be redefined",
             ) {
-                scope.insert_binding(view.name, sema.pool.error_type(), view.mutable);
+                scope.insert_binding(view.name, sema.pool.error_type(), view.mutable, false);
             } else {
-                scope.insert_binding(view.name, resolved, view.mutable);
+                scope.insert_binding(view.name, resolved, view.mutable, false);
             }
             fcx.builder
                 .var_decl(view.name, view.mutable, resolved, init_tir, span)
@@ -211,9 +211,9 @@ pub(crate) fn analyze_stmt(
                         span,
                         "is a reserved builtin and cannot be redefined",
                     ) {
-                        scope.insert_binding(view.name, sema.pool.error_type(), false);
+                        scope.insert_binding(view.name, sema.pool.error_type(), false, false);
                     } else {
-                        scope.insert_binding(view.name, resolved_ty, false);
+                        scope.insert_binding(view.name, resolved_ty, false, false);
                     }
                     fcx.builder
                         .var_decl(view.name, false, resolved_ty, value_tir, span)
@@ -281,9 +281,9 @@ pub(crate) fn analyze_stmt(
             let error_ty = sema.pool.error_type();
             let body_tirs = analyze_block_seeded(sema, fcx, scope, &view.body, |child_scope| {
                 if is_reserved {
-                    child_scope.insert_binding(var_name, error_ty, false);
+                    child_scope.insert_binding(var_name, error_ty, false, false);
                 } else {
-                    child_scope.insert_binding(var_name, int_ty, false);
+                    child_scope.insert_binding(var_name, int_ty, false, false);
                 }
             });
             fcx.loop_depth -= 1;
@@ -672,7 +672,7 @@ fn analyze_destructure(
             if fcx_temp_name(sema, *name) {
                 fcx.destructure_temps.insert(*name, sema.pool.error_type());
             } else if !scope.contains_in_current(*name) {
-                scope.insert_binding(*name, sema.pool.error_type(), false);
+                scope.insert_binding(*name, sema.pool.error_type(), false, false);
             }
         }
         fail(sema, fcx)
@@ -943,7 +943,7 @@ fn analyze_destructure(
                     sema.pool.str(name),
                 )),
             );
-            scope.insert_binding(name, sema.pool.error_type(), false);
+            scope.insert_binding(name, sema.pool.error_type(), false, false);
             had_error = true;
             continue;
         }
@@ -955,14 +955,14 @@ fn analyze_destructure(
                 "is a reserved builtin and cannot be redefined",
             )
         {
-            scope.insert_binding(name, sema.pool.error_type(), false);
+            scope.insert_binding(name, sema.pool.error_type(), false, false);
             had_error = true;
             continue;
         }
         if is_temp {
             fcx.destructure_temps.insert(name, ty);
         } else {
-            scope.insert_binding(name, ty, false);
+            scope.insert_binding(name, ty, false, false);
         }
         owners.push((bind, ty, field_index));
     }
