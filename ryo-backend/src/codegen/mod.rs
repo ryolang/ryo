@@ -43,6 +43,7 @@ mod enums;
 mod expr;
 mod frees;
 mod jit;
+mod match_;
 mod ranges;
 mod recursion;
 mod str_ops;
@@ -418,7 +419,10 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     ///       which dominates every downstream use;
     ///   (c) `IfStmt` is statement-level — no values flow out of
     ///       branches, so no branch-local value is ever read after the
-    ///       merge.
+    ///       merge. `TirTag::Match` (M12) is expression-level control
+    ///       flow, but its results flow out through a merge-block param
+    ///       exactly like (b), and arm-body expressions are scoped to
+    ///       their arm block (never read across the merge).
     /// If a future TIR producer introduces expression-level control
     /// flow (ternary if) or shared sub-expressions across blocks, this
     /// memo MUST be re-scoped per-block or reads will hit Cranelift

@@ -1153,29 +1153,36 @@ impl<M: Module> Codegen<M> {
                 Some(name) => {
                     let token = owners[owner_idx];
                     owner_idx += 1;
-                    Self::bind_destructured_field(builder, ctx, name, field_addr, sf.ty, token)?;
+                    Self::bind_field_move(builder, ctx, name, field_addr, sf.ty, Some(token))?;
                 }
             }
         }
         Ok(Terminator::None)
     }
 
-    /// Register one destructured-field binding: copy the field's value
-    /// out of the rhs slot into storage the binding owns, in the same
-    /// shape `VarDecl` produces (fat SSA triples for `str`/`bytes`, a
-    /// slot address for structs, a scalar `Variable` for Copy fields) so
-    /// every later read / scheduled free finds the binding where it
-    /// expects it. The field's owner token (`token`) caches the same
+    /// Register one field binding moved (or copied) out of an aggregate
+    /// slot: the field's value leaves `field_addr` into storage the
+    /// binding owns, in the same shape `VarDecl` produces (fat SSA
+    /// triples for `str`/`bytes`, a slot address for structs and enums, a
+    /// scalar `Variable` for Copy fields) so every later read / scheduled
+    /// free finds the binding where it expects it. Shared by M10
+    /// destructuring (`emit_destructure`) and M12 match arms
+    /// (`codegen/match_.rs`) — the binding prologue is identical, only
+    /// the caller's slot/offset source differs.
+    ///
+    /// The field's owner token (`token`), when present, caches the same
     /// value: the token instruction is never evaluated, and the
-    /// end-of-statement free sweep gates on a cached repr for the
-    /// Free's target before firing a sub-expression-anchored Free.
-    fn bind_destructured_field(
+    /// end-of-statement free sweep gates on a cached repr for the Free's
+    /// target before firing a sub-expression-anchored Free. Match Copy
+    /// bindings pass `None` — sema's owner-token convention emits a
+    /// token only per by-move binding, so nothing is cached for them.
+    pub(crate) fn bind_field_move(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         name: StringId,
         field_addr: Value,
         field_ty: TypeId,
-        token: TirRef,
+        token: Option<TirRef>,
     ) -> Result<(), String> {
         match ctx.pool.kind(field_ty) {
             TypeKind::Str | TypeKind::Bytes => {
@@ -1206,15 +1213,17 @@ impl<M: Module> Codegen<M> {
                         home_inline: false,
                     }),
                 );
-                Self::cache_repr(
-                    ctx,
-                    token,
-                    if matches!(ctx.pool.kind(field_ty), TypeKind::Bytes) {
-                        ValueRepr::Bytes { ptr, len, cap }
-                    } else {
-                        ValueRepr::Str { ptr, len, cap }
-                    },
-                );
+                if let Some(token) = token {
+                    Self::cache_repr(
+                        ctx,
+                        token,
+                        if matches!(ctx.pool.kind(field_ty), TypeKind::Bytes) {
+                            ValueRepr::Bytes { ptr, len, cap }
+                        } else {
+                            ValueRepr::Str { ptr, len, cap }
+                        },
+                    );
+                }
                 Ok(())
             }
             TypeKind::View(_) => {
@@ -1232,7 +1241,9 @@ impl<M: Module> Codegen<M> {
                     name,
                     Some(var),
                 );
-                Self::cache_repr(ctx, token, ValueRepr::Struct { addr: dst });
+                if let Some(token) = token {
+                    Self::cache_repr(ctx, token, ValueRepr::Struct { addr: dst });
+                }
                 Ok(())
             }
             TypeKind::Enum => {
@@ -1247,7 +1258,9 @@ impl<M: Module> Codegen<M> {
                     name,
                     Some(var),
                 );
-                Self::cache_repr(ctx, token, ValueRepr::Enum { addr: dst });
+                if let Some(token) = token {
+                    Self::cache_repr(ctx, token, ValueRepr::Enum { addr: dst });
+                }
                 Ok(())
             }
             _ => {
@@ -1261,7 +1274,9 @@ impl<M: Module> Codegen<M> {
                 // stale fact from the shadowed binding (mirrors VarDecl).
                 Self::write_slot(&mut ctx.range_facts, &mut ctx.range_facts_undo, name, None);
                 Self::write_slot(&mut ctx.locals, &mut ctx.locals_undo, name, Some(var));
-                Self::cache_repr(ctx, token, ValueRepr::Scalar(val));
+                if let Some(token) = token {
+                    Self::cache_repr(ctx, token, ValueRepr::Scalar(val));
+                }
                 Ok(())
             }
         }

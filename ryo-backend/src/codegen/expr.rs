@@ -379,6 +379,9 @@ impl<M: Module> Codegen<M> {
                 );
             }
             TirTag::FieldAccess => Self::eval_field_access_scalar(builder, ctx, r)?,
+            // M12 match expression — enum tag dispatch / guard chains,
+            // scalar-or-void merge; lowered in codegen/match_.rs.
+            TirTag::Match => Self::eval_inst_match(builder, ctx, r)?,
             other => {
                 return Err(format!(
                     "eval_inst: instruction at %{} is not a value (tag={:?})",

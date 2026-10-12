@@ -34,7 +34,7 @@ pub(crate) fn is_enum_type(ty: TypeId, pool: &InternPool) -> bool {
 /// index, so an out-of-range tag is a compiler bug, never a runtime
 /// path. Distinct from user(1) (the post-panic continuation trap) so
 /// the two unreachable-by-construction sites stay distinguishable.
-fn invalid_tag_trap(builder: &mut FunctionBuilder) {
+pub(crate) fn invalid_tag_trap(builder: &mut FunctionBuilder) {
     builder
         .ins()
         .trap(TrapCode::user(2).expect("user trap code 2 is within Cranelift's encodable range"));
@@ -145,14 +145,15 @@ impl<M: Module> Codegen<M> {
     }
 
     /// Tag-dispatch skeleton shared by `emit_enum_copy`,
-    /// `emit_enum_drop`, `emit_enum_eq`, and `eval_enum_debug_repr`:
-    /// one case block per variant plus an `otherwise` block that traps
-    /// (the discriminant is always a valid variant index — a
-    /// compiler-invariant violation, never a runtime path). Emits the
-    /// `Switch` in the current block (terminating it) and returns the
-    /// case blocks in variant declaration order; the caller fills each
-    /// arm and jumps to its own merge block.
-    fn emit_tag_dispatch(
+    /// `emit_enum_drop`, `emit_enum_eq`, `eval_enum_debug_repr`, and
+    /// M12 match lowering (`codegen/match_.rs`): one case block per
+    /// variant plus an `otherwise` block that traps (the discriminant is
+    /// always a valid variant index — a compiler-invariant violation,
+    /// never a runtime path; match routes its wildcard arm here
+    /// instead). Emits the `Switch` in the current block (terminating
+    /// it) and returns the case blocks in variant declaration order; the
+    /// caller fills each arm and jumps to its own merge block.
+    pub(crate) fn emit_tag_dispatch(
         builder: &mut FunctionBuilder,
         case_count: usize,
         tag: Value,
