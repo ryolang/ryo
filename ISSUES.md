@@ -707,6 +707,19 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-209 — parser/tests.rs sits at exactly the 2000-line CI cap — zero headroom
+
+**Severity:** Correctness / Hygiene
+**Area:** frontend-parser
+
+**Files:** ryo-frontend/src/parser/tests.rs, scripts/check_file_length.sh
+
+**Summary:** Discovered during M12 (Task 1 review): ryo-frontend/src/parser/tests.rs is at exactly 2000 lines, which passes scripts/check_file_length.sh (fails only on OVER 2000) with zero headroom. The next test addition anywhere in the file trips the CI gate for an unrelated change.
+
+**Resolution:** Split parser/tests.rs into thematic submodules following the enum_tests.rs / match_tests.rs precedent (e.g. statements.rs, expressions.rs), or raise the cap deliberately. Not M12 scope; schedule with the next parser-touching milestone (I-208 follow-up window).
+
+---
+
 ### I-210 — Ownership pass does not consume match arm-body results — aggregate value arms alias the result slot
 
 **Severity:** Correctness / Hygiene
