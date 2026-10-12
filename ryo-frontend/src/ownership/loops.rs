@@ -1,8 +1,8 @@
 //! Loop/branch ownership analysis — split from `mod.rs`.
 
 use super::{
-    BranchState, Owner, OwnerState, Ownership, analyze_stmt, merge_non_monotone, owner_sort_key,
-    remove_loop_deferred_views, states_differ_snapshot, visit_expr,
+    BranchState, Owner, OwnerState, Ownership, analyze_stmt, match_arm_bodies, merge_non_monotone,
+    owner_sort_key, remove_loop_deferred_views, states_differ_snapshot, visit_expr,
 };
 use ryo_core::diag::DiagSink;
 use ryo_core::ownership::{FreePoint, FunctionSidecar};
@@ -57,6 +57,15 @@ pub(crate) fn outermost_loop_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                     stack.pop();
                     if found.is_some() {
                         return found;
+                    }
+                }
+                // M12 match: transparent like an if — arms do not reset
+                // the loop stack.
+                TirTag::Match => {
+                    for body in match_arm_bodies(tir, r) {
+                        if let Some(found) = walk(tir, &body, target, stack) {
+                            return Some(found);
+                        }
                     }
                 }
                 _ => {}
@@ -119,6 +128,11 @@ pub(crate) fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> b
                 TirTag::ForRange => {
                     walk(tir, &tir.for_range_view(r).body, name, stop, found, stopped);
                 }
+                TirTag::Match => {
+                    for body in match_arm_bodies(tir, r) {
+                        walk(tir, &body, name, stop, found, stopped);
+                    }
+                }
                 _ => {}
             }
         }
@@ -156,6 +170,13 @@ pub(crate) fn body_may_return(tir: &Tir, stmts: &[TirRef]) -> bool {
                     && body_may_return(tir, &body)
                 {
                     return true;
+                }
+            }
+            TirTag::Match => {
+                for body in match_arm_bodies(tir, r) {
+                    if body_may_return(tir, &body) {
+                        return true;
+                    }
                 }
             }
             _ => {}
@@ -198,6 +219,17 @@ pub(crate) fn body_must_terminate(tir: &Tir, stmts: &[TirRef]) -> bool {
         // Loops may run zero iterations and fall through naturally, so
         // a loop last-statement never must-terminates.
         TirTag::WhileLoop | TirTag::ForRange => false,
+        // M12 match: exhaustive by construction (E0129), so the match
+        // must-terminates exactly when every arm does. An expression
+        // arm yields a value — it always falls through (a `never`-typed
+        // arm body is not distinguished here, matching the if arms).
+        TirTag::Match => {
+            let view = tir.match_view(last);
+            view.arms().all(|arm| {
+                let stmts: Vec<TirRef> = arm.body.stmts().collect();
+                body_must_terminate(tir, &stmts)
+            })
+        }
         _ => {
             // `ExprStmt`-wrapped if (sema's `assert` desugaring).
             if let TirData::UnOp(o) = tir.inst(last).data
@@ -233,6 +265,15 @@ pub(crate) fn stmt_must_return(tir: &Tir, stmt: TirRef) -> bool {
                     .else_stmts
                     .as_ref()
                     .is_some_and(|es| body_must_return_only(tir, es))
+        }
+        // M12 match: all arms must return (expression arms collect no
+        // statement refs, so `body_must_return_only` is false for them).
+        TirTag::Match => {
+            let view = tir.match_view(stmt);
+            view.arms().all(|arm| {
+                let stmts: Vec<TirRef> = arm.body.stmts().collect();
+                body_must_return_only(tir, &stmts)
+            })
         }
         // `ExprStmt`-wrapped if (sema's `assert` desugaring).
         _ => {
@@ -364,6 +405,13 @@ pub(crate) fn branch_may_not_return(tir: &Tir, branch_stmt: TirRef) -> bool {
             Some(body) => !body_may_return(tir, &body),
             None => false,
         },
+        TirTag::Match => {
+            let view = tir.match_view(branch_stmt);
+            view.arms().all(|arm| {
+                let stmts: Vec<TirRef> = arm.body.stmts().collect();
+                !body_may_return(tir, &stmts)
+            })
+        }
         _ => false,
     }
 }
@@ -565,6 +613,22 @@ pub(crate) fn ancestor_branches_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
                         return found;
                     }
                 }
+                // M12 match: a Free anchored after the match never fires
+                // on a return path exiting through an arm — the match is
+                // an ancestor branch exactly like the if.
+                TirTag::Match => {
+                    stack.push(r);
+                    let mut found = None;
+                    for body in match_arm_bodies(tir, r) {
+                        if found.is_none() {
+                            found = walk(tir, &body, target, stack);
+                        }
+                    }
+                    stack.pop();
+                    if found.is_some() {
+                        return found;
+                    }
+                }
                 _ => return Some(stack.clone()),
             }
         }
@@ -613,6 +677,13 @@ pub(crate) fn owner_binding_name(tir: &Tir, owner: TirRef) -> Option<StringId> {
                         && let Some(found) = walk(tir, &body, owner)
                     {
                         return Some(found);
+                    }
+                }
+                TirTag::Match => {
+                    for body in match_arm_bodies(tir, r) {
+                        if let Some(found) = walk(tir, &body, owner) {
+                            return Some(found);
+                        }
                     }
                 }
                 _ => {}
@@ -1014,6 +1085,11 @@ pub(crate) fn collect_assign_writes(
             TirTag::ForRange => {
                 collect_assign_writes(tir, &tir.for_range_view(r).body, out);
             }
+            TirTag::Match => {
+                for body in match_arm_bodies(tir, r) {
+                    collect_assign_writes(tir, &body, out);
+                }
+            }
             _ => {}
         }
     }
@@ -1053,6 +1129,11 @@ pub(crate) fn collect_loop_carried_owners(tir: &Tir) -> HashSet<TirRef> {
                     }
                     if let Some(else_stmts) = &view.else_stmts {
                         walk(tir, else_stmts, out);
+                    }
+                }
+                TirTag::Match => {
+                    for body in match_arm_bodies(tir, r) {
+                        walk(tir, &body, out);
                     }
                 }
                 _ => {}
@@ -1146,6 +1227,11 @@ pub(crate) fn schedule_loop_exit_frees_in(
                 }
                 if let Some(else_stmts) = &view.else_stmts {
                     schedule_loop_exit_frees_in(tir, own, sidecar, else_stmts, enclosing);
+                }
+            }
+            TirTag::Match => {
+                for body in match_arm_bodies(tir, r) {
+                    schedule_loop_exit_frees_in(tir, own, sidecar, &body, enclosing);
                 }
             }
             _ => {}

@@ -1,8 +1,8 @@
 //! Free scheduling (last-use anchors, materialize sites) — split from `mod.rs`.
 
 use super::{
-    Owner, OwnerState, Ownership, inout_escape_owner, needs_tracking, owner_sort_key,
-    projection_root,
+    Owner, OwnerState, Ownership, inout_escape_owner, match_arm_bodies, needs_tracking,
+    owner_sort_key, projection_root,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{ChildKind, Tir, TirData, TirRef, TirTag};
@@ -125,6 +125,17 @@ pub(crate) fn collect_named_inits_rec(tir: &Tir, r: TirRef, set: &mut HashSet<Ti
         TirTag::ForRange => {
             for &s in tir.for_range_view(r).body.iter() {
                 collect_named_inits_rec(tir, s, set);
+            }
+        }
+        TirTag::Match => {
+            // M12: a VarDecl/Assign initializer inside a match arm is
+            // named exactly like one inside an if arm — without this
+            // descent the anon-temp pass would schedule a second Free
+            // for the arm-local named value (double-free).
+            for body in match_arm_bodies(tir, r) {
+                for s in body {
+                    collect_named_inits_rec(tir, s, set);
+                }
             }
         }
         _ => {}
@@ -604,6 +615,11 @@ pub(crate) fn collect_return_stmts(tir: &Tir, stmts: &[TirRef], out: &mut Vec<Ti
             }
             TirTag::WhileLoop | TirTag::ForRange => {
                 if let Some(body) = tir.loop_body(r) {
+                    collect_return_stmts(tir, &body, out);
+                }
+            }
+            TirTag::Match => {
+                for body in match_arm_bodies(tir, r) {
                     collect_return_stmts(tir, &body, out);
                 }
             }

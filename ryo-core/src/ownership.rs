@@ -1,5 +1,5 @@
 use crate::tir::{Span, TirRef};
-use crate::types::StringId;
+use crate::types::{StringId, TypeId};
 
 /// Identifies a specific arm of an `IfStmt` (and, future, `Match`).
 /// Assigned by the ownership pass; codegen maps each `BranchId` to a
@@ -41,6 +41,38 @@ pub struct IfBranchIds {
     pub then_branch: BranchId,
     pub elif_branches: Vec<BranchId>,
     pub else_branch: Option<BranchId>,
+}
+
+/// Per-`Match` mapping from arm position to its assigned [`BranchId`]
+/// (M12). Codegen pushes the arm's `BranchId` onto `branch_stack` as it
+/// lowers the arm, so branch-gated `FreePoint`s and arm-start payload
+/// drops ([`MatchArmDrop`]) fire only inside the arm that owns them.
+/// One id per arm, in wire (written) order.
+#[derive(Debug, Clone, Default)]
+pub struct MatchBranchIds {
+    pub arms: Vec<BranchId>,
+}
+
+/// One arm-start drop of an unbound match payload field (M12). When a
+/// match arm binds at least one payload field by move, the arm consumes
+/// the scrutinee; the discriminating shape's remaining needs-drop
+/// fields (the pattern's `_` positions) must be destroyed when the arm
+/// starts. Codegen emits the free at the arm's start block, gated on
+/// `arm`. Never registered for borrowed scrutinees (E0133 keeps
+/// by-move binds off them) nor for arms without by-move bindings (the
+/// scrutinee survives there; its whole-value Free covers the payload).
+#[derive(Clone, Debug)]
+pub struct MatchArmDrop {
+    /// The owning `TirTag::Match` instruction.
+    pub match_inst: TirRef,
+    /// The arm that consumes the scrutinee — the drop fires at its start.
+    pub arm: BranchId,
+    /// Canonical declaration-order index of the scrutinee field to drop
+    /// (the enum-variant payload convention; for an anonymous-struct
+    /// scrutinee, the struct field index).
+    pub field_index: u32,
+    /// The field's type (needs-drop by construction).
+    pub ty: TypeId,
 }
 
 /// One conditional drop of a pre-branch buffer. When a binding
@@ -142,6 +174,16 @@ pub struct FunctionSidecar {
     /// consults this when lowering if/elif/else to know which
     /// `BranchId` to push onto `branch_stack` for each arm.
     pub if_branches: Vec<Option<IfBranchIds>>,
+    /// `BranchId` assignments per `Match` arm (M12). Dense side table
+    /// indexed by the `Match` instruction's `TirRef::index()` (slot 0
+    /// unused), sized like `if_branches`. Codegen consults this when
+    /// lowering arms to know which `BranchId` to push onto
+    /// `branch_stack`.
+    pub match_branches: Vec<Option<MatchBranchIds>>,
+    /// Arm-start payload drops for match arms that consume the
+    /// scrutinee (M12) — one entry per unbound needs-drop payload field.
+    /// Codegen fires each entry at the start of the arm it names.
+    pub match_arm_drops: Vec<MatchArmDrop>,
     /// Conditional drops of pre-branch buffers for dead conditional
     /// reassignments. Codegen fires each entry at the start of
     /// the arms it names (including a synthetic fall-through block for
@@ -166,6 +208,8 @@ impl FunctionSidecar {
             consumed_concat_lhs: vec![None; arena_len],
             field_free_on_reassign: vec![None; arena_len],
             if_branches: vec![None; arena_len],
+            match_branches: vec![None; arena_len],
+            match_arm_drops: Vec::new(),
             conditional_dead_drops: Vec::new(),
             promotion_frees: Vec::new(),
         }

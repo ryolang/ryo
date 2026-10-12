@@ -34,6 +34,8 @@ mod frees;
 pub(crate) use frees::*;
 mod loops;
 pub(crate) use loops::*;
+mod match_;
+pub(crate) use match_::*;
 mod merge;
 pub(crate) use merge::*;
 mod structs;
@@ -44,8 +46,8 @@ mod walk;
 pub(crate) use walk::*;
 
 pub use ryo_core::ownership::{
-    BranchId, ConditionalDeadDrop, FreePoint, FunctionSidecar, IfBranchIds, OwnershipSidecar,
-    PromoFree,
+    BranchId, ConditionalDeadDrop, FreePoint, FunctionSidecar, IfBranchIds, MatchArmDrop,
+    MatchBranchIds, OwnershipSidecar, PromoFree,
 };
 use ryo_core::tir::{ParamMode, Span, Tir, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId};
@@ -318,6 +320,15 @@ pub(crate) struct Ownership {
     /// walk (`record_promo_candidate`). Consumed by the post-walk
     /// promotion-free scheduling pass in `analyze_function`.
     pub(crate) promo_candidates: Vec<PromoCandidate>,
+
+    /// Match-arm bindings (M12) never read nor consumed inside their
+    /// arm, swept by `analyze_match` at arm end: the name/span pairs
+    /// for the W0001 drain in `analyze_function` (the pass cannot emit
+    /// warnings — only `analyze_function` holds the warnings sink).
+    /// The matching Frees are already scheduled arm-gated at the arm's
+    /// end. Monotone-accumulating: loop convergence re-walks can record
+    /// a binding twice — the drain dedups.
+    pub arm_dead_stores: Vec<(StringId, Span)>,
 
     /// The statement currently being walked; set (and restored) by
     /// `analyze_stmt` so `record_promo_candidate` can anchor each
@@ -971,6 +982,24 @@ fn analyze_function(
                 branch: None,
             });
         }
+    }
+
+    // Match-arm bindings never read inside their arm (M12): the walk
+    // already scheduled their arm-gated Frees at the arm ends; only the
+    // W0001 belongs here. Dedup — loop convergence re-walks can record
+    // the same binding twice. Unlike the drain above, no inout /
+    // escape checks: an arm-local bind is a fresh value that dies with
+    // the arm regardless of any same-named outer binding.
+    let mut seen_arm_dead: HashSet<(u32, usize, usize)> = HashSet::new();
+    for (name, span) in &own.arm_dead_stores {
+        if !seen_arm_dead.insert((name.raw(), span.start, span.end)) {
+            continue;
+        }
+        warnings.emit(Diag::warning(
+            *span,
+            DiagCode::DeadStore,
+            format!("value `{}` is declared but never used", pool.str(*name)),
+        ));
     }
 
     // W0003 case B (M8.4.1.2): redundant bound materializations. Runs

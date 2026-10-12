@@ -6,6 +6,7 @@ mod frees;
 mod frees_w0004;
 mod inout;
 mod loops;
+mod match_;
 mod merge;
 mod shadow_bindings;
 mod structs;

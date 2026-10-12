@@ -2,11 +2,11 @@
 
 use super::{
     BranchState, Owner, OwnerState, Ownership, PromoCandidate, ReseatDrop, analyze_destructure,
-    analyze_enum_lit, analyze_for_range, analyze_while_loop, body_must_terminate,
+    analyze_enum_lit, analyze_for_range, analyze_match, analyze_while_loop, body_must_terminate,
     check_field_move_out, check_field_target_projected, check_source_projected,
     consume_struct_lit_fields, consumed_binding_name, drain_dying_views, field_path_of,
-    format_binding, needs_tracking, owner_name_for_diag, owner_sort_key, param_idx,
-    projection_root, prune_branch_dead_projections, push_unique, record_return_epilogue,
+    format_binding, match_arm_bodies, needs_tracking, owner_name_for_diag, owner_sort_key,
+    param_idx, projection_root, prune_branch_dead_projections, push_unique, record_return_epilogue,
     refine_view_liveness_for_arm, register_projection, resolve_view_alias, restore_view_last_use,
     rule7_owner_name, struct_base_name, struct_root,
 };
@@ -669,6 +669,13 @@ fn collect_arm_reseats(
                 binding,
                 reseat_owners,
             ),
+            TirTag::Match => {
+                // M12: a reseat buried in a match arm attributes to the
+                // pre-branch binding exactly like if/loop bodies do.
+                for body in match_arm_bodies(tir, s) {
+                    collect_arm_reseats(tir, pool, sidecar, &body, binding, reseat_owners);
+                }
+            }
             _ => {}
         }
     }
@@ -1527,6 +1534,12 @@ pub(crate) fn visit_expr(
         TirTag::IfStmt => analyze_if_stmt(tir, pool, own, sink, sidecar, r),
         TirTag::WhileLoop => analyze_while_loop(tir, pool, own, sink, sidecar, r),
         TirTag::ForRange => analyze_for_range(tir, pool, own, sink, sidecar, r),
+        // ---- Match expression (M12) ----
+        // The arm bodies ride the `Extra` payload — `recurse_operands`
+        // never descends into it — so this arm is the ONLY walk of the
+        // scrutinee read and the arm bodies; see `analyze_match` in
+        // `match_.rs` (per-arm branches, union merge).
+        TirTag::Match => analyze_match(tir, pool, own, sink, sidecar, r),
         // ---- View-creating instructions over borrowed params ----
         // Same operand recursion as the catch-all (including its
         // `check_use_moved` calls); additionally record the inst when

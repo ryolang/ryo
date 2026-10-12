@@ -5,7 +5,7 @@ use super::{
     LoopNesting, Owner, OwnerState, Ownership, format_binding, needs_tracking, underlying_owner,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
-use ryo_core::tir::{Span, Tir, TirData, TirRef, TirTag};
+use ryo_core::tir::{MatchBodyView, Span, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
 use std::collections::{HashMap, HashSet};
 
@@ -594,7 +594,80 @@ pub(crate) fn view_liveness_stmt(
             record_view_reads(tir, pool, view.end, &bindings.map, last_use);
             view_liveness_loop_body(tir, pool, &view.body, bindings, last_use, arm_last_reads);
         }
+        // M12 match: statement-level matches are ExprStmt-wrapped (sema's
+        // convention — see sema/tests_match.rs), so the arm-scoped
+        // liveness dispatches on the OPERAND. A bare Match statement
+        // (future producers) takes the direct arm.
+        TirTag::ExprStmt => {
+            let TirData::UnOp(o) = tir.inst(r).data else {
+                unreachable!("ExprStmt must carry TirData::UnOp");
+            };
+            if tir.inst(o).tag == TirTag::Match {
+                view_liveness_match(tir, pool, o, bindings, last_use, arm_last_reads);
+            } else {
+                record_view_reads(tir, pool, r, &bindings.map, last_use);
+            }
+        }
+        TirTag::Match => {
+            view_liveness_match(tir, pool, r, bindings, last_use, arm_last_reads);
+        }
         _ => record_view_reads(tir, pool, r, &bindings.map, last_use),
+    }
+}
+
+/// M12 match: the same mark/rollback arm discipline as the if — the
+/// scrutinee is shared flow (recorded against the enclosing bindings,
+/// like an if condition); each arm's view bindings are arm-scoped and
+/// rolled back, and the per-arm read maps feed `if_arm_last_reads` so
+/// `refine_view_liveness_for_arm` resolves arm-local last uses during
+/// the walk (and reads of an arm-local view no longer misresolve to a
+/// same-named OUTER view, which stamped the outer projection with an
+/// in-arm last use and false-froze the root after the match).
+fn view_liveness_match(
+    tir: &Tir,
+    pool: &InternPool,
+    r: TirRef,
+    bindings: &mut Bindings,
+    last_use: &mut HashMap<TirRef, TirRef>,
+    arm_last_reads: &mut HashMap<TirRef, Vec<HashMap<TirRef, TirRef>>>,
+) {
+    let view = tir.match_view(r);
+    record_view_reads(tir, pool, view.scrutinee, &bindings.map, last_use);
+    let mark = bindings.mark();
+    let arm_count = view.len();
+    let mut arm_maps: Vec<HashMap<StringId, TirRef>> = Vec::with_capacity(arm_count);
+    let mut arm_reads: Vec<HashMap<TirRef, TirRef>> = Vec::with_capacity(arm_count);
+    for arm in view.arms() {
+        let mut body_reads = HashMap::new();
+        match arm.body {
+            // Statement arm: walk the body like an if arm.
+            MatchBodyView::Stmts(_) => {
+                let body: Vec<TirRef> = arm.body.stmts().collect();
+                view_liveness_stmts(tir, pool, &body, bindings, &mut body_reads, arm_last_reads);
+            }
+            // Expression arm: no statements to walk — record the body
+            // expr's view reads against the arm scope directly (a
+            // nested match EXPRESSION still gets the flat treatment,
+            // same as the old fallback).
+            MatchBodyView::Expr(e) => {
+                record_view_reads(tir, pool, e, &bindings.map, &mut body_reads);
+            }
+        }
+        for (k, v) in &body_reads {
+            last_use.insert(*k, *v);
+        }
+        arm_reads.push(body_reads);
+        arm_maps.push(bindings.rollback(mark));
+    }
+    arm_last_reads.insert(r, arm_reads);
+    // First-wins merge in arm order; `bindings` is already rolled back
+    // to the pre-match state.
+    for arm_writes in arm_maps {
+        for (k, v) in arm_writes {
+            if !bindings.map.contains_key(&k) {
+                bindings.insert(k, v);
+            }
+        }
     }
 }
 

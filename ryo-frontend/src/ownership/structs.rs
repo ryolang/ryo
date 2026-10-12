@@ -218,14 +218,31 @@ pub(crate) fn check_field_move_out(
         unreachable!("FieldAccess must carry TirData::FieldAccess");
     };
     let obj_ty = tir.inst(object).ty;
-    // Sema guarantees the object is a struct (named or anonymous); a
-    // poisoned (error-typed) chain already has a sema diagnostic, so
-    // don't add noise — the normal consume path no-ops on it.
-    // M11 needs no `TypeKind::Enum` arm here: the whole-value model has
-    // no payload access, so no partial-move read of an enum exists and
-    // no `MoveOutOfField`-analog is reachable — M12's bindings bring
-    // payload access (and with it the enum arm of this guard).
-    if !matches!(pool.kind(obj_ty), TypeKind::Struct | TypeKind::AnonStruct) {
+    // Sema guarantees the object is a struct (named or anonymous) or an
+    // enum (M12 payload access); a poisoned (error-typed) chain already
+    // has a sema diagnostic, so don't add noise — the normal consume
+    // path no-ops on it. M12's by-move match bindings make the enum arm
+    // reachable: the owner tokens sema emits are `FieldAccess`es on the
+    // enum-typed scrutinee, and any consume path that meets one must be
+    // rejected exactly like a struct field read (payload fields move
+    // only together with the whole enum).
+    let obj_kind = pool.kind(obj_ty);
+    if matches!(obj_kind, TypeKind::Enum) {
+        // The wire's field_index is variant-relative and the access
+        // site carries no variant — the payload shape cannot be named
+        // the way the struct arm names `field_name`.
+        let enum_display = pool.display(obj_ty);
+        sink.emit(Diag::error(
+            span,
+            DiagCode::MoveOutOfField,
+            format!(
+                "cannot move a payload field out of `{enum_display}`; \
+                 match on the value and bind the field, or move the whole value"
+            ),
+        ));
+        return true;
+    }
+    if !matches!(obj_kind, TypeKind::Struct | TypeKind::AnonStruct) {
         return false;
     }
     let sview = pool.struct_view(obj_ty);
