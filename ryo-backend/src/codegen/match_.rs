@@ -24,9 +24,14 @@
 //!    Anon-struct scrutinees lower to a linear chain of guard
 //!    conjunctions: each failed compare short-circuits to the next
 //!    arm's test block, and the final wildcard arm is the fallthrough.
-//!    Literal-arm chains on int/bool/str scrutinees and str literal
-//!    guards land in Task 10; both route through the shared compare
-//!    helper so that task extends rather than duplicates.
+//!    Literal scrutinees (int/bool/str) lower to the same chain shape
+//!    over `Discriminant::Int/Bool/Str` arms: one compare (`icmp_imm eq`
+//!    for int/bool, the runtime's bytewise `ryo_str_eq` for str — the
+//!    M9.1 `emit_field_eq` convention) plus `brif` per arm in written
+//!    order, the first bare wildcard the fallthrough, and a defensive
+//!    trap as the chain tail when no wildcard exists (reachable only
+//!    for a violated sema E0129 — a fully `true`/`false`-covered bool
+//!    never falls off its last compare).
 //! 4. Each arm runs in its own block under the undo-log slot-table
 //!    scope (`emit_scoped_body`'s discipline — bindings are arm-local):
 //!    arm-start payload drops ([`MatchArmDrop`][ryo_core::ownership::MatchArmDrop],
@@ -48,14 +53,15 @@
 //! merge block — the correct post-merge position by construction).
 
 use super::{
-    Codegen, FunctionContext, Terminator, cranelift_type_for, is_enum_type, is_struct_type,
+    Codegen, FunctionContext, Terminator, ValueRepr, cranelift_type_for, is_enum_type,
+    is_struct_type,
 };
 use cranelift::codegen::ir::{BlockArg, MemFlagsData};
 use cranelift::prelude::*;
 use cranelift_module::Module;
 use ryo_core::ast::LitPattern;
 use ryo_core::tir::{Discriminant, MatchArmView, MatchBodyView, MatchView, TirRef};
-use ryo_core::types::{InternPool, TypeId, TypeKind};
+use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 
 /// The merge shape of a lowered match, derived from its result TypeId.
 enum MatchShape {
@@ -72,10 +78,24 @@ enum MatchShape {
 enum ScrutineeHome {
     /// Enum / anon-struct scrutinee: the address of its stack slot.
     Slot(Value),
-    /// int/bool scrutinee: the loaded scalar. Literal-arm dispatch on
-    /// scalar scrutinees is Task 10; today only the pure-wildcard shape
-    /// lowers here, and no binding or guard reads the value.
-    Scalar,
+    /// int/bool scrutinee: the loaded scalar — the compare operand for
+    /// every literal arm (`icmp_imm eq` against the arm's immediate).
+    Scalar(Value),
+    /// str scrutinee: the extracted `(ptr, len)` content pair — the
+    /// bytewise compare operands against each literal arm's `.rodata`
+    /// pair (the scrutinee's SSO-inline values were spilled to a
+    /// scratch slot by the extraction, so the pair is chain-stable).
+    Str { ptr: Value, len: Value },
+}
+
+/// The compare operand(s) of a literal-arm chain, fixed by the
+/// scrutinee's type kind: int/bool compare the loaded scalar against an
+/// immediate; str compares the extracted content pair against each
+/// literal through the runtime's `ryo_str_eq`.
+#[derive(Clone, Copy)]
+enum LiteralScrut {
+    Scalar(Value),
+    Str { ptr: Value, len: Value },
 }
 
 impl<M: Module> Codegen<M> {
@@ -106,19 +126,25 @@ impl<M: Module> Codegen<M> {
                 ScrutineeHome::Slot(Self::eval_inst_struct(builder, ctx, view.scrutinee)?)
             }
             TypeKind::Int | TypeKind::Bool => {
-                let _ = Self::eval_inst(builder, ctx, view.scrutinee)?;
-                ScrutineeHome::Scalar
+                ScrutineeHome::Scalar(Self::eval_inst(builder, ctx, view.scrutinee)?)
             }
             TypeKind::Str => {
-                return Err(
-                    "eval_inst_match: str scrutinees (literal-arm chains) are not yet lowered (Task 10)"
-                        .to_string(),
-                )
+                let repr = Self::eval_inst_fat(builder, ctx, view.scrutinee)?;
+                let ValueRepr::Str { ptr, len, cap } = repr else {
+                    return Err(
+                        "eval_inst_match: str scrutinee did not lower to a str triple".to_string(),
+                    );
+                };
+                // Transient content extraction (the M9.1 Eq discipline):
+                // an SSO-inline scrutinee spills to a fresh scratch slot
+                // and hands back that address as the content pointer.
+                let (ptr, len) = Self::emit_fat_bytes_ptr_len(builder, ctx, ptr, len, cap, None)?;
+                ScrutineeHome::Str { ptr, len }
             }
             other => {
                 return Err(format!(
                     "eval_inst_match: scrutinee type kind {other:?} is not matchable (sema E0136 gates this)"
-                ))
+                ));
             }
         };
 
@@ -142,8 +168,23 @@ impl<M: Module> Codegen<M> {
                 );
                 Self::route_anon_dispatch(builder, ctx, scrut_ty, &view, addr, &mut arm_entry)?;
             }
-            ScrutineeHome::Scalar => {
-                Self::route_scalar_dispatch(builder, &view, &mut arm_entry)?;
+            ScrutineeHome::Scalar(v) => {
+                Self::route_literal_dispatch(
+                    builder,
+                    ctx,
+                    &view,
+                    LiteralScrut::Scalar(v),
+                    &mut arm_entry,
+                )?;
+            }
+            ScrutineeHome::Str { ptr, len } => {
+                Self::route_literal_dispatch(
+                    builder,
+                    ctx,
+                    &view,
+                    LiteralScrut::Str { ptr, len },
+                    &mut arm_entry,
+                )?;
             }
         }
 
@@ -483,7 +524,7 @@ impl<M: Module> Codegen<M> {
     /// chain slot is an invariant trap in `emit_guard_chain`.
     fn route_anon_dispatch(
         builder: &mut FunctionBuilder,
-        ctx: &FunctionContext<'_, M>,
+        ctx: &mut FunctionContext<'_, M>,
         scrut_ty: TypeId,
         view: &MatchView<'_>,
         scrutinee_addr: Value,
@@ -516,14 +557,13 @@ impl<M: Module> Codegen<M> {
         builder.ins().jump(recv[0], &[]);
 
         // The failure target of the LAST arm exists only when that arm
-        // is guarded — i.e. exactly the shapes sema's E0129 wildcard
-        // guarantee excludes (the trap is unreachable by construction).
+        // is guarded — under sema's E0129 wildcard guarantee that is a
+        // W0005-dead arm after the wildcard, so the trap (and the dead
+        // arm's whole test chain) is unreachable by construction. It is
+        // sealed and filled AFTER the loop: the last compare's `brif` is
+        // a predecessor, and Cranelift rejects edges into sealed blocks.
         let last_trap = if guarded[arm_count - 1] {
-            let trap = builder.create_block();
-            builder.seal_block(trap);
-            builder.switch_to_block(trap);
-            super::enums::invalid_tag_trap(builder);
-            Some(trap)
+            Some(builder.create_block())
         } else {
             None
         };
@@ -542,29 +582,187 @@ impl<M: Module> Codegen<M> {
             builder.switch_to_block(recv[i]);
             Self::emit_guard_chain(builder, ctx, scrutinee_addr, scrut_ty, arm, body, fail)?;
         }
+
+        if let Some(trap) = last_trap {
+            builder.seal_block(trap);
+            builder.switch_to_block(trap);
+            super::enums::invalid_tag_trap(builder);
+        }
         Ok(())
     }
 
-    /// int/bool scrutinee today: every arm must be a bare wildcard (at
-    /// most one is reachable — duplicates are W0005-dead), and the
-    /// scrutinee block jumps straight into the first arm's body.
-    /// Literal-arm chains on scalar scrutinees land in Task 10.
-    fn route_scalar_dispatch(
+    /// int/bool/str scrutinee: a linear chain of literal compares over
+    /// the arm list in written order — the same receiver-block shape as
+    /// `route_anon_dispatch`, with the scrutinee value as the compare
+    /// operand. Routing mirrors the enum case: the FIRST arm claiming a
+    /// literal wins (duplicates are W0005-dead and receive no chain
+    /// edge), the first bare wildcard is the fallthrough receiver, and
+    /// every arm after that wildcard is W0005-dead ("a previous `_` arm
+    /// matches everything", sema). The scrutinee block jumps into the
+    /// chain head; each failed compare branches to the next routed
+    /// arm's receiver (a literal arm's test block, the wildcard's body
+    /// block); the chain tail is the wildcard body, or — only when no
+    /// wildcard exists, i.e. a fully `true`/`false`-covered bool — a
+    /// defensive trap unreachable by construction (sema E0129
+    /// guarantees a wildcard for int/str scrutinees).
+    fn route_literal_dispatch(
         builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
         view: &MatchView<'_>,
+        scrut: LiteralScrut,
         arm_entry: &mut [Option<Block>],
     ) -> Result<(), String> {
+        let mut seen: Vec<Discriminant> = Vec::new();
+        let mut fallthrough: Option<usize> = None;
+        // Routed literal arms in written order: (arm index, test block).
+        let mut tests: Vec<(usize, Block)> = Vec::new();
         for (i, arm) in view.arms().enumerate() {
-            if !matches!(arm.discriminant, Discriminant::Wildcard) || arm.guard_count() != 0 {
-                return Err(format!(
-                    "eval_inst_match: literal-arm dispatch on a scalar scrutinee is not yet lowered (Task 10) — arm {i} is not a bare wildcard"
-                ));
+            match arm.discriminant {
+                Discriminant::Wildcard => {
+                    if arm.guard_count() != 0 {
+                        return Err(
+                            "eval_inst_match: wildcard arm with guards requires an anon-struct scrutinee (sema E0131 gates this)"
+                                .to_string(),
+                        );
+                    }
+                    // First wildcard claims the fallthrough; everything
+                    // after it is W0005-dead and stays unrouted.
+                    if fallthrough.is_none() {
+                        fallthrough = Some(i);
+                        arm_entry[i] = Some(builder.create_block());
+                    }
+                }
+                disc @ (Discriminant::Int(_) | Discriminant::Bool(_) | Discriminant::Str(_)) => {
+                    if arm.guard_count() != 0 {
+                        return Err(
+                            "eval_inst_match: literal arm carries guards (sema invariant)"
+                                .to_string(),
+                        );
+                    }
+                    if fallthrough.is_some() || seen.contains(&disc) {
+                        continue;
+                    }
+                    seen.push(disc);
+                    arm_entry[i] = Some(builder.create_block());
+                    tests.push((i, builder.create_block()));
+                }
+                Discriminant::Variant(_) => {
+                    return Err(
+                        "eval_inst_match: variant arm on a literal scrutinee is rejected by sema (E0131)"
+                            .to_string(),
+                    );
+                }
             }
         }
-        arm_entry[0] = Some(builder.create_block());
-        let entry = arm_entry[0].expect("just created");
-        builder.ins().jump(entry, &[]);
+
+        // No literal arms: pure-wildcard shape — straight into the body.
+        let Some(&(_, head)) = tests.first() else {
+            let w = fallthrough.expect(
+                "eval_inst_match: no live arm in a literal scrutinee's chain (sema E0129 gates this)",
+            );
+            let entry = arm_entry[w].expect("the fallthrough arm was routed");
+            builder.ins().jump(entry, &[]);
+            return Ok(());
+        };
+        builder.ins().jump(head, &[]);
+
+        // Chain tail: the wildcard body, or — only when no wildcard
+        // exists (bool full coverage) — a fresh trap block, sealed and
+        // filled AFTER the loop: the last compare's `brif` is a
+        // predecessor, and Cranelift rejects edges into sealed blocks.
+        let (tail, tail_trap) = match fallthrough {
+            Some(w) => (arm_entry[w].expect("the fallthrough arm was routed"), None),
+            None => {
+                let trap = builder.create_block();
+                (trap, Some(trap))
+            }
+        };
+
+        for (k, &(i, test)) in tests.iter().enumerate() {
+            let fail = if k + 1 < tests.len() {
+                tests[k + 1].1
+            } else {
+                tail
+            };
+            builder.seal_block(test);
+            builder.switch_to_block(test);
+            let arm = view.arm(i);
+            let cmp = Self::emit_literal_compare(builder, ctx, scrut, &arm.discriminant)?;
+            let body = arm_entry[i].expect("a routed literal arm always has an entry block");
+            builder.ins().brif(cmp, body, &[], fail, &[]);
+        }
+
+        if let Some(trap) = tail_trap {
+            builder.seal_block(trap);
+            builder.switch_to_block(trap);
+            super::enums::invalid_tag_trap(builder);
+        }
         Ok(())
+    }
+
+    /// One literal-arm compare: the scrutinee scalar against the arm's
+    /// immediate (`icmp_imm eq`, bool lowered to I8 with 0/1), or the
+    /// scrutinee's extracted content pair against the literal's static
+    /// `.rodata` pair through the runtime's bytewise `ryo_str_eq` — the
+    /// exact `emit_field_eq` str-arm convention. Returns the i8 equality
+    /// feeding the chain's `brif`.
+    fn emit_literal_compare(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        scrut: LiteralScrut,
+        disc: &Discriminant,
+    ) -> Result<Value, String> {
+        match (scrut, disc) {
+            (LiteralScrut::Scalar(v), Discriminant::Int(lit)) => {
+                Ok(builder.ins().icmp_imm_s(IntCC::Equal, v, *lit))
+            }
+            (LiteralScrut::Scalar(v), Discriminant::Bool(b)) => {
+                Ok(builder.ins().icmp_imm_s(IntCC::Equal, v, i64::from(*b)))
+            }
+            (LiteralScrut::Str { ptr, len }, Discriminant::Str(lit_id)) => {
+                let lit = Self::emit_str_lit_pair(builder, ctx, *lit_id)?;
+                Self::emit_ryo_str_eq(builder, ctx, (ptr, len), lit)
+            }
+            (_, other) => Err(format!(
+                "eval_inst_match: {other:?} arm on a literal scrutinee of another kind is rejected by sema (E0131)"
+            )),
+        }
+    }
+
+    /// A str literal's static `.rodata` (ptr, len) content pair: the
+    /// `emit_str_literal_fat` triple (cap == 0 is the static sentinel, so
+    /// the extraction passes it through unspilled) — the literal side of
+    /// the `emit_field_eq` str-arm convention.
+    fn emit_str_lit_pair(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        id: StringId,
+    ) -> Result<(Value, Value), String> {
+        let ValueRepr::Str { ptr, len, cap } = Self::emit_str_literal_fat(builder, ctx, id)? else {
+            unreachable!("emit_str_literal_fat always returns the str triple");
+        };
+        Self::emit_fat_bytes_ptr_len(builder, ctx, ptr, len, cap, None)
+    }
+
+    /// Bytewise str content equality through the runtime's
+    /// `ryo_str_eq(ptr, len, ptr, len) -> bool` — the M9.1
+    /// `emit_field_eq` str-arm call convention, shared by literal-arm
+    /// chains and anon-arm str literal guards.
+    fn emit_ryo_str_eq(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        lhs: (Value, Value),
+        rhs: (Value, Value),
+    ) -> Result<Value, String> {
+        let eq_ref = Self::declare_runtime_fn(
+            ctx,
+            builder,
+            "ryo_str_eq",
+            &[ctx.int_type, types::I64, ctx.int_type, types::I64],
+            &[types::I8],
+        )?;
+        let call = builder.ins().call(eq_ref, &[lhs.0, lhs.1, rhs.0, rhs.1]);
+        Ok(builder.inst_results(call)[0])
     }
 
     /// One guarded arm's conjunction: guards are field-equality
@@ -574,7 +772,7 @@ impl<M: Module> Codegen<M> {
     /// The field offset comes from the scrutinee's anon-struct shape.
     fn emit_guard_chain(
         builder: &mut FunctionBuilder,
-        ctx: &FunctionContext<'_, M>,
+        ctx: &mut FunctionContext<'_, M>,
         scrutinee_addr: Value,
         scrut_ty: TypeId,
         arm: &MatchArmView<'_>,
@@ -609,13 +807,13 @@ impl<M: Module> Codegen<M> {
 
     /// Compare one anon-scrutinee field against a literal guard,
     /// returning the i8 equality value. Int and bool literals lower to a
-    /// scalar load plus `icmp`; str literals need a runtime strcmp and
-    /// land in Task 10 (sema-legal today — routed to a clear internal
-    /// error). Task 10's scrutinee literal chains extend this helper
-    /// rather than duplicating it.
+    /// scalar load plus `icmp`; str literals load the field's fat triple
+    /// and compare content bytewise through the runtime's `ryo_str_eq`
+    /// — the exact `emit_field_eq` str-arm convention (the field's own
+    /// address is the SSO inline home).
     fn emit_arm_guard_compare(
         builder: &mut FunctionBuilder,
-        ctx: &FunctionContext<'_, M>,
+        ctx: &mut FunctionContext<'_, M>,
         scrutinee_addr: Value,
         field_offset: u32,
         lit: &LitPattern,
@@ -639,8 +837,25 @@ impl<M: Module> Codegen<M> {
                 let lit_val = builder.ins().iconst(types::I8, i64::from(*b));
                 Ok(builder.ins().icmp(IntCC::Equal, field_val, lit_val))
             }
-            LitPattern::Str(_) => {
-                Err("eval_inst_match: str literal guards are not yet lowered (Task 10)".to_string())
+            LitPattern::Str(id) => {
+                let field_addr = if off == 0 {
+                    scrutinee_addr
+                } else {
+                    builder.ins().iadd_imm_s(scrutinee_addr, i64::from(off))
+                };
+                let ptr = builder
+                    .ins()
+                    .load(ctx.int_type, MemFlagsData::trusted(), field_addr, 0);
+                let len = builder
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), field_addr, 8);
+                let cap = builder
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), field_addr, 16);
+                let field =
+                    Self::emit_fat_bytes_ptr_len(builder, ctx, ptr, len, cap, Some(field_addr))?;
+                let lit_pair = Self::emit_str_lit_pair(builder, ctx, *id)?;
+                Self::emit_ryo_str_eq(builder, ctx, field, lit_pair)
             }
         }
     }

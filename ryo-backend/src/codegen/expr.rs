@@ -1153,7 +1153,9 @@ impl<M: Module> Codegen<M> {
     /// Emit a string literal as a fat pointer triple (ptr, len, cap=0):
     /// the `.rodata` data pointer, the compile-time length, and the
     /// static cap-0 sentinel — pure constants, no runtime call.
-    fn emit_str_literal_fat(
+    /// `pub(crate)` for the M12 match codegen: literal-arm compares and
+    /// anon-arm str guards materialize their literal side through this.
+    pub(crate) fn emit_str_literal_fat(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         id: StringId,
