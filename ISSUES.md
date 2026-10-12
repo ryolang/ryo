@@ -733,6 +733,19 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-211 — landing What's Next lists M9.2 CLI intrinsics as unshipped though M9.2 is complete
+
+**Severity:** Correctness / Hygiene
+**Area:** docs-spec
+
+**Files:** landing/reference/index.html, docs/dev/implementation_roadmap.md
+
+**Summary:** Found during M12 closeout (Task 13): landing/reference/index.html still lists the M9.2 throwaway CLI intrinsics (process_*/io_*) in the What's Next / planned section, but Milestone 9.2 is marked COMPLETE in the roadmap and the intrinsics ship. Stale planned-callout drift of the kind the milestone-completion rule exists to prevent.
+
+**Resolution:** Remove the M9.2 entry from the What's Next list (and check adjacent entries against the roadmap's COMPLETE list in the same pass). Small docs cleanup; not M12 scope.
+
+---
+
 ## Cross-References
 
 - Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md) — latest verified snapshot (2026-08-24); several current entries originated there, and its `I-xxx` citations reflect what was open at the time (older snapshots live in git history).
