@@ -392,8 +392,13 @@ impl<M: Module> Codegen<M> {
         };
         // Scalar-only entry point: fat/view-typed insts are
         // rejected above, so no path here can have cached a non-scalar
-        // repr for `r` mid-evaluation.
-        Self::cache_repr(ctx, r, ValueRepr::Scalar(value));
+        // repr for `r` mid-evaluation — except `TirTag::Match`, whose
+        // aggregate results cache their family repr inside
+        // `eval_inst_match` (the scalar Value is a dummy there); keep
+        // the family repr and skip the scalar cache in that case.
+        if Self::cached_repr(ctx, r).is_none() {
+            Self::cache_repr(ctx, r, ValueRepr::Scalar(value));
+        }
         Ok(value)
     }
 
@@ -985,6 +990,26 @@ impl<M: Module> Codegen<M> {
                         ));
                     }
                 }
+            }
+            TirTag::Match => {
+                // M12 aggregate-result match: `eval_inst_match` writes
+                // each value arm's result into the match's own result
+                // slot and caches the loaded fat triple at the merge.
+                // An out_slot cannot be honored here — the match
+                // lowering allocates its result slot before the
+                // dispatch — and VarDecl/Assign only pass out_slot to
+                // slot-out producers, which a Match never is.
+                debug_assert!(
+                    out_slot.is_none(),
+                    "aggregate match lowering manages its own result slot"
+                );
+                Self::eval_inst_match(builder, ctx, r)?;
+                Self::cached_repr(ctx, r).ok_or_else(|| {
+                    format!(
+                        "eval_inst_fat_slot: match at %{} cached no fat repr",
+                        r.index()
+                    )
+                })?
             }
             _ => {
                 // Delegate to scalar eval_inst for non-fat instructions

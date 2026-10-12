@@ -12,10 +12,10 @@
 //!    `ValueRepr::Struct` address), int/bool scrutinees as the loaded
 //!    scalar — and its address/value is the payload base for every arm.
 //! 2. A merge block is created up front: scalar results ride one block
-//!    param (the `enums.rs` Eq precedent), void matches none. Aggregate
-//!    result types (str/bytes/view/struct/enum) are Task 11 — a
-//!    `debug_assert` plus the internal error path, never a silent
-//!    miscompile.
+//!    param (the `enums.rs` Eq precedent), void matches none, aggregate
+//!    results (str/bytes/struct/anon-struct/enum) a pre-allocated result
+//!    SLOT — sized from the pool before the dispatch, so the slot
+//!    address is a constant dominating every arm and the merge.
 //! 3. Dispatch per scrutinee kind: enums load the i32 tag and switch
 //!    (`emit_tag_dispatch`), routing each variant's case to the FIRST
 //!    arm covering it (written order wins; W0005-dead duplicates stay
@@ -38,29 +38,38 @@
 //!    the consuming arm's unbound needs-drop fields), then the binding
 //!    prologue through the shared `bind_field_move` (fat triples,
 //!    struct/enum slot copies, scalar loads — the M10 destructure
-//!    logic), then the body. Expression arms evaluate and jump to the
-//!    merge with the value (scalar) or without (void); statement arms
-//!    go through `emit_scoped_body` and its `Terminator` sense — only
-//!    non-terminating arms jump. Diverging arms (never-typed bodies,
-//!    return/break/continue) leave no merge edge; when EVERY arm
+//!    logic), then the body. Expression arms write the match result —
+//!    scalar values jump with the block param, aggregate values write
+//!    the result slot through the canonical per-type aggregate writes
+//!    (the exact helpers the function-return paths use), void matches
+//!    jump bare — and diverging arms (never-typed bodies,
+//!    return/break/continue) leave no merge edge and write nothing.
+//!    Statement arms go through `emit_scoped_body` and its `Terminator`
+//!    sense — only non-terminating arms jump.
+//! 5. The merge: scalars read the block param; aggregates read the
+//!    result slot (a fat triple load for str/bytes, the slot address
+//!    for memory-first structs/enums) and cache the family
+//!    `ValueRepr` on the inst, so aggregate consumers reach it through
+//!    their own entry points (`eval_inst_struct` / `eval_inst_enum` /
+//!    `eval_inst_fat`). Diverging arms leave no edge; when EVERY arm
 //!    diverges the merge is unreachable and traps.
 //!
-//! Task 11 completes the memory story: the post-merge drop of an owned
-//! needs-drop scrutinee TEMPORARY, and every aggregate-result match.
-//! This task's tests use non-needs-drop payloads, so nothing leaks
-//! today; a needs-drop scrutinee temporary reaching this code simply
-//! has its scheduled drop swept after the enclosing statement (the
-//! merge block — the correct post-merge position by construction).
+//! The post-merge drop of an owned needs-drop scrutinee TEMPORARY needs
+//! no codegen of its own: the ownership pass's anon-temp machinery
+//! schedules the whole-value Free anchored after this Match inst (the
+//! scrutinee's single consumer), and the end-of-statement sweep lands
+//! it here — post-merge on every path that reaches the merge, with the
+//! `freed_at` table guaranteeing one emission per schedule entry.
 
 use super::{
-    Codegen, FunctionContext, Terminator, ValueRepr, cranelift_type_for, is_enum_type,
-    is_struct_type,
+    Codegen, FunctionContext, STR_SLOT_SIZE, Terminator, ValueRepr, cranelift_type_for,
+    is_enum_type, is_struct_type,
 };
-use cranelift::codegen::ir::{BlockArg, MemFlagsData};
+use cranelift::codegen::ir::{BlockArg, MemFlagsData, StackSlotData, StackSlotKind};
 use cranelift::prelude::*;
 use cranelift_module::Module;
 use ryo_core::ast::LitPattern;
-use ryo_core::tir::{Discriminant, MatchArmView, MatchBodyView, MatchView, TirRef};
+use ryo_core::tir::{Discriminant, MatchArmView, MatchBodyView, MatchView, TirData, TirRef};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 
 /// The merge shape of a lowered match, derived from its result TypeId.
@@ -71,6 +80,12 @@ enum MatchShape {
     Scalar(types::Type),
     /// Every arm diverges: no merge param, and the merge is unreachable.
     Never,
+    /// Aggregate match (str/bytes/struct/anon-struct/enum): every value
+    /// arm writes the pre-allocated result slot; the merge yields the
+    /// slot (never a block param — a value materialized in one arm's
+    /// block could not dominate the merge, while the slot address is a
+    /// pre-dispatch constant dominating every arm).
+    Aggregate(TypeId),
 }
 
 /// Where the scrutinee value lives after evaluation.
@@ -101,7 +116,8 @@ enum LiteralScrut {
 impl<M: Module> Codegen<M> {
     /// Lower a typed `TirTag::Match` (M12); the `eval_inst` dispatch
     /// target. Returns the scalar merge value (the block param), or a
-    /// dummy for void/never shapes — aggregate results are Task 11.
+    /// dummy for void/never/aggregate shapes — aggregate results cache
+    /// their family `ValueRepr` on the inst (see [`MatchShape`]).
     pub(crate) fn eval_inst_match(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -117,7 +133,8 @@ impl<M: Module> Codegen<M> {
 
         // 1. Scrutinee into its canonical home; the payload base for
         // every arm. Whether the scrutinee is an owned temporary or a
-        // place matters only for the post-merge drop — Task 11.
+        // place matters only for the scheduled post-merge drop (the
+        // end-of-statement sweep fires the ownership pass's Free).
         let scrut = match ctx.pool.kind(scrut_ty) {
             TypeKind::Enum => {
                 ScrutineeHome::Slot(Self::eval_inst_enum(builder, ctx, view.scrutinee)?)
@@ -153,6 +170,25 @@ impl<M: Module> Codegen<M> {
         if let MatchShape::Scalar(cl_ty) = shape {
             builder.append_block_param(merge, cl_ty);
         }
+        // Aggregate results ride a pre-allocated result slot instead of
+        // a block param: allocated BEFORE the dispatch so the slot
+        // address is defined in the scrutinee block, which dominates
+        // every arm and the merge — the dominance hazard (a value
+        // produced in one arm read from the merge) cannot arise because
+        // arms write memory and the merge reads it.
+        let result_slot = if let MatchShape::Aggregate(ty) = shape {
+            let slot = match ctx.pool.kind(ty) {
+                TypeKind::Str | TypeKind::Bytes => builder.create_sized_stack_slot(
+                    StackSlotData::new(StackSlotKind::ExplicitSlot, STR_SLOT_SIZE, 3),
+                ),
+                TypeKind::Struct | TypeKind::AnonStruct => Self::struct_slot(builder, ctx, ty),
+                TypeKind::Enum => Self::enum_slot(builder, ctx, ty),
+                other => unreachable!("match_shape rejected {other:?} as an aggregate result"),
+            };
+            Some((ty, builder.ins().stack_addr(ctx.int_type, slot, 0)))
+        } else {
+            None
+        };
 
         // 3. Dispatch: fill each arm's entry block.
         let arm_count = view.len();
@@ -274,23 +310,43 @@ impl<M: Module> Codegen<M> {
             }
 
             // Body. Non-terminating arms jump to the merge (with the
-            // value for scalar shapes); diverging arms leave no edge.
+            // value for scalar shapes, after writing the result slot for
+            // aggregate shapes); diverging arms leave no edge and write
+            // nothing.
             let falls_through = match arm.body {
                 MatchBodyView::Expr(e) => {
                     let body_ty = ctx.tir.inst(e).ty;
-                    let v = Self::eval_inst(builder, ctx, e)?;
-                    if ctx.pool.is_never(body_ty) {
-                        false
-                    } else {
-                        match shape {
-                            MatchShape::Scalar(_) => {
-                                builder.ins().jump(merge, &[BlockArg::Value(v)]);
-                            }
-                            MatchShape::Void | MatchShape::Never => {
-                                builder.ins().jump(merge, &[]);
-                            }
+                    if let MatchShape::Aggregate(ty) = shape {
+                        if ctx.pool.is_never(body_ty) {
+                            // A diverging arm body (a noreturn call)
+                            // still evaluates — for its side effects.
+                            let _ = Self::eval_inst(builder, ctx, e)?;
+                            false
+                        } else {
+                            let (_, slot_addr) =
+                                result_slot.expect("aggregate shape has a result slot");
+                            Self::emit_match_result_write(builder, ctx, slot_addr, ty, e)?;
+                            builder.ins().jump(merge, &[]);
+                            true
                         }
-                        true
+                    } else {
+                        let v = Self::eval_inst(builder, ctx, e)?;
+                        if ctx.pool.is_never(body_ty) {
+                            false
+                        } else {
+                            match shape {
+                                MatchShape::Scalar(_) => {
+                                    builder.ins().jump(merge, &[BlockArg::Value(v)]);
+                                }
+                                MatchShape::Void | MatchShape::Never => {
+                                    builder.ins().jump(merge, &[]);
+                                }
+                                MatchShape::Aggregate(_) => {
+                                    unreachable!("aggregate shapes handled above")
+                                }
+                            }
+                            true
+                        }
                     }
                 }
                 MatchBodyView::Stmts(_) => {
@@ -301,7 +357,7 @@ impl<M: Module> Codegen<M> {
                             MatchShape::Void => {
                                 builder.ins().jump(merge, &[]);
                             }
-                            MatchShape::Scalar(_) => {
+                            MatchShape::Scalar(_) | MatchShape::Aggregate(_) => {
                                 return Err(
                                     "eval_inst_match: falling statement arm in a value-producing match (sema E0135 gates this)"
                                         .to_string(),
@@ -364,20 +420,236 @@ impl<M: Module> Codegen<M> {
         Self::invalidate_home_inline_flags(ctx);
         Self::kill_assigned_since(ctx, scope_mark);
 
+        // Diagnose unsupported aggregate value-arm shapes (I-210): the
+        // result slot's (shallow) per-type write ALIASES the arm body's
+        // buffer, so any scheduled drop that releases that storage
+        // cannot be correctly emitted — in the arm block it would free
+        // memory the result still aliases, and the end-of-statement
+        // sweep's post-merge position reads values that do not dominate
+        // the merge block (a Cranelift verifier error in debug builds,
+        // a silent miscompile in release). Two arm-body families alias:
+        //
+        // * Producers (calls, concats, needs-drop literals): the
+        //   ownership pass schedules their temporary's Free anchored on
+        //   this Match inst (the arm body's single consumer).
+        // * By-value reads of tracked bindings (`Var` / `FieldAccess`
+        //   arm bodies): the binding's last-use Free lands post-merge
+        //   while the result aliases the binding's storage.
+        //
+        // Ownership must instead consume the arm-body result into the
+        // match; until it does, fail loudly. Elided frees (static
+        // cap == 0 literals, provably-inline producers) and non-arm-body
+        // targets (the scrutinee temporary — its repr dominates the
+        // merge) are not this shape; the sweep owns them.
+        for arm in view.arms() {
+            let MatchBodyView::Expr(e) = arm.body else {
+                continue;
+            };
+            let body_ty = ctx.tir.inst(e).ty;
+            if ctx.pool.is_never(body_ty) || !ctx.pool.needs_drop(body_ty) {
+                continue;
+            }
+            let anchored: Vec<usize> = ctx
+                .free_by_after
+                .get(r.index())
+                .map(|indices| {
+                    indices
+                        .iter()
+                        .copied()
+                        .filter(|&idx| !ctx.freed_at[idx])
+                        .collect()
+                })
+                .unwrap_or_default();
+            if anchored
+                .iter()
+                .any(|&idx| ctx.sidecar.free_schedule[idx].target == e)
+                && Self::free_would_emit(builder, ctx, e)
+            {
+                return Err(Self::arm_alias_error(ctx, e));
+            }
+            // By-value read of a tracked binding: resolve the root name
+            // and look for a pending drop scheduled against the binding's
+            // CURRENT value (the same currency filter `emit_frees`'s
+            // binding-path redirect uses — a stale-value free targets
+            // superseded storage and does not alias the read).
+            let mut root = e;
+            while let TirData::FieldAccess { object, .. } = ctx.tir.inst(root).data {
+                root = object;
+            }
+            if let TirData::Var(name) = ctx.tir.inst(root).data {
+                let pending_free = ctx.pending_sweep.iter().any(|&idx| {
+                    if ctx.freed_at[idx] {
+                        return false;
+                    }
+                    let fp = &ctx.sidecar.free_schedule[idx];
+                    if !Self::free_would_emit(builder, ctx, fp.target)
+                        || Self::free_binding_name(ctx, fp.target) != Some(name)
+                    {
+                        return false;
+                    }
+                    match Self::free_binding_of(ctx, fp.target) {
+                        Some(binding) => ctx.binding_last_write.get(&binding) == Some(&fp.target),
+                        None => false,
+                    }
+                });
+                if pending_free {
+                    return Err(Self::arm_alias_error(ctx, e));
+                }
+            }
+        }
+
         let value = match shape {
             MatchShape::Scalar(cl_ty) if merge_unreachable => builder.ins().iconst(cl_ty, 0),
             MatchShape::Scalar(_) => builder.block_params(merge)[0],
             MatchShape::Void => builder.ins().iconst(ctx.int_type, 0),
             MatchShape::Never => builder.ins().iconst(types::I8, 0),
+            MatchShape::Aggregate(ty) => {
+                // The result lives in the pre-allocated slot; cache the
+                // family repr so aggregate consumers (var decls, call
+                // args, returns, nested aggregate ops) read it through
+                // their own entry points. The scalar Value returned
+                // here is a never-used dummy for those shapes. An
+                // aggregate-typed match always has at least one
+                // falling-through value arm (sema's join types the
+                // match by its value arms), so the merge is reachable
+                // and the slot written on every path here.
+                debug_assert!(
+                    !merge_unreachable,
+                    "an aggregate-typed match always has a value arm"
+                );
+                let (_, slot_addr) = result_slot.expect("aggregate shape has a result slot");
+                let repr = Self::match_result_repr(builder, ctx, slot_addr, ty)?;
+                Self::cache_repr(ctx, r, repr);
+                builder.ins().iconst(ctx.int_type, 0)
+            }
         };
         Ok(value)
     }
 
+    /// Write one aggregate arm-body value into the match's result slot
+    /// through the canonical per-type aggregate writes — the exact
+    /// internals the function-return paths use (`emit_struct_return` /
+    /// `emit_enum_return` copy field-wise through the sret pointer; the
+    /// fat Return arm stores the triple), so a match result can never
+    /// drift from the return ABI's layout conventions. The copy is
+    /// family-appropriate (fat triple store / field-wise struct copy /
+    /// tag + active-payload enum copy), never a byte-wise block copy.
+    fn emit_match_result_write(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        slot_addr: Value,
+        ty: TypeId,
+        body: TirRef,
+    ) -> Result<(), String> {
+        match ctx.pool.kind(ty) {
+            TypeKind::Str | TypeKind::Bytes => {
+                let repr = Self::eval_inst_fat(builder, ctx, body)?;
+                let (ptr, len, cap) = match repr {
+                    ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
+                        (ptr, len, cap)
+                    }
+                    _ => unreachable!("str/bytes arm body must produce a fat ValueRepr"),
+                };
+                builder
+                    .ins()
+                    .store(MemFlagsData::trusted(), ptr, slot_addr, 0);
+                builder
+                    .ins()
+                    .store(MemFlagsData::trusted(), len, slot_addr, 8);
+                builder
+                    .ins()
+                    .store(MemFlagsData::trusted(), cap, slot_addr, 16);
+                Ok(())
+            }
+            TypeKind::Struct | TypeKind::AnonStruct => {
+                let src = Self::eval_inst_struct(builder, ctx, body)?;
+                Self::emit_struct_copy(builder, ctx, slot_addr, src, ty)
+            }
+            TypeKind::Enum => {
+                let src = Self::eval_inst_enum(builder, ctx, body)?;
+                Self::emit_enum_copy(builder, ctx, slot_addr, src, ty)
+            }
+            other => Err(format!(
+                "eval_inst_match: {other:?} arm result is not an aggregate (sema gates match result types)"
+            )),
+        }
+    }
+
+    /// The merge-block `ValueRepr` of an aggregate match result at
+    /// `slot_addr`: str/bytes load the fat triple from the slot (the
+    /// `eval_field_access_fat` convention); memory-first structs and
+    /// enums ARE their slot address.
+    fn match_result_repr(
+        builder: &mut FunctionBuilder,
+        ctx: &FunctionContext<'_, M>,
+        slot_addr: Value,
+        ty: TypeId,
+    ) -> Result<ValueRepr, String> {
+        match ctx.pool.kind(ty) {
+            TypeKind::Str | TypeKind::Bytes => {
+                let ptr = builder
+                    .ins()
+                    .load(ctx.int_type, MemFlagsData::trusted(), slot_addr, 0);
+                let len = builder
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), slot_addr, 8);
+                let cap = builder
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), slot_addr, 16);
+                Ok(if matches!(ctx.pool.kind(ty), TypeKind::Bytes) {
+                    ValueRepr::Bytes { ptr, len, cap }
+                } else {
+                    ValueRepr::Str { ptr, len, cap }
+                })
+            }
+            TypeKind::Struct | TypeKind::AnonStruct => Ok(ValueRepr::Struct { addr: slot_addr }),
+            TypeKind::Enum => Ok(ValueRepr::Enum { addr: slot_addr }),
+            other => Err(format!(
+                "eval_inst_match: {other:?} is not a lowered aggregate match result"
+            )),
+        }
+    }
+
+    /// The I-210 diagnosis for an aggregate value arm whose result
+    /// aliases storage a scheduled drop will release outside the arm.
+    fn arm_alias_error(ctx: &FunctionContext<'_, M>, body: TirRef) -> String {
+        let ty = ctx.tir.inst(body).ty;
+        format!(
+            "eval_inst_match: a value arm yields an owned {} value whose drop is scheduled outside the arm (I-210): the result slot aliases the buffer, so lowering it would double-free or read arm-local values from the merge. Use a mutable binding assigned inside an if/else instead, until the ownership pass consumes arm-body results",
+            ctx.pool.display(ty)
+        )
+    }
+
+    /// True when emitting the scheduled Free for `target` would produce
+    /// an actual drop call — the mirror of `emit_frees`' elision
+    /// predicates (`is_static_cap_zero`, the provably-inline producer
+    /// exemption), so the I-210 diagnosis above only fires for frees that
+    /// would really run. Struct/enum drops are scheduled only for
+    /// needs-drop values, where the drop always emits real field frees.
+    fn free_would_emit(
+        builder: &mut FunctionBuilder,
+        ctx: &FunctionContext<'_, M>,
+        target: TirRef,
+    ) -> bool {
+        let Some(repr) = Self::cached_repr(ctx, target) else {
+            return false;
+        };
+        match repr {
+            ValueRepr::Str { cap, .. } | ValueRepr::Bytes { cap, .. } => {
+                !Self::is_static_cap_zero(builder.func, cap)
+                    && !(Self::provably_inline_producer(ctx, target)
+                        && !ctx.view_base_insts[target.index()])
+            }
+            ValueRepr::Struct { .. } | ValueRepr::Enum { .. } => true,
+            ValueRepr::Scalar(_) | ValueRepr::View { .. } => false,
+        }
+    }
+
     /// The merge shape for a match result type: void, scalar (one
-    /// Cranelift type), or never. Aggregate results (str/bytes/view/
-    /// struct/enum — anything `cranelift_type_for` rejects) are Task
-    /// 11: a `debug_assert` pins the contract, and the error path
-    /// reports instead of silently miscompiling.
+    /// Cranelift type), never, or aggregate (str/bytes/struct/
+    /// anon-struct/enum — anything `cranelift_type_for` rejects). A
+    /// view-typed result (and any other unexpected kind) is a sema
+    /// contract violation: reported, never silently miscompiled.
     fn match_shape(ctx: &FunctionContext<'_, M>, ty: TypeId) -> Result<MatchShape, String> {
         match ctx.pool.kind(ty) {
             TypeKind::Void => Ok(MatchShape::Void),
@@ -385,23 +657,14 @@ impl<M: Module> Codegen<M> {
                 cranelift_type_for(ty, ctx.pool, ctx.int_type),
             )),
             TypeKind::Never => Ok(MatchShape::Never),
-            other => {
-                debug_assert!(
-                    matches!(
-                        other,
-                        TypeKind::Str
-                            | TypeKind::Bytes
-                            | TypeKind::View(_)
-                            | TypeKind::Struct
-                            | TypeKind::AnonStruct
-                            | TypeKind::Enum
-                    ),
-                    "aggregate match results land in Task 11"
-                );
-                Err(format!(
-                    "eval_inst_match: aggregate match result type {other:?} is not yet lowered (Task 11 owns aggregate-result matches)"
-                ))
-            }
+            TypeKind::Str
+            | TypeKind::Bytes
+            | TypeKind::Struct
+            | TypeKind::AnonStruct
+            | TypeKind::Enum => Ok(MatchShape::Aggregate(ty)),
+            other => Err(format!(
+                "eval_inst_match: match result type kind {other:?} is not lowerable (sema gates match result types)"
+            )),
         }
     }
 

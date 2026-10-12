@@ -76,6 +76,22 @@ impl<M: Module> Codegen<M> {
                 builder.use_var(var)
             }
             TirTag::FieldAccess => Self::field_addr_of(builder, ctx, r)?.0,
+            TirTag::Match => {
+                // M12: an aggregate-result match writes each value arm's
+                // result into its pre-allocated result slot; the merge
+                // block's slot address is the value (cached by
+                // `eval_inst_match` as `ValueRepr::Struct`).
+                Self::eval_inst_match(builder, ctx, r)?;
+                match Self::cached_repr(ctx, r) {
+                    Some(ValueRepr::Struct { addr }) => addr,
+                    other => {
+                        return Err(format!(
+                            "eval_inst_struct: match at %{} cached {other:?}, not a struct repr",
+                            r.index()
+                        ));
+                    }
+                }
+            }
             TirTag::Call => {
                 // Struct-returning call: emit_call handles sret and
                 // caches ValueRepr::Struct for r.

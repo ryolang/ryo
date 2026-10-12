@@ -4,16 +4,20 @@ use common::*;
 use tempfile::TempDir;
 
 // =============================================================================
-// M12 Pattern matching (Task 9 + Task 10 codegen) — JIT end-to-end tests.
+// M12 Pattern matching (Tasks 9-11 codegen) — JIT end-to-end tests.
 // Task 9: enum tag dispatch with wildcard routing, per-arm payload bindings
 // (the shared `bind_field_move` move logic), anon-scrutinee int/bool guard
 // chains, scalar/void merges, and the arm-start drop of an unbound
 // needs-drop payload field on a consuming arm. Task 10: literal-arm chains
 // on int/bool/str scrutinees (ordered `icmp_imm eq`/`ryo_str_eq` + brif,
 // wildcard fallthrough, bool full coverage without a wildcard), str literal
-// guards on anon arms, and the W0005/E0129 surfaces. Aggregate-result
-// matches land in later tasks; leaks on the heap-backed shapes are pinned
-// under valgrind by the Task 12 smoke tests.
+// guards on anon arms, and the W0005/E0129 surfaces. Task 11: aggregate
+// results (str/enum/struct) merge through a pre-allocated result slot each
+// value arm writes via the canonical per-type aggregate writes; mixed
+// never/value matches; all-never termination; discarded non-void matches;
+// and the post-merge drop of an owned needs-drop scrutinee temporary.
+// Leaks/double-frees on the heap-backed shapes are pinned under valgrind
+// by the Task 12 smoke tests.
 // =============================================================================
 
 #[test]
@@ -259,4 +263,182 @@ fn match_int_non_exhaustive_errors_e0129_jit() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("E0129"), "stderr: {}", stderr);
+}
+
+// --- Task 11: aggregate results, termination, discarded values ---
+
+#[test]
+fn match_str_result_merge_both_ways_jit() {
+    // A str-valued match merges through the pre-allocated result slot:
+    // each value arm stores its fat triple into the slot (the canonical
+    // fat-return write), the merge loads the triple back, and the bound
+    // local prints. Both arms exercised.
+    assert_ryo_output(
+        "match_str_result",
+        "fn pick(b: bool) -> str:\n\ts = match b:\n\t\ttrue: \"yes\"\n\t\tfalse: \"no\"\n\treturn s\n\nfn main():\n\tprint(pick(true))\n\tprint(\"\\n\")\n\tprint(pick(false))\n\tprint(\"\\n\")\n",
+        "yes\nno\n",
+    );
+}
+
+#[test]
+fn match_enum_result_merge_debug_print_all_variants_jit() {
+    // An enum-valued match: each arm constructs a fresh variant value in
+    // its own slot, copies it tag + active payload into the result slot
+    // (the `emit_enum_return` convention), and the merge yields the
+    // result slot's address for the Debug print.
+    assert_ryo_output(
+        "match_enum_result",
+        "enum Color:\n\tRed\n\tGreen\n\tBlue\n\nfn next(c: Color) -> Color:\n\tr = match c:\n\t\tColor.Red: Color.Green\n\t\tColor.Green: Color.Blue\n\t\tColor.Blue: Color.Red\n\treturn r\n\nfn main():\n\tprint(next(Color.Red))\n\tprint(\"\\n\")\n\tprint(next(Color.Green))\n\tprint(\"\\n\")\n\tprint(next(Color.Blue))\n\tprint(\"\\n\")\n",
+        "Color.Green\nColor.Blue\nColor.Red\n",
+    );
+}
+
+#[test]
+fn match_anon_struct_result_merge_field_prints_jit() {
+    // An anonymous-struct-valued match: field-wise copies into the result
+    // slot (the `emit_struct_return` convention); the merge yields the
+    // slot address and field reads print through it. Both arms exercised.
+    assert_ryo_output(
+        "match_struct_result",
+        "fn point(b: bool) -> {x: int, y: int}:\n\treturn match b:\n\t\ttrue: {x=1, y=2}\n\t\tfalse: {x=3, y=4}\n\nfn main():\n\tp = point(true)\n\tprint(p.x)\n\tprint(\":\")\n\tprint(p.y)\n\tprint(\"\\n\")\n\tq = point(false)\n\tprint(q.x)\n\tprint(\":\")\n\tprint(q.y)\n\tprint(\"\\n\")\n",
+        "1:2\n3:4\n",
+    );
+}
+
+#[test]
+fn match_mixed_never_value_scalar_result_used_jit() {
+    // The dominance pin: a value arm jumps to the merge with the scalar
+    // block param while the `return` arm leaves no merge edge. The merge
+    // value must be the arm's value (not garbage from the diverging arm)
+    // on the value path, and the function must return early on the
+    // diverging path. Both paths asserted.
+    assert_ryo_output(
+        "match_mixed_never_value",
+        "enum Option:\n\tSome(value: int)\n\tNone\n\nfn get(opt: Option) -> int:\n\tx = match opt:\n\t\tOption.Some(v): v\n\t\tOption.None: return -1\n\treturn x * 10\n\nfn main():\n\tprint(get(Option.Some{value=7}))\n\tprint(\"\\n\")\n\tprint(get(Option.None))\n\tprint(\"\\n\")\n",
+        "70\n-1\n",
+    );
+}
+
+#[test]
+fn match_mixed_never_value_str_result_jit() {
+    // Aggregate variant of the mixed shape: the diverging arm never
+    // touches the result slot (non-value arms write nothing); the merge
+    // reads the slot only on the paths that wrote it. Pins slot
+    // reachability for the aggregate path specifically.
+    assert_ryo_output(
+        "match_mixed_never_str",
+        "fn pick(b: bool) -> str:\n\ts = match b:\n\t\ttrue: \"yes\"\n\t\tfalse: return \"early\"\n\treturn s\n\nfn main():\n\tprint(pick(true))\n\tprint(\"\\n\")\n\tprint(pick(false))\n\tprint(\"\\n\")\n",
+        "yes\nearly\n",
+    );
+}
+
+#[test]
+fn match_all_never_arms_merge_unreachable_code_after_compiles_jit() {
+    // Every arm returns: the merge block is unreachable and trap-filled
+    // (Task 9), and the dead statement after the match must still
+    // compile (codegen continues in a fresh dead block). The function
+    // returns normally on every path and main proceeds.
+    assert_ryo_output(
+        "match_all_never",
+        "enum Color:\n\tRed\n\tGreen\n\nfn die(c: Color):\n\tmatch c:\n\t\tColor.Red:\n\t\t\treturn\n\t\tColor.Green:\n\t\t\treturn\n\tprint(\"dead\\n\")\n\nfn main():\n\tdie(Color.Red)\n\tdie(Color.Green)\n\tprint(\"after\\n\")\n",
+        "after\n",
+    );
+}
+
+#[test]
+fn match_discarded_nonvoid_str_result_no_w0001_jit() {
+    // A non-void match used as a bare statement: it compiles and runs,
+    // the result slot is simply never read, and no W0001 fires (W0001
+    // binds only Move-typed BINDINGS today — I-191; a match binds
+    // nothing). The arm literals are static (cap == 0), so no free
+    // traffic is scheduled either.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn main():\n\tb = true\n\tmatch b:\n\t\ttrue: \"yes\"\n\t\t_: \"no\"\n\tprint(\"done\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "match_discard_str.ryo", code);
+    let output = run_ryo_command(&["run", "match_discard_str.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "a discarded non-void match must compile and run: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "done\n", "stdout mismatch");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("W0001"),
+        "a discarded match binds nothing — no W0001: {stderr}"
+    );
+}
+
+#[test]
+fn match_scrutinee_temp_enum_payload_drop_both_paths_jit() {
+    // An OWNED TEMPORARY scrutinee with a heap str payload, no consuming
+    // arm: the ownership pass schedules the whole-value drop anchored
+    // after the match (the anon-temp pass; the Match inst is the
+    // scrutinee's single consumer), and codegen's end-of-statement sweep
+    // lands it post-merge — after the merge block, on every path that
+    // reaches it. The >SSO-cap payload makes the free a real
+    // ryo_str_free; the exactly-once pin under valgrind lands in Task 12.
+    assert_ryo_output(
+        "match_scrutinee_temp_drop",
+        "enum Msg:\n\tText(body: str)\n\tQuit\n\nfn make_msg(n: int) -> Msg:\n\tif n > 0:\n\t\treturn Msg.Text{body=\"01234567890123456789012345678901234567890123456789\"}\n\treturn Msg.Quit\n\nfn main():\n\tmatch make_msg(1):\n\t\tMsg.Text(_):\n\t\t\tprint(\"text\\n\")\n\t\tMsg.Quit:\n\t\t\tprint(\"quit\\n\")\n\tmatch make_msg(0):\n\t\tMsg.Text(_):\n\t\t\tprint(\"text\\n\")\n\t\tMsg.Quit:\n\t\t\tprint(\"quit\\n\")\n",
+        "text\nquit\n",
+    );
+}
+
+#[test]
+fn match_scrutinee_temp_str_heap_drop_jit() {
+    // The literal-chain analogue: an owned str temporary from a call,
+    // matched by content. The scrutinee's free fires post-merge through
+    // the fat temp path (a real ryo_str_free for the heap arm).
+    assert_ryo_output(
+        "match_scrutinee_temp_str",
+        "fn make_str(n: int) -> str:\n\tif n > 0:\n\t\treturn \"01234567890123456789012345678901234567890123456789\"\n\treturn \"x\"\n\nfn main():\n\tmatch make_str(1):\n\t\t\"01234567890123456789012345678901234567890123456789\":\n\t\t\tprint(\"long\\n\")\n\t\t_:\n\t\t\tprint(\"short\\n\")\n\tmatch make_str(0):\n\t\t\"01234567890123456789012345678901234567890123456789\":\n\t\t\tprint(\"long\\n\")\n\t\t_:\n\t\t\tprint(\"short\\n\")\n",
+        "long\nshort\n",
+    );
+}
+
+#[test]
+fn match_value_arm_heap_producer_diagnosed_i210_jit() {
+    // I-210 (double-free direction): a value arm that PRODUCES an owned
+    // aggregate (a call) has its temporary's drop scheduled on the
+    // match, but the result slot aliases the buffer — lowering would
+    // free arm-local values from the merge block (verifier error) or
+    // double-free. Codegen must diagnose loudly, not miscompile.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn make_str(tag: int) -> str:\n\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\nfn pick(b: bool) -> str:\n\ts = match b:\n\t\ttrue: make_str(1)\n\t\tfalse: \"no\"\n\treturn s\n\nfn main():\n\tprint(pick(true))\n\tprint(\"\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "match_arm_heap_producer.ryo", code);
+    let output = run_ryo_command(&["run", "match_arm_heap_producer.ryo"], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "an owned-producing value arm must be diagnosed, not miscompiled"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("I-210"),
+        "the diagnosis must name I-210: {stderr}"
+    );
+}
+
+#[test]
+fn match_value_arm_binding_read_diagnosed_i210_jit() {
+    // I-210, the by-value-read variant: an arm body that reads a
+    // tracked binding copies the binding's buffer into the result slot,
+    // and the binding's last-use drop lands post-merge — freeing storage
+    // the result aliases (observed: garbage stdout + SIGTRAP before the
+    // diagnosis existed). Static-literal arms stay legal (the str-result
+    // merge tests); only the aliasing read is rejected.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn make_str(tag: int) -> str:\n\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\nfn pick(b: bool) -> str:\n\tt = make_str(1)\n\ts = match b:\n\t\ttrue: t\n\t\tfalse: \"no\"\n\treturn s\n\nfn main():\n\tprint(pick(true))\n\tprint(\"\\n\")\n";
+    let test_file = create_test_file(temp_dir.path(), "match_arm_binding_read.ryo", code);
+    let output = run_ryo_command(&["run", "match_arm_binding_read.ryo"], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "an owned-binding value arm read must be diagnosed, not miscompiled"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("I-210"),
+        "the diagnosis must name I-210: {stderr}"
+    );
 }

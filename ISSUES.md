@@ -707,6 +707,19 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-210 — Ownership pass does not consume match arm-body results — aggregate value arms alias the result slot
+
+**Severity:** Correctness / Hygiene
+**Area:** ownership
+
+**Files:** ryo-frontend/src/ownership/match_.rs, ryo-backend/src/codegen/match_.rs
+
+**Summary:** M12 aggregate-result matches lower each value arm's result into a pre-allocated result slot via the canonical (shallow) per-type writes. The ownership pass never consumes an aggregate arm-body result into the match inst: producer temporaries (calls, concats, needs-drop literals) stay Valid, so the anon-temp pass schedules their Free anchored on the Match inst (consumer_of maps the arm body to the match), and by-value reads of tracked bindings (Var / FieldAccess arm bodies) keep their binding's last-use Free. Both drop schedules release storage the result slot aliases: emitting in the arm block frees memory the merge result still points at; the sweep's post-merge position reads arm-local SSA values that do not dominate the merge (Cranelift verifier error in debug, silent miscompile in release — observed garbage stdout + SIGTRAP). Codegen diagnoses the shape (I-210 reference in the error) and rejects it loudly until the frontend models the consume.
+
+**Resolution:** In analyze_match (ryo-frontend/src/ownership/match_.rs), consume each non-never value arm's aggregate result into the match inst — mirror analyze_var_decl's consume_for_assignment + rebind_to_init so the arm-body owner is Moved and the match inst becomes the single owner the consumers (VarDecl/Assign/Return/call-arg) then move on. That removes both drop schedules (producer temp + binding read) and lets codegen delete the I-210 diagnosis in ryo-backend/src/codegen/match_.rs. Until then, programs with owned-producing aggregate value arms fail to compile with the I-210 error (sound; the mut-binding + if/else restructure is the workaround).
+
+---
+
 ## Cross-References
 
 - Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md) — latest verified snapshot (2026-08-24); several current entries originated there, and its `I-xxx` citations reflect what was open at the time (older snapshots live in git history).
