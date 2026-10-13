@@ -322,6 +322,7 @@ impl<M: Module> Codegen<M> {
                             // A diverging arm body (a noreturn call)
                             // still evaluates — for its side effects.
                             let _ = Self::eval_inst(builder, ctx, e)?;
+                            Self::terminate_dead_arm_block(builder);
                             false
                         } else {
                             let (_, slot_addr) =
@@ -333,6 +334,7 @@ impl<M: Module> Codegen<M> {
                     } else {
                         let v = Self::eval_inst(builder, ctx, e)?;
                         if ctx.pool.is_never(body_ty) {
+                            Self::terminate_dead_arm_block(builder);
                             false
                         } else {
                             // Arm-body frees: fire everything that became
@@ -367,7 +369,21 @@ impl<M: Module> Codegen<M> {
                 MatchBodyView::Stmts(_) => {
                     let stmts: Vec<TirRef> = arm.body.stmts().collect();
                     let term = Self::emit_scoped_body(builder, ctx, &stmts, false)?;
-                    if term == Terminator::None {
+                    if term != Terminator::None {
+                        // Return / Break / Continue — no merge edge.
+                        false
+                    } else if ctx.tir.block_definitely_terminates(&stmts, ctx.pool) {
+                        // Sema-level divergence emit_stmt cannot report:
+                        // the body's last statement is never-typed (a bare
+                        // `panic(...)` ExprStmt — the shape `stmt_terminates`
+                        // counts as terminating, and the noreturn-call path
+                        // already switched the builder into its sealed dead
+                        // block). The arm diverges like a `return` arm: no
+                        // merge edge, and the dead block gets its terminator
+                        // so finalize never sees a sealed, unterminated block.
+                        Self::terminate_dead_arm_block(builder);
+                        false
+                    } else {
                         match shape {
                             MatchShape::Void => {
                                 builder.ins().jump(merge, &[]);
@@ -386,8 +402,6 @@ impl<M: Module> Codegen<M> {
                             }
                         }
                         true
-                    } else {
-                        false
                     }
                 }
             };
@@ -640,6 +654,18 @@ impl<M: Module> Codegen<M> {
             "eval_inst_match: a value arm yields an owned {} value whose drop is scheduled outside the arm (I-210): the result slot aliases the buffer, so lowering it would double-free or read arm-local values from the merge. Use a mutable binding assigned inside an if/else instead, until the ownership pass consumes arm-body results",
             ctx.pool.display(ty)
         )
+    }
+
+    /// Give the builder's current block a terminator when a diverging
+    /// arm body leaves it sealed-but-unterminated: the noreturn-call
+    /// path emits its trap and switches into a fresh SEALED dead block,
+    /// and a diverging arm must leave no merge edge — so the abandoned
+    /// dead block needs an explicit terminator before finalize (the
+    /// merge-unreachable path's user trap code, the file convention).
+    fn terminate_dead_arm_block(builder: &mut FunctionBuilder) {
+        builder.ins().trap(
+            TrapCode::user(1).expect("user trap code 1 is within Cranelift's encodable range"),
+        );
     }
 
     /// True when emitting the scheduled Free for `target` would produce

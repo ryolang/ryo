@@ -280,6 +280,12 @@ pub enum DiagCode {
     /// `bytes`. The message names the scrutinee type and lists what IS
     /// matchable: enums, `int`, `bool`, `str`, and anonymous structs.
     InvalidMatchScrutinee,
+    /// Every value arm of a `match` yields a view type (M12): the join
+    /// accepts the common view, but no merge shape exists for a view
+    /// result (ownership/liveness of a projection across arms needs
+    /// design — M12.6 carry-over). Rejected at compile time, naming the
+    /// view type and the deferral, never silently miscompiled.
+    MatchViewResult,
 
     // --- ownership (M8.1b) ---
     /// Use of a value after it has been moved.
@@ -309,6 +315,17 @@ pub enum DiagCode {
     /// Rule P2 violation: an owner was moved, mutated, or passed
     /// `inout` while a slice projection of it is live (M8.4).
     SourceProjected,
+    /// A `match` value arm yielded an aggregate rooted in a BORROWED
+    /// owner (a borrow/inout parameter or binding, or a field
+    /// projection of one): the match result becomes an owned binding
+    /// whose cleanup would free caller-owned storage (observed:
+    /// corrupted output + SIGTRAP). The ownership pass does not yet
+    /// consume arm-body results into the match inst, so the shape is
+    /// rejected at compile time, naming I-210; the owned-producing and
+    /// owned-binding-read families are diagnosed by codegen's I-210
+    /// guard (no scheduled drop exists for a borrowed owner, so the
+    /// codegen guard cannot see this family).
+    MatchValueArmBorrowed,
 
     // --- parser ---
     ParseError,

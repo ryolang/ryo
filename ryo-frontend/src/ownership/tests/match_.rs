@@ -654,3 +654,80 @@ fn dead_bind_in_expr_arm_freed_exactly_once_in_arm() {
         "anchored at the arm-body expression (fired inside the arm)"
     );
 }
+
+#[test]
+fn borrowed_param_arm_result_rejected_i210() {
+    // P1 (memory-safety): an expression arm yielding a borrowed
+    // parameter hands caller-owned storage to the match result binding
+    // (whose cleanup then frees it — observed: corrupted stdout +
+    // SIGTRAP). The ownership pass rejects the borrowed-source family
+    // at compile time, naming I-210; codegen's guard cannot see it
+    // (borrowed owners carry no scheduled drop).
+    let src = "fn pick(s: str, b: bool):\n\tx = match b:\n\t\ttrue: s\n\t\tfalse: \"no\"\n\tprint(x)\n\nfn main():\n\ts = \"0123456789012345678901234567890123456789\" + \"!\"\n\tpick(s, true)\n\tprint(s)\n";
+    let diags = check_src(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::MatchValueArmBorrowed)
+        .expect("the borrowed arm result must be rejected");
+    assert!(
+        diag.message.contains("I-210"),
+        "the message must name I-210, got {:?}",
+        diag.message
+    );
+    assert_eq!(
+        diags
+            .iter()
+            .filter(|d| d.severity == ryo_core::diag::Severity::Error)
+            .count(),
+        1,
+        "exactly one error (the literal arm is clean): {diags:?}"
+    );
+}
+
+#[test]
+fn borrowed_param_field_projection_arm_result_rejected_i210() {
+    // The general family: a field projection of a borrowed parameter
+    // (`p.name`) aliases the caller's storage like a direct read — the
+    // E0133 root-walk resolves the chain to the borrowed base owner.
+    let src = "struct Person:\n\tname: str\n\tage: int\n\nfn pick(p: Person, b: bool):\n\tx = match b:\n\t\ttrue: p.name\n\t\tfalse: \"no\"\n\tprint(x)\n\nfn main():\n\tq = Person{name=\"0123456789012345678901234567890123456789\" + \"!\", age=3}\n\tpick(q, true)\n\tprint(q.name)\n";
+    let diags = check_src(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::MatchValueArmBorrowed)
+        .expect("the borrowed projection arm result must be rejected");
+    assert!(
+        diag.message.contains("I-210"),
+        "the message must name I-210, got {:?}",
+        diag.message
+    );
+}
+
+#[test]
+fn owned_literal_arm_result_is_not_rejected() {
+    // Positive control: owned aggregate arms (static literals) through
+    // the same shape keep compiling — the borrowed check must not
+    // over-fire on owners that are not Borrowed.
+    let src = "fn main():\n\tb = true\n\tx = match b:\n\t\ttrue: \"yes\"\n\t\tfalse: \"no\"\n\tprint(x)\n";
+    let diags = check_src(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.code != DiagCode::MatchValueArmBorrowed),
+        "owned literal arms must not be rejected: {diags:?}"
+    );
+}
+
+#[test]
+fn borrowed_scalar_arm_result_is_not_rejected() {
+    // Scalars are Copy — an arm yielding a borrowed int parameter is a
+    // plain copy, not a borrow escape; the aggregate-only check must
+    // stay silent.
+    let src = "fn pick(n: int, b: bool):\n\tx = match b:\n\t\ttrue: n\n\t\tfalse: 0\n\tprint(x)\n\nfn main():\n\tpick(5, true)\n";
+    let diags = check_src(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "a borrowed scalar arm result must compile clean: {diags:?}"
+    );
+}

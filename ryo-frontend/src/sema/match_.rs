@@ -1,5 +1,5 @@
 //! `match` expression analysis (M12) — pattern resolution, the
-//! E0129-E0136 diagnostic family, exhaustiveness checking, and typed
+//! E0129-E0137 diagnostic family, exhaustiveness checking, and typed
 //! TIR `Match` emission. Split from `expr.rs` so the parent file stays
 //! under the 2000-line CI gate.
 //!
@@ -27,11 +27,15 @@
 //! payload bindings (E0133 gates by-move binds out of borrowed
 //! scrutinees; the duplicate/reserved binding checks mirror M10
 //! destructure insertion), the arm types are joined — every value arm
-//! must agree on one `TypeId` (E0134), `never`/error arms join freely,
-//! a falling statement arm is legal only when no arm produces a value
-//! (else E0135) — and a clean match emits `TirTag::Match` typed as the
-//! joined result, preceded by one `FieldAccess` owner token per by-move
-//! binding (the convention documented on `TirBuilder::match_expr`).
+//! must agree on one `TypeId` (E0134), `never`/error arms join freely
+//! (an expression arm analyzed through the never-tolerant entry point,
+//! so a `panic(...)` arm is DIVERGING rather than E0017), a falling
+//! statement arm is legal only when no arm produces a value
+//! (else E0135), and a view-typed candidate is rejected outright
+//! (E0137 — no merge shape exists for a view result) — and a clean
+//! match emits `TirTag::Match` typed as the joined result, preceded by
+//! one `FieldAccess` owner token per by-move binding (the convention
+//! documented on `TirBuilder::match_expr`).
 //! Anon-pattern arms encode `Discriminant::Wildcard` as a coverage
 //! placeholder (structural lowering is M12.5) and carry their literal
 //! field constraints on the wire as a per-arm GUARD list so codegen
@@ -61,8 +65,8 @@
 //! type-check, and one E0133 bind never blocks the next arm's binds.
 
 use super::{
-    FuncCtx, Scope, Sema, analyze_block, analyze_expr, check_reserved_name, field_list, ordinal,
-    with_struct_shape_notes,
+    FuncCtx, Scope, Sema, analyze_block, analyze_expr, analyze_expr_allow_never,
+    check_reserved_name, field_list, ordinal, with_struct_shape_notes,
 };
 use ryo_core::ast::LitPattern;
 use ryo_core::diag::{Diag, DiagCode};
@@ -394,7 +398,12 @@ fn type_and_emit_match(
 
         let (body, class) = match uir_arm.body {
             UirArmBodyView::Expr(body_ref) => {
-                let body_tir = analyze_expr(sema, fcx, &child_scope, body_ref);
+                // The never-tolerant entry point: a diverging arm body
+                // (`panic(...)`, any noreturn call) is a DIVERGING arm
+                // at the join — like a `return`-ending statement arm —
+                // not an E0017 value-position error. The classifier
+                // below routes `never`/error bodies to Diverges.
+                let body_tir = analyze_expr_allow_never(sema, fcx, &child_scope, body_ref);
                 let ty = fcx.builder.ty_of(body_tir);
                 let class = if sema.pool.is_error(ty) || sema.pool.is_never(ty) {
                     ArmClass::Diverges
@@ -493,6 +502,34 @@ fn type_and_emit_match(
                 );
                 analysis.had_error = true;
             }
+        }
+        // E0137: every value arm agreeing on a VIEW type is the join
+        // accepting a result no merge shape exists for — a projection's
+        // ownership/liveness across arms needs design (M12.6 carry-over),
+        // and `eval_inst_view` has no Match case to miscompile into.
+        // Reject loudly here; only when no E0134 fired (piling the
+        // deferral on top of a plain mismatch would double-report).
+        if offenders.is_empty() && sema.pool.is_view(expected) {
+            let first_value = arms_out
+                .iter()
+                .find(|arm| matches!(arm.class, ArmClass::Value(_)))
+                .expect("a value candidate exists");
+            sema.sink.emit(
+                Diag::error(
+                    first_value.span,
+                    DiagCode::MatchViewResult,
+                    format!(
+                        "match arm yields a view type '{}' — view-typed match \
+                         results are not yet supported",
+                        sema.pool.display(expected),
+                    ),
+                )
+                .with_help(
+                    "restructure with a `mut` binding assigned in an if/else until \
+                     view-result merging lands (M12.6 carry-over)",
+                ),
+            );
+            analysis.had_error = true;
         }
     }
 

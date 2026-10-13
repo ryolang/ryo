@@ -479,6 +479,8 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::ArmTypeMismatch => "E0134",
         DiagCode::ArmNoValue => "E0135",
         DiagCode::InvalidMatchScrutinee => "E0136",
+        DiagCode::MatchViewResult => "E0137",
+        DiagCode::MatchValueArmBorrowed => "E0138",
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::InvalidCharacter => "E0102",
         DiagCode::UnknownEscape => "E0103",
@@ -945,6 +947,8 @@ mod tests {
             (DiagCode::ArmTypeMismatch, "E0134"),
             (DiagCode::ArmNoValue, "E0135"),
             (DiagCode::InvalidMatchScrutinee, "E0136"),
+            (DiagCode::MatchViewResult, "E0137"),
+            (DiagCode::MatchValueArmBorrowed, "E0138"),
             (DiagCode::ConstEvalFailure, "E0200"),
             (DiagCode::CycleInComptime, "E0201"),
             (DiagCode::GenericInstantiation, "E0202"),
@@ -1048,6 +1052,8 @@ mod tests {
                 | DiagCode::ArmTypeMismatch
                 | DiagCode::ArmNoValue
                 | DiagCode::InvalidMatchScrutinee
+                | DiagCode::MatchViewResult
+                | DiagCode::MatchValueArmBorrowed
                 | DiagCode::TooManyDiagnostics
                 | DiagCode::InvalidCharacter
                 | DiagCode::UnknownEscape

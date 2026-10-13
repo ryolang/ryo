@@ -1,6 +1,6 @@
-//! M12 `match` sema tests — pattern resolution (E0131-E0136 family),
+//! M12 `match` sema tests — pattern resolution (E0131-E0137 family),
 //! exhaustiveness / redundancy (E0129 / W0005), and arm typing with
-//! typed TIR `Match` emission (E0133-E0135). Harness shared with
+//! typed TIR `Match` emission (E0133-E0135, E0137). Harness shared with
 //! `tests.rs` via its `pub(super)` helpers (the 2000-line file cap keeps
 //! these out of `tests.rs`).
 //!
@@ -1044,6 +1044,102 @@ fn all_never_match_types_as_never() {
     let f = tir_named(&tirs, &pool, "f");
     let m = match_stmt_operand(f, 0);
     assert_eq!(f.inst(m).ty, pool.never(), "all-never match is never");
+}
+
+#[test]
+fn panic_expr_arm_joins_as_diverging_no_e0017() {
+    // P2a: an inline `panic(...)` expression arm is analyzed through the
+    // never-tolerant entry point, so it joins as DIVERGING (the match
+    // still types as int from the value arm) — not the E0017
+    // value-position rejection a never-typed expression usually gets.
+    let src = "fn main():\n\tx = match true:\n\t\ttrue: 1\n\t\tfalse: panic(\"no\")\n\tprint(x)\n";
+    let (tirs, diags, pool) = run_with_errors(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.code != DiagCode::VoidValueInExpression),
+        "no E0017 for the panic arm: {diags:?}"
+    );
+    assert_eq!(diags.len(), 0, "the mixed value/diverging match is clean");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_in_var_init(main, 0);
+    assert_eq!(
+        main.inst(m).ty,
+        pool.int(),
+        "the value arm sets the join type"
+    );
+    let view = main.match_view(m);
+    let MatchBodyView::Expr(diverging) = view.arm(1).body else {
+        panic!("arm 1 is an expr body, got {:?}", view.arm(1).body);
+    };
+    assert_eq!(
+        main.inst(diverging).ty,
+        pool.never(),
+        "the panic arm body stays never-typed on the wire"
+    );
+}
+
+#[test]
+fn all_diverging_panic_and_return_arms_type_never() {
+    // P2a/P2b pair: `panic(...)` (expr arm) and `return` (statement arm)
+    // in one match — both diverge, the join is `never`, no E0017.
+    let src = "fn f(b: bool) -> int:\n\tmatch b:\n\t\ttrue: panic(\"a\")\n\t\tfalse: return 7\n\nfn main():\n\tprint(f(false))\n";
+    let (tirs, diags, pool) = run_with_errors(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.code != DiagCode::VoidValueInExpression),
+        "no E0017 for the panic arm: {diags:?}"
+    );
+    assert_eq!(diags.len(), 0, "the all-diverging match is clean");
+    let f = tir_named(&tirs, &pool, "f");
+    let m = match_stmt_operand(f, 0);
+    assert_eq!(f.inst(m).ty, pool.never(), "all-diverging match is never");
+}
+
+#[test]
+fn view_result_is_rejected_with_e0137() {
+    // P2c: every value arm agreeing on a view type passes the E0134 join
+    // but no merge shape exists for a view result — E0137 names the view
+    // type and the deferral, and the match recovers error-typed (so
+    // codegen's eval_inst_view can never see a Match).
+    let src = "fn main():\n\ts = \"hello\"\n\tv = match true:\n\t\ttrue: s[0:2]\n\t\tfalse: s[2:4]\n\tprint(v)\n";
+    let (tirs, diags, pool) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::MatchViewResult)
+        .expect("E0137 must fire");
+    for needle in ["'strview'", "not yet supported"] {
+        assert!(
+            diag.message.contains(needle),
+            "message must contain {needle}, got {:?}",
+            diag.message
+        );
+    }
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_in_var_init(main, 1);
+    assert!(
+        matches!(main.inst(m).tag, TirTag::Unreachable),
+        "errored match recovers with Unreachable, got {:?}",
+        main.inst(m).tag
+    );
+}
+
+#[test]
+fn view_result_with_e0134_offender_reports_only_e0134() {
+    // A view candidate against a disagreeing value arm is a plain E0134
+    // — piling the E0137 deferral on top would double-report.
+    let src = "fn main():\n\ts = \"hello\"\n\tv = match true:\n\t\ttrue: s[0:2]\n\t\tfalse: 1\n\tprint(v)\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    assert!(
+        diags.iter().any(|d| d.code == DiagCode::ArmTypeMismatch),
+        "E0134 must fire: {diags:?}"
+    );
+    assert!(
+        diags.iter().all(|d| d.code != DiagCode::MatchViewResult),
+        "no E0137 pile-on when a plain mismatch exists: {diags:?}"
+    );
 }
 
 #[test]

@@ -22,16 +22,21 @@
 //!   the lattice; sema's E0133 already refuses by-move binds there);
 //! * arm-local dead binds (never read in their arm) are swept at arm
 //!   end into arm-gated Frees — an ungated after-match Free would free
-//!   garbage on the sibling arms' paths.
+//!   garbage on the sibling arms' paths;
+//! * an aggregate-typed match result can never ride a borrowed owner:
+//!   an expression arm yielding (a projection of) a borrowed
+//!   param/binding is rejected here (E0138, I-210's borrowed family —
+//!   no scheduled drop exists for codegen's guard to see), until the
+//!   pass learns to consume arm-body results into the match.
 
 use super::{
     BranchState, Owner, OwnerState, Ownership, analyze_stmt, body_must_terminate,
     check_source_projected, check_use_moved, consume_for_assignment, consumed_binding_name,
-    drain_dying_views, needs_tracking, owner_sort_key, prune_branch_dead_projections,
-    refine_view_liveness_for_arm, register_pending_dead_store, restore_view_last_use,
-    stmts_subtree, underlying_owner, visit_expr,
+    drain_dying_views, inout_escape_owner, needs_tracking, owner_sort_key,
+    prune_branch_dead_projections, refine_view_liveness_for_arm, register_pending_dead_store,
+    restore_view_last_use, stmts_subtree, struct_root, underlying_owner, visit_expr,
 };
-use ryo_core::diag::DiagSink;
+use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::ownership::{BranchId, FreePoint, FunctionSidecar, MatchArmDrop, MatchBranchIds};
 use ryo_core::tir::{ChildKind, MatchArmView, MatchBodyView, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, StructField, TypeId};
@@ -86,6 +91,17 @@ pub(crate) fn analyze_match(
     // sema-borrowed scrutinees, so no arm of it can consume.
     let scrutinee_owner = underlying_owner(own, scrutinee);
     let borrowed = matches!(own.states.get(&scrutinee_owner), Some(OwnerState::Borrowed));
+    // I-210, the borrowed-source family: when the match's result type is
+    // a needs-drop aggregate, an expression arm that yields (a
+    // projection of) a BORROWED owner hands caller-owned storage to the
+    // result binding — the arm-body visit never consumes the result, so
+    // no scheduled drop exists for codegen's I-210 guard to see, and the
+    // result binding's cleanup frees caller storage (observed: corrupted
+    // output + SIGTRAP). Codegen's guard covers the owned families
+    // (producers, tracked-binding reads) via their scheduled drops; this
+    // check covers the borrowed family via the lattice. Scalars are
+    // Copy (no aggregate result); views are rejected in sema (E0137).
+    let aggregate_result = pool.needs_drop(tir.inst(r).ty);
 
     // BranchId per arm, recorded for codegen before any arm walks
     // (the `if_branches` discipline — codegen pushes each arm's id as
@@ -176,7 +192,24 @@ pub(crate) fn analyze_match(
             .unwrap_or_default();
         let saved = refine_view_liveness_for_arm(own, r, arm_index, &match_subtree, &arm_subtree);
         match arm.body {
-            MatchBodyView::Expr(e) => visit_expr(tir, pool, own, sink, sidecar, e),
+            MatchBodyView::Expr(e) => {
+                if aggregate_result && arm_result_borrows_caller(tir, own, e) {
+                    sink.emit(
+                        Diag::error(
+                            tir.span(e),
+                            DiagCode::MatchValueArmBorrowed,
+                            "match value arms cannot yield values borrowed from the \
+                             caller — tracked as I-210",
+                        )
+                        .with_help(
+                            "yield an owned value in the arm, or restructure with a \
+                             `mut` binding assigned in an if/else, until arm-result \
+                             ownership transfer lands",
+                        ),
+                    );
+                }
+                visit_expr(tir, pool, own, sink, sidecar, e);
+            }
             MatchBodyView::Stmts(_) => {
                 for s in arm.body.stmts() {
                     analyze_stmt(tir, pool, own, sink, sidecar, s);
@@ -306,6 +339,28 @@ pub(crate) fn visit_operand_matches(tir: &Tir, r: TirRef, f: &mut impl FnMut(Tir
             visit_operand_matches(tir, child, f);
         }
     });
+}
+
+/// True when an aggregate-typed expression arm's body reads (a field
+/// projection of) a BORROWED owner — the I-210 borrowed-source family.
+/// The root walk mirrors E0133's `struct_root` convention: a
+/// `FieldAccess` chain resolves to its base binding's current owner,
+/// whose `Borrowed` state marks a borrow/inout parameter (a Valid value
+/// currently bound to an `inout str` param escapes through the
+/// write-back pointer — `consume_underlying`'s borrowed test, applied
+/// verbatim). Fresh producers (calls, concats, literals) resolve to
+/// their own Valid inst owner and are left to codegen's I-210 guard.
+fn arm_result_borrows_caller(tir: &Tir, own: &Ownership, e: TirRef) -> bool {
+    let Some(root) = struct_root(own, tir, e) else {
+        return false;
+    };
+    let state = own
+        .states
+        .get(&root)
+        .cloned()
+        .unwrap_or(OwnerState::NotTracked);
+    matches!(state, OwnerState::Borrowed)
+        || (matches!(state, OwnerState::Valid) && inout_escape_owner(own, root))
 }
 
 /// Where an arm's flow ends: the anchor for arm-gated Frees of values

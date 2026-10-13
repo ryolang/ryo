@@ -448,7 +448,176 @@ fn match_value_arm_binding_read_diagnosed_i210_jit() {
     );
 }
 
-// --- Negative sweep — every match diagnostic code on stderr ---
+// --- Review wave fixes: borrowed aggregate results (P1), panic-arm
+// divergence (P2a/b), view results (P2c) ---
+
+#[test]
+fn match_borrowed_param_result_rejected_i210_jit() {
+    // P1 (memory-safety): the user's exact repro shape — a heap-backed
+    // borrowed `str` parameter (concat-built past SSO) flows as an
+    // expression-arm result, and the match result becomes an owned
+    // binding whose cleanup frees caller-owned storage (observed at
+    // HEAD: corrupted stdout + SIGTRAP). The ownership pass now rejects
+    // the borrowed-source family at compile time, naming I-210; the
+    // codegen guard cannot see it (a borrowed owner has no scheduled
+    // drop).
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn pick(s: str, b: bool):\n\tx = match b:\n\t\ttrue: s\n\t\tfalse: \"no\"\n\tprint(x)\n\nfn main():\n\ts = \"0123456789012345678901234567890123456789\" + \"!\"\n\tpick(s, true)\n\tprint(s)\n";
+    let test_file = create_test_file(temp_dir.path(), "match_borrowed_result.ryo", code);
+    let output = run_ryo_command(&["run", "match_borrowed_result.ryo"], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "a borrowed aggregate arm result must be rejected. stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for needle in ["I-210", "E0138"] {
+        assert!(
+            stderr.contains(needle),
+            "stderr must contain {needle}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn match_borrowed_param_field_projection_rejected_i210_jit() {
+    // The general borrowed-source family: a field projection of a
+    // borrowed parameter (`p.name`) aliases the caller's storage exactly
+    // like a direct param read, so the same rejection fires.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "struct Person:\n\tname: str\n\tage: int\n\nfn pick(p: Person, b: bool):\n\tx = match b:\n\t\ttrue: p.name\n\t\tfalse: \"no\"\n\tprint(x)\n\nfn main():\n\tq = Person{name=\"0123456789012345678901234567890123456789\" + \"!\", age=3}\n\tpick(q, true)\n\tprint(q.name)\n";
+    let test_file = create_test_file(temp_dir.path(), "match_borrowed_field.ryo", code);
+    let output = run_ryo_command(&["run", "match_borrowed_field.ryo"], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "a borrowed field-projection arm result must be rejected. stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("I-210"),
+        "the diagnosis must name I-210: {stderr}"
+    );
+}
+
+#[test]
+fn match_direct_borrowed_assign_control_e0021_jit() {
+    // Control: the direct-assignment shape (`x = s` on a borrowed param)
+    // keeps its E0021 — the match rejection must not change it.
+    assert_match_rejected(
+        "match_borrowed_assign_control.ryo",
+        "fn pick(s: str):\n\tx = s\n\tprint(x)\n\nfn main():\n\tpick(\"hi\")\n",
+        "E0021",
+    );
+}
+
+#[test]
+fn match_owned_literal_result_both_arms_jit() {
+    // Positive control: an OWNED aggregate through the same match shape
+    // still compiles and runs correctly — both arms exercised. (Owned
+    // heap-backed arms stay rejected by codegen's I-210 guard until the
+    // ownership consume lands; static-literal arms are the legal shape.)
+    assert_ryo_output(
+        "match_owned_result",
+        "fn main():\n\tb = true\n\tx = match b:\n\t\ttrue: \"yes-owned\"\n\t\tfalse: \"no\"\n\tprint(x)\n\tprint(\"\\n\")\n\ty = match false:\n\t\ttrue: \"yes-owned\"\n\t\tfalse: \"no\"\n\tprint(y)\n\tprint(\"\\n\")\n",
+        "yes-owned\nno\n",
+    );
+}
+
+#[test]
+fn match_panic_expr_arm_mixed_value_diverging_jit() {
+    // P2a: an inline `panic(...)` expression arm joins as DIVERGING (no
+    // value, like a `return` arm) instead of hitting E0017; the value
+    // arm's merge value reaches the binding untouched.
+    assert_ryo_output(
+        "match_panic_expr_arm",
+        "fn main():\n\tx = match true:\n\t\ttrue: 1\n\t\tfalse: panic(\"no\")\n\tprint(x)\n\tprint(\"\\n\")\n",
+        "1\n",
+    );
+}
+
+#[test]
+fn match_panic_expr_arm_taken_panics_jit() {
+    // P2a runtime: when the diverging arm IS taken, the panic fires with
+    // its message and location (the arm body evaluated for effect, no
+    // merge edge, and the process exits 101).
+    let temp_dir = TempDir::new().expect("temp");
+    let code =
+        "fn main():\n\tx = match false:\n\t\ttrue: 1\n\t\tfalse: panic(\"no\")\n\tprint(x)\n";
+    let test_file = create_test_file(temp_dir.path(), "match_panic_taken.ryo", code);
+    let output = run_ryo_command(&["run", "match_panic_taken.ryo"], &test_file).expect("run");
+    assert_eq!(
+        output.status.code(),
+        Some(101),
+        "the taken panic arm must abort. stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("panicked"),
+        "stderr should contain the panic message: {stderr}"
+    );
+}
+
+#[test]
+fn match_all_diverging_panic_and_return_arms_jit() {
+    // All-diverging arms: `panic(...)` and `return` in one match — the
+    // join is `never`, the merge is unreachable, and the returning arm
+    // hands control back normally.
+    assert_ryo_output(
+        "match_all_diverging",
+        "fn f(b: bool) -> int:\n\tmatch b:\n\t\ttrue: panic(\"a\")\n\t\tfalse: return 7\n\nfn main():\n\tprint(f(false))\n\tprint(\"\\n\")\n",
+        "7\n",
+    );
+}
+
+#[test]
+fn match_panic_block_arm_value_match_jit() {
+    // P2b: the block-arm form of the diverging arm — a statement arm
+    // whose trailing `panic(...)` ExprStmt diverges — behaves exactly
+    // like the inline P2a form (the divergence rides the same
+    // stmt_terminates sense sema used to classify the arm).
+    assert_ryo_output(
+        "match_panic_block_arm",
+        "fn main():\n\tx = match true:\n\t\ttrue: 1\n\t\tfalse:\n\t\t\tpanic(\"no\")\n\tprint(x)\n\tprint(\"\\n\")\n",
+        "1\n",
+    );
+}
+
+#[test]
+fn match_panic_block_arm_str_result_jit() {
+    // P2b in an aggregate-result match: the diverging block arm leaves
+    // the result slot untouched on its (never-taken) path; the value arm
+    // writes it and the merge reads it back.
+    assert_ryo_output(
+        "match_panic_block_str",
+        "fn pick(b: bool) -> str:\n\ts = match b:\n\t\ttrue: \"yes\"\n\t\tfalse:\n\t\t\tpanic(\"no\")\n\treturn s\n\nfn main():\n\tprint(pick(true))\n\tprint(\"\\n\")\n",
+        "yes\n",
+    );
+}
+
+#[test]
+fn match_view_result_rejected_e0137_jit() {
+    // P2c: view-valued match results pass the E0134 join (both arms
+    // agree on strview) but no merge shape exists for a view — sema
+    // rejects them loudly instead of failing in eval_inst_view.
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "fn main():\n\ts = \"hello\"\n\tv = match true:\n\t\ttrue: s[0:2]\n\t\tfalse: s[2:4]\n\tprint(v)\n";
+    let test_file = create_test_file(temp_dir.path(), "match_view_result.ryo", code);
+    let output = run_ryo_command(&["run", "match_view_result.ryo"], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "a view-typed match result must be rejected. stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for needle in ["E0137", "not yet supported"] {
+        assert!(
+            stderr.contains(needle),
+            "stderr must contain {needle}: {stderr}"
+        );
+    }
+}
 // E0129 (three non-exhaustive shapes) and W0005 (duplicate-arm warning
 // with successful compile) are pinned by the literal-chain tests above;
 // each

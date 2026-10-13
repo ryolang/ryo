@@ -1522,6 +1522,24 @@ fn main():
                       <code>void</code> are rejected
                     </td>
                   </tr>
+                  <tr>
+                    <td><code>E0137</code></td>
+                    <td>
+                      View-typed match result — a match whose value arms
+                      all yield one view type is rejected until
+                      view-result merging lands
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>E0138</code></td>
+                    <td>
+                      Match value arm yields a value borrowed from the
+                      caller (a borrowed parameter or a projection of
+                      one) — restructure with a
+                      <code>mut</code> binding until arm-result ownership
+                      transfer lands
+                    </td>
+                  </tr>
                 </tbody>
               </table>
             </div>

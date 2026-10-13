@@ -134,7 +134,12 @@ structural alternative (phi nodes per arm) is what block params do for
 scalars, and aggregates do not fit in one machine value.
 
 Diverging arms (never-typed bodies, `return` / `break` / `continue`)
-write nothing and leave no merge edge.
+write nothing and leave no merge edge. Sema types an expression arm
+through the never-tolerant entry point, so an inline `panic(...)` arm
+joins as diverging (not E0017); a statement arm whose trailing statement
+diverges (a bare `panic(...)`, the `stmt_terminates` sense) diverges the
+same way — codegen leaves no merge edge and terminates the noreturn
+call's dead block.
 
 ### I-210: aggregate value arms are rejected for now
 
@@ -145,16 +150,30 @@ the ownership pass never consumes an arm-body result into the `Match`
 inst, so the drop schedules (producer temporaries anchored on the match,
 binding last-use Frees) would release storage the result slot aliases —
 a double-free or a post-merge read of arm-local SSA values that do not
-dominate the merge. Codegen diagnoses exactly the miscompiling subset
-(reusing the elision logic, so the rejected set tracks actually-emitting
-drops) and rejects loudly. Lift: in `analyze_match`, consume each
-non-`never` value arm's aggregate result into the match inst (mirror
-`analyze_var_decl`'s `consume_for_assignment` + `rebind_to_init`), then
-delete the codegen diagnosis. Until then the workaround is a `mut`
+dominate the merge. Codegen diagnoses the owned families (reusing the
+elision logic, so the rejected set tracks actually-emitting drops); the
+**borrowed family** — an arm yielding a borrow/`inout` parameter or
+binding, or a field projection of one — is diagnosed earlier, in the
+ownership pass (`arm_result_borrows_caller`, E0138): a borrowed owner
+carries no scheduled drop, so codegen's guard could never see it, and at
+HEAD the shape escaped as corrupted output + SIGTRAP. Lift: in
+`analyze_match`, consume each non-`never` value arm's aggregate result
+into the match inst (mirror `analyze_var_decl`'s
+`consume_for_assignment` + `rebind_to_init`), then delete the codegen
+diagnosis and the E0138 check. Until then the workaround is a `mut`
 binding assigned inside an if/else restructure. Tracked in
 `ISSUES.md` (I-210); the sanitizer fixture `match_discarded_value` is
 structurally leak-insensitive today and should gain a heap-carrying arm
 when the lift lands.
+
+### View-typed results are rejected (E0137)
+
+A match whose value arms all yield one view type passes the E0134 join
+but has no merge shape: a projection's ownership/liveness across arms
+needs design (M12.6 carry-over, lifted together with the I-210
+consume), and `eval_inst_view` has no `Match` case. Sema rejects the
+shape at compile time (E0137), naming the view type and the deferral —
+never silently miscompiled.
 
 ## Dispatch lowering
 
@@ -217,7 +236,9 @@ gets no loop-exit Frees yet (the loop-exit walk skips operand descent
 at loop statements to avoid the stale outer context; exotic shape);
 and `branch_may_not_return` has a `Match` arm but no operand descent
 (pre-existing, backstopped by the return epilogue). I-210's consume fix
-(above) is also queued there.
+(above) is also queued there, as is the view-result merge (E0137's
+deferral — a match whose value arms all yield one view type is rejected
+at compile time until the merge shape exists).
 
 ### Deferred to M13 / M16
 
@@ -239,6 +260,9 @@ for both.
 - **Errored arm after a wildcard** gets no W0005 (deliberate
   no-double-report, see above); M12.5's wildcard-precision work should
   revisit knowingly.
+- **View-typed match results** are rejected with E0137 (above) — no
+  merge shape exists for a projection result until the M12.6 carry-over
+  lifts it with the I-210 consume.
 - The UIR `ir --emit` dump renders `Match` as `<malformed>` until a dump
   arm lands.
 
