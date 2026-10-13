@@ -452,6 +452,15 @@ pub struct Tir {
     /// top-level statements, in execution order.
     pub body: ExtraRange,
     pub span: Span,
+    /// Lazily computed per-body operand-subtree match table; see
+    /// [`Tir::operand_match_memo`]. Not serialized.
+    pub operand_match_memo: std::cell::OnceCell<Box<[bool]>>,
+    /// `true` when this body contains at least one `Match`
+    /// instruction — stamped by the builder (`match_expr` is the only
+    /// producer), the O(1) gate that lets match-free bodies skip every
+    /// value-position-match scan and unwrap without decoding a single
+    /// instruction.
+    pub contains_match: bool,
 }
 
 impl Tir {
@@ -651,6 +660,9 @@ pub struct TirBuilder {
     instructions: Vec<TypedInst>,
     extra: Vec<u32>,
     spans: Vec<Span>,
+    /// Set by `match_expr` — the only `Match` producer — and copied
+    /// into the built [`Tir`]'s `contains_match`.
+    saw_match: bool,
 }
 
 impl TirBuilder {
@@ -676,6 +688,7 @@ impl TirBuilder {
             instructions: vec![placeholder],
             extra: Vec::new(),
             spans: vec![placeholder_span],
+            saw_match: false,
         }
     }
 
@@ -695,7 +708,7 @@ impl TirBuilder {
     /// fallthrough. Rules live in the shared free function so the
     /// finished-`Tir` and in-progress-builder answers never drift.
     pub fn block_definitely_returns(&self, stmts: &[TirRef], pool: &InternPool) -> bool {
-        block_terminates(&self.instructions, &self.extra, stmts, pool, false)
+        terminates::block_terminates(&self.instructions, &self.extra, stmts, pool, false)
     }
 
     /// The arm-termination sense used by M12 match arm typing: like
@@ -703,7 +716,7 @@ impl TirBuilder {
     /// ending in `break`/`continue` also counts as terminating (the
     /// arm is `never` at the join, never an E0135 fallthrough).
     pub fn block_definitely_terminates(&self, stmts: &[TirRef], pool: &InternPool) -> bool {
-        block_terminates(&self.instructions, &self.extra, stmts, pool, true)
+        terminates::block_terminates(&self.instructions, &self.extra, stmts, pool, true)
     }
 
     fn push(&mut self, tag: TirTag, ty: TypeId, data: TirData, span: Span) -> TirRef {
@@ -1207,6 +1220,8 @@ impl TirBuilder {
             spans: self.spans,
             body: ExtraRange { offset, len },
             span: self.span,
+            operand_match_memo: std::cell::OnceCell::new(),
+            contains_match: self.saw_match,
         };
         #[cfg(debug_assertions)]
         tir.validate_tree_shape();
@@ -1516,7 +1531,7 @@ fn read_ref_list(slice: &[u32], pos: &mut usize) -> Vec<TirRef> {
 /// * [`ChildKind::BodyStmt`] — a statement nested inside an
 ///   `if`/`while`/`for` body. Reachable from the parent for
 ///   traversal, but not a consumer of the parent.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ChildKind {
     Operand,
     BodyStmt,
@@ -1771,7 +1786,7 @@ impl Tir {
     /// A block definitely returns when ANY of its statements does —
     /// everything after that point is unreachable.
     pub fn block_definitely_returns(&self, stmts: &[TirRef], pool: &InternPool) -> bool {
-        block_terminates(&self.instructions, &self.extra, stmts, pool, false)
+        terminates::block_terminates(&self.instructions, &self.extra, stmts, pool, false)
     }
 
     /// The arm-termination sense used by M12 match arm typing: like
@@ -1779,7 +1794,7 @@ impl Tir {
     /// `break`/`continue` also counts as terminating (the arm is
     /// `never` at the join, never an E0135 fallthrough).
     pub fn block_definitely_terminates(&self, stmts: &[TirRef], pool: &InternPool) -> bool {
-        block_terminates(&self.instructions, &self.extra, stmts, pool, true)
+        terminates::block_terminates(&self.instructions, &self.extra, stmts, pool, true)
     }
 
     /// Collect the set of TirRefs evaluated on the path that reaches
@@ -1867,115 +1882,7 @@ impl Tir {
     }
 }
 
-// ---------- Shared return-flow analysis ----------
-
-/// The definite-termination rules behind [`Tir::block_definitely_returns`]
-/// / [`TirBuilder::block_definitely_returns`] and their
-/// `block_definitely_terminates` siblings: one implementation over the
-/// raw `(instructions, extra)` arenas both types hold, so mid-sema
-/// queries (match arm typing) and post-build queries (the E0036
-/// missing-return check) can never drift. `jumps` selects the sense:
-/// `false` — only `return`/`never` count (E0036); `true` —
-/// `break`/`continue` also count (the M12 match-arm sense: a statement
-/// arm ending in a jump out of the match is `never` at the join, never
-/// an E0135 fallthrough).
-///
-/// Statement rules:
-/// - `Return` / `ReturnVoid`: returns by construction. `Unreachable`:
-///   error-recovery sentinel — treated as terminating so a body that
-///   already errored doesn't cascade a spurious diagnostic.
-/// - `Break` / `Continue`: terminate only in the `jumps` sense.
-/// - `ExprStmt` whose operand is `never`-typed (e.g. a `panic` call):
-///   diverges, nothing past it executes.
-/// - `VarDecl` / `Assign` / `CompoundAssign` whose evaluated
-///   initializer/value is `never`-typed: same divergence, the binding
-///   never completes.
-/// - `IfStmt`: the then-block, every elif body, and the else block must
-///   all terminate; without an else the not-taken path falls through.
-/// - Everything else — including loops, whose bodies can run zero times
-///   — falls through.
-fn block_terminates(
-    insts: &[TypedInst],
-    extra: &[u32],
-    stmts: &[TirRef],
-    pool: &InternPool,
-    jumps: bool,
-) -> bool {
-    stmts
-        .iter()
-        .any(|&s| stmt_terminates(insts, extra, s, pool, jumps))
-}
-
-fn stmt_terminates(
-    insts: &[TypedInst],
-    extra: &[u32],
-    r: TirRef,
-    pool: &InternPool,
-    jumps: bool,
-) -> bool {
-    let inst = &insts[r.index()];
-    match inst.tag {
-        TirTag::Return | TirTag::ReturnVoid | TirTag::Unreachable => true,
-        TirTag::Break | TirTag::Continue => jumps,
-        TirTag::ExprStmt => {
-            let TirData::UnOp(operand) = inst.data else {
-                unreachable!("ExprStmt must carry TirData::UnOp");
-            };
-            pool.is_never(insts[operand.index()].ty)
-        }
-        TirTag::VarDecl => {
-            pool.is_never(insts[extra_ref_at(extra, inst, var_decl_extra::INIT).index()].ty)
-        }
-        TirTag::Assign => {
-            pool.is_never(insts[extra_ref_at(extra, inst, assign_extra::VALUE).index()].ty)
-        }
-        TirTag::CompoundAssign => {
-            pool.is_never(insts[extra_ref_at(extra, inst, compound_assign_extra::VALUE).index()].ty)
-        }
-        TirTag::IfStmt => {
-            // Decode the arm blocks straight from the wire (same layout
-            // `Tir::if_stmt_view` documents); only the bodies matter
-            // here. Word 0 is the cond — the arm blocks start at 1.
-            let slice = extra_slice(extra, inst);
-            let mut pos = 1;
-            let then_stmts = read_ref_list(slice, &mut pos);
-            let elif_count = slice[pos] as usize;
-            pos += 1;
-            let mut elif_bodies = Vec::with_capacity(elif_count);
-            for _ in 0..elif_count {
-                pos += 1; // elif cond
-                elif_bodies.push(read_ref_list(slice, &mut pos));
-            }
-            let has_else = slice[pos] != 0;
-            pos += 1;
-            if !has_else {
-                return false;
-            }
-            let else_stmts = read_ref_list(slice, &mut pos);
-            block_terminates(insts, extra, &then_stmts, pool, jumps)
-                && elif_bodies
-                    .iter()
-                    .all(|body| block_terminates(insts, extra, body, pool, jumps))
-                && block_terminates(insts, extra, &else_stmts, pool, jumps)
-        }
-        _ => false,
-    }
-}
-
-/// The `extra` payload slice of an instruction that must carry
-/// `TirData::Extra`.
-fn extra_slice<'a>(extra: &'a [u32], inst: &TypedInst) -> &'a [u32] {
-    let TirData::Extra(rng) = inst.data else {
-        unreachable!("instruction must carry TirData::Extra");
-    };
-    &extra[rng.as_range()]
-}
-
-/// Word `offset` of an instruction's `extra` payload, read as a
-/// [`TirRef`].
-fn extra_ref_at(extra: &[u32], inst: &TypedInst, offset: usize) -> TirRef {
-    TirRef::from_raw(extra_slice(extra, inst)[offset])
-}
+mod terminates;
 
 mod dump;
 pub use dump::{TirDump, dump};

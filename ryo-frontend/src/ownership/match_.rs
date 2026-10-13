@@ -208,6 +208,20 @@ pub(crate) fn analyze_match(
                         ),
                     );
                 }
+                if aggregate_result && arm_result_yields_match_payload(tir, own, e, &tokens) {
+                    sink.emit(
+                        Diag::error(
+                            tir.span(e),
+                            DiagCode::MatchValueArmPayloadMove,
+                            "match value arms cannot yield a by-move payload binding \
+                             of the same match — tracked as I-210",
+                        )
+                        .with_help(
+                            "restructure with a `mut` binding assigned in an if/else, \
+                             until arm-result ownership transfer lands",
+                        ),
+                    );
+                }
                 visit_expr(tir, pool, own, sink, sidecar, e);
             }
             MatchBodyView::Stmts(_) => {
@@ -311,7 +325,15 @@ pub(crate) fn match_arm_bodies(tir: &Tir, r: TirRef) -> Vec<Vec<TirRef>> {
 /// match's arms. Every walker below unwraps through this before its
 /// tag dispatch.
 pub(crate) fn stmt_match(tir: &Tir, r: TirRef) -> Option<TirRef> {
-    match (tir.inst(r).tag, tir.inst(r).data) {
+    // Match-free bodies cannot contain a statement-level match: the
+    // builder-stamped flag answers without decoding the instruction
+    // (the two `inst` decodes below showed up in ownership benchmarks
+    // once this unwrap ran per statement across every walker).
+    if !tir.contains_match {
+        return None;
+    }
+    let inst = tir.inst(r);
+    match (inst.tag, inst.data) {
         (TirTag::Match, _) => Some(r),
         (TirTag::ExprStmt, TirData::UnOp(o)) if tir.inst(o).tag == TirTag::Match => Some(o),
         _ => None,
@@ -330,15 +352,32 @@ pub(crate) fn stmt_match(tir: &Tir, r: TirRef) -> Option<TirRef> {
 /// first); statement-arm bodies are deliberately skipped, because the
 /// callback owns those via `match_arm_bodies` and its own statement
 /// recursion (which would otherwise visit them twice).
+///
+/// Two gates keep match-free bodies at ~zero cost: the
+/// builder-stamped [`Tir::contains_match`] flag rejects them in one
+/// load, and once a body is known to contain matches, every descent is
+/// gated on [`Tir::subtree_has_match`] — the shared per-body memo — so
+/// only match-containing operand frontiers are walked (the ungated scan
+/// regressed the ownership benchmarks double digits on match-free
+/// programs).
 pub(crate) fn visit_operand_matches(tir: &Tir, r: TirRef, f: &mut impl FnMut(TirRef)) {
-    tir.walk_operands(r, &mut |_parent, child, kind| {
-        if tir.inst(child).tag == TirTag::Match {
-            f(child);
+    if !tir.contains_match {
+        return;
+    }
+    fn visit(tir: &Tir, memo: &[bool], r: TirRef, f: &mut impl FnMut(TirRef)) {
+        if !memo[r.index()] {
+            return;
         }
-        if matches!(kind, ChildKind::Operand) {
-            visit_operand_matches(tir, child, f);
-        }
-    });
+        tir.walk_operands(r, &mut |_parent, child, kind| {
+            if tir.inst(child).tag == TirTag::Match {
+                f(child);
+            }
+            if matches!(kind, ChildKind::Operand) {
+                visit(tir, memo, child, f);
+            }
+        });
+    }
+    visit(tir, tir.operand_match_memo(), r, f);
 }
 
 /// True when an aggregate-typed expression arm's body reads (a field
@@ -361,6 +400,36 @@ fn arm_result_borrows_caller(tir: &Tir, own: &Ownership, e: TirRef) -> bool {
         .unwrap_or(OwnerState::NotTracked);
     matches!(state, OwnerState::Borrowed)
         || (matches!(state, OwnerState::Valid) && inout_escape_owner(own, root))
+}
+
+/// True when an aggregate-typed expression arm's body is a by-move read
+/// of one of THIS match's own payload bindings (`Some(v): v`) — the
+/// I-210 payload family. The arm-body visit never consumes the result,
+/// so the payload's scheduled drop stays anchored outside the arm and
+/// codegen's result-slot write would alias the binding's storage (the
+/// debug build aborted on the dropped free; release miscompiled inside
+/// Cranelift's egraph). The arm-seeding above has already installed the
+/// token as the binding's current owner, so the root walk (the
+/// E0133/`struct_root` convention) finding one of this match's tokens
+/// identifies the shape. A payload CONSUMED into a fresh producer
+/// (`Some(v): v + "?"`) roots at that producer instead and is left to
+/// codegen's I-210 guard via its scheduled drop.
+fn arm_result_yields_match_payload(
+    tir: &Tir,
+    own: &Ownership,
+    e: TirRef,
+    tokens: &[TirRef],
+) -> bool {
+    let mut root = e;
+    while let TirData::FieldAccess { object, .. } = tir.inst(root).data {
+        root = object;
+    }
+    let TirData::Var(name) = tir.inst(root).data else {
+        return false;
+    };
+    tokens
+        .iter()
+        .any(|&t| own.current_owner.get(&name) == Some(&Owner::Inst(t)))
 }
 
 /// Where an arm's flow ends: the anchor for arm-gated Frees of values

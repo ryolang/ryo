@@ -706,3 +706,94 @@ fn match_void_scrutinee_errors_e0136_jit() {
         "E0136",
     );
 }
+
+// --- Review wave 2 (post-10f1c3f findings): traversal consistency ---
+
+#[test]
+fn match_value_position_sibling_view_arm_mutation_rejected_e0035_jit() {
+    // P1: a match in VALUE position (a VarDecl initializer) must get the
+    // scoped per-arm liveness treatment: the flat fallback left the
+    // match's arm read maps empty, so arm refinement read "no reads in
+    // this arm" and removed the projection — the arm's reassignment of
+    // `s` then freed the buffer `print(v)` still read (corrupted output,
+    // no diagnostic). The reassignment must be rejected with E0035.
+    assert_match_rejected(
+        "match_value_pos_view_sibling.ryo",
+        "fn main():\n\tmut s = \"0123456789012345678901234567890123456789\" + \"!\"\n\tv = s[0:3]\n\tx = match true:\n\t\ttrue:\n\t\t\ts = \"changed\"\n\t\t\tprint(v)\n\t\t\treturn\n\t\tfalse: v.len()\n\tprint(x)\n",
+        "E0035",
+    );
+}
+
+#[test]
+fn match_value_position_arm_local_view_dead_arm_still_compiles_jit() {
+    // Positive control for the same path: the sibling-arm read is the
+    // view's global last use, and the arm that mutates nothing is
+    // genuinely read-free — the scoped kill still fires (maps present),
+    // the program compiles, and the join reads the result normally.
+    assert_ryo_output(
+        "match_value_pos_view_dead_arm",
+        "fn main():\n\ts = \"0123456789012345678901234567890123456789\" + \"!\"\n\tv = s[0:3]\n\tx = match true:\n\t\ttrue: 1\n\t\tfalse: v.len()\n\tprint(x)\n\tprint(\"\\n\")\n",
+        "1\n",
+    );
+}
+
+#[test]
+fn match_arm_inout_realloc_runs_clean_jit() {
+    // P1: an inout call on an arm-local heap str reallocates through the
+    // home slot; the arm-end free must resolve the binding's CURRENT
+    // storage. Pre-fix the free-binding tables never saw the arm's
+    // VarDecl, cleanup freed the stale cached triple, and the program
+    // crashed after printing (double free; debug, release, and AOT).
+    assert_ryo_output(
+        "match_arm_inout_realloc",
+        "fn replace(inout s: str):\n\ts = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\" + \"!\"\n\nfn main():\n\tmatch true:\n\t\ttrue:\n\t\t\tmut s = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" + \"!\"\n\t\t\treplace(&s)\n\t\t\tprint(s)\n\t\t\tprint(\"\\n\")\n\t\tfalse:\n\t\t\tprint(\"no\\n\")\n",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb!\n",
+    );
+}
+
+#[test]
+fn match_payload_yield_rejected_e0139_jit() {
+    // P1: yielding a by-move payload binding as an aggregate match
+    // result (`Some(v): v`). The arm-body visit never consumes the
+    // result, so the payload's scheduled drop stayed anchored outside
+    // the arm: the debug compiler aborted ("frees anchored to
+    // unmaterialized instructions were dropped"), release miscompiled
+    // inside Cranelift's egraph. Rejected with E0139 (I-210) until
+    // arm-result ownership transfer lands.
+    assert_match_rejected(
+        "match_payload_yield_e0139.ryo",
+        "enum Opt:\n\tSome(str)\n\tNone\n\nfn main():\n\to = Opt.Some(\"0123456789012345678901234567890123456789\" + \"!\")\n\tx = match o:\n\t\tSome(v): v\n\t\tNone: \"none\"\n\tprint(x)\n",
+        "E0139",
+    );
+}
+
+#[test]
+fn match_payload_yield_static_rejected_e0139_jit() {
+    // The static-payload variant aborts the same way pre-fix (the
+    // dropped free is not the elided one) — E0139 must cover it too.
+    assert_match_rejected(
+        "match_payload_yield_static_e0139.ryo",
+        "enum Opt:\n\tSome(str)\n\tNone\n\nfn main():\n\to = Opt.Some(\"abc\")\n\tx = match o:\n\t\tSome(v): v\n\t\tNone: \"none\"\n\tprint(x)\n",
+        "E0139",
+    );
+}
+
+#[test]
+fn match_payload_consumed_into_producer_still_guarded_i210_jit() {
+    // The E0139 shape is exactly the bare by-move payload read: a
+    // payload CONSUMED into a fresh producer (`v + "?"`) roots at that
+    // producer, escapes E0139, and stays rejected by codegen's I-210
+    // guard via its scheduled drop (the producer temp aliases the
+    // result slot).
+    let temp_dir = TempDir::new().expect("temp");
+    let code = "enum Opt:\n\tSome(str)\n\tNone\n\nfn main():\n\to = Opt.Some(\"0123456789012345678901234567890123456789\" + \"!\")\n\tx = match o:\n\t\tSome(v): v + \"?\"\n\t\tNone: \"none\"\n\tprint(x)\n";
+    let test_file = create_test_file(temp_dir.path(), "match_payload_producer.ryo", code);
+    let output = run_ryo_command(&["run", "match_payload_producer.ryo"], &test_file).expect("run");
+    assert!(
+        !output.status.success(),
+        "a producer-consuming payload arm must stay rejected. stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("I-210"), "stderr must name I-210: {stderr}");
+}

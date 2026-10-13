@@ -9,9 +9,9 @@ use super::{Codegen, CodegenNameIds, FunctionContext, ValueRepr, is_fat_type};
 use cranelift::codegen::ir::{FuncRef, InstructionData, Opcode, ValueDef};
 use cranelift::prelude::*;
 use cranelift_module::Module;
-use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
+use ryo_core::tir::{ChildKind, ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The four tables built by [`Codegen::build_free_binding_names`]:
 /// free-target → binding name (dense, per instruction ref), fat-param
@@ -534,62 +534,127 @@ impl<M: Module> Codegen<M> {
         pool: &InternPool,
         sidecar: &ryo_core::ownership::FunctionSidecar,
     ) -> FreeBindingTables {
+        /// The four tables the walk populates, bundled so the nested
+        /// helpers stay under clippy's argument cap.
+        struct Tables<'a> {
+            map: &'a mut [Option<StringId>],
+            binding_of: &'a mut [Option<TirRef>],
+            last_write: &'a mut HashMap<TirRef, TirRef>,
+            seen_matches: &'a mut HashSet<TirRef>,
+        }
+
+        /// Register one match's by-move payload bindings and recurse
+        /// its statement-arm bodies. The by-move owner tokens (the
+        /// `FieldAccess` insts before the Match, M10 destructure
+        /// convention) map to their binding names so the free-path
+        /// redirect resolves a scheduled Free through the binding's
+        /// current slot — the M10 discipline, extended to match
+        /// payloads. `seen_matches` dedups: a statement-level match is
+        /// registered by the tag dispatch AND findable by the
+        /// value-position scan of the same statement.
+        fn register_match(
+            tir: &Tir,
+            pool: &InternPool,
+            sidecar: &ryo_core::ownership::FunctionSidecar,
+            m: TirRef,
+            t: &mut Tables<'_>,
+        ) {
+            if !t.seen_matches.insert(m) {
+                return;
+            }
+            let tokens = tir.match_by_move_owner_refs(m, pool);
+            let mut cursor = 0;
+            for arm in tir.match_view(m).arms() {
+                for b in arm.bindings() {
+                    if pool.is_copy(b.ty) {
+                        continue;
+                    }
+                    let token = tokens[cursor];
+                    cursor += 1;
+                    t.map[token.index()] = Some(b.name);
+                    t.binding_of[token.index()] = Some(token);
+                    t.last_write.insert(token, token);
+                }
+                // Statement-arm declarations register exactly like
+                // top-level ones; expression arms cannot declare.
+                let stmts: Vec<TirRef> = arm.body.stmts().collect();
+                walk(tir, pool, sidecar, &stmts, t);
+            }
+        }
+
+        /// Every match nested in `r`'s expression operands (any depth),
+        /// gated on the builder-stamped flag so match-free statements
+        /// cost one load. Statement-arm bodies are NOT operand-reachable
+        /// — `register_match`'s recursion owns those.
+        fn for_each_operand_match(tir: &Tir, r: TirRef, f: &mut impl FnMut(TirRef)) {
+            fn visit(tir: &Tir, memo: &[bool], r: TirRef, f: &mut impl FnMut(TirRef)) {
+                if !memo[r.index()] {
+                    return;
+                }
+                tir.walk_operands(r, &mut |_parent, child, kind| {
+                    if tir.inst(child).tag == TirTag::Match {
+                        f(child);
+                    }
+                    if kind == ChildKind::Operand {
+                        visit(tir, memo, child, f);
+                    }
+                });
+            }
+            if !tir.contains_match {
+                return;
+            }
+            visit(tir, tir.operand_match_memo(), r, f);
+        }
+
         fn walk(
             tir: &Tir,
+            pool: &InternPool,
             sidecar: &ryo_core::ownership::FunctionSidecar,
             stmts: &[TirRef],
-            map: &mut [Option<StringId>],
-            binding_of: &mut [Option<TirRef>],
-            last_write: &mut HashMap<TirRef, TirRef>,
+            t: &mut Tables<'_>,
         ) {
-            for &r in stmts {
+            for &stmt in stmts {
+                // M12: unwrap an ExprStmt-wrapped statement-level match
+                // before the tag dispatch (sema's convention — the
+                // frontend `stmt_match` shape).
+                let r = match (tir.inst(stmt).tag, tir.inst(stmt).data) {
+                    (TirTag::ExprStmt, TirData::UnOp(o)) if tir.inst(o).tag == TirTag::Match => o,
+                    _ => stmt,
+                };
                 match tir.inst(r).tag {
                     TirTag::VarDecl => {
                         let view = tir.var_decl_view(r);
-                        map[view.initializer.index()] = Some(view.name);
+                        t.map[view.initializer.index()] = Some(view.name);
                         // A VarDecl always declares a fresh binding
                         // (possibly shadowing an outer same-named one),
                         // so the binding identity is the VarDecl itself.
-                        binding_of[view.initializer.index()] = Some(r);
-                        last_write.insert(r, view.initializer);
+                        t.binding_of[view.initializer.index()] = Some(r);
+                        t.last_write.insert(r, view.initializer);
                     }
                     TirTag::Assign => {
                         let view = tir.assign_view(r);
-                        map[view.value.index()] = Some(view.name);
+                        t.map[view.value.index()] = Some(view.name);
                         // The binding this Assign stores into, recorded
                         // by the ownership walk; missing only for
                         // sema-rejected programs.
                         if let Some(binding) = sidecar.assign_binding[r.index()] {
-                            binding_of[view.value.index()] = Some(binding);
-                            last_write.insert(binding, view.value);
+                            t.binding_of[view.value.index()] = Some(binding);
+                            t.last_write.insert(binding, view.value);
                         }
                     }
                     TirTag::IfStmt => {
                         let view = tir.if_stmt_view(r);
-                        walk(tir, sidecar, &view.then_stmts, map, binding_of, last_write);
+                        walk(tir, pool, sidecar, &view.then_stmts, t);
                         for elif in &view.elif_branches {
-                            walk(tir, sidecar, &elif.body, map, binding_of, last_write);
+                            walk(tir, pool, sidecar, &elif.body, t);
                         }
                         if let Some(else_stmts) = &view.else_stmts {
-                            walk(tir, sidecar, else_stmts, map, binding_of, last_write);
+                            walk(tir, pool, sidecar, else_stmts, t);
                         }
                     }
-                    TirTag::WhileLoop => walk(
-                        tir,
-                        sidecar,
-                        &tir.while_loop_view(r).body,
-                        map,
-                        binding_of,
-                        last_write,
-                    ),
-                    TirTag::ForRange => walk(
-                        tir,
-                        sidecar,
-                        &tir.for_range_view(r).body,
-                        map,
-                        binding_of,
-                        last_write,
-                    ),
+                    TirTag::WhileLoop => walk(tir, pool, sidecar, &tir.while_loop_view(r).body, t),
+                    TirTag::ForRange => walk(tir, pool, sidecar, &tir.for_range_view(r).body, t),
+                    TirTag::Match => register_match(tir, pool, sidecar, r, t),
                     TirTag::Destructure => {
                         // M10: each bound field's owner token (the
                         // FieldAccess insts emitted immediately before
@@ -609,13 +674,25 @@ impl<M: Module> Codegen<M> {
                             let Some(bind) = field.bind else { continue };
                             let owner = owners[owner_idx];
                             owner_idx += 1;
-                            map[owner.index()] = Some(bind);
-                            binding_of[owner.index()] = Some(owner);
-                            last_write.insert(owner, owner);
+                            t.map[owner.index()] = Some(bind);
+                            t.binding_of[owner.index()] = Some(owner);
+                            t.last_write.insert(owner, owner);
                         }
                     }
                     _ => {}
                 }
+                // M12 value-position: a match nested in this statement's
+                // expression operands (a VarDecl initializer, an Assign
+                // value, a Return operand, a call argument) hides arm
+                // declarations and payload bindings exactly like a
+                // statement-level one. The builder-stamped flag keeps
+                // match-free statements at one load; `seen_matches`
+                // dedups the statement-level match this loop already
+                // registered via the tag dispatch (it is also this
+                // statement's operand).
+                for_each_operand_match(tir, r, &mut |m| {
+                    register_match(tir, pool, sidecar, m, t);
+                });
             }
         }
         let mut last_write: HashMap<TirRef, TirRef> = HashMap::new();
@@ -630,14 +707,16 @@ impl<M: Module> Codegen<M> {
         }
         let mut inst_names = vec![None; tir.instructions.len()];
         let mut inst_bindings = vec![None; tir.instructions.len()];
-        walk(
-            tir,
-            sidecar,
-            &tir.body_stmts(),
-            &mut inst_names,
-            &mut inst_bindings,
-            &mut last_write,
-        );
+        let mut seen_matches: HashSet<TirRef> = HashSet::new();
+        {
+            let mut tables = Tables {
+                map: &mut inst_names,
+                binding_of: &mut inst_bindings,
+                last_write: &mut last_write,
+                seen_matches: &mut seen_matches,
+            };
+            walk(tir, pool, sidecar, &tir.body_stmts(), &mut tables);
+        }
         (inst_names, param_names, inst_bindings, last_write)
     }
 }

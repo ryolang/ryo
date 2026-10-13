@@ -326,6 +326,19 @@ pub enum DiagCode {
     /// guard (no scheduled drop exists for a borrowed owner, so the
     /// codegen guard cannot see this family).
     MatchValueArmBorrowed,
+    /// A `match` value arm yielded a by-move PAYLOAD binding of the same
+    /// match (`Some(v): v`): the arm body's visit never consumes the
+    /// result, so the payload's scheduled drop stays anchored outside
+    /// the arm and codegen's result-slot write would alias the binding's
+    /// storage — debug builds aborted on the dropped free, release
+    /// builds miscompiled inside Cranelift's egraph (observed). The
+    /// ownership pass does not yet consume arm-body results into the
+    /// match inst, so the shape is rejected at compile time, naming
+    /// I-210; codegen's I-210 guard remains as the backstop for the
+    /// producer families (a payload consumed into a fresh producer,
+    /// e.g. `Some(v): v + "?"`, is diagnosed there via its scheduled
+    /// drop).
+    MatchValueArmPayloadMove,
 
     // --- parser ---
     ParseError,

@@ -483,6 +483,17 @@ fn asan_match_arm_vardecl_double_free() {
 }
 
 #[test]
+fn asan_match_arm_inout_realloc() {
+    // Mirrors valgrind_match_arm_inout_realloc: the arm-end free of an
+    // inout-reassigned arm-local str resolves the binding's current
+    // slot storage (ASan double-free detection on the stale triple).
+    run_asan_smoke(
+        common::find_fixture("match_arm_inout_realloc"),
+        "match_arm_inout_realloc",
+    );
+}
+
+#[test]
 fn asan_match_break_in_value_arm_loop_exit() {
     // Mirrors valgrind_match_break_in_value_arm_loop_exit: the break
     // inside a value-position match arm fires its loop-exit Free (ASan

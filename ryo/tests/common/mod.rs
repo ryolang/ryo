@@ -1511,6 +1511,31 @@ fn main():
 \tprint(\"\\n\")
 ",
     ),
+    (
+        // M12 match: an `inout` call inside a statement arm, applied to
+        // an arm-local heap str. The callee reallocs through the home
+        // slot, so the arm-end Free must resolve the binding's CURRENT
+        // slot storage — pre-fix `build_free_binding_names` never
+        // descended into match arms, the free used the initializer's
+        // stale cached triple, and the buffer was freed twice (ASan
+        // abort / exit 134 on debug, release, and AOT). ASan/valgrind
+        // pin the exactly-once drop. Mirrors
+        // inout_call_on_arm_local_str_frees_current_storage.
+        "match_arm_inout_realloc",
+        "\
+fn replace(inout s: str):
+	s = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\" + \"!\"
+
+fn main():
+	match true:
+		true:
+			mut s = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" + \"!\"
+			replace(&s)
+			print(s)
+		false:
+			print(\"no\\n\")
+",
+    ),
 ];
 
 // Test-helper module, not `cfg(test)`-gated, so clippy.toml's

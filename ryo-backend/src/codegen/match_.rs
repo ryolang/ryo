@@ -235,8 +235,7 @@ impl<M: Module> Codegen<M> {
         let mut token_cursor = 0usize;
         let mut all_terminated = true;
 
-        for (i, entry) in arm_entry.iter().enumerate() {
-            let arm = view.arm(i);
+        for (i, (entry, arm)) in arm_entry.iter().zip(view.arms()).enumerate() {
             // Duplicate arms past a wildcard/route (W0005-dead) get an
             // unreachable block; the emission below is uniform.
             let block = entry.unwrap_or_else(|| builder.create_block());
@@ -989,6 +988,10 @@ impl<M: Module> Codegen<M> {
             }
         };
 
+        // Arm views materialized once: the chain below indexes them by
+        // arm position (`view.arm(i)` rescans the wire from the start
+        // per call — O(A²) for A arms).
+        let arms: Vec<MatchArmView<'_>> = view.arms().collect();
         for (k, &(i, test)) in tests.iter().enumerate() {
             let fail = if k + 1 < tests.len() {
                 tests[k + 1].1
@@ -997,7 +1000,7 @@ impl<M: Module> Codegen<M> {
             };
             builder.seal_block(test);
             builder.switch_to_block(test);
-            let arm = view.arm(i);
+            let arm = arms[i];
             let cmp = Self::emit_literal_compare(builder, ctx, scrut, &arm.discriminant)?;
             let body = arm_entry[i].expect("a routed literal arm always has an entry block");
             builder.ins().brif(cmp, body, &[], fail, &[]);

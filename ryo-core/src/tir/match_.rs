@@ -60,7 +60,7 @@
 //! ([`EnumLitView`][crate::tir::EnumLitView] precedent), and
 //! [`MatchBodyView::Stmts`] is the stmt-refs slice itself.
 
-use super::{ExtraRange, Span, Tir, TirBuilder, TirData, TirRef, TirTag};
+use super::{ChildKind, ExtraRange, Span, Tir, TirBuilder, TirData, TirRef, TirTag};
 use crate::ast::LitPattern;
 use crate::types::{InternPool, StringId, TypeId};
 
@@ -408,6 +408,10 @@ impl TirBuilder {
         arms: &[TypedMatchArm<'_>],
         span: Span,
     ) -> TirRef {
+        // The only Match producer: stamps `contains_match` on the built
+        // body so post-sema analyses can skip every match-shaped scan
+        // on match-free bodies at the cost of one bool load.
+        self.saw_match = true;
         let offset = self.extra_offset();
         self.extra.push(scrutinee.raw());
         self.extra.push(Self::len_u32(arms.len()));
@@ -564,6 +568,55 @@ impl Tir {
             }
         }
         out
+    }
+
+    /// The per-body memo backing [`Tir::subtree_has_match`]: slot `i` is
+    /// `true` when the operand subtree rooted at instruction `i`
+    /// contains a `Match`. Computed once per body on first query — a
+    /// single forward pass exploiting the arena's def-before-use order
+    /// (every operand child has a smaller index than its parent, which
+    /// [`TirBuilder::finish`]'s tree-shape validation plus codegen's
+    /// recursive evaluation both rely on). Not serialized: a clone
+    /// recomputes on first query.
+    pub fn operand_match_memo(&self) -> &[bool] {
+        self.operand_match_memo
+            .get_or_init(|| {
+                let mut memo = vec![false; self.instructions.len()];
+                for i in 1..self.instructions.len() {
+                    let inst = &self.instructions[i];
+                    if inst.tag == TirTag::Match {
+                        memo[i] = true;
+                        continue;
+                    }
+                    let r = TirRef::from_index(i);
+                    let mut has = false;
+                    self.walk_operands(r, &mut |_parent, child, kind| {
+                        debug_assert!(
+                            child.index() < i,
+                            "operand child precedes its parent (def-before-use)"
+                        );
+                        if kind == ChildKind::Operand {
+                            has |= memo[child.index()];
+                        }
+                    });
+                    memo[i] = has;
+                }
+                memo.into_boxed_slice()
+            })
+            .as_ref()
+    }
+
+    /// `true` when the operand subtree rooted at `r` contains a
+    /// `Match`. The shared traversal contract for every post-sema
+    /// analysis that must notice value-position matches (a `VarDecl`
+    /// initializer, an `Assign` value, a `Return` operand, a call
+    /// argument): query this before any operand-descent scan so
+    /// match-free subtrees cost one lookup instead of a full walk.
+    /// Statement-arm bodies are NOT operand-reachable and are never
+    /// flagged; statement-list walkers reach those through their own
+    /// recursion ([`Tir::match_view`] arms).
+    pub fn subtree_has_match(&self, r: TirRef) -> bool {
+        self.operand_match_memo()[r.index()]
     }
 }
 

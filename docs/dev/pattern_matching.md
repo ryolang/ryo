@@ -150,21 +150,30 @@ the ownership pass never consumes an arm-body result into the `Match`
 inst, so the drop schedules (producer temporaries anchored on the match,
 binding last-use Frees) would release storage the result slot aliases —
 a double-free or a post-merge read of arm-local SSA values that do not
-dominate the merge. Codegen diagnoses the owned families (reusing the
-elision logic, so the rejected set tracks actually-emitting drops); the
-**borrowed family** — an arm yielding a borrow/`inout` parameter or
-binding, or a field projection of one — is diagnosed earlier, in the
-ownership pass (`arm_result_borrows_caller`, E0138): a borrowed owner
-carries no scheduled drop, so codegen's guard could never see it, and at
-HEAD the shape escaped as corrupted output + SIGTRAP. Lift: in
+dominate the merge. Codegen diagnoses the owned producer families (reusing the
+elision logic, so the rejected set tracks actually-emitting drops); two
+families the guard cannot see are diagnosed earlier, in the ownership
+pass. The **borrowed family** — an arm yielding a borrow/`inout`
+parameter or binding, or a field projection of one — is E0138
+(`arm_result_borrows_caller`): a borrowed owner carries no scheduled
+drop, so the codegen guard could never see it, and pre-fix the shape
+escaped as corrupted output + SIGTRAP. The **by-move-payload family**
+(`Some(v): v` — a bare read of one of the match's own by-move payload
+bindings as the arm result) is E0139 (`arm_result_yields_match_payload`):
+the payload's drop stays anchored outside the arm and the guard's
+binding-read probe missed it while match payload tokens were absent
+from the free-binding tables (debug aborted on the dropped free;
+release miscompiled in Cranelift's egraph). The payload tokens are
+registered in `build_free_binding_names` now, so the guard's
+binding-read family is complete as a backstop. Lift: in
 `analyze_match`, consume each non-`never` value arm's aggregate result
 into the match inst (mirror `analyze_var_decl`'s
 `consume_for_assignment` + `rebind_to_init`), then delete the codegen
-diagnosis and the E0138 check. Until then the workaround is a `mut`
-binding assigned inside an if/else restructure. Tracked in
-`ISSUES.md` (I-210); the sanitizer fixture `match_discarded_value` is
-structurally leak-insensitive today and should gain a heap-carrying arm
-when the lift lands.
+diagnosis, the E0138 check, and the E0139 check. Until then the
+workaround is a `mut` binding assigned inside an if/else restructure.
+Tracked in `ISSUES.md` (I-210); the sanitizer fixture
+`match_discarded_value` is structurally leak-insensitive today and
+should gain a heap-carrying arm when the lift lands.
 
 ### View-typed results are rejected (E0137)
 

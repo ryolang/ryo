@@ -672,6 +672,20 @@ fn valgrind_match_arm_vardecl_double_free() {
 }
 
 #[test]
+fn valgrind_match_arm_inout_realloc() {
+    // The inout callee reallocs the arm-local str through its home
+    // slot; the arm-end Free must resolve that current storage.
+    // Pre-fix the free-binding walk never descended into match arms,
+    // so cleanup freed the initializer's stale cached triple — the
+    // original buffer, already released by the write-back (invalid
+    // free of the same block).
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_arm_inout_realloc"),
+        "match_arm_inout_realloc",
+    );
+}
+
+#[test]
 fn valgrind_match_break_in_value_arm_loop_exit() {
     // Mirrors break_in_value_position_match_arm_gets_loop_exit_free:
     // the break inside a value-position (VarDecl-initializer) match
