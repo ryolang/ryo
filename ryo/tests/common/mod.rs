@@ -1536,6 +1536,34 @@ fn main():
 			print(\"no\\n\")
 ",
     ),
+    (
+        // M12 match: a `break` in one arm of a statement-level match,
+        // with the sibling arm an EXPRESSION arm holding the last use
+        // of a loop-local heap str (`_: s.len()`). The jump-path prune
+        // iterated `match_arm_bodies`, which decodes an empty statement
+        // list for an expression arm — the sibling's anchor stayed on
+        // the break's path, the anchored last-use Free falsely
+        // "covered" the jump, and the loop-exit Free was skipped: the
+        // break path leaked the concat-built >SSO-cap str.
+        // ASan/valgrind pin the leak. Mirrors
+        // prune_match_arms_covers_expression_arm_siblings.
+        "match_break_sibling_expr_arm_leak",
+        "\
+fn make(tag: int) -> str:
+\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+
+fn main():
+\tmut i = 0
+\twhile i < 3:
+\t\ts = make(i)
+\t\tmatch i:
+\t\t\t1:
+\t\t\t\tbreak
+\t\t\t_: s.len()
+\t\ti = i + 1
+\tprint(\"done\\n\")
+",
+    ),
 ];
 
 // Test-helper module, not `cfg(test)`-gated, so clippy.toml's

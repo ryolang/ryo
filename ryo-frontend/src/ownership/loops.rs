@@ -7,7 +7,7 @@ use super::{
 };
 use ryo_core::diag::DiagSink;
 use ryo_core::ownership::{FreePoint, FunctionSidecar};
-use ryo_core::tir::{Tir, TirData, TirRef, TirTag};
+use ryo_core::tir::{MatchBodyView, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
 use std::collections::{HashMap, HashSet};
 
@@ -1519,16 +1519,27 @@ fn prune_match_arms(tir: &Tir, m: TirRef, jump: TirRef, on_path: &mut HashSet<Ti
     if !on_path.contains(&m) {
         return;
     }
-    for body in match_arm_bodies(tir, m) {
-        if body.iter().any(|&s| tir.contains_reachable(s, jump)) {
-            for &s in &body {
+    for arm in tir.match_view(m).arms() {
+        // Arm roots: the body expression for an expression arm, the
+        // statement list for a statement arm. `match_arm_bodies`
+        // alone decodes an EMPTY statement list for an expression arm
+        // and would skip the arm entirely — a sibling expression
+        // arm's subtree then stays on the jump path (its anchors
+        // falsely cover the jump; its producers falsely count as
+        // materialized there).
+        let roots: Vec<TirRef> = match arm.body {
+            MatchBodyView::Expr(e) => vec![e],
+            MatchBodyView::Stmts(_) => arm.body.stmts().collect(),
+        };
+        if roots.iter().any(|&s| tir.contains_reachable(s, jump)) {
+            for &s in &roots {
                 if tir.contains_reachable(s, jump) {
                     prune_sibling_match_arms(tir, s, jump, on_path);
                 }
             }
         } else {
             let mut sub = HashSet::new();
-            for &s in &body {
+            for &s in &roots {
                 tir.collect_reachable(s, &mut sub);
             }
             on_path.retain(|r| !sub.contains(r));

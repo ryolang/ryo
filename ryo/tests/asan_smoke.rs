@@ -494,6 +494,17 @@ fn asan_match_arm_inout_realloc() {
 }
 
 #[test]
+fn asan_match_break_sibling_expr_arm_leak() {
+    // Mirrors valgrind_match_break_sibling_expr_arm_leak: the sibling
+    // expression arm's anchor must not cover the break — the loop-exit
+    // Free owns the break path (ASan leak detection).
+    run_asan_smoke(
+        common::find_fixture("match_break_sibling_expr_arm_leak"),
+        "match_break_sibling_expr_arm_leak",
+    );
+}
+
+#[test]
 fn asan_match_break_in_value_arm_loop_exit() {
     // Mirrors valgrind_match_break_in_value_arm_loop_exit: the break
     // inside a value-position match arm fires its loop-exit Free (ASan

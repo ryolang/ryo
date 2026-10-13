@@ -496,6 +496,50 @@ fn break_in_stmt_match_arm_gets_loop_exit_free() {
 }
 
 #[test]
+fn prune_match_arms_covers_expression_arm_siblings() {
+    // A `break` in one arm of a statement-level match, with the SIBLING
+    // arm an expression arm holding the loop-local str's last use
+    // (`_: s.len()`). `prune_match_arms` iterated `match_arm_bodies`,
+    // which decodes an empty statement list for an expression arm, so
+    // the sibling's anchor stayed on the break's path and the anchored
+    // last-use Free falsely covered the jump — the loop-exit Free was
+    // skipped and the break path leaked. The prune must treat the
+    // expression arm body as the arm root: the break keeps its exit
+    // Free for `s`.
+    let src = "fn main():\n\tmut i = 0\n\twhile i < 3:\n\t\ts = int_to_str(i) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\t\tmatch i:\n\t\t\t1:\n\t\t\t\tbreak\n\t\t\t_: s.len()\n\t\ti = i + 1\n\tprint(\"done\")\n";
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "no errors expected; got {diags:?}"
+    );
+    let f = main_sidecar(&mut sidecar, &pool);
+    let s = pool.find_str("s").expect("`s` interned");
+    let init = (1..tirs[0].instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find(|&r| {
+            tirs[0].inst(r).tag == ryo_core::tir::TirTag::VarDecl
+                && tirs[0].var_decl_view(r).name == s
+        })
+        .map(|r| tirs[0].var_decl_view(r).initializer)
+        .expect("the loop-local `s` VarDecl");
+    let brk = (1..tirs[0].instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find(|&r| tirs[0].inst(r).tag == ryo_core::tir::TirTag::Break)
+        .expect("the in-arm break");
+    assert!(
+        f.free_schedule
+            .iter()
+            .any(|fp| fp.target == init && fp.after == brk),
+        "the break inside the match arm gets a loop-exit Free for the \
+         loop-local str even when the sibling arm is an expression arm; \
+         got {:?}",
+        f.free_schedule
+    );
+}
+
+#[test]
 fn named_vardecl_in_stmt_match_arm_freed_exactly_once() {
     // A heap str VarDecl inside a statement-level match arm is a NAMED
     // init: `collect_named_inits_rec` must see it through the ExprStmt

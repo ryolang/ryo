@@ -686,6 +686,19 @@ fn valgrind_match_arm_inout_realloc() {
 }
 
 #[test]
+fn valgrind_match_break_sibling_expr_arm_leak() {
+    // The jump-path prune iterated `match_arm_bodies`, which decodes
+    // an empty statement list for an expression arm — the sibling
+    // expression arm's last-use anchor stayed on the break's path,
+    // falsely covered the jump, and the loop-exit Free was skipped:
+    // the break path leaked the heap str.
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_break_sibling_expr_arm_leak"),
+        "match_break_sibling_expr_arm_leak",
+    );
+}
+
+#[test]
 fn valgrind_match_break_in_value_arm_loop_exit() {
     // Mirrors break_in_value_position_match_arm_gets_loop_exit_free:
     // the break inside a value-position (VarDecl-initializer) match
