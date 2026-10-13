@@ -722,7 +722,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ### I-210 — Ownership pass does not consume match arm-body results — aggregate value arms alias the result slot
 
-**Severity:** Correctness / Hygiene
+**Severity:** Correctness
 **Area:** ownership
 
 **Files:** ryo-frontend/src/ownership/match_.rs, ryo-backend/src/codegen/match_.rs

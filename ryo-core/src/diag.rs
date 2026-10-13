@@ -270,7 +270,9 @@ pub enum DiagCode {
     ArmTypeMismatch,
     /// A value-producing `match` has an arm whose statement body falls
     /// through without producing a value (M12). The message suggests
-    /// ending the arm with a value or `return`.
+    /// ending the arm with a value or terminating it with `return`,
+    /// `break`, or `continue` (all three diverge, so a value match may
+    /// end in any of them).
     ArmNoValue,
     /// The scrutinee of a `match` is not a matchable type (M12) —
     /// `void` / `never` (no value to match), floats (literal patterns

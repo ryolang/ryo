@@ -489,7 +489,7 @@ fn type_and_emit_match(
                             sema.pool.display(expected),
                         ),
                     )
-                    .with_help("end the arm with a value or `return`"),
+                    .with_help("end the arm with a value, or terminate it with `return`, `break`, or `continue`"),
                 );
                 analysis.had_error = true;
             }

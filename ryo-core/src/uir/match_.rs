@@ -1007,4 +1007,117 @@ mod tests {
         }
         assert_eq!(v2.arms[0].body, UirArmBodyView::Expr(e2));
     }
+
+    #[test]
+    fn match_dump_renders_scrutinee_patterns_and_bodies() {
+        let mut pool = InternPool::new();
+        let option = pool.intern_str("Option");
+        let some = pool.intern_str("Some");
+        let color = pool.intern_str("Color");
+        let red = pool.intern_str("Red");
+        let x = pool.intern_str("x");
+        let y = pool.intern_str("y");
+        let px = pool.intern_str("px");
+        let quit = pool.intern_str("quit");
+
+        let mut b = UirBuilder::new();
+        let scrut = b.var_ref(option, sp());
+        let e0 = b.int_literal(0, sp());
+        let e1 = b.int_literal(1, sp());
+        let e2 = b.int_literal(2, sp());
+        let e3 = b.int_literal(3, sp());
+        let e4 = b.int_literal(4, sp());
+        let st = b.return_void(sp());
+        let brace_fields = [
+            UirAnonField {
+                selector: x.raw(),
+                target: UirFieldTarget::Literal(LitPattern::Int(0)),
+            },
+            UirAnonField {
+                selector: y.raw(),
+                target: UirFieldTarget::Wildcard,
+            },
+        ];
+        b.match_expr(
+            scrut,
+            &[
+                UirMatchArm {
+                    pattern: UirPattern::Wildcard,
+                    body: UirArmBody::Expr(e1),
+                },
+                UirMatchArm {
+                    pattern: UirPattern::Literal(LitPattern::Int(-7)),
+                    body: UirArmBody::Expr(e0),
+                },
+                UirMatchArm {
+                    pattern: UirPattern::Literal(LitPattern::Str(quit)),
+                    body: UirArmBody::Expr(e2),
+                },
+                UirMatchArm {
+                    pattern: UirPattern::Variant {
+                        enum_name: Some(option),
+                        variant: some,
+                        args: Some(UirVariantArgs {
+                            by_position: true,
+                            args: &[
+                                (None, UirArgTarget::Bind(x)),
+                                (None, UirArgTarget::Wildcard),
+                            ],
+                        }),
+                    },
+                    body: UirArmBody::Expr(e3),
+                },
+                UirMatchArm {
+                    pattern: UirPattern::Variant {
+                        enum_name: Some(color),
+                        variant: red,
+                        args: Some(UirVariantArgs {
+                            by_position: false,
+                            args: &[(Some(x), UirArgTarget::Bind(px))],
+                        }),
+                    },
+                    body: UirArmBody::Stmts(&[st]),
+                },
+                UirMatchArm {
+                    pattern: UirPattern::Anon {
+                        positional: false,
+                        fields: &brace_fields,
+                    },
+                    body: UirArmBody::Expr(e4),
+                },
+            ],
+            sp(),
+        );
+
+        let uir = b.finish();
+        let dump = format!("{}", uir.dump(&pool));
+        assert!(
+            dump.contains(&format!("match %{}", scrut.index())),
+            "scrutinee missing, got:\n{dump}"
+        );
+        assert!(
+            dump.contains("_: expr"),
+            "wildcard arm missing, got:\n{dump}"
+        );
+        assert!(
+            dump.contains("-7: expr"),
+            "int literal arm missing, got:\n{dump}"
+        );
+        assert!(
+            dump.contains("\"quit\": expr"),
+            "str literal arm missing, got:\n{dump}"
+        );
+        assert!(
+            dump.contains("Option.Some(x, _)"),
+            "positional variant arm missing, got:\n{dump}"
+        );
+        assert!(
+            dump.contains(&format!("Color.Red{{x: px}}: stmts [%{}]", st.index())),
+            "named variant stmts arm missing, got:\n{dump}"
+        );
+        assert!(
+            dump.contains("{x: 0, y: _}"),
+            "anon fields arm missing, got:\n{dump}"
+        );
+    }
 }
