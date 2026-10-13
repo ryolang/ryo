@@ -459,3 +459,25 @@ fn asan_match_temporary_drop_once() {
         "match_temporary_drop_once",
     );
 }
+
+#[test]
+fn asan_match_break_in_arm_loop_leak() {
+    // Mirrors valgrind_match_break_in_arm_loop_leak: the jump-exit
+    // Free for the loop-local heap str fires on the break path (ASan
+    // catches the use-side of any schedule mistake; valgrind pins the
+    // leak itself).
+    run_asan_smoke(
+        common::find_fixture("match_break_in_arm_loop_leak"),
+        "match_break_in_arm_loop_leak",
+    );
+}
+
+#[test]
+fn asan_match_arm_vardecl_double_free() {
+    // Mirrors valgrind_match_arm_vardecl_double_free: the arm-local
+    // named str is freed exactly once (ASan double-free detection).
+    run_asan_smoke(
+        common::find_fixture("match_arm_vardecl_double_free"),
+        "match_arm_vardecl_double_free",
+    );
+}

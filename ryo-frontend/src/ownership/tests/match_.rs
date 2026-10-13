@@ -149,7 +149,8 @@ fn anon_owned_partial_move_registers_arm_start_drop() {
     // Bullet 5: anon-pattern match on an owned anonymous struct. The arm
     // binds `name` by move (consuming the scrutinee on that arm) and
     // wildcards `tag`; the unbound needs-drop field registers as an
-    // arm-start drop for codegen (Task 9 emits it). The `_` arm leaves
+    // arm-start drop for codegen (codegen emits it at arm start). The
+    // `_` arm leaves
     // the scrutinee valid — the union merge stamps it moved after the
     // match, so a branch-gated whole-value Free covers that arm.
     let src = "fn main():\n\tp = {name=\"alice\", tag=\"x\"}\n\tmatch p:\n\t\t{name=q, tag=_}:\n\t\t\tprint(q)\n\t\t_:\n\t\t\tprint(\"other\")\n";
@@ -449,5 +450,82 @@ fn moving_payload_field_out_of_enum_rejected() {
     assert!(
         diags.iter().any(|d| d.code == DiagCode::MoveOutOfField),
         "enum payload move-out must be rejected; got {diags:?}"
+    );
+}
+
+#[test]
+fn break_in_stmt_match_arm_gets_loop_exit_free() {
+    // A `break` inside a statement-level match arm inside a loop must
+    // get its loop-exit Free: the match arrives ExprStmt-wrapped (sema's
+    // convention), so the jump-free walk only sees the break by
+    // unwrapping through `stmt_match`. Pre-fix the arm was skipped and
+    // the loop-local heap str leaked on the break path (the `_` arm's
+    // last-use Free is not on that path).
+    let src = "fn main():\n\tmut i = 0\n\twhile i < 3:\n\t\ts = int_to_str(i) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\t\tmatch i:\n\t\t\t1:\n\t\t\t\tbreak\n\t\t\t_:\n\t\t\t\tprint(s)\n\t\ti = i + 1\n\tprint(\"done\")\n";
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "no errors expected; got {diags:?}"
+    );
+    let f = main_sidecar(&mut sidecar, &pool);
+    let s = pool.find_str("s").expect("`s` interned");
+    let find = |tag: ryo_core::tir::TirTag| {
+        (1..tirs[0].instructions.len())
+            .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+            .find(|&r| tirs[0].inst(r).tag == tag)
+    };
+    let init = (1..tirs[0].instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find(|&r| {
+            tirs[0].inst(r).tag == ryo_core::tir::TirTag::VarDecl
+                && tirs[0].var_decl_view(r).name == s
+        })
+        .map(|r| tirs[0].var_decl_view(r).initializer)
+        .expect("the loop-local `s` VarDecl");
+    let brk = find(ryo_core::tir::TirTag::Break).expect("the in-arm break");
+    assert!(
+        f.free_schedule
+            .iter()
+            .any(|fp| fp.target == init && fp.after == brk),
+        "the break inside the match arm gets a loop-exit Free for the \
+         loop-local str; got {:?}",
+        f.free_schedule
+    );
+}
+
+#[test]
+fn named_vardecl_in_stmt_match_arm_freed_exactly_once() {
+    // A heap str VarDecl inside a statement-level match arm is a NAMED
+    // init: `collect_named_inits_rec` must see it through the ExprStmt
+    // wrapper (`stmt_match`), or the anon-temp pass schedules a second
+    // Free on top of the named last-use Free — a double free.
+    let src = "fn main():\n\tmut i = 0\n\twhile i < 2:\n\t\tmatch i:\n\t\t\t0:\n\t\t\t\ts = int_to_str(i) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\t\t\t\tprint(s)\n\t\t\t_:\n\t\t\t\tprint(\"other\")\n\t\ti = i + 1\n\tprint(\"done\")\n";
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "no errors expected; got {diags:?}"
+    );
+    let f = main_sidecar(&mut sidecar, &pool);
+    let s = pool.find_str("s").expect("`s` interned");
+    let init = (1..tirs[0].instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find(|&r| {
+            tirs[0].inst(r).tag == ryo_core::tir::TirTag::VarDecl
+                && tirs[0].var_decl_view(r).name == s
+        })
+        .map(|r| tirs[0].var_decl_view(r).initializer)
+        .expect("the arm-local `s` VarDecl");
+    assert_eq!(
+        f.free_schedule
+            .iter()
+            .filter(|fp| fp.target == init)
+            .count(),
+        1,
+        "exactly one Free for the arm-local named str; got {:?}",
+        f.free_schedule
     );
 }

@@ -4,13 +4,14 @@
 //! `tests.rs` via its `pub(super)` helpers (the 2000-line file cap keeps
 //! these out of `tests.rs`).
 //!
-//! Task 5 scope: scrutinee validation (E0136), literal-kind checks
-//! (E0131), variant resolution (E0132) + payload shape checks (E0120 /
-//! E0121 / E0122 / E0125 reuse), anon/tuple shape checks (E0113 / E0114 /
-//! E0040 reuse). Task 6 adds exhaustiveness (E0129) and unreachable-arm
-//! warnings (W0005). Task 7 adds arm typing, per-arm binding scopes, the
-//! E0133-E0135 diagnostics, and the typed `TirTag::Match` emission
-//! (owner tokens + joined result type) the stub tests used to pin.
+//! The suite follows the sema analysis passes: resolution (scrutinee
+//! validation E0136, literal-kind checks E0131, variant resolution
+//! E0132 + payload shape checks E0120 / E0121 / E0122 / E0125 reuse,
+//! anon/tuple shape checks E0113 / E0114 / E0040 reuse), then
+//! exhaustiveness (E0129) and unreachable-arm warnings (W0005), then
+//! arm typing — per-arm binding scopes, the E0133-E0135 diagnostics —
+//! and the typed `TirTag::Match` emission (owner tokens + joined
+//! result type).
 
 use super::tests::*;
 use super::*;
@@ -487,13 +488,32 @@ fn anon_pattern_partial_coverage_is_e0114() {
         .iter()
         .find(|d| d.code == DiagCode::DestructureUnknownField)
         .expect("E0114 must fire");
-    for needle in ["does not cover", "`y`"] {
+    for needle in ["does not cover", "`y`", "add `y = _`"] {
         assert!(
             diag.message.contains(needle),
             "message should contain {needle}, got {:?}",
             diag.message
         );
     }
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+}
+
+#[test]
+fn anon_pattern_partial_coverage_suggestion_names_first_missing_field() {
+    // The "add `{first} = _`" suggestion must name the first MISSING
+    // field, not `shape.fields[0]` — for `{y=0}` on `{x, y}` that is
+    // `x` (already-covered `y` must not be suggested).
+    let src = "fn main():\n\tp = {x=1, y=2}\n\tmatch p:\n\t\t{y=0}: 0\n\t\t_: 1\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::DestructureUnknownField)
+        .expect("E0114 must fire");
+    assert!(
+        diag.message.contains("add `x = _`"),
+        "suggestion must name the first missing field `x`, got {:?}",
+        diag.message
+    );
     assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
 }
 
@@ -535,7 +555,7 @@ fn positional_pattern_arity_mismatch_is_e0113() {
     assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
 }
 
-// ---------- Task 6: exhaustiveness (E0129) + redundancy (W0005) ----------
+// ---------- Exhaustiveness (E0129) + redundancy (W0005) ----------
 
 /// `run_with_errors` variant that surfaces sema's buffered warnings
 /// (W0005) even when errors exist in the same unit. The plain harness
@@ -948,7 +968,7 @@ fn e0129_still_fires_alongside_redundant_arms() {
     assert!(e.message.contains("'Green'"), "got {:?}", e.message);
 }
 
-// ---------- Task 7: arm typing (E0133-E0135) + typed TIR Match ----------
+// ---------- Arm typing (E0133-E0135) + typed TIR Match ----------
 
 #[test]
 fn value_join_emits_typed_match_with_arm_bindings() {
@@ -1260,6 +1280,34 @@ fn borrowed_param_scrutinee_binding_non_copy_is_e0133() {
         diag.message
     );
     assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+}
+
+#[test]
+fn borrowed_param_field_projection_scrutinee_binding_non_copy_is_e0133() {
+    // `match w.inner:` — a FieldAccess chain rooted at a borrow-mode
+    // parameter. The projection borrows with its root, so binding the
+    // non-Copy payload (`Msg` carries a str field) is E0133 exactly
+    // like a bare `w` scrutinee.
+    let src = "struct Msg:\n\ttext: str\n\nenum Note:\n\tInfo(Msg)\n\tBlank\n\nstruct Wrapper:\n\tinner: Note\n\nfn f(w: Wrapper):\n\tmatch w.inner:\n\t\tNote.Info(m): print(m.text)\n\t\tNote.Blank: print(\"\")\n";
+    let (_t, diags, _p) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|d| d.code == DiagCode::MoveOutOfBorrowedScrutinee)
+        .expect("E0133 must fire for a borrowed-param projection scrutinee");
+    assert!(
+        diag.message.contains("'m'"),
+        "message names the binding, got {:?}",
+        diag.message
+    );
+    assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
+}
+
+#[test]
+fn move_param_field_projection_scrutinee_binds_non_copy_freely() {
+    // A `move` parameter is owned, so the same projection match is
+    // legal — the borrowed-root walk must not over-reject.
+    let src = "struct Msg:\n\ttext: str\n\nenum Note:\n\tInfo(Msg)\n\tBlank\n\nstruct Wrapper:\n\tinner: Note\n\nfn f(move w: Wrapper):\n\tmatch w.inner:\n\t\tNote.Info(m): print(m.text)\n\t\tNote.Blank: print(\"\")\n";
+    run(src).expect("move param projection is an owned scrutinee");
 }
 
 #[test]

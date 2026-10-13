@@ -2,8 +2,9 @@
 //! routing, anonymous-struct guard chains (int/bool literal guards),
 //! per-arm payload binding moves, and scalar/void merges.
 //!
-//! The typed `TirTag::Match` arrives fully resolved (Task 4's
-//! [`MatchView`]): every arm is a [`Discriminant`] plus typed
+//! The typed `TirTag::Match` arrives fully resolved (the typed TIR
+//! match view, [`MatchView`], in `ryo_core::tir::match_`): every arm is
+//! a [`Discriminant`] plus typed
 //! [`MatchBinding`][ryo_core::tir::MatchBinding]s, anon arms carrying
 //! their field-equality guards on the wire. The lowering shape:
 //!
@@ -782,9 +783,9 @@ impl<M: Module> Codegen<M> {
     /// scrutinee block jumps to receiver 0; the first bare wildcard's
     /// body is the chain's fallthrough (sema E0129 guarantees one; a
     /// violated shape fails down to a defensive trap instead). Arms
-    /// with an empty guard list cannot arrive (Task 6: anon arms carry
-    /// guards; a bare wildcard is the fallthrough) — one reaching a
-    /// chain slot is an invariant trap in `emit_guard_chain`.
+    /// with an empty guard list cannot arrive (sema's anon-arm lowering
+    /// guarantees guards; a bare wildcard is the fallthrough) — one
+    /// reaching a chain slot is an invariant trap in `emit_guard_chain`.
     fn route_anon_dispatch(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -1044,8 +1045,8 @@ impl<M: Module> Codegen<M> {
     ) -> Result<(), String> {
         let guards: Vec<(u32, LitPattern)> = arm.guards().collect();
         if guards.is_empty() {
-            // Invariant (Task 6): every non-fallthrough anon arm carries
-            // at least one literal guard.
+            // Invariant (sema anon-arm lowering): every non-fallthrough
+            // anon arm carries at least one literal guard.
             unreachable!("anon match arm with an empty guard list reached codegen");
         }
         for (k, (field_index, lit)) in guards.iter().enumerate() {

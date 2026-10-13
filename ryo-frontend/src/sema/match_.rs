@@ -3,15 +3,15 @@
 //! TIR `Match` emission. Split from `expr.rs` so the parent file stays
 //! under the 2000-line CI gate.
 //!
-//! Task 5 implemented RESOLUTION: the scrutinee type is validated
-//! (E0136), each arm's pattern is resolved against it — literal kinds
-//! (E0131), variant names and payload shapes (E0132, reusing the M11
-//! construction checks E0120/E0121/E0122/E0125), anonymous-struct
+//! Analysis runs in three passes. RESOLUTION validates the scrutinee
+//! type (E0136) and resolves each arm's pattern against it — literal
+//! kinds (E0131), variant names and payload shapes (E0132, reusing the
+//! M11 construction checks E0120/E0121/E0122/E0125), anonymous-struct
 //! shapes (reusing the M10 destructure checks E0113/E0114/E0040) — and
-//! the per-arm results are collected in a [`MatchAnalysis`] scratch
-//! struct for the follow-on tasks.
+//! collects the per-arm results in a [`MatchAnalysis`] scratch struct
+//! for the follow-on passes.
 //!
-//! Task 6 adds EXHAUSTIVENESS + REDUNDANCY over the resolved arms:
+//! The second pass adds EXHAUSTIVENESS + REDUNDANCY over the resolved arms:
 //! enum scrutinees cover variant indices (a `u128` bitset up to 128
 //! variants, a `Vec<bool>` fallback above), bool covers its two
 //! literals, int/str/anon-struct scrutinees are uncoverable without a
@@ -22,7 +22,7 @@
 //! discriminant before it, is W0005 (warning severity, buffered like
 //! W0002/W0003 so it never piles onto an error).
 //!
-//! Task 7 adds ARM TYPING and the typed emission: each cleanly
+//! The third pass adds ARM TYPING and the typed emission: each cleanly
 //! resolved arm is typed in its own child `Scope` seeded with the
 //! payload bindings (E0133 gates by-move binds out of borrowed
 //! scrutinees; the duplicate/reserved binding checks mirror M10
@@ -41,8 +41,8 @@
 //!
 //! ## Span anchoring
 //!
-//! The UIR match wire carries no per-pattern or per-arm spans (Task 1
-//! deferred arm spans; the AST pattern spans die in astgen). Pattern-
+//! The UIR match wire carries no per-pattern or per-arm spans (deferred
+//! — see I-212; the AST pattern spans die in astgen). Pattern-
 //! level diagnostics therefore anchor on the arm's BODY span — the
 //! first body instruction's span, the nearest per-arm location
 //! available — reconstructed by [`arm_span`]; scrutinee diagnostics
@@ -56,7 +56,7 @@
 //! exhaustiveness excludes it instead of piling derived diagnostics on
 //! top (E0129 still fires when the remaining, clean arms leave gaps).
 //! W0005 likewise never suppresses E0129 or any other diagnostic. The
-//! same holds into Task 7: a resolution-broken arm is skipped for
+//! same holds into arm typing: a resolution-broken arm is skipped for
 //! typing (its own diagnostic already fired), while its siblings still
 //! type-check, and one E0133 bind never blocks the next arm's binds.
 
@@ -76,7 +76,7 @@ use std::collections::HashMap;
 
 /// Resolution + exhaustiveness results for one `match` expression.
 /// Computed by the resolution pass and the [`check_exhaustiveness`]
-/// walk; consumed by [`type_and_emit_match`] (Task 7), which seeds the
+/// walk; consumed by [`type_and_emit_match`], which seeds the
 /// per-arm child scopes from [`MatchArmAnalysis::bindings`] and emits
 /// the typed TIR `Match` from the whole analysis. The exhaustiveness
 /// facts annotate the record for the follow-on tasks — the typed
@@ -91,7 +91,7 @@ struct MatchAnalysis {
     had_error: bool,
     /// The analyzed scrutinee operand.
     scrutinee: TirRef,
-    /// Task 7: whether the scrutinee is borrowed — an explicit `&expr`
+    /// Whether the scrutinee is borrowed — an explicit `&expr`
     /// or a read of a borrow-mode parameter. Gates E0133 at bind time;
     /// Copy binds and wildcard arms stay legal on borrows.
     scrutinee_borrowed: bool,
@@ -100,10 +100,10 @@ struct MatchAnalysis {
     /// quietly — the original diagnostic already explains).
     scrutinee_ty: TypeId,
     arms: Vec<MatchArmAnalysis>,
-    /// Task 6: true when every scrutinee value is covered — all enum
+    /// True when every scrutinee value is covered — all enum
     /// variants / both bool literals marked, or a `_:` arm exists.
     exhaustive: bool,
-    /// Task 6: true when any arm is `_` (the catch-all).
+    /// True when any arm is `_` (the catch-all).
     has_wildcard: bool,
 }
 
@@ -123,7 +123,7 @@ struct MatchArmAnalysis {
     pattern_text: String,
     /// Payload bindings in arm-written order: canonical field index,
     /// bound name, field type. Literal and wildcard targets bind
-    /// nothing. Task 7 inserts these into the arm scope.
+    /// nothing. Arm typing inserts these into the arm scope.
     bindings: Vec<MatchBinding>,
     /// Anonymous-shape literal constraints (`{x=0}`, `(0, _)`):
     /// (canonical field index, literal) in written order. Only
@@ -131,7 +131,7 @@ struct MatchArmAnalysis {
     /// encoding for it) is M12.5 — M12 keeps them resolution-only.
     anon_literals: Vec<(u32, LitPattern)>,
     /// True when the pattern produced a diagnostic. The match recovers
-    /// error-typed when any arm (or the scrutinee) errored, and Task 7
+    /// error-typed when any arm (or the scrutinee) errored; arm typing
     /// skips the arm's typing so the original error doesn't cascade.
     had_error: bool,
 }
@@ -148,9 +148,9 @@ fn is_matchable(sema: &Sema<'_>, ty: ryo_core::types::TypeId) -> bool {
     )
 }
 
-/// `match scrutinee:` (M12) — resolution (Task 5), exhaustiveness
-/// (Task 6), then arm typing + typed `TirTag::Match` emission (Task 7);
-/// see the module header for the split of responsibilities.
+/// `match scrutinee:` (M12) — resolution, exhaustiveness, then arm
+/// typing + typed `TirTag::Match` emission; see the module header for
+/// the split of responsibilities.
 pub(crate) fn analyze_match(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -203,7 +203,7 @@ pub(crate) fn analyze_match(
         arms.push(analysis);
     }
 
-    // Task 6: exhaustiveness + redundancy over the resolved arms. An
+    // Exhaustiveness + redundancy over the resolved arms. An
     // error-typed scrutinee (E0136 recovery or an already-errored
     // expression) skips the walk: E0129 on top of the original
     // diagnostic would double-report.
@@ -243,14 +243,16 @@ fn arm_span(sema: &Sema<'_>, body: &UirArmBodyView<'_>, match_span: Span) -> Spa
     }
 }
 
-// ---------- Arm typing + typed TIR emission (Task 7) ----------
+// ---------- Arm typing + typed TIR emission ----------
 
 /// Analyze the scrutinee expression, detecting whether the scrutinee is
-/// BORROWED — E0133's gate. Two shapes: an explicit `&expr` scrutinee
+/// BORROWED — E0133's gate. Three shapes: an explicit `&expr` scrutinee
 /// (`match &o:`, M8.2 — a legal borrow position; the match inspects the
-/// value without consuming it), and a bare read of a parameter declared
-/// in the default borrow mode. The `&` marker lowers away, exactly like
-/// `&` at an `inout` call argument: the TIR operand is the inner value.
+/// value without consuming it), a bare read of a parameter declared in
+/// the default borrow mode, and a field projection chain rooted at such
+/// a parameter (`match w.inner:` — the projection borrows with its
+/// root). The `&` marker lowers away, exactly like `&` at an `inout`
+/// call argument: the TIR operand is the inner value.
 fn analyze_scrutinee(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -265,7 +267,20 @@ fn analyze_scrutinee(
         };
         return (analyze_expr(sema, fcx, scope, inner), true);
     }
-    let borrowed = matches!(inst.data, InstData::Var(name) if scope.lookup_borrowed(name));
+    let borrowed = match inst.data {
+        InstData::Var(name) => scope.lookup_borrowed(name),
+        // Walk `a.b.c` down to its root: a field projection of a
+        // borrowed parameter (`match w.inner:`) is borrowed exactly
+        // like a bare `w` read — a by-move bind out of it is E0133.
+        InstData::FieldAccess { .. } => {
+            let mut root = scrutinee;
+            while let InstData::FieldAccess { object, .. } = sema.uir.inst(root).data {
+                root = object;
+            }
+            matches!(sema.uir.inst(root).data, InstData::Var(name) if scope.lookup_borrowed(name))
+        }
+        _ => false,
+    };
     (analyze_expr(sema, fcx, scope, scrutinee), borrowed)
 }
 
@@ -295,8 +310,8 @@ struct TypedArm {
     discriminant: Discriminant,
     bindings: Vec<MatchBinding>,
     /// Anon-arm literal guards (`{x=0}` constraints), in written order —
-    /// Task 5's resolution payloads, forwarded to the wire verbatim.
-    /// Empty for wildcard / literal / variant arms.
+    /// The resolution payloads, forwarded to the wire verbatim. Empty
+    /// for wildcard / literal / variant arms.
     guards: Vec<(u32, LitPattern)>,
     body: TypedArmBody,
     /// Arm span (the R11 body re-anchor) — the E0134/E0135 anchor.
@@ -304,7 +319,7 @@ struct TypedArm {
     class: ArmClass,
 }
 
-/// Task 7: type every cleanly-resolved arm in its own child `Scope`
+/// Type every cleanly-resolved arm in its own child `Scope`
 /// seeded with the payload bindings, join the arm types, and emit the
 /// typed `TirTag::Match`. On any error — resolution, E0133-E0135, or
 /// the scrutinee's own diagnostic — the match recovers with the
@@ -588,10 +603,10 @@ fn seed_arm_bindings(
     (owners, had_error)
 }
 
-// ---------- Exhaustiveness + redundancy (Task 6) ----------
+// ---------- Exhaustiveness + redundancy ----------
 
 /// The result of the coverage walk, annotated onto [`MatchAnalysis`]
-/// for Task 7.
+/// for arm typing.
 #[derive(Default)]
 struct Exhaustiveness {
     /// Every scrutinee value is covered: full variant/bool coverage, or
@@ -1596,10 +1611,13 @@ fn resolve_anon(
         }
         resolve_anon_target(sema, field, target, analysis);
     }
-    let missing: Vec<String> = shape
+    let missing_fields: Vec<&StructField> = shape
         .fields
         .iter()
         .filter(|f| !covered.contains(&f.idx))
+        .collect();
+    let missing: Vec<String> = missing_fields
+        .iter()
         .map(|f| format!("`{}`", sema.pool.str(f.name)))
         .collect();
     if !missing.is_empty() && !had_shape_error {
@@ -1616,7 +1634,7 @@ fn resolve_anon(
                  add `{first} = _` for each to skip {them}",
                 sema.pool.display(scrutinee_ty),
                 missing.join(", "),
-                first = sema.pool.str(shape.fields[0].name),
+                first = sema.pool.str(missing_fields[0].name),
             ),
         ));
         had_shape_error = true;

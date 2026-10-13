@@ -1361,7 +1361,7 @@ fn main():
         // M12 match: an owned temporary scrutinee with a heap str
         // payload, no consuming arm — the anon-temp whole-value drop is
         // scheduled anchored after the Match inst and swept post-merge,
-        // exactly once per path (the Task 11 temporary-drop machinery
+        // exactly once per path (the anon-temp temporary-drop machinery
         // the valgrind/ASan lanes pin). `make_msg(1)` exercises the
         // Text path (a real ryo_str_free of the concat-built payload);
         // `make_msg(0)` exercises the payload-free Quit path.
@@ -1387,6 +1387,63 @@ fn main():
 \t\t\tprint(\"text\\n\")
 \t\tMsg.Quit:
 \t\t\tprint(\"quit\\n\")
+",
+    ),
+    (
+        // M12 match: a `break` inside a statement-level match arm inside
+        // a loop. The loop-local heap str (concat-built > SSO cap) is
+        // read only in the sibling arm, so its last-use Free does not
+        // fire on the break path — the jump-exit Free scheduled by the
+        // loop-exit pass is the only release there. Pre-fix the
+        // ExprStmt-wrapped match hid the break from the jump walk
+        // (and sibling-arm Frees falsely counted as covering it), so
+        // the break path leaked the heap str; the valgrind lane pins
+        // the leak, ASan the same shape. Mirrors the
+        // break_in_stmt_match_arm_gets_loop_exit_free unit test.
+        "match_break_in_arm_loop_leak",
+        "\
+fn make(tag: int) -> str:
+\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+
+fn main():
+\tmut i = 0
+\twhile i < 3:
+\t\ts = make(i)
+\t\tmatch i:
+\t\t\t1:
+\t\t\t\tbreak
+\t\t\t_:
+\t\t\t\tprint(s)
+\t\ti = i + 1
+\tprint(\"done\\n\")
+",
+    ),
+    (
+        // M12 match: a heap str VarDecl inside a statement-level match
+        // arm is a NAMED init — the anon-temp pass must not schedule a
+        // second Free on top of the named last-use Free. Pre-fix the
+        // ExprStmt-wrapped match hid the arm VarDecl from
+        // collect_named_inits_rec, so both passes freed the
+        // concat-built > SSO-cap payload (double free); ASan/valgrind
+        // pin the exactly-once drop. Mirrors the
+        // named_vardecl_in_stmt_match_arm_freed_exactly_once unit test.
+        "match_arm_vardecl_double_free",
+        "\
+fn make(tag: int) -> str:
+\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+
+fn main():
+\tmut i = 0
+\twhile i < 2:
+\t\tmatch i:
+\t\t\t0:
+\t\t\t\ts = make(0)
+\t\t\t\tprint(s)
+\t\t\t\tprint(\"\\n\")
+\t\t\t_:
+\t\t\t\tprint(\"other\\n\")
+\t\ti = i + 1
+\tprint(\"done\\n\")
 ",
     ),
 ];

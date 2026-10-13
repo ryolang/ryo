@@ -33,7 +33,7 @@ use super::{
 };
 use ryo_core::diag::DiagSink;
 use ryo_core::ownership::{BranchId, FreePoint, FunctionSidecar, MatchArmDrop, MatchBranchIds};
-use ryo_core::tir::{MatchArmView, MatchBodyView, Tir, TirRef, TirTag};
+use ryo_core::tir::{MatchArmView, MatchBodyView, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, StructField, TypeId};
 use std::collections::HashSet;
 
@@ -267,6 +267,22 @@ pub(crate) fn match_arm_bodies(tir: &Tir, r: TirRef) -> Vec<Vec<TirRef>> {
         .arms()
         .map(|arm| arm.body.stmts().collect())
         .collect()
+}
+
+/// The `Match` instruction a statement-list slot refers to: the
+/// statement itself when it is a bare `Match` (only future producers
+/// emit one — sema always wraps), or the operand of an `ExprStmt`
+/// wrapper — sema lowers a statement-level `match` to `ExprStmt(Match)`
+/// (see `sema/stmt.rs`), so any statement-list walker that dispatches
+/// on the statement's OWN tag would otherwise never see the wrapped
+/// match's arms. Every walker below unwraps through this before its
+/// tag dispatch.
+pub(crate) fn stmt_match(tir: &Tir, r: TirRef) -> Option<TirRef> {
+    match (tir.inst(r).tag, tir.inst(r).data) {
+        (TirTag::Match, _) => Some(r),
+        (TirTag::ExprStmt, TirData::UnOp(o)) if tir.inst(o).tag == TirTag::Match => Some(o),
+        _ => None,
+    }
 }
 
 /// Where an arm's flow ends: the anchor for arm-gated Frees of values

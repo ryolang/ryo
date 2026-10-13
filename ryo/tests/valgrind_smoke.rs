@@ -646,3 +646,27 @@ fn valgrind_match_temporary_drop_once() {
         "match_temporary_drop_once",
     );
 }
+
+#[test]
+fn valgrind_match_break_in_arm_loop_leak() {
+    // The break inside the statement-level match arm must carry a
+    // loop-exit Free for the loop-local heap str (the sibling arm's
+    // last-use Free is not on the break path). Pre-fix the wrapped
+    // match hid the break from the jump walk and the break path
+    // leaked — the leak check fails on the lost block.
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_break_in_arm_loop_leak"),
+        "match_break_in_arm_loop_leak",
+    );
+}
+
+#[test]
+fn valgrind_match_arm_vardecl_double_free() {
+    // The arm-local VarDecl is named: exactly one Free for the
+    // heap str. Pre-fix the anon-temp pass double-freed it (an
+    // invalid free of the same block).
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_arm_vardecl_double_free"),
+        "match_arm_vardecl_double_free",
+    );
+}

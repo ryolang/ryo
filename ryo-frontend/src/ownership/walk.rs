@@ -8,7 +8,7 @@ use super::{
     format_binding, match_arm_bodies, needs_tracking, owner_name_for_diag, owner_sort_key,
     param_idx, projection_root, prune_branch_dead_projections, push_unique, record_return_epilogue,
     refine_view_liveness_for_arm, register_projection, resolve_view_alias, restore_view_last_use,
-    rule7_owner_name, struct_base_name, struct_root,
+    rule7_owner_name, stmt_match, struct_base_name, struct_root,
 };
 use crate::builtins::{is_borrowed_scalar_param, view_borrow_params};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
@@ -634,6 +634,9 @@ fn collect_arm_reseats(
     reseat_owners: &mut HashSet<Owner>,
 ) {
     for &s in stmts {
+        // M12: unwrap an ExprStmt-wrapped statement-level match before
+        // the tag dispatch (see `stmt_match`).
+        let s = stmt_match(tir, s).unwrap_or(s);
         match tir.inst(s).tag {
             TirTag::Assign => {
                 let av = tir.assign_view(s);

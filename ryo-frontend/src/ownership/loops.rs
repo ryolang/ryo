@@ -2,7 +2,7 @@
 
 use super::{
     BranchState, Owner, OwnerState, Ownership, analyze_stmt, match_arm_bodies, merge_non_monotone,
-    owner_sort_key, remove_loop_deferred_views, states_differ_snapshot, visit_expr,
+    owner_sort_key, remove_loop_deferred_views, states_differ_snapshot, stmt_match, visit_expr,
 };
 use ryo_core::diag::DiagSink;
 use ryo_core::ownership::{FreePoint, FunctionSidecar};
@@ -26,6 +26,10 @@ pub(crate) fn outermost_loop_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
             if r == target {
                 return stack.first().copied();
             }
+            // M12: statement-level matches arrive ExprStmt-wrapped —
+            // unwrap before the tag dispatch so the arms are descended
+            // (see `stmt_match`).
+            let r = stmt_match(tir, r).unwrap_or(r);
             match tir.inst(r).tag {
                 TirTag::IfStmt => {
                     let view = tir.if_stmt_view(r);
@@ -98,6 +102,9 @@ pub(crate) fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> b
                 *stopped = true;
                 return;
             }
+            // M12: unwrap an ExprStmt-wrapped statement-level match
+            // before the tag dispatch (see `stmt_match`).
+            let r = stmt_match(tir, r).unwrap_or(r);
             match tir.inst(r).tag {
                 TirTag::VarDecl => {
                     if tir.var_decl_view(r).name == name {
@@ -148,6 +155,9 @@ pub(crate) fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> b
 /// after-loop Free would be unreachable on the return path.
 pub(crate) fn body_may_return(tir: &Tir, stmts: &[TirRef]) -> bool {
     for &r in stmts {
+        // M12: unwrap an ExprStmt-wrapped statement-level match before
+        // the tag dispatch (see `stmt_match`).
+        let r = stmt_match(tir, r).unwrap_or(r);
         match tir.inst(r).tag {
             TirTag::Return | TirTag::ReturnVoid => return true,
             TirTag::IfStmt => {
@@ -237,6 +247,11 @@ pub(crate) fn body_must_terminate(tir: &Tir, stmts: &[TirRef]) -> bool {
             {
                 return body_must_terminate(tir, std::slice::from_ref(&o));
             }
+            // `ExprStmt`-wrapped statement-level match (sema's
+            // convention) — recurse on the unwrapped match.
+            if let Some(m) = stmt_match(tir, last) {
+                return body_must_terminate(tir, std::slice::from_ref(&m));
+            }
             false
         }
     }
@@ -277,6 +292,9 @@ pub(crate) fn stmt_must_return(tir: &Tir, stmt: TirRef) -> bool {
         }
         // `ExprStmt`-wrapped if (sema's `assert` desugaring).
         _ => {
+            if let Some(m) = stmt_match(tir, stmt) {
+                return stmt_must_return(tir, m);
+            }
             if let TirData::UnOp(o) = tir.inst(stmt).data
                 && tir.inst(o).tag == TirTag::IfStmt
             {
@@ -388,6 +406,9 @@ pub(crate) fn enclosing_if_main_cond(tir: &Tir, target: TirRef) -> Option<TirRef
 /// `Return`/`ReturnVoid` on any path — its exit anchor is reachable on
 /// every path, so a conditional-last-use Free can safely move there.
 pub(crate) fn branch_may_not_return(tir: &Tir, branch_stmt: TirRef) -> bool {
+    // A statement-level match may arrive ExprStmt-wrapped (see
+    // `stmt_match`).
+    let branch_stmt = stmt_match(tir, branch_stmt).unwrap_or(branch_stmt);
     match tir.inst(branch_stmt).tag {
         TirTag::IfStmt => {
             let view = tir.if_stmt_view(branch_stmt);
@@ -582,6 +603,10 @@ pub(crate) fn ancestor_branches_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
             if !tir.contains_reachable(r, target) {
                 continue;
             }
+            // M12: statement-level matches arrive ExprStmt-wrapped —
+            // unwrap so the match is recognized as an ancestor branch
+            // and its arms are descended (see `stmt_match`).
+            let r = stmt_match(tir, r).unwrap_or(r);
             match tir.inst(r).tag {
                 TirTag::IfStmt => {
                     stack.push(r);
@@ -643,6 +668,9 @@ pub(crate) fn ancestor_branches_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
 pub(crate) fn owner_binding_name(tir: &Tir, owner: TirRef) -> Option<StringId> {
     fn walk(tir: &Tir, stmts: &[TirRef], owner: TirRef) -> Option<StringId> {
         for &r in stmts {
+            // M12: unwrap an ExprStmt-wrapped statement-level match
+            // before the tag dispatch (see `stmt_match`).
+            let r = stmt_match(tir, r).unwrap_or(r);
             match tir.inst(r).tag {
                 TirTag::VarDecl => {
                     let view = tir.var_decl_view(r);
@@ -820,6 +848,16 @@ pub(crate) fn collect_loop_nesting(tir: &Tir) -> LoopNesting {
                         }
                         if let Some(else_stmts) = &view.else_stmts {
                             walk(tir, else_stmts, innermost, depth, nesting, sub);
+                        }
+                    }
+                    // M12 match (a statement-level one arrives
+                    // ExprStmt-wrapped — see `stmt_match`): the match
+                    // keeps the enclosing nesting, but a loop inside an
+                    // arm still needs its subtree recorded a level
+                    // deeper.
+                    if let Some(m) = stmt_match(tir, r) {
+                        for body in match_arm_bodies(tir, m) {
+                            walk(tir, &body, innermost, depth, nesting, sub);
                         }
                     }
                 }
@@ -1064,6 +1102,9 @@ pub(crate) fn collect_assign_writes(
     out: &mut Vec<(StringId, TirRef)>,
 ) {
     for &r in stmts {
+        // M12: unwrap an ExprStmt-wrapped statement-level match before
+        // the tag dispatch (see `stmt_match`).
+        let r = stmt_match(tir, r).unwrap_or(r);
         match tir.inst(r).tag {
             TirTag::Assign => {
                 let view = tir.assign_view(r);
@@ -1106,6 +1147,9 @@ pub(crate) fn collect_assign_writes(
 pub(crate) fn collect_loop_carried_owners(tir: &Tir) -> HashSet<TirRef> {
     fn walk(tir: &Tir, stmts: &[TirRef], out: &mut HashSet<TirRef>) {
         for &r in stmts {
+            // M12: unwrap an ExprStmt-wrapped statement-level match
+            // before the tag dispatch (see `stmt_match`).
+            let r = stmt_match(tir, r).unwrap_or(r);
             match tir.inst(r).tag {
                 TirTag::WhileLoop | TirTag::ForRange => {
                     let body = match tir.inst(r).tag {
@@ -1201,6 +1245,10 @@ pub(crate) fn schedule_loop_exit_frees_in(
     enclosing: Option<&LoopExitCtx>,
 ) {
     for &r in stmts {
+        // M12: unwrap an ExprStmt-wrapped statement-level match before
+        // the tag dispatch so break/continue inside its arms get their
+        // exit Frees (see `stmt_match`).
+        let r = stmt_match(tir, r).unwrap_or(r);
         let inst = *tir.inst(r);
         match inst.tag {
             TirTag::Break | TirTag::Continue => {
@@ -1271,6 +1319,42 @@ pub(crate) fn schedule_loop_exit_frees_in(
 /// comparisons are unsound (producer refs sit numerically below their
 /// parent body stmt, and sibling if-arms compare lexically but are not
 /// on the same control-flow path).
+/// M12: repair `collect_jump_path`'s over-approximation at a
+/// statement-level match. The path walk reaches an `ExprStmt`-wrapped
+/// match (sema's convention) only through its generic fallback, which
+/// collects the match's ENTIRE subtree: sibling arms land on the
+/// jump's path, so a Free anchored in a sibling arm falsely counts as
+/// covering the jump (its exit Free is skipped → leak), and a sibling
+/// arm's producers falsely count as materialized on the path (an exit
+/// Free targets a value that doesn't exist there). The precise path
+/// keeps the scrutinee and the arm chain containing the jump; every
+/// other arm's subtree is pruned. Matches nested inside the taken arm
+/// recurse. (The return-path sibling of this over-approximation is a
+/// documented carry-over; jump scheduling needs the precise path now.)
+fn prune_sibling_match_arms(tir: &Tir, stmt: TirRef, jump: TirRef, on_path: &mut HashSet<TirRef>) {
+    let Some(m) = stmt_match(tir, stmt) else {
+        return;
+    };
+    if !on_path.contains(&m) {
+        return;
+    }
+    for body in match_arm_bodies(tir, m) {
+        if body.iter().any(|&s| tir.contains_reachable(s, jump)) {
+            for &s in &body {
+                if tir.contains_reachable(s, jump) {
+                    prune_sibling_match_arms(tir, s, jump, on_path);
+                }
+            }
+        } else {
+            let mut sub = HashSet::new();
+            for &s in &body {
+                tir.collect_reachable(s, &mut sub);
+            }
+            on_path.retain(|r| !sub.contains(r));
+        }
+    }
+}
+
 pub(crate) fn schedule_break_continue_frees(
     tir: &Tir,
     own: &Ownership,
@@ -1299,11 +1383,20 @@ pub(crate) fn schedule_break_continue_frees(
                 jump_inst,
                 &mut on_path,
             );
+            // M12: collect_jump_path reaches a statement-level match
+            // only through its generic fallback, which collects the
+            // match's ENTIRE subtree — sibling arms land on the jump's
+            // path and their Frees falsely cover it. Rebuild the
+            // precise path (see prune_sibling_match_arms).
+            prune_sibling_match_arms(tir, enclosing_stmt, jump_inst, &mut on_path);
         }
         // Defensive: every jump visited from this loop's body is in
         // the map, so this only guards against malformed input.
         None => {
             let _ = tir.collect_jump_path(&ctx.body, jump_inst, &mut on_path);
+            for &stmt in &ctx.body {
+                prune_sibling_match_arms(tir, stmt, jump_inst, &mut on_path);
+            }
         }
     }
 

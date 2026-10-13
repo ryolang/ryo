@@ -2,7 +2,7 @@
 
 use super::{
     Owner, OwnerState, Ownership, inout_escape_owner, match_arm_bodies, needs_tracking,
-    owner_sort_key, projection_root,
+    owner_sort_key, projection_root, stmt_match,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{ChildKind, Tir, TirData, TirRef, TirTag};
@@ -86,6 +86,10 @@ pub(crate) fn collect_named_inits(tir: &Tir, stmts: &[TirRef]) -> HashSet<TirRef
 /// named initializers buried in nested control flow are still
 /// classified as named inits.
 pub(crate) fn collect_named_inits_rec(tir: &Tir, r: TirRef, set: &mut HashSet<TirRef>) {
+    // M12: a statement-level match arrives ExprStmt-wrapped (sema's
+    // convention) — unwrap before the tag dispatch so its arms are
+    // descended like an if's.
+    let r = stmt_match(tir, r).unwrap_or(r);
     match tir.inst(r).tag {
         TirTag::VarDecl => {
             set.insert(tir.var_decl_view(r).initializer);
@@ -601,6 +605,9 @@ fn copy_chain_clean(own: &Ownership, tir: &Tir, start: Owner, decl: TirRef) -> O
 /// buffer's single normal anchor.
 pub(crate) fn collect_return_stmts(tir: &Tir, stmts: &[TirRef], out: &mut Vec<TirRef>) {
     for &r in stmts {
+        // See collect_named_inits_rec: unwrap a statement-level match
+        // (ExprStmt-wrapped) before the tag dispatch.
+        let r = stmt_match(tir, r).unwrap_or(r);
         match tir.inst(r).tag {
             TirTag::Return | TirTag::ReturnVoid => out.push(r),
             TirTag::IfStmt => {

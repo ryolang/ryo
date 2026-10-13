@@ -4,22 +4,22 @@ use common::*;
 use tempfile::TempDir;
 
 // =============================================================================
-// M12 Pattern matching (Tasks 9-11 codegen) — JIT end-to-end tests.
-// Task 9: enum tag dispatch with wildcard routing, per-arm payload bindings
+// M12 Pattern matching — JIT end-to-end tests, grouped by lowering area.
+// Enum tag dispatch with wildcard routing, per-arm payload bindings
 // (the shared `bind_field_move` move logic), anon-scrutinee int/bool guard
 // chains, scalar/void merges, and the arm-start drop of an unbound
-// needs-drop payload field on a consuming arm. Task 10: literal-arm chains
+// needs-drop payload field on a consuming arm. Literal-arm chains
 // on int/bool/str scrutinees (ordered `icmp_imm eq`/`ryo_str_eq` + brif,
 // wildcard fallthrough, bool full coverage without a wildcard), str literal
-// guards on anon arms, and the W0005/E0129 surfaces. Task 11: aggregate
+// guards on anon arms, and the W0005/E0129 surfaces. Aggregate
 // results (str/enum/struct) merge through a pre-allocated result slot each
 // value arm writes via the canonical per-type aggregate writes; mixed
 // never/value matches; all-never termination; discarded non-void matches;
 // and the post-merge drop of an owned needs-drop scrutinee temporary.
-// Task 12: the negative sweep (E0131-E0136 each surface on stderr for a
-// reproducing source; E0129 and W0005 are pinned by the Task 10 tests
-// above) — leaks/double-frees on the heap-backed shapes are pinned under
-// ASan/Valgrind by the asan_match_* / valgrind_match_* smoke tests.
+// The negative sweep (E0131-E0136 each surface on stderr for a
+// reproducing source; E0129 and W0005 are pinned by the literal-chain
+// tests above) — leaks/double-frees on the heap-backed shapes are pinned
+// under ASan/Valgrind by the asan_match_* / valgrind_match_* smoke tests.
 // =============================================================================
 
 #[test]
@@ -113,7 +113,7 @@ fn match_arm_start_drop_wildcard_payload_field_jit() {
     // and leaves the second payload field unbound: the ownership pass
     // registers a MatchArmDrop for it, emitted at the arm's start. The
     // payloads are runtime-built past the SSO inline cap so the drop is a
-    // real ryo_str_free (leak pinning lands in the Task 12 valgrind
+    // real ryo_str_free (leak pinning lands in the valgrind
     // suite); this test pins the JIT output.
     assert_ryo_output(
         "match_arm_start_drop",
@@ -122,7 +122,7 @@ fn match_arm_start_drop_wildcard_payload_field_jit() {
     );
 }
 
-// --- Task 10: literal scrutinee chains (int/bool/str) ---
+// --- Literal scrutinee chains (int/bool/str) ---
 
 #[test]
 fn match_int_literal_arms_all_paths_jit() {
@@ -140,7 +140,8 @@ fn match_int_literal_arms_all_paths_jit() {
 #[test]
 fn match_int_literal_arms_value_producing_scalar_merge_jit() {
     // Literal-arm chain in value-producing position: expression arms jump
-    // to the merge block with the scalar result, exactly the Task 9 merge.
+    // to the merge block with the scalar result, exactly the enum-merge
+    // shape.
     assert_ryo_output(
         "match_int_literals_value",
         "fn code(n: int) -> int:\n\tx = match n:\n\t\t0: 100\n\t\t42: 200\n\t\t-1: 300\n\t\t_: -1\n\treturn x\n\nfn main():\n\tprint(code(0))\n\tprint(\"\\n\")\n\tprint(code(42))\n\tprint(\"\\n\")\n\tprint(code(-1))\n\tprint(\"\\n\")\n\tprint(code(7))\n\tprint(\"\\n\")\n",
@@ -267,7 +268,7 @@ fn match_int_non_exhaustive_errors_e0129_jit() {
     assert!(stderr.contains("E0129"), "stderr: {}", stderr);
 }
 
-// --- Task 11: aggregate results, termination, discarded values ---
+// --- Aggregate results, termination, discarded values ---
 
 #[test]
 fn match_str_result_merge_both_ways_jit() {
@@ -337,7 +338,8 @@ fn match_mixed_never_value_str_result_jit() {
 #[test]
 fn match_all_never_arms_merge_unreachable_code_after_compiles_jit() {
     // Every arm returns: the merge block is unreachable and trap-filled
-    // (Task 9), and the dead statement after the match must still
+    // (all-never matches lower the same way), and the dead statement
+    // after the match must still
     // compile (codegen continues in a fresh dead block). The function
     // returns normally on every path and main proceeds.
     assert_ryo_output(
@@ -380,7 +382,8 @@ fn match_scrutinee_temp_enum_payload_drop_both_paths_jit() {
     // scrutinee's single consumer), and codegen's end-of-statement sweep
     // lands it post-merge — after the merge block, on every path that
     // reaches it. The >SSO-cap payload makes the free a real
-    // ryo_str_free; the exactly-once pin under valgrind lands in Task 12.
+    // ryo_str_free; the exactly-once pin under valgrind lands in the
+    // sanitizer smoke suite.
     assert_ryo_output(
         "match_scrutinee_temp_drop",
         "enum Msg:\n\tText(body: str)\n\tQuit\n\nfn make_msg(n: int) -> Msg:\n\tif n > 0:\n\t\treturn Msg.Text{body=\"01234567890123456789012345678901234567890123456789\"}\n\treturn Msg.Quit\n\nfn main():\n\tmatch make_msg(1):\n\t\tMsg.Text(_):\n\t\t\tprint(\"text\\n\")\n\t\tMsg.Quit:\n\t\t\tprint(\"quit\\n\")\n\tmatch make_msg(0):\n\t\tMsg.Text(_):\n\t\t\tprint(\"text\\n\")\n\t\tMsg.Quit:\n\t\t\tprint(\"quit\\n\")\n",
@@ -445,9 +448,10 @@ fn match_value_arm_binding_read_diagnosed_i210_jit() {
     );
 }
 
-// --- Task 12: negative sweep — every match diagnostic code on stderr ---
+// --- Negative sweep — every match diagnostic code on stderr ---
 // E0129 (three non-exhaustive shapes) and W0005 (duplicate-arm warning
-// with successful compile) are pinned by the Task 10 tests above; each
+// with successful compile) are pinned by the literal-chain tests above;
+// each
 // remaining code gets one focused test here with a minimal reproducing
 // source (the shapes mirror ryo-frontend's sema/tests_match.rs).
 
