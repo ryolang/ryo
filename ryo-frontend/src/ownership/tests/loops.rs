@@ -715,6 +715,73 @@ fn loop_nesting_chains_depth_three() {
 }
 
 #[test]
+fn loop_nesting_cond_match_arms_stay_at_loop_depth() {
+    // M12 value-position regression: a match in a `while` CONDITION with
+    // a statement arm — the arm body re-executes per iteration, so it
+    // nests at the loop's depth + 1. The generic loop pass records the
+    // loop's ENTIRE subtree (condition included) at depth + 1; the
+    // operand-match descent must NOT re-walk the cond match's arms at
+    // the enclosing frame (it runs with the frame's depth, overwriting
+    // the correct depth + 1 entries with shallower ones — consumers
+    // like the view-liveness depth compare read this table).
+    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::tir::{Discriminant, TirBuilder, TypedMatchArm, TypedMatchBody};
+
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let bool_ty = pool.bool_();
+    let void = pool.void();
+    let main = pool.intern_str("main");
+    let x = pool.intern_str("x");
+    let span = SimpleSpan::new((), 0..0);
+
+    let mut tb = TirBuilder::new(main, vec![], void, span);
+    let scrut = tb.int_const(0, int_ty, span);
+    let arm_value = tb.int_const(1, int_ty, span);
+    let arm_assign = tb.assign(x, int_ty, arm_value, span);
+    let arm_expr = tb.bool_const(true, bool_ty, span);
+    let m = tb.match_expr(
+        scrut,
+        bool_ty,
+        &[
+            TypedMatchArm {
+                discriminant: Discriminant::Int(0),
+                bindings: &[],
+                guards: &[],
+                body: TypedMatchBody::Stmts(&[arm_assign]),
+            },
+            TypedMatchArm {
+                discriminant: Discriminant::Wildcard,
+                bindings: &[],
+                guards: &[],
+                body: TypedMatchBody::Expr(arm_expr),
+            },
+        ],
+        span,
+    );
+    let wl = tb.while_loop(m, &[], void, span);
+    let tir = tb.finish(&[wl]);
+
+    let nesting = collect_loop_nesting(&tir);
+
+    // The loop statement sits at the enclosing depth; its whole subtree
+    // — cond match and both arm bodies included — sits one level deeper.
+    assert_eq!(nesting.depth_of(wl), 0);
+    assert_eq!(nesting.depth_of(m), 1, "the cond match is inside the loop");
+    assert_eq!(
+        nesting.depth_of(arm_assign),
+        1,
+        "the statement-arm body stays at the loop's depth + 1"
+    );
+    assert_eq!(nesting.depth_of(arm_value), 1);
+    assert_eq!(
+        nesting.depth_of(arm_expr),
+        1,
+        "the expression-arm body stays at the loop's depth + 1"
+    );
+}
+
+#[test]
 fn loop_carried_concat_break_gets_no_jump_free() {
     // Regression for the loop-carried double free: a `mut str`
     // concatenated and reassigned inside a `while` loop is the

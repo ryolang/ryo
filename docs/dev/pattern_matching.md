@@ -200,13 +200,24 @@ deferral register.
 
 Mutable (`inout`) payload bindings, scrutinee liveness/reassignment,
 conditional-move merges, nested-place scrutinees. Additionally, the M12
-ownership review carried five items into M12.6's register (see the
+ownership review carried eight items into M12.6's register (see the
 roadmap): never-read by-move bind in a continue-ending arm can leak
 (narrow); `collect_jump_path` sibling-arm over-approximation on
 returns-in-arms (leak; needs core-TIR headroom); non-`Var` moved
 scrutinee reports UAM twice; copy-bind shadowing leak (same convention
-as M10); and Break/Continue-ending arms plus match-inside-loop interplay
-lack committed tests. I-210's consume fix (above) is also queued there.
+as M10); continue-ending arms and match-inside-loop interplay lack
+committed tests (break-in-arm coverage — statement-level and
+value-position — has landed: ownership unit tests + ASan/Valgrind
+sanitizer mirrors); four ownership walkers — `outermost_branch_of` and
+`enclosing_if_main_cond` (loops.rs), `collect_bound_call_sites`
+(frees.rs), and the `is_exit_anchor` predicate (mod.rs) — have no
+`Match` arm at all, so they miss bare matches, not just
+`ExprStmt`-wrapped ones; a `break` in a cond/bounds-position match arm
+gets no loop-exit Frees yet (the loop-exit walk skips operand descent
+at loop statements to avoid the stale outer context; exotic shape);
+and `branch_may_not_return` has a `Match` arm but no operand descent
+(pre-existing, backstopped by the return epilogue). I-210's consume fix
+(above) is also queued there.
 
 ### Deferred to M13 / M16
 

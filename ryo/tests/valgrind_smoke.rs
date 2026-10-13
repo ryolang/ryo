@@ -670,3 +670,28 @@ fn valgrind_match_arm_vardecl_double_free() {
         "match_arm_vardecl_double_free",
     );
 }
+
+#[test]
+fn valgrind_match_break_in_value_arm_loop_exit() {
+    // Mirrors break_in_value_position_match_arm_gets_loop_exit_free:
+    // the break inside a value-position (VarDecl-initializer) match
+    // arm must carry a loop-exit Free for the loop-local heap str —
+    // pre-fix the VarDecl statement hid the break from the jump walk
+    // and the break path leaked.
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_break_in_value_arm_loop_exit"),
+        "match_break_in_value_arm_loop_exit",
+    );
+}
+
+#[test]
+fn valgrind_match_value_arm_unconsumed_temporary() {
+    // Mirrors dead_bind_in_expr_arm_freed_exactly_once_in_arm: the
+    // arm-gated Free of a by-move payload bind never read in its
+    // expression arm must be flushed inside the arm — pre-fix it was
+    // never emitted and the heap payload leaked.
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_value_arm_unconsumed_temporary"),
+        "match_value_arm_unconsumed_temporary",
+    );
+}

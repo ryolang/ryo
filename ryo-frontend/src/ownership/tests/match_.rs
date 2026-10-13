@@ -529,3 +529,128 @@ fn named_vardecl_in_stmt_match_arm_freed_exactly_once() {
         f.free_schedule
     );
 }
+
+#[test]
+fn break_in_value_position_match_arm_gets_loop_exit_free() {
+    // A `break` inside the arm of a match in VALUE position (a VarDecl
+    // initializer) must get its loop-exit Free: the jump walk only saw
+    // statement-level matches (`stmt_match`), so the VarDecl statement
+    // hid the break and the loop-local heap str leaked on the break
+    // path (its last-use Free, anchored after the match, never fires
+    // there — the match does not complete on that path).
+    let src = "fn main():\n\tmut i = 0\n\twhile i < 3:\n\t\ts = int_to_str(i) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\t\tn = match i:\n\t\t\t1:\n\t\t\t\tbreak\n\t\t\t_: 0\n\t\tprint(s)\n\t\ti = i + 1\n\tprint(\"done\")\n";
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "no errors expected; got {diags:?}"
+    );
+    let f = main_sidecar(&mut sidecar, &pool);
+    let s = pool.find_str("s").expect("`s` interned");
+    let init = (1..tirs[0].instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find(|&r| {
+            tirs[0].inst(r).tag == ryo_core::tir::TirTag::VarDecl
+                && tirs[0].var_decl_view(r).name == s
+        })
+        .map(|r| tirs[0].var_decl_view(r).initializer)
+        .expect("the loop-local `s` VarDecl");
+    let brk = (1..tirs[0].instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find(|&r| tirs[0].inst(r).tag == ryo_core::tir::TirTag::Break)
+        .expect("the in-arm break");
+    assert!(
+        f.free_schedule
+            .iter()
+            .any(|fp| fp.target == init && fp.after == brk),
+        "the break inside the value-position match arm gets a loop-exit \
+         Free for the loop-local str; got {:?}",
+        f.free_schedule
+    );
+}
+
+#[test]
+fn return_in_value_position_match_arm_gets_promo_epilogue() {
+    // A `return` inside the arm of a match in Return-operand position
+    // must be seen by `collect_return_stmts` (via
+    // `visit_operand_matches`), or the promotion-buffer return
+    // epilogue misses it: the view's buffer, created before the match
+    // and read only in the sibling arm, is freed on this return path
+    // only by the epilogue-anchored copy.
+    let src = "enum E:\n\tA\n\tB\n\nfn f(p: str, e: E) -> int:\n\tv = p[0:8]\n\treturn match e:\n\t\tA: v.len()\n\t\tB:\n\t\t\treturn 1\n\nfn main():\n\tf(\"0123456789012345678901234567890123456789\", E.A)\n\tf(\"0123456789012345678901234567890123456789\", E.B)\n";
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "no errors expected; got {diags:?}"
+    );
+    let f_idx = sidecar
+        .functions
+        .iter()
+        .position(|f| pool.str(f.name) == "f")
+        .expect("f's sidecar entry");
+    let f = take_function_sidecar(&mut sidecar, f_idx);
+    // The inner (arm) return — the one whose operand is NOT the match.
+    let m = find_match(&tirs[f_idx]);
+    let inner_return = (1..tirs[f_idx].instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find(|&r| {
+            tirs[f_idx].inst(r).tag == ryo_core::tir::TirTag::Return
+                && matches!(tirs[f_idx].inst(r).data, ryo_core::tir::TirData::UnOp(o) if o != m)
+        })
+        .expect("the arm's return");
+    assert!(
+        f.promotion_frees.iter().any(|pf| pf.after == inner_return),
+        "the arm's return gets a promotion-buffer epilogue Free; got {:?}",
+        f.promotion_frees
+    );
+}
+
+#[test]
+fn dead_bind_in_expr_arm_freed_exactly_once_in_arm() {
+    // An expression arm binding a non-`Copy` payload by move and never
+    // reading it: the dead-bind machinery schedules an arm-gated Free
+    // anchored at the arm-body expression. Codegen must flush it
+    // inside the arm (before the merge jump) or the buffer leaks.
+    let src = "enum Opt:\n\tSome(str)\n\tEmpty\n\nfn main():\n\to = Opt.Some(\"alice-in-wonderland-0000000000000000000\")\n\tn = match o:\n\t\tSome(v): 1\n\t\t_: 0\n\tprint(int_to_str(n))\n";
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "no errors expected; got {diags:?}"
+    );
+    let f = main_sidecar(&mut sidecar, &pool);
+    let m = find_match(&tirs[0]);
+    let arms = f.match_branches[m.index()]
+        .as_ref()
+        .expect("match_branches entry for the Match inst")
+        .arms
+        .clone();
+    let token = tirs[0]
+        .match_by_move_owner_refs(m, &pool)
+        .into_iter()
+        .next()
+        .expect("one by-move owner token for `v`");
+    let body = match tirs[0].match_view(m).arms().next().unwrap().body {
+        ryo_core::tir::MatchBodyView::Expr(e) => e,
+        ryo_core::tir::MatchBodyView::Stmts(_) => panic!("`Some(v) => 1` is an expression arm"),
+    };
+    let frees: Vec<_> = f
+        .free_schedule
+        .iter()
+        .filter(|fp| fp.target == token)
+        .collect();
+    assert_eq!(
+        frees.len(),
+        1,
+        "exactly one Free for the dead payload bind; got {frees:?}"
+    );
+    assert_eq!(frees[0].branch, Some(arms[0]), "gated to the `Some(v)` arm");
+    assert_eq!(
+        frees[0].after, body,
+        "anchored at the arm-body expression (fired inside the arm)"
+    );
+}

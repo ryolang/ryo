@@ -335,6 +335,20 @@ impl<M: Module> Codegen<M> {
                         if ctx.pool.is_never(body_ty) {
                             false
                         } else {
+                            // Arm-body frees: fire everything that became
+                            // due while the arm expression evaluated —
+                            // branch-gated Frees (arm-local dead binds,
+                            // divergence frees) and sweep entries whose
+                            // anchors the body materialized — BEFORE the
+                            // merge jump, while the arm's BranchId is
+                            // still on the branch_stack. After the pop
+                            // the end-of-statement sweep can never see
+                            // branch-gated entries (leak). Mirrors
+                            // emit_body's post-statement calls.
+                            Self::emit_due_frees(builder, ctx, e)?;
+                            Self::emit_due_promo_frees(builder, ctx, e)?;
+                            Self::sweep_due_frees(builder, ctx)?;
+                            Self::sweep_due_promo_frees(builder, ctx)?;
                             match shape {
                                 MatchShape::Scalar(_) => {
                                     builder.ins().jump(merge, &[BlockArg::Value(v)]);
@@ -436,6 +450,13 @@ impl<M: Module> Codegen<M> {
         // * By-value reads of tracked bindings (`Var` / `FieldAccess`
         //   arm bodies): the binding's last-use Free lands post-merge
         //   while the result aliases the binding's storage.
+        //
+        // The expression-arm free flush above deliberately does NOT run
+        // for aggregate shapes: firing the binding-read Free inside the
+        // arm would free the buffer the result slot then aliases AND
+        // mark the schedule entry fired, suppressing this rejection —
+        // the loud error would become a silent use-after-free. Aggregate
+        // arms are rejected before any of their frees could fire.
         //
         // Ownership must instead consume the arm-body result into the
         // match; until it does, fail loudly. Elided frees (static

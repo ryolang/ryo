@@ -2,7 +2,7 @@
 
 use super::{
     Owner, OwnerState, Ownership, inout_escape_owner, match_arm_bodies, needs_tracking,
-    owner_sort_key, projection_root, stmt_match,
+    owner_sort_key, projection_root, stmt_match, visit_operand_matches,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{ChildKind, Tir, TirData, TirRef, TirTag};
@@ -144,6 +144,20 @@ pub(crate) fn collect_named_inits_rec(tir: &Tir, r: TirRef, set: &mut HashSet<Ti
         }
         _ => {}
     }
+    // M12 value-position: a match nested in this statement's expression
+    // operands (a VarDecl initializer, an Assign value, a Return
+    // operand, a call arg) hides its arms' named inits exactly like a
+    // statement-level one. Runs for every statement (on the unwrapped
+    // ref, so a statement-level match's arms are not visited twice —
+    // the operand walk covers its scrutinee and expression-arm bodies,
+    // which the Match arm above does not).
+    visit_operand_matches(tir, r, &mut |m| {
+        for body in match_arm_bodies(tir, m) {
+            for s in body {
+                collect_named_inits_rec(tir, s, set);
+            }
+        }
+    });
 }
 
 /// Interned ids for the synthesized `__ryo_*` callees the W0003/W0004
@@ -632,6 +646,16 @@ pub(crate) fn collect_return_stmts(tir: &Tir, stmts: &[TirRef], out: &mut Vec<Ti
             }
             _ => {}
         }
+        // M12 value-position: a match nested in this statement's operands
+        // (e.g. a Return-operand match whose arm returns) — every operand
+        // match's arm bodies are searched. Runs for every statement (on
+        // the unwrapped ref, so a statement-level match's arms are not
+        // searched twice).
+        visit_operand_matches(tir, r, &mut |m| {
+            for body in match_arm_bodies(tir, m) {
+                collect_return_stmts(tir, &body, out);
+            }
+        });
     }
 }
 

@@ -33,7 +33,7 @@ use super::{
 };
 use ryo_core::diag::DiagSink;
 use ryo_core::ownership::{BranchId, FreePoint, FunctionSidecar, MatchArmDrop, MatchBranchIds};
-use ryo_core::tir::{MatchArmView, MatchBodyView, Tir, TirData, TirRef, TirTag};
+use ryo_core::tir::{ChildKind, MatchArmView, MatchBodyView, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, StructField, TypeId};
 use std::collections::HashSet;
 
@@ -283,6 +283,29 @@ pub(crate) fn stmt_match(tir: &Tir, r: TirRef) -> Option<TirRef> {
         (TirTag::ExprStmt, TirData::UnOp(o)) if tir.inst(o).tag == TirTag::Match => Some(o),
         _ => None,
     }
+}
+
+/// Visit every `Match` nested in `r`'s expression operands — a
+/// `VarDecl` initializer, an `Assign` value, a `Return` operand, a call
+/// argument — at any depth. Value-position matches are not
+/// statement-level, so `stmt_match`'s unwrap never sees them and a
+/// statement-list walker that dispatches only on statement tags would
+/// skip their arm bodies: no owner states, no drops, no loop-exit frees
+/// for break/continue in arms. The walk continues through every operand
+/// — including each found match's scrutinee and expression-arm bodies —
+/// so multiple/nested operand matches are ALL visited (never just the
+/// first); statement-arm bodies are deliberately skipped, because the
+/// callback owns those via `match_arm_bodies` and its own statement
+/// recursion (which would otherwise visit them twice).
+pub(crate) fn visit_operand_matches(tir: &Tir, r: TirRef, f: &mut impl FnMut(TirRef)) {
+    tir.walk_operands(r, &mut |_parent, child, kind| {
+        if tir.inst(child).tag == TirTag::Match {
+            f(child);
+        }
+        if matches!(kind, ChildKind::Operand) {
+            visit_operand_matches(tir, child, f);
+        }
+    });
 }
 
 /// Where an arm's flow ends: the anchor for arm-gated Frees of values

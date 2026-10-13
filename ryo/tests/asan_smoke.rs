@@ -481,3 +481,26 @@ fn asan_match_arm_vardecl_double_free() {
         "match_arm_vardecl_double_free",
     );
 }
+
+#[test]
+fn asan_match_break_in_value_arm_loop_exit() {
+    // Mirrors valgrind_match_break_in_value_arm_loop_exit: the break
+    // inside a value-position match arm fires its loop-exit Free (ASan
+    // catches the use-side of any schedule mistake; valgrind pins the
+    // leak itself).
+    run_asan_smoke(
+        common::find_fixture("match_break_in_value_arm_loop_exit"),
+        "match_break_in_value_arm_loop_exit",
+    );
+}
+
+#[test]
+fn asan_match_value_arm_unconsumed_temporary() {
+    // Mirrors valgrind_match_value_arm_unconsumed_temporary: the dead
+    // payload bind's arm-gated Free is flushed inside the expression
+    // arm — freed exactly once, no use of released storage.
+    run_asan_smoke(
+        common::find_fixture("match_value_arm_unconsumed_temporary"),
+        "match_value_arm_unconsumed_temporary",
+    );
+}

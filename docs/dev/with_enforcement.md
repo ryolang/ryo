@@ -92,7 +92,7 @@ ownership: a held file is inert, a held lock blocks everyone.
 
 New error code, mirroring E0017's shape:
 
-```
+```text
 error[E0XXX]: cannot bind 'Scoped' value to 'g'
   --> example.ryo:3:5
   |

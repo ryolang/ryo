@@ -3,6 +3,7 @@
 use super::{
     BranchState, Owner, OwnerState, Ownership, analyze_stmt, match_arm_bodies, merge_non_monotone,
     owner_sort_key, remove_loop_deferred_views, states_differ_snapshot, stmt_match, visit_expr,
+    visit_operand_matches,
 };
 use ryo_core::diag::DiagSink;
 use ryo_core::ownership::{FreePoint, FunctionSidecar};
@@ -74,6 +75,26 @@ pub(crate) fn outermost_loop_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                 }
                 _ => {}
             }
+            // M12 value-position: a match nested in this statement's
+            // operands (a VarDecl initializer, a Return operand, an
+            // if-condition, ...) is searched like the statement-level
+            // case — transparent, the loop stack unchanged. Runs for
+            // every statement (on the unwrapped ref, so a
+            // statement-level match's arms are not searched twice).
+            let mut found = None;
+            visit_operand_matches(tir, r, &mut |m| {
+                if found.is_some() {
+                    return;
+                }
+                for body in match_arm_bodies(tir, m) {
+                    if found.is_none() {
+                        found = walk(tir, &body, target, stack);
+                    }
+                }
+            });
+            if found.is_some() {
+                return found;
+            }
         }
         None
     }
@@ -142,6 +163,17 @@ pub(crate) fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> b
                 }
                 _ => {}
             }
+            // M12 value-position: a VarDecl inside a match nested in this
+            // statement's operands (any operand position — the
+            // statement's own tag arm above does not descend) still
+            // counts. Runs for every statement (on the unwrapped ref, so
+            // a statement-level match's arms are not searched twice);
+            // the recursive walk early-exits on `found`/`stopped`.
+            visit_operand_matches(tir, r, &mut |m| {
+                for body in match_arm_bodies(tir, m) {
+                    walk(tir, &body, name, stop, found, stopped);
+                }
+            });
         }
     }
     let mut found = false;
@@ -190,6 +222,19 @@ pub(crate) fn body_may_return(tir: &Tir, stmts: &[TirRef]) -> bool {
                 }
             }
             _ => {}
+        }
+        // M12 value-position: a match nested in this statement's operands
+        // (e.g. a Return-operand match whose arm returns) may hide the
+        // return. Runs for every statement (on the unwrapped ref, so a
+        // statement-level match's arms are not searched twice).
+        let mut may = false;
+        visit_operand_matches(tir, r, &mut |m| {
+            for body in match_arm_bodies(tir, m) {
+                may = may || body_may_return(tir, &body);
+            }
+        });
+        if may {
+            return true;
         }
     }
     false
@@ -654,7 +699,47 @@ pub(crate) fn ancestor_branches_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
                         return found;
                     }
                 }
-                _ => return Some(stack.clone()),
+                _ => {
+                    // M12 value-position: a match nested in this
+                    // statement's operands is an ancestor branch exactly
+                    // like the statement-level case — push it and descend
+                    // the arm containing the target.
+                    let mut found = None;
+                    visit_operand_matches(tir, r, &mut |m| {
+                        if found.is_some() || !tir.contains_reachable(m, target) {
+                            return;
+                        }
+                        stack.push(m);
+                        for body in match_arm_bodies(tir, m) {
+                            if found.is_none() {
+                                found = walk(tir, &body, target, stack);
+                            }
+                        }
+                        stack.pop();
+                    });
+                    return Some(found.unwrap_or_else(|| stack.clone()));
+                }
+            }
+            // M12 value-position: a match nested in a BRANCH statement's
+            // operands (an if-condition, a match scrutinee) hides the
+            // target in its arms the same way — the branch arms above do
+            // not descend operands. Plain statements were handled by the
+            // fallback arm above.
+            let mut found = None;
+            visit_operand_matches(tir, r, &mut |m| {
+                if found.is_some() || !tir.contains_reachable(m, target) {
+                    return;
+                }
+                stack.push(m);
+                for body in match_arm_bodies(tir, m) {
+                    if found.is_none() {
+                        found = walk(tir, &body, target, stack);
+                    }
+                }
+                stack.pop();
+            });
+            if found.is_some() {
+                return found;
             }
         }
         None
@@ -715,6 +800,24 @@ pub(crate) fn owner_binding_name(tir: &Tir, owner: TirRef) -> Option<StringId> {
                     }
                 }
                 _ => {}
+            }
+            // M12 value-position: a binding declared inside a match
+            // nested in this statement's operands still produces the
+            // owner. Runs for every statement (on the unwrapped ref, so
+            // a statement-level match's arms are not searched twice).
+            let mut found = None;
+            visit_operand_matches(tir, r, &mut |m| {
+                if found.is_some() {
+                    return;
+                }
+                for body in match_arm_bodies(tir, m) {
+                    if found.is_none() {
+                        found = walk(tir, &body, owner);
+                    }
+                }
+            });
+            if found.is_some() {
+                return found;
             }
         }
         None
@@ -855,12 +958,33 @@ pub(crate) fn collect_loop_nesting(tir: &Tir) -> LoopNesting {
                     // keeps the enclosing nesting, but a loop inside an
                     // arm still needs its subtree recorded a level
                     // deeper.
-                    if let Some(m) = stmt_match(tir, r) {
+                    let stmt_level = stmt_match(tir, r);
+                    if let Some(m) = stmt_level {
                         for body in match_arm_bodies(tir, m) {
                             walk(tir, &body, innermost, depth, nesting, sub);
                         }
                     }
                 }
+            }
+            // M12 value-position: a match nested in this statement's
+            // operands — same re-walk for loops inside its arms (the
+            // whole-statement subtree recording above already covered
+            // the match itself at the enclosing depth). Runs on the
+            // unwrapped ref for every statement, so a statement-level
+            // match's arms are not re-walked twice — this covers the
+            // matches in its scrutinee and expression-arm bodies, which
+            // the re-walk above does not. Skipped at loop statements:
+            // the loop arm above already recorded the loop's ENTIRE
+            // subtree (condition and bounds included) at depth + 1, and
+            // re-walking a cond/bounds match's arms here at the
+            // enclosing frame would overwrite those correct entries
+            // with shallower ones.
+            if !matches!(tir.inst(r).tag, TirTag::WhileLoop | TirTag::ForRange) {
+                visit_operand_matches(tir, stmt_match(tir, r).unwrap_or(r), &mut |m| {
+                    for body in match_arm_bodies(tir, m) {
+                        walk(tir, &body, innermost, depth, nesting, sub);
+                    }
+                });
             }
         }
     }
@@ -1133,6 +1257,16 @@ pub(crate) fn collect_assign_writes(
             }
             _ => {}
         }
+        // M12 value-position: an Assign inside a match nested in this
+        // statement's operands (an Assign whose VALUE is a match, a
+        // VarDecl initializer, ...) is still a loop-carried write
+        // candidate. Runs for every statement (on the unwrapped ref, so
+        // a statement-level match's arms are not collected twice).
+        visit_operand_matches(tir, r, &mut |m| {
+            for body in match_arm_bodies(tir, m) {
+                collect_assign_writes(tir, &body, out);
+            }
+        });
     }
 }
 
@@ -1182,6 +1316,15 @@ pub(crate) fn collect_loop_carried_owners(tir: &Tir) -> HashSet<TirRef> {
                 }
                 _ => {}
             }
+            // M12 value-position: a match nested in this statement's
+            // operands — descend its arm bodies. Runs for every
+            // statement (on the unwrapped ref, so a statement-level
+            // match's arms are not searched twice).
+            visit_operand_matches(tir, r, &mut |m| {
+                for body in match_arm_bodies(tir, m) {
+                    walk(tir, &body, out);
+                }
+            });
         }
     }
     let mut out = HashSet::new();
@@ -1284,6 +1427,25 @@ pub(crate) fn schedule_loop_exit_frees_in(
             }
             _ => {}
         }
+        // M12 value-position: a break/continue inside a match nested in
+        // this statement's operands (a VarDecl initializer, an Assign
+        // value, ...) needs its loop-exit Frees exactly like a
+        // statement-level match arm. Runs for every statement (on the
+        // unwrapped ref, so a statement-level match's arms are not
+        // scheduled twice). Skipped at loop statements: the loop arm
+        // above recursed into the body with the loop's OWN context, and
+        // this descent would run against the STALE OUTER `enclosing`
+        // (for a nested loop, the outer ctx's loop_carried gate can
+        // misfire). Residual: a break inside a cond/bounds-position
+        // match arm gets no loop-exit Frees yet (exotic shape; matches
+        // in body/statement positions ARE covered).
+        if !matches!(inst.tag, TirTag::WhileLoop | TirTag::ForRange) {
+            visit_operand_matches(tir, r, &mut |m| {
+                for body in match_arm_bodies(tir, m) {
+                    schedule_loop_exit_frees_in(tir, own, sidecar, &body, enclosing);
+                }
+            });
+        }
     }
 }
 
@@ -1329,12 +1491,31 @@ pub(crate) fn schedule_loop_exit_frees_in(
 /// Free targets a value that doesn't exist there). The precise path
 /// keeps the scrutinee and the arm chain containing the jump; every
 /// other arm's subtree is pruned. Matches nested inside the taken arm
-/// recurse. (The return-path sibling of this over-approximation is a
+/// recurse, as do matches nested in the statement's OPERANDS
+/// (value-position matches — a VarDecl initializer, an Assign value —
+/// which the generic fallback reaches the same over-approximating
+/// way). (The return-path sibling of this over-approximation is a
 /// documented carry-over; jump scheduling needs the precise path now.)
 fn prune_sibling_match_arms(tir: &Tir, stmt: TirRef, jump: TirRef, on_path: &mut HashSet<TirRef>) {
-    let Some(m) = stmt_match(tir, stmt) else {
-        return;
-    };
+    let stmt_level = stmt_match(tir, stmt);
+    if let Some(m) = stmt_level {
+        prune_match_arms(tir, m, jump, on_path);
+    }
+    // M12 value-position: a match nested in this statement's operands is
+    // on the path through the same generic fallback — its sibling arms
+    // need the same pruning. Runs on the unwrapped ref, so the
+    // statement-level match handled above is not pruned twice.
+    visit_operand_matches(tir, stmt_level.unwrap_or(stmt), &mut |m| {
+        if on_path.contains(&m) {
+            prune_match_arms(tir, m, jump, on_path);
+        }
+    });
+}
+
+/// One match's sibling-arm pruning: the arm chain containing the jump
+/// recurses (deeper matches prune through `prune_sibling_match_arms`),
+/// every other arm's subtree leaves the jump path.
+fn prune_match_arms(tir: &Tir, m: TirRef, jump: TirRef, on_path: &mut HashSet<TirRef>) {
     if !on_path.contains(&m) {
         return;
     }

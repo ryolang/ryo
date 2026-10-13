@@ -1446,6 +1446,71 @@ fn main():
 \tprint(\"done\\n\")
 ",
     ),
+    (
+        // M12 match: a `break` inside the arm of a match in VALUE
+        // position (a VarDecl initializer) inside a loop. The
+        // loop-local heap str's last-use Free is anchored after the
+        // match, which never completes on the break path — the
+        // jump-exit Free scheduled by the loop-exit pass is the only
+        // release there. Pre-fix the jump walk only descended
+        // statement-level matches, so the VarDecl statement hid the
+        // break and the break path leaked the concat-built >SSO-cap
+        // str; ASan/valgrind pin the leak. Mirrors the
+        // break_in_value_position_match_arm_gets_loop_exit_free unit
+        // test.
+        "match_break_in_value_arm_loop_exit",
+        "\
+fn make(tag: int) -> str:
+\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+
+fn main():
+\tmut i = 0
+\twhile i < 3:
+\t\ts = make(i)
+\t\tn = match i:
+\t\t\t1:
+\t\t\t\tbreak
+\t\t\t_: 0
+\t\tprint(s)
+\t\tprint(\"\\n\")
+\t\ti = i + 1
+\tprint(\"done\\n\")
+",
+    ),
+    (
+        // M12 match: an expression arm that binds a non-`Copy` payload
+        // by move and never reads it leaves the owned value
+        // unconsumed — the dead-bind machinery schedules an arm-gated
+        // Free anchored at the arm-body expression, which codegen must
+        // flush INSIDE the arm (before the merge jump and the
+        // BranchId pop). Pre-fix the free was never emitted (leak) on
+        // both matches: `v`'s payload on the first, `w`'s payload plus
+        // the wildcard arm's whole-scrutinee drop on the second;
+        // ASan/valgrind pin the exactly-once drop of the concat-built
+        // >SSO-cap payloads. Mirrors the
+        // dead_bind_in_expr_arm_freed_exactly_once_in_arm unit test.
+        "match_value_arm_unconsumed_temporary",
+        "\
+enum Opt:
+\tSome(str)
+\tEmpty
+
+fn main():
+\tpad = \"0123456789012345678901234567890123456789\"
+\to = Opt.Some(\"first-\" + pad)
+\tn = match o:
+\t\tSome(v): 1
+\t\t_: 0
+\tprint(int_to_str(n))
+\tprint(\"\\n\")
+\tp = Opt.Some(\"second-\" + pad)
+\tm = match p:
+\t\tSome(w): 2
+\t\tEmpty: 0
+\tprint(int_to_str(m))
+\tprint(\"\\n\")
+",
+    ),
 ];
 
 // Test-helper module, not `cfg(test)`-gated, so clippy.toml's

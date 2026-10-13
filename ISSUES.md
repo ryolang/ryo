@@ -714,7 +714,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Files:** ryo-frontend/src/parser/tests.rs, scripts/check_file_length.sh
 
-**Summary:** Discovered during the M12 parser-test review: ryo-frontend/src/parser/tests.rs is at exactly 2000 lines, which passes scripts/check_file_length.sh (fails only on OVER 2000) with zero headroom. The next test addition anywhere in the file trips the CI gate for an unrelated change.
+**Summary:** Discovered during the M12 parser-test review: ryo-frontend/src/parser/tests.rs is exactly at the 2000-line maximum that scripts/check_file_length.sh enforces in CI (the gate fails only on OVER 2000), so the file has zero headroom: adding a single line anywhere without removing one fails the CI length gate for what looks like an unrelated change.
 
 **Resolution:** Split parser/tests.rs into thematic submodules following the enum_tests.rs / match_tests.rs precedent (e.g. statements.rs, expressions.rs), or raise the cap deliberately. Not M12 scope; schedule with the next parser-touching milestone (I-208 follow-up window).
 

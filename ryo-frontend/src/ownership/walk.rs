@@ -8,7 +8,7 @@ use super::{
     format_binding, match_arm_bodies, needs_tracking, owner_name_for_diag, owner_sort_key,
     param_idx, projection_root, prune_branch_dead_projections, push_unique, record_return_epilogue,
     refine_view_liveness_for_arm, register_projection, resolve_view_alias, restore_view_last_use,
-    rule7_owner_name, stmt_match, struct_base_name, struct_root,
+    rule7_owner_name, stmt_match, struct_base_name, struct_root, visit_operand_matches,
 };
 use crate::builtins::{is_borrowed_scalar_param, view_borrow_params};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
@@ -681,6 +681,15 @@ fn collect_arm_reseats(
             }
             _ => {}
         }
+        // M12 value-position: a reseat inside a match nested in this
+        // statement's operands attributes the same way. Runs for every
+        // statement (on the unwrapped ref, so a statement-level match's
+        // arms are not searched twice).
+        visit_operand_matches(tir, s, &mut |m| {
+            for body in match_arm_bodies(tir, m) {
+                collect_arm_reseats(tir, pool, sidecar, &body, binding, reseat_owners);
+            }
+        });
     }
 }
 
