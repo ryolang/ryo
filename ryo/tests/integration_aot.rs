@@ -338,3 +338,37 @@ fn heap_str_last_use_in_inline_assert_aot() {
         String::from_utf8_lossy(&run_output.stderr)
     );
 }
+
+#[test]
+fn while_body_return_choose_aot_run_prints_hello() {
+    // AOT leg of the G3/R4-A loop-convergence regression (JIT leg:
+    // `while_body_return_compiles_and_runs` in integration_basics.rs).
+    // A loop whose body's only live exit is `return` must reach the
+    // fixed point — with the live-projection membership compare active
+    // — and the compiled binary must print the in-loop value.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn choose(flag: bool) -> str:\n\ts = \"hello\"\n\twhile flag:\n\t\treturn s\n\treturn s\n\nfn main():\n\tprint(choose(true))\n";
+    let test_file = create_test_file(temp_dir.path(), "while_body_return_aot.ryo", code);
+
+    let build_output = run_ryo_build(&test_file, temp_dir.path());
+    assert!(
+        build_output.status.success(),
+        "ryo build failed. STDERR: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    let binary_path = exe_path(temp_dir.path(), "while_body_return_aot");
+    let run_output = Command::new(&binary_path)
+        .output()
+        .expect("Failed to execute compiled binary");
+    assert!(
+        run_output.status.success(),
+        "compiled binary should exit 0. stderr: {}",
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run_output.stdout),
+        "hello",
+        "choose(true) must return the in-loop value"
+    );
+}

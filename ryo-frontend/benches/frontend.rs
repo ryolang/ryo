@@ -257,7 +257,12 @@ fn ownership_nested_control(bencher: divan::Bencher, case: (usize, usize)) {
         .with_inputs(|| sema_program(&src))
         .bench_values(|(tirs, pool)| {
             let mut sink = ryo_core::diag::DiagSink::new();
-            let sidecar = ryo_frontend::ownership::check(divan::black_box(&tirs), &pool, &mut sink);
+            let flows: Vec<ryo_core::flow::Flow> = tirs
+                .iter()
+                .map(|t| ryo_core::flow::Flow::build(t, &pool))
+                .collect();
+            let sidecar =
+                ryo_frontend::ownership::check(divan::black_box(&tirs), &flows, &pool, &mut sink);
             assert!(!sink.has_errors(), "ownership should succeed");
             divan::black_box(sidecar);
         });
@@ -270,7 +275,12 @@ fn ownership_call_heavy(bencher: divan::Bencher, functions: usize) {
         .with_inputs(|| sema_program(&src))
         .bench_values(|(tirs, pool)| {
             let mut sink = ryo_core::diag::DiagSink::new();
-            let sidecar = ryo_frontend::ownership::check(divan::black_box(&tirs), &pool, &mut sink);
+            let flows: Vec<ryo_core::flow::Flow> = tirs
+                .iter()
+                .map(|t| ryo_core::flow::Flow::build(t, &pool))
+                .collect();
+            let sidecar =
+                ryo_frontend::ownership::check(divan::black_box(&tirs), &flows, &pool, &mut sink);
             assert!(!sink.has_errors(), "ownership should succeed");
             divan::black_box(sidecar);
         });

@@ -1,6 +1,7 @@
 //! Diagnostic name formatting — split from `mod.rs`; see module docs there.
 
-use super::{Owner, Ownership, inout_owner, struct_base_name};
+use super::{Owner, Ownership, struct_base_name};
+use ryo_core::flow::Flow;
 use ryo_core::tir::{Tir, TirData, TirRef};
 use ryo_core::types::{InternPool, StringId};
 
@@ -25,11 +26,11 @@ pub(crate) fn consumed_binding_name(tir: &Tir, r: TirRef) -> Option<StringId> {
     }
 }
 
-pub(crate) fn owner_name_for_diag(owner: Owner, tir: &Tir, pool: &InternPool) -> String {
-    match owner {
-        Owner::Param(name) => format!("`{}`", pool.str(name)),
-        Owner::Inst(r) => format_binding(consumed_binding_name(tir, r), pool),
-    }
+/// The diagnostic label for an owner: the owning place's source name,
+/// or `value` for anonymous storage (temps, match results).
+pub(crate) fn owner_name_for_diag(owner: Owner, flow: &Flow, pool: &InternPool) -> String {
+    let name = flow.place(owner.0).name();
+    format_binding((name.raw() != 0).then_some(name), pool)
 }
 
 /// Rule 7 (E0032) binding name: scan the call's args for a `Var` read
@@ -41,6 +42,7 @@ pub(crate) fn owner_name_for_diag(owner: Owner, tir: &Tir, pool: &InternPool) ->
 pub(crate) fn rule7_owner_name(
     own: &Ownership,
     tir: &Tir,
+    flow: &Flow,
     pool: &InternPool,
     args: &[TirRef],
     owner: Owner,
@@ -52,10 +54,10 @@ pub(crate) fn rule7_owner_name(
             _ => None,
         };
         if let Some(name) = name
-            && inout_owner(own, tir, *arg) == owner
+            && own.underlying_owner(*arg) == owner
         {
             return format!("`{}`", pool.str(name));
         }
     }
-    owner_name_for_diag(owner, tir, pool)
+    owner_name_for_diag(owner, flow, pool)
 }

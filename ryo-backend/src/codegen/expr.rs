@@ -6,7 +6,7 @@ use super::{
     Codegen, FunctionContext, OVERFLOW_MSG, STR_SLOT_SIZE, Terminator, ValueRepr,
     cranelift_type_for, is_enum_type, is_fat_type, is_struct_type, ranges,
 };
-use cranelift::codegen::ir::{BlockArg, FuncRef, MemFlagsData, StackSlot};
+use cranelift::codegen::ir::{FuncRef, MemFlagsData, StackSlot};
 use cranelift::prelude::*;
 use cranelift_module::{Linkage, Module};
 use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
@@ -216,69 +216,20 @@ impl<M: Module> Codegen<M> {
                     _ => unreachable!(),
                 }
             }
-            TirTag::BoolAnd => {
-                let (lhs_ref, rhs_ref) = match inst.data {
-                    TirData::BinOp { lhs, rhs } => (lhs, rhs),
-                    _ => unreachable!("BoolAnd must carry TirData::BinOp"),
-                };
-
-                let lhs_val = Self::eval_inst(builder, ctx, lhs_ref)?;
-
-                let rhs_block = builder.create_block();
-                let false_block = builder.create_block();
-                let merge_block = builder.create_block();
-                builder.append_block_param(merge_block, types::I8);
-
-                builder
-                    .ins()
-                    .brif(lhs_val, rhs_block, &[], false_block, &[]);
-
-                builder.seal_block(rhs_block);
-                builder.switch_to_block(rhs_block);
-                let rhs_val = Self::eval_inst(builder, ctx, rhs_ref)?;
-                builder.ins().jump(merge_block, &[BlockArg::Value(rhs_val)]);
-
-                builder.seal_block(false_block);
-                builder.switch_to_block(false_block);
-                let false_val = builder.ins().iconst(types::I8, 0);
-                builder
-                    .ins()
-                    .jump(merge_block, &[BlockArg::Value(false_val)]);
-
-                builder.seal_block(merge_block);
-                builder.switch_to_block(merge_block);
-                builder.block_params(merge_block)[0]
-            }
-            TirTag::BoolOr => {
-                let (lhs_ref, rhs_ref) = match inst.data {
-                    TirData::BinOp { lhs, rhs } => (lhs, rhs),
-                    _ => unreachable!("BoolOr must carry TirData::BinOp"),
-                };
-
-                let lhs_val = Self::eval_inst(builder, ctx, lhs_ref)?;
-
-                let true_block = builder.create_block();
-                let rhs_block = builder.create_block();
-                let merge_block = builder.create_block();
-                builder.append_block_param(merge_block, types::I8);
-
-                builder.ins().brif(lhs_val, true_block, &[], rhs_block, &[]);
-
-                builder.seal_block(true_block);
-                builder.switch_to_block(true_block);
-                let true_val = builder.ins().iconst(types::I8, 1);
-                builder
-                    .ins()
-                    .jump(merge_block, &[BlockArg::Value(true_val)]);
-
-                builder.seal_block(rhs_block);
-                builder.switch_to_block(rhs_block);
-                let rhs_val = Self::eval_inst(builder, ctx, rhs_ref)?;
-                builder.ins().jump(merge_block, &[BlockArg::Value(rhs_val)]);
-
-                builder.seal_block(merge_block);
-                builder.switch_to_block(merge_block);
-                builder.block_params(merge_block)[0]
+            TirTag::BoolAnd | TirTag::BoolOr => {
+                // The short-circuit control flow is explicit in
+                // the Flow IR — the lhs block's Branch terminator
+                // carries the constant merge value INTO the join block
+                // on the short-circuit edge, the rhs block's Goto
+                // carries the rhs value, and this STEP (the join
+                // block's first step) reads the join block's single
+                // I8 block param: the merged boolean.
+                let join_block = ctx
+                    .flow
+                    .step_block_of(r)
+                    .expect("BoolAnd/BoolOr step lives in its short-circuit join block");
+                let cb = ctx.flow_blocks[join_block.0 as usize];
+                builder.block_params(cb)[0]
             }
             TirTag::Call => {
                 // Fat/view-returning calls are multi-word — they
@@ -293,9 +244,17 @@ impl<M: Module> Codegen<M> {
                 Self::emit_call(builder, ctx, r)?
             }
             TirTag::IfStmt => {
-                // Expression-level if (a value-producing ternary
-                // shape): never a statement tail context.
-                Self::generate_if_stmt(builder, ctx, r, false)?;
+                // Sema's `assert` desugar puts an IfStmt in
+                // expression position (`ExprStmt(IfStmt)`); the flow
+                // builder cuts the cascade wherever it stands, so the
+                // IfStmt's Branch terminator and arm blocks were
+                // dispatched before this step's join block was reached.
+                // The old recursive emitter returned the same dummy
+                // after lowering the cascade.
+                debug_assert!(
+                    ctx.if_records.contains_key(&r),
+                    "expression-position IfStmt cascade was dispatched before its join"
+                );
                 builder.ins().iconst(ctx.int_type, 0)
             }
             TirTag::StrLen => {
@@ -380,8 +339,18 @@ impl<M: Module> Codegen<M> {
             }
             TirTag::FieldAccess => Self::eval_field_access_scalar(builder, ctx, r)?,
             // M12 match expression — enum tag dispatch / guard chains,
-            // scalar-or-void merge; lowered in codegen/match_.rs.
-            TirTag::Match => Self::eval_inst_match(builder, ctx, r)?,
+            // scalar/void/aggregate merges; lowered in codegen/match_.rs.
+            // The match's Switch terminator was dispatched when
+            // its block was emitted and the join prologue cached the
+            // result repr — a cache HIT is served by the memo check at
+            // this function's top, so reaching the arm means the match
+            // was never emitted (an invariant violation).
+            TirTag::Match => {
+                return Err(format!(
+                    "eval_inst: match %{} reached before its Switch terminator was emitted",
+                    r.index()
+                ));
+            }
             other => {
                 return Err(format!(
                     "eval_inst: instruction at %{} is not a value (tag={:?})",
@@ -393,9 +362,9 @@ impl<M: Module> Codegen<M> {
         // Scalar-only entry point: fat/view-typed insts are
         // rejected above, so no path here can have cached a non-scalar
         // repr for `r` mid-evaluation — except `TirTag::Match`, whose
-        // aggregate results cache their family repr inside
-        // `eval_inst_match` (the scalar Value is a dummy there); keep
-        // the family repr and skip the scalar cache in that case.
+        // aggregate results cache their family repr at the join
+        // prologue (the scalar Value is a dummy there); keep the family
+        // repr and skip the scalar cache in that case.
         if Self::cached_repr(ctx, r).is_none() {
             Self::cache_repr(ctx, r, ValueRepr::Scalar(value));
         }
@@ -992,21 +961,20 @@ impl<M: Module> Codegen<M> {
                 }
             }
             TirTag::Match => {
-                // M12 aggregate-result match: `eval_inst_match` writes
+                // M12 aggregate-result match: the Switch handler writes
                 // each value arm's result into the match's own result
-                // slot and caches the loaded fat triple at the merge.
-                // An out_slot cannot be honored here — the match
-                // lowering allocates its result slot before the
+                // slot and the join prologue caches the loaded fat
+                // triple. An out_slot cannot be honored here — the
+                // match lowering allocates its result slot before the
                 // dispatch — and VarDecl/Assign only pass out_slot to
                 // slot-out producers, which a Match never is.
                 debug_assert!(
                     out_slot.is_none(),
                     "aggregate match lowering manages its own result slot"
                 );
-                Self::eval_inst_match(builder, ctx, r)?;
                 Self::cached_repr(ctx, r).ok_or_else(|| {
                     format!(
-                        "eval_inst_fat_slot: match at %{} cached no fat repr",
+                        "eval_inst_fat_slot: match at %{} reached before its Switch terminator cached a fat repr",
                         r.index()
                     )
                 })?
@@ -1127,10 +1095,25 @@ impl<M: Module> Codegen<M> {
     /// Runs while the entry block is still the builder's current
     /// block (called from `compile_function` right before
     /// `emit_body`).
+    ///
+    /// A literal that anchors a scheduled drop (a `match` value-arm
+    /// body, a bare-literal statement arm's dead bind) is NOT hoisted:
+    /// hoisting caches its repr in the entry block, and the
+    /// end-of-statement sweep's arm gating — "the anchor has a cached
+    /// repr only while codegen is inside that arm" — would misfire,
+    /// releasing the free in the entry block instead of the arm (the
+    /// anchor is lowered lazily in its arm, restoring the invariant).
     pub(crate) fn hoist_str_literals(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
     ) -> Result<(), String> {
+        let drop_anchors: std::collections::HashSet<u32> = ctx
+            .sidecar
+            .drops
+            .iter()
+            .filter_map(|d| d.position.anchor_inst())
+            .map(|r| r.raw())
+            .collect();
         let mut panic_args = vec![false; ctx.tir.instructions.len()];
         for idx in 1..ctx.tir.instructions.len() {
             if ctx.tir.instructions[idx].tag != TirTag::Call {
@@ -1152,7 +1135,7 @@ impl<M: Module> Codegen<M> {
                 TirTag::BytesConst => true,
                 _ => continue,
             };
-            if panic_args[idx] {
+            if panic_args[idx] || drop_anchors.contains(&(idx as u32)) {
                 continue;
             }
             let TirData::Str(id) = inst.data else {

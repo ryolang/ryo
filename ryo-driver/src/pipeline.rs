@@ -481,7 +481,6 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::InvalidMatchScrutinee => "E0136",
         DiagCode::MatchViewResult => "E0137",
         DiagCode::MatchValueArmBorrowed => "E0138",
-        DiagCode::MatchValueArmPayloadMove => "E0139",
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::InvalidCharacter => "E0102",
         DiagCode::UnknownEscape => "E0103",
@@ -565,7 +564,11 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     // slots), and `--emit=tir` deliberately prints that partial
     // TIR — the whole point of the flag is debugging sema.
     let (tirs, sema_warnings) = sema::analyze_buffered(&uir, &mut pool, &mut sink, &input, file);
-    let sidecar = ryo_frontend::ownership::check(&tirs, &pool, &mut sink);
+    let flows: Vec<ryo_core::flow::Flow> = tirs
+        .iter()
+        .map(|t| ryo_core::flow::Flow::build(t, &pool))
+        .collect();
+    let sidecar = ryo_frontend::ownership::check(&tirs, &flows, &pool, &mut sink);
     // Sema warnings flush only after ownership has run: an ownership
     // error must suppress them exactly like a sema error would.
     if !sink.has_errors() {
@@ -586,7 +589,7 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
         if sink.has_errors() {
             return finalize_diags(sink.into_diags(), &input, &name);
         }
-        generate_and_display_ir(&tirs, &pool, &sidecar)?;
+        generate_and_display_ir(&tirs, &flows, &pool, &sidecar)?;
     }
 
     // Tail block: drains the sink whether sema/ownership were
@@ -663,12 +666,12 @@ fn display_tir(tirs: &[Tir], pool: &InternPool) {
     print!("{}", tir::dump(tirs, pool));
 }
 
-/// Run the front-end (astgen + sema) and return the UIR plus the
-/// typed TIR per-function with the ownership sidecar. Used by `run`
-/// and `build` (which require a clean front-end before codegen); the
-/// UIR comes back so `run --emit=uir` / `build --emit=uir` can dump
-/// it. `ryo ir` does its own staging so it can print partial UIR /
-/// TIR after a failure.
+/// Run the front-end (astgen + sema), build the canonical Flow IR per body,
+/// and run the ownership pass, returning the UIR, the typed TIR and Flow IR
+/// per-function, and the ownership sidecar. Used by `run` and `build`
+/// (which require a clean front-end before codegen); the UIR comes back
+/// so `run --emit=uir` / `build --emit=uir` can dump it. `ryo ir` does
+/// its own staging so it can print partial UIR / TIR after a failure.
 fn lower_and_analyze(
     program: &ast::Ast,
     pool: &mut InternPool,
@@ -676,7 +679,15 @@ fn lower_and_analyze(
     source_name: &str,
     file_path: &Path,
     parse_diags: Vec<Diag>,
-) -> Result<(Uir, Vec<Tir>, ryo_core::ownership::OwnershipSidecar), CompilerError> {
+) -> Result<
+    (
+        Uir,
+        Vec<Tir>,
+        Vec<ryo_core::flow::Flow>,
+        ryo_core::ownership::OwnershipSidecar,
+    ),
+    CompilerError,
+> {
     let mut sink = DiagSink::new();
     // Lex/parse diagnostics come first so the final render preserves
     // pipeline order.
@@ -690,7 +701,14 @@ fn lower_and_analyze(
     // Sema warnings are buffered and flushed after ownership so an
     // ownership error suppresses them exactly like a sema error.
     let (tirs, sema_warnings) = sema::analyze_buffered(&uir, pool, &mut sink, input, file_path);
-    let sidecar = ryo_frontend::ownership::check(&tirs, pool, &mut sink);
+    // Canonical Flow IR per body — the shared execution structure and
+    // storage-identity model (built once, validated in debug builds,
+    // consumed by the ownership pass below and by codegen).
+    let flows: Vec<ryo_core::flow::Flow> = tirs
+        .iter()
+        .map(|t| ryo_core::flow::Flow::build(t, pool))
+        .collect();
+    let sidecar = ryo_frontend::ownership::check(&tirs, &flows, pool, &mut sink);
     if !sink.has_errors() {
         for d in sema_warnings {
             sink.emit(d);
@@ -702,18 +720,19 @@ fn lower_and_analyze(
     // without a separate render block that could drift from the
     // error path.
     finalize_diags(sink.into_diags(), input, source_name)?;
-    Ok((uir, tirs, sidecar))
+    Ok((uir, tirs, flows, sidecar))
 }
 
 fn generate_and_display_ir(
     tirs: &[Tir],
+    flows: &[ryo_core::flow::Flow],
     pool: &InternPool,
     sidecar: &ryo_core::ownership::OwnershipSidecar,
 ) -> Result<(), CompilerError> {
     let target = Triple::host();
     let mut codegen = codegen::Codegen::new_aot(target).map_err(CompilerError::CodegenError)?;
     let ir = codegen
-        .compile_and_dump_ir(tirs, pool, sidecar)
+        .compile_and_dump_ir(tirs, flows, pool, sidecar)
         .map_err(CompilerError::CodegenError)?;
 
     println!("[Cranelift IR]");
@@ -749,7 +768,7 @@ pub fn run_file(
         println!();
     }
 
-    let (uir, tirs, sidecar) =
+    let (uir, tirs, flows, sidecar) =
         lower_and_analyze(&program, &mut pool, &input, &name, file, parse_diags)?;
 
     if want.uir {
@@ -763,7 +782,7 @@ pub fn run_file(
 
     let mut codegen = codegen::Codegen::new_jit().map_err(CompilerError::CodegenError)?;
     let (main_id, clif) = codegen
-        .compile(&tirs, &pool, &sidecar, want.clif)
+        .compile(&tirs, &flows, &pool, &sidecar, want.clif)
         .map_err(CompilerError::CodegenError)?;
     if want.clif {
         println!("[Cranelift IR]");
@@ -795,7 +814,7 @@ pub fn build_file(file: &Path, emit: &[EmitKind], link: LinkMode) -> Result<(), 
         println!();
     }
 
-    let (uir, tirs, sidecar) =
+    let (uir, tirs, flows, sidecar) =
         lower_and_analyze(&program, &mut pool, &input, &name, file, parse_diags)?;
 
     if want.uir {
@@ -812,7 +831,7 @@ pub fn build_file(file: &Path, emit: &[EmitKind], link: LinkMode) -> Result<(), 
     let target = Triple::host();
     let mut codegen = codegen::Codegen::new_aot(target).map_err(CompilerError::CodegenError)?;
     let (_main_id, clif) = codegen
-        .compile(&tirs, &pool, &sidecar, want.clif)
+        .compile(&tirs, &flows, &pool, &sidecar, want.clif)
         .map_err(CompilerError::CodegenError)?;
     if want.clif {
         println!("[Cranelift IR]");
@@ -950,7 +969,6 @@ mod tests {
             (DiagCode::InvalidMatchScrutinee, "E0136"),
             (DiagCode::MatchViewResult, "E0137"),
             (DiagCode::MatchValueArmBorrowed, "E0138"),
-            (DiagCode::MatchValueArmPayloadMove, "E0139"),
             (DiagCode::ConstEvalFailure, "E0200"),
             (DiagCode::CycleInComptime, "E0201"),
             (DiagCode::GenericInstantiation, "E0202"),
@@ -1056,7 +1074,6 @@ mod tests {
                 | DiagCode::InvalidMatchScrutinee
                 | DiagCode::MatchViewResult
                 | DiagCode::MatchValueArmBorrowed
-                | DiagCode::MatchValueArmPayloadMove
                 | DiagCode::TooManyDiagnostics
                 | DiagCode::InvalidCharacter
                 | DiagCode::UnknownEscape
@@ -1225,7 +1242,11 @@ mod tests {
         let uir = astgen::generate(&program, &mut pool, &mut sink);
         let (tirs, sema_warnings) =
             sema::analyze_buffered(&uir, &mut pool, &mut sink, src, Path::new("<test>"));
-        let _sidecar = ryo_frontend::ownership::check(&tirs, &pool, &mut sink);
+        let flows: Vec<ryo_core::flow::Flow> = tirs
+            .iter()
+            .map(|t| ryo_core::flow::Flow::build(t, &pool))
+            .collect();
+        let _sidecar = ryo_frontend::ownership::check(&tirs, &flows, &pool, &mut sink);
         if !sink.has_errors() {
             for d in sema_warnings {
                 sink.emit(d);

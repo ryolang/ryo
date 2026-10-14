@@ -1,166 +1,162 @@
-//! M12 match walking — split from `walk.rs`; see module docs there.
+//! M12 match analysis over the `Switch` terminator — split from
+//! `walk.rs`; see module docs there.
 //!
 //! A typed `TirTag::Match` is a discriminated join over per-arm
-//! branches, exactly like an `IfStmt` whose arms all entered from one
-//! shared scrutinee evaluation: each arm walks from the pre-match
-//! snapshot independently (`snapshot_branch` / `take_branch`), and the
-//! post-match state is the union over arms (`merge_branches` — moved in
-//! any falling-through arm ⇒ moved after).
+//! branches: each arm walks from the pre-match snapshot independently
+//! (`snapshot_branch` / `take_branch`), and the post-match state is the
+//! union over arms (`merge_branches`). The Switch's arm blocks (wire
+//! order, wildcard included) are the arm identities — a statement
+//! position match and a value-position match are structurally
+//! identical, so the statement-vs-value special-casing of the old TIR
+//! walk deletes itself.
 //!
 //! What match adds over if/elif/else:
 //!
 //! * payload bindings become fresh owners keyed on the by-move owner
 //!   tokens (`Tir::match_by_move_owner_refs`, the M10 destructure
 //!   convention) — arm-local, seeded before the arm body walks;
-//! * an arm that binds at least one non-`Copy` field by move consumes
-//!   the SCRUTINEE on that arm's path (the whole-value model: the
-//!   payload leaves through the arm, the shell is dead);
+//! * an arm binding at least one non-`Copy` field by move consumes the
+//!   SCRUTINEE on that arm's path (the whole-value model);
 //! * on an OWNED scrutinee, the consuming arm's unbound needs-drop
 //!   payload fields (`Some(_)` positions) register as arm-start drops
-//!   ([`MatchArmDrop`]) — codegen destroys them when the arm starts.
-//!   Borrowed scrutinees register nothing (`OwnerState::Borrowed` in
-//!   the lattice; sema's E0133 already refuses by-move binds there);
-//! * arm-local dead binds (never read in their arm) are swept at arm
-//!   end into arm-gated Frees — an ungated after-match Free would free
-//!   garbage on the sibling arms' paths;
-//! * an aggregate-typed match result can never ride a borrowed owner:
-//!   an expression arm yielding (a projection of) a borrowed
-//!   param/binding is rejected here (E0138, I-210's borrowed family —
-//!   no scheduled drop exists for codegen's guard to see), until the
-//!   pass learns to consume arm-body results into the match.
+//!   (one `DropOp` per consuming arm, target = the scrutinee, keyed by
+//!   the arm's Flow IR block) on the unified cleanup schedule;
+//! * arm-local dead binds are swept at arm end into arm-gated Frees;
+//! * arm-result transfer: a non-diverging aggregate value arm's
+//!   body owner is consumed into the match inst (mirroring
+//!   `analyze_var_decl`'s consume + rebind), so the result slot's
+//!   buffer has exactly one destruction obligation — the consumer's;
+//! * an aggregate-typed match result can never ride a borrowed owner
+//!   (E0138, the borrowed-result family — unchanged guard).
 
 use super::{
-    BranchState, Owner, OwnerState, Ownership, analyze_stmt, body_must_terminate,
+    BranchState, HazardKind, Owner, OwnerState, Ownership, RegionStop, Walk,
     check_source_projected, check_use_moved, consume_for_assignment, consumed_binding_name,
     drain_dying_views, inout_escape_owner, needs_tracking, owner_sort_key,
     prune_branch_dead_projections, refine_view_liveness_for_arm, register_pending_dead_store,
-    restore_view_last_use, stmts_subtree, struct_root, underlying_owner, visit_expr,
+    restore_view_last_use,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
-use ryo_core::ownership::{BranchId, FreePoint, FunctionSidecar, MatchArmDrop, MatchBranchIds};
+use ryo_core::flow::{BlockId, DropOp, DropPosition, PlaceId, Terminator};
+use ryo_core::ownership::FunctionSidecar;
 use ryo_core::tir::{ChildKind, MatchArmView, MatchBodyView, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, StructField, TypeId};
 use std::collections::HashSet;
 
-/// `visit_expr`'s `Match` arm (M12). The scrutinee is shared flow
-/// (evaluated before any arm, like an if condition); each arm then
-/// walks from the pre-match snapshot. Errored matches never reach here
-/// — sema recovers with the error-typed `Unreachable` sentinel.
-pub(crate) fn analyze_match(
-    tir: &Tir,
-    pool: &InternPool,
+/// `visit_block`'s `Switch` dispatch (M12). The scrutinee's steps ran
+/// in `sw` before this dispatch; each arm then walks from the
+/// pre-match snapshot. Diverging (never-typed) matches have no join —
+/// `None` tells the caller there is no continuation. Errored matches
+/// never reach here — sema recovers with the error-typed `Unreachable`
+/// sentinel.
+pub(crate) fn analyze_match_switch(
+    w: &mut Walk<'_>,
     own: &mut Ownership,
     sink: &mut DiagSink,
     sidecar: &mut FunctionSidecar,
-    r: TirRef,
-) {
-    let view = tir.match_view(r);
+    sw: BlockId,
+    match_inst: TirRef,
+    epoch: u32,
+) -> Option<BlockId> {
+    let view = w.tir.match_view(match_inst);
     if view.is_empty() {
         // Defensive: sema diagnoses source-level; well-formed TIR
         // always has at least the catch-all arm.
-        return;
+        return None;
     }
     let scrutinee = view.scrutinee;
-    let scrutinee_ty = tir.inst(scrutinee).ty;
-    let tracked = needs_tracking(scrutinee_ty, pool);
+    let scrutinee_ty = w.tir.inst(scrutinee).ty;
+    let tracked = needs_tracking(scrutinee_ty, w.pool);
     // Whether ANY arm binds a non-`Copy` field by move — the consume
-    // authority for the scrutinee (each such arm consumes it, and
-    // `consume_for_assignment` is the E0020/E0021 reporter there).
+    // authority for the scrutinee.
     let any_consumes = view
         .arms()
         .flat_map(|arm| arm.bindings())
-        .any(|b| !pool.is_copy(b.ty));
-    visit_expr(tir, pool, own, sink, sidecar, scrutinee);
-    // P4 lift (final spec §3.2), mirroring analyze_if_stmt's condition
-    // drain (walk.rs): a projection whose last use is a read inside
-    // the scrutinee is dead before any arm runs — drain now so every
-    // arm starts from the same freeze state. Without this, a by-move
-    // arm's `check_source_projected` (or any freeze check in an arm
-    // body) sees the stale projection and emits a false P2.
+        .any(|b| !w.pool.is_copy(b.ty));
+    // P4 lift (final spec §3.2), mirroring the if-condition drain: a
+    // projection whose last use is a read inside the scrutinee is dead
+    // before any arm runs.
     drain_dying_views(own);
     if tracked && !any_consumes {
-        // No arm consumes: nothing else will check the scrutinee read
-        // (the Match inst is the operand's consumer, and this arm IS
-        // the match) — a moved scrutinee is a use-after-move here.
-        check_use_moved(tir, pool, own, sink, scrutinee, tir.span(scrutinee));
+        // No arm consumes: nothing else will check the scrutinee read —
+        // a moved scrutinee is a use-after-move here.
+        check_use_moved(w.tir, w.pool, own, sink, scrutinee, w.tir.span(scrutinee));
     }
-    // Borrow-ness is sourced from OWNERSHIP's own lattice, not sema's
-    // `Scope::Binding::borrowed`: `OwnerState::Borrowed` is stamped only
-    // on borrow/inout params. `match &o:` on an owned local lands here
-    // as `Valid` — safe, because sema's E0133 keeps by-move binds off
-    // sema-borrowed scrutinees, so no arm of it can consume.
-    let scrutinee_owner = underlying_owner(own, scrutinee);
+    // Borrow-ness is sourced from OWNERSHIP's own lattice (unchanged).
+    let scrutinee_owner = own.underlying_owner(scrutinee);
     let borrowed = matches!(own.states.get(&scrutinee_owner), Some(OwnerState::Borrowed));
-    // I-210, the borrowed-source family: when the match's result type is
-    // a needs-drop aggregate, an expression arm that yields (a
-    // projection of) a BORROWED owner hands caller-owned storage to the
-    // result binding — the arm-body visit never consumes the result, so
-    // no scheduled drop exists for codegen's I-210 guard to see, and the
-    // result binding's cleanup frees caller storage (observed: corrupted
-    // output + SIGTRAP). Codegen's guard covers the owned families
-    // (producers, tracked-binding reads) via their scheduled drops; this
-    // check covers the borrowed family via the lattice. Scalars are
-    // Copy (no aggregate result); views are rejected in sema (E0137).
-    let aggregate_result = pool.needs_drop(tir.inst(r).ty);
+    // The borrowed-source family keeps its unchanged guards.
+    let aggregate_result = w.pool.needs_drop(w.tir.inst(match_inst).ty);
 
-    // BranchId per arm, recorded for codegen before any arm walks
-    // (the `if_branches` discipline — codegen pushes each arm's id as
-    // it lowers the arm).
-    let mut arm_ids = Vec::with_capacity(view.len());
-    for _ in 0..view.len() {
-        arm_ids.push(BranchId(own.next_branch_id));
-        own.next_branch_id += 1;
-    }
-    sidecar.match_branches[r.index()] = Some(MatchBranchIds {
-        arms: arm_ids.clone(),
-    });
+    // The arm blocks (wire order) and the join from the Switch.
+    let Terminator::Switch {
+        arms: rng, join, ..
+    } = *w.flow.term(sw)
+    else {
+        unreachable!("match is a switch")
+    };
+    let arm_blocks: Vec<BlockId> = rng.as_range().map(|i| BlockId(w.flow.extra[i])).collect();
 
     // By-move owner tokens, arm order then binding order (the
-    // `TirBuilder::match_expr` convention); one `FieldAccess` per
-    // non-`Copy` binding, immediately before the Match inst.
-    let tokens = tir.match_by_move_owner_refs(r, pool);
+    // `TirBuilder::match_expr` convention) — and their Flow places
+    // (same order, non-`Copy` only), the owner identities.
+    let tokens = w.tir.match_by_move_owner_refs(match_inst, w.pool);
+    let token_places = w.flow.token_places(match_inst);
+
+    // Arm regions + the whole-match block set, precomputed for the
+    // per-arm freeze refinement and the join-time prune (block
+    // membership replaces the old `collect_reachable` subtree sets).
+    let stop = match join {
+        Some(j) => RegionStop::At(j),
+        None => RegionStop::At(BlockId::NONE),
+    };
+    let mut match_blocks: Vec<BlockId> = vec![sw];
+    let mut arm_regions: Vec<Vec<BlockId>> = Vec::with_capacity(arm_blocks.len());
+    for &ab in &arm_blocks {
+        let (region, _) =
+            super::collect_region(w.flow, &mut w.region_scratch, ab, |b| stop.kind(b));
+        match_blocks.extend_from_slice(&region);
+        arm_regions.push(region);
+    }
+    let match_set: HashSet<BlockId> = match_blocks.iter().copied().collect();
 
     let snap = own.snapshot_branch();
-    let mut match_subtree: HashSet<TirRef> = HashSet::new();
-    tir.collect_reachable(r, &mut match_subtree);
-
     let mut arm_results: Vec<BranchState> = Vec::with_capacity(view.len());
     let mut falls_through: Vec<bool> = Vec::with_capacity(view.len());
+    let mut arm_lasts: Vec<Option<TirRef>> = Vec::with_capacity(view.len());
     let mut token_cursor = 0;
     for (arm_index, arm) in view.arms().enumerate() {
-        let branch_id = arm_ids[arm_index];
         // (a) Seed the arm's payload bindings as fresh owners keyed on
-        // their owner tokens (mirror M10 destructure, structs.rs) —
-        // arm-local: the per-arm snapshot/restore keeps sibling arms
-        // from seeing them. Copy binds need no owner at all.
-        let mut arm_binds: Vec<(TirRef, StringId)> = Vec::new();
+        // their owner tokens — arm-local. Copy binds need no owner.
+        let mut arm_binds: Vec<(TirRef, PlaceId, StringId)> = Vec::new();
         for b in arm.bindings() {
-            own.binding_of_name.insert(b.name, r);
-            if pool.is_copy(b.ty) {
+            own.binding_of_name.insert(b.name, match_inst);
+            if w.pool.is_copy(b.ty) {
                 continue;
             }
             let token = tokens[token_cursor];
+            let token_place = token_places[token_cursor];
             token_cursor += 1;
-            let span = tir.span(r);
-            own.states.insert(Owner::Inst(token), OwnerState::Valid);
-            Ownership::dense_set(&mut own.origin, token, None);
-            own.current_owner.insert(b.name, Owner::Inst(token));
-            register_pending_dead_store(own, token, b.name, span, r);
-            arm_binds.push((token, b.name));
+            let span = w.tir.span(match_inst);
+            // The token's place is both the binding's identity (Flow
+            // binds the payload name directly to the token place, so
+            // reads of it resolve without a name lookup) and the owner
+            // of the moved payload field.
+            let owner = Owner(token_place);
+            own.states.insert(owner, OwnerState::Valid);
+            register_pending_dead_store(own, owner, b.name, span, match_inst);
+            arm_binds.push((token, token_place, b.name));
         }
         // (b) Consumption: an arm binding a non-`Copy` field by move
-        // consumes the scrutinee on this arm's path (the payload move
-        // IS the whole-value move). The consume also covers E0020 /
-        // E0021 and the M9 field guard — a struct-field scrutinee with
-        // a by-move bind is a `MoveOutOfField` via `check_field_move_out`.
+        // consumes the scrutinee on this arm's path.
         let consumes = !arm_binds.is_empty();
         if consumes && tracked {
-            let span = tir.span(r);
-            let consumed_name = consumed_binding_name(tir, scrutinee);
-            // P2 freeze (final spec §3.2): the consume moves the owner.
+            let span = w.tir.span(match_inst);
+            let consumed_name = consumed_binding_name(w.tir, scrutinee);
             check_source_projected(
-                tir,
-                pool,
+                w.tir,
+                w.flow,
+                w.pool,
                 own,
                 sink,
                 scrutinee_owner,
@@ -168,106 +164,98 @@ pub(crate) fn analyze_match(
                 "move",
                 consumed_name,
             );
-            consume_for_assignment(tir, pool, own, sink, scrutinee, span, consumed_name, r);
+            consume_for_assignment(
+                w.tir,
+                w.pool,
+                own,
+                sink,
+                scrutinee,
+                span,
+                consumed_name,
+                match_inst,
+            );
         }
         // (c) Arm-start drops: on an OWNED scrutinee, the consuming
-        // arm's unbound needs-drop payload fields (the pattern's `_`
-        // positions) are destroyed when the arm starts — codegen's
-        // jurisdiction, registered here. Borrowed scrutinees register
-        // nothing.
-        if consumes && !borrowed {
-            for (field_index, ty) in unbound_payload_fields(pool, scrutinee_ty, &arm) {
-                sidecar.match_arm_drops.push(MatchArmDrop {
-                    match_inst: r,
-                    arm: branch_id,
-                    field_index,
-                    ty,
-                });
-            }
+        // arm's unbound needs-drop payload fields are destroyed when
+        // the arm starts. Registered on the unified DropOp schedule as
+        // ONE block-start drop per arm, target = the scrutinee: codegen
+        // recomputes the arm's unbound fields at the fire point (the
+        // same `unbound_payload_fields` derivation) and drops each —
+        // keeping the target a TirRef the free path can resolve while
+        // the field list stays derivable from the typed match wire.
+        if consumes && !borrowed && !unbound_payload_fields(w.pool, scrutinee_ty, &arm).is_empty() {
+            sidecar.drops.push(DropOp {
+                position: DropPosition::BlockStart {
+                    block: arm_blocks[arm_index],
+                },
+                target: scrutinee,
+                span: w.tir.span(scrutinee),
+            });
         }
-        // (d) Walk the body from the pre-match snapshot (the if-arm
-        // discipline, including the per-arm freeze refinement).
-        let arm_subtree = arm_stmts(&arm)
-            .map(|stmts| stmts_subtree(tir, &stmts))
-            .unwrap_or_default();
-        let saved = refine_view_liveness_for_arm(own, r, arm_index, &match_subtree, &arm_subtree);
-        match arm.body {
-            MatchBodyView::Expr(e) => {
-                if aggregate_result && arm_result_borrows_caller(tir, own, e) {
-                    sink.emit(
-                        Diag::error(
-                            tir.span(e),
-                            DiagCode::MatchValueArmBorrowed,
-                            "match value arms cannot yield values borrowed from the \
-                             caller — tracked as I-210",
-                        )
-                        .with_help(
-                            "yield an owned value in the arm, or restructure with a \
-                             `mut` binding assigned in an if/else, until arm-result \
-                             ownership transfer lands",
-                        ),
-                    );
-                }
-                if aggregate_result && arm_result_yields_match_payload(tir, own, e, &tokens) {
-                    sink.emit(
-                        Diag::error(
-                            tir.span(e),
-                            DiagCode::MatchValueArmPayloadMove,
-                            "match value arms cannot yield a by-move payload binding \
-                             of the same match — tracked as I-210",
-                        )
-                        .with_help(
-                            "restructure with a `mut` binding assigned in an if/else, \
-                             until arm-result ownership transfer lands",
-                        ),
-                    );
-                }
-                visit_expr(tir, pool, own, sink, sidecar, e);
-            }
-            MatchBodyView::Stmts(_) => {
-                for s in arm.body.stmts() {
-                    analyze_stmt(tir, pool, own, sink, sidecar, s);
-                }
-            }
+        // (d) The E0138 borrowed-source guard runs BEFORE the arm body
+        // steps (it inspects the pre-arm lattice).
+        if let MatchBodyView::Expr(e) = arm.body {
+            check_arm_result_borrowed(w.tir, own, sink, e, aggregate_result);
         }
+        // (e) Per-arm freeze refinement, then the body walk from the
+        // pre-match snapshot.
+        let arm_set: HashSet<BlockId> = arm_regions[arm_index].iter().copied().collect();
+        let analysis = own.arm_last_reads.get(&arm_blocks[arm_index]).cloned();
+        let saved =
+            refine_view_liveness_for_arm(own, w.flow, &match_set, &arm_set, analysis.as_ref());
+        let saved_last = w.last_inst;
+        w.last_inst = None;
+        w.walk_block_list(own, sink, sidecar, &arm_regions[arm_index], epoch);
+        let arm_last = w.last_inst;
+        w.last_inst = saved_last;
         restore_view_last_use(own, saved);
-        let falls = arm_falls_through(tir, &arm);
-        // (e) Dead arm-local binds: a tracked bind never read nor
+        // (e2) arm-result transfer: a non-diverging aggregate
+        // value arm's body is consumed into the match inst, so the
+        // result slot's buffer is owned by exactly one identity — the
+        // match inst the result's consumers (VarDecl/Assign/Return/
+        // call arg) then move on. Runs after the body steps (the body
+        // owner must be evaluated) and before the dead-bind sweep (the
+        // consume already removed a transferred bind's pending entry).
+        if let MatchBodyView::Expr(e) = arm.body {
+            // E0138's borrowed family was already rejected at (d) —
+            // skip the consume there or the same arm would double-report
+            // (E0138 + the transfer's E0021).
+            if aggregate_result
+                && needs_tracking(w.tir.inst(e).ty, w.pool)
+                && !arm_result_borrows_caller(w.tir, own, e)
+            {
+                transfer_arm_result(w, own, sink, match_inst, e);
+            }
+        }
+        let falls = arm_reaches_stop(w, &arm_regions[arm_index], join);
+        // (f) Dead arm-local binds: a tracked bind never read nor
         // consumed inside the arm dies with the arm. Always remove the
-        // pending entry (it must not survive into the merge — the
-        // drain would anchor an ungated Free after the match and free
-        // garbage on the sibling arms' paths) and buffer the W0001;
-        // the arm-gated Free is scheduled only where the anchor
-        // actually executes:
-        // * a Return end — the return epilogue owns the exit (a second
-        //   Free here would double-free);
+        // pending entry and buffer the W0001; the arm-gated Free is
+        // scheduled only where the anchor actually executes:
+        // * a Return end — the return epilogue owns the exit;
         // * a Break/Continue end — codegen fires due Frees before the
         //   jump, and the loop-exit pass dedups against it;
-        // * any other end — only when the arm falls through (a
-        //   must-terminating last statement never completes, so an
-        //   after-it anchor would never fire; the nested exits' own
-        //   machinery owns those paths).
-        let after = arm_end_anchor(&arm);
-        let anchor_fires = match after.map(|a| tir.inst(a).tag) {
+        // * any other end — only when the arm falls through.
+        let anchor_fires = match arm_last.map(|a| w.tir.inst(a).tag) {
             Some(TirTag::Return | TirTag::ReturnVoid) => false,
             Some(TirTag::Break | TirTag::Continue) => true,
             _ => falls,
         };
-        for (token, name) in &arm_binds {
-            if let Some((_, span, _)) = own.pending_dead_store.remove(&Owner::Inst(*token)) {
+        for (token_ref, token_place, name) in &arm_binds {
+            if let Some((_, span, _)) = own.pending_dead_store.remove(&Owner(*token_place)) {
                 own.arm_dead_stores.push((*name, span));
-                if anchor_fires && let Some(after) = after {
-                    sidecar.free_schedule.push(FreePoint {
-                        after,
-                        target: *token,
+                if anchor_fires && let Some(after) = arm_last {
+                    sidecar.drops.push(DropOp {
+                        position: DropPosition::AfterStep { inst: after },
+                        target: *token_ref,
                         span,
-                        branch: Some(branch_id),
                     });
                 }
             }
         }
         arm_results.push(own.take_branch(snap.clone()));
         falls_through.push(falls);
+        arm_lasts.push(arm_last);
     }
     debug_assert_eq!(
         token_cursor,
@@ -275,40 +263,278 @@ pub(crate) fn analyze_match(
         "one owner token consumed per by-move binding"
     );
 
-    // (f) Conditional divergence frees + union merge (the
-    // `analyze_if_stmt` machinery verbatim): an owner moved in any
-    // falling-through arm is moved after the match; an owner still
-    // Valid on a sibling arm needs an arm-gated Free or its buffer
-    // leaks on that arm's path.
+    // (g) Conditional divergence frees + union merge + join prune.
     schedule_arm_divergence_frees(
-        tir,
-        pool,
+        w.tir,
+        w.flow,
+        w.pool,
         own,
         sidecar,
-        &view,
-        &arm_ids,
+        &arm_lasts,
         &arm_results,
         &falls_through,
     );
     own.merge_branches(arm_results, &falls_through);
-    // P4: a view whose last use is inside this match is dead at the
-    // join on every path (subtree-based, same as the if prune).
-    prune_branch_dead_projections(tir, own, r);
+    prune_branch_dead_projections(own, w.flow, &match_set);
+    w.last_inst = Some(match_inst);
+    join
 }
 
-/// The statement refs of a statement-list arm body (`None` for an
-/// expression arm).
-fn arm_stmts(arm: &MatchArmView<'_>) -> Option<Vec<TirRef>> {
-    match arm.body {
-        MatchBodyView::Expr(_) => None,
-        MatchBodyView::Stmts(_) => Some(arm.body.stmts().collect()),
+/// True when the walked arm region's exit reaches the Switch's join.
+fn arm_reaches_stop(w: &Walk<'_>, region: &[BlockId], join: Option<BlockId>) -> bool {
+    let Some(join) = join else { return false };
+    region.iter().any(|&b| {
+        matches!(
+            w.flow.term(b),
+            Terminator::Goto { target } if *target == join
+        )
+    })
+}
+
+/// The E0138 borrowed-source guard for an expression arm body: an
+/// aggregate-typed arm body rooted in a BORROWED owner hands
+/// caller-owned storage to the result binding (whose cleanup would
+/// free it), so the shape stays rejected. Runs before the arm body
+/// steps (it inspects the pre-arm lattice). Owned arm bodies — producer
+/// temps, by-value reads of tracked bindings, by-move payload binds —
+/// are legalized by the arm-result transfer instead
+/// (`transfer_arm_result`).
+fn check_arm_result_borrowed(
+    tir: &Tir,
+    own: &Ownership,
+    sink: &mut DiagSink,
+    e: TirRef,
+    aggregate_result: bool,
+) {
+    if !aggregate_result || !arm_result_borrows_caller(tir, own, e) {
+        return;
+    }
+    sink.emit(
+        Diag::error(
+            tir.span(e),
+            DiagCode::MatchValueArmBorrowed,
+            "match value arms cannot yield values borrowed from the caller",
+        )
+        .with_help(
+            "yield an owned value in the arm, or restructure with a \
+             `mut` binding assigned in an if/else",
+        ),
+    );
+}
+
+/// Arm-result transfer: consume a non-diverging aggregate value
+/// arm's body owner into the match inst, mirroring `analyze_var_decl`'s
+/// `consume_for_assignment` + `rebind_to_init`. Before the transfer the
+/// arm-body owner is `Valid` and the match inst owns nothing; after it
+/// the arm-body owner is `Moved { moved_at }` — which removes BOTH
+/// destruction obligations the result slot would otherwise alias (the
+/// producer temp's Free anchored on the Match inst, and the binding /
+/// payload-token last-use Free) — and the match inst is the single
+/// `Valid` owner the result's consumers then move on (eager destruction
+/// at the consumer's last use, unchanged semantics).
+///
+/// Two body shapes get special handling:
+///
+/// * A `FieldAccess` chain body (`true: p.name`) moves its ROOT
+///   binding whole — fields move only with the struct, and the result
+///   slot aliases the field's buffer exactly like a whole move, so
+///   `consume_underlying`'s `MoveOutOfField` guard (which sanctions
+///   the field read for `analyze_var_decl`) is skipped here; the
+///   consumed root is the identity.
+/// * The match inst is seeded into `temp_owners`: consumed results are
+///   skipped by the anon-temp pass (a named init/value), while a
+///   DISCARDED aggregate match result (a statement-level value match)
+///   still gets its one Free after the wrapping statement.
+fn transfer_arm_result(
+    w: &Walk<'_>,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    match_inst: TirRef,
+    e: TirRef,
+) {
+    let span = w.tir.span(match_inst);
+    let consumed_name = consumed_binding_name(w.tir, e);
+    // The arm body's read fact names the root place for FieldAccess
+    // chains (Flow resolves the chain at build); producers resolve to
+    // their temp. `underlying_owner` covers both.
+    let owner = own.underlying_owner(e);
+    // P2 freeze (final spec §3.2): the consume moves the owner.
+    check_source_projected(
+        w.tir,
+        w.flow,
+        w.pool,
+        own,
+        sink,
+        owner,
+        span,
+        "move",
+        consumed_name,
+    );
+    // The consume transition proper — `consume_underlying` verbatim,
+    // minus the `MoveOutOfField` guard (the FieldAccess family above is
+    // the sanctioned whole-root move).
+    let mut state = own
+        .states
+        .get(&owner)
+        .cloned()
+        .unwrap_or(OwnerState::NotTracked);
+    // A Valid value currently bound to an `inout str` param escapes
+    // through the write-back pointer — treat it as borrowed at consume
+    // sites (mirrors `consume_underlying`).
+    if matches!(state, OwnerState::Valid) && inout_escape_owner(own, owner) {
+        state = OwnerState::Borrowed;
+    }
+    match state {
+        OwnerState::Valid => {
+            own.pending_dead_store.remove(&owner);
+            own.states
+                .insert(owner, OwnerState::Moved { moved_at: span });
+            // W0003 case-B support: the arm-result transfer is a
+            // move-hazard on the owner, anchored at the consuming
+            // match. (The validator models it as a transfer IN: the
+            // arm's value moves into the match result.)
+            own.owner_hazards
+                .push((owner, match_inst, HazardKind::Move));
+        }
+        OwnerState::Borrowed => {
+            sink.emit(
+                Diag::error(
+                    span,
+                    DiagCode::MoveOutOfBorrowedParam,
+                    format!(
+                        "cannot move out of borrowed parameter {}",
+                        super::format_binding(consumed_name, w.pool),
+                    ),
+                )
+                .with_help("add `move` to the parameter declaration if you need ownership"),
+            );
+        }
+        OwnerState::Moved { .. } => {
+            check_use_moved(w.tir, w.pool, own, sink, e, span);
+        }
+        OwnerState::NotTracked => {}
+    }
+    // The match result becomes the single owner of the merged result —
+    // the `rebind_to_init` half of the mirror.
+    let result = w
+        .flow
+        .match_result(match_inst)
+        .expect("aggregate match result place");
+    let owner = Owner(result);
+    own.states.insert(owner, OwnerState::Valid);
+    own.temp_owners.insert(owner);
+}
+
+/// True when an aggregate-typed expression arm's body reads (a field
+/// projection of) a BORROWED owner — the borrowed-source family.
+fn arm_result_borrows_caller(_tir: &Tir, own: &Ownership, e: TirRef) -> bool {
+    // The body's read fact resolves FieldAccess chains to their root
+    // place; producers and plain reads resolve to themselves.
+    let root = own.underlying_owner(e);
+    let state = own
+        .states
+        .get(&root)
+        .cloned()
+        .unwrap_or(OwnerState::NotTracked);
+    matches!(state, OwnerState::Borrowed)
+        || (matches!(state, OwnerState::Valid) && inout_escape_owner(own, root))
+}
+
+/// The arm's unbound needs-drop payload fields: the discriminating
+/// shape's fields minus the fields the arm binds.
+fn unbound_payload_fields(
+    pool: &InternPool,
+    scrutinee_ty: TypeId,
+    arm: &MatchArmView<'_>,
+) -> Vec<(u32, TypeId)> {
+    let fields: Vec<StructField> = match arm.discriminant {
+        ryo_core::tir::Discriminant::Variant(vidx) => {
+            let eview = pool.enum_view(scrutinee_ty);
+            let variant = eview
+                .variants()
+                .nth(vidx as usize)
+                .expect("sema resolved the variant index against the scrutinee enum");
+            variant.fields.to_vec()
+        }
+        _ => pool.struct_view(scrutinee_ty).fields.to_vec(),
+    };
+    fields
+        .into_iter()
+        .filter(|f| pool.needs_drop(f.ty))
+        .filter(|f| !arm.bindings().any(|b| b.field_index == f.idx))
+        .map(|f| (f.idx, f.ty))
+        .collect()
+}
+
+/// Arm-conditional Frees for owners that diverge across arms: moved in
+/// at least one falling-through arm (⇒ moved at the merge) but still
+/// `Valid` at the end of a sibling arm — the sibling's buffer leaks
+/// without a Free anchored inside that arm. Owners live only in arms
+/// that never move them are left to the usual passes, exactly the
+/// exemption the else-less fall-through arm has in `analyze_if_cascade`.
+#[allow(clippy::too_many_arguments)]
+fn schedule_arm_divergence_frees(
+    tir: &Tir,
+    flow: &ryo_core::flow::Flow,
+    pool: &InternPool,
+    _own: &Ownership,
+    sidecar: &mut FunctionSidecar,
+    arm_lasts: &[Option<TirRef>],
+    arm_results: &[BranchState],
+    falls_through: &[bool],
+) {
+    let mut all_keys: HashSet<Owner> = arm_results
+        .iter()
+        .flat_map(|a| a.states.keys().copied())
+        .collect();
+    // Sorted iteration for deterministic drops order.
+    let mut all_keys: Vec<Owner> = all_keys.drain().collect();
+    all_keys.sort_by_key(owner_sort_key);
+    for owner in all_keys {
+        let is_tracked = match flow.place(owner.0) {
+            ryo_core::flow::Place::Param { index, .. } => {
+                needs_tracking(tir.params[*index as usize].ty, pool)
+            }
+            _ => true,
+        };
+        if !is_tracked {
+            continue;
+        }
+        let any_moved = arm_results
+            .iter()
+            .zip(falls_through)
+            .any(|(a, &ft)| ft && matches!(a.states.get(&owner), Some(OwnerState::Moved { .. })));
+        if !any_moved {
+            continue;
+        }
+        for (i, a) in arm_results.iter().enumerate() {
+            if !falls_through[i] {
+                continue;
+            }
+            if matches!(a.states.get(&owner), Some(OwnerState::Valid))
+                && let Some(after) = arm_lasts[i]
+            {
+                sidecar.drops.push(DropOp {
+                    position: DropPosition::AfterStep { inst: after },
+                    target: owner.tirref(flow),
+                    span: owner.span(flow, tir),
+                });
+            }
+        }
     }
 }
 
+// ---------- Kept TIR-shape match helpers ----------
+//
+// The post-walk scheduling passes (loop-exit frees, return epilogue,
+// W0003/W0004) stay statement-recursive and still need to recognize
+// statement-level and value-position matches. The walk itself drives
+// from Flow IR blocks, where both shapes are one `Switch` and no
+// unwrap/memo machinery is needed.
+
 /// Each match arm's body statements in arm order — empty for an
-/// expression arm (`MatchBodyView::Expr` decodes zero statement refs).
-/// The Match-shaped descent every statement-list walker mirrors on its
-/// `IfStmt` arms.
+/// expression arm. The Match-shaped descent every kept statement-list
+/// walker mirrors on its `IfStmt` arms.
 pub(crate) fn match_arm_bodies(tir: &Tir, r: TirRef) -> Vec<Vec<TirRef>> {
     tir.match_view(r)
         .arms()
@@ -317,18 +543,13 @@ pub(crate) fn match_arm_bodies(tir: &Tir, r: TirRef) -> Vec<Vec<TirRef>> {
 }
 
 /// The `Match` instruction a statement-list slot refers to: the
-/// statement itself when it is a bare `Match` (only future producers
-/// emit one — sema always wraps), or the operand of an `ExprStmt`
-/// wrapper — sema lowers a statement-level `match` to `ExprStmt(Match)`
-/// (see `sema/stmt.rs`), so any statement-list walker that dispatches
-/// on the statement's OWN tag would otherwise never see the wrapped
-/// match's arms. Every walker below unwraps through this before its
-/// tag dispatch.
+/// statement itself when it is a bare `Match`, or the operand of an
+/// `ExprStmt` wrapper — sema lowers a statement-level `match` to
+/// `ExprStmt(Match)`. Every kept statement-list walker unwraps through
+/// this before its tag dispatch.
 pub(crate) fn stmt_match(tir: &Tir, r: TirRef) -> Option<TirRef> {
     // Match-free bodies cannot contain a statement-level match: the
-    // builder-stamped flag answers without decoding the instruction
-    // (the two `inst` decodes below showed up in ownership benchmarks
-    // once this unwrap ran per statement across every walker).
+    // builder-stamped flag answers without decoding the instruction.
     if !tir.contains_match {
         return None;
     }
@@ -341,25 +562,17 @@ pub(crate) fn stmt_match(tir: &Tir, r: TirRef) -> Option<TirRef> {
 }
 
 /// Visit every `Match` nested in `r`'s expression operands — a
-/// `VarDecl` initializer, an `Assign` value, a `Return` operand, a call
-/// argument — at any depth. Value-position matches are not
-/// statement-level, so `stmt_match`'s unwrap never sees them and a
-/// statement-list walker that dispatches only on statement tags would
-/// skip their arm bodies: no owner states, no drops, no loop-exit frees
-/// for break/continue in arms. The walk continues through every operand
-/// — including each found match's scrutinee and expression-arm bodies —
-/// so multiple/nested operand matches are ALL visited (never just the
-/// first); statement-arm bodies are deliberately skipped, because the
-/// callback owns those via `match_arm_bodies` and its own statement
-/// recursion (which would otherwise visit them twice).
+/// `VarDecl` initializer, an `Assign` value, a `Return` operand, a
+/// call argument — at any depth. The walk continues through every
+/// operand (including each found match's scrutinee and expression-arm
+/// bodies) so multiple/nested operand matches are ALL visited; statement
+/// arm bodies are deliberately skipped, because the callback owns those
+/// via `match_arm_bodies` and its own statement recursion.
 ///
 /// Two gates keep match-free bodies at ~zero cost: the
 /// builder-stamped [`Tir::contains_match`] flag rejects them in one
 /// load, and once a body is known to contain matches, every descent is
-/// gated on [`Tir::subtree_has_match`] — the shared per-body memo — so
-/// only match-containing operand frontiers are walked (the ungated scan
-/// regressed the ownership benchmarks double digits on match-free
-/// programs).
+/// gated on [`Tir::subtree_has_match`] — the shared per-body memo.
 pub(crate) fn visit_operand_matches(tir: &Tir, r: TirRef, f: &mut impl FnMut(TirRef)) {
     if !tir.contains_match {
         return;
@@ -380,191 +593,67 @@ pub(crate) fn visit_operand_matches(tir: &Tir, r: TirRef, f: &mut impl FnMut(Tir
     visit(tir, tir.operand_match_memo(), r, f);
 }
 
-/// True when an aggregate-typed expression arm's body reads (a field
-/// projection of) a BORROWED owner — the I-210 borrowed-source family.
-/// The root walk mirrors E0133's `struct_root` convention: a
-/// `FieldAccess` chain resolves to its base binding's current owner,
-/// whose `Borrowed` state marks a borrow/inout parameter (a Valid value
-/// currently bound to an `inout str` param escapes through the
-/// write-back pointer — `consume_underlying`'s borrowed test, applied
-/// verbatim). Fresh producers (calls, concats, literals) resolve to
-/// their own Valid inst owner and are left to codegen's I-210 guard.
-fn arm_result_borrows_caller(tir: &Tir, own: &Ownership, e: TirRef) -> bool {
-    let Some(root) = struct_root(own, tir, e) else {
-        return false;
-    };
-    let state = own
-        .states
-        .get(&root)
-        .cloned()
-        .unwrap_or(OwnerState::NotTracked);
-    matches!(state, OwnerState::Borrowed)
-        || (matches!(state, OwnerState::Valid) && inout_escape_owner(own, root))
-}
+// ---------- If-arm region machinery ----------
 
-/// True when an aggregate-typed expression arm's body is a by-move read
-/// of one of THIS match's own payload bindings (`Some(v): v`) — the
-/// I-210 payload family. The arm-body visit never consumes the result,
-/// so the payload's scheduled drop stays anchored outside the arm and
-/// codegen's result-slot write would alias the binding's storage (the
-/// debug build aborted on the dropped free; release miscompiled inside
-/// Cranelift's egraph). The arm-seeding above has already installed the
-/// token as the binding's current owner, so the root walk (the
-/// E0133/`struct_root` convention) finding one of this match's tokens
-/// identifies the shape. A payload CONSUMED into a fresh producer
-/// (`Some(v): v + "?"`) roots at that producer instead and is left to
-/// codegen's I-210 guard via its scheduled drop.
-fn arm_result_yields_match_payload(
-    tir: &Tir,
-    own: &Ownership,
-    e: TirRef,
-    tokens: &[TirRef],
-) -> bool {
-    let mut root = e;
-    while let TirData::FieldAccess { object, .. } = tir.inst(root).data {
-        root = object;
-    }
-    let TirData::Var(name) = tir.inst(root).data else {
-        return false;
-    };
-    tokens
-        .iter()
-        .any(|&t| own.current_owner.get(&name) == Some(&Owner::Inst(t)))
-}
-
-/// Where an arm's flow ends: the anchor for arm-gated Frees of values
-/// that die with the arm (the body expr for an expr arm, the last
-/// statement for a statement arm).
-fn arm_end_anchor(arm: &MatchArmView<'_>) -> Option<TirRef> {
-    match arm.body {
-        MatchBodyView::Expr(e) => Some(e),
-        MatchBodyView::Stmts(_) => arm.body.stmts().last(),
-    }
-}
-
-/// True when at least one path through the arm reaches the match's
-/// merge block: an expression arm always yields; a statement arm falls
-/// through unless it must-terminate (the `if_may_fall_through` sense).
-fn arm_falls_through(tir: &Tir, arm: &MatchArmView<'_>) -> bool {
-    match arm.body {
-        MatchBodyView::Expr(_) => true,
-        MatchBodyView::Stmts(_) => {
-            let stmts: Vec<TirRef> = arm.body.stmts().collect();
-            !body_must_terminate(tir, &stmts)
-        }
-    }
-}
-
-/// The arm's unbound needs-drop payload fields: the discriminating
-/// shape's fields (the variant's payload for a variant arm; the anon
-/// struct's fields for an anon-pattern arm — a `Wildcard` discriminant
-/// with bindings) minus the fields the arm binds. Literal/wildcard arms
-/// bind nothing and never consume, so the caller never reaches this for
-/// them.
-fn unbound_payload_fields(
-    pool: &InternPool,
-    scrutinee_ty: TypeId,
-    arm: &MatchArmView<'_>,
-) -> Vec<(u32, TypeId)> {
-    let fields: Vec<StructField> = match arm.discriminant {
-        ryo_core::tir::Discriminant::Variant(vidx) => {
-            let eview = pool.enum_view(scrutinee_ty);
-            let variant = eview
-                .variants()
-                .nth(vidx as usize)
-                .expect("sema resolved the variant index against the scrutinee enum");
-            variant.fields.to_vec()
-        }
-        // Anon-pattern arm: `Wildcard` coverage placeholder + bindings
-        // + literal guards (sema's E0136 gated the scrutinee to an
-        // anonymous struct for this shape).
-        _ => pool.struct_view(scrutinee_ty).fields.to_vec(),
-    };
-    fields
-        .into_iter()
-        .filter(|f| pool.needs_drop(f.ty))
-        .filter(|f| !arm.bindings().any(|b| b.field_index == f.idx))
-        .map(|f| (f.idx, f.ty))
-        .collect()
-}
-
-/// Branch-gated Frees for owners that diverge across arms: moved in at
-/// least one falling-through arm (⇒ moved at the merge, so the exit
-/// passes skip them) but still `Valid` at the end of a sibling arm —
-/// the sibling's buffer leaks without an arm-gated Free. Owners live
-/// only in arms that never move them are left to the usual passes
-/// (last-use / dead-store / return epilogue), exactly the exemption the
-/// else-less fall-through arm has in `analyze_if_stmt`.
+/// Per-arm walker for `analyze_if_cascade`: refine the freeze state
+/// for the arm (when the liveness pre-pass recorded a per-arm map for
+/// it — `refine_key`), walk the arm's region blocks from the pre-branch
+/// snapshot, restore, and record the arm end state plus whether the arm
+/// reaches the join. The per-arm analysis map is cloned out first (arm
+/// maps are small; refine needs `&mut Ownership`).
 #[allow(clippy::too_many_arguments)]
-fn schedule_arm_divergence_frees(
-    tir: &Tir,
-    pool: &InternPool,
-    own: &Ownership,
+pub(crate) fn walk_if_arm(
+    w: &mut Walk<'_>,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
     sidecar: &mut FunctionSidecar,
-    view: &ryo_core::tir::MatchView<'_>,
-    arm_ids: &[BranchId],
-    arm_results: &[BranchState],
-    falls_through: &[bool],
-) {
-    struct ArmInfo<'a> {
-        branch_id: BranchId,
-        last: Option<TirRef>,
-        state: &'a BranchState,
-        falls_through: bool,
+    arm_regions: &[Vec<BlockId>],
+    cascade_set: &HashSet<BlockId>,
+    snap: &BranchState,
+    arm_index: usize,
+    refine_key: Option<BlockId>,
+    join: BlockId,
+    epoch: u32,
+) -> (BranchState, bool, Option<TirRef>) {
+    if let Some(key) = refine_key {
+        let arm_set: HashSet<BlockId> = arm_regions[arm_index].iter().copied().collect();
+        let analysis = own.arm_last_reads.get(&key).cloned();
+        let saved =
+            refine_view_liveness_for_arm(own, w.flow, cascade_set, &arm_set, analysis.as_ref());
+        let saved_last = w.last_inst;
+        w.last_inst = None;
+        w.walk_block_list(own, sink, sidecar, &arm_regions[arm_index], epoch);
+        let arm_last = w.last_inst;
+        w.last_inst = saved_last;
+        restore_view_last_use(own, saved);
+        (
+            own.take_branch(snap.clone()),
+            arm_reaches_join(w, &arm_regions[arm_index], join),
+            arm_last,
+        )
+    } else {
+        let saved_last = w.last_inst;
+        w.last_inst = None;
+        w.walk_block_list(own, sink, sidecar, &arm_regions[arm_index], epoch);
+        let arm_last = w.last_inst;
+        w.last_inst = saved_last;
+        (
+            own.take_branch(snap.clone()),
+            arm_reaches_join(w, &arm_regions[arm_index], join),
+            arm_last,
+        )
     }
-    let arms: Vec<ArmInfo<'_>> = view
-        .arms()
-        .enumerate()
-        .map(|(i, arm)| ArmInfo {
-            branch_id: arm_ids[i],
-            last: arm_end_anchor(&arm),
-            state: &arm_results[i],
-            falls_through: falls_through[i],
-        })
-        .collect();
-    let all_keys: HashSet<Owner> = arms
-        .iter()
-        .flat_map(|a| a.state.states.keys().copied())
-        .collect();
-    // Sorted iteration for deterministic free_schedule order.
-    let mut all_keys: Vec<Owner> = all_keys.into_iter().collect();
-    all_keys.sort_by_key(owner_sort_key);
-    for owner in all_keys {
-        let is_tracked = match owner {
-            Owner::Inst(_) => true,
-            Owner::Param(name) => {
-                let idx = super::param_idx(&own.param_index, name);
-                needs_tracking(tir.params[idx].ty, pool)
-            }
-        };
-        if !is_tracked {
-            continue;
-        }
-        let any_moved = arms
-            .iter()
-            .filter(|a| a.falls_through)
-            .any(|a| matches!(a.state.states.get(&owner), Some(OwnerState::Moved { .. })));
-        if !any_moved {
-            continue;
-        }
-        for arm in arms.iter().filter(|a| a.falls_through) {
-            if matches!(arm.state.states.get(&owner), Some(OwnerState::Valid))
-                && let Some(after) = arm.last
-            {
-                let span = match owner {
-                    Owner::Inst(r) => tir.span(r),
-                    Owner::Param(name) => {
-                        let idx = super::param_idx(&own.param_index, name);
-                        tir.params[idx].span
-                    }
-                };
-                sidecar.free_schedule.push(FreePoint {
-                    after,
-                    target: owner.tirref(&own.param_index),
-                    span,
-                    branch: Some(arm.branch_id),
-                });
-            }
-        }
-    }
+}
+
+/// True when the walked arm region's exit reaches `join` (the arm's
+/// last live block jumps there). Arms whose every live path diverges
+/// return false; their end-state is path-local to an exit the join
+/// never sees.
+pub(crate) fn arm_reaches_join(w: &Walk<'_>, region: &[BlockId], join: BlockId) -> bool {
+    region.iter().any(|&b| {
+        matches!(
+            w.flow.term(b),
+            Terminator::Goto { target } if *target == join
+        )
+    })
 }

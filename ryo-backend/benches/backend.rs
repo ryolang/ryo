@@ -68,9 +68,37 @@ fn nested_control_source(functions: usize, depth: usize) -> String {
     src
 }
 
+/// Match-dispatch-dense functions: each of `functions` bodies matches
+/// an int scrutinee against `arms` literal arms yielding distinct int
+/// constants, the scalar merge consumed by an arithmetic fold (no print
+/// gating). Stresses the Switch lowering: per-arm compare chains, arm
+/// blocks, and the merge.
+fn match_arms_source(functions: usize, arms: usize) -> String {
+    let mut src = String::new();
+    for i in 0..functions {
+        src.push_str(&format!(
+            "fn dispatch_{i}(n: int) -> int:\n\tx = match n:\n"
+        ));
+        for k in 0..arms {
+            src.push_str(&format!("\t\t{k}: {}\n", 1000 + i * 100 + k));
+        }
+        src.push_str(&format!("\t\t_: -{i}\n"));
+        src.push_str("\treturn x * 3 + 1\n\n");
+    }
+    src.push_str("fn main():\n\tprint(\"bench\\n\")\n");
+    src
+}
+
 /// Run the frontend + ownership on a source string, returning everything
-/// codegen needs: TIRs, the intern pool, and the ownership sidecar.
-fn analyze(src: &str) -> (Vec<Tir>, InternPool, OwnershipSidecar) {
+/// codegen needs: TIRs, Flow IRs, the intern pool, and the ownership sidecar.
+fn analyze(
+    src: &str,
+) -> (
+    Vec<Tir>,
+    Vec<ryo_core::flow::Flow>,
+    InternPool,
+    OwnershipSidecar,
+) {
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
     let tokens = lexer::lex(src, &mut pool, &mut sink);
@@ -93,19 +121,29 @@ fn analyze(src: &str) -> (Vec<Tir>, InternPool, OwnershipSidecar) {
         std::path::Path::new("bench.ryo"),
     );
     assert!(!sema_sink.has_errors(), "sema should succeed");
+    let flows: Vec<ryo_core::flow::Flow> = tirs
+        .iter()
+        .map(|t| ryo_core::flow::Flow::build(t, &pool))
+        .collect();
     let mut ownership_sink = ryo_core::diag::DiagSink::new();
-    let sidecar = ryo_frontend::ownership::check(&tirs, &pool, &mut ownership_sink);
+    let sidecar = ryo_frontend::ownership::check(&tirs, &flows, &pool, &mut ownership_sink);
     assert!(!ownership_sink.has_errors(), "ownership should succeed");
-    (tirs, pool, sidecar)
+    (tirs, flows, pool, sidecar)
 }
 
 fn bench_codegen(bencher: divan::Bencher, src: &str) {
     bencher
         .with_inputs(|| analyze(src))
-        .bench_values(|(tirs, pool, sidecar)| {
+        .bench_values(|(tirs, flows, pool, sidecar)| {
             let mut codegen = Codegen::new_jit().expect("JIT codegen should initialize");
             let (main_id, _) = codegen
-                .compile(divan::black_box(&tirs), &pool, &sidecar, false)
+                .compile(
+                    divan::black_box(&tirs),
+                    divan::black_box(&flows),
+                    &pool,
+                    &sidecar,
+                    false,
+                )
                 .expect("codegen should succeed");
             divan::black_box(main_id);
         });
@@ -119,4 +157,9 @@ fn codegen_arith(bencher: divan::Bencher, functions: usize) {
 #[divan::bench(args = [(4, 4), (64, 8)])]
 fn codegen_nested_control(bencher: divan::Bencher, case: (usize, usize)) {
     bench_codegen(bencher, &nested_control_source(case.0, case.1));
+}
+
+#[divan::bench(args = [4, 16, 64])]
+fn codegen_match_arms(bencher: divan::Bencher, arms: usize) {
+    bench_codegen(bencher, &match_arms_source(16, arms));
 }

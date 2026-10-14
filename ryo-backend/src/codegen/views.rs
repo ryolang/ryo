@@ -337,8 +337,9 @@ impl<M: Module> Codegen<M> {
         Ok((m_ptr, m_len))
     }
 
-    /// Fire promotion frees anchored after `tir_ref`. Mirrors
-    /// `emit_due_frees`.
+    /// Fire promotion frees anchored after `tir_ref` (the promotion
+    /// family keeps its anchor-keyed hook; the position-mechanical fire map covers
+    /// `sidecar.drops` only).
     pub(crate) fn emit_due_promo_frees(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -353,10 +354,7 @@ impl<M: Module> Codegen<M> {
         let pending: Vec<usize> = indices
             .iter()
             .copied()
-            .filter(|&idx| {
-                let pf = &ctx.sidecar.promotion_frees[idx];
-                Self::branch_active(pf.branch, &ctx.branch_stack) && !ctx.promo_freed_at[idx]
-            })
+            .filter(|&idx| !ctx.promo_freed_at[idx])
             .collect();
         Self::emit_promo_frees(builder, ctx, pending)
     }
@@ -376,9 +374,8 @@ impl<M: Module> Codegen<M> {
             .copied()
             .filter(|&idx| {
                 let pf = &ctx.sidecar.promotion_frees[idx];
-                Self::branch_active(pf.branch, &ctx.branch_stack)
-                    && ctx.promo_slots.contains_key(&pf.base)
-                    && Self::cached_repr(ctx, pf.after).is_some()
+                let anchor = pf.position.anchor_inst().expect("step-anchored drop");
+                ctx.promo_slots.contains_key(&pf.base) && Self::cached_repr(ctx, anchor).is_some()
             })
             .collect();
         Self::emit_promo_frees(builder, ctx, pending)

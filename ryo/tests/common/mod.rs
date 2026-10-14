@@ -1184,7 +1184,7 @@ fn main():
         // both directions in one run: the x shape exercises the taken
         // reseat + taken shadow scope, the y shape the not-taken
         // reseat + not-taken shadow scope. The not-taken shadow side
-        // pins the binding-aware ConditionalDeadDrop honoring: a dead
+        // pins the binding-aware conditional dead-drop honoring: a dead
         // shadow-scope reseat value must not mint a drop against the
         // outer binding's home slot (the outer owner's own Free
         // already released it — the drop double-freed the slot's

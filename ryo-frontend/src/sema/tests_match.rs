@@ -1048,7 +1048,7 @@ fn all_never_match_types_as_never() {
 
 #[test]
 fn panic_expr_arm_joins_as_diverging_no_e0017() {
-    // P2a: an inline `panic(...)` expression arm is analyzed through the
+    // Reviewer case: an inline `panic(...)` expression arm is analyzed through the
     // never-tolerant entry point, so it joins as DIVERGING (the match
     // still types as int from the value arm) — not the E0017
     // value-position rejection a never-typed expression usually gets.
@@ -1081,7 +1081,7 @@ fn panic_expr_arm_joins_as_diverging_no_e0017() {
 
 #[test]
 fn all_diverging_panic_and_return_arms_type_never() {
-    // P2a/P2b pair: `panic(...)` (expr arm) and `return` (statement arm)
+    // Reviewer-round pair: `panic(...)` (expr arm) and `return` (statement arm)
     // in one match — both diverge, the join is `never`, no E0017.
     let src = "fn f(b: bool) -> int:\n\tmatch b:\n\t\ttrue: panic(\"a\")\n\t\tfalse: return 7\n\nfn main():\n\tprint(f(false))\n";
     let (tirs, diags, pool) = run_with_errors(src);

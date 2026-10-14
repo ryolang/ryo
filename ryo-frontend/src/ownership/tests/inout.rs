@@ -29,7 +29,12 @@ fn inout_same_owner_twice_rejected() {
     );
     let tir = tb.finish(&[decl, call]);
     let mut sink = DiagSink::new();
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     let e0032_count = diags
         .iter()
@@ -68,7 +73,12 @@ fn inout_and_borrow_same_owner_rejected() {
     );
     let tir = tb.finish(&[decl, call]);
     let mut sink = DiagSink::new();
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     let e0032_count = diags
         .iter()
@@ -108,7 +118,12 @@ fn inout_and_move_same_owner_rejected() {
     );
     let tir = tb.finish(&[decl, call]);
     let mut sink = DiagSink::new();
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     let e0032_count = diags
         .iter()
@@ -149,7 +164,12 @@ fn e0032_names_local_binding_not_value() {
     );
     let tir = tb.finish(&[decl, call]);
     let mut sink = DiagSink::new();
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     let msg = &diags
         .iter()
@@ -195,7 +215,12 @@ fn inout_distinct_owners_ok() {
     );
     let tir = tb.finish(&[da, db, call]);
     let mut sink = DiagSink::new();
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert!(
         !diags
@@ -234,7 +259,12 @@ fn inout_str_param_reassign_escapes_no_dead_store_no_free() {
     let asg = tb.assign(s, str_ty, lit, span);
     let tir = tb.finish(&[asg]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert!(
         !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
@@ -248,9 +278,9 @@ fn inout_str_param_reassign_escapes_no_dead_store_no_free() {
         sc.free_on_reassign
     );
     assert!(
-        !sc.free_schedule.iter().any(|fp| fp.target == lit),
+        !sc.drops.iter().any(|fp| fp.target == lit),
         "the reassigned value escapes to the caller — no Free may target it; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -288,7 +318,12 @@ fn inout_str_param_reassign_inside_if_escapes() {
     let if_s = tb.if_stmt(cond, &[asg], &[], None, void, span);
     let tir = tb.finish(&[if_s]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert!(
         !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
@@ -301,16 +336,14 @@ fn inout_str_param_reassign_inside_if_escapes() {
         sc.free_on_reassign
     );
     assert!(
-        !sc.free_schedule.iter().any(|fp| fp.target == lit),
+        !sc.drops.iter().any(|fp| fp.target == lit),
         "the rebound value escapes to the caller — no Free may target it; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
     assert!(
-        !sc.free_schedule
-            .iter()
-            .any(|fp| fp.target == TirRef::param(0)),
+        !sc.drops.iter().any(|fp| fp.target == TirRef::param(0)),
         "the inout param's value escapes — no callee Free for the param owner; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -345,7 +378,12 @@ fn inout_str_param_move_out_after_reassign_rejected() {
     let call = tb.call(g, &[sv], &[ParamMode::Move], void, span);
     let tir = tb.finish(&[asg, call]);
     let mut sink = DiagSink::new();
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert!(
         diags
@@ -385,7 +423,12 @@ fn inout_str_param_return_after_reassign_rejected() {
     let _ = void;
     let tir = tb.finish(&[asg, ret]);
     let mut sink = DiagSink::new();
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert!(
         diags
@@ -424,23 +467,24 @@ fn inout_call_keeps_owner_and_frees_current_buffer() {
     let pr = tb.call(print, &[sv2], &[ParamMode::Borrow], void, span);
     let tir = tb.finish(&[decl, call, pr]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert!(
         diags.is_empty(),
         "inout call on a str local must produce no diagnostics; got {diags:?}"
     );
     let sc = take_function_sidecar(&mut sidecar, 0);
-    let frees: Vec<_> = sc
-        .free_schedule
-        .iter()
-        .filter(|fp| fp.target == lit)
-        .collect();
+    let frees: Vec<_> = sc.drops.iter().filter(|fp| fp.target == lit).collect();
     assert_eq!(
         frees.len(),
         1,
         "exactly one Free for the binding's owner; codegen emits it from the current FatLocals; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -471,7 +515,12 @@ fn inout_call_inside_if_no_false_dead_store() {
     let pr = tb.call(print, &[sv2], &[ParamMode::Borrow], void, span);
     let tir = tb.finish(&[decl, if_s, pr]);
     let mut sink = DiagSink::new();
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert!(
         !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
@@ -505,7 +554,12 @@ fn inout_call_inside_loop_no_false_dead_store() {
     let pr = tb.call(print, &[sv2], &[ParamMode::Borrow], void, span);
     let tir = tb.finish(&[decl, wl, pr]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert!(
         !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
@@ -513,13 +567,10 @@ fn inout_call_inside_loop_no_false_dead_store() {
     );
     let sc = take_function_sidecar(&mut sidecar, 0);
     assert_eq!(
-        sc.free_schedule
-            .iter()
-            .filter(|fp| fp.target == lit)
-            .count(),
+        sc.drops.iter().filter(|fp| fp.target == lit).count(),
         1,
         "exactly one Free for the binding's owner after the loop; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 

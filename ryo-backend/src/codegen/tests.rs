@@ -14,10 +14,10 @@ use target_lexicon::Triple;
 /// inline here because the enum codegen tests are unit tests in this
 /// module, per the M11 plan).
 fn clif_of(src: &str) -> String {
-    let (tirs, pool, sidecar) = analyze(src);
+    let (tirs, flows, pool, sidecar) = analyze(src);
     let mut codegen = Codegen::new_jit().expect("JIT codegen should initialize");
     codegen
-        .compile_and_dump_ir(&tirs, &pool, &sidecar)
+        .compile_and_dump_ir(&tirs, &flows, &pool, &sidecar)
         .expect("codegen should succeed")
 }
 
@@ -25,15 +25,22 @@ fn clif_of(src: &str) -> String {
 /// on the emitted symbol/data surface (runtime-callee names and .rodata
 /// strings do not survive in CLIF text).
 fn object_bytes(src: &str) -> Vec<u8> {
-    let (tirs, pool, sidecar) = analyze(src);
+    let (tirs, flows, pool, sidecar) = analyze(src);
     let mut codegen = Codegen::new_aot(Triple::host()).expect("AOT codegen should initialize");
     codegen
-        .compile(&tirs, &pool, &sidecar, false)
+        .compile(&tirs, &flows, &pool, &sidecar, false)
         .expect("compile should succeed");
     codegen.finish().expect("object emission should succeed")
 }
 
-fn analyze(src: &str) -> (Vec<Tir>, InternPool, ryo_core::ownership::OwnershipSidecar) {
+fn analyze(
+    src: &str,
+) -> (
+    Vec<Tir>,
+    Vec<ryo_core::flow::Flow>,
+    InternPool,
+    ryo_core::ownership::OwnershipSidecar,
+) {
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
     let tokens = ryo_frontend::lexer::lex(src, &mut pool, &mut sink);
@@ -56,10 +63,14 @@ fn analyze(src: &str) -> (Vec<Tir>, InternPool, ryo_core::ownership::OwnershipSi
         std::path::Path::new("test.ryo"),
     );
     assert!(!sema_sink.has_errors(), "sema should succeed");
+    let flows: Vec<ryo_core::flow::Flow> = tirs
+        .iter()
+        .map(|t| ryo_core::flow::Flow::build(t, &pool))
+        .collect();
     let mut ownership_sink = ryo_core::diag::DiagSink::new();
-    let sidecar = ryo_frontend::ownership::check(&tirs, &pool, &mut ownership_sink);
+    let sidecar = ryo_frontend::ownership::check(&tirs, &flows, &pool, &mut ownership_sink);
     assert!(!ownership_sink.has_errors(), "ownership should succeed");
-    (tirs, pool, sidecar)
+    (tirs, flows, pool, sidecar)
 }
 
 /// (a) `EnumLit` emits an i32 tag store at offset 0 followed by
@@ -70,7 +81,7 @@ fn analyze(src: &str) -> (Vec<Tir>, InternPool, ryo_core::ownership::OwnershipSi
 #[test]
 fn enum_lit_emits_tag_store_and_payload_stores_at_pool_offsets() {
     let src = "enum Shape:\n\tCircle(float)\n\tRectangle(width: float, height: float)\n\nfn main():\n\ts = Shape.Rectangle{width=1.0, height=2.0}\n";
-    let (tirs, pool, _sidecar) = analyze(src);
+    let (tirs, _mirs, pool, _sidecar) = analyze(src);
     // Expected offsets straight from the pool layout.
     let main = tirs
         .iter()

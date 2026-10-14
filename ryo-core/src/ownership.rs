@@ -1,93 +1,17 @@
+use crate::flow::{DropOp, DropPosition};
 use crate::tir::{Span, TirRef};
-use crate::types::{StringId, TypeId};
-
-/// Identifies a specific arm of an `IfStmt` (and, future, `Match`).
-/// Assigned by the ownership pass; codegen maps each `BranchId` to a
-/// concrete Cranelift `Block` as it lowers if/else regions.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct BranchId(pub u32);
-
-/// One scheduled Free. Codegen emits `ryo_str_free(ptr, cap)` after
-/// the instruction at `after`, gated by `branch` (None =
-/// unconditional, Some = only inside that arm or a descendant).
-#[derive(Clone, Debug)]
-pub struct FreePoint {
-    pub after: TirRef,
-    pub target: TirRef,
-    pub span: Span,
-    pub branch: Option<BranchId>,
-}
+use crate::types::StringId;
 
 /// One scheduled promotion-buffer free. When a borrowed (non-inout)
 /// `str`/`bytes` param is used as a view base, codegen promotes the
 /// callee's inline copy to heap and records the result in a scratch
 /// slot keyed by `base`; codegen emits a flag-conditional
-/// `ryo_str_free(ptr, cap)` from that slot after the instruction at
-/// `after`, gated by `branch` (same discipline as [`FreePoint`]).
+/// `ryo_str_free(ptr, cap)` from that slot at the given position.
 #[derive(Clone, Debug)]
 pub struct PromoFree {
-    pub after: TirRef,
+    pub position: DropPosition,
     pub base: TirRef,
     pub span: Span,
-    pub branch: Option<BranchId>,
-}
-
-/// Per-`IfStmt` mapping from arm position to its assigned [`BranchId`].
-/// Codegen uses this to push the right `BranchId` onto `branch_stack`
-/// as it lowers each arm, so a branch-gated `FreePoint` only fires
-/// inside the arm that ended with the owner still `Valid`.
-#[derive(Debug, Clone, Default)]
-pub struct IfBranchIds {
-    pub then_branch: BranchId,
-    pub elif_branches: Vec<BranchId>,
-    pub else_branch: Option<BranchId>,
-}
-
-/// Per-`Match` mapping from arm position to its assigned [`BranchId`]
-/// (M12). Codegen pushes the arm's `BranchId` onto `branch_stack` as it
-/// lowers the arm, so branch-gated `FreePoint`s and arm-start payload
-/// drops ([`MatchArmDrop`]) fire only inside the arm that owns them.
-/// One id per arm, in wire (written) order.
-#[derive(Debug, Clone, Default)]
-pub struct MatchBranchIds {
-    pub arms: Vec<BranchId>,
-}
-
-/// One arm-start drop of an unbound match payload field (M12). When a
-/// match arm binds at least one payload field by move, the arm consumes
-/// the scrutinee; the discriminating shape's remaining needs-drop
-/// fields (the pattern's `_` positions) must be destroyed when the arm
-/// starts. Codegen emits the free at the arm's start block, gated on
-/// `arm`. Never registered for borrowed scrutinees (E0133 keeps
-/// by-move binds off them) nor for arms without by-move bindings (the
-/// scrutinee survives there; its whole-value Free covers the payload).
-#[derive(Clone, Debug)]
-pub struct MatchArmDrop {
-    /// The owning `TirTag::Match` instruction.
-    pub match_inst: TirRef,
-    /// The arm that consumes the scrutinee — the drop fires at its start.
-    pub arm: BranchId,
-    /// Canonical declaration-order index of the scrutinee field to drop
-    /// (the enum-variant payload convention; for an anonymous-struct
-    /// scrutinee, the struct field index).
-    pub field_index: u32,
-    /// The field's type (needs-drop by construction).
-    pub ty: TypeId,
-}
-
-/// One conditional drop of a pre-branch buffer. When a binding
-/// is reassigned in SOME arms of an if but kept untouched in others,
-/// and the reassigned value is never read after the join, the
-/// pre-branch buffer would leak on the untouched paths. This drop
-/// covers it: codegen emits `ryo_str_free` at the START of each arm in
-/// `arms` (the binding's value there is still the pre-if one).
-/// `target` is the pre-branch owner's `TirRef`, resolved to the
-/// binding's current `FatLocals` via `free_binding_names`.
-#[derive(Clone, Debug)]
-pub struct ConditionalDeadDrop {
-    pub if_stmt: TirRef,
-    pub target: TirRef,
-    pub arms: Vec<BranchId>,
 }
 
 /// Side-table produced by the ownership pass alongside diagnostics.
@@ -123,8 +47,12 @@ pub struct FunctionSidecar {
     /// fails loudly in debug builds instead of silently applying one
     /// function's frees to another.
     pub name: StringId,
-    /// Frees anchored after specific instructions.
-    pub free_schedule: Vec<FreePoint>,
+    /// Explicit destruction operations, positioned on the Flow IR's
+    /// execution paths. Codegen consumes them mechanically at the
+    /// given positions — conditionality is expressed by block
+    /// membership (an arm-only drop lives in the arm's blocks), never
+    /// by a branch-gating predicate.
+    pub drops: Vec<DropOp>,
     /// Reassignment Frees. Dense side table indexed by the `Assign`
     /// instruction's `TirRef::index()` (slot 0 unused — refs are
     /// 1-based), sized to the owning function's TIR arena length.
@@ -168,29 +96,23 @@ pub struct FunctionSidecar {
     /// *before* the new value is stored into it. Codegen
     /// walks the chain to compute the old field's address.
     pub field_free_on_reassign: Vec<Option<TirRef>>,
-    /// `BranchId` assignments per `IfStmt`. Dense side table indexed by
-    /// the `IfStmt` instruction's `TirRef::index()` (slot 0 unused),
-    /// sized to the owning function's TIR arena length. Codegen
-    /// consults this when lowering if/elif/else to know which
-    /// `BranchId` to push onto `branch_stack` for each arm.
-    pub if_branches: Vec<Option<IfBranchIds>>,
-    /// `BranchId` assignments per `Match` arm (M12). Dense side table
-    /// indexed by the `Match` instruction's `TirRef::index()` (slot 0
-    /// unused), sized like `if_branches`. Codegen consults this when
-    /// lowering arms to know which `BranchId` to push onto
-    /// `branch_stack`.
-    pub match_branches: Vec<Option<MatchBranchIds>>,
-    /// Arm-start payload drops for match arms that consume the
-    /// scrutinee (M12) — one entry per unbound needs-drop payload field.
-    /// Codegen fires each entry at the start of the arm it names.
-    pub match_arm_drops: Vec<MatchArmDrop>,
-    /// Conditional drops of pre-branch buffers for dead conditional
-    /// reassignments. Codegen fires each entry at the start of
-    /// the arms it names (including a synthetic fall-through block for
-    /// else-less ifs).
-    pub conditional_dead_drops: Vec<ConditionalDeadDrop>,
-    /// Promotion-buffer frees for borrowed-param view bases.
+    /// ALL scheduled destruction travels through this one DropOp list
+    /// (the unified cleanup schedule): `AfterStep`/`BeforeStep`/`PreTerminator` anchors plus
+    /// `BlockStart` drops — match-arm-start payload destruction (one
+    /// entry per consuming arm, target = the scrutinee) and conditional
+    /// dead drops of pre-branch buffers (one entry per untouched arm
+    /// block, target = the pre-branch owner), both fired by codegen at
+    /// the START of the named Flow block. Promotion-buffer frees for
+    /// borrowed-param view bases keep their own anchor-keyed schedule
+    /// (I-216).
     pub promotion_frees: Vec<PromoFree>,
+    /// Promotion-buffer ALLOCATIONS (Gap 5): one entry per promo
+    /// candidate, anchored at the view-creating step — codegen's
+    /// promote-on-view writes the flag-guarded conditional heap triple
+    /// there. The validator pairs each allocation with the base's
+    /// releases (`promotion_frees`): the promoted copy is a DISTINCT
+    /// identity from the borrowed original.
+    pub promo_allocs: Vec<PromoFree>,
 }
 
 impl FunctionSidecar {
@@ -202,16 +124,13 @@ impl FunctionSidecar {
     pub fn new(name: StringId, arena_len: usize) -> Self {
         FunctionSidecar {
             name,
-            free_schedule: Vec::new(),
+            drops: Vec::new(),
             free_on_reassign: vec![None; arena_len],
             assign_binding: vec![None; arena_len],
             consumed_concat_lhs: vec![None; arena_len],
             field_free_on_reassign: vec![None; arena_len],
-            if_branches: vec![None; arena_len],
-            match_branches: vec![None; arena_len],
-            match_arm_drops: Vec::new(),
-            conditional_dead_drops: Vec::new(),
             promotion_frees: Vec::new(),
+            promo_allocs: Vec::new(),
         }
     }
 }

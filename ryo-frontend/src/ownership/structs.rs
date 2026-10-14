@@ -22,34 +22,21 @@
 //!   `field_free_on_reassign`.
 
 use super::{
-    Owner, OwnerState, Ownership, check_source_projected, consume_for_assignment,
-    consumed_binding_name, needs_tracking, register_pending_dead_store, underlying_owner,
-    visit_expr,
+    HazardKind, Owner, OwnerState, Ownership, Walk, check_source_projected, consumed_binding_name,
+    format_binding, inout_escape_owner, needs_tracking, register_pending_dead_store,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::ownership::FunctionSidecar;
 use ryo_core::tir::{Span, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeKind};
 
-/// The root owner a `FieldAccess` chain reads from: walk nested
-/// `FieldAccess` objects down to the base `Var` read and resolve the
-/// binding's current owner (mirrors `projection_root` in views.rs for
-/// slice chains). The unwrap-or-`Param` fallback mirrors
-/// `inout_owner`: an unregistered name is a Copy-typed parameter,
-/// whose per-binding key is `Owner::Param(name)`. A chain rooted in
-/// anything else (a call result, a literal) resolves through the
-/// usual origin walk.
-pub(crate) fn struct_root(own: &Ownership, tir: &Tir, r: TirRef) -> Option<Owner> {
-    match tir.inst(r).data {
-        TirData::FieldAccess { object, .. } => struct_root(own, tir, object),
-        TirData::Var(name) => Some(
-            own.current_owner
-                .get(&name)
-                .copied()
-                .unwrap_or(Owner::Param(name)),
-        ),
-        _ => Some(underlying_owner(own, r)),
-    }
+/// The root owner a `FieldAccess` chain reads from (G2): the chain's
+/// step's `read` fact names the ROOT place — Flow resolved the chain
+/// at build — so the root owner is `underlying_owner` of the chain
+/// inst itself. Kept as a named helper so call sites read correctly;
+/// `tir` is unused (payload-free resolution).
+pub(crate) fn struct_root(own: &Ownership, _tir: &Tir, r: TirRef) -> Option<Owner> {
+    Some(own.underlying_owner(r))
 }
 
 /// The binding name at the base of a `FieldAccess` chain, for
@@ -100,6 +87,7 @@ pub(crate) fn field_path_of(tir: &Tir, mut r: TirRef) -> Option<Vec<u32>> {
 /// `lit` is the `StructLit` instruction, recorded as the consume site.
 pub(crate) fn consume_struct_lit_fields(
     tir: &Tir,
+    flow: &ryo_core::flow::Flow,
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
@@ -115,10 +103,11 @@ pub(crate) fn consume_struct_lit_fields(
         // P2 freeze (final spec §3.2): the consume moves the owner.
         check_source_projected(
             tir,
+            flow,
             pool,
             own,
             sink,
-            underlying_owner(own, value),
+            own.underlying_owner(value),
             span,
             "move",
             consumed_name,
@@ -127,33 +116,23 @@ pub(crate) fn consume_struct_lit_fields(
     }
 }
 
-/// `visit_expr`'s `EnumLit` arm (M11), split out of `walk.rs` (the
-/// workspace's small-function lint keeps `visit_expr` under the line
-/// budget). Whole-value model: an enum value is ONE `Owner`, exactly
-/// like a struct, so this mirrors the `StructLit` arm — a needs-drop
-/// enum literal materializes a fresh owner, and its payload args are
-/// walked and consumed only here (the payload is `TirData::Extra`,
-/// which `recurse_operands` never descends into). A Copy enum skips
-/// the lattice entirely; its payload args are Copy too, so the consume
-/// is a no-op on them. M11 has no payload-access syntax, so no
-/// field-level guard applies to the payload args.
+/// `process_step`'s `EnumLit` arm (M11). Whole-value model: an enum
+/// value is ONE `Owner`, exactly like a struct — this mirrors the
+/// `StructLit` step. The payload arg steps already ran (block iteration
+/// order); only the fresh-owner seeding and the per-payload consume
+/// remain. A Copy enum skips the lattice entirely.
 pub(crate) fn analyze_enum_lit(
-    tir: &Tir,
-    pool: &InternPool,
+    w: &mut Walk<'_>,
     own: &mut Ownership,
     sink: &mut DiagSink,
-    sidecar: &mut FunctionSidecar,
     lit: TirRef,
 ) {
-    if needs_tracking(tir.inst(lit).ty, pool) {
-        own.states.insert(Owner::Inst(lit), OwnerState::Valid);
-        Ownership::dense_set(&mut own.origin, lit, None);
-        own.temp_owners.insert(Owner::Inst(lit));
+    if needs_tracking(w.tir.inst(lit).ty, w.pool) {
+        let owner = own.owner_of_inst(lit);
+        own.states.insert(owner, OwnerState::Valid);
+        own.temp_owners.insert(owner);
     }
-    for (_, value) in tir.enum_lit_view(lit).fields() {
-        visit_expr(tir, pool, own, sink, sidecar, value);
-    }
-    consume_enum_lit_fields(tir, pool, own, sink, lit);
+    consume_enum_lit_fields(w.tir, w.flow, w.pool, own, sink, lit);
 }
 
 /// Consume each needs-drop payload arg of an `EnumLit` (M11) under the
@@ -167,6 +146,7 @@ pub(crate) fn analyze_enum_lit(
 /// recorded as the consume site.
 pub(crate) fn consume_enum_lit_fields(
     tir: &Tir,
+    flow: &ryo_core::flow::Flow,
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
@@ -181,10 +161,11 @@ pub(crate) fn consume_enum_lit_fields(
         // P2 freeze (final spec §3.2): the consume moves the owner.
         check_source_projected(
             tir,
+            flow,
             pool,
             own,
             sink,
-            underlying_owner(own, value),
+            own.underlying_owner(value),
             span,
             "move",
             consumed_name,
@@ -269,51 +250,52 @@ pub(crate) fn check_field_move_out(
 }
 
 /// Destructuring assignment (M10): `(a, _) = rhs` / `{q, r} = rhs` —
-/// the one place fields move out of a struct. The rhs struct owner is
-/// consumed at the statement (a whole-struct move: no partial-move
-/// state survives it), and each bound field registers as a FRESH owner
-/// keyed on the `FieldAccess` token sema emitted immediately before
-/// the `Destructure` instruction (`Tir::destructure_bound_owner_refs`)
-/// — those refs are never evaluated by codegen; they exist purely so
-/// the moved-out fields have independent owner identities for the
-/// last-use / dead-store / branch-divergence free passes, which lower
-/// through the binding's slot at codegen (the binding-path redirect).
+/// the one place fields move out of a struct. The rhs operand steps
+/// already ran; the rhs struct owner is consumed here (a whole-struct
+/// move: no partial-move state survives it), and each bound field
+/// registers as a FRESH owner keyed on the `FieldAccess` token sema
+/// emitted immediately before the `Destructure` instruction
+/// (`Tir::destructure_bound_owner_refs`) — those refs are never
+/// evaluated by codegen; they exist purely so the moved-out fields have
+/// independent owner identities for the last-use / dead-store /
+/// branch-divergence free passes, which lower through the binding's
+/// slot at codegen (the binding-path redirect).
 ///
 /// Wildcard fields are CODEGEN's jurisdiction — destroyed inline at
 /// the copy-out, never tracked here — and no whole-struct Free is
 /// scheduled for the shell: consuming the rhs owner stamps it `Moved`,
-/// which every free pass skips. Copy-typed bindings need no owner at
-/// all.
+/// which every free pass skips. Copy-typed bindings need no owner.
 pub(crate) fn analyze_destructure(
-    tir: &Tir,
-    pool: &InternPool,
+    w: &mut Walk<'_>,
     own: &mut Ownership,
     sink: &mut DiagSink,
     sidecar: &mut FunctionSidecar,
     stmt: TirRef,
 ) {
-    let view = tir.destructure_view(stmt);
+    let flow = w.flow;
+    let view = w.tir.destructure_view(stmt);
     let rhs = view.rhs;
-    let rhs_ty = tir.inst(rhs).ty;
-    visit_expr(tir, pool, own, sink, sidecar, rhs);
-    if needs_tracking(rhs_ty, pool) {
-        let span = tir.span(stmt);
-        let consumed_name = consumed_binding_name(tir, rhs);
+    let rhs_ty = w.tir.inst(rhs).ty;
+    if needs_tracking(rhs_ty, w.pool) {
+        let span = w.tir.span(stmt);
+        let consumed_name = consumed_binding_name(w.tir, rhs);
         // P2 freeze (final spec §3.2): the consume moves the owner.
         check_source_projected(
-            tir,
-            pool,
+            w.tir,
+            flow,
+            w.pool,
             own,
             sink,
-            underlying_owner(own, rhs),
+            own.underlying_owner(rhs),
             span,
             "move",
             consumed_name,
         );
-        consume_for_assignment(tir, pool, own, sink, rhs, span, consumed_name, stmt);
+        consume_for_assignment(w.tir, w.pool, own, sink, rhs, span, consumed_name, stmt);
     }
 
-    let owners = tir.destructure_bound_owner_refs(stmt);
+    let owners = w.tir.destructure_bound_owner_refs(stmt);
+    let owner_places = w.flow.token_places(stmt);
     debug_assert_eq!(
         owners.len(),
         view.fields.iter().filter(|f| f.bind.is_some()).count(),
@@ -324,20 +306,154 @@ pub(crate) fn analyze_destructure(
         let Some(bind) = field.bind else {
             continue;
         };
-        let owner_ref = owners[owner_idx];
+        let _owner_ref = owners[owner_idx];
+        let owner_place = owner_places[owner_idx];
         owner_idx += 1;
         own.binding_of_name.insert(bind, stmt);
-        if !needs_tracking(field.ty, pool) {
+        if !needs_tracking(field.ty, w.pool) {
             continue;
         }
-        let span = tir.span(stmt);
-        own.states.insert(Owner::Inst(owner_ref), OwnerState::Valid);
-        Ownership::dense_set(&mut own.origin, owner_ref, None);
-        own.current_owner.insert(bind, Owner::Inst(owner_ref));
+        let span = w.tir.span(stmt);
+        // The token's place is both the binding identity (Flow binds
+        // the name directly to it) and the owner of the moved-out
+        // field.
+        let owner = Owner(owner_place);
+        own.states.insert(owner, OwnerState::Valid);
         // A never-read bound field is a dead store (W0001) and its
         // allocation dies with the statement — the drain anchors the
         // Free right after it, where codegen has just populated the
         // binding's slot.
-        register_pending_dead_store(own, owner_ref, bind, span, stmt);
+        register_pending_dead_store(own, owner, bind, span, stmt);
+    }
+    let _ = sidecar;
+}
+
+// ---------- Consume transitions (shared by every consume site) ----------
+
+/// Use-site use-after-move authority (spec §5.3 Rule 1): resolve the
+/// operand's underlying owner and emit E0020 if it is `Moved`.
+pub(crate) fn check_use_moved(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &Ownership,
+    sink: &mut DiagSink,
+    operand: TirRef,
+    span: Span,
+) {
+    let owner = own.underlying_owner(operand);
+    if let Some(OwnerState::Moved { moved_at }) = own.states.get(&owner).cloned() {
+        let name = consumed_binding_name(tir, operand);
+        sink.emit(
+            Diag::error(span, DiagCode::UseAfterMove,
+                format!("use of moved value {}", format_binding(name, pool)))
+                .with_note(Some(moved_at), "value moved here")
+                .with_help("consider using the value before the move, or pass by default (borrow) instead of `move`"),
+        );
+    }
+}
+
+/// Which diagnostic the shared `consume_underlying` helper emits on the
+/// `Borrowed` arm.
+pub(crate) enum BorrowedAction {
+    /// E0021 — assignment-site consume.
+    MoveOutOfParam,
+    /// E0022 — `analyze_return` site.
+    ReturnBorrowed,
+}
+
+/// Apply the consumption transition for a Move-typed initializer.
+/// Caller must have already populated origin/state for `init` via the
+/// operand steps. `site` is the consuming instruction, recorded in the
+/// W0003 hazard log when the consume lands.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn consume_for_assignment(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    init: TirRef,
+    span: Span,
+    name: Option<StringId>,
+    site: TirRef,
+) {
+    consume_underlying(
+        tir,
+        pool,
+        own,
+        sink,
+        init,
+        span,
+        name,
+        BorrowedAction::MoveOutOfParam,
+        site,
+    );
+}
+
+/// Shared transition for every consume site: a needs-drop `FieldAccess`
+/// operand is rejected outright (`MoveOutOfField`, M9); `Valid` → stamp
+/// `Moved`, clear the pending dead-store entry, log the W0003 move
+/// hazard; `Borrowed` → E0021/E0022; `Moved` → E0020; `NotTracked` →
+/// no-op.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn consume_underlying(
+    tir: &Tir,
+    pool: &InternPool,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    operand: TirRef,
+    span: Span,
+    name: Option<StringId>,
+    on_borrowed: BorrowedAction,
+    site: TirRef,
+) {
+    // M9: consuming a needs-drop field read moves only the field out of
+    // its struct — rejected; the struct's fields move as one.
+    if check_field_move_out(tir, pool, sink, operand, span) {
+        return;
+    }
+    let underlying = own.underlying_owner(operand);
+    let mut state = own
+        .states
+        .get(&underlying)
+        .cloned()
+        .unwrap_or(OwnerState::NotTracked);
+    // A Valid value currently bound to an `inout str` param escapes
+    // through the write-back pointer — treat it as borrowed at consume
+    // sites.
+    if matches!(state, OwnerState::Valid) && inout_escape_owner(own, underlying) {
+        state = OwnerState::Borrowed;
+    }
+    match state {
+        OwnerState::Valid => {
+            own.pending_dead_store.remove(&underlying);
+            own.states
+                .insert(underlying, OwnerState::Moved { moved_at: span });
+            own.owner_hazards.push((underlying, site, HazardKind::Move));
+        }
+        OwnerState::Borrowed => {
+            let (code, msg, help) = match on_borrowed {
+                BorrowedAction::MoveOutOfParam => (
+                    DiagCode::MoveOutOfBorrowedParam,
+                    format!(
+                        "cannot move out of borrowed parameter {}",
+                        format_binding(name, pool),
+                    ),
+                    "add `move` to the parameter declaration if you need ownership",
+                ),
+                BorrowedAction::ReturnBorrowed => (
+                    DiagCode::ReturnBorrowedValue,
+                    format!(
+                        "cannot return borrowed value {} (Rule 5)",
+                        format_binding(name, pool),
+                    ),
+                    "return a locally-allocated value, or accept the parameter as `move`",
+                ),
+            };
+            sink.emit(Diag::error(span, code, msg).with_help(help));
+        }
+        OwnerState::Moved { .. } => {
+            check_use_moved(tir, pool, own, sink, operand, span);
+        }
+        OwnerState::NotTracked => {}
     }
 }

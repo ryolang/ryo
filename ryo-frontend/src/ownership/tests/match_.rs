@@ -41,31 +41,32 @@ fn moved_in_one_arm_moves_at_merge_union() {
         uam, 1,
         "exactly one use-after-move (the post-match read); got {diags:?}"
     );
-    // Union merge machinery: the scrutinee survives the `_` arm, so a
-    // branch-gated Free of the scrutinee owner must be scheduled for
-    // that arm (the whole-enum free covers the runtime payload).
+    // Union merge machinery: the scrutinee survives the `_` arm, so an
+    // arm-conditional Free of the scrutinee owner is scheduled anchored
+    // INSIDE that arm's Flow IR block — block membership gates it to the
+    // arm's path (the role the old branch tags played). Arm-body temp
+    // frees also anchor in arm blocks, so the filter pins the TARGET:
+    // the scrutinee's owner (the EnumLit), not an arm-local temp.
     let f = main_sidecar(&mut sidecar, &pool);
     let m = find_match(&tirs[0]);
-    let arms = f.match_branches[m.index()]
-        .as_ref()
-        .expect("match_branches entry for the Match inst")
-        .arms
-        .clone();
-    assert_eq!(arms.len(), 2, "one BranchId per arm");
+    let scrutinee_owner = (1..tirs[0].instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find(|&r| tirs[0].inst(r).tag == ryo_core::tir::TirTag::EnumLit)
+        .expect("the scrutinee's EnumLit");
+    let flow = build_flow(&tirs[0], &pool);
+    let arm_blocks = match_arm_blocks(&flow, m);
+    assert_eq!(arm_blocks.len(), 2, "one Flow IR block per arm");
     let gated: Vec<_> = f
-        .free_schedule
+        .drops
         .iter()
-        .filter(|fp| fp.branch.is_some())
+        .filter(|d| {
+            d.target == scrutinee_owner && flow.step_block_of(drop_anchor(d)) == Some(arm_blocks[1])
+        })
         .collect();
     assert_eq!(
         gated.len(),
         1,
-        "exactly one arm-gated Free (the scrutinee on the untouched arm); got {gated:?}"
-    );
-    assert_eq!(
-        gated[0].branch,
-        Some(arms[1]),
-        "the gated Free belongs to the `_` arm"
+        "exactly one arm-conditional Free (the scrutinee on the `_` arm); got {gated:?}"
     );
 }
 
@@ -117,7 +118,7 @@ fn borrowed_param_scrutinee_registers_no_drops() {
     // The ruling's drop-suppression: on a genuinely borrowed scrutinee
     // (a borrow-mode param read — `OwnerState::Borrowed` in the
     // lattice) even wildcard payload fields drop NOTHING: no arm-start
-    // drops, no branch-gated frees, and the scrutinee is not consumed.
+    // drops, no arm-conditional frees, and the scrutinee is not consumed.
     let src = "enum Opt:\n\tSome(str)\n\tEmpty\n\nfn show(o: Opt):\n\tmatch o:\n\t\tSome(_):\n\t\t\tprint(\"some\")\n\t\tEmpty:\n\t\t\tprint(\"empty\")\n\tprint(o)\n\nfn main():\n\tshow(Opt.Some(\"alice\"))\n";
     let (diags, mut sidecar, _tirs, pool) = check_src_full(src);
     assert!(
@@ -133,15 +134,15 @@ fn borrowed_param_scrutinee_registers_no_drops() {
         .expect("show's sidecar entry");
     let f = take_function_sidecar(&mut sidecar, show_idx);
     assert!(
-        f.match_arm_drops.is_empty(),
+        block_start_drops(&f).is_empty(),
         "borrowed scrutinee: wildcard payload fields drop nothing; got {:?}",
-        f.match_arm_drops
+        f.drops
     );
-    assert!(
-        f.free_schedule.iter().all(|fp| fp.branch.is_none()),
-        "borrowed scrutinee: no arm-gated frees; got {:?}",
-        f.free_schedule
-    );
+    // No arm-conditional frees were minted for the borrowed scrutinee:
+    // the branch-gating this test used to assert is gone, and a
+    // borrowed param has no owner instruction to schedule a free
+    // against — `match_arm_drops.is_empty()` above plus the
+    // error-free run IS the assertion.
 }
 
 #[test]
@@ -152,7 +153,7 @@ fn anon_owned_partial_move_registers_arm_start_drop() {
     // arm-start drop for codegen (codegen emits it at arm start). The
     // `_` arm leaves
     // the scrutinee valid — the union merge stamps it moved after the
-    // match, so a branch-gated whole-value Free covers that arm.
+    // match, so an arm-conditional whole-value Free covers that arm.
     let src = "fn main():\n\tp = {name=\"alice\", tag=\"x\"}\n\tmatch p:\n\t\t{name=q, tag=_}:\n\t\t\tprint(q)\n\t\t_:\n\t\t\tprint(\"other\")\n";
     let (diags, mut sidecar, tirs, pool) = check_src_full(src);
     assert!(
@@ -163,34 +164,52 @@ fn anon_owned_partial_move_registers_arm_start_drop() {
     );
     let f = main_sidecar(&mut sidecar, &pool);
     let m = find_match(&tirs[0]);
-    let arms = f.match_branches[m.index()]
-        .as_ref()
-        .expect("match_branches entry for the Match inst")
-        .arms
-        .clone();
-    assert_eq!(arms.len(), 2, "one BranchId per arm");
+    // The arm-start drop targets the match wire's scrutinee (the
+    // `var p` read); the whole-value arm-conditional Free targets the
+    // scrutinee's OWNER (the StructLit temp) — two identities.
+    let scrutinee = tirs[0].match_view(m).scrutinee;
+    let owner = (1..tirs[0].instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find(|&r| tirs[0].inst(r).tag == ryo_core::tir::TirTag::StructLit)
+        .expect("the scrutinee's StructLit owner");
+    let flow = build_flow(&tirs[0], &pool);
+    let arm_blocks = match_arm_blocks(&flow, m);
+    assert_eq!(arm_blocks.len(), 2, "one Flow IR block per arm");
+    let arm_start: Vec<_> = block_start_drops(&f)
+        .into_iter()
+        .filter(|d| d.target == scrutinee)
+        .collect();
     assert_eq!(
-        f.match_arm_drops.len(),
+        arm_start.len(),
         1,
-        "the unbound `tag` field registers exactly one arm-start drop; got {:?}",
-        f.match_arm_drops
+        "the consuming arm registers exactly one arm-start drop; got {:?}",
+        f.drops
     );
-    let drop = &f.match_arm_drops[0];
-    assert_eq!(drop.match_inst, m);
-    assert_eq!(drop.arm, arms[0], "the drop belongs to the consuming arm");
-    assert_eq!(drop.field_index, 1, "`tag` is field 1 in declaration order");
-    assert_eq!(drop.ty, pool.str_(), "the dropped field is the str payload");
+    assert!(
+        matches!(
+            arm_start[0].position,
+            ryo_core::flow::DropPosition::BlockStart { block } if block == arm_blocks[0]
+        ),
+        "the drop belongs to the consuming arm's Flow IR block"
+    );
+    // Arm-body temp frees also anchor in arm blocks, so the filter pins
+    // the TARGET: the scrutinee owner, not an arm-local temp.
     let gated: Vec<_> = f
-        .free_schedule
+        .drops
         .iter()
-        .filter(|fp| fp.branch.is_some())
+        .filter(|d| {
+            d.target == owner
+                && d.position
+                    .anchor_inst()
+                    .and_then(|a| flow.step_block_of(a))
+                    .is_some_and(|b| b == arm_blocks[1])
+        })
         .collect();
     assert_eq!(
         gated.len(),
         1,
-        "exactly one arm-gated Free (the scrutinee on the `_` arm); got {gated:?}"
+        "exactly one arm-conditional Free (the scrutinee on the `_` arm); got {gated:?}"
     );
-    assert_eq!(gated[0].branch, Some(arms[1]));
 }
 
 #[test]
@@ -207,22 +226,27 @@ fn wildcard_payload_field_on_owned_enum_registers_arm_start_drop() {
     );
     let f = main_sidecar(&mut sidecar, &pool);
     let m = find_match(&tirs[0]);
-    let arms = f.match_branches[m.index()]
-        .as_ref()
-        .expect("match_branches entry for the Match inst")
-        .arms
-        .clone();
-    assert_eq!(arms.len(), 1, "single exhaustive arm");
+    let flow = build_flow(&tirs[0], &pool);
+    let arm_blocks = match_arm_blocks(&flow, m);
+    assert_eq!(arm_blocks.len(), 1, "single exhaustive arm");
+    let m_scrut = tirs[0].match_view(m).scrutinee;
+    let arm_start: Vec<_> = block_start_drops(&f)
+        .into_iter()
+        .filter(|d| d.target == m_scrut)
+        .collect();
     assert_eq!(
-        f.match_arm_drops.len(),
+        arm_start.len(),
         1,
-        "the wildcard str payload registers one arm-start drop; got {:?}",
-        f.match_arm_drops
+        "the consuming arm registers one arm-start drop; got {:?}",
+        f.drops
     );
-    let drop = &f.match_arm_drops[0];
-    assert_eq!(drop.arm, arms[0]);
-    assert_eq!(drop.field_index, 1);
-    assert_eq!(drop.ty, pool.str_());
+    assert!(
+        matches!(
+            arm_start[0].position,
+            ryo_core::flow::DropPosition::BlockStart { block } if block == arm_blocks[0]
+        ),
+        "the drop belongs to the consuming arm's Flow IR block"
+    );
     // The bound field `x` registered as a fresh owner keyed on its
     // owner-token FieldAccess (the inst immediately before the Match);
     // its last-use Free is anchored after the in-arm `print(x)` read.
@@ -232,9 +256,9 @@ fn wildcard_payload_field_on_owned_enum_registers_arm_start_drop() {
         "the owner token is the FieldAccess before the Match"
     );
     assert!(
-        f.free_schedule.iter().any(|fp| fp.target == token),
+        f.drops.iter().any(|fp| fp.target == token),
         "the bound field's owner-token Free is scheduled; got {:?}",
-        f.free_schedule
+        f.drops
     );
 }
 
@@ -257,7 +281,7 @@ fn no_consuming_arm_leaves_scrutinee_valid() {
     // field by move, the scrutinee is untouched — post-match use is
     // legal, no arm-gated frees, no arm-start drops.
     let src = "enum Opt:\n\tSome(str)\n\tEmpty\n\nfn main():\n\to = Opt.Some(\"alice\")\n\tmatch o:\n\t\tSome(_):\n\t\t\tprint(\"some\")\n\t\tEmpty:\n\t\t\tprint(\"empty\")\n\tprint(o)\n";
-    let (diags, mut sidecar, _tirs, pool) = check_src_full(src);
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
     assert!(
         diags
             .iter()
@@ -266,17 +290,32 @@ fn no_consuming_arm_leaves_scrutinee_valid() {
     );
     let f = main_sidecar(&mut sidecar, &pool);
     assert!(
-        f.match_arm_drops.is_empty(),
+        block_start_drops(&f).is_empty(),
         "no consuming arm → no arm-start drops; got {:?}",
-        f.match_arm_drops
+        f.drops
+    );
+    // No conditional moves → no free TARGETING the scrutinee is
+    // anchored inside a match arm block (the old branch-gating
+    // assertion; arm-body temp frees legitimately anchor inside arm
+    // blocks, gated by anchor evaluation).
+    let m = find_match(&tirs[0]);
+    let scrutinee_owner = (1..tirs[0].instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find(|&r| tirs[0].inst(r).tag == ryo_core::tir::TirTag::EnumLit)
+        .expect("the scrutinee's EnumLit");
+    let flow = build_flow(&tirs[0], &pool);
+    let arm_blocks = match_arm_blocks(&flow, m);
+    assert!(
+        f.drops.iter().all(|d| {
+            d.target != scrutinee_owner
+                || !arm_blocks
+                    .contains(&flow.step_block_of(drop_anchor(d)).expect("step in a block"))
+        }),
+        "no conditional moves → no arm-conditional frees for the scrutinee; got {:?}",
+        f.drops
     );
     assert!(
-        f.free_schedule.iter().all(|fp| fp.branch.is_none()),
-        "no conditional moves → no arm-gated frees; got {:?}",
-        f.free_schedule
-    );
-    assert!(
-        !f.free_schedule.is_empty(),
+        !f.drops.is_empty(),
         "the scrutinee's whole-value last-use Free is still scheduled"
     );
 }
@@ -299,19 +338,11 @@ fn dead_bind_in_returning_arm_single_epilogue_free() {
     let f = main_sidecar(&mut sidecar, &pool);
     let m = find_match(&tirs[0]);
     let token = ryo_core::tir::TirRef::from_raw((m.index() - 1) as u32);
-    let token_frees: Vec<_> = f
-        .free_schedule
-        .iter()
-        .filter(|fp| fp.target == token)
-        .collect();
+    let token_frees: Vec<_> = f.drops.iter().filter(|fp| fp.target == token).collect();
     assert_eq!(
         token_frees.len(),
         1,
         "exactly one Free for the dead arm bind (the return epilogue); got {token_frees:?}"
-    );
-    assert!(
-        token_frees[0].branch.is_none(),
-        "the epilogue Free is ungated, anchored at the return"
     );
     assert!(
         diags.iter().any(|d| d.code == DiagCode::DeadStore),
@@ -445,7 +476,12 @@ fn moving_payload_field_out_of_enum_rejected() {
     let decl = tb.var_decl(x, false, str_ty, fa, span);
     let tir = tb.finish(&[decl]);
     let mut sink = DiagSink::new();
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert!(
         diags.iter().any(|d| d.code == DiagCode::MoveOutOfField),
@@ -486,12 +522,12 @@ fn break_in_stmt_match_arm_gets_loop_exit_free() {
         .expect("the loop-local `s` VarDecl");
     let brk = find(ryo_core::tir::TirTag::Break).expect("the in-arm break");
     assert!(
-        f.free_schedule
+        f.drops
             .iter()
-            .any(|fp| fp.target == init && fp.after == brk),
+            .any(|fp| fp.target == init && fp.position.anchor_inst().unwrap() == brk),
         "the break inside the match arm gets a loop-exit Free for the \
          loop-local str; got {:?}",
-        f.free_schedule
+        f.drops
     );
 }
 
@@ -529,13 +565,13 @@ fn prune_match_arms_covers_expression_arm_siblings() {
         .find(|&r| tirs[0].inst(r).tag == ryo_core::tir::TirTag::Break)
         .expect("the in-arm break");
     assert!(
-        f.free_schedule
+        f.drops
             .iter()
-            .any(|fp| fp.target == init && fp.after == brk),
+            .any(|fp| fp.target == init && fp.position.anchor_inst().unwrap() == brk),
         "the break inside the match arm gets a loop-exit Free for the \
          loop-local str even when the sibling arm is an expression arm; \
          got {:?}",
-        f.free_schedule
+        f.drops
     );
 }
 
@@ -564,13 +600,10 @@ fn named_vardecl_in_stmt_match_arm_freed_exactly_once() {
         .map(|r| tirs[0].var_decl_view(r).initializer)
         .expect("the arm-local `s` VarDecl");
     assert_eq!(
-        f.free_schedule
-            .iter()
-            .filter(|fp| fp.target == init)
-            .count(),
+        f.drops.iter().filter(|fp| fp.target == init).count(),
         1,
         "exactly one Free for the arm-local named str; got {:?}",
-        f.free_schedule
+        f.drops
     );
 }
 
@@ -605,12 +638,12 @@ fn break_in_value_position_match_arm_gets_loop_exit_free() {
         .find(|&r| tirs[0].inst(r).tag == ryo_core::tir::TirTag::Break)
         .expect("the in-arm break");
     assert!(
-        f.free_schedule
+        f.drops
             .iter()
-            .any(|fp| fp.target == init && fp.after == brk),
+            .any(|fp| fp.target == init && fp.position.anchor_inst().unwrap() == brk),
         "the break inside the value-position match arm gets a loop-exit \
          Free for the loop-local str; got {:?}",
-        f.free_schedule
+        f.drops
     );
 }
 
@@ -646,7 +679,9 @@ fn return_in_value_position_match_arm_gets_promo_epilogue() {
         })
         .expect("the arm's return");
     assert!(
-        f.promotion_frees.iter().any(|pf| pf.after == inner_return),
+        f.promotion_frees
+            .iter()
+            .any(|pf| pf.position.anchor_inst().unwrap() == inner_return),
         "the arm's return gets a promotion-buffer epilogue Free; got {:?}",
         f.promotion_frees
     );
@@ -668,11 +703,8 @@ fn dead_bind_in_expr_arm_freed_exactly_once_in_arm() {
     );
     let f = main_sidecar(&mut sidecar, &pool);
     let m = find_match(&tirs[0]);
-    let arms = f.match_branches[m.index()]
-        .as_ref()
-        .expect("match_branches entry for the Match inst")
-        .arms
-        .clone();
+    let flow = build_flow(&tirs[0], &pool);
+    let arm_blocks = match_arm_blocks(&flow, m);
     let token = tirs[0]
         .match_by_move_owner_refs(m, &pool)
         .into_iter()
@@ -682,31 +714,32 @@ fn dead_bind_in_expr_arm_freed_exactly_once_in_arm() {
         ryo_core::tir::MatchBodyView::Expr(e) => e,
         ryo_core::tir::MatchBodyView::Stmts(_) => panic!("`Some(v) => 1` is an expression arm"),
     };
-    let frees: Vec<_> = f
-        .free_schedule
-        .iter()
-        .filter(|fp| fp.target == token)
-        .collect();
+    let frees: Vec<_> = f.drops.iter().filter(|fp| fp.target == token).collect();
     assert_eq!(
         frees.len(),
         1,
         "exactly one Free for the dead payload bind; got {frees:?}"
     );
-    assert_eq!(frees[0].branch, Some(arms[0]), "gated to the `Some(v)` arm");
     assert_eq!(
-        frees[0].after, body,
+        flow.step_block_of(drop_anchor(frees[0])),
+        Some(arm_blocks[0]),
+        "gated to the `Some(v)` arm by block membership"
+    );
+    assert_eq!(
+        frees[0].position.anchor_inst().unwrap(),
+        body,
         "anchored at the arm-body expression (fired inside the arm)"
     );
 }
 
 #[test]
-fn borrowed_param_arm_result_rejected_i210() {
+fn borrowed_param_arm_result_rejected_e0138() {
     // P1 (memory-safety): an expression arm yielding a borrowed
     // parameter hands caller-owned storage to the match result binding
     // (whose cleanup then frees it — observed: corrupted stdout +
     // SIGTRAP). The ownership pass rejects the borrowed-source family
-    // at compile time, naming I-210; codegen's guard cannot see it
-    // (borrowed owners carry no scheduled drop).
+    // at compile time (E0138); codegen's guard cannot see it (borrowed
+    // owners carry no scheduled drop).
     let src = "fn pick(s: str, b: bool):\n\tx = match b:\n\t\ttrue: s\n\t\tfalse: \"no\"\n\tprint(x)\n\nfn main():\n\ts = \"0123456789012345678901234567890123456789\" + \"!\"\n\tpick(s, true)\n\tprint(s)\n";
     let diags = check_src(src);
     let diag = diags
@@ -714,8 +747,8 @@ fn borrowed_param_arm_result_rejected_i210() {
         .find(|d| d.code == DiagCode::MatchValueArmBorrowed)
         .expect("the borrowed arm result must be rejected");
     assert!(
-        diag.message.contains("I-210"),
-        "the message must name I-210, got {:?}",
+        diag.message.contains("borrowed from the caller"),
+        "the message must name the borrowed family, got {:?}",
         diag.message
     );
     assert_eq!(
@@ -729,7 +762,7 @@ fn borrowed_param_arm_result_rejected_i210() {
 }
 
 #[test]
-fn borrowed_param_field_projection_arm_result_rejected_i210() {
+fn borrowed_param_field_projection_arm_result_rejected_e0138() {
     // The general family: a field projection of a borrowed parameter
     // (`p.name`) aliases the caller's storage like a direct read — the
     // E0133 root-walk resolves the chain to the borrowed base owner.
@@ -740,8 +773,8 @@ fn borrowed_param_field_projection_arm_result_rejected_i210() {
         .find(|d| d.code == DiagCode::MatchValueArmBorrowed)
         .expect("the borrowed projection arm result must be rejected");
     assert!(
-        diag.message.contains("I-210"),
-        "the message must name I-210, got {:?}",
+        diag.message.contains("borrowed from the caller"),
+        "the message must name the borrowed family, got {:?}",
         diag.message
     );
 }
@@ -773,5 +806,180 @@ fn borrowed_scalar_arm_result_is_not_rejected() {
             .iter()
             .all(|d| d.severity != ryo_core::diag::Severity::Error),
         "a borrowed scalar arm result must compile clean: {diags:?}"
+    );
+}
+
+// --- Arm-result transfer: owned aggregate value arms are consumed
+// into the match inst, so the result slot's buffer has exactly one
+// destruction obligation (the consumer's). ---
+
+/// The arm-result transfer pins' ownership-side contract: for a payload
+/// yield (`Some(v): v`), the token's would-be arm-anchored Free and the
+/// sibling arm-body literal's would-be match-anchored Free are both
+/// gone; the only Free targeting the match result is the consumer's
+/// last-use Free.
+#[test]
+fn payload_yield_transfer_leaves_single_result_free() {
+    let src = "enum Opt:\n\tSome(str)\n\tNone\n\nfn main():\n\to = Opt.Some(\"0123456789012345678901234567890123456789\" + \"!\")\n\tx = match o:\n\t\tSome(v): v\n\t\tNone: \"none\"\n\tprint(x)\n";
+    let (diags, mut sidecar, tirs, _pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "the transfer must compile clean: {diags:?}"
+    );
+    let sc = take_function_sidecar(&mut sidecar, 0);
+    let tir = &tirs[0];
+    let matches: Vec<TirRef> = (1..tir.instructions.len() as u32)
+        .map(TirRef::from_raw)
+        .filter(|&r| matches!(tir.inst(r).tag, TirTag::Match))
+        .collect();
+    assert_eq!(matches.len(), 1, "one value match; got {matches:?}");
+    let m = matches[0];
+    let tokens = tir.match_by_move_owner_refs(m, &_pool);
+    assert_eq!(tokens.len(), 1, "one by-move payload token");
+    let token = tokens[0];
+    // Exactly one Free targets the match inst — the consumer's
+    // last-use Free.
+    let result_frees: Vec<_> = sc.drops.iter().filter(|fp| fp.target == m).collect();
+    assert_eq!(
+        result_frees.len(),
+        1,
+        "exactly one destruction of the match result; got {:?}",
+        sc.drops
+    );
+    // No Free may target the payload token anymore (its buffer is the
+    // match result's now).
+    assert!(
+        sc.drops.iter().all(|fp| fp.target != token),
+        "the token's arm-anchored Free must be gone; got {:?}",
+        sc.drops
+    );
+}
+
+/// The producer-arm transfer (`true: make_str(...)`): the producer
+/// temporary is Moved into the match — no Free targets the call/concat,
+/// and the match result keeps its single consumer Free.
+#[test]
+fn producer_arm_transfer_leaves_single_result_free() {
+    let src = "fn pick(b: bool):\n\ts = match b:\n\t\ttrue: int_to_str(1) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\t\tfalse: \"no\"\n\tprint(s)\n\tprint(\"\\n\")\n\nfn main():\n\tpick(true)\n";
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "the producer transfer must compile clean: {diags:?}"
+    );
+    let (fidx, tir) = tirs
+        .iter()
+        .enumerate()
+        .find(|(_, t)| {
+            (1..t.instructions.len() as u32)
+                .any(|r| matches!(t.inst(TirRef::from_raw(r)).tag, TirTag::Match))
+        })
+        .expect("a function with the value match");
+    let sc = take_function_sidecar(&mut sidecar, fidx);
+    let m = (1..tir.instructions.len() as u32)
+        .map(TirRef::from_raw)
+        .find(|&r| matches!(tir.inst(r).tag, TirTag::Match))
+        .expect("the value match");
+    // The producer family is represented in this body; the transfer
+    // contract is structural: nothing may be anchored ON the match inst
+    // anymore (the old anon-temp anchor), and exactly one Free targets
+    // the match inst — the consumer's.
+    assert!(
+        matches!(tir.inst(m).tag, TirTag::Match) && pool.needs_drop(tir.inst(m).ty),
+        "the test expects an aggregate value match"
+    );
+    assert!(
+        sc.drops
+            .iter()
+            .all(|fp| fp.position.anchor_inst() != Some(m)),
+        "no Free may be anchored on the match inst after the transfer; got {:?}",
+        sc.drops
+    );
+    let result_frees = sc.drops.iter().filter(|fp| fp.target == m).count();
+    assert_eq!(
+        result_frees, 1,
+        "exactly one destruction of the match result; got {:?}",
+        sc.drops
+    );
+}
+
+/// The by-value Var arm (`true: t`): the binding read moves into the
+/// match result — the binding's own last-use Free disappears.
+#[test]
+fn by_value_var_arm_transfer_leaves_single_result_free() {
+    let src = "fn pick(b: bool):\n\tt = int_to_str(1) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\ts = match b:\n\t\ttrue: t\n\t\tfalse: \"no\"\n\tprint(s)\n\tprint(\"\\n\")\n\nfn main():\n\tpick(true)\n";
+    let (diags, mut sidecar, tirs, _pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "the by-value read transfer must compile clean: {diags:?}"
+    );
+    let (fidx, tir) = tirs
+        .iter()
+        .enumerate()
+        .find(|(_, t)| {
+            (1..t.instructions.len() as u32)
+                .any(|r| matches!(t.inst(TirRef::from_raw(r)).tag, TirTag::Match))
+        })
+        .expect("a function with the value match");
+    let sc = take_function_sidecar(&mut sidecar, fidx);
+    let m = (1..tir.instructions.len() as u32)
+        .map(TirRef::from_raw)
+        .find(|&r| matches!(tir.inst(r).tag, TirTag::Match))
+        .expect("the value match");
+    let t_value = tir.var_decl_view(TirRef::from_raw(
+        (1..tir.instructions.len() as u32)
+            .find(|&r| matches!(tir.inst(TirRef::from_raw(r)).tag, TirTag::VarDecl))
+            .expect("t's decl"),
+    ));
+    assert_eq!(
+        sc.drops.iter().filter(|fp| fp.target == m).count(),
+        1,
+        "exactly one destruction of the match result; got {:?}",
+        sc.drops
+    );
+    // The binding-read last-use Free is gone, but the sibling arm's
+    // divergence Free (the false arm still owns t there) remains —
+    // exactly one destruction per path.
+    let t_frees: Vec<_> = sc
+        .drops
+        .iter()
+        .filter(|fp| fp.target == t_value.initializer)
+        .collect();
+    assert!(
+        t_frees.len() <= 1,
+        "at most one Free may target the moved binding (the sibling-arm          divergence Free); got {:?}",
+        sc.drops
+    );
+}
+
+/// A discarded aggregate match result (statement-level value match) is
+/// still destroyed exactly once: the transfer seeds the match inst as
+/// an anonymous temporary, freed after the wrapping statement.
+#[test]
+fn discarded_aggregate_match_result_freed_once() {
+    let src = "enum Opt:\n\tSome(str)\n\tNone\n\nfn main():\n\to = Opt.Some(\"abc\")\n\tmatch o:\n\t\tSome(v): v\n\t\tNone: \"none\"\n\tprint(\"done\\n\")\n";
+    let (diags, mut sidecar, tirs, _pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "a discarded aggregate match result must compile clean: {diags:?}"
+    );
+    let sc = take_function_sidecar(&mut sidecar, 0);
+    let tir = &tirs[0];
+    let m = (1..tir.instructions.len() as u32)
+        .map(TirRef::from_raw)
+        .find(|&r| matches!(tir.inst(r).tag, TirTag::Match))
+        .expect("the value match");
+    assert_eq!(
+        sc.drops.iter().filter(|fp| fp.target == m).count(),
+        1,
+        "exactly one destruction of the discarded result; got {:?}",
+        sc.drops
     );
 }

@@ -1,97 +1,97 @@
 //! M8.4 slice projections and view liveness — split from `mod.rs`.
+//!
+//! The liveness pre-pass (`collect_view_liveness`) simulates the walk's
+//! view-binding discipline (snapshot per branch arm, first-wins merge;
+//! entry-first-wins at loop back-edges) over Flow IR blocks and records
+//! each bound view's last read. Per-arm read maps are keyed by the
+//! arm's Flow IR entry block as an [`Analysis`] tri-state: a
+//! missing/`Unavailable` entry never refines (unavailable information
+//! must not justify removing a live projection); a `Present` map
+//! overrides/kills per view. Runs before the forward walk so the walk
+//! knows when it passes a projection's last use.
 
-use super::structs::{field_path_of, struct_root};
+use super::structs::field_path_of;
 use super::{
-    LoopNesting, Owner, OwnerState, Ownership, format_binding, needs_tracking, underlying_owner,
+    LoopNesting, Owner, OwnerState, Ownership, StopKind, collect_region, format_binding,
+    needs_tracking,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
-use ryo_core::tir::{MatchBodyView, Span, Tir, TirData, TirRef, TirTag};
+use ryo_core::flow::{Analysis, BlockId, Flow, PlaceId, Terminator};
+use ryo_core::tir::{Span, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
 use std::collections::{HashMap, HashSet};
 
-/// Deterministic iteration order for owners: the post passes
-/// push `FreePoint`s while iterating owner-keyed `HashMap`s, whose
-/// iteration order varies per run — sort by a stable key first.
+/// Deterministic iteration order for owners: the post passes push
+/// `DropOp`s while iterating owner-keyed `HashMap`s, whose iteration
+/// order varies per run — sort by the place id (owner identity is the
+/// place).
 pub(crate) fn owner_sort_key(owner: &Owner) -> (u8, u32) {
-    match owner {
-        Owner::Param(name) => (0, name.raw()),
-        Owner::Inst(r) => (1, r.raw()),
-    }
+    (0, owner.0.0)
 }
 
-/// The `Owner` a `strview`-typed binding should point at: through `Var`
-/// copies of other views to the original slice (P3), or the
-/// initializer instruction itself.
-pub(crate) fn resolve_view_alias(own: &Ownership, tir: &Tir, init: TirRef) -> Owner {
-    if let TirData::Var(name) = tir.inst(init).data
-        && let Some(&owner) = own.current_owner.get(&name)
-    {
-        return owner;
-    }
-    Owner::Inst(init)
-}
-
-/// The root owner a `strview`-typed value projects (P3, final spec §3.2):
-/// a `str` base resolves to its underlying owner; a view base resolves
-/// transitively to the original owner. `None` when the view projects
-/// storage this function does not own (a `strview` parameter's buffer
-/// belongs to the caller) — such projections need no freeze or
-/// destruction tracking here.
+/// The root owner a `strview`-typed value projects (P3, final spec §3.2)
+/// — fact-driven (G2): the inst's owner place is its view place (a
+/// slice/conversion) or its read place (a `Var` read, a `ViewAsOwner`
+/// re-borrow); a view place names its BASE place, and a base that is
+/// itself a view resolves through the registration chain. The base's
+/// home yields the seated owner, so reseated bases resolve to the
+/// current buffer exactly like reads do.
 pub(crate) fn projection_root(
     own: &Ownership,
     tir: &Tir,
+    flow: &Flow,
     pool: &InternPool,
     r: TirRef,
 ) -> Option<Owner> {
-    let inst = *tir.inst(r);
-    // P6': a `strview → str` re-borrow is `str`-typed (so the
-    // `needs_tracking` arm below would resolve the conversion inst
-    // itself as a bogus fresh owner), but ownership-wise it IS the
-    // view's borrow, call-scoped — resolve the operand's root.
-    if inst.tag == TirTag::ViewAsOwner
-        && let TirData::UnOp(inner) = inst.data
-    {
-        return projection_root(own, tir, pool, inner);
-    }
-    if needs_tracking(inst.ty, pool) {
-        // A str/bytes field read projects the STRUCT's storage: the
-        // struct binding's drop frees the field buffer, so the root
-        // owner is the struct — not the field-access instruction.
-        if let TirData::FieldAccess { .. } = inst.data
-            && let Some(root) = struct_root(own, tir, r)
-        {
-            return Some(root);
-        }
-        return Some(underlying_owner(own, r));
-    }
-    if !pool.is_view(inst.ty) {
-        return None;
-    }
-    match inst.data {
-        TirData::Var(name) => match own.current_owner.get(&name) {
-            Some(owner @ Owner::Inst(_)) => own.root_owner.get(owner).copied(),
-            _ => None,
-        },
-        TirData::Slice { base, .. } => {
-            // A slice already registered by its binding resolves to the
-            // recorded root; an unbound (transient) slice resolves
-            // through its own base.
-            if let Some(&root) = own.root_owner.get(&Owner::Inst(r)) {
-                return Some(root);
+    // The projection's place: a slice/conversion's VIEW fact, else the
+    // step's READ fact (a `Var` read of a view, a `ViewAsOwner`
+    // re-borrow, a FieldAccess chain root), else the owner place.
+    let step = flow.step_of(r)?;
+    let f = step.facts;
+    let p = f.view.or(f.read).or(own.inst_place[r.index()])?;
+    // Param-rooted projections: a `move` param's buffer is callee-
+    // owned — its projections register, freeze, and defer the exit
+    // free exactly like a local's. A borrowed/inout param's (and a
+    // `strview` param's) buffer belongs to the caller — the projection
+    // resolves to nothing, as before.
+    let param_root = |place: PlaceId| -> Option<Owner> {
+        match flow.place(place) {
+            ryo_core::flow::Place::Param { index, ty, .. } => {
+                // Owner-typed (needs-drop) borrow/move params resolve:
+                // their slices register, freeze, and defer the exit
+                // free exactly like a local's (`move` params defer;
+                // borrowed params promote). Inout params and view
+                // params (caller-owned storage) resolve to nothing.
+                let param = &tir.params[*index as usize];
+                if param.mode != ryo_core::tir::ParamMode::Inout && pool.needs_drop(*ty) {
+                    Some(Owner(place))
+                } else {
+                    None
+                }
             }
-            projection_root(own, tir, pool, base)
+            _ => None,
         }
-        TirData::UnOp(inner) if inst.tag == TirTag::ToView => {
-            projection_root(own, tir, pool, inner)
-        }
-        _ => None,
+    };
+    if let Some(root) = param_root(p) {
+        return Some(root);
     }
+    let start = match flow.place(p) {
+        ryo_core::flow::Place::View { base, .. } => {
+            own.current_owner.get(base).copied().unwrap_or(Owner(*base))
+        }
+        _ => own.current_owner.get(&p).copied().unwrap_or(Owner(p)),
+    };
+    param_root(start.0).or_else(|| {
+        if matches!(flow.place(start.0), ryo_core::flow::Place::Param { .. }) {
+            return None;
+        }
+        Some(own.root_owner.get(&start).copied().unwrap_or(start))
+    })
 }
 
-/// The field path a view slices, mirroring `projection_root`'s walk:
-/// a `FieldAccess` base yields its chain, `Var` copies and reslices
-/// inherit the aliased view's recorded path, everything else has no
-/// field identity (`None` — projections of plain str/bytes bindings).
+/// The field path a view slices. The chain's field indices are TIR
+/// payloads (`field_index` data) — read directly; only the aliasing
+/// `Var` arm resolves through the read fact's place.
 fn projection_field_path(
     own: &Ownership,
     tir: &Tir,
@@ -114,10 +114,13 @@ fn projection_field_path(
         return None;
     }
     match inst.data {
-        TirData::Var(name) => own
-            .current_owner
-            .get(&name)
-            .and_then(|owner| own.projection_fields.get(owner).cloned()),
+        TirData::Var(_) => own
+            .inst_place
+            .get(r.index())
+            .copied()
+            .flatten()
+            .map(|p| own.current_owner.get(&p).copied().unwrap_or(Owner(p)))
+            .and_then(|owner| own.projection_fields.get(&owner).cloned()),
         TirData::Slice { base, .. } => projection_field_path(own, tir, pool, base),
         TirData::UnOp(inner) if inst.tag == TirTag::ToView => {
             projection_field_path(own, tir, pool, inner)
@@ -127,16 +130,16 @@ fn projection_field_path(
 }
 
 /// P3 (final spec §3.2): register `view_owner` as a live projection of
-/// the root owner its initializer resolves to. Idempotent — loop
-/// convergence re-walks and `Var` copies re-register the same view.
+/// the root owner its initializer resolves to. Idempotent.
 pub(crate) fn register_projection(
     own: &mut Ownership,
     tir: &Tir,
+    flow: &Flow,
     pool: &InternPool,
     init: TirRef,
     view_owner: Owner,
 ) {
-    if let Some(root) = projection_root(own, tir, pool, init) {
+    if let Some(root) = projection_root(own, tir, flow, pool, init) {
         own.root_owner.insert(view_owner, root);
         if let Some(path) = projection_field_path(own, tir, pool, init) {
             own.projection_fields.insert(view_owner, path);
@@ -149,7 +152,7 @@ pub(crate) fn register_projection(
 }
 
 /// Remove a view from its root's live set (P4). No-op for views that
-/// were never registered (e.g. projections of non-local storage).
+/// were never registered.
 pub(crate) fn remove_projection(own: &mut Ownership, view: Owner) {
     if let Some(&root) = own.root_owner.get(&view)
         && let Some(projections) = own.live_projections.get_mut(&root)
@@ -158,10 +161,10 @@ pub(crate) fn remove_projection(own: &mut Ownership, view: Owner) {
     }
 }
 
-/// End-of-statement projection death (P4, final spec §3.2). Runs after
-/// a whole statement so a read and a consume within the same statement
-/// both see the view as live (borrow-for-the-whole-statement
-/// semantics, matching Rule 7).
+/// End-of-statement projection death (P4, final spec §3.2) — runs after
+/// a statement root so a read and a consume within the same statement
+/// both see the view as live (borrow-for-the-whole-statement semantics,
+/// matching Rule 7).
 pub(crate) fn drain_dying_views(own: &mut Ownership) {
     for view in std::mem::take(&mut own.pending_dying) {
         remove_projection(own, view);
@@ -169,8 +172,8 @@ pub(crate) fn drain_dying_views(own: &mut Ownership) {
 }
 
 /// P4 (final spec §3.2): projections whose last read is inside this
-/// loop but whose creation is outside it stayed live through the body
-/// (a later iteration re-reads them); they die at the loop's exit.
+/// loop but whose creation is outside it stayed live through the body;
+/// they die at the loop's exit.
 pub(crate) fn remove_loop_deferred_views(own: &mut Ownership, loop_ref: TirRef) {
     let dead: Vec<Owner> = own
         .view_defer_loop
@@ -178,10 +181,12 @@ pub(crate) fn remove_loop_deferred_views(own: &mut Ownership, loop_ref: TirRef) 
         .enumerate()
         .filter_map(|(i, slot)| {
             let &l = slot.as_ref()?;
-            (l == loop_ref).then(|| {
-                let raw = u32::try_from(i).expect("TIR arena index fits u32");
-                Owner::Inst(TirRef::from_raw(raw))
-            })
+            if l != loop_ref {
+                return None;
+            }
+            let raw = u32::try_from(i).expect("TIR arena index fits u32");
+            let r = TirRef::from_raw(raw);
+            Some(Owner(own.inst_place[r.index()].expect("view owner place")))
         })
         .collect();
     for view in dead {
@@ -190,35 +195,29 @@ pub(crate) fn remove_loop_deferred_views(own: &mut Ownership, loop_ref: TirRef) 
 }
 
 /// Branch-merge liveness (P4, final spec §3.2): a view whose last read
-/// is inside this `if`'s subtree has no reads after the join on ANY
-/// path (the last-use map records the final read), so it is dead at
-/// the join even though the union rule in `merge_branches` kept it
-/// live. Views bound inside an arm are scope-dropped with it — their
-/// last read is necessarily inside the branch — but their P5 deferral
-/// on the root survives via `root_owner` (never pruned).
-///
-/// Loop-deferred views (`view_defer_loop`) are exempt: their last read
-/// re-executes on later iterations, so their death is owned by
-/// `remove_loop_deferred_views` at the enclosing loop's exit. Pruning
-/// one here would lift the root's P2 freeze mid-loop-body and silently
-/// accept owner mutations whose realloc a later iteration reads
-/// through the view's stale pointer; conservative over-liveness is the
-/// sound direction.
-pub(crate) fn prune_branch_dead_projections(tir: &Tir, own: &mut Ownership, if_ref: TirRef) {
-    let mut subtree: HashSet<TirRef> = HashSet::new();
-    tir.collect_reachable(if_ref, &mut subtree);
+/// is inside this branch construct (block membership) has no reads
+/// after the join on ANY path, so it is dead at the join even though
+/// the union rule in `merge_branches` kept it live. Loop-deferred views
+/// are exempt (their death is owned by the enclosing loop's exit).
+pub(crate) fn prune_branch_dead_projections(
+    own: &mut Ownership,
+    flow: &Flow,
+    blocks: &HashSet<BlockId>,
+) {
+    // (flow names the places' blocks; kept in the signature.)
     let dead: Vec<Owner> = own
         .root_owner
         .keys()
         .filter(|view| {
-            let Some(vi) = view.inst_tirref() else {
+            let Some(vi) = view.inst_tirref(flow) else {
                 return false;
             };
             // P2/P4: loop-deferred views die at loop exit, not here.
             if Ownership::dense_get(&own.view_defer_loop, vi).is_some() {
                 return false;
             }
-            Ownership::dense_get(&own.view_last_use, vi).is_some_and(|lu| subtree.contains(&lu))
+            Ownership::dense_get(&own.view_last_use, vi)
+                .is_some_and(|lu| flow.step_block_of(lu).is_some_and(|b| blocks.contains(&b)))
         })
         .copied()
         .collect();
@@ -229,15 +228,15 @@ pub(crate) fn prune_branch_dead_projections(tir: &Tir, own: &mut Ownership, if_r
 
 /// P2 freeze (final spec §3.2): while any slice projection of an owner
 /// is live, moving or mutating the owner is a compile error. `verb` is
-/// "move" (consume sites) or "mutate" (`inout` args, reassignment).
-/// The diagnostic points at the consume site with a note at the
-/// projection's last use (post-liveness, §3.5.3); a projection that is
-/// never read notes its creation instead. Suppressed when the owner is
-/// already `Moved` (E0020 covers it) or, for "move", when it is
-/// `Borrowed` (E0021/E0022 cover it).
+/// "move" (consume sites) or "mutate" (`inout` args, reassignment). The
+/// diagnostic points at the consume site with a note at the projection's
+/// last use; a projection that is never read notes its creation.
+/// Suppressed when the owner is already `Moved` (E0020 covers it) or,
+/// for "move", when it is `Borrowed` (E0021/E0022 cover it).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_source_projected(
     tir: &Tir,
+    flow: &Flow,
     pool: &InternPool,
     own: &Ownership,
     sink: &mut DiagSink,
@@ -260,7 +259,7 @@ pub(crate) fn check_source_projected(
     }
     // Registration order is walk order, so projections[0] is a
     // deterministic choice for the note's span.
-    let (note_span, note_msg) = match projections[0].inst_tirref() {
+    let (note_span, note_msg) = match projections[0].inst_tirref(flow) {
         Some(vi) => match Ownership::dense_get(&own.view_last_use, vi) {
             Some(lu) => (tir.span(lu), "last slice use here"),
             None => (tir.span(vi), "slice created here"),
@@ -285,13 +284,11 @@ pub(crate) fn check_source_projected(
 
 /// FieldAssign-target freeze: `p.f = v` frees the old buffer of field
 /// `f` only, so it threatens exactly the live projections whose field
-/// path lies at or below `target_path` — sibling fields' buffers are
-/// untouched and must not trip the freeze. A projection with no
-/// recorded field path cannot prove it is a sibling, so it counts as
-/// threatened (conservative).
+/// path lies at or below `target_path`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_field_target_projected(
     tir: &Tir,
+    flow: &Flow,
     pool: &InternPool,
     own: &Ownership,
     sink: &mut DiagSink,
@@ -317,7 +314,7 @@ pub(crate) fn check_field_target_projected(
     let Some(first) = threatened.first() else {
         return;
     };
-    let (note_span, note_msg) = match first.inst_tirref() {
+    let (note_span, note_msg) = match first.inst_tirref(flow) {
         Some(vi) => match Ownership::dense_get(&own.view_last_use, vi) {
             Some(lu) => (tir.span(lu), "last slice use here"),
             None => (tir.span(vi), "slice created here"),
@@ -340,30 +337,26 @@ pub(crate) fn check_field_target_projected(
     );
 }
 
-/// Pre-walk liveness for bound views (P4, final spec §3.2). See
-/// [`collect_view_liveness`]. `last_use` / `defer_to_loop` are dense
+/// Pre-walk liveness for bound views (P4, final spec §3.2). See the
+/// module header. `last_use` / `defer_to_loop` are dense
 /// per-instruction tables sized to `tir.instructions.len()` (slot 0,
 /// the reserved sentinel, stays empty) — the walk writes them into
 /// `Ownership` wholesale.
 pub(crate) struct ViewLiveness {
     /// Bound view instruction → its last reading instruction.
     pub(crate) last_use: Vec<Option<TirRef>>,
-    /// View instruction → the loop at whose exit the projection dies
-    /// (its last read sits inside a loop the creation is outside of).
+    /// View instruction → the loop at whose exit the projection dies.
     pub(crate) defer_to_loop: Vec<Option<TirRef>>,
-    /// Per-`if` arm-local reads (P4 per-arm refinement): if stmt →
-    /// per-arm (view instruction → its last read within that arm's
-    /// subtree), in walk order [then, elif..., else]. Consulted by
-    /// `analyze_if_stmt` to refine `view_last_use` during arm walks.
-    pub(crate) arm_last_reads: HashMap<TirRef, Vec<HashMap<TirRef, TirRef>>>,
+    /// Per-arm view reads keyed by the arm's Flow IR entry block:
+    /// `Present` arms override/kill during the per-arm refinement; a
+    /// missing/`Unavailable` entry never refines.
+    pub(crate) arm_last_reads: HashMap<BlockId, Analysis<HashMap<TirRef, TirRef>>>,
 }
 
 /// View-binding tracker for the liveness pre-walk: a `StringId → TirRef`
 /// map plus an undo log, so branch arms and loop bodies restore the
 /// pre-branch state by replaying the log instead of cloning the whole
-/// map per arm. Each log entry is (mutated name, pre-mutation value,
-/// post-mutation value on inserts): the pre-mutation value drives
-/// rollback, the post-mutation value builds each arm's write set.
+/// map per arm.
 #[derive(Default)]
 pub(crate) struct Bindings {
     map: HashMap<StringId, TirRef>,
@@ -385,10 +378,7 @@ impl Bindings {
         self.log.len()
     }
 
-    /// Restore the map to `mark` and return the segment's write set:
-    /// last write per name, with a later removal dropping the name
-    /// (matching the old full-map merge, where a name removed inside
-    /// an arm is absent from that arm's map).
+    /// Restore the map to `mark` and return the segment's write set.
     fn rollback(&mut self, mark: usize) -> HashMap<StringId, TirRef> {
         let mut writes: HashMap<StringId, TirRef> = HashMap::new();
         for &(k, _, new) in &self.log[mark..] {
@@ -416,37 +406,37 @@ impl Bindings {
     }
 }
 
-/// Simulates the walk's `current_owner` discipline for `strview`-typed
-/// bindings only (snapshot per branch arm, first-wins merge;
-/// entry-first-wins at loop back-edges) and records each bound view's
-/// last read. Runs before the forward walk so the walk knows when it
-/// passes a projection's last use. A read inside a loop that does not
-/// contain the view's creation re-executes on later iterations, so
-/// the projection's death is deferred to that loop's exit.
+/// The liveness pre-pass driver: walks Flow blocks like the ownership
+/// walk (open id-ordered driver + construct dispatch), recording view
+/// reads and per-arm read maps. Runs before the forward walk.
 pub(crate) fn collect_view_liveness(
     tir: &Tir,
+    flow: &Flow,
     pool: &InternPool,
     nesting: &LoopNesting,
 ) -> ViewLiveness {
-    let mut bindings = Bindings::default();
+    let mut lw = LivenessWalk {
+        bindings: Bindings::default(),
+        arm_last_reads: HashMap::new(),
+        processed: vec![false; flow.blocks.len()],
+        epoch: vec![0; flow.blocks.len()],
+        epoch_next: 0,
+        region_scratch: Vec::new(),
+    };
     let mut last_use: HashMap<TirRef, TirRef> = HashMap::new();
-    let mut arm_last_reads: HashMap<TirRef, Vec<HashMap<TirRef, TirRef>>> = HashMap::new();
-    let body = tir.body_stmts();
-    view_liveness_stmts(
-        tir,
-        pool,
-        &body,
-        &mut bindings,
-        &mut last_use,
-        &mut arm_last_reads,
-    );
+    let epoch = lw.next_epoch();
+    for b in flow.forward_order() {
+        if lw.processed[b.0 as usize] {
+            continue;
+        }
+        lw.walk_open(tir, flow, pool, b, epoch, &mut last_use);
+    }
     let mut defer_to_loop = vec![None; tir.instructions.len()];
     for (view, read) in &last_use {
         let created_depth = nesting.depth_of(*view);
         let read_depth = nesting.depth_of(*read);
         // Scope rules guarantee the creation's nesting chain is a
-        // prefix of the read's (a view's reads cannot escape its
-        // binding's scope). A strictly deeper read re-executes on
+        // prefix of the read's. A strictly deeper read re-executes on
         // later iterations of the first loop beyond the creation's
         // nesting — the enclosing loop whose own depth is
         // `created_depth`.
@@ -461,43 +451,141 @@ pub(crate) fn collect_view_liveness(
     ViewLiveness {
         last_use: last_use_dense,
         defer_to_loop,
-        arm_last_reads,
+        arm_last_reads: lw.arm_last_reads,
     }
 }
 
-pub(crate) fn view_liveness_stmts(
-    tir: &Tir,
-    pool: &InternPool,
-    stmts: &[TirRef],
-    bindings: &mut Bindings,
-    last_use: &mut HashMap<TirRef, TirRef>,
-    arm_last_reads: &mut HashMap<TirRef, Vec<HashMap<TirRef, TirRef>>>,
-) {
-    for &s in stmts {
-        view_liveness_stmt(tir, pool, s, bindings, last_use, arm_last_reads);
+/// State for the liveness pre-pass (the walk's `Bindings` plus visit
+/// marks). A separate lightweight driver from `Walk` — no lattice, no
+/// diagnostics.
+struct LivenessWalk {
+    bindings: Bindings,
+    arm_last_reads: HashMap<BlockId, Analysis<HashMap<TirRef, TirRef>>>,
+    processed: Vec<bool>,
+    epoch: Vec<u32>,
+    epoch_next: u32,
+    region_scratch: Vec<bool>,
+}
+
+impl LivenessWalk {
+    fn next_epoch(&mut self) -> u32 {
+        self.epoch_next += 1;
+        self.epoch_next
+    }
+
+    /// Open-ended id-ordered walk (the driver): DFS preorder following
+    /// continuations, like `Walk::walk_region`.
+    fn walk_open(
+        &mut self,
+        tir: &Tir,
+        flow: &Flow,
+        pool: &InternPool,
+        entry: BlockId,
+        epoch: u32,
+        reads: &mut HashMap<TirRef, TirRef>,
+    ) {
+        let mut stack = vec![entry];
+        while let Some(b) = stack.pop() {
+            if self.processed[b.0 as usize] || self.epoch[b.0 as usize] == epoch {
+                continue;
+            }
+            self.epoch[b.0 as usize] = epoch;
+            self.processed[b.0 as usize] = true;
+            let conts = self.visit_block(tir, flow, pool, b, epoch, reads);
+            for c in conts.into_iter().flatten().rev() {
+                stack.push(c);
+            }
+        }
+    }
+
+    /// Bounded region walk: exactly `list`, continuations ignored
+    /// (every reachable block is a list member).
+    fn walk_list(
+        &mut self,
+        tir: &Tir,
+        flow: &Flow,
+        pool: &InternPool,
+        list: &[BlockId],
+        epoch: u32,
+        reads: &mut HashMap<TirRef, TirRef>,
+    ) {
+        for &b in list {
+            if self.epoch[b.0 as usize] == epoch {
+                continue;
+            }
+            self.epoch[b.0 as usize] = epoch;
+            self.processed[b.0 as usize] = true;
+            let _ = self.visit_block(tir, flow, pool, b, epoch, reads);
+        }
+    }
+
+    /// Steps + terminator dispatch for one block.
+    fn visit_block(
+        &mut self,
+        tir: &Tir,
+        flow: &Flow,
+        pool: &InternPool,
+        b: BlockId,
+        epoch: u32,
+        reads: &mut HashMap<TirRef, TirRef>,
+    ) -> [Option<BlockId>; 2] {
+        for step in flow.block_steps(b) {
+            liveness_step(tir, flow, pool, step.inst, &mut self.bindings, reads);
+        }
+        match *flow.term(b) {
+            Terminator::Goto { target } => [Some(target), None],
+            Terminator::Branch { then_, else_, .. } => match flow.branch_if(b) {
+                Some(if_inst) => [
+                    liveness_if(self, tir, flow, pool, b, if_inst, epoch, reads),
+                    None,
+                ],
+                None => [Some(then_), Some(else_)],
+            },
+            Terminator::Switch { match_inst, .. } => [
+                liveness_match(self, tir, flow, pool, b, match_inst, epoch, reads),
+                None,
+            ],
+            Terminator::While { .. } | Terminator::For { .. } => {
+                [liveness_loop(self, tir, flow, pool, b, epoch, reads), None]
+            }
+            _ => [None, None],
+        }
     }
 }
 
-pub(crate) fn view_liveness_stmt(
+/// One pre-pass step: record a view-typed `Var` read against the view
+/// it aliases, then apply view-binding updates at declaration steps
+/// (the initializer/value steps ran earlier — block iteration order).
+fn liveness_step(
     tir: &Tir,
+    flow: &Flow,
     pool: &InternPool,
     r: TirRef,
     bindings: &mut Bindings,
-    last_use: &mut HashMap<TirRef, TirRef>,
-    arm_last_reads: &mut HashMap<TirRef, Vec<HashMap<TirRef, TirRef>>>,
+    reads: &mut HashMap<TirRef, TirRef>,
 ) {
-    match tir.inst(r).tag {
+    let inst = *tir.inst(r);
+    if inst.tag == TirTag::Var
+        && pool.is_view(inst.ty)
+        && let TirData::Var(name) = inst.data
+        && let Some(&view_inst) = bindings.map.get(&name)
+    {
+        // Latest DOCUMENT-order read wins — emission order, not visit
+        // order: dead continuation blocks walk late but emitted in
+        // place, and must not displace a live last use.
+        let order = flow.order_of(r).unwrap_or(0);
+        let later = match reads.get(&view_inst) {
+            Some(&cur) => flow.order_of(cur).unwrap_or(0) < order,
+            None => true,
+        };
+        if later {
+            reads.insert(view_inst, r);
+        }
+    }
+    match inst.tag {
         TirTag::VarDecl => {
             let view = tir.var_decl_view(r);
-            record_view_reads(
-                tir,
-                pool,
-                view.initializer,
-                bindings,
-                last_use,
-                arm_last_reads,
-            );
-            if pool.is_view(tir.inst(r).ty)
+            if pool.is_view(inst.ty)
                 && let Some(target) = view_binding_target(tir, &bindings.map, view.initializer)
             {
                 bindings.insert(view.name, target);
@@ -505,8 +593,7 @@ pub(crate) fn view_liveness_stmt(
         }
         TirTag::Assign => {
             let view = tir.assign_view(r);
-            record_view_reads(tir, pool, view.value, bindings, last_use, arm_last_reads);
-            if pool.is_view(tir.inst(r).ty) {
+            if pool.is_view(inst.ty) {
                 match view_binding_target(tir, &bindings.map, view.value) {
                     Some(target) => {
                         bindings.insert(view.name, target);
@@ -517,233 +604,209 @@ pub(crate) fn view_liveness_stmt(
                 }
             }
         }
-        TirTag::IfStmt => {
-            let view = tir.if_stmt_view(r);
-            record_view_reads(tir, pool, view.cond, bindings, last_use, arm_last_reads);
-            // Mark/rollback replaces the old per-arm `pre.clone()`
-            // snapshots: each arm's writes fold into a small write set,
-            // merged first-wins in arm order. Removals never propagate
-            // past the join, matching the old full-map merge (a name
-            // absent from an arm's map left `merged`'s entry alone).
-            let mark = bindings.mark();
-            let arm_count = 1 + view.elif_branches.len() + usize::from(view.else_stmts.is_some());
-            let mut arm_maps: Vec<HashMap<StringId, TirRef>> = Vec::with_capacity(arm_count);
-            let mut arm_reads: Vec<HashMap<TirRef, TirRef>> = Vec::with_capacity(arm_count);
-            let mut then_reads = HashMap::new();
-            view_liveness_stmts(
-                tir,
-                pool,
-                &view.then_stmts,
-                bindings,
-                &mut then_reads,
-                arm_last_reads,
-            );
-            for (k, v) in &then_reads {
-                last_use.insert(*k, *v);
-            }
-            arm_reads.push(then_reads);
-            arm_maps.push(bindings.rollback(mark));
-            for elif in &view.elif_branches {
-                record_view_reads(tir, pool, elif.cond, bindings, last_use, arm_last_reads);
-                let mut body_reads = HashMap::new();
-                view_liveness_stmts(
-                    tir,
-                    pool,
-                    &elif.body,
-                    bindings,
-                    &mut body_reads,
-                    arm_last_reads,
-                );
-                for (k, v) in &body_reads {
-                    last_use.insert(*k, *v);
-                }
-                arm_reads.push(body_reads);
-                arm_maps.push(bindings.rollback(mark));
-            }
-            if let Some(else_stmts) = &view.else_stmts {
-                let mut else_reads = HashMap::new();
-                view_liveness_stmts(
-                    tir,
-                    pool,
-                    else_stmts,
-                    bindings,
-                    &mut else_reads,
-                    arm_last_reads,
-                );
-                for (k, v) in &else_reads {
-                    last_use.insert(*k, *v);
-                }
-                arm_reads.push(else_reads);
-                arm_maps.push(bindings.rollback(mark));
-            }
-            arm_last_reads.insert(r, arm_reads);
-            // First-wins merge in arm order; `bindings` is already
-            // rolled back to the pre-if state.
-            for arm_writes in arm_maps {
-                for (k, v) in arm_writes {
-                    // Logged insert (not map.entry): an enclosing arm's
-                    // rollback must undo this merge and pick the name up
-                    // in its write set.
-                    if !bindings.map.contains_key(&k) {
-                        bindings.insert(k, v);
-                    }
-                }
-            }
-        }
-        TirTag::WhileLoop => {
-            let view = tir.while_loop_view(r);
-            record_view_reads(tir, pool, view.cond, bindings, last_use, arm_last_reads);
-            view_liveness_loop_body(tir, pool, &view.body, bindings, last_use, arm_last_reads);
-        }
-        TirTag::ForRange => {
-            let view = tir.for_range_view(r);
-            record_view_reads(tir, pool, view.start, bindings, last_use, arm_last_reads);
-            record_view_reads(tir, pool, view.end, bindings, last_use, arm_last_reads);
-            view_liveness_loop_body(tir, pool, &view.body, bindings, last_use, arm_last_reads);
-        }
-        // M12 match: statement-level matches are ExprStmt-wrapped (sema's
-        // convention — see sema/tests_match.rs), so the arm-scoped
-        // liveness dispatches on the OPERAND. A bare Match statement
-        // (future producers) takes the direct arm.
-        TirTag::ExprStmt => {
-            let TirData::UnOp(o) = tir.inst(r).data else {
-                unreachable!("ExprStmt must carry TirData::UnOp");
-            };
-            if tir.inst(o).tag == TirTag::Match {
-                view_liveness_match(tir, pool, o, bindings, last_use, arm_last_reads);
-            } else {
-                record_view_reads(tir, pool, r, bindings, last_use, arm_last_reads);
-            }
-        }
-        TirTag::Match => {
-            view_liveness_match(tir, pool, r, bindings, last_use, arm_last_reads);
-        }
-        _ => record_view_reads(tir, pool, r, bindings, last_use, arm_last_reads),
+        _ => {}
     }
 }
 
-/// M12 match: the same mark/rollback arm discipline as the if — the
-/// scrutinee is shared flow (recorded against the enclosing bindings,
-/// like an if condition); each arm's view bindings are arm-scoped and
-/// rolled back, and the per-arm read maps feed `if_arm_last_reads` so
-/// `refine_view_liveness_for_arm` resolves arm-local last uses during
-/// the walk (and reads of an arm-local view no longer misresolve to a
-/// same-named OUTER view, which stamped the outer projection with an
-/// in-arm last use and false-froze the root after the match).
-fn view_liveness_match(
+/// If-cascade liveness: the mark/rollback arm discipline of the old
+/// `view_liveness_stmt`, keyed by Flow IR arm blocks. Each arm's reads
+/// become a `Present` entry keyed by the arm's entry block; the cond
+/// chains between arms record against the enclosing scope.
+#[allow(clippy::too_many_arguments)]
+fn liveness_if(
+    lw: &mut LivenessWalk,
     tir: &Tir,
+    flow: &Flow,
     pool: &InternPool,
-    r: TirRef,
-    bindings: &mut Bindings,
-    last_use: &mut HashMap<TirRef, TirRef>,
-    arm_last_reads: &mut HashMap<TirRef, Vec<HashMap<TirRef, TirRef>>>,
-) {
-    let view = tir.match_view(r);
-    record_view_reads(
-        tir,
-        pool,
-        view.scrutinee,
-        bindings,
-        last_use,
-        arm_last_reads,
-    );
-    let mark = bindings.mark();
-    let arm_count = view.len();
-    let mut arm_maps: Vec<HashMap<StringId, TirRef>> = Vec::with_capacity(arm_count);
-    let mut arm_reads: Vec<HashMap<TirRef, TirRef>> = Vec::with_capacity(arm_count);
-    for arm in view.arms() {
-        let mut body_reads = HashMap::new();
-        match arm.body {
-            // Statement arm: walk the body like an if arm.
-            MatchBodyView::Stmts(_) => {
-                let body: Vec<TirRef> = arm.body.stmts().collect();
-                view_liveness_stmts(tir, pool, &body, bindings, &mut body_reads, arm_last_reads);
-            }
-            // Expression arm: no statements to walk — record the body
-            // expr's view reads against the arm scope directly. A
-            // nested match in the expr routes to the scoped walk inside
-            // `record_view_reads` like any other expression position.
-            MatchBodyView::Expr(e) => {
-                record_view_reads(tir, pool, e, bindings, &mut body_reads, arm_last_reads);
-            }
-        }
-        for (k, v) in &body_reads {
-            last_use.insert(*k, *v);
-        }
-        arm_reads.push(body_reads);
-        arm_maps.push(bindings.rollback(mark));
+    fb: BlockId,
+    if_inst: TirRef,
+    epoch: u32,
+    reads: &mut HashMap<TirRef, TirRef>,
+) -> Option<BlockId> {
+    let view = tir.if_stmt_view(if_inst);
+    let arms = flow.branch_arm_blocks(if_inst);
+    let join = arms.join;
+    let mut arm_entries: Vec<BlockId> = Vec::with_capacity(2 + view.elif_branches.len());
+    arm_entries.push(arms.then_block);
+    for &holder in &arms.elif_blocks {
+        let Terminator::Branch { then_, .. } = *flow.term(holder) else {
+            unreachable!("recorded elif block holds a Branch")
+        };
+        arm_entries.push(then_);
     }
-    arm_last_reads.insert(r, arm_reads);
+    arm_entries.push(arms.else_block);
+    let arm_regions: Vec<Vec<BlockId>> = arm_entries
+        .iter()
+        .map(|&entry| {
+            collect_region(flow, &mut lw.region_scratch, entry, |b| {
+                super::RegionStop::At(join).kind(b)
+            })
+            .0
+        })
+        .collect();
+
+    let mark = lw.bindings.mark();
+    let mut arm_maps: Vec<HashMap<StringId, TirRef>> = Vec::new();
+    // Then arm.
+    let mut then_reads = HashMap::new();
+    lw.walk_list(tir, flow, pool, &arm_regions[0], epoch, &mut then_reads);
+    for (k, v) in &then_reads {
+        reads.insert(*k, *v);
+    }
+    lw.arm_last_reads
+        .insert(arm_entries[0], Analysis::Present(then_reads));
+    arm_maps.push(lw.bindings.rollback(mark));
+    // Elif arms: cond chain first (enclosing scope), then the body.
+    let Terminator::Branch { else_, .. } = *flow.term(fb) else {
+        unreachable!("cascade entry block holds a Branch")
+    };
+    let mut prev_else = else_;
+    for e in 0..view.elif_branches.len() {
+        let holder = arms.elif_blocks[e];
+        let (chain, _) = collect_region(flow, &mut lw.region_scratch, prev_else, |b| {
+            super::RegionStop::Through(holder).kind(b)
+        });
+        lw.walk_list(tir, flow, pool, &chain, epoch, reads);
+        let mut body_reads = HashMap::new();
+        lw.walk_list(tir, flow, pool, &arm_regions[1 + e], epoch, &mut body_reads);
+        for (k, v) in &body_reads {
+            reads.insert(*k, *v);
+        }
+        lw.arm_last_reads
+            .insert(arm_entries[1 + e], Analysis::Present(body_reads));
+        arm_maps.push(lw.bindings.rollback(mark));
+        let Terminator::Branch { else_, .. } = *flow.term(holder) else {
+            unreachable!("recorded elif block holds a Branch")
+        };
+        prev_else = else_;
+    }
+    // Else arm — walked uniformly; for an else-less if the region is
+    // the empty synthetic fallthrough, whose (absent) reads simply fold.
+    let last = arm_regions.len() - 1;
+    let mut else_reads = HashMap::new();
+    lw.walk_list(tir, flow, pool, &arm_regions[last], epoch, &mut else_reads);
+    for (k, v) in &else_reads {
+        reads.insert(*k, *v);
+    }
+    if view.else_stmts.is_some() {
+        lw.arm_last_reads
+            .insert(arm_entries[last], Analysis::Present(else_reads));
+    }
+    arm_maps.push(lw.bindings.rollback(mark));
     // First-wins merge in arm order; `bindings` is already rolled back
-    // to the pre-match state.
+    // to the pre-if state.
     for arm_writes in arm_maps {
         for (k, v) in arm_writes {
-            if !bindings.map.contains_key(&k) {
-                bindings.insert(k, v);
+            if !lw.bindings.map.contains_key(&k) {
+                lw.bindings.insert(k, v);
             }
         }
     }
+    Some(join)
 }
 
-/// Loop-body liveness with entry-first-wins at the back-edge (one pass
-/// suffices: `last_use` records are monotone).
-pub(crate) fn view_liveness_loop_body(
+/// Match liveness: the same mark/rollback arm discipline; the
+/// scrutinee's steps already ran against the enclosing scope (like an
+/// if condition). Statement and value positions are the same Switch.
+#[allow(clippy::too_many_arguments)]
+fn liveness_match(
+    lw: &mut LivenessWalk,
     tir: &Tir,
+    flow: &Flow,
     pool: &InternPool,
-    body: &[TirRef],
-    bindings: &mut Bindings,
-    last_use: &mut HashMap<TirRef, TirRef>,
-    arm_last_reads: &mut HashMap<TirRef, Vec<HashMap<TirRef, TirRef>>>,
-) {
-    let mark = bindings.mark();
-    view_liveness_stmts(tir, pool, body, bindings, last_use, arm_last_reads);
-    let writes = bindings.rollback(mark);
-    for (k, v) in writes {
-        // Logged insert (not map.entry): an enclosing arm's rollback must
-        // undo this merge and pick the name up in its write set.
-        if !bindings.map.contains_key(&k) {
-            bindings.insert(k, v);
+    sw: BlockId,
+    match_inst: TirRef,
+    epoch: u32,
+    reads: &mut HashMap<TirRef, TirRef>,
+) -> Option<BlockId> {
+    let view = tir.match_view(match_inst);
+    let Terminator::Switch {
+        arms: rng, join, ..
+    } = *flow.term(sw)
+    else {
+        unreachable!("match is a switch")
+    };
+    let arm_blocks: Vec<BlockId> = rng.as_range().map(|i| BlockId(flow.extra[i])).collect();
+    let stop = match join {
+        Some(j) => super::RegionStop::At(j),
+        None => super::RegionStop::At(BlockId::NONE),
+    };
+    let mark = lw.bindings.mark();
+    let mut arm_maps: Vec<HashMap<StringId, TirRef>> = Vec::with_capacity(arm_blocks.len());
+    for (i, _arm) in view.arms().enumerate() {
+        let (region, _) = collect_region(flow, &mut lw.region_scratch, arm_blocks[i], |b| {
+            stop.kind(b)
+        });
+        let mut body_reads = HashMap::new();
+        lw.walk_list(tir, flow, pool, &region, epoch, &mut body_reads);
+        for (k, v) in &body_reads {
+            reads.insert(*k, *v);
+        }
+        lw.arm_last_reads
+            .insert(arm_blocks[i], Analysis::Present(body_reads));
+        arm_maps.push(lw.bindings.rollback(mark));
+    }
+    for arm_writes in arm_maps {
+        for (k, v) in arm_writes {
+            if !lw.bindings.map.contains_key(&k) {
+                lw.bindings.insert(k, v);
+            }
         }
     }
+    join
 }
 
-/// Record every `strview`-typed `Var` read within expression `r` as the
-/// (latest) last use of the view it currently aliases. Overwriting
-/// insert: the latest forward-order read wins. A `Match` anywhere in
-/// expression position routes to the scoped arm walk (the same
-/// treatment statement-level matches get from the dispatch below): the
-/// flat fallback recorded arm reads against the enclosing scope only,
-/// leaving the match's per-arm read maps empty, and arm refinement then
-/// read "no reads in this arm" and removed the projection for the
-/// arm's duration — an arm-body owner mutation freed storage a
-/// sibling-arm read still used.
-pub(crate) fn record_view_reads(
+/// Loop liveness: the header (condition) steps record against the
+/// enclosing scope once; the body walks with entry-first-wins at the
+/// back-edge (one pass suffices: `last_use` records are monotone).
+fn liveness_loop(
+    lw: &mut LivenessWalk,
     tir: &Tir,
+    flow: &Flow,
     pool: &InternPool,
-    r: TirRef,
-    bindings: &mut Bindings,
-    last_use: &mut HashMap<TirRef, TirRef>,
-    arm_last_reads: &mut HashMap<TirRef, Vec<HashMap<TirRef, TirRef>>>,
-) {
-    if tir.inst(r).tag == TirTag::Match {
-        view_liveness_match(tir, pool, r, bindings, last_use, arm_last_reads);
-        return;
-    }
-    let inst = *tir.inst(r);
-    if inst.tag == TirTag::Var
-        && pool.is_view(inst.ty)
-        && let TirData::Var(name) = inst.data
-        && let Some(&view_inst) = bindings.map.get(&name)
-    {
-        last_use.insert(view_inst, r);
-    }
-    tir.walk_operands(r, &mut |_parent, child, _kind| {
-        record_view_reads(tir, pool, child, bindings, last_use, arm_last_reads);
+    ph: BlockId,
+    epoch: u32,
+    reads: &mut HashMap<TirRef, TirRef>,
+) -> Option<BlockId> {
+    let (loop_inst, header) = match *flow.term(ph) {
+        Terminator::While { loop_inst, header } | Terminator::For { loop_inst, header } => {
+            (loop_inst, header)
+        }
+        _ => unreachable!("liveness_loop at a non-loop terminator"),
+    };
+    let test_block = super::loop_test_block(flow, loop_inst, header);
+    let (body, exit) = match *flow.term(test_block) {
+        Terminator::WhileTest { body, exit, .. } | Terminator::ForTest { body, exit, .. } => {
+            (body, exit)
+        }
+        _ => unreachable!("loop test block holds the test"),
+    };
+    // Condition region (header + any complex-cond cascade, ending at
+    // the test block): recorded once against the enclosing scope.
+    let (cond_region, _) = collect_region(flow, &mut lw.region_scratch, header, |b| {
+        super::RegionStop::Through(test_block).kind(b)
     });
+    lw.walk_list(tir, flow, pool, &cond_region, epoch, reads);
+    let (region, _) = collect_region(flow, &mut lw.region_scratch, body, |b| {
+        if b == exit || b == test_block {
+            StopKind::Skip
+        } else {
+            StopKind::Visit
+        }
+    });
+    let mark = lw.bindings.mark();
+    lw.walk_list(tir, flow, pool, &region, epoch, reads);
+    let writes = lw.bindings.rollback(mark);
+    for (k, v) in writes {
+        if !lw.bindings.map.contains_key(&k) {
+            lw.bindings.insert(k, v);
+        }
+    }
+    Some(exit)
 }
 
-/// The view instruction a `strview`-typed binding aliases: through `Var`
-/// copies to the original slice (P3), or the initializer itself.
+/// The view instruction a `strview`-typed binding aliases: through
+/// `Var` copies to the original slice (P3), or the initializer itself.
 /// `None` for views of non-local storage (e.g. a `strview` parameter).
 pub(crate) fn view_binding_target(
     tir: &Tir,
@@ -760,62 +823,40 @@ pub(crate) fn view_binding_target(
     }
 }
 
-/// Per-arm freeze refinement (P2/P4, final spec §3.2): during an
-/// if-arm walk, a view's last use for freeze purposes is its last
-/// read on the path THROUGH this arm, not the global max over all
-/// arms. Applied before an arm body walks; two cases:
+/// Per-arm freeze refinement (P2/P4, final spec §3.2): during an arm
+/// walk, a view's last use for freeze purposes is its last read on the
+/// path THROUGH this arm, not the global max over all arms. Applied
+/// before an arm body walks; two cases:
 ///
-/// * Override: a view read in this arm whose global last use lies in
-///   a DIFFERENT arm of this if dies at its arm-local last read. The
-///   replaced entries are returned for `restore_view_last_use` (the
-///   walk-constant map must be whole again before the next arm and
-///   before the join-time prune).
-/// * Kill: a view whose every remaining read lies in OTHER arms of
-///   this if (global last use inside the if's subtree, none in this
-///   arm's) is already dead on this arm's path — its projection is
-///   removed for the duration of the arm walk. `analyze_if_stmt`'s
-///   per-arm snapshot/restore of `live_projections` scopes the
-///   removal to this arm.
+/// * Override: a view read in this arm whose global last use lies in a
+///   DIFFERENT arm of this construct (block membership: the global
+///   last-use step's block is inside the construct's blocks but outside
+///   this arm's) dies at its arm-local last read. The replaced entries
+///   are returned for `restore_view_last_use`.
+/// * Kill: a view whose every remaining read lies in OTHER arms is
+///   already dead on this arm's path — its projection is removed for
+///   the duration of the arm walk.
 ///
-/// Both cases skip loop-deferred views (`view_defer_loop`): a later
-/// iteration re-reads them through the back-edge, so they are live on
-/// every arm's path regardless of this arm's reads. The deferral table
-/// is computed from the GLOBAL max read only, so the override applies
-/// the same deferral test per candidate: an arm-local last read inside
-/// a loop the creation is outside of (`created_in < read_in`, the
-/// pre-pass's condition) blocks the override — installing it would let
-/// the death site drain the projection mid-loop and un-freeze a later
-/// owner mutation in the same body. (Skipped, the view stays live to
-/// the join: conservative.) The kill needs no such per-candidate test:
-/// it fires only when the arm has NO reads in its subtree, so there is
-/// no deeper arm-local read to strand; a deeper read in a SIBLING arm
-/// is itself a global-max read the pre-pass deferral already covers.
-/// Neither case applies when the global last use is OUTSIDE the if's
-/// subtree — a post-join read lies on every path and keeps the view
-/// live in every arm.
+/// Both cases skip loop-deferred views (`view_defer_loop`); the
+/// per-candidate deferral test re-applies the pre-pass's
+/// `created_depth < read_depth` rule to the arm-local read. Neither
+/// case applies when the global last use is OUTSIDE the construct's
+/// blocks — a post-join read lies on every path and keeps the view live
+/// in every arm.
 ///
-/// Missing analysis information never refines: no `if_arm_last_reads`
-/// entry for the construct, or no map for `arm_index`, leaves every
-/// projection in place (conservative over-liveness; a spurious E0035 is
-/// recoverable, a killed projection that hides a real freeze violation
-/// is not). Every match routes through `view_liveness_match`
-/// (`record_view_reads` dispatches on the tag at any operand depth), so
-/// the maps are complete for both ifs and matches in any position.
+/// The analysis is [`Analysis`] tri-state: a missing/`Unavailable`
+/// per-arm entry refines nothing (conservative over-liveness; a killed
+/// projection that hides a real freeze violation is the unrecoverable
+/// direction).
 pub(crate) fn refine_view_liveness_for_arm(
     own: &mut Ownership,
-    if_ref: TirRef,
-    arm_index: usize,
-    if_subtree: &HashSet<TirRef>,
-    arm_subtree: &HashSet<TirRef>,
+    flow: &Flow,
+    branch_blocks: &HashSet<BlockId>,
+    arm_blocks: &HashSet<BlockId>,
+    analysis: Option<&Analysis<HashMap<TirRef, TirRef>>>,
 ) -> Vec<(TirRef, TirRef)> {
-    // Missing analysis information must preserve a live projection. No
-    // entry for this branch construct (the liveness pre-pass never
-    // scoped it) or no map for this arm index (an arm-count mismatch)
-    // refines nothing: the kill branch below frees nothing, but the
-    // projection it removes is what freeze checks consult — removing
-    // it on a guess is the unrecoverable direction (an arm-body owner
-    // mutation slips past E0035 and frees storage a sibling read uses).
-    let Some(arm_maps) = own.if_arm_last_reads.get(&if_ref) else {
+    // Missing analysis information must preserve a live projection.
+    let Some(Analysis::Present(reads)) = analysis else {
         return Vec::new();
     };
     let actions: Vec<(TirRef, Option<TirRef>, TirRef)> = own
@@ -825,18 +866,15 @@ pub(crate) fn refine_view_liveness_for_arm(
         .filter_map(|(i, slot)| {
             let &global_lu = slot.as_ref()?;
             let vi = TirRef::from_raw(u32::try_from(i).expect("TIR arena index fits u32"));
-            if !(if_subtree.contains(&global_lu)
-                && !arm_subtree.contains(&global_lu)
-                && Ownership::dense_get(&own.view_defer_loop, vi).is_none())
+            let lu_block = flow.step_block_of(global_lu)?;
+            if !(branch_blocks.contains(&lu_block) && !arm_blocks.contains(&lu_block))
+                || Ownership::dense_get(&own.view_defer_loop, vi).is_some()
             {
                 return None;
             }
             // Known arm: no reads of this view in it → kill candidate
             // (None); an arm-local read → override candidate (Some).
-            // A missing arm map preserves the projection.
-            arm_maps
-                .get(arm_index)
-                .map(|reads| (vi, reads.get(&vi).copied(), global_lu))
+            Some((vi, reads.get(&vi).copied(), global_lu))
         })
         .collect();
     let mut saved = Vec::new();
@@ -845,15 +883,17 @@ pub(crate) fn refine_view_liveness_for_arm(
             Some(lu) => {
                 // P4 deferral, per candidate: `view_defer_loop` covers
                 // only the global max read, so re-apply the pre-pass's
-                // `created_depth < read_depth` test to the arm-local read the
-                // override would install.
+                // test to the arm-local read the override would install.
                 if own.loop_nesting.depth_of(vi) < own.loop_nesting.depth_of(lu) {
                     continue;
                 }
                 saved.push((vi, global_lu));
                 Ownership::dense_set(&mut own.view_last_use, vi, lu);
             }
-            None => remove_projection(own, Owner::Inst(vi)),
+            None => remove_projection(
+                own,
+                Owner(own.inst_place[vi.index()].expect("view owner place")),
+            ),
         }
     }
     saved
@@ -874,9 +914,8 @@ mod tests {
 
     /// Nested mark/rollback invariant: an inner if's write set, merged
     /// back with a guarded logged insert, must be picked up by the
-    /// enclosing arm's rollback (the merge's log entry is replayed and
-    /// undone), while a removal in the outer arm drops that name from
-    /// the outer write set.
+    /// enclosing arm's rollback, while a removal in the outer arm drops
+    /// that name from the outer write set.
     #[test]
     fn bindings_nested_rollback_picks_up_inner_merge_writes() {
         let mut bindings = Bindings::default();

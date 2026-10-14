@@ -92,10 +92,9 @@ impl<M: Module> Codegen<M> {
             TirTag::FieldAccess => Self::field_addr_of(builder, ctx, r)?.0,
             TirTag::Match => {
                 // M12: an aggregate-result match writes each value arm's
-                // result into its pre-allocated result slot; the merge
-                // block's slot address is the value (cached by
-                // `eval_inst_match` as `ValueRepr::Enum`).
-                Self::eval_inst_match(builder, ctx, r)?;
+                // result into its pre-allocated result slot; the join
+                // prologue cached the slot address as `ValueRepr::Enum`
+                // when the Switch terminator was dispatched.
                 match Self::cached_repr(ctx, r) {
                     Some(ValueRepr::Enum { addr }) => addr,
                     other => {
@@ -525,7 +524,7 @@ impl<M: Module> Codegen<M> {
         let src = Self::eval_inst_enum(builder, ctx, operand)?;
         let ret_ty = ctx.tir.return_type;
         Self::emit_enum_copy(builder, ctx, sret, src, ret_ty)?;
-        Self::emit_due_frees(builder, ctx, r)?;
+        Self::fire_payload(builder, ctx, r)?;
         Self::emit_due_promo_frees(builder, ctx, r)?;
         Self::emit_return(builder, ctx, &[])?;
         Ok(Terminator::Return)

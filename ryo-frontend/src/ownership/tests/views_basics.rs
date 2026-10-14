@@ -40,11 +40,16 @@ fn param_slice_read_defers_free_to_projection_last_use() {
     let call2 = tb.call(print, &[n], &all_borrow(&[n]), void, span);
     let tir = tb.finish(&[vdecl, call1, call2]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
 
     let frees: Vec<_> = sc
-        .free_schedule
+        .drops
         .iter()
         .filter(|fp| fp.target == TirRef::param(0))
         .collect();
@@ -52,12 +57,13 @@ fn param_slice_read_defers_free_to_projection_last_use() {
         frees.len(),
         1,
         "exactly one Free for the owned param; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
     assert_eq!(
-        frees[0].after, vread,
+        frees[0].position.anchor_inst().unwrap(),
+        vread,
         "a slice of the param defers its Free to the projection's last use; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -95,7 +101,12 @@ fn move_and_viewasowner_borrow_of_one_owner_reports_borrow_note() {
     let call = tb.call(two, &[sv1, reborrow], &modes, void, span);
     let tir = tb.finish(&[decl, call]);
     let mut sink = DiagSink::new();
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     let e0031: Vec<_> = diags
         .iter()
@@ -153,27 +164,28 @@ fn view_creation_registers_projection() {
     let tir = tb.finish(&[decl, vdecl, stmt]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sidecar = take_function_sidecar(&mut sidecar, 0);
     assert!(sink.is_empty(), "expected no diagnostics");
 
-    // The FreePoint targeting s's owner fires after the print(v)
+    // The DropOp targeting s's owner fires after the print(v)
     // statement (anchored on v's read inside the call), not after
     // the slice-base read — the projection keeps the buffer alive.
     assert!(
         sidecar
-            .free_schedule
+            .drops
             .iter()
-            .any(|fp| fp.target == lit && fp.after == vread && fp.branch.is_none()),
+            .any(|fp| fp.target == lit && fp.position.anchor_inst().unwrap() == vread),
         "expected s's Free anchored after print(v)'s read of v; got: {:?}",
-        sidecar.free_schedule
+        sidecar.drops
     );
     assert_eq!(
-        sidecar
-            .free_schedule
-            .iter()
-            .filter(|fp| fp.target == lit)
-            .count(),
+        sidecar.drops.iter().filter(|fp| fp.target == lit).count(),
         1,
         "expected exactly one Free for lit"
     );
@@ -212,7 +224,12 @@ fn freeze_blocks_move_while_view_live() {
     let tir = tb.finish(&[decl, vdecl, stmt]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert_eq!(
         diags.len(),
@@ -272,7 +289,12 @@ fn freeze_blocks_inout_while_view_live() {
     let tir = tb.finish(&[decl, vdecl, stmt]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert_eq!(
         diags.len(),
@@ -328,7 +350,12 @@ fn freeze_lifts_after_last_view_use() {
     let tir = tb.finish(&[decl, vdecl, pstmt, cstmt]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     assert!(
         sink.is_empty(),
         "expected no diagnostics (freeze lifted at v's last use)"
@@ -374,7 +401,12 @@ fn reslice_projects_root_owner() {
     let tir = tb.finish(&[decl, vdecl, wdecl, stmt]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert!(
         diags
@@ -416,7 +448,12 @@ fn view_return_is_escape() {
     let tir = tb.finish(&[ret]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert!(
         diags.iter().any(|d| matches!(d.code, DiagCode::ViewEscape)),

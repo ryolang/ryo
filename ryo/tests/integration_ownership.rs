@@ -1175,3 +1175,48 @@ fn reseat_fallthrough_skipped_read_arm_runs_clean() {
         "1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaadone\n",
     );
 }
+
+#[test]
+fn heap_return_from_loop_jit() {
+    // R4-C: a HEAP (> inline cap) value returned from inside a loop
+    // must reach the caller intact — the return transfer discharges
+    // the obligation; the callee must never release the transferred
+    // buffer (the pre-fix schedule freed it after the sret store —
+    // caller-visible corruption). 200-char payload forces a heap
+    // allocation (inline cap is well below that).
+    let long = "z".repeat(200);
+    let code = format!(
+        "fn f(flag: bool) -> str:\n\tmut i = 0\n\twhile flag:\n\t\tv = \"{long}\" + \"y\"\n\t\tif i == 1:\n\t\t\treturn v\n\t\ti += 1\n\treturn \"x\"\n\nfn main():\n\tprint(f(true))\n\tprint(\"\\n\")\n"
+    );
+    let expected = format!("{long}y\n");
+    assert_ryo_output("heap_return_from_loop.ryo", &code, &expected);
+}
+
+#[test]
+fn heap_return_from_loop_aot() {
+    // AOT twin of the loop-return pin: the sret store ordering must be
+    // correct in the linked binary too.
+    let long = "z".repeat(200);
+    let code = format!(
+        "fn f(flag: bool) -> str:\n\tmut i = 0\n\twhile flag:\n\t\tv = \"{long}\" + \"y\"\n\t\tif i == 1:\n\t\t\treturn v\n\t\ti += 1\n\treturn \"x\"\n\nfn main():\n\tprint(f(true))\n\tprint(\"\\n\")\n"
+    );
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(temp_dir.path(), "heap_ret_loop.ryo", &code);
+    let build_output = run_ryo_build(&test_file, temp_dir.path());
+    assert!(
+        build_output.status.success(),
+        "ryo build failed. STDERR: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+    let binary_path = exe_path(temp_dir.path(), "heap_ret_loop");
+    let run_output = std::process::Command::new(&binary_path)
+        .output()
+        .expect("Failed to execute compiled binary");
+    assert!(
+        run_output.status.success(),
+        "compiled binary should exit 0. stderr: {}",
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run_output.stdout);
+    assert_eq!(stdout, format!("{long}y\n"), "AOT stdout mismatch");
+}

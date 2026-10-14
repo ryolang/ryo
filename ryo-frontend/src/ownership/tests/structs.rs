@@ -34,10 +34,7 @@ fn struct_holding_str_freed_after_last_use() {
     let src = "struct Person:\n\tname: str\n\nfn main():\n\tp = Person{name=\"alice\"}\n\tx = 1\n";
     let (_diags, mut sidecar, _tirs, _pool) = check_src_full(src);
     let f = take_function_sidecar(&mut sidecar, 0);
-    assert!(
-        !f.free_schedule.is_empty(),
-        "struct with str field must be freed"
-    );
+    assert!(!f.drops.is_empty(), "struct with str field must be freed");
 }
 
 #[test]

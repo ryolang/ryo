@@ -319,27 +319,14 @@ pub enum DiagCode {
     /// owner (a borrow/inout parameter or binding, or a field
     /// projection of one): the match result becomes an owned binding
     /// whose cleanup would free caller-owned storage (observed:
-    /// corrupted output + SIGTRAP). The ownership pass does not yet
-    /// consume arm-body results into the match inst, so the shape is
-    /// rejected at compile time, naming I-210; the owned-producing and
-    /// owned-binding-read families are diagnosed by codegen's I-210
-    /// guard (no scheduled drop exists for a borrowed owner, so the
-    /// codegen guard cannot see this family).
+    /// corrupted output + SIGTRAP). The arm-result transfer consumes
+    /// owned arm bodies into the match inst, but a borrowed-rooted
+    /// aggregate cannot transfer — the borrowed family stays rejected
+    /// at compile time. No scheduled drop exists for a borrowed owner,
+    /// so the backend's aggregate-result guard could never see this
+    /// family (the owned producer/binding-read families it once
+    /// diagnosed are legalized by the transfer).
     MatchValueArmBorrowed,
-    /// A `match` value arm yielded a by-move PAYLOAD binding of the same
-    /// match (`Some(v): v`): the arm body's visit never consumes the
-    /// result, so the payload's scheduled drop stays anchored outside
-    /// the arm and codegen's result-slot write would alias the binding's
-    /// storage — debug builds aborted on the dropped free, release
-    /// builds miscompiled inside Cranelift's egraph (observed). The
-    /// ownership pass does not yet consume arm-body results into the
-    /// match inst, so the shape is rejected at compile time, naming
-    /// I-210; codegen's I-210 guard remains as the backstop for the
-    /// producer families (a payload consumed into a fresh producer,
-    /// e.g. `Some(v): v + "?"`, is diagnosed there via its scheduled
-    /// drop).
-    MatchValueArmPayloadMove,
-
     // --- parser ---
     ParseError,
 

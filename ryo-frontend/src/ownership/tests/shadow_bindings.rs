@@ -11,11 +11,11 @@ fn shadow_scope_dead_reseat_mints_no_outer_dead_drop() {
     // read once, then a same-named shadow scope whose own reseat value
     // is never read (dead store). The shadow's dead reseat value is a
     // different BINDING: honoring the if's reseat record against it
-    // minted a ConditionalDeadDrop targeting the OUTER binding's home
+    // minted a block-start dead drop targeting the OUTER binding's home
     // slot — a slot the outer owner's last-use Free (which redirects
     // through that slot) already released. The drop double-freed the
     // slot's current buffer on every path where it fired. No
-    // ConditionalDeadDrop may target the outer owner here.
+    // block-start dead drop may target the outer owner here.
     let src = "fn main():\n\tmut x = \"outer_a\"\n\tif true:\n\t\tx = \"outer_b\"\n\tprint(x)\n\tif true:\n\t\tmut x = \"s0\"\n\t\tx = \"s1\"\n\tprint(\"end\")\n";
     let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
     assert!(
@@ -43,17 +43,17 @@ fn shadow_scope_dead_reseat_mints_no_outer_dead_drop() {
     }
     let outer_init = outer_init.expect("outer decl found");
     assert!(
-        sc.free_schedule.iter().any(|fp| fp.target == outer_init),
+        sc.drops.iter().any(|fp| fp.target == outer_init),
         "outer owner must keep its last-use Free: {:?}",
-        sc.free_schedule
+        sc.drops
     );
     assert!(
-        !sc.conditional_dead_drops
+        !block_start_drops(&sc)
             .iter()
             .any(|d| d.target == outer_init),
         "the shadow binding's dead reseat value must not mint a dead \
          drop against the outer owner's home slot: {:?}",
-        sc.conditional_dead_drops
+        sc.drops
     );
 }
 
@@ -95,14 +95,14 @@ fn arm_reseat_then_shadow_keeps_fallthrough_drop() {
     }
     let outer_init = outer_init.expect("outer decl found");
     assert_eq!(
-        sc.conditional_dead_drops
+        block_start_drops(&sc)
             .iter()
             .filter(|d| d.target == outer_init)
             .count(),
         1,
         "reseat-then-shadow arm must still mint the pre-branch \
          fall-through drop: {:?}",
-        sc.conditional_dead_drops
+        sc.drops
     );
 }
 
@@ -142,12 +142,10 @@ fn nested_reseat_then_shadow_keeps_fallthrough_drop() {
     }
     let outer_init = outer_init.expect("outer decl found");
     assert!(
-        sc.conditional_dead_drops
-            .iter()
-            .any(|d| d.target == outer_init),
+        sc.drops.iter().any(|d| d.target == outer_init),
         "nested reseat-then-shadow arm must still mint the pre-branch \
          fall-through drop: {:?}",
-        sc.conditional_dead_drops
+        sc.drops
     );
 }
 
@@ -183,12 +181,12 @@ fn conditional_dead_reassign_still_minted_for_same_binding() {
     }
     let outer_init = outer_init.expect("outer decl found");
     assert_eq!(
-        sc.conditional_dead_drops
+        block_start_drops(&sc)
             .iter()
             .filter(|d| d.target == outer_init)
             .count(),
         1,
         "same-binding dead reseat must still mint the fall-through drop: {:?}",
-        sc.conditional_dead_drops
+        sc.drops
     );
 }

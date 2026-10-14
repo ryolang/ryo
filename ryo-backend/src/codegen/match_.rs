@@ -1,59 +1,47 @@
 //! `match` expression codegen (M12) — enum tag dispatch with wildcard
 //! routing, anonymous-struct guard chains (int/bool literal guards),
-//! per-arm payload binding moves, and scalar/void merges.
+//! per-arm payload binding moves, and scalar/void/aggregate merges.
 //!
-//! The typed `TirTag::Match` arrives fully resolved (the typed TIR
-//! match view, [`MatchView`], in `ryo_core::tir::match_`): every arm is
-//! a [`Discriminant`] plus typed
-//! [`MatchBinding`][ryo_core::tir::MatchBinding]s, anon arms carrying
-//! their field-equality guards on the wire. The lowering shape:
+//! The lowering is split across the Flow-block driver:
+//!
+//! * `emit_switch` (the Switch terminator handler) lowers ONLY the
+//!   dispatch: the scrutinee into its canonical home, a pre-allocated
+//!   result slot (scalar/aggregate shapes — every value merge rides
+//!   memory, never a block param), and the per-scrutinee-kind routing
+//!   into the pre-mapped Flow arm blocks (`route_*` below).
+//! * Each Flow arm block's prologue (`match_arm_prologue`) fires the
+//!   arm-start payload drops and moves the payload bindings out of the
+//!   scrutinee slot through the shared `bind_field_move`.
+//! * A falling arm's `Goto` terminator (`match_arm_fallthrough`) writes
+//!   the arm result into the match result slot (scalar values store;
+//!   aggregates go through the canonical per-type aggregate writes) and
+//!   jumps to the join — firing the arm-body frees first, exactly where
+//!   the old arm loop fired them.
+//! * The join block's prologue (`match_join_value`) restores the fact
+//!   tables and caches the result repr on the match instruction, so the
+//!   join's steps read it through their own entry points.
+//!
+//! The lowering shape:
 //!
 //! 1. The scrutinee is evaluated into its canonical home — enum and
 //!    anon-struct scrutinees into their stack slot (`ValueRepr::Enum` /
 //!    `ValueRepr::Struct` address), int/bool scrutinees as the loaded
 //!    scalar — and its address/value is the payload base for every arm.
-//! 2. A merge block is created up front: scalar results ride one block
-//!    param (the `enums.rs` Eq precedent), void matches none, aggregate
-//!    results (str/bytes/struct/anon-struct/enum) a pre-allocated result
-//!    SLOT — sized from the pool before the dispatch, so the slot
+//!    (A str scrutinee extracts its transient `(ptr, len)`.)
+//! 2. A result slot is allocated BEFORE the dispatch so the slot
 //!    address is a constant dominating every arm and the merge.
 //! 3. Dispatch per scrutinee kind: enums load the i32 tag and switch
 //!    (`emit_tag_dispatch`), routing each variant's case to the FIRST
 //!    arm covering it (written order wins; W0005-dead duplicates stay
-//!    unrouted) and the wildcard arm's entry to the switch's `otherwise`
-//!    — full coverage without a wildcard keeps the invalid-tag trap.
-//!    Anon-struct scrutinees lower to a linear chain of guard
-//!    conjunctions: each failed compare short-circuits to the next
-//!    arm's test block, and the final wildcard arm is the fallthrough.
-//!    Literal scrutinees (int/bool/str) lower to the same chain shape
-//!    over `Discriminant::Int/Bool/Str` arms: one compare (`icmp_imm eq`
-//!    for int/bool, the runtime's bytewise `ryo_str_eq` for str — the
-//!    M9.1 `emit_field_eq` convention) plus `brif` per arm in written
-//!    order, the first bare wildcard the fallthrough, and a defensive
-//!    trap as the chain tail when no wildcard exists (reachable only
-//!    for a violated sema E0129 — a fully `true`/`false`-covered bool
-//!    never falls off its last compare).
-//! 4. Each arm runs in its own block under the undo-log slot-table
-//!    scope (`emit_scoped_body`'s discipline — bindings are arm-local):
-//!    arm-start payload drops ([`MatchArmDrop`][ryo_core::ownership::MatchArmDrop],
-//!    the consuming arm's unbound needs-drop fields), then the binding
-//!    prologue through the shared `bind_field_move` (fat triples,
-//!    struct/enum slot copies, scalar loads — the M10 destructure
-//!    logic), then the body. Expression arms write the match result —
-//!    scalar values jump with the block param, aggregate values write
-//!    the result slot through the canonical per-type aggregate writes
-//!    (the exact helpers the function-return paths use), void matches
-//!    jump bare — and diverging arms (never-typed bodies,
-//!    return/break/continue) leave no merge edge and write nothing.
-//!    Statement arms go through `emit_scoped_body` and its `Terminator`
-//!    sense — only non-terminating arms jump.
-//! 5. The merge: scalars read the block param; aggregates read the
-//!    result slot (a fat triple load for str/bytes, the slot address
-//!    for memory-first structs/enums) and cache the family
-//!    `ValueRepr` on the inst, so aggregate consumers reach it through
-//!    their own entry points (`eval_inst_struct` / `eval_inst_enum` /
-//!    `eval_inst_fat`). Diverging arms leave no edge; when EVERY arm
-//!    diverges the merge is unreachable and traps.
+//!    unrouted) and the wildcard arm's entry to the switch's
+//!    `otherwise`. Anon-struct scrutinees lower to a linear chain of
+//!    guard conjunctions: each failed compare short-circuits to the
+//!    next arm's test block, and the final wildcard arm is the
+//!    fallthrough. Literal scrutinees (int/bool/str) lower to the same
+//!    chain shape over `Discriminant::Int/Bool/Str` arms.
+//! 4. Diverging arms (never-typed bodies, return/break/continue) are
+//!    their blocks' own terminators — they leave no merge edge and
+//!    write nothing.
 //!
 //! The post-merge drop of an owned needs-drop scrutinee TEMPORARY needs
 //! no codegen of its own: the ownership pass's anon-temp machinery
@@ -63,23 +51,27 @@
 //! `freed_at` table guaranteeing one emission per schedule entry.
 
 use super::{
-    Codegen, FunctionContext, STR_SLOT_SIZE, Terminator, ValueRepr, cranelift_type_for,
+    Codegen, FunctionContext, STR_SLOT_SIZE, SlotMarks, ValueRepr, cranelift_type_for,
     is_enum_type, is_struct_type,
 };
-use cranelift::codegen::ir::{BlockArg, MemFlagsData, StackSlotData, StackSlotKind};
+use cranelift::codegen::ir::{MemFlagsData, StackSlotData, StackSlotKind};
 use cranelift::prelude::*;
 use cranelift_module::Module;
 use ryo_core::ast::LitPattern;
-use ryo_core::tir::{Discriminant, MatchArmView, MatchBodyView, MatchView, TirData, TirRef};
+use ryo_core::flow::Terminator as FlowTerm;
+use ryo_core::tir::{Discriminant, MatchArmView, MatchBodyView, MatchView, TirRef};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 
 /// The merge shape of a lowered match, derived from its result TypeId.
-enum MatchShape {
-    /// Void match: the merge block carries no param; arms jump bare.
+#[derive(Clone, Copy)]
+pub(crate) enum MatchShape {
+    /// Void match: arms jump bare; the join caches a dummy.
     Void,
-    /// Scalar match (int/bool/float): one merge block param.
+    /// Scalar match (int/bool/float): every value arm stores into the
+    /// 8-byte result slot; the join loads and caches it.
     Scalar(types::Type),
-    /// Every arm diverges: no merge param, and the merge is unreachable.
+    /// Every arm diverges: no join, no result (the continuation block
+    /// is unreachable).
     Never,
     /// Aggregate match (str/bytes/struct/anon-struct/enum): every value
     /// arm writes the pre-allocated result slot; the merge yields the
@@ -91,7 +83,7 @@ enum MatchShape {
 
 /// Where the scrutinee value lives after evaluation.
 #[derive(Clone, Copy)]
-enum ScrutineeHome {
+pub(crate) enum ScrutineeHome {
     /// Enum / anon-struct scrutinee: the address of its stack slot.
     Slot(Value),
     /// int/bool scrutinee: the loaded scalar — the compare operand for
@@ -104,33 +96,82 @@ enum ScrutineeHome {
     Str { ptr: Value, len: Value },
 }
 
-/// The compare operand(s) of a literal-arm chain, fixed by the
-/// scrutinee's type kind: int/bool compare the loaded scalar against an
-/// immediate; str compares the extracted content pair against each
-/// literal through the runtime's `ryo_str_eq`.
-#[derive(Clone, Copy)]
-enum LiteralScrut {
-    Scalar(Value),
-    Str { ptr: Value, len: Value },
+/// Per-match Flow-driver record: the fact/slot marks (taken at the
+/// pre-step hook, before the scrutinee steps), the scrutinee home, the
+/// merge shape, the pre-allocated result slot address, and per-arm
+/// token-cursor offsets. Consumed by the arm prologues, the arm
+/// fallthroughs, and the join prologue.
+pub(crate) struct MatchRecord {
+    pub(crate) outer_facts_mark: usize,
+    pub(crate) scope_mark: usize,
+    pub(crate) slot_marks: SlotMarks,
+    /// Filled by `emit_switch`.
+    pub(crate) scrut: Option<ScrutineeHome>,
+    /// Filled by `emit_switch`.
+    pub(crate) shape: Option<MatchShape>,
+    /// Filled by `emit_switch` for scalar/aggregate shapes.
+    pub(crate) result_slot_addr: Option<Value>,
+    /// Per-arm token-cursor offsets into `flow.token_places(match)`.
+    pub(crate) token_offsets: Vec<usize>,
+}
+
+impl MatchRecord {
+    pub(crate) fn new(outer_facts_mark: usize, scope_mark: usize, slot_marks: SlotMarks) -> Self {
+        MatchRecord {
+            outer_facts_mark,
+            scope_mark,
+            slot_marks,
+            scrut: None,
+            shape: None,
+            result_slot_addr: None,
+            token_offsets: Vec::new(),
+        }
+    }
+
+    /// Read the record's filled fields (everything the Switch handler
+    /// stamps) — every consumer runs after `emit_switch`.
+    fn filled(&self) -> (ScrutineeHome, MatchShape, Option<Value>) {
+        (
+            self.scrut
+                .expect("match record filled by the switch handler"),
+            self.shape
+                .expect("match record filled by the switch handler"),
+            self.result_slot_addr,
+        )
+    }
 }
 
 impl<M: Module> Codegen<M> {
-    /// Lower a typed `TirTag::Match` (M12); the `eval_inst` dispatch
-    /// target. Returns the scalar merge value (the block param), or a
-    /// dummy for void/never/aggregate shapes — aggregate results cache
-    /// their family `ValueRepr` on the inst (see [`MatchShape`]).
-    pub(crate) fn eval_inst_match(
+    /// Lower the dispatch of a typed `TirTag::Match` (M12) — the
+    /// `Switch` terminator handler. The scrutinee is a step in this
+    /// block (already cached, except the str extraction which emits
+    /// here); the routing lands in the pre-mapped Flow arm blocks. Arm
+    /// bodies, arm drops/bindings, result writes, and the merge are the
+    /// driver's job (arm prologues, arm fallthroughs, join prologue).
+    pub(crate) fn emit_switch(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
-    ) -> Result<Value, String> {
+    ) -> Result<(), String> {
         let view = ctx.tir.match_view(r);
         if view.is_empty() {
             return Err("eval_inst_match: match with no arms reached codegen".to_string());
         }
-        let sidecar = ctx.sidecar;
         let shape = Self::match_shape(ctx, view.ty)?;
         let scrut_ty = ctx.tir.inst(view.scrutinee).ty;
+
+        // Create the match record with marks taken NOW — after this
+        // block's own steps (the scrutinee's condition-position writes
+        // belong INSIDE the marks, exactly where the old emitter took
+        // them when the match statement was reached).
+        ctx.match_records.insert(
+            r,
+            super::match_::MatchRecord::new(
+                ctx.range_facts_undo.len(),
+                ctx.assigned_log.len(),
+                Self::take_slot_marks(ctx),
+            ),
+        );
 
         // 1. Scrutinee into its canonical home; the payload base for
         // every arm. Whether the scrutinee is an owned temporary or a
@@ -166,44 +207,106 @@ impl<M: Module> Codegen<M> {
             }
         };
 
-        // 2. Merge block up front; scalar results ride one block param.
-        let merge = builder.create_block();
-        if let MatchShape::Scalar(cl_ty) = shape {
-            builder.append_block_param(merge, cl_ty);
-        }
-        // Aggregate results ride a pre-allocated result slot instead of
-        // a block param: allocated BEFORE the dispatch so the slot
-        // address is defined in the scrutinee block, which dominates
-        // every arm and the merge — the dominance hazard (a value
-        // produced in one arm read from the merge) cannot arise because
-        // arms write memory and the merge reads it.
-        let result_slot = if let MatchShape::Aggregate(ty) = shape {
-            let slot = match ctx.pool.kind(ty) {
-                TypeKind::Str | TypeKind::Bytes => builder.create_sized_stack_slot(
-                    StackSlotData::new(StackSlotKind::ExplicitSlot, STR_SLOT_SIZE, 3),
-                ),
-                TypeKind::Struct | TypeKind::AnonStruct => Self::struct_slot(builder, ctx, ty),
-                TypeKind::Enum => Self::enum_slot(builder, ctx, ty),
-                other => unreachable!("match_shape rejected {other:?} as an aggregate result"),
-            };
-            Some((ty, builder.ins().stack_addr(ctx.int_type, slot, 0)))
-        } else {
-            None
+        // 2. Result slot BEFORE the dispatch: the slot address is
+        // defined in the scrutinee block, which dominates every arm
+        // and the merge — the dominance hazard (a value produced in
+        // one arm read from the merge) cannot arise because arms write
+        // memory and the merge reads it.
+        let result_slot_addr = match shape {
+            MatchShape::Scalar(_) => {
+                let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    8,
+                    3,
+                ));
+                Some(builder.ins().stack_addr(ctx.int_type, slot, 0))
+            }
+            MatchShape::Aggregate(ty) => {
+                let slot = match ctx.pool.kind(ty) {
+                    TypeKind::Str | TypeKind::Bytes => builder.create_sized_stack_slot(
+                        StackSlotData::new(StackSlotKind::ExplicitSlot, STR_SLOT_SIZE, 3),
+                    ),
+                    TypeKind::Struct | TypeKind::AnonStruct => Self::struct_slot(builder, ctx, ty),
+                    TypeKind::Enum => Self::enum_slot(builder, ctx, ty),
+                    other => unreachable!("match_shape rejected {other:?} as an aggregate result"),
+                };
+                Some(builder.ins().stack_addr(ctx.int_type, slot, 0))
+            }
+            MatchShape::Void | MatchShape::Never => None,
         };
 
-        // 3. Dispatch: fill each arm's entry block.
-        let arm_count = view.len();
-        let mut arm_entry: Vec<Option<Block>> = vec![None; arm_count];
+        // Per-arm token offsets: one owner token per by-move binding,
+        // in arm/binding order (the sema owner-token convention).
+        let mut token_offsets = Vec::with_capacity(view.len());
+        let mut cursor = 0usize;
+        for arm in view.arms() {
+            token_offsets.push(cursor);
+            cursor += arm.bindings().filter(|b| !ctx.pool.is_copy(b.ty)).count();
+        }
+
+        // 3. Stamp the record created at the pre-step hook.
+        {
+            let rec = ctx
+                .match_records
+                .get_mut(&r)
+                .expect("match record created at the pre-step hook");
+            rec.scrut = Some(scrut);
+            rec.shape = Some(shape);
+            rec.result_slot_addr = result_slot_addr;
+            rec.token_offsets = token_offsets;
+        }
+
+        // No join (every arm diverged): the continuation is an
+        // unreachable block whose ExprStmt step still evaluates this
+        // match — cache the merge-unreachable dummy now (the value the
+        // old arm loop returned), so that evaluation hits the memo.
+        // Emitted BEFORE the routing below, which leaves its last
+        // internal block filled.
+        // The scrutinee block's at-terminator bucket (value-step
+        // anchors with no enclosing statement — e.g. a last-use read
+        // inside the scrutinee expression) fires here: the scrutinee
+        // home is established, including any lazily materialized
+        // slot-out producer the anchors' targets may alias.
+        let sw_block = ctx.flow.term_block_of(r).expect("match is a switch");
+        Self::fire_at_terminator(builder, ctx, sw_block)?;
+        let sw_join = match ctx.flow.term(sw_block) {
+            FlowTerm::Switch { join, .. } => *join,
+            _ => unreachable!("match is a switch"),
+        };
+        if sw_join.is_none() {
+            let dummy_ty = match shape {
+                MatchShape::Scalar(cl_ty) => cl_ty,
+                MatchShape::Void | MatchShape::Never => types::I8,
+                MatchShape::Aggregate(_) => {
+                    unreachable!("an aggregate-typed match always has a value arm")
+                }
+            };
+            let dummy = builder.ins().iconst(dummy_ty, 0);
+            Self::cache_repr(ctx, r, ValueRepr::Scalar(dummy));
+        }
+
+        // 4. Routing: the arm entries are the pre-mapped Flow arm
+        // blocks (Switch arms in wire order, wildcard included).
+        let FlowTerm::Switch { arms: rng, .. } = ctx.flow.term(sw_block) else {
+            unreachable!("match is a switch")
+        };
+        let arm_entry: Vec<Option<Block>> = rng
+            .as_range()
+            .map(|i| {
+                let ab = ryo_core::flow::BlockId(ctx.flow.extra[i]);
+                Some(ctx.flow_blocks[ab.0 as usize])
+            })
+            .collect();
         match scrut {
             ScrutineeHome::Slot(addr) if is_enum_type(scrut_ty, ctx.pool) => {
-                Self::route_enum_dispatch(builder, ctx, scrut_ty, &view, addr, &mut arm_entry)?;
+                Self::route_enum_dispatch(builder, ctx, scrut_ty, &view, addr, &arm_entry)?;
             }
             ScrutineeHome::Slot(addr) => {
                 debug_assert!(
                     is_struct_type(scrut_ty, ctx.pool),
                     "slot-homed scrutinee must be an enum or anon struct"
                 );
-                Self::route_anon_dispatch(builder, ctx, scrut_ty, &view, addr, &mut arm_entry)?;
+                Self::route_anon_dispatch(builder, ctx, scrut_ty, &view, addr, &arm_entry)?;
             }
             ScrutineeHome::Scalar(v) => {
                 Self::route_literal_dispatch(
@@ -211,7 +314,7 @@ impl<M: Module> Codegen<M> {
                     ctx,
                     &view,
                     LiteralScrut::Scalar(v),
-                    &mut arm_entry,
+                    &arm_entry,
                 )?;
             }
             ScrutineeHome::Str { ptr, len } => {
@@ -220,345 +323,288 @@ impl<M: Module> Codegen<M> {
                     ctx,
                     &view,
                     LiteralScrut::Str { ptr, len },
-                    &mut arm_entry,
+                    &arm_entry,
                 )?;
             }
         }
+        Ok(())
+    }
 
-        // 4. Arm emission. Facts join bookkeeping mirrors
-        // `generate_if_stmt`: arm bodies may seed/kill range facts, so
-        // the merge restores the pre-match facts and kills whatever the
-        // arms assigned.
-        let outer_facts_mark = ctx.range_facts_undo.len();
-        let scope_mark = ctx.assigned_log.len();
-        let tokens = ctx.tir.match_by_move_owner_refs(r, ctx.pool);
-        let mut token_cursor = 0usize;
-        let mut all_terminated = true;
-
-        for (i, (entry, arm)) in arm_entry.iter().zip(view.arms()).enumerate() {
-            // Duplicate arms past a wildcard/route (W0005-dead) get an
-            // unreachable block; the emission below is uniform.
-            let block = entry.unwrap_or_else(|| builder.create_block());
-            builder.seal_block(block);
-            builder.switch_to_block(block);
-            let branch_id = sidecar
-                .match_branches
-                .get(r.index())
-                .and_then(|ids| ids.as_ref())
-                .and_then(|ids| ids.arms.get(i))
-                .copied()
-                .unwrap_or_default();
-            // The arm's BranchId gates branch-gated FreePoints and the
-            // arm-start drops while the body lowers (the if-arm
-            // discipline).
-            ctx.branch_stack.push(branch_id);
-
-            // Binding scope: payload bindings are arm-local (sema child
-            // scopes) — roll the slot tables back when the arm ends.
-            // `range_facts` joins too: an arm body may seed facts, and no
-            // sibling arm (or the post-match code) may observe them.
-            let locals_mark = ctx.locals_undo.len();
-            let fat_mark = ctx.fat_locals_undo.len();
-            let struct_mark = ctx.struct_locals_undo.len();
-            let facts_mark = ctx.range_facts_undo.len();
-
-            if let ScrutineeHome::Slot(addr) = scrut {
-                // Arm-start drops: the consuming arm's unbound
-                // needs-drop payload fields (MatchArmDrop). The tag
-                // dispatch guarantees the discriminated variant, so the
-                // field address is the scrutinee slot plus the
-                // pool-computed absolute offset.
-                for drop in sidecar
-                    .match_arm_drops
-                    .iter()
-                    .filter(|d| d.match_inst == r && d.arm == branch_id)
-                {
-                    let offset = Self::arm_payload_field_offset(
-                        ctx.pool,
-                        scrut_ty,
-                        &arm.discriminant,
-                        drop.field_index,
-                    )?;
-                    Self::emit_field_drop(builder, ctx, addr, offset, drop.ty)?;
-                }
-                // Binding prologue: per-binding move out of the
-                // scrutinee slot through the shared `bind_field_move`
-                // (the M10 destructure move logic). Copy bindings pass
-                // no owner token — sema's convention emits one token
-                // per by-move binding only.
-                for b in arm.bindings() {
-                    let offset = Self::arm_payload_field_offset(
-                        ctx.pool,
-                        scrut_ty,
-                        &arm.discriminant,
-                        b.field_index,
-                    )?;
-                    let field_addr = if offset == 0 {
-                        addr
-                    } else {
-                        builder.ins().iadd_imm_s(addr, i64::from(offset))
-                    };
-                    let token = if ctx.pool.is_copy(b.ty) {
-                        None
-                    } else {
-                        let token = tokens[token_cursor];
-                        token_cursor += 1;
-                        Some(token)
-                    };
-                    Self::bind_field_move(builder, ctx, b.name, field_addr, b.ty, token)?;
-                }
+    /// The Flow arm block's prologue: arm-start payload drops (the
+    /// consuming arm's unbound needs-drop fields) and the binding
+    /// prologue through the shared `bind_field_move` (fat triples,
+    /// struct/enum slot copies, scalar loads — the M10 destructure
+    /// logic). Only slot-homed scrutinees (enum/anon-struct) carry
+    /// Arm-start payload destruction for a consuming match arm (the unified cleanup schedule):
+    /// the arm's unbound needs-drop payload fields are destroyed at the
+    /// arm block's start. Registered on the unified DropOp schedule as
+    /// one block-start drop per arm (target = the scrutinee); this
+    /// handler recomputes the field list — the same derivation the
+    /// frontend registered from (`unbound_payload_fields`): the
+    /// discriminated shape's needs-drop fields minus the bound ones.
+    /// The tag dispatch guarantees the discriminated variant, so the
+    /// field address is the scrutinee slot plus the pool-computed
+    /// absolute offset. Slot-homed scrutinees only (enum/anon-struct;
+    /// literal scrutinees bind nothing).
+    pub(crate) fn emit_arm_start_drops(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        arm_idx: usize,
+    ) -> Result<(), String> {
+        let view = ctx.tir.match_view(r);
+        let arms: Vec<MatchArmView<'_>> = view.arms().collect();
+        let arm = arms[arm_idx];
+        let scrut_ty = ctx.tir.inst(view.scrutinee).ty;
+        let scrut = ctx
+            .match_records
+            .get(&r)
+            .expect("match record filled by the switch handler")
+            .scrut
+            .expect("scrutinee home filled");
+        let ScrutineeHome::Slot(addr) = scrut else {
+            return Ok(());
+        };
+        // The discriminated shape's fields, in declaration order (the
+        // enum-variant payload convention; the struct's fields for an
+        // anon-pattern arm) — needs-drop only, minus the bound fields.
+        let fields: Vec<(u32, TypeId)> = match arm.discriminant {
+            Discriminant::Variant(vidx) => {
+                let eview = ctx.pool.enum_view(scrut_ty);
+                let variant = eview
+                    .variants()
+                    .nth(vidx as usize)
+                    .expect("sema resolved the variant index against the scrutinee enum");
+                variant.fields.iter().map(|f| (f.idx, f.ty)).collect()
             }
-
-            // Body. Non-terminating arms jump to the merge (with the
-            // value for scalar shapes, after writing the result slot for
-            // aggregate shapes); diverging arms leave no edge and write
-            // nothing.
-            let falls_through = match arm.body {
-                MatchBodyView::Expr(e) => {
-                    let body_ty = ctx.tir.inst(e).ty;
-                    if let MatchShape::Aggregate(ty) = shape {
-                        if ctx.pool.is_never(body_ty) {
-                            // A diverging arm body (a noreturn call)
-                            // still evaluates — for its side effects.
-                            let _ = Self::eval_inst(builder, ctx, e)?;
-                            Self::terminate_dead_arm_block(builder);
-                            false
-                        } else {
-                            let (_, slot_addr) =
-                                result_slot.expect("aggregate shape has a result slot");
-                            Self::emit_match_result_write(builder, ctx, slot_addr, ty, e)?;
-                            builder.ins().jump(merge, &[]);
-                            true
-                        }
-                    } else {
-                        let v = Self::eval_inst(builder, ctx, e)?;
-                        if ctx.pool.is_never(body_ty) {
-                            Self::terminate_dead_arm_block(builder);
-                            false
-                        } else {
-                            // Arm-body frees: fire everything that became
-                            // due while the arm expression evaluated —
-                            // branch-gated Frees (arm-local dead binds,
-                            // divergence frees) and sweep entries whose
-                            // anchors the body materialized — BEFORE the
-                            // merge jump, while the arm's BranchId is
-                            // still on the branch_stack. After the pop
-                            // the end-of-statement sweep can never see
-                            // branch-gated entries (leak). Mirrors
-                            // emit_body's post-statement calls.
-                            Self::emit_due_frees(builder, ctx, e)?;
-                            Self::emit_due_promo_frees(builder, ctx, e)?;
-                            Self::sweep_due_frees(builder, ctx)?;
-                            Self::sweep_due_promo_frees(builder, ctx)?;
-                            match shape {
-                                MatchShape::Scalar(_) => {
-                                    builder.ins().jump(merge, &[BlockArg::Value(v)]);
-                                }
-                                MatchShape::Void | MatchShape::Never => {
-                                    builder.ins().jump(merge, &[]);
-                                }
-                                MatchShape::Aggregate(_) => {
-                                    unreachable!("aggregate shapes handled above")
-                                }
-                            }
-                            true
-                        }
-                    }
-                }
-                MatchBodyView::Stmts(_) => {
-                    let stmts: Vec<TirRef> = arm.body.stmts().collect();
-                    let term = Self::emit_scoped_body(builder, ctx, &stmts, false)?;
-                    if term != Terminator::None {
-                        // Return / Break / Continue — no merge edge.
-                        false
-                    } else if ctx.tir.block_definitely_terminates(&stmts, ctx.pool) {
-                        // Sema-level divergence emit_stmt cannot report:
-                        // the body's last statement is never-typed (a bare
-                        // `panic(...)` ExprStmt — the shape `stmt_terminates`
-                        // counts as terminating, and the noreturn-call path
-                        // already switched the builder into its sealed dead
-                        // block). The arm diverges like a `return` arm: no
-                        // merge edge, and the dead block gets its terminator
-                        // so finalize never sees a sealed, unterminated block.
-                        Self::terminate_dead_arm_block(builder);
-                        false
-                    } else {
-                        match shape {
-                            MatchShape::Void => {
-                                builder.ins().jump(merge, &[]);
-                            }
-                            MatchShape::Scalar(_) | MatchShape::Aggregate(_) => {
-                                return Err(
-                                    "eval_inst_match: falling statement arm in a value-producing match (sema E0135 gates this)"
-                                        .to_string(),
-                                )
-                            }
-                            MatchShape::Never => {
-                                return Err(
-                                    "eval_inst_match: falling statement arm in a never-typed match (the sema join gates this)"
-                                        .to_string(),
-                                )
-                            }
-                        }
-                        true
-                    }
-                }
-            };
-            all_terminated &= !falls_through;
-
-            Self::restore_slots(&mut ctx.locals, &mut ctx.locals_undo, locals_mark);
-            Self::restore_slots(&mut ctx.fat_locals, &mut ctx.fat_locals_undo, fat_mark);
-            Self::restore_slots(
-                &mut ctx.struct_locals,
-                &mut ctx.struct_locals_undo,
-                struct_mark,
-            );
-            Self::restore_slots(&mut ctx.range_facts, &mut ctx.range_facts_undo, facts_mark);
-            ctx.branch_stack.pop();
-        }
-        debug_assert_eq!(
-            token_cursor,
-            tokens.len(),
-            "one owner token consumed per by-move binding"
-        );
-
-        // 5. Merge. All arms diverged: the merge is unreachable — trap
-        // it (the post-divergence continuation shape) and keep emitting
-        // in a fresh dead block, mirroring the never-call path.
-        builder.seal_block(merge);
-        let merge_unreachable = all_terminated && !matches!(shape, MatchShape::Never);
-        if merge_unreachable {
-            builder.switch_to_block(merge);
-            builder.ins().trap(
-                TrapCode::user(1).expect("user trap code 1 is within Cranelift's encodable range"),
-            );
-            let dead = builder.create_block();
-            builder.seal_block(dead);
-            builder.switch_to_block(dead);
-        } else {
-            builder.switch_to_block(merge);
-        }
-
-        // Facts join (the if-arm discipline).
-        Self::restore_slots(
-            &mut ctx.range_facts,
-            &mut ctx.range_facts_undo,
-            outer_facts_mark,
-        );
-        Self::invalidate_home_inline_flags(ctx);
-        Self::kill_assigned_since(ctx, scope_mark);
-
-        // Diagnose unsupported aggregate value-arm shapes (I-210): the
-        // result slot's (shallow) per-type write ALIASES the arm body's
-        // buffer, so any scheduled drop that releases that storage
-        // cannot be correctly emitted — in the arm block it would free
-        // memory the result still aliases, and the end-of-statement
-        // sweep's post-merge position reads values that do not dominate
-        // the merge block (a Cranelift verifier error in debug builds,
-        // a silent miscompile in release). Two arm-body families alias:
-        //
-        // * Producers (calls, concats, needs-drop literals): the
-        //   ownership pass schedules their temporary's Free anchored on
-        //   this Match inst (the arm body's single consumer).
-        // * By-value reads of tracked bindings (`Var` / `FieldAccess`
-        //   arm bodies): the binding's last-use Free lands post-merge
-        //   while the result aliases the binding's storage.
-        //
-        // The expression-arm free flush above deliberately does NOT run
-        // for aggregate shapes: firing the binding-read Free inside the
-        // arm would free the buffer the result slot then aliases AND
-        // mark the schedule entry fired, suppressing this rejection —
-        // the loud error would become a silent use-after-free. Aggregate
-        // arms are rejected before any of their frees could fire.
-        //
-        // Ownership must instead consume the arm-body result into the
-        // match; until it does, fail loudly. Elided frees (static
-        // cap == 0 literals, provably-inline producers) and non-arm-body
-        // targets (the scrutinee temporary — its repr dominates the
-        // merge) are not this shape; the sweep owns them.
-        for arm in view.arms() {
-            let MatchBodyView::Expr(e) = arm.body else {
-                continue;
-            };
-            let body_ty = ctx.tir.inst(e).ty;
-            if ctx.pool.is_never(body_ty) || !ctx.pool.needs_drop(body_ty) {
-                continue;
-            }
-            let anchored: Vec<usize> = ctx
-                .free_by_after
-                .get(r.index())
-                .map(|indices| {
-                    indices
-                        .iter()
-                        .copied()
-                        .filter(|&idx| !ctx.freed_at[idx])
-                        .collect()
-                })
-                .unwrap_or_default();
-            if anchored
+            _ => ctx
+                .pool
+                .struct_view(scrut_ty)
+                .fields
                 .iter()
-                .any(|&idx| ctx.sidecar.free_schedule[idx].target == e)
-                && Self::free_would_emit(builder, ctx, e)
-            {
-                return Err(Self::arm_alias_error(ctx, e));
+                .map(|f| (f.idx, f.ty))
+                .collect(),
+        };
+        for (field_index, ty) in fields {
+            if !ctx.pool.needs_drop(ty) || arm.bindings().any(|b| b.field_index == field_index) {
+                continue;
             }
-            // By-value read of a tracked binding: resolve the root name
-            // and look for a pending drop scheduled against the binding's
-            // CURRENT value (the same currency filter `emit_frees`'s
-            // binding-path redirect uses — a stale-value free targets
-            // superseded storage and does not alias the read).
-            let mut root = e;
-            while let TirData::FieldAccess { object, .. } = ctx.tir.inst(root).data {
-                root = object;
+            let offset =
+                Self::arm_payload_field_offset(ctx.pool, scrut_ty, &arm.discriminant, field_index)?;
+            Self::emit_field_drop(builder, ctx, addr, offset, ty)?;
+        }
+        Ok(())
+    }
+
+    /// payload fields; literal scrutinees bind nothing.
+    pub(crate) fn match_arm_prologue(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        arm_idx: usize,
+    ) -> Result<(), String> {
+        let view = ctx.tir.match_view(r);
+        let arms: Vec<MatchArmView<'_>> = view.arms().collect();
+        let arm = arms[arm_idx];
+        let scrut_ty = ctx.tir.inst(view.scrutinee).ty;
+        let (scrut, token_offset) = {
+            let rec = ctx
+                .match_records
+                .get(&r)
+                .expect("match record filled by the switch handler");
+            (
+                rec.scrut.expect("scrutinee home filled"),
+                rec.token_offsets[arm_idx],
+            )
+        };
+        let ScrutineeHome::Slot(addr) = scrut else {
+            return Ok(());
+        };
+        // Binding prologue: per-binding move out of the scrutinee slot.
+        // Copy bindings pass no owner token — sema's convention emits
+        // one token per by-move binding only.
+        let tokens = ctx.tir.match_by_move_owner_refs(r, ctx.pool);
+        let mut cursor = token_offset;
+        for b in arm.bindings() {
+            let offset = Self::arm_payload_field_offset(
+                ctx.pool,
+                scrut_ty,
+                &arm.discriminant,
+                b.field_index,
+            )?;
+            let field_addr = if offset == 0 {
+                addr
+            } else {
+                builder.ins().iadd_imm_s(addr, i64::from(offset))
+            };
+            let token = if ctx.pool.is_copy(b.ty) {
+                None
+            } else {
+                let token = tokens[cursor];
+                cursor += 1;
+                Some(token)
+            };
+            Self::bind_field_move(builder, ctx, b.name, field_addr, b.ty, token)?;
+        }
+        Ok(())
+    }
+
+    /// A falling match arm's `Goto` terminator: write the arm result
+    /// into the match's result slot (scalar store / canonical aggregate
+    /// writes) and jump to the join. Fires the arm-body frees BEFORE
+    /// the jump — after it the end-of-statement sweep would run in the
+    /// merge block, where arm-anchored entries have no cached repr and
+    /// can never fire (leak). Diverging arms have no Goto edge and
+    /// never reach here.
+    pub(crate) fn match_arm_fallthrough(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        arm_idx: usize,
+        from: ryo_core::flow::BlockId,
+    ) -> Result<(), String> {
+        let view = ctx.tir.match_view(r);
+        let arms: Vec<MatchArmView<'_>> = view.arms().collect();
+        let arm = arms[arm_idx];
+        let sw_block = ctx.flow.term_block_of(r).expect("match is a switch");
+        let join = match ctx.flow.term(sw_block) {
+            FlowTerm::Switch { join: Some(j), .. } => *j,
+            _ => unreachable!("a falling arm implies a join"),
+        };
+        let jb = ctx.flow_blocks[join.0 as usize];
+        let (_scrut, shape, slot_addr) = {
+            let rec = ctx
+                .match_records
+                .get(&r)
+                .expect("match record filled by the switch handler");
+            rec.filled()
+        };
+        // The arm-end block's at-terminator bucket (arm-body value
+        // anchors — e.g. a moved payload's token free, whose producer
+        // the result write may lazily materialize) fires after the
+        // body evaluation and result write, before the join jump.
+        let fire_join_bucket =
+            |builder: &mut FunctionBuilder,
+             ctx: &mut FunctionContext<'_, M>|
+             -> Result<(), String> { Self::fire_at_terminator(builder, ctx, from) };
+        match arm.body {
+            MatchBodyView::Expr(e) => {
+                match shape {
+                    MatchShape::Aggregate(ty) => {
+                        let slot_addr = slot_addr.expect("aggregate shape has a result slot");
+                        Self::emit_match_result_write(builder, ctx, slot_addr, ty, e)?;
+                        // Arm-body frees fire from the at-terminator
+                        // bucket (mechanical, fired by the driver before
+                        // this handler); the promotion family keeps its
+                        // own hook.
+                        Self::emit_due_promo_frees(builder, ctx, e)?;
+                        fire_join_bucket(builder, ctx)?;
+                        builder.ins().jump(jb, &[]);
+                    }
+                    MatchShape::Scalar(_) => {
+                        // The arm body expression was a step in this
+                        // block — its value is cached.
+                        let v = Self::eval_inst(builder, ctx, e)?;
+                        // Arm-body frees fire from the at-terminator
+                        // bucket (mechanical, fired by the driver before
+                        // this handler); the promotion family keeps its
+                        // own hook.
+                        Self::emit_due_promo_frees(builder, ctx, e)?;
+                        let slot_addr = slot_addr.expect("scalar shape has a result slot");
+                        builder
+                            .ins()
+                            .store(MemFlagsData::trusted(), v, slot_addr, 0);
+                        fire_join_bucket(builder, ctx)?;
+                        builder.ins().jump(jb, &[]);
+                    }
+                    MatchShape::Void => {
+                        let _ = Self::eval_inst(builder, ctx, e)?;
+                        // Arm-body frees fire from the at-terminator
+                        // bucket (mechanical, fired by the driver before
+                        // this handler); the promotion family keeps its
+                        // own hook.
+                        Self::emit_due_promo_frees(builder, ctx, e)?;
+                        fire_join_bucket(builder, ctx)?;
+                        builder.ins().jump(jb, &[]);
+                    }
+                    MatchShape::Never => {
+                        unreachable!("never match has no falling arm")
+                    }
+                }
             }
-            if let TirData::Var(name) = ctx.tir.inst(root).data {
-                let pending_free = ctx.pending_sweep.iter().any(|&idx| {
-                    if ctx.freed_at[idx] {
-                        return false;
+            MatchBodyView::Stmts(_) => {
+                // Falling statement arms exist only in void matches
+                // (sema E0135 gates value matches); the arm's statement
+                // steps already swept their frees.
+                match shape {
+                    MatchShape::Void => {
+                        fire_join_bucket(builder, ctx)?;
+                        builder.ins().jump(jb, &[]);
                     }
-                    let fp = &ctx.sidecar.free_schedule[idx];
-                    if !Self::free_would_emit(builder, ctx, fp.target)
-                        || Self::free_binding_name(ctx, fp.target) != Some(name)
-                    {
-                        return false;
+                    MatchShape::Scalar(_) | MatchShape::Aggregate(_) => {
+                        return Err(
+                            "eval_inst_match: falling statement arm in a value-producing match (sema E0135 gates this)"
+                                .to_string(),
+                        )
                     }
-                    match Self::free_binding_of(ctx, fp.target) {
-                        Some(binding) => ctx.binding_last_write.get(&binding) == Some(&fp.target),
-                        None => false,
+                    MatchShape::Never => {
+                        return Err(
+                            "eval_inst_match: falling statement arm in a never-typed match (the sema join gates this)"
+                                .to_string(),
+                        )
                     }
-                });
-                if pending_free {
-                    return Err(Self::arm_alias_error(ctx, e));
                 }
             }
         }
+        Ok(())
+    }
 
-        let value = match shape {
-            MatchShape::Scalar(cl_ty) if merge_unreachable => builder.ins().iconst(cl_ty, 0),
-            MatchShape::Scalar(_) => builder.block_params(merge)[0],
-            MatchShape::Void => builder.ins().iconst(ctx.int_type, 0),
-            MatchShape::Never => builder.ins().iconst(types::I8, 0),
+    /// The match join block's prologue (after the fact/slot restores,
+    /// which the driver runs first): cache the merged result value on
+    /// the match instruction so the join's steps read it through their
+    /// own entry points. Scalars load the result slot; aggregates read
+    /// the slot (a fat triple load for str/bytes, the slot address for
+    /// memory-first structs/enums); void caches a dummy.
+    pub(crate) fn match_join_value(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Result<(), String> {
+        let (_scrut, shape, slot_addr) = {
+            let rec = ctx
+                .match_records
+                .get(&r)
+                .expect("match record filled by the switch handler");
+            rec.filled()
+        };
+        match shape {
+            MatchShape::Scalar(cl_ty) => {
+                let slot_addr = slot_addr.expect("scalar shape has a result slot");
+                let v = builder
+                    .ins()
+                    .load(cl_ty, MemFlagsData::trusted(), slot_addr, 0);
+                Self::cache_repr(ctx, r, ValueRepr::Scalar(v));
+            }
+            MatchShape::Void => {
+                let v = builder.ins().iconst(ctx.int_type, 0);
+                Self::cache_repr(ctx, r, ValueRepr::Scalar(v));
+            }
+            MatchShape::Never => {
+                // No join exists for an all-diverging match — the
+                // driver never routes a block here.
+                unreachable!("never match has no join block")
+            }
             MatchShape::Aggregate(ty) => {
-                // The result lives in the pre-allocated slot; cache the
-                // family repr so aggregate consumers (var decls, call
-                // args, returns, nested aggregate ops) read it through
-                // their own entry points. The scalar Value returned
-                // here is a never-used dummy for those shapes. An
-                // aggregate-typed match always has at least one
-                // falling-through value arm (sema's join types the
-                // match by its value arms), so the merge is reachable
-                // and the slot written on every path here.
-                debug_assert!(
-                    !merge_unreachable,
-                    "an aggregate-typed match always has a value arm"
-                );
-                let (_, slot_addr) = result_slot.expect("aggregate shape has a result slot");
+                // An aggregate-typed match always has at least one
+                // falling-through value arm (sema's join types the match
+                // by its value arms), so the merge is reachable and the
+                // slot written on every path here.
+                let slot_addr = slot_addr.expect("aggregate shape has a result slot");
                 let repr = Self::match_result_repr(builder, ctx, slot_addr, ty)?;
                 Self::cache_repr(ctx, r, repr);
-                builder.ins().iconst(ctx.int_type, 0)
             }
-        };
-        Ok(value)
+        }
+        Ok(())
     }
 
     /// Write one aggregate arm-body value into the match's result slot
@@ -645,53 +691,6 @@ impl<M: Module> Codegen<M> {
         }
     }
 
-    /// The I-210 diagnosis for an aggregate value arm whose result
-    /// aliases storage a scheduled drop will release outside the arm.
-    fn arm_alias_error(ctx: &FunctionContext<'_, M>, body: TirRef) -> String {
-        let ty = ctx.tir.inst(body).ty;
-        format!(
-            "eval_inst_match: a value arm yields an owned {} value whose drop is scheduled outside the arm (I-210): the result slot aliases the buffer, so lowering it would double-free or read arm-local values from the merge. Use a mutable binding assigned inside an if/else instead, until the ownership pass consumes arm-body results",
-            ctx.pool.display(ty)
-        )
-    }
-
-    /// Give the builder's current block a terminator when a diverging
-    /// arm body leaves it sealed-but-unterminated: the noreturn-call
-    /// path emits its trap and switches into a fresh SEALED dead block,
-    /// and a diverging arm must leave no merge edge — so the abandoned
-    /// dead block needs an explicit terminator before finalize (the
-    /// merge-unreachable path's user trap code, the file convention).
-    fn terminate_dead_arm_block(builder: &mut FunctionBuilder) {
-        builder.ins().trap(
-            TrapCode::user(1).expect("user trap code 1 is within Cranelift's encodable range"),
-        );
-    }
-
-    /// True when emitting the scheduled Free for `target` would produce
-    /// an actual drop call — the mirror of `emit_frees`' elision
-    /// predicates (`is_static_cap_zero`, the provably-inline producer
-    /// exemption), so the I-210 diagnosis above only fires for frees that
-    /// would really run. Struct/enum drops are scheduled only for
-    /// needs-drop values, where the drop always emits real field frees.
-    fn free_would_emit(
-        builder: &mut FunctionBuilder,
-        ctx: &FunctionContext<'_, M>,
-        target: TirRef,
-    ) -> bool {
-        let Some(repr) = Self::cached_repr(ctx, target) else {
-            return false;
-        };
-        match repr {
-            ValueRepr::Str { cap, .. } | ValueRepr::Bytes { cap, .. } => {
-                !Self::is_static_cap_zero(builder.func, cap)
-                    && !(Self::provably_inline_producer(ctx, target)
-                        && !ctx.view_base_insts[target.index()])
-            }
-            ValueRepr::Struct { .. } | ValueRepr::Enum { .. } => true,
-            ValueRepr::Scalar(_) | ValueRepr::View { .. } => false,
-        }
-    }
-
     /// The merge shape for a match result type: void, scalar (one
     /// Cranelift type), never, or aggregate (str/bytes/struct/
     /// anon-struct/enum — anything `cranelift_type_for` rejects). A
@@ -720,14 +719,16 @@ impl<M: Module> Codegen<M> {
     /// order wins; duplicate arms past the first are W0005-dead and get
     /// no case edge), and the wildcard arm's entry takes the switch's
     /// `otherwise` — full coverage without a wildcard keeps the
-    /// invalid-tag trap, exactly the M11 invariant semantics.
+    /// invalid-tag trap, exactly the M11 invariant semantics. The case
+    /// blocks are pure dispatch: the arm bodies are the pre-mapped Flow
+    /// arm blocks, filled by the driver.
     fn route_enum_dispatch(
         builder: &mut FunctionBuilder,
-        ctx: &FunctionContext<'_, M>,
+        ctx: &mut FunctionContext<'_, M>,
         scrut_ty: TypeId,
         view: &MatchView<'_>,
         scrutinee_addr: Value,
-        arm_entry: &mut [Option<Block>],
+        arm_entry: &[Option<Block>],
     ) -> Result<(), String> {
         let variant_count = ctx.pool.enum_view(scrut_ty).variants().count();
         let tag = builder
@@ -736,10 +737,6 @@ impl<M: Module> Codegen<M> {
         let (cases, otherwise) = Self::emit_tag_dispatch(builder, variant_count, tag);
 
         let mut case_arm: Vec<Option<usize>> = vec![None; variant_count];
-        // True when the case block IS the routed arm's entry block
-        // (filled at arm emission); false when it only jumps to a
-        // wildcard's shared entry.
-        let mut case_is_entry = vec![false; variant_count];
         let mut wildcard: Option<usize> = None;
         for (i, arm) in view.arms().enumerate() {
             match arm.discriminant {
@@ -758,8 +755,6 @@ impl<M: Module> Codegen<M> {
                     }
                     if case_arm[v].is_none() {
                         case_arm[v] = Some(i);
-                        case_is_entry[v] = true;
-                        arm_entry[i] = Some(cases[v]);
                     }
                 }
                 Discriminant::Wildcard => {
@@ -778,7 +773,6 @@ impl<M: Module> Codegen<M> {
                     for routed in case_arm.iter_mut() {
                         if routed.is_none() {
                             *routed = Some(i);
-                            arm_entry[i].get_or_insert_with(|| builder.create_block());
                         }
                     }
                 }
@@ -791,22 +785,17 @@ impl<M: Module> Codegen<M> {
         }
 
         for (v, case) in cases.iter().enumerate() {
-            if case_is_entry[v] {
-                // The case block IS the routed arm's entry: it is sealed
-                // and filled during arm emission below.
-                continue;
-            }
+            // Pure dispatch: jump to the routed arm's pre-mapped Flow
+            // block (the driver fills it), or trap on a violated-
+            // exhaustiveness path (with a wildcard present every case
+            // is routed, so `None` is a compiler invariant).
             builder.seal_block(*case);
             builder.switch_to_block(*case);
             match case_arm[v] {
-                // Wildcard-routed: jump to the wildcard's shared entry.
                 Some(i) => {
                     let entry = arm_entry[i].expect("a routed arm always has an entry block");
                     builder.ins().jump(entry, &[]);
                 }
-                // No arm routes here: with a wildcard present every case
-                // is routed, so this is a compiler-invariant violation
-                // (partial coverage without a wildcard is sema E0129).
                 None => super::enums::invalid_tag_trap(builder),
             }
         }
@@ -814,7 +803,9 @@ impl<M: Module> Codegen<M> {
         builder.switch_to_block(otherwise);
         match wildcard {
             Some(i) => {
-                let entry = *arm_entry[i].get_or_insert_with(|| builder.create_block());
+                let entry = *arm_entry[i]
+                    .as_ref()
+                    .expect("the wildcard arm's mapped block exists");
                 builder.ins().jump(entry, &[]);
             }
             None => super::enums::invalid_tag_trap(builder),
@@ -838,18 +829,17 @@ impl<M: Module> Codegen<M> {
         scrut_ty: TypeId,
         view: &MatchView<'_>,
         scrutinee_addr: Value,
-        arm_entry: &mut [Option<Block>],
+        arm_entry: &[Option<Block>],
     ) -> Result<(), String> {
         let arm_count = view.len();
         let arms: Vec<MatchArmView<'_>> = view.arms().collect();
-        for (i, arm) in arms.iter().enumerate() {
+        for arm in arms.iter() {
             if !matches!(arm.discriminant, Discriminant::Wildcard) {
                 return Err(format!(
                     "eval_inst_match: {:?} arm on an anon-struct scrutinee is rejected by sema (E0131)",
                     arm.discriminant
                 ));
             }
-            arm_entry[i] = Some(builder.create_block());
         }
 
         // Receiver per arm: the test block for a guarded arm (created
@@ -920,7 +910,7 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         view: &MatchView<'_>,
         scrut: LiteralScrut,
-        arm_entry: &mut [Option<Block>],
+        arm_entry: &[Option<Block>],
     ) -> Result<(), String> {
         let mut seen: Vec<Discriminant> = Vec::new();
         let mut fallthrough: Option<usize> = None;
@@ -936,10 +926,10 @@ impl<M: Module> Codegen<M> {
                         );
                     }
                     // First wildcard claims the fallthrough; everything
-                    // after it is W0005-dead and stays unrouted.
+                    // after it is W0005-dead and stays unrouted. Its
+                    // entry is the pre-mapped Flow arm block.
                     if fallthrough.is_none() {
                         fallthrough = Some(i);
-                        arm_entry[i] = Some(builder.create_block());
                     }
                 }
                 disc @ (Discriminant::Int(_) | Discriminant::Bool(_) | Discriminant::Str(_)) => {
@@ -953,7 +943,6 @@ impl<M: Module> Codegen<M> {
                         continue;
                     }
                     seen.push(disc);
-                    arm_entry[i] = Some(builder.create_block());
                     tests.push((i, builder.create_block()));
                 }
                 Discriminant::Variant(_) => {
@@ -1208,4 +1197,14 @@ impl<M: Module> Codegen<M> {
             format!("eval_inst_match: payload field index {field_index} out of range for the arm's shape")
         })
     }
+}
+
+/// The compare operand(s) of a literal-arm chain, fixed by the
+/// scrutinee's type kind: int/bool compare the loaded scalar against an
+/// immediate; str compares the extracted content pair against each
+/// literal through the runtime's `ryo_str_eq`.
+#[derive(Clone, Copy)]
+enum LiteralScrut {
+    Scalar(Value),
+    Str { ptr: Value, len: Value },
 }

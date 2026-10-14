@@ -1809,7 +1809,11 @@ impl Tir {
     /// (then / a specific elif / else) that contains `target` and only
     /// recurse into that arm — sibling arms are off-path. For elif
     /// arms we also collect each preceding elif's cond (those conds
-    /// executed; their bodies were skipped).
+    /// executed; their bodies were skipped). For a loop we collect the
+    /// condition (`while`) / bounds (`for`) unconditionally (they run
+    /// before any body target) and recurse into the body up to the
+    /// target — a return nested in the body reaches the return-epilogue
+    /// pass, whose covering scan needs the in-loop statements.
     ///
     /// Used by the ownership pass's jump/return-exit Free scheduling
     /// to decide whether an existing Free actually fires on the exit's
@@ -1860,11 +1864,30 @@ impl Tir {
                         return true;
                     }
                     TirTag::WhileLoop | TirTag::ForRange => {
-                        // Inner loop containing the target. The inner
-                        // loop runs its own exit-path pass for a jump
-                        // targeting it, so there is nothing on-path to
-                        // collect here.
-                        return true;
+                        // Inner loop containing the target: the
+                        // statements before the target inside its body
+                        // execute on the target's path (the target's own
+                        // final iteration), so collect them — the
+                        // condition/bounds always run before a body
+                        // target as well. The old early-return assumed
+                        // only the loop-exit pass (break/continue)
+                        // consumes this set, but a Return nested in the
+                        // body reaches the return-epilogue pass, which
+                        // must see in-loop covering frees.
+                        set.insert(stmt);
+                        match self.inst(stmt).tag {
+                            TirTag::WhileLoop => {
+                                let view = self.while_loop_view(stmt);
+                                self.collect_reachable(view.cond, set);
+                                return self.collect_jump_path(&view.body, target, set);
+                            }
+                            _ => {
+                                let view = self.for_range_view(stmt);
+                                self.collect_reachable(view.start, set);
+                                self.collect_reachable(view.end, set);
+                                return self.collect_jump_path(&view.body, target, set);
+                            }
+                        }
                     }
                     _ => {
                         // Other shapes (ExprStmt, etc.). The stmt's
