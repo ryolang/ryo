@@ -1,74 +1,72 @@
-**Status:** Design (open questions)
+**Status:** Design (open specification questions)
 
-# Ryo Language Design Issues & Recommendations
+# Ryo Specification Design Issues
 
-This document identifies design inconsistencies, open questions, and recommendations for the Ryo language specification and roadmap. Issues are categorized by status. Resolved items are removed (see `git log` for history).
+This file tracks flaws, contradictions, and pending decisions in the existing specification.
+New features and language extensions belong in [proposals.md](proposals.md).
+Compiler implementation work belongs in its development document or `ISSUES.md`.
+The [roadmap](implementation_roadmap.md) owns delivery status.
 
-**Last updated:** 2026-09-01 (sweep: removed items resolved into the spec — Circular Dependencies (§11.7), the `!` operator conflict (§2 lexical conventions), Structural Equality (§4.5, `#[derive(Eq)]`), String Indexing (§4.7), Default Arguments (§6.1.1), Variadic Functions (§6.1.2 + §19 rejected list), the Versioned-Iterator runtime piece (§4.7), and Loop-as-an-Expression (§3 control flow) — and their checklist entries, per the removal convention; renumbered sequentially; trimmed Specification Holes to the struct-`impl` gap and the Zig-inspirations item to Safe `continue`. Prior sweeps: 2026-07-19, 2026-07-17.)
+Remove an entry when its resolution reaches the specification. Git history preserves prior discussion.
+Clarifications can resolve documented gaps; changes to language behavior require explicit human approval.
 
----
+**Last updated:** 2026-10-14
 
-## Open Issues
+## Open Specification Issues
 
-These require resolution before implementation reaches the affected milestone.
+### 1. Inherent Struct Methods Lack an Explicit Contract
 
-### 1. The "Hardcoded Generics" Trap
+**Existing contract:** Section 4.6 describes inherent enum methods through `impl EnumName:`.
+Section 4.5 describes named structs but does not give the corresponding inherent-method contract.
+The methods milestone uses `impl Rectangle:`.
 
-*   **The Smell:** Milestone 22 implements `list[int]` and `list[str]` as "hardcoded types" while pushing real generics to Phase 5 (post-v1.0).
-*   **The Problem:** This creates a **Privileged Standard Library**.
-    *   User code cannot define types that look or behave like stdlib types.
-    *   When real generics arrive, the entire standard library will need rewriting. Early adopters rewrite their code too.
-    *   This mirrors Go's pre-1.18 era where `map` and `slice` were magic generic types but user code was stuck with `interface{}`.
-*   **Proposal:** Keep hardcoded generics for v0.1 (pragmatic), but use **Monomorphization** (like Rust/C++) when real generics land — the compiler copies the generic code and replaces `T` with the concrete type.
-*   **Status:** Partially settled — the spec commits to static dispatch via monomorphization (§8, Traits) and notes that user-defined generics are future work (§4.7 note, §19). The privileged-stdlib concern above stands while Milestone 22 plans hardcoded types.
+**Gap:** Contributors lack an explicit statement that inherent implementations also apply to structs.
+This is a completeness problem for an already intended feature, not a proposal for new syntax.
 
-### 2. Error Handling Overhead
+**Resolution:** Clarify inherent struct implementations in Section 4.5 and cross-reference the existing receiver rules in Section 5.
+Do not introduce different receiver or ownership semantics through this clarification.
 
-*   **The Smell:** The spec claims "Native Performance" but admits a "~5-10% overhead" for mandatory stack trace capture on errors.
-*   **The Reality:** Capturing stack traces is extremely expensive in high-throughput systems (10x-100x slower than the operation itself).
-*   **Proposal: Lazy Symbol Resolution + PC Capture**
-    1.  **At Runtime (Fast):** Capture *only* the Program Counter and Stack Pointer (copying a few integers — nanoseconds).
-    2.  **At Print Time (Slow):** Resolve pointers to File/Line/Function strings only when `.stack_trace()` is called or the program panics.
-    3.  **Production:** Provide `--strip-debug` compiler flag to disable entirely.
-*   **Lightweight errors:** Add a `#[no_trace]` attribute for errors used as control flow (e.g., `EndOfFile`).
+**Needed before:** Implementation of inherent struct methods. See the roadmap's methods milestone.
 
-### 3. Specification Holes
+### 2. Error-Trace Wording Does Not Consistently Respect Configuration
 
-*   **`impl` Blocks for non-Trait methods:** The spec documents inherent `impl` blocks for enums (`impl EnumName:`, §4.6) but not for structs, while the roadmap shows `impl Rectangle: ...`.
-    *   *The Fix:* Document inherent struct implementations explicitly in Section 4.5.
+**Existing contract:** Section 7.10 defines `full`, `minimal`, and `off` capture modes.
+Section 4.10 describes full-stack creation and propagation records without qualifying those statements by the selected mode.
+Section 7.6 also describes panic traces in unconditional terms.
 
-### 4. Panic During Drop
+**Flaw:** These passages can imply mandatory capture despite the documented configuration controls.
+Debug-symbol stripping and runtime display controls are separate from build-time capture policy.
 
-*   If a `.drop()` panics while unwinding from another panic, undefined behavior.
-*   **Proposal: Immediate Abort.** Document clearly.
-*   **Status:** Open — prerequisite is Milestone 23 (RAII & Drop). Partially dissolved: panics abort immediately without unwinding and run no cleanup (§7 Panic Behavior), so a `drop()` never runs *during* a panic — but a `drop()` that itself panics still needs a documented rule.
+**Resolution:** Qualify default trace descriptions by the existing capture configuration.
+Clarify how the documented mode applies to errors and panic reporting, including runtime-profile behavior where applicable.
+Preserve the existing distinction between capture, display, and debug symbols.
+If those passages intend different panic and error policies, obtain a decision before changing behavior.
 
-### 5. Safe `continue` (Zig inspiration)
+**Needed before:** Configurable trace implementation and its diagnostics/documentation tests.
+No new flag, attribute, or measured overhead claim is needed to reconcile the current wording.
 
-*   **The Smell:** In `while` loops, using `continue` skips the rest of the block. If manual counter increments are placed there, it results in an accidental infinite loop. Zig solves this with `while (cond) : (continue_expr)`.
-*   **Proposal:** Since Ryo uses Pythonic syntax, adding `:(expr)` breaks aesthetic coherence. However, we could introduce a `defer` statement or explore a block-level `continue` hook to guarantee increment execution. For now, rely on `ForRange` loops where `continue` safely jumps to the builtin increment block.
+### 3. Panic Boundaries and Destruction Need a Consistent Contract
 
----
+**Existing contract:** Section 7.6 says panic immediately aborts the process without cleanup.
+Section 14.5.6 says a panic inside `task.run` or `task.spawn_detached` kills only that task.
+Section 9 requires cancellation cleanup to run destructors and permits those destructors to yield.
 
-## Recommendations
+**Flaw:** The general panic rule does not state the task-boundary exception.
+The passages do not clearly define cleanup when a destructor panics during cancellation or task-local panic handling.
+The former double-panic entry incorrectly assumed panic unwinding and undefined behavior as the general rule.
 
-### Spec Completeness
+**Resolution needed:** Define the applicability of process abort and task-isolated panic.
+Specify destruction obligations at a task panic boundary and panic behavior during cancellation cleanup.
+Distinguish these cases from ordinary resource destruction and cancellation deadline termination.
+Clarify existing intent where supported; obtain approval for behavior that the current specification does not settle.
+Do not select a new panic policy in a compiler implementation note.
 
-- Document inherent `impl` blocks for structs (Specification Holes, above).
-- Add a "post-v0.1" note to Section 9 (Concurrency).
-
-### Open Decisions
-
-- Document drop-panic abort behavior (Panic During Drop — blocked on M23).
-- Track Safe `continue` (Zig inspiration).
-
-### Checklist
-
-- [ ] Document inherent `impl` blocks for structs (spec §4.5 gap)
-- [ ] Document drop-panic abort behavior (M23)
-- [ ] Track Safe `continue` (Zig inspiration)
+**Needed before:** Task panic isolation, cancellation lowering, and exceptional cleanup implementation.
 
 ## References
 
-- Spec: `docs/specification.md` (each resolved issue lands in its relevant section)
-- Roadmap: `docs/dev/implementation_roadmap.md`
+- Spec: [Section 4.5](../specification.md#45-struct-type-product-type), [Section 4.6](../specification.md#46-enum-type-sum-type--algebraic-data-type---adt), and [Section 5](../specification.md#5-memory-management-ownership-lite) for inherent methods and receivers.
+- Spec: [Section 4.10](../specification.md#410-error-trait-and-message-handling) and [Section 7](../specification.md#7-error-handling) for error traces, panic, and capture configuration.
+- Spec: [Section 9](../specification.md#9-concurrency-model-taskfuturechannel) and [Section 14](../specification.md#14-standard-library) for cancellation and task panic isolation.
+- Feature proposals: [proposals.md](proposals.md).
+- Delivery: [Implementation roadmap](implementation_roadmap.md).

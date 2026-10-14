@@ -8,7 +8,7 @@ Rules for agents editing developer documentation in docs/dev/.
 
 Files in docs/dev/ are implementation notes, architectural decisions, and design explorations for the Ryo compiler and runtime. These are working documents for contributors — not user-facing docs.
 
-**Not covered here:** Compiler source code and architecture (see root AGENTS.md), user-facing docs (see docs/AGENTS.md), or language design (see root AGENTS.md).
+**Not covered here:** user-facing docs (see docs/AGENTS.md) or language design (see root AGENTS.md). The compiler architecture guide itself lives in [compiler_guide.md](compiler_guide.md).
 
 ---
 

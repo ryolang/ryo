@@ -27,9 +27,10 @@ wire format downstream, never a re-parse of source:
 | AST | `ryo-core/src/ast/patterns.rs` | `ExprKind::Match` with arms; `PatternFieldKind` (pun / rename / wildcard / literal) shared with M10 destructuring |
 | UIR | `ryo-core/src/uir/match_.rs`, `ryo-frontend/src/astgen/match_.rs` | `UirBuilder::match_expr` wire; patterns lowered directly (literal fields never route through `InstTag::Destructure`) |
 | Sema | `ryo-frontend/src/sema/match_.rs` | pattern resolution + E0129–E0136 family, exhaustiveness, arm typing; emits typed `TirTag::Match` via `TirBuilder::match_expr` |
-| Ownership | `ryo-frontend/src/ownership/match_.rs` | per-arm branch walking, union merge, binding owners, arm-start payload drops |
+| Flow | `ryo-core/src/flow.rs` | the match is a `Switch` terminator: per-arm blocks, explicit join, result place — identical for a statement-level match and a match in any operand position |
+| Ownership | `ryo-frontend/src/ownership/match_.rs` | per-arm analysis from the pre-match snapshot (arm identity = flow blocks), union merge, binding owners (by-move payload tokens are place-table entries), arm-start payload drops positioned at flow arm-block starts |
 | TIR | `ryo-core/src/tir/match_.rs` | typed wire (discriminant + bindings + guards per arm), owner-token convention, decoded views |
-| Codegen | `ryo-backend/src/codegen/match_.rs` | tag dispatch / guard chains / literal chains, binding prologues, merge block |
+| Codegen | `ryo-backend/src/codegen/match_.rs` | tag dispatch / guard chains / literal chains, binding prologues, merge block; cleanup consumed as flow-positioned `DropOp`s (arm-start payload drops fire at the flow arm block's start) |
 
 The matchable scrutinee kinds (E0136 gates the rest): enums by variant,
 exact literals over `int` / `bool` / `str`, and anonymous structs by
@@ -141,46 +142,52 @@ diverges (a bare `panic(...)`, the `stmt_terminates` sense) diverges the
 same way — codegen leaves no merge edge and terminates the noreturn
 call's dead block.
 
-### I-210: aggregate value arms are rejected for now
+### Aggregate value arms transfer ownership into the match result
 
 Aggregate-result matches whose value arms *yield owned storage* — heap
 calls, concats, needs-drop literals, by-value reads of tracked
-bindings — are rejected at compile time, naming **I-210**. Root cause:
-the ownership pass never consumes an arm-body result into the `Match`
-inst, so the drop schedules (producer temporaries anchored on the match,
-binding last-use Frees) would release storage the result slot aliases —
-a double-free or a post-merge read of arm-local SSA values that do not
-dominate the merge. Codegen diagnoses the owned producer families (reusing the
-elision logic, so the rejected set tracks actually-emitting drops); two
-families the guard cannot see are diagnosed earlier, in the ownership
-pass. The **borrowed family** — an arm yielding a borrow/`inout`
-parameter or binding, or a field projection of one — is E0138
-(`arm_result_borrows_caller`): a borrowed owner carries no scheduled
-drop, so the codegen guard could never see it, and pre-fix the shape
-escaped as corrupted output + SIGTRAP. The **by-move-payload family**
-(`Some(v): v` — a bare read of one of the match's own by-move payload
-bindings as the arm result) is E0139 (`arm_result_yields_match_payload`):
-the payload's drop stays anchored outside the arm and the guard's
-binding-read probe missed it while match payload tokens were absent
-from the free-binding tables (debug aborted on the dropped free;
-release miscompiled in Cranelift's egraph). The payload tokens are
-registered in `build_free_binding_names` now, so the guard's
-binding-read family is complete as a backstop. Lift: in
-`analyze_match`, consume each non-`never` value arm's aggregate result
-into the match inst (mirror `analyze_var_decl`'s
-`consume_for_assignment` + `rebind_to_init`), then delete the codegen
-diagnosis, the E0138 check, and the E0139 check. Until then the
-workaround is a `mut` binding assigned inside an if/else restructure.
-Tracked in `ISSUES.md` (I-210); the sanitizer fixture
-`match_discarded_value` is structurally leak-insensitive today and
-should gain a heap-carrying arm when the lift lands.
+bindings, by-move payload binds (`Some(v): v`) — are legalized by an
+arm-result transfer in `analyze_match`: each non-`never` value arm's
+aggregate result is consumed into the `Match` inst (mirroring
+`analyze_var_decl`'s `consume_for_assignment` + `rebind_to_init`).
+Before the transfer the arm-body owner is `Valid` and the match inst
+owns nothing; after it the arm-body owner is `Moved` — removing both
+destruction obligations the result slot would otherwise alias (the
+producer temp's Free anchored on the match, and the binding /
+payload-token last-use Free) — and the match inst is the single
+`Valid` owner the result's consumers (VarDecl/Assign/Return/call arg)
+then move on. Exactly one destruction remains, at the consumer's last
+use. A `FieldAccess`-chain body (`true: p.name`) moves its root binding
+whole, exactly as `analyze_var_decl` sanctions it.
+
+The transfer replaced the former compile-time rejection: the codegen
+owned-producer diagnosis, its `free_would_emit` elision-predicate
+duplication of `emit_frees`, and the E0139 by-move-payload check were
+all deleted with it. (While the guard lasted, the payload tokens
+registered in the flow place table — the backend's free-routing tables
+derive from flow places in a single pass, the old recursive
+`build_free_binding_names` TIR walk is gone — made its binding-read
+family complete as a backstop.)
+
+One family stays rejected: the **borrowed family** — an arm yielding a
+borrow/`inout` parameter or binding, or a field projection of one — is
+E0138 (`arm_result_borrows_caller`): the transfer cannot consume a
+borrowed-rooted aggregate (the result binding would take over cleanup
+of caller-owned storage), and a borrowed owner carries no scheduled
+drop, so no codegen guard could ever see this family — pre-fix the
+shape escaped as corrupted output + SIGTRAP. The workaround is a
+`mut` binding assigned inside an if/else restructure. The sanitizer
+fixture `match_discarded_value` is structurally leak-insensitive
+(static-literal arms); the heap-carrying coverage lives in the
+arm-result transfer tests (heap producer / binding-read / payload-yield
+arms).
 
 ### View-typed results are rejected (E0137)
 
 A match whose value arms all yield one view type passes the E0134 join
 but has no merge shape: a projection's ownership/liveness across arms
-needs design (M12.6 carry-over, lifted together with the I-210
-consume), and `eval_inst_view` has no `Match` case. Sema rejects the
+needs design (M12.6 carry-over, lifted together with the
+aggregate-result consume), and `eval_inst_view` has no `Match` case. Sema rejects the
 shape at compile time (E0137), naming the view type and the deferral —
 never silently miscompiled.
 
@@ -244,10 +251,10 @@ sanitizer mirrors); four ownership walkers — `outermost_branch_of` and
 gets no loop-exit Frees yet (the loop-exit walk skips operand descent
 at loop statements to avoid the stale outer context; exotic shape);
 and `branch_may_not_return` has a `Match` arm but no operand descent
-(pre-existing, backstopped by the return epilogue). I-210's consume fix
-(above) is also queued there, as is the view-result merge (E0137's
-deferral — a match whose value arms all yield one view type is rejected
-at compile time until the merge shape exists).
+(pre-existing, backstopped by the return epilogue). The view-result
+merge (E0137's deferral — a match whose value arms all yield one view
+type is rejected at compile time until the merge shape exists) is also
+queued there.
 
 ### Deferred to M13 / M16
 
@@ -271,7 +278,7 @@ for both.
   revisit knowingly.
 - **View-typed match results** are rejected with E0137 (above) — no
   merge shape exists for a projection result until the M12.6 carry-over
-  lifts it with the I-210 consume.
+  lifts it with the aggregate-result consume.
 - The UIR `ir --emit` dump renders `Match` as `<malformed>` until a dump
   arm lands.
 
@@ -280,4 +287,3 @@ for both.
 - Spec: [Section 4.6](../specification.md) (enum type & `match`), [Section 7.4](../specification.md) (`catch` — error-union matching)
 - Dev: `pipeline_alignment.md`
 - Milestone: M12 — see `implementation_roadmap.md` (deferral registers: M12.5, M12.6; consumers: M13, M16)
-- Issue: I-210 (`ISSUES.md`) — aggregate match value arms pending the ownership consume fix

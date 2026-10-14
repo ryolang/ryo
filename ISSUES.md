@@ -720,20 +720,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-210 — Ownership pass does not consume match arm-body results — aggregate value arms alias the result slot
-
-**Severity:** Correctness
-**Area:** ownership
-
-**Files:** ryo-frontend/src/ownership/match_.rs, ryo-backend/src/codegen/match_.rs
-
-**Summary:** M12 aggregate-result matches lower each value arm's result into a pre-allocated result slot via the canonical (shallow) per-type writes. The ownership pass never consumes an aggregate arm-body result into the match inst: producer temporaries (calls, concats, needs-drop literals) stay Valid, so the anon-temp pass schedules their Free anchored on the Match inst (consumer_of maps the arm body to the match), and by-value reads of tracked bindings (Var / FieldAccess arm bodies) keep their binding's last-use Free. Both drop schedules release storage the result slot aliases: emitting in the arm block frees memory the merge result still points at; the sweep's post-merge position reads arm-local SSA values that do not dominate the merge (Cranelift verifier error in debug, silent miscompile in release — observed garbage stdout + SIGTRAP). Codegen diagnoses the owned producer families (calls/concats/literals — a scheduled drop exists for the guard to see; I-210 reference in the error) and rejects them loudly until the frontend models the consume. Two families cannot rely on the codegen guard and are rejected in the ownership pass instead: the borrowed family (arms yielding a borrowed param/binding or a field projection of one — E0138, `arm_result_borrows_caller` — a borrowed owner has no scheduled drop, so the guard could never see it; it escaped as the SIGTRAP above), and the by-move-payload family (`Some(v): v` — E0139, `arm_result_yields_match_payload` — the payload's drop is anchored outside the arm and the guard's binding-read probe missed it while match payload tokens were absent from the free-binding tables; debug aborted on the dropped free, release miscompiled in Cranelift's egraph). The payload tokens are now registered in `build_free_binding_names` (the same walk that fixed the arm-local inout double-free), so the guard's binding-read family is complete as a backstop for shapes the frontend checks do not name.
-
-
-**Resolution:** In analyze_match (ryo-frontend/src/ownership/match_.rs), consume each non-never value arm's aggregate result into the match inst — mirror analyze_var_decl's consume_for_assignment + rebind_to_init so the arm-body owner is Moved and the match inst becomes the single owner the consumers (VarDecl/Assign/Return/call-arg) then move on. That removes both drop schedules (producer temp + binding read) and lets codegen delete the I-210 diagnosis in ryo-backend/src/codegen/match_.rs; the E0138 borrowed-family check falls away with the same lift. Until then, programs with owned-producing aggregate value arms fail to compile with the I-210 error (sound; the mut-binding + if/else restructure is the workaround).
-
----
-
 ### I-211 — landing What's Next lists M9.2 CLI intrinsics as unshipped though M9.2 is complete
 
 **Severity:** Correctness / Hygiene
@@ -757,6 +743,32 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** The M12 match wire (UIR match view + TypedMatchArm) records only the match span and per-arm bodies; AST pattern spans die in astgen. Every pattern-level diagnostic (E0131, E0132, E0133, W0005) therefore anchors on the arm's body span via arm_span() — sema/match_.rs module header documents this. Renders read acceptably because the messages quote the pattern, but the underline lands on the body, not the pattern. A future wire revision should carry per-arm header spans (pattern through colon) and sema should re-anchor.
 
 **Resolution:** Add per-arm span (pattern span) to the UIR match wire and the typed TIR match arms; re-anchor E0131/E0132/E0133/W0005 in sema/match_.rs; drop the arm_span() reconstruction.
+
+---
+
+### I-216 — Cleanup emission residue: promotion sweeps, redirect classification, aliasing probe, diagnostics walks
+
+**Severity:** Correctness / Hygiene
+**Area:** codegen
+
+**Files:** ryo-backend/src/codegen/frees.rs, ryo-backend/src/codegen/views.rs, ryo-backend/src/codegen/structs.rs, ryo-backend/src/codegen/enums.rs, ryo-backend/src/codegen/decls.rs, ryo-frontend/src/ownership/frees.rs
+
+**Summary:** Post-Flow-IR-migration audit (2026-10-14) of cleanup consumption against the contract in docs/dev/pipeline_migration.md ("codegen consumes operations and terminators mechanically; a pending sweep or cached value must not determine ownership validity"). The 2026-10-14 gap-closure pass fixed the core: main-line drop consumption is now position-mechanical (fire maps keyed by Flow fire position; `sweep_due_frees`, `pending_sweep`, `drops_by_after`, the cached_repr gates, and the tail-eligibility sweep mirror are deleted; provably-inline elision is a lowering-time pre-filter over flow/builtins facts), ownership state is place-keyed (`Owner(PlaceId)`; reads/writes/views come from `StepFacts`), `program_order`/`find_consumers`/`record_return_epilogue` TIR walks are deleted (emission-stamp ranks + a `parent_of` stamp), loop analysis is a provably monotone fixed point with a stated height bound, and cleanup completeness / backend-ready invariants are validated in debug at both phase ends. Remaining residue, all behavior-pinned and fail-loud-or-leak (never silent release miscompiles): (1) promotion frees (`sweep_due_promo_frees`, views.rs) keep their own anchor hook + cached-repr sweep — a separate cleanup family left out of the mechanical-firing migration; (2) `emit_frees`' binding-path redirect still classifies "superseded vs branch-divergent reseat" at emission time from `binding_last_write` + `all_free_targets` + current `fat_locals` instead of Flow write lineage; (3) `expr_refs_name` still walks a TIR operand subtree to decide RHS-aliases-binding for free-before-overwrite order, duplicating Flow `StepFacts.read`; (4) `build_fat_mutation_tables` still scans the TIR arena for mutation/view-base facts (now feeding only the lowering-time elision pre-filter); (5) struct/enum free emission still falls back to a producer's cached repr where a Flow place names the storage. Ownership side: the W0003/W0004 diagnostics walks (`collect_bound_call_sites`, `chain_outlives_loop_iteration`, `loop_encloses_chain_read_not_copy`) remain TIR-recursive (diagnostics-only, never codegen input).
+
+**Resolution:** Migrate item (1) onto the G1 fire-map model (the R4 work made promotion releases first-class validated events with alloc-paired backend accounting — the dedicated promo sweep hook in views.rs remains the emission mechanism to migrate); item (2) onto Flow write lineage (`place_writes` superseded classification); item (3) onto `StepFacts.read`; item (4) onto flow-step facts; item (5) onto `Place::Token` storage. Genuinely backend-local state (SSO inline-ability, `home_inline` materialization bits, memoization) stays, with comments marking the boundary. The W-diagnostics walks ride any later cleanup. Round-3 (same day) closed the unified cleanup boundary (all destruction travels the single DropOp list with first-class BlockStart positions — the dual match_arm_drops/conditional_dead_drops schedules are deleted) and added path-aware obligation validation; round-4 closed the six contract gaps: shared deterministic firing-point resolution consumed by both validation and emission, full live-view membership in loop convergence, path- and generation-specific transfer/escape events, view-backed storage obligations (UAF direction enforced; one leak-direction corner documented in gaps.rs), promotion buffers in the event model, and displaced-value cleanup at replacement writes — plus a latent heap-return-from-loop double-free the new checks exposed. The plan records are in docs/superpowers/plans/2026-10-14-*.md (session scratch, not committed).
+
+---
+
+### I-217 — Implement bounded Flow IR inlining before ABI lowering
+
+**Severity:** Cleanup
+**Area:** core-ir
+
+**Files:** ryo-core/src/flow.rs, ryo-core/src/flow/, ryo-core/src/tir.rs, ryo-frontend/src/ownership/, ryo-driver/src/pipeline.rs, ryo-backend/src/codegen/, docs/dev/pipeline_migration.md, benchmarks/json_validate/, benchmarks/collatz/
+
+**Summary:** I-186 and I-188 record call overhead, but their proposed TIR/backend placement predates the Flow pipeline. Record the implementation sequence from docs/dev/pipeline_migration.md. Small JSON validator helpers are candidates for bounded inlining. The expected speedup is unmeasured.
+
+**Resolution:** (1) Complete the required Flow storage, cleanup, phase-validation, and analysis-invalidation contracts, including the cleanup dependencies in I-216. (2) Define body cloning and mutation contracts. Remap TIR instructions, side arenas, Flow blocks, places, joins, cleanup references, and source provenance. Keep cached source bodies unchanged. (3) Add bounded inlining over concrete language-level Flow bodies before ABI lowering. Start with small direct callees returning scalar values, including borrowed bytesview parameters. Exclude unsupported ownership and effect cases. This first version does not require generics, comptime, ARC, or concurrency. (4) Split the caller block at the call. Evaluate arguments exactly once in original order. Bind parameters, clone the callee, and route returns to a continuation and result. Preserve borrow/move semantics, cleanup order, and exceptional exits. (5) Preserve or recompute affected analyses. Validate transformed bodies and cleanup obligations. Keep the unoptimized path valid. (6) Bound callee size, expansion depth, and caller growth. Detect recursive cycles and prevent unbounded expansion. (7) Test multiple returns, side effects, short-circuit evaluation, borrowed views, shadowing, and recursion limits. Add owned-value, replacement, destruction, and sanitizer coverage as those shapes become eligible. Compare execution with the pass enabled and disabled. (8) Measure JSON validation, collatz, and compiler benchmarks against the same base. Start with is_hex_digit, skip_ws, and match_lit candidates. Inspect generated code for removed calls. Record execution time, compile time, code size, toolchain versions, and remaining hot paths. Do not promise Rust parity or attribute the entire gap to call overhead.
 
 ---
 
