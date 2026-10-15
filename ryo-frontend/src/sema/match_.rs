@@ -111,6 +111,8 @@ struct MatchAnalysis {
 struct MatchArmAnalysis {
     /// Source span of the arm pattern, carried through UIR.
     span: Span,
+    /// Source span of the first body expression or statement.
+    body_span: Span,
     /// The resolved selector: `Some` for wildcard / literal / variant
     /// arms. `None` for anonymous-shape arms (no M12 discriminant
     /// exists — structural lowering is M12.5) and for arms whose
@@ -197,7 +199,14 @@ pub(crate) fn analyze_match(
     let mut arms = Vec::with_capacity(view.arms.len());
     for arm in &view.arms {
         let arm_span = arm.span;
-        let analysis = resolve_arm(sema, scrutinee_ty, arm, arm_span);
+        let body_span = match arm.body {
+            UirArmBodyView::Expr(body) => uir.span(body),
+            UirArmBodyView::Stmts(stmts) => stmts
+                .first()
+                .map(|stmt| uir.span(InstRef::from_raw(*stmt)))
+                .unwrap_or(arm_span),
+        };
+        let analysis = resolve_arm(sema, scrutinee_ty, arm, arm_span, body_span);
         had_error |= analysis.had_error;
         arms.push(analysis);
     }
@@ -301,7 +310,7 @@ struct TypedArm {
     /// for wildcard / literal / variant arms.
     guards: Vec<(u32, LitPattern)>,
     body: TypedArmBody,
-    /// Arm span (the R11 body re-anchor) — the E0134/E0135 anchor.
+    /// Body span for diagnostics about the arm's result.
     span: Span,
     class: ArmClass,
 }
@@ -422,7 +431,7 @@ fn type_and_emit_match(
             bindings: arm.bindings.clone(),
             guards: arm.anon_literals.clone(),
             body,
-            span: arm.span,
+            span: arm.body_span,
             class,
         });
     }
@@ -837,7 +846,7 @@ fn check_exhaustiveness(
 /// header) with the pattern's source text quoted.
 fn warn_unreachable(sema: &mut Sema<'_>, arm: &MatchArmAnalysis, reason: &str) {
     sema.warnings.push(Diag::warning(
-        arm.span,
+        arm.body_span,
         DiagCode::UnreachableArm,
         format!(
             "unreachable match arm — pattern `{}` can never match: {reason}",
@@ -1016,9 +1025,11 @@ fn resolve_arm(
     scrutinee_ty: ryo_core::types::TypeId,
     arm: &UirMatchArmView<'_>,
     span: Span,
+    body_span: Span,
 ) -> MatchArmAnalysis {
     let mut analysis = MatchArmAnalysis {
         span,
+        body_span,
         discriminant: None,
         pattern_text: render_pattern(sema, &arm.pattern),
         bindings: Vec::new(),
