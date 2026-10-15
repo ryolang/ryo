@@ -837,6 +837,32 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-233 — Sealed cleanup does not protect its validation result
+
+**Severity:** Correctness / Hygiene
+**Area:** core-ir
+
+**Files:** ryo-core/src/ownership.rs; ryo-core/src/ownership/version.rs; ryo-backend/src/codegen/validate.rs
+
+**Summary:** FunctionSidecar::validation is public, but representation_stamp omits it. A caller can change a sealed incomplete cleanup summary to required_checks_ran=true with zero NOT PROVED counters; require_unchanged still succeeds and backend input validation accepts it as complete. This breaks the published-artifact contract and can let callers bypass the debug cleanup proof gate.
+
+**Resolution:** Make validation status immutable after publication or include it in the sealed representation contract. Ensure backend preparation rejects any validation result whose provenance is not tied to the published cleanup artifact. Add a corruption test that mutates validation after sealing and requires rejection.
+
+---
+
+### I-234 — Cleanup validation does not expose invalid outcomes
+
+**Severity:** Correctness / Hygiene
+**Area:** ownership
+
+**Files:** ryo-core/src/ownership.rs; ryo-frontend/src/ownership/validate.rs; ryo-core/src/flow/inspect.rs
+
+**Summary:** ValidationOutcome declares Invalid, but FunctionSidecar::validation_outcome can return only NotRun, Skipped, Incomplete, or Complete. Unresolved positions trigger debug_assert in validate_positions, while Flow inspection labels CleanupPlan resolution errors Invalid through a separate path. Consumers cannot inspect a consistent invalid validation result, and debug validation aborts instead of reporting it.
+
+**Resolution:** Represent cleanup validation as an explicit result with invalid, incomplete, and complete outcomes plus skipped/not-run availability. Propagate invalid schedules to the driver and inspection output without relying on a debug assertion for the result. Keep structural backend checks enforced in release builds.
+
+---
+
 ## Cross-References
 
 - Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md) — latest verified snapshot (2026-08-24); several current entries originated there, and its `I-xxx` citations reflect what was open at the time (older snapshots live in git history).
