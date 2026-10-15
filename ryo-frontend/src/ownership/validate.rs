@@ -153,13 +153,16 @@ pub(crate) fn validate_cleanup(
     let fire_points = FirePoints::new(flow);
     let mut summary = ValidationSummary::default();
     validate_positions(flow, &fire_points, sidecar, &mut summary);
+    if summary.invalid {
+        return summary;
+    }
     validate_no_duplicate_destruction(&places, flow, sidecar);
     let idx = StepIndex::build(flow);
     let events = collect_events(tir, &places, flow, &fire_points, sidecar, own, pool);
     let table = generation_table(tir, flow, pool, &idx, sidecar);
     #[cfg(test)]
     record_test_ownership(tir.name, own.clone());
-    if body_clean {
+    if body_clean && !summary.invalid {
         summary.required_checks_ran = true;
         let ctx = Ctx {
             tir,
@@ -242,17 +245,17 @@ impl StepIndex {
 /// continuation (an IfStmt payload fires when the construct completes,
 /// on whichever arm completed); an empty vec is a real shape — the
 /// anchor can never fire (every arm diverges / no join) — and excludes
-/// the event from the path checks. `Unresolved` is gated by
-/// `validate_positions` (a validation error — never "treated as
-/// validated").
+/// the event from the path checks. `Unresolved` has no firing point;
+/// `validate_positions` records it as invalid, so these checks must not
+/// use a guessed point.
 pub(crate) fn position_points(fire_points: &FirePoints, pos: DropPosition) -> Vec<(Point, bool)> {
     match fire_points.resolve(pos) {
         FireVerdict::Resolved(p) => vec![(p, true)],
         FireVerdict::ResolvedPerArm(ps) => ps.into_iter().map(|p| (p, true)).collect(),
         FireVerdict::NonExact(p) => vec![(p, false)],
-        FireVerdict::Unresolved => unreachable!(
-            "validate_positions gates resolution; an unresolvable position is a validation error"
-        ),
+        // An unresolved position is reported by validate_positions and
+        // makes the summary invalid. Do not invent a firing point here.
+        FireVerdict::Unresolved => Vec::new(),
     }
 }
 
@@ -1228,14 +1231,14 @@ pub(crate) fn validate_positions(
         summary.positions += 1;
         match fire_points.resolve(*fp) {
             FireVerdict::Unresolved => {
-                debug_assert!(
-                    false,
-                    "cleanup position {fp:?} does not resolve: the anchor is neither a Flow step nor a terminator payload, or the block does not exist"
-                );
+                summary.invalid = true;
             }
             FireVerdict::NonExact(_) => summary.positions_not_proved += 1,
             FireVerdict::Resolved(_) | FireVerdict::ResolvedPerArm(_) => {}
         }
+    }
+    if summary.invalid {
+        return;
     }
     // BlockStart drops are either match-arm-start payload destruction
     // or conditional dead drops; tell them apart by the same identity

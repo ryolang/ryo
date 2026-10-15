@@ -99,7 +99,7 @@ fn validator_accepts_loop_body_frees() {
 }
 
 /// Negative pin (positions): a drop firing in a block the Flow does not
-/// have is a violation.
+/// have produces an invalid validation result.
 #[test]
 fn validator_rejects_drop_in_nonexistent_block() {
     let (diags, mut sidecar, tirs, pool) =
@@ -115,16 +115,13 @@ fn validator_rejects_drop_in_nonexistent_block() {
         target: real.target,
         span: real.span,
     });
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let fire_points = ryo_core::flow::fire_points::FirePoints::new(&flow);
-        cv::validate_positions(
-            &flow,
-            &fire_points,
-            &sc,
-            &mut cv::ValidationSummary::default(),
-        );
-    }));
-    assert!(r.is_err(), "a PreTerminator drop in block 999 must panic");
+    let fire_points = ryo_core::flow::fire_points::FirePoints::new(&flow);
+    let mut summary = cv::ValidationSummary::default();
+    cv::validate_positions(&flow, &fire_points, &sc, &mut summary);
+    assert!(
+        summary.invalid,
+        "a PreTerminator drop in block 999 is invalid"
+    );
 }
 
 /// Negative pin (positions): a conditional dead drop listing a block
@@ -625,6 +622,31 @@ fn view_protection_non_exact_release_counts_not_proved() {
     assert!(
         summary.views_not_proved > 0,
         "a non-exact release position must yield NOT PROVED accounting: {summary:?}"
+    );
+}
+
+#[test]
+fn unresolved_cleanup_position_is_reported_as_invalid() {
+    let source = "fn main():\n\ts = \"cleanup position\"\n\tprint(s)\n";
+    let (tirs, pool, _main, flow, own, mut sidecar) = path_check_harness(source, "main");
+    let drop = sidecar
+        .drops
+        .first_mut()
+        .expect("fixture has a cleanup drop");
+    drop.position = DropPosition::BlockStart {
+        block: ryo_core::flow::BlockId(u32::MAX),
+    };
+
+    let summary = cv::validate_cleanup(&tirs[0], &flow, &pool, &own, &sidecar, true);
+    assert!(
+        summary.invalid,
+        "unresolved anchor must be invalid: {summary:?}"
+    );
+    assert!(!summary.proof_complete());
+    sidecar.validation = Some(summary);
+    assert_eq!(
+        sidecar.validation_outcome(),
+        ryo_core::ownership::ValidationOutcome::Invalid
     );
 }
 

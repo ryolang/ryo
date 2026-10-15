@@ -56,7 +56,17 @@ A value whose type implements `Scoped`:
   (E0017, `VoidValueInExpression`): a small set of types the compiler refuses to
   bind.
 - **Can only be consumed as a `with` target** — `with cache.lock() as g:` binds it
-  inside the block, where it behaves as an ordinary in-scope value.
+  inside the block, where it behaves as an ordinary in-scope value. This rule
+  applies wherever an expression creates a `Scoped` value. The direct resource
+  expression in `with` is the allowed position. Reject a declaration or assignment
+  RHS, a call argument, or a discarded expression that creates the value. After
+  `with` binds the value, the body can use it as an ordinary in-scope value,
+  including as a call argument:
+
+  ```ryo
+  with cache.lock() as guard:
+	use(guard)
+  ```
 - **Implies `Drop`.** `Scoped` without `Drop` is a compile error; the cleanup the
   `with` block guarantees must exist.
 
@@ -112,11 +122,12 @@ the roadmap Phase 5 table (same dependency as E0034's fix).
 
 ### Compiler impact
 
-- **Sema, not the ownership pass.** The check is purely local: a variable-declaration
-  binding whose initializer's resolved `TypeId` carries the `Scoped` facet. No flow
-  analysis, no liveness interaction. `Scoped` values that pass the binding check are
-  ordinary in-scope `Drop` values from the ownership pass's perspective (lexical
-  destruction at block exit, per §5.4 rule 2).
+- **Sema, not the ownership pass.** The check is local: sema checks each expression
+  that creates a `Scoped` value. It permits the direct resource expression in `with`
+  and rejects creation in declaration or assignment RHSs, call arguments, and
+  discarded expressions. No flow analysis or liveness interaction is needed. After
+  `with` binds a value, the body can use it as an ordinary in-scope `Drop` value. The
+  ownership pass destroys it at block exit, per §5.4 rule 2.
 - **Facet, not a parallel hierarchy.** `Scoped` is a boolean facet on `TypeId`
   metadata, like the `Drop` facet M23 already tracks; no new IR instructions, no
   codegen surface.

@@ -107,6 +107,13 @@ impl Flow {
         }
         match &cleanup.validation {
             None => text.push_str("  validation: not run (build configuration)\n"),
+            Some(summary) if summary.invalid => {
+                let _ = writeln!(
+                    text,
+                    "  validation: {:?} {summary:?}",
+                    crate::ownership::ValidationOutcome::Invalid
+                );
+            }
             Some(summary) if !summary.required_checks_ran => {
                 text.push_str("  validation: required checks skipped (invalid source)\n")
             }

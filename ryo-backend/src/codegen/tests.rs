@@ -326,6 +326,23 @@ fn backend_rejects_incomplete_and_skipped_validation() {
 }
 
 #[test]
+fn backend_rejects_validation_mutated_after_publication() {
+    let (tirs, flows, pool, mut cleanup) = analyze("fn main():\n\tprint(1)\n");
+    cleanup.functions[0].validation = Some(ryo_core::ownership::ValidationSummary {
+        required_checks_ran: true,
+        ..Default::default()
+    });
+    let mut codegen = Codegen::new_jit().expect("JIT");
+    let error = codegen
+        .compile(&tirs, &flows, &pool, &cleanup, false)
+        .expect_err("forged validation must be rejected");
+    assert!(
+        error.contains("cleanup changed after publication"),
+        "{error}"
+    );
+}
+
+#[test]
 fn cleanup_executes_without_optional_optimizations() {
     for source in [
         include_str!("../../../ryo/tests/fixtures/shadowed_heap_reassignment.ryo"),

@@ -126,11 +126,9 @@ pub struct FunctionSidecar {
     /// releases (`promotion_frees`): the promoted copy is a DISTINCT
     /// identity from the borrowed original.
     pub promo_allocs: Vec<PromoFree>,
-    /// Debug-only cleanup-validation tally for this body (the
-    /// `ryo-frontend` `ownership::validate` pass fills it in debug
-    /// builds; `None` in release builds — validation did not run and
-    /// the body must NOT be labeled fully validated). See
-    /// [`ValidationSummary`].
+    /// Cleanup-validation result for this body. The frontend fills it
+    /// in debug builds; `None` in release builds means validation did
+    /// not run. See [`ValidationSummary`].
     pub validation: Option<ValidationSummary>,
 }
 
@@ -157,8 +155,10 @@ pub enum ValidationOutcome {
 /// driver) inspects the counts deterministically. `None` there means
 /// validation did not run (release builds), which must never be
 /// labeled "fully validated".
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ValidationSummary {
+    /// A required cleanup position did not resolve to this Flow body.
+    pub invalid: bool,
     /// False when validation was unavailable or required path checks were skipped.
     pub required_checks_ran: bool,
     /// Drop/promo-free positions examined for resolution.
@@ -216,7 +216,8 @@ impl ValidationSummary {
     /// module header and must surface as NOT PROVED (never Proven), so
     /// they keep this predicate honest.
     pub fn proof_complete(&self) -> bool {
-        self.required_checks_ran
+        !self.invalid
+            && self.required_checks_ran
             && self.positions_not_proved == 0
             && self.pairs_not_proved == 0
             && self.obligations_not_proved == 0
@@ -229,6 +230,7 @@ impl FunctionSidecar {
     pub fn validation_outcome(&self) -> ValidationOutcome {
         match self.validation {
             None => ValidationOutcome::NotRun,
+            Some(summary) if summary.invalid => ValidationOutcome::Invalid,
             Some(summary) if !summary.required_checks_ran => ValidationOutcome::Skipped,
             Some(summary) if summary.proof_complete() => ValidationOutcome::Complete,
             Some(_) => ValidationOutcome::Incomplete,

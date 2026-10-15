@@ -21,6 +21,7 @@ impl FunctionSidecar {
         }
         self.promotion_frees.len().hash(&mut hash);
         self.promo_allocs.len().hash(&mut hash);
+        self.validation.hash(&mut hash);
         for promotion in self.promotion_frees.iter().chain(&self.promo_allocs) {
             promotion.position.hash(&mut hash);
             promotion.base.hash(&mut hash);

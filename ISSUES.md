@@ -720,19 +720,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-211 — landing What's Next lists M9.2 CLI intrinsics as unshipped though M9.2 is complete
-
-**Severity:** Correctness / Hygiene
-**Area:** docs-spec
-
-**Files:** landing/reference/index.html, docs/dev/implementation_roadmap.md
-
-**Summary:** Found during the M12 closeout docs pass: landing/reference/index.html still lists the M9.2 throwaway CLI intrinsics (process_*/io_*) in the What's Next / planned section, but Milestone 9.2 is marked COMPLETE in the roadmap and the intrinsics ship. Stale planned-callout drift of the kind the milestone-completion rule exists to prevent.
-
-**Resolution:** Remove the M9.2 entry from the What's Next list (and check adjacent entries against the roadmap's COMPLETE list in the same pass). Small docs cleanup; not M12 scope.
-
----
-
 ### I-212 — Match UIR wire carries no per-arm/pattern spans — pattern diagnostics anchor on the arm body
 
 **Severity:** Correctness / Hygiene
@@ -837,32 +824,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-233 — Sealed cleanup does not protect its validation result
-
-**Severity:** Correctness / Hygiene
-**Area:** core-ir
-
-**Files:** ryo-core/src/ownership.rs; ryo-core/src/ownership/version.rs; ryo-backend/src/codegen/validate.rs
-
-**Summary:** FunctionSidecar::validation is public, but representation_stamp omits it. A caller can change a sealed incomplete cleanup summary to required_checks_ran=true with zero NOT PROVED counters; require_unchanged still succeeds and backend input validation accepts it as complete. This breaks the published-artifact contract and can let callers bypass the debug cleanup proof gate.
-
-**Resolution:** Make validation status immutable after publication or include it in the sealed representation contract. Ensure backend preparation rejects any validation result whose provenance is not tied to the published cleanup artifact. Add a corruption test that mutates validation after sealing and requires rejection.
-
----
-
-### I-234 — Cleanup validation does not expose invalid outcomes
-
-**Severity:** Correctness / Hygiene
-**Area:** ownership
-
-**Files:** ryo-core/src/ownership.rs; ryo-frontend/src/ownership/validate.rs; ryo-core/src/flow/inspect.rs
-
-**Summary:** ValidationOutcome declares Invalid, but FunctionSidecar::validation_outcome can return only NotRun, Skipped, Incomplete, or Complete. Unresolved positions trigger debug_assert in validate_positions, while Flow inspection labels CleanupPlan resolution errors Invalid through a separate path. Consumers cannot inspect a consistent invalid validation result, and debug validation aborts instead of reporting it.
-
-**Resolution:** Represent cleanup validation as an explicit result with invalid, incomplete, and complete outcomes plus skipped/not-run availability. Propagate invalid schedules to the driver and inspection output without relying on a debug assertion for the result. Keep structural backend checks enforced in release builds.
-
----
-
 ## Cross-References
 
 - Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md) — latest verified snapshot (2026-08-24); several current entries originated there, and its `I-xxx` citations reflect what was open at the time (older snapshots live in git history).
@@ -870,4 +831,4 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
 
-<!-- issue-id high-water: 232 -->
+<!-- issue-id high-water: 234 -->
