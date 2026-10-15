@@ -23,6 +23,7 @@
 //! See `docs/dev/pl_references/mojo.md`.
 
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
+use ryo_core::flow::fire_points::{FirePoints, FireVerdict};
 use ryo_core::flow::{Analysis, BlockId, DropOp, DropPosition, Flow, PlaceId};
 
 mod diag_fmt;
@@ -820,8 +821,9 @@ fn analyze_function(
                     // the branch exit, the earliest point where the
                     // value is dead on ALL paths, EXCEPT a loop-carried
                     // owner whose binding is read again after the loop.
-                    let anchor = last_use_anchor(
+                    let Some(anchor) = last_use_anchor(
                         tir,
+                        flow,
                         r,
                         after,
                         sidecar,
@@ -833,7 +835,9 @@ fn analyze_function(
                                 && matches!(kind, HazardKind::Move)
                                 && matches!(tir.inst(site).tag, TirTag::Return | TirTag::ReturnVoid)
                         }),
-                    );
+                    ) else {
+                        continue;
+                    };
                     // Anchor-order suppression: the owner is its
                     // binding's current owner (the stale-target check
                     // above did not fire — a loop merge's first-wins
@@ -1350,9 +1354,38 @@ fn schedule_return_epilogue_frees(
     reassign_orders: &HashMap<TirRef, Vec<TirRef>>,
 ) {
     let mut epilogue_emitted: HashSet<(TirRef, TirRef)> = HashSet::new();
+    let fire_points = FirePoints::new(flow);
+    let return_block_reached_from = |start: BlockId, target: BlockId| {
+        let mut seen = HashSet::new();
+        let mut pending = vec![start];
+        while let Some(block) = pending.pop() {
+            if block == target {
+                return true;
+            }
+            if seen.insert(block) {
+                pending.extend_from_slice(flow.successors(block));
+            }
+        }
+        false
+    };
+    let drop_precedes_return = |fp: &DropOp, return_block: BlockId| {
+        let reaches_return = |point: ryo_core::flow::fire_points::FirePoint| {
+            point.block != return_block && return_block_reached_from(point.block, return_block)
+        };
+        match fire_points.resolve(fp.position) {
+            FireVerdict::Resolved(point) | FireVerdict::NonExact(point) => reaches_return(point),
+            FireVerdict::ResolvedPerArm(points) => points.into_iter().any(reaches_return),
+            FireVerdict::Unresolved => false,
+        }
+    };
     for (return_stmt, owners) in &own.return_epilogue {
         let mut on_path: HashSet<TirRef> = HashSet::new();
         let _ = tir.collect_jump_path(body_stmts, *return_stmt, &mut on_path);
+        // The return node is the path target, so `collect_jump_path`
+        // stops there without collecting expressions evaluated to form
+        // its return value (including value-match arms). Those arm
+        // scopes execute before reaching the return block.
+        tir.collect_reachable(*return_stmt, &mut on_path);
         // A Free anchored after a branch CONTAINING the return never
         // fires on the return's path — the branch statement does not
         // complete before the return exits. Exclude ancestors from the
@@ -1401,31 +1434,44 @@ fn schedule_return_epilogue_frees(
                 continue;
             }
             // A covering Free must fire on a path that REACHES this
-            // return, at an anchor that CAN fire. Two anchor shapes
-            // never do: a terminator jump inside a traversed subtree
-            // (a `return`/`break`/`continue` of its own — codegen
-            // cannot sweep after a terminator, so the anchor only
-            // services its own exit), and — the dead-anchor
-            // family — any anchor inside THIS return's own operand
-            // subtree: the statement-end sweep that would fire it is
-            // skipped after the Return terminator, so a last-use Free
-            // anchored on the returned expression's reads never fires.
-            // `collect_jump_path` counts both shapes as on-path.
-            // Excluding them keeps the covering sound; without it a
-            // dead anchor suppresses this epilogue Free and codegen's
-            // leak-direction assert fires.
-            let fires_on_this_path = |after: TirRef| -> bool {
-                !tir.contains_reachable(*return_stmt, after)
-                    && !matches!(
-                        tir.inst(after).tag,
-                        TirTag::Return | TirTag::ReturnVoid | TirTag::Break | TirTag::Continue
-                    )
+            // return, at an anchor that CAN fire. A terminator jump
+            // inside a traversed subtree (`return`/`break`/`continue`)
+            // only services its own exit. A last-use drop inside this
+            // return's operand fires only when its Flow point is before
+            // the Return block, as for a match arm; a drop in the Return
+            // block cannot sweep after the terminator.
+            let return_block = flow.term_block_of(*return_stmt);
+            let fires_on_this_path = |fp: &DropOp| -> bool {
+                let after = drop_anchor(fp);
+                if matches!(
+                    tir.inst(after).tag,
+                    TirTag::Return | TirTag::ReturnVoid | TirTag::Break | TirTag::Continue
+                ) {
+                    return false;
+                }
+                if !tir.contains_reachable(*return_stmt, after) {
+                    return true;
+                }
+                let Some(return_block) = return_block else {
+                    return false;
+                };
+                drop_precedes_return(fp, return_block)
             };
             let covered = anchored_drops(sidecar).any(|fp| {
                 fp.target == r
-                    && on_path.contains(&drop_anchor(fp))
+                    && (on_path.contains(&drop_anchor(fp))
+                        // Match payload tokens are created at the match
+                        // terminator, outside the return expression's
+                        // TIR operand tree. Their arm-local last-use drop
+                        // can still cover this return when its firing
+                        // block reaches the return block.
+                        || (!r.is_param()
+                            && tir.inst(r).tag == TirTag::FieldAccess
+                            && return_block.is_some_and(|target| {
+                                drop_precedes_return(fp, target)
+                            })))
                     && !ancestors.contains(&drop_anchor(fp))
-                    && fires_on_this_path(drop_anchor(fp))
+                    && fires_on_this_path(fp)
             });
             if covered {
                 continue;
@@ -1499,7 +1545,7 @@ fn schedule_return_epilogue_frees(
                 let binding_covered = anchored_drops(sidecar).any(|fp| {
                     on_path.contains(&drop_anchor(fp))
                         && !ancestors.contains(&drop_anchor(fp))
-                        && fires_on_this_path(drop_anchor(fp))
+                        && fires_on_this_path(fp)
                         && covers(fp)
                 }) || staged.iter().any(covers);
                 if binding_covered {

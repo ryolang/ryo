@@ -404,6 +404,17 @@ fn match_scrutinee_temp_str_heap_drop_jit() {
 }
 
 #[test]
+fn match_return_string_payload_from_diverging_arm_jit() {
+    // All arms return, so the match has no join. The returned string
+    // must leave through its arm. Test inline and heap-backed strings.
+    assert_ryo_output(
+        "match_return_string_payload",
+        "enum Message:\n\tText(str)\n\tEmpty\n\nfn take_short() -> str:\n\tm = Message.Text(\"short\")\n\tmatch m:\n\t\tMessage.Text(value):\n\t\t\treturn value\n\t\tMessage.Empty:\n\t\t\treturn \"empty\"\n\nfn take_heap() -> str:\n\tm = Message.Text(int_to_str(1) + \"-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz\")\n\tmatch m:\n\t\tMessage.Text(value):\n\t\t\treturn value\n\t\tMessage.Empty:\n\t\t\treturn \"empty\"\n\nfn length_short() -> int:\n\tm = Message.Text(\"short\")\n\treturn match m:\n\t\tMessage.Text(value): value.len()\n\t\tMessage.Empty: 0\n\nfn length_heap() -> int:\n\tm = Message.Text(int_to_str(1) + \"-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz\")\n\treturn match m:\n\t\tMessage.Text(value): value.len()\n\t\tMessage.Empty: 0\n\nfn main():\n\tprint(take_short())\n\tprint(\"\\n\")\n\tprint(take_heap())\n\tprint(\"\\n\")\n\tprint(length_short())\n\tprint(\"\\n\")\n\tprint(length_heap())\n\tprint(\"\\n\")\n",
+        "short\n1-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz\n5\n55\n",
+    );
+}
+
+#[test]
 fn match_value_arm_heap_producer_transfers_jit() {
     // Arm-result transfer, the producer shape: a value arm that
     // PRODUCES an owned aggregate (a call) transfers its temporary into

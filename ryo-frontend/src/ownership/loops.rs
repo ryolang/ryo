@@ -988,6 +988,7 @@ pub(crate) fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn last_use_anchor(
     tir: &Tir,
+    flow: &Flow,
     owner: TirRef,
     after: TirRef,
     sidecar: &FunctionSidecar,
@@ -995,7 +996,7 @@ pub(crate) fn last_use_anchor(
     last_read_by_name: &HashMap<StringId, TirRef>,
     loop_carried_owners: &HashSet<TirRef>,
     return_transferred: bool,
-) -> TirRef {
+) -> Option<TirRef> {
     // Assignment sites inherit the declaring binding, even when names shadow.
     let binding = owner_binding_decl(tir, owner).and_then(|(site, name)| {
         if tir.inst(site).tag == TirTag::Assign {
@@ -1008,7 +1009,18 @@ pub(crate) fn last_use_anchor(
         binding
             .is_some_and(|(decl, _)| decl.is_param() || !tir.contains_reachable(branch_stmt, decl))
     };
-    match outermost_branch_of(tir, after) {
+    // An all-diverging match has no completion point. Do not anchor the
+    // scrutinee's last-use Free after it. That position cannot fire.
+    // Return and loop-exit cleanup handle each terminating arm.
+    if let Some(branch_stmt) = outermost_branch_of(tir, after)
+        && tir.inst(branch_stmt).tag == TirTag::Match
+        && flow
+            .term_block_of(branch_stmt)
+            .is_some_and(|block| matches!(flow.term(block), Terminator::Switch { join: None, .. }))
+    {
+        return None;
+    }
+    Some(match outermost_branch_of(tir, after) {
         Some(branch_stmt) if binding_outlives(branch_stmt) => {
             if matches!(
                 tir.inst(branch_stmt).tag,
@@ -1052,7 +1064,7 @@ pub(crate) fn last_use_anchor(
             }
         }
         _ => after,
-    }
+    })
 }
 
 /// All branch statements containing `target`, outermost first. Kept
