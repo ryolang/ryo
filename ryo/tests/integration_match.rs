@@ -1019,6 +1019,20 @@ fn match_in_while_condition_loop_until_arm_value_changes_jit() {
 }
 
 #[test]
+fn match_string_results_reassigned_after_loop_jit() {
+    // A loop-carried value match can replace an owned SSO string with a
+    // heap-backed string. A later match that reassigns the same binding
+    // must release the value currently in its home, even when the
+    // producer from the final loop iteration does not dominate the exit.
+    let source = "fn main():\n\tmut i = 0\n\tmut value: str = \"tiny\"\n\tmut label: str = \"\"\n\twhile i < 100:\n\t\tvalue = match i % 2:\n\t\t\t0: \"tiny\"\n\t\t\t_: \"0123456789012345678901234567890123456789\"\n\t\tlabel = match value:\n\t\t\t\"tiny\": \"S\"\n\t\t\t\"0123456789012345678901234567890123456789\": \"L\"\n\t\t\t_: \"?\"\n\t\ti = i + 1\n\tvalue = match value:\n\t\t\"tiny\": \"0123456789012345678901234567890123456789\"\n\t\t_: \"tiny\"\n\tlabel = match value:\n\t\t\"tiny\": \"S\"\n\t\t\"0123456789012345678901234567890123456789\": \"L\"\n\t\t_: \"?\"\n\tassert(label == \"S\", \"last reassignment selects the short string\")\n\tprint(\"ok\\n\")\n";
+    for (iterations, expected) in [(0, "L"), (1, "L"), (2, "S"), (100, "S"), (1000, "S")] {
+        let source = source.replace("i < 100", &format!("i < {iterations}"));
+        let source = source.replace("label == \"S\"", &format!("label == \"{expected}\""));
+        assert_ryo_output("match_string_reassign_after_loop", &source, "ok\n");
+    }
+}
+
+#[test]
 fn match_arm_break_and_continue_exit_to_loop_jit() {
     // Both loop-control exits inside match arms nested in a loop: the
     // `continue` arm jumps to the loop header, the `break` arm to the

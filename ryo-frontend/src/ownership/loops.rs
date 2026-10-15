@@ -23,7 +23,7 @@ use super::{
     visit_operand_matches,
 };
 use ryo_core::diag::DiagSink;
-use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow, Terminator};
+use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow, Place, Terminator, WriteKind};
 use ryo_core::ownership::FunctionSidecar;
 use ryo_core::tir::{MatchBodyView, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::StringId;
@@ -108,12 +108,59 @@ pub(crate) fn analyze_loop(
             StopKind::Visit
         }
     });
+    let mut loop_carried_homes = HashSet::new();
+    for &b in &region {
+        for step in w.flow.block_steps(b) {
+            if w.tir.inst(step.inst).tag != TirTag::Assign {
+                continue;
+            }
+            let view = w.tir.assign_view(step.inst);
+            if w.tir.inst(view.value).tag != TirTag::Match {
+                continue;
+            }
+            let Some(write) = step.facts.write else {
+                continue;
+            };
+            if write.kind != WriteKind::Replace {
+                continue;
+            }
+            let Place::Local { ty, .. } = w.flow.place(write.place) else {
+                continue;
+            };
+            if w.pool.needs_drop(*ty) && own.current_owner.contains_key(&write.place) {
+                loop_carried_homes.insert(write.place);
+            }
+        }
+    }
+    // A mutable binding assigned from a match in the loop can hold
+    // values produced by any iteration. Give that runtime slot a stable
+    // owner identity before the fixed-point walk, so no later release
+    // names a producer that may not dominate the loop exit.
+    for &home in &loop_carried_homes {
+        let dynamic_owner = Owner(home);
+        let Some(old_owner) = own.current_owner.insert(home, dynamic_owner) else {
+            continue;
+        };
+        if old_owner != dynamic_owner {
+            let state = own
+                .states
+                .get(&old_owner)
+                .cloned()
+                .unwrap_or(OwnerState::NotTracked);
+            own.states.insert(dynamic_owner, state);
+            if !own.current_owner.values().any(|owner| *owner == old_owner) {
+                own.pending_dead_store.remove(&old_owner);
+                own.states.remove(&old_owner);
+            }
+        }
+    }
     // Record the body region for the post-walk loop-carried scan.
     // The region is marked processed only after the fixed point below:
     // phase passes must re-walk these blocks, and the `processed` mark
     // gates the once-ever walks (the outer driver and enclosing arm
     // lists skip the region from then on).
     w.loop_regions.push((loop_inst, region.clone()));
+    w.active_loop_carried_homes.push(loop_carried_homes);
     // Structural whole-region test, never per-owner — the Flow IR
     // replacement for the old `!stmt_must_return(last body stmt)`: the
     // body's end-state reaches the back-edge / post-loop join iff some
@@ -298,6 +345,7 @@ pub(crate) fn analyze_loop(
     // zero times, so post-loop state = entry ⊔ post-check-pass.
     let after = own.take_branch(BranchState::default());
     merge_non_monotone(own, snap, after, after_flows_off_end);
+    w.active_loop_carried_homes.pop();
     // P4 (final spec §3.2): projections whose last read is inside this
     // loop (but whose creation is outside it) die at the loop's exit.
     remove_loop_deferred_views(own, loop_inst);

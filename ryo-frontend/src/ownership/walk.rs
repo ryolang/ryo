@@ -174,6 +174,9 @@ pub(crate) struct Walk<'a> {
     pub(crate) block_order: Vec<BlockId>,
     /// Per-loop body regions, for the post-walk loop-carried scan.
     pub(crate) loop_regions: Vec<(TirRef, Vec<BlockId>)>,
+    /// Mutable needs-drop homes assigned in the active loop bodies.
+    /// Their owner identity is the runtime home slot across iterations.
+    pub(crate) active_loop_carried_homes: Vec<HashSet<PlaceId>>,
     /// Owner-keyed last-use reads, recorded at `Var` steps (replaces the
     /// old post-walk `collect_last_uses` scan).
     pub(crate) last_use: HashMap<TirRef, TirRef>,
@@ -253,6 +256,7 @@ impl<'a> Walk<'a> {
             last_inst: None,
             block_order: Vec::new(),
             loop_regions: Vec::new(),
+            active_loop_carried_homes: Vec::new(),
             last_use: HashMap::new(),
             last_read_by_name: HashMap::new(),
             region_scratch: Vec::new(),
@@ -841,7 +845,19 @@ impl<'a> Walk<'a> {
                 r,
             );
             let seat = rebind_to_init(own, home, view.value);
-            register_pending_dead_store(own, seat, view.name, span, r);
+            let loop_carried = self
+                .active_loop_carried_homes
+                .iter()
+                .any(|homes| homes.contains(&home));
+            if loop_carried {
+                let home_owner = Owner(home);
+                own.pending_dead_store.remove(&seat);
+                own.current_owner.insert(home, home_owner);
+                own.states.insert(home_owner, OwnerState::Valid);
+                register_pending_dead_store(own, home_owner, view.name, span, r);
+            } else {
+                register_pending_dead_store(own, seat, view.name, span, r);
+            }
         } else if self.pool.is_view(value_ty) {
             // P3/P4 (final spec §3.2): rebinding a view registers the
             // new projection and ends the old binding's — unless another
