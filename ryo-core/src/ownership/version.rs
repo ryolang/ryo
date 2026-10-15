@@ -1,11 +1,12 @@
 //! Reject cleanup edits after analysis publishes its result.
 
 use super::FunctionSidecar;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use crate::artifact::StampHasher;
+use std::hash::{Hash, Hasher};
 
 impl FunctionSidecar {
     fn representation_stamp(&self) -> u64 {
-        let mut hash = DefaultHasher::new();
+        let mut hash = StampHasher::default();
         self.name.hash(&mut hash);
         self.free_on_reassign.hash(&mut hash);
         self.assign_binding.hash(&mut hash);

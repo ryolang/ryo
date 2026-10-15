@@ -1,11 +1,12 @@
 //! Content versions protect analyses from edits to cloned typed arenas.
 
 use super::{Tir, TirData};
-use std::hash::{DefaultHasher, Hash, Hasher};
+use crate::artifact::StampHasher;
+use std::hash::{Hash, Hasher};
 
 impl Tir {
     pub(crate) fn representation_stamp(&self) -> u64 {
-        let mut hash = DefaultHasher::new();
+        let mut hash = StampHasher::default();
         self.name.hash(&mut hash);
         self.return_type.hash(&mut hash);
         self.body.offset.hash(&mut hash);
