@@ -20,6 +20,7 @@ These compile and run with the current compiler.
 | [string_slices.ryo](string_slices.ryo) | `strview` slices, view parameters, zero-copy scanning, P4 lift |
 | [structs.ryo](structs.ryo) | Struct declaration, brace construction, field access/mutation |
 | [tuples.ryo](tuples.ryo) | Anonymous structs, tuple sugar, destructuring, multi-return |
+| [temperature_converter.ryo](temperature_converter.ryo) | Enums, structs, pattern matching, float output |
 
 ### Running
 
