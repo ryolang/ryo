@@ -4,6 +4,7 @@ This guide is for agents and contributors extending the Ryo compiler. Load it wh
 
 ### Design Inspiration
 
+- **Views and projections:** Hylo is a reference for bounded access to storage — see [pl_references/hylo.md](pl_references/hylo.md). Ryo keeps its own immutable-view, owner-freeze, last-use, and escape rules. Hylo's mutable projections and yielding subscripts are not adopted by this comparison.
 - **Compiler architecture (lexer → parser → UIR → Sema → TIR → Flow → ownership/cleanup → codegen):** takes inspiration from the Zig compiler — see [`/docs/dev/pl_references/zig.md`](pl_references/zig.md). TIR stays Zig AIR-shaped; the Flow IR layer between TIR and codegen (explicit blocks/terminators/places — rustc-MIR-shaped in role, not in name) is Ryo's own addition, documented in [`docs/dev/pipeline_migration.md`](pipeline_migration.md).
 - **Concurrency:** takes inspiration from Go — see [`/docs/dev/pl_references/go.md`](pl_references/go.md).
 - **Ownership pass (`ryo-frontend/src/ownership/mod.rs` & `ryo-core/src/ownership.rs`):** takes inspiration from Mojo — see [`/docs/dev/pl_references/mojo.md`](pl_references/mojo.md). Zig has no borrow checker, so it is not a useful reference for move semantics. Mojo's MLIR-based lifetime/ASAP-destruction passes are the closest published precedent for what Ryo's spec commits to (no annotated lifetimes, parameters borrow by default, eager destruction at last use). Sema and the IRs themselves remain Zig-shaped.

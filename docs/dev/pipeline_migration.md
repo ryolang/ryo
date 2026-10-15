@@ -236,19 +236,30 @@ and loop convergence. Do not assume one forward scan computes dataflow facts.
 
 ### Flow IR phases and validators
 
-Verified on this branch (2026-10-14) for the Built and Cleanup-elaborated
+Verified on this branch (2026-10-15) for the Built and Cleanup-elaborated
 phases as they apply to the current single-instance pipeline: construction
 validators (termination, coverage, def-before-use, place lineage, join
 shapes, recorded arm chains, bool-split/for-preheader/match-result shapes)
 run at build; the ownership pass emits explicit `DropOp` cleanup with
-deterministic firing points resolved by one shared resolver consumed by
-both validation and backend emission; and a path-aware validator proves
-per-generation, per-path exactly-once destruction (transfers discharge only
-the paths that execute them; view bases, promotion buffers, and displaced
-old generations carry their own obligations). Verdicts are PROVEN VALID /
-PROVEN INVALID / NOT PROVED, and NOT PROVED cases are reported, never
-assumed valid. The remaining NOT PROVED corners are listed in
-`ryo-frontend/src/ownership/gaps.rs`.
+deterministic firing points resolved by one shared resolver
+(`ryo-core/src/flow/fire_points.rs`) consumed by both validation and backend
+emission; and a path-aware validator proves per-generation, per-path
+exactly-once destruction (transfers discharge only the paths that execute
+them; view bases, promotion buffers, and displaced old generations carry
+their own obligations). The validator lives in `ryo-frontend/src/ownership/
+validate.rs` with responsibility-named children `validate/views.rs`
+(backing-storage lifetime vs view uses, cross-iteration reachability),
+`validate/promotions.rs` (promotion alloc/release pairing), and
+`validate/replacements.rs` (displaced-value release at generation-ending
+writes). Verdicts are PROVEN VALID / PROVEN INVALID / NOT PROVED; every
+incomplete check is recorded in `ValidationSummary`, propagated to the
+consumer via `FunctionSidecar.validation`, and exposed through the
+`proof_complete()` predicate — a body is never labeled fully validated
+while a supported case is unproved. On the workspace corpus all checks
+prove complete (zero NOT PROVED); the deliberately unsupported internal
+shapes (NonExact positions in corrupted/hand-built bodies, unresolvable
+view last uses) each yield NOT PROVED and are listed in the validator's
+module header.
 
 Define the following phase boundaries. Phase and specialization are separate:
 a body can be generic or concrete independently of its analysis phase.

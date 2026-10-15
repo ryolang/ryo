@@ -766,9 +766,191 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Files:** ryo-core/src/flow.rs, ryo-core/src/flow/, ryo-core/src/tir.rs, ryo-frontend/src/ownership/, ryo-driver/src/pipeline.rs, ryo-backend/src/codegen/, docs/dev/pipeline_migration.md, benchmarks/json_validate/, benchmarks/collatz/
 
-**Summary:** I-186 and I-188 record call overhead, but their proposed TIR/backend placement predates the Flow pipeline. Record the implementation sequence from docs/dev/pipeline_migration.md. Small JSON validator helpers are candidates for bounded inlining. The expected speedup is unmeasured.
+**Summary:** I-186 and I-188 record call overhead, but their proposed TIR/backend placement predates the Flow pipeline. Record the implementation sequence from docs/dev/pipeline_migration.md. Small JSON validator helpers are candidates for bounded inlining. The expected speedup is unmeasured. Cranelift 0.136.1 also provides `Context::inline` and the `Inline` trait. Evaluate these as optional backend machinery, not as a replacement for language-level Flow inlining. Ryo must supply verified, legalized callee bodies with matching signatures and bounded selection rules. A backend experiment must preserve cleanup, source provenance, and stack-guard behavior. Reference: [Cranelift inlining infrastructure](https://docs.rs/cranelift-codegen/latest/cranelift_codegen/inline/index.html).
 
 **Resolution:** (1) Complete the required Flow storage, cleanup, phase-validation, and analysis-invalidation contracts, including the cleanup dependencies in I-216. (2) Define body cloning and mutation contracts. Remap TIR instructions, side arenas, Flow blocks, places, joins, cleanup references, and source provenance. Keep cached source bodies unchanged. (3) Add bounded inlining over concrete language-level Flow bodies before ABI lowering. Start with small direct callees returning scalar values, including borrowed bytesview parameters. Exclude unsupported ownership and effect cases. This first version does not require generics, comptime, ARC, or concurrency. (4) Split the caller block at the call. Evaluate arguments exactly once in original order. Bind parameters, clone the callee, and route returns to a continuation and result. Preserve borrow/move semantics, cleanup order, and exceptional exits. (5) Preserve or recompute affected analyses. Validate transformed bodies and cleanup obligations. Keep the unoptimized path valid. (6) Bound callee size, expansion depth, and caller growth. Detect recursive cycles and prevent unbounded expansion. (7) Test multiple returns, side effects, short-circuit evaluation, borrowed views, shadowing, and recursion limits. Add owned-value, replacement, destruction, and sanitizer coverage as those shapes become eligible. Compare execution with the pass enabled and disabled. (8) Measure JSON validation, collatz, and compiler benchmarks against the same base. Start with is_hex_digit, skip_ws, and match_lit candidates. Inspect generated code for removed calls. Record execution time, compile time, code size, toolchain versions, and remaining hot paths. Do not promise Rust parity or attribute the entire gap to call overhead.
+
+---
+
+### I-218 — Driver lacks explicit analysis, cleanup, and backend-ready stage contracts
+
+**Severity:** Correctness / Hygiene
+**Area:** driver-cli
+
+**Files:** ryo-driver/src/pipeline.rs; ryo-core/src/flow.rs; ryo-core/src/ownership.rs; ryo-frontend/src/ownership/mod.rs; ryo-backend/src/codegen/mod.rs; docs/dev/pipeline_migration.md
+
+**Summary:** The driver builds Flow IR and calls ownership::check, which bundles ownership analysis, cleanup scheduling, and validation into one sidecar-producing operation. Backend compilation bundles cleanup firing-point resolution, ABI preparation, and emission. The driver does not receive explicit phase artifacts or validation status, so it cannot enforce analysis-ready, cleanup-elaborated, and backend-ready boundaries. This is an orchestration contract gap, not a requirement to implement future comptime, generics, or concurrency now.
+
+**Resolution:** Define phase-specific artifacts or equivalent validated state contracts. Return cleanup validation results to the driver and distinguish proven, invalid, and incomplete outcomes. Require the supported validation contract before advancing to backend preparation and emission. Share orchestration across JIT, AOT, and IR inspection while preserving partial diagnostic output. Keep pass implementations in their owning crates. Add tests for invalid transitions, incompatible body/sidecar artifacts, and incomplete validation handling; document the supported boundaries without claiming unproved completeness.
+
+---
+
+### I-219 — ABI lowering lacks a shared call and callee descriptor
+
+**Severity:** Correctness / Hygiene
+**Area:** codegen
+
+**Files:** ryo-backend/src/codegen/structs.rs; ryo-backend/src/codegen/expr.rs; ryo-backend/src/codegen/mod.rs; docs/dev/pipeline_migration.md
+
+**Summary:** Function signature construction, user-call argument marshalling, and callee parameter materialization independently dispatch on TIR types and parameter modes. There is no explicit immutable lowered ABI descriptor consumed by all three boundaries. Current paths can agree, but new type families, aggregate returns, inout modes, foreign calls, or target support can change one path without updating the others. This is a missing representation contract rather than a newly reproduced ABI failure.
+
+**Resolution:** Define one per-function or per-instance lowered ABI description with parameter expansion, passing modes, hidden return parameters, return convention, target settings, and applicable layout identities. Use it for declaration signatures, call marshalling, callee entry, and return lowering. Validate call/callee agreement and cover scalar, fat-value, view, aggregate, and inout combinations in JIT/AOT tests. Keep the implementation in backend-owned modules and connect its validated artifact to the driver stage contract tracked by I-218.
+
+---
+
+### I-220 — IR inspection omits Flow IR and resolved cleanup artifacts
+
+**Severity:** Correctness / Hygiene
+**Area:** driver-cli
+
+**Files:** ryo-driver/src/pipeline.rs; ryo-core/src/flow.rs; ryo-core/src/flow/fire_points.rs; ryo-core/src/ownership.rs; docs/dev/pipeline_migration.md
+
+**Summary:** EmitKind exposes AST, UIR, TIR, and Cranelift IR but omits Flow IR, which now defines executable blocks and storage identities. Resolved cleanup points and validation outcomes also have no structured inspection artifact. Contributors cannot inspect the authoritative ownership/backend boundary through the normal IR command, making mismatched graph, place, or cleanup behavior harder to diagnose.
+
+**Resolution:** Add deterministic inspection output for Flow blocks, steps, terminators, places, and resolved cleanup events. Include validation status when available and preserve source provenance. Reuse the shared stage artifacts and firing-point resolver rather than deriving another execution model. Integrate inspection with the shared driver orchestration contract in I-218, including supported partial diagnostic output. Test stable ordering, references, nested control flow, and cleanup positions; document the CLI surface.
+
+---
+
+### I-221 — Replace temporary gaps module with responsibility-owned validators
+
+**Severity:** Correctness / Hygiene
+**Area:** ownership
+
+**Files:** ryo-frontend/src/ownership/gaps.rs; ryo-frontend/src/ownership/validate.rs; ryo-frontend/src/ownership/mod.rs; ryo-frontend/src/ownership/tests/validate.rs; docs/dev/pipeline_migration.md
+
+**Summary:** gaps.rs groups promotion pairing, replacement release, and view protection by the review task that introduced them. Its name and Gap-number comments obscure the lasting ownership of these contracts and violate the responsibility-based module rule in AGENTS.md.
+
+**Resolution:** Move the code into child modules ownership/validate/views.rs, promotions.rs, and replacements.rs. Keep the shared event and generation model and validation entry point in validate.rs. Use narrow child-module visibility, remove the ownership-level gaps module, and replace review labels with behavior descriptions. Preserve positive and corruption-test coverage and update references. This issue covers organization only; unresolved validation correctness must not be hidden by the move.
+
+---
+
+### I-222 — Move shared backend utilities out of bytes and range modules
+
+**Severity:** Correctness / Hygiene
+**Area:** codegen
+
+**Files:** ryo-backend/src/codegen/bytes.rs; ryo-backend/src/codegen/ranges.rs; ryo-backend/src/codegen/mod.rs; ryo-backend/src/codegen/str_ops.rs; ryo-backend/src/codegen/control.rs
+
+**Summary:** bytes.rs houses shared string/byte read-only-data interning and the whole-TIR no_unreachable_in precondition. ranges.rs houses read_slot, write_slot, and restore_slots used by all scoped binding tables. These utilities are placed by historical file-length splits rather than their responsibilities, so unrelated code depends on bytes and range modules.
+
+**Resolution:** Move literal storage/dedup into codegen/literals.rs and reusable scoped slot tables into codegen/scoped_slots.rs or an equivalent explicit binding-storage module. Move the clean-TIR precondition into the existing backend validation boundary, or a specifically named validation module, without duplicating the stage checks planned by I-218. Keep bytes.rs for byte-value lowering and ranges.rs for range facts. Update imports and document ownership; preserve literal dedup, branch rollback, shadowing, and guard-elision tests.
+
+---
+
+### I-223 — Separate ownership diagnostics and value transfers from cleanup and structs
+
+**Severity:** Correctness / Hygiene
+**Area:** ownership
+
+**Files:** ryo-frontend/src/ownership/frees.rs; ryo-frontend/src/ownership/structs.rs; ryo-frontend/src/ownership/diag_fmt.rs; ryo-frontend/src/ownership/mod.rs; ryo-frontend/src/ownership/walk.rs
+
+**Summary:** ownership/frees.rs combines destruction scheduling with materialization classification and W0003/W0004 diagnostic analyses. ownership/structs.rs combines struct/enum/destructure analysis with general check_use_moved, consume_for_assignment, consume_underlying, and BorrowedAction. Module names no longer identify the responsibilities callers need, and generic transfer logic is owned by an aggregate-specific module.
+
+**Resolution:** Keep cleanup scheduling in a cleanup-owned module. Move materialization classification and redundant-materialization diagnostics into responsibility-named modules such as materialization.rs and diagnostics/materialization.rs. Move general ownership transfer/use checks into transfers.rs. Keep aggregate construction, field extraction, and destructuring in aggregates.rs or explicit aggregate submodules. Share the existing Flow facts and analysis state rather than copying walkers. Preserve diagnostic text, ordering, span coverage, move/borrow behavior, and cleanup schedules; coordinate algorithm changes with I-216 rather than duplicating that issue.
+
+---
+
+### I-224 — Distribute bug-report regression tests by compiler behavior
+
+**Severity:** Correctness / Hygiene
+**Area:** ci-benchmarks
+
+**Files:** ryo/tests/integration_bug_reports.rs; ryo/tests/integration_ownership.rs; ryo/tests/integration_sso.rs; ryo/tests/integration_structs.rs; ryo/tests/common/mod.rs
+
+**Summary:** integration_bug_reports.rs groups unrelated regression fixtures by the history of reported bugs. It mixes formatting/output corruption, concatenation cleanup, loop returns, reassignment, and struct-field mutation. New regressions accumulate in a historical catch-all instead of the suite that owns the behavior.
+
+**Resolution:** Move each regression into its behavior-owned integration suite, adding a specifically named suite only when an existing owner does not fit. Rename tests around the invariant or expected behavior while retaining useful historical context in comments. Reuse common temporary-source and execution helpers without introducing a generic catch-all utility module. Preserve exact output assertions, crash checks, and all fixtures; compare the test inventory before and after so no regression coverage is lost.
+
+---
+
+### I-225 — Short literal equality emits one load and comparison per byte
+
+**Severity:** Correctness / Hygiene
+**Area:** codegen
+
+**Files:** ryo-backend/src/codegen/str_ops.rs
+
+**Summary:** The inline literal equality path emits one I8 load and comparison per byte for literals up to 16 bytes. An eight-byte parameter comparison retains eight ldrb instructions and eight cmp/cset sequences in AArch64 AOT machine code with opt_level=speed. Cranelift 0.136.1 provides emit_small_memory_compare, which uses integer-width loads for supported equality sizes. This is a demonstrated code-shape opportunity; runtime improvement is not measured.
+
+**Resolution:** Benchmark wider bounded loads against the current byte path for str and bytes equality and inequality. Evaluate emit_small_memory_compare or immediate packed-literal comparisons for 2, 4, 8, and 16 bytes; retain an appropriate path for other lengths because the helper can fall back to memcmp. Preserve the length guard, unaligned view support, empty/null handling, and exact allocation bounds. Never widen the existing trusted aligned flags without an alignment proof. Verify AArch64 and x86-64 machine code, runtime performance, compiler cost, and code size before selecting the lowering.
+
+---
+
+### I-226 — Evaluate explicit CPU feature profiles for AOT compilation
+
+**Severity:** Cleanup
+**Area:** codegen
+
+**Files:** ryo-backend/src/codegen/mod.rs, ryo-backend/src/codegen/jit.rs, ryo-driver/src/pipeline.rs, ryo/src/main.rs, docs/dev/ryo-incremental-compilation.md
+
+**Summary:** AOT construction uses isa::lookup(target_triple) without explicit CPU features. The JIT builder already detects host features. AOT therefore cannot select an explicit native CPU profile for programs that can benefit from optional instructions. This is an optimization opportunity, not a measured regression.
+
+**Resolution:** Define a portable default and an explicit native CPU option. Evaluate named CPU profiles and explicit feature sets without changing language semantics. Use host detection only for a compatible host target; reject incompatible target/profile combinations. Keep target features separate from the Rust runtime build configuration. Include effective CPU features in artifact keys and diagnostic output. Compare baseline and native machine code for feature-sensitive kernels on AArch64 and x86-64. Measure execution time, code size, and compiler cost; feature selection alone does not perform loop vectorization. Reference: https://docs.rs/cranelift-native/latest/cranelift_native/fn.builder.html .
+
+---
+
+### I-227 — Evaluate direct AOT calls to statically linked runtime symbols
+
+**Severity:** Cleanup
+**Area:** codegen
+
+**Files:** ryo-backend/src/codegen/expr.rs, ryo-backend/src/codegen/mod.rs, ryo-backend/src/codegen/jit.rs, ryo-backend/src/linker.rs, ryo-backend/src/codegen/tests.rs
+
+**Summary:** declare_runtime_fn declares runtime symbols with Linkage::Import. On AArch64 AOT, inspection of a program that prints a bool and an int showed runtime address loads followed by indirect blr instructions. Calls to Ryo functions used direct bl instructions. The executable links the runtime archive, but codegen does not communicate a proven symbol-placement contract to Cranelift. Runtime gains are unmeasured.
+
+**Resolution:** Evaluate an AOT-specific symbol policy using ExtFuncData.colocated only when final linkage guarantees non-preemptible symbols and supported relocation distances. Keep the JIT policy independent because runtime addresses can be outside direct-call range. Do not replace imports with local definitions without providing their bodies. Reproduce with a function returning its int parameter plus one and main printing its result; inspect the runtime conversion, print, and panic calls. Test Mach-O, ELF, and COFF relocation behavior, large executables, and all supported linking modes. Preserve diagnostics and exit behavior. Compare code size, execution time, and compiler cost. Reference: https://docs.rs/cranelift-codegen/latest/cranelift_codegen/ir/struct.ExtFuncData.html#structfield.colocated .
+
+---
+
+### I-228 — Evaluate proven memory facts for Cranelift load optimization
+
+**Severity:** Cleanup
+**Area:** codegen
+
+**Files:** ryo-backend/src/codegen/expr.rs, ryo-backend/src/codegen/str_ops.rs, ryo-backend/src/codegen/structs.rs, ryo-backend/src/codegen/bytes.rs, ryo-core/src/flow.rs, ryo-frontend/src/ownership/
+
+**Summary:** Backend memory operations mostly supply trusted flags, which establish alignment and non-trapping access at the current instruction. Codegen does not supply readonly, alias-region, or can_move facts. Cranelift alias analysis is already enabled; the missing opportunity is proven input facts. No runtime gain is established.
+
+**Resolution:** Define memory facts from allocation provenance, ownership, effects, and lifetime before attaching flags. Start with stable immutable literal storage and clearly disjoint storage categories. readonly requires no mutation during the entire function invocation; a borrowed parameter or immutable binding does not establish this. can_move requires safety across control-flow changes; bounds-check-dependent loads and storage freed later do not qualify without stronger proof. Keep overlapping views in compatible alias regions and treat unknown aliases conservatively. Calls remain alias-analysis barriers unless the pinned Cranelift API supports stronger semantics. Test mutation through aliases, replacement, promotion, empty/null values, views, and loads dominated by guards. Compare generated loads and runtime results with annotations disabled. Reference: https://docs.rs/cranelift-codegen/latest/src/cranelift_codegen/ir/memflags.rs.html .
+
+---
+
+### I-229 — Benchmark Cranelift speed_and_size against the current speed profile
+
+**Severity:** Cleanup
+**Area:** ci-benchmarks
+
+**Files:** ryo-backend/src/codegen/mod.rs, ryo-backend/src/codegen/jit.rs, ryo-backend/benches/backend.rs, benchmarks/
+
+**Summary:** JIT and AOT hardcode opt_level=speed. Cranelift also provides speed_and_size, but Ryo has no recorded comparison that establishes whether it improves executable size or instruction-cache behavior for representative workloads. This is an evaluation task, not a claim that the current default is wrong.
+
+**Resolution:** Run controlled A/B comparisons of speed and speed_and_size with identical source, compiler, runtime, target features, and linker settings. Compare string slicing, JSON validation, call-heavy code, recursion, and large functions. Record generated-function size separately from runtime archive and final executable size. Measure execution time, backend compilation time, and peak compiler memory for JIT and AOT. Verify program output and failure behavior. Retain speed unless evidence supports a different default or an explicit profile. Check CodSpeed compile-time results before accepting a tradeoff. The pinned settings contract defines speed_and_size as speed plus size-oriented transformations; see Cranelift shared settings documentation: https://docs.rs/cranelift-codegen/latest/cranelift_codegen/settings/index.html .
+
+---
+
+### I-230 — Evaluate Cranelift function caching for repeated backend compilation
+
+**Severity:** Cleanup
+**Area:** codegen
+
+**Files:** ryo-backend/Cargo.toml, ryo-backend/src/codegen/mod.rs, ryo-backend/src/codegen/jit.rs, ryo-driver/src/pipeline.rs, docs/dev/ryo-incremental-compilation.md
+
+**Summary:** Ryo does not enable the Cranelift incremental-cache Cargo feature or use its compiled-function cache primitives. Cranelift 0.136.1 provides Context::compile_with_cache and lower-level serialization helpers. These can reduce repeated code generation, but do not improve emitted machine code or replace frontend dependency tracking.
+
+**Resolution:** Prototype cache-disabled, cold-cache, warm-cache, and edited-function builds. Follow the phase and dependency contracts in docs/dev/ryo-incremental-compilation.md. Account for compiler and Cranelift versions, target ISA and CPU features, optimization flags, runtime ABI/profile, and all body, layout, and inline dependencies. Verify symbol remapping, relocation reconstruction, and current-module installation for JIT and AOT. Preserve required unwind and source metadata; raw define_function_bytes integration alone may omit metadata handled by normal module compilation. Do not persist JIT process addresses. Treat unusable entries as cache misses and bound storage growth. Measure lookup cost, warm-build improvement, memory, and storage separately. Use the experimental cache checks during validation. Reference: Cranelift 0.136.1 src/incremental_cache.rs and https://docs.rs/cranelift-codegen/latest/cranelift_codegen/struct.Context.html .
+
+---
+
+### I-231 — Sibling-arm views of one borrowed param: double-discharge check flags distinct promo bases
+
+**Severity:** Correctness / Hygiene
+**Area:** ownership
+
+**Files:** ryo-frontend/src/ownership/validate.rs, ryo-frontend/src/ownership/validate/views.rs
+
+**Summary:** Two sibling match arms each creating a view of the SAME borrowed param produce two distinct promotion scratch allocations (different Var-read base insts, distinct slots). The path double-destruction check groups events by place-union and treats the two PromoRelease events as same-group events at mutually unreachable positions — but their establishment sites share the group, so the pair check flags the two distinct promo bases as a same-buffer double discharge (false positive; worked around in tests with two independent params). The promo bases need sub-identity by allocation site in the double-discharge pair check.
+
+**Resolution:** Give promotion-buffer events sub-identity keyed by the promotion-allocation site (the Var-read base inst already recorded in promo_allocs) in the double-discharge pair grouping, so distinct scratch allocations of one borrowed base never pair-check each other. Borrowed-original releases (non-promo) stay grouped by the base.
 
 ---
 

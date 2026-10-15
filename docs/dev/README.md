@@ -10,6 +10,7 @@ This directory contains implementation notes, architectural decisions, and desig
 
 | File | Content | Next Action |
 |---|---|---|
+| [pipeline_regression_checks.md](pipeline_regression_checks.md) | Differential, memory, diagnostic, and performance checks for the pipeline migration | **Run and record evidence** before migration acceptance |
 | [pipeline_migration.md](pipeline_migration.md) | Current pipeline audit, target Flow IR, and migration steps for ownership, cleanup, generics, comptime, and concurrency | **Implement and verify** the remaining contracts; keep the source audit current |
 | [pipeline_alignment.md](pipeline_alignment.md) | Zig-alignment plan — all phases shipped (UIR/TIR split, InternPool, diagnostics, lazy Sema); tracks pending comptime/generics substrate work, Zig divergence notes, and future considerations | **Implement** the pending features as their own roadmap milestones; **delete** once comptime/generics land |
 | [architecture_analysis.md](architecture_analysis.md) | Latest verified snapshot of the full compiler architecture (2026-08-24; data structures per stage, ranked weaknesses) + tiered improvement roadmap; source of a tranche of [ISSUES.md](../../ISSUES.md) entries | **Keep as reference**; implement roadmap tiers per ISSUES.md — refresh or delete when stale (older snapshots live in git history) |
@@ -29,6 +30,7 @@ This directory contains implementation notes, architectural decisions, and desig
 |---|---|---|
 | [pl_references/zig.md](pl_references/zig.md) | Zig compiler/toolchain snapshot — the pipeline (lexer→ZIR→AIR) Ryo's middle-end is modelled on | **Keep** while the compiler tracks Zig's shape |
 | [pl_references/mojo.md](pl_references/mojo.md) | Mojo language snapshot — inspiration for the ownership pass (borrow-by-default, eager destruction) | **Keep** while the ownership pass tracks Mojo |
+| [pl_references/hylo.md](pl_references/hylo.md) | Hylo projections and access modes — reference for scope-locked views and owner protection | **Keep** as a projection-model reference |
 | [pl_references/rust.md](pl_references/rust.md) | Rust borrowck/`Arc` comparison — the bar for Ryo's ownership pass and `shared[T]` | **Keep** as comparison reference |
 | [pl_references/go.md](pl_references/go.md) | Go language/toolchain snapshot — inspiration for the concurrency model | **Keep** while the concurrency model tracks Go |
 | [pl_references/swift.md](pl_references/swift.md) | Swift compiler snapshot (latest release 6.3.3) — SIL ARC optimizer (`lib/SILOptimizer/ARC/`), the model for `shared[T]`'s implicit refcounting and Ryo's planned ARC elision pass | **Keep** while `shared[T]`/ARC-optimizer work tracks Swift |

@@ -4,6 +4,8 @@
 
 Compiler architecture: [current pipeline, target Flow IR, and migration steps](pipeline_migration.md).
 This design note does not change milestone completion or feature sequencing.
+Migration validation: [regression checks and acceptance gates](pipeline_regression_checks.md).
+View design reference: [Hylo projections and the differences from Ryo views](pl_references/hylo.md).
 
 ## Milestone Index
 

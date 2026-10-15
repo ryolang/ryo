@@ -30,6 +30,27 @@ Non-member repository areas (not part of the Cargo workspace):
 - **Docs:** lowercase with underscores (`getting_started.md`). Special files uppercase (`README.md`, `NOTES.md`, `TODO.md`)
 - **Rust files:** lowercase with underscores (`main.rs`, `ast.rs`) following Rust conventions
 
+## Modules Follow Responsibilities
+
+Group new code by its lasting responsibility, not by the task, review,
+migration phase, or issue that caused it.
+
+- Name modules after the behavior they own: `views.rs`, `promotions.rs`,
+  `replacements.rs`, or `cleanup.rs`.
+- Avoid historical or catch-all names such as `gaps.rs`, `fixes.rs`,
+  `phase2.rs`, `misc.rs`, or `helpers.rs`.
+- Put related modules under their owning component. For example,
+  cleanup validation belongs under `ownership/validate/`.
+- Keep shared machinery in the parent module or a module with a specific
+  responsibility. Use the narrowest visibility necessary.
+- Extend an existing module when it already owns the responsibility.
+  Split modules when responsibilities differ or size requires it.
+- Describe behavior in comments and test names. Do not use review-round
+  or scratch-plan labels as permanent terminology.
+
+Before adding a module, identify its responsibility, owner, and reason
+it does not belong in an existing module.
+
 ---
 
 ## Critical Syntax Rules
