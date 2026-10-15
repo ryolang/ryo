@@ -724,6 +724,18 @@ fn valgrind_match_value_arm_unconsumed_temporary() {
 }
 
 #[test]
+fn valgrind_match_nested_if_heap_reassignment() {
+    // The nested if used to schedule a release of the pre-match
+    // allocation after both branches had replaced the binding. Require
+    // Valgrind to see the heap traffic and report no invalid access or
+    // leak while the replacement is read and freed.
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_nested_if_heap_reassignment"),
+        "match_nested_if_heap_reassignment",
+    );
+}
+
+#[test]
 fn valgrind_shadowed_heap_reassignment() {
     run_valgrind_smoke_allocating(
         include_str!("fixtures/shadowed_heap_reassignment.ryo"),

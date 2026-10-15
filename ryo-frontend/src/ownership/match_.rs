@@ -37,7 +37,7 @@ use super::{
     restore_view_last_use,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
-use ryo_core::flow::{BlockId, DropOp, DropPosition, PlaceId, Terminator};
+use ryo_core::flow::{BlockId, DropOp, DropPosition, PlaceId, Terminator, WriteKind};
 use ryo_core::ownership::FunctionSidecar;
 use ryo_core::tir::{ChildKind, MatchArmView, MatchBodyView, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, StructField, TypeId};
@@ -271,6 +271,7 @@ pub(crate) fn analyze_match_switch(
         own,
         sidecar,
         &arm_lasts,
+        &arm_regions,
         &arm_results,
         &falls_through,
     );
@@ -477,9 +478,10 @@ fn schedule_arm_divergence_frees(
     tir: &Tir,
     flow: &ryo_core::flow::Flow,
     pool: &InternPool,
-    _own: &Ownership,
+    pre_match: &Ownership,
     sidecar: &mut FunctionSidecar,
     arm_lasts: &[Option<TirRef>],
+    arm_regions: &[Vec<BlockId>],
     arm_results: &[BranchState],
     falls_through: &[bool],
 ) {
@@ -511,7 +513,25 @@ fn schedule_arm_divergence_frees(
             if !falls_through[i] {
                 continue;
             }
+            // A binding-aware nested merge can write `Valid` back onto
+            // the pre-match owner after every path has reseated the
+            // binding. That state describes the new value in the home
+            // slot, not the allocation represented by `owner`; freeing
+            // it here would release the replacement before its later
+            // use. The replacement's own owner and the post-match
+            // binding cleanup retain its destruction obligation.
+            let is_reseated = pre_match.current_owner.iter().any(|(&home, &before)| {
+                before == owner
+                    && arm_regions[i].iter().any(|&block| {
+                        flow.block_steps(block).iter().any(|step| {
+                            step.facts.write.is_some_and(|write| {
+                                write.place == home && write.kind == WriteKind::Replace
+                            })
+                        })
+                    })
+            });
             if matches!(a.states.get(&owner), Some(OwnerState::Valid))
+                && !is_reseated
                 && let Some(after) = arm_lasts[i]
             {
                 sidecar.drops.push(DropOp {

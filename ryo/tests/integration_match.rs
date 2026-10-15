@@ -79,6 +79,19 @@ fn match_statement_position_void_arms_print_jit() {
 }
 
 #[test]
+fn match_arm_nested_if_reassignment_preserves_heap_string_jit() {
+    // Reassign a heap-backed binding in both paths of an if nested in a
+    // consuming match arm. The pre-match allocation must not be freed
+    // after the nested if, because the binding home now contains the
+    // replacement string.
+    assert_ryo_output(
+        "match_nested_if_heap_reassignment",
+        common::find_fixture("match_nested_if_heap_reassignment"),
+        "123-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz!\n",
+    );
+}
+
+#[test]
 fn match_non_exhaustive_errors_e0129_jit() {
     // Missing `Green` (and no wildcard) is E0129; the driver surfaces it
     // on stderr and never reaches codegen.
@@ -929,6 +942,16 @@ fn match_value_arm_heap_producer_transfers_aot() {
         "match_arm_heap_producer_aot.ryo",
         "fn make_str(tag: int) -> str:\n\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\nfn pick(b: bool) -> str:\n\ts = match b:\n\t\ttrue: make_str(1)\n\t\tfalse: \"no\"\n\treturn s\n\nfn main():\n\tprint(pick(true))\n\tprint(\"\\n\")\n",
         "1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+    );
+}
+
+#[test]
+fn match_arm_nested_if_reassignment_preserves_heap_string_aot() {
+    // Pin the same heap replacement through the AOT codegen and linker.
+    assert_match_aot_output(
+        "match_nested_if_heap_reassignment_aot.ryo",
+        common::find_fixture("match_nested_if_heap_reassignment"),
+        "123-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz!\n",
     );
 }
 

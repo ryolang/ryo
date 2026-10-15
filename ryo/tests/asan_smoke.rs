@@ -528,6 +528,17 @@ fn asan_match_value_arm_unconsumed_temporary() {
 }
 
 #[test]
+fn asan_match_nested_if_heap_reassignment() {
+    // Mirrors valgrind_match_nested_if_heap_reassignment: the
+    // replacement remains live after the nested if and is freed once
+    // after its final read.
+    run_asan_smoke(
+        common::find_fixture("match_nested_if_heap_reassignment"),
+        "match_nested_if_heap_reassignment",
+    );
+}
+
+#[test]
 fn asan_shadowed_heap_reassignment() {
     run_asan_smoke(
         include_str!("fixtures/shadowed_heap_reassignment.ryo"),

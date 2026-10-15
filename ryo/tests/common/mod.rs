@@ -1564,6 +1564,35 @@ fn main():
 \tprint(\"done\\n\")
 ",
     ),
+    (
+        // M12 match: an if/else inside a consuming match arm reassigns
+        // a heap-backed string binding on both paths. A stale
+        // arm-divergence release used to free the replacement before
+        // the post-match read, causing corrupted output/use-after-free.
+        // The concat-built initial value and payload exercise real heap
+        // storage; Valgrind and ASan pin the cleanup path.
+        "match_nested_if_heap_reassignment",
+        "\
+enum Message:
+	Text(str)
+	Empty
+
+fn main():
+	mut value: str = int_to_str(123) + \"-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz\"
+	message = Message.Text(value)
+	match message:
+		Message.Text(payload):
+			if payload.len() > 5:
+				value = payload + \"!\"
+			else:
+				value = payload + \"?\"
+		Message.Empty:
+			value = \"empty!\"
+	assert(value == \"123-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz!\", \"heap payload survives branch assignment\")
+	print(value)
+	print(\"\\n\")
+",
+    ),
 ];
 
 // Test-helper module, not `cfg(test)`-gated, so clippy.toml's
