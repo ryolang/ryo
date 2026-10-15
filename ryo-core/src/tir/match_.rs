@@ -21,9 +21,10 @@
 //!   per arm (offsets relative to the arm's first word):
 //!   [0]      arm_len:           u32 — words in this arm AFTER the
 //!                                arm_len word itself
-//!   [1]      discriminant_kind: u32 (0 = variant, 1 = int, 2 = str,
+//!   [1..2]   pattern span start/end: u32 offsets
+//!   [3]      discriminant_kind: u32 (0 = variant, 1 = int, 2 = str,
 //!                                3 = bool, 4 = wildcard)
-//!   [2..]    discriminant payload:
+//!   [4..]    discriminant payload:
 //!     variant:  variant_index u32 (declaration-order, the
 //!               `enum_lit_extra` convention — sema resolved the name)
 //!     int:      lo u32, hi u32 — the i64 split into two words
@@ -63,6 +64,7 @@
 use super::{ChildKind, ExtraRange, Span, Tir, TirBuilder, TirData, TirRef, TirTag};
 use crate::ast::LitPattern;
 use crate::types::{InternPool, StringId, TypeId};
+use chumsky::span::Span as _;
 
 /// Layout constants for the [`TirTag::Match`] wire; see the module
 /// header for the full annotated layout.
@@ -74,8 +76,10 @@ pub mod match_extra {
 
     /// Per-arm header, relative to the arm's first word.
     pub const ARM_LEN: usize = 0;
-    pub const DISC_KIND: usize = 1;
-    pub const DISC_PAYLOAD: usize = 2;
+    pub const PATTERN_SPAN_START: usize = 1;
+    pub const PATTERN_SPAN_END: usize = 2;
+    pub const DISC_KIND: usize = 3;
+    pub const DISC_PAYLOAD: usize = 4;
 
     /// `DISC_KIND` discriminants.
     pub const DISC_VARIANT: u32 = 0;
@@ -178,6 +182,7 @@ pub enum TypedMatchBody<'a> {
 /// field-equality tests in codegen).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypedMatchArm<'a> {
+    pub span: Span,
     pub discriminant: Discriminant,
     pub bindings: &'a [MatchBinding],
     pub guards: &'a [(u32, LitPattern)],
@@ -246,6 +251,7 @@ impl<'a> MatchView<'a> {
 /// ([`EnumLitView`][crate::tir::EnumLitView] precedent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MatchArmView<'a> {
+    pub span: Span,
     pub discriminant: Discriminant,
     /// `3 * binding_count` binding words (`field_index, name, ty`
     /// triples).
@@ -418,6 +424,12 @@ impl TirBuilder {
         for arm in arms {
             let arm_len_slot = self.extra.len();
             self.extra.push(0); // arm_len, patched after the arm
+            self.extra.push(
+                u32::try_from(arm.span.start).expect("pattern span start exceeds TIR wire range"),
+            );
+            self.extra.push(
+                u32::try_from(arm.span.end).expect("pattern span end exceeds TIR wire range"),
+            );
             match arm.discriminant {
                 Discriminant::Variant(index) => {
                     self.extra.push(match_extra::DISC_VARIANT);
@@ -632,6 +644,11 @@ fn decode_match_arm(slice: &[u32]) -> MatchArmView<'_> {
         slice.len() >= arm_words,
         "match arm_len exceeds the remaining wire"
     );
+    let span = Span::new(
+        (),
+        slice[match_extra::PATTERN_SPAN_START] as usize
+            ..slice[match_extra::PATTERN_SPAN_END] as usize,
+    );
     let mut pos = match_extra::DISC_PAYLOAD;
     let discriminant = match slice[match_extra::DISC_KIND] {
         match_extra::DISC_VARIANT => {
@@ -693,6 +710,7 @@ fn decode_match_arm(slice: &[u32]) -> MatchArmView<'_> {
     };
     debug_assert_eq!(pos, arm_words, "match arm length mismatch");
     MatchArmView {
+        span,
         discriminant,
         bindings,
         guards,
@@ -724,6 +742,7 @@ mod tests {
             scrut,
             int_ty,
             &[TypedMatchArm {
+                span: sp(),
                 discriminant: Discriminant::Wildcard,
                 bindings: &[],
                 guards: &[],
@@ -763,7 +782,7 @@ mod tests {
         let wire = &tir.extra[rng.as_range()];
         assert_eq!(wire[match_extra::SCRUTINEE], scrut.raw());
         assert_eq!(wire[match_extra::ARM_COUNT], 1);
-        assert_eq!(wire[match_extra::ARMS_START + match_extra::ARM_LEN], 5);
+        assert_eq!(wire[match_extra::ARMS_START + match_extra::ARM_LEN], 7);
         assert_eq!(
             wire[match_extra::ARMS_START + match_extra::DISC_KIND],
             match_extra::DISC_WILDCARD
@@ -800,6 +819,7 @@ mod tests {
             scrut,
             int_ty,
             &[TypedMatchArm {
+                span: sp(),
                 discriminant: Discriminant::Variant(1),
                 bindings: &bindings,
                 guards: &[],
@@ -866,18 +886,21 @@ mod tests {
             int_ty,
             &[
                 TypedMatchArm {
+                    span: sp(),
                     discriminant: Discriminant::Int(-7),
                     bindings: &[],
                     guards: &[],
                     body: TypedMatchBody::Expr(e1),
                 },
                 TypedMatchArm {
+                    span: sp(),
                     discriminant: Discriminant::Str(quit),
                     bindings: &[],
                     guards: &[],
                     body: TypedMatchBody::Expr(e2),
                 },
                 TypedMatchArm {
+                    span: sp(),
                     discriminant: Discriminant::Bool(true),
                     bindings: &[],
                     guards: &[],
@@ -935,12 +958,14 @@ mod tests {
             int_ty,
             &[
                 TypedMatchArm {
+                    span: sp(),
                     discriminant: Discriminant::Wildcard,
                     bindings: &anon_bindings,
                     guards: &guards,
                     body: TypedMatchBody::Expr(body),
                 },
                 TypedMatchArm {
+                    span: sp(),
                     discriminant: Discriminant::Wildcard,
                     bindings: &[],
                     guards: &[],
@@ -1001,12 +1026,14 @@ mod tests {
             int_ty,
             &[
                 TypedMatchArm {
+                    span: sp(),
                     discriminant: Discriminant::Wildcard,
                     bindings: &[],
                     guards: &[],
                     body: TypedMatchBody::Expr(e1),
                 },
                 TypedMatchArm {
+                    span: sp(),
                     discriminant: Discriminant::Int(-1),
                     bindings: &[],
                     guards: &[],
@@ -1030,12 +1057,14 @@ mod tests {
             int_ty,
             &[
                 TypedMatchArm {
+                    span: sp(),
                     discriminant: Discriminant::Variant(0),
                     bindings: &[],
                     guards: &[],
                     body: TypedMatchBody::Stmts(&[st]),
                 },
                 TypedMatchArm {
+                    span: sp(),
                     discriminant: Discriminant::Variant(1),
                     bindings: &binding,
                     guards: &[],
@@ -1121,12 +1150,14 @@ mod tests {
             int_ty,
             &[
                 TypedMatchArm {
+                    span: sp(),
                     discriminant: Discriminant::Variant(0),
                     bindings: &arm0_bindings,
                     guards: &[],
                     body: TypedMatchBody::Expr(body1),
                 },
                 TypedMatchArm {
+                    span: sp(),
                     discriminant: Discriminant::Variant(1),
                     bindings: &arm1_bindings,
                     guards: &[],

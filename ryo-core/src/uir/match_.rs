@@ -15,10 +15,11 @@
 //!
 //!   per arm (offsets relative to the arm's first word):
 //!   [0]      arm_len:      u32 — words in this arm AFTER the arm_len
-//!                           word itself (pattern payload + body)
-//!   [1]      pattern_kind: u32 (0 = wildcard, 1 = literal, 2 = variant,
+//!                           word itself (span + pattern payload + body)
+//!   [1..2]   pattern span start/end: u32 offsets
+//!   [3]      pattern_kind: u32 (0 = wildcard, 1 = literal, 2 = variant,
 //!            3 = anon)
-//!   [2..]    pattern payload:
+//!   [4..]    pattern payload:
 //!     wildcard: (no words)
 //!     literal:  lit_kind u32 (0 = int, 1 = str, 2 = bool), then
 //!               int:  lo u32, hi u32 — the i64 split into two words
@@ -71,6 +72,7 @@ use super::destructure_extra;
 use super::{ExtraRange, InstData, InstRef, InstTag, Span, Uir, UirBuilder};
 use crate::ast::LitPattern;
 use crate::types::StringId;
+use chumsky::span::Span as _;
 
 /// Layout constants for the [`InstTag::Match`] wire; see the module
 /// header for the full annotated layout.
@@ -81,8 +83,10 @@ pub mod match_extra {
 
     /// Per-arm header, relative to the arm's first word.
     pub const ARM_LEN: usize = 0;
-    pub const PATTERN_KIND: usize = 1;
-    pub const PATTERN_START: usize = 2;
+    pub const PATTERN_SPAN_START: usize = 1;
+    pub const PATTERN_SPAN_END: usize = 2;
+    pub const PATTERN_KIND: usize = 3;
+    pub const PATTERN_START: usize = 4;
 
     /// `PATTERN_KIND` discriminants.
     pub const PATTERN_WILDCARD: u32 = 0;
@@ -217,6 +221,7 @@ pub enum UirPattern<'a> {
 /// copies every list into `extra`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UirMatchArm<'a> {
+    pub span: Span,
     pub pattern: UirPattern<'a>,
     pub body: UirArmBody<'a>,
 }
@@ -244,6 +249,7 @@ pub struct UirMatchView<'a> {
 /// Decoded view of one match arm; see [`UirMatchArm`].
 #[derive(Debug, PartialEq, Eq)]
 pub struct UirMatchArmView<'a> {
+    pub span: Span,
     pub pattern: UirPatternView<'a>,
     pub body: UirArmBodyView<'a>,
 }
@@ -385,6 +391,12 @@ impl UirBuilder {
         for arm in arms {
             let arm_len_slot = self.uir.extra.len();
             self.uir.extra.push(0); // arm_len, patched after the arm
+            self.uir.extra.push(
+                u32::try_from(arm.span.start).expect("pattern span start exceeds UIR wire range"),
+            );
+            self.uir.extra.push(
+                u32::try_from(arm.span.end).expect("pattern span end exceeds UIR wire range"),
+            );
             self.encode_match_pattern(&arm.pattern);
             self.encode_match_body(&arm.body);
             let arm_len = Self::len_u32(self.uir.extra.len() - arm_len_slot - 1);
@@ -560,6 +572,11 @@ fn decode_lit_at(slice: &[u32], pos: usize) -> (LitPattern, usize) {
 /// `arm_len` word first, then exactly `arm_len` payload words — so a
 /// cursor that ends at `slice.len()` is a trusted-producer invariant.
 fn decode_match_arm(slice: &[u32]) -> UirMatchArmView<'_> {
+    let span = Span::new(
+        (),
+        slice[match_extra::PATTERN_SPAN_START] as usize
+            ..slice[match_extra::PATTERN_SPAN_END] as usize,
+    );
     let mut pos = match_extra::PATTERN_START;
     let pattern = match slice[match_extra::PATTERN_KIND] {
         match_extra::PATTERN_WILDCARD => UirPatternView::Wildcard,
@@ -633,7 +650,11 @@ fn decode_match_arm(slice: &[u32]) -> UirMatchArmView<'_> {
         other => unreachable!("unknown match body kind {other}"),
     };
     debug_assert_eq!(pos, slice.len(), "match arm length mismatch");
-    UirMatchArmView { pattern, body }
+    UirMatchArmView {
+        span,
+        pattern,
+        body,
+    }
 }
 
 #[cfg(test)]
@@ -654,6 +675,7 @@ mod tests {
         let m = b.match_expr(
             scrut,
             &[UirMatchArm {
+                span: sp(),
                 pattern: UirPattern::Wildcard,
                 body: UirArmBody::Expr(body),
             }],
@@ -683,6 +705,7 @@ mod tests {
         let s1 = b.int_literal(1, sp());
         let s2 = b.int_literal(2, sp());
         let arm = UirMatchArm {
+            span: sp(),
             pattern: UirPattern::Variant {
                 enum_name: Some(option),
                 variant: some,
@@ -702,7 +725,7 @@ mod tests {
         let view = uir.match_view(m);
         assert_eq!(view.scrutinee, scrut);
         assert_eq!(view.arms.len(), 1);
-        let UirMatchArmView { pattern, body } = &view.arms[0];
+        let UirMatchArmView { pattern, body, .. } = &view.arms[0];
         match pattern {
             UirPatternView::Variant {
                 enum_name,
@@ -746,14 +769,17 @@ mod tests {
             scrut,
             &[
                 UirMatchArm {
+                    span: sp(),
                     pattern: UirPattern::Literal(LitPattern::Int(-7)),
                     body: UirArmBody::Expr(e1),
                 },
                 UirMatchArm {
+                    span: sp(),
                     pattern: UirPattern::Literal(LitPattern::Str(quit)),
                     body: UirArmBody::Expr(e2),
                 },
                 UirMatchArm {
+                    span: sp(),
                     pattern: UirPattern::Literal(LitPattern::Bool(true)),
                     body: UirArmBody::Expr(e3),
                 },
@@ -810,10 +836,12 @@ mod tests {
             s1,
             &[
                 UirMatchArm {
+                    span: sp(),
                     pattern: UirPattern::Wildcard,
                     body: UirArmBody::Expr(e1),
                 },
                 UirMatchArm {
+                    span: sp(),
                     pattern: UirPattern::Literal(LitPattern::Int(-1)),
                     body: UirArmBody::Expr(e2),
                 },
@@ -829,6 +857,7 @@ mod tests {
             s2,
             &[
                 UirMatchArm {
+                    span: sp(),
                     pattern: UirPattern::Variant {
                         enum_name: None,
                         variant: red,
@@ -837,6 +866,7 @@ mod tests {
                     body: UirArmBody::Stmts(&[st]),
                 },
                 UirMatchArm {
+                    span: sp(),
                     pattern: UirPattern::Variant {
                         enum_name: Some(color),
                         variant: blue,
@@ -949,6 +979,7 @@ mod tests {
         let m1 = b.match_expr(
             scrut,
             &[UirMatchArm {
+                span: sp(),
                 pattern: UirPattern::Anon {
                     positional: false,
                     fields: &brace_fields,
@@ -960,6 +991,7 @@ mod tests {
         let m2 = b.match_expr(
             scrut,
             &[UirMatchArm {
+                span: sp(),
                 pattern: UirPattern::Anon {
                     positional: true,
                     fields: &paren_fields,
@@ -1042,18 +1074,22 @@ mod tests {
             scrut,
             &[
                 UirMatchArm {
+                    span: sp(),
                     pattern: UirPattern::Wildcard,
                     body: UirArmBody::Expr(e1),
                 },
                 UirMatchArm {
+                    span: sp(),
                     pattern: UirPattern::Literal(LitPattern::Int(-7)),
                     body: UirArmBody::Expr(e0),
                 },
                 UirMatchArm {
+                    span: sp(),
                     pattern: UirPattern::Literal(LitPattern::Str(quit)),
                     body: UirArmBody::Expr(e2),
                 },
                 UirMatchArm {
+                    span: sp(),
                     pattern: UirPattern::Variant {
                         enum_name: Some(option),
                         variant: some,
@@ -1068,6 +1104,7 @@ mod tests {
                     body: UirArmBody::Expr(e3),
                 },
                 UirMatchArm {
+                    span: sp(),
                     pattern: UirPattern::Variant {
                         enum_name: Some(color),
                         variant: red,
@@ -1079,6 +1116,7 @@ mod tests {
                     body: UirArmBody::Stmts(&[st]),
                 },
                 UirMatchArm {
+                    span: sp(),
                     pattern: UirPattern::Anon {
                         positional: false,
                         fields: &brace_fields,

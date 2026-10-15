@@ -45,13 +45,9 @@
 //!
 //! ## Span anchoring
 //!
-//! The UIR match wire carries no per-pattern or per-arm spans (deferred
-//! — see I-212; the AST pattern spans die in astgen). Pattern-
-//! level diagnostics therefore anchor on the arm's BODY span — the
-//! first body instruction's span, the nearest per-arm location
-//! available — reconstructed by [`arm_span`]; scrutinee diagnostics
-//! anchor on the scrutinee expression. If a future wire revision
-//! carries pattern spans, re-anchor here.
+//! UIR and TIR match arms carry the source span of each pattern.
+//! Pattern diagnostics and redundancy warnings use that span;
+//! scrutinee diagnostics use the scrutinee expression span.
 //!
 //! ## Continuity
 //!
@@ -113,7 +109,7 @@ struct MatchAnalysis {
 
 /// Resolution results for one arm.
 struct MatchArmAnalysis {
-    /// Reconstructed arm span (see the module header).
+    /// Source span of the arm pattern, carried through UIR.
     span: Span,
     /// The resolved selector: `Some` for wildcard / literal / variant
     /// arms. `None` for anonymous-shape arms (no M12 discriminant
@@ -122,8 +118,7 @@ struct MatchArmAnalysis {
     /// discriminants, so both exclusions fall out naturally.
     discriminant: Option<Discriminant>,
     /// Source-faithful rendering of the pattern (see [`render_pattern`])
-    /// — quoted in W0005's message, since the wire carries no pattern
-    /// spans to slice instead.
+    /// — quoted in W0005's message when it describes a redundant arm.
     pattern_text: String,
     /// Payload bindings in arm-written order: canonical field index,
     /// bound name, field type. Literal and wildcard targets bind
@@ -201,7 +196,7 @@ pub(crate) fn analyze_match(
 
     let mut arms = Vec::with_capacity(view.arms.len());
     for arm in &view.arms {
-        let arm_span = arm_span(sema, &arm.body, span);
+        let arm_span = arm.span;
         let analysis = resolve_arm(sema, scrutinee_ty, arm, arm_span);
         had_error |= analysis.had_error;
         arms.push(analysis);
@@ -233,18 +228,6 @@ pub(crate) fn analyze_match(
         },
         span,
     )
-}
-
-/// Reconstruct an arm's span from its body (the UIR wire carries no
-/// arm/pattern spans — see the module header).
-fn arm_span(sema: &Sema<'_>, body: &UirArmBodyView<'_>, match_span: Span) -> Span {
-    match body {
-        UirArmBodyView::Expr(r) => sema.uir.span(*r),
-        UirArmBodyView::Stmts(words) => words
-            .first()
-            .map(|&w| sema.uir.span(InstRef::from_raw(w)))
-            .unwrap_or(match_span),
-    }
 }
 
 // ---------- Arm typing + typed TIR emission ----------
@@ -556,6 +539,7 @@ fn type_and_emit_match(
     let typed_arms: Vec<TypedMatchArm<'_>> = arms_out
         .iter()
         .map(|arm| TypedMatchArm {
+            span: arm.span,
             discriminant: arm.discriminant,
             bindings: &arm.bindings,
             guards: &arm.guards,
@@ -945,9 +929,8 @@ fn emit_non_exhaustive(
 }
 
 /// Source-faithful rendering of an arm's pattern for W0005's message.
-/// The UIR wire carries no pattern spans (the module header), so the
-/// quoted text is reconstructed from the resolved wire shape rather
-/// than sliced from the source.
+/// The quoted text is reconstructed from the resolved wire shape; the
+/// carried span provides the diagnostic underline.
 fn render_pattern(sema: &Sema<'_>, pattern: &UirPatternView<'_>) -> String {
     match pattern {
         UirPatternView::Wildcard => "_".to_string(),

@@ -280,6 +280,7 @@ fn value_match_switch_with_join_and_result_place() {
         scrut,
         int,
         &[TypedMatchArm {
+            span: sp(),
             discriminant: crate::tir::Discriminant::Wildcard,
             bindings: &[],
             guards: &[],
@@ -330,6 +331,7 @@ fn all_diverging_match_has_no_join_and_unreachable_continuation() {
         scrut,
         cx.never,
         &[TypedMatchArm {
+            span: sp(),
             discriminant: crate::tir::Discriminant::Wildcard,
             bindings: &[],
             guards: &[],
@@ -381,6 +383,7 @@ fn match_by_move_token_places_are_named_and_arm_scoped() {
         scrut,
         cx.void,
         &[TypedMatchArm {
+            span: sp(),
             discriminant: crate::tir::Discriminant::Wildcard,
             bindings: &[crate::tir::MatchBinding {
                 field_index: 0,
@@ -418,12 +421,14 @@ fn elif_with_match_condition_records_branch_holding_blocks() {
         bool_ty,
         &[
             TypedMatchArm {
+                span: sp(),
                 discriminant: crate::tir::Discriminant::Bool(true),
                 bindings: &[],
                 guards: &[],
                 body: TypedMatchBody::Expr(arm_t),
             },
             TypedMatchArm {
+                span: sp(),
                 discriminant: crate::tir::Discriminant::Bool(false),
                 bindings: &[],
                 guards: &[],
@@ -754,6 +759,7 @@ fn match_result_place_tracks_value_void_and_never_shapes() {
         scrut_v,
         int,
         &[TypedMatchArm {
+            span: sp(),
             discriminant: crate::tir::Discriminant::Wildcard,
             bindings: &[],
             guards: &[],
@@ -773,6 +779,7 @@ fn match_result_place_tracks_value_void_and_never_shapes() {
         scrut_s,
         cx.void,
         &[TypedMatchArm {
+            span: sp(),
             discriminant: crate::tir::Discriminant::Wildcard,
             bindings: &[],
             guards: &[],
@@ -788,6 +795,7 @@ fn match_result_place_tracks_value_void_and_never_shapes() {
         scrut_n,
         cx.never,
         &[TypedMatchArm {
+            span: sp(),
             discriminant: crate::tir::Discriminant::Wildcard,
             bindings: &[],
             guards: &[],
@@ -1122,6 +1130,7 @@ fn fire_points_match_payload_resolves_the_join() {
         scrut,
         int,
         &[TypedMatchArm {
+            span: sp(),
             discriminant: crate::tir::Discriminant::Wildcard,
             bindings: &[],
             guards: &[],

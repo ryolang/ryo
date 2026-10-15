@@ -101,14 +101,16 @@ pub(super) fn gen_match(
 ) -> InstRef {
     let scrutinee_ref = gen_expr(b, ast, scrutinee, types, defined_enums, pool, sink);
 
-    let owned: Vec<(OwnedPattern, OwnedBody)> = ast
-        .match_arms(arms)
+    let source_arms = ast.match_arms(arms);
+    let owned: Vec<(OwnedPattern, OwnedBody)> = source_arms
         .iter()
         .map(|arm| lower_arm(b, ast, arm, types, defined_enums, pool, sink))
         .collect();
     let uir_arms: Vec<UirMatchArm<'_>> = owned
         .iter()
-        .map(|(pattern, body)| UirMatchArm {
+        .zip(source_arms)
+        .map(|((pattern, body), arm)| UirMatchArm {
+            span: ast.pattern_span(arm.pattern),
             pattern: pattern.view(),
             body: body.view(),
         })
