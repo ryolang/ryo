@@ -466,6 +466,12 @@ pub(crate) fn collect_loop_carried_owners(tir: &Tir, flow: &Flow, w: &Walk<'_>) 
                 let view = tir.assign_view(step.inst);
                 if w.decl_rank.get(&view.name).is_some_and(|r| *r < loop_rank) {
                     out.insert(view.value);
+                    if tir.inst(view.value).tag == TirTag::Match
+                        && let Some(write) = step.facts.write
+                        && let Place::Local { decl, .. } = flow.place(write.place)
+                    {
+                        out.insert(*decl);
+                    }
                 }
             }
         }
@@ -1228,7 +1234,7 @@ pub(crate) fn owner_binding_decl(tir: &Tir, owner: TirRef) -> Option<(TirRef, St
             match tir.inst(r).tag {
                 TirTag::VarDecl => {
                     let view = tir.var_decl_view(r);
-                    if view.initializer == owner {
+                    if view.initializer == owner || r == owner {
                         return Some((r, view.name));
                     }
                 }
@@ -1302,21 +1308,22 @@ pub(crate) struct LoopExitCtx {
     has_any: HashSet<TirRef>,
     top_level: HashMap<TirRef, TirRef>,
     loop_carried_owners: HashSet<TirRef>,
+    reassigned_after_loop_bindings: HashSet<TirRef>,
 }
 
-/// Collect every `Assign` (name, value) pair reachable from `stmts`,
+/// Collect every `Assign` (site, name, value) reachable from `stmts`,
 /// descending through if/loop bodies. Kept for `LoopExitCtx`.
 pub(crate) fn collect_assign_writes(
     tir: &Tir,
     stmts: &[TirRef],
-    out: &mut Vec<(StringId, TirRef)>,
+    out: &mut Vec<(TirRef, StringId, TirRef)>,
 ) {
     for &r in stmts {
         let r = stmt_match(tir, r).unwrap_or(r);
         match tir.inst(r).tag {
             TirTag::Assign => {
                 let view = tir.assign_view(r);
-                out.push((view.name, view.value));
+                out.push((r, view.name, view.value));
             }
             TirTag::IfStmt => {
                 let view = tir.if_stmt_view(r);
@@ -1349,6 +1356,63 @@ pub(crate) fn collect_assign_writes(
     }
 }
 
+/// Collect consecutive direct assignments after `loop_inst` in the
+/// same statement list. These stores run on every normal path out of
+/// the loop, so break cleanup can leave their old home value for the
+/// assignment's displacement free.
+fn assignments_immediately_after_loop(
+    tir: &Tir,
+    stmts: &[TirRef],
+    loop_inst: TirRef,
+    out: &mut Vec<TirRef>,
+) -> bool {
+    for (index, &stmt) in stmts.iter().enumerate() {
+        let stmt = stmt_match(tir, stmt).unwrap_or(stmt);
+        if stmt == loop_inst {
+            for &after in &stmts[index + 1..] {
+                let after = stmt_match(tir, after).unwrap_or(after);
+                if tir.inst(after).tag != TirTag::Assign {
+                    break;
+                }
+                out.push(after);
+            }
+            return true;
+        }
+        let found = match tir.inst(stmt).tag {
+            TirTag::IfStmt => {
+                let view = tir.if_stmt_view(stmt);
+                assignments_immediately_after_loop(tir, &view.then_stmts, loop_inst, out)
+                    || view.elif_branches.iter().any(|arm| {
+                        assignments_immediately_after_loop(tir, &arm.body, loop_inst, out)
+                    })
+                    || view.else_stmts.as_ref().is_some_and(|body| {
+                        assignments_immediately_after_loop(tir, body, loop_inst, out)
+                    })
+            }
+            TirTag::WhileLoop => assignments_immediately_after_loop(
+                tir,
+                &tir.while_loop_view(stmt).body,
+                loop_inst,
+                out,
+            ),
+            TirTag::ForRange => assignments_immediately_after_loop(
+                tir,
+                &tir.for_range_view(stmt).body,
+                loop_inst,
+                out,
+            ),
+            TirTag::Match => match_arm_bodies(tir, stmt)
+                .into_iter()
+                .any(|body| assignments_immediately_after_loop(tir, &body, loop_inst, out)),
+            _ => false,
+        };
+        if found {
+            return true;
+        }
+    }
+    false
+}
+
 impl LoopExitCtx {
     fn new(tir: &Tir, sidecar: &FunctionSidecar, loop_inst: TirRef) -> Option<Self> {
         let body = tir.loop_body(loop_inst)?;
@@ -1367,8 +1431,20 @@ impl LoopExitCtx {
         collect_assign_writes(tir, &body, &mut writes);
         let loop_carried_owners: HashSet<TirRef> = writes
             .into_iter()
-            .filter(|(name, _)| declared_before_stmt(tir, *name, loop_inst))
-            .map(|(_, value)| value)
+            .filter(|(_, name, _)| declared_before_stmt(tir, *name, loop_inst))
+            .map(|(_, _, value)| value)
+            .collect();
+        let mut following_assignments = Vec::new();
+        assignments_immediately_after_loop(
+            tir,
+            &tir.body_stmts(),
+            loop_inst,
+            &mut following_assignments,
+        );
+        let reassigned_after_loop_bindings = following_assignments
+            .into_iter()
+            .filter(|site| sidecar.free_on_reassign[site.index()].is_some())
+            .filter_map(|site| sidecar.assign_binding[site.index()])
             .collect();
         Some(Self {
             body,
@@ -1376,6 +1452,7 @@ impl LoopExitCtx {
             has_any,
             top_level,
             loop_carried_owners,
+            reassigned_after_loop_bindings,
         })
     }
 }
@@ -1528,6 +1605,10 @@ pub(crate) fn schedule_break_continue_frees(
             None => continue,
         };
         if !matches!(state, OwnerState::Valid) {
+            continue;
+        }
+
+        if is_break && ctx.reassigned_after_loop_bindings.contains(&r) {
             continue;
         }
 

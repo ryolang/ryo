@@ -1033,6 +1033,17 @@ fn match_string_results_reassigned_after_loop_jit() {
 }
 
 #[test]
+fn match_string_reassignment_after_break_continue_loop_jit() {
+    // Break and continue paths can bypass the loop's match assignment.
+    // The post-loop match must free whichever value the home slot holds.
+    assert_ryo_output(
+        "match_string_break_continue_reassign",
+        "fn main():\n\tmut i = 0\n\tmut value: str = \"tiny\"\n\twhile i < 1000:\n\t\ti += 1\n\t\tif i == 777:\n\t\t\tbreak\n\t\tif i % 5 == 0:\n\t\t\tcontinue\n\t\tvalue = match i % 4:\n\t\t\t0: \"tiny\"\n\t\t\t1: \"0123456789012345678901234\"\n\t\t\t2: \"0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789\"\n\t\t\t_: \"other\"\n\tvalue = match value:\n\t\t_: \"done\"\n\tassert(value == \"done\", \"break and continue match reassignment\")\n\tprint(\"ok\\n\")\n",
+        "ok\n",
+    );
+}
+
+#[test]
 fn match_arm_break_and_continue_exit_to_loop_jit() {
     // Both loop-control exits inside match arms nested in a loop: the
     // `continue` arm jumps to the loop header, the `break` arm to the
