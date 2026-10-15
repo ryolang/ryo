@@ -1,3 +1,4 @@
+pub mod artifact;
 pub mod ast;
 pub mod ast_pretty;
 pub mod diag;

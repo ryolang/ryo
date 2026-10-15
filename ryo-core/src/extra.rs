@@ -6,7 +6,7 @@
 //! the type lives here once rather than being byte-duplicated per module.
 
 /// A `[offset, offset+len)` slice of an `extra: Vec<u32>` arena.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExtraRange {
     pub offset: u32,
     pub len: u32,

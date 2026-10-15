@@ -1,0 +1,10 @@
+fn change(inout s: str):
+	if true:
+		mut s = "inner_0123456789012345678901234567890123456789" + "!"
+		print(s[0:5])
+		return
+
+fn main():
+	mut s = "outer_0123456789012345678901234567890123456789" + "!"
+	change(&s)
+	print(s)

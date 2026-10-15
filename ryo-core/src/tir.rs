@@ -59,6 +59,8 @@ use chumsky::span::{SimpleSpan, Span as _};
 use std::collections::HashSet;
 use std::num::NonZeroU32;
 
+mod version;
+
 pub type Span = SimpleSpan;
 
 // ---------- TirRef ----------
@@ -442,6 +444,7 @@ pub struct TirParam {
 /// [`TirBuilder::finish`] debug-asserts it on every built body.
 #[derive(Debug, Clone)]
 pub struct Tir {
+    identity: crate::artifact::ArtifactId,
     pub name: StringId,
     pub params: Vec<TirParam>,
     pub return_type: TypeId,
@@ -464,6 +467,11 @@ pub struct Tir {
 }
 
 impl Tir {
+    /// Identity of this immutable typed body version.
+    pub fn identity(&self) -> crate::artifact::ArtifactId {
+        self.identity
+    }
+
     /// Look up the instruction for `r`.
     ///
     /// # Panics
@@ -1212,6 +1220,7 @@ impl TirBuilder {
         }
         let len = Self::len_u32(stmts.len());
         let tir = Tir {
+            identity: crate::artifact::ArtifactId::fresh(),
             name: self.name,
             params: self.params,
             return_type: self.return_type,

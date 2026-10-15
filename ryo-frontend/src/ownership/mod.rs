@@ -13,14 +13,10 @@
 //!
 //! ## State lattice
 //!
-//! Per-TirRef state, not per-binding. A binding name resolves through
-//! a shadow `current_owner: HashMap<StringId, TirRef>` to whichever
-//! SSA value currently owns the underlying allocation. Anonymous owned
-//! temporaries (concat results, formatter outputs) live in the same
-//! `states` map with no shadow entry.
-//!
-//! See `docs/superpowers/specs/2026-05-20-milestone-8.1-heap-str-and-move-semantics-design.md`
-//! sub-milestone 8.1b for the full algorithm.
+//! Flow places identify bindings and produced values. The current-owner
+//! table maps each binding place to the value that occupies its storage.
+//! Anonymous owning values use their producing Flow places.
+//! Names remain diagnostic labels.
 //!
 //! ## Mojo reference
 //!
@@ -31,16 +27,20 @@ use ryo_core::flow::{Analysis, BlockId, DropOp, DropPosition, Flow, PlaceId};
 
 mod diag_fmt;
 pub(crate) use diag_fmt::*;
-mod frees;
-pub(crate) use frees::*;
+mod cleanup;
+pub(crate) use cleanup::*;
+mod materialization;
+pub(crate) use materialization::*;
 mod loops;
 pub(crate) use loops::*;
 mod match_;
 pub(crate) use match_::*;
 mod merge;
 pub(crate) use merge::*;
-mod structs;
-pub(crate) use structs::*;
+mod aggregates;
+pub(crate) use aggregates::*;
+mod transfers;
+pub(crate) use transfers::*;
 #[cfg(debug_assertions)]
 mod validate;
 mod views;
@@ -520,14 +520,50 @@ pub fn check(
     pool: &InternPool,
     sink: &mut DiagSink,
 ) -> OwnershipSidecar {
+    try_check(tirs, flows, pool, sink).expect("ownership requires compatible built artifacts")
+}
+
+/// Reject incompatible analysis inputs before reading body-local indices.
+pub fn try_check(
+    tirs: &[Tir],
+    flows: &[ryo_core::flow::Flow],
+    pool: &InternPool,
+    sink: &mut DiagSink,
+) -> Result<OwnershipSidecar, String> {
+    try_check_with_optimizations(tirs, flows, pool, sink, true)
+}
+
+/// Analyze required cleanup with optional allocation reuse disabled.
+pub fn check_without_optimizations(
+    tirs: &[Tir],
+    flows: &[Flow],
+    pool: &InternPool,
+    sink: &mut DiagSink,
+) -> Result<OwnershipSidecar, String> {
+    try_check_with_optimizations(tirs, flows, pool, sink, false)
+}
+
+fn try_check_with_optimizations(
+    tirs: &[Tir],
+    flows: &[Flow],
+    pool: &InternPool,
+    sink: &mut DiagSink,
+    optional_optimizations: bool,
+) -> Result<OwnershipSidecar, String> {
+    if tirs.len() != flows.len() {
+        return Err("ownership requires one Flow per typed body".into());
+    }
+    for flow in flows {
+        flow.require_layout(pool)?;
+    }
     debug_assert_eq!(tirs.len(), flows.len(), "one Flow IR per TIR body");
     #[cfg(all(test, debug_assertions))]
     validate::clear_test_ownerships();
     let mut sidecar = OwnershipSidecar::default();
-    let synth = frees::SynthCalleeIds::resolve(pool);
+    let synth = materialization::SynthCalleeIds::resolve(pool);
     let mut warnings = DiagSink::new();
     for (tir, flow) in tirs.iter().zip(flows.iter()) {
-        let mut func_sidecar = FunctionSidecar::new(tir.name, tir.instructions.len());
+        let mut func_sidecar = FunctionSidecar::for_flow(tir, flow)?;
         analyze_function(
             tir,
             flow,
@@ -536,6 +572,7 @@ pub fn check(
             sink,
             &mut warnings,
             &mut func_sidecar,
+            optional_optimizations,
         );
         sidecar.functions.push(func_sidecar);
     }
@@ -544,18 +581,19 @@ pub fn check(
             sink.emit(d);
         }
     }
-    sidecar
+    Ok(sidecar)
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn analyze_function(
     tir: &Tir,
     flow: &Flow,
     pool: &InternPool,
-    synth: &frees::SynthCalleeIds,
+    synth: &materialization::SynthCalleeIds,
     sink: &mut DiagSink,
     warnings: &mut DiagSink,
     sidecar: &mut FunctionSidecar,
+    optional_optimizations: bool,
 ) {
     let mut own = Ownership {
         // Name → param-index map, built once so the per-owner lookups
@@ -786,6 +824,7 @@ fn analyze_function(
                         tir,
                         r,
                         after,
+                        sidecar,
                         &order,
                         &last_read_by_name,
                         &loop_carried_owners,
@@ -1258,6 +1297,25 @@ fn analyze_function(
         &reassign_orders,
     );
 
+    if !optional_optimizations {
+        sidecar.consumed_concat_lhs.fill(None);
+    }
+    sidecar.transfers = own
+        .owner_hazards
+        .iter()
+        .filter_map(|&(owner, site, kind)| {
+            (kind == HazardKind::Move).then_some(ryo_core::ownership::StorageTransfer {
+                source: owner.0,
+                target: owner.tirref(flow),
+                site,
+            })
+        })
+        .collect();
+    sidecar
+        .transfers
+        .sort_by_key(|transfer| (transfer.site.raw(), transfer.source.0));
+    sidecar.transfers.dedup();
+
     // backend validators: debug-only cleanup-schedule completeness validator (see
     // `validate`). Runs after every scheduling pass so the sidecar is
     // final; any broken invariant is a compiler bug, so panic. The path
@@ -1269,6 +1327,7 @@ fn analyze_function(
             validate::validate_cleanup(tir, flow, pool, &own, sidecar, !sink.has_errors());
         sidecar.validation = Some(summary);
     }
+    sidecar.seal();
 }
 
 /// Return epilogue: destroy locals still live at an early return.

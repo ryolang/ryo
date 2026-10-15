@@ -93,6 +93,7 @@ impl<M: Module> Codegen<M> {
                         &mut ctx.fat_locals_undo,
                         view.name,
                         Some(FatLocals {
+                            binding: Some(r),
                             ptr: var_ptr,
                             len: var_len,
                             cap: var_cap,
@@ -100,6 +101,9 @@ impl<M: Module> Codegen<M> {
                             home_inline,
                         }),
                     );
+                    let storage = Self::read_slot(&ctx.fat_locals, view.name)
+                        .expect("declaration registered fat storage");
+                    ctx.fat_binding_storage.insert(r, storage);
                 }
                 _ => unreachable!("fat-typed initializer should produce a fat ValueRepr"),
             }
@@ -230,7 +234,9 @@ impl<M: Module> Codegen<M> {
         // pass proved the lhs binding dies at this reassign, so
         // codegen appends in place and skips the
         // free_on_reassign free below by never reaching it.
-        if let Some(concat_ref) = ctx.sidecar.consumed_concat_lhs[r.index()] {
+        if ctx.optional_optimizations
+            && let Some(concat_ref) = ctx.sidecar.consumed_concat_lhs[r.index()]
+        {
             return Self::emit_consuming_concat_assign(builder, ctx, r, concat_ref);
         }
         // `read_slot` copies the FatLocals out (three Cranelift
@@ -243,6 +249,9 @@ impl<M: Module> Codegen<M> {
                 ctx.pool.str(view.name)
             )
         })?;
+        let binding = ctx.sidecar.assign_binding[r.index()]
+            .ok_or_else(|| "fat assignment has no declaring binding".to_string())?;
+        Self::require_fat_storage_binding(locals, binding)?;
         let is_bytes = matches!(ctx.pool.kind(inst.ty), TypeKind::Bytes);
         // Home-backed target whose RHS cannot reference the
         // binding: free the old buffer FIRST, then let the
@@ -253,7 +262,7 @@ impl<M: Module> Codegen<M> {
         // would be a use-after-free.
         let direct = locals.home.is_some()
             && structs::writes_out_slot_ids(ctx.tir, &ctx.name_ids, view.value)
-            && !Self::expr_refs_name(ctx.tir, view.value, view.name);
+            && !ctx.assignment_aliases[r.index()];
         let mut old_freed = false;
         // Elision, same predicate as the scheduled-free
         // path: when the home's CURRENT contents are

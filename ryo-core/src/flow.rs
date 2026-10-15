@@ -60,7 +60,7 @@ impl BlockId {
 }
 
 /// One evaluated instruction inside a block.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Hash)]
 pub struct Step {
     /// The TIR instruction this step evaluates.
     pub inst: TirRef,
@@ -69,7 +69,7 @@ pub struct Step {
 }
 
 /// Explicit per-step ownership-relevant facts.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Hash)]
 pub struct StepFacts {
     /// `Var` reads: the place this step reads. Projections
     /// (`FieldAccess`) read their base place. Call/operator arguments
@@ -79,20 +79,22 @@ pub struct StepFacts {
     /// Writes (declarations, assignments, in-place mutation, field
     /// replacement, `inout` writeback).
     pub write: Option<PlaceWrite>,
+    /// All call arguments whose storage can change in place.
+    pub mutations: Option<ExtraRange>,
     /// `Slice`/`ToView` steps: the view place this step creates; the
     /// protected owner is [`Place::View::base`].
     pub view: Option<PlaceId>,
 }
 
 /// A write of a place's storage.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Hash)]
 pub struct PlaceWrite {
     pub place: PlaceId,
     pub kind: WriteKind,
 }
 
 /// What kind of storage update a write performs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WriteKind {
     /// Declaration / first initialization.
     Init,
@@ -109,7 +111,7 @@ pub enum WriteKind {
 
 /// A lexical/projected storage identity. Never keyed by name alone:
 /// same-named bindings in different scopes are distinct places.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Hash)]
 pub enum Place {
     /// Function parameter, identified by position (never by name —
     /// params shadow and are shadowed like locals).
@@ -194,7 +196,7 @@ impl Place {
 
 /// Explicit block terminator — the exhaustive control-flow enum.
 /// Adding a control form is a compile error at every consumer.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Hash)]
 pub enum Terminator {
     /// Unconditional jump.
     Goto { target: BlockId },
@@ -274,7 +276,7 @@ pub enum Analysis<T> {
 
 /// Where a cleanup drop fires. Conditionality is expressed by block
 /// membership (an arm-only drop lives in the arm's block).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DropPosition {
     // NOTE: variants documented below.
     /// Start of a block (arm-start payload drops, conditional dead
@@ -339,7 +341,7 @@ pub struct DropOp {
 /// created up front in a batch must not capture a creation-time start —
 /// their ranges would overlap); a block with `steps_len == 0` never
 /// uses `steps_start` and reads back as an empty slice.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Hash)]
 pub struct FlowBlock {
     pub steps_start: u32,
     pub steps_len: u32,
@@ -352,6 +354,11 @@ pub struct FlowBlock {
 /// One function body's canonical control flow.
 #[derive(Debug, Clone)]
 pub struct Flow {
+    identity: crate::artifact::ArtifactId,
+    source_body: crate::artifact::ArtifactId,
+    source_stamp: u64,
+    content_stamp: u64,
+    layout_context: crate::artifact::ArtifactId,
     pub entry: BlockId,
     pub blocks: Vec<FlowBlock>,
     /// Steps in global evaluation order; each block's range is its
@@ -410,13 +417,47 @@ struct InstMeta {
     loop_var: Option<PlaceId>,
 }
 
+pub mod cleanup;
+mod inspect;
+mod version;
+
 impl Flow {
+    /// Identity of this execution representation version.
+    pub fn identity(&self) -> crate::artifact::ArtifactId {
+        self.identity
+    }
+
+    /// Reject indices interpreted through another interned layout context.
+    pub fn require_layout(&self, pool: &InternPool) -> Result<(), String> {
+        if self.layout_context != pool.identity() {
+            return Err("Flow belongs to a different type and layout context".into());
+        }
+        Ok(())
+    }
+
+    /// Reject a different typed body, even when its indices and name match.
+    pub fn require_body(&self, tir: &Tir) -> Result<(), String> {
+        if self.source_body != tir.identity() || self.source_stamp != tir.representation_stamp() {
+            return Err("Flow belongs to a different typed body version".into());
+        }
+        if self.content_stamp != self.representation_stamp() {
+            return Err("Flow changed after publication; rebuild its analysis and cleanup".into());
+        }
+        Ok(())
+    }
+
     /// Build the canonical Flow IR for one function body. Panics (debug
     /// builds only, via [`Flow::validate`]) on TIR that violates the
     /// invariants Flow IR depends on; well-formed post-sema TIR always
     /// passes.
     pub fn build(tir: &Tir, pool: &InternPool) -> Flow {
         build::build_flow(tir, pool)
+    }
+
+    /// Mutation places recorded by a call step.
+    pub fn mutations(&self, facts: &StepFacts) -> impl Iterator<Item = PlaceId> + '_ {
+        let range = facts.mutations.map(|r| r.as_range()).unwrap_or(0..0);
+        self.extra[range].iter().copied().map(PlaceId)
     }
 
     /// This block's steps, in evaluation order. Step-less blocks (empty

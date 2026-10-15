@@ -40,7 +40,10 @@ use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 use std::collections::{HashMap, HashSet};
 use target_lexicon::Triple;
 
+mod abi;
+use abi::{LoweredAbi, ValueAbi};
 mod arith;
+mod binding_storage;
 mod builtins;
 mod bytes;
 mod control;
@@ -49,12 +52,14 @@ mod enums;
 mod expr;
 mod frees;
 mod jit;
+mod literals;
 mod match_;
 mod ranges;
 mod recursion;
 mod str_ops;
 mod structs;
 mod tail;
+mod validate;
 mod views;
 
 pub(crate) use structs::{is_fat_type, is_struct_type};
@@ -96,7 +101,7 @@ pub(crate) const CODEGEN_INLINED_BUILTINS: &[&str] = &["bool_to_str"];
 
 /// True for instruction tags whose Flow IR steps are statement
 /// boundaries: after such a step the driver fires the end-of-statement
-/// free bookkeeping (due frees + sweeps), matching the old `emit_body`
+/// free bookkeeping at resolved firing points, matching the old `emit_body`
 /// post-statement pass. Control instructions are never steps.
 pub(crate) fn is_statement_step(tag: TirTag) -> bool {
     matches!(
@@ -220,6 +225,7 @@ fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) ->
 }
 
 pub struct Codegen<M: Module> {
+    optional_optimizations: bool,
     builder_context: FunctionBuilderContext,
     ctx: codegen::Context,
     module: M,
@@ -249,7 +255,7 @@ pub struct Codegen<M: Module> {
     name_ids: CodegenNameIds,
     /// Names of functions whose bodies contain a syntactic
     /// tail-position self-call, collected by the pre-pass in
-    /// `prepare_compilation`. `build_signature` compiles marked
+    /// `prepare_compilation`. `lower_abi` compiles marked
     /// functions with `CallConv::Tail` — the only convention from
     /// which Cranelift allows `return_call`. Recomputed per
     /// compilation; empty before the first one.
@@ -280,7 +286,7 @@ const OVERFLOW_MSG: &str = "integer overflow\n";
 /// Declared functions: `FuncId` plus the `Signature` built at
 /// declaration time, so `compile_function` can install it into
 /// `ctx.func` instead of rebuilding it.
-type DeclaredFunctions = HashMap<StringId, (FuncId, Signature)>;
+type DeclaredFunctions = HashMap<StringId, (FuncId, LoweredAbi)>;
 
 /// Undo-log marks for the four binding slot tables (`locals`,
 /// `fat_locals`, `view_locals`, `struct_locals`), captured when a
@@ -454,6 +460,7 @@ impl ValueRepr {
 /// memory, so no block-param phis are needed.
 #[derive(Clone, Copy)]
 struct FatLocals {
+    binding: Option<TirRef>,
     ptr: Variable,
     len: Variable,
     cap: Variable,
@@ -479,6 +486,7 @@ struct ViewLocals {
 /// function-local — and because `TirRef` itself is scoped to a
 /// single `Tir`.
 pub(crate) struct FunctionContext<'a, M: Module> {
+    optional_optimizations: bool,
     module: &'a mut M,
     data_ctx: &'a mut DataDescription,
     string_data: &'a mut HashMap<StringId, DataId>,
@@ -491,7 +499,7 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     is_main: bool,
     /// Whether the function being lowered was compiled with
     /// `CallConv::Tail`: its name was in `Codegen`'s
-    /// `tail_candidates` when `build_signature` ran. `return_call` is
+    /// `tail_candidates` when `lower_abi` ran. `return_call` is
     /// only legal from a `tail`-convention function, so the tail path
     /// consults this before attempting one.
     tail_conv_candidate: bool,
@@ -529,6 +537,7 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// while this drives the resurrect-then-re-kill join invalidation.
     assigned_log: Vec<StringId>,
     func_ids: &'a DeclaredFunctions,
+    abi: &'a LoweredAbi,
     /// `TirRef → ValueRepr` memo. Materializing the same instruction
     /// twice in one function would either duplicate side effects
     /// (calls) or waste Cranelift IR; both are cheap-but-wrong.
@@ -718,22 +727,19 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// cap) per binding name. Dense `StringId::raw()`-indexed table with
     /// an undo log, same scoping discipline as `locals`.
     fat_locals: Vec<Option<FatLocals>>,
+    /// Storage survives lexical name restoration until its resolved cleanup fires.
+    /// Entries identify representation only; Flow establishes ownership.
+    fat_binding_storage: HashMap<TirRef, FatLocals>,
+    assignment_aliases: Vec<bool>,
+    cleanup_plan: ryo_core::flow::cleanup::CleanupPlan,
     fat_locals_undo: Vec<(u32, Option<FatLocals>)>,
     /// Borrowed-param view bases (Slice/ToView) that were promoted
     /// through a scratch slot instead of the param's FatLocals: base
     /// inst → slot holding flag (offset 0) + promoted triple (8/16/24).
     promo_slots: HashMap<TirRef, StackSlot>,
-    /// Bases whose promotion ALLOC ran (the promote-on-view flag=1
-    /// store) — the end-of-function pairing assert requires each to
-    /// have a fired release (Gap 5).
-    promo_alloc_fired: std::collections::HashSet<TirRef>,
     /// Dense flag per `sidecar.promotion_frees` index (emission-time
     /// dedup, same discipline as `freed_at`).
     promo_freed_at: Vec<bool>,
-    /// Anchor `TirRef` → indices into `sidecar.promotion_frees`.
-    promo_free_by_after: Vec<Vec<usize>>,
-    /// Unfired `promotion_frees` indices for the end-of-statement sweep.
-    pending_promo_sweep: Vec<usize>,
     /// `strview` view bindings (M8.4): two SSA `Variable`s per binding,
     /// mirroring `fat_locals`. Views are non-owning — they never
     /// appear in the free schedule.
@@ -744,6 +750,7 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// `codegen/structs.rs`). Dense `StringId::raw()`-indexed table
     /// with an undo log, same scoping discipline as `locals`.
     struct_locals: Vec<Option<Variable>>,
+    aggregate_binding_storage: HashMap<TirRef, Variable>,
     struct_locals_undo: Vec<(u32, Option<Variable>)>,
     /// Free-target (initializer / Assign value / fat-param virtual ref)
     /// → binding-name map, built once per function by
@@ -758,35 +765,6 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// fat-param sentinel refs.
     free_binding_names: Vec<Option<StringId>>,
     free_binding_param_names: Vec<Option<StringId>>,
-    /// Binding name → its most recent write in program order (VarDecl
-    /// initializer or `Assign` value; fat params map to their sentinel
-    /// ref), built alongside `free_binding_names`. `emit_frees` only
-    /// takes the binding-path redirect when the drop's target IS
-    /// this write — a stale/superseded target would free the binding's
-    /// current value instead of its own buffer. Keyed by BINDING
-    /// identity (the declaring VarDecl's ref, or a fat param's sentinel
-    /// ref), not by name: one name can denote several bindings (a
-    /// same-named shadow), and name-keyed lookup lets a later shadow's
-    /// writes suppress the branch-divergent-reseat redirect of an outer
-    /// binding's Free (the invalid-free + leak in the taken-arm reseat
-    /// + shadow composition).
-    binding_last_write: HashMap<TirRef, TirRef>,
-    /// Free-target (initializer / Assign value) → BINDING identity (the
-    /// written Flow place's declaring `VarDecl` ref, for both write
-    /// kinds — the single-pass Flow-derived builder never reads
-    /// `sidecar.assign_binding`), built alongside `free_binding_names`.
-    /// Params need no entry — their binding identity is their own
-    /// sentinel ref (see `free_binding_of`). `emit_frees` pairs this
-    /// with `binding_last_write` to keep the redirect's lineage tracking
-    /// per-binding while `fat_locals` stay name-keyed.
-    free_binding_of_insts: Vec<Option<TirRef>>,
-    /// Every drop target in this function's schedule. `emit_frees`
-    /// consults it to distinguish a superseded redirect target whose
-    /// most recent write IS freed elsewhere (loop-carried reassign: do
-    /// not redirect — the write's own Free owns the home slot) from the
-    /// branch-divergent reseat (the write has no Free: the pre-branch
-    /// owner's Free must redirect to cover the path-correct buffer).
-    all_free_targets: std::collections::HashSet<TirRef>,
     /// M8.3 inout parameters: for each inout param's name, the
     /// caller-provided slot address (a function-entry block param)
     /// and its pointee `TypeId`. The write-back chokepoint stores each
@@ -799,6 +777,7 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// every name in the TIR is in bounds). Never scoped — params are
     /// bound at function entry — so it has no undo log.
     inout_ptrs: Vec<Option<(Value, TypeId)>>,
+    scalar_param_storage: Vec<Option<Variable>>,
     /// For fat-returning functions: the hidden sret pointer (first block param)
     /// through which the callee writes the (ptr, len, cap) triple.
     sret_ptr: Option<Value>,
@@ -854,6 +833,7 @@ impl<M: Module> Codegen<M> {
     fn from_module(module: M) -> Self {
         let int_type = module.target_config().pointer_type();
         Self {
+            optional_optimizations: true,
             builder_context: FunctionBuilderContext::new(),
             ctx: module.make_context(),
             module,
@@ -870,13 +850,20 @@ impl<M: Module> Codegen<M> {
 }
 
 /// Shared Cranelift flags for the AOT object pipeline.
-fn aot_shared_flags() -> Result<settings::Flags, String> {
+fn aot_shared_flags(optional_optimizations: bool) -> Result<settings::Flags, String> {
     let mut shared_builder = settings::builder();
     shared_builder
         .enable("is_pic")
         .map_err(|e| format!("Error enabling is_pic: {}", e))?;
     shared_builder
-        .set("opt_level", "speed")
+        .set(
+            "opt_level",
+            if optional_optimizations {
+                "speed"
+            } else {
+                "none"
+            },
+        )
         .map_err(|e| format!("Error setting opt_level: {}", e))?;
     shared_builder
         .set("preserve_frame_pointers", "true")
@@ -901,7 +888,14 @@ fn aot_shared_flags() -> Result<settings::Flags, String> {
 
 impl Codegen<ObjectModule> {
     pub fn new_aot(target_triple: Triple) -> Result<Self, String> {
-        let shared_flags = aot_shared_flags()?;
+        Self::new_aot_with_optimizations(target_triple, true)
+    }
+
+    pub fn new_aot_with_optimizations(
+        target_triple: Triple,
+        enabled: bool,
+    ) -> Result<Self, String> {
+        let shared_flags = aot_shared_flags(enabled)?;
 
         let isa = isa::lookup(target_triple.clone())
             .map_err(|e| format!("Unsupported target '{}': {}", target_triple, e))?
@@ -912,7 +906,9 @@ impl Codegen<ObjectModule> {
             ObjectBuilder::new(isa, "ryo_module", cranelift_module::default_libcall_names())
                 .map_err(|e| format!("Failed to create ObjectBuilder: {}", e))?;
 
-        Ok(Self::from_module(ObjectModule::new(obj_builder)))
+        let mut result = Self::from_module(ObjectModule::new(obj_builder));
+        result.optional_optimizations = enabled;
+        Ok(result)
     }
 
     pub fn finish(self) -> Result<Vec<u8>, String> {
@@ -930,10 +926,14 @@ impl<M: Module> Codegen<M> {
         pool: &InternPool,
     ) -> Result<DeclaredFunctions, String> {
         // Tail-call pre-pass: mark functions whose bodies contain a
-        // syntactic tail-position self-call, so `build_signature`
+        // syntactic tail-position self-call, so `lower_abi`
         // compiles them with CallConv::Tail (see
         // `tail::scan_tail_call_candidates` for the scope).
-        self.tail_candidates = tail::scan_tail_call_candidates(tirs, self.name_ids.main);
+        self.tail_candidates = if self.optional_optimizations {
+            tail::scan_tail_call_candidates(tirs, self.name_ids.main)
+        } else {
+            HashSet::new()
+        };
         // Stack-check pre-pass: find the call-graph cycles whose edges get
         // the stack-limit check (see `recursion` for the rationale).
         self.recursive_sccs = recursion::scan_recursive_sccs(tirs);
@@ -1019,17 +1019,40 @@ impl<M: Module> Codegen<M> {
         sidecar: &ryo_core::ownership::OwnershipSidecar,
         dump_ir: bool,
     ) -> Result<(DeclaredFunctions, String), String> {
-        debug_assert!(
-            bytes::no_unreachable_in(tirs),
-            "codegen requires sema to have produced TIR with no Unreachable instructions"
-        );
-        debug_assert_eq!(tirs.len(), flows.len(), "one Flow IR per TIR body");
+        let checked = validate::require_backend_input(tirs, flows, sidecar, pool)?;
+        if !self.optional_optimizations
+            && sidecar
+                .functions
+                .iter()
+                .any(|body| body.consumed_concat_lhs.iter().any(Option::is_some))
+        {
+            return Err(
+                "unoptimized backend requires cleanup without allocation-reuse transfers".into(),
+            );
+        }
         self.name_ids = CodegenNameIds::resolve(pool);
         let func_ids = self.prepare_compilation(tirs, pool)?;
+        for (tir, flow) in tirs.iter().zip(flows) {
+            let calls = flow
+                .steps
+                .iter()
+                .filter_map(|step| (tir.inst(step.inst).tag == TirTag::Call).then_some(step.inst))
+                .chain(flow.terms.iter().filter_map(|term| match term {
+                    ryo_core::flow::Terminator::Call { call, .. } => Some(*call),
+                    _ => None,
+                }));
+            for inst in calls {
+                let call = tir.call_view(inst);
+                if let Some((_, abi)) = func_ids.get(&call.name) {
+                    abi.require_call(tir, inst)?;
+                }
+            }
+        }
 
         let mut ir_output = String::new();
-        for (i, tir) in tirs.iter().enumerate() {
-            let text = self.compile_function(tir, &func_ids, pool, sidecar, flows, i, dump_ir)?;
+        for i in 0..tirs.len() {
+            let ready = checked.prepare_body(i)?;
+            let text = self.compile_function(ready, &func_ids, pool, dump_ir)?;
             if dump_ir {
                 ir_output.push_str(&text);
                 ir_output.push('\n');
@@ -1047,7 +1070,10 @@ impl<M: Module> Codegen<M> {
         let mut func_ids = HashMap::new();
         for tir in tirs {
             let is_main = self.name_ids.main == Some(tir.name);
-            let sig = self.build_signature(tir, pool, is_main);
+            let abi = self.lower_abi(tir, pool, is_main);
+            debug_assert_eq!(&abi.target, self.module.isa().triple());
+            debug_assert_eq!(abi.pointer_type, self.module.isa().pointer_type());
+            debug_assert_eq!(abi.layout_context, pool.identity());
             let name_str = pool.str(tir.name);
             let linkage = if is_main {
                 Linkage::Export
@@ -1056,11 +1082,11 @@ impl<M: Module> Codegen<M> {
             };
             let func_id = self
                 .module
-                .declare_function(name_str, linkage, &sig)
+                .declare_function(name_str, linkage, &abi.signature)
                 .map_err(|e| format!("Failed to declare function '{}': {}", name_str, e))?;
             // Keep the signature: `compile_function` installs it into
             // `ctx.func` instead of rebuilding it.
-            func_ids.insert(tir.name, (func_id, sig));
+            func_ids.insert(tir.name, (func_id, abi));
         }
         Ok(func_ids)
     }
@@ -1082,10 +1108,8 @@ impl<M: Module> Codegen<M> {
         pool: &InternPool,
         fat_mutated: &[bool],
         view_base_insts: &[bool],
-        free_binding_names: &[Option<StringId>],
-        free_binding_param_names: &[Option<StringId>],
-        free_binding_of_insts: &[Option<TirRef>],
-        binding_last_write: &HashMap<TirRef, TirRef>,
+        plan: &ryo_core::flow::cleanup::CleanupPlan,
+        optional_optimizations: bool,
         func_sidecar: &ryo_core::ownership::FunctionSidecar,
     ) -> DropFireMap {
         let mut fire_before_step: Vec<Vec<usize>> = vec![Vec::new(); tir.instructions.len()];
@@ -1098,8 +1122,14 @@ impl<M: Module> Codegen<M> {
         // buckets below are keyed FROM its resolutions — no private
         // re-anchoring lives here anymore.
         let fire_points = ryo_core::flow::fire_points::FirePoints::new(flow);
-        for (idx, drop) in func_sidecar.drops.iter().enumerate() {
-            match drop.position {
+        let positions = func_sidecar.drops.iter().map(|drop| drop.position).chain(
+            func_sidecar
+                .promotion_frees
+                .iter()
+                .map(|release| release.position),
+        );
+        for (idx, position) in positions.enumerate() {
+            match position {
                 ryo_core::flow::DropPosition::BlockStart { block } => {
                     // The unified cleanup schedule: arm-start payload
                     // destruction and conditional dead drops travel with
@@ -1110,7 +1140,7 @@ impl<M: Module> Codegen<M> {
                     // steps.
                     debug_assert!(
                         matches!(
-                            fire_points.resolve(drop.position),
+                            fire_points.resolve(position),
                             ryo_core::flow::fire_points::FireVerdict::Resolved(p)
                             if p.block == block && p.ordinal == 0
                         ),
@@ -1121,7 +1151,7 @@ impl<M: Module> Codegen<M> {
                 ryo_core::flow::DropPosition::BeforeStep { inst } => {
                     debug_assert!(
                         matches!(
-                            fire_points.resolve(drop.position),
+                            fire_points.resolve(position),
                             ryo_core::flow::fire_points::FireVerdict::Resolved(_)
                         ),
                         "BeforeStep anchors a real step"
@@ -1132,7 +1162,7 @@ impl<M: Module> Codegen<M> {
                 ryo_core::flow::DropPosition::PreTerminator { block } => {
                     debug_assert!(
                         matches!(
-                            fire_points.resolve(drop.position),
+                            fire_points.resolve(position),
                             ryo_core::flow::fire_points::FireVerdict::Resolved(_)
                         ),
                         "PreTerminator names a real block"
@@ -1181,18 +1211,18 @@ impl<M: Module> Codegen<M> {
             }
         }
         let mut freed_at = vec![false; func_sidecar.drops.len()];
-        Self::pre_elide_drops(
-            tir,
-            pool,
-            fat_mutated,
-            view_base_insts,
-            free_binding_names,
-            free_binding_param_names,
-            free_binding_of_insts,
-            binding_last_write,
-            func_sidecar,
-            &mut freed_at,
-        );
+        if optional_optimizations {
+            Self::pre_elide_drops(
+                tir,
+                pool,
+                fat_mutated,
+                view_base_insts,
+                flow,
+                plan,
+                func_sidecar,
+                &mut freed_at,
+            );
+        }
         DropFireMap(
             fire_before_step,
             fire_after_stmt,
@@ -1203,83 +1233,50 @@ impl<M: Module> Codegen<M> {
         )
     }
 
-    /// Promotion-free anchor tables: `promo_free_by_after` keys each
-    /// promotion free by its anchor instruction (the promo family keeps
-    /// its own anchor hook — I-216), `pending_promo_sweep` starts as
-    /// every index for the end-of-statement sweep.
-    fn build_promo_fire_tables(
-        tir: &Tir,
-        func_sidecar: &ryo_core::ownership::FunctionSidecar,
-    ) -> (Vec<Vec<usize>>, Vec<usize>) {
-        let mut promo_free_by_after: Vec<Vec<usize>> = vec![Vec::new(); tir.instructions.len()];
-        for (idx, pf) in func_sidecar.promotion_frees.iter().enumerate() {
-            let anchor = pf
-                .position
-                .anchor_inst()
-                .expect("promotion frees are step-anchored (AfterStep)");
-            debug_assert!(
-                !anchor.is_param(),
-                "promotion-free anchors are never param sentinel refs"
-            );
-            promo_free_by_after[anchor.index()].push(idx);
-        }
-        let pending_promo_sweep: Vec<usize> = (0..func_sidecar.promotion_frees.len()).collect();
-        (promo_free_by_after, pending_promo_sweep)
-    }
-
-    #[allow(clippy::too_many_arguments)]
     fn compile_function(
         &mut self,
-        tir: &Tir,
+        ready: validate::BackendReadyBody<'_>,
         func_ids: &DeclaredFunctions,
         pool: &InternPool,
-        sidecar: &ryo_core::ownership::OwnershipSidecar,
-        flows: &[ryo_core::flow::Flow],
-        sidecar_index: usize,
         dump_ir: bool,
     ) -> Result<String, String> {
+        let (tir, flow, func_sidecar, cleanup_plan) = ready.into_parts();
         // Interned-name ids for this compilation (resolved by
         // `compile_all`); copied out so the block below can read them
         // while `builder` holds mutable borrows of `self`.
         let ids = self.name_ids;
-        let (func_id, sig) = func_ids
+        let (func_id, abi) = func_ids
             .get(&tir.name)
             .ok_or_else(|| format!("Function '{}' not declared", pool.str(tir.name)))?;
         let func_id = *func_id;
 
-        // Pick the per-function sidecar entry. `TirRef`s are scoped
-        // per-function (each `Tir` arena restarts at `TirRef(1)`), so
-        // threading the program-wide sidecar would let frees scheduled
-        // for one function fire at numerically-matching TirRefs in
-        // another. The sidecar is positional with the `tirs` slice —
-        // `ownership::check` pushes exactly one entry per body — so a
-        // missing entry is a pipeline contract violation, not a case
-        // to paper over with an empty sidecar (compiler-emitted
-        // helpers like `__ryo_panic` are imported runtime calls and
-        // never appear in `tirs`).
-        let func_sidecar = sidecar.functions.get(sidecar_index).ok_or_else(|| {
-            format!(
-                "ownership sidecar has no entry for '{}' (index {} of {})",
-                pool.str(tir.name),
-                sidecar_index,
-                sidecar.functions.len()
-            )
-        })?;
-        // The length check above cannot detect a `tirs` slice that was
-        // reordered or filtered between `ownership::check` and codegen
-        // (same length, wrong alignment): every index would resolve to
-        // a wrong-but-plausible sidecar. The name recorded at push
-        // time pins entry `i` to `tirs[i]`.
-        debug_assert_eq!(
-            func_sidecar.name, tir.name,
-            "ownership sidecar misaligned with tirs at index {}",
-            sidecar_index
+        let (free_binding_names, free_binding_param_names) =
+            Self::build_free_binding_names(tir, flow, pool);
+        let (fat_mutated, view_base_insts) = Self::build_fat_mutation_tables(tir, flow, pool);
+        let DropFireMap(
+            fire_before_step,
+            fire_after_stmt,
+            fire_by_payload,
+            fire_at_term,
+            fire_at_block_start,
+            freed_at,
+        ) = Self::build_drop_fire_map(
+            tir,
+            flow,
+            pool,
+            &fat_mutated,
+            &view_base_insts,
+            &cleanup_plan,
+            self.optional_optimizations,
+            func_sidecar,
         );
+
+        let assignment_aliases = Self::assignment_aliases(tir, flow);
 
         // The signature built at declaration time; cloning two small
         // Vecs beats rebuilding the signature (pool queries + per-param
         // ABI branching) a second time.
-        self.ctx.func.signature = sig.clone();
+        self.ctx.func.signature = abi.signature.clone();
 
         {
             let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
@@ -1296,11 +1293,8 @@ impl<M: Module> Codegen<M> {
             let mut locals: Vec<Option<Variable>> = vec![None; pool.string_count()];
             let mut locals_undo: Vec<(u32, Option<Variable>)> = Vec::new();
 
-            let is_main = ids.main == Some(tir.name);
-            let returns_fat = !is_main && is_fat_type(tir.return_type, pool);
-            let returns_struct = !is_main && is_struct_type(tir.return_type, pool);
-            let returns_enum = !is_main && is_enum_type(tir.return_type, pool);
-            let has_sret = returns_fat || returns_struct || returns_enum;
+            let is_main = abi.hosted_main;
+            let has_sret = !is_main && abi.result.indirect_return();
             let mut block_idx: usize = if has_sret { 1 } else { 0 };
             let sret_ptr = if has_sret {
                 Some(builder.block_params(entry_block)[0])
@@ -1316,8 +1310,8 @@ impl<M: Module> Codegen<M> {
             let mut struct_locals_undo: Vec<(u32, Option<Variable>)> = Vec::new();
             let mut inout_ptrs: Vec<Option<(Value, TypeId)>> = vec![None; pool.string_count()];
 
-            for param in tir.params.iter() {
-                if param.mode == ParamMode::Inout {
+            for (param_index, (param, lowered)) in tir.params.iter().zip(&abi.params).enumerate() {
+                if lowered.mode == ParamMode::Inout {
                     // inout param: a single pointer to the caller's slot,
                     // regardless of pointee type. Load the current value
                     // into Variables so the body's existing read/mutate
@@ -1325,7 +1319,7 @@ impl<M: Module> Codegen<M> {
                     // write-back chokepoint before each `return_`.
                     let ptr = builder.block_params(entry_block)[block_idx];
                     block_idx += 1;
-                    if is_fat_type(param.ty, pool) {
+                    if lowered.value == ValueAbi::Fat {
                         // fat inout: load the fat-pointer triple into
                         // FatLocals so the body reads/mutates it like any
                         // fat local; write all three fields back before
@@ -1350,6 +1344,7 @@ impl<M: Module> Codegen<M> {
                             &mut fat_locals_undo,
                             param.name,
                             Some(FatLocals {
+                                binding: Some(TirRef::param(param_index)),
                                 ptr: var_ptr,
                                 len: var_len,
                                 cap: var_cap,
@@ -1357,7 +1352,7 @@ impl<M: Module> Codegen<M> {
                                 home_inline: false,
                             }),
                         );
-                    } else if is_struct_type(param.ty, pool) || is_enum_type(param.ty, pool) {
+                    } else if matches!(lowered.value, ValueAbi::Struct | ValueAbi::Enum) {
                         // Struct (M9 named / M10 anon) and enum (M11)
                         // inout pointees: mutations happen in place
                         // through the caller's slot — bind the pointer
@@ -1382,7 +1377,7 @@ impl<M: Module> Codegen<M> {
                     inout_ptrs[param.name.raw() as usize] = Some((ptr, param.ty));
                     continue;
                 }
-                if is_fat_type(param.ty, pool) {
+                if lowered.value == ValueAbi::Fat {
                     let var_ptr = builder.declare_var(int_type);
                     let var_len = builder.declare_var(types::I64);
                     let var_cap = builder.declare_var(types::I64);
@@ -1394,6 +1389,7 @@ impl<M: Module> Codegen<M> {
                         &mut fat_locals_undo,
                         param.name,
                         Some(FatLocals {
+                            binding: Some(TirRef::param(param_index)),
                             ptr: var_ptr,
                             len: var_len,
                             cap: var_cap,
@@ -1402,7 +1398,7 @@ impl<M: Module> Codegen<M> {
                         }),
                     );
                     block_idx += 3;
-                } else if pool.is_view(param.ty) {
+                } else if lowered.value == ValueAbi::View {
                     // `strview` view param: two ABI words (ptr, len). Views
                     // are borrows — no cap, never freed.
                     let var_ptr = builder.declare_var(int_type);
@@ -1419,7 +1415,7 @@ impl<M: Module> Codegen<M> {
                         }),
                     );
                     block_idx += 2;
-                } else if is_struct_type(param.ty, pool) || is_enum_type(param.ty, pool) {
+                } else if matches!(lowered.value, ValueAbi::Struct | ValueAbi::Enum) {
                     // Struct (M9 named / M10 anon) and enum (M11)
                     // params: a single pointer to the caller-side slot
                     // (borrow) or to a transferred field-wise copy
@@ -1443,47 +1439,6 @@ impl<M: Module> Codegen<M> {
                 }
             }
 
-            // The canonical Flow IR for this body — positional with the
-            // sidecar entry (both are built once per pipeline run,
-            // right after sema).
-            let flow = flows.get(sidecar_index).ok_or_else(|| {
-                format!(
-                    "no Flow built for '{}' (index {} of {})",
-                    pool.str(tir.name),
-                    sidecar_index,
-                    flows.len()
-                )
-            })?;
-            let (
-                free_binding_names,
-                free_binding_param_names,
-                free_binding_of_insts,
-                binding_last_write,
-            ) = Self::build_free_binding_names(tir, flow, pool);
-            let (fat_mutated, view_base_insts) = Self::build_fat_mutation_tables(tir, pool, &ids);
-            let DropFireMap(
-                fire_before_step,
-                fire_after_stmt,
-                fire_by_payload,
-                fire_at_term,
-                fire_at_block_start,
-                freed_at,
-            ) = Self::build_drop_fire_map(
-                tir,
-                flow,
-                pool,
-                &fat_mutated,
-                &view_base_insts,
-                &free_binding_names,
-                &free_binding_param_names,
-                &free_binding_of_insts,
-                &binding_last_write,
-                func_sidecar,
-            );
-
-            let (promo_free_by_after, pending_promo_sweep) =
-                Self::build_promo_fire_tables(tir, func_sidecar);
-
             // One scratch slot per borrowed-param view base scheduled
             // for a promotion free: flag word (offset 0) + promoted
             // triple (8/16/24), per PROMO_SLOT_SIZE.
@@ -1499,6 +1454,7 @@ impl<M: Module> Codegen<M> {
             }
 
             let mut ctx: FunctionContext<'_, M> = FunctionContext {
+                optional_optimizations: self.optional_optimizations,
                 module: &mut self.module,
                 data_ctx: &mut self.data_ctx,
                 string_data: &mut self.string_data,
@@ -1508,12 +1464,18 @@ impl<M: Module> Codegen<M> {
                 is_main,
                 tail_conv_candidate: self.tail_candidates.contains(&tir.name),
                 name_ids: ids,
+                scalar_param_storage: tir
+                    .params
+                    .iter()
+                    .map(|param| Self::read_slot(&locals, param.name))
+                    .collect(),
                 locals,
                 locals_undo,
                 range_facts: vec![None; pool.string_count()],
                 range_facts_undo: Vec::new(),
                 assigned_log: Vec::new(),
                 func_ids,
+                abi,
                 inst_values: vec![None; tir.instructions.len()],
                 param_values: vec![None; tir.params.len()],
                 freed_at,
@@ -1540,22 +1502,36 @@ impl<M: Module> Codegen<M> {
                 loop_records: HashMap::new(),
                 match_records: HashMap::new(),
                 has_sret,
+                cleanup_plan,
+                assignment_aliases,
+                fat_binding_storage: tir
+                    .params
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, param)| {
+                        Self::read_slot(&fat_param_locals, param.name)
+                            .map(|storage| (TirRef::param(index), storage))
+                    })
+                    .collect(),
                 fat_locals: fat_param_locals,
                 fat_locals_undo,
                 promo_slots,
                 promo_freed_at: vec![false; func_sidecar.promotion_frees.len()],
-                promo_alloc_fired: std::collections::HashSet::new(),
-                promo_free_by_after,
-                pending_promo_sweep,
                 view_locals: view_param_locals,
                 view_locals_undo,
+                aggregate_binding_storage: tir
+                    .params
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, param)| {
+                        Self::read_slot(&struct_param_locals, param.name)
+                            .map(|storage| (TirRef::param(index), storage))
+                    })
+                    .collect(),
                 struct_locals: struct_param_locals,
                 struct_locals_undo,
                 free_binding_names,
                 free_binding_param_names,
-                free_binding_of_insts,
-                binding_last_write,
-                all_free_targets: func_sidecar.drops.iter().map(|d| d.target).collect(),
                 inout_ptrs,
                 sret_ptr,
                 sidecar: func_sidecar,
@@ -1657,7 +1633,9 @@ impl<M: Module> Codegen<M> {
             // Hoist string and bytes literals while the entry block is
             // still the current block: one from-literal call per distinct
             // literal per function, dominating every use.
-            Self::hoist_str_literals(&mut builder, &mut ctx)?;
+            if ctx.optional_optimizations {
+                Self::hoist_str_literals(&mut builder, &mut ctx)?;
+            }
 
             // The backend drives emission from the canonical Flow
             // IR — one pre-created Cranelift block per Flow block, walked
@@ -1713,16 +1691,20 @@ impl<M: Module> Codegen<M> {
         // Iterate by index ascending: identical input must emit
         // identical instruction order (a HashMap's iteration order is
         // randomized per run).
-        for idx in 0..ctx.inout_ptrs.len() {
-            let Some((ptr, ty)) = ctx.inout_ptrs[idx] else {
+        for (index, param) in ctx.tir.params.iter().enumerate() {
+            let name = param.name;
+            let Some((ptr, ty)) = ctx.inout_ptrs[name.raw() as usize] else {
                 continue;
             };
-            let name = StringId::from_raw(u32::try_from(idx).expect("StringId index out of range"));
             if is_fat_type(ty, ctx.pool) {
                 // fat pointee: store all three fat-pointer fields.
-                let sl = Self::read_slot(&ctx.fat_locals, name).ok_or_else(|| {
-                    format!("inout fat '{}' has no FatLocals", ctx.pool.str(name))
-                })?;
+                let sl = ctx
+                    .fat_binding_storage
+                    .get(&TirRef::param(index))
+                    .copied()
+                    .ok_or_else(|| {
+                        format!("inout fat '{}' has no FatLocals", ctx.pool.str(name))
+                    })?;
                 let p = builder.use_var(sl.ptr);
                 let l = builder.use_var(sl.len);
                 let c = builder.use_var(sl.cap);
@@ -1731,7 +1713,7 @@ impl<M: Module> Codegen<M> {
                 builder.ins().store(MemFlagsData::trusted(), c, ptr, 16);
             } else {
                 // Scalar pointee: a single store at offset 0.
-                let var = Self::read_slot(&ctx.locals, name).ok_or_else(|| {
+                let var = ctx.scalar_param_storage[index].ok_or_else(|| {
                     format!(
                         "inout scalar '{}' has no local Variable",
                         ctx.pool.str(name)
@@ -1753,6 +1735,9 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         vals: &[Value],
     ) -> Result<(), String> {
+        if vals.len() != ctx.abi.signature.returns.len() {
+            return Err("return values disagree with the lowered function ABI".into());
+        }
         Self::emit_inout_writeback(builder, ctx)?;
         builder.ins().return_(vals);
         Ok(())
@@ -1763,7 +1748,7 @@ impl<M: Module> Codegen<M> {
     /// later in the block (steps are in evaluation order, so operand
     /// steps populate the value caches before their consumers).
     /// Statement-level steps also fire the end-of-statement free
-    /// bookkeeping (due frees + sweeps) — the Flow-block driver's
+    /// bookkeeping at resolved firing points — the Flow-block driver's
     /// analogue of the old `emit_body` post-statement pass.
     ///
     /// Control instructions (if/while/for/match/return/break/continue)
@@ -1876,11 +1861,8 @@ impl<M: Module> Codegen<M> {
             // drops whose anchor step lives in this statement (the
             // anchor's step index maps here at fire-map build time).
             // Firing lands each free after the statement's consumer, the
-            // only sound position for a last-use free. The promotion
-            // family keeps its own anchor hook + sweep.
+            // only sound position for a last-use free, including promotion releases.
             Self::fire_after_statement(builder, ctx, r)?;
-            Self::emit_due_promo_frees(builder, ctx, r)?;
-            Self::sweep_due_promo_frees(builder, ctx)?;
         }
         Ok(())
     }

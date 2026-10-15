@@ -56,7 +56,7 @@ See `docs/dev/pipeline_alignment.md` for what remains of the Zig-alignment plan 
 #### 2. Driver Orchestration Crate (`ryo-driver`)
 | File | Role |
 |------|------|
-| `ryo-driver/src/pipeline.rs` | Orchestrates pipeline stages: lex → parse → astgen → sema → ownership → codegen → link → run |
+| `ryo-driver/src/pipeline.rs` | Shares frontend artifact transitions across JIT, AOT, and IR inspection; coordinates codegen, linking, and execution |
 
 #### 3. Frontend Compilation Crate (`ryo-frontend`)
 | File | Role |
@@ -66,13 +66,14 @@ See `docs/dev/pipeline_alignment.md` for what remains of the Zig-alignment plan 
 | `ryo-frontend/src/parser.rs` | Chumsky-based parser over `Token` (produces AST) |
 | `ryo-frontend/src/astgen.rs` | AST → UIR structural lowering |
 | `ryo-frontend/src/sema.rs` | Semantic analysis: type-checks UIR, emits one TIR per function body |
+| `ryo-frontend/src/pipeline.rs` | BuiltProgram, AnalysisReady, and CleanupProgram transitions; immutable published bodies and cleanup |
 | `ryo-frontend/src/ownership/mod.rs` | Post-sema, pre-codegen ownership flow analysis |
 | `ryo-frontend/src/builtins.rs` | Builtin function and runtime ABI callee registry |
 
 #### 4. Code Generation and Linking Crate (`ryo-backend`)
 | File | Role |
 |------|------|
-| `ryo-backend/src/codegen/` | Cranelift IR generation from TIR (JIT and AOT) |
+| `ryo-backend/src/codegen/` | BackendReadyBody preparation, shared lowered ABI, and mechanical Flow/cleanup emission for JIT and AOT |
 | `ryo-backend/src/linker.rs` | Executable linking via the managed Zig toolchain |
 | `ryo-backend/src/toolchain.rs` | Zig toolchain download / version pinning / path resolution |
 | `ryo-backend/src/runtime_lib.rs` | Static runtime library extraction and caching |
@@ -85,7 +86,8 @@ See `docs/dev/pipeline_alignment.md` for what remains of the Zig-alignment plan 
 | `ryo-core/src/uir.rs` | Untyped IR data structures (flat, program-wide arena) |
 | `ryo-core/src/tir.rs` | Typed IR data structures (flat, per-function arena) |
 | `ryo-core/src/flow.rs` | Canonical control flow per function body: indexed blocks + exhaustive terminators (branch/switch/loop-backedge/return/diverging call), the place table (binding identity never keyed by name), per-step read/write/view facts, and `DropOp` positions — the shared execution-structure + storage-identity model for ownership analysis and codegen |
-| `ryo-core/src/ownership.rs` | Ownership pass side-tables and data structures (`BranchId`, `FreePoint`, etc.) |
+| `ryo-core/src/flow/cleanup.rs` | Resolve releases to declaring Flow places or displaced produced values |
+| `ryo-core/src/ownership.rs` | Ownership sidecars, transfer records, promotion lifetimes, and validation outcomes |
 | `ryo-core/src/types.rs` | `InternPool` for types and strings; `TypeId` / `StringId` newtypes |
 | `ryo-core/src/diag.rs` | Structured diagnostics: `Diag`, `DiagCode`, `DiagSink` |
 | `ryo-core/src/errors.rs` | Top-level `CompilerError` enum |

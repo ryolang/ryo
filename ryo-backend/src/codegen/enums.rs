@@ -15,7 +15,7 @@ use cranelift::frontend::Switch;
 use cranelift::prelude::*;
 use cranelift_module::Module;
 use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
-use ryo_core::types::{EnumVariantView, InternPool, StringId, TypeId, TypeKind, VariantKind};
+use ryo_core::types::{EnumVariantView, InternPool, TypeId, TypeKind, VariantKind};
 
 use super::{Codegen, FunctionContext, STR_SLOT_SIZE, Terminator, ValueRepr};
 
@@ -480,6 +480,7 @@ impl<M: Module> Codegen<M> {
             view.name,
             Some(var),
         );
+        ctx.aggregate_binding_storage.insert(r, var);
         Ok(Terminator::None)
     }
 
@@ -525,7 +526,6 @@ impl<M: Module> Codegen<M> {
         let ret_ty = ctx.tir.return_type;
         Self::emit_enum_copy(builder, ctx, sret, src, ret_ty)?;
         Self::fire_payload(builder, ctx, r)?;
-        Self::emit_due_promo_frees(builder, ctx, r)?;
         Self::emit_return(builder, ctx, &[])?;
         Ok(Terminator::Return)
     }
@@ -564,6 +564,7 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         target: TirRef,
+        binding: Option<TirRef>,
     ) -> Result<bool, String> {
         let ty = if let Some(idx) = target.as_param_index() {
             ctx.tir.params[idx as usize].ty
@@ -573,44 +574,23 @@ impl<M: Module> Codegen<M> {
         if !matches!(ctx.pool.kind(ty), TypeKind::Enum) {
             return Ok(false);
         }
-        let addr = match Self::free_binding_name(ctx, target)
-            .and_then(|name| Self::read_slot(&ctx.struct_locals, name))
-        {
-            Some(var) => builder.use_var(var),
-            None => match Self::cached_repr(ctx, target) {
+        let addr = if let Some(binding) = binding {
+            let var = ctx
+                .aggregate_binding_storage
+                .get(&binding)
+                .copied()
+                .ok_or_else(|| format!("aggregate release has no storage for {binding:?}"))?;
+            builder.use_var(var)
+        } else {
+            match Self::cached_repr(ctx, target) {
                 Some(ValueRepr::Enum { addr }) => addr,
                 _ => {
                     return Err(format!(
-                        "ownership pass scheduled Free for enum %{} but no enum local or ValueRepr is available",
-                        target.index()
+                        "aggregate release has no value storage for {target:?}"
                     ));
                 }
-            },
+            }
         };
-        Self::emit_enum_drop(builder, ctx, addr, ty)?;
-        Ok(true)
-    }
-
-    /// Enum arm of `emit_conditional_dead_drops` (M11): the pre-if
-    /// value of a conditionally-reassigned enum binding is dropped on
-    /// the arms that kept it (tag-dispatched payload drop). Returns
-    /// `Ok(true)` when `target` is an enum (handled), so the caller
-    /// skips the struct and fat paths.
-    pub(crate) fn try_emit_enum_dead_drop(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        name: StringId,
-        target: TirRef,
-    ) -> Result<bool, String> {
-        debug_assert!(!target.is_param());
-        let ty = ctx.tir.inst(target).ty;
-        if !matches!(ctx.pool.kind(ty), TypeKind::Enum) {
-            return Ok(false);
-        }
-        let Some(var) = Self::read_slot(&ctx.struct_locals, name) else {
-            return Ok(false);
-        };
-        let addr = builder.use_var(var);
         Self::emit_enum_drop(builder, ctx, addr, ty)?;
         Ok(true)
     }

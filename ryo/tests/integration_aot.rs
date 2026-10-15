@@ -407,3 +407,42 @@ fn compound_condition_loop_view_aot_run_stdout_exact() {
         "the view must print each iteration, base released after the loop"
     );
 }
+
+#[test]
+fn heap_shadowing_and_parameter_promotions_aot() {
+    for (name, source, expected) in [
+        (
+            "shadowed_heap_reassignment",
+            include_str!("fixtures/shadowed_heap_reassignment.ryo"),
+            "replacement_0123456789012345678901234567890123456789!\nouter_0123456789012345678901234567890123456789!\n",
+        ),
+        (
+            "same_parameter_promotions",
+            include_str!("fixtures/same_parameter_promotions.ryo"),
+            "abcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnop88",
+        ),
+        (
+            "mixed_call_abi",
+            include_str!("fixtures/mixed_call_abi.ryo"),
+            "abcd47abcd93start_0123456789012345678901234567890123456789!efghijkl",
+        ),
+    ] {
+        let temp = TempDir::new().expect("source directory");
+        let file = create_test_file(temp.path(), &format!("{name}.ryo"), source);
+        let build = run_ryo_build(&file, temp.path());
+        assert!(
+            build.status.success(),
+            "{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let run = Command::new(exe_path(temp.path(), name))
+            .output()
+            .expect("run binary");
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&run.stdout), expected);
+    }
+}

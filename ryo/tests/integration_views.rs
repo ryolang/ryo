@@ -621,3 +621,30 @@ fn test_early_return_in_compound_condition_loop() {
         "01017done\n",
     );
 }
+
+#[test]
+fn shadowed_heap_reassignment_preserves_outer_storage() {
+    assert_ryo_output(
+        "shadowed_heap_reassignment.ryo",
+        include_str!("fixtures/shadowed_heap_reassignment.ryo"),
+        "replacement_0123456789012345678901234567890123456789!\nouter_0123456789012345678901234567890123456789!\n",
+    );
+}
+
+#[test]
+fn sibling_views_promote_the_same_parameter_independently() {
+    assert_ryo_output(
+        "same_parameter_promotions.ryo",
+        include_str!("fixtures/same_parameter_promotions.ryo"),
+        "abcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnop88",
+    );
+}
+
+#[test]
+fn nested_heap_shadows_preserve_outer_storage() {
+    assert_ryo_output(
+        "nested_heap_shadows.ryo",
+        include_str!("fixtures/nested_heap_shadows.ryo"),
+        "deepreplacementouterdeepreplacementouterouter_0123456789012345678901234567890123456789!outerouterouter_0123456789012345678901234567890123456789!",
+    );
+}

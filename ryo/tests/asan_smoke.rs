@@ -526,3 +526,43 @@ fn asan_match_value_arm_unconsumed_temporary() {
         "match_value_arm_unconsumed_temporary",
     );
 }
+
+#[test]
+fn asan_shadowed_heap_reassignment() {
+    run_asan_smoke(
+        include_str!("fixtures/shadowed_heap_reassignment.ryo"),
+        "shadowed_heap_reassignment",
+    );
+}
+
+#[test]
+fn asan_same_parameter_promotions() {
+    run_asan_smoke(
+        include_str!("fixtures/same_parameter_promotions.ryo"),
+        "same_parameter_promotions",
+    );
+}
+
+#[test]
+fn asan_nested_heap_shadows() {
+    run_asan_smoke(
+        include_str!("fixtures/nested_heap_shadows.ryo"),
+        "nested_heap_shadows",
+    );
+}
+
+#[test]
+fn asan_nested_heap_byte_shadows() {
+    run_asan_smoke(
+        include_str!("fixtures/nested_heap_byte_shadows.ryo"),
+        "nested_heap_byte_shadows",
+    );
+}
+
+#[test]
+fn asan_inout_parameter_shadow() {
+    run_asan_smoke(
+        include_str!("fixtures/inout_parameter_shadow.ryo"),
+        "inout_parameter_shadow",
+    );
+}

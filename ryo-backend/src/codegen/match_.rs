@@ -349,49 +349,18 @@ impl<M: Module> Codegen<M> {
     pub(crate) fn emit_arm_start_drops(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
-        r: TirRef,
-        arm_idx: usize,
+        payload: &ryo_core::flow::cleanup::PayloadRelease,
     ) -> Result<(), String> {
-        let view = ctx.tir.match_view(r);
-        let arms: Vec<MatchArmView<'_>> = view.arms().collect();
-        let arm = arms[arm_idx];
-        let scrut_ty = ctx.tir.inst(view.scrutinee).ty;
         let scrut = ctx
             .match_records
-            .get(&r)
-            .expect("match record filled by the switch handler")
-            .scrut
-            .expect("scrutinee home filled");
+            .get(&payload.match_inst)
+            .and_then(|record| record.scrut)
+            .ok_or_else(|| "payload release has no scrutinee storage".to_string())?;
         let ScrutineeHome::Slot(addr) = scrut else {
-            return Ok(());
+            return Err("payload release requires aggregate storage".into());
         };
-        // The discriminated shape's fields, in declaration order (the
-        // enum-variant payload convention; the struct's fields for an
-        // anon-pattern arm) — needs-drop only, minus the bound fields.
-        let fields: Vec<(u32, TypeId)> = match arm.discriminant {
-            Discriminant::Variant(vidx) => {
-                let eview = ctx.pool.enum_view(scrut_ty);
-                let variant = eview
-                    .variants()
-                    .nth(vidx as usize)
-                    .expect("sema resolved the variant index against the scrutinee enum");
-                variant.fields.iter().map(|f| (f.idx, f.ty)).collect()
-            }
-            _ => ctx
-                .pool
-                .struct_view(scrut_ty)
-                .fields
-                .iter()
-                .map(|f| (f.idx, f.ty))
-                .collect(),
-        };
-        for (field_index, ty) in fields {
-            if !ctx.pool.needs_drop(ty) || arm.bindings().any(|b| b.field_index == field_index) {
-                continue;
-            }
-            let offset =
-                Self::arm_payload_field_offset(ctx.pool, scrut_ty, &arm.discriminant, field_index)?;
-            Self::emit_field_drop(builder, ctx, addr, offset, ty)?;
+        for field in &payload.fields {
+            Self::emit_field_drop(builder, ctx, addr, field.offset, field.ty)?;
         }
         Ok(())
     }
@@ -497,7 +466,6 @@ impl<M: Module> Codegen<M> {
                         // bucket (mechanical, fired by the driver before
                         // this handler); the promotion family keeps its
                         // own hook.
-                        Self::emit_due_promo_frees(builder, ctx, e)?;
                         fire_join_bucket(builder, ctx)?;
                         builder.ins().jump(jb, &[]);
                     }
@@ -509,7 +477,6 @@ impl<M: Module> Codegen<M> {
                         // bucket (mechanical, fired by the driver before
                         // this handler); the promotion family keeps its
                         // own hook.
-                        Self::emit_due_promo_frees(builder, ctx, e)?;
                         let slot_addr = slot_addr.expect("scalar shape has a result slot");
                         builder
                             .ins()
@@ -523,7 +490,6 @@ impl<M: Module> Codegen<M> {
                         // bucket (mechanical, fired by the driver before
                         // this handler); the promotion family keeps its
                         // own hook.
-                        Self::emit_due_promo_frees(builder, ctx, e)?;
                         fire_join_bucket(builder, ctx)?;
                         builder.ins().jump(jb, &[]);
                     }

@@ -746,19 +746,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-216 — Cleanup emission residue: promotion sweeps, redirect classification, aliasing probe, diagnostics walks
-
-**Severity:** Correctness / Hygiene
-**Area:** codegen
-
-**Files:** ryo-backend/src/codegen/frees.rs, ryo-backend/src/codegen/views.rs, ryo-backend/src/codegen/structs.rs, ryo-backend/src/codegen/enums.rs, ryo-backend/src/codegen/decls.rs, ryo-frontend/src/ownership/frees.rs
-
-**Summary:** Post-Flow-IR-migration audit (2026-10-14) of cleanup consumption against the contract in docs/dev/pipeline_migration.md ("codegen consumes operations and terminators mechanically; a pending sweep or cached value must not determine ownership validity"). The 2026-10-14 gap-closure pass fixed the core: main-line drop consumption is now position-mechanical (fire maps keyed by Flow fire position; `sweep_due_frees`, `pending_sweep`, `drops_by_after`, the cached_repr gates, and the tail-eligibility sweep mirror are deleted; provably-inline elision is a lowering-time pre-filter over flow/builtins facts), ownership state is place-keyed (`Owner(PlaceId)`; reads/writes/views come from `StepFacts`), `program_order`/`find_consumers`/`record_return_epilogue` TIR walks are deleted (emission-stamp ranks + a `parent_of` stamp), loop analysis is a provably monotone fixed point with a stated height bound, and cleanup completeness / backend-ready invariants are validated in debug at both phase ends. Remaining residue, all behavior-pinned and fail-loud-or-leak (never silent release miscompiles): (1) promotion frees (`sweep_due_promo_frees`, views.rs) keep their own anchor hook + cached-repr sweep — a separate cleanup family left out of the mechanical-firing migration; (2) `emit_frees`' binding-path redirect still classifies "superseded vs branch-divergent reseat" at emission time from `binding_last_write` + `all_free_targets` + current `fat_locals` instead of Flow write lineage; (3) `expr_refs_name` still walks a TIR operand subtree to decide RHS-aliases-binding for free-before-overwrite order, duplicating Flow `StepFacts.read`; (4) `build_fat_mutation_tables` still scans the TIR arena for mutation/view-base facts (now feeding only the lowering-time elision pre-filter); (5) struct/enum free emission still falls back to a producer's cached repr where a Flow place names the storage. Ownership side: the W0003/W0004 diagnostics walks (`collect_bound_call_sites`, `chain_outlives_loop_iteration`, `loop_encloses_chain_read_not_copy`) remain TIR-recursive (diagnostics-only, never codegen input).
-
-**Resolution:** Migrate item (1) onto the G1 fire-map model (the R4 work made promotion releases first-class validated events with alloc-paired backend accounting — the dedicated promo sweep hook in views.rs remains the emission mechanism to migrate); item (2) onto Flow write lineage (`place_writes` superseded classification); item (3) onto `StepFacts.read`; item (4) onto flow-step facts; item (5) onto `Place::Token` storage. Genuinely backend-local state (SSO inline-ability, `home_inline` materialization bits, memoization) stays, with comments marking the boundary. The W-diagnostics walks ride any later cleanup. Round-3 (same day) closed the unified cleanup boundary (all destruction travels the single DropOp list with first-class BlockStart positions — the dual match_arm_drops/conditional_dead_drops schedules are deleted) and added path-aware obligation validation; round-4 closed the six contract gaps: shared deterministic firing-point resolution consumed by both validation and emission, full live-view membership in loop convergence, path- and generation-specific transfer/escape events, view-backed storage obligations (UAF direction enforced; one leak-direction corner documented in gaps.rs), promotion buffers in the event model, and displaced-value cleanup at replacement writes — plus a latent heap-return-from-loop double-free the new checks exposed. The plan records are in docs/superpowers/plans/2026-10-14-*.md (session scratch, not committed).
-
----
-
 ### I-217 — Implement bounded Flow IR inlining before ABI lowering
 
 **Severity:** Cleanup
@@ -768,98 +755,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Summary:** I-186 and I-188 record call overhead, but their proposed TIR/backend placement predates the Flow pipeline. Record the implementation sequence from docs/dev/pipeline_migration.md. Small JSON validator helpers are candidates for bounded inlining. The expected speedup is unmeasured. Cranelift 0.136.1 also provides `Context::inline` and the `Inline` trait. Evaluate these as optional backend machinery, not as a replacement for language-level Flow inlining. Ryo must supply verified, legalized callee bodies with matching signatures and bounded selection rules. A backend experiment must preserve cleanup, source provenance, and stack-guard behavior. Reference: [Cranelift inlining infrastructure](https://docs.rs/cranelift-codegen/latest/cranelift_codegen/inline/index.html).
 
-**Resolution:** (1) Complete the required Flow storage, cleanup, phase-validation, and analysis-invalidation contracts, including the cleanup dependencies in I-216. (2) Define body cloning and mutation contracts. Remap TIR instructions, side arenas, Flow blocks, places, joins, cleanup references, and source provenance. Keep cached source bodies unchanged. (3) Add bounded inlining over concrete language-level Flow bodies before ABI lowering. Start with small direct callees returning scalar values, including borrowed bytesview parameters. Exclude unsupported ownership and effect cases. This first version does not require generics, comptime, ARC, or concurrency. (4) Split the caller block at the call. Evaluate arguments exactly once in original order. Bind parameters, clone the callee, and route returns to a continuation and result. Preserve borrow/move semantics, cleanup order, and exceptional exits. (5) Preserve or recompute affected analyses. Validate transformed bodies and cleanup obligations. Keep the unoptimized path valid. (6) Bound callee size, expansion depth, and caller growth. Detect recursive cycles and prevent unbounded expansion. (7) Test multiple returns, side effects, short-circuit evaluation, borrowed views, shadowing, and recursion limits. Add owned-value, replacement, destruction, and sanitizer coverage as those shapes become eligible. Compare execution with the pass enabled and disabled. (8) Measure JSON validation, collatz, and compiler benchmarks against the same base. Start with is_hex_digit, skip_ws, and match_lit candidates. Inspect generated code for removed calls. Record execution time, compile time, code size, toolchain versions, and remaining hot paths. Do not promise Rust parity or attribute the entire gap to call overhead.
-
----
-
-### I-218 — Driver lacks explicit analysis, cleanup, and backend-ready stage contracts
-
-**Severity:** Correctness / Hygiene
-**Area:** driver-cli
-
-**Files:** ryo-driver/src/pipeline.rs; ryo-core/src/flow.rs; ryo-core/src/ownership.rs; ryo-frontend/src/ownership/mod.rs; ryo-backend/src/codegen/mod.rs; docs/dev/pipeline_migration.md
-
-**Summary:** The driver builds Flow IR and calls ownership::check, which bundles ownership analysis, cleanup scheduling, and validation into one sidecar-producing operation. Backend compilation bundles cleanup firing-point resolution, ABI preparation, and emission. The driver does not receive explicit phase artifacts or validation status, so it cannot enforce analysis-ready, cleanup-elaborated, and backend-ready boundaries. This is an orchestration contract gap, not a requirement to implement future comptime, generics, or concurrency now.
-
-**Resolution:** Define phase-specific artifacts or equivalent validated state contracts. Return cleanup validation results to the driver and distinguish proven, invalid, and incomplete outcomes. Require the supported validation contract before advancing to backend preparation and emission. Share orchestration across JIT, AOT, and IR inspection while preserving partial diagnostic output. Keep pass implementations in their owning crates. Add tests for invalid transitions, incompatible body/sidecar artifacts, and incomplete validation handling; document the supported boundaries without claiming unproved completeness.
-
----
-
-### I-219 — ABI lowering lacks a shared call and callee descriptor
-
-**Severity:** Correctness / Hygiene
-**Area:** codegen
-
-**Files:** ryo-backend/src/codegen/structs.rs; ryo-backend/src/codegen/expr.rs; ryo-backend/src/codegen/mod.rs; docs/dev/pipeline_migration.md
-
-**Summary:** Function signature construction, user-call argument marshalling, and callee parameter materialization independently dispatch on TIR types and parameter modes. There is no explicit immutable lowered ABI descriptor consumed by all three boundaries. Current paths can agree, but new type families, aggregate returns, inout modes, foreign calls, or target support can change one path without updating the others. This is a missing representation contract rather than a newly reproduced ABI failure.
-
-**Resolution:** Define one per-function or per-instance lowered ABI description with parameter expansion, passing modes, hidden return parameters, return convention, target settings, and applicable layout identities. Use it for declaration signatures, call marshalling, callee entry, and return lowering. Validate call/callee agreement and cover scalar, fat-value, view, aggregate, and inout combinations in JIT/AOT tests. Keep the implementation in backend-owned modules and connect its validated artifact to the driver stage contract tracked by I-218.
-
----
-
-### I-220 — IR inspection omits Flow IR and resolved cleanup artifacts
-
-**Severity:** Correctness / Hygiene
-**Area:** driver-cli
-
-**Files:** ryo-driver/src/pipeline.rs; ryo-core/src/flow.rs; ryo-core/src/flow/fire_points.rs; ryo-core/src/ownership.rs; docs/dev/pipeline_migration.md
-
-**Summary:** EmitKind exposes AST, UIR, TIR, and Cranelift IR but omits Flow IR, which now defines executable blocks and storage identities. Resolved cleanup points and validation outcomes also have no structured inspection artifact. Contributors cannot inspect the authoritative ownership/backend boundary through the normal IR command, making mismatched graph, place, or cleanup behavior harder to diagnose.
-
-**Resolution:** Add deterministic inspection output for Flow blocks, steps, terminators, places, and resolved cleanup events. Include validation status when available and preserve source provenance. Reuse the shared stage artifacts and firing-point resolver rather than deriving another execution model. Integrate inspection with the shared driver orchestration contract in I-218, including supported partial diagnostic output. Test stable ordering, references, nested control flow, and cleanup positions; document the CLI surface.
-
----
-
-### I-221 — Replace temporary gaps module with responsibility-owned validators
-
-**Severity:** Correctness / Hygiene
-**Area:** ownership
-
-**Files:** ryo-frontend/src/ownership/gaps.rs; ryo-frontend/src/ownership/validate.rs; ryo-frontend/src/ownership/mod.rs; ryo-frontend/src/ownership/tests/validate.rs; docs/dev/pipeline_migration.md
-
-**Summary:** gaps.rs groups promotion pairing, replacement release, and view protection by the review task that introduced them. Its name and Gap-number comments obscure the lasting ownership of these contracts and violate the responsibility-based module rule in AGENTS.md.
-
-**Resolution:** Move the code into child modules ownership/validate/views.rs, promotions.rs, and replacements.rs. Keep the shared event and generation model and validation entry point in validate.rs. Use narrow child-module visibility, remove the ownership-level gaps module, and replace review labels with behavior descriptions. Preserve positive and corruption-test coverage and update references. This issue covers organization only; unresolved validation correctness must not be hidden by the move.
-
----
-
-### I-222 — Move shared backend utilities out of bytes and range modules
-
-**Severity:** Correctness / Hygiene
-**Area:** codegen
-
-**Files:** ryo-backend/src/codegen/bytes.rs; ryo-backend/src/codegen/ranges.rs; ryo-backend/src/codegen/mod.rs; ryo-backend/src/codegen/str_ops.rs; ryo-backend/src/codegen/control.rs
-
-**Summary:** bytes.rs houses shared string/byte read-only-data interning and the whole-TIR no_unreachable_in precondition. ranges.rs houses read_slot, write_slot, and restore_slots used by all scoped binding tables. These utilities are placed by historical file-length splits rather than their responsibilities, so unrelated code depends on bytes and range modules.
-
-**Resolution:** Move literal storage/dedup into codegen/literals.rs and reusable scoped slot tables into codegen/scoped_slots.rs or an equivalent explicit binding-storage module. Move the clean-TIR precondition into the existing backend validation boundary, or a specifically named validation module, without duplicating the stage checks planned by I-218. Keep bytes.rs for byte-value lowering and ranges.rs for range facts. Update imports and document ownership; preserve literal dedup, branch rollback, shadowing, and guard-elision tests.
-
----
-
-### I-223 — Separate ownership diagnostics and value transfers from cleanup and structs
-
-**Severity:** Correctness / Hygiene
-**Area:** ownership
-
-**Files:** ryo-frontend/src/ownership/frees.rs; ryo-frontend/src/ownership/structs.rs; ryo-frontend/src/ownership/diag_fmt.rs; ryo-frontend/src/ownership/mod.rs; ryo-frontend/src/ownership/walk.rs
-
-**Summary:** ownership/frees.rs combines destruction scheduling with materialization classification and W0003/W0004 diagnostic analyses. ownership/structs.rs combines struct/enum/destructure analysis with general check_use_moved, consume_for_assignment, consume_underlying, and BorrowedAction. Module names no longer identify the responsibilities callers need, and generic transfer logic is owned by an aggregate-specific module.
-
-**Resolution:** Keep cleanup scheduling in a cleanup-owned module. Move materialization classification and redundant-materialization diagnostics into responsibility-named modules such as materialization.rs and diagnostics/materialization.rs. Move general ownership transfer/use checks into transfers.rs. Keep aggregate construction, field extraction, and destructuring in aggregates.rs or explicit aggregate submodules. Share the existing Flow facts and analysis state rather than copying walkers. Preserve diagnostic text, ordering, span coverage, move/borrow behavior, and cleanup schedules; coordinate algorithm changes with I-216 rather than duplicating that issue.
-
----
-
-### I-224 — Distribute bug-report regression tests by compiler behavior
-
-**Severity:** Correctness / Hygiene
-**Area:** ci-benchmarks
-
-**Files:** ryo/tests/integration_bug_reports.rs; ryo/tests/integration_ownership.rs; ryo/tests/integration_sso.rs; ryo/tests/integration_structs.rs; ryo/tests/common/mod.rs
-
-**Summary:** integration_bug_reports.rs groups unrelated regression fixtures by the history of reported bugs. It mixes formatting/output corruption, concatenation cleanup, loop returns, reassignment, and struct-field mutation. New regressions accumulate in a historical catch-all instead of the suite that owns the behavior.
-
-**Resolution:** Move each regression into its behavior-owned integration suite, adding a specifically named suite only when an existing owner does not fit. Rename tests around the invariant or expected behavior while retaining useful historical context in comments. Reuse common temporary-source and execution helpers without introducing a generic catch-all utility module. Preserve exact output assertions, crash checks, and all fixtures; compare the test inventory before and after so no regression coverage is lost.
+**Resolution:** (1) Complete the required Flow storage, cleanup, phase-validation, and analysis-invalidation contracts, including explicit storage lineage, cleanup firing points, and promotion lifetimes. (2) Define body cloning and mutation contracts. Remap TIR instructions, side arenas, Flow blocks, places, joins, cleanup references, and source provenance. Keep cached source bodies unchanged. (3) Add bounded inlining over concrete language-level Flow bodies before ABI lowering. Start with small direct callees returning scalar values, including borrowed bytesview parameters. Exclude unsupported ownership and effect cases. This first version does not require generics, comptime, ARC, or concurrency. (4) Split the caller block at the call. Evaluate arguments exactly once in original order. Bind parameters, clone the callee, and route returns to a continuation and result. Preserve borrow/move semantics, cleanup order, and exceptional exits. (5) Preserve or recompute affected analyses. Validate transformed bodies and cleanup obligations. Keep the unoptimized path valid. (6) Bound callee size, expansion depth, and caller growth. Detect recursive cycles and prevent unbounded expansion. (7) Test multiple returns, side effects, short-circuit evaluation, borrowed views, shadowing, and recursion limits. Add owned-value, replacement, destruction, and sanitizer coverage as those shapes become eligible. Compare execution with the pass enabled and disabled. (8) Measure JSON validation, collatz, and compiler benchmarks against the same base. Start with is_hex_digit, skip_ws, and match_lit candidates. Inspect generated code for removed calls. Record execution time, compile time, code size, toolchain versions, and remaining hot paths. Do not promise Rust parity or attribute the entire gap to call overhead.
 
 ---
 
@@ -941,22 +837,11 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-231 — Sibling-arm views of one borrowed param: double-discharge check flags distinct promo bases
-
-**Severity:** Correctness / Hygiene
-**Area:** ownership
-
-**Files:** ryo-frontend/src/ownership/validate.rs, ryo-frontend/src/ownership/validate/views.rs
-
-**Summary:** Two sibling match arms each creating a view of the SAME borrowed param produce two distinct promotion scratch allocations (different Var-read base insts, distinct slots). The path double-destruction check groups events by place-union and treats the two PromoRelease events as same-group events at mutually unreachable positions — but their establishment sites share the group, so the pair check flags the two distinct promo bases as a same-buffer double discharge (false positive; worked around in tests with two independent params). The promo bases need sub-identity by allocation site in the double-discharge pair check.
-
-**Resolution:** Give promotion-buffer events sub-identity keyed by the promotion-allocation site (the Var-read base inst already recorded in promo_allocs) in the double-discharge pair grouping, so distinct scratch allocations of one borrowed base never pair-check each other. Borrowed-original releases (non-promo) stay grouped by the base.
-
----
-
 ## Cross-References
 
 - Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md) — latest verified snapshot (2026-08-24); several current entries originated there, and its `I-xxx` citations reflect what was open at the time (older snapshots live in git history).
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
+
+<!-- issue-id high-water: 232 -->

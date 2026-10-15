@@ -1,4 +1,4 @@
-**Status:** Design (v0.2+)
+**Status:** Implementation (current Flow migration)
 
 # Compiler Pipeline and Flow IR Migration (Draft — v0.2+)
 
@@ -59,55 +59,66 @@ Update side payloads, source provenance, and analysis tables with those referenc
 Never apply an old side table to a new body merely because its indices fit.
 Cached published artifacts remain immutable or explicitly versioned as described below.
 
-## Current pipeline: source audit on 2026-10-14
+## Current pipeline: source audit on 2026-10-15
 
-This refreshed audit includes the in-progress Flow changes in the working tree.
-It records source structure, not a completed verification of all migration acceptance criteria.
+The current migration implements the supported single-instance pipeline.
+Future features in the target pipeline below retain their separate boundaries.
+Verification evidence belongs in [pipeline_regression_checks.md](pipeline_regression_checks.md).
 
 ```mermaid
 flowchart TD
-    A[Source] --> B[Lexer and indentation]
-    B --> C[Parser and AST]
-    C --> D[AstGen and UIR]
-    D --> E[Sema and TIR]
-    E --> F[Driver builds per-function Flow IR]
-    F --> G[Flow graph, places, and step facts]
-    G --> H[Analyze Flow regions using TIR operation payloads]
-    H --> I[Ownership sidecar and drop schedules]
-    I --> J[Codegen emits Flow blocks and scheduled cleanup]
-    J --> K[Cranelift IR]
-    K --> L[Machine code or object emission]
-    L --> M[JIT execution or AOT linking]
+    A[Source, AST, UIR] --> B[Sema and typed bodies]
+    B --> C[Frontend BuiltProgram: TIR and Flow]
+    C --> D[AnalysisReady: compatible bodies and layouts]
+    D --> E[CleanupProgram: ownership, drops, transfers, promotion lifetimes]
+    E --> F[BackendReadyBody: resolved cleanup storage]
+    F --> G[Target ABI and firing maps]
+    G --> H[Cranelift emission]
+    H --> I[JIT execution or AOT object and linking]
 ```
 
-| Component | Current responsibility | Source evidence |
-|---|---|---|
-| Frontend | Lex, preprocess indentation, parse, and lower AST to UIR | [frontend](../../ryo-frontend/src/lib.rs) |
-| Sema | Resolve declarations, check types, and emit one TIR arena per function | [sema](../../ryo-frontend/src/sema/mod.rs) |
-| TIR | Store typed operations with source-shaped operand and body edges | [TIR](../../ryo-core/src/tir.rs) |
-| Flow | Add blocks, terminators, places, order metadata, and storage facts | [Flow](../../ryo-core/src/flow.rs), [builder](../../ryo-core/src/flow/build.rs) |
-| Ownership | Consume Flow regions and TIR operation payloads; produce cleanup metadata with remaining TIR-based scheduling scans | [ownership](../../ryo-frontend/src/ownership/mod.rs), [walk](../../ryo-frontend/src/ownership/walk.rs) |
-| Codegen | Map Flow blocks to Cranelift blocks, emit steps and terminators, and consume sidecar drop schedules | [codegen](../../ryo-backend/src/codegen/mod.rs), [control driver](../../ryo-backend/src/codegen/control.rs), [free routing](../../ryo-backend/src/codegen/frees.rs) |
-| Driver and backend | Coordinate compilation, JIT execution, object emission, and linking | [driver](../../ryo-driver/src/pipeline.rs), [linker](../../ryo-backend/src/linker.rs) |
+The frontend owns Flow construction and ownership analysis in
+[`pipeline.rs`](../../ryo-frontend/src/pipeline.rs).
+The driver shares these transitions across JIT, AOT, and IR inspection.
+Partial artifacts remain inspectable after source errors. Such errors block backend preparation.
 
-The driver builds Flow before ownership and passes the same bodies to codegen.
-Ownership's main walk follows Flow regions, with branch and loop handling.
-Backend control emission follows Flow blocks and terminators.
-TIR remains the source of operation payloads, types, and spans.
+Typed bodies, Flow versions, and layout contexts carry process-local identities.
+Cleanup records its Flow identity. Backend preparation checks these associations in every build.
+Equal names, arena lengths, or valid local indices do not establish compatibility.
+Published artifacts expose immutable references. Content stamps also reject edits to cloned
+TIR, Flow, and cleanup arenas. Rebuild an artifact and its analyses after a representation change.
 
-Cleanup remains transitional relative to the target below.
-Sidecar `DropOp` entries include `AfterStep` instruction anchors, and conditional
-dead drops and payload drops use separate schedules.
-Ownership still reads `tir.body_stmts()`, program-order ranks, and TIR jump paths
-in cleanup scheduling. Flow-driven traversal alone does not establish a fully
-cleanup-elaborated representation or backend-ready phase validation.
+[`CleanupPlan`](../../ryo-core/src/flow/cleanup.rs) selects each release's storage before emission.
+A binding release names a Flow place. A displaced value release names its producer.
+The backend retains declaring-binding storage after lexical name restoration.
+Physical fat-value representations also record their declaring binding, which emission checks before destruction.
+Aggregate and payload storage follows the same declaring-binding identities.
+Promotion scratch allocations have separate identities for each base-expression site.
+They share the ordinary cleanup firing maps and the
+[shared resolver](../../ryo-core/src/flow/fire_points.rs); no promotion sweep reads representation caches.
+Flow records call mutations and view bases. RHS aliasing uses resolved reads and parent metadata.
 
-The existing [Zig-alignment note](pipeline_alignment.md) records the original
-UIR/TIR substrate and the present Flow-driven traversal.
-It links to the target below for generic analysis, comptime, and transformations.
-Neither source structure nor this audit establishes that future features exist.
+[`LoweredAbi`](../../ryo-backend/src/codegen/abi.rs) records parameter modes and expansions,
+hidden result storage, result convention, target triple, pointer type, and layout context.
+Declarations, argument marshalling, callee entry, and return emission consume this description.
+Backend preparation rejects incompatible calls before body emission.
 
-## Why the current boundary is insufficient
+Backend caches retain registers, stack addresses, and inline-materialization facts.
+They do not choose ownership identities or cleanup positions.
+Optional allocation reuse, literal hoisting, range-based guard elision, release elision,
+tail calls, and Cranelift optimization can be disabled through the backend test APIs.
+Ownership analysis also supplies cleanup without allocation-reuse transfers.
+
+`ryo ir --emit flow` prints existing blocks, steps, terminators, places, source spans,
+resolved release storage, transfers, promotion allocations, and validation availability.
+The dump uses stage artifacts and the shared resolver. It does not reconstruct execution.
+
+Shared backend literal storage lives in `literals.rs`; scoped lookup lives in `binding_storage.rs`.
+Backend preconditions live in `validate.rs`. Frontend ownership transfers live in `transfers.rs`,
+aggregate analysis in `aggregates.rs`, cleanup scheduling in `cleanup.rs`,
+and materialization diagnostics in `materialization.rs`.
+
+## Why these contracts are required
 
 Structural reachability does not establish execution-path behavior.
 An operand walk can discover every instruction without preserving branch
@@ -236,30 +247,20 @@ and loop convergence. Do not assume one forward scan computes dataflow facts.
 
 ### Flow IR phases and validators
 
-Verified on this branch (2026-10-15) for the Built and Cleanup-elaborated
-phases as they apply to the current single-instance pipeline: construction
-validators (termination, coverage, def-before-use, place lineage, join
-shapes, recorded arm chains, bool-split/for-preheader/match-result shapes)
-run at build; the ownership pass emits explicit `DropOp` cleanup with
-deterministic firing points resolved by one shared resolver
-(`ryo-core/src/flow/fire_points.rs`) consumed by both validation and backend
-emission; and a path-aware validator proves per-generation, per-path
-exactly-once destruction (transfers discharge only the paths that execute
-them; view bases, promotion buffers, and displaced old generations carry
-their own obligations). The validator lives in `ryo-frontend/src/ownership/
-validate.rs` with responsibility-named children `validate/views.rs`
-(backing-storage lifetime vs view uses, cross-iteration reachability),
-`validate/promotions.rs` (promotion alloc/release pairing), and
-`validate/replacements.rs` (displaced-value release at generation-ending
-writes). Verdicts are PROVEN VALID / PROVEN INVALID / NOT PROVED; every
-incomplete check is recorded in `ValidationSummary`, propagated to the
-consumer via `FunctionSidecar.validation`, and exposed through the
-`proof_complete()` predicate — a body is never labeled fully validated
-while a supported case is unproved. On the workspace corpus all checks
-prove complete (zero NOT PROVED); the deliberately unsupported internal
-shapes (NonExact positions in corrupted/hand-built bodies, unresolvable
-view last uses) each yield NOT PROVED and are listed in the validator's
-module header.
+Construction validators check Flow structure in debug builds.
+Ownership validators check per-path destruction, view protection, displacement,
+and promotion pairing in `ownership/validate.rs` and its responsibility-named children.
+Their event model uses the same resolved storage that backend emission consumes.
+Each promotion allocation has its own discharge group, independent of its borrowed source.
+A reseat starts a new generation even when the previous value moved out.
+
+`FunctionSidecar.validation_outcome()` distinguishes unavailable, skipped, incomplete,
+and completed checks. Invalid artifact transitions return errors; developer cleanup assertions
+reject proven invalid schedules. `proof_complete()` requires all required checks to run
+and every not-proved counter to be zero. Source-error gating cannot report a complete proof.
+Release builds do not run the expensive developer proof. Their unavailable status remains explicit.
+Backend preparation enforces body, representation, layout, position, and ABI contracts in release too.
+Debug backend preparation rejects skipped or incomplete cleanup proofs.
 
 Define the following phase boundaries. Phase and specialization are separate:
 a body can be generic or concrete independently of its analysis phase.

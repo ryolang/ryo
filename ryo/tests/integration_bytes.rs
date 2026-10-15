@@ -341,3 +341,12 @@ fn test_w0004_fires_on_aot_build() {
     assert!(run.status.success());
     assert_eq!(String::from_utf8_lossy(&run.stdout), "2");
 }
+
+#[test]
+fn nested_heap_byte_shadows_preserve_outer_storage() {
+    assert_ryo_output(
+        "nested_heap_byte_shadows.ryo",
+        include_str!("fixtures/nested_heap_byte_shadows.ryo"),
+        "deepreplacementouterdeepreplacementouterouter_0123456789012345678901234567890123456789!outerouterouter_0123456789012345678901234567890123456789!",
+    );
+}

@@ -10,7 +10,7 @@
 //! overrides/kills per view. Runs before the forward walk so the walk
 //! knows when it passes a projection's last use.
 
-use super::structs::field_path_of;
+use super::aggregates::field_path_of;
 use super::{
     LoopNesting, Owner, OwnerState, Ownership, StopKind, collect_region, format_binding,
     needs_tracking,

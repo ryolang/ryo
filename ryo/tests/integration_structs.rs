@@ -280,3 +280,224 @@ fn print_struct_debug_repr_aot_exact_output() {
         "binary stdout must be exactly the printed bytes"
     );
 }
+
+const NATURAL_LOOP_STR_ACCUMULATOR: &str = "\
+struct Parsed:
+\ttext: str
+\tnext: int
+
+fn skip_ws(b: bytesview, at: int) -> int:
+\tmut p = at
+\twhile p < b.len():
+\t\tc = b[p]
+\t\tif c == 32 or c == 9 or c == 10 or c == 13:
+\t\t\tp += 1
+\t\telse:
+\t\t\treturn p
+\treturn p
+
+fn take_string(b: bytesview, s: str, at: int) -> Parsed:
+\tmut i = at + 1
+\tmut end = -1
+\twhile i < b.len() and end < 0:
+\t\tc = b[i]
+\t\tif c == 92:
+\t\t\ti += 2
+\t\telif c == 34:
+\t\t\tend = i + 1
+\t\telse:
+\t\t\ti += 1
+\tif end < 0:
+\t\treturn Parsed{text=\"<error>\", next=b.len()}
+\treturn Parsed{text=str(s[at:end]), next=end}
+
+fn take_number(b: bytesview, s: str, at: int) -> Parsed:
+\tmut i = at
+\tmut go = true
+\twhile go and i < b.len():
+\t\tc = b[i]
+\t\tif (c >= 48 and c <= 57) or c == 45 or c == 43 or c == 46 or c == 101 or c == 69:
+\t\t\ti += 1
+\t\telse:
+\t\t\tgo = false
+\treturn Parsed{text=str(s[at:i]), next=i}
+
+fn parse_array(b: bytesview, s: str, at: int) -> Parsed:
+\tmut p = skip_ws(b, at + 1)
+\tif p < b.len() and b[p] == 93:
+\t\treturn Parsed{text=\"[]\", next=p + 1}
+\tmut out = \"[\"
+\tmut child = parse_value(b, s, p)
+\tstr_push(&out, child.text)
+\tp = skip_ws(b, child.next)
+\twhile p < b.len() and b[p] == 44:
+\t\tstr_push(&out, \",\")
+\t\tchild = parse_value(b, s, p + 1)
+\t\tstr_push(&out, child.text)
+\t\tp = skip_ws(b, child.next)
+\tif p < b.len() and b[p] == 93:
+\t\tp += 1
+\t\tstr_push(&out, \"]\")
+\treturn Parsed{text=out, next=p}
+
+fn parse_object(b: bytesview, s: str, at: int) -> Parsed:
+\tmut p = skip_ws(b, at + 1)
+\tif p < b.len() and b[p] == 125:
+\t\treturn Parsed{text=\"{}\", next=p + 1}
+\tmut out = \"{\"
+\tmut first = true
+\tmut go = true
+\twhile go:
+\t\tif not first:
+\t\t\tstr_push(&out, \",\")
+\t\tfirst = false
+\t\tp = skip_ws(b, p)
+\t\tk = take_string(b, s, p)
+\t\tstr_push(&out, k.text)
+\t\tstr_push(&out, \":\")
+\t\tp = skip_ws(b, k.next)
+\t\tif p >= b.len() or b[p] != 58:
+\t\t\tgo = false
+\t\telse:
+\t\t\tchild = parse_value(b, s, p + 1)
+\t\t\tstr_push(&out, child.text)
+\t\t\tp = skip_ws(b, child.next)
+\t\t\tif p >= b.len():
+\t\t\t\tgo = false
+\t\t\telse:
+\t\t\t\tc = b[p]
+\t\t\t\tif c == 44:
+\t\t\t\t\tp += 1
+\t\t\t\telif c == 125:
+\t\t\t\t\tp += 1
+\t\t\t\t\tstr_push(&out, \"}\")
+\t\t\t\t\tgo = false
+\t\t\t\telse:
+\t\t\t\t\tgo = false
+\treturn Parsed{text=out, next=p}
+
+fn parse_value(b: bytesview, s: str, at: int) -> Parsed:
+\tp = skip_ws(b, at)
+\tif p >= b.len():
+\t\treturn Parsed{text=\"<error>\", next=p}
+\tc = b[p]
+\tif c == 34:
+\t\treturn take_string(b, s, p)
+\tif c == 123:
+\t\treturn parse_object(b, s, p)
+\tif c == 91:
+\t\treturn parse_array(b, s, p)
+\tif c == 116:
+\t\treturn Parsed{text=\"true\", next=p + 4}
+\tif c == 102:
+\t\treturn Parsed{text=\"false\", next=p + 5}
+\tif c == 110:
+\t\treturn Parsed{text=\"null\", next=p + 4}
+\tif c == 45 or (c >= 48 and c <= 57):
+\t\treturn take_number(b, s, p)
+\treturn Parsed{text=\"<error>\", next=p}
+
+fn render(doc: str) -> int:
+\tb = doc.as_bytes()
+\tr = parse_value(b, doc, 0)
+\treturn r.text.len()
+
+fn main():
+\t# Zero comma-iterations: the pre-fix build double-freed the
+\t# pre-loop child struct through codegen's binding-path redirect
+\t# (last-use Free anchored before the in-loop reassign).
+\tone = render(\"[{\\\"id\\\":0,\\\"name\\\":\\\"useruseruser\\\"}]\")
+\t# Two comma-iterations: exercises the reassign-free displacement
+\t# chain across loop back-edges.
+\tmut two = render(\"[{\\\"a\\\":1},{\\\"b\\\":2}]\")
+\ttwo += render(\"[{\\\"a\\\":1},{\\\"b\\\":2}]\")
+\tprint(int_to_str(one))
+\tprint(\" \")
+\tprint(int_to_str(two))
+\tprint(\"\\n\")
+";
+
+#[test]
+fn natural_loop_str_accumulator() {
+    // Pre-fix: SIGABRT (exit 134) from a bad ryo_str_free — the
+    // loop-carried `child` binding's pre-reassign owner was freed by
+    // BOTH a last-use Free (anchored before the in-loop reassign) and
+    // the reassign-free, and the return epilogue double-freed the
+    // binding's final value through the same home slot.
+    let temp_dir = tempfile::TempDir::new().expect("create source directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "bug_natural_loop_str_accumulator.ryo",
+        NATURAL_LOOP_STR_ACCUMULATOR,
+    );
+    let output = run_ryo_command(&["run", "bug_natural_loop_str_accumulator.ryo"], &test_file)
+        .expect("run ryo");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "32 34\n");
+}
+
+const STR_PUSH_STRUCT_FIELD_NOOP: &str = "\
+struct Rec:
+\ttext: str
+\tbuf: bytes
+\tn: int
+
+fn bump(inout s: str):
+\tstr_push(&s, \"!\")
+
+fn main():
+\tmut a = Rec{text=\"x\", buf=\"\".to_bytes(), n=0}
+\tbump(&a.text)
+\tprint(a.text)
+\tprint(\"\\n\")
+
+\tmut r = Rec{text=\"y\", buf=\"\".to_bytes(), n=0}
+\tstr_push(&r.text, \"?\")
+\tprint(r.text)
+\tprint(\"\\n\")
+
+\tbytes_push(&r.buf, 65)
+\tbytes_push(&r.buf, 66)
+\tprint(int_to_str(r.buf.len()))
+\tprint(\"\\n\")
+";
+
+#[test]
+fn str_push_struct_field_noop() {
+    // Pre-fix: the str_push/bytes_push builtin intercepts assumed arg 0
+    // lowered to Var(name), so a FieldAccess place was evaluated into a
+    // snapshot triple spilled to a temp slot; the runtime mutated the
+    // temp, and the reload was gated on local_name_of(field), which is
+    // None — the write-back was silently dropped (compiles, exit 0,
+    // prints "x!\ny\n0"). Post-fix the field's address in the root
+    // struct's slot is passed directly, like the generic inout path.
+    let temp_dir = tempfile::TempDir::new().expect("create source directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "bug_str_push_struct_field_noop.ryo",
+        STR_PUSH_STRUCT_FIELD_NOOP,
+    );
+    let output = run_ryo_command(&["run", "bug_str_push_struct_field_noop.ryo"], &test_file)
+        .expect("run ryo");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "x!\ny?\n2\n");
+}
+
+#[test]
+fn mixed_abi_modes_expand_consistently_at_multiple_calls() {
+    assert_ryo_output(
+        "mixed_call_abi.ryo",
+        include_str!("fixtures/mixed_call_abi.ryo"),
+        "abcd47abcd93start_0123456789012345678901234567890123456789!efghijkl",
+    );
+}

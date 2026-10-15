@@ -97,7 +97,7 @@
 //! All checks are debug-only, failing loudly (panic) on a PROVEN INVALID
 //! verdict — mirroring the existing validate.rs style.
 
-use super::{HazardKind, Ownership, flow_owner_place};
+use super::{Ownership, flow_owner_place};
 pub(crate) use ryo_core::flow::fire_points::FirePoint as Point;
 use ryo_core::flow::fire_points::{FirePoints, FireVerdict};
 use ryo_core::flow::{BlockId, DropPosition, Flow, Place, PlaceId, Terminator, WriteKind};
@@ -155,11 +155,12 @@ pub(crate) fn validate_cleanup(
     validate_positions(flow, &fire_points, sidecar, &mut summary);
     validate_no_duplicate_destruction(&places, flow, sidecar);
     let idx = StepIndex::build(flow);
-    let events = collect_events(tir, &places, flow, &fire_points, sidecar, own);
+    let events = collect_events(tir, &places, flow, &fire_points, sidecar, own, pool);
     let table = generation_table(tir, flow, pool, &idx, sidecar);
     #[cfg(test)]
     record_test_ownership(tir.name, own.clone());
     if body_clean {
+        summary.required_checks_ran = true;
         let ctx = Ctx {
             tir,
             flow,
@@ -321,6 +322,8 @@ pub(crate) struct Event {
 /// transfers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EventKind {
+    /// A static produced value with no allocation to destroy.
+    StaticNoop,
     /// A scheduled `DropOp` destruction.
     Destroy,
     /// `free_on_reassign` / `field_free_on_reassign`: the old content's
@@ -420,6 +423,7 @@ pub(crate) fn collect_events(
     fire_points: &FirePoints,
     sidecar: &FunctionSidecar,
     own: &Ownership,
+    pool: &InternPool,
 ) -> HashMap<PlaceId, Vec<Event>> {
     let mut out: HashMap<PlaceId, Vec<Event>> = HashMap::new();
     let push = |place: PlaceId, event: Event, out: &mut HashMap<PlaceId, Vec<Event>>| {
@@ -433,8 +437,14 @@ pub(crate) fn collect_events(
             list.push(event);
         }
     };
-    for fp in &sidecar.drops {
-        let Some(place) = places.place(flow, fp.target) else {
+    let storage = ryo_core::flow::cleanup::CleanupPlan::resolve(tir, flow, sidecar, pool)
+        .expect("cleanup positions resolve before event collection");
+    for (index, fp) in sidecar.drops.iter().enumerate() {
+        let actual = match storage.releases[index] {
+            ryo_core::flow::cleanup::ReleaseStorage::Binding(place) => Some(place),
+            ryo_core::flow::cleanup::ReleaseStorage::Value(target) => places.place(flow, target),
+        };
+        let Some(place) = actual else {
             continue;
         };
         if place.0 == u32::MAX {
@@ -446,7 +456,11 @@ pub(crate) fn collect_events(
                 Event {
                     point,
                     target: fp.target,
-                    kind: EventKind::Destroy,
+                    kind: if storage.releases[index].is_static_noop(tir) {
+                        EventKind::StaticNoop
+                    } else {
+                        EventKind::Destroy
+                    },
                     pos: fp.position,
                     exact,
                     field: field_key(tir, fp.target),
@@ -545,13 +559,9 @@ pub(crate) fn collect_events(
     // Walk-recorded transfers. `Move` hazards discharge the owner's
     // obligation at the hazard's resolved point; `InoutPass`/`Mutate`
     // hazards do not (see `Ownership::owner_hazards`).
-    for &(owner, site, kind) in &own.owner_hazards {
-        if !matches!(kind, HazardKind::Move) {
-            continue;
-        }
-        let Some(place) = places.place(flow, owner.tirref(flow)) else {
-            continue;
-        };
+    for transfer in &sidecar.transfers {
+        let site = transfer.site;
+        let place = transfer.source;
         if place.0 == u32::MAX {
             continue;
         }
@@ -575,7 +585,8 @@ pub(crate) fn collect_events(
                 // harmless (an earlier IN on the same union — the
                 // synthetic per-match events below keep the switch and
                 // join discharges explicit).
-                let Some(producer) = owner.inst_tirref(flow) else {
+                let Some(producer) = (!transfer.target.is_param()).then_some(transfer.target)
+                else {
                     continue; // param arm read: documented corner
                 };
                 let Some(arm_block) = flow.step_block_of(producer) else {
@@ -614,7 +625,7 @@ pub(crate) fn collect_events(
                 place,
                 Event {
                     point,
-                    target: owner.tirref(flow),
+                    target: transfer.target,
                     kind,
                     pos: DropPosition::AfterStep { inst: site },
                     exact,
@@ -1350,75 +1361,57 @@ pub(crate) fn validate_no_path_double_destruction(
 ) {
     let reachable = reachable_blocks(flow);
     let roots = place_roots(tir, flow, own, sidecar);
-    // Stale-target redirect frees: a Destroy naming a value that is not
-    // its binding's LAST write is filtered by codegen's redirect
-    // (`last == target || !all_free_targets.contains(last)`) — it
-    // never frees the buffer it names, so it cannot double-free.
-    // (Mirrors `ownership::binding_value_maps`.)
-    let mut binding_of_value: HashMap<TirRef, TirRef> = HashMap::new();
-    let mut last_write: HashMap<TirRef, TirRef> = HashMap::new();
-    let rank = |r: TirRef| flow.order_of(r).unwrap_or(0);
-    for place in flow.places.iter() {
-        if let Place::Local { decl, .. } = place {
-            if tir.inst(*decl).tag != TirTag::VarDecl {
-                continue;
-            }
-            let value = tir.var_decl_view(*decl).initializer;
-            binding_of_value.insert(value, *decl);
-            last_write
-                .entry(*decl)
-                .and_modify(|w| {
-                    if rank(value) > rank(*w) {
-                        *w = value;
-                    }
-                })
-                .or_insert(value);
-        }
-    }
-    for (slot, bound) in sidecar.assign_binding.iter().enumerate() {
-        let Some(binding) = *bound else { continue };
-        let assign = TirRef::from_raw(slot as u32);
-        if tir.inst(assign).tag != TirTag::Assign {
-            continue;
-        }
-        let value = tir.assign_view(assign).value;
-        binding_of_value.insert(value, binding);
-        last_write
-            .entry(binding)
-            .and_modify(|w| {
-                if rank(value) > rank(*w) {
-                    *w = value;
-                }
-            })
-            .or_insert(value);
-    }
-    let stale_destroy = |e: &Event| -> bool {
-        e.kind == EventKind::Destroy
-            && binding_of_value
-                .get(&e.target)
-                .is_some_and(|b| last_write.get(b) != Some(&e.target))
-    };
     // Group events by place-union root: one buffer, one obligation group.
-    let mut by_root: HashMap<u32, Vec<Event>> = HashMap::new();
+    let mut by_root: HashMap<(u32, Option<TirRef>), Vec<Event>> = HashMap::new();
     for (place, evs) in events {
-        by_root
-            .entry(roots[place.0 as usize])
-            .or_default()
-            .extend(evs.iter().copied());
+        for event in evs {
+            // Each promotion site owns separate scratch storage. The borrowed
+            // source remains in the ordinary storage group.
+            let allocation = (event.kind == EventKind::PromoRelease).then_some(event.target);
+            by_root
+                .entry((roots[place.0 as usize], allocation))
+                .or_default()
+                .push(*event);
+        }
     }
-    for (root, evs) in &by_root {
+    let index = StepIndex::build(flow);
+    let mut reseat_cuts: HashMap<u32, Vec<(BlockId, u32)>> = HashMap::new();
+    for step in &flow.steps {
+        if let Some(write) = step.facts.write
+            && matches!(
+                write.kind,
+                WriteKind::Replace | WriteKind::FieldReplace { .. }
+            )
+            && let Some(point) = index.get(step.inst)
+        {
+            reseat_cuts
+                .entry(roots[write.place.0 as usize])
+                .or_default()
+                .push(point);
+        }
+    }
+    for ((root, allocation), evs) in &by_root {
         // Cuts of ANY member place end a path (a Replace/FieldReplace
         // displaces the seated content — the buffer identity changes).
         let root_cuts: HashMap<BlockId, Vec<u32>> = {
             let mut m: HashMap<BlockId, Vec<u32>> = HashMap::new();
             for place in events.keys() {
-                if roots[place.0 as usize] != *root {
+                if allocation.is_some() || roots[place.0 as usize] != *root {
                     continue;
                 }
                 if let Some(by_block) = table.cut.get(place) {
                     for (&b, ords) in by_block {
                         m.entry(b).or_default().extend_from_slice(ords);
                     }
+                }
+            }
+            // A reseat starts a new home generation even when the old value
+            // moved out and therefore needed no displacement release.
+            if allocation.is_none()
+                && let Some(cuts) = reseat_cuts.get(root)
+            {
+                for &(block, ordinal) in cuts {
+                    m.entry(block).or_default().push(ordinal);
                 }
             }
             for ords in m.values_mut() {
@@ -1456,6 +1449,9 @@ pub(crate) fn validate_no_path_double_destruction(
                 if let Some(ids) = by_point.get(&p) {
                     for &j in ids {
                         let e2 = &evs[j];
+                        if e1.kind == EventKind::StaticNoop || e2.kind == EventKind::StaticNoop {
+                            continue;
+                        }
                         // Transfer-to-transfer: neither side emits a
                         // free — a second move of one storage is the
                         // walk's E0020 jurisdiction, not a cleanup-
@@ -1504,11 +1500,6 @@ pub(crate) fn validate_no_path_double_destruction(
                         {
                             continue;
                         }
-                        // A stale-target redirect free never fires as
-                        // modeled — it cannot double-free.
-                        if stale_destroy(e1) || stale_destroy(e2) {
-                            continue;
-                        }
                         // Codegen's per-block-visit `freed_targets` dedup
                         // (cleared per block) consumes a same-target
                         // release as a no-op when both fire in ONE visit
@@ -1534,18 +1525,6 @@ pub(crate) fn validate_no_path_double_destruction(
                         summary.pairs_examined += 1;
                         if !e1.exact || !e2.exact {
                             summary.pairs_not_proved += 1;
-                            continue;
-                        }
-                        // Static-literal targets are pre-elided no-ops
-                        // (cap == 0 sentinel — the resolver's contract
-                        // rule c: elided drops are not events, and a
-                        // moved literal emits nothing either), so an
-                        // all-literal pair never double-fires —
-                        // regardless of target identity or kind.
-                        if [e1.target, e2.target].iter().all(|&t| {
-                            !t.is_param()
-                                && matches!(tir.inst(t).tag, TirTag::StrConst | TirTag::BytesConst)
-                        }) {
                             continue;
                         }
                         // Reconstruct one witnessing path (block chain).

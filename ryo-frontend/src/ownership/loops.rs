@@ -625,60 +625,6 @@ pub(crate) fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> b
     found
 }
 
-/// True when a `VarDecl` named `name` exists OUTSIDE `branch` (the
-/// branch statement's own subtree is skipped) — the named binding's
-/// home outlives the branch. Used by the conditional-last-use re-anchor
-/// for `Assign`-seated values: a loop-carried reseat seats inside the
-/// loop body while the binding's `VarDecl` (declared before it)
-/// outlives the loop. Identity-based where it matters: a same-named
-/// `VarDecl` INSIDE the branch is a shadow and never matches, because
-/// the branch subtree is not searched.
-fn var_decl_outside(tir: &Tir, name: StringId, branch: TirRef) -> bool {
-    fn walk(tir: &Tir, stmts: &[TirRef], name: StringId, branch: TirRef, found: &mut bool) {
-        for &r in stmts {
-            if *found {
-                return;
-            }
-            let u = stmt_match(tir, r).unwrap_or(r);
-            if u == branch {
-                continue; // the branch's own subtree is not "outside"
-            }
-            match tir.inst(u).tag {
-                TirTag::VarDecl => {
-                    if tir.var_decl_view(u).name == name {
-                        *found = true;
-                        return;
-                    }
-                }
-                TirTag::IfStmt => {
-                    let view = tir.if_stmt_view(u);
-                    walk(tir, &view.then_stmts, name, branch, found);
-                    for elif in &view.elif_branches {
-                        walk(tir, &elif.body, name, branch, found);
-                    }
-                    if let Some(else_stmts) = &view.else_stmts {
-                        walk(tir, else_stmts, name, branch, found);
-                    }
-                }
-                TirTag::WhileLoop | TirTag::ForRange => {
-                    if let Some(body) = tir.loop_body(u) {
-                        walk(tir, &body, name, branch, found);
-                    }
-                }
-                TirTag::Match => {
-                    for body in match_arm_bodies(tir, u) {
-                        walk(tir, &body, name, branch, found);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    let mut found = false;
-    walk(tir, &tir.body_stmts(), name, branch, &mut found);
-    found
-}
-
 /// True if any statement in `stmts` (any depth) is a `Return` /
 /// `ReturnVoid` — a body that may leave the function early. Kept for
 /// the post-walk passes.
@@ -1039,31 +985,28 @@ pub(crate) fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
 /// exit (the earliest point dead on ALL paths), except a loop-carried
 /// owner read again after the loop anchors at its true last read. Kept
 /// for the post-walk passes.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn last_use_anchor(
     tir: &Tir,
     owner: TirRef,
     after: TirRef,
+    sidecar: &FunctionSidecar,
     order: &[u32],
     last_read_by_name: &HashMap<StringId, TirRef>,
     loop_carried_owners: &HashSet<TirRef>,
     return_transferred: bool,
 ) -> TirRef {
-    let binding = owner_binding_decl(tir, owner);
-    // The re-anchor is sound only when the value's binding HOME
-    // outlives the branch (the value is live on paths that skip it, so
-    // the cleanup must fire at the branch exit — the join — not inside
-    // the arm). A `VarDecl`-seated value checks that declaration
-    // itself (identity — a same-named shadow declared inside the
-    // branch is arm-local; its slot does not exist on the sibling
-    // path). An `Assign`-seated value resolves the binding's `VarDecl`
-    // by name: loop-carried reseats seat inside the loop body while
-    // the home declared before it outlives the loop.
-    let binding_outlives = |branch_stmt: TirRef| match binding {
-        Some((decl, _)) if tir.inst(decl).tag == TirTag::VarDecl => {
-            !tir.contains_reachable(branch_stmt, decl)
+    // Assignment sites inherit the declaring binding, even when names shadow.
+    let binding = owner_binding_decl(tir, owner).and_then(|(site, name)| {
+        if tir.inst(site).tag == TirTag::Assign {
+            sidecar.assign_binding[site.index()].map(|decl| (decl, name))
+        } else {
+            Some((site, name))
         }
-        Some((_, name)) => var_decl_outside(tir, name, branch_stmt),
-        None => false,
+    });
+    let binding_outlives = |branch_stmt: TirRef| {
+        binding
+            .is_some_and(|(decl, _)| decl.is_param() || !tir.contains_reachable(branch_stmt, decl))
     };
     match outermost_branch_of(tir, after) {
         Some(branch_stmt) if binding_outlives(branch_stmt) => {

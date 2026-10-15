@@ -240,6 +240,51 @@ File persistent defects through `scripts/issue.py`; do not create issues for fix
 Do not declare migration completion by moving required checks into follow-up issues.
 This document plans checks; it does not certify the current working tree.
 
+## Current Migration Evidence — 2026-10-15
+
+The comparison baseline is `426e50c`. The candidate is that checkout with the
+current migration changes, including the regression fixtures under
+`ryo/tests/fixtures/`. The source manifest digest is
+`b45994cb13bd01e567dd089ef32ab9d57ae469e0bdd353d3fca3d2d11618e130`
+(SHA-256 over sorted `.rs`, `.ryo`, `.toml`, and `.lock` paths and contents,
+separated by zero bytes).
+The candidate has not been committed. Re-run these checks after further changes.
+
+The host is an Apple M3 Pro running macOS 26.6.2, with Rust 1.98.0,
+Cranelift 0.136.1, and Zig 0.16.0. Linux checks use the repository's
+native ARM64 Docker image. No runtime source changed, so this change does not
+require another Miri run.
+
+| Check | Result | Scope and limits |
+|---|---|---|
+| `cargo test --workspace` | 1,802 passed | Includes corrupted artifacts, cleanup schedules, physical storage identity, and unavailable validation states |
+| `cargo test --workspace --release` | 1,765 passed | Developer validators are absent by configuration; supported artifact contracts still run |
+| Formatting, warnings-denied workspace Clippy, file length | Passed | Use the commands above; no file-length exemption |
+| Six focused fixtures, debug/release JIT/AOT | All 24 candidate executions matched exact expected output | Baseline passed 2/12 debug and 4/12 release executions; failures were crashes or incorrect shadowed-parameter output |
+| Generated interactions | 48/48 executions matched independent expected output | Twelve bounded cases combine storage forms, taken/untaken shadows, views, `inout`, match, compound loops, continue, and break; maximum four loop iterations |
+| Optional optimizations disabled | Passed backend tests | Executes JIT fixtures and emits AOT objects without allocation reuse, literal hoisting, guard elision, release prefiltering, tail calls, or Cranelift optimization |
+| Linux ASan/LSan and Valgrind | 65 and 76 tests passed | Final native ARM64 Docker run; 645 CLI/memory tests in total; separate Linux workspace-library run passed 1,298 tests |
+| Target ABI coverage | Passed object tests | macOS ARM64, Linux ARM64/x86-64, Windows x86-64; native execution covered macOS and Linux |
+| Performance acceptance | Pending CodSpeed | Local benchmarks stopped at the user's request; no final performance claim |
+
+The shadowed heap reassignment failed because assignment anchoring used a name,
+and delayed destruction then loaded the restored outer binding's storage.
+Anchoring now uses the declaring binding; resolved cleanup retains that exact
+home through scope restoration. Emission checks the physical storage's binding.
+The same correction protects aggregate homes and parameter write-back.
+
+The sibling-arm promotion assertion grouped separate scratch allocations by their
+shared borrowed source. Allocation-site identity now separates those lifetimes.
+Duplicate releases of the same allocation remain invalid. Tests use one parameter
+across if arms, statement/value matches, and early returns, with inline and heap inputs.
+
+Raw command logs, fixture copies, and per-process outputs are external test evidence.
+The regression fixtures and this record describe their correctness oracles without
+requiring those temporary files. The earlier remote CodSpeed result belongs to a
+different revision and does not validate this candidate. Final acceptance still
+requires candidate CI, including Windows execution and CodSpeed. No performance
+exception or improvement is asserted here.
+
 ## References
 
 - Spec: [Section 3](../specification.md#3-syntax--grammar), [Section 5](../specification.md#5-memory-management-ownership-lite), and [Section 7](../specification.md#7-error-handling) for control flow, ownership, and diagnostics.

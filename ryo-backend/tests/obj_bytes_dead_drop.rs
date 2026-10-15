@@ -75,15 +75,10 @@ fn bytes_conditional_dead_drop_references_bytes_free() {
     // by `bytes_conditional_reassign_emits_dead_drop`), for which
     // codegen must select `ryo_bytes_free` (not `ryo_str_free`).
     //
-    // The fixture is literal-backed on purpose: with heap-backed
-    // `.to_bytes()` sources, the str literal temporaries get scheduled
-    // Frees whose cap=0 *calls* are elided but whose `ryo_str_free`
-    // *declaration* still lands in the symbol table — declaration and
-    // call are not separable at symbol granularity, and what this pin
-    // cares about is the dead-drop's family selection. (The dead
-    // reassign warns W0001; warnings do not fail analysis.)
+    // Heap-backed byte producers require real destruction. An all-bytes
+    // fixture also makes a string-family release an observable mismatch.
     let obj = object_bytes(
-        "fn main():\n\tmut b = b\"AB\"\n\tflag = false\n\tif flag:\n\t\tb = b\"CD\"\n",
+        "fn main():\n\tmut b = b\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\" + b\"!\"\n\tflag = false\n\tif flag:\n\t\tb = b\"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\" + b\"?\"\n",
     );
     assert!(
         contains(&obj, b"ryo_bytes_free"),

@@ -1220,3 +1220,235 @@ fn heap_return_from_loop_aot() {
     let stdout = String::from_utf8_lossy(&run_output.stdout);
     assert_eq!(stdout, format!("{long}y\n"), "AOT stdout mismatch");
 }
+
+const CONCAT_AFTER_BREAK: &str = "\
+fn main():
+\tmut total = \"😀😀😀😀😀😀😀\"
+\twhile true:
+\t\ttotal = total + \"🦊\"
+\t\tbreak
+\t\tif total.len() > 5000:
+\t\t\tbreak
+\tprint(total)
+\tprint(\"\\n\")
+";
+
+#[test]
+fn double_free_str_concat_after_break() {
+    // Pre-fix: SIGTRAP/SIGABRT (double free) with no output. The
+    // explicit print("\n") is the only newline — print appends none.
+    let temp_dir = tempfile::TempDir::new().expect("create source directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "bug_double_free_str_concat_after_break.ryo",
+        CONCAT_AFTER_BREAK,
+    );
+    let output = run_ryo_command(
+        &["run", "bug_double_free_str_concat_after_break.ryo"],
+        &test_file,
+    )
+    .expect("run ryo");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.stdout.len(), 33, "stdout length mismatch");
+    assert_eq!(stdout, "😀😀😀😀😀😀😀🦊\n");
+}
+
+const CONCAT_IN_LOOP: &str = "\
+fn main():
+\tmut total = \"😀😀😀😀😀😀😀\"
+\twhile true:
+\t\ttotal = total + \"🦊\"
+\t\tif total.len() > 5000:
+\t\t\tbreak
+\tprint(total)
+\tprint(\"\\n\")
+";
+
+#[test]
+fn double_free_str_concat_in_loop() {
+    // Pre-fix: heap corruption / double free while growing the
+    // accumulator in the loop. Post-fix the loop breaks once
+    // total.len() > 5000: 7x😀 (28 B) + 1244x🦊 (4976 B) + "\n" =
+    // 5005 bytes exactly.
+    let temp_dir = tempfile::TempDir::new().expect("create source directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "bug_double_free_str_concat_in_loop.ryo",
+        CONCAT_IN_LOOP,
+    );
+    let output = run_ryo_command(
+        &["run", "bug_double_free_str_concat_in_loop.ryo"],
+        &test_file,
+    )
+    .expect("run ryo");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.stdout.len(), 5005, "stdout length mismatch");
+    assert!(stdout.starts_with("😀😀😀😀😀😀😀"), "7x😀 prefix");
+    assert!(stdout.ends_with("🦊\n"), "🦊 + newline suffix");
+    assert_eq!(stdout, format!("{}\n", "😀".repeat(7) + &"🦊".repeat(1244)));
+}
+
+const CODEGEN_FREE_NO_VALUEREPR: &str = "\
+fn adv(inout p: int):
+\tp += 1
+
+fn slice_at(s: str, at: int) -> str:
+\treturn str(s[at:at + 2])
+
+fn find(b: bytesview, s: str, key: str) -> str:
+\tmut p = 0
+\twhile true:
+\t\tif p >= b.len():
+\t\t\treturn \"<none>\"
+\t\tk = slice_at(s, p)
+\t\tadv(&p)
+\t\tv = slice_at(s, p)
+\t\tif k == key:
+\t\t\treturn v
+\t\tadv(&p)
+\treturn \"<none>\"
+
+fn main():
+\tdoc = \"hello world\"
+\tb = doc.as_bytes()
+\tprint(find(b, doc, \"he\"))
+\tprint(\"\\n\")
+";
+
+#[test]
+fn codegen_free_no_valuerepr() {
+    // Pre-fix: codegen aborted with "ownership pass scheduled Free ...
+    // but no ValueRepr cached". The lookup key is "he" (not the
+    // original "el") so the match prints "el" — the original key never
+    // matched because p steps by 2 over even offsets only, and the
+    // program then panics out-of-bounds; flipping it exercises the
+    // previously-crashing `return v` path. That is intentional, keep it.
+    let temp_dir = tempfile::TempDir::new().expect("create source directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "bug_codegen_free_no_valuerepr.ryo",
+        CODEGEN_FREE_NO_VALUEREPR,
+    );
+    let output = run_ryo_command(&["run", "bug_codegen_free_no_valuerepr.ryo"], &test_file)
+        .expect("run ryo");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "el\n");
+}
+
+const RETURN_ACCUMULATOR_IN_LOOP: &str = "\
+fn build(n: int) -> str:
+\tmut out = \"[\"
+\tmut i = 0
+\twhile i < n:
+\t\tstr_push(&out, \"x\")
+\t\tif i == 2:
+\t\t\treturn out
+\t\ti += 1
+\treturn out
+
+fn main():
+\tprint(build(5))
+\tprint(\"\\n\")
+";
+
+#[test]
+fn e0020_return_accumulator_in_loop() {
+    // Pre-fix: three bogus E0020 "use of moved value" errors — the
+    // flow-insensitive move analysis treated the in-loop `return out`
+    // as moving the accumulator on every iteration.
+    let temp_dir = tempfile::TempDir::new().expect("create source directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "bug_e0020_return_accumulator_in_loop.ryo",
+        RETURN_ACCUMULATOR_IN_LOOP,
+    );
+    let output = run_ryo_command(
+        &["run", "bug_e0020_return_accumulator_in_loop.ryo"],
+        &test_file,
+    )
+    .expect("run ryo");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "[xxx\n");
+}
+
+const EARLY_RETURN_AFTER_LOOP_REASSIGN: &str = "\
+fn f(n: int) -> str:
+\tmut s = \"aaaaaaaaaaaaaaaa\"
+\tmut i = 0
+\twhile i < n:
+\t\ts = \"bbbbbbbbbbbbbbbb\"
+\t\ti += 1
+\tif n > 1:
+\t\treturn s
+\treturn s + \"!\"
+
+fn main():
+\tprint(f(3))
+\tprint(\"\\n\")
+";
+
+#[test]
+fn early_return_after_loop_reassign() {
+    // Pre-fix (binding-covering without the terminator-anchor
+    // exclusion): the inner-return-anchored Free counted as covering
+    // the outer return's epilogue Free, codegen's leak-direction
+    // assert tripped ("frees anchored to unmaterialized instructions
+    // were dropped"), and the debug compiler aborted on this natural
+    // guard shape.
+    let temp_dir = tempfile::TempDir::new().expect("create source directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "bug_early_return_after_loop_reassign.ryo",
+        EARLY_RETURN_AFTER_LOOP_REASSIGN,
+    );
+    let output = run_ryo_command(
+        &["run", "bug_early_return_after_loop_reassign.ryo"],
+        &test_file,
+    )
+    .expect("run ryo");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "bbbbbbbbbbbbbbbb\n");
+}
+
+#[test]
+fn displaced_static_literal_is_not_a_heap_release() {
+    assert_ryo_output(
+        "loop_static_displacement.ryo",
+        "fn main():\n\tmut i = 0\n\twhile i < 3:\n\t\tmut s = \"ab\"\n\t\ts = s + \"🦊🦊🦊🦊🦊🦊\"\n\t\ti += 1\n\t\tif i == 2:\n\t\t\tbreak\n\tprint(\"ok\\n\")\n",
+        "ok\n",
+    );
+}
+
+#[test]
+fn early_return_under_shadow_writes_back_the_declared_parameter() {
+    assert_ryo_output(
+        "inout_parameter_shadow.ryo",
+        include_str!("fixtures/inout_parameter_shadow.ryo"),
+        "innerouter_0123456789012345678901234567890123456789!",
+    );
+}

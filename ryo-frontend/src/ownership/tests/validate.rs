@@ -334,9 +334,12 @@ fn run_path_checks(
     let places = cv::TargetPlaces::build(tir, flow, pool);
     let idx = cv::StepIndex::build(flow);
     let fire_points = ryo_core::flow::fire_points::FirePoints::new(flow);
-    let events = cv::collect_events(tir, &places, flow, &fire_points, sc, own);
+    let events = cv::collect_events(tir, &places, flow, &fire_points, sc, own, pool);
     let table = cv::generation_table(tir, flow, pool, &idx, sc);
-    let mut summary = cv::ValidationSummary::default();
+    let mut summary = cv::ValidationSummary {
+        required_checks_ran: true,
+        ..Default::default()
+    };
     cv::validate_no_path_double_destruction(tir, flow, own, sc, &events, &table, &mut summary);
     cv::validate_path_coverage(tir, flow, pool, own, sc, &events, &table, &mut summary);
     let ctx = cv::Ctx {
@@ -863,7 +866,7 @@ fn run_view_protection_only(
     let places = cv::TargetPlaces::build(tir, flow, pool);
     let idx = cv::StepIndex::build(flow);
     let fire_points = ryo_core::flow::fire_points::FirePoints::new(flow);
-    let events = cv::collect_events(tir, &places, flow, &fire_points, sc, own);
+    let events = cv::collect_events(tir, &places, flow, &fire_points, sc, own, pool);
     let table = cv::generation_table(tir, flow, pool, &idx, sc);
     let mut summary = cv::ValidationSummary::default();
     let ctx = cv::Ctx {
@@ -1159,4 +1162,17 @@ fn validator_corpus_satisfies_proof_completeness() {
         totals.promo_pairings_not_proved, 0,
         "clean corpus: {totals:?}"
     );
+}
+
+#[test]
+fn skipped_validation_does_not_prove_completeness() {
+    assert!(!cv::ValidationSummary::default().proof_complete());
+    let src = "fn main():\n\tprint(1)\n";
+    let (_, mut sidecar, tirs, pool) = check_src_full(src);
+    let sc = take_function_sidecar(&mut sidecar, 0);
+    let flow = build_flow(&tirs[0], &pool);
+    let own = cv::take_test_ownership(tirs[0].name).expect("ownership recorded");
+    let summary = cv::validate_cleanup(&tirs[0], &flow, &pool, &own, &sc, false);
+    assert!(!summary.required_checks_ran);
+    assert!(!summary.proof_complete());
 }

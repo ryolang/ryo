@@ -6,6 +6,8 @@ pub enum EmitKind {
     Uir,
     /// Typed IR (sema output, Zig-style AIR analogue).
     Tir,
+    /// Flow execution and resolved cleanup.
+    Flow,
     /// Cranelift IR (codegen output).
     Clif,
 }
@@ -503,7 +505,7 @@ fn display_ast(program: &ast::Ast, pool: &InternPool) {
 /// output.
 ///
 /// Sections are normalized into pipeline order before printing
-/// (AST → UIR → TIR → CLIF) so flag order is irrelevant. Stages
+/// (AST → UIR → TIR → Flow → CLIF) so flag order is irrelevant. Stages
 /// run only as far as the deepest requested section requires; an
 /// `--emit=uir` invocation never reaches sema.
 pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
@@ -512,13 +514,14 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     let mut pool = InternPool::new();
 
     let want = if emit.is_empty() {
-        // Default: all four sections, in pipeline order. (Until
+        // Default: all five sections, in pipeline order. (Until
         // 2026-09 this was AST + CLIF only, a leftover from when
         // those were the only two dumps.)
         EmitSet {
             ast: true,
             uir: true,
             tir: true,
+            flow: true,
             clif: true,
         }
     } else {
@@ -541,7 +544,7 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     // UIR / TIR / CLIF gating. We always *run* astgen if any of
     // those is asked for; sema only if TIR or CLIF; codegen only
     // if CLIF. Each stage's print is independent.
-    let need_uir = want.uir || want.tir || want.clif;
+    let need_uir = want.uir || want.tir || want.flow || want.clif;
     if !need_uir {
         return finalize_diags(sink.into_diags(), &input, &name);
     }
@@ -553,7 +556,7 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
         println!();
     }
 
-    if !(want.tir || want.clif) {
+    if !(want.tir || want.flow || want.clif) {
         // UIR-only run. Surface astgen diagnostics now, with a
         // non-zero exit if anything fired.
         return finalize_diags(sink.into_diags(), &input, &name);
@@ -564,11 +567,12 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     // slots), and `--emit=tir` deliberately prints that partial
     // TIR — the whole point of the flag is debugging sema.
     let (tirs, sema_warnings) = sema::analyze_buffered(&uir, &mut pool, &mut sink, &input, file);
-    let flows: Vec<ryo_core::flow::Flow> = tirs
-        .iter()
-        .map(|t| ryo_core::flow::Flow::build(t, &pool))
-        .collect();
-    let sidecar = ryo_frontend::ownership::check(&tirs, &flows, &pool, &mut sink);
+    let analyzed = ryo_frontend::pipeline::BuiltProgram::build(tirs, &pool)
+        .analyze(&pool, &mut sink)
+        .map_err(CompilerError::CodegenError)?;
+    let tirs = analyzed.tirs();
+    let flows = analyzed.flows();
+    let sidecar = analyzed.cleanup();
     // Sema warnings flush only after ownership has run: an ownership
     // error must suppress them exactly like a sema error would.
     if !sink.has_errors() {
@@ -578,8 +582,11 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     }
 
     if want.tir {
-        display_tir(&tirs, &pool);
+        display_tir(tirs, &pool);
         println!();
+    }
+    if want.flow {
+        display_flow(tirs, flows, sidecar, &pool)?;
     }
 
     if want.clif {
@@ -589,7 +596,7 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
         if sink.has_errors() {
             return finalize_diags(sink.into_diags(), &input, &name);
         }
-        generate_and_display_ir(&tirs, &flows, &pool, &sidecar)?;
+        generate_and_display_ir(tirs, flows, &pool, sidecar)?;
     }
 
     // Tail block: drains the sink whether sema/ownership were
@@ -608,6 +615,7 @@ struct EmitSet {
     ast: bool,
     uir: bool,
     tir: bool,
+    flow: bool,
     clif: bool,
 }
 
@@ -619,6 +627,7 @@ impl EmitSet {
                 EmitKind::Ast => s.ast = true,
                 EmitKind::Uir => s.uir = true,
                 EmitKind::Tir => s.tir = true,
+                EmitKind::Flow => s.flow = true,
                 EmitKind::Clif => s.clif = true,
             }
         }
@@ -666,6 +675,23 @@ fn display_tir(tirs: &[Tir], pool: &InternPool) {
     print!("{}", tir::dump(tirs, pool));
 }
 
+fn display_flow(
+    tirs: &[Tir],
+    flows: &[ryo_core::flow::Flow],
+    sidecar: &ryo_core::ownership::OwnershipSidecar,
+    pool: &InternPool,
+) -> Result<(), CompilerError> {
+    println!("[Flow]");
+    for ((tir, flow), cleanup) in tirs.iter().zip(flows).zip(&sidecar.functions) {
+        print!(
+            "{}",
+            flow.dump(tir, cleanup, pool)
+                .map_err(CompilerError::CodegenError)?
+        );
+    }
+    Ok(())
+}
+
 /// Run the front-end (astgen + sema), build the canonical Flow IR per body,
 /// and run the ownership pass, returning the UIR, the typed TIR and Flow IR
 /// per-function, and the ownership sidecar. Used by `run` and `build`
@@ -679,15 +705,7 @@ fn lower_and_analyze(
     source_name: &str,
     file_path: &Path,
     parse_diags: Vec<Diag>,
-) -> Result<
-    (
-        Uir,
-        Vec<Tir>,
-        Vec<ryo_core::flow::Flow>,
-        ryo_core::ownership::OwnershipSidecar,
-    ),
-    CompilerError,
-> {
+) -> Result<(Uir, ryo_frontend::pipeline::CleanupProgram), CompilerError> {
     let mut sink = DiagSink::new();
     // Lex/parse diagnostics come first so the final render preserves
     // pipeline order.
@@ -701,14 +719,9 @@ fn lower_and_analyze(
     // Sema warnings are buffered and flushed after ownership so an
     // ownership error suppresses them exactly like a sema error.
     let (tirs, sema_warnings) = sema::analyze_buffered(&uir, pool, &mut sink, input, file_path);
-    // Canonical Flow IR per body — the shared execution structure and
-    // storage-identity model (built once, validated in debug builds,
-    // consumed by the ownership pass below and by codegen).
-    let flows: Vec<ryo_core::flow::Flow> = tirs
-        .iter()
-        .map(|t| ryo_core::flow::Flow::build(t, pool))
-        .collect();
-    let sidecar = ryo_frontend::ownership::check(&tirs, &flows, pool, &mut sink);
+    let analyzed = ryo_frontend::pipeline::BuiltProgram::build(tirs, pool)
+        .analyze(pool, &mut sink)
+        .map_err(CompilerError::CodegenError)?;
     if !sink.has_errors() {
         for d in sema_warnings {
             sink.emit(d);
@@ -720,7 +733,7 @@ fn lower_and_analyze(
     // without a separate render block that could drift from the
     // error path.
     finalize_diags(sink.into_diags(), input, source_name)?;
-    Ok((uir, tirs, flows, sidecar))
+    Ok((uir, analyzed))
 }
 
 fn generate_and_display_ir(
@@ -768,21 +781,29 @@ pub fn run_file(
         println!();
     }
 
-    let (uir, tirs, flows, sidecar) =
-        lower_and_analyze(&program, &mut pool, &input, &name, file, parse_diags)?;
+    let (uir, analyzed) = lower_and_analyze(&program, &mut pool, &input, &name, file, parse_diags)?;
+    analyzed
+        .require_backend_transition()
+        .map_err(CompilerError::CodegenError)?;
+    let tirs = analyzed.tirs();
+    let flows = analyzed.flows();
+    let sidecar = analyzed.cleanup();
 
     if want.uir {
         display_uir(&uir, &pool);
         println!();
     }
     if want.tir {
-        display_tir(&tirs, &pool);
+        display_tir(tirs, &pool);
         println!();
+    }
+    if want.flow {
+        display_flow(tirs, flows, sidecar, &pool)?;
     }
 
     let mut codegen = codegen::Codegen::new_jit().map_err(CompilerError::CodegenError)?;
     let (main_id, clif) = codegen
-        .compile(&tirs, &flows, &pool, &sidecar, want.clif)
+        .compile(tirs, flows, &pool, sidecar, want.clif)
         .map_err(CompilerError::CodegenError)?;
     if want.clif {
         println!("[Cranelift IR]");
@@ -814,16 +835,24 @@ pub fn build_file(file: &Path, emit: &[EmitKind], link: LinkMode) -> Result<(), 
         println!();
     }
 
-    let (uir, tirs, flows, sidecar) =
-        lower_and_analyze(&program, &mut pool, &input, &name, file, parse_diags)?;
+    let (uir, analyzed) = lower_and_analyze(&program, &mut pool, &input, &name, file, parse_diags)?;
+    analyzed
+        .require_backend_transition()
+        .map_err(CompilerError::CodegenError)?;
+    let tirs = analyzed.tirs();
+    let flows = analyzed.flows();
+    let sidecar = analyzed.cleanup();
 
     if want.uir {
         display_uir(&uir, &pool);
         println!();
     }
     if want.tir {
-        display_tir(&tirs, &pool);
+        display_tir(tirs, &pool);
         println!();
+    }
+    if want.flow {
+        display_flow(tirs, flows, sidecar, &pool)?;
     }
 
     let (obj_filename, exe_filename) = get_output_filenames(file);
@@ -831,7 +860,7 @@ pub fn build_file(file: &Path, emit: &[EmitKind], link: LinkMode) -> Result<(), 
     let target = Triple::host();
     let mut codegen = codegen::Codegen::new_aot(target).map_err(CompilerError::CodegenError)?;
     let (_main_id, clif) = codegen
-        .compile(&tirs, &flows, &pool, &sidecar, want.clif)
+        .compile(tirs, flows, &pool, sidecar, want.clif)
         .map_err(CompilerError::CodegenError)?;
     if want.clif {
         println!("[Cranelift IR]");

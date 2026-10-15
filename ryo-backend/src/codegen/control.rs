@@ -41,7 +41,7 @@
 
 use super::{
     BlockPrologue, Codegen, ForRecord, FunctionContext, IfRecord, LoopRecord, SlotMarks,
-    WhileRecord, is_enum_type, is_fat_type, is_statement_step, is_struct_type,
+    WhileRecord, is_statement_step,
 };
 use cranelift::codegen::ir::{BlockArg, MemFlagsData};
 use cranelift::prelude::*;
@@ -575,8 +575,6 @@ impl<M: Module> Codegen<M> {
                 // dispatcher). The tail-call path fires the scope
                 // buckets inside `try_emit_tail_call` instead.
                 Self::fire_after_statement(builder, ctx, es)?;
-                Self::emit_due_promo_frees(builder, ctx, es)?;
-                Self::sweep_due_promo_frees(builder, ctx)?;
             }
         }
         if !tail_terminated {
@@ -683,7 +681,6 @@ impl<M: Module> Codegen<M> {
         Self::kill_assigned_since(ctx, scope_mark);
         Self::match_join_value(builder, ctx, match_inst)?;
         Self::fire_payload(builder, ctx, match_inst)?;
-        Self::emit_due_promo_frees(builder, ctx, match_inst)?;
         Ok(())
     }
 
@@ -832,7 +829,6 @@ impl<M: Module> Codegen<M> {
                 // payload bucket at the join — the mechanical
                 // fire point for terminator-payload anchors.
                 Self::fire_payload(builder, ctx, if_inst)?;
-                Self::emit_due_promo_frees(builder, ctx, if_inst)?;
                 Ok(())
             }
             BlockPrologue::MatchArm { match_inst, arm } => {
@@ -896,7 +892,6 @@ impl<M: Module> Codegen<M> {
                 // (loop-exit drops) fire from the payload bucket at the
                 // exit — the mechanical fire point.
                 Self::fire_payload(builder, ctx, loop_inst)?;
-                Self::emit_due_promo_frees(builder, ctx, loop_inst)?;
                 Ok(())
             }
             BlockPrologue::ForBody { loop_inst } => {
@@ -973,7 +968,6 @@ impl<M: Module> Codegen<M> {
                 // Frees anchored AFTER the ForRange instruction
                 // (loop-exit drops), exactly like the while exit.
                 Self::fire_payload(builder, ctx, loop_inst)?;
-                Self::emit_due_promo_frees(builder, ctx, loop_inst)?;
                 Ok(())
             }
         }
@@ -1302,7 +1296,6 @@ impl<M: Module> Codegen<M> {
             .expect("break carries its instruction");
         Self::fire_payload(builder, ctx, payload)?;
         Self::fire_at_terminator(builder, ctx, b)?;
-        Self::emit_due_promo_frees(builder, ctx, payload)?;
         let tb = ctx.flow_blocks[target.0 as usize];
         builder.ins().jump(tb, &[]);
         Ok(())
@@ -1326,7 +1319,6 @@ impl<M: Module> Codegen<M> {
             .expect("continue carries its instruction");
         Self::fire_payload(builder, ctx, payload)?;
         Self::fire_at_terminator(builder, ctx, b)?;
-        Self::emit_due_promo_frees(builder, ctx, payload)?;
         if let FlowTerm::ForTest { loop_inst, .. } = ctx.flow.term(target) {
             let counter = match ctx
                 .loop_records
@@ -1383,7 +1375,7 @@ impl<M: Module> Codegen<M> {
             .flow
             .term_payload(b)
             .expect("return carries its instruction");
-        if is_fat_type(ctx.tir.return_type, ctx.pool) {
+        if ctx.abi.result == super::ValueAbi::Fat {
             let sret = ctx.sret_ptr.expect("fat-returning fn must have sret_ptr");
             let repr = Self::eval_inst_fat(builder, ctx, value)?;
             let (ptr, len, cap) = match repr {
@@ -1396,11 +1388,10 @@ impl<M: Module> Codegen<M> {
             builder.ins().store(MemFlagsData::trusted(), cap, sret, 16);
             Self::fire_payload(builder, ctx, r)?;
             Self::fire_at_terminator(builder, ctx, b)?;
-            Self::emit_due_promo_frees(builder, ctx, r)?;
             Self::emit_return(builder, ctx, &[])?;
-        } else if is_struct_type(ctx.tir.return_type, ctx.pool) {
+        } else if ctx.abi.result == super::ValueAbi::Struct {
             Self::emit_struct_return(builder, ctx, r, value)?;
-        } else if is_enum_type(ctx.tir.return_type, ctx.pool) {
+        } else if ctx.abi.result == super::ValueAbi::Enum {
             Self::emit_enum_return(builder, ctx, r, value)?;
         } else {
             // A Return whose operand is a call is a tail context
@@ -1415,7 +1406,6 @@ impl<M: Module> Codegen<M> {
                 let val = Self::eval_inst(builder, ctx, value)?;
                 Self::fire_payload(builder, ctx, r)?;
                 Self::fire_at_terminator(builder, ctx, b)?;
-                Self::emit_due_promo_frees(builder, ctx, r)?;
                 Self::emit_return(builder, ctx, &[val])?;
             }
         }
@@ -1439,12 +1429,10 @@ impl<M: Module> Codegen<M> {
                     let zero = builder.ins().iconst(ctx.int_type, 0);
                     Self::fire_payload(builder, ctx, r)?;
                     Self::fire_at_terminator(builder, ctx, b)?;
-                    Self::emit_due_promo_frees(builder, ctx, r)?;
                     Self::emit_return(builder, ctx, &[zero])?;
                 } else {
                     Self::fire_payload(builder, ctx, r)?;
                     Self::fire_at_terminator(builder, ctx, b)?;
-                    Self::emit_due_promo_frees(builder, ctx, r)?;
                     Self::emit_return(builder, ctx, &[])?;
                 }
             }

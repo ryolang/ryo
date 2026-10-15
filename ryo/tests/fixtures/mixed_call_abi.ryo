@@ -1,0 +1,22 @@
+struct Record:
+	text: str
+	n: int
+
+fn mix(inout n: int, a: str, b: bytes, v: strview, w: bytesview, p: Record, inout out: str) -> Record:
+	n += b.len() + w.len() + p.n
+	str_push(&out, v)
+	return Record{text=str(a[0:4]), n=n}
+
+fn main():
+	mut n = 1
+	mut out = "start_0123456789012345678901234567890123456789" + "!"
+	a = "abcdefghijklmnop012345678901234567890123456789" + "!"
+	b = b"0123456789012345678901234567890123456789" + b"!"
+	p = Record{text="field_012345678901234567890123456789" + "!", n=2}
+	r = mix(&n, a, b, a[4:8], b[0:3], p, &out)
+	print(r.text)
+	print(r.n)
+	s = mix(&n, a, b, a[8:12], b[0:3], p, &out)
+	print(s.text)
+	print(s.n)
+	print(out)

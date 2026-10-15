@@ -39,6 +39,7 @@ except ImportError:  # non-POSIX (Windows dev VMs): no advisory locks available
     fcntl = None
 
 ENTRY_RE = re.compile(r"^###\s+(I-(\d+))\s+—\s+(.*)$")
+HIGH_WATER_RE = re.compile(r"<!-- issue-id high-water: (\d+) -->")
 BOUNDARY_RE = re.compile(r"^(#{1,3}\s|---\s*$)")
 FIELD_RE = r"^\*\*{}\:\*\*\s*(.+?)\s*$"
 SEVERITY_RE = re.compile(FIELD_RE.format("Severity"))
@@ -185,6 +186,9 @@ def max_id_ever(entries, issues_file):
     file's history; fall back to the live file (with a warning) if git fails.
     """
     highest = max((int(e[0][2:]) for e in entries), default=0)
+    marker = HIGH_WATER_RE.search(issues_file.read_text(encoding="utf-8"))
+    if marker:
+        highest = max(highest, int(marker.group(1)))
     try:
         log = subprocess.run(
             ["git", "log", "-p", "--format=", "--", str(issues_file)],
@@ -364,6 +368,14 @@ def cmd_delete(_entries, issues_file, args):
         # collapse any separator gap left at the seam
         seam = "\n".join(remaining)
         seam = re.sub(r"---\n(?:\n---\n)+", "---\n", seam)
+        # An entry can be resolved before its first commit. Git history alone
+        # cannot keep that number retired, so retain the allocation watermark.
+        highest = max_id_ever(parse_entries(text), issues_file)
+        marker = f"<!-- issue-id high-water: {highest} -->"
+        if HIGH_WATER_RE.search(seam):
+            seam = HIGH_WATER_RE.sub(marker, seam)
+        else:
+            seam = seam.rstrip("\n") + "\n\n" + marker
         write_atomic(issues_file, seam.rstrip("\n") + "\n")
     print(f"deleted {issue_id} (id stays retired; do not reuse it)")
 

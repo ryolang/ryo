@@ -1,3 +1,5 @@
+mod version;
+
 use crate::flow::{DropOp, DropPosition};
 use crate::tir::{Span, TirRef};
 use crate::types::StringId;
@@ -12,6 +14,14 @@ pub struct PromoFree {
     pub position: DropPosition,
     pub base: TirRef,
     pub span: Span,
+}
+
+/// One ownership transfer recorded by Flow analysis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StorageTransfer {
+    pub source: crate::flow::PlaceId,
+    pub target: TirRef,
+    pub site: TirRef,
 }
 
 /// Side-table produced by the ownership pass alongside diagnostics.
@@ -39,6 +49,8 @@ pub struct OwnershipSidecar {
 /// and pushed onto the parent [`OwnershipSidecar`].
 #[derive(Debug, Clone)]
 pub struct FunctionSidecar {
+    content_stamp: Option<u64>,
+    flow_identity: Option<crate::artifact::ArtifactId>,
     /// Name of the `Tir` this entry belongs to, recorded at push
     /// time. Positional indexing alone cannot detect a `tirs` slice
     /// that was reordered or filtered between `ownership::check` and
@@ -53,6 +65,8 @@ pub struct FunctionSidecar {
     /// membership (an arm-only drop lives in the arm's blocks), never
     /// by a branch-gating predicate.
     pub drops: Vec<DropOp>,
+    /// Moves into bindings, aggregates, call arguments, and return values.
+    pub transfers: Vec<StorageTransfer>,
     /// Reassignment Frees. Dense side table indexed by the `Assign`
     /// instruction's `TirRef::index()` (slot 0 unused — refs are
     /// 1-based), sized to the owning function's TIR arena length.
@@ -102,11 +116,10 @@ pub struct FunctionSidecar {
     /// entry per consuming arm, target = the scrutinee) and conditional
     /// dead drops of pre-branch buffers (one entry per untouched arm
     /// block, target = the pre-branch owner), both fired by codegen at
-    /// the START of the named Flow block. Promotion-buffer frees for
-    /// borrowed-param view bases keep their own anchor-keyed schedule
-    /// (I-216).
+    /// the start of the named Flow block. Promotion-buffer releases retain
+    /// allocation-site identities and use the same resolved firing maps.
     pub promotion_frees: Vec<PromoFree>,
-    /// Promotion-buffer ALLOCATIONS (Gap 5): one entry per promo
+    /// Promotion-buffer allocations: one entry per promo
     /// candidate, anchored at the view-creating step — codegen's
     /// promote-on-view writes the flag-guarded conditional heap triple
     /// there. The validator pairs each allocation with the base's
@@ -119,6 +132,16 @@ pub struct FunctionSidecar {
     /// the body must NOT be labeled fully validated). See
     /// [`ValidationSummary`].
     pub validation: Option<ValidationSummary>,
+}
+
+/// Validation availability and result are separate from proof counters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValidationOutcome {
+    NotRun,
+    Skipped,
+    Incomplete,
+    Complete,
+    Invalid,
 }
 
 /// Debug tally of the whole cleanup validator (see the
@@ -136,6 +159,8 @@ pub struct FunctionSidecar {
 /// labeled "fully validated".
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ValidationSummary {
+    /// False when validation was unavailable or required path checks were skipped.
+    pub required_checks_ran: bool,
     /// Drop/promo-free positions examined for resolution.
     pub positions: usize,
     /// Positions resolving `FireVerdict::NonExact` (the resolver's
@@ -191,7 +216,8 @@ impl ValidationSummary {
     /// module header and must surface as NOT PROVED (never Proven), so
     /// they keep this predicate honest.
     pub fn proof_complete(&self) -> bool {
-        self.positions_not_proved == 0
+        self.required_checks_ran
+            && self.positions_not_proved == 0
             && self.pairs_not_proved == 0
             && self.obligations_not_proved == 0
             && self.promo_pairings_not_proved == 0
@@ -200,6 +226,37 @@ impl ValidationSummary {
 }
 
 impl FunctionSidecar {
+    pub fn validation_outcome(&self) -> ValidationOutcome {
+        match self.validation {
+            None => ValidationOutcome::NotRun,
+            Some(summary) if !summary.required_checks_ran => ValidationOutcome::Skipped,
+            Some(summary) if summary.proof_complete() => ValidationOutcome::Complete,
+            Some(_) => ValidationOutcome::Incomplete,
+        }
+    }
+
+    /// Bind an empty cleanup artifact to its exact execution representation.
+    pub fn for_flow(tir: &crate::tir::Tir, flow: &crate::flow::Flow) -> Result<Self, String> {
+        flow.require_body(tir)?;
+        let mut result = Self::new(tir.name, tir.instructions.len());
+        result.flow_identity = Some(flow.identity());
+        Ok(result)
+    }
+
+    /// Check representation compatibility before any cleanup indices are consumed.
+    pub fn require_flow(
+        &self,
+        tir: &crate::tir::Tir,
+        flow: &crate::flow::Flow,
+    ) -> Result<(), String> {
+        flow.require_body(tir)?;
+        self.require_unchanged()?;
+        if self.flow_identity != Some(flow.identity()) {
+            return Err("cleanup belongs to a different Flow version".into());
+        }
+        Ok(())
+    }
+
     /// Empty sidecar for the function named `name`, with the dense
     /// `TirRef`-indexed tables sized to the function's TIR arena
     /// length (`tir.instructions.len()`). `Default` is deliberately
@@ -207,8 +264,11 @@ impl FunctionSidecar {
     /// codegen alignment assert documented on [`Self::name`].
     pub fn new(name: StringId, arena_len: usize) -> Self {
         FunctionSidecar {
+            content_stamp: None,
+            flow_identity: None,
             name,
             drops: Vec::new(),
+            transfers: Vec::new(),
             free_on_reassign: vec![None; arena_len],
             assign_binding: vec![None; arena_len],
             consumed_concat_lhs: vec![None; arena_len],

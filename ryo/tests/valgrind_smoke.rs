@@ -722,3 +722,43 @@ fn valgrind_match_value_arm_unconsumed_temporary() {
         "match_value_arm_unconsumed_temporary",
     );
 }
+
+#[test]
+fn valgrind_shadowed_heap_reassignment() {
+    run_valgrind_smoke_allocating(
+        include_str!("fixtures/shadowed_heap_reassignment.ryo"),
+        "shadowed_heap_reassignment",
+    );
+}
+
+#[test]
+fn valgrind_same_parameter_promotions() {
+    run_valgrind_smoke_allocating(
+        include_str!("fixtures/same_parameter_promotions.ryo"),
+        "same_parameter_promotions",
+    );
+}
+
+#[test]
+fn valgrind_nested_heap_shadows() {
+    run_valgrind_smoke_allocating(
+        include_str!("fixtures/nested_heap_shadows.ryo"),
+        "nested_heap_shadows",
+    );
+}
+
+#[test]
+fn valgrind_nested_heap_byte_shadows() {
+    run_valgrind_smoke_allocating(
+        include_str!("fixtures/nested_heap_byte_shadows.ryo"),
+        "nested_heap_byte_shadows",
+    );
+}
+
+#[test]
+fn valgrind_inout_parameter_shadow() {
+    run_valgrind_smoke_allocating(
+        include_str!("fixtures/inout_parameter_shadow.ryo"),
+        "inout_parameter_shadow",
+    );
+}

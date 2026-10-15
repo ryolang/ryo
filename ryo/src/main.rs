@@ -29,8 +29,8 @@ enum Commands {
     /// Inspect intermediate representations of a Ryo program.
     ///
     /// `--emit` selects which IR sections to print. Sections always
-    /// appear in pipeline order (AST → UIR → TIR → CLIF) regardless
-    /// of the order given on the command line. With no flag all four
+    /// appear in pipeline order (AST → UIR → TIR → Flow → CLIF) regardless
+    /// of the order given on the command line. With no flag all five
     /// sections are printed.
     Ir {
         /// Input file to generate IR for

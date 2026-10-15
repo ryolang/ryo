@@ -574,6 +574,23 @@ impl FlowBuilder<'_> {
             }
             _ => {}
         }
+        if inst.tag == TirTag::Call {
+            let call = self.tir.call_view(r);
+            let offset = self.extra.len() as u32;
+            let push = matches!(self.pool.str(call.name), "str_push" | "bytes_push");
+            for (index, &arg) in call.args.iter().enumerate() {
+                if (call.modes.get(index) == Some(&crate::tir::ParamMode::Inout)
+                    || (push && index == 0))
+                    && let Some(place) = self.resolve_view_base(arg)
+                {
+                    self.extra.push(place.0);
+                }
+            }
+            let len = self.extra.len() as u32 - offset;
+            if len != 0 {
+                facts.mutations = Some(ExtraRange { offset, len });
+            }
+        }
         facts
     }
 
@@ -1022,7 +1039,12 @@ impl FlowBuilder<'_> {
         if self.blocks.len() == 1 {
             let (place_write_ranges, place_write_list) =
                 Self::flatten_writes(&self.places.len(), &self.writes_flat);
-            let flow = Flow {
+            let mut flow = Flow {
+                identity: crate::artifact::ArtifactId::fresh(),
+                source_body: self.tir.identity(),
+                source_stamp: self.tir.representation_stamp(),
+                content_stamp: 0,
+                layout_context: self.pool.identity(),
                 entry,
                 blocks: self.blocks,
                 steps: self.steps,
@@ -1045,6 +1067,7 @@ impl FlowBuilder<'_> {
                 place_write_ranges,
                 place_write_list,
             };
+            flow.content_stamp = flow.representation_stamp();
             flow.validate(self.tir, self.pool);
             return flow;
         }
@@ -1139,7 +1162,12 @@ impl FlowBuilder<'_> {
         let (place_write_ranges, place_write_list) =
             Self::flatten_writes(&self.places.len(), &self.writes_flat);
 
-        let flow = Flow {
+        let mut flow = Flow {
+            identity: crate::artifact::ArtifactId::fresh(),
+            source_body: self.tir.identity(),
+            source_stamp: self.tir.representation_stamp(),
+            content_stamp: 0,
+            layout_context: self.pool.identity(),
             entry,
             blocks: self.blocks,
             steps: self.steps,
@@ -1162,6 +1190,7 @@ impl FlowBuilder<'_> {
             place_write_ranges,
             place_write_list,
         };
+        flow.content_stamp = flow.representation_stamp();
         flow.validate(self.tir, self.pool);
         flow
     }

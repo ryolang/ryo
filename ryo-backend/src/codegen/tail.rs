@@ -189,10 +189,19 @@ impl<M: Module> Codegen<M> {
         scope
             .into_iter()
             .filter(|&idx| {
-                if ctx.freed_at[idx] {
-                    return false;
-                }
-                match ctx.sidecar.drops[idx].position.anchor_inst() {
+                let position = if idx >= ctx.sidecar.drops.len() {
+                    let promotion = idx - ctx.sidecar.drops.len();
+                    if ctx.promo_freed_at[promotion] {
+                        return false;
+                    }
+                    ctx.sidecar.promotion_frees[promotion].position
+                } else {
+                    if ctx.freed_at[idx] {
+                        return false;
+                    }
+                    ctx.sidecar.drops[idx].position
+                };
+                match position.anchor_inst() {
                     // PreTerminator{block}: fires with the block's
                     // terminator — always at/after the call.
                     None => true,
@@ -247,7 +256,7 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         call_ref: TirRef,
         enclosing_return: Option<TirRef>,
-        anchor: TirRef,
+        _anchor: TirRef,
     ) -> Result<bool, String> {
         if !Self::tail_call_eligible(ctx, call_ref, enclosing_return) {
             return Ok(false);
@@ -289,8 +298,6 @@ impl<M: Module> Codegen<M> {
             let indices = ctx.fire_by_payload[r.index()].clone();
             Self::fire_bucket(builder, ctx, &indices)?;
         }
-        Self::emit_due_promo_frees(builder, ctx, anchor)?;
-        Self::sweep_due_promo_frees(builder, ctx)?;
         let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
         builder.ins().return_call(callee_ref, &marshalled.values);
         Ok(true)

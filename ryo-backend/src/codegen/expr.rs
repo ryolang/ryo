@@ -1,10 +1,10 @@
 //! Expression evaluation and call emission — split from `mod.rs`; see module docs there.
 
 use super::arith::{DIV_OVERFLOW_MSG, DIV_ZERO_MSG, MOD_OVERFLOW_MSG, MOD_ZERO_MSG};
-use super::bytes::store_string;
+use super::literals::store_string;
 use super::{
     Codegen, FunctionContext, OVERFLOW_MSG, STR_SLOT_SIZE, Terminator, ValueRepr,
-    cranelift_type_for, is_enum_type, is_fat_type, is_struct_type, ranges,
+    cranelift_type_for, is_fat_type, ranges,
 };
 use cranelift::codegen::ir::{FuncRef, MemFlagsData, StackSlot};
 use cranelift::prelude::*;
@@ -470,17 +470,26 @@ impl<M: Module> Codegen<M> {
         name: StringId,
     ) -> Option<(Value, Value)> {
         let sl = Self::read_slot(&ctx.fat_locals, name)?;
+        Some(Self::load_fat_storage_ptr_cap(builder, ctx.int_type, sl))
+    }
+
+    /// Load the storage selected by binding identity, independent of active names.
+    pub(super) fn load_fat_storage_ptr_cap(
+        builder: &mut FunctionBuilder,
+        int_type: Type,
+        sl: super::FatLocals,
+    ) -> (Value, Value) {
         if let Some(home) = sl.home {
-            let addr = builder.ins().stack_addr(ctx.int_type, home, 0);
+            let addr = builder.ins().stack_addr(int_type, home, 0);
             let ptr = builder
                 .ins()
-                .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);
+                .load(int_type, MemFlagsData::trusted(), addr, 0);
             let cap = builder
                 .ins()
                 .load(types::I64, MemFlagsData::trusted(), addr, 16);
-            Some((ptr, cap))
+            (ptr, cap)
         } else {
-            Some((builder.use_var(sl.ptr), builder.use_var(sl.cap)))
+            (builder.use_var(sl.ptr), builder.use_var(sl.cap))
         }
     }
 
@@ -1096,24 +1105,11 @@ impl<M: Module> Codegen<M> {
     /// block (called from `compile_function` right before
     /// `emit_body`).
     ///
-    /// A literal that anchors a scheduled drop (a `match` value-arm
-    /// body, a bare-literal statement arm's dead bind) is NOT hoisted:
-    /// hoisting caches its repr in the entry block, and the
-    /// end-of-statement sweep's arm gating — "the anchor has a cached
-    /// repr only while codegen is inside that arm" — would misfire,
-    /// releasing the free in the entry block instead of the arm (the
-    /// anchor is lowered lazily in its arm, restoring the invariant).
+    /// Cleanup uses Flow positions and remains independent of literal hoisting.
     pub(crate) fn hoist_str_literals(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
     ) -> Result<(), String> {
-        let drop_anchors: std::collections::HashSet<u32> = ctx
-            .sidecar
-            .drops
-            .iter()
-            .filter_map(|d| d.position.anchor_inst())
-            .map(|r| r.raw())
-            .collect();
         let mut panic_args = vec![false; ctx.tir.instructions.len()];
         for idx in 1..ctx.tir.instructions.len() {
             if ctx.tir.instructions[idx].tag != TirTag::Call {
@@ -1135,7 +1131,7 @@ impl<M: Module> Codegen<M> {
                 TirTag::BytesConst => true,
                 _ => continue,
             };
-            if panic_args[idx] || drop_anchors.contains(&(idx as u32)) {
+            if panic_args[idx] {
                 continue;
             }
             let TirData::Str(id) = inst.data else {
@@ -1462,10 +1458,10 @@ impl<M: Module> Codegen<M> {
             return Ok(builder.ins().iconst(ctx.int_type, 0));
         }
 
-        let callee_id = ctx
+        let (callee_id, return_abi) = ctx
             .func_ids
             .get(&name_id)
-            .map(|(id, _)| *id)
+            .map(|(id, abi)| (*id, abi.result))
             .ok_or_else(|| format!("Undefined function: '{}'", name_str))?;
 
         let marshalled = Self::marshal_user_call_args(builder, ctx, r, out_slot)?;
@@ -1493,7 +1489,7 @@ impl<M: Module> Codegen<M> {
             return Ok(builder.ins().iconst(dummy_ty, 0));
         }
 
-        if is_fat_type(ret_ty, ctx.pool) {
+        if return_abi == super::ValueAbi::Fat {
             // sret: the 24-byte slot (or the caller-provided binding
             // home) was allocated by marshalling; the pointer is already
             // prepended to `values`.
@@ -1522,7 +1518,7 @@ impl<M: Module> Codegen<M> {
             return Ok(ptr); // dummy scalar — consumers use eval_inst_fat
         }
 
-        if is_struct_type(ret_ty, ctx.pool) {
+        if return_abi == super::ValueAbi::Struct {
             // M9 named / M10 anon sret: the struct's slot was allocated
             // by marshalling; the slot address is the result (mirrors
             // the fat sret path above).
@@ -1537,7 +1533,7 @@ impl<M: Module> Codegen<M> {
             return Ok(out); // dummy scalar — consumers use eval_inst_struct
         }
 
-        if is_enum_type(ret_ty, ctx.pool) {
+        if return_abi == super::ValueAbi::Enum {
             // M11 enum sret: the enum's slot was allocated by
             // marshalling; the slot address is the result (mirrors the
             // struct sret path above).
@@ -1584,10 +1580,10 @@ impl<M: Module> Codegen<M> {
         // tail path (try_emit_tail_call) marshals before its own
         // func_ids lookup, so the error must surface here, with the
         // same message. emit_call_slot also checks beforehand.
-        let _ = ctx
+        let abi = &ctx
             .func_ids
             .get(&name_id)
-            .map(|(id, _)| *id)
+            .map(|(_, abi)| abi)
             .ok_or_else(|| format!("Undefined function: '{}'", name_str))?;
 
         let mut values = Vec::with_capacity(view.args.len() * 3 + 1);
@@ -1604,10 +1600,19 @@ impl<M: Module> Codegen<M> {
                 )
             })?;
             let arg_ty = ctx.tir.inst(*arg).ty;
+            let lowered = abi
+                .params
+                .get(i)
+                .ok_or_else(|| format!("call '{name_str}' has too many arguments"))?;
+            if lowered.ty != arg_ty || lowered.mode != mode {
+                return Err(format!(
+                    "call '{name_str}' disagrees with the lowered callee ABI"
+                ));
+            }
             if mode == ParamMode::Inout {
                 if matches!(ctx.tir.inst(*arg).data, TirData::FieldAccess { .. })
-                    || is_struct_type(arg_ty, ctx.pool)
-                    || is_enum_type(arg_ty, ctx.pool)
+                    || lowered.value == super::ValueAbi::Struct
+                    || lowered.value == super::ValueAbi::Enum
                 {
                     // M9 inout field path (`&p.x`), whole-struct inout
                     // (`&p`), or whole-enum inout (M11, `&e`): the
@@ -1616,7 +1621,7 @@ impl<M: Module> Codegen<M> {
                     // in place. No spill, no reload, no write-back.
                     let addr = Self::inout_pointee_addr(builder, ctx, *arg)?;
                     values.push(addr);
-                } else if is_fat_type(arg_ty, ctx.pool) {
+                } else if lowered.value == super::ValueAbi::Fat {
                     let repr = Self::eval_inst_fat(builder, ctx, *arg)?;
                     let (ptr, len, cap) = match repr {
                         ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
@@ -1668,7 +1673,7 @@ impl<M: Module> Codegen<M> {
                     values.push(addr);
                     inout_reloads.push((*arg, slot));
                 }
-            } else if is_fat_type(arg_ty, ctx.pool) {
+            } else if lowered.value == super::ValueAbi::Fat {
                 let repr = Self::eval_inst_fat(builder, ctx, *arg)?;
                 match repr {
                     ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
@@ -1678,20 +1683,20 @@ impl<M: Module> Codegen<M> {
                     }
                     _ => unreachable!("fat-typed arg must produce a fat ValueRepr"),
                 }
-            } else if ctx.pool.is_view(arg_ty) {
+            } else if lowered.value == super::ValueAbi::View {
                 // `strview` arg → 2-word ABI (ptr, len), matching the
                 // callee's build_signature. Sema has already inserted
                 // ToView for owned-str actuals (§3.4).
                 let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, *arg)?;
                 values.push(ptr);
                 values.push(len);
-            } else if is_struct_type(arg_ty, ctx.pool) {
+            } else if lowered.value == super::ValueAbi::Struct {
                 // M9 named / M10 anon struct arg: a single slot
                 // address — the existing slot for Borrow, a fresh
                 // field-wise copy for Move/Copy.
                 let addr = Self::emit_struct_call_arg(builder, ctx, *arg, mode)?;
                 values.push(addr);
-            } else if is_enum_type(arg_ty, ctx.pool) {
+            } else if lowered.value == super::ValueAbi::Enum {
                 // M11 enum arg: a single slot address — the existing
                 // slot for Borrow, a fresh tag + active-payload copy
                 // for Move/Copy.
@@ -1708,7 +1713,7 @@ impl<M: Module> Codegen<M> {
         // write the aggregate through a fresh struct slot. Scalar and
         // void callees have no sret word.
         let ret_ty = ctx.tir.inst(r).ty;
-        let sret = if is_fat_type(ret_ty, ctx.pool) {
+        let sret = if abi.result == super::ValueAbi::Fat {
             let slot = out_slot.unwrap_or_else(|| {
                 builder.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
@@ -1719,12 +1724,12 @@ impl<M: Module> Codegen<M> {
             let out = builder.ins().stack_addr(ctx.int_type, slot, 0);
             values.insert(0, out);
             Some(out)
-        } else if is_struct_type(ret_ty, ctx.pool) {
+        } else if abi.result == super::ValueAbi::Struct {
             let slot = Self::struct_slot(builder, ctx, ret_ty);
             let out = builder.ins().stack_addr(ctx.int_type, slot, 0);
             values.insert(0, out);
             Some(out)
-        } else if is_enum_type(ret_ty, ctx.pool) {
+        } else if abi.result == super::ValueAbi::Enum {
             let slot = Self::enum_slot(builder, ctx, ret_ty);
             let out = builder.ins().stack_addr(ctx.int_type, slot, 0);
             values.insert(0, out);
@@ -1732,6 +1737,11 @@ impl<M: Module> Codegen<M> {
         } else {
             None
         };
+        if values.len() != abi.signature.params.len() || ret_ty != abi.result_type {
+            return Err(format!(
+                "call '{name_str}' has an incompatible argument or return layout"
+            ));
+        }
         Ok(MarshalledArgs {
             values,
             sret,
@@ -1775,9 +1785,12 @@ impl<M: Module> Codegen<M> {
                 ctx.pool.str(lhs_name)
             )
         })?;
+        let binding = ctx.sidecar.assign_binding[assign_ref.index()]
+            .ok_or_else(|| "fat assignment has no declaring binding".to_string())?;
+        Self::require_fat_storage_binding(locals, binding)?;
         // Home-backed binding: push mutates the home in place — no
         // spill, and the "reload" loads below only feed the cached
-        // repr the free sweep keys on.
+        // representation that later consumers read.
         let addr = match Self::fat_home_addr(builder, ctx, lhs_name) {
             Some(addr) => addr,
             None => {
@@ -1833,9 +1846,7 @@ impl<M: Module> Codegen<M> {
             builder.def_var(locals.cap, nc);
         }
         // The concat inst stands in for the value the binding now
-        // holds. Caching its repr lets the end-of-statement sweep fire
-        // Frees anchored on the concat (e.g. a heap rhs temp) exactly
-        // as the allocating path does.
+        // holds. Consumers read this representation; Flow positions fire cleanup.
         let repr = if matches!(ctx.pool.kind(concat.ty), TypeKind::Bytes) {
             ValueRepr::Bytes {
                 ptr: np,
