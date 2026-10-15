@@ -15,13 +15,11 @@ fn unwrap_or(opt: Option, default: int) -> int:
 			return default
 
 fn describe_color(color: Color) -> str:
-	match color:
-		Color.Red:
-			return "red"
-		Color.Green:
-			return "green"
-		Color.Blue:
-			return "blue"
+	description = match color:
+		Color.Red: "red"
+		Color.Green: "green"
+		Color.Blue: "blue"
+	return description
 
 fn describe_number(n: int) -> str:
 	return match n:
