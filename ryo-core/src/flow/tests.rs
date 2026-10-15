@@ -1199,23 +1199,30 @@ fn fire_points_loop_payload_resolves_the_exit_block() {
 }
 
 #[test]
-fn fire_points_while_compound_condition_is_non_exact() {
+fn fire_points_while_compound_condition_resolves_the_loop_exit() {
     let mut cx = Ctx::new();
     let bool_ty = cx.pool.bool_();
     let t = cx.pool.intern_str("t");
     let mut b = cx.builder();
     // `while t and t:` — the and-split terminates the header block, so
-    // the header's terminator is not the loop test: the documented
-    // non-exact fallback (the payload block's terminator point).
+    // the header's terminator is not the loop test: the test is located
+    // through the condition's blocks and the completion point resolves
+    // EXACTLY to the exit block's terminator point (the same bucket the
+    // simple-condition shape resolves to).
     let lhs = b.var(t, bool_ty, sp());
     let rhs = b.var(t, bool_ty, sp());
     let cond = b.binary(TirTag::BoolAnd, bool_ty, lhs, rhs, sp());
     let body_read = b.var(t, bool_ty, sp());
     let body_expr = b.unary(TirTag::ExprStmt, cx.void, body_read, sp());
     let whl = b.while_loop(cond, &[body_expr], cx.void, sp());
-    let tir = b.finish(&[whl]);
+    // A post-loop statement lands in the exit block, so the exit's
+    // terminator ordinal is distinct from its entry ordinal — the
+    // resolution must land at the terminator, not the entry.
+    let tail_read = b.var(t, bool_ty, sp());
+    let tail_expr = b.unary(TirTag::ExprStmt, cx.void, tail_read, sp());
+    let tir = b.finish(&[whl, tail_expr]);
 
-    let flow = Flow::build(&tir, &cx.pool);
+    let mut flow = Flow::build(&tir, &cx.pool);
     let fp = FirePoints::new(&flow);
     assert!(
         matches!(flow.term(flow.entry), Terminator::While { .. }),
@@ -1233,8 +1240,37 @@ fn fire_points_while_compound_condition_is_non_exact() {
         matches!(flow.term(header), Terminator::Branch { .. }),
         "compound condition: the header is an and-split, not the loop test"
     );
-    // Entry holds no steps: the fallback point is (entry, 0), marked
-    // NON-exact.
+    // The exit block holds the post-loop statement.
+    let test_block = flow
+        .forward_order()
+        .find(|&blk| matches!(flow.term(blk), Terminator::WhileTest { .. }))
+        .expect("the loop test is reachable through the condition");
+    let exit = match flow.term(test_block) {
+        Terminator::WhileTest { exit, .. } => *exit,
+        other => panic!("test block terminates in the test: {other:?}"),
+    };
+    assert_eq!(
+        step_insts(&flow, exit),
+        vec![tail_read, tail_expr],
+        "the post-loop statement is the exit block's steps"
+    );
+    let exit_term = pt(exit, flow.block_steps(exit).len() as u32);
+    assert_eq!(
+        fp.resolve_after_step(whl),
+        AfterStepFire::Payload(FireVerdict::Resolved(exit_term))
+    );
+    assert_eq!(
+        fp.resolve(DropPosition::AfterStep { inst: whl }),
+        FireVerdict::Resolved(exit_term)
+    );
+
+    // A header whose matching test is unreachable (a malformed
+    // hand-built body — the test block's terminator destroyed) keeps
+    // the documented NON-exact fallback: the payload block's terminator
+    // point as a lower bound, never a guess.
+    let test_idx = test_block.0 as usize;
+    flow.terms[test_idx] = Terminator::ReturnVoid;
+    let fp = FirePoints::new(&flow);
     assert_eq!(
         fp.resolve_after_step(whl),
         AfterStepFire::Payload(FireVerdict::NonExact(pt(flow.entry, 0)))

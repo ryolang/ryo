@@ -372,3 +372,38 @@ fn while_body_return_choose_aot_run_prints_hello() {
         "choose(true) must return the in-loop value"
     );
 }
+
+#[test]
+fn compound_condition_loop_view_aot_run_stdout_exact() {
+    // AOT leg of the compound-condition loop-view regression (JIT leg:
+    // `test_view_in_and_condition_loop` in integration_views.rs). A
+    // heap str sliced to a view and printed in an `and`-condition loop:
+    // the base's loop-completion cleanup must validate and fire after
+    // the loop, and the compiled binary must print the view each
+    // iteration.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\ts = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tmut i = 0\n\twhile i < 2 and true:\n\t\tprint(v)\n\t\ti += 1\n";
+    let test_file = create_test_file(temp_dir.path(), "compound_loop_view_aot.ryo", code);
+
+    let build_output = run_ryo_build(&test_file, temp_dir.path());
+    assert!(
+        build_output.status.success(),
+        "ryo build failed. STDERR: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    let binary_path = exe_path(temp_dir.path(), "compound_loop_view_aot");
+    let run_output = Command::new(&binary_path)
+        .output()
+        .expect("Failed to execute compiled binary");
+    assert!(
+        run_output.status.success(),
+        "compiled binary should exit 0. stderr: {}",
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run_output.stdout),
+        "0101",
+        "the view must print each iteration, base released after the loop"
+    );
+}

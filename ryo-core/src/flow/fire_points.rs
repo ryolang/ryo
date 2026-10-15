@@ -32,14 +32,18 @@
 //!   non-diverging arm's continuation block (empty when every arm
 //!   diverges — the anchor can never fire); a `match` (`Switch`)
 //!   resolves to its join block (empty when all arms diverge); a
-//!   `while`/`for` resolves to its exit block; `Return`/`Break`/
+//!   `while`/`for` resolves to its exit block — the test terminator
+//!   (`WhileTest`/`ForTest`) reachable through the condition's blocks
+//!   carries the `exit`, so a compound condition (`and`/`or`/`match`,
+//!   which cuts the header so its terminator is not the loop test) is
+//!   located by a bounded successor search from the header and resolves
+//!   EXACTLY to the exit block's terminator point, the same way the
+//!   bucket fires at the exit prologue. Only a header whose matching
+//!   test is genuinely unreachable (a malformed hand-built body) keeps
+//!   the NON-exact fallback: the payload block's terminator as a lower
+//!   bound (see [`FireVerdict::NonExact`]). `Return`/`Break`/
 //!   `Continue` (and any other payload) resolve to the payload block's
-//!   terminator point. A `while` whose header carries a compound
-//!   condition (`and`/`or`/`match` — the header's terminator is not the
-//!   loop test) resolves to the payload block's terminator as a
-//!   NON-exact point: the bucket still fires at the loop exit, but the
-//!   precise modeling is unproven, so consumers must treat the point as
-//!   a lower bound (see [`FireVerdict::NonExact`]).
+//!   terminator point.
 //! - Anything else — an anchor that is neither a step nor a terminator
 //!   payload, or a block id the body does not contain — is
 //!   [`FireVerdict::Unresolved`]: internal schedule corruption. The
@@ -87,9 +91,10 @@ pub struct FirePoint {
 }
 
 /// The resolution of a [`DropPosition`]: an exactness-verdict taxonomy
-/// for consumers. `RESOLVED` points are exact; `NON_EXACT` is the
-/// compound loop-condition fallback (pairs containing one are NOT
-/// PROVED — counted, never silently validated); `UNRESOLVED` is
+/// for consumers. `RESOLVED` points are exact (compound loop conditions
+/// included — the loop exit resolves through the condition's blocks);
+/// `NON_EXACT` is the unresolvable-loop fallback (pairs containing one
+/// are NOT PROVED — counted, never silently validated); `UNRESOLVED` is
 /// internal schedule corruption (a validation error, never guessed).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FireVerdict {
@@ -100,9 +105,12 @@ pub enum FireVerdict {
     /// real verdict: the anchor can never fire (every arm diverges / no
     /// join) — the event is excluded from path checks.
     ResolvedPerArm(Vec<FirePoint>),
-    /// The compound loop-condition fallback: the bucket fires at or
-    /// after this point (never before), but the precise modeling is
-    /// unproven. Consumers must treat the point as a lower bound.
+    /// The unresolvable-loop fallback: a compound-condition loop whose
+    /// matching test terminator is not reachable through the condition's
+    /// blocks (a malformed hand-built body — well-formed bodies always
+    /// resolve exactly). The bucket fires at or after this point (never
+    /// before), but the precise modeling is unproven. Consumers must
+    /// treat the point as a lower bound.
     NonExact(FirePoint),
     /// The anchor is neither a Flow step nor a terminator payload, or
     /// the named block does not exist. Never guess — surface as a
@@ -240,6 +248,39 @@ impl<'f> FirePoints<'f> {
         }
     }
 
+    /// The exit block of the loop whose test terminator
+    /// (`WhileTest`/`ForTest` carrying `loop_inst`) is reachable
+    /// through the condition's blocks from `header`. Bounded successor
+    /// search (one visit per block); the condition region is acyclic
+    /// and ends at the test, so the first matching test is the loop's
+    /// own. `None` when no matching test is reachable — a malformed
+    /// hand-built body; the caller falls back to `NonExact` (a lower
+    /// bound, never a guess).
+    fn loop_test_exit(&self, header: BlockId, loop_inst: TirRef) -> Option<BlockId> {
+        let mut visited = vec![false; self.flow.blocks.len()];
+        let mut stack = vec![header];
+        while let Some(b) = stack.pop() {
+            if visited[b.0 as usize] {
+                continue;
+            }
+            visited[b.0 as usize] = true;
+            match self.flow.term(b) {
+                Terminator::WhileTest {
+                    loop_inst: li,
+                    exit,
+                    ..
+                }
+                | Terminator::ForTest {
+                    loop_inst: li,
+                    exit,
+                    ..
+                } if *li == loop_inst => return Some(*exit),
+                _ => stack.extend_from_slice(self.flow.successors(b)),
+            }
+        }
+        None
+    }
+
     /// Construct-completion points of a terminator-payload anchor.
     /// `block` is the block whose terminator carries `inst` (the
     /// caller resolved it via `term_block_of`).
@@ -288,10 +329,14 @@ impl<'f> FirePoints<'f> {
             }
             // A loop completes at its exit block. A compound condition
             // (and/or/match) cuts the header so its terminator is not
-            // the loop test: the bucket still fires at the exit, but
-            // the modeling is unproven — the documented non-exact
-            // fallback (the precise exit point is a lower bound).
-            Terminator::While { header, .. } | Terminator::For { header, .. } => {
+            // the loop test: the test is located through the
+            // condition's blocks (bounded successor search, matching
+            // `loop_inst`) and the completion point is the exit
+            // block's terminator point — exact, the same bucket the
+            // simple-condition shape resolves to. A header with no
+            // matching test reachable is a malformed body: the
+            // documented non-exact fallback (never guessed).
+            Terminator::While { header, loop_inst } | Terminator::For { header, loop_inst } => {
                 match self.flow.term(*header) {
                     Terminator::WhileTest { exit, .. } | Terminator::ForTest { exit, .. } => {
                         FireVerdict::Resolved(FirePoint {
@@ -299,7 +344,10 @@ impl<'f> FirePoints<'f> {
                             ordinal: 0,
                         })
                     }
-                    _ => FireVerdict::NonExact(self.terminator_point(block)),
+                    _ => match self.loop_test_exit(*header, *loop_inst) {
+                        Some(exit) => FireVerdict::Resolved(self.terminator_point(exit)),
+                        None => FireVerdict::NonExact(self.terminator_point(block)),
+                    },
                 }
             }
             // Return/Break/Continue (and any other payload): the

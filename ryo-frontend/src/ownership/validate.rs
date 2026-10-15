@@ -52,34 +52,47 @@
 //!    paths through it; a return-epilogue OBSERVATION is not a release; a
 //!    final Moved / missing / unseated state is not proof of coverage.
 //!    A generation-ending write is a discharge ONLY when the old
-//!    generation's release fires on the path before the store (Gap 6:
-//!    the write alone establishes the new generation; it never releases
+//!    generation's release fires on the path before the store (the
+//!    write alone establishes the new generation; it never releases
 //!    the old) — reaching the write unreleased is a LEAK and flags.
 //!
 //! Conservative corners (leak direction unless stated — unknown shapes
-//! pass; flag only PROVABLE violations). The NOT PROVED categories:
-//! - Events whose position resolves `NonExact` (the resolver's compound
-//!   loop-condition fallback): pairs/obligations containing one are not
-//!   provable and are counted.
+//! pass; flag only PROVABLE violations). The NOT PROVED categories
+//! (each counted in the per-body [`ValidationSummary`], which the check
+//! path propagates on `FunctionSidecar::validation` — the deterministic
+//! accessor for tests/tooling; the `RYO_CLEANUP_SUMMARY` env printer is
+//! a convenience only):
+//! - Positions resolving `NonExact` (the resolver's unresolvable-loop
+//!   fallback — a compound-condition header whose matching test is
+//!   unreachable, i.e. a malformed body): the position, and every
+//!   pair/obligation/view/promo check containing one, is not provable
+//!   and is counted, never asserted.
 //! - Events on all-diverging constructs (an empty `ResolvedPerArm`) never
 //!   fire — excluded from the path checks.
-//! - `PromoFree` positions are checked for resolution but are not yet
-//!   events (parity with the pre-existing checks; the promo pairing
-//!   checks land with the promo identity work).
 //! - Static-literal targets (see check 2).
 //! - Reaching a `Call{never}`/`Unreachable` terminator counts as covered
 //!   (dead path, leak direction).
-//! - Events/obligations in blocks unreachable from the entry are skipped.
+//! - Events/obligations/view checks in blocks unreachable from the entry
+//!   are EXCLUDED and counted separately (`*_unreachable`) — unreachable
+//!   code creates no obligation, a different category from unknown proof.
 //! - Loop cycles use an optimistic must-fixpoint: a cycle without an
 //!   in-cycle event stays covered (a forever-looping path leaks).
-//! - View-backed storage: a release that can fire before a reachable
-//!   view use is PROVEN INVALID (Gap 4, the UAF direction). The
-//!   leak-direction coverage for view bases stays a conservative
-//!   corner: the P2/P5 freeze machinery anchors base cleanup at view
-//!   last-use sites that arm-scoping can place off the running path —
-//!   per-path coverage needs the machinery to emit per-path events
-//!   (a follow-up); groups whose releases are freeze-anchored skip the
-//!   coverage must-analysis (the view-protection check still applies).
+//! - View-backed storage: views protect the backing allocation but never
+//!   discharge it — the base group's coverage runs through the same
+//!   must-analysis (no exemption), and a release that can fire before a
+//!   reachable view use — following loop-closing edges, so a release at
+//!   the end of iteration N reaches a use at the start of iteration N+1 —
+//!   is PROVEN INVALID (the UAF direction; the check lives in the
+//!   `views` child module).
+//!
+//! Intentionally UNSUPPORTED internal shapes (each must surface as NOT
+//! PROVED — counted, never silently Proven — so
+//! `ValidationSummary::proof_complete` stays honest):
+//! - A `NonExact` position (above) — nothing downstream of it proves.
+//! - A view producer whose final use is not a Flow step (the
+//!   `views_not_proved` count).
+//! - A promotion alloc/release whose position is `NonExact`
+//!   (the `promo_pairings_not_proved` count).
 //!
 //! All checks are debug-only, failing loudly (panic) on a PROVEN INVALID
 //! verdict — mirroring the existing validate.rs style.
@@ -89,9 +102,33 @@ pub(crate) use ryo_core::flow::fire_points::FirePoint as Point;
 use ryo_core::flow::fire_points::{FirePoints, FireVerdict};
 use ryo_core::flow::{BlockId, DropPosition, Flow, Place, PlaceId, Terminator, WriteKind};
 use ryo_core::ownership::FunctionSidecar;
+pub(crate) use ryo_core::ownership::ValidationSummary;
 use ryo_core::tir::{Tir, TirRef, TirTag};
 use ryo_core::types::InternPool;
 use std::collections::{HashMap, HashSet};
+
+mod promotions;
+mod replacements;
+mod views;
+pub(crate) use promotions::validate_promo;
+pub(crate) use replacements::validate_displacement;
+pub(crate) use views::validate_view_protection;
+
+/// The shared read-only context every check entry point consumes:
+/// the event model, the generation tables, and the shared
+/// firing-point resolver, built once by the validation entry. One
+/// argument instead of per-check plumbing; children read what they
+/// need and never reach sideways (each depends only on this module's
+/// shared model).
+pub(crate) struct Ctx<'a> {
+    pub(crate) tir: &'a Tir,
+    pub(crate) flow: &'a Flow,
+    pub(crate) own: &'a Ownership,
+    pub(crate) sidecar: &'a FunctionSidecar,
+    pub(crate) fire_points: &'a FirePoints<'a>,
+    pub(crate) events: &'a HashMap<PlaceId, Vec<Event>>,
+    pub(crate) table: &'a GenerationTable,
+}
 
 /// Validate the cleanup contract for one function body. Debug-only;
 /// `check` invokes this after `analyze_function` per body, while the
@@ -114,42 +151,49 @@ pub(crate) fn validate_cleanup(
     // interpretation, consumed by position validation and the event
     // model alike.
     let fire_points = FirePoints::new(flow);
-    validate_positions(flow, &fire_points, sidecar);
+    let mut summary = ValidationSummary::default();
+    validate_positions(flow, &fire_points, sidecar, &mut summary);
     validate_no_duplicate_destruction(&places, flow, sidecar);
     let idx = StepIndex::build(flow);
     let events = collect_events(tir, &places, flow, &fire_points, sidecar, own);
     let table = generation_table(tir, flow, pool, &idx, sidecar);
-    let mut summary = ValidationSummary::default();
     #[cfg(test)]
     record_test_ownership(tir.name, own.clone());
     if body_clean {
-        validate_no_path_double_destruction(tir, flow, own, sidecar, &events, &table, &mut summary);
-        validate_path_coverage(tir, flow, pool, own, sidecar, &events, &table, &mut summary);
-        crate::ownership::gaps::validate_view_protection(
+        let ctx = Ctx {
             tir,
             flow,
             own,
             sidecar,
-            &events,
-            &table,
-            &mut summary,
-        );
-        crate::ownership::gaps::validate_displacement(tir, flow, own, sidecar, &mut summary);
-        crate::ownership::gaps::validate_promo(flow, &fire_points, sidecar, &mut summary);
+            fire_points: &fire_points,
+            events: &events,
+            table: &table,
+        };
+        validate_no_path_double_destruction(tir, flow, own, sidecar, &events, &table, &mut summary);
+        validate_path_coverage(tir, flow, pool, own, sidecar, &events, &table, &mut summary);
+        validate_view_protection(&ctx, &mut summary);
+        validate_displacement(&ctx, &mut summary);
+        validate_promo(&ctx, &mut summary);
         // Debug-only tally surfacing: the NOT PROVED corners are listed
         // here (per body) instead of vanishing into a silent skip.
-        if summary.any_not_proved() && std::env::var_os("RYO_CLEANUP_SUMMARY").is_some() {
+        if !summary.proof_complete() && std::env::var_os("RYO_CLEANUP_SUMMARY").is_some() {
             eprintln!(
-                "[cleanup-summary] {}: pairs examined={} not_proved={}; obligations={}                  not_proved={}; views {}+{}; displacements={}; promo pairings={}",
+                "[cleanup-summary] {}: positions {}+{}; pairs examined={} not_proved={};                  obligations={} not_proved={} unreachable={}; events unreachable={};                  views {}+{} unreachable={}; displacements={}; promo pairings={} not_proved={}",
                 pool.str(tir.name),
+                summary.positions,
+                summary.positions_not_proved,
                 summary.pairs_examined,
                 summary.pairs_not_proved,
                 summary.obligations,
                 summary.obligations_not_proved,
+                summary.obligations_unreachable,
+                summary.events_unreachable,
                 summary.view_checks,
                 summary.views_not_proved,
+                summary.views_unreachable,
                 summary.displacements,
-                summary.promo_pairings
+                summary.promo_pairings,
+                summary.promo_pairings_not_proved
             );
         }
     }
@@ -248,10 +292,11 @@ pub(crate) fn take_test_ownership(name: ryo_core::types::StringId) -> Option<Own
 /// `exact` comes from the shared resolver's verdict (`FireVerdict`):
 /// every resolved shape is exact — a stepped `AfterStep` resolves to its
 /// enclosing statement's boundary, the same point the backend's fire
-/// map builds from. The single non-exact shape is the compound
-/// loop-condition fallback (`FireVerdict::NonExact`): its ordinal is a
-/// lower bound, not the fire point — pairs involving a non-exact event
-/// are not PROVABLE double-fires (counted in `DoubleFireSummary`,
+/// map builds from. The single non-exact shape is the unresolvable-loop
+/// fallback (`FireVerdict::NonExact` — a compound-condition header whose
+/// matching test is unreachable, i.e. a malformed body): its ordinal is
+/// a lower bound, not the fire point — pairs involving a non-exact event
+/// are not PROVABLE double-fires (counted in [`ValidationSummary`],
 /// never silently complete).
 /// One executable cleanup event: a RELEASE frees the generation's buffer
 /// in this function; a TRANSFER moves ownership out (the buffer leaves
@@ -706,7 +751,7 @@ pub(crate) fn collect_events(
             );
         }
     }
-    // Promotion-buffer releases (Gap 5): the promoted copy is a
+    // Promotion-buffer releases: the promoted copy is a
     // DISTINCT identity from the borrowed original — keyed here under
     // the base's place so the double-discharge check relates releases
     // of one buffer (borrowed params carry no callee obligations, so
@@ -747,7 +792,8 @@ pub(crate) fn collect_events(
 ///   establish it).
 /// - `cut`: block → sorted step ordinals that END a generation —
 ///   `Replace`/`FieldReplace` writes, whose previously-seated content
-///   is displaced (Gap 6: reaching a cut unreleased is a leak; events
+///   is displaced (a reseat never releases the old content: reaching a
+///   cut unreleased is a leak; events
 ///   across a cut name different buffers). A seating write (`Init`, or
 ///   a `Replace` seating its value) does NOT cut — the same buffer
 ///   continues in the new home. In-place `Mutate` keeps the storage
@@ -1151,20 +1197,34 @@ impl TargetPlaces {
 /// (a) Every scheduled position resolves through the shared resolver —
 /// `FireVerdict::Unresolved` (an anchor that is neither a Flow step nor
 /// a terminator payload, or a block the body does not contain) is a
-/// VALIDATION ERROR: unknown is never "treated as validated". And every
-/// conditional-dead-drop block is one of its `IfStmt`'s RECORDED cascade
-/// arms (the fall-through block included).
-pub(crate) fn validate_positions(flow: &Flow, fire_points: &FirePoints, sidecar: &FunctionSidecar) {
+/// VALIDATION ERROR: unknown is never "treated as validated". A
+/// `NonExact` resolution (the resolver's unresolvable-loop fallback) is
+/// not an error — it is NOT PROVED, counted in the summary. And every
+/// conditional-dead-drop block is one of its `IfStmt`'s RECORDED
+/// cascade arms (the fall-through block included).
+pub(crate) fn validate_positions(
+    flow: &Flow,
+    fire_points: &FirePoints,
+    sidecar: &FunctionSidecar,
+    summary: &mut ValidationSummary,
+) {
     for fp in sidecar
         .drops
         .iter()
         .map(|d| &d.position)
         .chain(sidecar.promotion_frees.iter().map(|p| &p.position))
     {
-        debug_assert!(
-            !matches!(fire_points.resolve(*fp), FireVerdict::Unresolved),
-            "cleanup position {fp:?} does not resolve: the anchor is neither a Flow step nor a terminator payload, or the block does not exist"
-        );
+        summary.positions += 1;
+        match fire_points.resolve(*fp) {
+            FireVerdict::Unresolved => {
+                debug_assert!(
+                    false,
+                    "cleanup position {fp:?} does not resolve: the anchor is neither a Flow step nor a terminator payload, or the block does not exist"
+                );
+            }
+            FireVerdict::NonExact(_) => summary.positions_not_proved += 1,
+            FireVerdict::Resolved(_) | FireVerdict::ResolvedPerArm(_) => {}
+        }
     }
     // BlockStart drops are either match-arm-start payload destruction
     // or conditional dead drops; tell them apart by the same identity
@@ -1265,46 +1325,6 @@ pub(crate) fn validate_no_duplicate_destruction(
     }
 }
 
-/// Debug tally of the whole validator: what each check examined and
-/// what it could NOT prove. Every check's verdict is PROVEN VALID /
-/// PROVEN INVALID / NOT PROVED; the not-proved counts are the
-/// conservative corners made visible — a body that skipped nothing
-/// reports zeros, never "complete" by omission. See the module header
-/// for the category list.
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct ValidationSummary {
-    /// (event, event) pairs the double-discharge check examined at its
-    /// provability gate (both ends reachable, after the designed-dedup
-    /// exemptions).
-    pub pairs_examined: usize,
-    /// Pairs containing a NON-exact event — the resolver's compound
-    /// loop-condition fallback (`FireVerdict::NonExact`): NOT PROVED,
-    /// counted here.
-    pub pairs_not_proved: usize,
-    /// Obligation points the coverage must-analysis examined.
-    pub obligations: usize,
-    /// Obligations whose covering event is NON-exact — NOT PROVED,
-    /// counted here.
-    pub obligations_not_proved: usize,
-    /// Promotion allocation/release pairings examined (Gap 5).
-    pub promo_pairings: usize,
-    /// Reassignment displacements examined (Gap 6): a Mutate hazard
-    /// whose store names no displacement release is a PROVEN INVALID
-    /// leak of the old generation.
-    pub displacements: usize,
-    /// (release, view-final-use) reachability checks performed (Gap 4).
-    pub view_checks: usize,
-    /// View-protection checks that could not be proved (the view's
-    /// final use did not resolve to a point) — NOT PROVED, counted.
-    pub views_not_proved: usize,
-}
-
-impl ValidationSummary {
-    fn any_not_proved(&self) -> bool {
-        self.pairs_not_proved > 0 || self.obligations_not_proved > 0 || self.views_not_proved > 0
-    }
-}
-
 /// (d) No PATH double destruction. Two events of one place-union group
 /// whose points reach each other through the CFG with no intervening
 /// Init/Replace write (or producer step / token adoption) of any member
@@ -1315,7 +1335,10 @@ impl ValidationSummary {
 /// skipped here; distinct targets at one position are check (b)'s job
 /// and also fire, so they are flagged here too (a same-point reach is a
 /// path). O(events × blocks): one DFS per event, visited-set on points —
-/// no per-pair matrices.
+/// no per-pair matrices. The per-body tally type lives in `ryo-core`
+/// (`ValidationSummary`) so the check path propagates it to the consumer
+/// on `FunctionSidecar::validation`; see its docs and the module header
+/// for the category list.
 pub(crate) fn validate_no_path_double_destruction(
     tir: &Tir,
     flow: &Flow,
@@ -1414,6 +1437,9 @@ pub(crate) fn validate_no_path_double_destruction(
                 });
         for e1 in evs {
             if !reachable.contains(&e1.point.block) {
+                // Never fires — excluded from the path checks, counted
+                // (unreachable events create no false obligations).
+                summary.events_unreachable += 1;
                 continue;
             }
             let mut visited: HashSet<Point> = HashSet::new();
@@ -1502,9 +1528,9 @@ pub(crate) fn validate_no_path_double_destruction(
                         // Provability gate: a pair is only PROVABLE when
                         // both events fire exactly where modeled (every
                         // resolved shape is exact except the resolver's
-                        // compound loop-condition fallback); a pair
-                        // containing a non-exact event is NOT PROVED —
-                        // counted, never silently valid.
+                        // unresolvable-loop fallback); a pair containing
+                        // a non-exact event is NOT PROVED — counted,
+                        // never silently valid.
                         summary.pairs_examined += 1;
                         if !e1.exact || !e2.exact {
                             summary.pairs_not_proved += 1;
@@ -1565,7 +1591,7 @@ pub(crate) fn validate_no_path_double_destruction(
 
 /// The coverage verdict for one scan: `Proven` (an exact event
 /// discharges every path), `NotProved` (a non-exact event does — the
-/// resolver's compound loop-condition fallback; counted, never silently
+/// resolver's unresolvable-loop fallback; counted, never silently
 /// valid), `Uncovered` (a path reaches an exit or a replacement write
 /// with no discharge — a PROVEN INVALID leak).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -1624,8 +1650,8 @@ fn push_successors(
 /// There is NO escape predicate: a transfer covers only the paths
 /// through it, a final Moved/unseated state is not evidence, and a
 /// generation-ending write discharges the old generation ONLY when its
-/// release fired on the path (reaching the write unreleased is a LEAK —
-/// Gap 6). `must[b]` is a tri-state lattice (Proven > NotProved >
+/// release fired on the path (reaching the write unreleased is a LEAK).
+/// `must[b]` is a tri-state lattice (Proven > NotProved >
 /// Uncovered) so non-exact covering events stay countable as NOT
 /// PROVED instead of silently valid.
 #[allow(clippy::too_many_arguments)]
@@ -1674,25 +1700,12 @@ pub(crate) fn validate_path_coverage(
         if group.iter().all(|p| !flow.place(*p).owns_storage(pool)) {
             continue; // views never own
         }
-        // View-freeze-anchored cleanups (the conservative corner): the
-        // P2/P5 machinery anchors a base's destruction at the view's
-        // last use, and arm-scoping can place that anchor off the CFG
-        // path that actually runs (an arm-local view read with a
-        // read-free sibling arm). The machinery OWNS those anchors —
-        // per-path coverage for view bases needs it to emit per-path
-        // events (a follow-up) — so the coverage check skips groups
-        // whose releases are freeze-anchored. The Gap-4 view-protection
-        // check (the UAF direction) still applies in full.
-        let touches_view = group.iter().any(|p| {
-            matches!(flow.place(*p), Place::View { .. })
-                || flow
-                    .places
-                    .iter()
-                    .any(|q| matches!(q, Place::View { base, .. } if *base == *p))
-        });
-        if touches_view {
-            continue;
-        }
+        // View-backed storage is covered like every other group (the
+        // exemption is gone): views protect the backing allocation but
+        // never discharge it — the base group's releases/transfers must
+        // cover every path from each establishment. The
+        // view-protection check (the UAF direction, `views` module)
+        // still applies in full.
         // Merged events, establishments, and cuts of the whole group.
         let group_events: Vec<Event> = group
             .iter()
@@ -1736,6 +1749,9 @@ pub(crate) fn validate_path_coverage(
         }
         for (&b, ords) in &group_est {
             if !reachable.contains(&b) {
+                // Unreachable code creates no obligation (a separate
+                // category from unknown proof).
+                summary.obligations_unreachable += ords.len();
                 continue;
             }
             for &ord in ords {
@@ -1750,6 +1766,8 @@ pub(crate) fn validate_path_coverage(
                 for point in points {
                     if reachable.contains(&point.block) {
                         obligations.push(*point);
+                    } else {
+                        summary.obligations_unreachable += 1;
                     }
                 }
             }
@@ -1808,7 +1826,7 @@ pub(crate) fn must_fixup(
 /// Scan block `b` from ordinal `from`: a group event at any ordinal
 /// discharges with the event's exactness; a generation CUT (a
 /// Replace/FieldReplace displacing the seated content) ends the old
-/// generation UNdischarged (Gap 6 — the write alone establishes the new
+/// generation UNdischarged (the write alone establishes the new
 /// generation and never releases the old; reaching it unreleased is a
 /// leak); falling off the end delegates to the terminator — real exits
 /// (Return/ReturnVoid) are Uncovered, `Call{never}`/`Unreachable` are

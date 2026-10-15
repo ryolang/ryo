@@ -113,6 +113,90 @@ pub struct FunctionSidecar {
     /// releases (`promotion_frees`): the promoted copy is a DISTINCT
     /// identity from the borrowed original.
     pub promo_allocs: Vec<PromoFree>,
+    /// Debug-only cleanup-validation tally for this body (the
+    /// `ryo-frontend` `ownership::validate` pass fills it in debug
+    /// builds; `None` in release builds — validation did not run and
+    /// the body must NOT be labeled fully validated). See
+    /// [`ValidationSummary`].
+    pub validation: Option<ValidationSummary>,
+}
+
+/// Debug tally of the whole cleanup validator (see the
+/// `ryo-frontend` `ownership::validate` module): what each check
+/// examined and what it could NOT prove. Every check's verdict is
+/// PROVEN VALID / PROVEN INVALID / NOT PROVED; the not-proved counts
+/// are the conservative corners made visible — a body that skipped
+/// nothing reports zeros, never "complete" by omission.
+///
+/// Propagated on the check path: `ryo-frontend`'s debug-only validator
+/// fills one summary per body into `FunctionSidecar::validation`, so
+/// the consumer (`ownership::check`'s caller — tests, tooling, the
+/// driver) inspects the counts deterministically. `None` there means
+/// validation did not run (release builds), which must never be
+/// labeled "fully validated".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ValidationSummary {
+    /// Drop/promo-free positions examined for resolution.
+    pub positions: usize,
+    /// Positions resolving `FireVerdict::NonExact` (the resolver's
+    /// unresolvable-loop fallback): NOT PROVED, counted here.
+    pub positions_not_proved: usize,
+    /// (event, event) pairs the double-discharge check examined at its
+    /// provability gate (both ends reachable, after the designed-dedup
+    /// exemptions).
+    pub pairs_examined: usize,
+    /// Pairs containing a NON-exact event — the resolver's
+    /// unresolvable-loop fallback (`FireVerdict::NonExact`): NOT PROVED,
+    /// counted here.
+    pub pairs_not_proved: usize,
+    /// Obligation points the coverage must-analysis examined.
+    pub obligations: usize,
+    /// Obligations whose covering event is NON-exact — NOT PROVED,
+    /// counted here.
+    pub obligations_not_proved: usize,
+    /// Obligation points EXCLUDED because they live in blocks
+    /// unreachable from the entry — a separate category from unknown
+    /// proof: unreachable code creates no obligation.
+    pub obligations_unreachable: usize,
+    /// Events excluded from the path checks because their block is
+    /// unreachable from the entry (never fire; no false pair/obligations).
+    pub events_unreachable: usize,
+    /// Promotion allocation/release pairings examined.
+    pub promo_pairings: usize,
+    /// Promotion pairings whose coverage rested on a NON-exact event or
+    /// obligation point — NOT PROVED, counted here.
+    pub promo_pairings_not_proved: usize,
+    /// Reassignment displacements examined: a Mutate hazard whose store
+    /// names no displacement release is a PROVEN INVALID leak of the old
+    /// generation.
+    pub displacements: usize,
+    /// (release, view-final-use) reachability checks performed.
+    pub view_checks: usize,
+    /// View-protection checks that could not be proved — the view's
+    /// final use did not resolve to a point, or the release position is
+    /// NON-exact (an estimated lower bound cannot prove a hazard) — NOT
+    /// PROVED, counted.
+    pub views_not_proved: usize,
+    /// View checks EXCLUDED because the view use or the release sits in
+    /// a block unreachable from the entry — no obligation created.
+    pub views_unreachable: usize,
+}
+
+impl ValidationSummary {
+    /// The proof-completeness predicate: every check that ran PROVED
+    /// out — zero NOT PROVED anywhere. Unreachable exclusions do not
+    /// count against completeness (they create no obligations). A
+    /// supported-but-unproved shape makes this false; intentionally
+    /// unsupported internal shapes are documented in the validator's
+    /// module header and must surface as NOT PROVED (never Proven), so
+    /// they keep this predicate honest.
+    pub fn proof_complete(&self) -> bool {
+        self.positions_not_proved == 0
+            && self.pairs_not_proved == 0
+            && self.obligations_not_proved == 0
+            && self.promo_pairings_not_proved == 0
+            && self.views_not_proved == 0
+    }
 }
 
 impl FunctionSidecar {
@@ -131,6 +215,7 @@ impl FunctionSidecar {
             field_free_on_reassign: vec![None; arena_len],
             promotion_frees: Vec::new(),
             promo_allocs: Vec::new(),
+            validation: None,
         }
     }
 }

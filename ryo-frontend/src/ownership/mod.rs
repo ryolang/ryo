@@ -42,8 +42,6 @@ pub(crate) use merge::*;
 mod structs;
 pub(crate) use structs::*;
 #[cfg(debug_assertions)]
-pub(crate) mod gaps;
-#[cfg(debug_assertions)]
 mod validate;
 mod views;
 pub(crate) use views::*;
@@ -1038,7 +1036,7 @@ fn analyze_function(
             base: cand.base,
             span: tir.span(cand.view_inst),
         });
-        // Gap 5: the allocation identity — codegen promotes on the
+        // The allocation identity — codegen promotes on the
         // view write (flag-guarded conditional heap triple); the
         // validator pairs this point with the base's releases.
         sidecar.promo_allocs.push(PromoFree {
@@ -1267,7 +1265,9 @@ fn analyze_function(
     // errored body's best-effort schedule never reaches codegen).
     #[cfg(debug_assertions)]
     {
-        validate::validate_cleanup(tir, flow, pool, &own, sidecar, !sink.has_errors());
+        let summary =
+            validate::validate_cleanup(tir, flow, pool, &own, sidecar, !sink.has_errors());
+        sidecar.validation = Some(summary);
     }
 }
 

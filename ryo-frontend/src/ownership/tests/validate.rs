@@ -24,7 +24,12 @@ fn validator_accepts_straight_line_last_use() {
     let flow = build_flow(&tirs[0], &pool);
     let places = cv::TargetPlaces::build(&tirs[0], &flow, &pool);
     let fire_points = ryo_core::flow::fire_points::FirePoints::new(&flow);
-    cv::validate_positions(&flow, &fire_points, &sc);
+    cv::validate_positions(
+        &flow,
+        &fire_points,
+        &sc,
+        &mut cv::ValidationSummary::default(),
+    );
     cv::validate_no_duplicate_destruction(&places, &flow, &sc);
 }
 
@@ -38,7 +43,12 @@ fn validator_accepts_if_else_borrows() {
     let flow = build_flow(&tirs[0], &pool);
     let places = cv::TargetPlaces::build(&tirs[0], &flow, &pool);
     let fire_points = ryo_core::flow::fire_points::FirePoints::new(&flow);
-    cv::validate_positions(&flow, &fire_points, &sc);
+    cv::validate_positions(
+        &flow,
+        &fire_points,
+        &sc,
+        &mut cv::ValidationSummary::default(),
+    );
     cv::validate_no_duplicate_destruction(&places, &flow, &sc);
 }
 
@@ -58,7 +68,12 @@ fn validator_accepts_match_by_move_arm() {
     let flow = build_flow(&tirs[0], &pool);
     let places = cv::TargetPlaces::build(&tirs[0], &flow, &pool);
     let fire_points = ryo_core::flow::fire_points::FirePoints::new(&flow);
-    cv::validate_positions(&flow, &fire_points, &sc);
+    cv::validate_positions(
+        &flow,
+        &fire_points,
+        &sc,
+        &mut cv::ValidationSummary::default(),
+    );
     cv::validate_no_duplicate_destruction(&places, &flow, &sc);
 }
 
@@ -74,7 +89,12 @@ fn validator_accepts_loop_body_frees() {
     let flow = build_flow(&tirs[0], &pool);
     let places = cv::TargetPlaces::build(&tirs[0], &flow, &pool);
     let fire_points = ryo_core::flow::fire_points::FirePoints::new(&flow);
-    cv::validate_positions(&flow, &fire_points, &sc);
+    cv::validate_positions(
+        &flow,
+        &fire_points,
+        &sc,
+        &mut cv::ValidationSummary::default(),
+    );
     cv::validate_no_duplicate_destruction(&places, &flow, &sc);
 }
 
@@ -97,7 +117,12 @@ fn validator_rejects_drop_in_nonexistent_block() {
     });
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let fire_points = ryo_core::flow::fire_points::FirePoints::new(&flow);
-        cv::validate_positions(&flow, &fire_points, &sc);
+        cv::validate_positions(
+            &flow,
+            &fire_points,
+            &sc,
+            &mut cv::ValidationSummary::default(),
+        );
     }));
     assert!(r.is_err(), "a PreTerminator drop in block 999 must panic");
 }
@@ -128,7 +153,12 @@ fn validator_rejects_conditional_dead_drop_outside_recorded_arms() {
     });
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let fire_points = ryo_core::flow::fire_points::FirePoints::new(&flow);
-        cv::validate_positions(&flow, &fire_points, &sc);
+        cv::validate_positions(
+            &flow,
+            &fire_points,
+            &sc,
+            &mut cv::ValidationSummary::default(),
+        );
     }));
     assert!(
         r.is_err(),
@@ -242,7 +272,12 @@ fn validator_accepts_same_target_double_anchor_by_design() {
     let flow = build_flow(&tir, &pool);
     let places = cv::TargetPlaces::build(&tir, &flow, &pool);
     let fire_points = ryo_core::flow::fire_points::FirePoints::new(&flow);
-    cv::validate_positions(&flow, &fire_points, &sc);
+    cv::validate_positions(
+        &flow,
+        &fire_points,
+        &sc,
+        &mut cv::ValidationSummary::default(),
+    );
     cv::validate_no_duplicate_destruction(&places, &flow, &sc);
 }
 
@@ -291,7 +326,7 @@ fn run_path_checks(
     own: &Ownership,
     sc: &FunctionSidecar,
     no_escapes: bool,
-) {
+) -> cv::ValidationSummary {
     let tir = tirs
         .iter()
         .find(|t| build_flow(t, pool).blocks.len() == flow.blocks.len())
@@ -304,21 +339,23 @@ fn run_path_checks(
     let mut summary = cv::ValidationSummary::default();
     cv::validate_no_path_double_destruction(tir, flow, own, sc, &events, &table, &mut summary);
     cv::validate_path_coverage(tir, flow, pool, own, sc, &events, &table, &mut summary);
-    crate::ownership::gaps::validate_view_protection(
+    let ctx = cv::Ctx {
         tir,
         flow,
         own,
-        sc,
-        &events,
-        &table,
-        &mut summary,
-    );
-    crate::ownership::gaps::validate_displacement(tir, flow, own, sc, &mut summary);
-    crate::ownership::gaps::validate_promo(flow, &fire_points, sc, &mut summary);
+        sidecar: sc,
+        fire_points: &fire_points,
+        events: &events,
+        table: &table,
+    };
+    cv::validate_view_protection(&ctx, &mut summary);
+    cv::validate_displacement(&ctx, &mut summary);
+    cv::validate_promo(&ctx, &mut summary);
     let _ = no_escapes; // the escape predicate is gone — coverage is per-path events
+    summary
 }
 
-/// Negative pin (reviewer a): cleanup removed from one branch while the
+/// Negative pin: cleanup removed from one branch while the
 /// sibling branch retains its drop. `mut s = "a"; if true: s = "b"` —
 /// the pre-branch buffer's fall-through-path drop (a BlockStart
 /// conditional dead drop) is removed: the fall-through path leaks with
@@ -343,7 +380,7 @@ fn path_coverage_flags_branch_cleanup_removed() {
     run_path_checks(&tirs, &pool, &flow, &own, &sc, false);
 }
 
-/// Negative pin (reviewer b): destruction scheduled before a branch AND
+/// Negative pin: destruction scheduled before a branch AND
 /// again at its reachable join — the join copy is reachable from the
 /// pre-branch event with no intervening write, so both fire on one
 /// path. Constructed by cloning the conditional dead drop into the
@@ -399,7 +436,7 @@ fn path_double_destruction_flags_before_branch_and_at_join() {
     );
 }
 
-/// Negative pin (reviewer c): a return-path drop removed while the
+/// Negative pin: a return-path drop removed while the
 /// recorded return-epilogue observation remains — the observation is
 /// NOT an escape; the return path leaks.
 #[test]
@@ -477,7 +514,7 @@ fn path_checks_accept_by_design_double_anchor() {
     run_path_checks(std::slice::from_ref(&tir), &pool, &flow, &own, &sc, false);
 }
 
-/// Gap 1 pin: the `choose` reproducer. A value returned on one path
+/// Branch-returned value pin (the `choose` reproducer): a value returned on one path
 /// and destroyed on the sibling path: coverage discharges the
 /// obligation per PATH — the return transfer covers the taken path,
 /// the last-use release covers the false path. Removing the
@@ -511,7 +548,7 @@ fn path_coverage_choose_false_path_cleanup_removed() {
     );
 }
 
-/// Gap 4 pin (UAF direction): a base release cloned BEFORE a reachable
+/// UAF-direction pin: a base release cloned BEFORE a reachable
 /// view use — the free can fire before the view's final read.
 #[test]
 fn view_protection_flags_release_before_view_use() {
@@ -555,7 +592,40 @@ fn view_protection_flags_release_before_view_use() {
     );
 }
 
-/// Gap 6 pin: a generation-ending write establishes the new generation
+/// Verdict-honesty pin: a genuinely unresolvable
+/// position — the loop's test terminator destroyed in a hand-corrupted
+/// Flow, so the payload anchor's matching test is unreachable and the
+/// resolver keeps its NON-exact fallback — yields NOT PROVED accounting
+/// (counted in the summary), never a violation assertion: an estimated
+/// lower bound cannot prove a hazard.
+#[test]
+fn view_protection_non_exact_release_counts_not_proved() {
+    let src = "fn main():\n\ts = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tmut i = 0\n\twhile i < 2 and true:\n\t\tprint(v)\n\t\ti += 1\n";
+    let (tirs, pool, _main, mut flow, own, sc) = path_check_harness(src, "main");
+    // The intact compound-condition schedule resolves exactly and
+    // passes with every check proved.
+    let summary = run_path_checks(&tirs, &pool, &flow, &own, &sc, false);
+    assert_eq!(
+        summary.views_not_proved, 0,
+        "the intact compound-condition schedule proves its view checks: {summary:?}"
+    );
+    // Corrupt the Flow: the loop's test block no longer holds the
+    // matching WhileTest — the loop-completion position stays NON-exact.
+    let test_block = flow
+        .forward_order()
+        .find(|&b| matches!(flow.term(b), ryo_core::flow::Terminator::WhileTest { .. }))
+        .expect("the compound loop's test block");
+    flow.terms[test_block.0 as usize] = ryo_core::flow::Terminator::ReturnVoid;
+    // The corrupted schedule must NOT panic; the non-exact release is
+    // counted as NOT PROVED (the only honest verdict for an estimate).
+    let summary = run_path_checks(&tirs, &pool, &flow, &own, &sc, false);
+    assert!(
+        summary.views_not_proved > 0,
+        "a non-exact release position must yield NOT PROVED accounting: {summary:?}"
+    );
+}
+
+/// Displacement pin: a generation-ending write establishes the new generation
 /// but is NOT a release — the old generation needs its displacement
 /// release. Removing the release while the write stays leaves the old
 /// buffer unreleased; the walk-recorded Mutate hazard is the
@@ -582,7 +652,7 @@ fn displacement_release_removed_while_write_stays() {
     );
 }
 
-/// Gap 6 positive pin: release-before-overwrite is the sound order —
+/// Displacement positive pin: release-before-overwrite is the sound order —
 /// the intact schedule is accepted, and the new value keeps its own
 /// eventual obligation (freed by its last use after `print`).
 #[test]
@@ -592,7 +662,7 @@ fn displacement_release_before_overwrite_accepted() {
     run_path_checks(&_t, &_p, &flow, &own, &sc, false);
 }
 
-/// Gap 5 pin: a promotion buffer's release removed (all anchors of the
+/// Promotion pin: a promotion buffer's release removed (all anchors of the
 /// base) — the conditional alloc's obligation is never discharged; the
 /// pairing check proves the leak. Mutually exclusive conditional
 /// releases and the no-promotion case are accepted (the suite's promo
@@ -624,7 +694,7 @@ fn promo_release_removed_flags() {
     );
 }
 
-/// Gap 5 pin: an EXTRA release of the base on the same path — the
+/// Promotion pin: an EXTRA release of the base on the same path — the
 /// flag-guard makes the designed epilogue copies no-ops, but a release
 /// placed where no alloc-path needs it still pairs; the soundness pin
 /// here is the INTACT schedule accepted with mutually exclusive
@@ -634,4 +704,459 @@ fn promo_branch_conditional_releases_accepted() {
     let src = "fn f(p: str, c: bool):\n\tv = p[0:8]\n\tif c:\n\t\tprint(v)\n\telse:\n\t\tprint(v)\n\nfn main():\n\tf(\"0123456789012345678901234567890123456789\", true)\n\tf(\"0123456789012345678901234567890123456789\", false)\n";
     let (_t, _p, _m, flow, own, sc) = path_check_harness(src, "f");
     run_path_checks(&_t, &_p, &flow, &own, &sc, false);
+}
+
+// ─── View-backed coverage (the exemption is gone) ────────────────────────
+
+/// Positive: view-touched branch-local cleanup — a pre-branch buffer
+/// displaced on the taken arm (free_on_reassign) and dead-dropped on
+/// the fall-through arm, with a view of it read before the branch. The
+/// base group's coverage runs through the production must-analysis
+/// (previously exempt as view-touched).
+#[test]
+fn view_base_coverage_accepts_intact_branch_cleanup() {
+    let src = "fn f(c: bool):\n\tmut s = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tprint(v)\n\tif c:\n\t\ts = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\nfn main():\n\tf(true)\n\tf(false)\n";
+    let (_t, _p, _m, flow, own, sc) = path_check_harness(src, "f");
+    let summary = run_path_checks(&_t, &_p, &flow, &own, &sc, false);
+    assert!(
+        summary.proof_complete(),
+        "the intact view-touched schedule proves out: {summary:?}"
+    );
+}
+
+/// Negative (view family): the taken arm's displacement
+/// release removed (the view's last use is before the branch; the
+/// branch's own destruction never fires on the taken path) — the taken
+/// path leaks, the must-analysis proves it.
+#[test]
+fn view_base_coverage_flags_arm_displacement_removed() {
+    let src = "fn f(c: bool):\n\tmut s = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tprint(v)\n\tif c:\n\t\ts = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\nfn main():\n\tf(true)\n\tf(false)\n";
+    let (_t, _p, _m, flow, own, mut sc) = path_check_harness(src, "f");
+    // Remove the reassign's displacement release (keep the write).
+    assert!(
+        sc.free_on_reassign.iter().flatten().count() > 0,
+        "fixture must schedule a displacement release"
+    );
+    for slot in sc.free_on_reassign.iter_mut() {
+        *slot = None;
+    }
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_path_checks(&_t, &_p, &flow, &own, &sc, false);
+    }));
+    assert!(
+        r.is_err(),
+        "removing one branch's displacement of a view-touched base must flag"
+    );
+}
+
+/// Negative (view family): the fall-through arm's
+/// conditional dead drop removed — the sibling branch never reads the
+/// view, but the pre-branch buffer still leaks there; the sibling path
+/// derived no coverage from the taken arm's releases.
+#[test]
+fn view_base_coverage_flags_sibling_dead_drop_removed() {
+    let src = "fn f(c: bool):\n\tmut s = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tprint(v)\n\tif c:\n\t\ts = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\nfn main():\n\tf(true)\n\tf(false)\n";
+    let (_t, _p, _m, flow, own, mut sc) = path_check_harness(src, "f");
+    let before = sc.drops.len();
+    sc.drops
+        .retain(|d| !matches!(d.position, DropPosition::BlockStart { .. }));
+    assert!(
+        sc.drops.len() < before,
+        "the corruption must remove the fall-through dead drop"
+    );
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_path_checks(&_t, &_p, &flow, &own, &sc, false);
+    }));
+    assert!(
+        r.is_err(),
+        "removing the sibling branch's cleanup of a view-touched base must flag"
+    );
+}
+
+/// Positive: nested views (a reslice) — the base group covers both
+/// projection lifetimes; the inner view's last use bounds the release.
+#[test]
+fn view_base_coverage_accepts_nested_views() {
+    let src = "fn main():\n\ts = \"0123456789012345678901234567890123456789\"\n\tw = s[0:4]\n\tv = w[1:3]\n\tprint(v)\n";
+    let (_t, _p, _m, flow, own, sc) = path_check_harness(src, "main");
+    let summary = run_path_checks(&_t, &_p, &flow, &own, &sc, false);
+    assert!(
+        summary.proof_complete(),
+        "the nested-view schedule proves out: {summary:?}"
+    );
+}
+
+/// Positive: a shadowed then reassigned owner — the generation split is
+/// respected (the shadow's reassigns do not touch the outer binding's
+/// obligation; both buffers free per path).
+#[test]
+fn view_base_coverage_accepts_shadowed_reassigned_owner() {
+    let src = "fn main():\n\tcond = \"ab\".len() > 0\n\tmut x = \"0123456789012345678901234567890123456789\"\n\tv = x[0:2]\n\tprint(v)\n\tif cond:\n\t\tmut x = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n\t\tx = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\n\tprint(x)\n";
+    let (_t, _p, _m, flow, own, sc) = path_check_harness(src, "main");
+    let summary = run_path_checks(&_t, &_p, &flow, &own, &sc, false);
+    assert!(
+        summary.proof_complete(),
+        "the shadowed/reassigned schedule proves out: {summary:?}"
+    );
+}
+
+/// Positive: loop-deferred cleanup — a view created before a
+/// compound-condition loop, read inside it. The base's loop-completion
+/// anchor resolves exactly (the shared resolver locates the test
+/// through the condition's blocks), and the coverage must-analysis
+/// proves the exit path.
+#[test]
+fn view_base_coverage_accepts_loop_deferred_cleanup() {
+    let src = "fn main():\n\ts = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tmut i = 0\n\twhile i < 2 and true:\n\t\tprint(v)\n\t\ti += 1\n";
+    let (_t, _p, _m, flow, own, sc) = path_check_harness(src, "main");
+    let summary = run_path_checks(&_t, &_p, &flow, &own, &sc, false);
+    assert!(
+        summary.proof_complete(),
+        "the loop-deferred schedule proves out: {summary:?}"
+    );
+}
+
+/// Positive: valid transfers — the base returns (ownership moves out)
+/// after the view's last use; the return transfer discharges the
+/// obligation on that path.
+#[test]
+fn view_base_coverage_accepts_valid_transfer() {
+    let src = "fn f() -> str:\n\ts = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tprint(v)\n\treturn s\n\nfn main():\n\tprint(f())\n\tprint(\"\\n\")\n";
+    let (_t, _p, _m, flow, own, sc) = path_check_harness(src, "f");
+    let summary = run_path_checks(&_t, &_p, &flow, &own, &sc, false);
+    assert!(
+        summary.proof_complete(),
+        "the transfer schedule proves out: {summary:?}"
+    );
+}
+
+/// Positive: independently owned promotion buffers — two borrowed-param
+/// views in sibling arms free their own promoted copies (the pairing
+/// checks' family; the borrowed original stays caller-owned).
+#[test]
+fn view_base_coverage_accepts_independent_promotion_buffers() {
+    let src = "fn f(a: str, b: str, c: bool):\n\tif c:\n\t\tv = a[0:8]\n\t\tprint(v)\n\telse:\n\t\tw = b[8:16]\n\t\tprint(w)\n\nfn main():\n\tf(\"0123456789012345678901234567890123456789aaaa\", \"0123456789012345678901234567890123456789bbbb\", true)\n\tf(\"0123456789012345678901234567890123456789aaaa\", \"0123456789012345678901234567890123456789bbbb\", false)\n";
+    let (_t, _p, _m, flow, own, sc) = path_check_harness(src, "f");
+    let summary = run_path_checks(&_t, &_p, &flow, &own, &sc, false);
+    assert!(
+        summary.proof_complete(),
+        "the independent promotion buffers prove out: {summary:?}"
+    );
+}
+
+// ─── Cross-iteration view protection ─────────────────────────────────────
+
+/// Run ONLY the view-protection check on a corrupted schedule (the
+/// full pipeline would reject the same corruption earlier at the
+/// double-discharge check — this pins the view-protection walk itself).
+fn run_view_protection_only(
+    tirs: &[ryo_core::tir::Tir],
+    pool: &InternPool,
+    flow: &Flow,
+    own: &Ownership,
+    sc: &FunctionSidecar,
+) {
+    let tir = tirs
+        .iter()
+        .find(|t| build_flow(t, pool).blocks.len() == flow.blocks.len())
+        .expect("the fixture's tir");
+    let places = cv::TargetPlaces::build(tir, flow, pool);
+    let idx = cv::StepIndex::build(flow);
+    let fire_points = ryo_core::flow::fire_points::FirePoints::new(flow);
+    let events = cv::collect_events(tir, &places, flow, &fire_points, sc, own);
+    let table = cv::generation_table(tir, flow, pool, &idx, sc);
+    let mut summary = cv::ValidationSummary::default();
+    let ctx = cv::Ctx {
+        tir,
+        flow,
+        own,
+        sidecar: sc,
+        fire_points: &fire_points,
+        events: &events,
+        table: &table,
+    };
+    cv::validate_view_protection(&ctx, &mut summary);
+}
+
+/// Negative (cross-iteration): the base's loop-exit release cloned
+/// INSIDE the loop body, after the view's last use — with pre-loop
+/// storage the release at the end of iteration N reaches the view's
+/// use at the start of iteration N+1 through the backedge (no
+/// generation boundary in between): a use-after-free the walk now
+/// proves. Pre-fix the closing edge was not followed and this leaked
+/// silently.
+#[test]
+fn view_protection_flags_release_before_next_iteration_use() {
+    let src = "fn main():\n\ts = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tmut i = 0\n\twhile i < 3:\n\t\tprint(v)\n\t\ti += 1\n";
+    let (_t, _p, _m, flow, own, mut sc) = path_check_harness(src, "main");
+    let base_free = *sc
+        .drops
+        .iter()
+        .find(|d| matches!(d.position, DropPosition::AfterStep { .. }))
+        .expect("the base's loop-completion free");
+    // Clone it at the body block's terminator point — after the view's
+    // last use, before the backedge. The same-iteration use is behind
+    // the walk; only the NEXT iteration's use is reachable — through
+    // the closing edge.
+    let backedge = flow
+        .forward_order()
+        .find(|&b| matches!(flow.term(b), ryo_core::flow::Terminator::Backedge { .. }))
+        .expect("the loop's backedge block");
+    sc.drops.push(DropOp {
+        position: DropPosition::PreTerminator { block: backedge },
+        target: base_free.target,
+        span: base_free.span,
+    });
+    // The view-protection walk itself proves the UAF direction.
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_view_protection_only(&_t, &_p, &flow, &own, &sc);
+    }));
+    let err = r.expect_err("the release must reach the next iteration's use");
+    let msg = panic_message(&err);
+    assert!(
+        msg.contains("view protection"),
+        "the view-protection walk must flag the cross-iteration UAF: {msg}"
+    );
+    // And the full pipeline rejects the schedule too (the clone also
+    // double-fires with the original at the exit).
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_path_checks(&_t, &_p, &flow, &own, &sc, false);
+    }));
+    assert!(r.is_err(), "the corrupted schedule must be rejected");
+}
+
+/// Negative (continue path): the cloned release sits at a `continue`
+/// terminator — the walk follows the continue edge to the header and
+/// around to the next iteration's use.
+#[test]
+fn view_protection_flags_release_at_continue_before_next_use() {
+    let src = "fn main():\n\ts = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tmut i = 0\n\twhile i < 3:\n\t\tprint(v)\n\t\ti += 1\n\t\tif i == 2:\n\t\t\tcontinue\n";
+    let (_t, _p, _m, flow, own, mut sc) = path_check_harness(src, "main");
+    let base_free = *sc
+        .drops
+        .iter()
+        .find(|d| matches!(d.position, DropPosition::AfterStep { .. }))
+        .expect("the base's loop-completion free");
+    let continue_block = flow
+        .forward_order()
+        .find(|&b| matches!(flow.term(b), ryo_core::flow::Terminator::Continue { .. }))
+        .expect("the continue's block");
+    sc.drops.push(DropOp {
+        position: DropPosition::PreTerminator {
+            block: continue_block,
+        },
+        target: base_free.target,
+        span: base_free.span,
+    });
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_view_protection_only(&_t, &_p, &flow, &own, &sc);
+    }));
+    let err = r.expect_err("the continue-path release must reach the next iteration's use");
+    let msg = panic_message(&err);
+    assert!(
+        msg.contains("view protection"),
+        "the view-protection walk must flag the continue-path UAF: {msg}"
+    );
+}
+
+/// The panic message of a caught unwind (the payload is a `String` for
+/// explicit panics, `&str` for assertion macros).
+fn panic_message(err: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = err.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = err.downcast_ref::<&str>() {
+        s.to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// Positive: per-iteration destruction with genuine reinitialization —
+/// the body establishes a fresh generation every iteration (its Init /
+/// producer step is a boundary after the closing edge), so the
+/// previous iteration's release cannot reach the next iteration's use.
+#[test]
+fn view_protection_accepts_per_iteration_reinitialization() {
+    let src = "fn main():\n\tmut i = 0\n\twhile i < 3 and true:\n\t\tt = \"0123456789012345678901234567890123456789\" + int_to_str(i)\n\t\tv = t[0:2]\n\t\tprint(v)\n\t\ti += 1\n";
+    let (_t, _p, _m, flow, own, sc) = path_check_harness(src, "main");
+    let summary = run_path_checks(&_t, &_p, &flow, &own, &sc, false);
+    assert!(
+        summary.proof_complete(),
+        "the per-iteration reinitialization proves out: {summary:?}"
+    );
+}
+
+/// Positive: nested compound-condition loops with a pre-loop view —
+/// the base's outer-loop-exit release cannot reach the in-body uses.
+#[test]
+fn view_protection_accepts_nested_loops() {
+    let src = "fn main():\n\ts = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tmut i = 0\n\twhile i < 2 and true:\n\t\tmut j = 0\n\t\twhile j < 2 or false:\n\t\t\tprint(v)\n\t\t\tj += 1\n\t\ti += 1\n";
+    let (_t, _p, _m, flow, own, sc) = path_check_harness(src, "main");
+    let summary = run_path_checks(&_t, &_p, &flow, &own, &sc, false);
+    assert!(
+        summary.proof_complete(),
+        "the nested-loop schedule proves out: {summary:?}"
+    );
+}
+
+/// Positive: zero-iteration path — the base's release lands after the
+/// loop; the zero-iteration path (test false on entry) reaches it
+/// directly, and no in-loop obligation exists.
+#[test]
+fn view_protection_accepts_zero_iteration_path() {
+    let src = "fn main():\n\ts = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tmut i = 0\n\twhile i < 2 and true:\n\t\ti += 1\n\tprint(v)\n";
+    let (_t, _p, _m, flow, own, sc) = path_check_harness(src, "main");
+    let summary = run_path_checks(&_t, &_p, &flow, &own, &sc, false);
+    assert!(
+        summary.proof_complete(),
+        "the zero-iteration schedule proves out: {summary:?}"
+    );
+}
+
+// ─── Proof accounting (three outcomes everywhere) ────────────────────────
+
+/// Item-5 pin: a NON-exact promotion release yields NOT PROVED
+/// accounting — counted in `promo_pairings_not_proved`, never treated
+/// as Proven. Constructed by corrupting the Flow (the loop's test
+/// terminator destroyed) so the loop-anchored promo frees resolve to
+/// the resolver's NonExact fallback.
+#[test]
+fn promo_non_exact_release_counts_not_proved() {
+    // A borrowed-param view whose promotion free is loop-anchored (the
+    // view's last use is inside the loop; the freeze machinery defers
+    // the free to the loop exit).
+    let src = "fn scan(s: str):\n\tv = s[0:2]\n\tmut i = 0\n\twhile i < 2 and true:\n\t\tprint(v)\n\t\ti += 1\n\nfn main():\n\tscan(\"0123456789012345678901234567890123456789\")\n";
+    let (tirs, pool, _m, mut flow, own, sc) = path_check_harness(src, "scan");
+    // Intact: the loop-deferred promo schedule proves out.
+    let summary = run_path_checks(&tirs, &pool, &flow, &own, &sc, false);
+    assert!(
+        summary.promo_pairings > 0,
+        "fixture must schedule promotion pairings"
+    );
+    assert!(
+        summary.proof_complete(),
+        "the intact promo schedule proves out: {summary:?}"
+    );
+    // Corrupt the Flow: the compound-condition loop's test terminator
+    // destroyed — the loop-anchored promo frees turn NonExact (the
+    // resolver's unresolvable-loop fallback) while staying on the
+    // covering path (the alloc's pre-header block terminator).
+    let test_block = flow
+        .forward_order()
+        .find(|&b| matches!(flow.term(b), ryo_core::flow::Terminator::WhileTest { .. }))
+        .expect("the while loop's test block");
+    flow.terms[test_block.0 as usize] = ryo_core::flow::Terminator::ReturnVoid;
+    // No check may assert from an estimated position — and the pairing
+    // must be accounted as NOT PROVED.
+    let summary = run_path_checks(&tirs, &pool, &flow, &own, &sc, false);
+    assert!(
+        summary.promo_pairings_not_proved > 0,
+        "a non-exact promo release must yield NOT PROVED accounting: {summary:?}"
+    );
+    assert!(
+        !summary.proof_complete(),
+        "an unproved supported shape must keep the proof-completeness predicate false"
+    );
+}
+/// Item-5 pin: unreachable events create no false obligations — a
+/// release parked in a dead join block (Unreachable terminator) is
+/// excluded and COUNTED (`events_unreachable`), never mistaken for
+/// coverage and never a double-discharge pair; the body still proves
+/// complete (unreachable is a separate category from unknown proof).
+#[test]
+fn unreachable_events_create_no_false_obligations() {
+    let src = "fn f(c: bool, d: bool) -> int:\n\ts = \"0123456789012345678901234567890123456789\"\n\twhile c:\n\t\tif d:\n\t\t\treturn 1\n\t\telse:\n\t\t\tbreak\n\treturn 0\n\nfn main():\n\tprint(int_to_str(f(true, true)))\n\tprint(\"\\n\")\n";
+    let (_t, _p, _m, flow, own, mut sc) = path_check_harness(src, "f");
+    // The body's if join is dead (both arms diverge) — an Unreachable block.
+    let dead = flow
+        .forward_order()
+        .find(|&b| matches!(flow.term(b), ryo_core::flow::Terminator::Unreachable))
+        .expect("a dead join block exists");
+    let parked = sc.drops[0];
+    sc.drops.push(DropOp {
+        position: DropPosition::PreTerminator { block: dead },
+        target: parked.target,
+        span: parked.span,
+    });
+    let summary = run_path_checks(&_t, &_p, &flow, &own, &sc, false);
+    assert!(
+        summary.events_unreachable >= 1,
+        "the parked release is unreachable and must be counted: {summary:?}"
+    );
+    assert!(
+        summary.proof_complete(),
+        "unreachable exclusions must not count against proof completeness: {summary:?}"
+    );
+}
+
+/// Item-5 pin: the corpus of clean fixtures satisfies the
+/// proof-completeness predicate on every body, and the per-body
+/// summaries PROPAGATE on `FunctionSidecar::validation` (the
+/// deterministic accessor — no env printer involved).
+#[test]
+fn validator_corpus_satisfies_proof_completeness() {
+    let fixtures: &[&str] = &[
+        // Straight-line last use.
+        "fn main():\n\ts = \"0123456789012345678901234567890123456789\"\n\tprint(s)\n",
+        // If/else borrows in both arms.
+        "fn main():\n\ts = \"a\"\n\tif true:\n\t\tprint(s)\n\telse:\n\t\tprint(s)\n",
+        // Match by-move arm.
+        "enum Pair:\n\tBoth(str, str)\n\nfn main():\n\tp = Pair.Both(\"a\", \"b\")\n\tmatch p:\n\t\tBoth(x, _):\n\t\t\tprint(x)\n",
+        // Compound-condition loop view (the R5-A reproducer family).
+        "fn main():\n\ts = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tmut i = 0\n\twhile i < 2 and true:\n\t\tprint(v)\n\t\ti += 1\n",
+        // Value-position match with an arm-local view read (the
+        // per-path re-anchor family).
+        "fn main():\n\ts = \"0123456789012345678901234567890123456789\" + \"!\"\n\tv = s[0:3]\n\tx = match true:\n\t\ttrue: 1\n\t\tfalse: v.len()\n\tprint(x)\n\tprint(\"\\n\")\n",
+        // Nested views.
+        "fn main():\n\ts = \"0123456789012345678901234567890123456789\"\n\tw = s[0:4]\n\tv = w[1:3]\n\tprint(v)\n",
+        // Loop-carried concat accumulator.
+        "fn main():\n\tmut total = \"😀😀😀😀😀😀😀\"\n\twhile true:\n\t\ttotal = total + \"🦊\"\n\t\tbreak\n\tprint(total)\n\tprint(\"\\n\")\n",
+        // Branch-local reassign cleanup (displacement + dead drop).
+        "fn main():\n\tmut s = \"a\"\n\tif true:\n\t\ts = \"b\"\n\tprint(s)\n",
+        // Borrowed-param view + promotion buffers.
+        "fn f(p: str):\n\tv = p[0:8]\n\tprint(v)\n\nfn main():\n\tf(\"0123456789012345678901234567890123456789\")\n",
+        // Early return with live locals.
+        "fn f():\n\ts = \"a\"\n\tif true:\n\t\treturn\n\tprint(s)\n\nfn main():\n\tf()\n\tprint(\"done\\n\")\n",
+    ];
+    let mut totals = cv::ValidationSummary::default();
+    for (n, src) in fixtures.iter().enumerate() {
+        let (_diags, sidecar, _tirs, _pool) = check_src_full(src);
+        for f in &sidecar.functions {
+            let v = f
+                .validation
+                .expect("debug validation populates the per-body summary");
+            assert!(
+                v.proof_complete(),
+                "corpus fixture {n} body {:?} must prove complete: {v:?}",
+                _pool.str(f.name)
+            );
+            totals.positions += v.positions;
+            totals.pairs_examined += v.pairs_examined;
+            totals.pairs_not_proved += v.pairs_not_proved;
+            totals.obligations += v.obligations;
+            totals.obligations_not_proved += v.obligations_not_proved;
+            totals.obligations_unreachable += v.obligations_unreachable;
+            totals.events_unreachable += v.events_unreachable;
+            totals.promo_pairings += v.promo_pairings;
+            totals.promo_pairings_not_proved += v.promo_pairings_not_proved;
+            totals.displacements += v.displacements;
+            totals.view_checks += v.view_checks;
+            totals.views_not_proved += v.views_not_proved;
+            totals.views_unreachable += v.views_unreachable;
+            totals.positions_not_proved += v.positions_not_proved;
+        }
+    }
+    eprintln!("validator corpus totals: {totals:?}");
+    assert!(
+        totals.obligations > 0 && totals.view_checks > 0 && totals.positions > 0,
+        "the corpus must exercise every check: {totals:?}"
+    );
+    assert_eq!(totals.pairs_not_proved, 0, "clean corpus: {totals:?}");
+    assert_eq!(totals.obligations_not_proved, 0, "clean corpus: {totals:?}");
+    assert_eq!(totals.views_not_proved, 0, "clean corpus: {totals:?}");
+    assert_eq!(totals.positions_not_proved, 0, "clean corpus: {totals:?}");
+    assert_eq!(
+        totals.promo_pairings_not_proved, 0,
+        "clean corpus: {totals:?}"
+    );
 }
