@@ -723,7 +723,7 @@ fn decode_match_arm(slice: &[u32]) -> MatchArmView<'_> {
 mod tests {
     use super::*;
     use crate::tir::ChildKind;
-    use chumsky::span::{SimpleSpan, Span as _};
+    use chumsky::span::SimpleSpan;
 
     fn sp() -> Span {
         SimpleSpan::new((), 0..0)

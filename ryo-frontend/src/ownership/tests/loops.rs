@@ -801,14 +801,14 @@ fn loop_nesting_cond_match_arms_stay_at_loop_depth() {
         bool_ty,
         &[
             TypedMatchArm {
-                span: span,
+                span,
                 discriminant: Discriminant::Int(0),
                 bindings: &[],
                 guards: &[],
                 body: TypedMatchBody::Stmts(&[arm_assign]),
             },
             TypedMatchArm {
-                span: span,
+                span,
                 discriminant: Discriminant::Wildcard,
                 bindings: &[],
                 guards: &[],
