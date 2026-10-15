@@ -115,17 +115,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-033 — Variables declared inside if/elif/else branches are not visible after the statement
-
-**Severity:** Correctness / Hygiene
-**Area:** sema
-
-**Files:** `ryo-frontend/src/sema/stmt.rs` (`analyze_block`)
-**Summary:** Each branch of an if/elif/else creates a child scope. Variables declared inside a branch are dropped when the branch scope ends. There is no "variable promotion" — even if all branches declare `x: int`, `x` is not available after the if statement. This is the correct scoping semantics for now, but may surprise users expecting Python-style scoping where if-branches don't create a new scope.
-**Resolution:** This is intentional for M8b. If user feedback requests Python-style flat scoping, revisit as a language design decision (requires approval per AGENTS.md escalation rules).
-
----
-
 ### I-037 — Panic/Assert mechanism lacks `#file` / `#line` intrinsic expansion
 
 **Severity:** Correctness / Hygiene
@@ -190,17 +179,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `ryo-backend/src/codegen/mod.rs` (`generate_for_range` :1377)
 **Summary:** Currently, `for-range` loops have bespoke code generation that manually emits basic blocks, jump instructions, and raw counter increments. When general iterators are added, loops should be desugared during the AST-to-UIR phase into standard `while` loops that call `.next()`.
 **Resolution:** Once iterators land, remove the `generate_for_range` codegen entirely and rely on standard `while` codegen to emit loops.
-
----
-
-### I-047 — UIR `is_move` field is a pass-through
-
-**Severity:** Correctness / Hygiene
-**Area:** core-ir
-
-**Files:** `ryo-core/src/uir.rs` (`UirParam`), `ryo-frontend/src/astgen.rs`, `ryo-frontend/src/sema/`
-**Summary:** `is_move` is threaded lexer → parser → AST → UIR → TIR. The UIR copy is never read: astgen propagates the AST flag in, sema reads it back out into `TirParam`, and no UIR pass inspects it. UIR is structural lowering with no semantic meaning, so `UirParam::is_move` is dead weight that exists only to bridge two layers it shouldn't.
-**Resolution:** Drop `UirParam::is_move`. Sema can read the flag straight from the AST `FuncBody` (or via a side-channel keyed by FuncBody) when it constructs `TirParam`. Wait until any other UIR-level pass needs the flag before re-introducing it.
 
 ---
 
@@ -678,19 +656,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** The M9.2 `read_line_from` function reads stdin in 128-byte chunks. When it finds the first `\n` in a chunk, it returns only the bytes up to that newline and **frees the entire buffer**, discarding any remaining bytes in the chunk. Crucially, the file position has already advanced by the full chunk size (not the line length), so subsequent `io_read_line()` calls skip the discarded data. Example: piping a file where lines 1-3 fit in the first 128-byte read will return line 1, then jump to the byte position after the chunk, skipping lines 2-3. Demonstrated by `cat README.md | cargo run -- run examples/echo.ryo` which loses the second and third lines of the file. Related: the oracle example documents this as "piping all answers at once starves it."
 
 **Resolution:** Fix in **Milestone 13.6** (buffering work). Preserve the unread portion of the chunk between calls by maintaining buffer state — the proper fix, and the one that also enables real buffering. (The minimal alternative, seeking the file position back after extracting the line, is not viable for piped stdin: pipes are not seekable.) After this lands, remove the workaround note from `examples/oracle.ryo`.
-
----
-
-### I-207 — Brace Law asymmetry vs Go-style uniform braces — revisit if alpha reopens syntax
-
-**Severity:** Correctness / Hygiene
-**Area:** docs-spec
-
-**Files:** docs/specification.md (D11), landing/reference/index.html (#enums)
-
-**Summary:** Enum named payloads declare with parens + 'name: Type' (Rectangle(width: float)) but construct with braces + 'name=value' (Rectangle{width=1.0}). The asymmetry is frozen for alpha (D11), but it is a Rust/Swift idiom, not the simplest option: Go uses one brace+name syntax for both declaration and construction (type Point struct{ X, Y float64 } / Point{X: 1}). DX review against the 'as simple as Go' bar flagged this as the remaining declaration/construction visual mismatch; the landing Forms table mitigates in the meantime.
-
-**Resolution:** Revisit only if alpha ever reopens enum syntax: benchmark Go's uniform-brace declaration/construction against the current D11 form, including how tuple variants would render. Until then the landing Forms table owns the teachability; no code action.
 
 ---
 
