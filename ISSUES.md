@@ -700,7 +700,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ### I-225 — Short literal equality emits one load and comparison per byte
 
-**Severity:** Correctness / Hygiene
+**Severity:** Cleanup
 **Area:** codegen
 
 **Files:** ryo-backend/src/codegen/str_ops.rs

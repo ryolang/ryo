@@ -165,6 +165,37 @@ fn while_loop_backedge_and_break_continue_targets() {
 }
 
 #[test]
+fn for_loop_dead_join_does_not_emit_backedge() {
+    let mut cx = Ctx::new();
+    let bool_ty = cx.pool.bool_();
+    let mut b = cx.builder();
+    let t = cx.pool.intern_str("t");
+    let cond_if = b.var(t, bool_ty, sp());
+    let zero = b.int_const(0, cx.int, sp());
+    let ten = b.int_const(10, cx.int, sp());
+    let brk = b.break_stmt(cx.never, sp());
+    let cont = b.continue_stmt(cx.never, sp());
+    let body_stmt = b.if_stmt(cond_if, &[brk], &[], Some(&[cont]), cx.void, sp());
+    let for_stmt = b.for_range(cx.i, zero, ten, &[body_stmt], cx.void, sp());
+    let tir = b.finish(&[for_stmt]);
+
+    let flow = Flow::build(&tir, &cx.pool);
+    let header = match flow.term(flow.entry) {
+        Terminator::For { header, .. } => *header,
+        other => panic!("entry terminates in the for loop: {other:?}"),
+    };
+    assert_eq!(flow.predecessors(header).len(), 2);
+    assert!(
+        flow.forward_order()
+            .all(|block| !matches!(flow.term(block), Terminator::Backedge { .. })),
+        "the dead join must not add a backedge to the loop header"
+    );
+    assert!(flow.forward_order().any(|block| {
+        matches!(flow.term(block), Terminator::Unreachable) && flow.predecessors(block).is_empty()
+    }));
+}
+
+#[test]
 fn for_loop_binds_induction_place_in_body_scope() {
     let mut cx = Ctx::new();
     let int = cx.int;
@@ -1216,7 +1247,7 @@ fn fire_points_while_compound_condition_resolves_the_loop_exit() {
     // `while t and t:` — the and-split terminates the header block, so
     // the header's terminator is not the loop test: the test is located
     // through the condition's blocks and the completion point resolves
-    // EXACTLY to the exit block's terminator point (the same bucket the
+    // EXACTLY to the exit block's entry point (the same bucket the
     // simple-condition shape resolves to).
     let lhs = b.var(t, bool_ty, sp());
     let rhs = b.var(t, bool_ty, sp());
@@ -1224,9 +1255,8 @@ fn fire_points_while_compound_condition_resolves_the_loop_exit() {
     let body_read = b.var(t, bool_ty, sp());
     let body_expr = b.unary(TirTag::ExprStmt, cx.void, body_read, sp());
     let whl = b.while_loop(cond, &[body_expr], cx.void, sp());
-    // A post-loop statement lands in the exit block, so the exit's
-    // terminator ordinal is distinct from its entry ordinal — the
-    // resolution must land at the terminator, not the entry.
+    // A post-loop statement lands in the exit block after its prologue,
+    // so the resolution must land before that statement.
     let tail_read = b.var(t, bool_ty, sp());
     let tail_expr = b.unary(TirTag::ExprStmt, cx.void, tail_read, sp());
     let tir = b.finish(&[whl, tail_expr]);
@@ -1263,14 +1293,14 @@ fn fire_points_while_compound_condition_resolves_the_loop_exit() {
         vec![tail_read, tail_expr],
         "the post-loop statement is the exit block's steps"
     );
-    let exit_term = pt(exit, flow.block_steps(exit).len() as u32);
+    let exit_entry = pt(exit, 0);
     assert_eq!(
         fp.resolve_after_step(whl),
-        AfterStepFire::Payload(FireVerdict::Resolved(exit_term))
+        AfterStepFire::Payload(FireVerdict::Resolved(exit_entry))
     );
     assert_eq!(
         fp.resolve(DropPosition::AfterStep { inst: whl }),
-        FireVerdict::Resolved(exit_term)
+        FireVerdict::Resolved(exit_entry)
     );
 
     // A header whose matching test is unreachable (a malformed

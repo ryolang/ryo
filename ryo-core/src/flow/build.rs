@@ -827,14 +827,19 @@ impl FlowBuilder<'_> {
         self.pop_scope();
         self.loops.pop();
         if !self.terminated(self.cur) {
-            self.set_term(
-                self.cur,
-                Terminator::Backedge {
-                    to: header,
-                    inc: Some(var),
-                },
-                None,
-            );
+            if self.has_pred[self.cur.0 as usize] {
+                self.set_term(
+                    self.cur,
+                    Terminator::Backedge {
+                        to: header,
+                        inc: Some(var),
+                    },
+                    None,
+                );
+            } else {
+                // Dead join inside the body (every path returned/broke/continued).
+                self.set_term(self.cur, Terminator::Unreachable, None);
+            }
         }
 
         self.cur = exit;

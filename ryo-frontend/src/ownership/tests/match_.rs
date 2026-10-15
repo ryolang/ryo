@@ -84,6 +84,21 @@ fn owned_scrutinee_payload_move_invalidates_later_use() {
 }
 
 #[test]
+fn owner_diagnostic_preserves_binding_named_derive() {
+    let src = "enum Opt:\n\tSome(str)\n\tEmpty\n\nfn main():\n\tderive = Opt.Some(\"alice\")\n\tmatch derive:\n\t\tSome(v):\n\t\t\tprint(v)\n\t\tEmpty:\n\t\t\tprint(\"empty\")\n\tprint(derive)\n";
+    let diags = check_src(src);
+    let msg = &diags
+        .iter()
+        .find(|diag| diag.code == DiagCode::UseAfterMove)
+        .expect("the payload move must invalidate the scrutinee")
+        .message;
+    assert!(
+        msg.contains("`derive`"),
+        "E0020 must name the binding: {msg}"
+    );
+}
+
+#[test]
 fn copy_payload_match_binds_freely() {
     // Bullet 3: a Copy enum never enters the lattice — arms bind freely
     // and post-match use is fine.

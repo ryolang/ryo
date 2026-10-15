@@ -1,5 +1,5 @@
 //! Flow-block emission driver: the backend lowers a function
-//! body by walking its canonical Flow IR in DFS pre-order from the entry â
+//! body by walking its canonical Flow IR in DFS pre-order from the entry —
 //! one
 //! pre-created Cranelift block per Flow block, per-step evaluation
 //! through the `eval_inst` family, and an exhaustive terminator
@@ -18,15 +18,15 @@
 //!   condition's true-polarity facts, and fire block-start drops.
 //!   Elif condition blocks and the else arm re-baseline the range
 //!   facts to the pre-cascade state and seed every earlier
-//!   condition's false polarity. The join restores everything and â
-//!   for an else-less cascade whose written arms all terminated â
+//!   condition's false polarity. The join restores everything and —
+//!   for an else-less cascade whose written arms all terminated —
 //!   seeds all negations (the `if n <= 1: return n` fibonacci shape).
 //! * Loops: the while header kills body-written facts BEFORE its
 //!   condition steps (back-edge rule). The body prologue takes the
 //!   post-restore marks and seeds the condition's true polarity; the
 //!   exit restores them. `for` binds the induction counter to the
 //!   loop variable at the body and restores only that binding at the
-//!   exit (body writes to other bindings persist â the legacy shape).
+//!   exit (body writes to other bindings persist — the legacy shape).
 //! * Matches: the Switch handler lowers only the dispatch (scrutinee
 //!   home + routing); arm blocks carry their payload drops and
 //!   binding moves in their prologue, and their fallthrough Goto
@@ -103,7 +103,7 @@ impl<M: Module> Codegen<M> {
         // 1. Pre-create one Cranelift block per Flow block. The ONLY
         //    block params: a Flow block whose first step is a
         //    BoolAnd/BoolOr (the short-circuit join) gets one I8
-        //    param â the merged boolean.
+        //    param — the merged boolean.
         let mut mapped: Vec<Block> = Vec::with_capacity(block_count);
         mapped.push(entry_block);
         for _ in 1..block_count {
@@ -143,11 +143,11 @@ impl<M: Module> Codegen<M> {
         //    preds emit.
         //
         //    The id-ordered tail holds the blocks deferred above
-        //    (bool-join blocks â no table effects) plus the blocks
+        //    (bool-join blocks — no table effects) plus the blocks
         //    unreachable from the entry (dead continuations after
-        //    returns and diverging calls): their steps still emit â
+        //    returns and diverging calls): their steps still emit —
         //    mirroring the old emitter, which kept lowering after a
-        //    noreturn call â but unreachable blocks skip their
+        //    noreturn call — but unreachable blocks skip their
         //    prologues and block-start drops (a dead region's scope
         //    restores and arm drops are meaningless and could free
         //    live buffers). The flow's own reachability flag (set at
@@ -158,7 +158,7 @@ impl<M: Module> Codegen<M> {
             // emission: deferred joins are reachable (their prologues
             // must run); dead continuations are not (their scope
             // restores and arm drops are meaningless and could free
-            // live buffers â see `emit_flow_block`).
+            // live buffers — see `emit_flow_block`).
             let reachable = !flow.blocks[b.0 as usize].unreachable;
             Self::emit_flow_block(builder, ctx, b, reachable)?;
         }
@@ -178,7 +178,7 @@ impl<M: Module> Codegen<M> {
 
     /// Build the per-block static maps the driver consults: the
     /// region-entry prologue per block (from the recorded cascade /
-    /// switch / loop structure â never reconstructed from TIR
+    /// switch / loop structure — never reconstructed from TIR
     /// position), the bool-join flags, and the tail-candidate flags.
     fn build_flow_maps(ctx: &mut FunctionContext<'_, M>) {
         let flow = ctx.flow;
@@ -186,6 +186,8 @@ impl<M: Module> Codegen<M> {
         let mut prologue = vec![BlockPrologue::None; block_count];
         let mut match_join: Vec<Option<TirRef>> = vec![None; block_count];
         let mut match_fallthrough: Vec<Option<(TirRef, usize)>> = vec![None; block_count];
+        let mut match_region_seen = vec![0u32; block_count];
+        let mut match_region_stamp = 0u32;
         let mut if_arm_owner: Vec<Option<TirRef>> = vec![None; block_count];
         for b in flow.forward_order() {
             match flow.term(b) {
@@ -230,22 +232,36 @@ impl<M: Module> Codegen<M> {
                         match_join[j.0 as usize] = Some(*match_inst);
                         // Each falling-through arm contributes exactly
                         // one `Goto { join }` edge, from the last live
-                        // block of its region â for an expression arm
+                        // block of its region — for an expression arm
                         // that is a nested value match, the source is
                         // the inner match's join, not the arm block.
                         // Walk each arm's region (never crossing the
                         // join) to find it.
                         for (k, &ab) in arm_blocks.iter().enumerate() {
                             let mut stack = vec![ab];
-                            let mut seen = vec![false; block_count];
+                            match_region_stamp = match_region_stamp.wrapping_add(1);
+                            if match_region_stamp == 0 {
+                                match_region_seen.fill(0);
+                                match_region_stamp = 1;
+                            }
                             while let Some(r) = stack.pop() {
-                                if std::mem::replace(&mut seen[r.0 as usize], true) {
+                                let idx = r.0 as usize;
+                                if match_region_seen[idx] == match_region_stamp {
                                     continue;
                                 }
+                                match_region_seen[idx] = match_region_stamp;
                                 if let FlowTerm::Goto { target } = flow.term(r)
                                     && *target == *j
                                 {
                                     match_fallthrough[r.0 as usize] = Some((*match_inst, k));
+                                    continue;
+                                }
+                                if matches!(
+                                    flow.term(r),
+                                    FlowTerm::Break { .. }
+                                        | FlowTerm::Continue { .. }
+                                        | FlowTerm::Backedge { .. }
+                                ) {
                                     continue;
                                 }
                                 for &s in flow.successors(r) {
@@ -312,7 +328,7 @@ impl<M: Module> Codegen<M> {
                 continue;
             }
             let tail = match flow.term(b) {
-                // Function fall-off (no explicit `return` â the payload
+                // Function fall-off (no explicit `return` — the payload
                 // marks an explicit one, whose preceding statement is
                 // NOT in tail position).
                 FlowTerm::ReturnVoid => flow.term_payload(b).is_none(),
@@ -331,8 +347,8 @@ impl<M: Module> Codegen<M> {
     /// Whether the `IfStmt` is the last statement of its enclosing
     /// body: its join block holds no statement steps and the join's
     /// terminator defers to the body end (fall-off return) or to an
-    /// enclosing cascade's arm (recursion). Any other terminator â
-    /// another construct's entry, a loop backedge â means a statement
+    /// enclosing cascade's arm (recursion). Any other terminator —
+    /// another construct's entry, a loop backedge — means a statement
     /// or loop follows, so the if is not last.
     fn construct_is_last(ctx: &FunctionContext<'_, M>, if_inst: TirRef) -> bool {
         let join = ctx.flow.branch_arm_blocks(if_inst).join;
@@ -399,7 +415,7 @@ impl<M: Module> Codegen<M> {
     /// producer, so every Goto target is a join (if/match arm
     /// fallthrough). Chasing a fallthrough would schedule the join
     /// after the first arm's subtree but before its sibling arms, and
-    /// the join's scope restore (an undo-log pop) is irreversible â a
+    /// the join's scope restore (an undo-log pop) is irreversible — a
     /// coarser restore that runs first destroys the entries a finer
     /// one needs. Instead every table-affected continuation is pushed
     /// by its own construct: the Switch pushes its arms + join, the
@@ -408,7 +424,7 @@ impl<M: Module> Codegen<M> {
     /// id-ordered tail then holds only the blocks with no table
     /// effects (bool-join blocks) and the unreachable ones
     /// (construction order is join-after-arms, which keeps each
-    /// region complete before its continuation â exactly like the old
+    /// region complete before its continuation — exactly like the old
     /// recursive emitters). Loop exits need no deferral: their
     /// WhileTest/ForTest pushes them right after the body subtree,
     /// which is why raw construction order alone was not sufficient
@@ -439,7 +455,7 @@ impl<M: Module> Codegen<M> {
                     // A cascade-entry branch also pushes its join: the
                     // join is reached only via arm-fallthrough Gotos
                     // (suppressed above), and its scope restore must
-                    // run right after the whole cascade â not in the
+                    // run right after the whole cascade — not in the
                     // deferred tail, where an enclosing loop exit's
                     // restore would already have popped the bindings
                     // its steps need (undo-log pops are irreversible).
@@ -466,7 +482,7 @@ impl<M: Module> Codegen<M> {
                 }
                 // Break/Continue/Backedge targets are loop exits/headers,
                 // already scheduled by the loop's own WhileTest/ForTest
-                // (header) / pre-header push â chasing them here would
+                // (header) / pre-header push — chasing them here would
                 // pop an enclosing continuation (the exit's scope
                 // restore) in the middle of a sibling region, exactly
                 // like the Goto chase above.
@@ -518,7 +534,7 @@ impl<M: Module> Codegen<M> {
 
         // Switch to the mapped block. The entry block is already
         // current (the param preamble, hosted-main shim, and literal
-        // hoisting emit into it) and is unfilled â Cranelift forbids
+        // hoisting emit into it) and is unfilled — Cranelift forbids
         // switching away from an unfilled block, so the entry visit
         // skips the switch. Every other visit switches away from the
         // previous block, which its terminator handler just filled.
@@ -528,9 +544,9 @@ impl<M: Module> Codegen<M> {
         if reachable {
             // A match join block (its result caching + fact/slot
             // restores) always runs before the region prologue: the
-            // join can coincide with another region entry â an elif
+            // join can coincide with another region entry — an elif
             // whose condition is a match holds its Branch in the
-            // condition's join block, and a `while match â¦:` header is
+            // condition's join block, and a `while match …:` header is
             // the match's join.
             if let Some(match_inst) = ctx.match_join[b.0 as usize] {
                 Self::run_match_join(builder, ctx, match_inst)?;
@@ -570,7 +586,7 @@ impl<M: Module> Codegen<M> {
             tail_terminated = Self::emit_expr_stmt_operand(builder, ctx, es, operand, true)?;
             if !tail_terminated {
                 // No tail call: the operand evaluated as a plain
-                // statement â fire its statement's drop bucket exactly
+                // statement — fire its statement's drop bucket exactly
                 // like `emit_step` does (the deferral bypassed the step
                 // dispatcher). The tail-call path fires the scope
                 // buckets inside `try_emit_tail_call` instead.
@@ -639,7 +655,7 @@ impl<M: Module> Codegen<M> {
             let tir = ctx.tir;
             let view = tir.while_loop_view(loop_inst);
             // Back-edge rule: kill facts on bindings the body
-            // writes BEFORE the condition steps emit â the
+            // writes BEFORE the condition steps emit — the
             // condition re-evaluates every iteration, so a fact it
             // consults must hold on every one. The undo-log mark is
             // taken after this kill (at the body prologue), so the
@@ -655,7 +671,7 @@ impl<M: Module> Codegen<M> {
     /// Run a match join block's handling: the fact/slot restores (the
     /// if-arm discipline), the merged result caching, and the frees
     /// anchored after the match itself (the owned scrutinee temporary's
-    /// whole-value Free â the old arm loop's caller fired them in the
+    /// whole-value Free — the old arm loop's caller fired them in the
     /// merge block as its post-statement pass, post-merge on every
     /// path). Runs before the block's region prologue when the join
     /// coincides with one.
@@ -722,7 +738,7 @@ impl<M: Module> Codegen<M> {
                 Self::restore_slot_marks(ctx, slot_marks);
                 // Re-baseline: true-polarity seeds live only inside
                 // their own arm. This block is dominated by the FALSE
-                // path of every earlier condition â and by nothing
+                // path of every earlier condition — and by nothing
                 // else.
                 Self::restore_slots(
                     &mut ctx.range_facts,
@@ -733,7 +749,7 @@ impl<M: Module> Codegen<M> {
                     Self::seed_cond_facts(ctx, prev, false);
                 }
                 // The restore above predates every earlier condition's
-                // evaluation â an inout call in one killed its binding's
+                // evaluation — an inout call in one killed its binding's
                 // fact via the reload path; re-apply every kill since
                 // the scope mark.
                 Self::kill_assigned_since(ctx, scope_mark);
@@ -771,7 +787,7 @@ impl<M: Module> Codegen<M> {
                 };
                 Self::restore_slot_marks(ctx, slot_marks);
                 // Same re-baseline as the elif condition blocks,
-                // seeded with every condition's FALSE polarity â the
+                // seeded with every condition's FALSE polarity — the
                 // else arm is dominated by the all-conditions-false
                 // path.
                 Self::restore_slots(
@@ -810,11 +826,11 @@ impl<M: Module> Codegen<M> {
                 );
                 // Home-provenance join: arm stores into home slots
                 // persist in memory while the table restore reverted
-                // the flags â no arm's provenance may survive.
+                // the flags — no arm's provenance may survive.
                 Self::invalidate_home_inline_flags(ctx);
                 // Only when there is no else and every written arm
                 // terminated is the merge dominated by the
-                // fall-through edge alone â seed all negations there.
+                // fall-through edge alone — seed all negations there.
                 if !has_else && Self::written_arms_terminated(ctx, if_inst) {
                     for &cond in &negs {
                         Self::seed_cond_facts(ctx, cond, false);
@@ -862,7 +878,7 @@ impl<M: Module> Codegen<M> {
                     // The condition holds at every body entry (the
                     // header's brif guards it). Assignments inside the
                     // body kill facts in place; the seeds themselves
-                    // must NOT survive the loop â the exit block is
+                    // must NOT survive the loop — the exit block is
                     // also reached on the zero-iteration path.
                     Self::seed_cond_facts(ctx, view.cond, true);
                 }
@@ -907,7 +923,7 @@ impl<M: Module> Codegen<M> {
                 };
                 // Scope the loop variable: bind var_name to the counter
                 // Variable. Body writes to OTHER bindings persist past
-                // the loop (the legacy shape) â only this one slot is
+                // the loop (the legacy shape) — only this one slot is
                 // restored, by hand at the exit.
                 let shadowed_var = Self::read_slot(&ctx.locals, view.var_name);
                 let shadowed_fact = Self::read_slot(&ctx.range_facts, view.var_name);
@@ -918,7 +934,7 @@ impl<M: Module> Codegen<M> {
                     Some(counter),
                 );
                 // The loop variable is a different quantity than any
-                // shadowed outer binding â its fact must not leak onto
+                // shadowed outer binding — its fact must not leak onto
                 // the counter.
                 Self::write_slot(
                     &mut ctx.range_facts,
@@ -937,7 +953,7 @@ impl<M: Module> Codegen<M> {
                 // bounds were evaluated once pre-loop, but a fact
                 // consulted inside the body must hold on every
                 // iteration. There is no post-loop restore for these
-                // kills â they persist past the loop, as before.
+                // kills — they persist past the loop, as before.
                 Self::kill_loop_writes(ctx, None, &view.body);
                 Self::invalidate_home_inline_flags(ctx);
                 Ok(())
@@ -953,7 +969,7 @@ impl<M: Module> Codegen<M> {
                 };
                 // The loop variable goes out of scope; restore the
                 // shadowed binding (write the saved slot back
-                // unconditionally â None clears it).
+                // unconditionally — None clears it).
                 Self::write_slot(&mut ctx.locals, &mut ctx.locals_undo, var_name, saved_local);
                 Self::write_slot(
                     &mut ctx.range_facts,
@@ -974,7 +990,7 @@ impl<M: Module> Codegen<M> {
     }
 
     /// Whether every written arm (then + elifs) of the cascade ends
-    /// the block â the merge is then dominated by the fall-through
+    /// the block — the merge is then dominated by the fall-through
     /// edge alone. Termination mirrors the old emitter's report:
     /// return / bare return / break / continue count; a diverging
     /// noreturn call did NOT (the old `ExprStmt` arm reported None).
@@ -1079,7 +1095,7 @@ impl<M: Module> Codegen<M> {
         }
     }
 
-    /// Goto: plain jump â except the two value-carrying shapes: a
+    /// Goto: plain jump — except the two value-carrying shapes: a
     /// match arm's fallthrough writes the arm result into the match
     /// result slot before jumping to the join, and a BoolAnd/BoolOr
     /// rhs edge jumps to the short-circuit join with the rhs value
@@ -1127,7 +1143,7 @@ impl<M: Module> Codegen<M> {
 
     /// Branch: `brif` on the cached condition value. A cascade-entry
     /// branch (recorded via `branch_if`) creates the cascade record
-    /// with marks taken NOW â after this block's own steps, before any
+    /// with marks taken NOW — after this block's own steps, before any
     /// arm block emits (the old recursive emitter took them when the
     /// IfStmt statement was reached). An elif branch appends its
     /// condition to the record; a BoolAnd/BoolOr split passes the
@@ -1250,7 +1266,7 @@ impl<M: Module> Codegen<M> {
     /// Loop backedge: jump to the header; a for-latch increments the
     /// induction counter on the edge (the shape the old increment
     /// block synthesized). The loop's record is found through the
-    /// header block's `ForTest` terminator â exact under nesting,
+    /// header block's `ForTest` terminator — exact under nesting,
     /// where a linear record search could find an outer loop's counter.
     fn term_backedge(
         builder: &mut FunctionBuilder,
@@ -1282,7 +1298,7 @@ impl<M: Module> Codegen<M> {
     }
 
     /// Break: fire the loop-exit Frees anchored on the Break
-    /// instruction (they must land BEFORE the jump â the sweep cannot
+    /// instruction (they must land BEFORE the jump — the sweep cannot
     /// run after a terminator), then jump to the recorded exit block.
     fn term_break(
         builder: &mut FunctionBuilder,
@@ -1303,7 +1319,7 @@ impl<M: Module> Codegen<M> {
 
     /// Continue: fire the anchored Frees (see `term_break`), then jump
     /// to the recorded loop header. A `for` header (ForTest) receives
-    /// the induction increment on EVERY incoming edge â the flow
+    /// the induction increment on EVERY incoming edge — the flow
     /// builder routes `continue` straight to the header, so the
     /// increment the backedge synthesizes must be duplicated here (the
     /// old emitter's continue targeted the increment block).
@@ -1338,10 +1354,10 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
-    /// Diverging call (`panic`, â¦): the call instruction is the
+    /// Diverging call (`panic`, …): the call instruction is the
     /// terminator payload, never a step. `eval_inst` emits the call
     /// plus its trap and switches into its own sealed dead block;
-    /// terminate that block â the Flow continuation (`next`) is an
+    /// terminate that block — the Flow continuation (`next`) is an
     /// unreachable block the driver emits separately.
     fn term_call(
         builder: &mut FunctionBuilder,
@@ -1397,7 +1413,7 @@ impl<M: Module> Codegen<M> {
             // A Return whose operand is a call is a tail context
             // regardless of position. An eligible self-call is emitted
             // as `return_call` (firing the statement's due frees first)
-            // and `emit_return` below is skipped â eligibility proved
+            // and `emit_return` below is skipped — eligibility proved
             // no inout write-back is due and no free is anchored on the
             // call or this Return.
             let tail_emitted = matches!(ctx.tir.inst(value).tag, TirTag::Call)
@@ -1453,7 +1469,7 @@ impl<M: Module> Codegen<M> {
 
     /// Post-terminator sealing: every Flow successor's predecessor
     /// count advances; a block seals once ALL its Flow predecessors
-    /// have emitted (loop headers therefore wait for their backedge â
+    /// have emitted (loop headers therefore wait for their backedge —
     /// Cranelift dominance is preserved). Unreachable
     /// no-predecessor blocks self-seal: live blocks never target them,
     /// so they can gain no further predecessors.

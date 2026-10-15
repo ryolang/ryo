@@ -1674,7 +1674,7 @@ fn describe_color(color: Color) -> str:
 - Compile-time exhaustiveness — **E0129** names the missing enum variants (declaration order) or the uncovered literal kind; **W0005** flags arms that can never execute (anything after `_:`, duplicate literals/variants), buffered like the other warnings so it never piles onto an error
 - Arm typing: all value arms join to one `TypeId` (E0134); `never`/error arms join freely; arms ending in `return`/`break`/`continue` diverge from the merge via the return|break|continue termination predicate, so `break`/`continue` arms are legal in value-producing matches inside loops (E0135 only fires on a statement arm that falls through in a value match)
 - Move-only payload bindings on the whole-value model: a non-`Copy` bind consumes the scrutinee on its arm's path, unbound needs-drop payload fields drop at arm start, and **E0133** refuses by-move binds out of borrowed scrutinees (`match &opt:`)
-- Merge lowering: scalar results ride one merge-block param, aggregate results a pre-dispatch result slot (the slot address dominates every arm and the merge), void matches jump bare, and a match whose arms all diverge traps; enum scrutinees dispatch on the i32 tag, anon scrutinees on ordered guard conjunctions, literal scrutinees on compare chains
+- Merge lowering: scalar and aggregate results ride a pre-dispatch result slot (the slot address dominates every arm and the merge), void matches jump bare, and a match whose arms all diverge traps; enum scrutinees dispatch on the i32 tag, anon scrutinees on ordered guard conjunctions, literal scrutinees on compare chains
 - `examples/match.ryo` shipped; the Docker ASan/Valgrind sanitizer suite covers the move/partial-move payload paths
 
 **Diverged / Notes:**

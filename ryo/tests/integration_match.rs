@@ -1151,3 +1151,23 @@ fn match_arm_break_and_continue_exit_to_loop_aot() {
         "1\n3\ndone\n",
     );
 }
+
+const MATCH_FALLTHROUGH_BEFORE_CONTINUE: &str = "fn main():\n\tmut i = 0\n\tmut result = 0\n\twhile i < 4:\n\t\ti += 1\n\t\tif i % 2 == 1:\n\t\t\tresult = match i:\n\t\t\t\t1: 10\n\t\t\t\t_: continue\n\t\t\tassert(result == 10, \"value match fallthrough\")\n\t\telse:\n\t\t\tmatch i:\n\t\t\t\t2: print(\"two\\n\")\n\t\t\t\t_: continue\n\tprint(\"done\\n\")\n";
+
+#[test]
+fn match_fallthrough_before_continue_in_loop_jit() {
+    assert_ryo_output(
+        "match_fallthrough_before_continue",
+        MATCH_FALLTHROUGH_BEFORE_CONTINUE,
+        "two\ndone\n",
+    );
+}
+
+#[test]
+fn match_fallthrough_before_continue_in_loop_aot() {
+    assert_match_aot_output(
+        "match_fallthrough_before_continue_aot.ryo",
+        MATCH_FALLTHROUGH_BEFORE_CONTINUE,
+        "two\ndone\n",
+    );
+}

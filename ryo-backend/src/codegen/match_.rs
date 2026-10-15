@@ -330,22 +330,8 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
-    /// The Flow arm block's prologue: arm-start payload drops (the
-    /// consuming arm's unbound needs-drop fields) and the binding
-    /// prologue through the shared `bind_field_move` (fat triples,
-    /// struct/enum slot copies, scalar loads — the M10 destructure
-    /// logic). Only slot-homed scrutinees (enum/anon-struct) carry
-    /// Arm-start payload destruction for a consuming match arm (the unified cleanup schedule):
-    /// the arm's unbound needs-drop payload fields are destroyed at the
-    /// arm block's start. Registered on the unified DropOp schedule as
-    /// one block-start drop per arm (target = the scrutinee); this
-    /// handler recomputes the field list — the same derivation the
-    /// frontend registered from (`unbound_payload_fields`): the
-    /// discriminated shape's needs-drop fields minus the bound ones.
-    /// The tag dispatch guarantees the discriminated variant, so the
-    /// field address is the scrutinee slot plus the pool-computed
-    /// absolute offset. Slot-homed scrutinees only (enum/anon-struct;
-    /// literal scrutinees bind nothing).
+    /// Emit the scheduled drops for unbound needs-drop payload fields
+    /// at the start of a consuming match arm.
     pub(crate) fn emit_arm_start_drops(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -365,7 +351,12 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
-    /// payload fields; literal scrutinees bind nothing.
+    /// The Flow arm block's prologue: arm-start payload drops (the
+    /// consuming arm's unbound needs-drop fields) and the binding
+    /// prologue through the shared `bind_field_move` (fat triples,
+    /// struct/enum slot copies, scalar loads — the destructure logic).
+    /// Only slot-homed scrutinees (enum/anon-struct) carry payload
+    /// drops; literal scrutinees bind nothing.
     pub(crate) fn match_arm_prologue(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,

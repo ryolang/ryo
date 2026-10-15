@@ -1,5 +1,7 @@
 # Compiler Architecture & Developer Guide
 
+**Status:** Implementation (v0.1)
+
 This guide is for agents and contributors extending the Ryo compiler. Load it when working on compiler internals; the always-on rules live in the root `AGENTS.md`.
 
 ### Design Inspiration
@@ -150,7 +152,7 @@ ast::StmtKind::MyFeature(expr) => {
 In `sema::analyze`, type-check the UIR instruction and emit the typed equivalent into the per-function `Tir`. Resolve types via `InternPool`, look up names in the active scope, and push `Diag` values into the `DiagSink` on type errors (analysis continues — do not bail). Every emitted `TypedInst` carries its resolved `TypeId`.
 
 ### 7. Add Codegen (ryo-backend/src/codegen/)
-Add a match arm in `compile_function()` where `TirInst` variants are dispatched. Use `Self::eval_expr()` to evaluate sub-expressions (which are themselves `TirRef`s into the same per-function arena). Common patterns: `builder.ins().iconst()` for ints, `.f64const()` for floats, `.iadd()`/`.fadd()` for add, `.call()` for calls.
+Statement steps dispatch in `emit_step` (`codegen/mod.rs`). Value instructions go through the `eval_inst` family (`eval_inst`, `eval_inst_fat`, `eval_inst_view`, `eval_inst_struct`, `eval_inst_enum`). Flow terminators go through `emit_terminator` (`codegen/control.rs`). Common patterns: `builder.ins().iconst()` for ints, `.f64const()` for floats, `.iadd()`/`.fadd()` for add, `.call()` for calls.
 
 ### 8. Run All Tests
 ```bash
@@ -191,6 +193,7 @@ cargo test -- --nocapture       # Show output
 
 ## References
 
+- Spec: [Section 3, Syntax & Grammar](../specification.md) and [Section 5, Memory Management](../specification.md)
 - Dev: [pipeline_migration.md](pipeline_migration.md) — compiler pipeline + Flow IR design: representation contracts, phase boundaries, migration steps (authoritative for the Flow layer)
 - Dev: [pipeline_alignment.md](pipeline_alignment.md) — UIR/TIR pipeline: remaining work (comptime/generics substrate), Zig divergence notes, future considerations
 - Dev: [implementation_roadmap.md](implementation_roadmap.md) — feature roadmap

@@ -113,9 +113,9 @@ fresh owners of the moved-out fields; codegen never evaluates them.
 A merge block is created up front; how each arm's result reaches it
 depends on the result type family:
 
-- **Scalar result** (`int` / `bool` / `float`): one merge-block *param*.
-  Value arms jump to the merge passing their value; the merge reads the
-  param (the `enums.rs` Eq precedent).
+- **Scalar result** (`int` / `bool` / `float`): one 8-byte result slot
+  allocated before dispatch. Value arms store into the slot; the merge
+  loads the result.
 - **Void match**: no param; arms jump bare.
 - **Aggregate result** (`str` / `bytes` / struct / anon-struct / enum):
   a pre-allocated result *slot*, sized from the pool **before** the

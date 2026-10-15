@@ -332,7 +332,7 @@ impl<'f> FirePoints<'f> {
             // the loop test: the test is located through the
             // condition's blocks (bounded successor search, matching
             // `loop_inst`) and the completion point is the exit
-            // block's terminator point — exact, the same bucket the
+            // block's entry point — exact, the same bucket the
             // simple-condition shape resolves to. A header with no
             // matching test reachable is a malformed body: the
             // documented non-exact fallback (never guessed).
@@ -345,7 +345,10 @@ impl<'f> FirePoints<'f> {
                         })
                     }
                     _ => match self.loop_test_exit(*header, *loop_inst) {
-                        Some(exit) => FireVerdict::Resolved(self.terminator_point(exit)),
+                        Some(exit) => FireVerdict::Resolved(FirePoint {
+                            block: exit,
+                            ordinal: 0,
+                        }),
                         None => FireVerdict::NonExact(self.terminator_point(block)),
                     },
                 }
