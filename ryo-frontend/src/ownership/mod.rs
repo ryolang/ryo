@@ -824,6 +824,7 @@ fn analyze_function(
                     let Some(anchor) = last_use_anchor(
                         tir,
                         flow,
+                        pool,
                         r,
                         after,
                         sidecar,

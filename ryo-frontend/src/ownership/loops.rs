@@ -26,7 +26,7 @@ use ryo_core::diag::DiagSink;
 use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow, Place, Terminator, WriteKind};
 use ryo_core::ownership::FunctionSidecar;
 use ryo_core::tir::{MatchBodyView, Tir, TirData, TirRef, TirTag};
-use ryo_core::types::StringId;
+use ryo_core::types::{InternPool, StringId};
 use std::collections::{HashMap, HashSet};
 
 /// The loop-header test block: the block terminating in `WhileTest`/
@@ -919,6 +919,15 @@ pub(crate) fn innermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                     }
                     return Some(r);
                 }
+                TirTag::Match => {
+                    for arm in tir.match_view(r).arms() {
+                        let body: Vec<TirRef> = arm.body.stmts().collect();
+                        if let Some(found) = walk(tir, &body, target) {
+                            return Some(found);
+                        }
+                    }
+                    return Some(r);
+                }
                 _ => {
                     if let TirData::UnOp(o) = tir.inst(r).data
                         && matches!(
@@ -928,6 +937,15 @@ pub(crate) fn innermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                         && tir.contains_reachable(o, target)
                     {
                         return walk(tir, &[o], target);
+                    }
+                    let mut operand_match = None;
+                    visit_operand_matches(tir, r, &mut |m| {
+                        if operand_match.is_none() && tir.contains_reachable(m, target) {
+                            operand_match = Some(m);
+                        }
+                    });
+                    if let Some(m) = operand_match {
+                        return walk(tir, &[m], target);
                     }
                     return None;
                 }
@@ -1043,6 +1061,7 @@ pub(crate) fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
 pub(crate) fn last_use_anchor(
     tir: &Tir,
     flow: &Flow,
+    pool: &InternPool,
     owner: TirRef,
     after: TirRef,
     sidecar: &FunctionSidecar,
@@ -1052,7 +1071,7 @@ pub(crate) fn last_use_anchor(
     return_transferred: bool,
 ) -> Option<TirRef> {
     // Assignment sites inherit the declaring binding, even when names shadow.
-    let binding = owner_binding_decl(tir, owner).and_then(|(site, name)| {
+    let binding = owner_binding_decl(tir, owner, pool).and_then(|(site, name)| {
         if tir.inst(site).tag == TirTag::Assign {
             sidecar.assign_binding[site.index()].map(|decl| (decl, name))
         } else {
@@ -1063,10 +1082,11 @@ pub(crate) fn last_use_anchor(
         binding
             .is_some_and(|(decl, _)| decl.is_param() || !tir.contains_reachable(branch_stmt, decl))
     };
+    let outermost = outermost_branch_of(tir, after);
     // An all-diverging match has no completion point. Do not anchor the
     // scrutinee's last-use Free after it. That position cannot fire.
     // Return and loop-exit cleanup handle each terminating arm.
-    if let Some(branch_stmt) = outermost_branch_of(tir, after)
+    if let Some(branch_stmt) = outermost
         && tir.inst(branch_stmt).tag == TirTag::Match
         && flow
             .term_block_of(branch_stmt)
@@ -1074,8 +1094,22 @@ pub(crate) fn last_use_anchor(
     {
         return None;
     }
-    Some(match outermost_branch_of(tir, after) {
-        Some(branch_stmt) if binding_outlives(branch_stmt) => {
+    let branch = outermost
+        .filter(|&branch_stmt| binding_outlives(branch_stmt))
+        .or_else(|| {
+            // A match payload binding lives inside its match arm. If
+            // its last read is nested in an if, the match itself cannot
+            // anchor the Free because that fires after every arm. Use
+            // the nested if join instead. Keep loop and if handling on
+            // their existing paths: their exits have separate cleanup
+            // rules for values declared inside them.
+            outermost.filter(|&branch_stmt| tir.inst(branch_stmt).tag == TirTag::Match)?;
+            innermost_branch_of(tir, after).filter(|&branch_stmt| {
+                tir.inst(branch_stmt).tag == TirTag::IfStmt && binding_outlives(branch_stmt)
+            })
+        });
+    Some(match branch {
+        Some(branch_stmt) => {
             if matches!(
                 tir.inst(branch_stmt).tag,
                 TirTag::WhileLoop | TirTag::ForRange
@@ -1104,16 +1138,17 @@ pub(crate) fn last_use_anchor(
         // iteration; a branch STRICTLY inside the outer construct is
         // reached on the same iteration and a returning arm leaves
         // before it (the return transfer owns that path).
-        Some(branch_stmt)
-            if binding.is_some()
+        None if outermost.is_some_and(|branch_stmt| {
+            binding.is_some()
                 && return_transferred
                 && matches!(
                     tir.inst(branch_stmt).tag,
                     TirTag::WhileLoop | TirTag::ForRange
-                ) =>
+                )
+        }) =>
         {
             match innermost_branch_of(tir, after) {
-                Some(inner) if inner != branch_stmt => inner,
+                Some(inner) if Some(inner) != outermost => inner,
                 _ => after,
             }
         }
@@ -1227,8 +1262,17 @@ pub(crate) fn ancestor_branches_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
 /// statement, not just the name, lets consumers tell a binding
 /// declared outside a branch from a same-named shadow declared
 /// inside it.
-pub(crate) fn owner_binding_decl(tir: &Tir, owner: TirRef) -> Option<(TirRef, StringId)> {
-    fn walk(tir: &Tir, stmts: &[TirRef], owner: TirRef) -> Option<(TirRef, StringId)> {
+pub(crate) fn owner_binding_decl(
+    tir: &Tir,
+    owner: TirRef,
+    pool: &InternPool,
+) -> Option<(TirRef, StringId)> {
+    fn walk(
+        tir: &Tir,
+        stmts: &[TirRef],
+        owner: TirRef,
+        pool: &InternPool,
+    ) -> Option<(TirRef, StringId)> {
         for &r in stmts {
             let r = stmt_match(tir, r).unwrap_or(r);
             match tir.inst(r).tag {
@@ -1246,30 +1290,43 @@ pub(crate) fn owner_binding_decl(tir: &Tir, owner: TirRef) -> Option<(TirRef, St
                 }
                 TirTag::IfStmt => {
                     let view = tir.if_stmt_view(r);
-                    if let Some(found) = walk(tir, &view.then_stmts, owner) {
+                    if let Some(found) = walk(tir, &view.then_stmts, owner, pool) {
                         return Some(found);
                     }
                     for elif in &view.elif_branches {
-                        if let Some(found) = walk(tir, &elif.body, owner) {
+                        if let Some(found) = walk(tir, &elif.body, owner, pool) {
                             return Some(found);
                         }
                     }
                     if let Some(else_stmts) = &view.else_stmts
-                        && let Some(found) = walk(tir, else_stmts, owner)
+                        && let Some(found) = walk(tir, else_stmts, owner, pool)
                     {
                         return Some(found);
                     }
                 }
                 TirTag::WhileLoop | TirTag::ForRange => {
                     if let Some(body) = tir.loop_body(r)
-                        && let Some(found) = walk(tir, &body, owner)
+                        && let Some(found) = walk(tir, &body, owner, pool)
                     {
                         return Some(found);
                     }
                 }
                 TirTag::Match => {
-                    for body in match_arm_bodies(tir, r) {
-                        if let Some(found) = walk(tir, &body, owner) {
+                    let token_refs = tir.match_by_move_owner_refs(r, pool);
+                    let mut token_cursor = 0;
+                    for arm in tir.match_view(r).arms() {
+                        for binding in arm.bindings() {
+                            if pool.is_copy(binding.ty) {
+                                continue;
+                            }
+                            let token = token_refs[token_cursor];
+                            token_cursor += 1;
+                            if token == owner {
+                                return Some((r, binding.name));
+                            }
+                        }
+                        let body: Vec<TirRef> = arm.body.stmts().collect();
+                        if let Some(found) = walk(tir, &body, owner, pool) {
                             return Some(found);
                         }
                     }
@@ -1283,7 +1340,7 @@ pub(crate) fn owner_binding_decl(tir: &Tir, owner: TirRef) -> Option<(TirRef, St
                 }
                 for body in match_arm_bodies(tir, m) {
                     if found.is_none() {
-                        found = walk(tir, &body, owner);
+                        found = walk(tir, &body, owner, pool);
                     }
                 }
             });
@@ -1293,7 +1350,7 @@ pub(crate) fn owner_binding_decl(tir: &Tir, owner: TirRef) -> Option<(TirRef, St
         }
         None
     }
-    walk(tir, &tir.body_stmts(), owner)
+    walk(tir, &tir.body_stmts(), owner, pool)
 }
 
 // ---------- Post-walk jump-exit free scheduling (kept TIR-based) ----------

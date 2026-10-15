@@ -58,6 +58,42 @@ fn dead_store_schedules_free_after_decl() {
 }
 
 #[test]
+fn match_payload_last_use_across_if_paths_frees_at_if_join() {
+    let src = "enum Message:\n\tText(str)\n\tEmpty\n\nfn main():\n\tmessage = Message.Text(\"first-\" + \"abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz\")\n\tmatch message:\n\t\tMessage.Text(payload):\n\t\t\tif payload.len() > 5:\n\t\t\t\tprint(payload)\n\t\t\telse:\n\t\t\t\tprint(payload)\n\t\tMessage.Empty:\n\t\t\tprint(\"empty\")\n";
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "source must pass sema and ownership: {diags:?}"
+    );
+
+    let tir = &tirs[0];
+    let match_inst = (1..tir.instructions.len())
+        .map(|i| TirRef::from_raw(i as u32))
+        .find(|&r| tir.inst(r).tag == TirTag::Match)
+        .expect("match instruction");
+    let payload_token = tir.match_by_move_owner_refs(match_inst, &pool)[0];
+    let if_inst = (1..tir.instructions.len())
+        .map(|i| TirRef::from_raw(i as u32))
+        .find(|&r| tir.inst(r).tag == TirTag::IfStmt)
+        .expect("nested if instruction");
+    let function = take_function_sidecar(&mut sidecar, 0);
+    let frees: Vec<_> = function
+        .drops
+        .iter()
+        .filter(|drop| drop.target == payload_token)
+        .collect();
+
+    assert_eq!(frees.len(), 1, "one payload Free: {frees:?}");
+    assert_eq!(
+        frees[0].position.anchor_inst(),
+        Some(if_inst),
+        "the payload is live across both if paths, so free it at their join"
+    );
+}
+
+#[test]
 fn ryo_panic_str_arg_excluded_via_abi_registry() {
     // Regression test for the borrowed-scalar exclusion. The
     // StrConst arg of `__ryo_panic` uses the borrowed-scalar ABI in
