@@ -390,7 +390,7 @@ fn check_for_preheader_shapes(flow: &Flow, tir: &Tir) {
         let Terminator::For { loop_inst, header } = *term else {
             continue;
         };
-        let view = tir.for_range_view(loop_inst);
+        let view = tir.for_range_ref_view(loop_inst);
         debug_assert_eq!(
             flow.step_block_of(view.start),
             Some(p),
