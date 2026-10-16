@@ -647,7 +647,7 @@ pub(crate) fn outermost_loop_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
         }
         None
     }
-    let body = tir.body_stmts();
+    let body = tir.body_stmts_view();
     walk(tir, &body, target, &mut Vec::new())
 }
 
@@ -713,7 +713,7 @@ pub(crate) fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> b
     }
     let mut found = false;
     let mut stopped = false;
-    let body = tir.body_stmts();
+    let body = tir.body_stmts_view();
     walk(tir, &body, name, stop, &mut found, &mut stopped);
     found
 }
@@ -886,7 +886,8 @@ pub(crate) fn enclosing_if_main_cond(tir: &Tir, target: TirRef) -> Option<TirRef
         }
         None
     }
-    walk(tir, &tir.body_stmts(), target)
+    let body = tir.body_stmts_view();
+    walk(tir, &body, target)
 }
 
 /// True when the branch contains no `Return`/`ReturnVoid` on any path.
@@ -991,7 +992,8 @@ pub(crate) fn innermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
         }
         None
     }
-    walk(tir, &tir.body_stmts(), target)
+    let body = tir.body_stmts_view();
+    walk(tir, &body, target)
 }
 
 /// Outermost branch statement containing `target`. Kept for the
@@ -1085,7 +1087,8 @@ pub(crate) fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
         }
         None
     }
-    walk(tir, &tir.body_stmts(), target, &mut Vec::new())
+    let body = tir.body_stmts_view();
+    walk(tir, &body, target, &mut Vec::new())
 }
 
 /// Last-use Free anchor for a named-binding owner whose raw last read
@@ -1303,7 +1306,7 @@ pub(crate) fn ancestor_branches_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
         }
         None
     }
-    let body = tir.body_stmts();
+    let body = tir.body_stmts_view();
     walk(tir, &body, target, &mut Vec::new()).unwrap_or_default()
 }
 
@@ -1400,7 +1403,8 @@ pub(crate) fn owner_binding_decl(
         }
         None
     }
-    walk(tir, &tir.body_stmts(), owner, pool)
+    let body = tir.body_stmts_view();
+    walk(tir, &body, owner, pool)
 }
 
 // ---------- Post-walk jump-exit free scheduling (kept TIR-based) ----------
@@ -1552,12 +1556,8 @@ impl<'a> LoopExitCtx<'a> {
             .map(|(_, _, value)| value)
             .collect();
         let mut following_assignments = Vec::new();
-        assignments_immediately_after_loop(
-            tir,
-            &tir.body_stmts(),
-            loop_inst,
-            &mut following_assignments,
-        );
+        let root_stmts = tir.body_stmts_view();
+        assignments_immediately_after_loop(tir, &root_stmts, loop_inst, &mut following_assignments);
         let reassigned_after_loop_bindings = following_assignments
             .into_iter()
             .filter(|site| sidecar.free_on_reassign[site.index()].is_some())

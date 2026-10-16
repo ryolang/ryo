@@ -121,12 +121,12 @@ fn collect_bound_call_sites_iter(
 /// jurisdiction, not case B's.
 pub(crate) fn collect_materialize_sites(
     tir: &Tir,
-    stmts: &[TirRef],
+    stmts: impl IntoIterator<Item = TirRef>,
     pool: &InternPool,
     ids: &SynthCalleeIds,
     out: &mut Vec<(TirRef, TirRef)>,
 ) {
-    collect_bound_call_sites(
+    collect_bound_call_sites_iter(
         tir,
         stmts,
         &|t, r| is_materialize_call(t, pool, ids, r),
@@ -168,7 +168,7 @@ pub(crate) fn warn_redundant_materialize(
     sink: &mut DiagSink,
 ) {
     let mut sites: Vec<(TirRef, TirRef)> = Vec::new();
-    collect_materialize_sites(tir, &tir.body_stmts(), pool, ids, &mut sites);
+    collect_materialize_sites(tir, tir.body_stmts_view(), pool, ids, &mut sites);
     if sites.is_empty() {
         return;
     }
@@ -269,9 +269,9 @@ pub(crate) fn warn_redundant_to_bytes(
 ) {
     let _ = (pool,);
     let mut sites: Vec<(TirRef, TirRef)> = Vec::new();
-    collect_bound_call_sites(
+    collect_bound_call_sites_iter(
         tir,
-        &tir.body_stmts(),
+        tir.body_stmts_view(),
         &|t, r| is_to_bytes_call(t, ids, r),
         &mut sites,
     );
