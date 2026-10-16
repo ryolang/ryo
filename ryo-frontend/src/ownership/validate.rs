@@ -1417,12 +1417,33 @@ pub(crate) fn validate_no_path_double_destruction(
 ) {
     let reachable = reachable_blocks(flow);
     let roots = place_roots(tir, flow, own, sidecar);
-    // Group events by place-union root: one buffer, one obligation group.
+    let index = StepIndex::build(flow);
+    let by_root = group_path_events(events, &roots);
+    let reseat_cuts = reseat_cuts(flow, &index, &roots);
+    for ((root, allocation), evs) in &by_root {
+        // Cuts of ANY member place end a path (a Replace/FieldReplace
+        // displaces the seated content — the buffer identity changes).
+        let root_cuts = root_generation_cuts(
+            events,
+            &roots,
+            table,
+            &reseat_cuts,
+            *root,
+            allocation.is_some(),
+        );
+        check_path_event_group(tir, flow, &reachable, *root, evs, &root_cuts, summary);
+    }
+}
+
+/// Group events by place-union root. Promotion releases use their own
+/// allocation identity because they free a scratch copy, not the source.
+fn group_path_events(
+    events: &HashMap<PlaceId, Vec<Event>>,
+    roots: &[u32],
+) -> HashMap<(u32, Option<TirRef>), Vec<Event>> {
     let mut by_root: HashMap<(u32, Option<TirRef>), Vec<Event>> = HashMap::new();
     for (place, evs) in events {
         for event in evs {
-            // Each promotion site owns separate scratch storage. The borrowed
-            // source remains in the ordinary storage group.
             let allocation = (event.kind == EventKind::PromoRelease).then_some(event.target);
             by_root
                 .entry((roots[place.0 as usize], allocation))
@@ -1430,8 +1451,12 @@ pub(crate) fn validate_no_path_double_destruction(
                 .push(*event);
         }
     }
-    let index = StepIndex::build(flow);
-    let mut reseat_cuts: HashMap<u32, Vec<(BlockId, u32)>> = HashMap::new();
+    by_root
+}
+
+/// Index replacement writes that start a new home generation for a root.
+fn reseat_cuts(flow: &Flow, index: &StepIndex, roots: &[u32]) -> HashMap<u32, Vec<(BlockId, u32)>> {
+    let mut cuts: HashMap<u32, Vec<(BlockId, u32)>> = HashMap::new();
     for step in &flow.steps {
         if let Some(write) = step.facts.write
             && matches!(
@@ -1440,188 +1465,187 @@ pub(crate) fn validate_no_path_double_destruction(
             )
             && let Some(point) = index.get(step.inst)
         {
-            reseat_cuts
-                .entry(roots[write.place.0 as usize])
+            cuts.entry(roots[write.place.0 as usize])
                 .or_default()
                 .push(point);
         }
     }
-    for ((root, allocation), evs) in &by_root {
-        // Cuts of ANY member place end a path (a Replace/FieldReplace
-        // displaces the seated content — the buffer identity changes).
-        let root_cuts: HashMap<BlockId, Vec<u32>> = {
-            let mut m: HashMap<BlockId, Vec<u32>> = HashMap::new();
-            for place in events.keys() {
-                if allocation.is_some() || roots[place.0 as usize] != *root {
-                    continue;
-                }
-                if let Some(by_block) = table.cut.get(place) {
-                    for (&b, ords) in by_block {
-                        m.entry(b).or_default().extend_from_slice(ords);
-                    }
-                }
+    cuts
+}
+
+/// Collect every cut that ends a group's current generation.
+fn root_generation_cuts(
+    events: &HashMap<PlaceId, Vec<Event>>,
+    roots: &[u32],
+    table: &GenerationTable,
+    reseat_cuts: &HashMap<u32, Vec<(BlockId, u32)>>,
+    root: u32,
+    is_promotion: bool,
+) -> HashMap<BlockId, Vec<u32>> {
+    let mut cuts: HashMap<BlockId, Vec<u32>> = HashMap::new();
+    for place in events.keys() {
+        if is_promotion || roots[place.0 as usize] != root {
+            continue;
+        }
+        if let Some(by_block) = table.cut.get(place) {
+            for (&block, ordinals) in by_block {
+                cuts.entry(block).or_default().extend_from_slice(ordinals);
             }
-            // A reseat starts a new home generation even when the old value
-            // moved out and therefore needed no displacement release.
-            if allocation.is_none()
-                && let Some(cuts) = reseat_cuts.get(root)
-            {
-                for &(block, ordinal) in cuts {
-                    m.entry(block).or_default().push(ordinal);
-                }
-            }
-            for ords in m.values_mut() {
-                ords.sort_unstable();
-                ords.dedup();
-            }
-            m
-        };
-        let place_cuts = Some(&root_cuts);
-        let by_point: HashMap<Point, Vec<usize>> =
-            evs.iter()
-                .enumerate()
-                .fold(HashMap::new(), |mut m, (i, e)| {
-                    m.entry(e.point).or_insert_with(Vec::new).push(i);
-                    m
-                });
-        for e1 in evs {
-            if !reachable.contains(&e1.point.block) {
-                // Never fires — excluded from the path checks, counted
-                // (unreachable events create no false obligations).
-                summary.events_unreachable += 1;
+        }
+    }
+    // A reseat starts a new home generation even when the old value moved
+    // out and therefore needed no displacement release.
+    if !is_promotion && let Some(reseats) = reseat_cuts.get(&root) {
+        for &(block, ordinal) in reseats {
+            cuts.entry(block).or_default().push(ordinal);
+        }
+    }
+    for ordinals in cuts.values_mut() {
+        ordinals.sort_unstable();
+        ordinals.dedup();
+    }
+    cuts
+}
+
+fn index_events_by_point(events: &[Event]) -> HashMap<Point, Vec<usize>> {
+    events
+        .iter()
+        .enumerate()
+        .fold(HashMap::new(), |mut by_point, (index, event)| {
+            by_point.entry(event.point).or_default().push(index);
+            by_point
+        })
+}
+
+/// Check reachability between events within one storage-generation group.
+fn check_path_event_group(
+    tir: &Tir,
+    flow: &Flow,
+    reachable: &HashSet<BlockId>,
+    root: u32,
+    events: &[Event],
+    cuts: &HashMap<BlockId, Vec<u32>>,
+    summary: &mut ValidationSummary,
+) {
+    let place_cuts = Some(cuts);
+    let by_point = index_events_by_point(events);
+    for e1 in events {
+        if !reachable.contains(&e1.point.block) {
+            // Never fires — excluded from the path checks, counted
+            // (unreachable events create no false obligations).
+            summary.events_unreachable += 1;
+            continue;
+        }
+        let mut visited: HashSet<Point> = HashSet::new();
+        let mut parent: HashMap<Point, Point> = HashMap::new();
+        let mut stack: Vec<Point> = Vec::new();
+        push_successors(flow, place_cuts, e1.point, &mut stack);
+        for &next in &stack {
+            parent.insert(next, e1.point);
+        }
+        while let Some(p) = stack.pop() {
+            if !visited.insert(p) {
                 continue;
             }
-            let mut visited: HashSet<Point> = HashSet::new();
-            let mut parent: HashMap<Point, Point> = HashMap::new();
-            let mut stack: Vec<Point> = Vec::new();
-            push_successors(flow, place_cuts, e1.point, &mut stack);
-            for &next in &stack {
-                parent.insert(next, e1.point);
-            }
-            while let Some(p) = stack.pop() {
-                if !visited.insert(p) {
-                    continue;
-                }
-                if let Some(ids) = by_point.get(&p) {
-                    for &j in ids {
-                        let e2 = &evs[j];
-                        if e1.kind == EventKind::StaticNoop || e2.kind == EventKind::StaticNoop {
-                            continue;
-                        }
-                        // Transfer-to-transfer: neither side emits a
-                        // free — a second move of one storage is the
-                        // walk's E0020 jurisdiction, not a cleanup-
-                        // schedule violation.
-                        if !e1.is_release() && !e2.is_release() {
-                            continue;
-                        }
-                        // One release, one transfer. A transfer OUT
-                        // (return / move-arg / inout write-back) on
-                        // EITHER side is a violation — the callee must
-                        // never release storage whose ownership left
-                        // the function. A transfer IN (aggregate / arm
-                        // seating) reached FROM a release is a
-                        // free-before-adoption (UAF); a release reached
-                        // FROM a transfer IN is the normal lifecycle
-                        // (the aggregate's own release) — not a
-                        // violation.
-                        if e1.is_release() != e2.is_release() {
-                            let transfer = if e1.is_release() { e2 } else { e1 };
-                            if !transfer.is_transfer_out()
-                                && !std::ptr::eq(transfer as *const _, e2 as *const _)
-                            {
-                                continue; // IN(e1) -> release(e2): normal
-                            }
-                        }
-                        // The designed no-op twin: the very same event
-                        // (target + position + kind) at the reached point.
-                        if e2.target == e1.target && e2.pos == e1.pos && e2.kind == e1.kind {
-                            continue;
-                        }
-                        // Different fields of one aggregate (or a field
-                        // vs the whole) free different buffers — never
-                        // a double-discharge pair.
-                        if e1.field != e2.field {
-                            continue;
-                        }
-                        // Promotion releases are flag-guarded and
-                        // flag-CLEARING: the first frees the promoted
-                        // copy and clears the flag, every later release
-                        // of the same base is a designed no-op (the
-                        // return-epilogue copies exist exactly for
-                        // early-exit coverage).
-                        if e1.kind == EventKind::PromoRelease
-                            && e2.kind == EventKind::PromoRelease
-                            && e1.target == e2.target
-                        {
-                            continue;
-                        }
-                        // Codegen's per-block-visit `freed_targets` dedup
-                        // (cleared per block) consumes a same-target
-                        // release as a no-op when both fire in ONE visit
-                        // of one block — the documented co-located
-                        // double-anchor (consumer + epilogue in the same
-                        // block). Releases only (a transfer marks nothing
-                        // in `freed_targets`); never on a cycle (re-entry
-                        // clears the dedup) or across blocks (both fire).
-                        if e1.is_release()
-                            && e2.is_release()
-                            && e2.target == e1.target
-                            && e1.point.block == e2.point.block
-                            && !block_on_cycle(flow, e1.point.block)
-                        {
-                            continue;
-                        }
-                        // Provability gate: a pair is only PROVABLE when
-                        // both events fire exactly where modeled (every
-                        // resolved shape is exact except the resolver's
-                        // unresolvable-loop fallback); a pair containing
-                        // a non-exact event is NOT PROVED — counted,
-                        // never silently valid.
-                        summary.pairs_examined += 1;
-                        if !e1.exact || !e2.exact {
-                            summary.pairs_not_proved += 1;
-                            continue;
-                        }
-                        // Reconstruct one witnessing path (block chain).
-                        let mut path = vec![p];
-                        let mut cur = p;
-                        while cur != e1.point {
-                            cur = parent[&cur];
-                            path.push(cur);
-                        }
-                        path.reverse();
-                        debug_assert!(
-                            false,
-                            "path double discharge of place union {root}: event at {:?} \
+            if let Some(ids) = by_point.get(&p) {
+                for &j in ids {
+                    let e2 = &events[j];
+                    if !is_path_double_destruction_candidate(flow, e1, e2) {
+                        continue;
+                    }
+                    // Provability gate: a pair is only PROVABLE when
+                    // both events fire exactly where modeled (every
+                    // resolved shape is exact except the resolver's
+                    // unresolvable-loop fallback); a pair containing
+                    // a non-exact event is NOT PROVED — counted,
+                    // never silently valid.
+                    summary.pairs_examined += 1;
+                    if !e1.exact || !e2.exact {
+                        summary.pairs_not_proved += 1;
+                        continue;
+                    }
+                    // Reconstruct one witnessing path (block chain).
+                    let mut path = vec![p];
+                    let mut cur = p;
+                    while cur != e1.point {
+                        cur = parent[&cur];
+                        path.push(cur);
+                    }
+                    path.reverse();
+                    debug_assert!(
+                        false,
+                        "path double discharge of place union {root}: event at {:?} \
                              ({:?} kind {:?} target {:?} tag {:?}) reaches event at {:?} \
                              ({:?} kind {:?} target {:?} tag {:?}) with no intervening \
                              generation write — a release frees storage whose ownership \
                              already left, or frees it twice; witness blocks: {:?}",
-                            e1.point,
-                            e1.pos,
-                            e1.kind,
-                            e1.target,
-                            tag_of(tir, e1.target),
-                            e2.point,
-                            e2.pos,
-                            e2.kind,
-                            e2.target,
-                            tag_of(tir, e2.target),
-                            path.iter()
-                                .map(|p| (p.block, p.ordinal))
-                                .collect::<Vec<_>>()
-                        );
-                    }
+                        e1.point,
+                        e1.pos,
+                        e1.kind,
+                        e1.target,
+                        tag_of(tir, e1.target),
+                        e2.point,
+                        e2.pos,
+                        e2.kind,
+                        e2.target,
+                        tag_of(tir, e2.target),
+                        path.iter()
+                            .map(|p| (p.block, p.ordinal))
+                            .collect::<Vec<_>>()
+                    );
                 }
-                let before = stack.len();
-                push_successors(flow, place_cuts, p, &mut stack);
-                for &next in &stack[before..] {
-                    parent.entry(next).or_insert(p);
-                }
+            }
+            let before = stack.len();
+            push_successors(flow, place_cuts, p, &mut stack);
+            for &next in &stack[before..] {
+                parent.entry(next).or_insert(p);
             }
         }
     }
+}
+
+/// Apply event-kind and codegen-dedup rules before proving reachability
+/// is a double discharge of the same storage generation.
+fn is_path_double_destruction_candidate(flow: &Flow, first: &Event, second: &Event) -> bool {
+    if first.kind == EventKind::StaticNoop || second.kind == EventKind::StaticNoop {
+        return false;
+    }
+    // Transfer-to-transfer is the walk's E0020 jurisdiction, not a
+    // cleanup-schedule violation.
+    if !first.is_release() && !second.is_release() {
+        return false;
+    }
+    // A transfer out on either side is invalid. A transfer in reached
+    // from a release is use-after-free; a release reached from a
+    // transfer in is the normal lifecycle of the adopted value.
+    if first.is_release() != second.is_release() {
+        let transfer = if first.is_release() { second } else { first };
+        if !transfer.is_transfer_out() && !std::ptr::eq(transfer, second) {
+            return false;
+        }
+    }
+    // The identical event is the designed consumer + epilogue no-op.
+    if second.target == first.target && second.pos == first.pos && second.kind == first.kind {
+        return false;
+    }
+    // Different fields of one aggregate free different buffers.
+    if first.field != second.field {
+        return false;
+    }
+    // Promotion releases are flag-guarded and flag-clearing.
+    if first.kind == EventKind::PromoRelease
+        && second.kind == EventKind::PromoRelease
+        && first.target == second.target
+    {
+        return false;
+    }
+    // Same-target releases in one non-cyclic block visit are deduped by
+    // codegen. Re-entry clears that dedup, so cyclic blocks stay checked.
+    !(first.is_release()
+        && second.is_release()
+        && second.target == first.target
+        && first.point.block == second.point.block
+        && !block_on_cycle(flow, first.point.block))
 }
 
 /// The coverage verdict for one scan: `Proven` (an exact event
