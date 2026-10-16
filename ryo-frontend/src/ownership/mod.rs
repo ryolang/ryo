@@ -727,7 +727,7 @@ fn analyze_function(
     // per-read `owner_at_read` snapshot keys the owner map).
     let last_use = std::mem::take(&mut w.last_use);
     let last_read_by_name = std::mem::take(&mut w.last_read_by_name);
-    let body_stmts = tir.body_stmts();
+    let body_stmts = tir.body_stmts_view();
     // P5 (final spec §3.2): root owner → every view that ever
     // projected it (sorted for deterministic iteration).
     // Program-order ranks, built once per function and shared by the
@@ -922,7 +922,7 @@ fn analyze_function(
                         // params precede the body.
                         Some(outermost_branch_of(tir, after).unwrap_or(after))
                     }
-                    None => body_stmts.last().copied(),
+                    None => body_stmts.iter().next_back(),
                 }) else {
                     continue;
                 };
@@ -1115,7 +1115,7 @@ fn analyze_function(
     // free after the final body statement; flag-conditional emission
     // keeps it a harmless no-op on paths that already freed (or never
     // promoted) the buffer.
-    if let Some(&last) = body_stmts.last() {
+    if let Some(last) = body_stmts.iter().next_back() {
         let may_fall_through = match tir.inst(last).tag {
             TirTag::Return | TirTag::ReturnVoid => false,
             TirTag::IfStmt => if_may_fall_through(tir, last),
@@ -1318,12 +1318,12 @@ fn analyze_function(
 /// due Frees before every `return_`, so anchoring at the return
 /// statement itself fires exactly on that exit path.
 #[allow(clippy::too_many_arguments)]
-fn schedule_return_epilogue_frees(
+fn schedule_return_epilogue_frees<S: TirStmtList + ?Sized>(
     tir: &Tir,
     flow: &Flow,
     own: &Ownership,
     sidecar: &mut FunctionSidecar,
-    body_stmts: &[TirRef],
+    body_stmts: &S,
     order: &[u32],
     decl_of_init: &HashMap<TirRef, TirRef>,
     assign_value_of: &HashMap<TirRef, TirRef>,
@@ -1482,17 +1482,17 @@ struct ReturnPath<'a> {
 }
 
 impl<'a> ReturnPath<'a> {
-    fn new(
+    fn new<S: TirStmtList + ?Sized>(
         tir: &Tir,
         flow: &Flow,
         own: &Ownership,
-        body_stmts: &[TirRef],
+        body_stmts: &S,
         return_stmt: TirRef,
         decl_of_init: &'a HashMap<TirRef, TirRef>,
         assign_value_of: &'a HashMap<TirRef, TirRef>,
     ) -> Self {
         let mut on_path = HashSet::new();
-        let _ = tir.collect_jump_path(body_stmts, return_stmt, &mut on_path);
+        let _ = tir.collect_jump_path_iter(body_stmts.iter_refs(), return_stmt, &mut on_path);
         // Collect the return expression too: value-match arms execute
         // before control reaches the return block.
         tir.collect_reachable(return_stmt, &mut on_path);
