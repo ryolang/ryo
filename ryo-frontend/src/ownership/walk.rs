@@ -1567,7 +1567,8 @@ fn analyze_if_cascade(
     if_inst: TirRef,
     epoch: u32,
 ) -> Option<BlockId> {
-    let view = w.tir.if_stmt_view(if_inst);
+    let tir = w.tir;
+    let view = tir.if_stmt_view_borrowed(if_inst);
     let arms = w.flow.branch_arm_blocks(if_inst);
     let join = arms.join;
     // P4 lift (final spec §3.2): a projection whose last use is the
@@ -1644,7 +1645,7 @@ fn analyze_if_cascade(
 
     // Elif arms: the cond chain walks first (with the snapshot state,
     // like the old visit_expr(elif.cond)), then the body.
-    for (e, _) in view.elif_branches.iter().enumerate() {
+    for e in 0..view.elif_branches.len() {
         let (chain_entry, holder) = cond_chains[e];
         w.walk_region(
             own,
