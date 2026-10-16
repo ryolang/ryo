@@ -25,9 +25,44 @@ use super::{
 use ryo_core::diag::DiagSink;
 use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow, Place, Terminator, WriteKind};
 use ryo_core::ownership::FunctionSidecar;
-use ryo_core::tir::{MatchBodyView, Tir, TirData, TirRef, TirTag};
+use ryo_core::tir::{ExtraList, MatchBodyView, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
 use std::collections::{HashMap, HashSet};
+
+pub(crate) trait TirStmtList {
+    type Iter<'a>: Iterator<Item = TirRef> + DoubleEndedIterator
+    where
+        Self: 'a;
+
+    fn iter_refs(&self) -> Self::Iter<'_>;
+}
+
+impl TirStmtList for [TirRef] {
+    type Iter<'a> = std::iter::Copied<std::slice::Iter<'a, TirRef>>;
+
+    fn iter_refs(&self) -> Self::Iter<'_> {
+        self.iter().copied()
+    }
+}
+
+impl TirStmtList for Vec<TirRef> {
+    type Iter<'a> = std::iter::Copied<std::slice::Iter<'a, TirRef>>;
+
+    fn iter_refs(&self) -> Self::Iter<'_> {
+        self.iter().copied()
+    }
+}
+
+impl TirStmtList for ExtraList<'_, TirRef> {
+    type Iter<'a>
+        = ryo_core::extra::ExtraListIter<'a, TirRef>
+    where
+        Self: 'a;
+
+    fn iter_refs(&self) -> Self::Iter<'_> {
+        self.iter()
+    }
+}
 
 /// The loop-header test block: the block terminating in `WhileTest`/
 /// `ForTest` for `loop_inst`. A simple condition tests in the header
@@ -538,13 +573,13 @@ impl LoopNesting {
 /// the post-walk dead-store re-anchor (statement-recursive; see the
 /// module header).
 pub(crate) fn outermost_loop_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
-    fn walk(
+    fn walk<S: TirStmtList + ?Sized>(
         tir: &Tir,
-        stmts: &[TirRef],
+        stmts: &S,
         target: TirRef,
         stack: &mut Vec<TirRef>,
     ) -> Option<TirRef> {
-        for &r in stmts {
+        for r in stmts.iter_refs() {
             if r == target {
                 return stack.first().copied();
             }
@@ -570,7 +605,8 @@ pub(crate) fn outermost_loop_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                 }
                 TirTag::WhileLoop => {
                     stack.push(r);
-                    let found = walk(tir, &tir.while_loop_view(r).body, target, stack);
+                    let body = tir.while_loop_body_view(r);
+                    let found = walk(tir, &body, target, stack);
                     stack.pop();
                     if found.is_some() {
                         return found;
@@ -578,7 +614,8 @@ pub(crate) fn outermost_loop_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                 }
                 TirTag::ForRange => {
                     stack.push(r);
-                    let found = walk(tir, &tir.for_range_view(r).body, target, stack);
+                    let body = tir.for_range_body_view(r);
+                    let found = walk(tir, &body, target, stack);
                     stack.pop();
                     if found.is_some() {
                         return found;
@@ -610,22 +647,23 @@ pub(crate) fn outermost_loop_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
         }
         None
     }
-    walk(tir, &tir.body_stmts(), target, &mut Vec::new())
+    let body = tir.body_stmts();
+    walk(tir, &body, target, &mut Vec::new())
 }
 
 /// True if `name` is declared by a `VarDecl` anywhere before `stop` in
 /// program order (any nesting depth). Guards the dead-store re-anchor.
 /// Kept for the post-walk passes (see the module header).
 pub(crate) fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> bool {
-    fn walk(
+    fn walk<S: TirStmtList + ?Sized>(
         tir: &Tir,
-        stmts: &[TirRef],
+        stmts: &S,
         name: StringId,
         stop: TirRef,
         found: &mut bool,
         stopped: &mut bool,
     ) {
-        for &r in stmts {
+        for r in stmts.iter_refs() {
             if *found || *stopped {
                 return;
             }
@@ -652,17 +690,12 @@ pub(crate) fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> b
                     }
                 }
                 TirTag::WhileLoop => {
-                    walk(
-                        tir,
-                        &tir.while_loop_view(r).body,
-                        name,
-                        stop,
-                        found,
-                        stopped,
-                    );
+                    let body = tir.while_loop_body_view(r);
+                    walk(tir, &body, name, stop, found, stopped);
                 }
                 TirTag::ForRange => {
-                    walk(tir, &tir.for_range_view(r).body, name, stop, found, stopped);
+                    let body = tir.for_range_body_view(r);
+                    walk(tir, &body, name, stop, found, stopped);
                 }
                 TirTag::Match => {
                     for body in match_arm_bodies(tir, r) {
@@ -680,15 +713,16 @@ pub(crate) fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> b
     }
     let mut found = false;
     let mut stopped = false;
-    walk(tir, &tir.body_stmts(), name, stop, &mut found, &mut stopped);
+    let body = tir.body_stmts();
+    walk(tir, &body, name, stop, &mut found, &mut stopped);
     found
 }
 
 /// True if any statement in `stmts` (any depth) is a `Return` /
 /// `ReturnVoid` — a body that may leave the function early. Kept for
 /// the post-walk passes.
-pub(crate) fn body_may_return(tir: &Tir, stmts: &[TirRef]) -> bool {
-    for &r in stmts {
+pub(crate) fn body_may_return<S: TirStmtList + ?Sized>(tir: &Tir, stmts: &S) -> bool {
+    for r in stmts.iter_refs() {
         let r = stmt_match(tir, r).unwrap_or(r);
         match tir.inst(r).tag {
             TirTag::Return | TirTag::ReturnVoid => return true,
@@ -708,9 +742,8 @@ pub(crate) fn body_may_return(tir: &Tir, stmts: &[TirRef]) -> bool {
                 }
             }
             TirTag::WhileLoop | TirTag::ForRange => {
-                if let Some(body) = tir.loop_body(r)
-                    && body_may_return(tir, &body)
-                {
+                let body = tir.loop_body_view(r).expect("loop tag has a body");
+                if body_may_return(tir, &body) {
                     return true;
                 }
             }
@@ -740,8 +773,8 @@ pub(crate) fn body_may_return(tir: &Tir, stmts: &[TirRef]) -> bool {
 /// last statement terminates in Return/Break/Continue, or is an if
 /// whose arms ALL must terminate. Kept for the post-walk passes
 /// (`if_may_fall_through` / `stmt_must_return`).
-pub(crate) fn body_must_terminate(tir: &Tir, stmts: &[TirRef]) -> bool {
-    let Some(&last) = stmts.last() else {
+pub(crate) fn body_must_terminate<S: TirStmtList + ?Sized>(tir: &Tir, stmts: &S) -> bool {
+    let Some(last) = stmts.iter_refs().next_back() else {
         return false;
     };
     match tir.inst(last).tag {
@@ -805,8 +838,8 @@ pub(crate) fn if_may_fall_through(tir: &Tir, if_stmt: TirRef) -> bool {
 /// The `IfStmt` whose MAIN condition's subtree contains `target`, or
 /// `None`. Kept for the anonymous-temporary Free pass.
 pub(crate) fn enclosing_if_main_cond(tir: &Tir, target: TirRef) -> Option<TirRef> {
-    fn walk(tir: &Tir, stmts: &[TirRef], target: TirRef) -> Option<TirRef> {
-        for &r in stmts {
+    fn walk<S: TirStmtList + ?Sized>(tir: &Tir, stmts: &S, target: TirRef) -> Option<TirRef> {
+        for r in stmts.iter_refs() {
             if !tir.contains_reachable(r, target) {
                 continue;
             }
@@ -832,9 +865,8 @@ pub(crate) fn enclosing_if_main_cond(tir: &Tir, target: TirRef) -> Option<TirRef
                     return None;
                 }
                 TirTag::WhileLoop | TirTag::ForRange => {
-                    if let Some(body) = tir.loop_body(r)
-                        && let Some(found) = walk(tir, &body, target)
-                    {
+                    let body = tir.loop_body_view(r).expect("loop tag has a body");
+                    if let Some(found) = walk(tir, &body, target) {
                         return Some(found);
                     }
                     return None;
@@ -874,10 +906,12 @@ pub(crate) fn branch_may_not_return(tir: &Tir, branch_stmt: TirRef) -> bool {
                     .as_ref()
                     .is_some_and(|es| body_may_return(tir, es))
         }
-        TirTag::WhileLoop | TirTag::ForRange => match tir.loop_body(branch_stmt) {
-            Some(body) => !body_may_return(tir, &body),
-            None => false,
-        },
+        TirTag::WhileLoop | TirTag::ForRange => {
+            let body = tir
+                .loop_body_view(branch_stmt)
+                .expect("loop tag has a body");
+            !body_may_return(tir, &body)
+        }
         TirTag::Match => {
             let view = tir.match_view(branch_stmt);
             view.arms().all(|arm| {
@@ -897,8 +931,8 @@ pub(crate) fn branch_may_not_return(tir: &Tir, branch_stmt: TirRef) -> bool {
 /// a returning arm leaves before it (the return transfer owns that
 /// path). Mirrors `outermost_branch_of`'s shape walk.
 pub(crate) fn innermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
-    fn walk(tir: &Tir, stmts: &[TirRef], target: TirRef) -> Option<TirRef> {
-        for &r in stmts {
+    fn walk<S: TirStmtList + ?Sized>(tir: &Tir, stmts: &S, target: TirRef) -> Option<TirRef> {
+        for r in stmts.iter_refs() {
             let r = stmt_match(tir, r).unwrap_or(r);
             if !tir.contains_reachable(r, target) {
                 continue;
@@ -917,9 +951,8 @@ pub(crate) fn innermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                     return Some(r);
                 }
                 TirTag::WhileLoop | TirTag::ForRange => {
-                    if let Some(body) = tir.loop_body(r)
-                        && let Some(found) = walk(tir, &body, target)
-                    {
+                    let body = tir.loop_body_view(r).expect("loop tag has a body");
+                    if let Some(found) = walk(tir, &body, target) {
                         return Some(found);
                     }
                     return Some(r);
@@ -941,7 +974,7 @@ pub(crate) fn innermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                         )
                         && tir.contains_reachable(o, target)
                     {
-                        return walk(tir, &[o], target);
+                        return walk(tir, std::slice::from_ref(&o), target);
                     }
                     let mut operand_match = None;
                     visit_operand_matches(tir, r, &mut |m| {
@@ -950,7 +983,7 @@ pub(crate) fn innermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                         }
                     });
                     if let Some(m) = operand_match {
-                        return walk(tir, &[m], target);
+                        return walk(tir, std::slice::from_ref(&m), target);
                     }
                     return None;
                 }
@@ -969,13 +1002,13 @@ pub(crate) fn innermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
 /// match statement so the cleanup fires on every arm's path (the
 /// switch payload resolves to the join — reached from all arms).
 pub(crate) fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
-    fn walk(
+    fn walk<S: TirStmtList + ?Sized>(
         tir: &Tir,
-        stmts: &[TirRef],
+        stmts: &S,
         target: TirRef,
         stack: &mut Vec<TirRef>,
     ) -> Option<TirRef> {
-        for &r in stmts {
+        for r in stmts.iter_refs() {
             if r == target {
                 return stack.first().copied();
             }
@@ -1007,10 +1040,8 @@ pub(crate) fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                 }
                 TirTag::WhileLoop | TirTag::ForRange => {
                     stack.push(r);
-                    let mut found = match tir.loop_body(r) {
-                        Some(body) => walk(tir, &body, target, stack),
-                        None => None,
-                    };
+                    let body = tir.loop_body_view(r).expect("loop tag has a body");
+                    let mut found = walk(tir, &body, target, stack);
                     if found.is_none() {
                         found = stack.first().copied();
                     }
@@ -1027,7 +1058,7 @@ pub(crate) fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
                         )
                         && tir.contains_reachable(o, target)
                     {
-                        return walk(tir, &[o], target, stack);
+                        return walk(tir, std::slice::from_ref(&o), target, stack);
                     }
                     // A match nested in the statement's operands (a
                     // VarDecl initializer, an Assign value, a call
@@ -1180,13 +1211,13 @@ pub(crate) fn last_use_anchor(
 /// All branch statements containing `target`, outermost first. Kept
 /// for the return-epilogue dedup.
 pub(crate) fn ancestor_branches_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
-    fn walk(
+    fn walk<S: TirStmtList + ?Sized>(
         tir: &Tir,
-        stmts: &[TirRef],
+        stmts: &S,
         target: TirRef,
         stack: &mut Vec<TirRef>,
     ) -> Option<Vec<TirRef>> {
-        for &r in stmts {
+        for r in stmts.iter_refs() {
             if r == target {
                 return Some(stack.clone());
             }
@@ -1216,10 +1247,8 @@ pub(crate) fn ancestor_branches_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
                 }
                 TirTag::WhileLoop | TirTag::ForRange => {
                     stack.push(r);
-                    let found = match tir.loop_body(r) {
-                        Some(body) => walk(tir, &body, target, stack),
-                        None => None,
-                    };
+                    let body = tir.loop_body_view(r).expect("loop tag has a body");
+                    let found = walk(tir, &body, target, stack);
                     stack.pop();
                     if found.is_some() {
                         return found;
@@ -1274,7 +1303,8 @@ pub(crate) fn ancestor_branches_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
         }
         None
     }
-    walk(tir, &tir.body_stmts(), target, &mut Vec::new()).unwrap_or_default()
+    let body = tir.body_stmts();
+    walk(tir, &body, target, &mut Vec::new()).unwrap_or_default()
 }
 
 /// The binding whose initializer (`VarDecl`) or value (`Assign`)
@@ -1288,13 +1318,13 @@ pub(crate) fn owner_binding_decl(
     owner: TirRef,
     pool: &InternPool,
 ) -> Option<(TirRef, StringId)> {
-    fn walk(
+    fn walk<S: TirStmtList + ?Sized>(
         tir: &Tir,
-        stmts: &[TirRef],
+        stmts: &S,
         owner: TirRef,
         pool: &InternPool,
     ) -> Option<(TirRef, StringId)> {
-        for &r in stmts {
+        for r in stmts.iter_refs() {
             let r = stmt_match(tir, r).unwrap_or(r);
             match tir.inst(r).tag {
                 TirTag::VarDecl => {
@@ -1326,9 +1356,8 @@ pub(crate) fn owner_binding_decl(
                     }
                 }
                 TirTag::WhileLoop | TirTag::ForRange => {
-                    if let Some(body) = tir.loop_body(r)
-                        && let Some(found) = walk(tir, &body, owner, pool)
-                    {
+                    let body = tir.loop_body_view(r).expect("loop tag has a body");
+                    if let Some(found) = walk(tir, &body, owner, pool) {
                         return Some(found);
                     }
                 }
@@ -1380,8 +1409,8 @@ pub(crate) fn owner_binding_decl(
 /// when the traversal enters a `WhileLoop`/`ForRange` and shared by
 /// every `break`/`continue` jump inside the loop. See
 /// `schedule_loop_exit_frees_in` (kept statement-recursive).
-pub(crate) struct LoopExitCtx {
-    body: Vec<TirRef>,
+pub(crate) struct LoopExitCtx<'a> {
+    body: ExtraList<'a, TirRef>,
     inside_loop: HashSet<TirRef>,
     has_any: HashSet<TirRef>,
     top_level: HashMap<TirRef, TirRef>,
@@ -1396,7 +1425,15 @@ pub(crate) fn collect_assign_writes(
     stmts: &[TirRef],
     out: &mut Vec<(TirRef, StringId, TirRef)>,
 ) {
-    for &r in stmts {
+    collect_assign_writes_list(tir, stmts, out);
+}
+
+fn collect_assign_writes_list<S: TirStmtList + ?Sized>(
+    tir: &Tir,
+    stmts: &S,
+    out: &mut Vec<(TirRef, StringId, TirRef)>,
+) {
+    for r in stmts.iter_refs() {
         let r = stmt_match(tir, r).unwrap_or(r);
         match tir.inst(r).tag {
             TirTag::Assign => {
@@ -1414,21 +1451,23 @@ pub(crate) fn collect_assign_writes(
                 }
             }
             TirTag::WhileLoop => {
-                collect_assign_writes(tir, &tir.while_loop_view(r).body, out);
+                let body = tir.while_loop_body_view(r);
+                collect_assign_writes_list(tir, &body, out);
             }
             TirTag::ForRange => {
-                collect_assign_writes(tir, &tir.for_range_view(r).body, out);
+                let body = tir.for_range_body_view(r);
+                collect_assign_writes_list(tir, &body, out);
             }
             TirTag::Match => {
                 for body in match_arm_bodies(tir, r) {
-                    collect_assign_writes(tir, &body, out);
+                    collect_assign_writes_list(tir, &body, out);
                 }
             }
             _ => {}
         }
         visit_operand_matches(tir, r, &mut |m| {
             for body in match_arm_bodies(tir, m) {
-                collect_assign_writes(tir, &body, out);
+                collect_assign_writes_list(tir, &body, out);
             }
         });
     }
@@ -1438,16 +1477,16 @@ pub(crate) fn collect_assign_writes(
 /// same statement list. These stores run on every normal path out of
 /// the loop, so break cleanup can leave their old home value for the
 /// assignment's displacement free.
-fn assignments_immediately_after_loop(
+fn assignments_immediately_after_loop<S: TirStmtList + ?Sized>(
     tir: &Tir,
-    stmts: &[TirRef],
+    stmts: &S,
     loop_inst: TirRef,
     out: &mut Vec<TirRef>,
 ) -> bool {
-    for (index, &stmt) in stmts.iter().enumerate() {
+    for (index, stmt) in stmts.iter_refs().enumerate() {
         let stmt = stmt_match(tir, stmt).unwrap_or(stmt);
         if stmt == loop_inst {
-            for &after in &stmts[index + 1..] {
+            for after in stmts.iter_refs().skip(index + 1) {
                 let after = stmt_match(tir, after).unwrap_or(after);
                 if tir.inst(after).tag != TirTag::Assign {
                     break;
@@ -1469,13 +1508,13 @@ fn assignments_immediately_after_loop(
             }
             TirTag::WhileLoop => assignments_immediately_after_loop(
                 tir,
-                &tir.while_loop_view(stmt).body,
+                &tir.while_loop_body_view(stmt),
                 loop_inst,
                 out,
             ),
             TirTag::ForRange => assignments_immediately_after_loop(
                 tir,
-                &tir.for_range_view(stmt).body,
+                &tir.for_range_body_view(stmt),
                 loop_inst,
                 out,
             ),
@@ -1491,14 +1530,14 @@ fn assignments_immediately_after_loop(
     false
 }
 
-impl LoopExitCtx {
-    fn new(tir: &Tir, sidecar: &FunctionSidecar, loop_inst: TirRef) -> Option<Self> {
-        let body = tir.loop_body(loop_inst)?;
+impl<'a> LoopExitCtx<'a> {
+    fn new(tir: &'a Tir, sidecar: &FunctionSidecar, loop_inst: TirRef) -> Option<Self> {
+        let body = tir.loop_body_view(loop_inst)?;
         let mut inside_loop: HashSet<TirRef> = HashSet::new();
         tir.collect_loop_body_refs(loop_inst, &mut inside_loop);
         let has_any: HashSet<TirRef> = sidecar.drops.iter().map(|fp| fp.target).collect();
         let mut top_level: HashMap<TirRef, TirRef> = HashMap::new();
-        for &stmt in &body {
+        for stmt in body {
             let mut reachable: HashSet<TirRef> = HashSet::new();
             tir.collect_reachable(stmt, &mut reachable);
             for r in reachable {
@@ -1506,7 +1545,7 @@ impl LoopExitCtx {
             }
         }
         let mut writes = Vec::new();
-        collect_assign_writes(tir, &body, &mut writes);
+        collect_assign_writes_list(tir, &body, &mut writes);
         let loop_carried_owners: HashSet<TirRef> = writes
             .into_iter()
             .filter(|(_, name, _)| declared_before_stmt(tir, *name, loop_inst))
@@ -1538,16 +1577,16 @@ impl LoopExitCtx {
 /// Schedule unconditional Frees on `break`/`continue` paths. Runs after
 /// the last-use, anonymous-temp, and dead-store passes have populated
 /// `sidecar.drops`. Kept statement-recursive (see the module header).
-pub(crate) fn schedule_loop_exit_frees_in(
+pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
     tir: &Tir,
     flow: &ryo_core::flow::Flow,
     pool: &InternPool,
     own: &Ownership,
     sidecar: &mut FunctionSidecar,
-    stmts: &[TirRef],
-    enclosing: Option<&LoopExitCtx>,
+    stmts: &S,
+    enclosing: Option<&LoopExitCtx<'_>>,
 ) {
-    for &r in stmts {
+    for r in stmts.iter_refs() {
         let r = stmt_match(tir, r).unwrap_or(r);
         let inst = *tir.inst(r);
         match inst.tag {
@@ -1658,14 +1697,14 @@ pub(crate) fn schedule_break_continue_frees(
     own: &Ownership,
     sidecar: &mut FunctionSidecar,
     jump_inst: TirRef,
-    ctx: &LoopExitCtx,
+    ctx: &LoopExitCtx<'_>,
 ) {
     let inside_loop = &ctx.inside_loop;
 
     let mut on_path: HashSet<TirRef> = HashSet::new();
     match ctx.top_level.get(&jump_inst) {
         Some(&enclosing_stmt) => {
-            for &stmt in ctx.body.iter().take_while(|&&s| s != enclosing_stmt) {
+            for stmt in ctx.body.iter().take_while(|&s| s != enclosing_stmt) {
                 tir.collect_reachable(stmt, &mut on_path);
             }
             let _ = tir.collect_jump_path(
@@ -1676,8 +1715,8 @@ pub(crate) fn schedule_break_continue_frees(
             prune_sibling_match_arms(tir, enclosing_stmt, jump_inst, &mut on_path);
         }
         None => {
-            let _ = tir.collect_jump_path(&ctx.body, jump_inst, &mut on_path);
-            for &stmt in &ctx.body {
+            let _ = tir.collect_jump_path_iter(ctx.body, jump_inst, &mut on_path);
+            for stmt in ctx.body.iter() {
                 prune_sibling_match_arms(tir, stmt, jump_inst, &mut on_path);
             }
         }

@@ -1470,6 +1470,18 @@ impl Tir {
         WhileLoopView { cond, body }
     }
 
+    /// Borrow the statement refs in a `WhileLoop` body from the extra arena.
+    pub fn while_loop_body_view(&self, r: TirRef) -> ExtraList<'_, TirRef> {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, TirTag::WhileLoop));
+        let range = match inst.data {
+            TirData::Extra(rng) => rng,
+            _ => unreachable!("WhileLoop must carry TirData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        ExtraList::new(&slice[while_loop_extra::BODY_START..])
+    }
+
     pub fn for_range_view(&self, r: TirRef) -> ForRangeView {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, TirTag::ForRange));
@@ -1489,6 +1501,18 @@ impl Tir {
             end,
             body,
         }
+    }
+
+    /// Borrow the statement refs in a `ForRange` body from the extra arena.
+    pub fn for_range_body_view(&self, r: TirRef) -> ExtraList<'_, TirRef> {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, TirTag::ForRange));
+        let range = match inst.data {
+            TirData::Extra(rng) => rng,
+            _ => unreachable!("ForRange must carry TirData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        ExtraList::new(&slice[for_range_extra::BODY_START..])
     }
 
     pub fn struct_lit_view(&self, r: TirRef) -> StructLitView {
@@ -1778,9 +1802,15 @@ impl Tir {
     /// caller can re-borrow `self` for recursive walks. Returns `None`
     /// for non-loop refs.
     pub fn loop_body(&self, loop_inst: TirRef) -> Option<Vec<TirRef>> {
+        self.loop_body_view(loop_inst)
+            .map(|body| body.into_iter().collect())
+    }
+
+    /// Borrow a loop body from the extra arena without decoding it into a `Vec`.
+    pub fn loop_body_view(&self, loop_inst: TirRef) -> Option<ExtraList<'_, TirRef>> {
         match self.inst(loop_inst).tag {
-            TirTag::WhileLoop => Some(self.while_loop_view(loop_inst).body),
-            TirTag::ForRange => Some(self.for_range_view(loop_inst).body),
+            TirTag::WhileLoop => Some(self.while_loop_body_view(loop_inst)),
+            TirTag::ForRange => Some(self.for_range_body_view(loop_inst)),
             _ => None,
         }
     }
@@ -1793,7 +1823,7 @@ impl Tir {
     /// can sit below the parent body-stmt's even though it's
     /// semantically inside).
     pub fn collect_loop_body_refs(&self, loop_inst: TirRef, set: &mut HashSet<TirRef>) {
-        let Some(body) = self.loop_body(loop_inst) else {
+        let Some(body) = self.loop_body_view(loop_inst) else {
             return;
         };
         for stmt in body {
@@ -1905,7 +1935,17 @@ impl Tir {
         target: TirRef,
         set: &mut HashSet<TirRef>,
     ) -> bool {
-        for &stmt in body {
+        self.collect_jump_path_iter(body.iter().copied(), target, set)
+    }
+
+    /// Iterator-backed form of [`Tir::collect_jump_path`] for borrowed arena lists.
+    pub fn collect_jump_path_iter(
+        &self,
+        body: impl IntoIterator<Item = TirRef>,
+        target: TirRef,
+        set: &mut HashSet<TirRef>,
+    ) -> bool {
+        for stmt in body {
             if stmt == target {
                 set.insert(target);
                 return true;
@@ -1926,7 +1966,11 @@ impl Tir {
                             .iter()
                             .any(|&s| self.contains_reachable(s, target))
                         {
-                            return self.collect_jump_path(&view.then_stmts, target, set);
+                            return self.collect_jump_path_iter(
+                                view.then_stmts.iter().copied(),
+                                target,
+                                set,
+                            );
                         }
                         for elif in &view.elif_branches {
                             self.collect_reachable(elif.cond, set);
@@ -1935,11 +1979,19 @@ impl Tir {
                                 .iter()
                                 .any(|&s| self.contains_reachable(s, target))
                             {
-                                return self.collect_jump_path(&elif.body, target, set);
+                                return self.collect_jump_path_iter(
+                                    elif.body.iter().copied(),
+                                    target,
+                                    set,
+                                );
                             }
                         }
                         if let Some(else_stmts) = &view.else_stmts {
-                            return self.collect_jump_path(else_stmts, target, set);
+                            return self.collect_jump_path_iter(
+                                else_stmts.iter().copied(),
+                                target,
+                                set,
+                            );
                         }
                         return true;
                     }
@@ -1959,13 +2011,21 @@ impl Tir {
                             TirTag::WhileLoop => {
                                 let view = self.while_loop_view(stmt);
                                 self.collect_reachable(view.cond, set);
-                                return self.collect_jump_path(&view.body, target, set);
+                                return self.collect_jump_path_iter(
+                                    view.body.iter().copied(),
+                                    target,
+                                    set,
+                                );
                             }
                             _ => {
                                 let view = self.for_range_view(stmt);
                                 self.collect_reachable(view.start, set);
                                 self.collect_reachable(view.end, set);
-                                return self.collect_jump_path(&view.body, target, set);
+                                return self.collect_jump_path_iter(
+                                    view.body.iter().copied(),
+                                    target,
+                                    set,
+                                );
                             }
                         }
                     }

@@ -71,7 +71,16 @@ pub(crate) fn collect_bound_call_sites(
     pred: &dyn Fn(&Tir, TirRef) -> bool,
     out: &mut Vec<(TirRef, TirRef)>,
 ) {
-    for &r in stmts {
+    collect_bound_call_sites_iter(tir, stmts.iter().copied(), pred, out);
+}
+
+fn collect_bound_call_sites_iter(
+    tir: &Tir,
+    stmts: impl IntoIterator<Item = TirRef>,
+    pred: &dyn Fn(&Tir, TirRef) -> bool,
+    out: &mut Vec<(TirRef, TirRef)>,
+) {
+    for r in stmts {
         match tir.inst(r).tag {
             TirTag::VarDecl => {
                 let init = tir.var_decl_view(r).initializer;
@@ -96,10 +105,10 @@ pub(crate) fn collect_bound_call_sites(
                 }
             }
             TirTag::WhileLoop => {
-                collect_bound_call_sites(tir, &tir.while_loop_view(r).body, pred, out);
+                collect_bound_call_sites_iter(tir, tir.while_loop_body_view(r), pred, out);
             }
             TirTag::ForRange => {
-                collect_bound_call_sites(tir, &tir.for_range_view(r).body, pred, out);
+                collect_bound_call_sites_iter(tir, tir.for_range_body_view(r), pred, out);
             }
             _ => {}
         }

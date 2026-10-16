@@ -219,7 +219,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Resolution:** Replace the remaining owned decoded lists with safe borrowed iterators. Keep the packed `u32` arena and its range bounds. Add `assert_eq!(size_of::<Inst>(), 24)` before any `InstData` refactor.
 **Update (2026-10-09, Milestone 11):** The M11 enum view decoders (`EnumLitView` in `uir.rs`/`tir.rs`) borrow the `extra` arena (`&[u32]`) and iterate fields with no per-decode `Vec`. The legacy view decoders listed above still collect; entry stays open for them.
 
-**Update (2026-10-16):** `Tir::walk_operands`, TIR call views, and UIR call/method-call argument views no longer allocate decoded lists. Borrowed body views are used in TIR flow construction, core validation/dumping, function return-flow analysis, UIR dumping, and sema. Sema no longer decodes each UIR body twice before producing TIR statements. Compatibility `body_stmts()` collectors, branch and loop views, and struct-literal views still allocate.
+**Update (2026-10-16):** `Tir::walk_operands`, TIR call views, and UIR call/method-call argument views no longer allocate decoded lists. Borrowed body views are used in TIR flow construction, core validation/dumping, function return-flow analysis, UIR dumping, and sema. Ownership’s recursive loop scans now borrow TIR loop bodies. Sema no longer decodes each UIR body twice before producing TIR statements. Compatibility `body_stmts()` and `loop_body()` collectors, branch views, and struct-literal views still allocate.
 
 ---
 

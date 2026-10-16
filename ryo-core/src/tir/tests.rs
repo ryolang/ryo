@@ -523,6 +523,21 @@ fn walk_operands_visits_if_and_loop_payloads_in_order() {
     let for_loop = b.for_range(name, start, end, &[for_stmt], void_ty, sp());
     let tir = b.finish(&[if_stmt, while_loop, for_loop]);
 
+    assert_eq!(
+        tir.loop_body_view(while_loop)
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        vec![while_a, while_b]
+    );
+    assert_eq!(
+        tir.loop_body_view(for_loop)
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        vec![for_stmt]
+    );
+
     let mut edges = Vec::new();
     tir.walk_operands(if_stmt, &mut |_parent, child, kind| {
         edges.push((child, kind))
@@ -564,6 +579,25 @@ fn walk_operands_visits_if_and_loop_payloads_in_order() {
             (for_stmt, ChildKind::BodyStmt),
         ]
     );
+}
+
+#[test]
+fn collect_jump_path_iter_stops_after_the_target() {
+    let mut pool = InternPool::new();
+    let name = pool.intern_str("main");
+    let int_ty = pool.int();
+    let void_ty = pool.void();
+    let mut b = TirBuilder::new(name, vec![], void_ty, sp());
+    let before = b.int_const(1, int_ty, sp());
+    let target = b.int_const(2, int_ty, sp());
+    let after = b.int_const(3, int_ty, sp());
+    let tir = b.finish(&[before, target, after]);
+
+    let mut path = std::collections::HashSet::new();
+    assert!(tir.collect_jump_path_iter([before, target, after], target, &mut path));
+    assert!(path.contains(&before));
+    assert!(path.contains(&target));
+    assert!(!path.contains(&after));
 }
 
 #[test]
