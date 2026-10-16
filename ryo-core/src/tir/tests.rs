@@ -679,6 +679,57 @@ fn collect_jump_path_iter_stops_after_the_target() {
 }
 
 #[test]
+fn collect_jump_path_iter_borrows_nested_loop_bodies() {
+    let mut pool = InternPool::new();
+    let name = pool.intern_str("main");
+    let loop_var = pool.intern_str("i");
+    let int_ty = pool.int();
+    let bool_ty = pool.bool_();
+    let void_ty = pool.void();
+    let mut b = TirBuilder::new(name, vec![], void_ty, sp());
+
+    let cond = b.bool_const(true, bool_ty, sp());
+    let while_before = b.int_const(1, int_ty, sp());
+    let while_target = b.int_const(2, int_ty, sp());
+    let while_after = b.int_const(3, int_ty, sp());
+    let while_loop = b.while_loop(
+        cond,
+        &[while_before, while_target, while_after],
+        void_ty,
+        sp(),
+    );
+
+    let start = b.int_const(0, int_ty, sp());
+    let end = b.int_const(4, int_ty, sp());
+    let for_before = b.int_const(5, int_ty, sp());
+    let for_target = b.int_const(6, int_ty, sp());
+    let for_after = b.int_const(7, int_ty, sp());
+    let for_loop = b.for_range(
+        loop_var,
+        start,
+        end,
+        &[for_before, for_target, for_after],
+        void_ty,
+        sp(),
+    );
+    let tir = b.finish(&[while_loop, for_loop]);
+
+    let mut path = std::collections::HashSet::new();
+    assert!(tir.collect_jump_path_iter([while_loop], while_target, &mut path));
+    for reachable in [while_loop, cond, while_before, while_target] {
+        assert!(path.contains(&reachable));
+    }
+    assert!(!path.contains(&while_after));
+
+    path.clear();
+    assert!(tir.collect_jump_path_iter([for_loop], for_target, &mut path));
+    for reachable in [for_loop, start, end, for_before, for_target] {
+        assert!(path.contains(&reachable));
+    }
+    assert!(!path.contains(&for_after));
+}
+
+#[test]
 fn destructure_dump_lists_fields() {
     let mut pool = InternPool::new();
     let int_ty = pool.int();

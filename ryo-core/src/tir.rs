@@ -2155,23 +2155,15 @@ impl Tir {
                         set.insert(stmt);
                         match self.inst(stmt).tag {
                             TirTag::WhileLoop => {
-                                let view = self.while_loop_view(stmt);
+                                let view = self.while_loop_ref_view(stmt);
                                 self.collect_reachable(view.cond, set);
-                                return self.collect_jump_path_iter(
-                                    view.body.iter().copied(),
-                                    target,
-                                    set,
-                                );
+                                return self.collect_jump_path_iter(view.body, target, set);
                             }
                             _ => {
-                                let view = self.for_range_view(stmt);
+                                let view = self.for_range_ref_view(stmt);
                                 self.collect_reachable(view.start, set);
                                 self.collect_reachable(view.end, set);
-                                return self.collect_jump_path_iter(
-                                    view.body.iter().copied(),
-                                    target,
-                                    set,
-                                );
+                                return self.collect_jump_path_iter(view.body, target, set);
                             }
                         }
                     }

@@ -219,7 +219,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Resolution:** Replace the remaining owned decoded lists with safe borrowed iterators. Keep the packed `u32` arena and its range bounds. Add `assert_eq!(size_of::<Inst>(), 24)` before any `InstData` refactor.
 **Update (2026-10-09, Milestone 11):** The M11 enum view decoders (`EnumLitView` in `uir.rs`/`tir.rs`) borrow the `extra` arena (`&[u32]`) and iterate fields with no per-decode `Vec`. The legacy view decoders listed above still collect; entry stays open for them.
 
-**Update (2026-10-16):** TIR operand walks, TIR calls, and UIR calls no longer allocate decoded lists. TIR body views serve flow construction, core validation and dumps, return-flow analysis, UIR dumps, and sema. Flow construction and ownership scans borrow TIR `if` branches, loop bodies, and top-level function bodies; FlowBuilder also reads `while` and `for` headers through borrowed views. Sema decodes each UIR body once before it creates TIR statements. Compatibility body collectors, branch views, and struct-literal views still allocate.
+**Update (2026-10-16):** TIR operand walks, TIR calls, and UIR calls no longer allocate decoded lists. TIR body views serve flow construction, core validation and dumps, return-flow analysis, UIR dumps, and sema. Flow construction and ownership scans borrow TIR `if` branches, loop bodies, and top-level function bodies; FlowBuilder also reads `while` and `for` headers through borrowed views. Jump-path scans read loop headers and bodies through borrowed views. Sema decodes each UIR body once before it creates TIR statements. Compatibility body collectors, branch views, and struct-literal views still allocate.
 
 ---
 
