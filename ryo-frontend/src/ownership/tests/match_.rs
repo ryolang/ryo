@@ -113,6 +113,46 @@ fn copy_payload_match_binds_freely() {
 }
 
 #[test]
+fn copy_payload_binding_shadow_keeps_outer_owner() {
+    // A Copy payload binding must not replace a same-named outer owner.
+    let src = "enum Number:\n\tValue(int)\n\tEmpty\n\nfn main():\n\tvalue = int_to_str(73) + \" outer heap-backed owner\"\n\tmatch Number.Value(9):\n\t\tValue(value):\n\t\t\tprint(int_to_str(value))\n\t\tEmpty:\n\t\t\tprint(\"empty\")\n\tprint(value)\n\tprint(\"\\n\")\n";
+    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "no errors expected; got {diags:?}"
+    );
+    let main_idx = tirs
+        .iter()
+        .position(|tir| pool.str(tir.name) == "main")
+        .expect("main's TIR");
+    let tir = &tirs[main_idx];
+    let value_name = pool.intern_str("value");
+    let outer_init = (1..tir.instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find_map(|r| {
+            if tir.inst(r).tag == ryo_core::tir::TirTag::VarDecl {
+                let decl = tir.var_decl_view(r);
+                (decl.name == value_name).then_some(decl.initializer)
+            } else {
+                None
+            }
+        })
+        .expect("outer value's initializer");
+    let f = take_function_sidecar(&mut sidecar, main_idx);
+    assert_eq!(
+        f.drops
+            .iter()
+            .filter(|drop| drop.target == outer_init)
+            .count(),
+        1,
+        "the outer string must keep one scope-exit release: {:?}",
+        f.drops
+    );
+}
+
+#[test]
 fn borrowed_scrutinee_amp_no_consumption() {
     // Bullet 4: `match &x:` — no consumption, post-match use OK. (The `&`
     // lowers away in sema; the scrutinee owner is an owned local in
