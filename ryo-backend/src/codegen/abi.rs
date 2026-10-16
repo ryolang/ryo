@@ -139,7 +139,7 @@ impl LoweredAbi {
             return Err("call shape disagrees with the lowered callee ABI".into());
         }
         for ((arg, mode), param) in view.args.iter().zip(&view.modes).zip(&self.params) {
-            if tir.inst(*arg).ty != param.ty || *mode != param.mode {
+            if tir.inst(arg).ty != param.ty || mode != param.mode {
                 return Err("call parameter disagrees with the lowered callee ABI".into());
             }
         }

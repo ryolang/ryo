@@ -1025,22 +1025,22 @@ impl<'a> Walk<'a> {
         let mut inout_uses: Vec<(Owner, Span)> = Vec::new();
         for (i, arg) in view.args.iter().enumerate() {
             if is_borrowed_scalar_param(view.name, self.pool, i)
-                && matches!(self.tir.inst(*arg).tag, TirTag::StrConst)
+                && matches!(self.tir.inst(arg).tag, TirTag::StrConst)
             {
                 // Undo the lattice seeding from the StrConst step: the
                 // borrowed-scalar ABI never owns its argument.
-                let arg_owner = own.owner_of_inst(*arg);
+                let arg_owner = own.owner_of_inst(arg);
                 own.temp_owners.remove(&arg_owner);
                 own.states.remove(&arg_owner);
             }
-            let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
-            let arg_ty = self.tir.inst(*arg).ty;
+            let mode = view.modes.get(i).unwrap_or(ParamMode::Borrow);
+            let arg_ty = self.tir.inst(arg).ty;
             if mode == ParamMode::Inout {
                 // Rule 7 (M8.3): resolve an aliasing identity even for
                 // Copy scalars, which never enter the lattice — the
                 // arg's read fact names the binding home place.
-                let owner = own.underlying_owner(*arg);
-                check_use_moved(self.tir, self.pool, own, sink, *arg, self.tir.span(*arg));
+                let owner = own.underlying_owner(arg);
+                check_use_moved(self.tir, self.pool, own, sink, arg, self.tir.span(arg));
                 if needs_tracking(arg_ty, self.pool) {
                     // P2 freeze (final spec §3.2): `inout` passing
                     // mutates the owner.
@@ -1051,12 +1051,12 @@ impl<'a> Walk<'a> {
                         own,
                         sink,
                         owner,
-                        self.tir.span(*arg),
+                        self.tir.span(arg),
                         "mutate",
-                        consumed_binding_name(self.tir, *arg),
+                        consumed_binding_name(self.tir, arg),
                     );
                 }
-                inout_uses.push((owner, self.tir.span(*arg)));
+                inout_uses.push((owner, self.tir.span(arg)));
                 // W0003 case-B support: an `inout` pass mutates the
                 // owner — a defensive-copy hazard on it.
                 own.owner_hazards.push((owner, r, HazardKind::InoutPass));
@@ -1068,7 +1068,7 @@ impl<'a> Walk<'a> {
                     // duration (E4). `projection_root` looks through
                     // ToView conversions (the implicit str → strview
                     // coercion) to the underlying owner.
-                    if let Some(root) = projection_root(own, self.tir, self.flow, self.pool, *arg) {
+                    if let Some(root) = projection_root(own, self.tir, self.flow, self.pool, arg) {
                         push_unique(&mut view_borrowed, root);
                     }
                 } else if mode == ParamMode::Borrow {
@@ -1079,7 +1079,7 @@ impl<'a> Walk<'a> {
                     // boundaries: a nested call's args are that call's
                     // own Rule-7 partition, fully evaluated before this
                     // call starts.
-                    let mut stack = vec![*arg];
+                    let mut stack = vec![arg];
                     while let Some(cur) = stack.pop() {
                         let inst = self.tir.inst(cur);
                         match inst.tag {
@@ -1100,20 +1100,20 @@ impl<'a> Walk<'a> {
             }
             // M9: a needs-drop field read in a borrow-mode argument
             // borrows the ROOT struct owner for the call's duration.
-            if mode == ParamMode::Borrow && matches!(self.tir.inst(*arg).tag, TirTag::FieldAccess) {
-                push_unique(&mut borrowed, own.underlying_owner(*arg));
+            if mode == ParamMode::Borrow && matches!(self.tir.inst(arg).tag, TirTag::FieldAccess) {
+                push_unique(&mut borrowed, own.underlying_owner(arg));
                 continue;
             }
             // M8.4.1.2: a `str(view)` materialization call passed as a
             // borrow-mode arg READS the view's buffer at call time —
             // the view's ROOT owner is immutably borrowed for the outer
             // call's duration (E4).
-            if mode == ParamMode::Borrow && self.tir.inst(*arg).tag == TirTag::Call {
-                let inner = self.tir.call_view(*arg);
+            if mode == ParamMode::Borrow && self.tir.inst(arg).tag == TirTag::Call {
+                let inner = self.tir.call_view(arg);
                 let vb_params = view_borrow_params(inner.name, self.pool);
                 if !vb_params.is_empty() {
                     for &idx in vb_params {
-                        if let Some(&varg) = inner.args.get(idx)
+                        if let Some(varg) = inner.args.get(idx)
                             && let Some(root) =
                                 projection_root(own, self.tir, self.flow, self.pool, varg)
                         {
@@ -1126,14 +1126,14 @@ impl<'a> Walk<'a> {
             // P6': a view re-borrowed into a `str` arg (ViewAsOwner)
             // borrows the view's ROOT owner for the call's duration.
             let owner =
-                if mode == ParamMode::Borrow && self.tir.inst(*arg).tag == TirTag::ViewAsOwner {
-                    projection_root(own, self.tir, self.flow, self.pool, *arg)
-                        .unwrap_or_else(|| own.underlying_owner(*arg))
+                if mode == ParamMode::Borrow && self.tir.inst(arg).tag == TirTag::ViewAsOwner {
+                    projection_root(own, self.tir, self.flow, self.pool, arg)
+                        .unwrap_or_else(|| own.underlying_owner(arg))
                 } else {
-                    own.underlying_owner(*arg)
+                    own.underlying_owner(arg)
                 };
             if mode == ParamMode::Borrow {
-                check_use_moved(self.tir, self.pool, own, sink, *arg, self.tir.span(*arg));
+                check_use_moved(self.tir, self.pool, own, sink, arg, self.tir.span(arg));
                 push_unique(&mut borrowed, owner);
             } else {
                 push_unique(&mut moved, owner);
@@ -1162,7 +1162,7 @@ impl<'a> Walk<'a> {
         own: &Ownership,
         sink: &mut DiagSink,
         r: TirRef,
-        view: &ryo_core::tir::CallView,
+        view: &ryo_core::tir::CallView<'_>,
         borrowed: &[Owner],
         moved: &[Owner],
         view_borrowed: &[Owner],
@@ -1233,10 +1233,10 @@ impl<'a> Walk<'a> {
             let mut borrow_span = None;
             let mut move_span = None;
             for (i, arg) in view.args.iter().enumerate() {
-                if !needs_tracking(self.tir.inst(*arg).ty, self.pool) {
+                if !needs_tracking(self.tir.inst(arg).ty, self.pool) {
                     continue;
                 }
-                let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
+                let mode = view.modes.get(i).unwrap_or(ParamMode::Borrow);
                 // P6' (mirrors the Rule-7 partition above): a view
                 // re-borrowed into a `str` arg via ViewAsOwner borrows
                 // the view's ROOT owner.
@@ -1244,18 +1244,17 @@ impl<'a> Walk<'a> {
                 // FieldAccess step carries the chain's ROOT place), so
                 // alias resolution is uniform; ViewAsOwner args resolve
                 // through the projection chain.
-                let arg_owner = if mode == ParamMode::Borrow
-                    && self.tir.inst(*arg).tag == TirTag::ViewAsOwner
-                {
-                    projection_root(own, self.tir, self.flow, self.pool, *arg)
-                        .unwrap_or_else(|| own.underlying_owner(*arg))
-                } else {
-                    own.underlying_owner(*arg)
-                };
+                let arg_owner =
+                    if mode == ParamMode::Borrow && self.tir.inst(arg).tag == TirTag::ViewAsOwner {
+                        projection_root(own, self.tir, self.flow, self.pool, arg)
+                            .unwrap_or_else(|| own.underlying_owner(arg))
+                    } else {
+                        own.underlying_owner(arg)
+                    };
                 if arg_owner == *owner {
                     match mode {
-                        ParamMode::Borrow => borrow_span = Some(self.tir.span(*arg)),
-                        ParamMode::Move => move_span = Some(self.tir.span(*arg)),
+                        ParamMode::Borrow => borrow_span = Some(self.tir.span(arg)),
+                        ParamMode::Move => move_span = Some(self.tir.span(arg)),
                         ParamMode::Inout => {}
                     }
                 }
@@ -1300,10 +1299,10 @@ impl<'a> Walk<'a> {
                 format!("cannot move {name} while a slice of it is live"),
             );
             for arg in &view.args {
-                if self.pool.is_view(self.tir.inst(*arg).ty)
-                    && projection_root(own, self.tir, self.flow, self.pool, *arg) == Some(owner)
+                if self.pool.is_view(self.tir.inst(arg).ty)
+                    && projection_root(own, self.tir, self.flow, self.pool, arg) == Some(owner)
                 {
-                    diag = diag.with_note(Some(self.tir.span(*arg)), "slice passed here");
+                    diag = diag.with_note(Some(self.tir.span(arg)), "slice passed here");
                     break;
                 }
             }
@@ -1316,13 +1315,13 @@ impl<'a> Walk<'a> {
         own: &mut Ownership,
         sink: &mut DiagSink,
         r: TirRef,
-        view: &ryo_core::tir::CallView,
+        view: &ryo_core::tir::CallView<'_>,
         view_borrowed: &[Owner],
     ) {
         // Phase 3 — commit the moves.
         for (i, arg) in view.args.iter().enumerate() {
-            let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
-            let arg_ty = self.tir.inst(*arg).ty;
+            let mode = view.modes.get(i).unwrap_or(ParamMode::Borrow);
+            let arg_ty = self.tir.inst(arg).ty;
             // E2 (final spec §3.3): slices cannot be passed to `move`
             // parameters. Backstop — sema rejects `move` on view-typed
             // parameters already.
@@ -1338,7 +1337,7 @@ impl<'a> Walk<'a> {
                 continue;
             }
             if mode == ParamMode::Move && needs_tracking(arg_ty, self.pool) {
-                let owner = own.underlying_owner(*arg);
+                let owner = own.underlying_owner(arg);
                 // P2 freeze (final spec §3.2) — unless the view
                 // partition above already reported this owner.
                 if !view_borrowed.contains(&owner) {
@@ -1351,16 +1350,16 @@ impl<'a> Walk<'a> {
                         owner,
                         self.tir.span(r),
                         "move",
-                        consumed_binding_name(self.tir, *arg),
+                        consumed_binding_name(self.tir, arg),
                     );
                 }
-                let consumed_name = consumed_binding_name(self.tir, *arg);
+                let consumed_name = consumed_binding_name(self.tir, arg);
                 consume_for_assignment(
                     self.tir,
                     self.pool,
                     own,
                     sink,
-                    *arg,
+                    arg,
                     self.tir.span(r),
                     consumed_name,
                     r,

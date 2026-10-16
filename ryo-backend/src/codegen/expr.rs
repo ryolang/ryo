@@ -645,7 +645,7 @@ impl<M: Module> Codegen<M> {
             TirTag::Call => {
                 let view = ctx.tir.call_view(r);
                 if let Some(repr) =
-                    Self::emit_fat_builtin_call(builder, ctx, view.name, &view.args, out_slot)?
+                    Self::emit_fat_builtin_call(builder, ctx, view.name, view.args, out_slot)?
                 {
                     repr
                 } else {
@@ -856,7 +856,7 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         name_id: StringId,
-        args: &[TirRef],
+        args: ryo_core::tir::ExtraList<'_, TirRef>,
         out_slot: Option<StackSlot>,
     ) -> Result<Option<ValueRepr>, String> {
         // These ids are interned once per compilation. Keep the dispatch
@@ -864,7 +864,8 @@ impl<M: Module> Codegen<M> {
         let ids = ctx.name_ids;
         let repr = if ids.str_from_view == Some(name_id) {
             // `str(view)` materialization evaluates its argument as a view.
-            let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, args[0])? else {
+            let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, args.at(0))?
+            else {
                 unreachable!("__ryo_str_from_view argument must produce ValueRepr::View")
             };
             let (ptr, len, cap) = Self::emit_slot_out_call(
@@ -877,7 +878,8 @@ impl<M: Module> Codegen<M> {
             ValueRepr::Str { ptr, len, cap }
         } else if ids.bytes_from_view == Some(name_id) {
             // `bytes(bview)` materialization evaluates its argument as a view.
-            let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, args[0])? else {
+            let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, args.at(0))?
+            else {
                 unreachable!("__ryo_bytes_from_view argument must produce ValueRepr::View")
             };
             let (ptr, len, cap) = Self::emit_slot_out_call(
@@ -889,7 +891,7 @@ impl<M: Module> Codegen<M> {
             )?;
             ValueRepr::Bytes { ptr, len, cap }
         } else if ids.str_to_bytes == Some(name_id) {
-            let (ptr_arg, len_arg) = Self::eval_str_or_view_parts(builder, ctx, args[0])?;
+            let (ptr_arg, len_arg) = Self::eval_str_or_view_parts(builder, ctx, args.at(0))?;
             let (ptr, len, cap) = Self::emit_slot_out_call(
                 builder,
                 ctx,
@@ -899,7 +901,7 @@ impl<M: Module> Codegen<M> {
             )?;
             ValueRepr::Bytes { ptr, len, cap }
         } else if ids.bytes_to_str == Some(name_id) {
-            let (ptr_arg, len_arg) = Self::eval_str_or_view_parts(builder, ctx, args[0])?;
+            let (ptr_arg, len_arg) = Self::eval_str_or_view_parts(builder, ctx, args.at(0))?;
             let (ptr, len, cap) = Self::emit_slot_out_call(
                 builder,
                 ctx,
@@ -909,7 +911,7 @@ impl<M: Module> Codegen<M> {
             )?;
             ValueRepr::Str { ptr, len, cap }
         } else if ids.bytes_repr == Some(name_id) {
-            let (ptr_arg, len_arg) = Self::eval_str_or_view_parts(builder, ctx, args[0])?;
+            let (ptr_arg, len_arg) = Self::eval_str_or_view_parts(builder, ctx, args.at(0))?;
             let (ptr, len, cap) = Self::emit_slot_out_call(
                 builder,
                 ctx,
@@ -924,7 +926,7 @@ impl<M: Module> Codegen<M> {
             if out_slot.is_some() {
                 return Err("bool_to_str is codegen-inlined but was handed an out slot".to_string());
             }
-            let cond = Self::eval_inst(builder, ctx, args[0])?;
+            let cond = Self::eval_inst(builder, ctx, args.at(0))?;
             let true_id =
                 Self::store_guard_msg(ctx.module, ctx.data_ctx, ctx.guard_msg_data, "true")?;
             let false_id =
@@ -940,7 +942,7 @@ impl<M: Module> Codegen<M> {
             let cap = builder.ins().iconst(types::I64, 0);
             ValueRepr::Str { ptr, len, cap }
         } else if ids.int_to_str == Some(name_id) || ids.float_to_str == Some(name_id) {
-            let arg_val = Self::eval_inst(builder, ctx, args[0])?;
+            let arg_val = Self::eval_inst(builder, ctx, args.at(0))?;
             let (fn_name, param_ty) = if ids.int_to_str == Some(name_id) {
                 ("ryo_int_to_str", ctx.int_type)
             } else {
@@ -951,13 +953,13 @@ impl<M: Module> Codegen<M> {
             ValueRepr::Str { ptr, len, cap }
         } else if ids.process_argv == Some(name_id) {
             // Interim form until process.args replaces process_argv.
-            let arg_val = Self::eval_inst(builder, ctx, args[0])?;
+            let arg_val = Self::eval_inst(builder, ctx, args.at(0))?;
             let (ptr, len, cap) = Self::emit_process_argv(builder, ctx, arg_val, out_slot)?;
             ValueRepr::Str { ptr, len, cap }
         } else if ids.process_env == Some(name_id) {
             // Interim form until process.env replaces process_env. The key
             // bytes are consumed by ryo_getenv immediately after extraction.
-            let (key_ptr, key_len) = Self::eval_str_or_view_parts(builder, ctx, args[0])?;
+            let (key_ptr, key_len) = Self::eval_str_or_view_parts(builder, ctx, args.at(0))?;
             let (ptr, len, cap) = Self::emit_slot_out_call_out_last(
                 builder,
                 ctx,
@@ -1193,11 +1195,11 @@ impl<M: Module> Codegen<M> {
                 // The message is a StrConst whose .rodata pointer the
                 // scalar (ptr, len) ABI consumes directly — the one
                 // deliberate exception to the scalar-path rule.
-                match ctx.tir.inst(*arg).data {
+                match ctx.tir.inst(arg).data {
                     TirData::Str(id) => {
                         arg_values.push(Self::emit_strconst_rodata_ptr(builder, ctx, id)?)
                     }
-                    _ => arg_values.push(Self::eval_inst(builder, ctx, *arg)?),
+                    _ => arg_values.push(Self::eval_inst(builder, ctx, arg)?),
                 }
             }
             let panic_ref = Self::declare_runtime_fn(
@@ -1235,12 +1237,12 @@ impl<M: Module> Codegen<M> {
             );
             debug_assert!(
                 matches!(
-                    ctx.pool.kind(ctx.tir.inst(view.args[0]).ty),
+                    ctx.pool.kind(ctx.tir.inst(view.args.at(0)).ty),
                     TypeKind::Str | TypeKind::View(_)
                 ),
                 "sema should reject non-str print() args",
             );
-            let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
+            let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, view.args.at(0))?;
             let print_ref = Self::declare_runtime_fn(
                 ctx,
                 builder,
@@ -1269,8 +1271,8 @@ impl<M: Module> Codegen<M> {
             // A home-backed binding skips the spill+reload entirely:
             // the runtime mutates its home slot in place. arg 0 is
             // `&s` (lowered to Var(s)); arg 1 is the suffix str.
-            let s_ref = view.args[0];
-            let suffix_ref = view.args[1];
+            let s_ref = view.args.at(0);
+            let suffix_ref = view.args.at(1);
             // A field place (`str_push(&s.field, ...)`) already lives in
             // the root struct's stack slot — pass its address directly
             // (same invariant as the generic inout call path): the
@@ -1360,8 +1362,8 @@ impl<M: Module> Codegen<M> {
             // home slot in place. arg 0 is `&b` (lowered to Var(b));
             // arg 1 is the int byte value.
             // The 0-255 range check is runtime-side (M8.4.2 stopgap).
-            let b_ref = view.args[0];
-            let x_ref = view.args[1];
+            let b_ref = view.args.at(0);
+            let x_ref = view.args.at(1);
             // Field place (`bytes_push(&b.field, ...)`) — see the
             // str_push arm: pass the field's address in the root
             // struct's slot directly; the runtime mutates in place.
@@ -1570,14 +1572,14 @@ impl<M: Module> Codegen<M> {
         // field; fat owners spill the fat-pointer triple.
         let mut inout_reloads: Vec<(TirRef, StackSlot)> = Vec::new();
         for (i, arg) in view.args.iter().enumerate() {
-            let mode = view.modes.get(i).copied().ok_or_else(|| {
+            let mode = view.modes.get(i).ok_or_else(|| {
                 format!(
                     "internal error: call '{name_str}' has {} args but {} modes",
                     view.args.len(),
                     view.modes.len()
                 )
             })?;
-            let arg_ty = ctx.tir.inst(*arg).ty;
+            let arg_ty = ctx.tir.inst(arg).ty;
             let lowered = abi
                 .params
                 .get(i)
@@ -1588,7 +1590,7 @@ impl<M: Module> Codegen<M> {
                 ));
             }
             if mode == ParamMode::Inout {
-                if matches!(ctx.tir.inst(*arg).data, TirData::FieldAccess { .. })
+                if matches!(ctx.tir.inst(arg).data, TirData::FieldAccess { .. })
                     || lowered.value == super::ValueAbi::Struct
                     || lowered.value == super::ValueAbi::Enum
                 {
@@ -1597,10 +1599,10 @@ impl<M: Module> Codegen<M> {
                     // pointee already lives in the caller's stack slot —
                     // pass its address directly so the callee mutates
                     // in place. No spill, no reload, no write-back.
-                    let addr = Self::inout_pointee_addr(builder, ctx, *arg)?;
+                    let addr = Self::inout_pointee_addr(builder, ctx, arg)?;
                     values.push(addr);
                 } else if lowered.value == super::ValueAbi::Fat {
-                    let repr = Self::eval_inst_fat(builder, ctx, *arg)?;
+                    let repr = Self::eval_inst_fat(builder, ctx, arg)?;
                     let (ptr, len, cap) = match repr {
                         ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
                             (ptr, len, cap)
@@ -1609,7 +1611,7 @@ impl<M: Module> Codegen<M> {
                     };
                     // Home-backed binding: the callee mutates the home
                     // slot in place — no spill, no reload.
-                    let arg_name = Self::local_name_of(ctx, *arg);
+                    let arg_name = Self::local_name_of(ctx, arg);
                     let home_addr = arg_name.and_then(|n| Self::fat_home_addr(builder, ctx, n));
                     match home_addr {
                         Some(addr) => {
@@ -1634,7 +1636,7 @@ impl<M: Module> Codegen<M> {
                             builder.ins().store(MemFlagsData::trusted(), len, addr, 8);
                             builder.ins().store(MemFlagsData::trusted(), cap, addr, 16);
                             values.push(addr);
-                            inout_reloads.push((*arg, slot));
+                            inout_reloads.push((arg, slot));
                         }
                     }
                 } else {
@@ -1646,13 +1648,13 @@ impl<M: Module> Codegen<M> {
                         3,
                     ));
                     let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-                    let cur = Self::eval_inst(builder, ctx, *arg)?;
+                    let cur = Self::eval_inst(builder, ctx, arg)?;
                     builder.ins().store(MemFlagsData::trusted(), cur, addr, 0);
                     values.push(addr);
-                    inout_reloads.push((*arg, slot));
+                    inout_reloads.push((arg, slot));
                 }
             } else if lowered.value == super::ValueAbi::Fat {
-                let repr = Self::eval_inst_fat(builder, ctx, *arg)?;
+                let repr = Self::eval_inst_fat(builder, ctx, arg)?;
                 match repr {
                     ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
                         values.push(ptr);
@@ -1665,23 +1667,23 @@ impl<M: Module> Codegen<M> {
                 // `strview` arg → 2-word ABI (ptr, len), matching the
                 // callee's build_signature. Sema has already inserted
                 // ToView for owned-str actuals (§3.4).
-                let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, *arg)?;
+                let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, arg)?;
                 values.push(ptr);
                 values.push(len);
             } else if lowered.value == super::ValueAbi::Struct {
                 // M9 named / M10 anon struct arg: a single slot
                 // address — the existing slot for Borrow, a fresh
                 // field-wise copy for Move/Copy.
-                let addr = Self::emit_struct_call_arg(builder, ctx, *arg, mode)?;
+                let addr = Self::emit_struct_call_arg(builder, ctx, arg, mode)?;
                 values.push(addr);
             } else if lowered.value == super::ValueAbi::Enum {
                 // M11 enum arg: a single slot address — the existing
                 // slot for Borrow, a fresh tag + active-payload copy
                 // for Move/Copy.
-                let addr = Self::emit_enum_call_arg(builder, ctx, *arg, mode)?;
+                let addr = Self::emit_enum_call_arg(builder, ctx, arg, mode)?;
                 values.push(addr);
             } else {
-                values.push(Self::eval_inst(builder, ctx, *arg)?);
+                values.push(Self::eval_inst(builder, ctx, arg)?);
             }
         }
 

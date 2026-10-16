@@ -214,10 +214,12 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Severity:** Cleanup
 **Area:** core-ir
 
-**Files:** `ryo-core/src/uir.rs` (`call_view` :870-886, `if_stmt_view` :1004-1046, `body_stmts` :344, `while_loop_view` :942, `for_range_view` :956, `method_call_view` :981), `ryo-core/src/tir.rs` (`call_view`), `ryo-backend/src/codegen/expr.rs` (call view args/modes)
-**Summary:** Every accessor decode collects refs out of `extra` into a fresh `Vec<InstRef>`/`Vec<TirRef>`, and `body_stmts()` collects a slice that is already contiguous. Sema and codegen call these in their hottest loops. Multipliers found in the 2026-08 arena-perf review: `Tir::walk_operands` (`tir.rs:1194-1266`) decodes views per visited instruction, so every `collect_reachable` costs several Vec allocs per inst; sema calls `uir.body_stmts(body)` twice per function (`sema/mod.rs:485-486`); ownership calls `tir.body_stmts()` per whole-body-walk query (`ownership/frees.rs:28, :208`, `ownership/loops.rs:67, :128, :249, :307`). Additionally `ExtraRange.len` is write-only metadata (decoders re-derive counts from inline `argc` words) — a second source of truth.
-**Resolution:** Return borrowed slices (`&[InstRef]` over `extra`) or `impl Iterator` from the views; `body_stmts` can be a slice iter directly. Add `assert_eq!(size_of::<Inst>(), 24)` before any `InstData` refactor.
+**Files:** `ryo-core/src/uir.rs` (`body_stmts`, `call_view`, `if_stmt_view`, `while_loop_view`, `for_range_view`, `method_call_view`, `struct_lit_view`), `ryo-core/src/tir.rs` (`body_stmts`, `if_stmt_view`, loop and struct-literal views), and their sema, ownership, and codegen callers.
+**Summary:** UIR/TIR view decoders still collect arena words into vectors for statement lists, branch and loop bodies, UIR call and method-call arguments, and struct fields. These paths run during sema, ownership, and codegen. `Tir::walk_operands` now visits call, struct, branch, and loop payloads directly. `Tir::call_view` now borrows its argument and mode words through lazy typed iterators. The 2026-08 arena review also found repeated `body_stmts()` allocations in sema and ownership. `ExtraRange.len` bounds the arena slice; payload list counts also appear in the payload encoding.
+**Resolution:** Replace the remaining owned decoded lists with safe borrowed iterators. Keep the packed `u32` arena and its range bounds. Add `assert_eq!(size_of::<Inst>(), 24)` before any `InstData` refactor.
 **Update (2026-10-09, Milestone 11):** The M11 enum view decoders (`EnumLitView` in `uir.rs`/`tir.rs`) borrow the `extra` arena (`&[u32]`) and iterate fields with no per-decode `Vec`. The legacy view decoders listed above still collect; entry stays open for them.
+
+**Update (2026-10-16):** `Tir::walk_operands` and `Tir::call_view` no longer allocate decoded lists. UIR views, body-statement accessors, branch and loop views, and struct-literal views still allocate.
 
 ---
 

@@ -44,7 +44,7 @@ pub(crate) fn is_materialize_call(
     let view = tir.call_view(r);
     (ids.str_from_view == Some(view.name) || ids.bytes_from_view == Some(view.name))
         && view.args.len() == 1
-        && pool.is_view(tir.inst(view.args[0]).ty)
+        && pool.is_view(tir.inst(view.args.at(0)).ty)
 }
 
 /// True when `r` is a call to the `__ryo_str_to_bytes` bridge callee
@@ -188,7 +188,7 @@ pub(crate) fn warn_redundant_materialize(
         // The view's root must be local and resolvable; a `strview`
         // parameter's buffer belongs to the caller, and the pass
         // cannot judge mutations it cannot see — no warning.
-        let view_arg = tir.call_view(call).args[0];
+        let view_arg = tir.call_view(call).args.at(0);
         let Some(root) = projection_root(own, tir, flow, pool, view_arg) else {
             continue;
         };
@@ -295,7 +295,7 @@ pub(crate) fn warn_redundant_to_bytes(
         // lexical order against the last read. A receiver with no
         // local root (a view of caller storage) cannot be hazarded by
         // anything this function does.
-        let receiver = tir.call_view(call).args[0];
+        let receiver = tir.call_view(call).args.at(0);
         if let Some(root) = projection_root(own, tir, flow, pool, receiver) {
             let copy_rank = rank(call);
             // Latest read of any chain link: the point where the

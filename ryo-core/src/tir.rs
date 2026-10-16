@@ -70,6 +70,12 @@ pub type Span = SimpleSpan;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TirRef(NonZeroU32);
 
+impl ExtraValue for TirRef {
+    fn from_extra(raw: u32) -> Self {
+        Self::from_raw(raw)
+    }
+}
+
 impl TirRef {
     fn from_index(idx: usize) -> Self {
         let raw = u32::try_from(idx).expect("TirRef index out of range (>= 2^32)");
@@ -132,8 +138,8 @@ impl TirRef {
 
 // ---------- ExtraRange ----------
 
-pub use crate::extra::ExtraRange;
 pub use crate::extra::enum_lit_extra;
+pub use crate::extra::{ExtraList, ExtraRange, ExtraValue};
 
 // ---------- Instruction tags ----------
 
@@ -375,6 +381,14 @@ impl ParamMode {
             2 => Some(ParamMode::Inout),
             _ => None,
         }
+    }
+}
+
+impl ExtraValue for ParamMode {
+    fn from_extra(raw: u32) -> Self {
+        Self::from_u32(raw).unwrap_or_else(|| {
+            unreachable!("call_extra mode word {raw} not written by ParamMode::to_u32")
+        })
     }
 }
 
@@ -1240,12 +1254,12 @@ impl TirBuilder {
 
 // ---------- Read-side helpers ----------
 
-pub struct CallView {
+pub struct CallView<'a> {
     pub name: StringId,
-    pub args: Vec<TirRef>,
+    pub args: ExtraList<'a, TirRef>,
     /// Per-argument call convention, parallel to `args`. Stamped by
     /// sema from each callee parameter's `mode` field.
-    pub modes: Vec<ParamMode>,
+    pub modes: ExtraList<'a, ParamMode>,
 }
 
 pub struct VarDeclView {
@@ -1322,7 +1336,7 @@ impl EnumLitView<'_> {
 }
 
 impl Tir {
-    pub fn call_view(&self, r: TirRef) -> CallView {
+    pub fn call_view(&self, r: TirRef) -> CallView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, TirTag::Call));
         let range = match inst.data {
@@ -1332,20 +1346,8 @@ impl Tir {
         let slice = &self.extra[range.as_range()];
         let name = StringId::from_raw(slice[call_extra::NAME]);
         let argc = slice[call_extra::ARGC] as usize;
-        let args = slice[call_extra::ARGS..call_extra::ARGS + argc]
-            .iter()
-            .copied()
-            .map(TirRef::from_raw)
-            .collect();
-        let modes = slice[call_extra::ARGS + argc..call_extra::ARGS + 2 * argc]
-            .iter()
-            .copied()
-            .map(|v| {
-                ParamMode::from_u32(v).unwrap_or_else(|| {
-                    unreachable!("call_extra mode word {v} not written by ParamMode::to_u32")
-                })
-            })
-            .collect();
+        let args = ExtraList::new(&slice[call_extra::ARGS..call_extra::ARGS + argc]);
+        let modes = ExtraList::new(&slice[call_extra::ARGS + argc..call_extra::ARGS + 2 * argc]);
         CallView { name, args, modes }
     }
 

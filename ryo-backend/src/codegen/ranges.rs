@@ -245,7 +245,7 @@ impl<M: Module> Codegen<M> {
             TirTag::CompoundAssign => out.push(tir.compound_assign_view(r).name),
             TirTag::Call => {
                 let view = tir.call_view(r);
-                for (&arg, &mode) in view.args.iter().zip(view.modes.iter()) {
+                for (arg, mode) in view.args.iter().zip(view.modes.iter()) {
                     if mode != ParamMode::Inout {
                         continue;
                     }

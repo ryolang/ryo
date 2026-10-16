@@ -136,8 +136,8 @@ impl<M: Module> Codegen<M> {
             return false;
         }
         let pool = ctx.pool;
-        for (i, &arg) in view.args.iter().enumerate() {
-            if view.modes.get(i) == Some(&ParamMode::Inout) {
+        for (i, arg) in view.args.iter().enumerate() {
+            if view.modes.get(i) == Some(ParamMode::Inout) {
                 return false;
             }
             if !matches!(

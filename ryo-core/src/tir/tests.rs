@@ -95,8 +95,11 @@ fn call_payload_round_trips() {
 
     let view = tir.call_view(call);
     assert_eq!(view.name, foo);
-    assert_eq!(view.args, vec![a, bb]);
-    assert_eq!(view.modes, vec![ParamMode::Borrow, ParamMode::Move]);
+    assert_eq!(view.args.iter().collect::<Vec<_>>(), vec![a, bb]);
+    assert_eq!(
+        view.modes.iter().collect::<Vec<_>>(),
+        vec![ParamMode::Borrow, ParamMode::Move]
+    );
 }
 
 #[test]
@@ -135,7 +138,7 @@ fn call_view_panics_on_corrupt_mode_word() {
     let mode_idx = rng.as_range().start + call_extra::ARGS + 1;
     tir.extra[mode_idx] = 99;
 
-    tir.call_view(call);
+    let _ = tir.call_view(call).modes.iter().next();
 }
 
 #[test]

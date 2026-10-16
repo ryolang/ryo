@@ -498,7 +498,7 @@ impl FlowBuilder<'_> {
             }
             TirTag::Call if self.pool.is_never(inst.ty) => {
                 let view = self.tir.call_view(r);
-                for &arg in &view.args {
+                for arg in &view.args {
                     self.emit_expr(arg);
                 }
                 let next = self.new_block(true);
@@ -578,8 +578,8 @@ impl FlowBuilder<'_> {
             let call = self.tir.call_view(r);
             let offset = self.extra.len() as u32;
             let push = matches!(self.pool.str(call.name), "str_push" | "bytes_push");
-            for (index, &arg) in call.args.iter().enumerate() {
-                if (call.modes.get(index) == Some(&crate::tir::ParamMode::Inout)
+            for (index, arg) in call.args.iter().enumerate() {
+                if (call.modes.get(index) == Some(crate::tir::ParamMode::Inout)
                     || (push && index == 0))
                     && let Some(place) = self.resolve_view_base(arg)
                 {

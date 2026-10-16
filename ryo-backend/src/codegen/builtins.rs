@@ -26,7 +26,7 @@ impl<M: Module> Codegen<M> {
             1,
             "sema should reject process_exit() arity errors"
         );
-        let arg = Self::eval_inst(builder, ctx, view.args[0])?;
+        let arg = Self::eval_inst(builder, ctx, view.args.at(0))?;
         let exit_ref = Self::declare_runtime_fn(ctx, builder, "ryo_exit", &[ctx.int_type], &[])?;
         builder.ins().call(exit_ref, &[arg]);
         builder.ins().trap(
@@ -99,7 +99,7 @@ impl<M: Module> Codegen<M> {
             1,
             "sema should reject io_eprint() arity errors"
         );
-        let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
+        let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, view.args.at(0))?;
         let eprint_ref =
             Self::declare_runtime_fn(ctx, builder, "ryo_eprint", &[ctx.int_type, types::I64], &[])?;
         builder.ins().call(eprint_ref, &[ptr, len]);
