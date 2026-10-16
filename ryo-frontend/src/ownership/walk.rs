@@ -1139,6 +1139,35 @@ impl<'a> Walk<'a> {
                 push_unique(&mut moved, owner);
             }
         }
+        self.check_call_argument_aliasing(
+            own,
+            sink,
+            r,
+            &view,
+            &borrowed,
+            &moved,
+            &view_borrowed,
+            &inout_uses,
+        );
+        self.commit_call_moves(own, sink, r, &view, &view_borrowed);
+        // `inout` args need no ownership transition: the callee only
+        // borrows the slot, and the binding keeps its pre-call owner.
+        // The stale-triple hazard (callee realloc'd/replaced the
+        // buffer) is handled in CODEGEN (named-binding Frees emit the
+        // binding's CURRENT `FatLocals`).
+    }
+
+    fn check_call_argument_aliasing(
+        &self,
+        own: &Ownership,
+        sink: &mut DiagSink,
+        r: TirRef,
+        view: &ryo_core::tir::CallView,
+        borrowed: &[Owner],
+        moved: &[Owner],
+        view_borrowed: &[Owner],
+        inout_uses: &[(Owner, Span)],
+    ) {
         // Rule 7 (M8.3): at most one mutable borrow per owner in a
         // call, and no immutable borrow / move alongside it.
         for (pos, (owner, _span)) in inout_uses.iter().enumerate() {
@@ -1280,7 +1309,16 @@ impl<'a> Walk<'a> {
             }
             sink.emit(diag);
         }
+    }
 
+    fn commit_call_moves(
+        &self,
+        own: &mut Ownership,
+        sink: &mut DiagSink,
+        r: TirRef,
+        view: &ryo_core::tir::CallView,
+        view_borrowed: &[Owner],
+    ) {
         // Phase 3 — commit the moves.
         for (i, arg) in view.args.iter().enumerate() {
             let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
@@ -1329,11 +1367,6 @@ impl<'a> Walk<'a> {
                 );
             }
         }
-        // `inout` args need no ownership transition: the callee only
-        // borrows the slot, and the binding keeps its pre-call owner.
-        // The stale-triple hazard (callee realloc'd/replaced the
-        // buffer) is handled in CODEGEN (named-binding Frees emit the
-        // binding's CURRENT `FatLocals`).
     }
 
     /// Aliasing read: the step's `read` fact names the binding home

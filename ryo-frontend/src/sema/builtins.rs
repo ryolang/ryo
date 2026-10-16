@@ -20,35 +20,23 @@ pub(crate) fn emit_builtin_call(
     // Builtins never take ownership of their arguments — every arg
     // is borrowed regardless of declared type.
     let modes = vec![ParamMode::Borrow; arg_tirs.len()];
-    // --- M8.3: `&`/`inout` agreement for builtin calls (builtins
-    // bypass `check_call`, so the check is replayed here). `&` is only
-    // valid on an `inout` parameter — today only the first argument of
-    // str_push/bytes_push — everywhere else it is rejected, exactly
-    // like user-function calls. The push arms additionally validate
-    // the mutable lvalue of that first argument.
-    let builtin_modes: Vec<ParamMode> = if view.name == ids.str_push || view.name == ids.bytes_push
+    // Builtins bypass `check_call`, so check explicit `&` arguments
+    // before dispatching to their validation group.
+    check_builtin_borrow_modes(sema, view.name, &view.args);
+    if view.name == ids.process_exit
+        || view.name == ids.process_argc
+        || view.name == ids.process_argv
+        || view.name == ids.process_env
+        || view.name == ids.io_read_line
     {
-        vec![ParamMode::Inout, ParamMode::Borrow]
-    } else {
-        modes.clone()
-    };
-    for (idx, arg_uir) in view.args.iter().enumerate() {
-        let arg_is_borrow = matches!(sema.uir.inst(*arg_uir).tag, InstTag::Borrow);
-        let param_is_inout =
-            builtin_modes.get(idx).copied().unwrap_or(ParamMode::Borrow) == ParamMode::Inout;
-        if arg_is_borrow && !param_is_inout {
-            sema.sink.emit(
-                Diag::error(
-                    sema.uir.span(*arg_uir),
-                    DiagCode::BorrowMismatch,
-                    format!(
-                        "argument {} is passed by `&` but parameter is not `inout`",
-                        idx + 1
-                    ),
-                )
-                .with_help("remove the `&`, or declare the parameter `inout`"),
-            );
-        }
+        return emit_process_builtin(sema, fcx, view, arg_tirs, span, builtin, modes);
+    }
+    if view.name == ids.int_to_str || view.name == ids.float_to_str || view.name == ids.bool_to_str
+    {
+        return emit_conversion_builtin(sema, fcx, view, arg_tirs, span, builtin, modes);
+    }
+    if view.name == ids.str_push || view.name == ids.bytes_push {
+        return emit_push_builtin(sema, fcx, scope, view, arg_tirs, span, builtin);
     }
     match view.name {
         // M9.2: `io_eprint` is the exact twin of `print` — same
@@ -58,7 +46,25 @@ pub(crate) fn emit_builtin_call(
             emit_print_like(sema, fcx, view, arg_tirs, &modes, span, builtin)
         }
         n if n == ids.panic => emit_panic(sema, fcx, view, span),
-        // TODO(M24): interim call form — replaced by `process.exit`.
+        n if n == ids.assert => emit_assert(sema, fcx, view, arg_tirs, span),
+        _ => {
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+        }
+    }
+}
+
+fn emit_process_builtin(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    view: &CallView,
+    arg_tirs: &[TirRef],
+    span: Span,
+    builtin: &'static crate::builtins::BuiltinFunction,
+    modes: Vec<ParamMode>,
+) -> TirRef {
+    let ids = sema.names;
+    match view.name {
         n if n == ids.process_exit => {
             if view.args.len() != 1 {
                 sema.sink.emit(Diag::error(
@@ -89,8 +95,6 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
-        n if n == ids.assert => emit_assert(sema, fcx, view, arg_tirs, span),
-        // TODO(M22): interim call form — replaced by `process.args`.
         n if n == ids.process_argc => {
             if !view.args.is_empty() {
                 sema.sink.emit(Diag::error(
@@ -193,6 +197,21 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
+        _ => unreachable!("builtin routed to the wrong validation group"),
+    }
+}
+
+fn emit_conversion_builtin(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    view: &CallView,
+    arg_tirs: &[TirRef],
+    span: Span,
+    builtin: &'static crate::builtins::BuiltinFunction,
+    modes: Vec<ParamMode>,
+) -> TirRef {
+    let ids = sema.names;
+    match view.name {
         n if n == ids.int_to_str => {
             if view.args.len() != 1 {
                 sema.sink.emit(Diag::error(
@@ -283,6 +302,21 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
+        _ => unreachable!("builtin routed to the wrong validation group"),
+    }
+}
+
+fn emit_push_builtin(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    view: &CallView,
+    arg_tirs: &[TirRef],
+    span: Span,
+    builtin: &'static crate::builtins::BuiltinFunction,
+) -> TirRef {
+    let ids = sema.names;
+    match view.name {
         n if n == ids.str_push => {
             // str_push(s: inout str, suffix: strview) -> void. Builtins
             // bypass `check_call`, so the `&`/`inout` agreement +
@@ -405,9 +439,27 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
-        _ => {
-            let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+        _ => unreachable!("builtin routed to the wrong validation group"),
+    }
+}
+
+fn check_builtin_borrow_modes(sema: &mut Sema<'_>, name: StringId, args: &[InstRef]) {
+    let push_modes = name == sema.names.str_push || name == sema.names.bytes_push;
+    for (idx, arg_uir) in args.iter().enumerate() {
+        let arg_is_borrow = matches!(sema.uir.inst(*arg_uir).tag, InstTag::Borrow);
+        let param_is_inout = push_modes && idx == 0;
+        if arg_is_borrow && !param_is_inout {
+            sema.sink.emit(
+                Diag::error(
+                    sema.uir.span(*arg_uir),
+                    DiagCode::BorrowMismatch,
+                    format!(
+                        "argument {} is passed by `&` but parameter is not `inout`",
+                        idx + 1
+                    ),
+                )
+                .with_help("remove the `&`, or declare the parameter `inout`"),
+            );
         }
     }
 }

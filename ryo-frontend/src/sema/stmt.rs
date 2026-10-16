@@ -628,6 +628,230 @@ fn check_field_chain(
     Some((target_tir, field_ty))
 }
 
+type DestructureField = (u32, Option<StringId>, TypeId);
+
+struct ResolvedDestructureShape {
+    fields: Vec<DestructureField>,
+    had_error: bool,
+}
+
+fn resolve_positional_destructure(
+    sema: &mut Sema<'_>,
+    value_ty: TypeId,
+    span: Span,
+    plan: &[(u32, Option<StringId>)],
+    shape_fields: &[ryo_core::types::StructField],
+    named_struct: bool,
+) -> ResolvedDestructureShape {
+    let mut fields = Vec::new();
+    let mut had_error = false;
+    if named_struct {
+        // Named structs have no "0"/"1" fields; the by-name
+        // spelling is the only shape.
+        let names = shape_fields
+            .iter()
+            .map(|f| sema.pool.str(f.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sema.sink.emit(
+            Diag::error(
+                span,
+                DiagCode::DestructurePositionalOnNamed,
+                format!(
+                    "cannot destructure named struct `{}` positionally — \
+                         named structs destructure by field name",
+                    sema.pool.display(value_ty),
+                ),
+            )
+            .with_help(format!("write the brace pattern: `{{{names}}} = ...`")),
+        );
+        had_error = true;
+    } else if plan.len() != shape_fields.len() {
+        let n = shape_fields.len();
+        let m = plan.len();
+        // Name the offending side so the user isn't left counting:
+        // extra bindings with no field left, or shape fields the
+        // pattern leaves unbound.
+        let detail = if m > n {
+            // Name the bindings with no field left — but never
+            // compiler temps: a nested element mints
+            // `__ryo_destructure_N`, and leaking one into a
+            // user-facing message reads as a compiler bug.
+            let extra_named = plan
+                .iter()
+                .skip(n)
+                .filter_map(|(_, b)| *b)
+                .filter(|b| !fcx_temp_name(sema, *b))
+                .map(|b| format!("'{}'", sema.pool.str(b)))
+                .collect::<Vec<_>>();
+            if extra_named.is_empty() {
+                // Only nested-pattern temps sit past the shape's
+                // end — count elements instead of naming internals.
+                let k = m - n;
+                format!(
+                    "{k} extra pattern element{} {} no field to bind",
+                    if k == 1 { "" } else { "s" },
+                    if k == 1 { "has" } else { "have" },
+                )
+            } else {
+                format!("no field left to bind {}", extra_named.join(", "))
+            }
+        } else {
+            let uncovered = shape_fields
+                .iter()
+                .skip(m)
+                .map(|f| format!("'{}'", sema.pool.str(f.name)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let (s, is, it) = if n - m == 1 {
+                ("", "is", "it")
+            } else {
+                ("s", "are", "them")
+            };
+            format!("field{s} {uncovered} {is} not covered — bind {it} or write `_`")
+        };
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::DestructureArity,
+            format!(
+                "expected {n} fields, found {m} binding{} — {detail}",
+                if m == 1 { "" } else { "s" },
+            ),
+        ));
+        had_error = true;
+    } else {
+        for (i, (_, bind)) in plan.iter().enumerate() {
+            fields.push((i as u32, *bind, shape_fields[i].ty));
+        }
+    }
+    ResolvedDestructureShape { fields, had_error }
+}
+
+fn resolve_named_destructure(
+    sema: &mut Sema<'_>,
+    value_ty: TypeId,
+    span: Span,
+    plan: &[(u32, Option<StringId>)],
+    shape_fields: &[ryo_core::types::StructField],
+) -> ResolvedDestructureShape {
+    let mut fields = Vec::new();
+    let mut had_error = false;
+    // Brace pattern. Per-entry resolution:
+    // - rename (`{x = quot}` — binding differs from the field
+    //   name): field `x` must exist (else DestructureUnknownField)
+    //   and binds the rename target (`_` skips the field);
+    // - pun (`{q}` — binding equals the field name): field `q`
+    //   when the struct has one; otherwise the NEXT UNCOVERED
+    //   field in canonical order — the Python-unpack fallback that
+    //   makes `{quot, _} = divmod(...)` bind `q` to `quot`;
+    // - a field named `_`: the wildcard-rest form — covers every
+    //   otherwise-uncovered field as an inline drop.
+    let mut covered: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for (selector, bind) in plan {
+        let name = StringId::from_raw(*selector);
+        let bind = *bind;
+        if sema.pool.str(name) == "_" {
+            // Explicit bindings after the rest marker hit the
+            // covered-field error below.
+            for f in shape_fields {
+                if covered.insert(f.idx) {
+                    fields.push((f.idx, None, f.ty));
+                }
+            }
+            continue;
+        }
+        let is_pun = bind == Some(name);
+        let field = if is_pun {
+            match shape_fields.iter().find(|f| f.name == name) {
+                Some(f) => Some(f),
+                // Unmatched pun: bind the next uncovered field.
+                None => shape_fields.iter().find(|f| !covered.contains(&f.idx)),
+            }
+        } else {
+            match shape_fields.iter().find(|f| f.name == name) {
+                Some(f) => Some(f),
+                None => {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::DestructureUnknownField,
+                        format!(
+                            "struct `{}` has no field `{}`",
+                            sema.pool.display(value_ty),
+                            sema.pool.str(name),
+                        ),
+                    ));
+                    had_error = true;
+                    continue;
+                }
+            }
+        };
+        let Some(field) = field else {
+            // More bindings than fields — the positional reading
+            // of the arity rule. Name the binding that ran out of
+            // fields (renames error above; only puns reach here).
+            let n = shape_fields.len();
+            let offender = bind
+                .map(|b| format!("'{}'", sema.pool.str(b)))
+                .unwrap_or_else(|| "`_`".to_string());
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::DestructureArity,
+                format!("expected {n} fields — no field left to bind {offender}"),
+            ));
+            had_error = true;
+            continue;
+        };
+        if !covered.insert(field.idx) {
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::DuplicateStructField,
+                format!(
+                    "field '{}' is specified more than once",
+                    sema.pool.str(field.name),
+                ),
+            ));
+            had_error = true;
+            continue;
+        }
+        // A rename whose target is `_` skips the field without
+        // binding it.
+        let bind = bind.filter(|b| sema.pool.str(*b) != "_");
+        fields.push((field.idx, bind, field.ty));
+    }
+    // Full coverage: every field is bound, wildcarded, or rest-
+    // covered above — anything still uncovered is an error. Skipped
+    // when an entry already errored: the coverage set of a broken
+    // pattern is derived noise on top of the real diagnostic.
+    let missing: Vec<StringId> = shape_fields
+        .iter()
+        .filter(|f| !covered.contains(&f.idx))
+        .map(|f| f.name)
+        .collect();
+    if !missing.is_empty() && !had_error {
+        let names = missing
+            .iter()
+            .map(|n| format!("`{}`", sema.pool.str(*n)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (noun, pronoun) = if missing.len() == 1 {
+            ("field", "it")
+        } else {
+            ("fields", "them")
+        };
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::DestructureUnknownField,
+            format!(
+                "destructuring `{}` does not cover {noun} {names} — \
+                     bind {pronoun} or write `_`",
+                sema.pool.display(value_ty),
+            ),
+        ));
+        had_error = true;
+    }
+    ResolvedDestructureShape { fields, had_error }
+}
+
 /// Destructuring assignment `pattern = value` (M10): `(a, b) = e`,
 /// `{q, r} = e`. Sema resolves the rhs type (anonymous or named
 /// struct), validates the pattern against the struct shape — full
@@ -653,33 +877,8 @@ fn analyze_destructure(
     let view = sema.uir.destructure_view(r);
     let value_tir = analyze_expr_allow_never(sema, fcx, scope, view.value);
     let value_ty = fcx.builder.ty_of(value_tir);
-    let fail = |sema: &mut Sema<'_>, fcx: &mut FuncCtx| -> TirRef {
-        fcx.builder.unreachable(sema.pool.error_type(), span)
-    };
-    // Recovery with the docstring contract below: a failed destructure
-    // declares nothing, but its names must still resolve — user binds
-    // with the error type so later uses point back at this statement
-    // instead of cascading an 'undefined variable' per use, temps in
-    // the side table so the nested sub-pattern's own statement fails
-    // silently. User names insert only when absent: a failed pattern
-    // never actually shadowed a same-named outer binding.
-    let fail_registered = |sema: &mut Sema<'_>, fcx: &mut FuncCtx, scope: &mut Scope| -> TirRef {
-        for (_, bind) in &view.plan {
-            let Some(name) = bind else { continue };
-            if sema.pool.str(*name) == "_" {
-                continue;
-            }
-            if fcx_temp_name(sema, *name) {
-                fcx.destructure_temps.insert(*name, sema.pool.error_type());
-            } else if !scope.contains_in_current(*name) {
-                scope.insert_binding(*name, sema.pool.error_type(), false, false);
-            }
-        }
-        fail(sema, fcx)
-    };
-
     if sema.pool.is_error(value_ty) {
-        return fail_registered(sema, fcx, scope);
+        return fail_destructure_registered(sema, fcx, scope, &view.plan, span);
     }
     // Name the void/never diagnostic after the first USER binding —
     // leading with a compiler temp would leak `__ryo_destructure_N`
@@ -690,7 +889,7 @@ fn analyze_destructure(
         .find_map(|(_, bind)| bind.filter(|b| !fcx_temp_name(sema, *b)))
         .unwrap_or_else(|| sema.pool.intern_str("_"));
     if check_bindable_value(sema, first_bind, value_ty, sema.uir.span(view.value)) {
-        return fail_registered(sema, fcx, scope);
+        return fail_destructure_registered(sema, fcx, scope, &view.plan, span);
     }
     let kind = sema.pool.kind(value_ty);
     if !matches!(
@@ -705,219 +904,30 @@ fn analyze_destructure(
                 sema.pool.display(value_ty),
             ),
         ));
-        return fail_registered(sema, fcx, scope);
+        return fail_destructure_registered(sema, fcx, scope, &view.plan, span);
     }
     if matches!(kind, ryo_core::types::TypeKind::Struct) && !sema.pool.is_defined_struct(value_ty) {
         // Declared but never defined (cycle / unknown field type) —
         // astgen already diagnosed it. Recover without touching
         // `struct_view`, which panics on undefined structs. (Anon
         // structs are interned whole; they are always defined.)
-        return fail_registered(sema, fcx, scope);
+        return fail_destructure_registered(sema, fcx, scope, &view.plan, span);
     }
     let shape = sema.pool.struct_view(value_ty);
-
-    // ---- Shape validation: build the per-field plan ----
-    let mut fields: Vec<(u32, Option<StringId>, TypeId)> = Vec::new();
-    let mut had_error = false;
-    if view.by_position {
-        if matches!(kind, ryo_core::types::TypeKind::Struct) {
-            // Named structs have no "0"/"1" fields; the by-name
-            // spelling is the only shape.
-            let names = shape
-                .fields
-                .iter()
-                .map(|f| sema.pool.str(f.name))
-                .collect::<Vec<_>>()
-                .join(", ");
-            sema.sink.emit(
-                Diag::error(
-                    span,
-                    DiagCode::DestructurePositionalOnNamed,
-                    format!(
-                        "cannot destructure named struct `{}` positionally — \
-                         named structs destructure by field name",
-                        sema.pool.display(value_ty),
-                    ),
-                )
-                .with_help(format!("write the brace pattern: `{{{names}}} = ...`")),
-            );
-            had_error = true;
-        } else if view.plan.len() != shape.fields.len() {
-            let n = shape.fields.len();
-            let m = view.plan.len();
-            // Name the offending side so the user isn't left counting:
-            // extra bindings with no field left, or shape fields the
-            // pattern leaves unbound.
-            let detail = if m > n {
-                // Name the bindings with no field left — but never
-                // compiler temps: a nested element mints
-                // `__ryo_destructure_N`, and leaking one into a
-                // user-facing message reads as a compiler bug.
-                let extra_named = view
-                    .plan
-                    .iter()
-                    .skip(n)
-                    .filter_map(|(_, b)| *b)
-                    .filter(|b| !fcx_temp_name(sema, *b))
-                    .map(|b| format!("'{}'", sema.pool.str(b)))
-                    .collect::<Vec<_>>();
-                if extra_named.is_empty() {
-                    // Only nested-pattern temps sit past the shape's
-                    // end — count elements instead of naming internals.
-                    let k = m - n;
-                    format!(
-                        "{k} extra pattern element{} {} no field to bind",
-                        if k == 1 { "" } else { "s" },
-                        if k == 1 { "has" } else { "have" },
-                    )
-                } else {
-                    format!("no field left to bind {}", extra_named.join(", "))
-                }
-            } else {
-                let uncovered = shape
-                    .fields
-                    .iter()
-                    .skip(m)
-                    .map(|f| format!("'{}'", sema.pool.str(f.name)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let (s, is, it) = if n - m == 1 {
-                    ("", "is", "it")
-                } else {
-                    ("s", "are", "them")
-                };
-                format!("field{s} {uncovered} {is} not covered — bind {it} or write `_`")
-            };
-            sema.sink.emit(Diag::error(
-                span,
-                DiagCode::DestructureArity,
-                format!(
-                    "expected {n} fields, found {m} binding{} — {detail}",
-                    if m == 1 { "" } else { "s" },
-                ),
-            ));
-            had_error = true;
-        } else {
-            for (i, (_, bind)) in view.plan.iter().enumerate() {
-                fields.push((i as u32, *bind, shape.fields[i].ty));
-            }
-        }
+    let resolved = if view.by_position {
+        resolve_positional_destructure(
+            sema,
+            value_ty,
+            span,
+            &view.plan,
+            &shape.fields,
+            matches!(kind, ryo_core::types::TypeKind::Struct),
+        )
     } else {
-        // Brace pattern. Per-entry resolution:
-        // - rename (`{x = quot}` — binding differs from the field
-        //   name): field `x` must exist (else DestructureUnknownField)
-        //   and binds the rename target (`_` skips the field);
-        // - pun (`{q}` — binding equals the field name): field `q`
-        //   when the struct has one; otherwise the NEXT UNCOVERED
-        //   field in canonical order — the Python-unpack fallback that
-        //   makes `{quot, _} = divmod(...)` bind `q` to `quot`;
-        // - a field named `_`: the wildcard-rest form — covers every
-        //   otherwise-uncovered field as an inline drop.
-        let mut covered: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        for (selector, bind) in &view.plan {
-            let name = StringId::from_raw(*selector);
-            let bind = *bind;
-            if sema.pool.str(name) == "_" {
-                // Explicit bindings after the rest marker hit the
-                // covered-field error below.
-                for f in &shape.fields {
-                    if covered.insert(f.idx) {
-                        fields.push((f.idx, None, f.ty));
-                    }
-                }
-                continue;
-            }
-            let is_pun = bind == Some(name);
-            let field = if is_pun {
-                match shape.fields.iter().find(|f| f.name == name) {
-                    Some(f) => Some(f),
-                    // Unmatched pun: bind the next uncovered field.
-                    None => shape.fields.iter().find(|f| !covered.contains(&f.idx)),
-                }
-            } else {
-                match shape.fields.iter().find(|f| f.name == name) {
-                    Some(f) => Some(f),
-                    None => {
-                        sema.sink.emit(Diag::error(
-                            span,
-                            DiagCode::DestructureUnknownField,
-                            format!(
-                                "struct `{}` has no field `{}`",
-                                sema.pool.display(value_ty),
-                                sema.pool.str(name),
-                            ),
-                        ));
-                        had_error = true;
-                        continue;
-                    }
-                }
-            };
-            let Some(field) = field else {
-                // More bindings than fields — the positional reading
-                // of the arity rule. Name the binding that ran out of
-                // fields (renames error above; only puns reach here).
-                let n = shape.fields.len();
-                let offender = bind
-                    .map(|b| format!("'{}'", sema.pool.str(b)))
-                    .unwrap_or_else(|| "`_`".to_string());
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::DestructureArity,
-                    format!("expected {n} fields — no field left to bind {offender}"),
-                ));
-                had_error = true;
-                continue;
-            };
-            if !covered.insert(field.idx) {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::DuplicateStructField,
-                    format!(
-                        "field '{}' is specified more than once",
-                        sema.pool.str(field.name),
-                    ),
-                ));
-                had_error = true;
-                continue;
-            }
-            // A rename whose target is `_` skips the field without
-            // binding it.
-            let bind = bind.filter(|b| sema.pool.str(*b) != "_");
-            fields.push((field.idx, bind, field.ty));
-        }
-        // Full coverage: every field is bound, wildcarded, or rest-
-        // covered above — anything still uncovered is an error. Skipped
-        // when an entry already errored: the coverage set of a broken
-        // pattern is derived noise on top of the real diagnostic.
-        let missing: Vec<StringId> = shape
-            .fields
-            .iter()
-            .filter(|f| !covered.contains(&f.idx))
-            .map(|f| f.name)
-            .collect();
-        if !missing.is_empty() && !had_error {
-            let names = missing
-                .iter()
-                .map(|n| format!("`{}`", sema.pool.str(*n)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let (noun, pronoun) = if missing.len() == 1 {
-                ("field", "it")
-            } else {
-                ("fields", "them")
-            };
-            sema.sink.emit(Diag::error(
-                span,
-                DiagCode::DestructureUnknownField,
-                format!(
-                    "destructuring `{}` does not cover {noun} {names} — \
-                     bind {pronoun} or write `_`",
-                    sema.pool.display(value_ty),
-                ),
-            ));
-            had_error = true;
-        }
-    }
+        resolve_named_destructure(sema, value_ty, span, &view.plan, &shape.fields)
+    };
+    let fields = resolved.fields;
+    let mut had_error = resolved.had_error;
 
     // ---- Bindings: collision / reserved checks, then insertion ----
     // Temps (nested-pattern sub-bindings) live in the side table and
@@ -973,7 +983,7 @@ fn analyze_destructure(
         // validated — register every remaining plan name so later
         // uses still resolve (already-inserted names keep their
         // error-typed or validated binding).
-        return fail_registered(sema, fcx, scope);
+        return fail_destructure_registered(sema, fcx, scope, &view.plan, span);
     }
 
     // ---- Emit: owner tokens (bound fields, plan order) then the
@@ -985,6 +995,29 @@ fn analyze_destructure(
     }
     let plan: Vec<(u32, Option<StringId>, TypeId)> = fields;
     fcx.builder.destructure(value_tir, &plan, span)
+}
+
+/// Register destructuring names after failed validation so later uses
+/// resolve to this error instead of producing cascaded diagnostics.
+fn fail_destructure_registered(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &mut Scope,
+    plan: &[(u32, Option<StringId>)],
+    span: Span,
+) -> TirRef {
+    for (_, bind) in plan {
+        let Some(name) = bind else { continue };
+        if sema.pool.str(*name) == "_" {
+            continue;
+        }
+        if fcx_temp_name(sema, *name) {
+            fcx.destructure_temps.insert(*name, sema.pool.error_type());
+        } else if !scope.contains_in_current(*name) {
+            scope.insert_binding(*name, sema.pool.error_type(), false, false);
+        }
+    }
+    fcx.builder.unreachable(sema.pool.error_type(), span)
 }
 
 /// True for the compiler-temp names astgen mints for nested

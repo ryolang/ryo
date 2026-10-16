@@ -585,17 +585,8 @@ fn try_check_with_optimizations(
     Ok(sidecar)
 }
 
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-fn analyze_function(
-    tir: &Tir,
-    flow: &Flow,
-    pool: &InternPool,
-    synth: &materialization::SynthCalleeIds,
-    sink: &mut DiagSink,
-    warnings: &mut DiagSink,
-    sidecar: &mut FunctionSidecar,
-    optional_optimizations: bool,
-) {
+#[allow(clippy::too_many_lines)]
+fn initialize_function_ownership(tir: &Tir, flow: &Flow, pool: &InternPool) -> Ownership {
     let mut own = Ownership {
         // Name → param-index map, built once so the per-owner lookups
         // below (Param owner → TirRef / type / span) are O(1) instead
@@ -688,6 +679,22 @@ fn analyze_function(
             own.inout_str_params.insert(param.name);
         }
     }
+
+    own
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn analyze_function(
+    tir: &Tir,
+    flow: &Flow,
+    pool: &InternPool,
+    synth: &materialization::SynthCalleeIds,
+    sink: &mut DiagSink,
+    warnings: &mut DiagSink,
+    sidecar: &mut FunctionSidecar,
+    optional_optimizations: bool,
+) {
+    let mut own = initialize_function_ownership(tir, flow, pool);
 
     // The forward walk, driven by Flow IR: the driver iterates blocks
     // in construction order; each block's steps run in evaluation
@@ -1694,6 +1701,125 @@ fn convert_honored_reseat_drops(
     }
 }
 
+fn suppress_exit_frees_covered_later(
+    tir: &Tir,
+    order: &[u32],
+    sidecar: &FunctionSidecar,
+    candidates: &[(usize, TirRef, TirRef)],
+    binding_of: &impl Fn(TirRef) -> Option<TirRef>,
+    drop: &mut HashSet<usize>,
+) {
+    // An exit Free covered by a same-binding Free anchored strictly
+    // after the exit is redundant on every path. The covering anchor
+    // must lie outside the exit's subtree: an anchor inside it fires
+    // only on paths that reach it, so it cannot cover skipped arms or
+    // zero-iteration loops.
+    for &(i, after, binding) in candidates {
+        let covered = anchored_drops(sidecar).enumerate().any(|(j, fp2)| {
+            j != i
+                && !drop.contains(&j)
+                && !matches!(
+                    tir.inst(drop_anchor(fp2)).tag,
+                    TirTag::Return | TirTag::ReturnVoid | TirTag::Break | TirTag::Continue
+                )
+                && binding_of(fp2.target) == Some(binding)
+                && !tir.contains_reachable(after, drop_anchor(fp2))
+                && anchored_after(tir, order, drop_anchor(fp2), after)
+        });
+        if covered {
+            drop.insert(i);
+        }
+    }
+}
+
+fn retarget_displaced_exit_frees(
+    tir: &Tir,
+    order: &[u32],
+    sidecar: &mut FunctionSidecar,
+    decl_of_init: &HashMap<TirRef, TirRef>,
+    assign_value_of: &HashMap<TirRef, TirRef>,
+    reassign_orders: &HashMap<TirRef, Vec<TirRef>>,
+    drop: &mut HashSet<usize>,
+) {
+    // Pass 1b: an exit Free whose target was already released by a
+    // reassign displacement before the exit must target the binding's
+    // last write instead. This makes codegen release the slot's current
+    // content without freeing the displaced buffer twice.
+    let binding_of = |t: TirRef| decl_of_init.get(&t).or(assign_value_of.get(&t)).copied();
+    let last_write_target = |binding: TirRef| -> Option<TirRef> {
+        if let Some(assigns) = reassign_orders.get(&binding)
+            && let Some(&slot) = assigns.last()
+        {
+            return Some(tir.assign_view(slot).value);
+        }
+        if tir.inst(binding).tag == TirTag::VarDecl {
+            return Some(tir.var_decl_view(binding).initializer);
+        }
+        None
+    };
+    let displaced_targets: HashSet<TirRef> =
+        sidecar.free_on_reassign.iter().flatten().copied().collect();
+    for i in 0..sidecar.drops.len() {
+        if drop.contains(&i) {
+            continue;
+        }
+        let fp = &sidecar.drops[i];
+        // Block-start drops fire at block starts, not instruction anchors.
+        let Some(anchor) = fp.position.anchor_inst() else {
+            continue;
+        };
+        // This scan also covers last-use Frees re-anchored to a branch.
+        if tir.inst(anchor).tag != TirTag::IfStmt {
+            continue;
+        }
+        let Some(binding) = binding_of(fp.target) else {
+            continue;
+        };
+        if !displaced_targets.contains(&fp.target) {
+            continue;
+        }
+        let after = drop_anchor(fp);
+        let displaced_before_exit = reassign_orders.get(&binding).is_some_and(|assigns| {
+            assigns
+                .iter()
+                .any(|&r| order[r.index()] < order[after.index()])
+        });
+        if !displaced_before_exit {
+            continue;
+        }
+        let Some(last_write) = last_write_target(binding) else {
+            continue;
+        };
+        if last_write == fp.target {
+            continue;
+        }
+        // A same-binding Free at this anchor already covers these paths.
+        let redundant_at_anchor = anchored_drops(sidecar).enumerate().any(|(j, fp2)| {
+            j != i
+                && !drop.contains(&j)
+                && drop_anchor(fp2) == after
+                && binding_of(fp2.target) == Some(binding)
+        });
+        if redundant_at_anchor {
+            drop.insert(i);
+            continue;
+        }
+        let redirect_safe = anchored_drops(sidecar)
+            .filter(|fp2| fp2.target == last_write)
+            .all(|fp2| {
+                drop_anchor(fp2) == after
+                    || (tir.contains_reachable(after, drop_anchor(fp2))
+                        && matches!(
+                            tir.inst(drop_anchor(fp2)).tag,
+                            TirTag::Return | TirTag::ReturnVoid
+                        ))
+            });
+        if redirect_safe {
+            sidecar.drops[i].target = last_write;
+        }
+    }
+}
+
 /// Branch-exit Free redundancy suppression. When a `mut` binding
 /// declared before a branch is reseated inside one or more arms and the
 /// reseated values are read only inside those arms, `last_use_anchor`
@@ -1769,29 +1895,7 @@ fn suppress_redundant_exit_frees(
         .collect();
 
     let mut drop: HashSet<usize> = HashSet::new();
-    // Pass 1: an exit Free covered by a same-binding Free anchored
-    // strictly after the exit is redundant on every path. The covering
-    // anchor must lie OUTSIDE the exit's own subtree: an anchor inside
-    // it (an in-arm read, an in-body Assign) fires only on the paths
-    // that reach it — never on the zero-iteration loop path or the
-    // not-taken arms — so it cannot release the buffer the exit Free
-    // would.
-    for &(i, after, binding) in &candidates {
-        let covered = anchored_drops(sidecar).enumerate().any(|(j, fp2)| {
-            j != i
-                && !drop.contains(&j)
-                && !matches!(
-                    tir.inst(drop_anchor(fp2)).tag,
-                    TirTag::Return | TirTag::ReturnVoid | TirTag::Break | TirTag::Continue
-                )
-                && binding_of(fp2.target) == Some(binding)
-                && !tir.contains_reachable(after, drop_anchor(fp2))
-                && anchored_after(tir, order, drop_anchor(fp2), after)
-        });
-        if covered {
-            drop.insert(i);
-        }
-    }
+    suppress_exit_frees_covered_later(tir, order, sidecar, &candidates, &binding_of, &mut drop);
     // Pass 1b: an exit Free whose target was ALREADY released by
     // a reassign displacement before the exit must not keep targeting
     // that owner. Codegen's binding-path redirect filter
@@ -1814,80 +1918,31 @@ fn suppress_redundant_exit_frees(
     // reach the merge, so the redirect cannot double-free with them).
     // Any other anchor could fire before the exit on a reaching path
     // and make the redirect a double free — leave the schedule as-is.
-    let displaced_targets: HashSet<TirRef> =
-        sidecar.free_on_reassign.iter().flatten().copied().collect();
-    for i in 0..sidecar.drops.len() {
-        if drop.contains(&i) {
-            continue;
-        }
-        let fp = &sidecar.drops[i];
-        // Block-start drops (the unified cleanup schedule) fire at block starts, not on an
-        // instruction anchor — the anchor-order scan skips them.
-        let Some(anchor) = fp.position.anchor_inst() else {
-            continue;
-        };
-        // A last-use Free conditionally re-anchored by `last_use_anchor`
-        // lands on a branch statement whose subtree does NOT contain the
-        // target (unlike the arm-value exit Frees in `candidates`), so
-        // this scan is schedule-wide.
-        if tir.inst(anchor).tag != TirTag::IfStmt {
-            continue;
-        }
-        let Some(binding) = binding_of(fp.target) else {
-            continue;
-        };
-        if !displaced_targets.contains(&fp.target) {
-            continue;
-        }
-        let after = drop_anchor(fp);
-        let displaced_before_exit = reassign_orders.get(&binding).is_some_and(|assigns| {
-            assigns
-                .iter()
-                .any(|&r| order[r.index()] < order[after.index()])
-        });
-        if !displaced_before_exit {
-            continue;
-        }
-        let Some(last_write) = last_write_target(binding) else {
-            continue;
-        };
-        if last_write == fp.target {
-            continue;
-        }
-        // A same-binding Free already at this anchor lowers through the
-        // same home-slot redirect and covers this anchor's paths — this
-        // one is redundant (and retargeting would mint a double
-        // redirect).
-        let redundant_at_anchor = anchored_drops(sidecar).enumerate().any(|(j, fp2)| {
-            j != i
-                && !drop.contains(&j)
-                && drop_anchor(fp2) == after
-                && binding_of(fp2.target) == Some(binding)
-        });
-        if redundant_at_anchor {
-            drop.insert(i);
-            continue;
-        }
-        let redirect_safe = anchored_drops(sidecar)
-            .filter(|fp2| fp2.target == last_write)
-            .all(|fp2| {
-                drop_anchor(fp2) == after
-                    || (tir.contains_reachable(after, drop_anchor(fp2))
-                        && matches!(
-                            tir.inst(drop_anchor(fp2)).tag,
-                            TirTag::Return | TirTag::ReturnVoid
-                        ))
-            });
-        if redirect_safe {
-            sidecar.drops[i].target = last_write;
-        }
-    }
+    retarget_displaced_exit_frees(
+        tir,
+        order,
+        sidecar,
+        decl_of_init,
+        assign_value_of,
+        reassign_orders,
+        &mut drop,
+    );
+    deduplicate_exit_free_groups(order, sidecar, &candidates, &last_write_target, &mut drop);
+}
+
+fn deduplicate_exit_free_groups(
+    order: &[u32],
+    sidecar: &mut FunctionSidecar,
+    candidates: &[(usize, TirRef, TirRef)],
+    last_write_target: &impl Fn(TirRef) -> Option<TirRef>,
+    drop: &mut HashSet<usize>,
+) {
     // Pass 2: same (binding, exit) anchor — keep one Free, preferring
     // the Free whose target is the binding's last write (codegen's
     // redirect filter then passes unconditionally), then the
     // latest-ranked target, then the latest schedule index.
     let mut groups: HashMap<(TirRef, TirRef), Vec<usize>> = HashMap::new();
-    for &(i, after, binding) in &candidates {
+    for &(i, after, binding) in candidates {
         if !drop.contains(&i) {
             groups.entry((binding, after)).or_default().push(i);
         }
