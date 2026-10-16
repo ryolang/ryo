@@ -1390,6 +1390,52 @@ fn main():
 ",
     ),
     (
+        // M12 match: free an unread by-move enum payload before its arm
+        // continues. Concatenation forces a heap allocation for Valgrind.
+        "match_dead_payload_continue",
+        "\
+enum Item:
+	Text(str)
+	Empty
+
+fn main():
+	mut i = 0
+	while i < 4:
+		i += 1
+		item = match i:
+			1: Item.Text(int_to_str(i) + \" payload that needs heap storage\")
+			_: Item.Empty
+		match item:
+			Text(unused):
+				continue
+			Empty:
+				print(\"empty\\n\")
+	print(\"done\\n\")
+",
+    ),
+    (
+        // M12 match: continue and break arms release their iteration's
+        // heap value. Keep this runtime check for loop convergence.
+        "match_continue_break_loop_cleanup",
+        "\
+fn main():
+	mut i = 0
+	while i < 5:
+		i += 1
+		match i:
+			2:
+				text = int_to_str(i) + \" continue payload that needs heap storage\"
+				continue
+			4:
+				text = int_to_str(i) + \" break payload that needs heap storage\"
+				break
+			_:
+				text = int_to_str(i) + \" ordinary payload that needs heap storage\"
+				print(text)
+	print(\"done\\n\")
+",
+    ),
+    (
         // M12 match: a `break` inside a statement-level match arm inside
         // a loop. The loop-local heap str (concat-built > SSO cap) is
         // read only in the sibling arm, so its last-use Free does not

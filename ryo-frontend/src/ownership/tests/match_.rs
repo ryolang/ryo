@@ -917,6 +917,48 @@ fn dead_payload_in_continue_arm_is_freed_before_continue() {
         "release runs before the continue terminator; continue TIR is {continue_inst:?}, got {:?}",
         frees[0].position
     );
+
+    let item_init = (1..tirs[0].instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find_map(|r| {
+            if tirs[0].inst(r).tag == ryo_core::tir::TirTag::VarDecl {
+                let decl = tirs[0].var_decl_view(r);
+                (pool.str(decl.name) == "item").then_some(decl.initializer)
+            } else {
+                None
+            }
+        })
+        .expect("the enum value matched by the consuming match");
+    let scrutinee_read = tirs[0].match_view(consuming_match).scrutinee;
+    assert!(
+        !f.drops.iter().any(|drop| {
+            drop.target == item_init
+                && matches!(
+                    drop.position,
+                    ryo_core::flow::DropPosition::AfterStep { inst } if inst == scrutinee_read
+                )
+        }),
+        "the whole enum owner cannot be freed after its scrutinee read, before payload extraction; got {:?}",
+        f.drops
+    );
+    assert!(
+        !f.drops.iter().any(|drop| {
+            drop.target == item_init
+                && matches!(
+                    drop.position,
+                    ryo_core::flow::DropPosition::PreTerminator { block }
+                        if block == continue_block
+                )
+                || drop.target == item_init
+                    && matches!(
+                        drop.position,
+                        ryo_core::flow::DropPosition::AfterStep { inst }
+                            if inst == continue_inst
+                    )
+        }),
+        "the consuming continue arm must not free the source enum after the payload token; got {:?}",
+        f.drops
+    );
 }
 
 #[test]

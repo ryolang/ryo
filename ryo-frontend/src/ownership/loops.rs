@@ -18,9 +18,9 @@
 
 use super::{
     BranchState, Owner, OwnerState, Ownership, RegionStop, StopKind, Walk, anchored_drops,
-    binding_state_writes, branch_states_differ, collect_region, drop_anchor, match_arm_bodies,
-    merge_loop_plain, merge_non_monotone, owner_sort_key, remove_loop_deferred_views, stmt_match,
-    visit_operand_matches,
+    binding_state_writes, branch_states_differ, collect_region, drop_anchor, flow_owner_place,
+    match_arm_bodies, merge_loop_plain, merge_non_monotone, owner_sort_key,
+    remove_loop_deferred_views, stmt_match, visit_operand_matches,
 };
 use ryo_core::diag::DiagSink;
 use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow, Place, Terminator, WriteKind};
@@ -1088,6 +1088,22 @@ pub(crate) fn last_use_anchor(
             .is_some_and(|(decl, _)| decl.is_param() || !tir.contains_reachable(branch_stmt, decl))
     };
     let outermost = outermost_branch_of(tir, after);
+    // A by-move arm takes a payload from the enum. Do not free the enum
+    // after its scrutinee read. The arm must read the payload first.
+    // Match cleanup frees the payload on consuming arms. It frees the
+    // whole enum on other arms. Suppress only a direct scrutinee read
+    // of the same binding.
+    let is_consuming_scrutinee_read = innermost_branch_of(tir, after).is_some_and(|candidate| {
+        tir.inst(candidate).tag == TirTag::Match
+            && tir.match_view(candidate).scrutinee == after
+            && !tir.match_by_move_owner_refs(candidate, pool).is_empty()
+            && binding.is_some_and(|(decl, _)| {
+                flow_owner_place(flow, after) == flow_owner_place(flow, decl)
+            })
+    });
+    if is_consuming_scrutinee_read {
+        return None;
+    }
     // An all-diverging match has no completion point. Do not anchor the
     // scrutinee's last-use Free after it. That position cannot fire.
     // Return and loop-exit cleanup handle each terminating arm.
@@ -1525,6 +1541,7 @@ impl LoopExitCtx {
 pub(crate) fn schedule_loop_exit_frees_in(
     tir: &Tir,
     flow: &ryo_core::flow::Flow,
+    pool: &InternPool,
     own: &Ownership,
     sidecar: &mut FunctionSidecar,
     stmts: &[TirRef],
@@ -1536,27 +1553,47 @@ pub(crate) fn schedule_loop_exit_frees_in(
         match inst.tag {
             TirTag::Break | TirTag::Continue => {
                 if let Some(ctx) = enclosing {
-                    schedule_break_continue_frees(tir, flow, own, sidecar, r, ctx);
+                    schedule_break_continue_frees(tir, flow, pool, own, sidecar, r, ctx);
                 }
             }
             TirTag::WhileLoop | TirTag::ForRange => {
                 if let Some(ctx) = LoopExitCtx::new(tir, sidecar, r) {
-                    schedule_loop_exit_frees_in(tir, flow, own, sidecar, &ctx.body, Some(&ctx));
+                    schedule_loop_exit_frees_in(
+                        tir,
+                        flow,
+                        pool,
+                        own,
+                        sidecar,
+                        &ctx.body,
+                        Some(&ctx),
+                    );
                 }
             }
             TirTag::IfStmt => {
                 let view = tir.if_stmt_view(r);
-                schedule_loop_exit_frees_in(tir, flow, own, sidecar, &view.then_stmts, enclosing);
+                schedule_loop_exit_frees_in(
+                    tir,
+                    flow,
+                    pool,
+                    own,
+                    sidecar,
+                    &view.then_stmts,
+                    enclosing,
+                );
                 for elif in &view.elif_branches {
-                    schedule_loop_exit_frees_in(tir, flow, own, sidecar, &elif.body, enclosing);
+                    schedule_loop_exit_frees_in(
+                        tir, flow, pool, own, sidecar, &elif.body, enclosing,
+                    );
                 }
                 if let Some(else_stmts) = &view.else_stmts {
-                    schedule_loop_exit_frees_in(tir, flow, own, sidecar, else_stmts, enclosing);
+                    schedule_loop_exit_frees_in(
+                        tir, flow, pool, own, sidecar, else_stmts, enclosing,
+                    );
                 }
             }
             TirTag::Match => {
                 for body in match_arm_bodies(tir, r) {
-                    schedule_loop_exit_frees_in(tir, flow, own, sidecar, &body, enclosing);
+                    schedule_loop_exit_frees_in(tir, flow, pool, own, sidecar, &body, enclosing);
                 }
             }
             _ => {}
@@ -1564,7 +1601,7 @@ pub(crate) fn schedule_loop_exit_frees_in(
         if !matches!(inst.tag, TirTag::WhileLoop | TirTag::ForRange) {
             visit_operand_matches(tir, r, &mut |m| {
                 for body in match_arm_bodies(tir, m) {
-                    schedule_loop_exit_frees_in(tir, flow, own, sidecar, &body, enclosing);
+                    schedule_loop_exit_frees_in(tir, flow, pool, own, sidecar, &body, enclosing);
                 }
             });
         }
@@ -1617,6 +1654,7 @@ fn prune_match_arms(tir: &Tir, m: TirRef, jump: TirRef, on_path: &mut HashSet<Ti
 pub(crate) fn schedule_break_continue_frees(
     tir: &Tir,
     flow: &ryo_core::flow::Flow,
+    pool: &InternPool,
     own: &Ownership,
     sidecar: &mut FunctionSidecar,
     jump_inst: TirRef,
@@ -1657,7 +1695,27 @@ pub(crate) fn schedule_break_continue_frees(
     }
 
     let is_break = matches!(tir.inst(jump_inst).tag, TirTag::Break);
-
+    let mut consumed_scrutinees = HashSet::new();
+    for &candidate in &on_path {
+        if tir.inst(candidate).tag != TirTag::Match {
+            continue;
+        }
+        let view = tir.match_view(candidate);
+        let selected_arm = view.arms().find(|arm| match arm.body {
+            MatchBodyView::Expr(expr) => tir.contains_reachable(expr, jump_inst),
+            MatchBodyView::Stmts(_) => arm
+                .body
+                .stmts()
+                .any(|stmt| tir.contains_reachable(stmt, jump_inst)),
+        });
+        let consumes_scrutinee =
+            selected_arm.is_some_and(|arm| arm.bindings().any(|binding| !pool.is_copy(binding.ty)));
+        if consumes_scrutinee {
+            if let Some(owner) = own.underlying_owner(view.scrutinee).inst_tirref(flow) {
+                consumed_scrutinees.insert(owner);
+            }
+        }
+    }
     let mut sorted_states: Vec<(Owner, OwnerState)> =
         own.states.iter().map(|(o, s)| (*o, s.clone())).collect();
     sorted_states.sort_by_key(|(o, _)| owner_sort_key(o));
@@ -1667,6 +1725,12 @@ pub(crate) fn schedule_break_continue_frees(
             None => continue,
         };
         if !matches!(state, OwnerState::Valid) {
+            continue;
+        }
+
+        // The selected arm transfers the payload to its by-move binding.
+        // Do not release the source slot again at the loop exit.
+        if consumed_scrutinees.contains(&r) {
             continue;
         }
 
