@@ -1208,11 +1208,23 @@ pub struct WhileLoopView {
     pub body: Vec<InstRef>,
 }
 
+pub struct WhileLoopRefView<'a> {
+    pub cond: InstRef,
+    pub body: ExtraList<'a, InstRef>,
+}
+
 pub struct ForRangeView {
     pub var_name: StringId,
     pub start: InstRef,
     pub end: InstRef,
     pub body: Vec<InstRef>,
+}
+
+pub struct ForRangeRefView<'a> {
+    pub var_name: StringId,
+    pub start: InstRef,
+    pub end: InstRef,
+    pub body: ExtraList<'a, InstRef>,
 }
 
 /// Decoded view of an [`InstTag::MethodCall`] payload.
@@ -1368,6 +1380,14 @@ impl Uir {
     }
 
     pub fn while_loop_view(&self, r: InstRef) -> WhileLoopView {
+        let view = self.while_loop_ref_view(r);
+        WhileLoopView {
+            cond: view.cond,
+            body: view.body.into_iter().collect(),
+        }
+    }
+
+    pub fn while_loop_ref_view(&self, r: InstRef) -> WhileLoopRefView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, InstTag::WhileLoop));
         let range = match inst.data {
@@ -1376,12 +1396,21 @@ impl Uir {
         };
         let slice = &self.extra[range.as_range()];
         let cond = InstRef::from_raw(slice[while_loop_extra::COND]);
-        let mut pos = while_loop_extra::BODY_COUNT;
-        let body = read_ref_list(slice, &mut pos);
-        WhileLoopView { cond, body }
+        let body = ExtraList::new(&slice[while_loop_extra::BODY_START..]);
+        WhileLoopRefView { cond, body }
     }
 
     pub fn for_range_view(&self, r: InstRef) -> ForRangeView {
+        let view = self.for_range_ref_view(r);
+        ForRangeView {
+            var_name: view.var_name,
+            start: view.start,
+            end: view.end,
+            body: view.body.into_iter().collect(),
+        }
+    }
+
+    pub fn for_range_ref_view(&self, r: InstRef) -> ForRangeRefView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, InstTag::ForRange));
         let range = match inst.data {
@@ -1392,13 +1421,8 @@ impl Uir {
         let var_name = StringId::from_raw(slice[for_range_extra::VAR_NAME]);
         let start = InstRef::from_raw(slice[for_range_extra::START]);
         let end = InstRef::from_raw(slice[for_range_extra::END]);
-        let body_count = slice[for_range_extra::BODY_COUNT] as usize;
-        let body = slice[for_range_extra::BODY_START..for_range_extra::BODY_START + body_count]
-            .iter()
-            .copied()
-            .map(InstRef::from_raw)
-            .collect();
-        ForRangeView {
+        let body = ExtraList::new(&slice[for_range_extra::BODY_START..]);
+        ForRangeRefView {
             var_name,
             start,
             end,
@@ -1737,6 +1761,55 @@ mod tests {
         assert_eq!(view.elif_branches[1].cond, elif_cond2);
         assert_eq!(view.elif_branches[1].body, vec![elif2_a, elif2_b]);
         assert_eq!(view.else_stmts, Some(vec![else_ret]));
+    }
+
+    #[test]
+    fn borrowed_loop_views_preserve_headers_and_bodies() {
+        let mut pool = InternPool::new();
+        let name = pool.intern_str("i");
+        let mut b = UirBuilder::new();
+        let cond = b.bool_literal(true, sp());
+        let while_loop = b.while_loop(cond, &[], sp());
+        let while_body = b.int_literal(3, sp());
+        let while_loop_with_body = b.while_loop(cond, &[while_body], sp());
+        let start = b.int_literal(0, sp());
+        let end = b.int_literal(4, sp());
+        let first = b.int_literal(1, sp());
+        let second = b.int_literal(2, sp());
+        let for_loop = b.for_range(name, start, end, &[first, second], sp());
+        let for_loop_without_body = b.for_range(name, start, end, &[], sp());
+        let uir = b.finish();
+
+        let view = uir.while_loop_ref_view(while_loop);
+        assert_eq!(view.cond, cond);
+        assert!(view.body.is_empty());
+
+        let view = uir.while_loop_ref_view(while_loop_with_body);
+        assert_eq!(view.cond, cond);
+        assert_eq!(view.body.into_iter().collect::<Vec<_>>(), vec![while_body]);
+
+        let view = uir.for_range_ref_view(for_loop);
+        assert_eq!(view.var_name, name);
+        assert_eq!(view.start, start);
+        assert_eq!(view.end, end);
+        assert_eq!(
+            view.body.into_iter().collect::<Vec<_>>(),
+            vec![first, second]
+        );
+
+        let view = uir.for_range_ref_view(for_loop_without_body);
+        assert_eq!(view.var_name, name);
+        assert_eq!(view.start, start);
+        assert_eq!(view.end, end);
+        assert!(view.body.is_empty());
+
+        assert!(uir.while_loop_view(while_loop).body.is_empty());
+        assert_eq!(
+            uir.while_loop_view(while_loop_with_body).body,
+            vec![while_body]
+        );
+        assert_eq!(uir.for_range_view(for_loop).body, vec![first, second]);
+        assert!(uir.for_range_view(for_loop_without_body).body.is_empty());
     }
 
     #[test]

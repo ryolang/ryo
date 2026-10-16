@@ -225,30 +225,38 @@ pub(crate) fn analyze_stmt(
         InstTag::CompoundFieldAssign => analyze_compound_field_assign(sema, fcx, scope, r, span),
         InstTag::Destructure => analyze_destructure(sema, fcx, scope, r, span),
         InstTag::WhileLoop => {
-            let view = sema.uir.while_loop_view(r);
+            let uir = sema.uir;
+            let view = uir.while_loop_ref_view(r);
+            let cond = view.cond;
+            let body = view.body;
 
-            let cond_tir = analyze_expr(sema, fcx, scope, view.cond);
-            check_condition_bool(sema, fcx, cond_tir, view.cond);
+            let cond_tir = analyze_expr(sema, fcx, scope, cond);
+            check_condition_bool(sema, fcx, cond_tir, cond);
 
             fcx.loop_depth += 1;
-            let body_tirs = analyze_block(sema, fcx, scope, &view.body);
+            let body_tirs = analyze_block_iter(sema, fcx, scope, body.into_iter());
             fcx.loop_depth -= 1;
 
             fcx.builder
                 .while_loop(cond_tir, &body_tirs, sema.pool.void(), span)
         }
         InstTag::ForRange => {
-            let view = sema.uir.for_range_view(r);
+            let uir = sema.uir;
+            let view = uir.for_range_ref_view(r);
+            let var_name = view.var_name;
+            let start = view.start;
+            let end = view.end;
+            let body = view.body;
 
-            let start_tir = analyze_expr(sema, fcx, scope, view.start);
-            let end_tir = analyze_expr(sema, fcx, scope, view.end);
+            let start_tir = analyze_expr(sema, fcx, scope, start);
+            let end_tir = analyze_expr(sema, fcx, scope, end);
 
             let start_ty = fcx.builder.ty_of(start_tir);
             let end_ty = fcx.builder.ty_of(end_tir);
 
             if !sema.pool.is_error(start_ty) && start_ty != sema.pool.int() {
                 sema.sink.emit(Diag::error(
-                    sema.uir.span(view.start),
+                    sema.uir.span(start),
                     DiagCode::RangeArgType,
                     format!(
                         "range() start must be 'int', got '{}'",
@@ -258,7 +266,7 @@ pub(crate) fn analyze_stmt(
             }
             if !sema.pool.is_error(end_ty) && end_ty != sema.pool.int() {
                 sema.sink.emit(Diag::error(
-                    sema.uir.span(view.end),
+                    sema.uir.span(end),
                     DiagCode::RangeArgType,
                     format!(
                         "range() end must be 'int', got '{}'",
@@ -269,8 +277,6 @@ pub(crate) fn analyze_stmt(
 
             let int_ty = sema.pool.int();
             let void_ty = sema.pool.void();
-            let var_name = view.var_name;
-
             fcx.loop_depth += 1;
             let is_reserved = check_reserved_name(
                 sema,
@@ -279,13 +285,14 @@ pub(crate) fn analyze_stmt(
                 "is a reserved builtin and cannot be redefined",
             );
             let error_ty = sema.pool.error_type();
-            let body_tirs = analyze_block_seeded(sema, fcx, scope, &view.body, |child_scope| {
-                if is_reserved {
-                    child_scope.insert_binding(var_name, error_ty, false, false);
-                } else {
-                    child_scope.insert_binding(var_name, int_ty, false, false);
-                }
-            });
+            let body_tirs =
+                analyze_block_seeded_iter(sema, fcx, scope, body.into_iter(), |child_scope| {
+                    if is_reserved {
+                        child_scope.insert_binding(var_name, error_ty, false, false);
+                    } else {
+                        child_scope.insert_binding(var_name, int_ty, false, false);
+                    }
+                });
             fcx.loop_depth -= 1;
 
             fcx.builder
@@ -331,6 +338,15 @@ pub(crate) fn analyze_block(
     stmts: &[InstRef],
 ) -> Vec<TirRef> {
     analyze_block_seeded(sema, fcx, scope, stmts, |_| {})
+}
+
+fn analyze_block_iter(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    stmts: impl ExactSizeIterator<Item = InstRef>,
+) -> Vec<TirRef> {
+    analyze_block_seeded_iter(sema, fcx, scope, stmts, |_| {})
 }
 
 /// The final field name of a field-assign target chain, for
@@ -1037,6 +1053,16 @@ pub(crate) fn analyze_block_seeded(
     stmts: &[InstRef],
     seed: impl FnOnce(&mut Scope),
 ) -> Vec<TirRef> {
+    analyze_block_seeded_iter(sema, fcx, scope, stmts.iter().copied(), seed)
+}
+
+fn analyze_block_seeded_iter(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    stmts: impl ExactSizeIterator<Item = InstRef>,
+    seed: impl FnOnce(&mut Scope),
+) -> Vec<TirRef> {
     let mut child_scope = Scope {
         parent: Some(scope),
         bindings: HashMap::new(),
@@ -1044,7 +1070,7 @@ pub(crate) fn analyze_block_seeded(
     seed(&mut child_scope);
     let mut tirs = Vec::with_capacity(stmts.len());
     for stmt_ref in stmts {
-        tirs.push(analyze_stmt(sema, fcx, &mut child_scope, *stmt_ref));
+        tirs.push(analyze_stmt(sema, fcx, &mut child_scope, stmt_ref));
     }
     tirs
 }
