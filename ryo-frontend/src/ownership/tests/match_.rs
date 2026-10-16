@@ -366,6 +366,46 @@ fn dead_bind_in_returning_arm_single_epilogue_free() {
 }
 
 #[test]
+fn local_before_returning_match_is_freed_once() {
+    // An unused local must be released once even when one match arm returns.
+    let src = "fn finish(should_return: bool):\n\towned = int_to_str(42) + \" payload that needs heap storage\"\n\tmatch should_return:\n\t\ttrue:\n\t\t\tprint(\"returning\\n\")\n\t\t\treturn\n\t\tfalse:\n\t\t\tprint(\"fall through\\n\")\n\tprint(\"after match\\n\")\n\nfn main():\n\tfinish(true)\n\tfinish(false)\n";
+    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "no errors expected; got {diags:?}"
+    );
+    let finish_idx = tirs
+        .iter()
+        .position(|tir| pool.str(tir.name) == "finish")
+        .expect("finish's TIR");
+    let tir = &tirs[finish_idx];
+    let owned_name = pool.intern_str("owned");
+    let owned_init = (1..tir.instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find_map(|r| {
+            if tir.inst(r).tag == ryo_core::tir::TirTag::VarDecl {
+                let decl = tir.var_decl_view(r);
+                (decl.name == owned_name).then_some(decl.initializer)
+            } else {
+                None
+            }
+        })
+        .expect("owned's initializer");
+    let f = take_function_sidecar(&mut sidecar, finish_idx);
+    assert_eq!(
+        f.drops
+            .iter()
+            .filter(|drop| drop.target == owned_init)
+            .count(),
+        1,
+        "the local must be released once across the return and fallthrough paths: {:?}",
+        f.drops
+    );
+}
+
+#[test]
 fn view_last_used_in_scrutinee_does_not_freeze_arms() {
     // F1: a projection whose last use is a read inside the scrutinee
     // must be dead before any arm runs — the P4 lift / condition-drain
