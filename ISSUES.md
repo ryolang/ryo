@@ -189,7 +189,11 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Files:** `ryo-backend/src/codegen/mod.rs` (`STR_SLOT_SIZE`/`VIEW_SLOT_SIZE`/`OFF_PTR`/`OFF_LEN` :40-45), `ryo-backend/src/codegen/expr.rs` (`types::I64` len/cap :1155-1170), `runtime/src/lib.rs` (`RyoStrFat`)
 **Summary:** Every str stack slot hardcodes 24 bytes / align 3 / offsets 0,8,16 (consts at `codegen/mod.rs:40-45`), and `len`/`cap` are hardcoded `types::I64` (`codegen/expr.rs:1155-1170`) while `ptr` is pointer-sized. On a 32-bit target, caller and callee layouts silently mismatch.
-**Resolution:** Centralize the fat-pointer layout in one place (offsets and size computed from `module.target_config().pointer_type()`) and mirror it in the runtime. Prerequisite for any 32-bit target; interacts with I-021 (bool FFI width) when FFI lands.
+**Gate:** Keep the current supported-target behavior until codegen and runtime agree on the target-specific layout. Do not advertise a new pointer-width target until cross-target ABI checks cover generated calls and runtime storage. Any change to the language-visible `str`/`bytes` representation or FFI contract needs explicit human approval.
+
+**References:** [Zig language reference, C interoperability](https://ziglang.org/documentation/master/#C) requires C header translation to use the same target triple and C flags as the final build to avoid subtle ABI mismatches; Ryo must likewise keep Cranelift's target layout and the Rust runtime's `RyoStrFat` layout in agreement.
+
+**Resolution:** Centralize the fat-pointer layout in one place (offsets and size computed from `module.target_config().pointer_type()`) and mirror it in the runtime. Add target-layout checks that validate both emitted code and the runtime storage contract, not object emission alone. Prerequisite for any 32-bit target; interacts with I-021 (bool FFI width) when FFI lands.
 
 ---
 
@@ -456,8 +460,12 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Area:** runtime
 
 **Files:** `runtime/src/lib.rs` (all `#[unsafe(no_mangle)]` entry points)
-**Summary:** Two robustness gaps at the C-ABI boundary were fixed directly (conflated abort modes for OOM vs capacity overflow, and debug-only null checks on `ryo_print` / `ryo_panic` / the slice path), but they were found by inspection, not by a systematic pass. Other entry points may have similar under-checked inputs: untrusted `len`/`cap` values that flow into `write_all`/`memcpy`/allocation size arithmetic, raw pointers beyond the three known sites, and panic/abort paths whose exit codes or messages are load-bearing for codegen assumptions.
-**Resolution:** One audit pass over every `#[unsafe(no_mangle)]` function in `runtime/src/lib.rs`: for each, enumerate the caller contract (which args are trusted vs attacker/bad-codegen-controlled), confirm each unsafe dereference is guarded or documented, and confirm each abort path reports a distinct, accurate message. Fix what's found in the same pass; it's a small file.
+**Summary:** Two robustness gaps at the C-ABI boundary were fixed directly (conflated abort modes for OOM vs capacity overflow, and debug-only null checks on `ryo_print` / `ryo_panic` / the slice path), but they were found by inspection, not by a systematic pass. Other entry points may have similar under-checked inputs: untrusted `len`/`cap` values that flow into `write_all`/`memcpy`/allocation size arithmetic, raw pointers beyond the three known sites, target-dependent ABI assumptions, and panic/abort paths whose exit codes or messages are load-bearing for codegen assumptions. Record pointer nullability, element cardinality, and lifetime expectations at each boundary; raw C pointers do not establish those contracts.
+**Gate:** The runtime boundary audit can proceed under the current FFI and `unsafe` design. Changes that promise isolation from faulty or hostile native dependencies—such as copy-only crossings, opaque checked handles, separate stacks/heaps, or sandboxing—need a separate design review and explicit human approval.
+
+**References:** [Zig language reference, C interoperability](https://ziglang.org/documentation/master/#C) documents C-ABI types, ambiguous C-pointer shapes, and the need to match target triples and C flags during header translation to avoid ABI mismatches; [Vale, “Fearless FFI”](https://verdagon.dev/blog/fearless-ffi) distinguishes memory-safe crossings from containment of unsafe dependencies; Ryo's current policy is in [Specification §4.11 and §17](docs/specification.md).
+
+**Resolution:** One audit pass over every `#[unsafe(no_mangle)]` function in `runtime/src/lib.rs`: for each, enumerate the caller contract (which args are trusted vs attacker/bad-codegen-controlled), the ABI target assumptions, and each pointer's nullability, cardinality, and lifetime; confirm each unsafe dereference is guarded or documented, and confirm each abort path reports a distinct, accurate message. Fix what's found in the same pass; it's a small file.
 
 ---
 
@@ -603,7 +611,11 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Files:** `ryo-frontend/src/ownership/walk.rs` (`inout_owner`, the `inout_uses` Rule-7 partition), `ryo-frontend/src/ownership/structs.rs` (`struct_root`), `bug_reports/bug_e0032_disjoint_field_borrows.ryo` (repro)
 
-**Summary:** `f(&p.a, &p.b)` — two `inout` borrows of distinct fields of one struct — is rejected with E0032 "cannot borrow `p` as mutable more than once in the same call"; the diagnostic names the root binding, and the genuinely-aliasing `f(&p.a, &p.a)` produces the identical message. Alpha-tester report, verified on current main. Root cause: `inout_owner` resolves any `FieldAccess` chain to its ROOT owner ("`&p.x` is the one mutable borrow of `p` for the call's duration", the M9 comment), and the Rule-7 partition compares root owners — no field-path disjointness anywhere. Immutable field reads alias the root too, so `f(&p.a, p.b)` is also rejected (conservative, safe direction). Tester matrix, all confirmed: `(&p.a, &p.a)` → E0032 (correct), `(&p.a, &p.b)` → E0032 (false positive), `(&b, &b.value)` → E0032 (correct); single-field `f(&p.x)` and two distinct variables are accepted. Spec status: the language reference documents a field as a valid inout target, the precise borrow-checker algorithm is an acknowledged gap, and spec §5.8 explicitly lists disjoint field borrows among "the rules restrict" cases with a mechanical rewrite (split calls / hoisted reads) — so the checker matches the spec today. Severity: filed Correctness/Hygiene rather than Blocking because no roadmap feature depends on disjoint field borrows (concurrency disjointness is `std.slice.split_mut` by design); accepting the disjoint pair would be a language design change (path-based places in Rule 7) needing human sign-off before the checker is loosened.
+**Summary:** `f(&p.a, &p.b)` — two `inout` borrows of distinct fields of one struct — is rejected with E0032 "cannot borrow `p` as mutable more than once in the same call"; the diagnostic names the root binding, and the genuinely-aliasing `f(&p.a, &p.a)` produces the identical message. Alpha-tester report, verified on current main. Root cause: `inout_owner` resolves any `FieldAccess` chain to its ROOT owner ("`&p.x` is the one mutable borrow of `p` for the call's duration", the M9 comment), and the Rule-7 partition compares root owners — no field-path disjointness anywhere. Immutable field reads alias the root too, so `f(&p.a, p.b)` is also rejected (conservative, safe direction). Tester matrix, all confirmed: `(&p.a, &p.a)` → E0032 (correct), `(&p.a, &p.b)` → E0032 (false positive), `(&b, &b.value)` → E0032 (correct); single-field `f(&p.x)` and two distinct variables are accepted. Spec status: the language reference documents a field as a valid inout target, the precise borrow-checker algorithm is an acknowledged gap, and spec §5.8 explicitly lists disjoint field borrows among "the rules restrict" cases with a mechanical rewrite (split calls / hoisted reads) — so the checker matches the spec today. Severity: filed Correctness/Hygiene rather than Blocking because no roadmap feature depends on disjoint field borrows (concurrency disjointness is `std.slice.split_mut` by design). Hylo's mutable-value-semantics work provides a useful precedent: compare access paths at call boundaries, and keep unknown index overlap conservative. This does not imply adopting Hylo's value-copying or projection semantics wholesale.
+
+**Gate:** The issue is research/planning only until explicit human approval authorizes this language-visible Rule 7 change. Keep current rejection behavior until then.
+
+**References:** [Hylo introduction](https://hylo-lang.org/introduction/) (temporary projections without first-class references); Racordon et al., [“Implementation Strategies for Mutable Value Semantics”](https://www.jot.fm/issues/issue_2022_02/article2.pdf), §2 and §3 (independent value paths and static inout path uniqueness).
 
 **Resolution:** Compare full field-access paths (or a path-prefix disjointness test) in the Rule-7 partition instead of root owners; keep the root-owner fallback for non-struct bases. When it lands, differentiate the E0032 message so the aliasing case (`&p.a, &p.a`) can name the field. Until then the workaround is splitting the call per field.
 
@@ -749,6 +761,53 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** Ryo does not enable the Cranelift incremental-cache Cargo feature or use its compiled-function cache primitives. Cranelift 0.136.1 provides Context::compile_with_cache and lower-level serialization helpers. These can reduce repeated code generation, but do not improve emitted machine code or replace frontend dependency tracking.
 
 **Resolution:** Prototype cache-disabled, cold-cache, warm-cache, and edited-function builds. Follow the phase and dependency contracts in docs/dev/ryo-incremental-compilation.md. Account for compiler and Cranelift versions, target ISA and CPU features, optimization flags, runtime ABI/profile, and all body, layout, and inline dependencies. Verify symbol remapping, relocation reconstruction, and current-module installation for JIT and AOT. Preserve required unwind and source metadata; raw define_function_bytes integration alone may omit metadata handled by normal module compilation. Do not persist JIT process addresses. Treat unusable entries as cache misses and bound storage growth. Measure lookup cost, warm-build improvement, memory, and storage separately. Use the experimental cache checks during validation. Reference: Cranelift 0.136.1 src/incremental_cache.rs and https://docs.rs/cranelift-codegen/latest/cranelift_codegen/struct.Context.html .
+
+---
+
+### I-236 — Evaluate explicit mutation effects for function APIs
+
+**Severity:** Cleanup
+**Area:** ownership
+
+**Files:** docs/specification.md; ryo-frontend/src/ownership
+
+**Summary:** After place-path borrowing is addressed, evaluate whether APIs need explicit contracts that state which argument paths a function may mutate. Also evaluate a Hylo-style temporary projection for APIs that select one of several inputs and mutate the selected place without returning a first-class reference. Inferred effects can make downstream code stop compiling when an implementation changes, so compare ergonomics and API stability against concrete Ryo use cases before proposing syntax.
+
+**Gate:** Evaluation only until concrete Ryo use cases justify a proposal. Any new projection syntax, mutation-effect contract, or change to borrow behavior requires explicit human approval before implementation.
+
+**References:** [Hylo introduction](https://hylo-lang.org/introduction/) (`longer_of` temporary projection); Racordon et al., [“Implementation Strategies for Mutable Value Semantics”](https://www.jot.fm/issues/issue_2022_02/article2.pdf), §3–5 (subscripts/projections, inout path uniqueness, and implementation strategy).
+
+**Resolution:** Collect use cases that remain awkward with call-scoped, field-granular borrows. If they justify the feature, write a design proposal with explicit signature contracts, compatibility rules, and diagnostics. Otherwise document why current inout modes are sufficient.
+
+---
+
+### I-237 — Define FFI representation and conversion contracts before implementation
+
+**Severity:** Correctness / Hygiene
+**Area:** docs-spec
+
+**Files:** docs/specification.md; docs/dev/implementation_roadmap.md; ryo-backend/src/codegen
+
+**Summary:** Before implementing Ryo FFI, define a per-type boundary contract covering layout, size, alignment, valid values (including trap and niche representations), ownership, and pointer lifetime. Decide which values can cross directly and which need checked temporary storage with writeback for mutable arguments. Bindgen output must not imply safety from ABI translation alone: imports still assert symbol, calling convention, signature, ownership, lifetime, mutability, and aliasing contracts.
+
+**Gate:** Research and design only until explicit human approval. Do not add FFI syntax, accept new types across the boundary, or change ownership/conversion semantics before that approval.
+
+**References:** [CO3 documentation](https://docs.rs/co3/latest/co3/) (soundness-first FFI, borrowed/cloned defaults with explicit ownership transfer, checked temporary conversions for non-robust representations, and import/export safety contracts); Ryo's [FFI roadmap section](docs/dev/implementation_roadmap.md) (CO3 design reference and candidate decisions).
+
+**Resolution:** Write an FFI design matrix for every supported parameter and return type, including C pointer nullability/cardinality, slice pointer-plus-length lowering, move opt-in, borrowed/cloned defaults, fallible conversion and writeback behavior, opaque handles, callbacks, and failure handling. Align generated call signatures with the target ABI and add boundary tests before enabling each type. Obtain explicit approval for the language-visible contract before implementation.
+
+---
+
+### I-241 — ASan does not instrument Cranelift-generated code
+
+**Severity:** Correctness / Hygiene
+**Area:** codegen
+
+**Files:** ryo-backend/src/codegen/, ryo/tests/asan_smoke.rs, scripts/run_linux_tests.sh
+
+**Summary:** The ASan smoke suite instruments the Rust compiler and runtime, but Ryo functions emitted by Cranelift do not pass through LLVM ASan instrumentation. ASan can catch some allocator errors at runtime boundaries, but it cannot reliably check heap accesses made directly by generated code. The current Valgrind lane covers those instructions.
+
+**Resolution:** Evaluate a Cranelift-compatible way to add address checks to generated code. Add a smoke test that proves ASan detects an invalid memory access made by generated Ryo code. If direct instrumentation is not feasible, document the exact ASan coverage and keep Valgrind as the memory-access check for generated code.
 
 ---
 
