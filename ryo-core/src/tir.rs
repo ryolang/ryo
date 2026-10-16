@@ -1396,11 +1396,23 @@ pub struct WhileLoopView {
     pub body: Vec<TirRef>,
 }
 
+pub struct WhileLoopRefView<'a> {
+    pub cond: TirRef,
+    pub body: ExtraList<'a, TirRef>,
+}
+
 pub struct ForRangeView {
     pub var_name: StringId,
     pub start: TirRef,
     pub end: TirRef,
     pub body: Vec<TirRef>,
+}
+
+pub struct ForRangeRefView<'a> {
+    pub var_name: StringId,
+    pub start: TirRef,
+    pub end: TirRef,
+    pub body: ExtraList<'a, TirRef>,
 }
 
 /// Decoded view of a [`TirTag::StructLit`] payload (M9). Fields are
@@ -1578,6 +1590,14 @@ impl Tir {
     }
 
     pub fn while_loop_view(&self, r: TirRef) -> WhileLoopView {
+        let view = self.while_loop_ref_view(r);
+        WhileLoopView {
+            cond: view.cond,
+            body: view.body.into_iter().collect(),
+        }
+    }
+
+    pub fn while_loop_ref_view(&self, r: TirRef) -> WhileLoopRefView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, TirTag::WhileLoop));
         let range = match inst.data {
@@ -1586,9 +1606,8 @@ impl Tir {
         };
         let slice = &self.extra[range.as_range()];
         let cond = TirRef::from_raw(slice[while_loop_extra::COND]);
-        let mut pos = while_loop_extra::BODY_COUNT;
-        let body = read_ref_list(slice, &mut pos);
-        WhileLoopView { cond, body }
+        let body = ExtraList::new(&slice[while_loop_extra::BODY_START..]);
+        WhileLoopRefView { cond, body }
     }
 
     /// Borrow the statement refs in a `WhileLoop` body from the extra arena.
@@ -1604,6 +1623,16 @@ impl Tir {
     }
 
     pub fn for_range_view(&self, r: TirRef) -> ForRangeView {
+        let view = self.for_range_ref_view(r);
+        ForRangeView {
+            var_name: view.var_name,
+            start: view.start,
+            end: view.end,
+            body: view.body.into_iter().collect(),
+        }
+    }
+
+    pub fn for_range_ref_view(&self, r: TirRef) -> ForRangeRefView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, TirTag::ForRange));
         let range = match inst.data {
@@ -1614,9 +1643,8 @@ impl Tir {
         let var_name = StringId::from_raw(slice[for_range_extra::VAR_NAME]);
         let start = TirRef::from_raw(slice[for_range_extra::START]);
         let end = TirRef::from_raw(slice[for_range_extra::END]);
-        let mut pos = for_range_extra::BODY_COUNT;
-        let body = read_ref_list(slice, &mut pos);
-        ForRangeView {
+        let body = ExtraList::new(&slice[for_range_extra::BODY_START..]);
+        ForRangeRefView {
             var_name,
             start,
             end,

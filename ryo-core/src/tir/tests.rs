@@ -264,6 +264,37 @@ fn borrowed_if_view_iterates_all_branches_without_losing_empty_else() {
 }
 
 #[test]
+fn borrowed_loop_views_preserve_headers_and_bodies() {
+    let mut pool = InternPool::new();
+    let bool_ty = pool.bool_();
+    let int_ty = pool.int();
+    let void_ty = pool.void();
+    let main = pool.intern_str("main");
+    let name = pool.intern_str("i");
+    let mut b = TirBuilder::new(main, vec![], void_ty, sp());
+    let cond = b.bool_const(true, bool_ty, sp());
+    let while_stmt = b.int_const(1, int_ty, sp());
+    let start = b.int_const(0, int_ty, sp());
+    let end = b.int_const(4, int_ty, sp());
+    let for_stmt = b.int_const(2, int_ty, sp());
+    let while_loop = b.while_loop(cond, &[while_stmt], void_ty, sp());
+    let for_loop = b.for_range(name, start, end, &[for_stmt], void_ty, sp());
+    let tir = b.finish(&[while_loop, for_loop]);
+
+    let view = tir.while_loop_ref_view(while_loop);
+    assert_eq!(view.cond, cond);
+    assert_eq!(view.body.into_iter().collect::<Vec<_>>(), vec![while_stmt]);
+    let view = tir.for_range_ref_view(for_loop);
+    assert_eq!(view.var_name, name);
+    assert_eq!(view.start, start);
+    assert_eq!(view.end, end);
+    assert_eq!(view.body.into_iter().collect::<Vec<_>>(), vec![for_stmt]);
+
+    assert_eq!(tir.while_loop_view(while_loop).body, vec![while_stmt]);
+    assert_eq!(tir.for_range_view(for_loop).body, vec![for_stmt]);
+}
+
+#[test]
 fn assign_round_trips() {
     let mut pool = InternPool::new();
     let int_ty = pool.int();

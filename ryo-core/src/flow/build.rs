@@ -733,7 +733,8 @@ impl FlowBuilder<'_> {
     }
 
     fn build_while(&mut self, stmt: TirRef) {
-        let view = self.tir.while_loop_view(stmt);
+        let tir = self.tir;
+        let view = tir.while_loop_ref_view(stmt);
         let header = self.new_block(false);
         let body = self.new_block(false);
         let exit = self.new_block(false);
@@ -763,7 +764,7 @@ impl FlowBuilder<'_> {
         self.loops.push(LoopFrame { header, exit });
         self.cur = body;
         self.push_scope();
-        self.emit_stmts(&view.body);
+        self.emit_stmts_iter(&view.body);
         self.pop_scope();
         self.loops.pop();
         if !self.terminated(self.cur) {
@@ -786,7 +787,8 @@ impl FlowBuilder<'_> {
     }
 
     fn build_for(&mut self, stmt: TirRef) {
-        let view = self.tir.for_range_view(stmt);
+        let tir = self.tir;
+        let view = tir.for_range_ref_view(stmt);
         let header = self.new_block(false);
         let body = self.new_block(false);
         let exit = self.new_block(false);
@@ -830,7 +832,7 @@ impl FlowBuilder<'_> {
         self.cur = body;
         self.push_scope();
         self.bind(view.var_name, var);
-        self.emit_stmts(&view.body);
+        self.emit_stmts_iter(&view.body);
         self.pop_scope();
         self.loops.pop();
         if !self.terminated(self.cur) {
