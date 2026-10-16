@@ -1528,6 +1528,15 @@ fn read_ref_list(slice: &[u32], pos: &mut usize) -> Vec<TirRef> {
     refs
 }
 
+fn walk_ref_list(slice: &[u32], pos: &mut usize, mut visit: impl FnMut(TirRef)) {
+    let count = slice[*pos] as usize;
+    *pos += 1;
+    for &raw in &slice[*pos..*pos + count] {
+        visit(TirRef::from_raw(raw));
+    }
+    *pos += count;
+}
+
 // ---------- Structural reachability ----------
 
 /// Distinguishes the two kinds of (parent, child) edges announced
@@ -1540,7 +1549,7 @@ fn read_ref_list(slice: &[u32], pos: &mut usize) -> Vec<TirRef> {
 /// * [`ChildKind::BodyStmt`] — a statement nested inside an
 ///   `if`/`while`/`for` body. Reachable from the parent for
 ///   traversal, but not a consumer of the parent.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChildKind {
     Operand,
     BodyStmt,
@@ -1585,14 +1594,18 @@ impl Tir {
             }
             TirData::Extra(_) => match inst.tag {
                 TirTag::Call => {
-                    let view = self.call_view(r);
-                    for &arg in &view.args {
-                        f(r, arg, ChildKind::Operand);
+                    let slice = self.extra_slice(r);
+                    let argc = slice[call_extra::ARGC] as usize;
+                    for &raw in &slice[call_extra::ARGS..call_extra::ARGS + argc] {
+                        f(r, TirRef::from_raw(raw), ChildKind::Operand);
                     }
                 }
                 TirTag::StructLit => {
-                    for &(_, value) in &self.struct_lit_view(r).fields {
-                        f(r, value, ChildKind::Operand);
+                    let slice = self.extra_slice(r);
+                    let n = slice[struct_lit_extra::N_FIELDS] as usize;
+                    for i in 0..n {
+                        let value = slice[struct_lit_extra::FIELDS + 2 * i + 1];
+                        f(r, TirRef::from_raw(value), ChildKind::Operand);
                     }
                 }
                 TirTag::EnumLit => {
@@ -1654,37 +1667,48 @@ impl Tir {
                     }
                 }
                 TirTag::IfStmt => {
-                    let v = self.if_stmt_view(r);
-                    f(r, v.cond, ChildKind::Operand);
-                    for &s in &v.then_stmts {
-                        f(r, s, ChildKind::BodyStmt);
+                    let slice = self.extra_slice(r);
+                    let cond = TirRef::from_raw(slice[0]);
+                    f(r, cond, ChildKind::Operand);
+                    let mut pos = 1;
+                    walk_ref_list(slice, &mut pos, |s| f(r, s, ChildKind::BodyStmt));
+                    let elif_count = slice[pos] as usize;
+                    pos += 1;
+                    for _ in 0..elif_count {
+                        let cond = TirRef::from_raw(slice[pos]);
+                        pos += 1;
+                        f(r, cond, ChildKind::Operand);
+                        walk_ref_list(slice, &mut pos, |s| f(r, s, ChildKind::BodyStmt));
                     }
-                    for elif in &v.elif_branches {
-                        f(r, elif.cond, ChildKind::Operand);
-                        for &s in &elif.body {
-                            f(r, s, ChildKind::BodyStmt);
-                        }
-                    }
-                    if let Some(else_stmts) = &v.else_stmts {
-                        for &s in else_stmts {
-                            f(r, s, ChildKind::BodyStmt);
-                        }
+                    if slice[pos] != 0 {
+                        pos += 1;
+                        walk_ref_list(slice, &mut pos, |s| f(r, s, ChildKind::BodyStmt));
                     }
                 }
                 TirTag::WhileLoop => {
-                    let v = self.while_loop_view(r);
-                    f(r, v.cond, ChildKind::Operand);
-                    for &s in &v.body {
-                        f(r, s, ChildKind::BodyStmt);
-                    }
+                    let slice = self.extra_slice(r);
+                    f(
+                        r,
+                        TirRef::from_raw(slice[while_loop_extra::COND]),
+                        ChildKind::Operand,
+                    );
+                    let mut pos = while_loop_extra::BODY_COUNT;
+                    walk_ref_list(slice, &mut pos, |s| f(r, s, ChildKind::BodyStmt));
                 }
                 TirTag::ForRange => {
-                    let v = self.for_range_view(r);
-                    f(r, v.start, ChildKind::Operand);
-                    f(r, v.end, ChildKind::Operand);
-                    for &s in &v.body {
-                        f(r, s, ChildKind::BodyStmt);
-                    }
+                    let slice = self.extra_slice(r);
+                    f(
+                        r,
+                        TirRef::from_raw(slice[for_range_extra::START]),
+                        ChildKind::Operand,
+                    );
+                    f(
+                        r,
+                        TirRef::from_raw(slice[for_range_extra::END]),
+                        ChildKind::Operand,
+                    );
+                    let mut pos = for_range_extra::BODY_COUNT;
+                    walk_ref_list(slice, &mut pos, |s| f(r, s, ChildKind::BodyStmt));
                 }
                 _ => {}
             },
@@ -1695,6 +1719,14 @@ impl Tir {
             | TirData::Bool(_)
             | TirData::Var(_) => {}
         }
+    }
+
+    fn extra_slice(&self, r: TirRef) -> &[u32] {
+        let range = match self.inst(r).data {
+            TirData::Extra(range) => range,
+            _ => unreachable!("instruction must carry TirData::Extra"),
+        };
+        &self.extra[range.as_range()]
     }
 
     /// Debug-only check of the tree-shape invariant documented on

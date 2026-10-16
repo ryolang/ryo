@@ -477,6 +477,89 @@ fn walk_operands_visits_enum_lit_fields_and_enum_eq_ne_operands() {
 }
 
 #[test]
+fn walk_operands_visits_if_and_loop_payloads_in_order() {
+    let mut pool = InternPool::new();
+    let name = pool.intern_str("main");
+    let int_ty = pool.int();
+    let void_ty = pool.void();
+    let mut b = TirBuilder::new(name, vec![], void_ty, sp());
+    let refs: Vec<_> = (0..12)
+        .map(|value| b.int_const(value, int_ty, sp()))
+        .collect();
+    let [
+        cond,
+        then_a,
+        then_b,
+        elif_cond,
+        elif_stmt,
+        else_stmt,
+        while_cond,
+        while_a,
+        while_b,
+        start,
+        end,
+        for_stmt,
+    ] = refs[..]
+    else {
+        unreachable!()
+    };
+
+    let if_stmt = b.if_stmt(
+        cond,
+        &[then_a, then_b],
+        &[(elif_cond, vec![elif_stmt])],
+        Some(&[else_stmt]),
+        void_ty,
+        sp(),
+    );
+    let while_loop = b.while_loop(while_cond, &[while_a, while_b], void_ty, sp());
+    let for_loop = b.for_range(name, start, end, &[for_stmt], void_ty, sp());
+    let tir = b.finish(&[if_stmt, while_loop, for_loop]);
+
+    let mut edges = Vec::new();
+    tir.walk_operands(if_stmt, &mut |_parent, child, kind| {
+        edges.push((child, kind))
+    });
+    assert_eq!(
+        edges,
+        vec![
+            (cond, ChildKind::Operand),
+            (then_a, ChildKind::BodyStmt),
+            (then_b, ChildKind::BodyStmt),
+            (elif_cond, ChildKind::Operand),
+            (elif_stmt, ChildKind::BodyStmt),
+            (else_stmt, ChildKind::BodyStmt),
+        ]
+    );
+
+    edges.clear();
+    tir.walk_operands(while_loop, &mut |_parent, child, kind| {
+        edges.push((child, kind))
+    });
+    assert_eq!(
+        edges,
+        vec![
+            (while_cond, ChildKind::Operand),
+            (while_a, ChildKind::BodyStmt),
+            (while_b, ChildKind::BodyStmt),
+        ]
+    );
+
+    edges.clear();
+    tir.walk_operands(for_loop, &mut |_parent, child, kind| {
+        edges.push((child, kind))
+    });
+    assert_eq!(
+        edges,
+        vec![
+            (start, ChildKind::Operand),
+            (end, ChildKind::Operand),
+            (for_stmt, ChildKind::BodyStmt),
+        ]
+    );
+}
+
+#[test]
 fn destructure_dump_lists_fields() {
     let mut pool = InternPool::new();
     let int_ty = pool.int();
