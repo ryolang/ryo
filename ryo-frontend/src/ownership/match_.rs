@@ -209,6 +209,16 @@ pub(crate) fn analyze_match_switch(
         let arm_last = w.last_inst;
         w.last_inst = saved_last;
         restore_view_last_use(own, saved);
+        let arm_exit = arm_regions[arm_index].iter().find_map(|&block| {
+            matches!(
+                w.flow.term(block),
+                Terminator::Return { .. }
+                    | Terminator::ReturnVoid
+                    | Terminator::Break { .. }
+                    | Terminator::Continue { .. }
+            )
+            .then_some(block)
+        });
         // (e2) arm-result transfer: a non-diverging aggregate
         // value arm's body is consumed into the match inst, so the
         // result slot's buffer is owned by exactly one identity — the
@@ -239,17 +249,28 @@ pub(crate) fn analyze_match_switch(
         let anchor_fires = match arm_last.map(|a| w.tir.inst(a).tag) {
             Some(TirTag::Return | TirTag::ReturnVoid) => false,
             Some(TirTag::Break | TirTag::Continue) => true,
-            _ => falls,
+            _ => match arm_exit.map(|block| w.flow.term(block)) {
+                Some(Terminator::Return { .. } | Terminator::ReturnVoid) => false,
+                Some(Terminator::Break { .. } | Terminator::Continue { .. }) => true,
+                _ => falls,
+            },
         };
         for (token_ref, token_place, name) in &arm_binds {
             if let Some((_, span, _)) = own.pending_dead_store.remove(&Owner(*token_place)) {
                 own.arm_dead_stores.push((*name, span));
-                if anchor_fires && let Some(after) = arm_last {
-                    sidecar.drops.push(DropOp {
-                        position: DropPosition::AfterStep { inst: after },
-                        target: *token_ref,
-                        span,
-                    });
+                if anchor_fires {
+                    let position = if let Some(after) = arm_last {
+                        Some(DropPosition::AfterStep { inst: after })
+                    } else {
+                        arm_exit.map(|block| DropPosition::PreTerminator { block })
+                    };
+                    if let Some(position) = position {
+                        sidecar.drops.push(DropOp {
+                            position,
+                            target: *token_ref,
+                            span,
+                        });
+                    }
                 }
             }
         }

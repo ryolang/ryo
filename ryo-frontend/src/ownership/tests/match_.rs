@@ -748,6 +748,58 @@ fn dead_bind_in_expr_arm_freed_exactly_once_in_arm() {
 }
 
 #[test]
+fn dead_payload_in_continue_arm_is_freed_before_continue() {
+    // Moving an unread heap payload out of the scrutinee and then
+    // continuing must release the payload on that iteration's path.
+    let src = "enum Item:\n\tText(str)\n\tEmpty\n\nfn main():\n\tmut i = 0\n\twhile i < 4:\n\t\ti += 1\n\t\titem = match i:\n\t\t\t1: Item.Text(int_to_str(i) + \" payload that needs heap storage\")\n\t\t\t_: Item.Empty\n\t\tmatch item:\n\t\t\tText(unused):\n\t\t\t\tcontinue\n\t\t\tEmpty:\n\t\t\t\tprint(\"empty\\n\")\n\tprint(\"done\\n\")\n";
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "no errors expected; got {diags:?}"
+    );
+    let f = main_sidecar(&mut sidecar, &pool);
+    let consuming_match = (1..tirs[0].instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(u32::try_from(i).expect("index fits u32")))
+        .find(|&r| {
+            tirs[0].inst(r).tag == ryo_core::tir::TirTag::Match
+                && !tirs[0].match_by_move_owner_refs(r, &pool).is_empty()
+        })
+        .expect("the match that moves `unused`");
+    let token = tirs[0]
+        .match_by_move_owner_refs(consuming_match, &pool)
+        .into_iter()
+        .next()
+        .expect("one by-move owner token for `unused`");
+    let continue_inst = (1..tirs[0].instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find(|&r| tirs[0].inst(r).tag == ryo_core::tir::TirTag::Continue)
+        .expect("the continue in the consuming match arm");
+    let flow = build_flow(&tirs[0], &pool);
+    let continue_block = flow
+        .terms
+        .iter()
+        .position(|term| matches!(term, ryo_core::flow::Terminator::Continue { .. }))
+        .map(|index| ryo_core::flow::BlockId(index as u32))
+        .expect("the continue's Flow block");
+    let frees: Vec<_> = f.drops.iter().filter(|drop| drop.target == token).collect();
+    assert_eq!(
+        frees.len(),
+        1,
+        "exactly one release for the unread payload; got {frees:?}"
+    );
+    assert!(
+        matches!(
+            frees[0].position,
+            ryo_core::flow::DropPosition::PreTerminator { block } if block == continue_block
+        ),
+        "release runs before the continue terminator; continue TIR is {continue_inst:?}, got {:?}",
+        frees[0].position
+    );
+}
+
+#[test]
 fn borrowed_param_arm_result_rejected_e0138() {
     // P1 (memory-safety): an expression arm yielding a borrowed
     // parameter hands caller-owned storage to the match result binding
