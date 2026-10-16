@@ -1298,6 +1298,92 @@ pub struct TirElifView {
     pub body: Vec<TirRef>,
 }
 
+#[derive(Clone, Copy)]
+pub struct TirElifRefView<'a> {
+    pub cond: TirRef,
+    pub body: ExtraList<'a, TirRef>,
+}
+
+#[derive(Clone, Copy)]
+pub struct TirElifList<'a> {
+    words: &'a [u32],
+    count: usize,
+}
+
+impl<'a> TirElifList<'a> {
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn iter(&self) -> TirElifIter<'a> {
+        TirElifIter {
+            words: self.words,
+            pos: 0,
+            remaining: self.count,
+        }
+    }
+}
+
+pub struct TirElifIter<'a> {
+    words: &'a [u32],
+    pos: usize,
+    remaining: usize,
+}
+
+impl<'a> Iterator for TirElifIter<'a> {
+    type Item = TirElifRefView<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let cond = TirRef::from_raw(self.words[self.pos]);
+        self.pos += 1;
+        let body = read_ref_list_view(self.words, &mut self.pos);
+        self.remaining -= 1;
+        Some(TirElifRefView { cond, body })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl ExactSizeIterator for TirElifIter<'_> {}
+
+impl<'a> IntoIterator for TirElifList<'a> {
+    type Item = TirElifRefView<'a>;
+    type IntoIter = TirElifIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        TirElifIter {
+            words: self.words,
+            pos: 0,
+            remaining: self.count,
+        }
+    }
+}
+
+impl<'list, 'words> IntoIterator for &'list TirElifList<'words> {
+    type Item = TirElifRefView<'words>;
+    type IntoIter = TirElifIter<'words>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+pub struct TirIfStmtRefView<'a> {
+    pub cond: TirRef,
+    pub then_stmts: ExtraList<'a, TirRef>,
+    pub elif_branches: TirElifList<'a>,
+    pub else_stmts: Option<ExtraList<'a, TirRef>>,
+}
+
 pub struct TirIfStmtView {
     pub cond: TirRef,
     pub then_stmts: Vec<TirRef>,
@@ -1456,6 +1542,41 @@ impl Tir {
         }
     }
 
+    /// Borrow the branch statement lists in an `IfStmt` without collecting them.
+    pub fn if_stmt_view_borrowed(&self, r: TirRef) -> TirIfStmtRefView<'_> {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, TirTag::IfStmt));
+        let range = match inst.data {
+            TirData::Extra(rng) => rng,
+            _ => unreachable!("IfStmt must carry TirData::Extra"),
+        };
+        let slice = &self.extra[range.as_range()];
+        let mut pos = 1;
+        let cond = TirRef::from_raw(slice[0]);
+        let then_stmts = read_ref_list_view(slice, &mut pos);
+        let elif_count = slice[pos] as usize;
+        pos += 1;
+        let elif_start = pos;
+        for _ in 0..elif_count {
+            pos += 1;
+            skip_ref_list(slice, &mut pos);
+        }
+        let elif_branches = TirElifList {
+            words: &slice[elif_start..pos],
+            count: elif_count,
+        };
+        let has_else = slice[pos] != 0;
+        pos += 1;
+        let else_stmts = has_else.then(|| read_ref_list_view(slice, &mut pos));
+
+        TirIfStmtRefView {
+            cond,
+            then_stmts,
+            elif_branches,
+            else_stmts,
+        }
+    }
+
     pub fn while_loop_view(&self, r: TirRef) -> WhileLoopView {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, TirTag::WhileLoop));
@@ -1566,6 +1687,19 @@ fn read_ref_list(slice: &[u32], pos: &mut usize) -> Vec<TirRef> {
         .collect();
     *pos += count;
     refs
+}
+
+fn read_ref_list_view<'a>(slice: &'a [u32], pos: &mut usize) -> ExtraList<'a, TirRef> {
+    let count = slice[*pos] as usize;
+    *pos += 1;
+    let words = &slice[*pos..*pos + count];
+    *pos += count;
+    ExtraList::new(words)
+}
+
+fn skip_ref_list(slice: &[u32], pos: &mut usize) {
+    let count = slice[*pos] as usize;
+    *pos += 1 + count;
 }
 
 fn walk_ref_list(slice: &[u32], pos: &mut usize, mut visit: impl FnMut(TirRef)) {

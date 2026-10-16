@@ -65,15 +65,6 @@ pub(crate) fn is_to_bytes_call(tir: &Tir, ids: &SynthCalleeIds, r: TirRef) -> bo
 /// nested control flow like [`collect_named_inits`]. Unbound results
 /// (call arguments, return operands) are never collected: argument
 /// positions are the sema-side warning shapes' jurisdiction.
-pub(crate) fn collect_bound_call_sites(
-    tir: &Tir,
-    stmts: &[TirRef],
-    pred: &dyn Fn(&Tir, TirRef) -> bool,
-    out: &mut Vec<(TirRef, TirRef)>,
-) {
-    collect_bound_call_sites_iter(tir, stmts.iter().copied(), pred, out);
-}
-
 fn collect_bound_call_sites_iter(
     tir: &Tir,
     stmts: impl IntoIterator<Item = TirRef>,
@@ -95,13 +86,13 @@ fn collect_bound_call_sites_iter(
                 }
             }
             TirTag::IfStmt => {
-                let v = tir.if_stmt_view(r);
-                collect_bound_call_sites(tir, &v.then_stmts, pred, out);
+                let v = tir.if_stmt_view_borrowed(r);
+                collect_bound_call_sites_iter(tir, v.then_stmts, pred, out);
                 for arm in &v.elif_branches {
-                    collect_bound_call_sites(tir, &arm.body, pred, out);
+                    collect_bound_call_sites_iter(tir, arm.body, pred, out);
                 }
-                if let Some(else_stmts) = v.else_stmts.as_deref() {
-                    collect_bound_call_sites(tir, else_stmts, pred, out);
+                if let Some(else_stmts) = v.else_stmts {
+                    collect_bound_call_sites_iter(tir, else_stmts, pred, out);
                 }
             }
             TirTag::WhileLoop => {

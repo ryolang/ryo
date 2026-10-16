@@ -217,6 +217,53 @@ fn if_stmt_round_trips_through_extra() {
 }
 
 #[test]
+fn borrowed_if_view_iterates_all_branches_without_losing_empty_else() {
+    let mut pool = InternPool::new();
+    let bool_ty = pool.bool_();
+    let int_ty = pool.int();
+    let void_ty = pool.void();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], void_ty, sp());
+    let cond = b.bool_const(true, bool_ty, sp());
+    let then_stmt = b.int_const(1, int_ty, sp());
+    let elif_cond_a = b.bool_const(false, bool_ty, sp());
+    let elif_stmt = b.int_const(2, int_ty, sp());
+    let elif_cond_b = b.bool_const(true, bool_ty, sp());
+    let empty_else_cond = b.bool_const(false, bool_ty, sp());
+    let with_empty_else = b.if_stmt(
+        cond,
+        &[then_stmt],
+        &[(elif_cond_a, vec![elif_stmt]), (elif_cond_b, vec![])],
+        Some(&[]),
+        void_ty,
+        sp(),
+    );
+    let without_else = b.if_stmt(empty_else_cond, &[], &[], None, void_ty, sp());
+    let tir = b.finish(&[with_empty_else, without_else]);
+
+    let view = tir.if_stmt_view_borrowed(with_empty_else);
+    assert_eq!(view.cond, cond);
+    assert_eq!(
+        view.then_stmts.into_iter().collect::<Vec<_>>(),
+        vec![then_stmt]
+    );
+    let elifs: Vec<_> = view
+        .elif_branches
+        .iter()
+        .map(|arm| (arm.cond, arm.body.into_iter().collect::<Vec<_>>()))
+        .collect();
+    assert_eq!(
+        elifs,
+        vec![(elif_cond_a, vec![elif_stmt]), (elif_cond_b, vec![])]
+    );
+    assert_eq!(view.else_stmts.unwrap().len(), 0);
+
+    let view = tir.if_stmt_view_borrowed(without_else);
+    assert!(view.elif_branches.is_empty());
+    assert!(view.else_stmts.is_none());
+}
+
+#[test]
 fn assign_round_trips() {
     let mut pool = InternPool::new();
     let int_ty = pool.int();
