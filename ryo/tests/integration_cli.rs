@@ -370,21 +370,19 @@ fn env_present_and_unset_jit() {
 // Milestone 9.2: io_read_line CLI intrinsic
 // ============================================================================
 
-/// `line = io_read_line()` then `print(line)`: the trailing newline of
-/// the piped line is stripped; a closed/empty stdin yields the empty
-/// string (EOF is not an error), still exit 0.
+/// Consecutive calls preserve buffered lines; a closed/empty stdin
+/// yields empty strings (EOF is not an error), still exit 0.
 #[test]
 fn echo_stdin_jit() {
     use std::io::Write;
     use std::process::Stdio;
 
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let code = "fn main():\n\tline = io_read_line()\n\tprint(line)\n";
+    let code = "fn main():\n\tfirst = io_read_line()\n\tsecond = io_read_line()\n\tprint(first + \"|\" + second)\n";
     let test_file = create_test_file(temp_dir.path(), "echo_stdin.ryo", code);
 
     // stdin must be piped, so build the command directly (same as the
-    // args_echo test). wait_with_output drops stdin before waiting, so
-    // the child sees a clean EOF after the line.
+    // args_echo test). Both lines fit in the runtime's first read chunk.
     let mut child = Command::new(env!("CARGO_BIN_EXE_ryo"))
         .arg("run")
         .arg(&test_file)
@@ -397,7 +395,7 @@ fn echo_stdin_jit() {
         .stdin
         .as_mut()
         .expect("stdin should be piped")
-        .write_all(b"hello\n")
+        .write_all(b"hello\nworld\n")
         .expect("Failed to write to child stdin");
     let output = child.wait_with_output().expect("Failed to wait on child");
 
@@ -408,8 +406,8 @@ fn echo_stdin_jit() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "hello",
-        "the trailing newline must be stripped"
+        "hello|world",
+        "each call must return the next line and strip its trailing newline"
     );
 
     // Second run: closed/empty stdin — EOF before any byte yields the
@@ -427,8 +425,8 @@ fn echo_stdin_jit() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "",
-        "EOF before any byte yields the empty line"
+        "|",
+        "EOF before any byte yields an empty line for each call"
     );
 }
 

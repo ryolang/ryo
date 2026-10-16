@@ -14,8 +14,10 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_void};
-use core::sync::atomic::{AtomicIsize, AtomicPtr, AtomicUsize, Ordering};
+use core::hint::spin_loop;
+use core::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicUsize, Ordering};
 
 const STDIN_FD: c_int = 0;
 const STDOUT_FD: c_int = 1;
@@ -531,6 +533,88 @@ pub unsafe extern "C" fn ryo_getenv(key_ptr: *const u8, key_len: u64, out: *mut 
 
 // ---------- io_read_line (M9.2) ----------
 
+const READ_LINE_CHUNK: usize = 128;
+
+/// Bytes read beyond the current line stay here for the next call.
+#[derive(Clone, Copy)]
+pub(crate) struct ReadLineState {
+    pending: [u8; READ_LINE_CHUNK],
+    pending_start: usize,
+    pending_len: usize,
+}
+
+impl ReadLineState {
+    const fn new() -> Self {
+        Self {
+            pending: [0; READ_LINE_CHUNK],
+            pending_start: 0,
+            pending_len: 0,
+        }
+    }
+}
+
+struct LockedReadLineState {
+    locked: AtomicBool,
+    state: UnsafeCell<ReadLineState>,
+}
+
+// SAFETY: Access to state is serialized by locked.
+unsafe impl Sync for LockedReadLineState {}
+
+impl LockedReadLineState {
+    const fn new() -> Self {
+        Self {
+            locked: AtomicBool::new(false),
+            state: UnsafeCell::new(ReadLineState::new()),
+        }
+    }
+
+    fn lock(&self) -> ReadLineGuard<'_> {
+        while self
+            .locked
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            spin_loop();
+        }
+        ReadLineGuard { state: self }
+    }
+}
+
+struct ReadLineGuard<'a> {
+    state: &'a LockedReadLineState,
+}
+
+impl ReadLineGuard<'_> {
+    fn get_mut(&mut self) -> &mut ReadLineState {
+        // SAFETY: this guard owns the lock for the lifetime of the borrow.
+        unsafe { &mut *self.state.state.get() }
+    }
+}
+
+impl Drop for ReadLineGuard<'_> {
+    fn drop(&mut self) {
+        self.state.locked.store(false, Ordering::Release);
+    }
+}
+
+static STDIN_READ_LINE_STATE: LockedReadLineState = LockedReadLineState::new();
+
+fn grow_read_line_buffer(buf: &mut *mut u8, cap: &mut usize) {
+    // Double the buffer with overflow protection.
+    *cap = cap.checked_mul(2).unwrap_or_else(|| overflow_abort());
+    // SAFETY: buf came from c_malloc/c_realloc with the old cap; on
+    // success realloc copies the initialized bytes and frees the old
+    // buffer. On failure the old buffer is still live.
+    let grown = unsafe { c_realloc(*buf as *mut c_void, *cap) } as *mut u8;
+    if grown.is_null() {
+        // SAFETY: buf is the still-live old allocation.
+        unsafe { c_free(*buf as *mut c_void) };
+        oom_abort();
+    }
+    *buf = grown;
+}
+
 /// Read one line from `fd` into a growable heap buffer, then copy it
 /// into `out` as a tagged slot (inline when it fits, else a fresh heap
 /// buffer — the transient accumulation buffer is freed on every exit
@@ -544,38 +628,61 @@ pub unsafe extern "C" fn ryo_getenv(key_ptr: *const u8, key_len: u64, out: *mut 
 /// # Safety
 /// `out` points to a valid, uninitialized `RyoStrFat`; `fd` is open and
 /// readable for the duration of the call.
-pub(crate) unsafe fn read_line_from(fd: c_int, out: *mut RyoStrFat) {
+pub(crate) unsafe fn read_line_from(state: &mut ReadLineState, fd: c_int, out: *mut RyoStrFat) {
     // Initial accumulation-buffer cap; also the growth quantum
     // (doubling). One typical line fits without a single realloc.
-    const CHUNK: usize = 128;
-    let mut cap: usize = CHUNK;
-    // SAFETY: CHUNK is nonzero; the null check below handles OOM.
+    let mut cap: usize = READ_LINE_CHUNK;
+    // SAFETY: READ_LINE_CHUNK is nonzero; the null check below handles OOM.
     let mut buf = unsafe { c_malloc(cap) } as *mut u8;
     if buf.is_null() {
         oom_abort();
     }
     let mut len: usize = 0;
     loop {
-        if len == cap {
-            // Grow: double the buffer (checked — never wraps toward a
-            // cap smaller than `len`).
-            cap = cap.checked_mul(2).unwrap_or_else(|| overflow_abort());
-            // SAFETY: buf came from c_malloc/c_realloc with the old
-            // cap; on success realloc copies the old `len` bytes and
-            // frees the old buffer. On failure the old buffer is still
-            // live: free it before the abort so OOM paths leak nothing.
-            let grown = unsafe { c_realloc(buf as *mut c_void, cap) } as *mut u8;
-            if grown.is_null() {
-                // SAFETY: buf is the still-live old allocation.
+        if state.pending_start < state.pending_len {
+            let pending = &state.pending[state.pending_start..state.pending_len];
+            if let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+                while cap - len < pos {
+                    grow_read_line_buffer(&mut buf, &mut cap);
+                }
+                // SAFETY: pending bytes were initialized by an earlier read.
+                unsafe { core::ptr::copy_nonoverlapping(pending.as_ptr(), buf.add(len), pos) };
+                len += pos;
+                state.pending_start += pos + 1;
+                if state.pending_start == state.pending_len {
+                    state.pending_start = 0;
+                    state.pending_len = 0;
+                }
+                // SAFETY: buf holds len initialized bytes and out is valid.
+                unsafe { write_str_slot(out, core::slice::from_raw_parts(buf, len)) };
+                // SAFETY: buf is this loop's own allocation.
                 unsafe { c_free(buf as *mut c_void) };
-                oom_abort();
+                return;
             }
-            buf = grown;
+
+            let count = pending.len();
+            while cap - len < count {
+                grow_read_line_buffer(&mut buf, &mut cap);
+            }
+            // SAFETY: pending bytes were initialized by an earlier read.
+            unsafe { core::ptr::copy_nonoverlapping(pending.as_ptr(), buf.add(len), count) };
+            len += count;
+            state.pending_start = 0;
+            state.pending_len = 0;
+        }
+        if len == cap {
+            grow_read_line_buffer(&mut buf, &mut cap);
         }
         // SAFETY: buf points to `cap` writable bytes and len < cap here
         // (the growth above restores the invariant), so buf+len has
         // cap-len bytes of room.
-        let n = os_read(fd, unsafe { buf.add(len) }, cap - len);
+        // Limit each syscall so the retained tail always fits pending,
+        // even when the line accumulation buffer has grown substantially.
+        let n = os_read(
+            fd,
+            unsafe { buf.add(len) },
+            (cap - len).min(READ_LINE_CHUNK),
+        );
         if n > 0 {
             let start = len;
             len += n as usize;
@@ -583,6 +690,11 @@ pub(crate) unsafe fn read_line_from(fd: c_int, out: *mut RyoStrFat) {
             let fresh = unsafe { core::slice::from_raw_parts(buf.add(start), n as usize) };
             if let Some(pos) = fresh.iter().position(|&b| b == b'\n') {
                 let line_len = start + pos;
+                let tail_start = pos + 1;
+                let tail_len = fresh.len() - tail_start;
+                state.pending[..tail_len].copy_from_slice(&fresh[tail_start..]);
+                state.pending_start = 0;
+                state.pending_len = tail_len;
                 // SAFETY: out is a valid out-slot; buf holds line_len
                 // initialized bytes (write_str_slot copies them out).
                 unsafe { write_str_slot(out, core::slice::from_raw_parts(buf, line_len)) };
@@ -629,9 +741,11 @@ pub(crate) unsafe fn read_line_from(fd: c_int, out: *mut RyoStrFat) {
 /// `out` points to a valid, uninitialized `RyoStrFat`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ryo_read_line(out: *mut RyoStrFat) {
+    let mut state = STDIN_READ_LINE_STATE.lock();
     // SAFETY: forwarded contract — `out` is a valid out-slot (the
-    // caller's guarantee), and fd 0 is the process's own stdin.
-    unsafe { read_line_from(STDIN_FD, out) }
+    // caller's guarantee), and fd 0 is the process's own stdin. The
+    // guard serializes access to the pending-byte buffer.
+    unsafe { read_line_from(state.get_mut(), STDIN_FD, out) }
 }
 
 #[cfg(feature = "staticlib")]
