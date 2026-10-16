@@ -425,7 +425,7 @@ pub(crate) fn collect_loop_nesting(tir: &Tir, flow: &Flow) -> LoopNesting {
         let (loop_inst, header, bounds) = match *flow.term(b) {
             Terminator::While { loop_inst, header } => (loop_inst, header, None),
             Terminator::For { loop_inst, header } => {
-                let view = tir.for_range_view(loop_inst);
+                let view = tir.for_range_ref_view(loop_inst);
                 (loop_inst, header, Some((view.start, view.end)))
             }
             _ => continue,
