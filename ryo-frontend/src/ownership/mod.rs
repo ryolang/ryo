@@ -1193,17 +1193,10 @@ fn analyze_function(
         // after-loop anchor is unreachable on the return path.
         let (anchor, also_in_body) = match outermost_loop_of(tir, *decl_inst) {
             Some(loop_stmt) if declared_before_stmt(tir, *name, loop_stmt) => {
-                let may_return = match tir.inst(loop_stmt).tag {
-                    TirTag::WhileLoop => {
-                        let view = tir.while_loop_view(loop_stmt);
-                        body_may_return(tir, &view.body)
-                    }
-                    TirTag::ForRange => {
-                        let view = tir.for_range_view(loop_stmt);
-                        body_may_return(tir, &view.body)
-                    }
-                    _ => unreachable!("outermost_loop_of returns loops"),
-                };
+                let body = tir
+                    .loop_body_view(loop_stmt)
+                    .expect("outermost_loop_of returns loops");
+                let may_return = body_may_return(tir, &body);
                 (loop_stmt, may_return)
             }
             _ => (*decl_inst, false),
