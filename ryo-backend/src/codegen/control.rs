@@ -653,14 +653,14 @@ impl<M: Module> Codegen<M> {
         } = *term
         {
             let tir = ctx.tir;
-            let view = tir.while_loop_view(loop_inst);
+            let view = tir.while_loop_ref_view(loop_inst);
             // Back-edge rule: kill facts on bindings the body
             // writes BEFORE the condition steps emit — the
             // condition re-evaluates every iteration, so a fact it
             // consults must hold on every one. The undo-log mark is
             // taken after this kill (at the body prologue), so the
             // post-loop restore keeps these names dead.
-            Self::kill_loop_writes(ctx, Some(cond), &view.body);
+            Self::kill_loop_writes(ctx, Some(cond), view.body);
             // Back-edge rule for home provenance: a flag set
             // pre-loop says nothing about a value the body stored
             // on a later iteration.
@@ -767,7 +767,13 @@ impl<M: Module> Codegen<M> {
                 // `negated_conds` bookkeeping is not positionally
                 // aligned with the arm index.
                 let tir = ctx.tir;
-                let cond = tir.if_stmt_view(if_inst).elif_branches[idx].cond;
+                let cond = tir
+                    .if_stmt_view_borrowed(if_inst)
+                    .elif_branches
+                    .iter()
+                    .nth(idx)
+                    .expect("elif index comes from the cascade")
+                    .cond;
                 Self::restore_slot_marks(ctx, slot_marks);
                 Self::seed_cond_facts(ctx, cond, true);
                 Ok(())
@@ -865,7 +871,7 @@ impl<M: Module> Codegen<M> {
             }
             BlockPrologue::WhileBody { loop_inst } => {
                 let tir = ctx.tir;
-                let view = tir.while_loop_view(loop_inst);
+                let view = tir.while_loop_ref_view(loop_inst);
                 if !ctx.loop_records.contains_key(&loop_inst) {
                     ctx.loop_records.insert(
                         loop_inst,
@@ -912,7 +918,7 @@ impl<M: Module> Codegen<M> {
             }
             BlockPrologue::ForBody { loop_inst } => {
                 let tir = ctx.tir;
-                let view = tir.for_range_view(loop_inst);
+                let view = tir.for_range_ref_view(loop_inst);
                 let counter = match ctx
                     .loop_records
                     .get(&loop_inst)
@@ -954,7 +960,7 @@ impl<M: Module> Codegen<M> {
                 // consulted inside the body must hold on every
                 // iteration. There is no post-loop restore for these
                 // kills — they persist past the loop, as before.
-                Self::kill_loop_writes(ctx, None, &view.body);
+                Self::kill_loop_writes(ctx, None, view.body);
                 Self::invalidate_home_inline_flags(ctx);
                 Ok(())
             }
@@ -1165,7 +1171,7 @@ impl<M: Module> Codegen<M> {
         Self::fire_at_terminator(builder, ctx, b)?;
         if let Some(if_inst) = ctx.flow.branch_if(b) {
             let tir = ctx.tir;
-            let view = tir.if_stmt_view(if_inst);
+            let view = tir.if_stmt_view_borrowed(if_inst);
             ctx.if_records.insert(
                 if_inst,
                 IfRecord {
@@ -1218,7 +1224,7 @@ impl<M: Module> Codegen<M> {
         header: BlockId,
     ) -> Result<(), String> {
         let tir = ctx.tir;
-        let view = tir.for_range_view(loop_inst);
+        let view = tir.for_range_ref_view(loop_inst);
         let start_val = Self::eval_inst(builder, ctx, view.start)?;
         let counter = builder.declare_var(ctx.int_type);
         builder.def_var(counter, start_val);

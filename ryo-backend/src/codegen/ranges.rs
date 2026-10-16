@@ -215,7 +215,7 @@ impl<M: Module> Codegen<M> {
     pub(crate) fn kill_loop_writes(
         ctx: &mut FunctionContext<'_, M>,
         cond: Option<TirRef>,
-        body: &[TirRef],
+        body: impl IntoIterator<Item = TirRef>,
     ) {
         let mut writes = Vec::new();
         if let Some(cond) = cond {
@@ -232,8 +232,12 @@ impl<M: Module> Codegen<M> {
     /// (the callee may write through the pointer). Recursion drives off
     /// `walk_operands`, so nested if/elif/else/while/for-range bodies
     /// are covered.
-    fn collect_loop_writes(tir: &Tir, stmts: &[TirRef], out: &mut Vec<StringId>) {
-        for &stmt in stmts {
+    fn collect_loop_writes(
+        tir: &Tir,
+        stmts: impl IntoIterator<Item = TirRef>,
+        out: &mut Vec<StringId>,
+    ) {
+        for stmt in stmts {
             Self::collect_writes_in(tir, stmt, out);
         }
     }
