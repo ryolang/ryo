@@ -157,64 +157,7 @@ impl<M: Module> Codegen<M> {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
                     _ => unreachable!("binary op must carry TirData::BinOp"),
                 };
-                let lv = Self::eval_inst(builder, ctx, lhs)?;
-                let rv = Self::eval_inst(builder, ctx, rhs)?;
-                match inst.tag {
-                    // Spec §18: signed +,-,* trap on overflow in all
-                    // build modes. The s*_overflow ops return the
-                    // wrapped result plus an i8 overflow flag; a set
-                    // flag branches to ryo_panic.
-                    TirTag::IAdd | TirTag::ISub | TirTag::IMul => Self::emit_int_binop(
-                        builder,
-                        ctx,
-                        inst.tag,
-                        ranges::int_range_of(ctx.tir, &ctx.range_facts, lhs),
-                        ranges::int_range_of(ctx.tir, &ctx.range_facts, rhs),
-                        lv,
-                        rv,
-                    )?,
-                    TirTag::ISDiv => {
-                        Self::emit_div_guard(
-                            builder,
-                            ctx,
-                            lv,
-                            ranges::int_range_of(ctx.tir, &ctx.range_facts, lhs),
-                            rv,
-                            DIV_ZERO_MSG,
-                            DIV_OVERFLOW_MSG,
-                        )?;
-                        builder.ins().sdiv(lv, rv)
-                    }
-                    TirTag::IMod => {
-                        Self::emit_div_guard(
-                            builder,
-                            ctx,
-                            lv,
-                            ranges::int_range_of(ctx.tir, &ctx.range_facts, lhs),
-                            rv,
-                            MOD_ZERO_MSG,
-                            MOD_OVERFLOW_MSG,
-                        )?;
-                        builder.ins().srem(lv, rv)
-                    }
-                    TirTag::ICmpEq => builder.ins().icmp(IntCC::Equal, lv, rv),
-                    TirTag::ICmpNe => builder.ins().icmp(IntCC::NotEqual, lv, rv),
-                    TirTag::ICmpLt => builder.ins().icmp(IntCC::SignedLessThan, lv, rv),
-                    TirTag::ICmpLe => builder.ins().icmp(IntCC::SignedLessThanOrEqual, lv, rv),
-                    TirTag::ICmpGt => builder.ins().icmp(IntCC::SignedGreaterThan, lv, rv),
-                    TirTag::ICmpGe => builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, lv, rv),
-                    TirTag::FAdd => builder.ins().fadd(lv, rv),
-                    TirTag::FSub => builder.ins().fsub(lv, rv),
-                    TirTag::FMul => builder.ins().fmul(lv, rv),
-                    TirTag::FDiv => builder.ins().fdiv(lv, rv),
-                    TirTag::FCmpEq => builder.ins().fcmp(FloatCC::Equal, lv, rv),
-                    TirTag::FCmpNe => builder.ins().fcmp(FloatCC::NotEqual, lv, rv),
-                    TirTag::FCmpLt => builder.ins().fcmp(FloatCC::LessThan, lv, rv),
-                    TirTag::FCmpLe => builder.ins().fcmp(FloatCC::LessThanOrEqual, lv, rv),
-                    TirTag::FCmpGt => builder.ins().fcmp(FloatCC::GreaterThan, lv, rv),
-                    TirTag::FCmpGe => builder.ins().fcmp(FloatCC::GreaterThanOrEqual, lv, rv),
-                    _ => unreachable!(),
-                }
+                Self::emit_numeric_binary_op(builder, ctx, inst.tag, lhs, rhs)?
             }
             TirTag::BoolAnd | TirTag::BoolOr => {
                 // The short-circuit control flow is explicit in
@@ -369,6 +312,75 @@ impl<M: Module> Codegen<M> {
             Self::cache_repr(ctx, r, ValueRepr::Scalar(value));
         }
         Ok(value)
+    }
+
+    /// Evaluate and lower a scalar numeric binary instruction. Keep the
+    /// checked integer guards beside their operations so range-based guard
+    /// elision and division overflow behavior stay aligned.
+    fn emit_numeric_binary_op(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        tag: TirTag,
+        lhs: TirRef,
+        rhs: TirRef,
+    ) -> Result<Value, String> {
+        let lv = Self::eval_inst(builder, ctx, lhs)?;
+        let rv = Self::eval_inst(builder, ctx, rhs)?;
+        Ok(match tag {
+            // Spec §18: signed +,-,* trap on overflow in all build modes.
+            // The s*_overflow ops return the wrapped result plus an i8
+            // overflow flag; a set flag branches to ryo_panic.
+            TirTag::IAdd | TirTag::ISub | TirTag::IMul => Self::emit_int_binop(
+                builder,
+                ctx,
+                tag,
+                ranges::int_range_of(ctx.tir, &ctx.range_facts, lhs),
+                ranges::int_range_of(ctx.tir, &ctx.range_facts, rhs),
+                lv,
+                rv,
+            )?,
+            TirTag::ISDiv => {
+                Self::emit_div_guard(
+                    builder,
+                    ctx,
+                    lv,
+                    ranges::int_range_of(ctx.tir, &ctx.range_facts, lhs),
+                    rv,
+                    DIV_ZERO_MSG,
+                    DIV_OVERFLOW_MSG,
+                )?;
+                builder.ins().sdiv(lv, rv)
+            }
+            TirTag::IMod => {
+                Self::emit_div_guard(
+                    builder,
+                    ctx,
+                    lv,
+                    ranges::int_range_of(ctx.tir, &ctx.range_facts, lhs),
+                    rv,
+                    MOD_ZERO_MSG,
+                    MOD_OVERFLOW_MSG,
+                )?;
+                builder.ins().srem(lv, rv)
+            }
+            TirTag::ICmpEq => builder.ins().icmp(IntCC::Equal, lv, rv),
+            TirTag::ICmpNe => builder.ins().icmp(IntCC::NotEqual, lv, rv),
+            TirTag::ICmpLt => builder.ins().icmp(IntCC::SignedLessThan, lv, rv),
+            TirTag::ICmpLe => builder.ins().icmp(IntCC::SignedLessThanOrEqual, lv, rv),
+            TirTag::ICmpGt => builder.ins().icmp(IntCC::SignedGreaterThan, lv, rv),
+            TirTag::ICmpGe => builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, lv, rv),
+            TirTag::FAdd => builder.ins().fadd(lv, rv),
+            TirTag::FSub => builder.ins().fsub(lv, rv),
+            TirTag::FMul => builder.ins().fmul(lv, rv),
+            TirTag::FDiv => builder.ins().fdiv(lv, rv),
+            TirTag::FCmpEq => builder.ins().fcmp(FloatCC::Equal, lv, rv),
+            TirTag::FCmpNe => builder.ins().fcmp(FloatCC::NotEqual, lv, rv),
+            TirTag::FCmpLt => builder.ins().fcmp(FloatCC::LessThan, lv, rv),
+            TirTag::FCmpLe => builder.ins().fcmp(FloatCC::LessThanOrEqual, lv, rv),
+            TirTag::FCmpGt => builder.ins().fcmp(FloatCC::GreaterThan, lv, rv),
+            TirTag::FCmpGe => builder.ins().fcmp(FloatCC::GreaterThanOrEqual, lv, rv),
+            _ => unreachable!("non-numeric tag passed to numeric binary lowering: {tag:?}"),
+        })
     }
 
     /// Emit a string literal's raw `.rodata` pointer (no fat-pointer
@@ -632,170 +644,10 @@ impl<M: Module> Codegen<M> {
             }
             TirTag::Call => {
                 let view = ctx.tir.call_view(r);
-                // Fat-producer dispatch compares interned ids (resolved
-                // once per compilation in `CodegenNameIds`).
-                let ids = ctx.name_ids;
-                let name_id = view.name;
-                if ids.str_from_view == Some(name_id) {
-                    // M8.4.1.2 `str(view)` materialization: the argument
-                    // is a view pair evaluated via `eval_inst_view`.
-                    let ValueRepr::View {
-                        ptr: v_ptr,
-                        len: v_len,
-                    } = Self::eval_inst_view(builder, ctx, view.args[0])?
-                    else {
-                        unreachable!("__ryo_str_from_view argument must produce ValueRepr::View")
-                    };
-                    let (ptr, len, cap) = Self::emit_slot_out_call(
-                        builder,
-                        ctx,
-                        "ryo_str_from_view",
-                        &[(ctx.int_type, v_ptr), (types::I64, v_len)],
-                        out_slot,
-                    )?;
-                    ValueRepr::Str { ptr, len, cap }
-                } else if ids.bytes_from_view == Some(name_id) {
-                    // M8.4.2 `bytes(bview)` materialization: the
-                    // argument is a view pair via `eval_inst_view`.
-                    let ValueRepr::View {
-                        ptr: v_ptr,
-                        len: v_len,
-                    } = Self::eval_inst_view(builder, ctx, view.args[0])?
-                    else {
-                        unreachable!("__ryo_bytes_from_view argument must produce ValueRepr::View")
-                    };
-                    let (ptr, len, cap) = Self::emit_slot_out_call(
-                        builder,
-                        ctx,
-                        "ryo_bytes_from_view",
-                        &[(ctx.int_type, v_ptr), (types::I64, v_len)],
-                        out_slot,
-                    )?;
-                    ValueRepr::Bytes { ptr, len, cap }
-                } else if ids.str_to_bytes == Some(name_id) {
-                    // `str.to_bytes()` / `strview.to_bytes()` — only
-                    // (ptr, len) is read.
-                    let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
-                    let (ptr, len, cap) = Self::emit_slot_out_call(
-                        builder,
-                        ctx,
-                        "__ryo_str_to_bytes",
-                        &[(ctx.int_type, p), (types::I64, l)],
-                        out_slot,
-                    )?;
-                    ValueRepr::Bytes { ptr, len, cap }
-                } else if ids.bytes_to_str == Some(name_id) {
-                    // `bytes.to_str()` / `bytesview.to_str()` — returns
-                    // an owned str (validated copy; panics on bad UTF-8).
-                    let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
-                    let (ptr, len, cap) = Self::emit_slot_out_call(
-                        builder,
-                        ctx,
-                        "__ryo_bytes_to_str",
-                        &[(ctx.int_type, p), (types::I64, l)],
-                        out_slot,
-                    )?;
-                    ValueRepr::Str { ptr, len, cap }
-                } else if ids.bytes_repr == Some(name_id) {
-                    // print(bytes) rewrite (sema, M8.4.2) — returns the
-                    // escaped-repr str.
-                    let (p, l) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
-                    let (ptr, len, cap) = Self::emit_slot_out_call(
-                        builder,
-                        ctx,
-                        "__ryo_bytes_repr",
-                        &[(ctx.int_type, p), (types::I64, l)],
-                        out_slot,
-                    )?;
-                    ValueRepr::Str { ptr, len, cap }
-                } else if ids.bool_to_str == Some(name_id) {
-                    // Provably-inline producer taken all the way: the
-                    // result is one of two static literals, so select
-                    // between their .rodata pointers — no runtime call,
-                    // no slot-out, and the cap=0 static sentinel keeps
-                    // the dead-free elision firing.
-                    if out_slot.is_some() {
-                        // The inline never writes a slot; a Some here
-                        // means `writes_out_slot` failed to exclude this
-                        // builtin — fail loudly instead of leaving the
-                        // home slot unwritten (silent miscompile).
-                        return Err(
-                            "bool_to_str is codegen-inlined but was handed an out slot".to_string()
-                        );
-                    }
-                    let cond = Self::eval_inst(builder, ctx, view.args[0])?;
-                    let true_id = Self::store_guard_msg(
-                        ctx.module,
-                        ctx.data_ctx,
-                        ctx.guard_msg_data,
-                        "true",
-                    )?;
-                    let false_id = Self::store_guard_msg(
-                        ctx.module,
-                        ctx.data_ctx,
-                        ctx.guard_msg_data,
-                        "false",
-                    )?;
-                    let true_ref = ctx.module.declare_data_in_func(true_id, builder.func);
-                    let false_ref = ctx.module.declare_data_in_func(false_id, builder.func);
-                    let true_ptr = builder.ins().symbol_value(ctx.int_type, true_ref);
-                    let false_ptr = builder.ins().symbol_value(ctx.int_type, false_ref);
-                    let ptr = builder.ins().select(cond, true_ptr, false_ptr);
-                    let four = builder.ins().iconst(types::I64, 4);
-                    let five = builder.ins().iconst(types::I64, 5);
-                    let len = builder.ins().select(cond, four, five);
-                    let cap = builder.ins().iconst(types::I64, 0);
-                    ValueRepr::Str { ptr, len, cap }
-                } else if ids.int_to_str == Some(name_id) || ids.float_to_str == Some(name_id) {
-                    let arg_val = Self::eval_inst(builder, ctx, view.args[0])?;
-                    let (fn_name, param_ty) = if ids.int_to_str == Some(name_id) {
-                        ("ryo_int_to_str", ctx.int_type)
-                    } else {
-                        ("ryo_float_to_str", types::F64)
-                    };
-                    let (ptr, len, cap) = Self::emit_slot_out_call(
-                        builder,
-                        ctx,
-                        fn_name,
-                        &[(param_ty, arg_val)],
-                        out_slot,
-                    )?;
-                    ValueRepr::Str { ptr, len, cap }
-                } else if ids.process_argv == Some(name_id) {
-                    // TODO(M22): interim call form — replaced by
-                    // `process.args`. `process_argv(i)` copies argv[i]
-                    // into a tagged str slot (SSO inline or fresh heap
-                    // buffer); out-of-range panics in the runtime.
-                    let arg_val = Self::eval_inst(builder, ctx, view.args[0])?;
-                    let (ptr, len, cap) = Self::emit_process_argv(builder, ctx, arg_val, out_slot)?;
-                    ValueRepr::Str { ptr, len, cap }
-                } else if ids.process_env == Some(name_id) {
-                    // TODO(M16): interim call form — replaced by
-                    // `process.env`. `process_env(key)` copies the
-                    // environment variable's value into a tagged str
-                    // slot; an unset variable yields "" (the M16 `?str`
-                    // shape will distinguish unset). The key accepts
-                    // str/strview, same as print's operand. Transient
-                    // extraction is sound here: the key bytes are
-                    // consumed by the ryo_getenv call immediately after.
-                    let (k_ptr, k_len) = Self::eval_str_or_view_parts(builder, ctx, view.args[0])?;
-                    let (ptr, len, cap) = Self::emit_slot_out_call_out_last(
-                        builder,
-                        ctx,
-                        "ryo_getenv",
-                        &[(ctx.int_type, k_ptr), (types::I64, k_len)],
-                        out_slot,
-                    )?;
-                    ValueRepr::Str { ptr, len, cap }
-                } else if ids.io_read_line == Some(name_id) {
-                    // TODO(M13.6): interim call form — replaced by
-                    // `io.read_line() -> IoError!str`. `io_read_line()`
-                    // reads one line from stdin (fd 0) into the tagged
-                    // str slot: the trailing `\n` is stripped, EOF maps
-                    // to "". Arg-less — the out-slot is the call's only
-                    // parameter, passed last (the `process_env` pattern).
-                    let (ptr, len, cap) = Self::emit_io_read_line(builder, ctx, out_slot)?;
-                    ValueRepr::Str { ptr, len, cap }
+                if let Some(repr) =
+                    Self::emit_fat_builtin_call(builder, ctx, view.name, &view.args, out_slot)?
+                {
+                    repr
                 } else {
                     // User call — emit_call handles sret for fat-returning
                     // calls and caches the triple. Called directly
@@ -996,6 +848,132 @@ impl<M: Module> Codegen<M> {
         };
         Self::cache_repr(ctx, r, repr);
         Ok(repr)
+    }
+
+    /// Lower the builtins that produce owned `str` or `bytes` values.
+    /// `None` leaves user-call handling to `eval_inst_fat_slot`.
+    fn emit_fat_builtin_call(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        name_id: StringId,
+        args: &[TirRef],
+        out_slot: Option<StackSlot>,
+    ) -> Result<Option<ValueRepr>, String> {
+        // These ids are interned once per compilation. Keep the dispatch
+        // here so the caller's cache and user-call paths stay centralized.
+        let ids = ctx.name_ids;
+        let repr = if ids.str_from_view == Some(name_id) {
+            // `str(view)` materialization evaluates its argument as a view.
+            let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, args[0])? else {
+                unreachable!("__ryo_str_from_view argument must produce ValueRepr::View")
+            };
+            let (ptr, len, cap) = Self::emit_slot_out_call(
+                builder,
+                ctx,
+                "ryo_str_from_view",
+                &[(ctx.int_type, ptr), (types::I64, len)],
+                out_slot,
+            )?;
+            ValueRepr::Str { ptr, len, cap }
+        } else if ids.bytes_from_view == Some(name_id) {
+            // `bytes(bview)` materialization evaluates its argument as a view.
+            let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, args[0])? else {
+                unreachable!("__ryo_bytes_from_view argument must produce ValueRepr::View")
+            };
+            let (ptr, len, cap) = Self::emit_slot_out_call(
+                builder,
+                ctx,
+                "ryo_bytes_from_view",
+                &[(ctx.int_type, ptr), (types::I64, len)],
+                out_slot,
+            )?;
+            ValueRepr::Bytes { ptr, len, cap }
+        } else if ids.str_to_bytes == Some(name_id) {
+            let (ptr_arg, len_arg) = Self::eval_str_or_view_parts(builder, ctx, args[0])?;
+            let (ptr, len, cap) = Self::emit_slot_out_call(
+                builder,
+                ctx,
+                "__ryo_str_to_bytes",
+                &[(ctx.int_type, ptr_arg), (types::I64, len_arg)],
+                out_slot,
+            )?;
+            ValueRepr::Bytes { ptr, len, cap }
+        } else if ids.bytes_to_str == Some(name_id) {
+            let (ptr_arg, len_arg) = Self::eval_str_or_view_parts(builder, ctx, args[0])?;
+            let (ptr, len, cap) = Self::emit_slot_out_call(
+                builder,
+                ctx,
+                "__ryo_bytes_to_str",
+                &[(ctx.int_type, ptr_arg), (types::I64, len_arg)],
+                out_slot,
+            )?;
+            ValueRepr::Str { ptr, len, cap }
+        } else if ids.bytes_repr == Some(name_id) {
+            let (ptr_arg, len_arg) = Self::eval_str_or_view_parts(builder, ctx, args[0])?;
+            let (ptr, len, cap) = Self::emit_slot_out_call(
+                builder,
+                ctx,
+                "__ryo_bytes_repr",
+                &[(ctx.int_type, ptr_arg), (types::I64, len_arg)],
+                out_slot,
+            )?;
+            ValueRepr::Str { ptr, len, cap }
+        } else if ids.bool_to_str == Some(name_id) {
+            // This inline selects one of two static literals. It never writes
+            // an output slot; reject an unexpected slot to catch ABI drift.
+            if out_slot.is_some() {
+                return Err("bool_to_str is codegen-inlined but was handed an out slot".to_string());
+            }
+            let cond = Self::eval_inst(builder, ctx, args[0])?;
+            let true_id =
+                Self::store_guard_msg(ctx.module, ctx.data_ctx, ctx.guard_msg_data, "true")?;
+            let false_id =
+                Self::store_guard_msg(ctx.module, ctx.data_ctx, ctx.guard_msg_data, "false")?;
+            let true_ref = ctx.module.declare_data_in_func(true_id, builder.func);
+            let false_ref = ctx.module.declare_data_in_func(false_id, builder.func);
+            let true_ptr = builder.ins().symbol_value(ctx.int_type, true_ref);
+            let false_ptr = builder.ins().symbol_value(ctx.int_type, false_ref);
+            let ptr = builder.ins().select(cond, true_ptr, false_ptr);
+            let four = builder.ins().iconst(types::I64, 4);
+            let five = builder.ins().iconst(types::I64, 5);
+            let len = builder.ins().select(cond, four, five);
+            let cap = builder.ins().iconst(types::I64, 0);
+            ValueRepr::Str { ptr, len, cap }
+        } else if ids.int_to_str == Some(name_id) || ids.float_to_str == Some(name_id) {
+            let arg_val = Self::eval_inst(builder, ctx, args[0])?;
+            let (fn_name, param_ty) = if ids.int_to_str == Some(name_id) {
+                ("ryo_int_to_str", ctx.int_type)
+            } else {
+                ("ryo_float_to_str", types::F64)
+            };
+            let (ptr, len, cap) =
+                Self::emit_slot_out_call(builder, ctx, fn_name, &[(param_ty, arg_val)], out_slot)?;
+            ValueRepr::Str { ptr, len, cap }
+        } else if ids.process_argv == Some(name_id) {
+            // Interim form until process.args replaces process_argv.
+            let arg_val = Self::eval_inst(builder, ctx, args[0])?;
+            let (ptr, len, cap) = Self::emit_process_argv(builder, ctx, arg_val, out_slot)?;
+            ValueRepr::Str { ptr, len, cap }
+        } else if ids.process_env == Some(name_id) {
+            // Interim form until process.env replaces process_env. The key
+            // bytes are consumed by ryo_getenv immediately after extraction.
+            let (key_ptr, key_len) = Self::eval_str_or_view_parts(builder, ctx, args[0])?;
+            let (ptr, len, cap) = Self::emit_slot_out_call_out_last(
+                builder,
+                ctx,
+                "ryo_getenv",
+                &[(ctx.int_type, key_ptr), (types::I64, key_len)],
+                out_slot,
+            )?;
+            ValueRepr::Str { ptr, len, cap }
+        } else if ids.io_read_line == Some(name_id) {
+            // Interim arg-less form until io.read_line returns IoError!str.
+            let (ptr, len, cap) = Self::emit_io_read_line(builder, ctx, out_slot)?;
+            ValueRepr::Str { ptr, len, cap }
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(repr))
     }
 
     /// Materialize a `strview`-typed TIR instruction as a `ValueRepr::View`
