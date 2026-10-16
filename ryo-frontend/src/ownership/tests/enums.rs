@@ -150,3 +150,37 @@ fn copy_enum_copies_freely() {
         "Copy enums must copy freely; got {diags:?}"
     );
 }
+
+#[test]
+fn moving_viewed_payload_into_enum_is_rejected() {
+    // Constructing an enum moves its non-Copy payload. A live view of
+    // that payload must prevent the move, or the enum could own and
+    // eventually free the storage while the view still points at it.
+    let src = "enum Opt:\n\tSome(str)\n\tEmpty\n\nfn main():\n\tmut s = \"alice\"\n\tv = s[0:2]\n\to = Opt.Some(s)\n\tprint(v)\n";
+    let diags = check_src(src);
+    assert!(
+        diags.iter().any(|d| {
+            d.code == DiagCode::SourceProjected
+                && d.message.contains("`s`")
+                && d.message.contains("move")
+        }),
+        "expected a move diagnostic naming the projected owner; got {diags:?}"
+    );
+}
+
+#[test]
+fn moving_viewed_payload_into_enum_on_one_branch_is_rejected() {
+    // The view is read after the join, so it is live on the branch that
+    // moves its owner into the enum. The diagnostic must identify that
+    // branch's enum construction as the invalidating operation.
+    let src = "enum Opt:\n\tSome(str)\n\tEmpty\n\nfn main():\n\tmut s = \"alice\"\n\tv = s[0:2]\n\tmut o = Opt.Empty\n\tc = true\n\tif c:\n\t\to = Opt.Some(s)\n\tprint(v)\n";
+    let diags = check_src(src);
+    assert!(
+        diags.iter().any(|d| {
+            d.code == DiagCode::SourceProjected
+                && d.message.contains("`s`")
+                && d.message.contains("move")
+        }),
+        "expected a branch-local move diagnostic naming the projected owner; got {diags:?}"
+    );
+}
