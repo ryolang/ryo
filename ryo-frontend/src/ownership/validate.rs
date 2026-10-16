@@ -958,10 +958,14 @@ pub(crate) fn generation_table(
                 // mirrors the read owner (a by-value arm read, an
                 // identity rewrite); the obligation rides the owner's
                 // own group, so no self-establishment here.
-                if matches!(tir.inst(*producer).tag, TirTag::Var) {
-                    continue;
-                }
-                if let Some((b, ord)) = idx.get(*producer) {
+                let producer_tag = tir.inst(*producer).tag;
+                if !matches!(
+                    producer_tag,
+                    TirTag::Var | TirTag::StrConst | TirTag::BytesConst
+                ) && let Some((b, ord)) = idx.get(*producer)
+                {
+                    // Static strings and bytes have no allocation to
+                    // release, so they create no storage obligation.
                     est.entry(b).or_default().push(ord);
                 }
             }

@@ -33,6 +33,19 @@ fn validator_accepts_straight_line_last_use() {
     cv::validate_no_duplicate_destruction(&places, &flow, &sc);
 }
 
+#[test]
+fn validator_accepts_static_string_comparison_before_loop_break() {
+    let src = "fn main():\n\twhile true:\n\t\tif \"x\" == \"\":\n\t\t\tbreak\n";
+    let (diags, _, _, _) = check_src_full(src);
+    assert!(diags.is_empty(), "clean program; got {diags:?}");
+}
+
+#[test]
+fn validator_accepts_echo_example() {
+    let (diags, _, _, _) = check_src_full(include_str!("../../../../examples/echo.ryo"));
+    assert!(diags.is_empty(), "clean example; got {diags:?}");
+}
+
 /// Positive pin: if/else with borrows in both arms.
 #[test]
 fn validator_accepts_if_else_borrows() {
