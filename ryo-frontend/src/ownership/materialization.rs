@@ -1,135 +1,10 @@
-//! Free scheduling (last-use anchors, materialize sites) — split from `mod.rs`.
+//! Materialization classification and redundant-copy diagnostics.
 
-use super::{
-    Owner, OwnerState, Ownership, inout_escape_owner, needs_tracking, owner_sort_key,
-    projection_root,
-};
+use super::{Owner, OwnerState, Ownership, projection_root};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
-use ryo_core::tir::{ChildKind, Tir, TirData, TirRef, TirTag};
+use ryo_core::tir::{Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
 use std::collections::{HashMap, HashSet};
-
-/// Assign every instruction in the function a monotonic rank in
-/// forward walk order (the same traversal `collect_last_uses` uses),
-/// so two last-use anchors can be compared for "later" (P5). Dense
-/// per-instruction table indexed by `TirRef::index()`; rank 0 means
-/// "unranked" (matching the old `unwrap_or(0)` fallback), so
-/// assignment starts at 1 — a uniform shift that leaves every
-/// rank-vs-rank comparison unchanged.
-pub(crate) fn program_order(tir: &Tir) -> Vec<u32> {
-    fn assign(tir: &Tir, r: TirRef, order: &mut [u32], next: &mut u32) {
-        debug_assert!(!r.is_param());
-        if order[r.index()] != 0 {
-            return;
-        }
-        order[r.index()] = *next;
-        *next += 1;
-        tir.walk_operands(r, &mut |_parent, child, _kind| {
-            assign(tir, child, order, next);
-        });
-    }
-    let mut order = vec![0; tir.instructions.len()];
-    let mut next = 1u32;
-    for &stmt in &tir.body_stmts() {
-        assign(tir, stmt, &mut order, &mut next);
-    }
-    order
-}
-
-/// P5 (final spec §3.2): an owner's destruction is deferred to the
-/// last use of any projection of it. Returns the later of the owner's
-/// own `anchor` and its projections' last uses by program order. A
-/// projection that is never read defers nothing — no one can observe
-/// the buffer through it.
-pub(crate) fn defer_anchor(
-    anchor: TirRef,
-    owner: &Owner,
-    projections_of: &HashMap<Owner, Vec<TirRef>>,
-    last_use: &HashMap<TirRef, TirRef>,
-    order: &[u32],
-) -> TirRef {
-    let rank = |r: TirRef| order.get(r.index()).copied().unwrap_or(0);
-    let mut best = anchor;
-    if let Some(views) = projections_of.get(owner) {
-        for &view in views {
-            if let Some(&read) = last_use.get(&view)
-                && rank(read) > rank(best)
-            {
-                best = read;
-            }
-        }
-    }
-    best
-}
-
-/// Collect the init/value `TirRef` of every `VarDecl`/`Assign` anywhere
-/// in `stmts`, recursing into nested control flow. These are the
-/// "named" producers whose Free is owned by the last-use / dead-store /
-/// `free_on_reassign` / loop-exit pass; the anon-temp pass skips them to
-/// avoid a double-free. Stateless replacement for the old
-/// sticky side-set that formerly lived on `Ownership` and accumulated
-/// named-init TirRefs during the forward walk. Unlike a
-/// `current_owner.values()` derivation this is merge-immune: a temp
-/// reassigned inside a loop body is statically the loop-body `Assign`'s
-/// value regardless of any loop-merge state.
-pub(crate) fn collect_named_inits(tir: &Tir, stmts: &[TirRef]) -> HashSet<TirRef> {
-    let mut set = HashSet::new();
-    for &s in stmts {
-        collect_named_inits_rec(tir, s, &mut set);
-    }
-    set
-}
-
-/// Recursive core of [`collect_named_inits`]. Dispatches on the
-/// statement tag, records each `VarDecl`/`Assign` producer, and
-/// recurses into `IfStmt` arms / `WhileLoop` body / `ForRange` body so
-/// named initializers buried in nested control flow are still
-/// classified as named inits.
-pub(crate) fn collect_named_inits_rec(tir: &Tir, r: TirRef, set: &mut HashSet<TirRef>) {
-    match tir.inst(r).tag {
-        TirTag::VarDecl => {
-            set.insert(tir.var_decl_view(r).initializer);
-        }
-        TirTag::Assign => {
-            set.insert(tir.assign_view(r).value);
-        }
-        TirTag::Destructure => {
-            // M10: a destructured rhs is "named" by the destructure —
-            // the statement consumes the whole value and moves or
-            // inline-drops every field. The anon-temp pass must skip
-            // it or it would schedule a whole-struct Free on top of
-            // the field moves (double-free).
-            set.insert(tir.destructure_view(r).rhs);
-        }
-        TirTag::IfStmt => {
-            let v = tir.if_stmt_view(r);
-            for &s in &v.then_stmts {
-                collect_named_inits_rec(tir, s, set);
-            }
-            for arm in &v.elif_branches {
-                for &s in &arm.body {
-                    collect_named_inits_rec(tir, s, set);
-                }
-            }
-            if let Some(else_stmts) = v.else_stmts.as_deref() {
-                for &s in else_stmts {
-                    collect_named_inits_rec(tir, s, set);
-                }
-            }
-        }
-        TirTag::WhileLoop => {
-            for &s in tir.while_loop_view(r).body.iter() {
-                collect_named_inits_rec(tir, s, set);
-            }
-        }
-        TirTag::ForRange => {
-            for &s in tir.for_range_view(r).body.iter() {
-                collect_named_inits_rec(tir, s, set);
-            }
-        }
-        _ => {}
-    }
-}
 
 /// Interned ids for the synthesized `__ryo_*` callees the W0003/W0004
 /// warnings match call names against. Resolved once per `check` via
@@ -271,10 +146,12 @@ pub(crate) fn collect_materialize_sites(
 ///    counts (the merged lattice and the monotone hazard log are
 ///    path-insensitive), so a maybe-escape suppresses the warning.
 ///
-/// `order` is the per-function [`program_order`] table, built once in
+/// `order` is the per-function document-rank table (the Flow builder's
+/// emission stamp — see [`document_rank`]), built once in
 /// `analyze_function` and shared with the P5 deferral.
 pub(crate) fn warn_redundant_materialize(
     tir: &Tir,
+    flow: &ryo_core::flow::Flow,
     pool: &InternPool,
     ids: &SynthCalleeIds,
     own: &Ownership,
@@ -288,7 +165,7 @@ pub(crate) fn warn_redundant_materialize(
     }
     let rank = |r: TirRef| order.get(r.index()).copied().unwrap_or(0);
     for (decl, call) in sites {
-        let copy = Owner::Inst(call);
+        let copy = own.owner_of_inst(call);
         // Escape check: the copy was consumed (returned, move-passed,
         // rebound away) after its binding, or mutated / `inout`-passed
         // anywhere — either makes the owned allocation legitimate. The
@@ -300,7 +177,7 @@ pub(crate) fn warn_redundant_materialize(
         if own
             .owner_hazards
             .iter()
-            .any(|&(o, site)| o == copy && site != decl)
+            .any(|&(o, site, _)| o == copy && site != decl)
         {
             continue;
         }
@@ -312,7 +189,7 @@ pub(crate) fn warn_redundant_materialize(
         // parameter's buffer belongs to the caller, and the pass
         // cannot judge mutations it cannot see — no warning.
         let view_arg = tir.call_view(call).args[0];
-        let Some(root) = projection_root(own, tir, pool, view_arg) else {
+        let Some(root) = projection_root(own, tir, flow, pool, view_arg) else {
             continue;
         };
         // Defensive-copy exception: the root owner is moved, mutated,
@@ -322,7 +199,7 @@ pub(crate) fn warn_redundant_materialize(
         // re-executes between iterations regardless of source order,
         // so it suppresses too (conservative).
         let mat_rank = rank(call);
-        let defensive = own.owner_hazards.iter().any(|&(o, site)| {
+        let defensive = own.owner_hazards.iter().any(|&(o, site, _)| {
             o == root
                 && (rank(site) > mat_rank
                     || own.loop_nesting.ancestors_innermost_first(site).any(|l| {
@@ -370,8 +247,10 @@ pub(crate) fn warn_redundant_materialize(
 ///    the log), so they always suppress — only moves into a FRESH
 ///    binding (`VarDecl`) are followed;
 ///  - never-read results are W0001 dead-store's jurisdiction.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn warn_redundant_to_bytes(
     tir: &Tir,
+    flow: &ryo_core::flow::Flow,
     pool: &InternPool,
     ids: &SynthCalleeIds,
     own: &Ownership,
@@ -379,6 +258,7 @@ pub(crate) fn warn_redundant_to_bytes(
     last_use: &HashMap<TirRef, TirRef>,
     sink: &mut DiagSink,
 ) {
+    let _ = (pool,);
     let mut sites: Vec<(TirRef, TirRef)> = Vec::new();
     collect_bound_call_sites(
         tir,
@@ -388,7 +268,7 @@ pub(crate) fn warn_redundant_to_bytes(
     );
     let rank = |r: TirRef| order.get(r.index()).copied().unwrap_or(0);
     for (decl, call) in sites {
-        let Some(chain) = copy_chain_clean(own, tir, Owner::Inst(call), decl) else {
+        let Some(chain) = copy_chain_clean(own, tir, flow, own.owner_of_inst(call), decl) else {
             continue;
         };
         // Receiver-root hazard check: `to_bytes()` SNAPSHOTS the
@@ -416,7 +296,7 @@ pub(crate) fn warn_redundant_to_bytes(
         // local root (a view of caller storage) cannot be hazarded by
         // anything this function does.
         let receiver = tir.call_view(call).args[0];
-        if let Some(root) = projection_root(own, tir, pool, receiver) {
+        if let Some(root) = projection_root(own, tir, flow, pool, receiver) {
             let copy_rank = rank(call);
             // Latest read of any chain link: the point where the
             // replacement view dies. Chain owners with no recorded read
@@ -425,12 +305,12 @@ pub(crate) fn warn_redundant_to_bytes(
             // degenerate shapes.
             let chain_last_use = chain
                 .iter()
-                .filter_map(|o| o.inst_tirref())
+                .filter_map(|o| o.inst_tirref(flow))
                 .filter_map(|r| last_use.get(&r))
                 .map(|r| rank(*r))
                 .max()
                 .unwrap_or(copy_rank);
-            let hazarded = own.owner_hazards.iter().any(|&(o, site)| {
+            let hazarded = own.owner_hazards.iter().any(|&(o, site, _)| {
                 o == root
                     && ((rank(site) > copy_rank && rank(site) <= chain_last_use)
                         || own.loop_nesting.ancestors_innermost_first(site).any(|l| {
@@ -556,7 +436,13 @@ fn loop_encloses_chain_read_not_copy(
 /// `inout` pass (`bytes_push`), an `Assign` (move-into-`mut` or
 /// reassign-drop), an aggregate store — is a legitimate use of the
 /// owned copy and yields `None`.
-fn copy_chain_clean(own: &Ownership, tir: &Tir, start: Owner, decl: TirRef) -> Option<Vec<Owner>> {
+fn copy_chain_clean(
+    own: &Ownership,
+    tir: &Tir,
+    _flow: &ryo_core::flow::Flow,
+    start: Owner,
+    decl: TirRef,
+) -> Option<Vec<Owner>> {
     let mut work = vec![(start, decl)];
     let mut seen: HashSet<Owner> = HashSet::new();
     while let Some((owner, binding_site)) = work.pop() {
@@ -567,7 +453,7 @@ fn copy_chain_clean(own: &Ownership, tir: &Tir, start: Owner, decl: TirRef) -> O
         if own.pending_dead_store.contains_key(&owner) {
             return None;
         }
-        for &(o, site) in &own.owner_hazards {
+        for &(o, site, _) in &own.owner_hazards {
             // The hazard at `site == binding_site` is the binding's own
             // consume — how the walk models `b = <value>` — not an escape.
             if o != owner || site == binding_site {
@@ -575,168 +461,17 @@ fn copy_chain_clean(own: &Ownership, tir: &Tir, start: Owner, decl: TirRef) -> O
             }
             match tir.inst(site).tag {
                 TirTag::VarDecl => {
-                    work.push((Owner::Inst(tir.var_decl_view(site).initializer), site));
+                    work.push((
+                        Owner(
+                            own.inst_place[tir.var_decl_view(site).initializer.index()]
+                                .expect("chain value owner place"),
+                        ),
+                        site,
+                    ));
                 }
                 _ => return None,
             }
         }
     }
     Some(seen.into_iter().collect())
-}
-
-/// Every `Return`/`ReturnVoid` statement in `stmts` (any depth), in
-/// forward source order. The promotion-free return epilogue anchors a
-/// free at each one, so an early-exit path cannot bypass a promotion
-/// buffer's single normal anchor.
-pub(crate) fn collect_return_stmts(tir: &Tir, stmts: &[TirRef], out: &mut Vec<TirRef>) {
-    for &r in stmts {
-        match tir.inst(r).tag {
-            TirTag::Return | TirTag::ReturnVoid => out.push(r),
-            TirTag::IfStmt => {
-                let view = tir.if_stmt_view(r);
-                collect_return_stmts(tir, &view.then_stmts, out);
-                for elif in &view.elif_branches {
-                    collect_return_stmts(tir, &elif.body, out);
-                }
-                if let Some(else_stmts) = &view.else_stmts {
-                    collect_return_stmts(tir, else_stmts, out);
-                }
-            }
-            TirTag::WhileLoop | TirTag::ForRange => {
-                if let Some(body) = tir.loop_body(r) {
-                    collect_return_stmts(tir, &body, out);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Snapshot the owners still `Valid` at a return — values the function
-/// must destroy on that exit path (see `Ownership::return_epilogue`).
-/// The returned value itself is already `Moved` by `analyze_return`,
-/// so it is naturally excluded; inout-escape owners are excluded too —
-/// they leave through the write-back pointer, not through destruction.
-/// Owners whose producer is ranked AFTER the return's own expression
-/// subtree are also dropped: a value produced lexically later than the
-/// return cannot exist when it executes. Such owners only appear `Valid`
-/// here because loop convergence re-walks seed body-local owners from
-/// the backedge state (`merge_non_monotone`) — recording them would
-/// schedule a Free the return's path never needs (and codegen cannot
-/// lower, since the producer is never materialized on that path).
-pub(crate) fn record_return_epilogue(tir: &Tir, own: &mut Ownership, return_stmt: TirRef) {
-    // Rank table, built once per function and cached on `Ownership` —
-    // loop convergence re-walks Returns, and rebuilding the per-
-    // function Vec for each one is pure waste.
-    if own.order.is_empty() {
-        own.order = program_order(tir);
-    }
-    let order = &own.order;
-    let rank = |r: TirRef| order.get(r.index()).copied().unwrap_or(0);
-    // The return "completes" only after its own operand subtree has
-    // evaluated, and `program_order` ranks a statement BEFORE its
-    // operands — so producers inside that subtree rank after the
-    // Return yet can still be live at it. Rank the return by the max
-    // over its subtree, not by the Return statement alone.
-    let mut ret_rank = rank(return_stmt);
-    let mut stack: Vec<TirRef> = Vec::new();
-    tir.walk_operands(return_stmt, &mut |_, child, _| stack.push(child));
-    while let Some(r) = stack.pop() {
-        ret_rank = ret_rank.max(rank(r));
-        tir.walk_operands(r, &mut |_, child, _| stack.push(child));
-    }
-    let mut live: Vec<Owner> = own
-        .states
-        .iter()
-        .filter(|(o, s)| {
-            if !matches!(s, OwnerState::Valid) || inout_escape_owner(own, **o) {
-                return false;
-            }
-            match o {
-                // Params predate every statement.
-                Owner::Param(_) => true,
-                Owner::Inst(r) => rank(*r) <= ret_rank,
-            }
-        })
-        .map(|(o, _)| *o)
-        .collect();
-    // Sorted for deterministic sidecar emission order.
-    live.sort_by_key(owner_sort_key);
-    if !live.is_empty() {
-        own.return_epilogue.push((return_stmt, live));
-    }
-}
-
-/// For every Move-typed owner that has at least one `Var` read,
-/// record the *last* read in forward source order. The map is
-/// populated by overwriting (not `or_insert`), so the latest read
-/// wins — semantically equivalent to the previous reverse-walk +
-/// `or_insert` approach for a tree-shaped IR. Recurses through
-/// `Tir::walk_operands` so reads buried inside calls, loops, and if-arms
-/// are still seen. M8.4 (P4/P5, final spec §3.2): `strview`-typed reads
-/// are recorded too — keyed by the view's slice instruction — so the
-/// P5 deferral can compare an owner's last use against its
-/// projections' last uses.
-pub(crate) fn collect_last_uses(
-    tir: &Tir,
-    pool: &InternPool,
-    own: &Ownership,
-    r: TirRef,
-    last_use: &mut HashMap<TirRef, TirRef>,
-    last_read_by_name: &mut HashMap<StringId, TirRef>,
-) {
-    let inst = *tir.inst(r);
-    // Record this instruction's own `Var` read, if any. Resolve via
-    // the per-read `owner_at_read` snapshot taken during the forward
-    // walk — `current_owner`'s end-of-function state would misroute
-    // reads that precede a `mut` reassignment to the post-rebind
-    // owner (wrong target, double-free hazard once heap-allocated
-    // strings reach this pattern). The snapshot anchors each read to
-    // the owner that was live *at that read*, regardless of any
-    // subsequent rebinds.
-    if let TirTag::Var = inst.tag
-        && let TirData::Var(name) = inst.data
-        && (needs_tracking(inst.ty, pool) || pool.is_view(inst.ty))
-    {
-        // By NAME, latest forward-order read wins — the last-use
-        // anchor for a LOOP-CARRIED owner (whose value survives the
-        // loop because the binding is read again after it) must see
-        // the post-loop read even when that read resolved to a
-        // different owner in the `owner_at_read` snapshot.
-        last_read_by_name.insert(name, r);
-        if let Some(owner) = Ownership::dense_get(&own.owner_at_read, r) {
-            // Overwriting insert: latest forward-order read wins =
-            // last source-order read. `Owner::tirref` keys a `Param`
-            // owner under its sentinel ref, so reads of a param-owned
-            // binding register a last use for the param too — the
-            // last-use pass can then anchor its Free after the param's
-            // true last read instead of the last body statement.
-            last_use.insert(owner.tirref(&own.param_index), r);
-        }
-    }
-    tir.walk_operands(r, &mut |_parent, operand, _kind| {
-        collect_last_uses(tir, pool, own, operand, last_use, last_read_by_name);
-    });
-}
-
-/// Build a `child_TirRef → parent_TirRef` map. Each temporary owner
-/// has at most one direct parent in the TIR (the tree-shape invariant
-/// documented on `Tir`, checked by `validate_tree_shape` in debug
-/// builds), so `or_insert` correctly preserves the first parent
-/// observed. Used by the anonymous-temporary-free pass to anchor
-/// each temp's Free after its single consumer.
-///
-/// Only `Operand`-kinded edges contribute to `consumer_of`: a body
-/// statement nested inside an `if`/`while`/`for` is not a consumer
-/// of the surrounding control-flow instruction, so its Free must
-/// not be anchored on the loop/branch header. Recursion still
-/// descends through `BodyStmt` edges to reach operands buried
-/// inside those nested statements.
-pub(crate) fn find_consumers(tir: &Tir, r: TirRef, consumer_of: &mut HashMap<TirRef, TirRef>) {
-    tir.walk_operands(r, &mut |parent, operand, kind| {
-        if matches!(kind, ChildKind::Operand) {
-            consumer_of.entry(operand).or_insert(parent);
-        }
-        find_consumers(tir, operand, consumer_of);
-    });
 }

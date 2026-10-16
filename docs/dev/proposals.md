@@ -1,8 +1,46 @@
-# Ryo Language Proposals
+**Status:** Design (v0.2+)
 
-This document outlines planned language extensions and experimental features for the Ryo programming language. These proposals are not part of the current specification but are under consideration for future versions.
+# Ryo Language Proposals (Draft — v0.2+)
+
+This file collects new features, language extensions, and experimental proposals that need design approval.
+Flaws, contradictions, and pending decisions in the existing specification belong in [design_issues.md](design_issues.md).
+A proposal does not authorize implementation or change the specification.
+The [implementation roadmap](implementation_roadmap.md) owns delivery status.
 
 ## Additional Language Proposals
+
+### Per-Error Trace Suppression
+
+**Status:** Unapproved feature proposal, moved from `design_issues.md`.
+
+**Question:** Should a declaration-level `#[no_trace]` attribute suppress automatic trace capture for selected error types?
+The current specification already provides build-wide `--error-traces=full|minimal|off` controls.
+An attribute would add finer control rather than fix a missing global switch.
+
+**Decisions needed:** Define whether suppression covers creation, propagation, or both.
+Define interactions with build modes, error unions, wrappers, and cross-package calls.
+Keep panic reporting and debug-symbol stripping separate.
+
+**Alternative:** Keep the existing configuration without a new attribute.
+Measure representative error workloads before claiming a benefit.
+Capture can store frame addresses for later symbolization; retaining only the original program counter and stack pointer cannot preserve a complete returned call chain.
+That capture implementation belongs in a compiler/runtime design, not a new language feature.
+
+### While-Loop Continuation Hook
+
+**Status:** Unapproved feature proposal, moved from `design_issues.md`.
+
+**Question:** Should Ryo add a continuation hook for manual updates in `while` loops?
+A `continue` can skip an update at the bottom of the body.
+This follows the current control-flow rules; it is not a specification contradiction.
+
+**Options:** Keep current `while` behavior and use counted `for` loops where suitable, or design an explicit continuation hook.
+A general `defer` statement would be a separate, broader proposal with its own scope and cleanup rules.
+No syntax is selected here.
+
+**Decisions needed:** Define execution on `continue`, normal iteration, `break`, return, panic, and cancellation.
+Define nested-loop targeting and ownership behavior before approval.
+Counted-loop `continue` must already route through its required increment; that is compiler correctness work, not this extension.
 
 ### **Advanced Generics**
 
@@ -1307,6 +1345,7 @@ Attribute System → Compile-Time Reflection
 - Platform-specific and embedded development supported
 
 ## References
-- Spec: `docs/specification.md` (accepted proposals migrate into their relevant sections)
-- Roadmap: `docs/dev/implementation_roadmap.md`
+- Spec: [Specification](../specification.md) (approved proposals migrate into their relevant sections).
+- Spec flaws and pending decisions: [design_issues.md](design_issues.md).
+- Delivery: [Implementation roadmap](implementation_roadmap.md).
 - Sub-proposal: `docs/dev/proposals/wasm_target.md`

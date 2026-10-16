@@ -55,19 +55,20 @@ fn bytes_reslice_projects_root_owner() {
 fn bytes_conditional_reassign_emits_dead_drop() {
     // The sidecar half of the codegen dead-drop path: a bytes owner
     // conditionally reassigned and never read afterwards yields a
-    // ConditionalDeadDrop whose target is Bytes-typed — codegen reads
+    // block-start dead drop whose target is Bytes-typed — codegen reads
     // the target's type to pick `ryo_bytes_free` over `ryo_str_free`.
     // (The dead reassign warns W0001; only the sidecar is pinned here.)
     let src = "fn main():\n\tmut b = \"AB\".to_bytes()\n\tflag = false\n\tif flag:\n\t\tb = \"CD\".to_bytes()\n";
     let (_diags, mut sidecar, tirs, pool) = check_src_full(src);
     let sc = take_function_sidecar(&mut sidecar, 0);
+    let block_start = block_start_drops(&sc);
     assert_eq!(
-        sc.conditional_dead_drops.len(),
+        block_start.len(),
         1,
-        "expected one ConditionalDeadDrop for the pre-if bytes owner; got {:?}",
-        sc.conditional_dead_drops
+        "expected one block-start dead drop for the pre-if bytes owner; got {:?}",
+        sc.drops
     );
-    let target = sc.conditional_dead_drops[0].target;
+    let target = block_start[0].target;
     assert!(
         matches!(pool.kind(tirs[0].inst(target).ty), TypeKind::Bytes),
         "dead-drop target must be Bytes-typed so codegen selects ryo_bytes_free"

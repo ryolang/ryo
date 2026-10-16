@@ -26,23 +26,24 @@ fn inside_loop_temp_is_freed() {
     let tir = tb.finish(&[wl]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sidecar = take_function_sidecar(&mut sidecar, 0);
 
     assert!(
-        sidecar.free_schedule.iter().any(|fp| fp.target == lit),
+        sidecar.drops.iter().any(|fp| fp.target == lit),
         "expected inside-loop StrConst to be scheduled for Free; got: {:?}",
-        sidecar.free_schedule
+        sidecar.drops
     );
     assert_eq!(
-        sidecar
-            .free_schedule
-            .iter()
-            .filter(|fp| fp.target == lit)
-            .count(),
+        sidecar.drops.iter().filter(|fp| fp.target == lit).count(),
         1,
         "expected exactly one Free for the inside-loop StrConst; got: {:?}",
-        sidecar.free_schedule
+        sidecar.drops
     );
 }
 
@@ -87,11 +88,16 @@ fn pre_loop_owner_last_use_in_loop_freed_at_loop_exit() {
     let tir = tb.finish(&[decl, wl]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sidecar = take_function_sidecar(&mut sidecar, 0);
 
     let frees: Vec<_> = sidecar
-        .free_schedule
+        .drops
         .iter()
         .filter(|fp| fp.target == alloc)
         .collect();
@@ -99,12 +105,13 @@ fn pre_loop_owner_last_use_in_loop_freed_at_loop_exit() {
         frees.len(),
         1,
         "exactly one Free for the pre-loop owner; got: {:?}",
-        sidecar.free_schedule
+        sidecar.drops
     );
     assert_eq!(
-        frees[0].after, wl,
+        frees[0].position.anchor_inst().unwrap(),
+        wl,
         "a pre-loop owner whose last use is in the loop is freed at the loop exit (covers break, normal-exit, and zero-iteration paths); got: {:?}",
-        sidecar.free_schedule
+        sidecar.drops
     );
 }
 
@@ -149,13 +156,18 @@ fn pre_loop_owner_continue_before_last_use_does_not_free_on_continue() {
     let tir = tb.finish(&[decl, wl]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sidecar = take_function_sidecar(&mut sidecar, 0);
 
     // The only Free for `alloc` must be anchored on `print_call`,
     // and we must NOT have any Free anchored on `cont`.
     let frees_for_alloc: Vec<_> = sidecar
-        .free_schedule
+        .drops
         .iter()
         .filter(|fp| fp.target == alloc)
         .collect();
@@ -163,10 +175,11 @@ fn pre_loop_owner_continue_before_last_use_does_not_free_on_continue() {
         frees_for_alloc.len(),
         1,
         "expected exactly one Free for `alloc`; got: {:?}",
-        sidecar.free_schedule
+        sidecar.drops
     );
     assert_ne!(
-        frees_for_alloc[0].after, cont,
+        frees_for_alloc[0].position.anchor_inst().unwrap(),
+        cont,
         "Free for pre-loop owner must not be anchored on continue; got: {:?}",
         frees_for_alloc[0]
     );
@@ -208,13 +221,18 @@ fn continue_jump_does_not_free_pre_loop_owner_uaf_guard() {
     let lp = tb.while_loop(cond, &[ifstmt], void, span);
     let tir = tb.finish(&[decl, lp]);
     let mut sink = DiagSink::new();
-    let mut sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sc, 0);
     // No Free for `lit` anchored on the continue jump:
     assert!(
-        !sc.free_schedule
+        !sc.drops
             .iter()
-            .any(|fp| fp.target == lit && fp.after == cont),
+            .any(|fp| fp.target == lit && fp.position.anchor_inst().unwrap() == cont),
         "continue must not free the pre-loop owner (UAF); got {sc:?}"
     );
 }
@@ -245,13 +263,18 @@ fn continue_jump_does_not_free_pre_loop_owner_uaf_guard_reassigned() {
     let lp = tb.while_loop(cond, &[ifstmt, assign], void, span);
     let tir = tb.finish(&[decl, lp]);
     let mut sink = DiagSink::new();
-    let mut sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sc, 0);
     // Under the buggy compiler, `lit1` is defensively freed on `cont`:
     let freed_on_cont = sc
-        .free_schedule
+        .drops
         .iter()
-        .any(|fp| fp.target == lit1 && fp.after == cont);
+        .any(|fp| fp.target == lit1 && fp.position.anchor_inst().unwrap() == cont);
     assert!(
         !freed_on_cont,
         "continue must not free the pre-loop owner (UAF); got {sc:?}"
@@ -299,16 +322,21 @@ fn break_before_last_use_schedules_jump_free() {
     let tir = tb.finish(&[wl]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sidecar = take_function_sidecar(&mut sidecar, 0);
 
     assert!(
         sidecar
-            .free_schedule
+            .drops
             .iter()
-            .any(|fp| fp.after == brk && fp.target == alloc),
+            .any(|fp| fp.position.anchor_inst().unwrap() == brk && fp.target == alloc),
         "expected a Free for the inside-loop owner anchored on break; got: {:?}",
-        sidecar.free_schedule
+        sidecar.drops
     );
 }
 
@@ -354,13 +382,18 @@ fn break_after_last_use_does_not_double_schedule() {
     let tir = tb.finish(&[wl]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sidecar = take_function_sidecar(&mut sidecar, 0);
 
     // Exactly one Free for `alloc`, anchored on `print_call` (the
     // last-use), not on `brk`.
     let frees_for_alloc: Vec<_> = sidecar
-        .free_schedule
+        .drops
         .iter()
         .filter(|fp| fp.target == alloc)
         .collect();
@@ -368,10 +401,11 @@ fn break_after_last_use_does_not_double_schedule() {
         frees_for_alloc.len(),
         1,
         "expected exactly one Free for `alloc`; got: {:?}",
-        sidecar.free_schedule
+        sidecar.drops
     );
     assert_ne!(
-        frees_for_alloc[0].after, brk,
+        frees_for_alloc[0].position.anchor_inst().unwrap(),
+        brk,
         "Free for `alloc` must not be anchored on break; got: {:?}",
         frees_for_alloc[0]
     );
@@ -422,7 +456,12 @@ fn break_in_else_arm_sibling_print_schedules_jump_free() {
     let tir = tb.finish(&[wl]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sidecar = take_function_sidecar(&mut sidecar, 0);
 
     // Two Frees expected: one anchored on s_var (the Var read in
@@ -430,19 +469,23 @@ fn break_in_else_arm_sibling_print_schedules_jump_free() {
     // their wrapping Call), one anchored on brk (cross-branch
     // leak fix).
     let frees_for_alloc: Vec<_> = sidecar
-        .free_schedule
+        .drops
         .iter()
         .filter(|fp| fp.target == alloc)
         .collect();
     assert!(
-        frees_for_alloc.iter().any(|fp| fp.after == s_var),
+        frees_for_alloc
+            .iter()
+            .any(|fp| fp.position.anchor_inst().unwrap() == s_var),
         "expected then-arm last-use Free anchored on s_var (the Var read); got: {:?}",
-        sidecar.free_schedule
+        sidecar.drops
     );
     assert!(
-        frees_for_alloc.iter().any(|fp| fp.after == brk),
+        frees_for_alloc
+            .iter()
+            .any(|fp| fp.position.anchor_inst().unwrap() == brk),
         "expected cross-branch jump-anchored Free on break; got: {:?}",
-        sidecar.free_schedule
+        sidecar.drops
     );
 }
 
@@ -484,16 +527,21 @@ fn continue_before_last_use_schedules_jump_free() {
     let tir = tb.finish(&[wl]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sidecar = take_function_sidecar(&mut sidecar, 0);
 
     assert!(
         sidecar
-            .free_schedule
+            .drops
             .iter()
-            .any(|fp| fp.after == cont && fp.target == alloc),
+            .any(|fp| fp.position.anchor_inst().unwrap() == cont && fp.target == alloc),
         "expected a Free for the inside-loop owner anchored on continue; got: {:?}",
-        sidecar.free_schedule
+        sidecar.drops
     );
 }
 
@@ -526,7 +574,12 @@ fn pre_loop_owner_read_only_in_loop_is_freed() {
     let tir = tb.finish(&[decl, wl]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sidecar = take_function_sidecar(&mut sidecar, 0);
 
     let diags = sink.into_diags();
@@ -536,15 +589,11 @@ fn pre_loop_owner_read_only_in_loop_is_freed() {
         diags
     );
 
-    let count = sidecar
-        .free_schedule
-        .iter()
-        .filter(|fp| fp.target == lit)
-        .count();
+    let count = sidecar.drops.iter().filter(|fp| fp.target == lit).count();
     assert_eq!(
         count, 1,
         "expected exactly one Free for pre-loop owner read only inside loop; got {} schedule={:?}",
-        count, sidecar.free_schedule
+        count, sidecar.drops
     );
 }
 
@@ -562,12 +611,11 @@ fn diverged_loop_writes_branch_gated_free_exactly_once() {
     //       consume(m)       # moved without rebinding → divergence
     //
     // m flips Valid → Moved across the back-edge, so the state
-    // tuple differs and the diverged path runs. The if schedules a
-    // branch-gated Free for x on the else arm. Before the fix the
-    // scratch walk wrote that FreePoint into the REAL sidecar and
-    // the re-walk wrote it again under freshly minted BranchIds —
-    // two entries for one arm, the first gated on a BranchId that
-    // `if_branches` no longer records and codegen never activates.
+    // tuple differs and the diverged path runs. The if schedules an
+    // arm-conditional Free for x anchored inside the else arm. Before
+    // the fix the scratch walk wrote that DropOp into the REAL sidecar
+    // and the re-walk wrote it again — two entries for one arm, the
+    // first anchored on a path the merge discarded.
     use chumsky::span::{SimpleSpan, Span as _};
     use ryo_core::tir::TirBuilder;
 
@@ -606,7 +654,12 @@ fn diverged_loop_writes_branch_gated_free_exactly_once() {
     let tir = tb.finish(&[decl_m, wl]);
 
     let mut sink = DiagSink::new();
-    let mut sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sc, 0);
 
     // Precondition: the loop actually diverged — the re-walk sees
@@ -623,30 +676,30 @@ fn diverged_loop_writes_branch_gated_free_exactly_once() {
         "expected exactly one UAM from the diverged re-walk; got {uam}"
     );
 
-    // Exactly ONE branch-gated Free for the if's else arm,
-    // gated on the BranchId `if_branches` actually records.
-    assert_eq!(
-        sc.if_branches.iter().flatten().count(),
-        1,
-        "one if → one entry set; got {:?}",
-        sc.if_branches
-    );
-    let ids = sc.if_branches[if_inst.index()]
-        .as_ref()
-        .expect("if_branches entry for the loop-body if");
+    // Exactly ONE arm-conditional Free for the if's else arm — its
+    // anchor inside the else's Flow IR block (the structural gate).
+    let flow = build_flow(&tir, &pool);
+    let arm_blocks = flow.branch_arm_blocks(if_inst);
     let gated: Vec<_> = sc
-        .free_schedule
+        .drops
         .iter()
-        .filter(|fp| fp.branch.is_some())
+        .filter(|d| flow.step_block_of(drop_anchor(d)) == Some(arm_blocks.else_block))
         .collect();
     assert_eq!(
         gated.len(),
         1,
         "diverged loop must schedule the else-arm Free exactly once; got {gated:?}"
     );
-    assert_eq!(
-        gated[0].branch, ids.else_branch,
-        "the gated Free must reference the live else BranchId; if_branches = {ids:?}"
+    // And no other in-arm anchors anywhere in the schedule (the
+    // discarded scratch-walk duplicate would show up here).
+    let in_arm: Vec<_> = sc
+        .drops
+        .iter()
+        .filter(|d| flow.step_block_of(drop_anchor(d)) == Some(arm_blocks.then_block))
+        .collect();
+    assert!(
+        in_arm.is_empty(),
+        "no drops anchored in the then arm; got {in_arm:?}"
     );
 }
 
@@ -688,7 +741,8 @@ fn loop_nesting_chains_depth_three() {
     let fr = tb.for_range(i, start, end, &[wl_outer], void, span);
     let tir = tb.finish(&[fr]);
 
-    let nesting = collect_loop_nesting(&tir);
+    let flow = ryo_core::flow::Flow::build(&tir, &pool);
+    let nesting = collect_loop_nesting(&tir, &flow);
 
     // Depths: the loop instructions themselves sit at the ENCLOSING
     // depth; their subtrees (bounds, conditions, bodies) sit one
@@ -712,6 +766,78 @@ fn loop_nesting_chains_depth_three() {
     assert_eq!(nesting.ancestor_at_depth(print_call, 0), fr);
     assert_eq!(nesting.ancestor_at_depth(print_call, 1), wl_outer);
     assert_eq!(nesting.ancestor_at_depth(print_call, 2), wl_inner);
+}
+
+#[test]
+fn loop_nesting_cond_match_arms_stay_at_loop_depth() {
+    // M12 value-position regression: a match in a `while` CONDITION with
+    // a statement arm — the arm body re-executes per iteration, so it
+    // nests at the loop's depth + 1. The generic loop pass records the
+    // loop's ENTIRE subtree (condition included) at depth + 1; the
+    // operand-match descent must NOT re-walk the cond match's arms at
+    // the enclosing frame (it runs with the frame's depth, overwriting
+    // the correct depth + 1 entries with shallower ones — consumers
+    // like the view-liveness depth compare read this table).
+    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::tir::{Discriminant, TirBuilder, TypedMatchArm, TypedMatchBody};
+
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let bool_ty = pool.bool_();
+    let void = pool.void();
+    let main = pool.intern_str("main");
+    let x = pool.intern_str("x");
+    let span = SimpleSpan::new((), 0..0);
+
+    let mut tb = TirBuilder::new(main, vec![], void, span);
+    let x_init = tb.int_const(0, int_ty, span);
+    let x_decl = tb.var_decl(x, false, int_ty, x_init, span);
+    let scrut = tb.int_const(0, int_ty, span);
+    let arm_value = tb.int_const(1, int_ty, span);
+    let arm_assign = tb.assign(x, int_ty, arm_value, span);
+    let arm_expr = tb.bool_const(true, bool_ty, span);
+    let m = tb.match_expr(
+        scrut,
+        bool_ty,
+        &[
+            TypedMatchArm {
+                span,
+                discriminant: Discriminant::Int(0),
+                bindings: &[],
+                guards: &[],
+                body: TypedMatchBody::Stmts(&[arm_assign]),
+            },
+            TypedMatchArm {
+                span,
+                discriminant: Discriminant::Wildcard,
+                bindings: &[],
+                guards: &[],
+                body: TypedMatchBody::Expr(arm_expr),
+            },
+        ],
+        span,
+    );
+    let wl = tb.while_loop(m, &[], void, span);
+    let tir = tb.finish(&[x_decl, wl]);
+
+    let flow = ryo_core::flow::Flow::build(&tir, &pool);
+    let nesting = collect_loop_nesting(&tir, &flow);
+
+    // The loop statement sits at the enclosing depth; its whole subtree
+    // — cond match and both arm bodies included — sits one level deeper.
+    assert_eq!(nesting.depth_of(wl), 0);
+    assert_eq!(nesting.depth_of(m), 1, "the cond match is inside the loop");
+    assert_eq!(
+        nesting.depth_of(arm_assign),
+        1,
+        "the statement-arm body stays at the loop's depth + 1"
+    );
+    assert_eq!(nesting.depth_of(arm_value), 1);
+    assert_eq!(
+        nesting.depth_of(arm_expr),
+        1,
+        "the expression-arm body stays at the loop's depth + 1"
+    );
 }
 
 #[test]
@@ -747,21 +873,21 @@ fn loop_carried_concat_break_gets_no_jump_free() {
     assert_eq!(concats.len(), 1, "expected one concat; got {concats:?}");
     let concat = concats[0];
     assert!(
-        sc.free_schedule
+        sc.drops
             .iter()
-            .all(|fp| !(jumps.contains(&fp.after) && fp.target == concat)),
+            .all(|fp| !(jumps.contains(&fp.position.anchor_inst().unwrap()) && fp.target == concat)),
         "no Free anchored on a jump may target the loop-carried concat owner; got: {:?}",
-        sc.free_schedule
+        sc.drops
     );
     // The binding's buffer must still be freed — after the post-loop
     // read, not at the loop exit (which would free it before the read).
     let post_loop_read_free = sc
-        .free_schedule
+        .drops
         .iter()
         .find(|fp| fp.target == concat)
         .expect("concat owner must have a last-use Free");
     assert!(
-        !jumps.contains(&post_loop_read_free.after),
+        !jumps.contains(&post_loop_read_free.position.anchor_inst().unwrap()),
         "concat Free must not anchor on a jump; got: {:?}",
         post_loop_read_free
     );
@@ -796,11 +922,11 @@ fn loop_carried_concat_continue_gets_no_jump_free() {
         .find(|&r| matches!(tir.inst(r).tag, TirTag::StrConcat))
         .expect("expected a concat");
     assert!(
-        sc.free_schedule
+        sc.drops
             .iter()
-            .all(|fp| !(jumps.contains(&fp.after) && fp.target == concat)),
+            .all(|fp| !(jumps.contains(&fp.position.anchor_inst().unwrap()) && fp.target == concat)),
         "no Free anchored on a jump may target the loop-carried concat owner; got: {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -868,19 +994,21 @@ fn main():
     let break_ref = break_ref.expect("break found");
     let post_break_owner = post_break_owner.expect("child decl found");
     assert!(
-        !sc.free_schedule
+        !sc.drops
             .iter()
-            .any(|fp| fp.after == break_ref && fp.target == post_break_owner),
+            .any(|fp| fp.position.anchor_inst().unwrap() == break_ref
+                && fp.target == post_break_owner),
         "a Free anchored at the break must not target the not-yet-defined owner: {:?}",
-        sc.free_schedule
+        sc.drops
     );
     // The owner's release is its in-body last-use Free.
     assert!(
-        sc.free_schedule
+        sc.drops
             .iter()
-            .any(|fp| fp.target == post_break_owner && fp.after != break_ref),
+            .any(|fp| fp.target == post_break_owner
+                && fp.position.anchor_inst().unwrap() != break_ref),
         "owner must be freed by its in-body last-use Free: {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -946,17 +1074,148 @@ fn main():
     let continue_ref = continue_ref.expect("continue found");
     let post_continue_owner = post_continue_owner.expect("child decl found");
     assert!(
-        !sc.free_schedule
+        !sc.drops
             .iter()
-            .any(|fp| fp.after == continue_ref && fp.target == post_continue_owner),
+            .any(|fp| fp.position.anchor_inst().unwrap() == continue_ref
+                && fp.target == post_continue_owner),
         "a Free anchored at the continue must not target the not-yet-defined owner: {:?}",
-        sc.free_schedule
+        sc.drops
     );
     assert!(
-        sc.free_schedule
-            .iter()
-            .any(|fp| fp.target == post_continue_owner && fp.after != continue_ref),
+        sc.drops.iter().any(|fp| fp.target == post_continue_owner
+            && fp.position.anchor_inst().unwrap() != continue_ref),
         "owner must be freed by its in-body last-use Free: {:?}",
-        sc.free_schedule
+        sc.drops
+    );
+}
+
+#[test]
+fn consume_then_rebind_in_loop_converges() {
+    // G3: the body below consumes the binding's current value and
+    // then reseats the binding — the shape whose entry state the old
+    // feedback merge (binding-aware override applied per pass) flipped
+    // back and forth forever, existing only by grace of the
+    // load-bearing two-pass cap. Under the convergent iteration the
+    // plain operator reaches its fixed point and the override applies
+    // once as a polish computed against the pre-loop snapshot, so the
+    // loop header keeps the pre-rebind owner Valid (the reseated home
+    // holds a fresh value each iteration) — no E0020, and the
+    // pre-rebind buffer is released exactly once (free_on_reassign).
+    // A body needing >2 plain passes is not constructible with the
+    // current walk: every reachable transition fires in pass 1 (the
+    // walk is state-independent), so the second pass's post-body state
+    // already equals the merged entry — the height bound is the
+    // guarantee, never the expectation.
+    let src = "fn take(move s: str):\n\tprint(s)\n\nfn main():\n\tmut s = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" + \"!\"\n\twhile true:\n\t\ttake(s)\n\t\ts = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\" + \"?\"\n\t\tbreak\n\tprint(s)\n\tprint(\"\\n\")\n";
+    let (diags, mut sidecar, tirs, _pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "consume-then-rebind in a loop must compile clean: {diags:?}"
+    );
+    let _sc = take_function_sidecar(&mut sidecar, 1);
+    // (The reseat emits no free_on_reassign: the consume transferred
+    // the pre-rebind buffer to `take`'s move parameter, so there is
+    // nothing left for the reassign to release. The load-bearing pin
+    // is the clean compile above — the old feedback merge reached it
+    // only by cap accident.)
+    let _ = tirs;
+}
+
+#[test]
+fn loop_body_return_converges_and_does_not_poison_post_loop_use() {
+    // Regression (G3 convergence test): a loop whose body's live exits
+    // are Return-only (`while flag: return s`). The body moves `s` on a
+    // path that reaches neither the back-edge nor the post-loop join,
+    // so the entry join DISCARDS the body's Moved state every pass — a
+    // genuine fixed point — while the raw post-body state keeps
+    // differing from the entry forever. Comparing the convergence test
+    // against the raw post-body state (entry vs `after`) therefore never
+    // went false and the height cap aborted the compile. The
+    // convergence test now compares the previous entry against the
+    // MERGED state (the one actually fed back), which is a no-op on the
+    // second pass. Two poison regressions are pinned alongside: the
+    // merge's binding-aware override must not write the body's
+    // path-local Moved/reseat state into the joined binding state (the
+    // post-loop `return s` would trip a spurious E0020), and the
+    // in-loop `return s` must still record the move for the return
+    // epilogue (no leak of the returned buffer).
+    let src = "fn choose(flag: bool) -> str:\n\ts = \"hello\"\n\twhile flag:\n\t\treturn s\n\treturn s\n\nfn main():\n\tprint(choose(true))\n";
+    let (diags, mut sidecar, tirs, _pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "loop-body return must compile clean (no spurious E0020 on the post-loop use): {diags:?}"
+    );
+    // The returned value is consumed by the caller — it must NOT be
+    // freed inside `choose` (no obligation of any kind on `s`'s owner
+    // in the final schedule: the in-loop return's epilogue pass sees
+    // the consume record and skips it).
+    let choose_idx = tirs
+        .iter()
+        .position(|t| _pool.str(t.name) == "choose")
+        .expect("choose's tir");
+    let sc = take_function_sidecar(&mut sidecar, choose_idx);
+    let s_init = (1..tirs[choose_idx].instructions.len() as u32)
+        .map(TirRef::from_raw)
+        .find(|&r| tirs[choose_idx].inst(r).tag == TirTag::StrConst)
+        .expect("the s initializer");
+    assert!(
+        sc.drops.iter().all(|fp| fp.target != s_init),
+        "a value returned (in-loop or post-loop) must not be freed in the callee: {:?}",
+        sc.drops
+    );
+}
+
+#[test]
+fn loop_multiple_live_views_converges() {
+    // R4-A: two loop-carried views of one root (plus a second root)
+    // must reach the fixed point under the membership compare — no
+    // debug_assert, no cap abort, no spurious freeze/move diagnostic.
+    // Both views' last use is inside the body, so P4 pruning kills them
+    // at the loop exit; while iterating, the back-edge set is {v, w}.
+    let src = "fn main():\n\ts = \"abcdefghijklmnopqrstuvwxyz\"\n\tt = \"0123456789\"\n\tv = s[0:10]\n\tw = s[10:20]\n\tu = t[0:5]\n\tmut i = 0\n\twhile i < 3:\n\t\tprint(v)\n\t\tprint(w)\n\t\tprint(u)\n\t\ti += 1\n\tprint(s)\n\tprint(t)\n";
+    let (diags, mut _sidecar, _tirs, _pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "multiple loop-carried views must compile clean: {diags:?}"
+    );
+}
+
+#[test]
+fn loop_branch_dependent_view_liveness_converges() {
+    // R4-A: a view live on ONE arm of an if/else inside the loop. The
+    // arm join unions the projection sets (P2), so the back-edge
+    // membership differs from a pass-1 entry that lacks the arm-local
+    // view — the membership compare must see the growth, re-walk, and
+    // converge rather than abort at the cap or accept a state that was
+    // never walked.
+    let src = "fn main():\n\ts = \"hello there friend\"\n\tmut i = 0\n\twhile i < 2:\n\t\tif i == 0:\n\t\t\tv = s[0:5]\n\t\t\tprint(v)\n\t\telse:\n\t\t\tprint(\"skip\")\n\t\ti += 1\n\tprint(s)\n";
+    let (diags, mut _sidecar, _tirs, _pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "branch-dependent view liveness in a loop must compile clean: {diags:?}"
+    );
+}
+
+#[test]
+fn nested_loops_with_carried_views_converges() {
+    // R4-A: a pre-outer-loop view read inside an INNER loop — the inner
+    // fixed point runs with the view live at its back-edge, then the
+    // outer fixed point re-walks the whole inner region. Both must
+    // converge under the membership compare.
+    let src = "fn main():\n\ts = \"abcdefghijklmnopqrst\"\n\tv = s[0:10]\n\tmut i = 0\n\twhile i < 2:\n\t\tmut j = 0\n\t\twhile j < 2:\n\t\t\tprint(v)\n\t\t\tj += 1\n\t\ti += 1\n\tprint(s)\n";
+    let (diags, mut _sidecar, _tirs, _pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "nested loops with a carried view must compile clean: {diags:?}"
     );
 }

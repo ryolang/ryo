@@ -1,6 +1,7 @@
 //! Branch-state merging — split from `mod.rs`; see module docs there.
 
 use super::{Owner, OwnerState, Ownership};
+use ryo_core::flow::PlaceId;
 use ryo_core::tir::{Span, TirRef};
 use ryo_core::types::StringId;
 use std::collections::{HashMap, HashSet};
@@ -12,7 +13,13 @@ use std::collections::{HashMap, HashSet};
 #[derive(Clone, Default)]
 pub(crate) struct BranchState {
     pub states: HashMap<Owner, OwnerState>,
-    pub current_owner: HashMap<StringId, Owner>,
+    /// Binding home place → the owner seated in it (a shadowing
+    /// declaration mints a new place, so same-named bindings in
+    /// different scopes never collide).
+    pub current_owner: HashMap<PlaceId, Owner>,
+    /// Name → the lexical binding the name currently resolves to (the
+    /// declaring `VarDecl` inst, or a param's virtual ref) — the
+    /// scope-resolution record, seeded from write facts only.
     pub binding_of_name: HashMap<StringId, TirRef>,
     pub pending_dead_store: HashMap<Owner, (StringId, Span, TirRef)>,
     pub live_projections: HashMap<Owner, Vec<Owner>>,
@@ -78,8 +85,8 @@ impl Ownership {
     ///   contribute their state to the merged binding.
     ///
     /// Monotone fields (`origin`, `owner_at_read`, `temp_owners`,
-    /// `root_owner`, `owner_hazards`, `reseat_drops`, `return_epilogue`,
-    /// `next_branch_id`) are deliberately NOT merged: arms walk the same
+    /// `root_owner`, `owner_hazards`, `reseat_drops`, `return_epilogue`)
+    /// are deliberately NOT merged: arms walk the same
     /// `Ownership` in place and never restore those fields, so `self`
     /// already holds every arm's contribution and a union would be a
     /// subset-into-superset no-op.
@@ -159,22 +166,23 @@ pub(crate) fn merge_states_any_moved_wins(
     }
 }
 
-/// First-write-wins merge of name-keyed entries: `dst` keeps its
+/// First-write-wins merge of key→owner entries: `dst` keeps its
 /// existing entries, entries present only in `src` are copied over.
 /// Shared by `Ownership::merge_branches` and `merge_non_monotone` for
-/// both `current_owner` and `binding_of_name` (same join semantics:
-/// a branch-local rebinding does not survive the join).
+/// `current_owner` (home-place keyed), `binding_of_name` (name keyed),
+/// and `binding_of_name`-style maps (same join semantics: a
+/// branch-local rebinding does not survive the join).
 pub(crate) fn merge_current_owner_first_wins(
-    dst: &mut HashMap<StringId, Owner>,
-    src: &HashMap<StringId, Owner>,
+    dst: &mut HashMap<PlaceId, Owner>,
+    src: &HashMap<PlaceId, Owner>,
 ) {
     merge_name_map_first_wins(dst, src);
 }
 
-/// The value-type-generic half of [`merge_current_owner_first_wins`].
-pub(crate) fn merge_name_map_first_wins<V: Copy>(
-    dst: &mut HashMap<StringId, V>,
-    src: &HashMap<StringId, V>,
+/// The key-type-generic half of [`merge_current_owner_first_wins`].
+pub(crate) fn merge_name_map_first_wins<K: Copy + Eq + std::hash::Hash, V: Copy>(
+    dst: &mut HashMap<K, V>,
+    src: &HashMap<K, V>,
 ) {
     for (&name, &value) in src {
         dst.entry(name).or_insert(value);
@@ -183,7 +191,7 @@ pub(crate) fn merge_name_map_first_wins<V: Copy>(
 
 /// One side of a binding-aware merge: the side's binding → owner map
 /// paired with its owner-state map.
-type MergeSide<'a> = (&'a HashMap<StringId, Owner>, &'a HashMap<Owner, OwnerState>);
+type MergeSide<'a> = (&'a HashMap<PlaceId, Owner>, &'a HashMap<Owner, OwnerState>);
 
 /// Binding-aware override, shared by `Ownership::merge_branches`
 /// (sides = the branch lattices) and `merge_non_monotone` (sides =
@@ -205,14 +213,14 @@ type MergeSide<'a> = (&'a HashMap<StringId, Owner>, &'a HashMap<Owner, OwnerStat
 /// NOT monotone: when a loop body reseats a binding (consume-then-
 /// rebind), this merges the pre-reseat owner's entry state with the
 /// post-reseat owner's post-body state, which can flip `Moved` back
-/// to `Valid` on every merge. `analyze_loop_body`'s propagate phase
-/// is capped at MAX_PROPAGATE_PASSES walks precisely because of this
-/// (see the cap comment there and the maintainer note on
-/// `analyze_while_loop`). `Ownership::merge_branches` merges a fixed
-/// branch list, so monotonicity does not arise on that path.
+/// to `Valid`. The loop's propagate phase (G3) therefore keeps this
+/// override OUT of its monotone iteration and applies it once as a
+/// final polish on the converged entry — see the proof comment in
+/// `analyze_loop`. `Ownership::merge_branches` merges a fixed branch
+/// list, so monotonicity does not arise on that path.
 pub(crate) fn merge_binding_states(
     dst_states: &mut HashMap<Owner, OwnerState>,
-    pre_owners: &HashMap<StringId, Owner>,
+    pre_owners: &HashMap<PlaceId, Owner>,
     sides: &[MergeSide<'_>],
 ) {
     for (owner, state) in binding_state_writes(pre_owners, sides) {
@@ -226,14 +234,14 @@ pub(crate) fn merge_binding_states(
 /// still intact, then apply the writes after moving a side into the
 /// merge accumulator.
 pub(crate) fn binding_state_writes(
-    pre_owners: &HashMap<StringId, Owner>,
+    pre_owners: &HashMap<PlaceId, Owner>,
     sides: &[MergeSide<'_>],
 ) -> Vec<(Owner, OwnerState)> {
     let mut writes: Vec<(Owner, OwnerState)> = Vec::with_capacity(pre_owners.len());
-    for (&name, &owner_pre) in pre_owners {
+    for (&home, &owner_pre) in pre_owners {
         let mut merged: Option<OwnerState> = None;
         for &(current_owner, states) in sides {
-            let owner_side = current_owner.get(&name).copied().unwrap_or(owner_pre);
+            let owner_side = current_owner.get(&home).copied().unwrap_or(owner_pre);
             let state_side = states
                 .get(&owner_side)
                 .cloned()
@@ -312,10 +320,11 @@ pub(crate) fn union_live_projections(
 
 /// Loop fixed-point convergence comparison. Compares the full
 /// state tuple — every tracked owner's full `OwnerState` (not just its
-/// Moved-ness) plus the emptiness of each owner's live-projection set
-/// — between the entry and post-body snapshots. A `Valid` ↔ `Borrowed`
-/// flip or a change in freeze state across the back-edge must force a
-/// re-walk, or P2 freeze state inside loop bodies is unsound.
+/// Moved-ness) plus the MEMBERSHIP of each owner's live-projection set
+/// (order- and duplicate-insensitive) — between the entry and post-body
+/// snapshots. A `Valid` ↔ `Borrowed` flip or a change in which views
+/// freeze a root across the back-edge must force a re-walk, or P2 freeze
+/// state inside loop bodies is unsound.
 pub(crate) fn states_differ_snapshot(
     a: &HashMap<Owner, OwnerState>,
     b: &HashMap<Owner, OwnerState>,
@@ -334,21 +343,83 @@ pub(crate) fn states_differ_snapshot(
             return true;
         }
     }
-    // Freeze-range comparison: a live projection on one side and none
-    // on the other changes what consume sites inside the body
-    // diagnose. Only EMPTINESS is compared — which particular view is
-    // live does not change the freeze decision, and the union merge
-    // is monotone over membership.
+    // Freeze-range comparison: which views are live per owner. The
+    // merged set is exactly the state the next iteration consumes:
+    // membership decides where freeze violations are diagnosed inside
+    // the body and which projections later passes create or prune.
+    // `{v1}` vs `{v1, v2}` are different states even though both are
+    // non-empty — comparing only emptiness can claim a fixed point
+    // that was never walked. Compare sets semantically (order- and
+    // duplicate-insensitive). The union merge is monotone over
+    // membership, so a membership change here is a genuine ascension
+    // (see the height argument in loops.rs).
     let mut owners: HashSet<Owner> = a_live.keys().copied().collect();
     owners.extend(b_live.keys().copied());
     for o in owners {
-        let a_live_o = a_live.get(&o).is_some_and(|v| !v.is_empty());
-        let b_live_o = b_live.get(&o).is_some_and(|v| !v.is_empty());
-        if a_live_o != b_live_o {
+        let a_views: &[Owner] = a_live.get(&o).map_or(&[], Vec::as_slice);
+        let b_views: &[Owner] = b_live.get(&o).map_or(&[], Vec::as_slice);
+        if !same_live_views(a_views, b_views) {
             return true;
         }
     }
     false
+}
+
+/// Set-membership equality of two live-view lists: order- and
+/// duplicate-insensitive. Two-directional `contains` over the small
+/// per-owner lists — no allocation; O(n·m) with n, m the live-view
+/// count (a handful at most). A key present with an empty vec and a
+/// missing key are both the empty set, hence equal.
+fn same_live_views(a: &[Owner], b: &[Owner]) -> bool {
+    a.iter().all(|v| b.contains(v)) && b.iter().all(|v| a.contains(v))
+}
+
+/// Loop fixed-point convergence comparison (G3 fix): does the merged
+/// loop-entry state now installed in `own` differ from the PREVIOUS
+/// entry snapshot `prev`? The convergence test must compare against the
+/// state the iteration actually feeds back — the MERGE RESULT — not the
+/// raw post-body state: when the body's live exits are Return-only the
+/// merge discards the body's changes (path-local to the exit), the
+/// merged entry equals the previous entry (a genuine fixed point), and
+/// the raw post-body state keeps differing forever (cap abort).
+///
+/// Covered components — every field `merge_loop_plain` can mutate, so no
+/// merge-mutated component can change while this says false:
+/// 1. `states` — full `OwnerState` comparison (not just Moved-ness).
+/// 2. `live_projections` — per-owner MEMBERSHIP of the view set
+///    (order- and duplicate-insensitive): membership decides where
+///    freeze violations are diagnosed inside the body and which
+///    projections later passes create or prune, so `{v1}` vs `{v1, v2}`
+///    must force a re-walk even though both are non-empty — see
+///    states_differ_snapshot.
+/// 3. `current_owner` — the binding homes (full key/value comparison);
+///    a body-local home inserted by the merge requires a re-walk.
+/// 4. `binding_of_name` — the scope-resolution record, same rule.
+/// 5. `pending_dead_store` — full key/value comparison; the intersect/
+///    union merge can both drop and add keys.
+pub(crate) fn branch_states_differ(prev: &BranchState, own: &Ownership) -> bool {
+    if states_differ_snapshot(
+        &prev.states,
+        &own.states,
+        &prev.live_projections,
+        &own.live_projections,
+    ) {
+        return true;
+    }
+    map_differs(&prev.current_owner, &own.current_owner)
+        || map_differs(&prev.binding_of_name, &own.binding_of_name)
+        || map_differs(&prev.pending_dead_store, &own.pending_dead_store)
+}
+
+/// Key/value equality of two maps (differ = key-set or value mismatch).
+fn map_differs<K: Eq + std::hash::Hash, V: PartialEq>(
+    a: &HashMap<K, V>,
+    b: &HashMap<K, V>,
+) -> bool {
+    if a.len() != b.len() {
+        return true;
+    }
+    a.iter().any(|(k, v)| b.get(k).is_none_or(|bv| bv != v))
 }
 
 /// Merge only the non-monotone fields of two states into `own`'s
@@ -372,31 +443,61 @@ pub(crate) fn merge_non_monotone(
     after: BranchState,
     after_flows_off_end: bool,
 ) {
+    let writes = merge_loop_plain(own, entry, after, after_flows_off_end);
+    // Binding-aware override (NOT monotone — see binding_state_writes):
+    // applied only by callers that do not feed the result back into
+    // further iteration (the loop's final polish / the final merge).
+    for (owner, state) in writes {
+        own.states.insert(owner, state);
+    }
+}
+
+/// The plain loop-entry join — MONOTONE (G3): per-owner any-Moved-wins
+/// (Moved is absorbing; first-observed otherwise), home/binding maps
+/// first-wins (the entry side is fixed, so these never change after the
+/// first merge), dead-store intersect/union, projection union. Returns
+/// the binding-aware override writes UNAPPLIED so the caller decides
+/// (iteration: discard; final polish/merge: apply once, no feedback).
+///
+/// `after_flows_off_end == false` (the body's live exits are Return-only):
+/// the post-body state reaches neither the back-edge nor the post-loop
+/// join, so — exactly like its `Moved` entries, which are discarded
+/// above — its binding-state side is EXCLUDED from the binding-aware
+/// override: a reseat/move on a path to the exit is path-local there
+/// (the return epilogue owns destruction) and must not be written into
+/// the joined binding state. The override then has only the entry side,
+/// which writes each pre-loop owner's own state back — a pure no-op —
+/// so `writes` is empty.
+pub(crate) fn merge_loop_plain(
+    own: &mut Ownership,
+    entry: BranchState,
+    after: BranchState,
+    after_flows_off_end: bool,
+) -> Vec<(Owner, OwnerState)> {
     let mut after = after;
     if !after_flows_off_end {
         after
             .states
             .retain(|_, s| !matches!(s, OwnerState::Moved { .. }));
     }
-    // Binding-aware override computed FIRST, while `entry`/`after` are
-    // intact — NOT monotone (see binding_state_writes);
-    // analyze_loop_body's propagate-phase cap depends on that. Applied
-    // after the Moved-merge, matching the old clone-then-merge order.
-    let writes = binding_state_writes(
-        &entry.current_owner,
-        &[
-            (&entry.current_owner, &entry.states),
-            (&after.current_owner, &after.states),
-        ],
-    );
+    // Computed while `entry`/`after` are intact; the caller applies.
+    // One side per fall-through policy (see the doc above).
+    let writes = if after_flows_off_end {
+        binding_state_writes(
+            &entry.current_owner,
+            &[
+                (&entry.current_owner, &entry.states),
+                (&after.current_owner, &after.states),
+            ],
+        )
+    } else {
+        Vec::new()
+    };
 
     // 1. Merge states: any side Moved -> Moved; otherwise entry (first
     //    observed) wins.
     let mut merged_states = entry.states;
     merge_states_any_moved_wins(&mut merged_states, &after.states);
-    for (owner, state) in writes {
-        merged_states.insert(owner, state);
-    }
 
     // 2. Merge current_owner: first-wins.
     let mut merged_current_owner = entry.current_owner;
@@ -412,7 +513,7 @@ pub(crate) fn merge_non_monotone(
 
     // 4. Merge live_projections: union per root (P2 freeze ranges,
     //    final spec §3.2) — a view live on either side of the back-edge
-    //    stays live. Monotone, so the 2-pass fixed point still suffices.
+    //    stays live. Monotone (membership grows in one direction only).
     let mut merged_live_projections = entry.live_projections;
     union_live_projections(&mut merged_live_projections, &after.live_projections);
 
@@ -421,4 +522,5 @@ pub(crate) fn merge_non_monotone(
     own.binding_of_name = merged_binding_of_name;
     own.pending_dead_store = merged_pending_dead_store;
     own.live_projections = merged_live_projections;
+    writes
 }

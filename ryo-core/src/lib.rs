@@ -1,8 +1,10 @@
+pub mod artifact;
 pub mod ast;
 pub mod ast_pretty;
 pub mod diag;
 pub mod errors;
 pub mod extra;
+pub mod flow;
 pub mod ownership;
 pub mod tir;
 pub mod types;

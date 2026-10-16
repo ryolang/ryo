@@ -13,40 +13,43 @@
 //!
 //! ## State lattice
 //!
-//! Per-TirRef state, not per-binding. A binding name resolves through
-//! a shadow `current_owner: HashMap<StringId, TirRef>` to whichever
-//! SSA value currently owns the underlying allocation. Anonymous owned
-//! temporaries (concat results, formatter outputs) live in the same
-//! `states` map with no shadow entry.
-//!
-//! See `docs/superpowers/specs/2026-05-20-milestone-8.1-heap-str-and-move-semantics-design.md`
-//! sub-milestone 8.1b for the full algorithm.
+//! Flow places identify bindings and produced values. The current-owner
+//! table maps each binding place to the value that occupies its storage.
+//! Anonymous owning values use their producing Flow places.
+//! Names remain diagnostic labels.
 //!
 //! ## Mojo reference
 //!
 //! See `docs/dev/pl_references/mojo.md`.
 
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
+use ryo_core::flow::fire_points::{FirePoints, FireVerdict};
+use ryo_core::flow::{Analysis, BlockId, DropOp, DropPosition, Flow, PlaceId};
 
 mod diag_fmt;
 pub(crate) use diag_fmt::*;
-mod frees;
-pub(crate) use frees::*;
+mod cleanup;
+pub(crate) use cleanup::*;
+mod materialization;
+pub(crate) use materialization::*;
 mod loops;
 pub(crate) use loops::*;
+mod match_;
+pub(crate) use match_::*;
 mod merge;
 pub(crate) use merge::*;
-mod structs;
-pub(crate) use structs::*;
+mod aggregates;
+pub(crate) use aggregates::*;
+mod transfers;
+pub(crate) use transfers::*;
+#[cfg(debug_assertions)]
+mod validate;
 mod views;
 pub(crate) use views::*;
 mod walk;
 pub(crate) use walk::*;
 
-pub use ryo_core::ownership::{
-    BranchId, ConditionalDeadDrop, FreePoint, FunctionSidecar, IfBranchIds, OwnershipSidecar,
-    PromoFree,
-};
+pub use ryo_core::ownership::{FunctionSidecar, OwnershipSidecar, PromoFree};
 use ryo_core::tir::{ParamMode, Span, Tir, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId};
 use std::collections::{HashMap, HashSet};
@@ -72,6 +75,22 @@ pub(crate) fn needs_tracking(ty: TypeId, pool: &InternPool) -> bool {
 
 // ---------- Lattice ----------
 
+/// How an owner hazard arose — the validator's transfer-event production
+/// discriminates moves (ownership leaves this function: a return, a
+/// move argument, a match consume) from non-moves (an `inout` pass —
+/// the value comes back; a reassign mutation — discharged by the
+/// displacement release, not a transfer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HazardKind {
+    /// Ownership moved out (move arg, match/return consume, an
+    /// aggregate field seat, an arm-expression by-value read).
+    Move,
+    /// An `inout` pass: the callee may mutate, the value returns.
+    InoutPass,
+    /// A reassign mutation: the old value is displaced at the store.
+    Mutate,
+}
+
 /// Per-`TirRef` ownership state. Anything Copy-typed lives in
 /// `NotTracked` for its whole lifetime (the walk skips it). Move-
 /// typed values start at `Valid` on definition, transition to
@@ -84,54 +103,106 @@ pub(crate) enum OwnerState {
     Moved { moved_at: Span },
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Owner {
-    Param(StringId),
-    Inst(TirRef),
-}
+/// Ownership identity (G2): the Flow [`PlaceId`] that owns the
+/// storage — a `Param`/`Local`/`Token`/`Temp`/`MatchResult` place.
+/// Names are diagnostic labels only; the analysis path never keys
+/// state by name (a `Var` read resolves through the step's
+/// `StepFacts.read` place, a write through `StepFacts.write.place`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct Owner(pub(crate) PlaceId);
 
 impl Owner {
-    /// Return the underlying `TirRef` for an `Inst` owner, or `None`
-    /// for a `Param`. Used wherever a Free target / codegen lookup is
-    /// needed (FreePoint.target, free_on_reassign values, inst_values).
-    fn inst_tirref(self) -> Option<TirRef> {
-        match self {
-            Owner::Inst(r) => Some(r),
-            Owner::Param(_) => None,
+    /// The `TirRef` codegen resolves this owner by — the place's
+    /// identity instruction: a param's virtual ref, a `Local`'s
+    /// declaring `VarDecl`, a `Token`'s inst, a `Temp`'s producer, a
+    /// match result's match inst. Every Free target / codegen lookup
+    /// goes through here (DropOp.target, free_on_reassign values).
+    pub(crate) fn tirref(self, flow: &Flow) -> TirRef {
+        match flow.place(self.0) {
+            ryo_core::flow::Place::Param { index, .. } => TirRef::param(*index as usize),
+            ryo_core::flow::Place::Local { decl, .. }
+            | ryo_core::flow::Place::Token { inst: decl, .. }
+            | ryo_core::flow::Place::Temp { producer: decl, .. }
+            | ryo_core::flow::Place::MatchResult {
+                match_inst: decl, ..
+            }
+            | ryo_core::flow::Place::LoopVar {
+                loop_inst: decl, ..
+            }
+            | ryo_core::flow::Place::View { producer: decl, .. } => *decl,
         }
     }
 
-    pub(crate) fn tirref(self, param_index: &HashMap<StringId, usize>) -> TirRef {
-        match self {
-            Owner::Inst(r) => r,
-            Owner::Param(name) => TirRef::param(param_idx(param_index, name)),
+    /// The owner as an instruction `TirRef`, or `None` for a param
+    /// (param identity is its virtual ref, not an instruction). View
+    /// owners resolve through their producing slice/conversion inst —
+    /// the dense view tables are inst-indexed.
+    pub(crate) fn inst_tirref(self, flow: &Flow) -> Option<TirRef> {
+        match flow.place(self.0) {
+            ryo_core::flow::Place::Param { .. } => None,
+            _ => Some(self.tirref(flow)),
+        }
+    }
+
+    /// The diagnostic span of the owning place's identity instruction
+    /// (payload lookup — the place names the inst whose span labels
+    /// the owner).
+    pub(crate) fn span(self, flow: &Flow, tir: &Tir) -> Span {
+        match flow.place(self.0) {
+            ryo_core::flow::Place::Param { index, .. } => tir.params[*index as usize].span,
+            _ => tir.span(self.tirref(flow)),
         }
     }
 }
 
-/// Look up a param's index in `param_index`. TIR trusted-producer
-/// contract (see the `tir.rs` module header): sema is the only TIR
-/// producer, so a `Param` owner missing from `param_index` is a
-/// compiler bug, not user input.
-pub(crate) fn param_idx(param_index: &HashMap<StringId, usize>, name: StringId) -> usize {
-    match param_index.get(&name) {
-        Some(idx) => *idx,
-        None => unreachable!("param {:?} missing from param_index", name),
-    }
+/// The step instruction a scheduled drop is anchored on. The ownership
+/// pass only ever emits step-anchored (`AfterStep`) positions today —
+/// conditionality is expressed by the anchor's block membership, so no
+/// other `DropPosition` variant reaches the anchor-order scans. The
+/// `expect` pins that invariant at every read site.
+pub(crate) fn drop_anchor(fp: &DropOp) -> TirRef {
+    fp.position.anchor_inst().expect("step-anchored drop")
+}
+
+/// The step/terminator-anchored subset of the schedule. The anchor-order
+/// scans reason about instruction order; `BlockStart` drops (the unified cleanup schedule — the
+/// unified schedule) fire at block starts and are covered by
+/// block-membership passes instead, so they are not anchor-scannable.
+pub(crate) fn anchored_drops(sidecar: &FunctionSidecar) -> impl Iterator<Item = &DropOp> {
+    sidecar
+        .drops
+        .iter()
+        .filter(|fp| fp.position.anchor_inst().is_some())
 }
 
 /// Per-function ownership state. `states` is the lattice itself,
-/// keyed by the `TirRef` that produced the value. `current_owner`
-/// is a shadow map from binding name to whichever SSA value
-/// currently owns the underlying allocation (so reassignment
-/// reseats ownership without disturbing the producing SSA value).
-/// `origin` records, for each tracked `TirRef`, the upstream value
-/// it derives from (or `None` for fresh allocations) — used to walk
-/// back to the root owner when diagnosing a use-after-move.
+/// keyed by the owning Flow place. `current_owner` maps a binding
+/// home place (the `Local`/`Param` place a read or write fact names)
+/// to whichever owner currently holds its underlying allocation — a
+/// `Var` read step resolves its owner as
+/// `current_owner[facts.read].unwrap_or(facts.read)`, so
+/// reassignment reseats ownership without disturbing the producing
+/// value's state.
 #[derive(Default, Clone)]
 pub(crate) struct Ownership {
     pub states: HashMap<Owner, OwnerState>,
-    pub current_owner: HashMap<StringId, Owner>,
+    /// Binding home place → the owner currently seated in it.
+    pub current_owner: HashMap<PlaceId, Owner>,
+    /// Dense per-instruction owner-place resolution (G2): the place
+    /// whose owner an instruction's value IS — the write place for
+    /// declarations/assignments, the read place for `Var` reads, the
+    /// view place for slices, the temp/token/match-result place for
+    /// producers. Built once per body in `analyze_function` from Flow
+    /// facts (`temp_of`/`local_of_decl`/`match_result`/`token_places`
+    /// plus per-step `StepFacts`); every query of "who owns the value
+    /// of inst r" goes through this table instead of re-deriving
+    /// storage relationships from TIR shape. `None` for untracked
+    /// instructions (slot 0, Copy values, control payloads).
+    pub inst_place: Vec<Option<PlaceId>>,
+    /// Param index → the param's place (params are the outermost
+    /// scope; their places are built first). The `Owner` of a param
+    /// value is `Owner(param_places[idx])`.
+    pub param_places: Vec<PlaceId>,
     /// Name → the lexical BINDING the name currently resolves to:
     /// the `TirRef` of the declaring `VarDecl` (unique per binding —
     /// one name may denote several bindings via an explicit `mut`
@@ -145,18 +216,13 @@ pub(crate) struct Ownership {
     /// loops, first-wins at merges (a shadow does not survive the
     /// join unless every side took it).
     pub binding_of_name: HashMap<StringId, TirRef>,
-    /// Lazily-built [`program_order`] rank table, cached so
+    /// Lazily-built document-rank table (the Flow builder's emission
+    /// stamp — see `document_rank`), cached so
     /// `record_return_epilogue` does not rebuild the per-function Vec
     /// on every Return (loop convergence re-walks returns several
-    /// times). `program_order` never returns an empty table, so
-    /// `is_empty` is a safe "not built yet" sentinel.
+    /// times). Slot 0 stays 0, so `is_empty` is a safe "not built yet"
+    /// sentinel.
     pub order: Vec<u32>,
-    /// Dense per-instruction table indexed by `TirRef::index()`, sized
-    /// to `tir.instructions.len()` in `analyze_function` (slot 0, the
-    /// reserved sentinel, stays empty). Outer `None` = no entry; the
-    /// inner `None` is the meaningful "rebound / fresh allocation"
-    /// value written by `rebind_to_init` and the producer arms.
-    pub origin: Vec<Option<Option<Owner>>>,
     /// Param name → index into `tir.params`, built once per function
     /// in `analyze_function`. Resolving a `Param` owner to its virtual
     /// `TirRef`, type, or span happens inside per-owner loops, so a
@@ -186,18 +252,13 @@ pub(crate) struct Ownership {
 
     /// Per-`Var`-read snapshot of the owner that was live at the
     /// program point of the read. Populated during the forward walk
-    /// (`visit_expr`'s `Var` arm) and consulted by `collect_last_uses`
-    /// instead of resolving through `current_owner`'s end-of-function
-    /// state — which would misroute reads that precede a `mut`
-    /// reassignment to the post-rebind owner. For Move-typed reads
-    /// this anchors the last-use Free to the correct allocation.
-    /// Dense per-instruction table, sized like `origin`.
+    /// (the `Var` step handler) and consulted by the post-walk
+    /// last-use passes instead of resolving through `current_owner`'s
+    /// end-of-function state — which would misroute reads that precede
+    /// a `mut` reassignment to the post-rebind owner. For Move-typed
+    /// reads this anchors the last-use Free to the correct allocation.
+    /// Dense per-instruction table, sized to the arena.
     pub owner_at_read: Vec<Option<Owner>>,
-
-    /// Monotonic `BranchId` allocator. Bumped each time
-    /// `analyze_if_stmt` enters an arm (then / each elif / else) so
-    /// the resulting ids are unique across the function body.
-    pub next_branch_id: u32,
 
     /// Names of `inout` parameters whose type is Move-tracked (i.e.
     /// `str` in v0.1). The value bound to such a param ESCAPES through
@@ -213,7 +274,7 @@ pub(crate) struct Ownership {
     /// the pre-branch owner. Monotone-accumulating (like
     /// `owner_at_read`) — loop convergence re-walks are deduped at push
     /// time. Consumed by the dead-store drain, which converts the
-    /// matching entries into arm-gated `ConditionalDeadDrop`s so the
+    /// matching entries into block-keyed `ConditionalDeadDrop`s so the
     /// pre-branch buffer is also freed on the untouched paths.
     pub reseat_drops: Vec<ReseatDrop>,
 
@@ -236,8 +297,7 @@ pub(crate) struct Ownership {
     /// projects (re-slices resolve transitively to the original
     /// owner). Monotone (insert-only): a view's root never changes,
     /// and branch-scope-dropped views keep their entry so the P5
-    /// deferral on the root survives the merge. Merges first-wins,
-    /// mirroring `origin`. Sparse keys, like `states`.
+    /// deferral on the root survives the merge. Merges first-wins. Sparse keys, like `states`.
     pub root_owner: HashMap<Owner, Owner>,
 
     /// P2 freeze ranges (final spec §3.2): root owner → its currently
@@ -267,24 +327,27 @@ pub(crate) struct Ownership {
     /// its last reading instruction. Views with no entry are never
     /// read — their projection lives to scope end. Constant per
     /// function (computed before the walk), so branch merges need no
-    /// per-field rule for it. `analyze_if_stmt` temporarily refines
-    /// entries per arm (see `if_arm_last_reads`) and restores them at
+    /// per-field rule for it. The branch analysis temporarily refines
+    /// entries per arm (see `arm_last_reads`) and restores them at
     /// each arm's end. Dense per-instruction table, sized like
     /// `origin`.
     pub view_last_use: Vec<Option<TirRef>>,
 
-    /// Walk-constant pre-pass liveness (P4 per-arm refinement): if
-    /// stmt → per-arm (view instruction → its last read within that
-    /// arm's subtree), in walk order [then, elif..., else]. Consulted
-    /// by `analyze_if_stmt`; constant per function, so branch merges
-    /// need no per-field rule for it.
-    pub if_arm_last_reads: HashMap<TirRef, Vec<HashMap<TirRef, TirRef>>>,
+    /// Walk-constant pre-pass liveness (P4 per-arm refinement): the
+    /// arm's Flow IR entry block → per-arm (view instruction → its
+    /// last read within that arm's blocks), recorded by the liveness
+    /// pre-pass for every if/match arm. Consulted via
+    /// `refine_view_liveness_for_arm`; [`Analysis`] tri-state: a
+    /// missing/`Unavailable` entry never refines (conservative
+    /// over-liveness), a `Present` map overrides/kills per view.
+    /// Constant per function, so branch merges need no per-field rule.
+    pub arm_last_reads: HashMap<BlockId, Analysis<HashMap<TirRef, TirRef>>>,
 
     /// Walk-constant pre-pass liveness (P4): view instruction → the
     /// loop at whose exit the projection dies. A view whose last read
     /// sits inside a loop its creation is outside of re-executes on
     /// later iterations, so it stays live through the whole loop.
-    /// Dense per-instruction table, sized like `origin`.
+    /// Dense per-instruction table, sized to the arena.
     pub view_defer_loop: Vec<Option<TirRef>>,
 
     /// Walk-constant pre-pass structure: per-instruction loop nesting
@@ -299,30 +362,41 @@ pub(crate) struct Ownership {
     pub loop_nesting: LoopNesting,
 
     /// Views whose projection ends at the current statement's end
-    /// (P4). Drained by `analyze_stmt` after every statement, so a
-    /// read and a consume within the same statement both see the view
-    /// as live (borrow-for-the-whole-statement semantics, matching
-    /// Rule 7).
+    /// (P4). Drained at statement-root steps, so a read and a consume
+    /// within the same statement both see the view as live
+    /// (borrow-for-the-whole-statement semantics, matching Rule 7).
     pub pending_dying: Vec<Owner>,
 
     /// W0003 case-B support (M8.4.1.2): every move, mutation
     /// (reassign), or `inout` pass of a tracked owner the walk
-    /// observed, as `(owner, site)` pairs. Monotone-accumulating like
-    /// `reseat_drops` — loop convergence re-walks may push duplicates
+    /// observed, as `(owner, site, kind)` triples. Monotone-accumulating
+    /// like `reseat_drops` — loop convergence re-walks may push duplicates
     /// (queries are `any()`-shaped, so no dedup is needed). Read by
     /// the post-walk redundant-materialize pass to classify escapes of
-    /// the copy and defensive-copy hazards on the view's root owner.
-    pub owner_hazards: Vec<(Owner, TirRef)>,
+    /// the copy and defensive-copy hazards on the view's root owner, by
+    /// the return-epilogue pass (consumed bindings), and by the cleanup
+    /// validator, which turns `Move` hazards at Return sites into
+    /// return-TRANSFER events and `Move` hazards at call/match sites
+    /// into call-transfer events (the validator's per-path coverage
+    /// discharges obligations only through transfers and releases —
+    /// `InoutPass`/`Mutate` hazards are neither: the value returns from
+    /// the pass, and a reassign's discharge is its displacement release).
+    pub owner_hazards: Vec<(Owner, TirRef, HazardKind)>,
 
     /// View-creating insts over borrowed-param bases, recorded by the
-    /// walk (`record_promo_candidate`). Consumed by the post-walk
-    /// promotion-free scheduling pass in `analyze_function`.
+    /// walk (`record_promo_candidate`, anchored to its enclosing
+    /// statement via the walk's `stmt_of` table). Consumed by the
+    /// post-walk promotion-free scheduling pass in `analyze_function`.
     pub(crate) promo_candidates: Vec<PromoCandidate>,
 
-    /// The statement currently being walked; set (and restored) by
-    /// `analyze_stmt` so `record_promo_candidate` can anchor each
-    /// candidate to its enclosing statement.
-    pub(crate) current_stmt: Option<TirRef>,
+    /// Match-arm bindings (M12) never read nor consumed inside their
+    /// arm, swept by the match analysis at arm end: the name/span pairs
+    /// for the W0001 drain in `analyze_function` (the pass cannot emit
+    /// warnings — only `analyze_function` holds the warnings sink).
+    /// The matching Frees are already scheduled arm-gated at the arm's
+    /// end. Monotone-accumulating: loop convergence re-walks can record
+    /// a binding twice — the drain dedups.
+    pub arm_dead_stores: Vec<(StringId, Span)>,
 }
 
 impl Ownership {
@@ -340,21 +414,76 @@ impl Ownership {
         debug_assert!(!r.is_param());
         table[r.index()] = Some(v);
     }
+
+    /// The owner whose storage an instruction's value IS (G2): the
+    /// place recorded in `inst_place`, resolved through the binding
+    /// home map when the place is a binding someone may have reseated
+    /// (a `Var` read of `x` resolves to the owner currently seated in
+    /// `x`'s home; a fresh temp/token/result resolves to itself). An
+    /// inst with no place (error-shaped TIR, unregistered reads) maps
+    /// to the shared `UNTRACKED` owner — `NotTracked` in the lattice,
+    /// exactly the old `Owner::Inst` fallback's behavior.
+    pub(crate) fn underlying_owner(&self, r: TirRef) -> Owner {
+        match self.inst_place[r.index()] {
+            Some(p) => self.current_owner.get(&p).copied().unwrap_or(Owner(p)),
+            None => Owner(UNTRACKED_PLACE),
+        }
+    }
+
+    /// The owner identity for a value-producing instruction that is
+    /// its own storage (fresh temps, tokens, match results): the
+    /// inst's own place, panicking if the inst is not an owner.
+    pub(crate) fn owner_of_inst(&self, r: TirRef) -> Owner {
+        Owner(self.inst_place[r.index()].expect("inst has an owner place"))
+    }
+}
+
+/// The shared owner for instructions with no resolvable place
+/// (error-shaped TIR) — never seated, so `states` reads `NotTracked`
+/// and every transition no-ops, mirroring the old `Owner::Inst`
+/// fallback for unregistered values.
+pub(crate) const UNTRACKED_PLACE: PlaceId = PlaceId(u32::MAX);
+
+/// Param-name → index lookup for PAYLOAD queries (param modes, param
+/// spans/types) — not an analysis-identity lookup (owner identity is
+/// the param's place, via `param_places`).
+pub(crate) fn param_idx(param_index: &HashMap<StringId, usize>, name: StringId) -> usize {
+    match param_index.get(&name) {
+        Some(idx) => *idx,
+        None => unreachable!("param {:?} missing from param_index", name),
+    }
+}
+
+/// The owner place an instruction's value IS (G2), derived from Flow
+/// facts alone: the write place for declarations/assignments, the read
+/// place for `Var`/`FieldAccess` reads (the chain's root — Flow
+/// resolves it at build), the view place for slices/conversions, the
+/// temp place for producers. `None` for untracked instructions.
+pub(crate) fn flow_owner_place(flow: &Flow, r: TirRef) -> Option<PlaceId> {
+    if let Some(p) = flow.temp_of(r) {
+        return Some(p);
+    }
+    let step = flow.step_of(r)?;
+    let f = step.facts;
+    // View before read: a `ToView` step's read names its BASE, but the
+    // step's value IS the new view.
+    f.write.map(|w| w.place).or(f.view).or(f.read)
 }
 
 /// One conditional-reseat observation, recorded by
 /// `analyze_if_stmt` after walking an if's arms. `reseat_owners` is the
 /// set of owners the binding was reseated TO across the arms;
-/// `untouched_arms` are the arms (by [`BranchId`]) that kept the
-/// pre-branch owner — including the synthetic fall-through arm of an
-/// else-less if.
+/// `untouched_arms` are the arms (by their Flow IR [`BlockId`]s) that kept
+/// the pre-branch owner — including the synthetic fall-through block of
+/// an else-less if. Codegen fires the recorded `ConditionalDeadDrop` at
+/// the start of each listed block.
 #[derive(Clone, Debug)]
 pub(crate) struct ReseatDrop {
     pub if_stmt: TirRef,
     pub name: StringId,
     pub pre_owner: Owner,
     pub reseat_owners: HashSet<Owner>,
-    pub untouched_arms: Vec<BranchId>,
+    pub untouched_arms: Vec<BlockId>,
 }
 
 /// A `Slice`/`ToView` instruction whose base is a borrowed `str`/`bytes`
@@ -376,7 +505,8 @@ pub(crate) struct PromoCandidate {
 /// into `sink`. Returns an [`OwnershipSidecar`] that codegen consults
 /// to decide where to emit `ryo_str_free` calls. The TIR itself is
 /// never mutated. The sidecar is positional with `tirs`: entry `i`
-/// belongs to `tirs[i]`.
+/// belongs to `tirs[i]`. `flows` is the canonical Flow IR per body, built
+/// once per pipeline run right after sema and shared with codegen.
 ///
 /// Warnings (W0001/W0003/W0004) are buffered and flushed only if the
 /// whole unit compiles without errors — an error that fired anywhere,
@@ -385,13 +515,66 @@ pub(crate) struct PromoCandidate {
 /// compile, etc.). Analysis itself always runs to completion so the
 /// sidecar (frees, anchors) is complete for tooling that reads it on
 /// the error path.
-pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) -> OwnershipSidecar {
+pub fn check(
+    tirs: &[Tir],
+    flows: &[ryo_core::flow::Flow],
+    pool: &InternPool,
+    sink: &mut DiagSink,
+) -> OwnershipSidecar {
+    try_check(tirs, flows, pool, sink).expect("ownership requires compatible built artifacts")
+}
+
+/// Reject incompatible analysis inputs before reading body-local indices.
+pub fn try_check(
+    tirs: &[Tir],
+    flows: &[ryo_core::flow::Flow],
+    pool: &InternPool,
+    sink: &mut DiagSink,
+) -> Result<OwnershipSidecar, String> {
+    try_check_with_optimizations(tirs, flows, pool, sink, true)
+}
+
+/// Analyze required cleanup with optional allocation reuse disabled.
+pub fn check_without_optimizations(
+    tirs: &[Tir],
+    flows: &[Flow],
+    pool: &InternPool,
+    sink: &mut DiagSink,
+) -> Result<OwnershipSidecar, String> {
+    try_check_with_optimizations(tirs, flows, pool, sink, false)
+}
+
+fn try_check_with_optimizations(
+    tirs: &[Tir],
+    flows: &[Flow],
+    pool: &InternPool,
+    sink: &mut DiagSink,
+    optional_optimizations: bool,
+) -> Result<OwnershipSidecar, String> {
+    if tirs.len() != flows.len() {
+        return Err("ownership requires one Flow per typed body".into());
+    }
+    for flow in flows {
+        flow.require_layout(pool)?;
+    }
+    debug_assert_eq!(tirs.len(), flows.len(), "one Flow IR per TIR body");
+    #[cfg(all(test, debug_assertions))]
+    validate::clear_test_ownerships();
     let mut sidecar = OwnershipSidecar::default();
-    let synth = frees::SynthCalleeIds::resolve(pool);
+    let synth = materialization::SynthCalleeIds::resolve(pool);
     let mut warnings = DiagSink::new();
-    for tir in tirs {
-        let mut func_sidecar = FunctionSidecar::new(tir.name, tir.instructions.len());
-        analyze_function(tir, pool, &synth, sink, &mut warnings, &mut func_sidecar);
+    for (tir, flow) in tirs.iter().zip(flows.iter()) {
+        let mut func_sidecar = FunctionSidecar::for_flow(tir, flow)?;
+        analyze_function(
+            tir,
+            flow,
+            pool,
+            &synth,
+            sink,
+            &mut warnings,
+            &mut func_sidecar,
+            optional_optimizations,
+        );
         sidecar.functions.push(func_sidecar);
     }
     if !sink.has_errors() {
@@ -399,16 +582,19 @@ pub fn check(tirs: &[Tir], pool: &InternPool, sink: &mut DiagSink) -> OwnershipS
             sink.emit(d);
         }
     }
-    sidecar
+    Ok(sidecar)
 }
 
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn analyze_function(
     tir: &Tir,
+    flow: &Flow,
     pool: &InternPool,
-    synth: &frees::SynthCalleeIds,
+    synth: &materialization::SynthCalleeIds,
     sink: &mut DiagSink,
     warnings: &mut DiagSink,
     sidecar: &mut FunctionSidecar,
+    optional_optimizations: bool,
 ) {
     let mut own = Ownership {
         // Name → param-index map, built once so the per-owner lookups
@@ -424,7 +610,6 @@ fn analyze_function(
         // the reserved sentinel and stays empty). `loop_nesting` /
         // `view_last_use` / `view_defer_loop` are initialized by the
         // pre-pass assignments below instead.
-        origin: vec![None; tir.instructions.len()],
         owner_at_read: vec![None; tir.instructions.len()],
         ..Ownership::default()
     };
@@ -432,77 +617,134 @@ fn analyze_function(
     // M8.4: view-liveness pre-pass (P4, final spec §3.2). The walk
     // consults these walk-constant tables to know when it passes a
     // projection's last use (and which loop exit defers it). The
-    // nesting map the deferral table is derived from is computed
-    // first, so the walk's per-arm refinement and the
-    // redundant-materialize pass reuse the same table.
-    own.loop_nesting = collect_loop_nesting(tir);
-    let liveness = collect_view_liveness(tir, pool, &own.loop_nesting);
+    // nesting map the deferral table is derived from is computed first;
+    // both are built from Flow IR blocks (see views.rs / loops.rs).
+    own.loop_nesting = collect_loop_nesting(tir, flow);
+    let liveness = collect_view_liveness(tir, flow, pool, &own.loop_nesting);
     own.view_last_use = liveness.last_use;
     own.view_defer_loop = liveness.defer_to_loop;
-    own.if_arm_last_reads = liveness.arm_last_reads;
+    own.arm_last_reads = liveness.arm_last_reads;
+
+    // G2: dense owner-place resolution, built once per body from Flow
+    // facts — the single source of "which place owns inst r's value".
+    // Param places are minted first (the outermost scope), then
+    // temp/token/match-result producers, then per-step facts (write
+    // beats read beats view).
+    own.inst_place = vec![None; tir.instructions.len()];
+    own.param_places = vec![PlaceId(u32::MAX); tir.params.len()];
+    for (i, place) in flow.places.iter().enumerate() {
+        if let ryo_core::flow::Place::Param { index, .. } = place {
+            own.param_places[*index as usize] = PlaceId(i as u32);
+        }
+    }
+    debug_assert!(
+        own.param_places.iter().all(|p| p.0 != u32::MAX),
+        "every param has a place"
+    );
+    for inst in 1..tir.instructions.len() {
+        let r = TirRef::from_raw(u32::try_from(inst).expect("TIR arena index fits u32"));
+        if let Some(p) = flow.temp_of(r) {
+            own.inst_place[inst] = Some(p);
+        } else if let Some(p) = flow.match_result(r) {
+            own.inst_place[inst] = Some(p);
+        } else if let Some(p) = flow_owner_place(flow, r) {
+            own.inst_place[inst] = Some(p);
+        }
+    }
+    for (owner_inst, places) in flow.token_places_iter() {
+        // The token refs come from the producing instruction's wire —
+        // a match's by-move refs, a destructure's bound-owner refs.
+        let refs = match tir.inst(owner_inst).tag {
+            TirTag::Match => tir.match_by_move_owner_refs(owner_inst, pool),
+            TirTag::Destructure => tir.destructure_bound_owner_refs(owner_inst),
+            other => unreachable!("token places only for matches/destructures: {other:?}"),
+        };
+        debug_assert_eq!(refs.len(), places.len(), "token/place mismatch");
+        for (r, p) in refs.iter().zip(places) {
+            own.inst_place[r.index()] = Some(*p);
+        }
+    }
 
     // Initialise per-parameter state. Move-typed params start at
     // `Valid` (the callee owns them); borrowed and inout params start
     // at `Borrowed` (the callee does not own the buffer — inout adds
     // mutability, not ownership). Copy-typed params skip the lattice
-    // entirely.
-    for param in &tir.params {
+    // entirely. Owner identity is the param's place; names are labels.
+    for (idx, param) in tir.params.iter().enumerate() {
         if !needs_tracking(param.ty, pool) {
             continue;
         }
-        let owner = Owner::Param(param.name);
+        let owner = Owner(own.param_places[idx]);
         let state = match param.mode {
             ParamMode::Move => OwnerState::Valid,
             ParamMode::Borrow | ParamMode::Inout => OwnerState::Borrowed,
         };
         own.states.insert(owner, state);
-        own.current_owner.insert(param.name, owner);
+        own.current_owner.insert(own.param_places[idx], owner);
         // The param is the current binding for its name until a
         // shadowing `VarDecl` installs a different one.
-        own.binding_of_name
-            .insert(param.name, TirRef::param(own.param_index[&param.name]));
+        own.binding_of_name.insert(param.name, TirRef::param(idx));
         if param.mode == ParamMode::Inout {
             own.inout_str_params.insert(param.name);
         }
     }
 
-    for stmt in tir.body_stmts() {
-        analyze_stmt(tir, pool, &mut own, sink, sidecar, stmt);
+    // The forward walk, driven by Flow IR: the driver iterates blocks
+    // in construction order; each block's steps run in evaluation
+    // order, then the terminator dispatches (if-cascade / match /
+    // loop / return epilogue). Construct handlers walk their sub-
+    // regions and mark them processed, so the id-ordered driver never
+    // re-processes them; join/exit blocks stay unmarked and are
+    // processed later with the merged state. Dead continuations the
+    // regions never reach (statements after a return/break) are
+    // processed inline by the driver in block order.
+    let mut w = Walk::new(tir, flow, pool);
+    let epoch = w.next_epoch();
+    for b in flow.forward_order() {
+        if w.is_processed(b) {
+            continue;
+        }
+        w.walk_region(
+            &mut own,
+            sink,
+            sidecar,
+            b,
+            RegionStop::At(BlockId::NONE),
+            epoch,
+        );
     }
-
-    // Forward last-use scan: for every owner still `Valid` at function exit
-    // (i.e., not moved out via return / move-typed call argument /
-    // reassign), find its last reading instruction and schedule a Free
-    // anchored after it. The forward walk uses overwriting `insert` so the
-    // *latest* forward-order read across the whole function wins — last
-    // source-order read in the outer-statement-loop and inner-operand-walk
-    // composition. Reads of a binding in the body always alias *some*
-    // owner that the forward walk classified; the per-read
-    // `owner_at_read` snapshot resolves each read to the owner that was
-    // live at that point, regardless of any later rebinds. For any owner
-    // whose state is `Moved` at function exit (e.g. the pre-reassign
-    // owner of a rebound binding), the final-state filter below skips it.
+    // Owner-keyed last-use reads and per-name latest reads were
+    // recorded at `Var` steps during the walk (see `Walk::last_use`) —
+    // the Flow IR replacement for the old post-walk `collect_last_uses`
+    // scan, with identical recording rules (by-name latest read; the
+    // per-read `owner_at_read` snapshot keys the owner map).
+    let last_use = std::mem::take(&mut w.last_use);
+    let last_read_by_name = std::mem::take(&mut w.last_read_by_name);
     let body_stmts = tir.body_stmts();
-    let mut last_use: HashMap<TirRef, TirRef> = HashMap::new();
-    // Binding name → its latest read anywhere (same traversal order as
-    // `last_use`). Used to re-anchor a LOOP-CARRIED owner's Free: the
-    // value survives the loop when the binding is read again after it,
-    // so the loop exit is not its death point — the free belongs after
-    // the binding's true last read (codegen's binding-path redirect
-    // frees the path-correct buffer there).
-    let mut last_read_by_name: HashMap<StringId, TirRef> = HashMap::new();
-    for &stmt in &body_stmts {
-        collect_last_uses(tir, pool, &own, stmt, &mut last_use, &mut last_read_by_name);
-    }
-    let loop_carried_owners: HashSet<TirRef> = collect_loop_carried_owners(tir);
     // P5 (final spec §3.2): root owner → every view that ever
     // projected it (sorted for deterministic iteration).
     // Program-order ranks, built once per function and shared by the
     // P5 deferral (`defer_anchor`) and the redundant-materialize pass.
-    let order = program_order(tir);
+    // G2: the document rank table is the Flow builder's emission
+    // stamp, dense per instruction (0 = unstamped). Same shape as the
+    // old `program_order` table — every consumer's comparisons carry
+    // over.
+    let order: Vec<u32> = (0..tir.instructions.len() as u32)
+        .map(|i| {
+            if i == 0 {
+                0
+            } else {
+                flow.order_of(TirRef::from_raw(i)).unwrap_or(0)
+            }
+        })
+        .collect();
+    // Values assigned inside a loop to a binding declared BEFORE it
+    // survive the loop — driven by the walk-recorded body regions and
+    // document-order ranks (see loops.rs).
+    let loop_carried_owners: HashSet<TirRef> = collect_loop_carried_owners(tir, flow, &w);
     let mut projections_of: HashMap<Owner, Vec<TirRef>> = HashMap::new();
     for (view, root) in &own.root_owner {
-        if let Some(vi) = view.inst_tirref() {
+        if let Some(vi) = view.inst_tirref(flow) {
             projections_of.entry(*root).or_default().push(vi);
         }
     }
@@ -527,7 +769,14 @@ fn analyze_function(
         .free_on_reassign
         .iter()
         .flatten()
-        .map(|t| Owner::Inst(*t))
+        .map(|t| {
+            // Inout-param reseats store the param's virtual ref.
+            if let Some(idx) = t.as_param_index() {
+                Owner(own.param_places[idx as usize])
+            } else {
+                Owner(own.inst_place[t.index()].expect("reassign target owner place"))
+            }
+        })
         .collect();
     // Reassign points per binding name, and owner-value → binding-name
     // maps (see the helpers for what the suppressions below use them).
@@ -540,9 +789,13 @@ fn analyze_function(
     let inout_escape_owners: HashSet<Owner> = own
         .inout_str_params
         .iter()
-        .filter_map(|n| own.current_owner.get(n).copied())
+        .filter_map(|n| {
+            own.current_owner
+                .get(&own.param_places[own.param_index[n]])
+                .copied()
+        })
         .collect();
-    // Iterate owners in a sorted order so `free_schedule` push
+    // Iterate owners in a sorted order so `drops` push
     // order does not depend on HashMap iteration order.
     let mut sorted_states: Vec<(Owner, OwnerState)> =
         own.states.iter().map(|(o, s)| (*o, s.clone())).collect();
@@ -551,14 +804,14 @@ fn analyze_function(
         if !matches!(state, OwnerState::Valid) {
             continue;
         }
-        match owner {
-            Owner::Inst(r) => {
+        match owner.inst_tirref(flow) {
+            Some(r) => {
                 let stale_reassign_target =
                     reassign_targets.contains(owner) && !live_binding_owners.contains(owner);
                 if stale_reassign_target || inout_escape_owners.contains(owner) {
                     continue;
                 }
-                if let Some(&after) = last_use.get(r) {
+                if let Some(&after) = last_use.get(&r) {
                     // P5 (final spec §3.2): defer the destruction to
                     // the last use of any projection of this owner.
                     let after = defer_anchor(after, owner, &projections_of, &last_use, &order);
@@ -568,14 +821,24 @@ fn analyze_function(
                     // the branch exit, the earliest point where the
                     // value is dead on ALL paths, EXCEPT a loop-carried
                     // owner whose binding is read again after the loop.
-                    let anchor = last_use_anchor(
+                    let Some(anchor) = last_use_anchor(
                         tir,
-                        *r,
+                        flow,
+                        pool,
+                        r,
                         after,
+                        sidecar,
                         &order,
                         &last_read_by_name,
                         &loop_carried_owners,
-                    );
+                        own.owner_hazards.iter().any(|&(o, site, kind)| {
+                            o == *owner
+                                && matches!(kind, HazardKind::Move)
+                                && matches!(tir.inst(site).tag, TirTag::Return | TirTag::ReturnVoid)
+                        }),
+                    ) else {
+                        continue;
+                    };
                     // Anchor-order suppression: the owner is its
                     // binding's current owner (the stale-target check
                     // above did not fire — a loop merge's first-wins
@@ -601,33 +864,34 @@ fn analyze_function(
                     // init or a single reseating Assign's value, never
                     // both — so the `.or()` below is unambiguous.
                     debug_assert!(
-                        !(decl_of_init.contains_key(r) && assign_value_of.contains_key(r)),
+                        !(decl_of_init.contains_key(&r) && assign_value_of.contains_key(&r)),
                         "owner {r:?} is both a VarDecl init and an Assign value"
                     );
                     if reassign_targets.contains(owner)
-                        && let Some(&binding) = decl_of_init.get(r).or(assign_value_of.get(r))
+                        && let Some(&binding) = decl_of_init.get(&r).or(assign_value_of.get(&r))
                         && reassign_orders.get(&binding).is_some_and(|v| {
                             v.iter().any(|&rr| anchored_after(tir, &order, rr, anchor))
                         })
                     {
                         continue;
                     }
-                    sidecar.free_schedule.push(FreePoint {
-                        after: anchor,
-                        target: *r,
-                        span: tir.span(*r),
-                        branch: None,
+                    sidecar.drops.push(DropOp {
+                        position: DropPosition::AfterStep { inst: anchor },
+                        target: r,
+                        span: tir.span(r),
                     });
                 }
             }
-            Owner::Param(name) => {
-                // An `inout str` param's value escapes through the
-                // write-back pointer — never freed by the callee, even
-                // if a branch merge left its owner stamped Valid.
-                if own.inout_str_params.contains(name) {
+            None => {
+                // A param owner: an `inout str` param's value escapes
+                // through the write-back pointer — never freed by the
+                // callee, even if a branch merge left its owner stamped
+                // Valid.
+                let name = flow.place(owner.0).name();
+                if own.inout_str_params.contains(&name) {
                     continue;
                 }
-                let idx = param_idx(&own.param_index, *name);
+                let idx = param_idx(&own.param_index, name);
                 // Anchor the Free after the param's last read — the
                 // same policy locals get — so later statements that
                 // never touch the param don't keep its buffer alive.
@@ -655,11 +919,10 @@ fn analyze_function(
                 }) else {
                     continue;
                 };
-                sidecar.free_schedule.push(FreePoint {
-                    after,
+                sidecar.drops.push(DropOp {
+                    position: DropPosition::AfterStep { inst: after },
                     target: TirRef::param(idx),
                     span: tir.params[idx].span,
-                    branch: None,
                 });
             }
         }
@@ -681,16 +944,14 @@ fn analyze_function(
     // by the loop-exit pass, so the dynamic classifier would schedule
     // a spurious second Free). The static set is provably equivalent
     // to the old sticky set across all cases.
-    let named_inits: HashSet<TirRef> = collect_named_inits(tir, &body_stmts);
+    let named_inits: HashSet<TirRef> = collect_named_inits(tir, flow);
     let mut consumer_of: HashMap<TirRef, TirRef> = HashMap::new();
-    for &stmt in &body_stmts {
-        find_consumers(tir, stmt, &mut consumer_of);
-    }
+    find_consumers(flow, tir.instructions.len(), &mut consumer_of);
     let mut sorted_temps: Vec<Owner> = own.temp_owners.iter().copied().collect();
     sorted_temps.sort_by_key(owner_sort_key);
     for temp in sorted_temps {
-        // Temps are always `Inst` owners, never `Param`.
-        let Some(t) = temp.inst_tirref() else {
+        // Temps always name an instruction, never a param.
+        let Some(t) = temp.inst_tirref(flow) else {
             continue;
         };
         if named_inits.contains(&t) {
@@ -721,11 +982,10 @@ fn analyze_function(
                 Some(if_stmt) if if_may_fall_through(tir, if_stmt) => if_stmt,
                 _ => anchor,
             };
-            sidecar.free_schedule.push(FreePoint {
-                after: anchor,
+            sidecar.drops.push(DropOp {
+                position: DropPosition::AfterStep { inst: anchor },
                 target: t,
                 span: tir.span(t),
-                branch: None,
             });
         }
         // No consumer = unreachable from any body statement; can't
@@ -743,7 +1003,9 @@ fn analyze_function(
     let mut promo_anchors: Vec<(TirRef, TirRef)> = Vec::with_capacity(candidates.len());
     for cand in candidates {
         let rank = |r: TirRef| order.get(r.index()).copied().unwrap_or(0);
-        let bound = own.root_owner.contains_key(&Owner::Inst(cand.view_inst));
+        let bound = own.root_owner.contains_key(&Owner(
+            own.inst_place[cand.view_inst.index()].expect("view owner place"),
+        ));
         let after = if bound {
             if let Some(loop_ref) = Ownership::dense_get(&own.view_defer_loop, cand.view_inst) {
                 // Created outside a loop, last read inside it: dies at
@@ -757,7 +1019,7 @@ fn analyze_function(
                 // exactly as owner frees do.
                 let lu = defer_anchor(
                     lu,
-                    &Owner::Inst(cand.view_inst),
+                    &Owner(own.inst_place[cand.view_inst.index()].expect("view owner place")),
                     &projections_of,
                     &last_use,
                     &order,
@@ -814,10 +1076,19 @@ fn analyze_function(
             cand.stmt
         };
         sidecar.promotion_frees.push(PromoFree {
-            after,
+            position: DropPosition::AfterStep { inst: after },
             base: cand.base,
             span: tir.span(cand.view_inst),
-            branch: None,
+        });
+        // The allocation identity — codegen promotes on the
+        // view write (flag-guarded conditional heap triple); the
+        // validator pairs this point with the base's releases.
+        sidecar.promo_allocs.push(PromoFree {
+            position: DropPosition::AfterStep {
+                inst: cand.view_inst,
+            },
+            base: cand.base,
+            span: tir.span(cand.view_inst),
         });
         promo_anchors.push((cand.base, after));
     }
@@ -835,7 +1106,7 @@ fn analyze_function(
     // `return_` terminator. Deduped against the candidate's normal
     // anchor when that anchor IS the return statement.
     let mut return_stmts: Vec<TirRef> = Vec::new();
-    collect_return_stmts(tir, &body_stmts, &mut return_stmts);
+    collect_return_stmts(flow, &w.block_order, &mut return_stmts);
     let mut promo_epilogue_emitted: HashSet<(TirRef, TirRef)> = HashSet::new();
     for return_stmt in return_stmts {
         for &(base, normal_anchor) in &promo_anchors {
@@ -846,10 +1117,9 @@ fn analyze_function(
                 continue;
             }
             sidecar.promotion_frees.push(PromoFree {
-                after: return_stmt,
+                position: DropPosition::AfterStep { inst: return_stmt },
                 base,
                 span: tir.span(return_stmt),
-                branch: None,
             });
         }
     }
@@ -878,10 +1148,9 @@ fn analyze_function(
                     continue;
                 }
                 sidecar.promotion_frees.push(PromoFree {
-                    after: last,
+                    position: DropPosition::AfterStep { inst: last },
                     base,
                     span: tir.span(last),
-                    branch: None,
                 });
             }
         }
@@ -900,7 +1169,11 @@ fn analyze_function(
         .pending_dead_store
         .iter()
         .map(|(o, v)| (*o, *v))
+        // The shared untracked sentinel (error-shaped TIR seats) owns
+        // nothing schedulable; the unit's own diagnostic carries it.
+        .filter(|(o, _)| o.0 != UNTRACKED_PLACE)
         .collect();
+
     sorted_dead.sort_by_key(|(o, _)| owner_sort_key(o));
     for (owner, (name, span, decl_inst)) in &sorted_dead {
         // Bound to an `inout str` param: the value escapes through the
@@ -953,45 +1226,58 @@ fn analyze_function(
             }
             _ => (*decl_inst, false),
         };
-        sidecar.free_schedule.push(FreePoint {
-            after: anchor,
-            target: owner.inst_tirref().expect(
-                "pending_dead_store keys are always Owner::Inst (register_pending_dead_store)",
-            ),
+        sidecar.drops.push(DropOp {
+            position: DropPosition::AfterStep { inst: anchor },
+            target: owner.tirref(flow),
             span: *span,
-            branch: None,
         });
         if also_in_body {
-            sidecar.free_schedule.push(FreePoint {
-                after: *decl_inst,
-                target: owner.inst_tirref().expect(
-                    "pending_dead_store keys are always Owner::Inst (register_pending_dead_store)",
-                ),
+            sidecar.drops.push(DropOp {
+                position: DropPosition::AfterStep { inst: *decl_inst },
+                target: owner.tirref(flow),
                 span: *span,
-                branch: None,
             });
         }
+    }
+
+    // Match-arm bindings never read inside their arm (M12): the walk
+    // already scheduled their arm-gated Frees at the arm ends; only the
+    // W0001 belongs here. Dedup — loop convergence re-walks can record
+    // the same binding twice. Unlike the drain above, no inout /
+    // escape checks: an arm-local bind is a fresh value that dies with
+    // the arm regardless of any same-named outer binding.
+    let mut seen_arm_dead: HashSet<(u32, usize, usize)> = HashSet::new();
+    for (name, span) in &own.arm_dead_stores {
+        if !seen_arm_dead.insert((name.raw(), span.start, span.end)) {
+            continue;
+        }
+        warnings.emit(Diag::warning(
+            *span,
+            DiagCode::DeadStore,
+            format!("value `{}` is declared but never used", pool.str(*name)),
+        ));
     }
 
     // W0003 case B (M8.4.1.2): redundant bound materializations. Runs
     // after the walk so the escape classification it reuses — final
     // lattice states plus the hazard log — is complete.
-    warn_redundant_materialize(tir, pool, synth, &own, &order, warnings);
+    warn_redundant_materialize(tir, flow, pool, synth, &own, &order, warnings);
 
     // W0004: bound `to_bytes()` copies that never mutate nor escape.
     // Same post-walk shape as W0003 case B, plus the last-use map to
     // bound the window where a receiver hazard collides with the
     // suggested view.
-    warn_redundant_to_bytes(tir, pool, synth, &own, &order, &last_use, warnings);
+    warn_redundant_to_bytes(tir, flow, pool, synth, &own, &order, &last_use, warnings);
 
-    // Convert honored reseat records into arm-gated
-    // `ConditionalDeadDrop`s (see the helper for the honoring rules).
-    convert_honored_reseat_drops(&own, sidecar, &decl_of_init, &assign_value_of);
+    // Convert honored reseat records into block-start DropOps (see the
+    // helper for the honoring rules).
+    convert_honored_reseat_drops(tir, &own, flow, sidecar, &decl_of_init, &assign_value_of);
 
     // Drop redundant branch-exit Frees of branch-reseated values before
     // the loop-exit / return-epilogue passes dedup against the schedule.
     suppress_redundant_exit_frees(
         tir,
+        flow,
         sidecar,
         &order,
         &decl_of_init,
@@ -1000,12 +1286,13 @@ fn analyze_function(
     );
 
     // Loop-exit Frees run LAST so they can inspect the now-complete
-    // `free_schedule` and only add jump-anchored Frees for inside-loop
+    // `drops` schedule and only add jump-anchored Frees for inside-loop
     // owners that no earlier pass already covered.
-    schedule_loop_exit_frees_in(tir, &own, sidecar, &body_stmts, None);
+    schedule_loop_exit_frees_in(tir, flow, &own, sidecar, &body_stmts, None);
 
     schedule_return_epilogue_frees(
         tir,
+        flow,
         &own,
         sidecar,
         &body_stmts,
@@ -1014,11 +1301,43 @@ fn analyze_function(
         &assign_value_of,
         &reassign_orders,
     );
+
+    if !optional_optimizations {
+        sidecar.consumed_concat_lhs.fill(None);
+    }
+    sidecar.transfers = own
+        .owner_hazards
+        .iter()
+        .filter_map(|&(owner, site, kind)| {
+            (kind == HazardKind::Move).then_some(ryo_core::ownership::StorageTransfer {
+                source: owner.0,
+                target: owner.tirref(flow),
+                site,
+            })
+        })
+        .collect();
+    sidecar
+        .transfers
+        .sort_by_key(|transfer| (transfer.site.raw(), transfer.source.0));
+    sidecar.transfers.dedup();
+
+    // backend validators: debug-only cleanup-schedule completeness validator (see
+    // `validate`). Runs after every scheduling pass so the sidecar is
+    // final; any broken invariant is a compiler bug, so panic. The path
+    // checks run only on bodies the analysis itself found clean (an
+    // errored body's best-effort schedule never reaches codegen).
+    #[cfg(debug_assertions)]
+    {
+        let summary =
+            validate::validate_cleanup(tir, flow, pool, &own, sidecar, !sink.has_errors());
+        sidecar.validation = Some(summary);
+    }
+    sidecar.seal();
 }
 
 /// Return epilogue: destroy locals still live at an early return.
-/// Runs LAST so every other Free pass has populated `free_schedule`
-/// and we can dedup against it — a value is skipped when another
+/// Runs LAST so every other Free pass has populated the `drops`
+/// schedule and we can dedup against it — a value is skipped when another
 /// Free already fires on the return's path, or the dead-store drain
 /// owns it (its after-decl Free covers every path). Codegen emits
 /// due Frees before every `return_`, so anchoring at the return
@@ -1026,6 +1345,7 @@ fn analyze_function(
 #[allow(clippy::too_many_arguments)]
 fn schedule_return_epilogue_frees(
     tir: &Tir,
+    flow: &Flow,
     own: &Ownership,
     sidecar: &mut FunctionSidecar,
     body_stmts: &[TirRef],
@@ -1035,9 +1355,38 @@ fn schedule_return_epilogue_frees(
     reassign_orders: &HashMap<TirRef, Vec<TirRef>>,
 ) {
     let mut epilogue_emitted: HashSet<(TirRef, TirRef)> = HashSet::new();
+    let fire_points = FirePoints::new(flow);
+    let return_block_reached_from = |start: BlockId, target: BlockId| {
+        let mut seen = HashSet::new();
+        let mut pending = vec![start];
+        while let Some(block) = pending.pop() {
+            if block == target {
+                return true;
+            }
+            if seen.insert(block) {
+                pending.extend_from_slice(flow.successors(block));
+            }
+        }
+        false
+    };
+    let drop_precedes_return = |fp: &DropOp, return_block: BlockId| {
+        let reaches_return = |point: ryo_core::flow::fire_points::FirePoint| {
+            point.block != return_block && return_block_reached_from(point.block, return_block)
+        };
+        match fire_points.resolve(fp.position) {
+            FireVerdict::Resolved(point) | FireVerdict::NonExact(point) => reaches_return(point),
+            FireVerdict::ResolvedPerArm(points) => points.into_iter().any(reaches_return),
+            FireVerdict::Unresolved => false,
+        }
+    };
     for (return_stmt, owners) in &own.return_epilogue {
         let mut on_path: HashSet<TirRef> = HashSet::new();
         let _ = tir.collect_jump_path(body_stmts, *return_stmt, &mut on_path);
+        // The return node is the path target, so `collect_jump_path`
+        // stops there without collecting expressions evaluated to form
+        // its return value (including value-match arms). Those arm
+        // scopes execute before reaching the return block.
+        tir.collect_reachable(*return_stmt, &mut on_path);
         // A Free anchored after a branch CONTAINING the return never
         // fires on the return's path — the branch statement does not
         // complete before the return exits. Exclude ancestors from the
@@ -1056,20 +1405,20 @@ fn schedule_return_epilogue_frees(
         let consumed_bindings: HashSet<TirRef> = own
             .owner_hazards
             .iter()
-            .filter(|&&(_, site)| site == *return_stmt)
-            .filter_map(|&(o, _)| binding_of(o.tirref(&own.param_index)))
+            .filter(|&&(_, site, _)| site == *return_stmt)
+            .filter_map(|&(o, _, _)| binding_of(o.tirref(flow)))
             .collect();
         // Epilogue Frees decided for THIS return, staged before they
-        // join `free_schedule`. The binding-covering scan must see
+        // join the `drops` schedule. The binding-covering scan must see
         // them: two owners of the SAME binding live at one return all
         // lower through the home-slot redirect, so the first decision
         // covers the rest — but only if the scan can observe it.
-        let mut staged: Vec<FreePoint> = Vec::new();
+        let mut staged: Vec<DropOp> = Vec::new();
         for owner in owners {
             if own.pending_dead_store.contains_key(owner) {
                 continue;
             }
-            let r = owner.tirref(&own.param_index);
+            let r = owner.tirref(flow);
             // A return that moves a binding's value hands the home
             // slot's content to the caller (sret / register copy). The
             // consume record names the owner the read resolved to —
@@ -1086,31 +1435,44 @@ fn schedule_return_epilogue_frees(
                 continue;
             }
             // A covering Free must fire on a path that REACHES this
-            // return, at an anchor that CAN fire. Two anchor shapes
-            // never do: a terminator jump inside a traversed subtree
-            // (a `return`/`break`/`continue` of its own — codegen
-            // cannot sweep after a terminator, so the anchor only
-            // services its own exit), and — the dead-anchor
-            // family — any anchor inside THIS return's own operand
-            // subtree: the statement-end sweep that would fire it is
-            // skipped after the Return terminator, so a last-use Free
-            // anchored on the returned expression's reads never fires.
-            // `collect_jump_path` counts both shapes as on-path.
-            // Excluding them keeps the covering sound; without it a
-            // dead anchor suppresses this epilogue Free and codegen's
-            // leak-direction assert fires.
-            let fires_on_this_path = |after: TirRef| -> bool {
-                !tir.contains_reachable(*return_stmt, after)
-                    && !matches!(
-                        tir.inst(after).tag,
-                        TirTag::Return | TirTag::ReturnVoid | TirTag::Break | TirTag::Continue
-                    )
+            // return, at an anchor that CAN fire. A terminator jump
+            // inside a traversed subtree (`return`/`break`/`continue`)
+            // only services its own exit. A last-use drop inside this
+            // return's operand fires only when its Flow point is before
+            // the Return block, as for a match arm; a drop in the Return
+            // block cannot sweep after the terminator.
+            let return_block = flow.term_block_of(*return_stmt);
+            let fires_on_this_path = |fp: &DropOp| -> bool {
+                let after = drop_anchor(fp);
+                if matches!(
+                    tir.inst(after).tag,
+                    TirTag::Return | TirTag::ReturnVoid | TirTag::Break | TirTag::Continue
+                ) {
+                    return false;
+                }
+                if !tir.contains_reachable(*return_stmt, after) {
+                    return true;
+                }
+                let Some(return_block) = return_block else {
+                    return false;
+                };
+                drop_precedes_return(fp, return_block)
             };
-            let covered = sidecar.free_schedule.iter().any(|fp| {
+            let covered = anchored_drops(sidecar).any(|fp| {
                 fp.target == r
-                    && on_path.contains(&fp.after)
-                    && !ancestors.contains(&fp.after)
-                    && fires_on_this_path(fp.after)
+                    && (on_path.contains(&drop_anchor(fp))
+                        // Match payload tokens are created at the match
+                        // terminator, outside the return expression's
+                        // TIR operand tree. Their arm-local last-use drop
+                        // can still cover this return when its firing
+                        // block reaches the return block.
+                        || (!r.is_param()
+                            && tir.inst(r).tag == TirTag::FieldAccess
+                            && return_block.is_some_and(|target| {
+                                drop_precedes_return(fp, target)
+                            })))
+                    && !ancestors.contains(&drop_anchor(fp))
+                    && fires_on_this_path(fp)
             });
             if covered {
                 continue;
@@ -1166,11 +1528,12 @@ fn schedule_return_epilogue_frees(
                 // Covered only when the covering Free anchors after
                 // EVERY reassign of the binding — otherwise the return
                 // may hold a value the covering Free did not release.
-                let covers = |fp: &FreePoint| {
+                let covers = |fp: &DropOp| {
                     binding_of(fp.target) == Some(binding)
                         && reassign_orders.get(&binding).is_some_and(|v| {
                             !v.is_empty()
-                                && v.iter().all(|&rr| anchored_after(tir, order, fp.after, rr))
+                                && v.iter()
+                                    .all(|&rr| anchored_after(tir, order, drop_anchor(fp), rr))
                         })
                 };
                 // Staged epilogue Frees (anchored at THIS return) skip
@@ -1180,24 +1543,23 @@ fn schedule_return_epilogue_frees(
                 // terminator). Schedule frees must pass the gates —
                 // an anchor inside this return's own operand subtree
                 // or on a different exit never fires here.
-                let binding_covered = sidecar.free_schedule.iter().any(|fp| {
-                    on_path.contains(&fp.after)
-                        && !ancestors.contains(&fp.after)
-                        && fires_on_this_path(fp.after)
+                let binding_covered = anchored_drops(sidecar).any(|fp| {
+                    on_path.contains(&drop_anchor(fp))
+                        && !ancestors.contains(&drop_anchor(fp))
+                        && fires_on_this_path(fp)
                         && covers(fp)
                 }) || staged.iter().any(covers);
                 if binding_covered {
                     continue;
                 }
             }
-            staged.push(FreePoint {
-                after: *return_stmt,
+            staged.push(DropOp {
+                position: DropPosition::AfterStep { inst: *return_stmt },
                 target: r,
                 span: tir.span(*return_stmt),
-                branch: None,
             });
         }
-        sidecar.free_schedule.append(&mut staged);
+        sidecar.drops.append(&mut staged);
     }
 }
 
@@ -1264,7 +1626,9 @@ fn binding_value_maps(tir: &Tir, sidecar: &FunctionSidecar, order: &[u32]) -> Bi
     (reassign_orders, decl_of_init, assign_value_of)
 }
 
-/// Convert honored reseat records into arm-gated `ConditionalDeadDrop`s.
+/// Convert honored reseat records into block-start DropOps (the unified
+/// cleanup schedule): one `DropOp { position: BlockStart { block } }`
+/// per untouched arm block, target = the pre-branch owner.
 /// A record is honored when a pending entry for one of its reseated
 /// owners survived to the drain — i.e. the reassigned value is never
 /// read afterwards — so the pre-branch buffer would leak on the paths
@@ -1284,15 +1648,17 @@ fn binding_value_maps(tir: &Tir, sidecar: &FunctionSidecar, order: &[u32]) -> Bi
 /// either: the shadow binding does not exist on the arms where its
 /// reassign never ran.
 fn convert_honored_reseat_drops(
+    tir: &Tir,
     own: &Ownership,
+    flow: &Flow,
     sidecar: &mut FunctionSidecar,
     decl_of_init: &HashMap<TirRef, TirRef>,
     assign_value_of: &HashMap<TirRef, TirRef>,
 ) {
     let binding_of_owner = |o: &Owner| -> Option<TirRef> {
-        match o {
-            Owner::Inst(r) => decl_of_init.get(r).or(assign_value_of.get(r)).copied(),
-            Owner::Param(_) => None,
+        match o.inst_tirref(flow) {
+            Some(r) => decl_of_init.get(&r).or(assign_value_of.get(&r)).copied(),
+            None => None,
         }
     };
     let mut honored: HashSet<usize> = HashSet::new();
@@ -1313,11 +1679,18 @@ fn convert_honored_reseat_drops(
     honored.sort_unstable();
     for idx in honored {
         let drop = &own.reseat_drops[idx];
-        sidecar.conditional_dead_drops.push(ConditionalDeadDrop {
-            if_stmt: drop.if_stmt,
-            target: drop.pre_owner.tirref(&own.param_index),
-            arms: drop.untouched_arms.clone(),
-        });
+        let target = drop.pre_owner.tirref(flow);
+        let span = match drop.pre_owner.inst_tirref(flow) {
+            Some(r) => tir.span(r),
+            None => tir.span(drop.if_stmt),
+        };
+        for &block in &drop.untouched_arms {
+            sidecar.drops.push(DropOp {
+                position: DropPosition::BlockStart { block },
+                target,
+                span,
+            });
+        }
     }
 }
 
@@ -1359,6 +1732,7 @@ fn convert_honored_reseat_drops(
 /// passes see the final schedule.
 fn suppress_redundant_exit_frees(
     tir: &Tir,
+    flow: &Flow,
     sidecar: &mut FunctionSidecar,
     order: &[u32],
     decl_of_init: &HashMap<TirRef, TirRef>,
@@ -1366,6 +1740,7 @@ fn suppress_redundant_exit_frees(
     reassign_orders: &HashMap<TirRef, Vec<TirRef>>,
 ) {
     let binding_of = |t: TirRef| decl_of_init.get(&t).or(assign_value_of.get(&t)).copied();
+    let _ = flow;
     let is_exit_anchor = |after: TirRef, target: TirRef| {
         matches!(
             tir.inst(after).tag,
@@ -1387,12 +1762,10 @@ fn suppress_redundant_exit_frees(
     };
 
     // Exit-anchored Frees of named binding values, in schedule order.
-    let candidates: Vec<(usize, TirRef, TirRef)> = sidecar
-        .free_schedule
-        .iter()
+    let candidates: Vec<(usize, TirRef, TirRef)> = anchored_drops(sidecar)
         .enumerate()
-        .filter(|(_, fp)| fp.branch.is_none() && is_exit_anchor(fp.after, fp.target))
-        .filter_map(|(i, fp)| binding_of(fp.target).map(|b| (i, fp.after, b)))
+        .filter(|(_, fp)| is_exit_anchor(drop_anchor(fp), fp.target))
+        .filter_map(|(i, fp)| binding_of(fp.target).map(|b| (i, drop_anchor(fp), b)))
         .collect();
 
     let mut drop: HashSet<usize> = HashSet::new();
@@ -1404,17 +1777,16 @@ fn suppress_redundant_exit_frees(
     // not-taken arms — so it cannot release the buffer the exit Free
     // would.
     for &(i, after, binding) in &candidates {
-        let covered = sidecar.free_schedule.iter().enumerate().any(|(j, fp2)| {
+        let covered = anchored_drops(sidecar).enumerate().any(|(j, fp2)| {
             j != i
                 && !drop.contains(&j)
-                && fp2.branch.is_none()
                 && !matches!(
-                    tir.inst(fp2.after).tag,
+                    tir.inst(drop_anchor(fp2)).tag,
                     TirTag::Return | TirTag::ReturnVoid | TirTag::Break | TirTag::Continue
                 )
                 && binding_of(fp2.target) == Some(binding)
-                && !tir.contains_reachable(after, fp2.after)
-                && anchored_after(tir, order, fp2.after, after)
+                && !tir.contains_reachable(after, drop_anchor(fp2))
+                && anchored_after(tir, order, drop_anchor(fp2), after)
         });
         if covered {
             drop.insert(i);
@@ -1444,16 +1816,21 @@ fn suppress_redundant_exit_frees(
     // and make the redirect a double free — leave the schedule as-is.
     let displaced_targets: HashSet<TirRef> =
         sidecar.free_on_reassign.iter().flatten().copied().collect();
-    for i in 0..sidecar.free_schedule.len() {
+    for i in 0..sidecar.drops.len() {
         if drop.contains(&i) {
             continue;
         }
-        let fp = &sidecar.free_schedule[i];
+        let fp = &sidecar.drops[i];
+        // Block-start drops (the unified cleanup schedule) fire at block starts, not on an
+        // instruction anchor — the anchor-order scan skips them.
+        let Some(anchor) = fp.position.anchor_inst() else {
+            continue;
+        };
         // A last-use Free conditionally re-anchored by `last_use_anchor`
         // lands on a branch statement whose subtree does NOT contain the
         // target (unlike the arm-value exit Frees in `candidates`), so
         // this scan is schedule-wide.
-        if fp.branch.is_some() || tir.inst(fp.after).tag != TirTag::IfStmt {
+        if tir.inst(anchor).tag != TirTag::IfStmt {
             continue;
         }
         let Some(binding) = binding_of(fp.target) else {
@@ -1462,7 +1839,7 @@ fn suppress_redundant_exit_frees(
         if !displaced_targets.contains(&fp.target) {
             continue;
         }
-        let after = fp.after;
+        let after = drop_anchor(fp);
         let displaced_before_exit = reassign_orders.get(&binding).is_some_and(|assigns| {
             assigns
                 .iter()
@@ -1481,28 +1858,28 @@ fn suppress_redundant_exit_frees(
         // same home-slot redirect and covers this anchor's paths — this
         // one is redundant (and retargeting would mint a double
         // redirect).
-        let redundant_at_anchor = sidecar.free_schedule.iter().enumerate().any(|(j, fp2)| {
+        let redundant_at_anchor = anchored_drops(sidecar).enumerate().any(|(j, fp2)| {
             j != i
                 && !drop.contains(&j)
-                && fp2.branch.is_none()
-                && fp2.after == after
+                && drop_anchor(fp2) == after
                 && binding_of(fp2.target) == Some(binding)
         });
         if redundant_at_anchor {
             drop.insert(i);
             continue;
         }
-        let redirect_safe = sidecar
-            .free_schedule
-            .iter()
+        let redirect_safe = anchored_drops(sidecar)
             .filter(|fp2| fp2.target == last_write)
             .all(|fp2| {
-                fp2.after == after
-                    || (tir.contains_reachable(after, fp2.after)
-                        && matches!(tir.inst(fp2.after).tag, TirTag::Return | TirTag::ReturnVoid))
+                drop_anchor(fp2) == after
+                    || (tir.contains_reachable(after, drop_anchor(fp2))
+                        && matches!(
+                            tir.inst(drop_anchor(fp2)).tag,
+                            TirTag::Return | TirTag::ReturnVoid
+                        ))
             });
         if redirect_safe {
-            sidecar.free_schedule[i].target = last_write;
+            sidecar.drops[i].target = last_write;
         }
     }
     // Pass 2: same (binding, exit) anchor — keep one Free, preferring
@@ -1528,13 +1905,13 @@ fn suppress_redundant_exit_frees(
                 members
                     .iter()
                     .copied()
-                    .find(|&m| sidecar.free_schedule[m].target == lw)
+                    .find(|&m| sidecar.drops[m].target == lw)
             })
             .unwrap_or_else(|| {
                 members
                     .iter()
                     .copied()
-                    .max_by_key(|&m| (order[sidecar.free_schedule[m].target.index()], m))
+                    .max_by_key(|&m| (order[sidecar.drops[m].target.index()], m))
                     .expect("group has members")
             });
         for &m in &members {
@@ -1546,19 +1923,19 @@ fn suppress_redundant_exit_frees(
     if drop.is_empty() {
         return;
     }
-    let mut kept = Vec::with_capacity(sidecar.free_schedule.len());
-    for (i, fp) in sidecar.free_schedule.drain(..).enumerate() {
+    let mut kept = Vec::with_capacity(sidecar.drops.len());
+    for (i, fp) in sidecar.drops.drain(..).enumerate() {
         if !drop.contains(&i) {
             kept.push(fp);
         }
     }
-    sidecar.free_schedule = kept;
+    sidecar.drops = kept;
 }
 
 /// True when `anchor` fires at or after `point` in control flow:
 /// a strictly-later program rank, or `anchor` is a loop/branch
 /// statement whose body CONTAINS `point` (containers rank before
-/// their bodies in `program_order`, so the rank test alone
+/// their bodies in the document rank, so the rank test alone
 /// under-orders them).
 fn anchored_after(tir: &Tir, order: &[u32], anchor: TirRef, point: TirRef) -> bool {
     order[anchor.index()] > order[point.index()]

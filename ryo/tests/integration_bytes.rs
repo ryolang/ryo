@@ -255,7 +255,7 @@ fn test_bytes_conditional_reassign_dead_drop() {
     // Conditional dead-drop for a bytes owner (M8.4.2): a bytes
     // binding reassigned on one arm and never read afterwards gets its
     // pre-if heap buffer freed on the untouched path by
-    // `emit_conditional_dead_drops`, which must select `ryo_bytes_free`
+    // the block-start fire, which must select `ryo_bytes_free`
     // (not `ryo_str_free`). Heap-backed via `.to_bytes()` so the free
     // is a real deallocation — a rodata bytes literal would be cap=0,
     // a runtime no-op. (The dead reassign warns W0001; warnings do not
@@ -340,4 +340,13 @@ fn test_w0004_fires_on_aot_build() {
         .expect("run built binary");
     assert!(run.status.success());
     assert_eq!(String::from_utf8_lossy(&run.stdout), "2");
+}
+
+#[test]
+fn nested_heap_byte_shadows_preserve_outer_storage() {
+    assert_ryo_output(
+        "nested_heap_byte_shadows.ryo",
+        include_str!("fixtures/nested_heap_byte_shadows.ryo"),
+        "deepreplacementouterdeepreplacementouterouter_0123456789012345678901234567890123456789!outerouterouter_0123456789012345678901234567890123456789!",
+    );
 }

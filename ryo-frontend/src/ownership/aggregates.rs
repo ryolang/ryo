@@ -22,34 +22,21 @@
 //!   `field_free_on_reassign`.
 
 use super::{
-    Owner, OwnerState, Ownership, check_source_projected, consume_for_assignment,
-    consumed_binding_name, needs_tracking, register_pending_dead_store, underlying_owner,
-    visit_expr,
+    Owner, OwnerState, Ownership, Walk, check_source_projected, consume_for_assignment,
+    consumed_binding_name, needs_tracking, register_pending_dead_store,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::ownership::FunctionSidecar;
 use ryo_core::tir::{Span, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeKind};
 
-/// The root owner a `FieldAccess` chain reads from: walk nested
-/// `FieldAccess` objects down to the base `Var` read and resolve the
-/// binding's current owner (mirrors `projection_root` in views.rs for
-/// slice chains). The unwrap-or-`Param` fallback mirrors
-/// `inout_owner`: an unregistered name is a Copy-typed parameter,
-/// whose per-binding key is `Owner::Param(name)`. A chain rooted in
-/// anything else (a call result, a literal) resolves through the
-/// usual origin walk.
-pub(crate) fn struct_root(own: &Ownership, tir: &Tir, r: TirRef) -> Option<Owner> {
-    match tir.inst(r).data {
-        TirData::FieldAccess { object, .. } => struct_root(own, tir, object),
-        TirData::Var(name) => Some(
-            own.current_owner
-                .get(&name)
-                .copied()
-                .unwrap_or(Owner::Param(name)),
-        ),
-        _ => Some(underlying_owner(own, r)),
-    }
+/// The root owner a `FieldAccess` chain reads from (G2): the chain's
+/// step's `read` fact names the ROOT place — Flow resolved the chain
+/// at build — so the root owner is `underlying_owner` of the chain
+/// inst itself. Kept as a named helper so call sites read correctly;
+/// `tir` is unused (payload-free resolution).
+pub(crate) fn struct_root(own: &Ownership, _tir: &Tir, r: TirRef) -> Option<Owner> {
+    Some(own.underlying_owner(r))
 }
 
 /// The binding name at the base of a `FieldAccess` chain, for
@@ -100,6 +87,7 @@ pub(crate) fn field_path_of(tir: &Tir, mut r: TirRef) -> Option<Vec<u32>> {
 /// `lit` is the `StructLit` instruction, recorded as the consume site.
 pub(crate) fn consume_struct_lit_fields(
     tir: &Tir,
+    flow: &ryo_core::flow::Flow,
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
@@ -115,10 +103,11 @@ pub(crate) fn consume_struct_lit_fields(
         // P2 freeze (final spec §3.2): the consume moves the owner.
         check_source_projected(
             tir,
+            flow,
             pool,
             own,
             sink,
-            underlying_owner(own, value),
+            own.underlying_owner(value),
             span,
             "move",
             consumed_name,
@@ -127,33 +116,23 @@ pub(crate) fn consume_struct_lit_fields(
     }
 }
 
-/// `visit_expr`'s `EnumLit` arm (M11), split out of `walk.rs` (the
-/// workspace's small-function lint keeps `visit_expr` under the line
-/// budget). Whole-value model: an enum value is ONE `Owner`, exactly
-/// like a struct, so this mirrors the `StructLit` arm — a needs-drop
-/// enum literal materializes a fresh owner, and its payload args are
-/// walked and consumed only here (the payload is `TirData::Extra`,
-/// which `recurse_operands` never descends into). A Copy enum skips
-/// the lattice entirely; its payload args are Copy too, so the consume
-/// is a no-op on them. M11 has no payload-access syntax, so no
-/// field-level guard applies to the payload args.
+/// `process_step`'s `EnumLit` arm (M11). Whole-value model: an enum
+/// value is ONE `Owner`, exactly like a struct — this mirrors the
+/// `StructLit` step. The payload arg steps already ran (block iteration
+/// order); only the fresh-owner seeding and the per-payload consume
+/// remain. A Copy enum skips the lattice entirely.
 pub(crate) fn analyze_enum_lit(
-    tir: &Tir,
-    pool: &InternPool,
+    w: &mut Walk<'_>,
     own: &mut Ownership,
     sink: &mut DiagSink,
-    sidecar: &mut FunctionSidecar,
     lit: TirRef,
 ) {
-    if needs_tracking(tir.inst(lit).ty, pool) {
-        own.states.insert(Owner::Inst(lit), OwnerState::Valid);
-        Ownership::dense_set(&mut own.origin, lit, None);
-        own.temp_owners.insert(Owner::Inst(lit));
+    if needs_tracking(w.tir.inst(lit).ty, w.pool) {
+        let owner = own.owner_of_inst(lit);
+        own.states.insert(owner, OwnerState::Valid);
+        own.temp_owners.insert(owner);
     }
-    for (_, value) in tir.enum_lit_view(lit).fields() {
-        visit_expr(tir, pool, own, sink, sidecar, value);
-    }
-    consume_enum_lit_fields(tir, pool, own, sink, lit);
+    consume_enum_lit_fields(w.tir, w.flow, w.pool, own, sink, lit);
 }
 
 /// Consume each needs-drop payload arg of an `EnumLit` (M11) under the
@@ -167,6 +146,7 @@ pub(crate) fn analyze_enum_lit(
 /// recorded as the consume site.
 pub(crate) fn consume_enum_lit_fields(
     tir: &Tir,
+    flow: &ryo_core::flow::Flow,
     pool: &InternPool,
     own: &mut Ownership,
     sink: &mut DiagSink,
@@ -181,10 +161,11 @@ pub(crate) fn consume_enum_lit_fields(
         // P2 freeze (final spec §3.2): the consume moves the owner.
         check_source_projected(
             tir,
+            flow,
             pool,
             own,
             sink,
-            underlying_owner(own, value),
+            own.underlying_owner(value),
             span,
             "move",
             consumed_name,
@@ -218,14 +199,31 @@ pub(crate) fn check_field_move_out(
         unreachable!("FieldAccess must carry TirData::FieldAccess");
     };
     let obj_ty = tir.inst(object).ty;
-    // Sema guarantees the object is a struct (named or anonymous); a
-    // poisoned (error-typed) chain already has a sema diagnostic, so
-    // don't add noise — the normal consume path no-ops on it.
-    // M11 needs no `TypeKind::Enum` arm here: the whole-value model has
-    // no payload access, so no partial-move read of an enum exists and
-    // no `MoveOutOfField`-analog is reachable — M12's bindings bring
-    // payload access (and with it the enum arm of this guard).
-    if !matches!(pool.kind(obj_ty), TypeKind::Struct | TypeKind::AnonStruct) {
+    // Sema guarantees the object is a struct (named or anonymous) or an
+    // enum (M12 payload access); a poisoned (error-typed) chain already
+    // has a sema diagnostic, so don't add noise — the normal consume
+    // path no-ops on it. M12's by-move match bindings make the enum arm
+    // reachable: the owner tokens sema emits are `FieldAccess`es on the
+    // enum-typed scrutinee, and any consume path that meets one must be
+    // rejected exactly like a struct field read (payload fields move
+    // only together with the whole enum).
+    let obj_kind = pool.kind(obj_ty);
+    if matches!(obj_kind, TypeKind::Enum) {
+        // The wire's field_index is variant-relative and the access
+        // site carries no variant — the payload shape cannot be named
+        // the way the struct arm names `field_name`.
+        let enum_display = pool.display(obj_ty);
+        sink.emit(Diag::error(
+            span,
+            DiagCode::MoveOutOfField,
+            format!(
+                "cannot move a payload field out of `{enum_display}`; \
+                 match on the value and bind the field, or move the whole value"
+            ),
+        ));
+        return true;
+    }
+    if !matches!(obj_kind, TypeKind::Struct | TypeKind::AnonStruct) {
         return false;
     }
     let sview = pool.struct_view(obj_ty);
@@ -252,51 +250,52 @@ pub(crate) fn check_field_move_out(
 }
 
 /// Destructuring assignment (M10): `(a, _) = rhs` / `{q, r} = rhs` —
-/// the one place fields move out of a struct. The rhs struct owner is
-/// consumed at the statement (a whole-struct move: no partial-move
-/// state survives it), and each bound field registers as a FRESH owner
-/// keyed on the `FieldAccess` token sema emitted immediately before
-/// the `Destructure` instruction (`Tir::destructure_bound_owner_refs`)
-/// — those refs are never evaluated by codegen; they exist purely so
-/// the moved-out fields have independent owner identities for the
-/// last-use / dead-store / branch-divergence free passes, which lower
-/// through the binding's slot at codegen (the binding-path redirect).
+/// the one place fields move out of a struct. The rhs operand steps
+/// already ran; the rhs struct owner is consumed here (a whole-struct
+/// move: no partial-move state survives it), and each bound field
+/// registers as a FRESH owner keyed on the `FieldAccess` token sema
+/// emitted immediately before the `Destructure` instruction
+/// (`Tir::destructure_bound_owner_refs`) — those refs are never
+/// evaluated by codegen; they exist purely so the moved-out fields have
+/// independent owner identities for the last-use / dead-store /
+/// branch-divergence free passes, which lower through the binding's
+/// slot at codegen (the binding-path redirect).
 ///
 /// Wildcard fields are CODEGEN's jurisdiction — destroyed inline at
 /// the copy-out, never tracked here — and no whole-struct Free is
 /// scheduled for the shell: consuming the rhs owner stamps it `Moved`,
-/// which every free pass skips. Copy-typed bindings need no owner at
-/// all.
+/// which every free pass skips. Copy-typed bindings need no owner.
 pub(crate) fn analyze_destructure(
-    tir: &Tir,
-    pool: &InternPool,
+    w: &mut Walk<'_>,
     own: &mut Ownership,
     sink: &mut DiagSink,
     sidecar: &mut FunctionSidecar,
     stmt: TirRef,
 ) {
-    let view = tir.destructure_view(stmt);
+    let flow = w.flow;
+    let view = w.tir.destructure_view(stmt);
     let rhs = view.rhs;
-    let rhs_ty = tir.inst(rhs).ty;
-    visit_expr(tir, pool, own, sink, sidecar, rhs);
-    if needs_tracking(rhs_ty, pool) {
-        let span = tir.span(stmt);
-        let consumed_name = consumed_binding_name(tir, rhs);
+    let rhs_ty = w.tir.inst(rhs).ty;
+    if needs_tracking(rhs_ty, w.pool) {
+        let span = w.tir.span(stmt);
+        let consumed_name = consumed_binding_name(w.tir, rhs);
         // P2 freeze (final spec §3.2): the consume moves the owner.
         check_source_projected(
-            tir,
-            pool,
+            w.tir,
+            flow,
+            w.pool,
             own,
             sink,
-            underlying_owner(own, rhs),
+            own.underlying_owner(rhs),
             span,
             "move",
             consumed_name,
         );
-        consume_for_assignment(tir, pool, own, sink, rhs, span, consumed_name, stmt);
+        consume_for_assignment(w.tir, w.pool, own, sink, rhs, span, consumed_name, stmt);
     }
 
-    let owners = tir.destructure_bound_owner_refs(stmt);
+    let owners = w.tir.destructure_bound_owner_refs(stmt);
+    let owner_places = w.flow.token_places(stmt);
     debug_assert_eq!(
         owners.len(),
         view.fields.iter().filter(|f| f.bind.is_some()).count(),
@@ -307,20 +306,24 @@ pub(crate) fn analyze_destructure(
         let Some(bind) = field.bind else {
             continue;
         };
-        let owner_ref = owners[owner_idx];
+        let _owner_ref = owners[owner_idx];
+        let owner_place = owner_places[owner_idx];
         owner_idx += 1;
         own.binding_of_name.insert(bind, stmt);
-        if !needs_tracking(field.ty, pool) {
+        if !needs_tracking(field.ty, w.pool) {
             continue;
         }
-        let span = tir.span(stmt);
-        own.states.insert(Owner::Inst(owner_ref), OwnerState::Valid);
-        Ownership::dense_set(&mut own.origin, owner_ref, None);
-        own.current_owner.insert(bind, Owner::Inst(owner_ref));
+        let span = w.tir.span(stmt);
+        // The token's place is both the binding identity (Flow binds
+        // the name directly to it) and the owner of the moved-out
+        // field.
+        let owner = Owner(owner_place);
+        own.states.insert(owner, OwnerState::Valid);
         // A never-read bound field is a dead store (W0001) and its
         // allocation dies with the statement — the drain anchors the
         // Free right after it, where codegen has just populated the
         // binding's slot.
-        register_pending_dead_store(own, owner_ref, bind, span, stmt);
+        register_pending_dead_store(own, owner, bind, span, stmt);
     }
+    let _ = sidecar;
 }

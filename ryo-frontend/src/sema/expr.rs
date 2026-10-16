@@ -1,6 +1,6 @@
 //! Expression analysis and const-int folding — split from `mod.rs`.
 
-use super::{FuncCtx, Scope, Sema, check_call};
+use super::{FuncCtx, Scope, Sema, analyze_match, check_call};
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::extra::enum_lit_extra;
 use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
@@ -476,6 +476,7 @@ pub(crate) fn analyze_expr_allow_never(
         InstTag::Borrow => analyze_borrow(sema, fcx, scope, r, inst.data, span),
         InstTag::StructLit => analyze_struct_lit(sema, fcx, scope, r, span),
         InstTag::EnumLit => analyze_variant_construct(sema, fcx, scope, r, span),
+        InstTag::Match => analyze_match(sema, fcx, scope, r, span),
         InstTag::FieldAccess => analyze_field_access(sema, fcx, scope, r, span),
         // UIR trusted-producer contract (see the `uir.rs` module
         // header): astgen is the only producer, so a non-expression tag
@@ -1148,12 +1149,13 @@ fn analyze_unit_variant_access(
 }
 
 /// Comma-separated quoted field names of a struct or enum payload, for
-/// the "has no field" diagnostics.
+/// the "has no field" diagnostics. Shared with the M12 match-pattern
+/// payload checks (`sema/match_.rs`).
 /// English ordinal for a 1-based argument position: "second",
 /// "third", "fourth", then "Nth". Used when an extra positional
 /// argument names its own position ("found a second positional
 /// argument — 'Some' takes 1").
-fn ordinal(n: usize) -> String {
+pub(crate) fn ordinal(n: usize) -> String {
     match n {
         2 => "second".to_string(),
         3 => "third".to_string(),
@@ -1162,7 +1164,10 @@ fn ordinal(n: usize) -> String {
     }
 }
 
-fn field_list(pool: &ryo_core::types::InternPool, fields: &[StructField]) -> String {
+/// Comma-separated quoted field names of a struct or enum payload, for
+/// the "has no field" diagnostics. Shared with the M12 match-pattern
+/// payload checks (`sema/match_.rs`).
+pub(crate) fn field_list(pool: &ryo_core::types::InternPool, fields: &[StructField]) -> String {
     fields
         .iter()
         .map(|f| format!("'{}'", pool.str(f.name)))

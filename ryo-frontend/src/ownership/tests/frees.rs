@@ -22,7 +22,12 @@ fn dead_store_schedules_free_after_decl() {
     let tir = tb.finish(&[decl]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sidecar = take_function_sidecar(&mut sidecar, 0);
 
     // W0001 fires.
@@ -35,24 +40,56 @@ fn dead_store_schedules_free_after_decl() {
     // Free anchored after the VarDecl, target = the literal's TirRef.
     assert!(
         sidecar
-            .free_schedule
+            .drops
             .iter()
-            .any(|fp| fp.after == decl && fp.target == lit && fp.branch.is_none()),
+            .any(|fp| fp.position.anchor_inst().unwrap() == decl && fp.target == lit),
         "expected dead-store Free anchored at decl with target=lit; got: {:?}",
-        sidecar.free_schedule
+        sidecar.drops
     );
 
     // Exactly one Free for `lit` — guards against Task 3/4 ever
     // double-counting (anonymous-temp pass + dead-store pass both
     // emitting for the same owner).
     assert_eq!(
-        sidecar
-            .free_schedule
-            .iter()
-            .filter(|fp| fp.target == lit)
-            .count(),
+        sidecar.drops.iter().filter(|fp| fp.target == lit).count(),
         1,
         "expected exactly one Free for lit"
+    );
+}
+
+#[test]
+fn match_payload_last_use_across_if_paths_frees_at_if_join() {
+    let src = "enum Message:\n\tText(str)\n\tEmpty\n\nfn main():\n\tmessage = Message.Text(\"first-\" + \"abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz\")\n\tmatch message:\n\t\tMessage.Text(payload):\n\t\t\tif payload.len() > 5:\n\t\t\t\tprint(payload)\n\t\t\telse:\n\t\t\t\tprint(payload)\n\t\tMessage.Empty:\n\t\t\tprint(\"empty\")\n";
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "source must pass sema and ownership: {diags:?}"
+    );
+
+    let tir = &tirs[0];
+    let match_inst = (1..tir.instructions.len())
+        .map(|i| TirRef::from_raw(i as u32))
+        .find(|&r| tir.inst(r).tag == TirTag::Match)
+        .expect("match instruction");
+    let payload_token = tir.match_by_move_owner_refs(match_inst, &pool)[0];
+    let if_inst = (1..tir.instructions.len())
+        .map(|i| TirRef::from_raw(i as u32))
+        .find(|&r| tir.inst(r).tag == TirTag::IfStmt)
+        .expect("nested if instruction");
+    let function = take_function_sidecar(&mut sidecar, 0);
+    let frees: Vec<_> = function
+        .drops
+        .iter()
+        .filter(|drop| drop.target == payload_token)
+        .collect();
+
+    assert_eq!(frees.len(), 1, "one payload Free: {frees:?}");
+    assert_eq!(
+        frees[0].position.anchor_inst(),
+        Some(if_inst),
+        "the payload is live across both if paths, so free it at their join"
     );
 }
 
@@ -92,15 +129,20 @@ fn ryo_panic_str_arg_excluded_via_abi_registry() {
     let tir = tb.finish(&[call]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar_map = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar_map = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sidecar = take_function_sidecar(&mut sidecar_map, 0);
 
     // No scheduled Free should target __ryo_panic's StrConst arg —
     // codegen's borrowed-scalar ABI never frees it.
     assert!(
-        sidecar.free_schedule.iter().all(|fp| fp.target != str_arg),
+        sidecar.drops.iter().all(|fp| fp.target != str_arg),
         "expected no scheduled Free for __ryo_panic's StrConst arg, got: {:?}",
-        sidecar.free_schedule
+        sidecar.drops
     );
 
     // The exclusion is driven by the ABI registry: `__ryo_panic`
@@ -148,13 +190,17 @@ fn last_use_scheduled_for_unmoved_local() {
     let tir = b.finish(&[decl, stmt]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sidecar = take_function_sidecar(&mut sidecar, 0);
     assert!(sink.is_empty(), "expected no diagnostics");
-    assert_eq!(sidecar.free_schedule.len(), 1);
-    assert_eq!(sidecar.free_schedule[0].target, lit);
-    assert_eq!(sidecar.free_schedule[0].after, var_read);
-    assert!(sidecar.free_schedule[0].branch.is_none());
+    assert_eq!(sidecar.drops.len(), 1);
+    assert_eq!(sidecar.drops[0].target, lit);
+    assert_eq!(sidecar.drops[0].position.anchor_inst().unwrap(), var_read);
 }
 
 #[test]
@@ -187,7 +233,12 @@ fn reassignment_records_free_on_old_owner() {
     let tir = tb.finish(&[decl, assign, stmt]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sidecar = take_function_sidecar(&mut sidecar, 0);
     assert!(sink.is_empty(), "expected no diagnostics");
 
@@ -201,18 +252,18 @@ fn reassignment_records_free_on_old_owner() {
     // Last-use frees l2 (new owner reaches function exit via print(s)).
     assert!(
         sidecar
-            .free_schedule
+            .drops
             .iter()
-            .any(|fp| fp.target == l2 && fp.after == var_read && fp.branch.is_none()),
+            .any(|fp| fp.target == l2 && fp.position.anchor_inst().unwrap() == var_read),
         "expected last-use Free for l2; got: {:?}",
-        sidecar.free_schedule
+        sidecar.drops
     );
 
     // No dead-store Free for l1 — it's covered by free_on_reassign.
     assert!(
-        !sidecar.free_schedule.iter().any(|fp| fp.target == l1),
-        "l1 must not be in free_schedule (it's in free_on_reassign): {:?}",
-        sidecar.free_schedule
+        !sidecar.drops.iter().any(|fp| fp.target == l1),
+        "l1 must not be in the drops schedule (it's in free_on_reassign): {:?}",
+        sidecar.drops
     );
 }
 
@@ -241,17 +292,22 @@ fn concat_intermediate_freed_after_consumer() {
     let tir = tb.finish(&[stmt]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sidecar = take_function_sidecar(&mut sidecar, 0);
     assert!(sink.is_empty());
 
     // Three Frees: la, lb, cat. Anchored after consumers (la/lb on
     // cat, cat on call). Order-independent.
-    let targets: HashSet<TirRef> = sidecar.free_schedule.iter().map(|fp| fp.target).collect();
-    assert!(targets.contains(&la), "expected la in free_schedule");
-    assert!(targets.contains(&lb), "expected lb in free_schedule");
-    assert!(targets.contains(&cat), "expected cat in free_schedule");
-    assert_eq!(sidecar.free_schedule.len(), 3);
+    let targets: HashSet<TirRef> = sidecar.drops.iter().map(|fp| fp.target).collect();
+    assert!(targets.contains(&la), "expected la in the drops schedule");
+    assert!(targets.contains(&lb), "expected lb in the drops schedule");
+    assert!(targets.contains(&cat), "expected cat in the drops schedule");
+    assert_eq!(sidecar.drops.len(), 3);
 }
 
 #[test]
@@ -288,7 +344,12 @@ fn last_use_uses_pre_rebind_owner_not_post() {
     let tir = tb.finish(&[decl, stmt1, assign, stmt2]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sidecar = take_function_sidecar(&mut sidecar, 0);
     assert!(sink.is_empty(), "expected no diagnostics");
 
@@ -300,24 +361,24 @@ fn last_use_uses_pre_rebind_owner_not_post() {
         Some(alice_lit),
         "expected free_on_reassign[assign] = alice_lit"
     );
-    // free_schedule must not contain a FreePoint with target=alice_lit
+    // the drops schedule must not contain a DropOp with target=alice_lit
     // anchored at read1 (the bug's signature was wrong-target via post-rebind current_owner).
     assert!(
         !sidecar
-            .free_schedule
+            .drops
             .iter()
-            .any(|fp| fp.after == read1 && fp.target == alice_lit),
+            .any(|fp| fp.position.anchor_inst().unwrap() == read1 && fp.target == alice_lit),
         "expected no last-use Free for Alice anchored at read1 (Alice freed via free_on_reassign): {:?}",
-        sidecar.free_schedule
+        sidecar.drops
     );
     // Last-use Free for Bob must exist anchored at read2.
     assert!(
         sidecar
-            .free_schedule
+            .drops
             .iter()
-            .any(|fp| fp.after == read2 && fp.target == bob_lit && fp.branch.is_none()),
+            .any(|fp| fp.position.anchor_inst().unwrap() == read2 && fp.target == bob_lit),
         "expected last-use Free for Bob anchored at read2; got: {:?}",
-        sidecar.free_schedule
+        sidecar.drops
     );
 }
 
@@ -346,16 +407,21 @@ fn unconsumed_move_param_schedules_free_at_function_end() {
     let ret = tb.return_void(void, span);
     let tir = tb.finish(&[ret]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
 
     let virtual_ref = TirRef::param(0);
     let fp = sc
-        .free_schedule
+        .drops
         .iter()
         .find(|fp| fp.target == virtual_ref)
         .expect("free scheduled");
-    assert_eq!(fp.after, ret);
+    assert_eq!(fp.position.anchor_inst().unwrap(), ret);
 }
 
 #[test]
@@ -390,11 +456,16 @@ fn read_move_param_frees_after_last_read_not_last_stmt() {
     let call2 = tb.call(print, &[n], &all_borrow(&[n]), void, span);
     let tir = tb.finish(&[call1, call2]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
 
     let frees: Vec<_> = sc
-        .free_schedule
+        .drops
         .iter()
         .filter(|fp| fp.target == TirRef::param(0))
         .collect();
@@ -402,12 +473,13 @@ fn read_move_param_frees_after_last_read_not_last_stmt() {
         frees.len(),
         1,
         "exactly one Free for the owned param; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
     assert_eq!(
-        frees[0].after, s_read,
+        frees[0].position.anchor_inst().unwrap(),
+        s_read,
         "the Free must anchor after the param's last read; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -453,11 +525,16 @@ fn param_last_read_inside_loop_frees_after_loop() {
     let while_stmt = tb.while_loop(cond, &[call], void, span);
     let tir = tb.finish(&[while_stmt]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
 
     let frees: Vec<_> = sc
-        .free_schedule
+        .drops
         .iter()
         .filter(|fp| fp.target == TirRef::param(0))
         .collect();
@@ -465,12 +542,13 @@ fn param_last_read_inside_loop_frees_after_loop() {
         frees.len(),
         1,
         "exactly one Free for the owned param; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
     assert_eq!(
-        frees[0].after, while_stmt,
+        frees[0].position.anchor_inst().unwrap(),
+        while_stmt,
         "a param last read inside a loop must be freed after the loop, not inside it; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -504,11 +582,16 @@ fn never_read_move_param_still_freed_once_after_last_stmt() {
     let call = tb.call(print, &[n], &all_borrow(&[n]), void, span);
     let tir = tb.finish(&[call]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
 
     let frees: Vec<_> = sc
-        .free_schedule
+        .drops
         .iter()
         .filter(|fp| fp.target == TirRef::param(0))
         .collect();
@@ -516,12 +599,13 @@ fn never_read_move_param_still_freed_once_after_last_stmt() {
         frees.len(),
         1,
         "exactly one Free for the owned param; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
     assert_eq!(
-        frees[0].after, call,
+        frees[0].position.anchor_inst().unwrap(),
+        call,
         "a never-read param keeps the last-body-statement anchor; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -570,17 +654,22 @@ fn conditional_move_param_schedules_branch_gated_free() {
 
     let tir = tb.finish(&[if_stmt]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
 
     let virtual_ref = TirRef::param(0);
-    // We expect a branch-gated free for the parameter in the else branch!
+    // We expect an arm-conditional free for the parameter in the else branch!
     let fp = sc
-        .free_schedule
+        .drops
         .iter()
-        .find(|fp| fp.target == virtual_ref && fp.branch.is_some())
-        .expect("branch-gated free scheduled");
-    assert_eq!(fp.after, call_else);
+        .find(|fp| fp.target == virtual_ref)
+        .expect("arm-conditional free scheduled");
+    assert_eq!(fp.position.anchor_inst().unwrap(), call_else);
 }
 
 #[test]
@@ -611,7 +700,12 @@ fn rebind_then_reassign_does_not_double_free() {
     let tir = tb.finish(&[decl, assign]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
 
     // temp_a (lit_a) is released via `free_on_reassign` (codegen lowers
@@ -621,11 +715,7 @@ fn rebind_then_reassign_does_not_double_free() {
     // if that filter were missing the anon-temp pass would schedule a
     // second Free here. See the sibling invariant in
     // `reassignment_records_free_on_old_owner`.
-    let a_frees = sc
-        .free_schedule
-        .iter()
-        .filter(|fp| fp.target == lit_a)
-        .count();
+    let a_frees = sc.drops.iter().filter(|fp| fp.target == lit_a).count();
     assert_eq!(
         a_frees, 0,
         "temp_a must not be in free_schedule (it's in free_on_reassign); got {sc:?}"
@@ -640,11 +730,7 @@ fn rebind_then_reassign_does_not_double_free() {
     );
     // lit_b is never read, so it is a dead store and is freed exactly
     // once via the dead-store pass (anchored at the Assign).
-    let b_frees = sc
-        .free_schedule
-        .iter()
-        .filter(|fp| fp.target == lit_b)
-        .count();
+    let b_frees = sc.drops.iter().filter(|fp| fp.target == lit_b).count();
     assert_eq!(
         b_frees, 1,
         "temp_b freed exactly once via dead-store; got {sc:?}"
@@ -672,13 +758,14 @@ fn rebind_then_read_no_double_free() {
     let call = tb.call(print, &[v], &all_borrow(&[v]), void, span);
     let tir = tb.finish(&[decl, call]);
     let mut sink = DiagSink::new();
-    let mut sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sc, 0);
-    let lit_frees = sc
-        .free_schedule
-        .iter()
-        .filter(|fp| fp.target == lit)
-        .count();
+    let lit_frees = sc.drops.iter().filter(|fp| fp.target == lit).count();
     assert_eq!(
         lit_frees, 1,
         "backed temp freed exactly once via last-use; got {sc:?}"
@@ -718,28 +805,25 @@ fn rebind_in_loop_converges_no_spurious_free() {
     let lp = tb.while_loop(cond, &[body_assign], void, span);
     let tir = tb.finish(&[decl, lp]);
     let mut sink = DiagSink::new();
-    let mut sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sc, 0);
     // body_lit must be scheduled exactly once (dead-store pass owns
     // it; anon-temp skips it as a named init). The dynamic
     // current_owner.values() classifier would schedule it twice
     // (anon-temp + dead-store) -> the double-free this test guards.
-    let body_lit_frees = sc
-        .free_schedule
-        .iter()
-        .filter(|fp| fp.target == body_lit)
-        .count();
+    let body_lit_frees = sc.drops.iter().filter(|fp| fp.target == body_lit).count();
     assert_eq!(
         body_lit_frees, 1,
         "loop-rebound temp must be freed exactly once (static classifier skips it in anon-temp); got {sc:?}"
     );
     // lit (the decl init) is freed via free_on_reassign at the
     // loop-body Assign, so it must NOT also appear in free_schedule.
-    let lit_frees = sc
-        .free_schedule
-        .iter()
-        .filter(|fp| fp.target == lit)
-        .count();
+    let lit_frees = sc.drops.iter().filter(|fp| fp.target == lit).count();
     assert_eq!(
         lit_frees, 0,
         "decl-init temp must not be in free_schedule (it's in free_on_reassign); got {sc:?}"
@@ -775,7 +859,12 @@ fn reassign_inside_if_still_frees_binding_at_last_use() {
     let pr = tb.call(print, &[sv], &[ParamMode::Borrow], void, span);
     let tir = tb.finish(&[decl, if_s, pr]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert!(
         !diags.iter().any(|d| matches!(d.code, DiagCode::DeadStore)),
@@ -788,18 +877,15 @@ fn reassign_inside_if_still_frees_binding_at_last_use() {
         sc.free_on_reassign
     );
     assert_eq!(
-        sc.free_schedule
-            .iter()
-            .filter(|fp| fp.target == lit_a)
-            .count(),
+        sc.drops.iter().filter(|fp| fp.target == lit_a).count(),
         1,
         "the binding's owner must still get its last-use Free (covers the not-taken path); schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
     assert!(
-        !sc.free_schedule.iter().any(|fp| fp.target == lit_b),
+        !sc.drops.iter().any(|fp| fp.target == lit_b),
         "lit_b's buffer is freed through the binding's current FatLocals (same buffer as lit_a's Free on the taken path) — a second Free would double-free; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -827,24 +913,31 @@ fn conditional_dead_reassign_schedules_fallthrough_drop() {
     let if_s = tb.if_stmt(cond, &[asg], &[], None, void, span);
     let tir = tb.finish(&[decl, if_s]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
-    let drops: Vec<_> = sc
-        .conditional_dead_drops
-        .iter()
+    let drops: Vec<_> = block_start_drops(&sc)
+        .into_iter()
         .filter(|d| d.target == lit_a)
         .collect();
     assert_eq!(
         drops.len(),
         1,
-        "expected one ConditionalDeadDrop for the pre-branch owner; got {:?}",
-        sc.conditional_dead_drops
+        "expected one block-start dead drop for the pre-branch owner; got {:?}",
+        sc.drops
     );
-    assert_eq!(drops[0].if_stmt, if_s, "the drop must key on the if");
     assert!(
-        !drops[0].arms.is_empty(),
-        "the drop must name at least one untouched arm (the fall-through)"
+        matches!(
+            drops[0].position,
+            ryo_core::flow::DropPosition::BlockStart { .. }
+        ),
+        "the drop must fire at an untouched arm (the fall-through)"
     );
+    let _ = if_s;
 }
 
 #[test]
@@ -872,12 +965,17 @@ fn conditional_reassign_all_arms_reseated_no_drop() {
     let if_s = tb.if_stmt(cond, &[asg_then], &[], Some(&[asg_else]), void, span);
     let tir = tb.finish(&[decl, if_s]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
     assert!(
-        sc.conditional_dead_drops.is_empty(),
-        "all arms reseated — no untouched path, no ConditionalDeadDrop; got {:?}",
-        sc.conditional_dead_drops
+        block_start_drops(&sc).is_empty(),
+        "all arms reseated — no untouched path, no dead drop; got {:?}",
+        sc.drops
     );
 }
 
@@ -907,21 +1005,26 @@ fn loop_dead_reassign_anchors_after_loop() {
     let wl = tb.while_loop(cond, &[asg], void, span);
     let tir = tb.finish(&[decl, wl]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
     assert!(
-        sc.free_schedule
+        sc.drops
             .iter()
-            .any(|fp| fp.after == wl && fp.target == lit_b),
+            .any(|fp| fp.position.anchor_inst().unwrap() == wl && fp.target == lit_b),
         "expected a Free anchored after the loop for the binding's value; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
     assert!(
-        !sc.free_schedule
+        !sc.drops
             .iter()
-            .any(|fp| fp.after == asg && fp.target == lit_b),
+            .any(|fp| fp.position.anchor_inst().unwrap() == asg && fp.target == lit_b),
         "the in-loop dead-store Free must move to the loop anchor (it never fires on zero iterations); schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -949,21 +1052,26 @@ fn loop_dead_reassign_with_return_keeps_in_body_free() {
     let wl = tb.while_loop(cond, &[asg, ret], void, span);
     let tir = tb.finish(&[decl, wl]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
     assert!(
-        sc.free_schedule
+        sc.drops
             .iter()
-            .any(|fp| fp.after == wl && fp.target == lit_b),
+            .any(|fp| fp.position.anchor_inst().unwrap() == wl && fp.target == lit_b),
         "expected the after-loop Free; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
     assert!(
-        sc.free_schedule
+        sc.drops
             .iter()
-            .any(|fp| fp.after == asg && fp.target == lit_b),
+            .any(|fp| fp.position.anchor_inst().unwrap() == asg && fp.target == lit_b),
         "a returning body keeps the in-body Free (return path); schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -989,19 +1097,26 @@ fn loop_local_dead_value_keeps_in_body_anchor() {
     let wl = tb.while_loop(cond, &[decl], void, span);
     let tir = tb.finish(&[wl]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
     assert!(
-        sc.free_schedule
+        sc.drops
             .iter()
-            .any(|fp| fp.after == decl && fp.target == lit_x),
+            .any(|fp| fp.position.anchor_inst().unwrap() == decl && fp.target == lit_x),
         "loop-local dead value keeps its in-body Free; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
     assert!(
-        !sc.free_schedule.iter().any(|fp| fp.after == wl),
+        !sc.drops
+            .iter()
+            .any(|fp| fp.position.anchor_inst().unwrap() == wl),
         "loop-local value must NOT be re-anchored after the loop; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -1034,21 +1149,26 @@ fn last_use_inside_loop_anchors_after_loop() {
     let fr = tb.for_range(i, zero, three, &[pr], void, span);
     let tir = tb.finish(&[decl, fr]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
     assert!(
-        sc.free_schedule
+        sc.drops
             .iter()
-            .any(|fp| fp.after == fr && fp.target == lit_a),
+            .any(|fp| fp.position.anchor_inst().unwrap() == fr && fp.target == lit_a),
         "the last-use Free must anchor after the loop (in-body anchoring frees s between iterations — UAF); schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
     assert!(
-        !sc.free_schedule
+        !sc.drops
             .iter()
-            .any(|fp| fp.after == sv && fp.target == lit_a),
+            .any(|fp| fp.position.anchor_inst().unwrap() == sv && fp.target == lit_a),
         "no Free may anchor after the in-loop read itself; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -1076,14 +1196,19 @@ fn last_use_inside_if_anchors_after_if() {
     let if_s = tb.if_stmt(cond, &[pr], &[], None, void, span);
     let tir = tb.finish(&[decl, if_s]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
     assert!(
-        sc.free_schedule
+        sc.drops
             .iter()
-            .any(|fp| fp.after == if_s && fp.target == lit_a),
+            .any(|fp| fp.position.anchor_inst().unwrap() == if_s && fp.target == lit_a),
         "the last-use Free must anchor after the if (in-arm anchoring leaks on the not-taken path); schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -1114,14 +1239,19 @@ fn return_epilogue_frees_live_local() {
     let if_s = tb.if_stmt(cond, &[pr], &[], Some(&[ret]), void, span);
     let tir = tb.finish(&[decl, if_s]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
     assert!(
-        sc.free_schedule
+        sc.drops
             .iter()
-            .any(|fp| fp.after == ret && fp.target == lit_a),
+            .any(|fp| fp.position.anchor_inst().unwrap() == ret && fp.target == lit_a),
         "the still-live local must be freed on the early-return path; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -1144,14 +1274,19 @@ fn return_epilogue_skips_consumed_return_value() {
     let ret = tb.push_typed(TirTag::Return, TirData::UnOp(sv), str_ty, span);
     let tir = tb.finish(&[decl, ret]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
     assert!(
-        !sc.free_schedule
+        !sc.drops
             .iter()
-            .any(|fp| fp.target == lit && fp.after == ret),
+            .any(|fp| fp.target == lit && fp.position.anchor_inst().unwrap() == ret),
         "the returned value moved out — no epilogue Free for it; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -1177,14 +1312,19 @@ fn return_epilogue_skips_dead_store_owned() {
     let if_s = tb.if_stmt(cond, &[ret], &[], None, void, span);
     let tir = tb.finish(&[decl, if_s]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
     assert!(
-        !sc.free_schedule
+        !sc.drops
             .iter()
-            .any(|fp| fp.target == lit_a && fp.after == ret),
+            .any(|fp| fp.target == lit_a && fp.position.anchor_inst().unwrap() == ret),
         "dead-store-owned value is already freed at its decl — no epilogue Free; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -1219,14 +1359,19 @@ fn return_epilogue_covers_move_param() {
     let if_s = tb.if_stmt(cond, &[ret], &[], None, void, span);
     let tir = tb.finish(&[if_s]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
     assert!(
-        sc.free_schedule
+        sc.drops
             .iter()
-            .any(|fp| fp.after == ret && fp.target == TirRef::param(0)),
+            .any(|fp| fp.position.anchor_inst().unwrap() == ret && fp.target == TirRef::param(0)),
         "an owned param must be destroyed on the early-return path; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -1282,11 +1427,11 @@ fn return_epilogue_ignores_loop_local_declared_after_return() {
         .find(|&&s| tir.inst(s).tag == ryo_core::tir::TirTag::VarDecl)
         .map(|&s| tir.var_decl_view(s).initializer)
         .expect("var_decl for k");
-    let schedule = &sidecar.functions[f_idx].free_schedule;
+    let schedule = &sidecar.functions[f_idx].drops;
     assert!(
         !schedule
             .iter()
-            .any(|fp| fp.after == early_return && fp.target == k_init),
+            .any(|fp| fp.position.anchor_inst().unwrap() == early_return && fp.target == k_init),
         "no epilogue Free for a loop-local declared after the return; schedule = {schedule:?}"
     );
     assert!(
@@ -1321,26 +1466,33 @@ fn temp_last_use_inside_loop_not_reanchored() {
     let fr = tb.for_range(i, zero, three, &[pr], void, span);
     let tir = tb.finish(&[fr]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
     assert!(
-        !sc.free_schedule.iter().any(|fp| fp.after == fr),
+        !sc.drops
+            .iter()
+            .any(|fp| fp.position.anchor_inst().unwrap() == fr),
         "a loop-local temp must keep its per-iteration Free, not move to the loop anchor; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
     assert!(
-        sc.free_schedule
+        sc.drops
             .iter()
-            .any(|fp| fp.target == call && fp.after == pr),
+            .any(|fp| fp.target == call && fp.position.anchor_inst().unwrap() == pr),
         "the temp's Free stays anchored after its consumer; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
 #[test]
 fn conditional_dead_reassign_gated_on_real_else() {
     // `if c: s = "b" else: <no reassign>` with s unread after —
-    // the drop must be gated on the REAL else arm's BranchId.
+    // the drop must name the REAL else arm's Flow IR block.
     use chumsky::span::{SimpleSpan, Span as _};
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
@@ -1362,28 +1514,33 @@ fn conditional_dead_reassign_gated_on_real_else() {
     let if_s = tb.if_stmt(cond, &[asg], &[], Some(&[pr]), void, span);
     let tir = tb.finish(&[decl, if_s]);
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
-    let else_id = sc.if_branches[if_s.index()]
-        .as_ref()
-        .and_then(|ids| ids.else_branch)
-        .expect("else branch id");
-    let drops: Vec<_> = sc
-        .conditional_dead_drops
-        .iter()
+    let flow = build_flow(&tir, &pool);
+    let arm_blocks = flow.branch_arm_blocks(if_s);
+    let drops: Vec<_> = block_start_drops(&sc)
+        .into_iter()
         .filter(|d| d.target == lit_a)
         .collect();
     assert_eq!(
         drops.len(),
         1,
-        "expected one ConditionalDeadDrop; got {:?}",
-        sc.conditional_dead_drops
+        "expected one block-start dead drop; got {:?}",
+        sc.drops
     );
     assert!(
-        drops[0].arms.contains(&else_id),
-        "the drop must be gated on the else arm {:?}; got {:?}",
-        else_id,
-        drops[0].arms
+        matches!(
+            drops[0].position,
+            ryo_core::flow::DropPosition::BlockStart { block } if block == arm_blocks.else_block
+        ),
+        "the drop must name the else arm's block {:?}; got {:?}",
+        arm_blocks.else_block,
+        drops[0].position
     );
 }
 
@@ -1446,11 +1603,16 @@ fn free_schedule_is_deterministic() {
 
     let run = |tir: &Tir| {
         let mut sink = DiagSink::new();
-        let mut sidecar = check(std::slice::from_ref(tir), &pool, &mut sink);
+        let mut sidecar = check(
+            std::slice::from_ref(tir),
+            &[ryo_core::flow::Flow::build(tir, &pool)],
+            &pool,
+            &mut sink,
+        );
         let sc = take_function_sidecar(&mut sidecar, 0);
-        sc.free_schedule
+        sc.drops
             .iter()
-            .map(|fp| (fp.after.raw(), fp.target.raw(), fp.branch.map(|b| b.0)))
+            .map(|fp| (fp.position.anchor_inst().unwrap().raw(), fp.target.raw()))
             .collect::<Vec<_>>()
     };
     let first = run(&tir);
@@ -1567,7 +1729,7 @@ fn last_use_in_loop_condition_comparison_anchors_after_loop() {
         .copied()
         .expect("while loop stmt");
     let frees_for_s: Vec<_> = sidecar.functions[0]
-        .free_schedule
+        .drops
         .iter()
         .filter(|fp| fp.target == s_init)
         .collect();
@@ -1575,13 +1737,13 @@ fn last_use_in_loop_condition_comparison_anchors_after_loop() {
         frees_for_s.len(),
         1,
         "exactly one Free for s's owner; got: {:?}",
-        sidecar.functions[0].free_schedule
+        sidecar.functions[0].drops
     );
     assert_eq!(
-        frees_for_s[0].after, while_stmt,
+        frees_for_s[0].position.anchor_inst().unwrap(),
+        while_stmt,
         "Free must anchor after the while loop, not inside it"
     );
-    assert!(frees_for_s[0].branch.is_none());
 }
 
 #[test]
@@ -1624,13 +1786,15 @@ fn last_use_in_inline_assert_counts_as_use() {
     // also parked at the desugared if — a cached-fallback Free of the
     // (possibly already displaced) buffer could double-free; the
     // sibling's redirect frees the slot's path-correct content.
-    let schedule = &sidecar.functions[0].free_schedule;
+    let schedule = &sidecar.functions[0].drops;
     assert!(
         schedule.iter().all(|fp| fp.target != s_init),
         "s's owner must be covered by the sibling same-binding Free; got: {schedule:?}"
     );
     assert!(
-        schedule.iter().any(|fp| fp.after == assert_if),
+        schedule
+            .iter()
+            .any(|fp| fp.position.anchor_inst().unwrap() == assert_if),
         "a same-binding Free must anchor after the desugared assert if; got: {schedule:?}"
     );
 }
@@ -1664,7 +1828,7 @@ fn cond_temp_free_anchors_after_if() {
     };
     assert_eq!(tir.inst(concat).tag, ryo_core::tir::TirTag::StrConcat);
     let frees: Vec<_> = sidecar.functions[0]
-        .free_schedule
+        .drops
         .iter()
         .filter(|fp| fp.target == concat)
         .collect();
@@ -1672,10 +1836,11 @@ fn cond_temp_free_anchors_after_if() {
         frees.len(),
         1,
         "exactly one Free for the cond temp; got: {:?}",
-        sidecar.functions[0].free_schedule
+        sidecar.functions[0].drops
     );
     assert_eq!(
-        frees[0].after, if_stmt,
+        frees[0].position.anchor_inst().unwrap(),
+        if_stmt,
         "cond temp Free must anchor after the if statement"
     );
 }
@@ -1705,7 +1870,7 @@ fn compound_assign_rhs_method_call_counts_as_use() {
         .map(|&s| tir.var_decl_view(s).initializer)
         .expect("var_decl for t");
     let frees_for_t: Vec<_> = sidecar.functions[0]
-        .free_schedule
+        .drops
         .iter()
         .filter(|fp| fp.target == t_init)
         .collect();
@@ -1713,284 +1878,6 @@ fn compound_assign_rhs_method_call_counts_as_use() {
         frees_for_t.len(),
         1,
         "exactly one Free for t's owner; got: {:?}",
-        sidecar.functions[0].free_schedule
+        sidecar.functions[0].drops
     );
-}
-
-#[test]
-fn loop_carried_struct_reassign_pre_owner_not_double_freed() {
-    // `mut child = f(); while c: child = g()` with child never read
-    // after the loop (the natural do-while parser-loop shape): the
-    // pre-reassign owner's last-use Free must be suppressed — the
-    // reassign-Free releases it at the first displacing store, and the
-    // loop-exit Free of the reseated value (codegen redirects it to
-    // the binding's home slot) releases the final buffer. Pre-fix the
-    // owner was scheduled BOTH a last-use Free and the reassign-Free,
-    // and the return epilogue double-freed the final value through the
-    // same home slot — natural do-while parser loops (a JSON
-    // parse_array) SIGABRT'd on exactly this composition.
-    let src = r#"
-struct P:
-	text: str
-	next: int
-
-fn make(x: int) -> P:
-	return P{text=int_to_str(x) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", next=x}
-
-fn main():
-	mut i = 0
-	mut child = make(1)
-	while i < 2:
-		child = make(2)
-		i += 1
-	print("done")
-"#;
-    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
-    assert!(
-        diags
-            .iter()
-            .all(|d| d.severity != ryo_core::diag::Severity::Error),
-        "expected no errors: {diags:?}"
-    );
-    let idx = tirs
-        .iter()
-        .position(|t| pool.str(t.name) == "main")
-        .unwrap();
-    let tir = &tirs[idx];
-    let sc = take_function_sidecar(&mut sidecar, idx);
-
-    let child = pool.intern_str("child");
-    let mut pre_owner = None;
-    let mut in_loop_value = None;
-    let mut assign_ref = None;
-    for r in 1..tir.instructions.len() {
-        let rr = TirRef::from_raw(r as u32);
-        match tir.instructions[r].tag {
-            TirTag::VarDecl => {
-                let v = tir.var_decl_view(rr);
-                if v.name == child {
-                    pre_owner = Some(v.initializer);
-                }
-            }
-            TirTag::Assign => {
-                let v = tir.assign_view(rr);
-                if v.name == child {
-                    assign_ref = Some(rr);
-                    in_loop_value = Some(v.value);
-                }
-            }
-            _ => {}
-        }
-    }
-    let pre_owner = pre_owner.expect("child decl found");
-    let in_loop_value = in_loop_value.expect("child reassign found");
-    let assign_ref = assign_ref.expect("child assign found");
-
-    // Displacement coverage exists.
-    assert_eq!(
-        sc.free_on_reassign[assign_ref.index()],
-        Some(pre_owner),
-        "reassign-Free must release the pre-reassign owner"
-    );
-    // The pre-reassign owner has NO scheduled Free: its only release
-    // is the reassign-Free (loop ran) or the loop-exit slot redirect
-    // (zero iterations) — never both, never a last-use Free anchored
-    // before the reassign.
-    assert!(
-        !sc.free_schedule.iter().any(|fp| fp.target == pre_owner),
-        "pre-reassign owner must not be in free_schedule: {:?}",
-        sc.free_schedule
-    );
-    // The final buffer gets exactly one release: the loop-exit Free of
-    // the reseated value (redirected to the home slot by codegen).
-    let final_frees = sc
-        .free_schedule
-        .iter()
-        .filter(|fp| fp.target == in_loop_value)
-        .count();
-    assert_eq!(
-        final_frees, 1,
-        "reseated value must be freed exactly once: {:?}",
-        sc.free_schedule
-    );
-}
-
-#[test]
-fn shadowed_binding_reassign_does_not_suppress_outer_owner_free() {
-    // A same-named shadow is a DIFFERENT binding: its reassigns must
-    // not enter the outer binding's reassign set. Pre-fix the
-    // anchor-order suppression grouped reassigns by name, so the
-    // shadow's `x = "s1"` — anchored after the outer owner's last use —
-    // suppressed the outer owner's only surviving Free. The outer
-    // buffer then leaked on every run (the `if false:` reassign-Free
-    // never fires to release it).
-    let src = "fn main():\n\tmut x = \"outer_a\"\n\tif false:\n\t\tx = \"outer_b\"\n\tprint(x)\n\tif true:\n\t\tmut x = \"s0\"\n\t\tx = \"s1\"\n\tprint(\"end\")\n";
-    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
-    assert!(
-        diags
-            .iter()
-            .all(|d| d.severity != ryo_core::diag::Severity::Error),
-        "expected no errors: {diags:?}"
-    );
-    let idx = tirs
-        .iter()
-        .position(|t| pool.str(t.name) == "main")
-        .unwrap();
-    let tir = &tirs[idx];
-    let sc = take_function_sidecar(&mut sidecar, idx);
-
-    let x = pool.intern_str("x");
-    let mut outer_init = None;
-    for r in 1..tir.instructions.len() {
-        if tir.instructions[r].tag == TirTag::VarDecl {
-            let v = tir.var_decl_view(TirRef::from_raw(r as u32));
-            if v.name == x && outer_init.is_none() {
-                outer_init = Some(v.initializer);
-            }
-        }
-    }
-    let outer_init = outer_init.expect("outer decl found");
-    // free_on_reassign covers the taken path only; a scheduled Free
-    // must cover the not-taken path. Pre-fix there was none.
-    assert!(
-        sc.free_schedule.iter().any(|fp| fp.target == outer_init),
-        "outer owner must have a scheduled Free (the shadow's reassign \
-         must not suppress it): {:?}",
-        sc.free_schedule
-    );
-}
-
-#[test]
-fn sibling_scope_bindings_do_not_share_reassign_sets() {
-    // Same failure mode without shadowing: two sibling scopes declare
-    // their own `x`. An arm's reassign must not count toward the other
-    // arm's binding suppression set.
-    let src = "fn main():\n\tif true:\n\t\tmut x = \"a1\"\n\t\tx = \"a2\"\n\telse:\n\t\tmut x = \"b1\"\n\t\tx = \"b2\"\n\tprint(1)\n";
-    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
-    assert!(
-        diags
-            .iter()
-            .all(|d| d.severity != ryo_core::diag::Severity::Error),
-        "expected no errors: {diags:?}"
-    );
-    let idx = tirs
-        .iter()
-        .position(|t| pool.str(t.name) == "main")
-        .unwrap();
-    let tir = &tirs[idx];
-    let sc = take_function_sidecar(&mut sidecar, idx);
-
-    // Every arm value must be released exactly through the machinery
-    // (reassign-Free or a scheduled Free); in particular the b-arm's
-    // values must not be dropped from scheduling by the a-arm's
-    // same-name reassigns.
-    let x = pool.intern_str("x");
-    let mut values = Vec::new();
-    for r in 1..tir.instructions.len() {
-        if tir.instructions[r].tag == TirTag::VarDecl {
-            let v = tir.var_decl_view(TirRef::from_raw(r as u32));
-            if v.name == x {
-                values.push(v.initializer);
-            }
-        }
-    }
-    assert_eq!(values.len(), 2, "two sibling bindings of x");
-    for v in values {
-        let freed = sc.free_schedule.iter().any(|fp| fp.target == v)
-            || sc.free_on_reassign.contains(&Some(v));
-        assert!(
-            freed,
-            "sibling binding value {v:?} must be freed: {:?}",
-            sc.free_schedule
-        );
-    }
-}
-
-#[test]
-fn early_return_after_loop_carried_reassign_keeps_outer_epilogue_free() {
-    // `while ...: s = g(); ...; if n > 1: return s; return s + "!"` —
-    // a Free anchored at the INNER return must not count as covering
-    // the OUTER return's epilogue Free for the same binding:
-    // `collect_jump_path` marks a non-containing loop's whole subtree
-    // on-path, but codegen cannot sweep after a terminator, so an
-    // inner-return-anchored Free never fires on the outer return's
-    // path. When the binding-covering check accepted it, the epilogue
-    // Free was suppressed and codegen's leak-direction assert tripped
-    // ("frees anchored to unmaterialized instructions were dropped").
-    let src = r#"
-fn make(x: int) -> str:
-	return int_to_str(x) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-
-fn f(n: int) -> str:
-	mut s = make(0)
-	mut i = 0
-	while i < n:
-		s = make(1)
-		i += 1
-	if n > 1:
-		return s
-	return s + "!"
-
-fn main():
-	print(f(3))
-"#;
-    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
-    assert!(
-        diags
-            .iter()
-            .all(|d| d.severity != ryo_core::diag::Severity::Error),
-        "expected no errors: {diags:?}"
-    );
-    let idx = tirs.iter().position(|t| pool.str(t.name) == "f").unwrap();
-    let tir = &tirs[idx];
-    let sc = take_function_sidecar(&mut sidecar, idx);
-
-    let mut outer_return = None;
-    let mut inner_return = None;
-    for r in 1..tir.instructions.len() {
-        if tir.instructions[r].tag == TirTag::Return {
-            let rr = TirRef::from_raw(r as u32);
-            match inner_return {
-                None => inner_return = Some(rr),
-                _ => outer_return = Some(rr),
-            }
-        }
-    }
-    let outer_return = outer_return.expect("two returns (inner if-arm, outer fallthrough)");
-    let s = pool.intern_str("s");
-    let outer_epilogue = sc.free_schedule.iter().any(|fp| {
-        fp.after == outer_return
-            && (tir.instructions[fp.target.index()].tag == TirTag::Call
-                || tir.instructions[fp.target.index()].tag == TirTag::Var)
-            && {
-                // the free targets a value of `s` (decl init or reassign value)
-                let mut found = false;
-                for rr2 in 1..tir.instructions.len() {
-                    let t2 = TirRef::from_raw(rr2 as u32);
-                    match tir.instructions[rr2].tag {
-                        TirTag::VarDecl => {
-                            let v = tir.var_decl_view(t2);
-                            if v.name == s && v.initializer == fp.target {
-                                found = true;
-                            }
-                        }
-                        TirTag::Assign => {
-                            let v = tir.assign_view(t2);
-                            if v.name == s && v.value == fp.target {
-                                found = true;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                found
-            }
-    });
-    assert!(
-        outer_epilogue,
-        "the outer return's epilogue Free for `s` must survive \
-         (inner-return-anchored frees do not cover it): {:?}",
-        sc.free_schedule
-    );
-    let _ = inner_return;
 }

@@ -14,10 +14,10 @@ use target_lexicon::Triple;
 /// inline here because the enum codegen tests are unit tests in this
 /// module, per the M11 plan).
 fn clif_of(src: &str) -> String {
-    let (tirs, pool, sidecar) = analyze(src);
+    let (tirs, flows, pool, sidecar) = analyze(src);
     let mut codegen = Codegen::new_jit().expect("JIT codegen should initialize");
     codegen
-        .compile_and_dump_ir(&tirs, &pool, &sidecar)
+        .compile_and_dump_ir(&tirs, &flows, &pool, &sidecar)
         .expect("codegen should succeed")
 }
 
@@ -25,15 +25,22 @@ fn clif_of(src: &str) -> String {
 /// on the emitted symbol/data surface (runtime-callee names and .rodata
 /// strings do not survive in CLIF text).
 fn object_bytes(src: &str) -> Vec<u8> {
-    let (tirs, pool, sidecar) = analyze(src);
+    let (tirs, flows, pool, sidecar) = analyze(src);
     let mut codegen = Codegen::new_aot(Triple::host()).expect("AOT codegen should initialize");
     codegen
-        .compile(&tirs, &pool, &sidecar, false)
+        .compile(&tirs, &flows, &pool, &sidecar, false)
         .expect("compile should succeed");
     codegen.finish().expect("object emission should succeed")
 }
 
-fn analyze(src: &str) -> (Vec<Tir>, InternPool, ryo_core::ownership::OwnershipSidecar) {
+fn analyze(
+    src: &str,
+) -> (
+    Vec<Tir>,
+    Vec<ryo_core::flow::Flow>,
+    InternPool,
+    ryo_core::ownership::OwnershipSidecar,
+) {
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
     let tokens = ryo_frontend::lexer::lex(src, &mut pool, &mut sink);
@@ -56,10 +63,14 @@ fn analyze(src: &str) -> (Vec<Tir>, InternPool, ryo_core::ownership::OwnershipSi
         std::path::Path::new("test.ryo"),
     );
     assert!(!sema_sink.has_errors(), "sema should succeed");
+    let flows: Vec<ryo_core::flow::Flow> = tirs
+        .iter()
+        .map(|t| ryo_core::flow::Flow::build(t, &pool))
+        .collect();
     let mut ownership_sink = ryo_core::diag::DiagSink::new();
-    let sidecar = ryo_frontend::ownership::check(&tirs, &pool, &mut ownership_sink);
+    let sidecar = ryo_frontend::ownership::check(&tirs, &flows, &pool, &mut ownership_sink);
     assert!(!ownership_sink.has_errors(), "ownership should succeed");
-    (tirs, pool, sidecar)
+    (tirs, flows, pool, sidecar)
 }
 
 /// (a) `EnumLit` emits an i32 tag store at offset 0 followed by
@@ -70,7 +81,7 @@ fn analyze(src: &str) -> (Vec<Tir>, InternPool, ryo_core::ownership::OwnershipSi
 #[test]
 fn enum_lit_emits_tag_store_and_payload_stores_at_pool_offsets() {
     let src = "enum Shape:\n\tCircle(float)\n\tRectangle(width: float, height: float)\n\nfn main():\n\ts = Shape.Rectangle{width=1.0, height=2.0}\n";
-    let (tirs, pool, _sidecar) = analyze(src);
+    let (tirs, _mirs, pool, _sidecar) = analyze(src);
     // Expected offsets straight from the pool layout.
     let main = tirs
         .iter()
@@ -232,4 +243,202 @@ fn value_repr_expect_scalar_panics_on_str() {
         cap: ClifValue::from_u32(3),
     };
     repr.expect_scalar();
+}
+
+#[test]
+fn backend_rejects_same_shape_artifacts_from_another_body() {
+    let source = "fn main():\n\ts = \"heap_012345678901234567890123456789\" + \"!\"\n\tprint(s)\n";
+    let (tirs, flows, pool, cleanup) = analyze(source);
+    let (other_tirs, other_flows, _, other_cleanup) = analyze(source);
+    let mut codegen = Codegen::new_jit().expect("JIT");
+    assert!(
+        codegen
+            .compile(&tirs, &other_flows, &pool, &cleanup, false)
+            .is_err()
+    );
+    assert!(
+        codegen
+            .compile(&other_tirs, &flows, &pool, &cleanup, false)
+            .is_err()
+    );
+    assert!(
+        codegen
+            .compile(&tirs, &flows, &pool, &other_cleanup, false)
+            .is_err()
+    );
+}
+
+#[test]
+fn backend_rejects_unresolved_cleanup_before_emission() {
+    let (tirs, flows, pool, mut cleanup) = analyze("fn main():\n\ts = \"x\" + \"y\"\n\tprint(s)\n");
+    cleanup.functions[0].drops[0].position = ryo_core::flow::DropPosition::BlockStart {
+        block: ryo_core::flow::BlockId(u32::MAX),
+    };
+    let mut codegen = Codegen::new_jit().expect("JIT");
+    let error = codegen
+        .compile(&tirs, &flows, &pool, &cleanup, false)
+        .expect_err("bad position");
+    assert!(
+        error.contains("cleanup changed after publication"),
+        "{error}"
+    );
+}
+
+#[test]
+fn flow_inspection_uses_stable_arenas_and_resolved_storage() {
+    let src = include_str!("../../../ryo/tests/fixtures/shadowed_heap_reassignment.ryo");
+    let (tirs, flows, pool, cleanup) = analyze(src);
+    let first = flows[0]
+        .dump(&tirs[0], &cleanup.functions[0], &pool)
+        .expect("dump");
+    let (tirs, flows, pool, cleanup) = analyze(src);
+    let second = flows[0]
+        .dump(&tirs[0], &cleanup.functions[0], &pool)
+        .expect("dump");
+    assert_eq!(first, second);
+    assert!(first.contains("place") && first.contains("release") && first.contains("Resolved"));
+    assert!(first.contains(if cfg!(debug_assertions) {
+        "validation: complete"
+    } else {
+        "validation: not run"
+    }));
+}
+
+#[test]
+fn backend_rejects_incomplete_and_skipped_validation() {
+    let (tirs, flows, pool, mut cleanup) = analyze("fn main():\n\tprint(1)\n");
+    for summary in [
+        ryo_core::ownership::ValidationSummary::default(),
+        ryo_core::ownership::ValidationSummary {
+            required_checks_ran: true,
+            positions_not_proved: 1,
+            ..Default::default()
+        },
+    ] {
+        cleanup.functions[0].validation = Some(summary);
+        let mut codegen = Codegen::new_jit().expect("JIT");
+        assert!(
+            codegen
+                .compile(&tirs, &flows, &pool, &cleanup, false)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn backend_rejects_validation_mutated_after_publication() {
+    let (tirs, flows, pool, mut cleanup) = analyze("fn main():\n\tprint(1)\n");
+    cleanup.functions[0].validation = Some(ryo_core::ownership::ValidationSummary {
+        required_checks_ran: true,
+        ..Default::default()
+    });
+    let mut codegen = Codegen::new_jit().expect("JIT");
+    let error = codegen
+        .compile(&tirs, &flows, &pool, &cleanup, false)
+        .expect_err("forged validation must be rejected");
+    assert!(
+        error.contains("cleanup changed after publication"),
+        "{error}"
+    );
+}
+
+#[test]
+fn cleanup_executes_without_optional_optimizations() {
+    for source in [
+        include_str!("../../../ryo/tests/fixtures/shadowed_heap_reassignment.ryo"),
+        include_str!("../../../ryo/tests/fixtures/same_parameter_promotions.ryo"),
+        include_str!("../../../ryo/tests/fixtures/nested_heap_shadows.ryo"),
+        include_str!("../../../ryo/tests/fixtures/nested_heap_byte_shadows.ryo"),
+        "fn main():\n\tmut s = \"heap_012345678901234567890123456789\" + \"!\"\n\ts = s + \"?\"\n\tassert(s == \"heap_012345678901234567890123456789!?\", \"concat without reuse\")\n",
+    ] {
+        let (tirs, flows, pool, _) = analyze(source);
+        let cleanup = ryo_frontend::ownership::check_without_optimizations(
+            &tirs,
+            &flows,
+            &pool,
+            &mut ryo_core::diag::DiagSink::new(),
+        )
+        .expect("unoptimized cleanup");
+        let mut jit = Codegen::new_jit_with_optimizations(false).expect("JIT");
+        let (main, _) = jit
+            .compile(&tirs, &flows, &pool, &cleanup, false)
+            .expect("unoptimized emission");
+        assert_eq!(jit.execute(main, &[]).expect("execution"), 0);
+        let mut aot = Codegen::new_aot_with_optimizations(Triple::host(), false).expect("AOT");
+        aot.compile(&tirs, &flows, &pool, &cleanup, false)
+            .expect("unoptimized object");
+        assert!(!aot.finish().expect("object bytes").is_empty());
+    }
+}
+
+#[test]
+fn cleanup_rejects_physical_storage_of_another_binding() {
+    let expected = TirRef::from_raw(1);
+    let wrong = TirRef::from_raw(2);
+    let var = Variable::from_u32(0);
+    let storage = FatLocals {
+        binding: Some(wrong),
+        ptr: var,
+        len: var,
+        cap: var,
+        home: None,
+        home_inline: false,
+    };
+    assert!(
+        Codegen::<cranelift_jit::JITModule>::require_fat_storage_binding(storage, expected)
+            .is_err()
+    );
+    assert!(
+        Codegen::<cranelift_jit::JITModule>::require_fat_storage_binding(storage, wrong).is_ok()
+    );
+}
+
+#[test]
+fn mixed_abi_emits_objects_for_supported_target_layouts() {
+    let (tirs, flows, pool, cleanup) = analyze(include_str!(
+        "../../../ryo/tests/fixtures/mixed_call_abi.ryo"
+    ));
+    for target in [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-gnu",
+    ] {
+        let mut codegen =
+            Codegen::new_aot(target.parse().expect("target triple")).expect("target ISA");
+        codegen
+            .compile(&tirs, &flows, &pool, &cleanup, false)
+            .expect("target ABI emission");
+        assert!(!codegen.finish().expect("object").is_empty());
+    }
+}
+
+#[test]
+fn backend_rejects_edits_to_cloned_body_and_execution_arenas() {
+    let (tirs, flows, pool, cleanup) = analyze("fn main():\n\tprint(1)\n");
+    let mut changed_tirs = tirs.clone();
+    let instruction = changed_tirs[0]
+        .instructions
+        .iter_mut()
+        .find(|inst| inst.tag == TirTag::IntConst)
+        .expect("integer");
+    instruction.data = TirData::Int(2);
+    let mut codegen = Codegen::new_jit().expect("JIT");
+    assert!(
+        codegen
+            .compile(&changed_tirs, &flows, &pool, &cleanup, false)
+            .is_err()
+    );
+    let mut changed_flows = flows.clone();
+    changed_flows[0].blocks[0].unreachable = true;
+    assert!(
+        codegen
+            .compile(&tirs, &changed_flows, &pool, &cleanup, false)
+            .is_err()
+    );
+    assert!(
+        codegen
+            .compile(&tirs, &flows, &InternPool::new(), &cleanup, false)
+            .is_err()
+    );
 }

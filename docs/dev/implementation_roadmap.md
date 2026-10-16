@@ -2,6 +2,11 @@
 
 # Ryo Implementation Roadmap
 
+Compiler architecture: [current pipeline, target Flow IR, and migration steps](pipeline_migration.md).
+This design note does not change milestone completion or feature sequencing.
+Migration validation: [regression checks and acceptance gates](pipeline_regression_checks.md).
+View design reference: [Hylo projections and the differences from Ryo views](pl_references/hylo.md).
+
 ## Milestone Index
 
 Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone's section below for details.
@@ -35,13 +40,15 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 9.2 — Throwaway CLI Intrinsics (`process_*`, `io_*`) ✅ COMPLETE](#milestone-92-throwaway-cli-intrinsics-process_-io_--complete) *(no dependencies; slots in alongside the core cluster)*
 - [x] [Milestone 10 — Tuples ✅ COMPLETE](#milestone-10-tuples-tuple-sugar-over-anonymous-structs--complete)
 - [x] [Milestone 11 — Enums (Algebraic Data Types) ✅ COMPLETE](#milestone-11-enums-algebraic-data-types--complete)
-- [ ] [Milestone 12 — Pattern Matching [alpha]](#milestone-12-pattern-matching-alpha)
+- [x] [Milestone 12 — Pattern Matching [alpha] ✅ COMPLETE](#milestone-12-pattern-matching-alpha--complete)
+- [ ] [Milestone 12.5 — Advanced Pattern Matching](#milestone-125-advanced-pattern-matching) *(deferred to v0.2 — post-alpha; holds everything M12 defers)*
+- [ ] [Milestone 12.6 — Match Ownership Completion](#milestone-126-match-ownership-completion) *(deferred to v0.2 — post-alpha; undefined enum/match ownership semantics)*
 - [ ] [Milestone 13 — Error Types & Unions [alpha]](#milestone-13-error-types--unions-alpha)
 - [ ] [Milestone 13.5 — Default Parameters & Named Arguments](#milestone-135-default-parameters--named-arguments) *(deferred — see sequencing note below)*
 - [ ] [Milestone 13.6 — `io_read_line` Gains Error Unions](#milestone-136-io_read_line-gains-error-unions) *(lands directly after M13)*
 - [ ] [Milestone 13.7 — Literal Completeness (Hex/Octal/Binary Ints, Escapes)](#milestone-137-literal-completeness-hexoctalbinary-ints-escapes) *(deferred — no dependencies; slots in anywhere)*
 
-> **Sequencing note (2026-09):** Next-up order is the alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M16** — followed by the rest of Phase 3. M10 is no longer a standalone milestone in effort terms: per D11 its grouping machinery folds into M9, so what ships between M9.1 and M11 is only the positional-sugar layer (parser forms + destructuring, depends on M9). **M13.5 and M13.7 are deferred past the core cluster.** M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"), and M9's former dependency on its named-argument parsing is stale — D11 moved struct literals to brace construction with its own grammar. M13.7 has no dependencies and slots in as filler. M13.5 remains v0.1-scope but may slip to v0.2 if the core cluster absorbs the schedule. **M9.2 (throwaway CLI intrinsics)** has no dependencies and slots in alongside the core cluster any time after M9.1; **M13.6** lands directly after M13, before M16, migrating the M9.2 `io_read_line` placeholder to real error unions.
+> **Sequencing note (2026-09):** Next-up order is the alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M16** — followed by the rest of Phase 3. M10 is no longer a standalone milestone in effort terms: per D11 its grouping machinery folds into M9, so what ships between M9.1 and M11 is only the positional-sugar layer (parser forms + destructuring, depends on M9). **M12.5, M12.6, M13.5, and M13.7 are deferred past the core cluster.** M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"), and M9's former dependency on its named-argument parsing is stale — D11 moved struct literals to brace construction with its own grammar. M13.7 has no dependencies and slots in as filler. M13.5 remains v0.1-scope but may slip to v0.2 if the core cluster absorbs the schedule. **M9.2 (throwaway CLI intrinsics)** has no dependencies and slots in alongside the core cluster any time after M9.1; **M13.6** lands directly after M13, before M16, migrating the M9.2 `io_read_line` placeholder to real error unions. **M12.5** (advanced pattern matching — nested patterns, guards, or-patterns, and the rest of M12's deferral register) is v0.2 work, not alpha-gating; the only pattern features alpha needs beyond M12 ship inside M13 (error-union match) and M16 (`?T`/`none` patterns) themselves.
 
 ### Phase 3: Type System & Memory Safety
 
@@ -88,6 +95,7 @@ Deferred features tracked separately — see Phase 5 section for the full list (
 | Binary pattern matching (if adopted) | post-v0.4 | deferred; stdlib parser facility first |
 | GUI Phase 1 (immediate-mode toolkit PoC) | post-v0.2 | ecosystem, not language; D4 + `ryo-bindgen` |
 | `yield` subroutines | separate RFC | measured re-entry condition only (final spec §11.4) |
+| `Scoped` marker trait (`with` enforcement) | with M23 + sync guards | generalizes spec §14.5.4's mandatory-`with` guard rule into a user-accessible core trait; rides the M23 `Drop` facet machinery and the concurrency guard types; design in `with_enforcement.md` (draft, pending approval) |
 
 ---
 
@@ -1608,9 +1616,11 @@ fn divide(a: int, b: int) -> Result:
 - String type used for the example above is available since Milestone 8.1
 - Dependencies: Milestone 9 (structs provide foundation for variant data), Milestone 10 (tuples share the variant-payload codegen path)
 
-### Milestone 12: Pattern Matching [alpha]
+### Milestone 12: Pattern Matching [alpha] ✅ COMPLETE
 
 **Goal:** Implement exhaustive pattern matching on enums and literals
+
+**Status:** ✅ COMPLETE (2026-10-13, branch `feat/m12-pattern-matching`)
 
 **Tasks:**
 
@@ -1658,13 +1668,84 @@ fn describe_color(color: Color) -> str:
   Color.Blue: return "blue"
 ```
 
+**Shipped (2026-10-13):**
+
+- `match` expression over enum, `int`/`bool`/`str` literal, and anonymous-struct scrutinees: unit-variant and payload patterns with positional binds (`Option.Some(v)`), literal arms, and a wildcard catch-all; anonymous-struct patterns carry literal-field constraints to codegen as per-arm guard lists (Int/Bool/Str field-equality chains) and always require a `_:` arm — see [pattern_matching.md](pattern_matching.md)
+- Compile-time exhaustiveness — **E0129** names the missing enum variants (declaration order) or the uncovered literal kind; **W0005** flags arms that can never execute (anything after `_:`, duplicate literals/variants), buffered like the other warnings so it never piles onto an error
+- Arm typing: all value arms join to one `TypeId` (E0134); `never`/error arms join freely; arms ending in `return`/`break`/`continue` diverge from the merge via the return|break|continue termination predicate, so `break`/`continue` arms are legal in value-producing matches inside loops (E0135 only fires on a statement arm that falls through in a value match)
+- Move-only payload bindings on the whole-value model: a non-`Copy` bind consumes the scrutinee on its arm's path, unbound needs-drop payload fields drop at arm start, and **E0133** refuses by-move binds out of borrowed scrutinees (`match &opt:`)
+- Merge lowering: scalar and aggregate results ride a pre-dispatch result slot (the slot address dominates every arm and the merge), void matches jump bare, and a match whose arms all diverge traps; enum scrutinees dispatch on the i32 tag, anon scrutinees on ordered guard conjunctions, literal scrutinees on compare chains
+- `examples/match.ryo` shipped; the Docker ASan/Valgrind sanitizer suite covers the move/partial-move payload paths
+
+**Diverged / Notes:**
+
+- **Aggregate arm-result transfer (shipped):** value arms that *yield owned storage* (heap calls/concats, by-value reads of tracked bindings, by-move payload binds) are consumed into the match inst in `analyze_match` — the match inst becomes the single owner the result's consumers move on, with exactly one destruction at the consumer's last use (the borrowed-result family stays rejected, E0138). See [pattern_matching.md](pattern_matching.md)
+- **Anon scrutinee guards** ride the TIR wire as a typed per-arm guard list; the `Discriminant::Wildcard` encoding is a coverage marker only — sema-accepted anon syntax always lowers to something codegen can evaluate
+- **`match` in call-argument position** requires the closing `)` on its own line (the indent preprocessor emits dedents only at line boundaries)
+- **Editor grammar:** the tree-sitter grammar for `match` expressions and patterns landed on the tree-sitter-ryo repo's `feat/m12-pattern-matching` branch alongside the compiler work
+
 **Implementation Notes:**
 
 - Match is an **expression** (returns a value)
 - All arms must have same return type
 - Exhaustiveness checking at compile time (prevents missing cases)
-- Nested patterns deferred to later milestone
+- Nested patterns, guards, or-patterns, float-literal patterns, nominal-struct patterns, borrow-bindings, and full structural exhaustiveness for anonymous-struct patterns are **deferred to Milestone 12.5** (v0.2, post-alpha) — see its section for the full deferral register; undefined match-ownership semantics (mutable `inout` binds, scrutinee reassignment, conditional-move merges, nested-place scrutinees) are **deferred to Milestone 12.6**
+- Scope boundary: M12 lands match-only — I-208 (lowercase type names), I-032 (expression-level `if`), and I-195 (disjoint field borrows, needs design sign-off) are triaged as immediate post-M12 follow-ups, not bundled
 - Dependencies: Milestone 11 (enums to match on)
+
+### Milestone 12.5: Advanced Pattern Matching
+
+**Goal:** Everything M12 deliberately deferred — the pattern features that make `match` fully ergonomic but that alpha (and M13/M16, which carry their own pattern needs) does not require.
+
+**Status:** ⏳ Deferred — v0.2, post-alpha. Not alpha-gating: the alpha litmus and M13's error handling need only M12's surface; matching over error unions ships inside M13, and `?T` matching ships inside M16 (both noted in their sections).
+
+**Deferral register (from the M12 design):**
+
+- **Nested patterns** — patterns inside variant payloads (`Some(Coords{x, y})`), literals inside payloads (`Some(0)`), anon patterns nested in variants
+- **Guards** — `User(age) if age >= 18:` (spec Future Work: "Advanced Pattern Matching")
+- **OR patterns** — `1 | 2 | 3:` arm alternatives
+- **Float literal patterns** — excluded from M12 over NaN/IEEE equality semantics; needs a defined story (exact-bit compare? IEEE `==`?) before parsing
+- **Bare irrefutable bind as a whole-arm pattern** — `v:` binding the entire scrutinee (M12 rejects this with a did-you-mean note)
+- **Nominal struct patterns** — `Point{x, y}:` destructure-by-name on named structs (needs a decision on how nominal patterns interact with the Brace Law)
+- **Full structural exhaustiveness for anon/tuple patterns** — cross-arm literal-field coverage (M12 always requires a `_:` arm for anonymous-struct scrutinees)
+- **Borrow-bindings in arms** — bind payload by immutable borrow when the scrutinee is borrowed (M12 emits `E0133` for non-`Copy` fields on borrowed scrutinees); requires reference/view codegen in arm prologues. Binding-mode inference semantics are tracked in M12.6
+- Further ideas (slice patterns, `@` bindings, range patterns) live in [proposals.md](proposals.md) "Pattern Matching Extensions" and fold in here if accepted
+
+**Dependencies:** Milestone 12 (the entire surface builds on its Match IR, exhaustiveness checker, and arm-binding machinery)
+
+**Target:** v0.2
+
+**Effort:** ~2-3 weeks (medium)
+
+**Visible Progress:** `match` gains the expressiveness of Rust/Swift pattern matching — deep destructuring in a single arm, guarded arms, compact alternative arms.
+
+### Milestone 12.6: Match Ownership Completion
+
+**Goal:** The ownership semantics M12's move-only core deliberately left undefined: mutable payload bindings, scrutinee liveness rules, and conditional-move merge behavior. Alpha survives without them (each case has a workaround — extract/move/reconstruct, or restructure the match); together they make `match` a complete ownership citizen.
+
+**Status:** ⏳ Deferred — v0.2, post-alpha. Not alpha-gating.
+
+**Items:**
+
+- **Mutable payload bindings (`inout` binds)** — `match opt: Some(inout v): v = f(v)` mutates the payload in place; the scrutinee must be a mutable place (`mut` binding, `inout` param, mutable field path). No surface syntax or semantics defined today; requires mutable-borrow arm prologues (the M8.3 `inout` idiom applied to bindings) plus a conflict rule (while `inout v` is live, no other access to the scrutinee in that arm). Anon/tuple `inout` fields follow the same rule.
+- **Scrutinee liveness & reassignment** — define and enforce: may an arm assign to the scrutinee variable (`match x: _: x = new()`)? Adopt the Rust-shaped rule — legal when no arm borrows from or moves through the scrutinee, `E0033`-family error otherwise — and extend the ownership pass to model it.
+- **Conditional move + reinitialization across arms** — `match opt: Some(v): opt = None` with `opt` used after the match: moved in one arm, re-initialized on every path after the move → valid at the merge. M12's union merge conservatively reports "moved"; this pins the finer lattice (re-init resets per-arm state; merge joins states) with tests. Until then the conservative error is the specified behavior.
+- **Nested-place scrutinees & enum-in-aggregate moves** — `match wrapper.inner:` (partial moves out of a nested place's payload, interaction with the outer owner's remaining-field drops) and moving enums out of struct fields / containers. Requires place-expression scrutinee ownership beyond simple variables; today only variable (and simple owned-temporary) scrutinees are well-defined.
+- **M12 ownership-review carry-overs** — eight leaks/diagnostics residuals deferred from the M12 implementation review: (1) a never-read by-move bind in a `continue`-ending arm can leak (narrow trigger); (2) `collect_jump_path` sibling-arm over-approximation on returns-in-arms leaks (needs core-TIR headroom); (3) a non-`Var` moved scrutinee reports use-after-move twice; (4) copy-bind shadowing leaks (same convention as the M10 destructuring bind — one entry covers both); (5) `continue`-ending arms and match-inside-loop interplay lack committed tests (break-in-arm coverage landed in the M12 review fix wave: ownership unit tests + ASan/Valgrind sanitizer mirrors); (6) four ownership walkers have no `Match` arm at all — `outermost_branch_of` and `enclosing_if_main_cond` (loops.rs), `collect_bound_call_sites` (frees.rs), and the `is_exit_anchor` predicate (mod.rs) — so they miss bare matches, not just `ExprStmt`-wrapped ones; each needs its own design + tests; (7) a `break` inside a cond/bounds-position match arm (`while match ...:` / `for i in match ...`) gets no loop-exit Frees — the loop-exit walk's operand descent is skipped at loop statements, where it would run against the stale outer loop context (exotic shape; matches in body/statement positions are covered); (8) `branch_may_not_return` (loops.rs) has a `Match` arm but no operand descent (pre-existing; backstopped by the return epilogue).
+- **Aggregate match value arms** — shipped with M12: each non-`never` value arm's aggregate result is consumed into the match inst in `analyze_match` (mirror `analyze_var_decl`'s `consume_for_assignment` + `rebind_to_init`), so the ownership pass stops scheduling drops that alias the result slot; the match inst is the single owner the result's consumers move on. The compile-time rejections that preceded the lift — codegen's owned-producer guard (with its `free_would_emit` elision-predicate duplication of `emit_frees`) and the E0139 by-move-payload check — were deleted with it. The borrowed-result family stays rejected (E0138, no scheduled drop exists for a borrowed owner); the `match_discarded_value` sanitizer fixture remains structurally leak-insensitive (static-literal arms), with heap-carrying coverage in the arm-result transfer tests.
+- **View-typed match results** — every value arm agreeing on a view type passes the E0134 join, but no merge shape exists for a view result (ownership/liveness of a projection across arms needs design); sema rejects the shape at compile time (E0137) instead of miscompiling through `eval_inst_view`. Lift together with the (now shipped) aggregate arm-result consume: an arm result consumed into the match is an owned value like any other, and view results can then merge through the same slot machinery.
+
+**Cross-references (not claimed here):**
+
+- Immutable borrow-bindings / match ergonomics — pattern surface in M12.5; binding-mode inference semantics land together with or just before this milestone's items
+- `match self:` on `move self` / `inout self` — M17 (Method Implementations) defines the self parameter modes; match rides them
+- Copy elision through the match merge block — tracked in [copy_elision.md](copy_elision.md) (P1 specialization for pattern matching)
+
+**Dependencies:** Milestone 12 (match core), Milestone 8.3 (`inout`, shipped); pairs naturally with M12.5
+
+**Target:** v0.2
+
+**Effort:** ~2 weeks (medium)
 
 ### Milestone 13: Error Types & Unions [alpha]
 
@@ -1732,6 +1813,7 @@ fn main():
 - `.message() -> str` is exposed via a compiler-known interface (the user-facing `trait` keyword is v0.2/v0.3 — see Phase 5: Traits & Generics)
 - The `try` *propagation* operator and the bare `catch:` shortcut are deferred to v0.2 (see Phase 5: Try/Catch Operators); v0.1 handles errors with `expr catch as e:` (spec §7.4) and propagates with explicit `match`/`return`
 - Dependencies: Milestone 11 (enums), Milestone 12 (pattern matching for handling)
+- `match` on an error-union scrutinee extends M12's arm resolution: unqualified variant names resolve against *every* error type in the union (spec §7.4 shows `io.FileNotFound(p):` and `parse.InvalidFormat(reason):` in one `match`), and exhaustiveness covers the union's full variant set. The rest of M12's deferral register (guards, or-patterns, nested patterns) stays in M12.5 — none of it is needed for error handling
 - Converts the M8.4.2 interim: `bytes.to_str()` / `bytesview.to_str()` gain their final `Utf8Error!str` signature (the panicking stopgap is replaced; call sites switch to `catch`/match handling)
 - **Error return traces** (Zig-inspired): instrument every error-return site to record the return address into a per-error trace buffer, giving users the full propagation path from creation to handler. Compiler inserts instrumentation at `match` error-forwarding sites (`Err(e): return e`); the trace buffer is a fixed-size array carried alongside the error union value. Zero cost when errors don't fire. Unlike panic stack traces (I-039, which walk frame pointers at crash time), error traces capture the *propagation chain* at each return site — showing every function that forwarded the error, not just where it was created. Requires DWARF `.debug_line` for source mapping (shared prerequisite with I-039).
 
@@ -1924,6 +2006,7 @@ fn main():
 - Extend type system: `Type::Optional(Box<Type>)`
 - Parse optional type annotations: `?User`, `?str`
 - Parse `none` literal
+- Integrate `match`: `none` as a literal pattern plus a payload-binding form for `?T` scrutinees, making `match` a first-class way to consume optionals
 - Parse optional chaining: `user?.name?.len()`
 - Parse `orelse` operator: `value orelse default`
 - Implement smart casting:
@@ -1969,6 +2052,7 @@ fn main():
 - Chaining returns `?T` (must handle with `orelse` or check)
 - Migrate `io_read_line` to its final signature `io_read_line() -> IoError!?str`: clean EOF becomes `none`, replacing the interim `IoError` EOF variant from M13.6 (deliberate breaking change — pre-alpha; matches the Swift `readLine() -> String?` / Rust `None` / Go Scanner consensus that EOF is graceful termination, not a failure)
 - Migrate `process_env(key: str) -> str` (M9.2 placeholder, empty = unset) to `process_env(key: str) -> ?str` (`none` = unset); the final `process.env` name swap waits for M24
+- M12's match machinery extends to `?T`: `none` is a literal pattern, the payload-binding form follows whatever unwrap idiom M16 establishes (decided at implementation time), and exhaustiveness covers `{none, value}` — no wildcard needed for a fully handled optional
 - Dependencies: Milestone 11 (enums provide foundation for tagged unions)
 
 ### Milestone 17: Method Implementations

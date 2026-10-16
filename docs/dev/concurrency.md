@@ -452,11 +452,11 @@ result = scheduler.call_ffi(fn(): extern_function(args))
 4. System coroutine yields back with the result.
 5. Scheduler resumes the original task coroutine.
 
-Cost: two extra stack switches per FFI call (~200 ns total on x86_64),
-versus ~10 µs for `#[blocking]` dispatch — roughly 50× cheaper. With compute
-FFI on the system coroutine, the 128 KB green-stack cap is no longer a
-stack-safety risk for FFI users; it remains a safety net for runaway Ryo
-recursion.
+The router adds stack switches, request handling, and result delivery.
+Measure that complete path against blocking-pool dispatch before assigning
+an overhead or speedup. Raw-switch PoC timings do not establish router cost.
+The system stack separates native stack usage from the 128 KB task cap,
+but native overflow recovery and worker progress still need validation.
 
 **Nested FFI re-entry from C callbacks.** A C library may call back into Ryo
 code (qsort comparators, libjpeg error handlers, visitor APIs), and that
@@ -531,7 +531,8 @@ locking mistakes on top of that model; the memory model defines what
 - FFI re-entry: a C callback that itself calls FFI works up to
   `RYO_FFI_OVERFLOW_DEPTH` nested calls; one level deeper fails immediately
   with `FfiReentryLimit` and no task is left suspended
-- FFI overhead benchmark: plain FFI round-trip ≈200 ns on x86_64
+- FFI overhead benchmark: measure full router and blocking-pool round trips,
+  separately from raw switches, with platform and workload recorded
 
 **Exit criteria:** Linear scaling for embarrassingly parallel workloads.
 `task.local` works across migration. Blocking pool does not stall green
@@ -604,10 +605,11 @@ outlive its lender. Implementation duties, split by pass:
   `task.run` outside a scope and `task.spawn_detached` keep move-only
   capture, enforced exactly as today.
 - **Runtime:** nothing new. The join already provides the happens-before edge
-  the memory model (§3.7) needs; the cancel-siblings-on-panic rule above
-  already guarantees children unwind before the scope's frame pops. A child's
-  green-thread stack referencing parent stack frames is sound precisely
-  because the parent is suspended at the join for the borrow's lifetime.
+  the memory model (§3.7) needs. Keep borrowed storage alive until every
+  child and outstanding access has settled. The parent can run while its
+  children borrow storage; enforced freezing and the scope join establish
+  safety, rather than continuous parent suspension. Native work continuing
+  after cancellation must also satisfy this lifetime bound.
 - **Stdlib `par_*` combinators** (`par_for_each_chunk`, parallel map, etc.)
   are library APIs over D5 borrows with D4-permitted unsafe internals — they
   are *not* a separate thread pool. They schedule onto the calling task's
@@ -1136,9 +1138,9 @@ BEAM internals worth benchmarking against: preemptive scheduling via
 reduction counting (~4000 reductions between preemptions), one scheduler
 thread per core with per-scheduler run queues, per-process stack/heap/
 mailbox isolation with per-process copying GC, and **dirty schedulers** —
-separate pools (dirty-CPU / dirty-IO) for long or blocking NIFs, which is
-the same split as §3.4 `#[blocking]` + §3.5 system coroutine, ~15 years
-earlier.
+separate pools (dirty-CPU / dirty-IO) for long or blocking NIFs. These are
+references for scheduling isolation, not equivalents of §3.5: a system
+coroutine changes stacks on the same worker and still occupies that worker.
 
 Lessons, mapped onto this plan:
 
@@ -1149,11 +1151,12 @@ Lessons, mapped onto this plan:
    rejects preemptive scheduling (cooperative + fairness counter +
    `task.yield_now`, §5.3). BEAM shows preemption's payoff: no task —
    including an accidental infinite loop — can starve a worker. Reduction
-   counting also shows preemption need not be signal-based: it is a cheap
-   counter check at call boundaries, which Cranelift could insert. Not a
-   v0.4 change, but the rejection deserves a risk-register entry.
-3. **Linked-by-default ≈ `task.scope` as recommended default (§4.2).**
-   Both make the safe thing the easy thing; keep it that way in API naming.
+   counting also shows preemption need not be signal-based. Compiler-inserted
+   scheduling checks remain a possible future design, not an adopted v0.4
+   feature. Checks only at calls miss tight loops without calls.
+3. **Links and scopes serve different contracts.** BEAM links propagate
+   failures. A Ryo scope joins children and bounds borrowed storage. Linking
+   is not a join witness.
 4. **`Selector` vs `select`.** Gleam's selector is a first-class,
    composable value (mergeable, mappable, monitor-aware); Ryo's §4.3
    `select` is a one-shot syntax form. The Gleam shape is strictly more
@@ -1170,9 +1173,10 @@ Lessons, mapped onto this plan:
    failure mode with no built-in answer. Ryo's four channel modes (§4.1)
    are explicit backpressure tools Gleam can only imitate with
    protocol-level acks.
-7. **Dirty schedulers validate §3.4/§3.5.** Ryo's ~200 ns coroutine
-   handoff is the cheaper mechanism; BEAM pays a full scheduler handoff
-   for dirty NIFs.
+7. **Dirty schedulers distinguish long CPU work from blocking I/O.**
+   Ryo must define both policies. A same-worker system coroutine provides
+   stack capacity, not scheduling isolation. Compare complete native-call
+   paths before making overhead claims.
 8. **Mandatory call timeout.** `process.call` forces a timeout and crashes
    the caller on expiry. Ryo's `.await` has no such forcing function
    (`task.timeout` is opt-in, §2.4). For channel-based request/reply,
@@ -1198,20 +1202,19 @@ is the one place Ryo chooses to be weaker than BEAM.
 
 TinyGo's `scheduler=tasks` ([`scheduler_cooperative.go`](https://github.com/tinygo-org/tinygo/blob/release/src/runtime/scheduler_cooperative.go),
 [`internal/task`](https://github.com/tinygo-org/tinygo/blob/release/src/internal/task/task.go))
-is essentially this plan's **Phase 1 + 2 subset, shipped and proven** in the
-embedded/WASM domain: cooperative FIFO runqueue, per-task stacks switched by
-per-arch assembly (callee-saved registers + SP swap — the same mechanism as
-corosensei), a delta-list sleep queue, switches only at explicit pause points.
-It is also deliberately the *ceiling* of that subset: `hasParallelism =
-false` and `NumCPU() = 1` are literals in the source — no multi-core, no
-stealing, ever. Where TinyGo stops is exactly where Ryo's Phase 3 begins.
+is a reference for cooperative scheduling: a FIFO runqueue, sleep queue,
+and explicit suspension points. Native task stacks use per-architecture
+switching; the Wasm Asyncify path uses a compiler transform. The inspected
+cooperative scheduler declares `hasParallelism = false`. That describes this
+implementation, not every future TinyGo target. It does not establish Ryo's
+M:N migration or cancellation guarantees.
 
 Lessons, mapped onto this plan:
 
 1. **Fourth independent confirmation of the core mechanism.** Per-task
    stacks + a tiny asm switch helper is now the convergent design across Go,
-   Wasmtime-fiber, corosensei, and TinyGo. The PoC gate remains, but the
-   mechanism itself is not the risk.
+   Wasmtime-fiber, corosensei, and TinyGo. These precedents support the
+   mechanism. Ryo still needs target-specific integration and recovery tests.
 2. **Static stack-size analysis is an option this plan hasn't priced in.**
    TinyGo computes per-goroutine stack bounds *at compile time*
    (`getGoroutineStackSize` intrinsic over a compiler-emitted section),
@@ -1241,11 +1244,120 @@ Lessons, mapped onto this plan:
    (real atomics), possibly relevant to a future Embassy-style `core`
    executor crate (see *Parallelism on `core`* in the overview).
 
-One-line summary: TinyGo proves the cooperative single-threaded core of this
-plan is shippable as-is, contributes the compile-time stack-sizing idea, and
-marks the WASM fallback cost curve — while confirming that everything past
-Phase 2 (M:N, cancellation, RAII unwind, static lock safety) is territory
-Ryo enters largely alone.
+TinyGo contributes cooperative scheduling and compile-time stack-sizing
+precedents. It does not prove that Ryo's runtime is shippable unchanged.
+M:N migration, yielding cleanup, and static lock safety need separate evidence.
+
+## Implementation concerns from Go, Pony, Erlang, and TinyGo
+
+Review basis: the primary sources below and [concurrency_poc.md](concurrency_poc.md).
+These are implementation obligations and open decisions. They do not adopt
+new syntax, preemption, restart supervision, or a bundled `core` executor.
+
+### Native-call scheduling and completion
+
+The system coroutine in §3.5 solves stack capacity. Long native computation
+still occupies the same worker. If every worker enters such a call, timers
+and unrelated network tasks cannot execute on those workers until calls return.
+Go's cgo path informs its scheduler when foreign execution begins. Erlang
+moves lengthy native CPU work onto dirty CPU schedulers.
+
+Define separate routing contracts for short calls, long CPU work, blocking
+calls, and thread-affine calls. Evaluate the existing dispatcher proposal
+before selecting a policy. Specify callback entry, pinning, native error
+capture, saturation behavior, and completion ownership.
+
+**Acceptance:** Saturate workers with long native calls while measuring timer
+and network progress. Test nested callbacks and cancellation on each route.
+Measure the full router, not only raw coroutine switches.
+
+Sources: [Go cgo implementation](https://go.dev/src/runtime/cgocall.go),
+[Erlang native functions](https://www.erlang.org/doc/apps/erts/erl_nif.html).
+
+### Progress while runnable work remains
+
+Queue age in §5.3 cannot interrupt a running task that never suspends.
+With one worker, a tight infinite loop can prevent another task's timeout
+and cancellation handler from running. Pony documents this cooperative limit.
+Go supports asynchronous preemption.
+
+The §2.1 loop must bound runnable batches before servicing timers and I/O.
+Tasks that continually yield and requeue can keep the ready queue nonempty.
+Draining that queue completely can starve polling even with cooperation.
+
+**Acceptance:** Run an always-runnable yielding task beside a timer and socket
+reader. Measure maximum service delay. Also test non-yielding loops and
+state the current progress limit. Compiler-inserted checks remain a draft
+option requiring a separate decision, effect analysis, and lock-safety review.
+
+Sources: [Go preemption](https://go.dev/doc/go1.14),
+[Pony scheduler](https://tutorial.ponylang.io/runtime-basics/scheduler).
+
+### Cancellation, scoped borrows, and outstanding native work
+
+A cancellation request is not proof that execution or memory access ended.
+Distinguish result delivery, cleanup completion, and completion of outstanding
+accesses in the task state machine. Apply these distinctions to §4.7's
+destructor deadline and to blocking-pool requests.
+
+Example: a scoped child passes parent-backed data to a native operation.
+Cancellation arrives while that operation continues on another thread.
+The scope must not release parent storage before the operation stops
+accessing it. Releasing a task stack or reporting cancellation is insufficient.
+
+Define who keeps arguments alive and when a native completion can release
+them. Forced termination must not permit further access through scoped borrows.
+Document which cleanup resources can leak under the existing deadline rule.
+Do not claim unconditional leak prevention for that exceptional path.
+
+**Acceptance:** Cancel scoped children during native work and yielding cleanup.
+Verify that the scope cannot return while external accesses remain possible.
+Erlang delays some resource reclamation until a dirty native call finishes,
+even after process termination is reported.
+
+Source: [Erlang native-call termination](https://www.erlang.org/doc/apps/erts/erl_nif.html).
+
+### Recursive sendability and supervision boundaries
+
+Pony's `iso`/`val`/`tag` mappings are conceptual references. Ryo must check
+reachable fields and captures of transferred values. An owned outer object
+can contain a thread-affine native resource. Atomic reference counting
+protects lifetime; it does not make mutable contents safe across workers.
+Include retaining views, native wrappers, and scoped captures in these checks.
+
+The §4.2.1 supervisor scope provides failure isolation and joining. OTP
+supervision also defines restart strategies, restart intensity, and shutdown
+policies. Those services are not part of Ryo's current proposal. Detached-task
+monitoring and restart supervision remain separate design work. Any future
+restart mechanism needs a fresh task factory, not reused consumed captures.
+
+**Acceptance:** Test nested non-sendable resources and prohibited capture escapes.
+For any future restart proposal, test repeated failure and bounded shutdown.
+
+Sources: [Pony reference transfer](https://tutorial.ponylang.io/reference-capabilities/passing-and-sharing),
+[OTP supervision](https://www.erlang.org/doc/system/sup_princ.html).
+
+### Stack evidence, target coverage, and memory accounting
+
+The PoC demonstrates growth and overflow detection on its tested configurations.
+Its overflow runs terminate the process with exit 42. They do not establish
+the task-level `StackOverflow` recovery required by §1.1. Add a recovery test
+where the failing task reports its error and unrelated tasks continue.
+
+Windows measurements use x64 emulation. Keep native Windows ARM64 support
+unverified until switching, ABI, growth, migration, and cleanup paths pass
+on that target. Rust backtrace probes do not prove unwinding through
+Cranelift-generated Ryo frames or yielding Ryo destructors.
+
+Report reserved address space, committed pages, resident memory, task metadata,
+and cached stacks separately. The 32 KB initial stack budget is not measured
+RSS or total reserved space. Static sizing needs conservative fallback for
+recursion, unknown callees, and native calls. Asyncify demonstrates that
+a compiler transform can preserve colorless source syntax.
+
+Sources: [PoC evidence](concurrency_poc.md),
+[TinyGo scheduler options](https://tinygo.org/docs/reference/usage/important-options/),
+[TinyGo stack configuration](https://pkg.go.dev/github.com/tinygo-org/tinygo/compileopts#Config.AutomaticStackSize).
 
 ---
 
@@ -1269,8 +1381,8 @@ existing stack.
 | Feature | Reason |
 |---|---|
 | Generator-style `yield` | Channels cover all use cases more idiomatically |
-| WASM target | Stack swapping not available in standard WASM — see WasmFX section |
-| Stackless coroutines | Reintroduces function coloring, wrong for Ryo |
+| WASM target | Deferred pending backend and runtime integration; Asyncify is an existing transform-based alternative to WasmFX |
+| Stackless coroutines | Not the selected native implementation; implicit compiler transforms can preserve colorless syntax |
 | Tokio as scheduler | Stackless-first, conflicts with stack-swapping model |
 | `io_uring` direct | Linux only, use `mio` for cross-platform (may become a Linux opt-in feature later) |
 | Preemptive scheduling | Cooperative is sufficient for scripting; adds significant complexity |
@@ -1285,10 +1397,10 @@ How common C-library workloads behave under this plan:
 
 | Scenario | Behavior |
 |---|---|
-| `libjpeg.decode(bytes)` (compute, no I/O) | Safe for any internal stack usage up to the configured `RYO_FFI_STACK_SIZE` (2 MB by default) — runs on the system coroutine, ~200 ns overhead. This removes the previous 128 KB stack limit for typical libraries. |
+| `libjpeg.decode(bytes)` (compute, no I/O) | Uses the system-coroutine stack budget (`RYO_FFI_STACK_SIZE`, default 2 MB). Long calls still occupy the worker; routing and overflow recovery need validation. |
 | `simdjson.parse(bytes)` (compute, no I/O) | Same system-coroutine path. |
-| `sqlite3.query(db, sql)` (blocking I/O) | `#[blocking]`; ~10 µs dispatch. |
-| `openssl.aes_encrypt(key, data)` (compute) | System coroutine; ~200 ns overhead. |
+| `sqlite3.query(db, sql)` (blocking I/O) | `#[blocking]`; benchmark complete dispatch and cancellation behavior. |
+| `openssl.aes_encrypt(key, data)` (compute) | System coroutine; measure complete router cost and worker occupancy. |
 | `libpng.write(file, data)` (compute + libc write) | `#[blocking]` required — the libc write may block. |
 | `libfoo.compute()` recursing 4 MB deep | `StackOverflow` at 2 MB → task fails. Configurable via `RYO_FFI_STACK_SIZE`. |
 | Callback from C into Ryo | Runs on system-coroutine stack — safe to do work, can `task.spawn` cleanly; nested FFI from the callback routes to an overflow system coroutine, and past `RYO_FFI_OVERFLOW_DEPTH` the inner call fails immediately with an explicit re-entry-limit error (`FfiReentryLimit`, no queueing — see §3.5). |
@@ -1297,17 +1409,18 @@ How common C-library workloads behave under this plan:
 
 ## Memory profile at scale
 
-| Concurrent task count | Stack memory (32 KB+ per task) |
+| Concurrent task count | Initial usable-stack budget (32 KB per task; not RSS or reserved space) |
 |---|---|
 | 10 K tasks | ~320 MB |
 | 100 K tasks | ~3.2 GB |
 | 1 M tasks | ~32 GB |
 
-The per-task memory floor is corosensei's, not Loom's: true Loom-style heap
-capture would bring 1 M concurrent tasks to ~8 GB instead of ~32 GB. For
-Ryo's target audience (10K–100K concurrent tasks per process, FFI-heavy
-workloads) this is rounding error, so the plan **explicitly defers** true
-Loom-style heap-capture as a future optimization. Revisit if:
+The table is an initial usable-stack budget, not a resident-memory estimate.
+Account separately for the maximum reservation, guard gaps, committed pages,
+task metadata, system coroutines, and cached stacks. Compare measured workloads
+before accepting a task-count target or predicting savings from heap capture.
+The PoC's parked-task measurements do not establish active-workload memory use.
+The plan defers Loom-style heap capture. Revisit if:
 
 - 1M+ concurrent tasks become a real Ryo use case.
 - A `loom-rs` Rust crate matures, or corosensei gains `freeze`/`thaw` modes.
@@ -1564,7 +1677,12 @@ browser target is a stated product priority.
 | Windows IOCP + stack unwinding edge cases | Medium | High | CI on Windows from Phase 1, not Phase 5 |
 | Stack overflow in recursive user code | Medium | Medium | Adaptive growth + guard pages + `StackOverflow` error delivered to task |
 | Work stealing causing cache thrashing | Low | Medium | Profile before tuning; start with random steal |
-| `corosensei` platform gap | Low | High | Verified support: x86_64 + aarch64 on all three OSes |
+| Non-yielding tasks monopolize workers | High | High | Record cooperative progress limits; test timers and cancellation under CPU saturation; scheduling checks need a separate decision |
+| Runnable queue prevents timer/I/O service | Medium | High | Bound runnable batches and poll regularly; test continuously requeued tasks |
+| Long native computation occupies all workers | Medium | High | Distinguish stack switching from scheduling isolation; define and test native-call routing policies |
+| Cancellation releases storage still used by native work | Medium | High | Track physical completion and outstanding accesses; retain arguments and scope storage until access ends |
+| Overflow detection mistaken for task recovery | Medium | High | Add task-level recovery tests; process exit 42 proves detection only |
+| `corosensei` platform gap | Medium | High | Track the tested architecture/OS matrix; Windows x64 emulation does not establish native Windows ARM64 support |
 | Cancellation during `select` leaving zombie wakers | Medium | High | Strict ownership of waker registration; cancel deregisters atomically |
 | Phase 6.2 effect propagation balloons compile time | Medium | Medium | Measure on real corpus from Phase 6 start; budget under 10% overhead |
 | Phase 6.2 dyn-trace error messages turn out unhelpful | Medium | High | Dedicate engineering effort; this is the make-or-break detail for user acceptance |

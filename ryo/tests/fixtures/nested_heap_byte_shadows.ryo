@@ -1,0 +1,19 @@
+fn check(flag: bool):
+	mut s = b"outer_0123456789012345678901234567890123456789" + b"!"
+	for i in range(0, 2):
+		if flag:
+			mut s = b"inner_0123456789012345678901234567890123456789" + b"!"
+			s = b"replacement_0123456789012345678901234567890123456789" + b"!"
+			if true:
+				mut s = b"deep_0123456789012345678901234567890123456789" + b"!"
+				s = b"deep_replacement_0123456789012345678901234567890123456789" + b"!"
+				v = s[0:4]
+				print(v.to_str())
+			v = s[0:11]
+			print(v.to_str())
+		print(s[0:5].to_str())
+	print(s.to_str())
+
+fn main():
+	check(true)
+	check(false)

@@ -3,12 +3,16 @@ mod concat;
 mod enums;
 mod error_path;
 mod frees;
+mod frees_reassign;
 mod frees_w0004;
 mod inout;
 mod loops;
+mod match_;
 mod merge;
 mod shadow_bindings;
 mod structs;
+#[cfg(debug_assertions)]
+mod validate;
 mod views_basics;
 mod views_branches;
 mod views_bytes;
@@ -63,7 +67,12 @@ fn str_const_walk_no_panic() {
     let tir = b.finish(&[stmt]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     assert!(sink.is_empty());
 }
 
@@ -94,7 +103,12 @@ fn borrowed_param_resolves_under_owner_param_as_borrowed() {
     // check() initialises the param lattice under Owner::Param(s_name) as
     // Borrowed. Assert that reading the borrowed param does NOT trip E0020
     // — the Owner::Param + Borrowed init is load-bearing for the enum migration.
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     assert!(
         sink.into_diags()
             .iter()
@@ -127,7 +141,12 @@ fn double_consume_reports_uam_once_via_consume_authority() {
     let take2 = tb.call(take, &[xv2], &[ParamMode::Move], void, span);
     let tir = tb.finish(&[decl, take1, take2]);
     let mut sink = DiagSink::new();
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let uam = sink
         .into_diags()
         .iter()
@@ -159,7 +178,12 @@ fn borrow_of_moved_value_still_reports_uam() {
     let print_call = tb.call(print, &[xv2], &[ParamMode::Borrow], void, span); // borrow of moved
     let tir = tb.finish(&[decl, take_call, print_call]);
     let mut sink = DiagSink::new();
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert!(
         diags
@@ -223,23 +247,22 @@ fn three_arm_if_with_conditional_move_and_loop_rebind() {
     let tir = tb.finish(&[decl_x, decl_mut, if_stmt, wl, call_post]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sidecar = take_function_sidecar(&mut sidecar, 0);
 
-    // (a) Assert no next_branch_id collision in sidecar.if_branches
+    // (a) Assert no duplicate (anchor, target) pairs in the schedule —
+    // the structural successor of the old BranchId-collision check.
     let mut ids = HashSet::new();
-    for ib in sidecar.if_branches.iter().flatten() {
+    for d in &sidecar.drops {
         assert!(
-            ids.insert(ib.then_branch.0),
-            "duplicate branch id {}",
-            ib.then_branch.0
+            ids.insert((drop_anchor(d), d.target)),
+            "duplicate drop for one (anchor, target) pair: {d:?}"
         );
-        for b in &ib.elif_branches {
-            assert!(ids.insert(b.0), "duplicate branch id {}", b.0);
-        }
-        if let Some(b) = ib.else_branch {
-            assert!(ids.insert(b.0), "duplicate branch id {}", b.0);
-        }
     }
 
     // (b) Assert a post-if read of the conditionally-moved binding emits exactly one DiagCode::UseAfterMove
@@ -295,7 +318,12 @@ fn move_and_borrow_of_same_owner_in_one_call_e0023_both_orderings() {
     let tir1 = tb1.finish(&[decl1, call1]);
 
     let mut sink1 = DiagSink::new();
-    let _sc1 = check(std::slice::from_ref(&tir1), &pool, &mut sink1);
+    let _sc1 = check(
+        std::slice::from_ref(&tir1),
+        &[ryo_core::flow::Flow::build(&tir1, &pool)],
+        &pool,
+        &mut sink1,
+    );
     let diags1 = sink1.into_diags();
     let e0023_count1 = diags1
         .iter()
@@ -314,7 +342,12 @@ fn move_and_borrow_of_same_owner_in_one_call_e0023_both_orderings() {
     let tir2 = tb2.finish(&[decl2, call2]);
 
     let mut sink2 = DiagSink::new();
-    let _sc2 = check(std::slice::from_ref(&tir2), &pool, &mut sink2);
+    let _sc2 = check(
+        std::slice::from_ref(&tir2),
+        &[ryo_core::flow::Flow::build(&tir2, &pool)],
+        &pool,
+        &mut sink2,
+    );
     let diags2 = sink2.into_diags();
     let e0023_count2 = diags2
         .iter()
@@ -346,7 +379,12 @@ fn two_borrows_of_one_owner_ok() {
     let call = tb.call(f, &[xv1, xv2], &modes, void, span);
     let tir = tb.finish(&[decl, call]);
     let mut sink = DiagSink::new();
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert!(
         !diags
@@ -379,7 +417,12 @@ fn borrow_and_move_of_distinct_owners_ok() {
     let call = tb.call(f, &[av, bv], &modes, void, span);
     let tir = tb.finish(&[da, db, call]);
     let mut sink = DiagSink::new();
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     assert!(
         !sink
             .into_diags()
@@ -407,7 +450,12 @@ fn single_move_arg_no_e0023() {
     let call = tb.call(f, &[xv], &[ParamMode::Move], void, span);
     let tir = tb.finish(&[decl, call]);
     let mut sink = DiagSink::new();
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     assert!(
         !sink
             .into_diags()
@@ -441,7 +489,12 @@ fn copy_args_untracked_no_false_positive() {
     let call = tb.call(f, &[nv, xv], &modes, void, span);
     let tir = tb.finish(&[dn, dx, call]);
     let mut sink = DiagSink::new();
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     assert!(
         !sink
             .into_diags()
@@ -473,7 +526,12 @@ fn borrow_and_move_in_sequential_statements_ok() {
     let call2 = tb.call(f, &[xv2], &[ParamMode::Move], void, span);
     let tir = tb.finish(&[decl, call1, call2]);
     let mut sink = DiagSink::new();
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     assert!(
         !sink
             .into_diags()
@@ -511,7 +569,12 @@ fn two_immutable_borrows_ok() {
     );
     let tir = tb.finish(&[decl, call]);
     let mut sink = DiagSink::new();
-    let _sc = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let _sc = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert!(
         !diags

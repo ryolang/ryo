@@ -530,3 +530,121 @@ fn test_as_bytes_on_bytes_diag() {
         stderr
     );
 }
+
+// ---------------------------------------------------------------------------
+// Compound-condition loops (`and`/`or`/parenthesized `match` in the while
+// header): a view of a heap string read inside the loop. The base's
+// cleanup is anchored at loop completion; the firing-point resolver
+// locates the loop's real exit through the condition's cut blocks, so
+// the cleanup validates and fires after the loop — pre-fix the
+// estimated pre-loop fallback point made the debug validator assert a
+// use-after-free on this exact shape.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_view_in_and_condition_loop() {
+    // The primary reproducer: heap str sliced to a view, printed in a
+    // two-iteration `and`-condition loop.
+    assert_ryo_output(
+        "view_and_loop.ryo",
+        "fn main():\n\ts = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tmut i = 0\n\twhile i < 2 and true:\n\t\tprint(v)\n\t\ti += 1\n",
+        "0101",
+    );
+}
+
+#[test]
+fn test_view_in_or_condition_loop() {
+    assert_ryo_output(
+        "view_or_loop.ryo",
+        "fn main():\n\ts = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tmut i = 0\n\twhile i < 2 or false:\n\t\tprint(v)\n\t\ti += 1\n\tprint(\"done\\n\")\n",
+        "0101done\n",
+    );
+}
+
+#[test]
+fn test_view_in_match_condition_loop() {
+    // A parenthesized match in the while header cuts the condition the
+    // same way `and`/`or` do — the loop exit must resolve exactly.
+    assert_ryo_output(
+        "view_match_loop.ryo",
+        "fn main():\n\ts = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tmut i = 0\n\twhile (match i:\n\t\t0: true\n\t\t1: true\n\t\t_: false\n\t):\n\t\tprint(v)\n\t\ti += 1\n\tprint(\"done\\n\")\n",
+        "0101done\n",
+    );
+}
+
+#[test]
+fn test_view_used_after_compound_condition_loop() {
+    // The base outlives the loop; the view is read after it.
+    assert_ryo_output(
+        "view_after_loop.ryo",
+        "fn main():\n\ts = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tmut i = 0\n\twhile i < 2 and true:\n\t\ti += 1\n\tprint(v)\n\tprint(\"done\\n\")\n",
+        "01done\n",
+    );
+}
+
+#[test]
+fn test_view_in_nested_compound_condition_loops() {
+    assert_ryo_output(
+        "view_nested_loops.ryo",
+        "fn main():\n\ts = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tmut i = 0\n\twhile i < 2 and true:\n\t\tmut j = 0\n\t\twhile j < 2 or false:\n\t\t\tprint(v)\n\t\t\tj += 1\n\t\ti += 1\n\tprint(\"done\\n\")\n",
+        "01010101done\n",
+    );
+}
+
+#[test]
+fn test_break_in_compound_condition_loop() {
+    // The break bypasses the loop-completion anchor; the break path's
+    // cleanup must still release the base exactly once.
+    assert_ryo_output(
+        "view_break_loop.ryo",
+        "fn main():\n\ts = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tmut i = 0\n\twhile i < 10 and true:\n\t\tprint(v)\n\t\ti += 1\n\t\tif i == 2:\n\t\t\tbreak\n\tprint(\"done\\n\")\n",
+        "0101done\n",
+    );
+}
+
+#[test]
+fn test_continue_in_compound_condition_loop() {
+    assert_ryo_output(
+        "view_continue_loop.ryo",
+        "fn main():\n\ts = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tmut i = 0\n\twhile i < 4 and true:\n\t\ti += 1\n\t\tif i % 2 == 1:\n\t\t\tcontinue\n\t\tprint(v)\n\tprint(\"done\\n\")\n",
+        "0101done\n",
+    );
+}
+
+#[test]
+fn test_early_return_in_compound_condition_loop() {
+    // The early return bypasses the loop-completion anchor; only the
+    // return-epilogue cleanup may release the base on that path.
+    assert_ryo_output(
+        "view_return_loop.ryo",
+        "fn scan() -> int:\n\ts = \"0123456789012345678901234567890123456789\"\n\tv = s[0:2]\n\tmut i = 0\n\twhile i < 10 and true:\n\t\tprint(v)\n\t\ti += 1\n\t\tif i == 2:\n\t\t\treturn 7\n\treturn 0\n\nfn main():\n\tprint(int_to_str(scan()))\n\tprint(\"done\\n\")\n",
+        "01017done\n",
+    );
+}
+
+#[test]
+fn shadowed_heap_reassignment_preserves_outer_storage() {
+    assert_ryo_output(
+        "shadowed_heap_reassignment.ryo",
+        include_str!("fixtures/shadowed_heap_reassignment.ryo"),
+        "replacement_0123456789012345678901234567890123456789!\nouter_0123456789012345678901234567890123456789!\n",
+    );
+}
+
+#[test]
+fn sibling_views_promote_the_same_parameter_independently() {
+    assert_ryo_output(
+        "same_parameter_promotions.ryo",
+        include_str!("fixtures/same_parameter_promotions.ryo"),
+        "abcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnopabcdefghijklmnop88",
+    );
+}
+
+#[test]
+fn nested_heap_shadows_preserve_outer_storage() {
+    assert_ryo_output(
+        "nested_heap_shadows.ryo",
+        include_str!("fixtures/nested_heap_shadows.ryo"),
+        "deepreplacementouterdeepreplacementouterouter_0123456789012345678901234567890123456789!outerouterouter_0123456789012345678901234567890123456789!",
+    );
+}

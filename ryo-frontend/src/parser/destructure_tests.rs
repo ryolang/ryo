@@ -83,9 +83,9 @@ fn destructure_named_pun_and_rename_parses() {
     };
     assert_eq!(fields.len(), 2);
     assert_eq!(pool.str(fields[0].name), "q");
-    assert_eq!(pool.str(fields[0].binding.name), "q");
+    assert_eq!(fields[0].kind, PatternFieldKind::Pun);
     assert_eq!(pool.str(fields[1].name), "r");
-    assert_eq!(pool.str(fields[1].binding.name), "r");
+    assert_eq!(fields[1].kind, PatternFieldKind::Pun);
 
     // `{x = quot} = e` — a rename: field `x` binds the local `quot`.
     let (ast, pool) = lex_and_parse("{x = quot} = dm\n").unwrap();
@@ -96,7 +96,11 @@ fn destructure_named_pun_and_rename_parses() {
     };
     assert_eq!(fields.len(), 1);
     assert_eq!(pool.str(fields[0].name), "x");
-    assert_eq!(pool.str(fields[0].binding.name), "quot");
+    assert!(
+        matches!(fields[0].kind, PatternFieldKind::Rename(n) if pool.str(n) == "quot"),
+        "expected Rename(quot), got {:?}",
+        fields[0].kind
+    );
 }
 
 #[test]
@@ -124,7 +128,13 @@ fn destructure_wildcard_parses() {
     };
     assert_eq!(fields.len(), 2);
     assert_eq!(pool.str(fields[0].name), "q");
+    assert_eq!(fields[0].kind, PatternFieldKind::Pun);
     assert_eq!(pool.str(fields[1].name), "_");
+    assert_eq!(
+        fields[1].kind,
+        PatternFieldKind::Wildcard,
+        "a field named `_` is a wildcard"
+    );
 
     // `(a, _, c) = e` — wildcard positional element.
     let (ast, pool) = lex_and_parse("(a, _, c) = f()\n").unwrap();

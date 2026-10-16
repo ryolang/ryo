@@ -230,6 +230,63 @@ pub enum DiagCode {
     /// diagnostic names the offending field and its type.
     AnonFieldNotEq,
 
+    // --- sema: match (M12) ---
+    /// A `match` expression does not cover every value of the scrutinee
+    /// (M12): an enum is missing variant arms, or a `bool` / `int` /
+    /// `str` scrutinee has no wildcard. The message lists the missing
+    /// variants in declaration order (or the kind name for literals);
+    /// the help note suggests a `_:` arm.
+    NonExhaustiveMatch,
+    /// A `match` arm can never execute because an earlier arm already
+    /// matched everything it could (M12): any arm after `_:`, or a
+    /// duplicate literal / variant arm. Warning severity — the first
+    /// arm still wins at runtime. The span anchors on the redundant
+    /// pattern's arm.
+    UnreachableArm,
+    /// A `match` arm pattern's kind does not match the scrutinee type
+    /// (M12): a literal pattern against a non-literal scrutinee (or of
+    /// the wrong literal kind), a variant pattern against a non-enum,
+    /// an anonymous-struct pattern against a non-anon scrutinee, or a
+    /// literal field of the wrong kind inside an anon pattern. The
+    /// message names both sides (pattern kind vs scrutinee/field type).
+    PatternTypeMismatch,
+    /// A variant pattern names a variant the scrutinee's enum does not
+    /// declare (M12), or a qualified pattern names a different enum
+    /// than the scrutinee's. The message names the unmatched identifier
+    /// and carries a did-you-mean help note over the scrutinee enum's
+    /// variant list when a close name exists; qualified mismatches name
+    /// both enums. Distinct from M11's [`UnknownVariant`][Self::UnknownVariant]
+    /// (E0119, construction / bare access) — the table assigns match
+    /// patterns their own E0132.
+    UnknownMatchVariant,
+    /// A `match` arm binds a payload field by move out of a BORROWED
+    /// scrutinee (M12): `match &opt:` with `Some(v):` where the field
+    /// type is not `Copy`. The message names the field and its type;
+    /// the help note suggests matching on an owned value or binding `_`.
+    MoveOutOfBorrowedScrutinee,
+    /// `match` arms yield incompatible value types (M12). The primary
+    /// span sits on the first offending arm's body with notes on the
+    /// other arms; the message names both types in the field-diff style.
+    ArmTypeMismatch,
+    /// A value-producing `match` has an arm whose statement body falls
+    /// through without producing a value (M12). The message suggests
+    /// ending the arm with a value or terminating it with `return`,
+    /// `break`, or `continue` (all three diverge, so a value match may
+    /// end in any of them).
+    ArmNoValue,
+    /// The scrutinee of a `match` is not a matchable type (M12) —
+    /// `void` / `never` (no value to match), floats (literal patterns
+    /// deferred), named structs (nominal patterns deferred), views, or
+    /// `bytes`. The message names the scrutinee type and lists what IS
+    /// matchable: enums, `int`, `bool`, `str`, and anonymous structs.
+    InvalidMatchScrutinee,
+    /// Every value arm of a `match` yields a view type (M12): the join
+    /// accepts the common view, but no merge shape exists for a view
+    /// result (ownership/liveness of a projection across arms needs
+    /// design — M12.6 carry-over). Rejected at compile time, naming the
+    /// view type and the deferral, never silently miscompiled.
+    MatchViewResult,
+
     // --- ownership (M8.1b) ---
     /// Use of a value after it has been moved.
     UseAfterMove,
@@ -258,7 +315,18 @@ pub enum DiagCode {
     /// Rule P2 violation: an owner was moved, mutated, or passed
     /// `inout` while a slice projection of it is live (M8.4).
     SourceProjected,
-
+    /// A `match` value arm yielded an aggregate rooted in a BORROWED
+    /// owner (a borrow/inout parameter or binding, or a field
+    /// projection of one): the match result becomes an owned binding
+    /// whose cleanup would free caller-owned storage (observed:
+    /// corrupted output + SIGTRAP). The arm-result transfer consumes
+    /// owned arm bodies into the match inst, but a borrowed-rooted
+    /// aggregate cannot transfer — the borrowed family stays rejected
+    /// at compile time. No scheduled drop exists for a borrowed owner,
+    /// so the backend's aggregate-result guard could never see this
+    /// family (the owned producer/binding-read families it once
+    /// diagnosed are legalized by the transfer).
+    MatchValueArmBorrowed,
     // --- parser ---
     ParseError,
 

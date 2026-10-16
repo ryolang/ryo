@@ -45,7 +45,12 @@ fn view_across_branches() {
     let tir = tb.finish(&[decl, vdecl, ifs, cstmt]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     assert!(
         sink.is_empty(),
         "expected no diagnostics (freeze lifted at the join)"
@@ -101,7 +106,12 @@ fn freeze_is_per_arm_precise_across_if_arms() {
     let tir = tb.finish(&[decl, vdecl, ifs]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     assert!(
         sink.is_empty(),
         "expected no diagnostics (v is dead on the then-path before the move); got: {:?}",
@@ -175,7 +185,12 @@ fn per_arm_override_respects_loop_deferral() {
     let tir = tb.finish(&[decl, vdecl, ifs]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert_eq!(
         diags.len(),
@@ -248,7 +263,12 @@ fn per_arm_kill_respects_loop_deferral() {
     let tir = tb.finish(&[decl, vdecl, ifs]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert_eq!(
         diags.len(),
@@ -336,7 +356,12 @@ fn per_arm_kill_without_deferral_stays_scoped() {
     let tir = tb.finish(&[decl, vdecl, ifs]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert_eq!(
         diags.len(),
@@ -423,7 +448,12 @@ fn per_arm_override_applies_to_elif_arms() {
     let tir = tb.finish(&[decl, vdecl, ifs]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     assert!(
         sink.is_empty(),
         "expected no diagnostics (v dies at its elif-local last read); got: {:?}",
@@ -492,7 +522,12 @@ fn view_created_in_loop_body_per_arm_kill_applies() {
     let tir = tb.finish(&[decl, wl]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     assert!(
         sink.is_empty(),
         "expected no diagnostics (v is re-sliced each iteration and dead on the push arm); got: {:?}",
@@ -559,7 +594,12 @@ fn view_created_in_loop_body_freeze_holds_before_read() {
     let tir = tb.finish(&[decl, wl]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert_eq!(
         diags.len(),
@@ -626,7 +666,12 @@ fn freeze_holds_before_arm_local_last_read() {
     let tir = tb.finish(&[decl, vdecl, ifs]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert_eq!(
         diags.len(),
@@ -694,7 +739,12 @@ fn freeze_holds_in_arm_when_view_read_after_join() {
     let tir = tb.finish(&[decl, vdecl, ifs, pstmt]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert_eq!(
         diags.len(),
@@ -762,7 +812,12 @@ fn move_in_arm_where_view_is_dead_ok_but_post_join_use_is_uam() {
     let tir = tb.finish(&[decl, vdecl, ifs, pstmt]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert_eq!(
         diags.len(),
@@ -832,7 +887,12 @@ fn loop_deferred_view_stays_frozen_across_arm_without_read() {
     let tir = tb.finish(&[decl, vdecl, wl]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert_eq!(
         diags.len(),
@@ -910,7 +970,12 @@ fn for_range_deferred_view_stays_frozen_across_arm_without_read() {
     let tir = tb.finish(&[decl, vdecl, fr]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert_eq!(
         diags.len(),
@@ -967,7 +1032,12 @@ fn view_in_loop_body_converges() {
     let tir = tb.finish(&[decl, wl]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sidecar = take_function_sidecar(&mut sidecar, 0);
     assert!(
         sink.is_empty(),
@@ -978,11 +1048,11 @@ fn view_in_loop_body_converges() {
     // re-anchor moves it to the loop exit).
     assert!(
         sidecar
-            .free_schedule
+            .drops
             .iter()
-            .any(|fp| fp.target == lit && fp.after == wl && fp.branch.is_none()),
+            .any(|fp| fp.target == lit && fp.position.anchor_inst().unwrap() == wl),
         "expected s's Free anchored after the loop; got: {:?}",
-        sidecar.free_schedule
+        sidecar.drops
     );
 }
 
@@ -1045,7 +1115,12 @@ fn loop_deferred_view_survives_if_join_prune() {
     let tir = tb.finish(&[decl, vdecl, wl]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert_eq!(
         diags.len(),

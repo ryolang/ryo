@@ -416,6 +416,51 @@ fn test_and_short_circuit_in_range() {
 }
 
 #[test]
+fn test_and_or_short_circuit_skips_rhs_side_effects() {
+    // The Flow IR cuts a conditional branch for `and`/`or`: the RHS block is
+    // reachable only through the taken edge, so a side-effecting RHS is
+    // observed exactly when the LHS does not decide the result.
+    assert_ryo_output(
+        "and_or_short_circuit",
+        "fn probe() -> bool:\n\tprint(\"rhs\\n\")\n\treturn true\n\nfn main():\n\tx = false and probe()\n\tprint(x)\n\tprint(\"\\n\")\n\ty = true or probe()\n\tprint(y)\n\tprint(\"\\n\")\n\tw = true and probe()\n\tprint(w)\n\tprint(\"\\n\")\n\tz = false or probe()\n\tprint(z)\n\tprint(\"\\n\")\n",
+        "false\ntrue\nrhs\ntrue\nrhs\ntrue\n",
+    );
+}
+
+#[test]
+fn test_and_in_while_condition_reevaluates_each_iteration() {
+    // Block cutting inside a loop header: the WhileTest lands in the
+    // `and` join block and the RHS runs per iteration.
+    assert_ryo_output(
+        "and_while_condition",
+        "fn main():\n\tmut i = 0\n\tflag = true\n\twhile i < 3 and flag:\n\t\tprint(i)\n\t\tprint(\"\\n\")\n\t\ti = i + 1\n\tprint(\"done\\n\")\n",
+        "0\n1\n2\ndone\n",
+    );
+}
+
+#[test]
+fn test_for_bounds_evaluate_once() {
+    // Bound evaluation is pre-header work: the backedge targets the
+    // ForTest header directly and must not re-run the bound steps.
+    assert_ryo_output(
+        "for_bounds_once",
+        "fn start() -> int:\n\tprint(\"start\")\n\treturn 0\n\nfn main():\n\tfor i in range(start(), 3):\n\t\tprint(i)\n",
+        "start012",
+    );
+}
+
+#[test]
+fn test_for_bounds_evaluate_once_per_enclosing_iteration() {
+    // Nested loops: the inner bound evaluates once per outer iteration,
+    // not once per inner iteration and not once per program.
+    assert_ryo_output(
+        "for_bounds_nested",
+        "fn inner() -> int:\n\tprint(\"[i]\")\n\treturn 1\n\nfn main():\n\tfor i in range(0, 2):\n\t\tfor j in range(inner(), 3):\n\t\t\tprint(j)\n",
+        "[i]12[i]12",
+    );
+}
+
+#[test]
 fn test_not_operator_codegen() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let code = "fn main():\n\tx = not true\n\ty = not false\n\tprint(\"done\\n\")\n";
@@ -617,6 +662,32 @@ fn while_loop_countdown() {
         output.status.success(),
         "STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn while_body_return_compiles_and_runs() {
+    // Regression (G3 loop convergence): a loop whose body's only live
+    // exit is a `return` aborts the ownership pass — the convergence
+    // test compared the entry against the raw post-body state, which the
+    // entry join discards every pass (Return-only state is path-local),
+    // so the fixed point was never detected. Must compile and print.
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn choose(flag: bool) -> str:\n\ts = \"hello\"\n\twhile flag:\n\t\treturn s\n\treturn s\n\nfn main():\n\tprint(choose(true))\n";
+    let test_file = create_test_file(temp_dir.path(), "while_body_return.ryo", code);
+
+    let output = run_ryo_command(&["run", "while_body_return.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(
+        output.status.success(),
+        "STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "hello",
+        "choose(true) must return the in-loop value"
     );
 }
 

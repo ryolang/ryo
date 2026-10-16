@@ -48,9 +48,9 @@ fn conditional_enum_move_schedules_branch_gated_free() {
     // else-arm only reads it. The post-if state is Moved (any-Moved-wins
     // over arms that reach the merge), so the function-exit last-use pass
     // skips the owner: the else-arm's still-Valid buffer needs an
-    // arm-gated Free or it leaks on the taken path's complement.
+    // arm-conditional Free or it leaks on the taken path's complement.
     let src = "enum Opt:\n\tSome(str)\n\tEmpty\n\nfn take(move o: Opt):\n\tprint(o)\n\nfn main():\n\tmut o = Opt.Some(\"alice\")\n\tc = true\n\tif c:\n\t\ttake(o)\n\telse:\n\t\tprint(o)\n";
-    let (diags, mut sidecar, _tirs, pool) = check_src_full(src);
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
     assert!(
         !diags
             .iter()
@@ -63,15 +63,32 @@ fn conditional_enum_move_schedules_branch_gated_free() {
         .position(|f| pool.str(f.name) == "main")
         .expect("main's sidecar entry");
     let f = take_function_sidecar(&mut sidecar, main_idx);
+    // Arm-conditional = the scrutinee owner's drop anchored inside an
+    // arm's Flow IR block (block membership gates it to the arm's path).
+    // Arm-body temp frees also anchor there, so the filter pins the
+    // TARGET: the enum owner (the init's EnumLit).
+    let enum_owner = (1..tirs[main_idx].instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find(|&r| tirs[main_idx].inst(r).tag == ryo_core::tir::TirTag::EnumLit)
+        .expect("the enum owner's EnumLit");
+    let flow = build_flow(&tirs[main_idx], &pool);
+    let if_stmt = (1..tirs[main_idx].instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find(|&r| tirs[main_idx].inst(r).tag == ryo_core::tir::TirTag::IfStmt)
+        .expect("the conditional if");
+    let arm_blocks = flow.branch_arm_blocks(if_stmt);
     let gated: Vec<_> = f
-        .free_schedule
+        .drops
         .iter()
-        .filter(|fp| fp.branch.is_some())
+        .filter(|d| {
+            d.target == enum_owner
+                && flow.step_block_of(drop_anchor(d)) == Some(arm_blocks.else_block)
+        })
         .collect();
     assert_eq!(
         gated.len(),
         1,
-        "exactly one arm-gated Free for the conditionally-moved enum; got {gated:?}"
+        "exactly one arm-conditional Free for the conditionally-moved enum; got {gated:?}"
     );
 }
 
@@ -80,7 +97,7 @@ fn conditional_enum_reassign_schedules_fallthrough_drop() {
     // (c, reassign shape) `mut o = ...; if c: o = Opt.Empty` with `o`
     // never read after: the taken arm drops the pre-reassign buffer via
     // `free_on_reassign`; the NOT-taken path must free it too — via an
-    // arm-gated ConditionalDeadDrop for the pre-branch owner.
+    // arm-gated block-start dead drop for the pre-branch owner.
     let src = "enum Opt:\n\tSome(str)\n\tEmpty\n\nfn main():\n\tmut o = Opt.Some(\"alice\")\n\tc = true\n\tif c:\n\t\to = Opt.Empty\n";
     let (diags, mut sidecar, _tirs, _pool) = check_src_full(src);
     assert!(
@@ -90,15 +107,19 @@ fn conditional_enum_reassign_schedules_fallthrough_drop() {
         "no errors expected; got {diags:?}"
     );
     let f = take_function_sidecar(&mut sidecar, 0);
+    let block_start = block_start_drops(&f);
     assert_eq!(
-        f.conditional_dead_drops.len(),
+        block_start.len(),
         1,
-        "expected one ConditionalDeadDrop for the pre-branch enum owner; got {:?}",
-        f.conditional_dead_drops
+        "expected one block-start dead drop for the pre-branch enum owner; got {:?}",
+        f.drops
     );
     assert!(
-        !f.conditional_dead_drops[0].arms.is_empty(),
-        "the drop must name at least one untouched arm (the fall-through)"
+        matches!(
+            block_start[0].position,
+            ryo_core::flow::DropPosition::BlockStart { .. }
+        ),
+        "the drop must fire at an untouched arm block (the fall-through)"
     );
 }
 

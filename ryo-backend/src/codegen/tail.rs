@@ -98,14 +98,18 @@ impl<M: Module> Codegen<M> {
     ///    value, or void): no fat/view/struct args, no inout modes, no
     ///    sret. The deliberate v1 scope; the eager_destruction
     ///    benchmark (`recursive(x: int)`, void return) is covered.
-    /// 4. No frees are scheduled with `after == call_ref` — a
-    ///    `return_call` never returns to this frame, so a free anchored
-    ///    on the call would never fire.
-    /// 5. No frees are scheduled with `after == enclosing_return` (the
-    ///    ownership pass double-anchors frees at the enclosing Return
-    ///    because codegen cannot sweep after a terminator), and no
-    ///    pending free a sweep would fire right now — mirroring the
-    ///    exact condition `sweep_due_frees` consults.
+    /// 4. (position-mechanical, mechanical) No unconsumed drop in the call's fire scope
+    ///    — the `AfterStep` bucket of the statement containing the
+    ///    call, the block's at-terminator bucket, and the enclosing
+    ///    Return's payload bucket — is anchored at/after the call's
+    ///    step. A `return_call` never returns to this frame, so a drop
+    ///    firing at/after it would never fire: one anchored ON the call
+    ///    (its result temp) or on the Return blocks; one anchored in the
+    ///    operand subtree (an argument read) still fires — marshalling
+    ///    has evaluated the argument, making the marshalled scalars the
+    ///    freed value's last use — so `try_emit_tail_call` fires the
+    ///    scope buckets between marshalling and the `return_call`,
+    ///    exactly where the old post-statement sweep fired them.
     ///
     /// Rejecting is always a silent fallback to `call` + `return`,
     /// never an error.
@@ -149,21 +153,78 @@ impl<M: Module> Codegen<M> {
         ) {
             return false;
         }
-        if !ctx.free_by_after[call_ref.index()].is_empty() {
-            return false;
-        }
-        if let Some(r) = enclosing_return
-            && !ctx.free_by_after[r.index()].is_empty()
+        !Self::tail_scope_has_blocking_drops(ctx, call_ref, enclosing_return)
+    }
+
+    /// The position-mechanical mechanical tail scope: drop indices in the call's fire
+    /// scope — the `AfterStep` bucket of the statement containing the
+    /// call (the trailing `ExprStmt`, or no statement when the call is
+    /// a deferred return operand), the block's at-terminator bucket,
+    /// and the enclosing Return's payload bucket. Returns the indices
+    /// of the UNCONSUMED drops in that scope whose anchor is at/after
+    /// the call's step — the drops a `return_call` would strand.
+    fn tail_blocking_drops(
+        ctx: &FunctionContext<'_, M>,
+        call_ref: TirRef,
+        enclosing_return: Option<TirRef>,
+    ) -> Vec<usize> {
+        let mut scope: Vec<usize> = Vec::new();
+        let Some(block) = ctx.flow.step_block_of(call_ref) else {
+            return Vec::new();
+        };
+        let steps = ctx.flow.block_steps(block);
+        let Some(call_pos) = steps.iter().position(|s| s.inst == call_ref) else {
+            return Vec::new();
+        };
+        if let Some(stmt) = steps[call_pos..]
+            .iter()
+            .find(|s| super::is_statement_step(ctx.tir.inst(s.inst).tag))
         {
-            return false;
+            scope.extend(ctx.fire_after_stmt[stmt.inst.index()].iter().copied());
         }
-        let pending_fireable = ctx.pending_sweep.iter().any(|&idx| {
-            let fp = &ctx.sidecar.free_schedule[idx];
-            Self::branch_active(fp.branch, &ctx.branch_stack)
-                && Self::cached_repr(ctx, fp.after).is_some()
-                && Self::cached_repr(ctx, fp.target).is_some()
-        });
-        !pending_fireable
+        scope.extend(ctx.fire_at_term.get(&block).into_iter().flatten().copied());
+        if let Some(r) = enclosing_return {
+            scope.extend(ctx.fire_by_payload[r.index()].iter().copied());
+        }
+        scope
+            .into_iter()
+            .filter(|&idx| {
+                let position = if idx >= ctx.sidecar.drops.len() {
+                    let promotion = idx - ctx.sidecar.drops.len();
+                    if ctx.promo_freed_at[promotion] {
+                        return false;
+                    }
+                    ctx.sidecar.promotion_frees[promotion].position
+                } else {
+                    if ctx.freed_at[idx] {
+                        return false;
+                    }
+                    ctx.sidecar.drops[idx].position
+                };
+                match position.anchor_inst() {
+                    // PreTerminator{block}: fires with the block's
+                    // terminator — always at/after the call.
+                    None => true,
+                    Some(anchor) => match ctx.flow.step_of(anchor) {
+                        None => true,
+                        Some(_) => steps
+                            .iter()
+                            .position(|s| s.inst == anchor)
+                            .is_none_or(|ap| ap >= call_pos),
+                    },
+                }
+            })
+            .collect()
+    }
+
+    /// True when `tail_blocking_drops` is non-empty (see
+    /// `tail_call_eligible` condition 4).
+    fn tail_scope_has_blocking_drops(
+        ctx: &FunctionContext<'_, M>,
+        call_ref: TirRef,
+        enclosing_return: Option<TirRef>,
+    ) -> bool {
+        !Self::tail_blocking_drops(ctx, call_ref, enclosing_return).is_empty()
     }
 
     /// Emit `call_ref` as a Cranelift `return_call` when
@@ -182,27 +243,20 @@ impl<M: Module> Codegen<M> {
     /// * Due frees at the anchor: the ownership pass's return-epilogue
     ///   anchors promo frees at every Return/ReturnVoid and the
     ///   fallthrough backstop anchors them at the final body statement.
-    /// * Sweep-eligible frees: `tail_call_eligible`'s pending-sweep
-    ///   mirror runs BEFORE arg marshalling, when the call's arg
-    ///   sub-expressions have no cached reprs yet — a last-use free
-    ///   anchored on a `Var` read inside an arg (the normal body-level
-    ///   anchor) becomes sweep-eligible only when marshalling evaluates
-    ///   that arg, and `emit_body` never sweeps after a Return
-    ///   terminator. Sweeping here (frame still alive; the marshalled
-    ///   scalars are the freed values' last use) is the only sound way
-    ///   to keep such a free. The plain path fires exactly this free
-    ///   via the end-of-statement sweep.
-    ///
-    /// free_schedule frees at the anchor itself are already excluded by
-    /// `tail_call_eligible` (conditions 4/5), so the due-frees call is
-    /// normally a no-op; firing it keeps the tail path a faithful
-    /// mirror of the plain path.
+    /// * The drop fire scope (position-mechanical): `tail_call_eligible` proved every
+    ///   unconsumed drop in the scope is anchored inside the operand
+    ///   subtree (an argument read) — marshalling has now evaluated
+    ///   those arguments, making the marshalled scalars the freed
+    ///   values' last use, so firing the scope buckets here (frame
+    ///   still alive) lands each free exactly where the mechanical
+    ///   post-statement fire point would have. The plain path fires
+    ///   the same drops via the statement's fire bucket.
     pub(crate) fn try_emit_tail_call(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         call_ref: TirRef,
         enclosing_return: Option<TirRef>,
-        anchor: TirRef,
+        _anchor: TirRef,
     ) -> Result<bool, String> {
         if !Self::tail_call_eligible(ctx, call_ref, enclosing_return) {
             return Ok(false);
@@ -222,10 +276,28 @@ impl<M: Module> Codegen<M> {
             marshalled.inout_reloads.is_empty(),
             "tail_call_eligible rejects inout args"
         );
-        Self::emit_due_frees(builder, ctx, anchor)?;
-        Self::emit_due_promo_frees(builder, ctx, anchor)?;
-        Self::sweep_due_frees(builder, ctx)?;
-        Self::sweep_due_promo_frees(builder, ctx)?;
+        // Fire the scope's non-consumed drops (all anchored in the
+        // operand subtree by eligibility). Reuse the blocking-drop
+        // scan's scope: the same buckets, filtered to unconsumed.
+        let block = ctx.flow.step_block_of(call_ref).expect("call is a step");
+        let steps = ctx.flow.block_steps(block);
+        let call_pos = steps
+            .iter()
+            .position(|s| s.inst == call_ref)
+            .expect("call step is in its block");
+        if let Some(stmt) = steps[call_pos..]
+            .iter()
+            .find(|s| super::is_statement_step(ctx.tir.inst(s.inst).tag))
+        {
+            let indices = ctx.fire_after_stmt[stmt.inst.index()].clone();
+            Self::fire_bucket(builder, ctx, &indices)?;
+        }
+        let term_indices = ctx.fire_at_term.get(&block).cloned().unwrap_or_default();
+        Self::fire_bucket(builder, ctx, &term_indices)?;
+        if let Some(r) = enclosing_return {
+            let indices = ctx.fire_by_payload[r.index()].clone();
+            Self::fire_bucket(builder, ctx, &indices)?;
+        }
         let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
         builder.ins().return_call(callee_ref, &marshalled.values);
         Ok(true)

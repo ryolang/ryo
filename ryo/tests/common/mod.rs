@@ -1184,7 +1184,7 @@ fn main():
         // both directions in one run: the x shape exercises the taken
         // reseat + taken shadow scope, the y shape the not-taken
         // reseat + not-taken shadow scope. The not-taken shadow side
-        // pins the binding-aware ConditionalDeadDrop honoring: a dead
+        // pins the binding-aware conditional dead-drop honoring: a dead
         // shadow-scope reseat value must not mint a drop against the
         // outer binding's home slot (the outer owner's own Free
         // already released it — the drop double-freed the slot's
@@ -1298,6 +1298,299 @@ fn main():
 \tf(true, false)
 \tf(false, false)
 \tprint(\"done\\n\")
+",
+    ),
+    (
+        // M12 match: partial moves out of a named enum payload, both
+        // directions, on a >SSO-cap heap str (concat-built — plain
+        // literals are cap==0 rodata and leak-invisible). Direction 1
+        // (`Text{msg=t, code=_}`) binds `msg` by move, consuming the
+        // scrutinee; the bound copy frees at its own last use. Direction
+        // 2 (`Text{msg=_, code=c}`) copies the int and leaves `msg`
+        // unbound on a non-consuming arm, so the payload drops through
+        // the scrutinee's whole-value enum drop scheduled after the
+        // match. Either direction leaking or double-freeing fails the
+        // leak check; mirrors the valgrind_match_* lane.
+        "match_partial_move_wildcard_drop",
+        "\
+enum Msg:
+\tText(msg: str, code: int)
+\tQuit
+
+fn main():
+\tpad = \"0123456789012345678901234567890123456789\"
+\tm = Msg.Text{msg=\"first-\" + pad, code=1}
+\tmatch m:
+\t\tText{msg=t, code=_}:
+\t\t\tprint(t)
+\t\t\tprint(\"\\n\")
+\t\tQuit:
+\t\t\tprint(\"quit\\n\")
+\tn = Msg.Text{msg=\"second-\" + pad, code=2}
+\tmatch n:
+\t\tText{msg=_, code=c}:
+\t\t\tprint(int_to_str(c))
+\t\t\tprint(\"\\n\")
+\t\tQuit:
+\t\t\tprint(\"quit\\n\")
+",
+    ),
+    (
+        // M12 match: a value-producing str match used as a bare
+        // statement — the aggregate result slot is written per arm and
+        // discarded unread. Arm literals are static (cap == 0), so no
+        // free traffic is scheduled; the pin is that the slot
+        // write/merge path runs clean end to end (memcheck sees every
+        // store, so a mis-sized slot or bogus merge store still fails).
+        // Both arms execute across the two matches.
+        "match_discarded_value",
+        "\
+fn main():
+\tt = true
+\tmatch t:
+\t\ttrue: \"yes\"
+\t\t_: \"no\"
+\tf = false
+\tmatch f:
+\t\ttrue: \"yes\"
+\t\t_: \"no\"
+\tprint(\"done\\n\")
+",
+    ),
+    (
+        // M12 match: an owned temporary scrutinee with a heap str
+        // payload, no consuming arm — the anon-temp whole-value drop is
+        // scheduled anchored after the Match inst and swept post-merge,
+        // exactly once per path (the anon-temp temporary-drop machinery
+        // the valgrind/ASan lanes pin). `make_msg(1)` exercises the
+        // Text path (a real ryo_str_free of the concat-built payload);
+        // `make_msg(0)` exercises the payload-free Quit path.
+        "match_temporary_drop_once",
+        "\
+enum Msg:
+\tText(body: str)
+\tQuit
+
+fn make_msg(n: int) -> Msg:
+\tif n > 0:
+\t\treturn Msg.Text{body=int_to_str(n) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}
+\treturn Msg.Quit
+
+fn main():
+\tmatch make_msg(1):
+\t\tMsg.Text(_):
+\t\t\tprint(\"text\\n\")
+\t\tMsg.Quit:
+\t\t\tprint(\"quit\\n\")
+\tmatch make_msg(0):
+\t\tMsg.Text(_):
+\t\t\tprint(\"text\\n\")
+\t\tMsg.Quit:
+\t\t\tprint(\"quit\\n\")
+",
+    ),
+    (
+        // M12 match: a `break` inside a statement-level match arm inside
+        // a loop. The loop-local heap str (concat-built > SSO cap) is
+        // read only in the sibling arm, so its last-use Free does not
+        // fire on the break path — the jump-exit Free scheduled by the
+        // loop-exit pass is the only release there. Pre-fix the
+        // ExprStmt-wrapped match hid the break from the jump walk
+        // (and sibling-arm Frees falsely counted as covering it), so
+        // the break path leaked the heap str; the valgrind lane pins
+        // the leak, ASan the same shape. Mirrors the
+        // break_in_stmt_match_arm_gets_loop_exit_free unit test.
+        "match_break_in_arm_loop_leak",
+        "\
+fn make(tag: int) -> str:
+\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+
+fn main():
+\tmut i = 0
+\twhile i < 3:
+\t\ts = make(i)
+\t\tmatch i:
+\t\t\t1:
+\t\t\t\tbreak
+\t\t\t_:
+\t\t\t\tprint(s)
+\t\ti = i + 1
+\tprint(\"done\\n\")
+",
+    ),
+    (
+        // M12 match: a heap str VarDecl inside a statement-level match
+        // arm is a NAMED init — the anon-temp pass must not schedule a
+        // second Free on top of the named last-use Free. Pre-fix the
+        // ExprStmt-wrapped match hid the arm VarDecl from
+        // collect_named_inits_rec, so both passes freed the
+        // concat-built > SSO-cap payload (double free); ASan/valgrind
+        // pin the exactly-once drop. Mirrors the
+        // named_vardecl_in_stmt_match_arm_freed_exactly_once unit test.
+        "match_arm_vardecl_double_free",
+        "\
+fn make(tag: int) -> str:
+\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+
+fn main():
+\tmut i = 0
+\twhile i < 2:
+\t\tmatch i:
+\t\t\t0:
+\t\t\t\ts = make(0)
+\t\t\t\tprint(s)
+\t\t\t\tprint(\"\\n\")
+\t\t\t_:
+\t\t\t\tprint(\"other\\n\")
+\t\ti = i + 1
+\tprint(\"done\\n\")
+",
+    ),
+    (
+        // M12 match: a `break` inside the arm of a match in VALUE
+        // position (a VarDecl initializer) inside a loop. The
+        // loop-local heap str's last-use Free is anchored after the
+        // match, which never completes on the break path — the
+        // jump-exit Free scheduled by the loop-exit pass is the only
+        // release there. Pre-fix the jump walk only descended
+        // statement-level matches, so the VarDecl statement hid the
+        // break and the break path leaked the concat-built >SSO-cap
+        // str; ASan/valgrind pin the leak. Mirrors the
+        // break_in_value_position_match_arm_gets_loop_exit_free unit
+        // test.
+        "match_break_in_value_arm_loop_exit",
+        "\
+fn make(tag: int) -> str:
+\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+
+fn main():
+\tmut i = 0
+\twhile i < 3:
+\t\ts = make(i)
+\t\tn = match i:
+\t\t\t1:
+\t\t\t\tbreak
+\t\t\t_: 0
+\t\tprint(s)
+\t\tprint(\"\\n\")
+\t\ti = i + 1
+\tprint(\"done\\n\")
+",
+    ),
+    (
+        // M12 match: an expression arm that binds a non-`Copy` payload
+        // by move and never reads it leaves the owned value
+        // unconsumed — the dead-bind machinery schedules an arm-gated
+        // Free anchored at the arm-body expression, which codegen must
+        // flush INSIDE the arm (before the merge jump and the
+        // BranchId pop). Pre-fix the free was never emitted (leak) on
+        // both matches: `v`'s payload on the first, `w`'s payload plus
+        // the wildcard arm's whole-scrutinee drop on the second;
+        // ASan/valgrind pin the exactly-once drop of the concat-built
+        // >SSO-cap payloads. Mirrors the
+        // dead_bind_in_expr_arm_freed_exactly_once_in_arm unit test.
+        "match_value_arm_unconsumed_temporary",
+        "\
+enum Opt:
+\tSome(str)
+\tEmpty
+
+fn main():
+\tpad = \"0123456789012345678901234567890123456789\"
+\to = Opt.Some(\"first-\" + pad)
+\tn = match o:
+\t\tSome(v): 1
+\t\t_: 0
+\tprint(int_to_str(n))
+\tprint(\"\\n\")
+\tp = Opt.Some(\"second-\" + pad)
+\tm = match p:
+\t\tSome(w): 2
+\t\tEmpty: 0
+\tprint(int_to_str(m))
+\tprint(\"\\n\")
+",
+    ),
+    (
+        // M12 match: an `inout` call inside a statement arm, applied to
+        // an arm-local heap str. The callee reallocs through the home
+        // slot, so the arm-end Free must resolve the binding's CURRENT
+        // slot storage — pre-fix `build_free_binding_names` never
+        // descended into match arms, the free used the initializer's
+        // stale cached triple, and the buffer was freed twice (ASan
+        // abort / exit 134 on debug, release, and AOT). ASan/valgrind
+        // pin the exactly-once drop. Mirrors
+        // inout_call_on_arm_local_str_frees_current_storage.
+        "match_arm_inout_realloc",
+        "\
+fn replace(inout s: str):
+	s = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\" + \"!\"
+
+fn main():
+	match true:
+		true:
+			mut s = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" + \"!\"
+			replace(&s)
+			print(s)
+		false:
+			print(\"no\\n\")
+",
+    ),
+    (
+        // M12 match: a `break` in one arm of a statement-level match,
+        // with the sibling arm an EXPRESSION arm holding the last use
+        // of a loop-local heap str (`_: s.len()`). The jump-path prune
+        // iterated `match_arm_bodies`, which decodes an empty statement
+        // list for an expression arm — the sibling's anchor stayed on
+        // the break's path, the anchored last-use Free falsely
+        // "covered" the jump, and the loop-exit Free was skipped: the
+        // break path leaked the concat-built >SSO-cap str.
+        // ASan/valgrind pin the leak. Mirrors
+        // prune_match_arms_covers_expression_arm_siblings.
+        "match_break_sibling_expr_arm_leak",
+        "\
+fn make(tag: int) -> str:
+\treturn int_to_str(tag) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+
+fn main():
+\tmut i = 0
+\twhile i < 3:
+\t\ts = make(i)
+\t\tmatch i:
+\t\t\t1:
+\t\t\t\tbreak
+\t\t\t_: s.len()
+\t\ti = i + 1
+\tprint(\"done\\n\")
+",
+    ),
+    (
+        // M12 match: an if/else inside a consuming match arm reassigns
+        // a heap-backed string binding on both paths. A stale
+        // arm-divergence release used to free the replacement before
+        // the post-match read, causing corrupted output/use-after-free.
+        // The concat-built initial value and payload exercise real heap
+        // storage; Valgrind and ASan pin the cleanup path.
+        "match_nested_if_heap_reassignment",
+        "\
+enum Message:
+	Text(str)
+	Empty
+
+fn main():
+	mut value: str = int_to_str(123) + \"-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz\"
+	message = Message.Text(value)
+	match message:
+		Message.Text(payload):
+			if payload.len() > 5:
+				value = payload + \"!\"
+			else:
+				value = payload + \"?\"
+		Message.Empty:
+			value = \"empty!\"
+	assert(value == \"123-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz!\", \"heap payload survives branch assignment\")
+	print(value)
+	print(\"\\n\")
 ",
     ),
 ];

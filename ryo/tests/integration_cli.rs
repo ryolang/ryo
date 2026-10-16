@@ -431,3 +431,27 @@ fn echo_stdin_jit() {
         "EOF before any byte yields the empty line"
     );
 }
+
+#[test]
+fn flow_inspection_preserves_partial_output_with_source_errors() {
+    let temp = TempDir::new().expect("source directory");
+    let file = create_test_file(
+        temp.path(),
+        "partial_flow.ryo",
+        "fn main():\n\tx: int = \"wrong\"\n\ts = \"heap_012345678901234567890123456789\" + \"!\"\n\tprint(s)\n",
+    );
+    let output = run_ryo_command(&["ir", "--emit", "flow", "partial_flow.ryo"], &file)
+        .expect("inspect Flow");
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let validation = if cfg!(debug_assertions) {
+        "validation: required checks skipped"
+    } else {
+        "validation: not run (build configuration)"
+    };
+    assert!(
+        stdout.contains("[Flow]") && stdout.contains("place") && stdout.contains(validation),
+        "{stdout}"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("E0012"));
+}

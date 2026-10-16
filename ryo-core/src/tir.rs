@@ -59,6 +59,8 @@ use chumsky::span::{SimpleSpan, Span as _};
 use std::collections::HashSet;
 use std::num::NonZeroU32;
 
+mod version;
+
 pub type Span = SimpleSpan;
 
 // ---------- TirRef ----------
@@ -335,6 +337,15 @@ pub enum TirTag {
     /// tokens (see [`TirBuilder::destructure`]'s convention) as fresh
     /// owners.
     Destructure,
+
+    /// `match scrutinee:` expression (M12): resolved arms over a typed
+    /// scrutinee. Variable payload in `extra` — see [`match_extra`]
+    /// and the `tir::match_` module for the wire layout.
+    /// `TypedInst.ty` is the match expression's result type (the join
+    /// of the arm bodies). The ownership pass consumes the
+    /// by-move-binding owner tokens (see [`TirBuilder::match_expr`]'s
+    /// convention) the way it does for [`TirTag::Destructure`].
+    Match,
 }
 
 // ---------- Per-argument call convention ----------
@@ -433,6 +444,7 @@ pub struct TirParam {
 /// [`TirBuilder::finish`] debug-asserts it on every built body.
 #[derive(Debug, Clone)]
 pub struct Tir {
+    identity: crate::artifact::ArtifactId,
     pub name: StringId,
     pub params: Vec<TirParam>,
     pub return_type: TypeId,
@@ -443,9 +455,23 @@ pub struct Tir {
     /// top-level statements, in execution order.
     pub body: ExtraRange,
     pub span: Span,
+    /// Lazily computed per-body operand-subtree match table; see
+    /// [`Tir::operand_match_memo`]. Not serialized.
+    pub operand_match_memo: std::cell::OnceCell<Box<[bool]>>,
+    /// `true` when this body contains at least one `Match`
+    /// instruction — stamped by the builder (`match_expr` is the only
+    /// producer), the O(1) gate that lets match-free bodies skip every
+    /// value-position-match scan and unwrap without decoding a single
+    /// instruction.
+    pub contains_match: bool,
 }
 
 impl Tir {
+    /// Identity of this immutable typed body version.
+    pub fn identity(&self) -> crate::artifact::ArtifactId {
+        self.identity
+    }
+
     /// Look up the instruction for `r`.
     ///
     /// # Panics
@@ -642,6 +668,9 @@ pub struct TirBuilder {
     instructions: Vec<TypedInst>,
     extra: Vec<u32>,
     spans: Vec<Span>,
+    /// Set by `match_expr` — the only `Match` producer — and copied
+    /// into the built [`Tir`]'s `contains_match`.
+    saw_match: bool,
 }
 
 impl TirBuilder {
@@ -667,6 +696,7 @@ impl TirBuilder {
             instructions: vec![placeholder],
             extra: Vec::new(),
             spans: vec![placeholder_span],
+            saw_match: false,
         }
     }
 
@@ -677,6 +707,24 @@ impl TirBuilder {
     /// arena stays an implementation detail.
     pub fn ty_of(&self, r: TirRef) -> TypeId {
         self.instructions[r.index()].ty
+    }
+
+    /// Return-flow query over the partially built body — the
+    /// [`Tir::block_definitely_returns`] rules, runnable mid-analysis.
+    /// Sema's match arm typing asks this of a statement arm's just-
+    /// emitted stmt list to class the arm as `never` (terminating) or
+    /// fallthrough. Rules live in the shared free function so the
+    /// finished-`Tir` and in-progress-builder answers never drift.
+    pub fn block_definitely_returns(&self, stmts: &[TirRef], pool: &InternPool) -> bool {
+        terminates::block_terminates(&self.instructions, &self.extra, stmts, pool, false)
+    }
+
+    /// The arm-termination sense used by M12 match arm typing: like
+    /// [`TirBuilder::block_definitely_returns`], but a statement arm
+    /// ending in `break`/`continue` also counts as terminating (the
+    /// arm is `never` at the join, never an E0135 fallthrough).
+    pub fn block_definitely_terminates(&self, stmts: &[TirRef], pool: &InternPool) -> bool {
+        terminates::block_terminates(&self.instructions, &self.extra, stmts, pool, true)
     }
 
     fn push(&mut self, tag: TirTag, ty: TypeId, data: TirData, span: Span) -> TirRef {
@@ -1172,6 +1220,7 @@ impl TirBuilder {
         }
         let len = Self::len_u32(stmts.len());
         let tir = Tir {
+            identity: crate::artifact::ArtifactId::fresh(),
             name: self.name,
             params: self.params,
             return_type: self.return_type,
@@ -1180,6 +1229,8 @@ impl TirBuilder {
             spans: self.spans,
             body: ExtraRange { offset, len },
             span: self.span,
+            operand_match_memo: std::cell::OnceCell::new(),
+            contains_match: self.saw_match,
         };
         #[cfg(debug_assertions)]
         tir.validate_tree_shape();
@@ -1489,7 +1540,7 @@ fn read_ref_list(slice: &[u32], pos: &mut usize) -> Vec<TirRef> {
 /// * [`ChildKind::BodyStmt`] — a statement nested inside an
 ///   `if`/`while`/`for` body. Reachable from the parent for
 ///   traversal, but not a consumer of the parent.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ChildKind {
     Operand,
     BodyStmt,
@@ -1579,6 +1630,28 @@ impl Tir {
                     // reach the rhs twice, breaking the tree-shape
                     // invariant.
                     f(r, self.destructure_view(r).rhs, ChildKind::Operand);
+                }
+                TirTag::Match => {
+                    // M12: the scrutinee is an operand; each arm body is
+                    // announced like an IfStmt branch — an operand for
+                    // an expr arm, body statements for a statement arm.
+                    // The per-by-move-binding owner tokens (FieldAccess
+                    // insts emitted immediately before this instruction)
+                    // are NOT operands: codegen never evaluates them,
+                    // and announcing them would reach the scrutinee
+                    // twice, breaking the tree-shape invariant.
+                    let view = self.match_view(r);
+                    f(r, view.scrutinee, ChildKind::Operand);
+                    for arm in view.arms() {
+                        match arm.body {
+                            MatchBodyView::Expr(e) => f(r, e, ChildKind::Operand),
+                            MatchBodyView::Stmts(_) => {
+                                for s in arm.body.stmts() {
+                                    f(r, s, ChildKind::BodyStmt);
+                                }
+                            }
+                        }
+                    }
                 }
                 TirTag::IfStmt => {
                     let v = self.if_stmt_view(r);
@@ -1722,53 +1795,15 @@ impl Tir {
     /// A block definitely returns when ANY of its statements does —
     /// everything after that point is unreachable.
     pub fn block_definitely_returns(&self, stmts: &[TirRef], pool: &InternPool) -> bool {
-        stmts.iter().any(|&s| self.stmt_definitely_returns(s, pool))
+        terminates::block_terminates(&self.instructions, &self.extra, stmts, pool, false)
     }
 
-    /// Statement rules for [`Tir::block_definitely_returns`]:
-    /// - `Return` / `ReturnVoid`: returns by construction.
-    /// - `Unreachable`: error-recovery sentinel — treated as
-    ///   returning so a body that already errored doesn't cascade a
-    ///   spurious `MissingReturn`.
-    /// - `ExprStmt` whose operand is `never`-typed (e.g. a `panic`
-    ///   call): diverges, nothing past it executes.
-    /// - `VarDecl` / `Assign` / `CompoundAssign` whose evaluated
-    ///   initializer/value is `never`-typed: same divergence, the
-    ///   binding never completes.
-    /// - `IfStmt`: the then-block, every elif body, and the else
-    ///   block must all definitely return; without an else the
-    ///   not-taken path falls through.
-    /// - Everything else — including loops, whose bodies can run
-    ///   zero times — falls through.
-    fn stmt_definitely_returns(&self, r: TirRef, pool: &InternPool) -> bool {
-        let inst = self.inst(r);
-        match inst.tag {
-            TirTag::Return | TirTag::ReturnVoid | TirTag::Unreachable => true,
-            TirTag::ExprStmt => {
-                let TirData::UnOp(operand) = inst.data else {
-                    unreachable!("ExprStmt must carry TirData::UnOp");
-                };
-                pool.is_never(self.inst(operand).ty)
-            }
-            TirTag::VarDecl => pool.is_never(self.inst(self.var_decl_view(r).initializer).ty),
-            TirTag::Assign => pool.is_never(self.inst(self.assign_view(r).value).ty),
-            TirTag::CompoundAssign => {
-                pool.is_never(self.inst(self.compound_assign_view(r).value).ty)
-            }
-            TirTag::IfStmt => {
-                let view = self.if_stmt_view(r);
-                let Some(else_stmts) = view.else_stmts else {
-                    return false;
-                };
-                self.block_definitely_returns(&view.then_stmts, pool)
-                    && view
-                        .elif_branches
-                        .iter()
-                        .all(|elif| self.block_definitely_returns(&elif.body, pool))
-                    && self.block_definitely_returns(&else_stmts, pool)
-            }
-            _ => false,
-        }
+    /// The arm-termination sense used by M12 match arm typing: like
+    /// [`Tir::block_definitely_returns`], but a statement arm ending in
+    /// `break`/`continue` also counts as terminating (the arm is
+    /// `never` at the join, never an E0135 fallthrough).
+    pub fn block_definitely_terminates(&self, stmts: &[TirRef], pool: &InternPool) -> bool {
+        terminates::block_terminates(&self.instructions, &self.extra, stmts, pool, true)
     }
 
     /// Collect the set of TirRefs evaluated on the path that reaches
@@ -1783,7 +1818,11 @@ impl Tir {
     /// (then / a specific elif / else) that contains `target` and only
     /// recurse into that arm — sibling arms are off-path. For elif
     /// arms we also collect each preceding elif's cond (those conds
-    /// executed; their bodies were skipped).
+    /// executed; their bodies were skipped). For a loop we collect the
+    /// condition (`while`) / bounds (`for`) unconditionally (they run
+    /// before any body target) and recurse into the body up to the
+    /// target — a return nested in the body reaches the return-epilogue
+    /// pass, whose covering scan needs the in-loop statements.
     ///
     /// Used by the ownership pass's jump/return-exit Free scheduling
     /// to decide whether an existing Free actually fires on the exit's
@@ -1834,11 +1873,30 @@ impl Tir {
                         return true;
                     }
                     TirTag::WhileLoop | TirTag::ForRange => {
-                        // Inner loop containing the target. The inner
-                        // loop runs its own exit-path pass for a jump
-                        // targeting it, so there is nothing on-path to
-                        // collect here.
-                        return true;
+                        // Inner loop containing the target: the
+                        // statements before the target inside its body
+                        // execute on the target's path (the target's own
+                        // final iteration), so collect them — the
+                        // condition/bounds always run before a body
+                        // target as well. The old early-return assumed
+                        // only the loop-exit pass (break/continue)
+                        // consumes this set, but a Return nested in the
+                        // body reaches the return-epilogue pass, which
+                        // must see in-loop covering frees.
+                        set.insert(stmt);
+                        match self.inst(stmt).tag {
+                            TirTag::WhileLoop => {
+                                let view = self.while_loop_view(stmt);
+                                self.collect_reachable(view.cond, set);
+                                return self.collect_jump_path(&view.body, target, set);
+                            }
+                            _ => {
+                                let view = self.for_range_view(stmt);
+                                self.collect_reachable(view.start, set);
+                                self.collect_reachable(view.end, set);
+                                return self.collect_jump_path(&view.body, target, set);
+                            }
+                        }
                     }
                     _ => {
                         // Other shapes (ExprStmt, etc.). The stmt's
@@ -1856,6 +1914,8 @@ impl Tir {
     }
 }
 
+mod terminates;
+
 mod dump;
 pub use dump::{TirDump, dump};
 
@@ -1867,3 +1927,9 @@ pub use field_assign::{CompoundFieldAssignView, FieldAssignView};
 
 mod destructure;
 pub use destructure::{DestructureField, DestructureView, destructure_extra};
+
+mod match_;
+pub use match_::{
+    Discriminant, MatchArmView, MatchBinding, MatchBodyView, MatchView, TypedMatchArm,
+    TypedMatchBody, match_extra,
+};

@@ -614,3 +614,163 @@ fn valgrind_enum_nested_wrapper() {
         "enum_nested_wrapper",
     );
 }
+
+// M12 match: the heap-backed match drop paths, leak-checked under
+// Valgrind (the lane that sees Cranelift-emitted frees). The
+// partial-move and temporary-drop fixtures carry real heap traffic
+// (concat-built >SSO-cap payloads), so they use the allocating guard;
+// the discarded-value fixture's arms are static literals (no free
+// traffic by design), so a plain leak-check smoke — same convention as
+// valgrind_enum_copy_narrow_variant_active above.
+
+#[test]
+fn valgrind_match_partial_move_wildcard_drop() {
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_partial_move_wildcard_drop"),
+        "match_partial_move_wildcard_drop",
+    );
+}
+
+#[test]
+fn valgrind_match_discarded_value() {
+    run_valgrind_smoke(
+        common::find_fixture("match_discarded_value"),
+        "match_discarded_value",
+    );
+}
+
+#[test]
+fn valgrind_match_temporary_drop_once() {
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_temporary_drop_once"),
+        "match_temporary_drop_once",
+    );
+}
+
+#[test]
+fn valgrind_match_break_in_arm_loop_leak() {
+    // The break inside the statement-level match arm must carry a
+    // loop-exit Free for the loop-local heap str (the sibling arm's
+    // last-use Free is not on the break path). Pre-fix the wrapped
+    // match hid the break from the jump walk and the break path
+    // leaked — the leak check fails on the lost block.
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_break_in_arm_loop_leak"),
+        "match_break_in_arm_loop_leak",
+    );
+}
+
+#[test]
+fn valgrind_match_arm_vardecl_double_free() {
+    // The arm-local VarDecl is named: exactly one Free for the
+    // heap str. Pre-fix the anon-temp pass double-freed it (an
+    // invalid free of the same block).
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_arm_vardecl_double_free"),
+        "match_arm_vardecl_double_free",
+    );
+}
+
+#[test]
+fn valgrind_match_arm_inout_realloc() {
+    // The inout callee reallocs the arm-local str through its home
+    // slot; the arm-end Free must resolve that current storage.
+    // Pre-fix the free-binding walk never descended into match arms,
+    // so cleanup freed the initializer's stale cached triple — the
+    // original buffer, already released by the write-back (invalid
+    // free of the same block).
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_arm_inout_realloc"),
+        "match_arm_inout_realloc",
+    );
+}
+
+#[test]
+fn valgrind_match_break_sibling_expr_arm_leak() {
+    // The jump-path prune iterated `match_arm_bodies`, which decodes
+    // an empty statement list for an expression arm — the sibling
+    // expression arm's last-use anchor stayed on the break's path,
+    // falsely covered the jump, and the loop-exit Free was skipped:
+    // the break path leaked the heap str.
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_break_sibling_expr_arm_leak"),
+        "match_break_sibling_expr_arm_leak",
+    );
+}
+
+#[test]
+fn valgrind_match_break_in_value_arm_loop_exit() {
+    // Mirrors break_in_value_position_match_arm_gets_loop_exit_free:
+    // the break inside a value-position (VarDecl-initializer) match
+    // arm must carry a loop-exit Free for the loop-local heap str —
+    // pre-fix the VarDecl statement hid the break from the jump walk
+    // and the break path leaked.
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_break_in_value_arm_loop_exit"),
+        "match_break_in_value_arm_loop_exit",
+    );
+}
+
+#[test]
+fn valgrind_match_value_arm_unconsumed_temporary() {
+    // Mirrors dead_bind_in_expr_arm_freed_exactly_once_in_arm: the
+    // arm-gated Free of a by-move payload bind never read in its
+    // expression arm must be flushed inside the arm — pre-fix it was
+    // never emitted and the heap payload leaked.
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_value_arm_unconsumed_temporary"),
+        "match_value_arm_unconsumed_temporary",
+    );
+}
+
+#[test]
+fn valgrind_match_nested_if_heap_reassignment() {
+    // The nested if used to schedule a release of the pre-match
+    // allocation after both branches had replaced the binding. Require
+    // Valgrind to see the heap traffic and report no invalid access or
+    // leak while the replacement is read and freed.
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_nested_if_heap_reassignment"),
+        "match_nested_if_heap_reassignment",
+    );
+}
+
+#[test]
+fn valgrind_shadowed_heap_reassignment() {
+    run_valgrind_smoke_allocating(
+        include_str!("fixtures/shadowed_heap_reassignment.ryo"),
+        "shadowed_heap_reassignment",
+    );
+}
+
+#[test]
+fn valgrind_same_parameter_promotions() {
+    run_valgrind_smoke_allocating(
+        include_str!("fixtures/same_parameter_promotions.ryo"),
+        "same_parameter_promotions",
+    );
+}
+
+#[test]
+fn valgrind_nested_heap_shadows() {
+    run_valgrind_smoke_allocating(
+        include_str!("fixtures/nested_heap_shadows.ryo"),
+        "nested_heap_shadows",
+    );
+}
+
+#[test]
+fn valgrind_nested_heap_byte_shadows() {
+    run_valgrind_smoke_allocating(
+        include_str!("fixtures/nested_heap_byte_shadows.ryo"),
+        "nested_heap_byte_shadows",
+    );
+}
+
+#[test]
+fn valgrind_inout_parameter_shadow() {
+    run_valgrind_smoke_allocating(
+        include_str!("fixtures/inout_parameter_shadow.ryo"),
+        "inout_parameter_shadow",
+    );
+}

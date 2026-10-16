@@ -257,7 +257,12 @@ fn ownership_nested_control(bencher: divan::Bencher, case: (usize, usize)) {
         .with_inputs(|| sema_program(&src))
         .bench_values(|(tirs, pool)| {
             let mut sink = ryo_core::diag::DiagSink::new();
-            let sidecar = ryo_frontend::ownership::check(divan::black_box(&tirs), &pool, &mut sink);
+            let flows: Vec<ryo_core::flow::Flow> = tirs
+                .iter()
+                .map(|t| ryo_core::flow::Flow::build(t, &pool))
+                .collect();
+            let sidecar =
+                ryo_frontend::ownership::check(divan::black_box(&tirs), &flows, &pool, &mut sink);
             assert!(!sink.has_errors(), "ownership should succeed");
             divan::black_box(sidecar);
         });
@@ -267,10 +272,117 @@ fn ownership_nested_control(bencher: divan::Bencher, case: (usize, usize)) {
 fn ownership_call_heavy(bencher: divan::Bencher, functions: usize) {
     let src = call_heavy_source(functions);
     bencher
+        .with_inputs(|| {
+            let (tirs, pool) = sema_program(&src);
+            let flows: Vec<ryo_core::flow::Flow> = tirs
+                .iter()
+                .map(|t| ryo_core::flow::Flow::build(t, &pool))
+                .collect();
+            (tirs, flows, pool)
+        })
+        .bench_values(|(tirs, flows, pool)| {
+            let mut sink = ryo_core::diag::DiagSink::new();
+            let sidecar =
+                ryo_frontend::ownership::check(divan::black_box(&tirs), &flows, &pool, &mut sink);
+            assert!(!sink.has_errors(), "ownership should succeed");
+            divan::black_box(sidecar);
+        });
+}
+
+#[divan::bench(args = [16, 256])]
+fn flow_build_call_heavy(bencher: divan::Bencher, functions: usize) {
+    let src = call_heavy_source(functions);
+    bencher
+        .with_inputs(|| sema_program(&src))
+        .bench_values(|(tirs, pool)| {
+            let flows: Vec<ryo_core::flow::Flow> = tirs
+                .iter()
+                .map(|t| ryo_core::flow::Flow::build(t, &pool))
+                .collect();
+            divan::black_box(flows);
+        });
+}
+
+/// A 40-char string literal — past the SSO inline cap, so every
+/// binding initialized from it owns a real destruction event.
+fn heap_lit(tag: usize) -> String {
+    format!("\"{tag:040}\"")
+}
+
+/// One owner, many views: a heap str sliced `views` times at staggered
+/// 2-byte offsets, each view read exactly once (its final use), the
+/// owner read last. Stresses projection liveness/last-use tracking and
+/// the view-protection + coverage checks over many protection lifetimes
+/// per group.
+fn many_views_source(functions: usize, views: usize) -> String {
+    let mut src = String::new();
+    for i in 0..functions {
+        src.push_str(&format!(
+            "fn views_{i}() -> int:\n\tmut total = 0\n\ts = {}\n",
+            heap_lit(i)
+        ));
+        for v in 0..views {
+            let off = v * 2;
+            src.push_str(&format!(
+                "\tv{v} = s[{off}:{end}]\n\ttotal += v{v}.len()\n",
+                end = off + 2
+            ));
+        }
+        src.push_str("\ttotal += s.len()\n\treturn total\n\n");
+    }
+    src
+}
+
+/// Many destruction events: `drops` sequential heap str locals per
+/// function, each initialized and last-used in declaration order — one
+/// destruction event per binding. Stresses the cleanup schedule's
+/// per-owner anchors and the coverage must-analysis over many groups.
+fn many_drops_source(functions: usize, drops: usize) -> String {
+    let mut src = String::new();
+    for i in 0..functions {
+        src.push_str(&format!("fn drops_{i}() -> int:\n\tmut total = 0\n"));
+        for d in 0..drops {
+            src.push_str(&format!(
+                "\ts{d} = {lit}\n\ttotal += s{d}.len()\n",
+                lit = heap_lit(i * 1000 + d)
+            ));
+        }
+        src.push_str("\treturn total\n\n");
+    }
+    src
+}
+
+#[divan::bench(args = [4, 16])]
+fn ownership_many_views(bencher: divan::Bencher, views: usize) {
+    let src = many_views_source(4, views);
+    bencher
         .with_inputs(|| sema_program(&src))
         .bench_values(|(tirs, pool)| {
             let mut sink = ryo_core::diag::DiagSink::new();
-            let sidecar = ryo_frontend::ownership::check(divan::black_box(&tirs), &pool, &mut sink);
+            let flows: Vec<ryo_core::flow::Flow> = tirs
+                .iter()
+                .map(|t| ryo_core::flow::Flow::build(t, &pool))
+                .collect();
+            let sidecar =
+                ryo_frontend::ownership::check(divan::black_box(&tirs), &flows, &pool, &mut sink);
+            assert!(!sink.has_errors(), "ownership should succeed");
+            divan::black_box(sidecar);
+        });
+}
+
+#[divan::bench(args = [16, 64])]
+fn ownership_many_drops(bencher: divan::Bencher, drops: usize) {
+    let src = many_drops_source(4, drops);
+    bencher
+        .with_inputs(|| sema_program(&src))
+        .bench_values(|(tirs, pool)| {
+            let mut sink = ryo_core::diag::DiagSink::new();
+            let flows: Vec<ryo_core::flow::Flow> = tirs
+                .iter()
+                .map(|t| ryo_core::flow::Flow::build(t, &pool))
+                .collect();
+            let sidecar =
+                ryo_frontend::ownership::check(divan::black_box(&tirs), &flows, &pool, &mut sink);
             assert!(!sink.has_errors(), "ownership should succeed");
             divan::black_box(sidecar);
         });

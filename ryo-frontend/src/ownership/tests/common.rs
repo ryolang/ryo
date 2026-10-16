@@ -25,6 +25,19 @@ pub(super) fn take_function_sidecar(
     )
 }
 
+/// The unified cleanup schedule (the unified cleanup schedule): every scheduled destruction
+/// travels through `drops` — `BlockStart` entries are the old
+/// `match_arm_drops` (arm-start payload destruction, one per consuming
+/// arm) and `conditional_dead_drops` (one per untouched arm block).
+/// Tests that pinned the old tables filter by position.
+pub(super) fn block_start_drops(sidecar: &FunctionSidecar) -> Vec<&ryo_core::flow::DropOp> {
+    sidecar
+        .drops
+        .iter()
+        .filter(|d| matches!(d.position, ryo_core::flow::DropPosition::BlockStart { .. }))
+        .collect()
+}
+
 /// Lex + parse + astgen + sema + ownership on a source snippet —
 /// the full front-end, so the case-B tests read like the programs
 /// users write. Returns every diagnostic from all four stages.
@@ -70,7 +83,11 @@ pub(super) fn check_src_full(
         input,
         std::path::Path::new("<test>"),
     );
-    let sidecar = check(&tirs, &pool, &mut sink);
+    let flows: Vec<ryo_core::flow::Flow> = tirs
+        .iter()
+        .map(|t| ryo_core::flow::Flow::build(t, &pool))
+        .collect();
+    let sidecar = check(&tirs, &flows, &pool, &mut sink);
     // Match the driver's deferred flush: sema warnings surface only
     // when the whole unit (including the ownership pass) is clean.
     if !sink.has_errors() {
@@ -93,4 +110,26 @@ pub(super) fn w0004_count(diags: &[Diag]) -> usize {
         .iter()
         .filter(|d| d.code == DiagCode::RedundantToBytes)
         .count()
+}
+
+/// Build the canonical Flow IR for a test's TIR — the same execution
+/// structure the ownership pass and codegen share — for asserting
+/// block membership of scheduled drops.
+pub(super) fn build_flow(tir: &ryo_core::tir::Tir, pool: &InternPool) -> ryo_core::flow::Flow {
+    ryo_core::flow::Flow::build(tir, pool)
+}
+
+/// The arm Flow IR blocks of the match at `m`, in wire (written) order —
+/// the Switch arms of the match's terminator block.
+pub(super) fn match_arm_blocks(
+    flow: &ryo_core::flow::Flow,
+    m: ryo_core::tir::TirRef,
+) -> Vec<ryo_core::flow::BlockId> {
+    let sw_block = flow.term_block_of(m).expect("match is a switch");
+    let ryo_core::flow::Terminator::Switch { arms: rng, .. } = flow.term(sw_block) else {
+        panic!("match is a switch")
+    };
+    rng.as_range()
+        .map(|i| ryo_core::flow::BlockId(flow.extra[i]))
+        .collect()
 }

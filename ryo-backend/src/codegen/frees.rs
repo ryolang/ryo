@@ -1,124 +1,220 @@
-//! Free/dead-drop emission and the provably-inline free elision —
-//! split from `expr.rs`; see module docs in `mod.rs`. Also home to the
-//! free-routing helpers: the binding-lineage accessors
-//! (`free_binding_name` / `free_binding_of`), the aliasing probe
-//! (`expr_refs_name`), and the fat-home provenance flags
-//! (`set_home_inline` and friends).
+//! Cleanup emission and representation-only release elision.
+//!
+//! Flow cleanup preparation selects storage and firing positions. The backend
+//! supplies registers, stack slots, and inline-materialization facts.
 
-use super::{Codegen, CodegenNameIds, FunctionContext, ValueRepr, is_fat_type};
+use super::{Codegen, FunctionContext, ValueRepr, is_fat_type};
 use cranelift::codegen::ir::{FuncRef, InstructionData, Opcode, ValueDef};
 use cranelift::prelude::*;
 use cranelift_module::Module;
-use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
+use ryo_core::tir::{Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
-use std::collections::HashMap;
 
-/// The four tables built by [`Codegen::build_free_binding_names`]:
-/// free-target → binding name (dense, per instruction ref), fat-param
-/// sentinel → binding name (dense, per param position), free-target →
-/// its BINDING identity (dense, per instruction ref — a declaring
-/// `VarDecl`'s `TirRef`, or the `Assign` value's
-/// `sidecar.assign_binding` entry), and binding identity → its most
-/// recent write (see the builder's docs).
-type FreeBindingTables = (
-    Vec<Option<StringId>>,
-    Vec<Option<StringId>>,
-    Vec<Option<TirRef>>,
-    HashMap<TirRef, TirRef>,
-);
+/// Producer and parameter labels used only for representation elision.
+type FreeBindingTables = (Vec<Option<StringId>>, Vec<Option<StringId>>);
 
 impl<M: Module> Codegen<M> {
-    /// True if a `FreePoint` with the given `branch` tag is eligible
-    /// to fire at the current point in codegen. Unconditional entries
-    /// (`branch == None`) always pass; branch-gated entries fire only
-    /// when their `BranchId` is on `branch_stack`. We use `contains`
-    /// rather than `last() == Some(&b)` so a Free anchored to a
-    /// parent arm still fires when codegen is inside a nested child
-    /// arm of that parent.
-    pub(crate) fn branch_active(
-        branch: Option<ryo_core::ownership::BranchId>,
-        stack: &[ryo_core::ownership::BranchId],
-    ) -> bool {
-        match branch {
-            None => true,
-            Some(b) => stack.contains(&b),
-        }
-    }
-
-    /// Emit the family-appropriate free (`ryo_str_free` /
-    /// `ryo_bytes_free`, selected per target via `free_target_is_bytes`)
-    /// for any scheduled Free whose
-    /// anchor is `tir_ref` and whose `branch` tag is active on the
-    /// current `branch_stack`. Called at the end of each
-    /// materialisation (`eval_inst` / `eval_inst_fat`) so that Task
-    /// 4's anonymous-temporary Frees, anchored on the consuming
-    /// `Call`, fire after the consumer has emitted its IR.
-    ///
-    /// Scheduled Frees only target `Str`-/`Bytes`-cached owners. A
-    /// `Scalar`-cached target is an ownership-pass bug — the
-    /// borrowed-scalar ABI never owns its argument and the ownership
-    /// pass excludes such args from `temp_owners`. If a
-    /// `Scalar` target is observed here, this function returns `Err`.
-    ///
-    /// `freed_at` (a per-`free_schedule`-index flag table) guards against
-    /// double-emission across the eval-end hooks and the end-of-stmt
-    /// sweep.
-    pub(crate) fn emit_due_frees(
+    /// Emit the drops assigned to one resolved firing-point bucket.
+    /// Each scheduled drop lives in exactly one bucket (built once per
+    /// function from its Flow position), so every drop fires exactly
+    /// once — arm/branch conditionality is the anchor step's block
+    /// membership, never a cached-value or sweep predicate. Entries the
+    /// lowering-time pre-filter marked consumed are skipped.
+    pub(crate) fn fire_bucket(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
-        tir_ref: TirRef,
+        indices: &[usize],
     ) -> Result<(), String> {
-        if ctx.sidecar.free_schedule.is_empty() {
+        if indices.is_empty() {
             return Ok(());
         }
-        let Some(indices) = ctx.free_by_after.get(tir_ref.index()) else {
-            return Ok(());
-        };
-        let pending: Vec<(usize, TirRef)> = indices
-            .iter()
-            .copied()
-            .filter(|&idx| {
-                let fp = &ctx.sidecar.free_schedule[idx];
-                Self::branch_active(fp.branch, &ctx.branch_stack) && !ctx.freed_at[idx]
-            })
-            .map(|idx| (idx, ctx.sidecar.free_schedule[idx].target))
-            .collect();
+        // Consume (mark) every bucket entry, emitting frees only for
+        // targets not already destroyed: the ownership pass's
+        // double-anchors (consumer + return epilogue) make one
+        // same-target duplicate a no-op by design.
+        let mut pending: Vec<(usize, TirRef)> = Vec::new();
+        for &idx in indices {
+            if idx >= ctx.sidecar.drops.len() {
+                Self::emit_promo_frees(builder, ctx, vec![idx - ctx.sidecar.drops.len()])?;
+                continue;
+            }
+            if ctx.freed_at[idx] {
+                continue;
+            }
+            ctx.freed_at[idx] = true;
+            #[cfg(debug_assertions)]
+            {
+                ctx.fire_marked[idx] = true;
+            }
+            let target = ctx.sidecar.drops[idx].target;
+            if !ctx.freed_targets.contains(&target) {
+                pending.push((idx, target));
+            }
+        }
         Self::emit_frees(builder, ctx, pending)
     }
 
-    /// End-of-statement sweep: fire any scheduled Free whose anchor
-    /// was materialised within the just-emitted statement but hasn't
-    /// been emitted yet. This covers Task 3's last-use Frees where
-    /// `after` is a sub-expression `Var` read — by the time the
-    /// statement finishes, the consumer has already issued its IR,
-    /// so a Free here lands after the consumer's use of the buffer.
-    /// Eager firing during the inner `eval_inst_fat(Var)` would have
-    /// dropped the allocation before the consumer (e.g. `print`'s
-    /// `write` syscall) finished reading from it.
-    ///
-    /// Branch-gated entries are filtered through `branch_active`, so
-    /// only Frees whose `BranchId` is on the current `branch_stack`
-    /// fire here.
-    pub(crate) fn sweep_due_frees(
+    /// Fire `BeforeStep{inst}` drops: the block driver calls this
+    /// immediately before the step emits.
+    pub(crate) fn fire_before_step(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
+        inst: TirRef,
     ) -> Result<(), String> {
-        if ctx.pending_sweep.is_empty() {
-            return Ok(());
+        let indices = ctx
+            .fire_before_step
+            .get(inst.index())
+            .cloned()
+            .unwrap_or_default();
+        Self::fire_bucket(builder, ctx, &indices)
+    }
+
+    /// Fire the `AfterStep` drops of the statement rooted at `inst`
+    /// (the post-statement hook). Value-step anchors resolve here
+    /// through their enclosing statement, so the free lands after the
+    /// statement's consumer.
+    pub(crate) fn fire_after_statement(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        inst: TirRef,
+    ) -> Result<(), String> {
+        let indices = ctx
+            .fire_after_stmt
+            .get(inst.index())
+            .cloned()
+            .unwrap_or_default();
+        Self::fire_bucket(builder, ctx, &indices)
+    }
+
+    /// Fire `AfterStep` drops anchored on a terminator payload
+    /// (an if/loop/match/return/break/continue instruction). The
+    /// construct's handler is the instruction's single emit position —
+    /// the join/exit prologue, the terminator arm — so this is the
+    /// mechanical fire point; no construct path may skip it.
+    pub(crate) fn fire_payload(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        inst: TirRef,
+    ) -> Result<(), String> {
+        let indices = ctx
+            .fire_by_payload
+            .get(inst.index())
+            .cloned()
+            .unwrap_or_default();
+        Self::fire_bucket(builder, ctx, &indices)
+    }
+
+    /// Fire the block's at-terminator bucket (`PreTerminator` drops and
+    /// `AfterStep` drops whose anchor has no enclosing statement — a
+    /// match-arm body expression, a deferred return operand). Called by
+    /// the terminator handler at its canonical point: after the
+    /// operand/body evaluation, before the jump/return.
+    pub(crate) fn fire_at_terminator(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        block: ryo_core::flow::BlockId,
+    ) -> Result<(), String> {
+        let indices = ctx.fire_at_term.get(&block).cloned().unwrap_or_default();
+        Self::fire_bucket(builder, ctx, &indices)
+    }
+
+    /// position-mechanical lowering-time provably-inline pre-filter: mark scheduled
+    /// drops consumed when the runtime free is a guaranteed no-op, so
+    /// the emission paths never re-derive the predicate. This is a
+    /// lowering-time no-op-free decision, NOT an ownership decision —
+    /// the ownership schedule (`sidecar.drops`) stays untouched and the
+    /// `freed_at` mark plays the role the static-cap-zero skip always
+    /// did: the call would be dead at the emission site.
+    ///
+    /// Two static families, mirroring the two emission paths they
+    /// replace:
+    /// * static `.rodata` literals (`StrConst`/`BytesConst` targets) —
+    ///   cap == 0 is the static sentinel, so `ryo_*_free` returns
+    ///   immediately (this subsumes the old `is_static_cap_zero`
+    ///   probe for literal producers);
+    /// * provably-inline producers (runtime builtins whose output never
+    ///   exceeds `INLINE_CAP`; mirrored from `builtins::max_output_len`
+    ///   — the backend agreement test pins the two), elided on the
+    ///   binding path when the binding is never mutated and on the
+    ///   temp path when the producer is not a view base (promotion
+    ///   would swap the cached triple for a heap one).
+    ///
+    /// The home-provenance elision (`home_inline`) stays at emission:
+    /// it is genuine codegen state (the value actually in the home at
+    /// the fire point), not a lowering-time fact.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn pre_elide_drops(
+        tir: &Tir,
+        pool: &InternPool,
+        fat_mutated: &[bool],
+        view_base_insts: &[bool],
+        flow: &ryo_core::flow::Flow,
+        plan: &ryo_core::flow::cleanup::CleanupPlan,
+        func_sidecar: &ryo_core::ownership::FunctionSidecar,
+        freed_at: &mut [bool],
+    ) {
+        for (idx, drop) in func_sidecar.drops.iter().enumerate() {
+            if freed_at[idx] {
+                continue;
+            }
+            if matches!(
+                drop.position,
+                ryo_core::flow::DropPosition::BlockStart { .. }
+            ) {
+                // Block-start drops fire through their own emission
+                // paths (`emit_dead_drop` / `emit_arm_start_drops`),
+                // which have NO static elision and no redirect-lineage
+                // gate — the pre-filter's predicates (built for the
+                // `emit_frees` path) do not apply to them.
+                continue;
+            }
+            let target = drop.target;
+            let static_literal = !target.is_param()
+                && matches!(tir.inst(target).tag, TirTag::StrConst | TirTag::BytesConst);
+            // Provably-inline producer predicate (mirrors
+            // `provably_inline_producer`; the producer set is pinned
+            // against the frontend registry by the backend test).
+            let inline_producer = !target.is_param()
+                && tir.inst(target).tag == TirTag::Call
+                && Self::producer_max_output_len(pool.str(tir.call_view(target).name))
+                    .is_some_and(|max| max as usize <= ryo_runtime::INLINE_CAP);
+            // Mirror `emit_frees`' two branches exactly (the redirect's
+            // applicability is a lowering-time lineage fact), so a mark
+            // here always agrees with the branch the emission path
+            // would take.
+            let binding_name = match plan.releases[idx] {
+                ryo_core::flow::cleanup::ReleaseStorage::Binding(place) => {
+                    Some(flow.place(place).name())
+                }
+                ryo_core::flow::cleanup::ReleaseStorage::Value(_) => None,
+            };
+            match binding_name {
+                Some(name) => {
+                    // Binding-redirect path: the free releases the
+                    // binding's CURRENT home contents, so NO
+                    // static-literal elision is sound — in-place
+                    // mutation (push, ensure-heap promotion) may have
+                    // replaced the literal's inline buffer with a heap
+                    // one. The old runtime check skipped these via
+                    // `is_static_cap_zero` on the LOADED home cap, which
+                    // stays at emission. Only the provably-inline
+                    // producer elision is lowering-time derivable here,
+                    // and only for never-mutated bindings.
+                    if !fat_mutated[name.raw() as usize] && inline_producer {
+                        freed_at[idx] = true;
+                    }
+                }
+                None => {
+                    // Temp path: the cached triple is the producer's
+                    // own, never mutated in place — a static .rodata
+                    // literal or a provably-inline producer temp cannot
+                    // own a heap buffer.
+                    if static_literal || (inline_producer && !view_base_insts[target.index()]) {
+                        freed_at[idx] = true;
+                    }
+                }
+            }
         }
-        let pending: Vec<(usize, TirRef)> = ctx
-            .pending_sweep
-            .iter()
-            .copied()
-            .filter(|&idx| {
-                let fp = &ctx.sidecar.free_schedule[idx];
-                Self::branch_active(fp.branch, &ctx.branch_stack)
-                    && Self::cached_repr(ctx, fp.after).is_some()
-                    && Self::cached_repr(ctx, fp.target).is_some()
-            })
-            .map(|idx| (idx, ctx.sidecar.free_schedule[idx].target))
-            .collect();
-        Self::emit_frees(builder, ctx, pending)
     }
 
     /// True when `cap` is a materialized `iconst 0` — the static
@@ -141,7 +237,7 @@ impl<M: Module> Codegen<M> {
     /// 24 bytes, one over `INLINE_CAP`. Mirrors the frontend registry
     /// (`builtins.rs::max_output_len`) — the backend cannot depend on
     /// the frontend, so a ryo-backend test asserts the two agree.
-    fn producer_max_output_len(name: &str) -> Option<u8> {
+    pub(crate) fn producer_max_output_len(name: &str) -> Option<u8> {
         match name {
             "int_to_str" => Some(20),
             "bool_to_str" => Some(5),
@@ -153,7 +249,11 @@ impl<M: Module> Codegen<M> {
     /// provably always SSO-inline (max ≤ `INLINE_CAP`): the runtime
     /// tags the cap word inline, so `ryo_*_free` on the value is a
     /// guaranteed no-op and codegen may elide it (generalizing the
-    /// cap==0 static-literal elision in `is_static_cap_zero`).
+    /// cap==0 static-literal elision in `is_static_cap_zero`). This
+    /// infers a property of the produced VALUE (its runtime SSO
+    /// inline-ability, mirrored from the frontend's
+    /// `builtins::max_output_len`) — not a Flow IR or ownership-pass
+    /// fact.
     pub(crate) fn provably_inline_producer(ctx: &FunctionContext<'_, M>, target: TirRef) -> bool {
         if target.is_param() {
             return false;
@@ -183,76 +283,51 @@ impl<M: Module> Codegen<M> {
     ///   free is real and must stay.
     pub(crate) fn build_fat_mutation_tables(
         tir: &Tir,
+        flow: &ryo_core::flow::Flow,
         pool: &InternPool,
-        ids: &CodegenNameIds,
     ) -> (Vec<bool>, Vec<bool>) {
-        let mut fat_mutated = vec![false; pool.string_count()];
-        let mut view_base_insts = vec![false; tir.instructions.len()];
-        let mark_var = |mutated: &mut Vec<bool>, tir: &Tir, r: TirRef| {
-            if let TirData::Var(n) = tir.inst(r).data {
-                mutated[n.raw() as usize] = true;
+        let mut mutated = vec![false; pool.string_count()];
+        let mut view_bases = vec![false; tir.instructions.len()];
+        for step in &flow.steps {
+            for place in flow.mutations(&step.facts) {
+                if is_fat_type(flow.place(place).ty(), pool) {
+                    mutated[flow.place(place).name().raw() as usize] = true;
+                }
             }
-        };
-        for i in 1..tir.instructions.len() {
-            let r = TirRef::from_raw(i as u32);
-            let inst = tir.inst(r);
-            match inst.tag {
-                TirTag::Assign => {
-                    let view = tir.assign_view(r);
-                    fat_mutated[view.name.raw() as usize] = true;
-                }
-                TirTag::Call => {
-                    let view = tir.call_view(r);
-                    // StringId equality against the ids resolved once
-                    // per compilation (see `CodegenNameIds`).
-                    if (ids.str_push == Some(view.name) || ids.bytes_push == Some(view.name))
-                        && let Some(&target) = view.args.first()
-                    {
-                        mark_var(&mut fat_mutated, tir, target);
-                    }
-                    for (i, &arg) in view.args.iter().enumerate() {
-                        if view.modes.get(i) == Some(&ParamMode::Inout)
-                            && is_fat_type(tir.inst(arg).ty, pool)
-                        {
-                            mark_var(&mut fat_mutated, tir, arg);
-                        }
-                    }
-                }
-                TirTag::Slice => {
-                    let base = match inst.data {
-                        TirData::Slice { base, .. } => base,
-                        _ => unreachable!("Slice must carry TirData::Slice"),
+            if let Some(write) = step.facts.write
+                && write.kind != ryo_core::flow::WriteKind::Init
+                && is_fat_type(flow.place(write.place).ty(), pool)
+            {
+                mutated[flow.place(write.place).name().raw() as usize] = true;
+            }
+            if let Some(view) = step.facts.view {
+                let ryo_core::flow::Place::View { base, .. } = flow.place(view) else {
+                    unreachable!("view fact names a view place");
+                };
+                if is_fat_type(flow.place(*base).ty(), pool) {
+                    mutated[flow.place(*base).name().raw() as usize] = true;
+                    let value = match tir.inst(step.inst).data {
+                        TirData::Slice { base, .. } | TirData::UnOp(base) => base,
+                        _ => unreachable!("view step has a base operand"),
                     };
-                    if is_fat_type(tir.inst(base).ty, pool) {
-                        view_base_insts[base.index()] = true;
-                        mark_var(&mut fat_mutated, tir, base);
-                    }
+                    view_bases[value.index()] = true;
                 }
-                TirTag::ToView => {
-                    let operand = match inst.data {
-                        TirData::UnOp(o) => o,
-                        _ => unreachable!("ToView must carry TirData::UnOp"),
-                    };
-                    if is_fat_type(tir.inst(operand).ty, pool) {
-                        view_base_insts[operand.index()] = true;
-                        mark_var(&mut fat_mutated, tir, operand);
-                    }
-                }
-                _ => {}
             }
         }
-        (fat_mutated, view_base_insts)
+        (mutated, view_bases)
     }
 
-    /// Shared emission body for `emit_due_frees` / `sweep_due_frees`.
-    /// Given the already-filtered `(free_schedule index, target)`
-    /// pairs, declare the family-appropriate free (`ryo_str_free` /
-    /// `ryo_bytes_free`, selected per target via `free_target_is_bytes`)
-    /// and emit one call per pair, marking each index as fired in
-    /// `ctx.freed_at`. A `Scalar`-cached target
-    /// (borrowed-scalar ABI, never heap-owned) returns an error and aborts
-    /// code generation — the ABI registry is supposed to keep such args out
-    /// of `temp_owners`.
+    /// Shared emission body for the fire-map buckets (position-mechanical): each bucket
+    /// is one Flow fire position, so a drop is emitted at most once —
+    /// the `freed_at` mark guards the lowering-time pre-filter against
+    /// the fire paths and backs the all-consumed debug assertion.
+    /// Given the already-filtered `(drops index, target)` pairs, declare
+    /// the family-appropriate free (`ryo_str_free` / `ryo_bytes_free`,
+    /// selected per target via `free_target_is_bytes`) and emit one call
+    /// per pair, marking each index as fired in `ctx.freed_at`. A
+    /// `Scalar`-cached target (borrowed-scalar ABI, never heap-owned)
+    /// returns an error and aborts code generation — the ABI registry is
+    /// supposed to keep such args out of `temp_owners`.
     ///
     /// When the target is a named binding's initializer/value (or a fat
     /// param's virtual ref), the Free is emitted from the binding's
@@ -301,83 +376,69 @@ impl<M: Module> Codegen<M> {
         let mut bytes_free_ref: Option<FuncRef> = None;
         for (idx, target) in pending {
             ctx.freed_at[idx] = true;
+            let binding = match ctx.cleanup_plan.releases[idx] {
+                ryo_core::flow::cleanup::ReleaseStorage::Binding(place) => {
+                    Some(match ctx.flow.place(place) {
+                        ryo_core::flow::Place::Local { decl, .. } => *decl,
+                        ryo_core::flow::Place::Token { inst, .. } => *inst,
+                        ryo_core::flow::Place::Param { index, .. } => {
+                            TirRef::param(*index as usize)
+                        }
+                        _ => {
+                            return Err(format!(
+                                "cleanup binding has no backend storage: {place:?}"
+                            ));
+                        }
+                    })
+                }
+                ryo_core::flow::cleanup::ReleaseStorage::Value(_) => None,
+            };
             // M11: enum-typed targets route to the tag-dispatched
             // payload drop; M9 structs to the recursive field drop;
             // everything below is the str/bytes path.
-            if Self::try_emit_enum_free(builder, ctx, target)? {
+            if Self::try_emit_enum_free(builder, ctx, target, binding)? {
+                ctx.freed_targets.insert(target);
                 continue;
             }
-            if Self::try_emit_struct_free(builder, ctx, target)? {
+            if Self::try_emit_struct_free(builder, ctx, target, binding)? {
+                ctx.freed_targets.insert(target);
                 continue;
             }
             let is_bytes = Self::free_target_is_bytes(ctx, target);
-            // Binding-path redirect: free the binding's CURRENT home
-            // value instead of the producing inst's cached repr (the
-            // cached triple may be stale across reassigns/merges). The
-            // redirect frees the home SLOT's contents, so it must not
-            // fire for a stale/superseded target (e.g. the pre-reassign
-            // owner of a loop-carried binding, scheduled by a
-            // last-use/exit pass against the first-wins merged owner
-            // map): that would free the value the binding CURRENTLY
-            // holds, double-freeing it with that value's own last-use
-            // Free. The redirect fires when the target IS the binding's
-            // most recent write, OR when that most recent write has no
-            // Free of its own — the branch-divergent reseat shape,
-            // where the merge keeps the pre-branch owner as the live
-            // owner, the reseated value's Free is skipped as stale, and
-            // the pre-branch owner's Free must redirect to free the
-            // path-correct buffer. Any other stale target falls through
-            // to the cached-repr path (or the static cap==0 elision)
-            // below.
-            //
-            // Both the target's binding and the "most recent write"
-            // table are keyed by BINDING identity (the declaring
-            // VarDecl's ref; `sidecar.assign_binding` for Assign
-            // values), not by name: a same-named shadow writes the same
-            // name-keyed slot tables but is a different binding with its
-            // own home lineage. Name-keyed lookup let a later shadow's
-            // writes clobber the outer binding's "most recent write",
-            // misclassifying the outer owner's Free as superseded — the
-            // fallback then freed the owner's stale cached triple (an
-            // invalid free on the taken path) while the slot's
-            // path-correct buffer leaked.
-            let binding_name = Self::free_binding_name(ctx, target)
-                .filter(|name| Self::read_slot(&ctx.fat_locals, *name).is_some())
-                .filter(|_| match Self::free_binding_of(ctx, target) {
-                    Some(binding) => match ctx.binding_last_write.get(&binding) {
-                        Some(&last) => last == target || !ctx.all_free_targets.contains(&last),
-                        None => false,
-                    },
-                    None => false,
-                });
-            if let Some(name) = binding_name {
-                // Provably-inline elision: the free fires on the
-                // binding's CURRENT value, so it is sound only when the
-                // initializer is a provably-inline producer AND the
-                // binding is never reassigned, pushed, passed inout, or
-                // view-promoted (the pre-scan marks those names). The
-                // home-provenance flag generalizes this to reassigned
-                // bindings: it tracks the value ACTUALLY in the home at
-                // this program point, cleared at control-flow joins and
-                // in-place mutations.
-                let home_inline =
-                    Self::read_slot(&ctx.fat_locals, name).is_some_and(|fl| fl.home_inline);
-                let elide = home_inline
-                    || (!ctx.fat_mutated[name.raw() as usize]
-                        && Self::provably_inline_producer(ctx, target));
-                if !elide {
-                    let (ptr, cap) = Self::emit_fat_load_ptr_cap(builder, ctx, name)
-                        .expect("fat_locals entry checked above");
-                    if !Self::is_static_cap_zero(builder.func, cap) {
-                        let free_ref = Self::free_ref_for(
-                            builder,
-                            ctx,
-                            &mut str_free_ref,
-                            &mut bytes_free_ref,
-                            is_bytes,
-                        )?;
-                        builder.ins().call(free_ref, &[ptr, cap]);
-                    }
+            // Storage selection is complete before emission. Representation caches
+            // supply register values, never the identity of a release.
+            if let Some(binding) = binding {
+                let storage = ctx
+                    .fat_binding_storage
+                    .get(&binding)
+                    .copied()
+                    .ok_or_else(|| {
+                        format!("cleanup target {target:?} has no storage for binding {binding:?}")
+                    })?;
+                Self::require_fat_storage_binding(storage, binding)?;
+                // Scoped provenance can elide a call only for this exact storage.
+                // Name restoration must never select a different binding's buffer.
+                let inline = Self::free_binding_name(ctx, target)
+                    .and_then(|name| Self::read_slot(&ctx.fat_locals, name))
+                    .is_some_and(|active| {
+                        active.ptr == storage.ptr
+                            && active.home == storage.home
+                            && active.home_inline
+                    });
+                if ctx.optional_optimizations && inline {
+                    continue;
+                }
+                let (ptr, cap) = Self::load_fat_storage_ptr_cap(builder, ctx.int_type, storage);
+                if !Self::is_static_cap_zero(builder.func, cap) {
+                    let free_ref = Self::free_ref_for(
+                        builder,
+                        ctx,
+                        &mut str_free_ref,
+                        &mut bytes_free_ref,
+                        is_bytes,
+                    )?;
+                    builder.ins().call(free_ref, &[ptr, cap]);
+                    ctx.freed_targets.insert(target);
                 }
                 continue;
             }
@@ -387,6 +448,12 @@ impl<M: Module> Codegen<M> {
                     target.index()
                 )
             })?;
+            // position-mechanical: a scheduled drop whose target has no storage — the
+            // producer was never emitted and the lowering-time
+            // pre-filter did not elide it — is a compiler bug, not a
+            // silently-skippable case: the free would leak. The cached
+            // lookup errors out loudly above (debug builds assert in
+            // `assert_no_dropped_frees`).
             // M8.4: views are borrows, never owners — the ownership pass
             // must never schedule a Free for one. The
             // repr check below doubles as the release-mode guard.
@@ -397,13 +464,7 @@ impl<M: Module> Codegen<M> {
             );
             match repr {
                 ValueRepr::Str { ptr, cap, .. } | ValueRepr::Bytes { ptr, cap, .. } => {
-                    // Provably-inline elision for temporaries: sound
-                    // unless the temp is a view base — promotion swaps
-                    // its cached triple for a heap one, making the free
-                    // real.
-                    let elide = Self::provably_inline_producer(ctx, target)
-                        && !ctx.view_base_insts[target.index()];
-                    if !elide && !Self::is_static_cap_zero(builder.func, cap) {
+                    if !Self::is_static_cap_zero(builder.func, cap) {
                         let free_ref = Self::free_ref_for(
                             builder,
                             ctx,
@@ -412,6 +473,7 @@ impl<M: Module> Codegen<M> {
                             is_bytes,
                         )?;
                         builder.ins().call(free_ref, &[ptr, cap]);
+                        ctx.freed_targets.insert(target);
                     }
                 }
                 ValueRepr::View { .. } => {
@@ -440,255 +502,370 @@ impl<M: Module> Codegen<M> {
                 }
             }
         }
-        ctx.pending_sweep.retain(|&idx| !ctx.freed_at[idx]);
         Ok(())
     }
 
-    /// Emit conditional DeadDrops for (`if_stmt`, `arm`): frees of
-    /// the pre-if buffer of a conditionally-reassigned binding on the
-    /// paths where the reassign did NOT happen. Fired at the START of an
-    /// untouched arm, where the binding's `FatLocals` still hold the
-    /// pre-if value. Resolves `target` through `free_binding_names` (the
-    /// init→name map), so the freed buffer is the binding's
-    /// current triple at that program point. The free is
-    /// family-appropriate (`ryo_str_free` / `ryo_bytes_free`, selected
-    /// per target via `free_target_is_bytes`).
+    /// Fire the block-start drop bucket (position-mechanical unification):
+    /// the driver calls this once per Flow block, after switching into
+    /// the mapped Cranelift block and BEFORE the block's steps. Two
+    /// kinds share the bucket, told apart by target identity:
     ///
-    /// Consults `dead_drop_by_if` (built once per function) rather than
-    /// re-scanning the whole per-function drop list at the start of
-    /// every arm — on if-heavy functions with dead drops the old scan
-    /// was O(ifs × arms × drops).
-    pub(crate) fn emit_conditional_dead_drops(
+    /// * Match-arm-start payload destruction — the block is an arm of
+    ///   a match and the drop's target is that match's scrutinee. The
+    ///   consuming arm's unbound needs-drop payload fields are destroyed
+    ///   (the same `unbound_payload_fields` derivation the frontend
+    ///   registered from); the tag dispatch guarantees the
+    ///   discriminated variant, so the field address is the scrutinee
+    ///   slot plus the pool-computed absolute offset.
+    /// * Conditional dead drops — the target is a pre-branch owner;
+    ///   resolved through `free_binding_names` (the init→name map), so
+    ///   the freed buffer is the binding's current triple at that
+    ///   program point, family-appropriate (enum tag-dispatched /
+    ///   struct recursive / fat triple — the exact emission the old
+    ///   block-start hook performed).
+    ///
+    /// Consumption is marked for every entry (the backend validators debug assertions
+    /// read the split), and the per-path same-target dedup applies.
+    pub(crate) fn fire_block_start(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
-        if_stmt: TirRef,
-        arm: ryo_core::ownership::BranchId,
+        block: ryo_core::flow::BlockId,
     ) -> Result<(), String> {
-        if ctx.sidecar.conditional_dead_drops.is_empty() {
+        let empty = Vec::new();
+        let indices = ctx
+            .fire_at_block_start
+            .get(&block)
+            .cloned()
+            .unwrap_or_else(|| empty.to_vec());
+        if indices.is_empty() {
             return Ok(());
         }
-        let pending: Vec<TirRef> = ctx
-            .dead_drop_by_if
-            .get(if_stmt.index())
-            .map(|indices| {
-                indices
-                    .iter()
-                    .filter(|&&i| ctx.sidecar.conditional_dead_drops[i].arms.contains(&arm))
-                    .map(|&i| ctx.sidecar.conditional_dead_drops[i].target)
-                    .collect()
-            })
-            .unwrap_or_default();
-        for target in pending {
-            let Some(name) = Self::free_binding_name(ctx, target) else {
-                continue;
-            };
-            // M11: enum bindings drop the active variant's needs-drop
-            // fields (tag-dispatched).
-            if Self::try_emit_enum_dead_drop(builder, ctx, name, target)? {
+        // Match-arm-start drops resolve their fields through the owning
+        // match (target == scrutinee); group them by that match so each
+        // drop emits exactly its arm's field set.
+        for idx in indices {
+            if idx >= ctx.sidecar.drops.len() {
+                Self::emit_promo_frees(builder, ctx, vec![idx - ctx.sidecar.drops.len()])?;
                 continue;
             }
-            // M9: struct bindings drop their needs-drop fields.
-            if Self::try_emit_struct_dead_drop(builder, ctx, name, target)? {
+            if ctx.freed_at[idx] {
                 continue;
             }
-            let Some((ptr, cap)) = Self::emit_fat_load_ptr_cap(builder, ctx, name) else {
-                continue;
-            };
-            let free_ref = if Self::free_target_is_bytes(ctx, target) {
-                Self::declare_bytes_free(ctx, builder)?
+            ctx.freed_at[idx] = true;
+            #[cfg(debug_assertions)]
+            {
+                ctx.fire_marked[idx] = true;
+            }
+            let target = ctx.sidecar.drops[idx].target;
+            if let Some(payload) = ctx.cleanup_plan.payloads[idx].clone() {
+                if ctx.freed_targets.contains(&target) {
+                    continue;
+                }
+                Self::emit_arm_start_drops(builder, ctx, &payload)?;
+                ctx.freed_targets.insert(target);
             } else {
-                Self::declare_str_free(ctx, builder)?
-            };
-            builder.ins().call(free_ref, &[ptr, cap]);
+                if ctx.freed_targets.contains(&target) {
+                    continue;
+                }
+                Self::emit_frees(builder, ctx, vec![(idx, target)])?;
+            }
         }
         Ok(())
     }
 
-    /// Map every fat-producing named initializer to its binding: VarDecl
-    /// initializers, Assign values, and fat (str/bytes) params' virtual
-    /// refs. Built
-    /// once per function; `emit_frees` consults it to free a binding's
-    /// current `FatLocals` rather than a stale cached repr.
+    /// Build the free-routing tables (see [`FreeBindingTables`]) from
+    /// the Flow IR's place table — one pass over the Flow IR's steps, no
+    /// recursive TIR walk. Every storage-replacing write (a `VarDecl`
+    /// initializer or an `Assign`
+    /// value, anywhere in the Flow IR — including match arms, nested
+    /// scopes, and dead blocks, which the Flow IR's coverage invariant
+    /// enumerates exactly once) registers its producer inst as a free
+    /// target of the written place:
     ///
-    /// Returns four tables (see [`FreeBindingTables`]): the first and
-    /// third are dense — indexed by `TirRef::index()` for real
-    /// instruction refs (slot 0 unused), mapping a free target to its
-    /// binding NAME and to its BINDING identity respectively (a VarDecl
-    /// initializer's binding is its own `VarDecl` ref; an Assign value's
-    /// binding is the `sidecar.assign_binding` entry the ownership walk
-    /// stamped). The second is dense by param position for fat-param
-    /// sentinel refs. The fourth, `last_write`, is keyed by BINDING
-    /// identity (not name — one name can denote a same-named shadow) and
-    /// records the `TirRef` of the binding's most recent write in
-    /// program order (the `VarDecl` initializer, overwritten by each
-    /// `Assign` value; fat params start at their param sentinel ref,
-    /// whose binding identity is the sentinel itself). `emit_frees'`
-    /// binding-path redirect frees the binding's CURRENT home value,
-    /// which is only the FreePoint's buffer when the FreePoint's target
-    /// IS that most recent write — a stale/superseded target (e.g. a
-    /// pre-reassign owner of a loop-carried binding) would free whatever
-    /// value the binding currently holds, so the redirect must not fire
-    /// for it.
+    /// * names come from the write instruction (as before);
+    /// * binding identity comes from the [`Place`] (the declaring
+    ///   `VarDecl` ref, the param sentinel, or the match/destructure
+    ///   owner token) — never from a name lookup, so same-named
+    ///   shadows stay distinct;
+    ///
+    /// This replaces the previous backend-side recursive walk (with
+    /// its statement/value-position match special-casing and its
+    /// dependency on `sidecar.assign_binding`): the Flow IR carries the
+    /// same facts structurally.
     pub(crate) fn build_free_binding_names(
         tir: &Tir,
+        flow: &ryo_core::flow::Flow,
         pool: &InternPool,
-        sidecar: &ryo_core::ownership::FunctionSidecar,
     ) -> FreeBindingTables {
-        fn walk(
-            tir: &Tir,
-            sidecar: &ryo_core::ownership::FunctionSidecar,
-            stmts: &[TirRef],
-            map: &mut [Option<StringId>],
-            binding_of: &mut [Option<TirRef>],
-            last_write: &mut HashMap<TirRef, TirRef>,
-        ) {
-            for &r in stmts {
-                match tir.inst(r).tag {
-                    TirTag::VarDecl => {
-                        let view = tir.var_decl_view(r);
-                        map[view.initializer.index()] = Some(view.name);
-                        // A VarDecl always declares a fresh binding
-                        // (possibly shadowing an outer same-named one),
-                        // so the binding identity is the VarDecl itself.
-                        binding_of[view.initializer.index()] = Some(r);
-                        last_write.insert(r, view.initializer);
-                    }
-                    TirTag::Assign => {
-                        let view = tir.assign_view(r);
-                        map[view.value.index()] = Some(view.name);
-                        // The binding this Assign stores into, recorded
-                        // by the ownership walk; missing only for
-                        // sema-rejected programs.
-                        if let Some(binding) = sidecar.assign_binding[r.index()] {
-                            binding_of[view.value.index()] = Some(binding);
-                            last_write.insert(binding, view.value);
-                        }
-                    }
-                    TirTag::IfStmt => {
-                        let view = tir.if_stmt_view(r);
-                        walk(tir, sidecar, &view.then_stmts, map, binding_of, last_write);
-                        for elif in &view.elif_branches {
-                            walk(tir, sidecar, &elif.body, map, binding_of, last_write);
-                        }
-                        if let Some(else_stmts) = &view.else_stmts {
-                            walk(tir, sidecar, else_stmts, map, binding_of, last_write);
-                        }
-                    }
-                    TirTag::WhileLoop => walk(
-                        tir,
-                        sidecar,
-                        &tir.while_loop_view(r).body,
-                        map,
-                        binding_of,
-                        last_write,
-                    ),
-                    TirTag::ForRange => walk(
-                        tir,
-                        sidecar,
-                        &tir.for_range_view(r).body,
-                        map,
-                        binding_of,
-                        last_write,
-                    ),
-                    TirTag::Destructure => {
-                        // M10: each bound field's owner token (the
-                        // FieldAccess insts emitted immediately before
-                        // the Destructure) maps to its binding name, so
-                        // a scheduled Free lowers through the binding's
-                        // slot instead of the never-evaluated token.
-                        // The binding identity is the owner token
-                        // itself: destructure bindings are fresh, never
-                        // reassigned, and cannot collide with an
-                        // in-scope name (sema rejects), so per-binding
-                        // keying leaves same-named outer bindings'
-                        // lineages untouched.
-                        let view = tir.destructure_view(r);
-                        let owners = tir.destructure_bound_owner_refs(r);
-                        let mut owner_idx = 0;
-                        for field in &view.fields {
-                            let Some(bind) = field.bind else { continue };
-                            let owner = owners[owner_idx];
-                            owner_idx += 1;
-                            map[owner.index()] = Some(bind);
-                            binding_of[owner.index()] = Some(owner);
-                            last_write.insert(owner, owner);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        let mut last_write: HashMap<TirRef, TirRef> = HashMap::new();
         let mut param_names = vec![None; tir.params.len()];
         for (idx, param) in tir.params.iter().enumerate() {
             if is_fat_type(param.ty, pool) {
                 // A fat param's binding identity is its own sentinel ref
                 // (params are bound at entry and never shadowed).
                 param_names[idx] = Some(param.name);
-                last_write.insert(TirRef::param(idx), TirRef::param(idx));
             }
         }
         let mut inst_names = vec![None; tir.instructions.len()];
-        let mut inst_bindings = vec![None; tir.instructions.len()];
-        walk(
-            tir,
-            sidecar,
-            &tir.body_stmts(),
-            &mut inst_names,
-            &mut inst_bindings,
-            &mut last_write,
-        );
-        (inst_names, param_names, inst_bindings, last_write)
+        for place in &flow.places {
+            if let ryo_core::flow::Place::Token { inst, name, .. } = *place {
+                inst_names[inst.index()] = Some(name);
+            }
+        }
+        for step in &flow.steps {
+            let Some(write) = step.facts.write else {
+                continue;
+            };
+            // In-place mutations (compound assign, push, field writes)
+            // preserve storage identity — they register nothing, as
+            // before.
+            let (name, value) = match (tir.inst(step.inst).tag, write.kind) {
+                (TirTag::VarDecl, ryo_core::flow::WriteKind::Init) => {
+                    let view = tir.var_decl_view(step.inst);
+                    (view.name, view.initializer)
+                }
+                (TirTag::Assign, ryo_core::flow::WriteKind::Replace) => {
+                    let view = tir.assign_view(step.inst);
+                    (view.name, view.value)
+                }
+                _ => continue,
+            };
+            inst_names[value.index()] = Some(name);
+            // A release may target the
+            // declaring `VarDecl` itself — the seat of a binding whose
+            // owner is the binding's home place (a moved-through-`Var`
+            // value). The decl names its binding exactly like an init
+            // value does, so the binding-path redirect resolves it.
+            if tir.inst(step.inst).tag == TirTag::VarDecl {
+                inst_names[step.inst.index()] = Some(name);
+            }
+        }
+        (inst_names, param_names)
     }
 }
 
 impl<M: Module> Codegen<M> {
+    /// Backend lowering validators — debug-only invariants of the
+    /// Flow→Cranelift lowering, run once per function after emission
+    /// (release builds compile them out entirely; the few Vecs in the
+    /// failure messages are built only on the assertion path):
+    /// (1) drop consumption — every scheduled drop consumed exactly
+    ///     once (the fire maps fully drained);
+    /// (2) block coverage — every REACHABLE Flow block was emitted
+    ///     exactly once with its terminator dispatched (unreachable
+    ///     blocks are visited at most once — the driver traps/emits
+    ///     them deliberately, never drops them by accident);
+    /// (3) place resolution — every consumed drop's target resolved to
+    ///     storage (a binding-table entry or a cached repr), with the
+    ///     lowering-time pre-filter the only legitimate non-resolver.
+    /// Backend lowering validators — debug-only invariants of the
+    /// Flow→Cranelift lowering, run once per function after emission.
+    /// Release builds compile the bodies out entirely (the failure
+    /// Vecs and the visit-state reads exist only under
+    /// `debug_assertions`).
+    pub(crate) fn assert_backend_invariants(ctx: &FunctionContext<'_, M>) {
+        #[cfg(debug_assertions)]
+        {
+            Self::assert_no_dropped_frees(ctx);
+            Self::assert_no_dropped_promo_frees(ctx);
+            Self::assert_block_coverage(ctx);
+            Self::assert_drop_place_resolution(ctx);
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = ctx;
+    }
+
+    /// Every scheduled promotion release must reach its resolved firing point.
+    #[cfg(debug_assertions)]
+    fn assert_no_dropped_promo_frees(ctx: &FunctionContext<'_, M>) {
+        let unconsumed: Vec<_> = ctx
+            .promo_freed_at
+            .iter()
+            .enumerate()
+            .filter_map(|(index, fired)| (!fired).then_some(index))
+            .collect();
+        debug_assert!(
+            unconsumed.is_empty(),
+            "promotion releases never consumed: {unconsumed:?}"
+        );
+    }
+
+    /// position-mechanical/Drop-consumption check: every scheduled drop was consumed exactly once —
+    /// fired at its Flow fire position or marked consumed by the
+    /// lowering-time pre-filter. A drop left unconsumed means its
+    /// fire-map bucket never ran (a construct path skipped its
+    /// mechanical fire point) — a compiler bug, since the bucket exists
+    /// by construction and each fires once. The assertion states the
+    /// unconsumed count and the first few offending positions.
+    #[cfg(debug_assertions)]
+    fn assert_no_dropped_frees(ctx: &FunctionContext<'_, M>) {
+        {
+            let unconsumed: Vec<usize> = ctx
+                .freed_at
+                .iter()
+                .enumerate()
+                .filter(|&(_, &consumed)| !consumed)
+                .map(|(idx, _)| idx)
+                .collect();
+            debug_assert!(
+                unconsumed.is_empty(),
+                "{} scheduled drops never consumed (fire-map bucket never fired); first few (idx, target, anchor): {:?}",
+                unconsumed.len(),
+                unconsumed
+                    .iter()
+                    .take(5)
+                    .map(|&idx| {
+                        (
+                            idx,
+                            ctx.sidecar.drops[idx].target.index(),
+                            ctx.sidecar.drops[idx]
+                                .position
+                                .anchor_inst()
+                                .map(|a| a.index()),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// Check the concrete storage selected by each fired release. Elided releases
+    /// must satisfy the same no-allocation predicate used during preparation.
+    #[cfg(debug_assertions)]
+    fn assert_drop_place_resolution(ctx: &FunctionContext<'_, M>) {
+        {
+            let (fat_mutated, view_base_insts) =
+                Self::build_fat_mutation_tables(ctx.tir, ctx.flow, ctx.pool);
+            // Branch-aware elision predicate, mirroring `pre_elide_drops`.
+            let predicate_holds = |idx: usize, target: TirRef| {
+                let static_literal = !target.is_param()
+                    && matches!(
+                        ctx.tir.inst(target).tag,
+                        ryo_core::tir::TirTag::StrConst | ryo_core::tir::TirTag::BytesConst
+                    );
+                let inline_producer = !target.is_param()
+                    && ctx.tir.inst(target).tag == ryo_core::tir::TirTag::Call
+                    && Self::producer_max_output_len(ctx.pool.str(ctx.tir.call_view(target).name))
+                        .is_some_and(|max| max as usize <= ryo_runtime::INLINE_CAP);
+                let redirect = match ctx.cleanup_plan.releases[idx] {
+                    ryo_core::flow::cleanup::ReleaseStorage::Binding(place) => {
+                        Some(ctx.flow.place(place).name())
+                    }
+                    ryo_core::flow::cleanup::ReleaseStorage::Value(_) => None,
+                };
+                match redirect {
+                    Some(name) => inline_producer && !fat_mutated[name.raw() as usize],
+                    None => static_literal || (inline_producer && !view_base_insts[target.index()]),
+                }
+            };
+            let mut bad_elision: Vec<(usize, usize)> = Vec::new();
+            let mut bad_resolution: Vec<(usize, usize)> = Vec::new();
+            for (idx, drop) in ctx.sidecar.drops.iter().enumerate() {
+                if !ctx.freed_at[idx] {
+                    continue; // the consumption assert reports it
+                }
+                let target = drop.target;
+                if ctx.fire_marked[idx] {
+                    let resolved = match ctx.cleanup_plan.releases[idx] {
+                        ryo_core::flow::cleanup::ReleaseStorage::Binding(place) => {
+                            let binding = match ctx.flow.place(place) {
+                                ryo_core::flow::Place::Local { decl, .. } => Some(*decl),
+                                ryo_core::flow::Place::Token { inst, .. } => Some(*inst),
+                                ryo_core::flow::Place::Param { index, .. } => {
+                                    Some(TirRef::param(*index as usize))
+                                }
+                                _ => None,
+                            };
+                            binding.is_some_and(|binding| {
+                                ctx.aggregate_binding_storage.contains_key(&binding)
+                                    || ctx.fat_binding_storage.get(&binding).is_some_and(
+                                        |storage| {
+                                            Self::require_fat_storage_binding(*storage, binding)
+                                                .is_ok()
+                                        },
+                                    )
+                            })
+                        }
+                        ryo_core::flow::cleanup::ReleaseStorage::Value(value) => {
+                            Self::cached_repr(ctx, value).is_some()
+                        }
+                    } || ctx.cleanup_plan.payloads[idx].is_some();
+                    if !resolved {
+                        bad_resolution.push((idx, target.index()));
+                    }
+                } else if !predicate_holds(idx, target) {
+                    bad_elision.push((idx, target.index()));
+                }
+            }
+            debug_assert!(
+                bad_elision.is_empty(),
+                "pre-elided drops outside the elision predicate (idx, target): {:?}",
+                bad_elision
+            );
+            debug_assert!(
+                bad_resolution.is_empty(),
+                "fired drops whose target resolved to no storage (idx, target): {:?}",
+                bad_resolution
+            );
+        }
+    }
+
+    /// Validate the physical representation selected for a declaring binding.
+    pub(super) fn require_fat_storage_binding(
+        storage: super::FatLocals,
+        expected: TirRef,
+    ) -> Result<(), String> {
+        if storage.binding != Some(expected) {
+            return Err(format!(
+                "cleanup selected storage for {:?}, expected {expected:?}",
+                storage.binding
+            ));
+        }
+        Ok(())
+    }
+
     /// Read the free-target → binding-name map. Param sentinel refs
     /// are served from `free_binding_param_names`; real instruction
     /// refs from `free_binding_names`. Same dispatch shape as
     /// `cached_repr`.
     pub(crate) fn free_binding_name(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<StringId> {
+        Self::free_binding_name_tables(&ctx.free_binding_names, &ctx.free_binding_param_names, r)
+    }
+
+    /// Table form of [`Self::free_binding_name`] — usable before the
+    /// `FunctionContext` exists (the lowering-time pre-filter).
+    fn free_binding_name_tables(
+        free_binding_names: &[Option<StringId>],
+        free_binding_param_names: &[Option<StringId>],
+        r: TirRef,
+    ) -> Option<StringId> {
         if let Some(idx) = r.as_param_index() {
-            ctx.free_binding_param_names[idx as usize]
+            free_binding_param_names[idx as usize]
         } else {
-            ctx.free_binding_names.get(r.index()).copied().flatten()
+            free_binding_names.get(r.index()).copied().flatten()
         }
     }
 
-    /// Read the free-target → BINDING identity map: the declaring
-    /// `VarDecl`'s `TirRef` for initializer targets, the
-    /// `sidecar.assign_binding` entry for `Assign` value targets. A fat
-    /// param's binding identity IS its own sentinel ref (params are
-    /// never shadowed). Same dispatch shape as `free_binding_name`;
-    /// `emit_frees` consults it so the redirect's "most recent write"
-    /// lookup is per-binding, not per-name (a same-named shadow is a
-    /// different binding and must not clobber the outer binding's
-    /// lineage).
-    pub(crate) fn free_binding_of(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<TirRef> {
-        if r.as_param_index().is_some() {
-            Some(r)
-        } else {
-            ctx.free_binding_of_insts.get(r.index()).copied().flatten()
-        }
-    }
-
-    /// True if any instruction reachable from `root` (transitive
-    /// operands and nested body statements) is a `Var` read of `name`.
-    /// Conservative aliasing probe for the producer-into-home Assign
-    /// path: an RHS that mentions the target binding (including a
-    /// shadowed same-name read — the probe cannot distinguish shadowing)
-    /// forbids the free-before-overwrite order.
-    pub(super) fn expr_refs_name(tir: &Tir, root: TirRef, name: StringId) -> bool {
-        let mut stack = vec![root];
-        while let Some(r) = stack.pop() {
-            if let TirData::Var(n) = tir.inst(r).data
-                && n == name
-            {
-                return true;
+    /// Resolve RHS aliasing from Flow reads before backend emission.
+    pub(super) fn assignment_aliases(tir: &Tir, flow: &ryo_core::flow::Flow) -> Vec<bool> {
+        let mut aliases = vec![false; tir.instructions.len()];
+        for step in &flow.steps {
+            let Some(read) = step.facts.read else {
+                continue;
+            };
+            let mut cursor = step.inst;
+            while let Some(parent) = flow.parent_of(cursor) {
+                if tir.inst(parent).tag == TirTag::Assign
+                    && flow
+                        .facts_of(parent)
+                        .and_then(|f| f.write)
+                        .is_some_and(|w| w.place == read)
+                {
+                    aliases[parent.index()] = true;
+                }
+                cursor = parent;
             }
-            tir.walk_operands(r, &mut |_parent, child, _kind| stack.push(child));
         }
-        false
+        aliases
     }
 
     /// Provenance of a freshly stored home value: true iff the value

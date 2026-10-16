@@ -29,13 +29,13 @@ enum Commands {
     /// Inspect intermediate representations of a Ryo program.
     ///
     /// `--emit` selects which IR sections to print. Sections always
-    /// appear in pipeline order (AST → UIR → TIR → CLIF) regardless
-    /// of the order given on the command line. With no flag all four
+    /// appear in pipeline order (AST → UIR → TIR → Flow → CLIF) regardless
+    /// of the order given on the command line. With no flag all five
     /// sections are printed.
     Ir {
         /// Input file to generate IR for
         file: PathBuf,
-        /// Comma-separated list of IRs to dump: ast, uir, tir, clif.
+        /// Comma-separated list of IRs to dump: ast, uir, tir, flow, clif.
         #[arg(long, value_delimiter = ',', value_enum)]
         emit: Vec<EmitKind>,
     },
@@ -43,7 +43,7 @@ enum Commands {
     Run {
         /// Input file to compile and run
         file: PathBuf,
-        /// Comma-separated list of IRs to dump: ast, uir, tir, clif.
+        /// Comma-separated list of IRs to dump: ast, uir, tir, flow, clif.
         /// Sections print in pipeline order before the program's own
         /// output; without the flag stdout carries only what the
         /// program writes.
@@ -59,7 +59,7 @@ enum Commands {
     Build {
         /// Input file to compile
         file: PathBuf,
-        /// Comma-separated list of IRs to dump: ast, uir, tir, clif.
+        /// Comma-separated list of IRs to dump: ast, uir, tir, flow, clif.
         /// Sections print in pipeline order; without the flag the
         /// command is silent on success.
         #[arg(long, value_delimiter = ',', value_enum)]

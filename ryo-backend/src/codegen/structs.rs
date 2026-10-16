@@ -12,17 +12,14 @@
 //! FIELD-WISE, never byte-wise — a block copy would read uninitialized
 //! padding bytes, which the ASan/Valgrind suites flag.
 
-use cranelift::codegen::ir::{
-    ArgumentPurpose, MemFlagsData, StackSlot, StackSlotData, StackSlotKind,
-};
-use cranelift::codegen::isa::CallConv;
+use cranelift::codegen::ir::{MemFlagsData, StackSlot, StackSlotData, StackSlotKind};
 use cranelift::prelude::*;
 use cranelift_module::{DataId, Module};
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, StructField, TypeId, TypeKind};
 
-use super::bytes::store_string;
 use super::enums::is_enum_type;
+use super::literals::store_string;
 use super::{
     Codegen, CodegenNameIds, FunctionContext, STR_SLOT_SIZE, Terminator, ValueRepr,
     cranelift_type_for, ranges,
@@ -76,6 +73,22 @@ impl<M: Module> Codegen<M> {
                 builder.use_var(var)
             }
             TirTag::FieldAccess => Self::field_addr_of(builder, ctx, r)?.0,
+            TirTag::Match => {
+                // M12: an aggregate-result match writes each value arm's
+                // result into its pre-allocated result slot; the join
+                // prologue cached the slot address as
+                // `ValueRepr::Struct` when the Switch terminator was
+                // dispatched.
+                match Self::cached_repr(ctx, r) {
+                    Some(ValueRepr::Struct { addr }) => addr,
+                    other => {
+                        return Err(format!(
+                            "eval_inst_struct: match at %{} cached {other:?}, not a struct repr",
+                            r.index()
+                        ));
+                    }
+                }
+            }
             TirTag::Call => {
                 // Struct-returning call: emit_call handles sret and
                 // caches ValueRepr::Struct for r.
@@ -489,6 +502,7 @@ impl<M: Module> Codegen<M> {
             view.name,
             Some(var),
         );
+        ctx.aggregate_binding_storage.insert(r, var);
         Ok(Terminator::None)
     }
 
@@ -533,8 +547,7 @@ impl<M: Module> Codegen<M> {
         let src = Self::eval_inst_struct(builder, ctx, operand)?;
         let ret_ty = ctx.tir.return_type;
         Self::emit_struct_copy(builder, ctx, sret, src, ret_ty)?;
-        Self::emit_due_frees(builder, ctx, r)?;
-        Self::emit_due_promo_frees(builder, ctx, r)?;
+        Self::fire_payload(builder, ctx, r)?;
         Self::emit_return(builder, ctx, &[])?;
         Ok(Terminator::Return)
     }
@@ -644,6 +657,7 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         target: TirRef,
+        binding: Option<TirRef>,
     ) -> Result<bool, String> {
         let ty = if let Some(idx) = target.as_param_index() {
             ctx.tir.params[idx as usize].ty
@@ -653,48 +667,23 @@ impl<M: Module> Codegen<M> {
         if !matches!(ctx.pool.kind(ty), TypeKind::Struct | TypeKind::AnonStruct) {
             return Ok(false);
         }
-        let addr = match Self::free_binding_name(ctx, target)
-            .and_then(|name| Self::read_slot(&ctx.struct_locals, name))
-        {
-            Some(var) => builder.use_var(var),
-            None => match Self::cached_repr(ctx, target) {
+        let addr = if let Some(binding) = binding {
+            let var = ctx
+                .aggregate_binding_storage
+                .get(&binding)
+                .copied()
+                .ok_or_else(|| format!("aggregate release has no storage for {binding:?}"))?;
+            builder.use_var(var)
+        } else {
+            match Self::cached_repr(ctx, target) {
                 Some(ValueRepr::Struct { addr }) => addr,
                 _ => {
                     return Err(format!(
-                        "ownership pass scheduled Free for struct %{} but no struct local or ValueRepr is available",
-                        target.index()
+                        "aggregate release has no value storage for {target:?}"
                     ));
                 }
-            },
+            }
         };
-        Self::emit_struct_drop(builder, ctx, addr, ty)?;
-        Ok(true)
-    }
-
-    /// Struct arm of `emit_conditional_dead_drops` (M9): the pre-if
-    /// value of a conditionally-reassigned struct binding is dropped
-    /// on the arms that kept it. Returns `Ok(true)` when `name` is a
-    /// struct binding (handled), so the caller skips the fat path.
-    pub(crate) fn try_emit_struct_dead_drop(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        name: StringId,
-        target: TirRef,
-    ) -> Result<bool, String> {
-        // Conditional dead drops only fire for locals; a param-sentinel
-        // target would panic the arena index below.
-        debug_assert!(!target.is_param());
-        let ty = ctx.tir.inst(target).ty;
-        // Kind gate: enum bindings share the `struct_locals` table —
-        // the enum dead-drop routing (`try_emit_enum_dead_drop`) claims
-        // those targets first; reaching here with one is a dispatch bug.
-        if !matches!(ctx.pool.kind(ty), TypeKind::Struct | TypeKind::AnonStruct) {
-            return Ok(false);
-        }
-        let Some(var) = Self::read_slot(&ctx.struct_locals, name) else {
-            return Ok(false);
-        };
-        let addr = builder.use_var(var);
         Self::emit_struct_drop(builder, ctx, addr, ty)?;
         Ok(true)
     }
@@ -1153,29 +1142,36 @@ impl<M: Module> Codegen<M> {
                 Some(name) => {
                     let token = owners[owner_idx];
                     owner_idx += 1;
-                    Self::bind_destructured_field(builder, ctx, name, field_addr, sf.ty, token)?;
+                    Self::bind_field_move(builder, ctx, name, field_addr, sf.ty, Some(token))?;
                 }
             }
         }
         Ok(Terminator::None)
     }
 
-    /// Register one destructured-field binding: copy the field's value
-    /// out of the rhs slot into storage the binding owns, in the same
-    /// shape `VarDecl` produces (fat SSA triples for `str`/`bytes`, a
-    /// slot address for structs, a scalar `Variable` for Copy fields) so
-    /// every later read / scheduled free finds the binding where it
-    /// expects it. The field's owner token (`token`) caches the same
+    /// Register one field binding moved (or copied) out of an aggregate
+    /// slot: the field's value leaves `field_addr` into storage the
+    /// binding owns, in the same shape `VarDecl` produces (fat SSA
+    /// triples for `str`/`bytes`, a slot address for structs and enums, a
+    /// scalar `Variable` for Copy fields) so every later read / scheduled
+    /// free finds the binding where it expects it. Shared by M10
+    /// destructuring (`emit_destructure`) and M12 match arms
+    /// (`codegen/match_.rs`) — the binding prologue is identical, only
+    /// the caller's slot/offset source differs.
+    ///
+    /// The field's owner token (`token`), when present, caches the same
     /// value: the token instruction is never evaluated, and the
-    /// end-of-statement free sweep gates on a cached repr for the
-    /// Free's target before firing a sub-expression-anchored Free.
-    fn bind_destructured_field(
+    /// end-of-statement free sweep gates on a cached repr for the Free's
+    /// target before firing a sub-expression-anchored Free. Match Copy
+    /// bindings pass `None` — sema's owner-token convention emits a
+    /// token only per by-move binding, so nothing is cached for them.
+    pub(crate) fn bind_field_move(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         name: StringId,
         field_addr: Value,
         field_ty: TypeId,
-        token: TirRef,
+        token: Option<TirRef>,
     ) -> Result<(), String> {
         match ctx.pool.kind(field_ty) {
             TypeKind::Str | TypeKind::Bytes => {
@@ -1199,6 +1195,7 @@ impl<M: Module> Codegen<M> {
                     &mut ctx.fat_locals_undo,
                     name,
                     Some(super::FatLocals {
+                        binding: token,
                         ptr: var_ptr,
                         len: var_len,
                         cap: var_cap,
@@ -1206,15 +1203,20 @@ impl<M: Module> Codegen<M> {
                         home_inline: false,
                     }),
                 );
-                Self::cache_repr(
-                    ctx,
-                    token,
-                    if matches!(ctx.pool.kind(field_ty), TypeKind::Bytes) {
-                        ValueRepr::Bytes { ptr, len, cap }
-                    } else {
-                        ValueRepr::Str { ptr, len, cap }
-                    },
-                );
+                if let Some(token) = token {
+                    let storage =
+                        Self::read_slot(&ctx.fat_locals, name).expect("bound payload storage");
+                    ctx.fat_binding_storage.insert(token, storage);
+                    Self::cache_repr(
+                        ctx,
+                        token,
+                        if matches!(ctx.pool.kind(field_ty), TypeKind::Bytes) {
+                            ValueRepr::Bytes { ptr, len, cap }
+                        } else {
+                            ValueRepr::Str { ptr, len, cap }
+                        },
+                    );
+                }
                 Ok(())
             }
             TypeKind::View(_) => {
@@ -1232,7 +1234,10 @@ impl<M: Module> Codegen<M> {
                     name,
                     Some(var),
                 );
-                Self::cache_repr(ctx, token, ValueRepr::Struct { addr: dst });
+                if let Some(token) = token {
+                    ctx.aggregate_binding_storage.insert(token, var);
+                    Self::cache_repr(ctx, token, ValueRepr::Struct { addr: dst });
+                }
                 Ok(())
             }
             TypeKind::Enum => {
@@ -1247,7 +1252,10 @@ impl<M: Module> Codegen<M> {
                     name,
                     Some(var),
                 );
-                Self::cache_repr(ctx, token, ValueRepr::Enum { addr: dst });
+                if let Some(token) = token {
+                    ctx.aggregate_binding_storage.insert(token, var);
+                    Self::cache_repr(ctx, token, ValueRepr::Enum { addr: dst });
+                }
                 Ok(())
             }
             _ => {
@@ -1261,7 +1269,10 @@ impl<M: Module> Codegen<M> {
                 // stale fact from the shadowed binding (mirrors VarDecl).
                 Self::write_slot(&mut ctx.range_facts, &mut ctx.range_facts_undo, name, None);
                 Self::write_slot(&mut ctx.locals, &mut ctx.locals_undo, name, Some(var));
-                Self::cache_repr(ctx, token, ValueRepr::Scalar(val));
+                if let Some(token) = token {
+                    ctx.aggregate_binding_storage.insert(token, var);
+                    Self::cache_repr(ctx, token, ValueRepr::Scalar(val));
+                }
                 Ok(())
             }
         }
@@ -1308,78 +1319,6 @@ pub(crate) fn writes_out_slot(tir: &Tir, pool: &InternPool, r: TirRef) -> bool {
 }
 
 impl<M: Module> Codegen<M> {
-    pub(super) fn build_signature(&self, tir: &Tir, pool: &InternPool, is_main: bool) -> Signature {
-        let mut sig = self.module.make_signature();
-        for param in &tir.params {
-            if param.mode == ParamMode::Inout {
-                // Mutable borrow: pass a single pointer to the caller's
-                // slot, regardless of pointee type (scalar or fat owner).
-                sig.params.push(AbiParam::new(self.int_type));
-            } else if is_fat_type(param.ty, pool) {
-                // Fat owner (str/bytes): 3-word ABI.
-                sig.params.push(AbiParam::new(self.int_type)); // ptr
-                sig.params.push(AbiParam::new(types::I64)); // len
-                sig.params.push(AbiParam::new(types::I64)); // cap
-            } else if pool.is_view(param.ty) {
-                // `strview` view: 2-word ABI (ptr, len) — no cap word (M8.4).
-                sig.params.push(AbiParam::new(self.int_type)); // ptr
-                sig.params.push(AbiParam::new(types::I64)); // len
-            } else if is_struct_type(param.ty, pool) || is_enum_type(param.ty, pool) {
-                // Struct (M9 named / M10 anonymous) and enum (M11)
-                // params: a single pointer to the value's stack slot,
-                // regardless of mode (borrow/move/copy).
-                sig.params.push(AbiParam::new(self.int_type));
-            } else {
-                let cl_ty = cranelift_type_for(param.ty, pool, self.int_type);
-                sig.params.push(AbiParam::new(cl_ty));
-            }
-        }
-        // C-ABI shim for `main`: Ryo's `fn main()` is void and takes no
-        // Ryo params (sema rejects a parametrized main), but the host
-        // C runtime (crt0 via zig cc, or our JIT trampoline) enters
-        // `main` with C's `(argc, argv)`. C's argc is a 32-bit `int`,
-        // but the Cranelift ABI word is pointer-sized (`i64`): works on
-        // x86-64/aarch64/Windows because a 32-bit argument arrives
-        // zero-extended in its register, so the low half the C side
-        // reads is exact. Push the two entry params — argc, then argv,
-        // in C order — before the int return word; `compile_function`
-        // reads them from the entry block to call `ryo_rt_init`, and
-        // falls through to an explicit `return 0` since Ryo's return
-        // type is void.
-        // `is_main` is resolved by `declare_all_functions` from the
-        // interned-id cache.
-        if is_main {
-            sig.params.push(AbiParam::new(self.int_type));
-            sig.params
-                .push(AbiParam::new(self.module.isa().pointer_type()));
-            sig.returns.push(AbiParam::new(self.int_type));
-        } else if tir.return_type != pool.void() {
-            if is_fat_type(tir.return_type, pool)
-                || is_struct_type(tir.return_type, pool)
-                || is_enum_type(tir.return_type, pool)
-            {
-                // sret: hidden pointer prepended to regular params, no IR-level return.
-                sig.params.insert(
-                    0,
-                    AbiParam::special(self.int_type, ArgumentPurpose::StructReturn),
-                );
-            } else {
-                let cl_ty = cranelift_type_for(tir.return_type, pool, self.int_type);
-                sig.returns.push(AbiParam::new(cl_ty));
-            }
-        }
-        // A function the pre-pass marked gets the Tail calling
-        // convention — the only convention from which Cranelift allows
-        // `return_call`. Never `main` (the C runtime enters it with the
-        // C ABI). A marked function that turns out ineligible at
-        // emission still compiles correctly as a plain Tail-conv
-        // function, so over-marking costs nothing.
-        if !is_main && self.tail_candidates.contains(&tir.name) {
-            sig.call_conv = CallConv::Tail;
-        }
-        sig
-    }
-
     /// Call a slot-out runtime producer: allocate a 24-byte slot (or
     /// use the caller-provided `out_slot` — a fat binding's canonical
     /// home when the result initializes one), pass its address as

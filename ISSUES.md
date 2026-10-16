@@ -115,17 +115,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-033 — Variables declared inside if/elif/else branches are not visible after the statement
-
-**Severity:** Correctness / Hygiene
-**Area:** sema
-
-**Files:** `ryo-frontend/src/sema/stmt.rs` (`analyze_block`)
-**Summary:** Each branch of an if/elif/else creates a child scope. Variables declared inside a branch are dropped when the branch scope ends. There is no "variable promotion" — even if all branches declare `x: int`, `x` is not available after the if statement. This is the correct scoping semantics for now, but may surprise users expecting Python-style scoping where if-branches don't create a new scope.
-**Resolution:** This is intentional for M8b. If user feedback requests Python-style flat scoping, revisit as a language design decision (requires approval per AGENTS.md escalation rules).
-
----
-
 ### I-037 — Panic/Assert mechanism lacks `#file` / `#line` intrinsic expansion
 
 **Severity:** Correctness / Hygiene
@@ -190,17 +179,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `ryo-backend/src/codegen/mod.rs` (`generate_for_range` :1377)
 **Summary:** Currently, `for-range` loops have bespoke code generation that manually emits basic blocks, jump instructions, and raw counter increments. When general iterators are added, loops should be desugared during the AST-to-UIR phase into standard `while` loops that call `.next()`.
 **Resolution:** Once iterators land, remove the `generate_for_range` codegen entirely and rely on standard `while` codegen to emit loops.
-
----
-
-### I-047 — UIR `is_move` field is a pass-through
-
-**Severity:** Correctness / Hygiene
-**Area:** core-ir
-
-**Files:** `ryo-core/src/uir.rs` (`UirParam`), `ryo-frontend/src/astgen.rs`, `ryo-frontend/src/sema/`
-**Summary:** `is_move` is threaded lexer → parser → AST → UIR → TIR. The UIR copy is never read: astgen propagates the AST flag in, sema reads it back out into `TirParam`, and no UIR pass inspects it. UIR is structural lowering with no semantic meaning, so `UirParam::is_move` is dead weight that exists only to bridge two layers it shouldn't.
-**Resolution:** Drop `UirParam::is_move`. Sema can read the flag straight from the AST `FuncBody` (or via a side-channel keyed by FuncBody) when it constructs `TirParam`. Wait until any other UIR-level pass needs the flag before re-introducing it.
 
 ---
 
@@ -681,19 +659,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-207 — Brace Law asymmetry vs Go-style uniform braces — revisit if alpha reopens syntax
-
-**Severity:** Correctness / Hygiene
-**Area:** docs-spec
-
-**Files:** docs/specification.md (D11), landing/reference/index.html (#enums)
-
-**Summary:** Enum named payloads declare with parens + 'name: Type' (Rectangle(width: float)) but construct with braces + 'name=value' (Rectangle{width=1.0}). The asymmetry is frozen for alpha (D11), but it is a Rust/Swift idiom, not the simplest option: Go uses one brace+name syntax for both declaration and construction (type Point struct{ X, Y float64 } / Point{X: 1}). DX review against the 'as simple as Go' bar flagged this as the remaining declaration/construction visual mismatch; the landing Forms table mitigates in the meantime.
-
-**Resolution:** Revisit only if alpha ever reopens enum syntax: benchmark Go's uniform-brace declaration/construction against the current D11 form, including how tuple variants would render. Until then the landing Forms table owns the teachability; no code action.
-
----
-
 ### I-208 — Lowercase type names half-work: enum defines and unit-accesses fine, payload construction redirects
 
 **Severity:** Correctness / Hygiene
@@ -707,9 +672,115 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-209 — parser/tests.rs sits at exactly the 2000-line CI cap — zero headroom
+
+**Severity:** Correctness / Hygiene
+**Area:** frontend-parser
+
+**Files:** ryo-frontend/src/parser/tests.rs, scripts/check_file_length.sh
+
+**Summary:** Discovered during the M12 parser-test review: ryo-frontend/src/parser/tests.rs is exactly at the 2000-line maximum that scripts/check_file_length.sh enforces in CI (the gate fails only on OVER 2000), so the file has zero headroom: adding a single line anywhere without removing one fails the CI length gate for what looks like an unrelated change.
+
+**Resolution:** Split parser/tests.rs into thematic submodules following the enum_tests.rs / match_tests.rs precedent (e.g. statements.rs, expressions.rs), or raise the cap deliberately. Not M12 scope; schedule with the next parser-touching milestone (I-208 follow-up window).
+
+---
+
+### I-217 — Implement bounded Flow IR inlining before ABI lowering
+
+**Severity:** Cleanup
+**Area:** core-ir
+
+**Files:** ryo-core/src/flow.rs, ryo-core/src/flow/, ryo-core/src/tir.rs, ryo-frontend/src/ownership/, ryo-driver/src/pipeline.rs, ryo-backend/src/codegen/, docs/dev/pipeline_migration.md, benchmarks/json_validate/, benchmarks/collatz/
+
+**Summary:** I-186 and I-188 record call overhead, but their proposed TIR/backend placement predates the Flow pipeline. Record the implementation sequence from docs/dev/pipeline_migration.md. Small JSON validator helpers are candidates for bounded inlining. The expected speedup is unmeasured. Cranelift 0.136.1 also provides `Context::inline` and the `Inline` trait. Evaluate these as optional backend machinery, not as a replacement for language-level Flow inlining. Ryo must supply verified, legalized callee bodies with matching signatures and bounded selection rules. A backend experiment must preserve cleanup, source provenance, and stack-guard behavior. Reference: [Cranelift inlining infrastructure](https://docs.rs/cranelift-codegen/latest/cranelift_codegen/inline/index.html).
+
+**Resolution:** (1) Complete the required Flow storage, cleanup, phase-validation, and analysis-invalidation contracts, including explicit storage lineage, cleanup firing points, and promotion lifetimes. (2) Define body cloning and mutation contracts. Remap TIR instructions, side arenas, Flow blocks, places, joins, cleanup references, and source provenance. Keep cached source bodies unchanged. (3) Add bounded inlining over concrete language-level Flow bodies before ABI lowering. Start with small direct callees returning scalar values, including borrowed bytesview parameters. Exclude unsupported ownership and effect cases. This first version does not require generics, comptime, ARC, or concurrency. (4) Split the caller block at the call. Evaluate arguments exactly once in original order. Bind parameters, clone the callee, and route returns to a continuation and result. Preserve borrow/move semantics, cleanup order, and exceptional exits. (5) Preserve or recompute affected analyses. Validate transformed bodies and cleanup obligations. Keep the unoptimized path valid. (6) Bound callee size, expansion depth, and caller growth. Detect recursive cycles and prevent unbounded expansion. (7) Test multiple returns, side effects, short-circuit evaluation, borrowed views, shadowing, and recursion limits. Add owned-value, replacement, destruction, and sanitizer coverage as those shapes become eligible. Compare execution with the pass enabled and disabled. (8) Measure JSON validation, collatz, and compiler benchmarks against the same base. Start with is_hex_digit, skip_ws, and match_lit candidates. Inspect generated code for removed calls. Record execution time, compile time, code size, toolchain versions, and remaining hot paths. Do not promise Rust parity or attribute the entire gap to call overhead.
+
+---
+
+### I-225 — Short literal equality emits one load and comparison per byte
+
+**Severity:** Cleanup
+**Area:** codegen
+
+**Files:** ryo-backend/src/codegen/str_ops.rs
+
+**Summary:** The inline literal equality path emits one I8 load and comparison per byte for literals up to 16 bytes. An eight-byte parameter comparison retains eight ldrb instructions and eight cmp/cset sequences in AArch64 AOT machine code with opt_level=speed. Cranelift 0.136.1 provides emit_small_memory_compare, which uses integer-width loads for supported equality sizes. This is a demonstrated code-shape opportunity; runtime improvement is not measured.
+
+**Resolution:** Benchmark wider bounded loads against the current byte path for str and bytes equality and inequality. Evaluate emit_small_memory_compare or immediate packed-literal comparisons for 2, 4, 8, and 16 bytes; retain an appropriate path for other lengths because the helper can fall back to memcmp. Preserve the length guard, unaligned view support, empty/null handling, and exact allocation bounds. Never widen the existing trusted aligned flags without an alignment proof. Verify AArch64 and x86-64 machine code, runtime performance, compiler cost, and code size before selecting the lowering.
+
+---
+
+### I-226 — Evaluate explicit CPU feature profiles for AOT compilation
+
+**Severity:** Cleanup
+**Area:** codegen
+
+**Files:** ryo-backend/src/codegen/mod.rs, ryo-backend/src/codegen/jit.rs, ryo-driver/src/pipeline.rs, ryo/src/main.rs, docs/dev/ryo-incremental-compilation.md
+
+**Summary:** AOT construction uses isa::lookup(target_triple) without explicit CPU features. The JIT builder already detects host features. AOT therefore cannot select an explicit native CPU profile for programs that can benefit from optional instructions. This is an optimization opportunity, not a measured regression.
+
+**Resolution:** Define a portable default and an explicit native CPU option. Evaluate named CPU profiles and explicit feature sets without changing language semantics. Use host detection only for a compatible host target; reject incompatible target/profile combinations. Keep target features separate from the Rust runtime build configuration. Include effective CPU features in artifact keys and diagnostic output. Compare baseline and native machine code for feature-sensitive kernels on AArch64 and x86-64. Measure execution time, code size, and compiler cost; feature selection alone does not perform loop vectorization. Reference: https://docs.rs/cranelift-native/latest/cranelift_native/fn.builder.html .
+
+---
+
+### I-227 — Evaluate direct AOT calls to statically linked runtime symbols
+
+**Severity:** Cleanup
+**Area:** codegen
+
+**Files:** ryo-backend/src/codegen/expr.rs, ryo-backend/src/codegen/mod.rs, ryo-backend/src/codegen/jit.rs, ryo-backend/src/linker.rs, ryo-backend/src/codegen/tests.rs
+
+**Summary:** declare_runtime_fn declares runtime symbols with Linkage::Import. On AArch64 AOT, inspection of a program that prints a bool and an int showed runtime address loads followed by indirect blr instructions. Calls to Ryo functions used direct bl instructions. The executable links the runtime archive, but codegen does not communicate a proven symbol-placement contract to Cranelift. Runtime gains are unmeasured.
+
+**Resolution:** Evaluate an AOT-specific symbol policy using ExtFuncData.colocated only when final linkage guarantees non-preemptible symbols and supported relocation distances. Keep the JIT policy independent because runtime addresses can be outside direct-call range. Do not replace imports with local definitions without providing their bodies. Reproduce with a function returning its int parameter plus one and main printing its result; inspect the runtime conversion, print, and panic calls. Test Mach-O, ELF, and COFF relocation behavior, large executables, and all supported linking modes. Preserve diagnostics and exit behavior. Compare code size, execution time, and compiler cost. Reference: https://docs.rs/cranelift-codegen/latest/cranelift_codegen/ir/struct.ExtFuncData.html#structfield.colocated .
+
+---
+
+### I-228 — Evaluate proven memory facts for Cranelift load optimization
+
+**Severity:** Cleanup
+**Area:** codegen
+
+**Files:** ryo-backend/src/codegen/expr.rs, ryo-backend/src/codegen/str_ops.rs, ryo-backend/src/codegen/structs.rs, ryo-backend/src/codegen/bytes.rs, ryo-core/src/flow.rs, ryo-frontend/src/ownership/
+
+**Summary:** Backend memory operations mostly supply trusted flags, which establish alignment and non-trapping access at the current instruction. Codegen does not supply readonly, alias-region, or can_move facts. Cranelift alias analysis is already enabled; the missing opportunity is proven input facts. No runtime gain is established.
+
+**Resolution:** Define memory facts from allocation provenance, ownership, effects, and lifetime before attaching flags. Start with stable immutable literal storage and clearly disjoint storage categories. readonly requires no mutation during the entire function invocation; a borrowed parameter or immutable binding does not establish this. can_move requires safety across control-flow changes; bounds-check-dependent loads and storage freed later do not qualify without stronger proof. Keep overlapping views in compatible alias regions and treat unknown aliases conservatively. Calls remain alias-analysis barriers unless the pinned Cranelift API supports stronger semantics. Test mutation through aliases, replacement, promotion, empty/null values, views, and loads dominated by guards. Compare generated loads and runtime results with annotations disabled. Reference: https://docs.rs/cranelift-codegen/latest/src/cranelift_codegen/ir/memflags.rs.html .
+
+---
+
+### I-229 — Benchmark Cranelift speed_and_size against the current speed profile
+
+**Severity:** Cleanup
+**Area:** ci-benchmarks
+
+**Files:** ryo-backend/src/codegen/mod.rs, ryo-backend/src/codegen/jit.rs, ryo-backend/benches/backend.rs, benchmarks/
+
+**Summary:** JIT and AOT hardcode opt_level=speed. Cranelift also provides speed_and_size, but Ryo has no recorded comparison that establishes whether it improves executable size or instruction-cache behavior for representative workloads. This is an evaluation task, not a claim that the current default is wrong.
+
+**Resolution:** Run controlled A/B comparisons of speed and speed_and_size with identical source, compiler, runtime, target features, and linker settings. Compare string slicing, JSON validation, call-heavy code, recursion, and large functions. Record generated-function size separately from runtime archive and final executable size. Measure execution time, backend compilation time, and peak compiler memory for JIT and AOT. Verify program output and failure behavior. Retain speed unless evidence supports a different default or an explicit profile. Check CodSpeed compile-time results before accepting a tradeoff. The pinned settings contract defines speed_and_size as speed plus size-oriented transformations; see Cranelift shared settings documentation: https://docs.rs/cranelift-codegen/latest/cranelift_codegen/settings/index.html .
+
+---
+
+### I-230 — Evaluate Cranelift function caching for repeated backend compilation
+
+**Severity:** Cleanup
+**Area:** codegen
+
+**Files:** ryo-backend/Cargo.toml, ryo-backend/src/codegen/mod.rs, ryo-backend/src/codegen/jit.rs, ryo-driver/src/pipeline.rs, docs/dev/ryo-incremental-compilation.md
+
+**Summary:** Ryo does not enable the Cranelift incremental-cache Cargo feature or use its compiled-function cache primitives. Cranelift 0.136.1 provides Context::compile_with_cache and lower-level serialization helpers. These can reduce repeated code generation, but do not improve emitted machine code or replace frontend dependency tracking.
+
+**Resolution:** Prototype cache-disabled, cold-cache, warm-cache, and edited-function builds. Follow the phase and dependency contracts in docs/dev/ryo-incremental-compilation.md. Account for compiler and Cranelift versions, target ISA and CPU features, optimization flags, runtime ABI/profile, and all body, layout, and inline dependencies. Verify symbol remapping, relocation reconstruction, and current-module installation for JIT and AOT. Preserve required unwind and source metadata; raw define_function_bytes integration alone may omit metadata handled by normal module compilation. Do not persist JIT process addresses. Treat unusable entries as cache misses and bound storage growth. Measure lookup cost, warm-build improvement, memory, and storage separately. Use the experimental cache checks during validation. Reference: Cranelift 0.136.1 src/incremental_cache.rs and https://docs.rs/cranelift-codegen/latest/cranelift_codegen/struct.Context.html .
+
+---
+
 ## Cross-References
 
 - Architecture analysis: [docs/dev/architecture_analysis.md](docs/dev/architecture_analysis.md) — latest verified snapshot (2026-08-24); several current entries originated there, and its `I-xxx` citations reflect what was open at the time (older snapshots live in git history).
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
+
+<!-- issue-id high-water: 234 -->

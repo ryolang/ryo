@@ -337,58 +337,11 @@ impl<M: Module> Codegen<M> {
         Ok((m_ptr, m_len))
     }
 
-    /// Fire promotion frees anchored after `tir_ref`. Mirrors
-    /// `emit_due_frees`.
-    pub(crate) fn emit_due_promo_frees(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        tir_ref: TirRef,
-    ) -> Result<(), String> {
-        if ctx.sidecar.promotion_frees.is_empty() {
-            return Ok(());
-        }
-        let Some(indices) = ctx.promo_free_by_after.get(tir_ref.index()) else {
-            return Ok(());
-        };
-        let pending: Vec<usize> = indices
-            .iter()
-            .copied()
-            .filter(|&idx| {
-                let pf = &ctx.sidecar.promotion_frees[idx];
-                Self::branch_active(pf.branch, &ctx.branch_stack) && !ctx.promo_freed_at[idx]
-            })
-            .collect();
-        Self::emit_promo_frees(builder, ctx, pending)
-    }
-
-    /// End-of-statement sweep for promotion frees whose anchor passed
-    /// without an `emit_due_promo_frees` call. Mirrors `sweep_due_frees`.
-    pub(crate) fn sweep_due_promo_frees(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-    ) -> Result<(), String> {
-        if ctx.pending_promo_sweep.is_empty() {
-            return Ok(());
-        }
-        let pending: Vec<usize> = ctx
-            .pending_promo_sweep
-            .iter()
-            .copied()
-            .filter(|&idx| {
-                let pf = &ctx.sidecar.promotion_frees[idx];
-                Self::branch_active(pf.branch, &ctx.branch_stack)
-                    && ctx.promo_slots.contains_key(&pf.base)
-                    && Self::cached_repr(ctx, pf.after).is_some()
-            })
-            .collect();
-        Self::emit_promo_frees(builder, ctx, pending)
-    }
-
     /// Emit one flag-conditional free per pending promotion free: load
     /// the flag from the base's scratch slot; only on the promoted
     /// path free the recorded triple and clear the flag (so a later
     /// free-before-overwrite or duplicate anchor no-ops).
-    fn emit_promo_frees(
+    pub(super) fn emit_promo_frees(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         pending: Vec<usize>,
@@ -443,8 +396,6 @@ impl<M: Module> Codegen<M> {
             builder.seal_block(done_block);
             builder.switch_to_block(done_block);
         }
-        ctx.pending_promo_sweep
-            .retain(|&idx| !ctx.promo_freed_at[idx]);
         Ok(())
     }
 }

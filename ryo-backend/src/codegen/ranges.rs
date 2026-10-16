@@ -12,12 +12,7 @@
 //! guard". Every range here must hold for *every* execution that
 //! reaches the program point where it is consulted.
 //!
-//! This module also owns the fact-table plumbing: the dense
-//! `StringId`-indexed slot-table helpers (`read_slot` / `write_slot` /
-//! `restore_slots`, shared by all of codegen's scoped binding tables)
-//! and the `impl Codegen` block that seeds and kills facts
-//! (`seed_cond_facts`, `kill_fact`, `kill_assigned_since`,
-//! `kill_loop_writes` and its write collectors).
+//! Scoped binding tables live in `binding_storage`.
 
 use cranelift_module::Module;
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
@@ -169,49 +164,6 @@ fn flip(tag: TirTag) -> TirTag {
 }
 
 impl<M: Module> Codegen<M> {
-    /// Read a dense `StringId`-indexed slot table. Out-of-range ids
-    /// read as absent — codegen never interns, so every name in the
-    /// TIR is in bounds, but stay tolerant like `free_binding_name`.
-    pub(crate) fn read_slot<T: Copy>(table: &[Option<T>], name: StringId) -> Option<T> {
-        table.get(name.raw() as usize).copied().flatten()
-    }
-
-    /// Write a dense `StringId`-indexed slot table, pushing the
-    /// previous slot value onto the table's undo log so scoped
-    /// emitters (`emit_scoped_body`, the if/while join handling) can
-    /// restore it via `restore_slots`.
-    pub(crate) fn write_slot<T: Copy>(
-        table: &mut [Option<T>],
-        undo: &mut Vec<(u32, Option<T>)>,
-        name: StringId,
-        value: Option<T>,
-    ) {
-        let raw = name.raw();
-        // Invariant: every name in the TIR comes from the pool the
-        // tables were sized from (codegen never interns), so a miss
-        // here is a compiler bug — a dropped write would also
-        // desynchronize the undo log.
-        let slot = table
-            .get_mut(raw as usize)
-            .expect("binding name within slot-table range");
-        undo.push((raw, *slot));
-        *slot = value;
-    }
-
-    /// Restore a slot table to `mark` (a previous `undo.len()`):
-    /// replay the undo log in reverse down to the mark, writing each
-    /// saved old slot value back, then truncate the log.
-    pub(crate) fn restore_slots<T: Copy>(
-        table: &mut [Option<T>],
-        undo: &mut Vec<(u32, Option<T>)>,
-        mark: usize,
-    ) {
-        while undo.len() > mark {
-            let (raw, old) = undo.pop().expect("len > mark");
-            table[raw as usize] = old;
-        }
-    }
-
     /// Record an assignment: the binding's range fact dies here, and
     /// enclosing scopes learn (via `assigned_log`) to kill it at their
     /// join. Cheap enough to call on every assignment path.
@@ -233,6 +185,9 @@ impl<M: Module> Codegen<M> {
     /// Seed the facts a condition implies under `polarity`,
     /// intersecting with any fact that already holds here.
     pub(crate) fn seed_cond_facts(ctx: &mut FunctionContext<'_, M>, cond: TirRef, polarity: bool) {
+        if !ctx.optional_optimizations {
+            return;
+        }
         for (name, range) in cond_facts(ctx.tir, cond, polarity) {
             let seeded = match Self::read_slot(&ctx.range_facts, name) {
                 Some(old) => old.intersect(range),

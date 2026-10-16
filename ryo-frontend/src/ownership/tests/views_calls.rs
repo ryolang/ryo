@@ -36,7 +36,12 @@ fn toview_arg_counts_as_borrow_rule7() {
     let tir = tb.finish(&[decl, stmt]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert_eq!(
         diags.len(),
@@ -95,7 +100,12 @@ fn toview_read_counts_as_use_dead_store() {
     let tir = tb.finish(&[decl_s, decl_o, ifs]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     assert!(
         sink.is_empty(),
         "expected no diagnostics — the ToView read must count as a use of s"
@@ -142,7 +152,12 @@ fn viewasowner_arg_counts_as_borrow_rule7() {
     let tir = tb.finish(&[decl, stmt]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert_eq!(
         diags.len(),
@@ -199,7 +214,12 @@ fn viewasowner_reborrow_is_call_scoped() {
     let tir = tb.finish(&[decl, show_stmt, eat_stmt]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     assert!(
         sink.is_empty(),
         "expected no diagnostics — the re-borrow is call-scoped; got: {:?}",
@@ -241,7 +261,12 @@ fn str_materialize_result_is_fresh_owner() {
     let tir = tb.finish(&[ret]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     assert!(
         sink.is_empty(),
         "materialize-and-return must be clean — the copy is a fresh owner; got: {:?}",
@@ -292,7 +317,12 @@ fn str_materialize_arg_counts_as_borrow_rule7() {
     let tir = tb.finish(&[decl, stmt]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert_eq!(
         diags.len(),
@@ -374,7 +404,12 @@ fn loop_view_created_after_owner_mutation_dies_within_iteration() {
     let tir = tb.finish(&[decl, wl]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     assert!(
         sink.is_empty(),
         "expected no diagnostics — the view dies within each iteration, \
@@ -457,7 +492,12 @@ fn loop_view_live_at_back_edge_flags_earlier_mutation_on_rewalk() {
     let tir = tb.finish(&[decl, suffix_decl, wl]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert_eq!(
         diags.len(),
@@ -515,7 +555,12 @@ fn view_and_move_args_same_owner_rejected() {
     let tir = tb.finish(&[decl, stmt]);
 
     let mut sink = DiagSink::new();
-    check(std::slice::from_ref(&tir), &pool, &mut sink);
+    check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let diags = sink.into_diags();
     assert_eq!(
         diags.len(),
@@ -548,7 +593,7 @@ fn p5_view_read_inside_if_arm_anchors_free_at_if_exit() {
     // last read is the slice creation OUTSIDE the if; only the
     // projection's last read is inside the then-arm. P5 defers the
     // owner's destruction to that read (final spec §3.2), and the
-    // conditional re-anchor must lift the FreePoint to the IfStmt
+    // conditional re-anchor must lift the DropOp to the IfStmt
     // exit — anchoring inside the arm would leak on the not-taken
     // path.
     //   s: str = "hello"
@@ -586,7 +631,12 @@ fn p5_view_read_inside_if_arm_anchors_free_at_if_exit() {
     let tir = tb.finish(&[decl, vdecl, ifs]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sc = take_function_sidecar(&mut sidecar, 0);
     assert!(
         sink.is_empty(),
@@ -594,17 +644,17 @@ fn p5_view_read_inside_if_arm_anchors_free_at_if_exit() {
         sink.into_diags()
     );
     assert!(
-        sc.free_schedule
+        sc.drops
             .iter()
-            .any(|fp| fp.target == lit && fp.after == ifs && fp.branch.is_none()),
+            .any(|fp| fp.target == lit && fp.position.anchor_inst().unwrap() == ifs),
         "expected s's Free anchored at the IfStmt exit (P5 deferral across the branch); schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
     assert!(
-        !sc.free_schedule
+        !sc.drops
             .iter()
-            .any(|fp| fp.target == lit && fp.after != ifs),
+            .any(|fp| fp.target == lit && fp.position.anchor_inst().unwrap() != ifs),
         "no Free for s may anchor inside the arm (leaks on the not-taken path); schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }

@@ -14,8 +14,9 @@
 //! last child of its parent.
 
 use crate::ast::{
-    Ast, ExprId, ExprKind, FunctionDef, IfStmt, Literal, PatternId, PatternKind, StmtId, StmtKind,
-    TypeExpr, TypeExprKind, VarDecl, VariantArgs,
+    Ast, ExprId, ExprKind, FunctionDef, IfStmt, LitPattern, Literal, MatchArmBody,
+    PatternFieldKind, PatternId, PatternKind, PatternVariantArgTarget, StmtId, StmtKind, TypeExpr,
+    TypeExprKind, VarDecl, VariantArgs,
 };
 use crate::tir::ParamMode;
 use crate::types::{InternPool, VariantKind};
@@ -453,6 +454,7 @@ fn write_expr(
             pool.str(c.enum_name.name),
             pool.str(c.variant.name)
         )),
+        ExprKind::Match { .. } => Cow::Borrowed("Match"),
     };
 
     writeln!(
@@ -544,6 +546,43 @@ fn write_expr(
             }
             _ => Ok(()),
         },
+        ExprKind::Match { scrutinee, arms } => {
+            let arms = ast.match_arms(arms);
+            write_expr(
+                out,
+                ast,
+                scrutinee,
+                &new_prefix,
+                arms.is_empty(),
+                "scrut: ",
+                pool,
+            )?;
+            for (i, arm) in arms.iter().enumerate() {
+                let is_last = i == arms.len() - 1;
+                writeln!(out, "{}{}arm[{}]:", new_prefix, connector(is_last), i)?;
+                let arm_prefix = format!("{}{}", new_prefix, continuation(is_last));
+                write_pattern(out, ast, arm.pattern, &arm_prefix, false, "pat: ", pool)?;
+                match arm.body {
+                    MatchArmBody::Expr(body) => {
+                        write_expr(out, ast, body, &arm_prefix, true, "body: ", pool)?;
+                    }
+                    MatchArmBody::Stmts(list) => {
+                        let stmts = ast.stmt_list(list);
+                        for (j, &stmt) in stmts.iter().enumerate() {
+                            write_stmt_tree(
+                                out,
+                                ast,
+                                stmt,
+                                &arm_prefix,
+                                j == stmts.len() - 1,
+                                pool,
+                            )?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -577,6 +616,15 @@ fn write_pattern(
         PatternKind::Bind(ident) => Cow::Owned(format!("Bind({})", pool.str(ident.name))),
         PatternKind::Anon { .. } => Cow::Borrowed("Anon"),
         PatternKind::Positional(_) => Cow::Borrowed("Positional"),
+        PatternKind::Literal(lit) => {
+            Cow::Owned(format!("Literal({})", fmt_lit_pattern(*lit, pool)))
+        }
+        PatternKind::Variant {
+            enum_name, variant, ..
+        } => Cow::Owned(match enum_name {
+            Some(enum_name) => format!("Variant({}.{})", pool.str(*enum_name), pool.str(*variant)),
+            None => format!("Variant({})", pool.str(*variant)),
+        }),
     };
     writeln!(
         out,
@@ -590,21 +638,28 @@ fn write_pattern(
     )?;
     let new_prefix = format!("{}{}", prefix, continuation(is_last));
     match &pattern.kind {
-        PatternKind::Wildcard | PatternKind::Bind(_) => Ok(()),
+        PatternKind::Wildcard | PatternKind::Bind(_) | PatternKind::Literal(_) => Ok(()),
         PatternKind::Anon { fields } => {
-            // Fields are scalar (name, binding) pairs, not nodes:
+            // Fields are scalar (name, kind) pairs, not nodes:
             // render one line each, no recursion.
             let fields = ast.pattern_field_list(*fields);
             for (i, field) in fields.iter().enumerate() {
+                let target = match field.kind {
+                    PatternFieldKind::Pun => pool.str(field.name).to_string(),
+                    PatternFieldKind::Rename(bind) => {
+                        format!("{} = {}", pool.str(field.name), pool.str(bind))
+                    }
+                    PatternFieldKind::Literal(lit) => {
+                        format!("{} = {}", pool.str(field.name), fmt_lit_pattern(lit, pool))
+                    }
+                    PatternFieldKind::Wildcard => "_".to_string(),
+                };
                 writeln!(
                     out,
-                    "{}{}{}: {} ({}..{})",
+                    "{}{}: {}",
                     new_prefix,
                     connector(i == fields.len() - 1),
-                    pool.str(field.name),
-                    pool.str(field.binding.name),
-                    field.binding.span.start,
-                    field.binding.span.end
+                    target
                 )?;
             }
             Ok(())
@@ -616,6 +671,41 @@ fn write_pattern(
             }
             Ok(())
         }
+        PatternKind::Variant { args, .. } => {
+            // Arguments are scalar (name, target) pairs, not nodes:
+            // render one line each, no recursion.
+            if let Some(args) = args {
+                let argv = ast.variant_arg_list(args.list);
+                for (i, arg) in argv.iter().enumerate() {
+                    let target = match arg.target {
+                        PatternVariantArgTarget::Wildcard => "_".to_string(),
+                        PatternVariantArgTarget::Bind(bind) => pool.str(bind).to_string(),
+                    };
+                    let line = match arg.name {
+                        Some(name) => format!("{} = {}", pool.str(name), target),
+                        None => target,
+                    };
+                    writeln!(
+                        out,
+                        "{}{}: {}",
+                        new_prefix,
+                        connector(i == argv.len() - 1),
+                        line
+                    )?;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Render a literal match pattern (M12) the way the tree printer
+/// renders expression literals: the bare value, strings quoted.
+fn fmt_lit_pattern(lit: LitPattern, pool: &InternPool) -> String {
+    match lit {
+        LitPattern::Int(n) => n.to_string(),
+        LitPattern::Str(s) => format!("\"{}\"", pool.str(s)),
+        LitPattern::Bool(b) => b.to_string(),
     }
 }
 

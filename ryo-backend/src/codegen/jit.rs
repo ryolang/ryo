@@ -102,6 +102,10 @@ fn runtime_symbols() -> [(&'static str, *const u8); 30] {
 
 impl Codegen<JITModule> {
     pub fn new_jit() -> Result<Self, String> {
+        Self::new_jit_with_optimizations(true)
+    }
+
+    pub fn new_jit_with_optimizations(enabled: bool) -> Result<Self, String> {
         // opt_level=speed: run the egraph optimization pipeline (constant
         // folding, algebraic simplification, GVN/LICM) like the AOT path.
         // enable_verifier: debug builds and tests only, same rationale as
@@ -111,7 +115,7 @@ impl Codegen<JITModule> {
         // matches `aot_shared_flags`.
         let mut jit_builder = JITBuilder::with_flags(
             &[
-                ("opt_level", "speed"),
+                ("opt_level", if enabled { "speed" } else { "none" }),
                 ("preserve_frame_pointers", "true"),
                 (
                     "enable_verifier",
@@ -129,7 +133,9 @@ impl Codegen<JITModule> {
         // Register runtime symbols so the JIT can resolve them.
         jit_builder.symbols(runtime_symbols());
 
-        Ok(Self::from_module(JITModule::new(jit_builder)))
+        let mut result = Self::from_module(JITModule::new(jit_builder));
+        result.optional_optimizations = enabled;
+        Ok(result)
     }
 
     /// Enter the compiled `main`, forwarding `argv` (already including

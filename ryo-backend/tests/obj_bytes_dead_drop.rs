@@ -15,7 +15,14 @@ use ryo_frontend::lexer;
 use ryo_frontend::parser::{ParseState, program_parser};
 use target_lexicon::Triple;
 
-fn analyze(src: &str) -> (Vec<Tir>, InternPool, OwnershipSidecar) {
+fn analyze(
+    src: &str,
+) -> (
+    Vec<Tir>,
+    Vec<ryo_core::flow::Flow>,
+    InternPool,
+    OwnershipSidecar,
+) {
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
     let tokens = lexer::lex(src, &mut pool, &mut sink);
@@ -39,16 +46,20 @@ fn analyze(src: &str) -> (Vec<Tir>, InternPool, OwnershipSidecar) {
     );
     assert!(!sema_sink.has_errors(), "sema should succeed");
     let mut ownership_sink = ryo_core::diag::DiagSink::new();
-    let sidecar = ryo_frontend::ownership::check(&tirs, &pool, &mut ownership_sink);
+    let flows: Vec<ryo_core::flow::Flow> = tirs
+        .iter()
+        .map(|t| ryo_core::flow::Flow::build(t, &pool))
+        .collect();
+    let sidecar = ryo_frontend::ownership::check(&tirs, &flows, &pool, &mut ownership_sink);
     assert!(!ownership_sink.has_errors(), "ownership should succeed");
-    (tirs, pool, sidecar)
+    (tirs, flows, pool, sidecar)
 }
 
 fn object_bytes(src: &str) -> Vec<u8> {
-    let (tirs, pool, sidecar) = analyze(src);
+    let (tirs, flows, pool, sidecar) = analyze(src);
     let mut codegen = Codegen::new_aot(Triple::host()).expect("AOT codegen should initialize");
     codegen
-        .compile(&tirs, &pool, &sidecar, false)
+        .compile(&tirs, &flows, &pool, &sidecar, false)
         .expect("compile should succeed");
     codegen.finish().expect("object emission should succeed")
 }
@@ -60,19 +71,14 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 #[test]
 fn bytes_conditional_dead_drop_references_bytes_free() {
     // A bytes owner conditionally reassigned and never read afterwards
-    // yields a ConditionalDeadDrop (the ownership-side half is pinned
+    // yields a block-start dead drop (the ownership-side half is pinned
     // by `bytes_conditional_reassign_emits_dead_drop`), for which
     // codegen must select `ryo_bytes_free` (not `ryo_str_free`).
     //
-    // The fixture is literal-backed on purpose: with heap-backed
-    // `.to_bytes()` sources, the str literal temporaries get scheduled
-    // Frees whose cap=0 *calls* are elided but whose `ryo_str_free`
-    // *declaration* still lands in the symbol table — declaration and
-    // call are not separable at symbol granularity, and what this pin
-    // cares about is the dead-drop's family selection. (The dead
-    // reassign warns W0001; warnings do not fail analysis.)
+    // Heap-backed byte producers require real destruction. An all-bytes
+    // fixture also makes a string-family release an observable mismatch.
     let obj = object_bytes(
-        "fn main():\n\tmut b = b\"AB\"\n\tflag = false\n\tif flag:\n\t\tb = b\"CD\"\n",
+        "fn main():\n\tmut b = b\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\" + b\"!\"\n\tflag = false\n\tif flag:\n\t\tb = b\"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\" + b\"?\"\n",
     );
     assert!(
         contains(&obj, b"ryo_bytes_free"),

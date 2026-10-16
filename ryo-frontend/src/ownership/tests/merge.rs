@@ -23,14 +23,13 @@ fn branch_ids_unique_across_post_loop_if() {
     //     if true:
     //         print("b")
     //
-    // The post-loop `if` must not reuse BranchIds that the
-    // inside-loop `if` already minted. Today this test may pass
-    // vacuously because M8.1's print-of-StrConst doesn't produce
-    // branch-gated Frees, so `free_schedule` may have no
-    // `Some(BranchId)` entries to inspect. The strong regression
-    // for Bug 4 lives in
-    // `branch_ids_do_not_collide_after_loop` in
-    // `tests/integration_ownership.rs`.
+    // The loop fixed-point re-walks the body; the speculative pass's
+    // sidecar writes must not leak into the real schedule. The old
+    // BranchId-based test passed vacuously when no gated frees were
+    // scheduled; the structural equivalent pins the actual hazard:
+    // at most one drop per (anchor, target) pair in the final
+    // schedule. (The strong regression for the loop-re-walk shape
+    // lives in `diverged_loop_writes_branch_gated_free_exactly_once`.)
     let mut tb = TirBuilder::new(main, vec![], void, span);
 
     let cond_w = tb.bool_const(false, bool_ty, span);
@@ -48,46 +47,123 @@ fn branch_ids_unique_across_post_loop_if() {
     let tir = tb.finish(&[wl, if_post]);
 
     let mut sink = DiagSink::new();
-    let mut sidecar = check(std::slice::from_ref(&tir), &pool, &mut sink);
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
     let sidecar = take_function_sidecar(&mut sidecar, 0);
 
-    let max = sidecar
-        .free_schedule
-        .iter()
-        .filter_map(|fp| fp.branch.map(|b| b.0))
-        .max();
-    if let Some(m) = max {
+    let mut seen = HashSet::new();
+    for d in &sidecar.drops {
         assert!(
-            m >= 2,
-            "post-loop branch reused an inside-loop BranchId; max id = {m}, schedule = {:?}",
-            sidecar.free_schedule
+            seen.insert((drop_anchor(d), d.target)),
+            "duplicate drop for one (anchor, target) pair — a speculative \
+             walk leaked into the real schedule: {d:?}"
         );
     }
-    // If no branch-gated frees were scheduled, the test passes
-    // vacuously — the integration test
-    // `branch_ids_do_not_collide_after_loop` is the stronger
-    // guarantee.
 }
 
 #[test]
-fn merge_branches_leaves_branch_allocator_untouched() {
+fn merge_branches_leaves_monotone_fields_untouched() {
     // Direct regression for Bug 4 in M8.1c. The loop merge starts
-    // from the pre-loop entry; the BranchId allocator lives on the
+    // from the pre-loop entry; the monotone accumulators live on the
     // single `Ownership` walked in place across all arms and loop
-    // passes, so a merge can never roll it backward. BranchState
-    // doesn't even carry next_branch_id — pin that structurally:
-    // merging arms must leave the allocator untouched.
-    let mut entry = Ownership {
-        next_branch_id: 7,
-        ..Ownership::default()
-    };
+    // passes, so a merge can never roll them backward. `BranchState`
+    // doesn't carry them — pin that structurally: merging arms must
+    // leave every monotone field untouched.
+    let mut entry = Ownership::default();
+    entry
+        .owner_hazards
+        // A dummy owner (place ids are opaque to the merge).
+        .push((
+            Owner(ryo_core::flow::PlaceId(0)),
+            TirRef::from_raw(1),
+            HazardKind::Move,
+        ));
+    let hazard_len = entry.owner_hazards.len();
 
     let arm = entry.snapshot_branch();
     entry.merge_branches(vec![arm.clone(), arm], &[true, true]);
 
     assert_eq!(
-        entry.next_branch_id, 7,
-        "merge_branches must not touch the BranchId allocator"
+        entry.owner_hazards.len(),
+        hazard_len,
+        "merge_branches must not touch the monotone accumulators"
+    );
+}
+
+/// Owner identities for the membership pins below — place ids are
+/// opaque to the differ, any distinct values work.
+fn owner(n: u32) -> Owner {
+    Owner(ryo_core::flow::PlaceId(n))
+}
+
+#[test]
+fn live_projection_membership_differ_extra_view() {
+    // G3/R4-A: `{v1}` vs `{v1, v2}` are DIFFERENT states even though
+    // both are non-empty — the old emptiness comparison claimed a fixed
+    // point here. The merged set is what the next loop iteration
+    // consumes, so an extra live view must force a re-walk.
+    let mut own = Ownership::default();
+    let root = owner(0);
+    let v1 = owner(1);
+    own.live_projections.insert(root, vec![v1]);
+    let prev = own.snapshot_branch();
+    own.live_projections.get_mut(&root).unwrap().push(owner(2));
+    assert!(
+        branch_states_differ(&prev, &own),
+        "one extra live view on an already-live root must differ"
+    );
+}
+
+#[test]
+fn live_projection_membership_equal_reordered_duplicated() {
+    // Order- and duplicate-insensitivity: the same semantic set in a
+    // different list order (with a duplicate entry) is NOT a difference
+    // — spurious re-walks would burn the height budget for nothing.
+    let mut own = Ownership::default();
+    let root = owner(0);
+    own.live_projections.insert(root, vec![owner(1), owner(2)]);
+    let prev = own.snapshot_branch();
+    *own.live_projections.get_mut(&root).unwrap() = vec![owner(2), owner(1), owner(1)];
+    assert!(
+        !branch_states_differ(&prev, &own),
+        "reordered/duplicated membership of the same set must compare equal"
+    );
+}
+
+#[test]
+fn live_projection_membership_partial_removal_still_differs() {
+    // Freeze preservation: removing one view while another remains is
+    // still a membership change. Both sides are non-empty, so the old
+    // emptiness comparison missed BOTH directions of this shape.
+    let mut own = Ownership::default();
+    let root = owner(0);
+    own.live_projections.insert(root, vec![owner(1), owner(2)]);
+    let prev = own.snapshot_branch();
+    // Shrink to a different single member.
+    *own.live_projections.get_mut(&root).unwrap() = vec![owner(2)];
+    assert!(
+        branch_states_differ(&prev, &own),
+        "a two-view set vs a different one-view subset must differ — a member was removed"
+    );
+    // And from the other side: a non-empty set vs the empty set.
+    let prev = own.snapshot_branch();
+    own.live_projections.get_mut(&root).unwrap().clear();
+    assert!(
+        branch_states_differ(&prev, &own),
+        "a two-view set vs its one-view subset must differ — the root lost a live view"
+    );
+    // A missing key and a present-but-empty entry are the same empty
+    // set: no difference.
+    own.live_projections.remove(&root);
+    let prev = own.snapshot_branch();
+    own.live_projections.insert(root, Vec::new());
+    assert!(
+        !branch_states_differ(&prev, &own),
+        "missing key vs empty entry are both the empty set — equal"
     );
 }
 
@@ -137,24 +213,20 @@ fn return_arm_move_does_not_poison_join() {
     let returns = find_tags(tir, ryo_core::tir::TirTag::Return);
     assert_eq!(returns.len(), 2, "the in-if return + the final return");
     let out_frees: Vec<_> = sc
-        .free_schedule
+        .drops
         .iter()
         .filter(|fp| fp.target == out_owner)
         .collect();
     assert_eq!(
         out_frees.len(),
         1,
-        "exactly one Free for `out` (last-use, no branch-gated double); schedule = {:?}",
-        sc.free_schedule
+        "exactly one Free for `out` (last-use, no arm-conditional double); schedule = {:?}",
+        sc.drops
     );
     assert!(
-        out_frees[0].after.index() > returns[0].index(),
+        out_frees[0].position.anchor_inst().unwrap().index() > returns[0].index(),
         "the `out` Free anchors after the if (its last read is post-if); schedule = {:?}",
-        sc.free_schedule
-    );
-    assert!(
-        out_frees[0].branch.is_none(),
-        "no branch-gated Free may exist for `out` — the moved arm exits"
+        sc.drops
     );
 }
 
@@ -200,36 +272,36 @@ fn return_accumulator_in_loop_no_e0020() {
     // the in-loop return) is freed there, while the returned `out`
     // moves out to the caller and must NOT be freed on that path.
     assert!(
-        sc.free_schedule
+        sc.drops
             .iter()
-            .any(|fp| fp.after == returns[0] && fp.target == tag_owner),
+            .any(|fp| fp.position.anchor_inst().unwrap() == returns[0] && fp.target == tag_owner),
         "the epilogue must free the still-owned `tag` on the in-loop return path; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
     assert!(
-        !sc.free_schedule
+        !sc.drops
             .iter()
-            .any(|fp| fp.after == returns[0] && fp.target == out_owner),
+            .any(|fp| fp.position.anchor_inst().unwrap() == returns[0] && fp.target == out_owner),
         "the returned `out` moved out — no Free for it on the return path; schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
     // The loop-carried binding is freed after the loop: `out`'s only
     // Free anchors at its post-loop last use.
     let out_frees: Vec<_> = sc
-        .free_schedule
+        .drops
         .iter()
         .filter(|fp| fp.target == out_owner)
         .collect();
     assert_eq!(
         out_frees.len(),
         1,
-        "exactly one Free for `out` (last-use, no branch-gated double); schedule = {:?}",
-        sc.free_schedule
+        "exactly one Free for `out` (last-use, no arm-conditional double); schedule = {:?}",
+        sc.drops
     );
     assert!(
-        out_frees[0].after.index() > loops[0].index(),
+        out_frees[0].position.anchor_inst().unwrap().index() > loops[0].index(),
         "the `out` Free must anchor after the loop (its last read is post-loop); schedule = {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }
 
@@ -407,28 +479,24 @@ fn main():
     // path.
     for reseat in [*make1, *make2] {
         assert!(
-            sc.free_schedule.iter().all(|fp| fp.target != reseat),
+            sc.drops.iter().all(|fp| fp.target != reseat),
             "reseated value %{:?} must not keep its own Free; schedule: {:?}",
             reseat,
-            sc.free_schedule
+            sc.drops
         );
     }
     // Exactly one Free for the pre-branch owner, anchored after the
     // post-branch read (a Var), so codegen's binding-path redirect
     // frees the path-correct slot content.
-    let owner_frees: Vec<_> = sc
-        .free_schedule
-        .iter()
-        .filter(|fp| fp.target == *make0)
-        .collect();
+    let owner_frees: Vec<_> = sc.drops.iter().filter(|fp| fp.target == *make0).collect();
     assert_eq!(
         owner_frees.len(),
         1,
         "exactly one Free for the pre-branch owner; schedule: {:?}",
-        sc.free_schedule
+        sc.drops
     );
     assert_eq!(
-        tir.inst(owner_frees[0].after).tag,
+        tir.inst(owner_frees[0].position.anchor_inst().unwrap()).tag,
         ryo_core::tir::TirTag::Var,
         "owner Free anchors after the post-branch read"
     );
@@ -499,36 +567,32 @@ fn main():
     // Free after the post-branch read.)
     for ret in &returns {
         assert!(
-            sc.free_schedule
+            sc.drops
                 .iter()
-                .all(|fp| fp.after != *ret || fp.target != *make0),
+                .all(|fp| fp.position.anchor_inst().unwrap() != *ret || fp.target != *make0),
             "pre-reassign owner must not be freed at a return whose path reseated it"
         );
     }
     // Each reseated value IS freed at its own return.
     for (reseat, ret) in [(*make1, returns[0]), (*make2, returns[1])] {
         assert!(
-            sc.free_schedule
+            sc.drops
                 .iter()
-                .any(|fp| fp.after == ret && fp.target == reseat),
+                .any(|fp| fp.position.anchor_inst().unwrap() == ret && fp.target == reseat),
             "reseated value %{reseat:?} must be freed at its return {ret:?}"
         );
     }
     // The fall-through path still frees the pre-branch owner after the
     // post-branch read.
-    let owner_frees: Vec<_> = sc
-        .free_schedule
-        .iter()
-        .filter(|fp| fp.target == *make0)
-        .collect();
+    let owner_frees: Vec<_> = sc.drops.iter().filter(|fp| fp.target == *make0).collect();
     assert_eq!(
         owner_frees.len(),
         1,
         "exactly one Free for the pre-branch owner; schedule: {:?}",
-        sc.free_schedule
+        sc.drops
     );
     assert_eq!(
-        tir.inst(owner_frees[0].after).tag,
+        tir.inst(owner_frees[0].position.anchor_inst().unwrap()).tag,
         ryo_core::tir::TirTag::Var,
         "owner Free anchors after the post-branch read"
     );
@@ -601,9 +665,9 @@ fn main():
     // released it at the reassign store, the not-taken paths release it
     // through the exit Free's redirect (as the slot's current content).
     assert!(
-        sc.free_schedule.iter().all(|fp| fp.target != *make0),
+        sc.drops.iter().all(|fp| fp.target != *make0),
         "pre-branch owner must not keep its own Free; schedule: {:?}",
-        sc.free_schedule
+        sc.drops
     );
 
     // Exactly one Free anchors at the later branch's exit, and it
@@ -612,15 +676,15 @@ fn main():
     // slot's current content — the reseated buffer on taken paths, the
     // pre-branch buffer otherwise.
     let exit_frees: Vec<_> = sc
-        .free_schedule
+        .drops
         .iter()
-        .filter(|fp| fp.after == *if2)
+        .filter(|fp| fp.position.anchor_inst().unwrap() == *if2)
         .collect();
     assert_eq!(
         exit_frees.len(),
         1,
         "exactly one Free at the later branch exit; schedule: {:?}",
-        sc.free_schedule
+        sc.drops
     );
     assert_eq!(
         exit_frees[0].target, *make1,
@@ -628,8 +692,10 @@ fn main():
     );
     // The first branch (the reseat) keeps no exit Free of its own.
     assert!(
-        sc.free_schedule.iter().all(|fp| fp.after != *if1),
+        sc.drops
+            .iter()
+            .all(|fp| fp.position.anchor_inst().unwrap() != *if1),
         "no exit Free at the reseating branch; schedule: {:?}",
-        sc.free_schedule
+        sc.drops
     );
 }

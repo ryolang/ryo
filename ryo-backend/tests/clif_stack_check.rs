@@ -17,7 +17,14 @@ use ryo_frontend::lexer;
 use ryo_frontend::parser::{ParseState, program_parser};
 use target_lexicon::Triple;
 
-fn analyze(src: &str) -> (Vec<Tir>, InternPool, OwnershipSidecar) {
+fn analyze(
+    src: &str,
+) -> (
+    Vec<Tir>,
+    Vec<ryo_core::flow::Flow>,
+    InternPool,
+    OwnershipSidecar,
+) {
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
     let tokens = lexer::lex(src, &mut pool, &mut sink);
@@ -41,16 +48,20 @@ fn analyze(src: &str) -> (Vec<Tir>, InternPool, OwnershipSidecar) {
     );
     assert!(!sema_sink.has_errors(), "sema should succeed");
     let mut ownership_sink = ryo_core::diag::DiagSink::new();
-    let sidecar = ryo_frontend::ownership::check(&tirs, &pool, &mut ownership_sink);
+    let flows: Vec<ryo_core::flow::Flow> = tirs
+        .iter()
+        .map(|t| ryo_core::flow::Flow::build(t, &pool))
+        .collect();
+    let sidecar = ryo_frontend::ownership::check(&tirs, &flows, &pool, &mut ownership_sink);
     assert!(!ownership_sink.has_errors(), "ownership should succeed");
-    (tirs, pool, sidecar)
+    (tirs, flows, pool, sidecar)
 }
 
 fn obj_bytes_of(src: &str) -> Vec<u8> {
-    let (tirs, pool, sidecar) = analyze(src);
+    let (tirs, flows, pool, sidecar) = analyze(src);
     let mut codegen = Codegen::new_aot(Triple::host()).expect("AOT codegen should initialize");
     codegen
-        .compile(&tirs, &pool, &sidecar, false)
+        .compile(&tirs, &flows, &pool, &sidecar, false)
         .expect("compile should succeed");
     codegen.finish().expect("object emission should succeed")
 }

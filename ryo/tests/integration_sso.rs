@@ -1,4 +1,5 @@
 mod common;
+use common::{create_test_file, run_ryo_command};
 
 use std::process::Command;
 
@@ -177,4 +178,42 @@ fn main():
 \tprint(\"\\n\")
 ";
     assert_eq!(run_ryo(src, "sso_struct_fields"), "user42! 31\n");
+}
+
+const INT_TO_STR_GARBAGE: &str = "\
+fn main():
+\tmut total = \"😀😀😀😀😀😀😀\"
+\twhile true:
+\t\ttotal = total + \"🦊\"
+\t\tbreak
+\tprint(int_to_str(total.len()))
+\tprint(total)
+\tprint(\"\\n\")
+";
+
+#[test]
+fn int_to_str_garbage_output() {
+    // Pre-fix: print(int_to_str(...)) emitted ~32 garbage bytes after
+    // the digits while a >23-byte str was live, then double-freed at
+    // exit. Exact bytes: "32" + 7x😀 (28 B) + 🦊 (4 B) + "\n" = 35.
+    let temp_dir = tempfile::TempDir::new().expect("create source directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "bug_int_to_str_garbage_output.ryo",
+        INT_TO_STR_GARBAGE,
+    );
+    let output = run_ryo_command(&["run", "bug_int_to_str_garbage_output.ryo"], &test_file)
+        .expect("run ryo");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.starts_with("32"),
+        "stdout must start with the digits '32', got: {stdout:?}"
+    );
+    assert_eq!(output.stdout.len(), 35, "stdout length mismatch");
+    assert_eq!(stdout, "32😀😀😀😀😀😀😀🦊\n");
 }

@@ -1,983 +1,1784 @@
-//! Forward statement/expression walk — split from `mod.rs`.
+//! Flow IR-driven forward walk — the analysis driver.
+//!
+//! Iterates [`Flow`] blocks in construction order; for each block, the
+//! steps run in evaluation order (operands before consumers — the block
+//! iteration replaces the old TIR operand recursion), then the
+//! terminator dispatches: `Branch` with a recorded payload is an
+//! if-cascade, `Switch` is a match, `While`/`For` are loops, `Return`s
+//! record the exit-path epilogue. `BoolAnd`/`BoolOr` splits, elif
+//! branches, loop tests and backedges carry no payload and need nothing.
+//!
+//! Region walks (arms, loop bodies) recurse through the same
+//! step/terminator machinery and mark their blocks visited, so the
+//! outer driver never re-processes them; join/exit blocks stay unmarked
+//! and are processed later with the merged state, exactly where the old
+//! recursive statement walk resumed after an arm/loop body.
 
 use super::{
-    BranchState, Owner, OwnerState, Ownership, PromoCandidate, ReseatDrop, analyze_destructure,
-    analyze_enum_lit, analyze_for_range, analyze_while_loop, body_must_terminate,
-    check_field_move_out, check_field_target_projected, check_source_projected,
-    consume_struct_lit_fields, consumed_binding_name, drain_dying_views, field_path_of,
-    format_binding, needs_tracking, owner_name_for_diag, owner_sort_key, param_idx,
-    projection_root, prune_branch_dead_projections, push_unique, record_return_epilogue,
-    refine_view_liveness_for_arm, register_projection, resolve_view_alias, restore_view_last_use,
-    rule7_owner_name, struct_base_name, struct_root,
+    BorrowedAction, BranchState, HazardKind, Owner, OwnerState, Ownership, PromoCandidate,
+    ReseatDrop, analyze_destructure, analyze_enum_lit, analyze_loop, analyze_match_switch,
+    check_field_target_projected, check_source_projected, check_use_moved, consume_for_assignment,
+    consume_struct_lit_fields, consume_underlying, consumed_binding_name, drain_dying_views,
+    field_path_of, needs_tracking, owner_name_for_diag, owner_sort_key, projection_root,
+    prune_branch_dead_projections, push_unique, record_return_epilogue, register_projection,
+    rule7_owner_name, struct_base_name, struct_root, walk_if_arm,
 };
 use crate::builtins::{is_borrowed_scalar_param, view_borrow_params};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
-use ryo_core::ownership::{BranchId, FreePoint, FunctionSidecar, IfBranchIds};
-use ryo_core::tir::{ParamMode, Span, Tir, TirData, TirRef, TirTag};
+use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow, PlaceId, Step, Terminator};
+use ryo_core::ownership::FunctionSidecar;
+use ryo_core::tir::{ChildKind, ParamMode, Span, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeKind};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-pub(crate) fn analyze_stmt(
-    tir: &Tir,
-    pool: &InternPool,
-    own: &mut Ownership,
-    sink: &mut DiagSink,
-    sidecar: &mut FunctionSidecar,
-    stmt: TirRef,
-) {
-    // Anchor for `record_promo_candidate`: nested statements (if arms,
-    // loop bodies, loop-convergence re-walks) overwrite this, so save
-    // and restore the enclosing statement on the way out.
-    let prev_stmt = own.current_stmt.replace(stmt);
-    let inst = *tir.inst(stmt);
-    match inst.tag {
-        TirTag::VarDecl => analyze_var_decl(tir, pool, own, sink, sidecar, stmt),
-        TirTag::Assign => analyze_assign(tir, pool, own, sink, sidecar, stmt),
-        TirTag::Return => {
-            analyze_return(tir, pool, own, sink, sidecar, stmt);
-            record_return_epilogue(tir, own, stmt);
+/// How a region walk treats its boundary block.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RegionStop {
+    /// Exclusive: the block is never visited (arms stop before the join;
+    /// `At(BlockId::NONE)` means "no stop").
+    At(BlockId),
+    /// Inclusive: the block's steps run, but its terminator is not
+    /// dispatched and its successors are not followed (an elif cond
+    /// chain ends at its Branch-holding block).
+    Through(BlockId),
+}
+
+/// Per-block region-boundary decision for [`collect_region`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum StopKind {
+    /// Visit and follow successors.
+    Visit,
+    /// Visit (steps only), then stop.
+    VisitStop,
+    /// Do not visit at all.
+    Skip,
+}
+
+impl RegionStop {
+    pub(crate) fn kind(self, b: BlockId) -> StopKind {
+        if self.excludes(b) {
+            StopKind::Skip
+        } else if self.freezes(b) {
+            StopKind::VisitStop
+        } else {
+            StopKind::Visit
         }
-        TirTag::ReturnVoid => record_return_epilogue(tir, own, stmt),
-        TirTag::IfStmt => analyze_if_stmt(tir, pool, own, sink, sidecar, stmt),
-        TirTag::WhileLoop => analyze_while_loop(tir, pool, own, sink, sidecar, stmt),
-        TirTag::ForRange => analyze_for_range(tir, pool, own, sink, sidecar, stmt),
-        TirTag::Break | TirTag::Continue => {
-            // 8.1c attaches Free metadata here; 8.1b is a no-op.
+    }
+    fn excludes(self, b: BlockId) -> bool {
+        matches!(self, RegionStop::At(s) if s == b)
+    }
+    fn freezes(self, b: BlockId) -> bool {
+        matches!(self, RegionStop::Through(s) if s == b)
+    }
+}
+
+/// The blocks a region walk will visit, in document (DFS preorder)
+/// order — the same order [`Walk::walk_region`] processes them. Purely
+/// structural: no analysis state is touched. `stop` decides the
+/// boundary per block (see [`StopKind`]); `Break`/`Continue`/`Backedge`
+/// and diverging terminators contribute no successors, so loop
+/// headers/exits and dead continuations never leak into a region.
+pub(crate) fn collect_region(
+    flow: &Flow,
+    scratch: &mut Vec<bool>,
+    entry: BlockId,
+    stop: impl Fn(BlockId) -> StopKind,
+) -> (Vec<BlockId>, bool) {
+    scratch.clear();
+    scratch.resize(flow.blocks.len(), false);
+    let mut blocks = Vec::new();
+    let mut reached_stop = false;
+    let mut stack = vec![entry];
+    while let Some(b) = stack.pop() {
+        match stop(b) {
+            StopKind::Skip => {
+                reached_stop = true;
+                continue;
+            }
+            StopKind::VisitStop => {
+                if scratch[b.0 as usize] {
+                    continue;
+                }
+                scratch[b.0 as usize] = true;
+                blocks.push(b);
+                continue;
+            }
+            StopKind::Visit => {}
         }
-        TirTag::CompoundAssign => {
-            // Sema rejects compound-assign on Move-typed values today
-            // (str doesn't support `+=`/`-=`/etc.). Enforce the invariant
-            // here so a future sema relaxation that reaches the ownership
-            // pass without ownership-aware handling trips a debug build
-            // instead of silently falling through to no analysis.
-            let view = tir.compound_assign_view(stmt);
-            debug_assert!(
-                !needs_tracking(tir.inst(view.value).ty, pool),
-                "compound-assign on Move-typed value reached ownership pass; \
-                 sema should have rejected",
+        if scratch[b.0 as usize] {
+            continue;
+        }
+        scratch[b.0 as usize] = true;
+        blocks.push(b);
+        for &s in region_successors(flow, b).iter().rev() {
+            stack.push(s);
+        }
+    }
+    (blocks, reached_stop)
+}
+
+/// Document-ordered successors a region DFS follows for structural
+/// coverage (see [`collect_region`]): unlike the walk's `visit_block`
+/// continuations — where a construct handler owns its sub-region and
+/// returns only the join — region collection must include EVERYTHING
+/// the enclosing region will visit, so if-cascade arms and match arms
+/// expand here and the DFS is bounded only by the caller's stop block.
+fn region_successors(flow: &Flow, b: BlockId) -> Vec<BlockId> {
+    match *flow.term(b) {
+        Terminator::Goto { target } => vec![target],
+        Terminator::Branch { then_, else_, .. } => vec![then_, else_],
+        Terminator::Switch { arms, .. } => {
+            arms.as_range().map(|i| BlockId(flow.extra[i])).collect()
+        }
+        Terminator::While { header, .. } | Terminator::For { header, .. } => vec![header],
+        Terminator::WhileTest { body, exit, .. } | Terminator::ForTest { body, exit, .. } => {
+            vec![body, exit]
+        }
+        Terminator::Backedge { .. }
+        | Terminator::Break { .. }
+        | Terminator::Continue { .. }
+        | Terminator::Call { .. }
+        | Terminator::Return { .. }
+        | Terminator::ReturnVoid
+        | Terminator::Unreachable => Vec::new(),
+    }
+}
+
+/// Per-function walk state: the Flow IR driver plus the tables the
+/// post-walk passes consume (last-use reads recorded during the walk,
+/// loop body regions, document-order ranks).
+pub(crate) struct Walk<'a> {
+    pub(crate) tir: &'a Tir,
+    pub(crate) flow: &'a Flow,
+    pub(crate) pool: &'a InternPool,
+    /// Outer-driver skip marks: set once per block (first visit); the
+    /// id-ordered driver uses them to process dead continuations the
+    /// region walks never reach, and never to re-process a block.
+    processed: Vec<bool>,
+    /// Re-entrancy guard for region walks (arm walks, fixed-point
+    /// passes): blocks stamped with the walk's current epoch are
+    /// skipped, so nested or repeated walks stay exactly-once. Loop
+    /// handlers re-stamp their finished body regions with the
+    /// enclosing generation's epoch (see `analyze_loop`).
+    pub(crate) epoch: Vec<u32>,
+    epoch_next: u32,
+    /// First-VarDecl emission rank per binding name (the "declared
+    /// before" test of the loop-carried scan) — keyed on the build's
+    /// emission order, which is document order even for dead code.
+    pub(crate) decl_rank: HashMap<StringId, u32>,
+    /// The last instruction processed within the current region (steps
+    /// and terminator payloads) — the Flow IR replacement for "the
+    /// arm's last statement".
+    pub(crate) last_inst: Option<TirRef>,
+    /// Every block in first-visit (document) order.
+    pub(crate) block_order: Vec<BlockId>,
+    /// Per-loop body regions, for the post-walk loop-carried scan.
+    pub(crate) loop_regions: Vec<(TirRef, Vec<BlockId>)>,
+    /// Mutable needs-drop homes assigned in the active loop bodies.
+    /// Their owner identity is the runtime home slot across iterations.
+    pub(crate) active_loop_carried_homes: Vec<HashSet<PlaceId>>,
+    /// Owner-keyed last-use reads, recorded at `Var` steps (replaces the
+    /// old post-walk `collect_last_uses` scan).
+    pub(crate) last_use: HashMap<TirRef, TirRef>,
+    /// Binding name → latest read (same recording rules as `last_use`).
+    pub(crate) last_read_by_name: HashMap<StringId, TirRef>,
+    /// Scratch for `collect_region`.
+    pub(crate) region_scratch: Vec<bool>,
+    /// The enclosing-statement inst per stepped instruction
+    /// (promo-candidate anchors; replaces `Ownership::current_stmt`).
+    stmt_of: Vec<Option<TirRef>>,
+    /// Step insts that stand alone as a statement (not an operand of any
+    /// stepped inst or terminator payload) — statement boundaries where
+    /// dying projections drain.
+    is_root: Vec<bool>,
+}
+
+impl<'a> Walk<'a> {
+    pub(crate) fn new(tir: &'a Tir, flow: &'a Flow, pool: &'a InternPool) -> Self {
+        let len = tir.instructions.len();
+        // Statement roots (drain gates) and `stmt_of` (promo anchors)
+        // matter only when the body can create views or promotion
+        // candidates: any view-typed step, or a borrowed `str`/`bytes`
+        // param (promotion only leaks through borrowed params — a move
+        // param's buffer is callee-owned). Bodies without either skip
+        // the operand-marking precompute entirely (it walks every
+        // operand edge — the old recursion's cost — for nothing).
+        let has_views = tir.params.iter().any(|p| {
+            p.mode == ParamMode::Borrow
+                && matches!(pool.kind(p.ty), TypeKind::Str | TypeKind::Bytes)
+        }) || flow
+            .steps
+            .iter()
+            .any(|step| pool.is_view(tir.inst(step.inst).ty));
+        let (is_root, stmt_of) = if has_views {
+            // Statement roots: stepped insts that no stepped inst or
+            // terminator payload consumes as an operand. Operand
+            // marking covers conditions/scrutinees/bounds/return
+            // operands via the recorded terminator payloads
+            // (`term_payload`).
+            let mut is_operand = vec![false; len];
+            for b in flow.forward_order() {
+                for step in flow.block_steps(b) {
+                    tir.walk_operands(step.inst, &mut |_p, child, kind| {
+                        if kind == ChildKind::Operand {
+                            is_operand[child.index()] = true;
+                        }
+                    });
+                }
+                if let Some(p) = flow.term_payload(b) {
+                    tir.walk_operands(p, &mut |_p, child, kind| {
+                        if kind == ChildKind::Operand {
+                            is_operand[child.index()] = true;
+                        }
+                    });
+                }
+            }
+            let mut is_root = vec![false; len];
+            for b in flow.forward_order() {
+                for step in flow.block_steps(b) {
+                    is_root[step.inst.index()] = !is_operand[step.inst.index()];
+                }
+            }
+            let mut stmt_of = vec![None; len];
+            compute_stmt_of(flow, &is_root, &mut stmt_of);
+            (is_root, stmt_of)
+        } else {
+            (vec![false; len], vec![None; len])
+        };
+        Walk {
+            tir,
+            flow,
+            pool,
+            processed: vec![false; flow.blocks.len()],
+            epoch: vec![0; flow.blocks.len()],
+            epoch_next: 0,
+            decl_rank: HashMap::new(),
+            last_inst: None,
+            block_order: Vec::new(),
+            loop_regions: Vec::new(),
+            active_loop_carried_homes: Vec::new(),
+            last_use: HashMap::new(),
+            last_read_by_name: HashMap::new(),
+            region_scratch: Vec::new(),
+            stmt_of,
+            is_root,
+        }
+    }
+}
+
+/// The enclosing-statement inst for every stepped instruction: the
+/// nearest root step at or after it in its block, or — for trailing
+/// operand steps (conditions, scrutinees, bounds, return operands,
+/// diverging-call args) — the first root/payload reachable through the
+/// continuation chain.
+fn compute_stmt_of(flow: &Flow, is_root: &[bool], stmt_of: &mut [Option<TirRef>]) {
+    for b in flow.forward_order() {
+        let steps = flow.block_steps(b);
+        let mut next_root: Option<TirRef> = None;
+        let mut resolved: Vec<Option<TirRef>> = vec![None; steps.len()];
+        for i in (0..steps.len()).rev() {
+            resolved[i] = next_root;
+            if is_root[steps[i].inst.index()] {
+                next_root = Some(steps[i].inst);
+            }
+        }
+        let tail = trailing_stmt(flow, is_root, b);
+        for (i, step) in steps.iter().enumerate() {
+            stmt_of[step.inst.index()] = resolved[i].or(tail);
+        }
+    }
+}
+
+/// The enclosing statement for trailing steps of `b`: the block's
+/// terminator payload when it carries one (if/match/loop/return…), the
+/// loop instruction for loop tests/backedges, else the first
+/// root/payload found by following the continuation chain (a
+/// `BoolAnd`/`BoolOr` lhs resolves to the statement boundary in the
+/// join block).
+fn trailing_stmt(flow: &Flow, is_root: &[bool], b: BlockId) -> Option<TirRef> {
+    match *flow.term(b) {
+        Terminator::WhileTest { loop_inst, .. } | Terminator::ForTest { loop_inst, .. } => {
+            Some(loop_inst)
+        }
+        Terminator::Backedge { to, .. } => match *flow.term(to) {
+            Terminator::WhileTest { loop_inst, .. } | Terminator::ForTest { loop_inst, .. } => {
+                Some(loop_inst)
+            }
+            _ => None,
+        },
+        _ => {
+            if let Some(p) = flow.term_payload(b) {
+                return Some(p);
+            }
+            // Follow continuations (bounded by block count) to the
+            // nearest block that names the enclosing statement.
+            let mut visited = vec![false; flow.blocks.len()];
+            let mut stack: Vec<BlockId> = region_successors(flow, b);
+            while let Some(c) = stack.pop() {
+                if visited[c.0 as usize] {
+                    continue;
+                }
+                visited[c.0 as usize] = true;
+                if let Some(p) = flow.term_payload(c) {
+                    return Some(p);
+                }
+                for step in flow.block_steps(c) {
+                    if is_root[step.inst.index()] {
+                        return Some(step.inst);
+                    }
+                }
+                stack.extend(region_successors(flow, c));
+            }
+            None
+        }
+    }
+}
+
+impl<'a> Walk<'a> {
+    /// Bump the fixed-point pass counter.
+    pub(crate) fn next_epoch(&mut self) -> u32 {
+        self.epoch_next += 1;
+        self.epoch_next
+    }
+
+    /// The build's emission order for `r` (document order — parents
+    /// before children, dead code at its source position). Order-aware
+    /// recordings compare with this instead of visit order: dead
+    /// continuation blocks are walked late but emitted in place.
+    pub(crate) fn order(&self, r: TirRef) -> u32 {
+        self.flow.order_of(r).unwrap_or(0)
+    }
+
+    /// The `StepFacts` of the step that evaluates `inst`.
+    pub(crate) fn step_facts(&self, inst: TirRef) -> ryo_core::flow::StepFacts {
+        self.flow.step_of(inst).expect("stepped inst").facts
+    }
+
+    pub(crate) fn mark_processed(&mut self, b: BlockId) {
+        if !self.processed[b.0 as usize] {
+            self.processed[b.0 as usize] = true;
+            self.block_order.push(b);
+        }
+    }
+
+    pub(crate) fn is_processed(&self, b: BlockId) -> bool {
+        self.processed[b.0 as usize]
+    }
+
+    /// Enter a block for a once-ever walk (outer driver, arm/cond
+    /// lists): false when the current generation (`epoch`) already
+    /// visited it. Loop handlers re-stamp their finished body regions
+    /// with the enclosing generation's epoch, so enclosing lists skip
+    /// them without consulting `processed` — which fixed-point phase
+    /// passes must not gate on (they re-walk the body per pass via
+    /// [`Walk::enter_epoch`], whose epoch differs from the enclosing
+    /// generation's).
+    fn enter_seen(&mut self, b: BlockId, epoch: u32) -> bool {
+        if self.epoch[b.0 as usize] == epoch {
+            return false;
+        }
+        self.epoch[b.0 as usize] = epoch;
+        self.mark_processed(b);
+        true
+    }
+
+    /// Enter a block for a fixed-point pass: false when THIS pass
+    /// already visited it (earlier passes' stamps do not count — the
+    /// pass re-walks the region, and `processed` must not gate it).
+    fn enter_epoch(&mut self, b: BlockId, epoch: u32) -> bool {
+        if self.epoch[b.0 as usize] == epoch {
+            return false;
+        }
+        self.epoch[b.0 as usize] = epoch;
+        true
+    }
+
+    /// Open-ended region walk (the outer driver, if/match cond
+    /// chains): DFS preorder from `entry`, stopping per `stop`.
+    /// Returns true when the `At` boundary was reached.
+    pub(crate) fn walk_region(
+        &mut self,
+        own: &mut Ownership,
+        sink: &mut DiagSink,
+        sidecar: &mut FunctionSidecar,
+        entry: BlockId,
+        stop: RegionStop,
+        epoch: u32,
+    ) -> bool {
+        let mut reached_stop = false;
+        let mut stack = vec![entry];
+        while let Some(b) = stack.pop() {
+            if stop.excludes(b) {
+                reached_stop = true;
+                continue;
+            }
+            if !self.enter_seen(b, epoch) {
+                continue;
+            }
+            let conts = self.visit_block(own, sink, sidecar, b, epoch);
+            if stop.freezes(b) {
+                continue;
+            }
+            for c in conts.into_iter().flatten().rev() {
+                stack.push(c);
+            }
+        }
+        reached_stop
+    }
+
+    /// Bounded region walk (if/match arms, loop-body fixed points):
+    /// visits exactly the precomputed `list`, ignoring continuations
+    /// (every block a construct dispatch would reach is a list member).
+    pub(crate) fn walk_block_list(
+        &mut self,
+        own: &mut Ownership,
+        sink: &mut DiagSink,
+        sidecar: &mut FunctionSidecar,
+        list: &[BlockId],
+        epoch: u32,
+    ) {
+        for &b in list {
+            if !self.enter_seen(b, epoch) {
+                continue;
+            }
+            let _ = self.visit_block(own, sink, sidecar, b, epoch);
+        }
+    }
+
+    /// Bounded region walk for fixed-point passes: visits exactly
+    /// `list`, allowing re-visits across passes (per-pass epoch) but
+    /// never within one.
+    pub(crate) fn walk_phase(
+        &mut self,
+        own: &mut Ownership,
+        sink: &mut DiagSink,
+        sidecar: &mut FunctionSidecar,
+        list: &[BlockId],
+        epoch: u32,
+    ) {
+        for &b in list {
+            if !self.enter_epoch(b, epoch) {
+                continue;
+            }
+            let _ = self.visit_block(own, sink, sidecar, b, epoch);
+        }
+    }
+
+    /// Process one block's steps, then dispatch its terminator.
+    /// Returns the continuation blocks (a `BoolAnd`/`BoolOr` rhs+join, a
+    /// cascade/match/loop join) in visit order.
+    fn visit_block(
+        &mut self,
+        own: &mut Ownership,
+        sink: &mut DiagSink,
+        sidecar: &mut FunctionSidecar,
+        b: BlockId,
+        epoch: u32,
+    ) -> [Option<BlockId>; 2] {
+        let dead = self.flow.blocks[b.0 as usize].unreachable;
+        for step in self.flow.block_steps(b) {
+            self.process_step(own, sink, sidecar, *step, dead);
+        }
+        match *self.flow.term(b) {
+            Terminator::Goto { target } => [Some(target), None],
+            Terminator::Branch { then_, else_, .. } => match self.flow.branch_if(b) {
+                Some(if_inst) => [
+                    analyze_if_cascade(self, own, sink, sidecar, b, if_inst, epoch),
+                    None,
+                ],
+                None => [Some(then_), Some(else_)],
+            },
+            Terminator::Switch { match_inst, .. } => [
+                analyze_match_switch(self, own, sink, sidecar, b, match_inst, epoch),
+                None,
+            ],
+            Terminator::While { .. } | Terminator::For { .. } => {
+                [analyze_loop(self, own, sink, sidecar, b, epoch), None]
+            }
+            Terminator::Return { .. } => {
+                // The return's own steps (the operand expression) ran
+                // above; the payload instruction is the consumer: E1 /
+                // the move-or-borrowed transition, then the exit-path
+                // epilogue snapshot.
+                if let Some(payload) = self.flow.term_payload(b) {
+                    self.analyze_return(own, sink, payload);
+                    record_return_epilogue(self.tir, self.flow, own, payload);
+                }
+                [None, None]
+            }
+            Terminator::ReturnVoid => {
+                // The implicit end-of-body `ReturnVoid` carries no
+                // payload (no TIR instruction exists for it) — the
+                // promo fallthrough backstop and synthesized-return
+                // epilogue own that path, exactly as when the old walk
+                // saw no explicit return statement.
+                if let Some(payload) = self.flow.term_payload(b) {
+                    record_return_epilogue(self.tir, self.flow, own, payload);
+                }
+                [None, None]
+            }
+            Terminator::Backedge { .. }
+            | Terminator::Break { .. }
+            | Terminator::Continue { .. }
+            | Terminator::Unreachable
+            | Terminator::WhileTest { .. }
+            | Terminator::ForTest { .. } => [None, None],
+            Terminator::Call { .. } => {
+                // A diverging call (`panic`, …): the call instruction
+                // is the terminator payload, never a step, but it still
+                // needs the Call analysis — the borrowed-scalar arg
+                // un-seeding and the Rule-7 partition run here (the arg
+                // operand steps already ran above). There is no
+                // continuation: `next` is an unreachable block the
+                // outer driver processes as dead code.
+                let payload = self
+                    .flow
+                    .term_payload(b)
+                    .expect("diverging calls carry their instruction");
+                self.analyze_call(own, sink, payload);
+                [None, None]
+            }
+        }
+    }
+
+    /// Handle one stepped instruction. Operand steps have already run
+    /// (block iteration order), so handlers keep only the
+    /// parent-owned work: seeding, reads, use-safety checks, consumes.
+    /// Statement-root steps drain dying projections at the end (the
+    /// P4 per-statement lift).
+    fn process_step(
+        &mut self,
+        own: &mut Ownership,
+        sink: &mut DiagSink,
+        sidecar: &mut FunctionSidecar,
+        step: Step,
+        dead: bool,
+    ) {
+        let r = step.inst;
+        let inst = *self.tir.inst(r);
+        match inst.tag {
+            TirTag::VarDecl => self.analyze_var_decl(own, sink, sidecar, r, dead),
+            TirTag::Assign => self.analyze_assign(own, sink, sidecar, r),
+            TirTag::CompoundAssign => {
+                // Sema rejects compound-assign on Move-typed values
+                // today; enforce the invariant so a future sema
+                // relaxation trips a debug build. The RHS reads were
+                // recorded by the RHS operand steps.
+                let view = self.tir.compound_assign_view(r);
+                debug_assert!(
+                    !needs_tracking(self.tir.inst(view.value).ty, self.pool),
+                    "compound-assign on Move-typed value reached ownership pass; \
+                     sema should have rejected",
+                );
+            }
+            TirTag::FieldAssign => self.analyze_field_assign(own, sink, sidecar, r, false),
+            TirTag::CompoundFieldAssign => self.analyze_field_assign(own, sink, sidecar, r, true),
+            TirTag::Destructure => analyze_destructure(self, own, sink, sidecar, r),
+            TirTag::ExprStmt => {}
+            TirTag::StrConst | TirTag::BytesConst => self.seed_temp(own, r),
+            TirTag::StrConcat | TirTag::BytesConcat => {
+                self.seed_temp(own, r);
+                if let TirData::BinOp { lhs, rhs } = inst.data {
+                    for op in [lhs, rhs] {
+                        if needs_tracking(self.tir.inst(op).ty, self.pool) {
+                            check_use_moved(self.tir, self.pool, own, sink, op, self.tir.span(op));
+                        }
+                    }
+                }
+            }
+            TirTag::DebugRepr => {
+                self.seed_temp(own, r);
+                if let TirData::UnOp(operand) = inst.data
+                    && needs_tracking(self.tir.inst(operand).ty, self.pool)
+                {
+                    check_use_moved(
+                        self.tir,
+                        self.pool,
+                        own,
+                        sink,
+                        operand,
+                        self.tir.span(operand),
+                    );
+                }
+            }
+            TirTag::StructLit => {
+                self.seed_temp(own, r);
+                consume_struct_lit_fields(self.tir, self.flow, self.pool, own, sink, r);
+            }
+            TirTag::EnumLit => analyze_enum_lit(self, own, sink, r),
+            TirTag::Call => self.analyze_call(own, sink, r),
+            TirTag::Var => self.analyze_var_read(own, r, dead),
+            TirTag::Slice => {
+                check_operands_moved(self.tir, self.pool, own, sink, r);
+                if let TirData::Slice { base, .. } = inst.data {
+                    self.record_promo_candidate(own, r, base);
+                }
+            }
+            TirTag::ToView => {
+                check_operands_moved(self.tir, self.pool, own, sink, r);
+                if let TirData::UnOp(operand) = inst.data {
+                    self.record_promo_candidate(own, r, operand);
+                }
+            }
+            // Control constructs are terminator payloads, never steps —
+            // except `Unreachable`, which sema also emits inside an
+            // `ExprStmt` wrapper (error recovery), and the ExprStmt
+            // arm of the builder steps its operand like any expression.
+            TirTag::Unreachable => {}
+            TirTag::IfStmt
+            | TirTag::WhileLoop
+            | TirTag::ForRange
+            | TirTag::Match
+            | TirTag::Return
+            | TirTag::ReturnVoid
+            | TirTag::Break
+            | TirTag::Continue => {
+                unreachable!(
+                    "structural instruction {:?} reached the step walk",
+                    inst.tag
+                )
+            }
+            _ => check_operands_moved(self.tir, self.pool, own, sink, r),
+        }
+        self.last_inst = Some(r);
+        if self.is_root[r.index()] {
+            drain_dying_views(own);
+        }
+    }
+
+    /// Fresh owned producer (concat result, call result, literal, …):
+    /// enters the lattice as `Valid`; the temp's Flow place is its
+    /// owner identity.
+    fn seed_temp(&mut self, own: &mut Ownership, r: TirRef) {
+        if needs_tracking(self.tir.inst(r).ty, self.pool) {
+            let owner = own.owner_of_inst(r);
+            own.states.insert(owner, OwnerState::Valid);
+            own.temp_owners.insert(owner);
+        }
+    }
+
+    // ---------- statement-step handlers (operand visits removed) ----------
+
+    /// Move-typed `VarDecl` is a consumer: the new binding takes
+    /// ownership of the initializer's underlying value. The initializer
+    /// ran as operand steps; this handler does the binding reseat,
+    /// freeze check, consume and dead-store registration.
+    fn analyze_var_decl(
+        &mut self,
+        own: &mut Ownership,
+        sink: &mut DiagSink,
+        _sidecar: &mut FunctionSidecar,
+        r: TirRef,
+        dead: bool,
+    ) {
+        let view = self.tir.var_decl_view(r);
+        let init = view.initializer;
+        let init_ty = self.tir.inst(init).ty;
+        // The declaration's write fact names the binding's home place.
+        let home = self.step_facts(r).write.expect("VarDecl writes").place;
+        own.binding_of_name.insert(view.name, r);
+        if needs_tracking(init_ty, self.pool) {
+            let span = self.tir.span(r);
+            let consumed_name = consumed_binding_name(self.tir, init);
+            // P2 freeze (final spec §3.2): the consume moves the owner.
+            check_source_projected(
+                self.tir,
+                self.flow,
+                self.pool,
+                own,
+                sink,
+                own.underlying_owner(init),
+                span,
+                "move",
+                consumed_name,
             );
-            // The RHS is a Copy-typed expression, but it can still READ
-            // Move-typed bindings (`total += t.len()` reads `t`). Walk it
-            // so those reads clear dead-store entries and record
-            // owner_at_read like any other expression position.
-            visit_expr(tir, pool, own, sink, sidecar, view.value);
+            consume_for_assignment(self.tir, self.pool, own, sink, init, span, consumed_name, r);
+            let seat = rebind_to_init(own, home, init);
+            // Register the new binding as pending dead-store, keyed by
+            // the seat (free targets derive from it). The walk clears
+            // this entry on any later read or consumption; a surviving
+            // entry at function end fires W0001.
+            register_pending_dead_store(own, seat, view.name, span, r);
+        } else if self.pool.is_view(init_ty) {
+            // P3 (final spec §3.2): binding a slice registers a
+            // projection against the root owner (re-slices resolve
+            // transitively). Var copies alias the original slice rather
+            // than projecting again — the read fact resolves the alias.
+            let view_owner = own.underlying_owner(init);
+            own.current_owner.insert(home, view_owner);
+            register_projection(own, self.tir, self.flow, self.pool, init, view_owner);
+        } else {
+            own.current_owner.insert(home, Owner(home));
         }
-        TirTag::FieldAssign => {
-            // M9: `p.f = v` reads its root (liveness: the target-chain
-            // visit clears the root's dead-store entry and records
-            // owner_at_read, and a moved root trips E0020 there), then
-            // moves the value into the field. When the field type
-            // needs-drop, the OLD field value must be freed before the
-            // store — codegen consults
-            // `field_free_on_reassign` and walks the target chain.
-            let view = tir.field_assign_view(stmt);
-            visit_expr(tir, pool, own, sink, sidecar, view.target);
-            visit_expr(tir, pool, own, sink, sidecar, view.value);
-            if needs_tracking(inst.ty, pool) {
-                sidecar.field_free_on_reassign[stmt.index()] = Some(view.target);
-                let span = tir.span(stmt);
+        // First-declared rank for the loop-carried scan. Live blocks
+        // walk in document order, so the first visit wins; a dead-code
+        // declaration walks late but was emitted in place, so its rank
+        // is order-aware.
+        if dead {
+            let order = self.order(r);
+            match self.decl_rank.get(&view.name) {
+                Some(&cur) if cur <= order => {}
+                _ => {
+                    self.decl_rank.insert(view.name, order);
+                }
+            }
+        } else {
+            let order = self.order(r);
+            self.decl_rank.entry(view.name).or_insert(order);
+        }
+    }
+
+    /// Reassignment to a Move-typed binding: same consumption rules as
+    /// `VarDecl`; the existing binding name is reseated to whichever
+    /// SSA value owns the new underlying allocation.
+    fn analyze_assign(
+        &mut self,
+        own: &mut Ownership,
+        sink: &mut DiagSink,
+        sidecar: &mut FunctionSidecar,
+        r: TirRef,
+    ) {
+        let view = self.tir.assign_view(r);
+        // Stamp the Assign with the lexical binding its name resolved to
+        // BEFORE any early return: the free-scheduling passes group
+        // reassignments by this identity so a same-named shadow's
+        // reassigns cannot suppress the outer binding's cleanup.
+        // The write fact names the home place; the binding identity
+        // recorded for the free-scheduling passes is the place's
+        // declaring inst (a `Local`'s VarDecl, a param's virtual ref).
+        let home = self.step_facts(r).write.expect("Assign writes").place;
+        sidecar.assign_binding[r.index()] = match self.flow.place(home) {
+            ryo_core::flow::Place::Local { decl, .. } => Some(*decl),
+            ryo_core::flow::Place::Param { index, .. } => Some(TirRef::param(*index as usize)),
+            _ => None,
+        };
+        let value_ty = self.tir.inst(view.value).ty;
+        if needs_tracking(value_ty, self.pool) {
+            // Capture the old owner before consume_for_assignment /
+            // rebind overwrite current_owner[name]. Only emit the Free
+            // entry if the old owner is Valid — Borrowed/Moved/missing
+            // means there is no live allocation to release. EXCEPTION:
+            // an `inout str` param's current owner is Borrowed, yet the
+            // callee must drop the old pointee when reassigning the
+            // param (the write-back ABI hands the caller whatever triple
+            // the param holds at exit).
+            if let Some(&old_owner) = own.current_owner.get(&home) {
+                let old_droppable = match own.states.get(&old_owner) {
+                    Some(OwnerState::Valid) => true,
+                    Some(OwnerState::Borrowed) => {
+                        // An inout param's home is its own place.
+                        matches!(self.flow.place(home), ryo_core::flow::Place::Param { .. })
+                            && own.inout_str_params.contains(&self.flow.place(home).name())
+                    }
+                    _ => false,
+                };
+                if old_droppable {
+                    // Self-assignment (`s = s`, `p = p`): the RHS reads
+                    // the same owner the target currently holds, so the
+                    // reseat is a liveness no-op. Bail before scheduling
+                    // anything.
+                    if own.underlying_owner(view.value) == old_owner {
+                        return;
+                    }
+                    // P2 freeze (final spec §3.2): reassignment mutates
+                    // the owner — illegal while a slice of it is live.
+                    check_source_projected(
+                        self.tir,
+                        self.flow,
+                        self.pool,
+                        own,
+                        sink,
+                        old_owner,
+                        self.tir.span(r),
+                        "mutate",
+                        Some(view.name),
+                    );
+                    // `tirref` (not `inst_tirref`): an inout param's old
+                    // owner is a `Param`, resolved here to its virtual
+                    // ref — codegen caches that ref's repr at the
+                    // prologue.
+                    sidecar.free_on_reassign[r.index()] = Some(old_owner.tirref(self.flow));
+                    // Consuming concat: `s = s + suffix` where the lhs
+                    // Var resolves to the dying owner and the rhs is a
+                    // different owner.
+                    let old_valid = matches!(own.states.get(&old_owner), Some(OwnerState::Valid));
+                    let value_inst = self.tir.inst(view.value);
+                    if old_valid
+                        && matches!(value_inst.tag, TirTag::StrConcat | TirTag::BytesConcat)
+                        && let TirData::BinOp { lhs, rhs } = value_inst.data
+                        && matches!(self.tir.inst(lhs).data, TirData::Var(_))
+                        && own.underlying_owner(lhs) == old_owner
+                        && own.underlying_owner(rhs) != old_owner
+                    {
+                        sidecar.consumed_concat_lhs[r.index()] = Some(view.value);
+                    }
+                    // W0003 case-B support: reassignment mutates the
+                    // binding's owner — a defensive-copy hazard on it.
+                    own.owner_hazards.push((old_owner, r, HazardKind::Mutate));
+                    // Reassignment runs the old value's destructor — an
+                    // observable use, so drop the pending dead-store.
+                    own.pending_dead_store.remove(&old_owner);
+                }
+            }
+            let span = self.tir.span(r);
+            let consumed_name = consumed_binding_name(self.tir, view.value);
+            // P2 freeze (final spec §3.2): the consume moves the owner.
+            check_source_projected(
+                self.tir,
+                self.flow,
+                self.pool,
+                own,
+                sink,
+                own.underlying_owner(view.value),
+                span,
+                "move",
+                consumed_name,
+            );
+            consume_for_assignment(
+                self.tir,
+                self.pool,
+                own,
+                sink,
+                view.value,
+                span,
+                consumed_name,
+                r,
+            );
+            let seat = rebind_to_init(own, home, view.value);
+            let loop_carried = self
+                .active_loop_carried_homes
+                .iter()
+                .any(|homes| homes.contains(&home));
+            if loop_carried {
+                let home_owner = Owner(home);
+                own.pending_dead_store.remove(&seat);
+                own.current_owner.insert(home, home_owner);
+                own.states.insert(home_owner, OwnerState::Valid);
+                register_pending_dead_store(own, home_owner, view.name, span, r);
+            } else {
+                register_pending_dead_store(own, seat, view.name, span, r);
+            }
+        } else if self.pool.is_view(value_ty) {
+            // P3/P4 (final spec §3.2): rebinding a view registers the
+            // new projection and ends the old binding's — unless another
+            // binding still aliases the old view.
+            let old_owner = own.current_owner.get(&home).copied();
+            let view_owner = own.underlying_owner(view.value);
+            register_projection(own, self.tir, self.flow, self.pool, view.value, view_owner);
+            own.current_owner.insert(home, view_owner);
+            if let Some(old) = old_owner
+                && old != view_owner
+                && own.root_owner.contains_key(&old)
+                && !own.current_owner.values().any(|o| *o == old)
+            {
+                own.pending_dying.push(old);
+            }
+        }
+    }
+
+    /// M9: `p.f = v` reads its root and moves the value into the field;
+    /// when the field type needs-drop, the OLD field value must be
+    /// freed before the store (codegen consults `field_free_on_reassign`
+    /// and walks the target chain). Target/value operand steps already
+    /// ran; this handler does the field-free scheduling, the target-side
+    /// freeze check and the value consume.
+    fn analyze_field_assign(
+        &mut self,
+        own: &mut Ownership,
+        sink: &mut DiagSink,
+        sidecar: &mut FunctionSidecar,
+        r: TirRef,
+        compound: bool,
+    ) {
+        let inst = *self.tir.inst(r);
+        let (target, value) = if compound {
+            let v = self.tir.compound_field_assign_view(r);
+            (v.target, v.value)
+        } else {
+            let v = self.tir.field_assign_view(r);
+            (v.target, v.value)
+        };
+        if needs_tracking(inst.ty, self.pool) {
+            sidecar.field_free_on_reassign[r.index()] = Some(target);
+            if !compound {
+                let span = self.tir.span(r);
                 // P2 freeze on the TARGET side: the reassign frees the
                 // old buffer of the assigned field only, so the check
                 // matches the target's field path against each live
-                // projection's — sibling-field reassigns stay legal,
-                // same-field (or parent-struct-field) ones are rejected.
-                if let Some(root) = struct_root(own, tir, view.target) {
-                    let target_path = field_path_of(tir, view.target).unwrap_or_default();
+                // projection's.
+                if let Some(root) = struct_root(own, self.tir, target) {
+                    let target_path = field_path_of(self.tir, target).unwrap_or_default();
                     check_field_target_projected(
-                        tir,
-                        pool,
+                        self.tir,
+                        self.flow,
+                        self.pool,
                         own,
                         sink,
                         root,
                         &target_path,
                         span,
-                        struct_base_name(tir, view.target),
+                        struct_base_name(self.tir, target),
                     );
                 }
-                let consumed_name = consumed_binding_name(tir, view.value);
+                let consumed_name = consumed_binding_name(self.tir, value);
                 // P2 freeze (final spec §3.2): the consume moves the owner.
                 check_source_projected(
-                    tir,
-                    pool,
+                    self.tir,
+                    self.flow,
+                    self.pool,
                     own,
                     sink,
-                    underlying_owner(own, view.value),
+                    own.underlying_owner(value),
                     span,
                     "move",
                     consumed_name,
                 );
-                consume_for_assignment(tir, pool, own, sink, view.value, span, consumed_name, stmt);
-            }
-        }
-        TirTag::CompoundFieldAssign => {
-            // M9: `p.f += v`. Sema rejects compound-assign on
-            // needs-drop fields (`str` supports no compound operator),
-            // but schedule the field free by the same rule as
-            // `FieldAssign` so a future relaxation is handled, not
-            // silently skipped.
-            let view = tir.compound_field_assign_view(stmt);
-            visit_expr(tir, pool, own, sink, sidecar, view.target);
-            visit_expr(tir, pool, own, sink, sidecar, view.value);
-            if needs_tracking(inst.ty, pool) {
-                sidecar.field_free_on_reassign[stmt.index()] = Some(view.target);
-            }
-        }
-        TirTag::Destructure => {
-            // M10: whole-pattern destructuring — the one sanctioned
-            // field-move site. See `ownership/structs.rs`.
-            analyze_destructure(tir, pool, own, sink, sidecar, stmt);
-        }
-        TirTag::ExprStmt => {
-            if let TirData::UnOp(o) = inst.data {
-                visit_expr(tir, pool, own, sink, sidecar, o);
-            }
-        }
-        _ => {
-            visit_expr(tir, pool, own, sink, sidecar, stmt);
-        }
-    }
-    // P4 lift (final spec §3.2): projections whose last use this
-    // statement contained die here — after the whole statement, so a
-    // read and a consume within the same statement both see the view
-    // as live.
-    drain_dying_views(own);
-    own.current_stmt = prev_stmt;
-}
-
-/// Move-typed `VarDecl` is a consumer: the new binding takes
-/// ownership of the initializer's underlying value. If the
-/// initializer aliases a borrowed parameter, this is the E0021
-/// "move out of borrowed parameter" site; if the underlying owner is
-/// already `Moved`, this is the E0020 "use after move" site.
-pub(crate) fn analyze_var_decl(
-    tir: &Tir,
-    pool: &InternPool,
-    own: &mut Ownership,
-    sink: &mut DiagSink,
-    sidecar: &mut FunctionSidecar,
-    r: TirRef,
-) {
-    let view = tir.var_decl_view(r);
-    let init = view.initializer;
-    let init_ty = tir.inst(init).ty;
-    visit_expr(tir, pool, own, sink, sidecar, init);
-    // The VarDecl IS a fresh lexical binding (possibly shadowing an
-    // outer same-named one): record it as the binding `name` resolves
-    // to from here until scope exit. The initializer was evaluated in
-    // the outer scope, so this happens after `visit_expr(init)`.
-    own.binding_of_name.insert(view.name, r);
-    if needs_tracking(init_ty, pool) {
-        let span = tir.span(r);
-        let consumed_name = consumed_binding_name(tir, init);
-        // P2 freeze (final spec §3.2): the consume moves the owner.
-        check_source_projected(
-            tir,
-            pool,
-            own,
-            sink,
-            underlying_owner(own, init),
-            span,
-            "move",
-            consumed_name,
-        );
-        consume_for_assignment(tir, pool, own, sink, init, span, consumed_name, r);
-        rebind_to_init(own, view.name, init);
-        // Register the new binding as pending dead-store. The walk
-        // clears this entry on any later read or consumption; a
-        // surviving entry at function end fires W0001. Keyed by
-        // `init`, the same TirRef `rebind_to_init` stamped Valid.
-        register_pending_dead_store(own, init, view.name, span, r);
-    } else if pool.is_view(init_ty) {
-        // P3 (final spec §3.2): binding a slice registers a projection
-        // against the root owner (re-slices resolve transitively).
-        // Var copies alias the original slice rather than projecting
-        // again.
-        let view_owner = resolve_view_alias(own, tir, init);
-        own.current_owner.insert(view.name, view_owner);
-        register_projection(own, tir, pool, init, view_owner);
-    } else {
-        own.current_owner.insert(view.name, Owner::Inst(init));
-    }
-}
-
-/// Reassignment to a Move-typed binding. Same consumption rules as
-/// `VarDecl`; the existing binding name is reseated to whichever
-/// SSA value owns the new underlying allocation.
-pub(crate) fn analyze_assign(
-    tir: &Tir,
-    pool: &InternPool,
-    own: &mut Ownership,
-    sink: &mut DiagSink,
-    sidecar: &mut FunctionSidecar,
-    r: TirRef,
-) {
-    let view = tir.assign_view(r);
-    // Stamp the Assign with the lexical binding its name resolved to
-    // (declaring VarDecl / param ref), BEFORE any early return below:
-    // the free-scheduling passes group reassignments by this identity
-    // so a same-named shadow's reassigns cannot suppress the outer
-    // binding's cleanup.
-    sidecar.assign_binding[r.index()] = own.binding_of_name.get(&view.name).copied();
-    let value_ty = tir.inst(view.value).ty;
-    visit_expr(tir, pool, own, sink, sidecar, view.value);
-    if needs_tracking(value_ty, pool) {
-        // Capture the old owner before consume_for_assignment / rebind
-        // overwrite current_owner[name]. Only emit the Free entry if the
-        // old owner is Valid — Borrowed/Moved/missing means there is no
-        // live allocation to release. EXCEPTION: an `inout str` param's
-        // current owner is Borrowed, yet the callee must drop the old
-        // pointee when reassigning the param (the write-back ABI hands
-        // the caller whatever triple the param holds at exit — like
-        // `*x = new` dropping the old value in Rust). Codegen
-        // consults this map when lowering Assign.
-        if let Some(&old_owner) = own.current_owner.get(&view.name) {
-            let old_droppable = match own.states.get(&old_owner) {
-                Some(OwnerState::Valid) => true,
-                Some(OwnerState::Borrowed) => own.inout_str_params.contains(&view.name),
-                _ => false,
-            };
-            if old_droppable {
-                // Self-assignment (`s = s`, `p = p`): the RHS reads the
-                // same owner the target currently holds, so the reseat is
-                // a liveness no-op. Bail before scheduling anything —
-                // the free_on_reassign entry would free the allocation at
-                // the assign and the reseated owner (the same buffer)
-                // would be freed again at its last use.
-                if underlying_owner(own, view.value) == old_owner {
-                    return;
-                }
-                // P2 freeze (final spec §3.2): reassignment mutates the
-                // owner — illegal while a slice of it is live.
-                check_source_projected(
-                    tir,
-                    pool,
+                consume_for_assignment(
+                    self.tir,
+                    self.pool,
                     own,
                     sink,
-                    old_owner,
-                    tir.span(r),
-                    "mutate",
-                    Some(view.name),
+                    value,
+                    span,
+                    consumed_name,
+                    r,
                 );
-                // `tirref` (not `inst_tirref`): an inout param's old owner
-                // is a `Param`, resolved here to its virtual ref — codegen
-                // caches that ref's repr at the prologue.
-                sidecar.free_on_reassign[r.index()] = Some(old_owner.tirref(&own.param_index));
-                // Consuming concat: `s = s + suffix` where the lhs Var
-                // resolves to the dying owner and the rhs is a different
-                // owner. Only for Valid owners (the inout-param Borrowed
-                // exception above is excluded: the callee does not own
-                // the caller's buffer). The `check_source_projected`
-                // call above has already proven no live views.
-                let old_valid = matches!(own.states.get(&old_owner), Some(OwnerState::Valid));
-                let value_inst = tir.inst(view.value);
-                if old_valid
-                    && matches!(value_inst.tag, TirTag::StrConcat | TirTag::BytesConcat)
-                    && let TirData::BinOp { lhs, rhs } = value_inst.data
-                    && matches!(tir.inst(lhs).data, TirData::Var(_))
-                    && underlying_owner(own, lhs) == old_owner
-                    && underlying_owner(own, rhs) != old_owner
-                {
-                    sidecar.consumed_concat_lhs[r.index()] = Some(view.value);
-                }
-                // W0003 case-B support: reassignment mutates the binding's
-                // owner — a defensive-copy hazard on it.
-                own.owner_hazards.push((old_owner, r));
-                // Reassignment runs the old value's destructor (the
-                // free_on_reassign Free above) — that's an observable use,
-                // so the prior VarDecl/Assign isn't a dead store. Drop the
-                // pending_dead_store entry so W0001 doesn't fire and the
-                // drain block doesn't try to schedule a redundant Free.
-                own.pending_dead_store.remove(&old_owner);
             }
         }
-        let span = tir.span(r);
-        let consumed_name = consumed_binding_name(tir, view.value);
-        // P2 freeze (final spec §3.2): the consume moves the owner.
+    }
+
+    /// Move-typed `Return` is a consumer: the returned value flows out
+    /// of the function and the caller takes ownership. The operand
+    /// steps already ran; E1 rejects returning views, then the consume.
+    fn analyze_return(&mut self, own: &mut Ownership, sink: &mut DiagSink, r: TirRef) {
+        let inst = *self.tir.inst(r);
+        let operand = match inst.data {
+            TirData::UnOp(o) => o,
+            _ => unreachable!("Return must carry TirData::UnOp"),
+        };
+        let ty = self.tir.inst(operand).ty;
+        if self.pool.is_view(ty) {
+            // E1 (final spec §3.3): slices cannot be returned from
+            // functions. Backstop to sema's signature-level rejection.
+            sink.emit(
+                Diag::error(
+                    self.tir.span(r),
+                    DiagCode::ViewEscape,
+                    "cannot return a slice from a function",
+                )
+                .with_help("slices are non-escaping; return an owned `str` instead"),
+            );
+            return;
+        }
+        if !needs_tracking(ty, self.pool) {
+            return;
+        }
+        let span = self.tir.span(r);
+        let consumed_name = consumed_binding_name(self.tir, operand);
+        // P2 freeze (final spec §3.2): returning moves the value out.
         check_source_projected(
-            tir,
-            pool,
+            self.tir,
+            self.flow,
+            self.pool,
             own,
             sink,
-            underlying_owner(own, view.value),
+            own.underlying_owner(operand),
             span,
             "move",
             consumed_name,
         );
-        consume_for_assignment(tir, pool, own, sink, view.value, span, consumed_name, r);
-        rebind_to_init(own, view.name, view.value);
-        register_pending_dead_store(own, view.value, view.name, span, r);
-    } else if pool.is_view(value_ty) {
-        // P3/P4 (final spec §3.2): rebinding a view registers the new
-        // projection and ends the old binding's — unless another
-        // binding still aliases the old view (a Var copy keeps it
-        // alive).
-        let old_owner = own.current_owner.get(&view.name).copied();
-        let view_owner = resolve_view_alias(own, tir, view.value);
-        register_projection(own, tir, pool, view.value, view_owner);
-        own.current_owner.insert(view.name, view_owner);
-        if let Some(old) = old_owner
-            && old != view_owner
-            && own.root_owner.contains_key(&old)
-            && !own.current_owner.values().any(|o| *o == old)
-        {
-            own.pending_dying.push(old);
-        }
-    }
-}
-
-/// Move-typed `Return` is a consumer: the returned value flows out of
-/// the function and the caller takes ownership. Borrowed parameters
-/// cannot be returned (E0022). If the underlying owner is already
-/// `Moved`, this is the E0020 "use after move" site.
-pub(crate) fn analyze_return(
-    tir: &Tir,
-    pool: &InternPool,
-    own: &mut Ownership,
-    sink: &mut DiagSink,
-    sidecar: &mut FunctionSidecar,
-    r: TirRef,
-) {
-    let inst = *tir.inst(r);
-    let operand = match inst.data {
-        TirData::UnOp(o) => o,
-        _ => unreachable!("Return must carry TirData::UnOp"),
-    };
-    let ty = tir.inst(operand).ty;
-    visit_expr(tir, pool, own, sink, sidecar, operand);
-    if pool.is_view(ty) {
-        // E1 (final spec §3.3): slices cannot be returned from
-        // functions. Backstop to sema's signature-level rejection.
-        sink.emit(
-            Diag::error(
-                tir.span(r),
-                DiagCode::ViewEscape,
-                "cannot return a slice from a function",
-            )
-            .with_help("slices are non-escaping; return an owned `str` instead"),
+        consume_underlying(
+            self.tir,
+            self.pool,
+            own,
+            sink,
+            operand,
+            span,
+            consumed_name,
+            BorrowedAction::ReturnBorrowed,
+            r,
         );
-        return;
     }
-    if !needs_tracking(ty, pool) {
-        return;
-    }
-    let span = tir.span(r);
-    let consumed_name = consumed_binding_name(tir, operand);
-    // P2 freeze (final spec §3.2): returning moves the value out.
-    check_source_projected(
-        tir,
-        pool,
-        own,
-        sink,
-        underlying_owner(own, operand),
-        span,
-        "move",
-        consumed_name,
-    );
-    consume_underlying(
-        tir,
-        pool,
-        own,
-        sink,
-        operand,
-        span,
-        consumed_name,
-        BorrowedAction::ReturnBorrowed,
-        r,
-    );
-}
 
-/// Reseat `name` to point at `init` as its current owner. After a
-/// consume, the source binding's underlying value is `Moved`; the
-/// new binding takes a fresh, independent slot in the lattice so
-/// subsequent reads of `name` resolve to a `Valid` owner instead of
-/// tripping over the just-moved underlying. We do this by severing
-/// `init`'s `origin` link (if any) and stamping it `Valid`.
-pub(crate) fn rebind_to_init(own: &mut Ownership, name: StringId, init: TirRef) {
-    Ownership::dense_set(&mut own.origin, init, None);
-    own.states.insert(Owner::Inst(init), OwnerState::Valid);
-    own.current_owner.insert(name, Owner::Inst(init));
-}
-
-/// Register a Move-typed binding into `pending_dead_store`. The owner
-/// key (`init`/`value` TirRef) is whatever currently owns the
-/// allocation; `decl_inst` is the `VarDecl`/`Assign` instruction's own
-/// TirRef and serves as the Free anchor if the binding turns out to be
-/// a dead store. Single source of truth for `analyze_var_decl` and
-/// `analyze_assign` — kept in one place so the two registration paths
-/// cannot drift apart.
-pub(crate) fn register_pending_dead_store(
-    own: &mut Ownership,
-    owner: TirRef,
-    name: StringId,
-    span: Span,
-    decl_inst: TirRef,
-) {
-    own.pending_dead_store
-        .insert(Owner::Inst(owner), (name, span, decl_inst));
-}
-
-/// Walk back from `init` to whichever SSA value currently owns the
-/// underlying allocation. `visit_expr` is responsible for populating
-/// `origin` for `Var` reads; for fresh producers (`StrConst`,
-/// `StrConcat`, `Call`) `init` is itself the owner.
-pub(crate) fn underlying_owner(own: &Ownership, init: TirRef) -> Owner {
-    match Ownership::dense_get(&own.origin, init) {
-        Some(Some(owner)) => owner,
-        _ => Owner::Inst(init),
-    }
-}
-
-/// Aliasing identity of an `inout` (or Copy borrow) call argument for the
-/// Rule 7 overlap check (M8.3). Tracked (Move-typed) args resolve to the
-/// usual underlying owner. Copy scalars never enter the lattice, so their
-/// stable identity is the binding's `current_owner` slot (seeded at the
-/// VarDecl) — two `&c` reads of one `mut c` must collide even though each
-/// read is its own SSA value. An unregistered name (a Copy-typed
-/// parameter, which the param loop skips) falls back to
-/// `Owner::Param(name)` — the correct per-binding key for exactly that
-/// case. A `FieldAccess` chain (M9) resolves to its ROOT owner: `&p.x`
-/// is the one mutable borrow of `p` for the call's duration.
-pub(crate) fn inout_owner(own: &Ownership, tir: &Tir, arg: TirRef) -> Owner {
-    match tir.inst(arg).data {
-        TirData::Var(name) => own
-            .current_owner
-            .get(&name)
-            .copied()
-            .unwrap_or(Owner::Param(name)),
-        TirData::FieldAccess { .. } => {
-            struct_root(own, tir, arg).unwrap_or_else(|| underlying_owner(own, arg))
+    /// A `Call` step: seed a needs-drop result, run the borrow/move/
+    /// inout partition (Rule 7, E0031/E0032, E4 view borrows), then
+    /// commit the moves. Arg operand steps already ran (phase 1 of the
+    /// old walk is inherent in the block iteration).
+    fn analyze_call(&mut self, own: &mut Ownership, sink: &mut DiagSink, r: TirRef) {
+        let inst = *self.tir.inst(r);
+        // A str-returning call (e.g. `int_to_str`) is a producer.
+        if needs_tracking(inst.ty, self.pool) {
+            let owner = own.owner_of_inst(r);
+            own.states.insert(owner, OwnerState::Valid);
+            own.temp_owners.insert(owner);
         }
-        _ => underlying_owner(own, arg),
+        let view = self.tir.call_view(r);
+
+        // Phase 2 — use-safety check + borrow/move/inout partition.
+        let mut borrowed: Vec<Owner> = Vec::new();
+        let mut moved: Vec<Owner> = Vec::new();
+        // E4 (final spec §3.3): a view argument borrows its ROOT owner
+        // for the duration of the call.
+        let mut view_borrowed: Vec<Owner> = Vec::new();
+        // inout occurrences: (owner, arg span) — a Vec, not a Set, so a
+        // double-inout of one owner is detectable by count (Rule 7).
+        let mut inout_uses: Vec<(Owner, Span)> = Vec::new();
+        for (i, arg) in view.args.iter().enumerate() {
+            if is_borrowed_scalar_param(view.name, self.pool, i)
+                && matches!(self.tir.inst(*arg).tag, TirTag::StrConst)
+            {
+                // Undo the lattice seeding from the StrConst step: the
+                // borrowed-scalar ABI never owns its argument.
+                let arg_owner = own.owner_of_inst(*arg);
+                own.temp_owners.remove(&arg_owner);
+                own.states.remove(&arg_owner);
+            }
+            let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
+            let arg_ty = self.tir.inst(*arg).ty;
+            if mode == ParamMode::Inout {
+                // Rule 7 (M8.3): resolve an aliasing identity even for
+                // Copy scalars, which never enter the lattice — the
+                // arg's read fact names the binding home place.
+                let owner = own.underlying_owner(*arg);
+                check_use_moved(self.tir, self.pool, own, sink, *arg, self.tir.span(*arg));
+                if needs_tracking(arg_ty, self.pool) {
+                    // P2 freeze (final spec §3.2): `inout` passing
+                    // mutates the owner.
+                    check_source_projected(
+                        self.tir,
+                        self.flow,
+                        self.pool,
+                        own,
+                        sink,
+                        owner,
+                        self.tir.span(*arg),
+                        "mutate",
+                        consumed_binding_name(self.tir, *arg),
+                    );
+                }
+                inout_uses.push((owner, self.tir.span(*arg)));
+                // W0003 case-B support: an `inout` pass mutates the
+                // owner — a defensive-copy hazard on it.
+                own.owner_hazards.push((owner, r, HazardKind::InoutPass));
+                continue;
+            }
+            if !needs_tracking(arg_ty, self.pool) {
+                if mode == ParamMode::Borrow && self.pool.is_view(arg_ty) {
+                    // A view arg borrows its root owner for the call's
+                    // duration (E4). `projection_root` looks through
+                    // ToView conversions (the implicit str → strview
+                    // coercion) to the underlying owner.
+                    if let Some(root) = projection_root(own, self.tir, self.flow, self.pool, *arg) {
+                        push_unique(&mut view_borrowed, root);
+                    }
+                } else if mode == ParamMode::Borrow {
+                    // A Copy borrow is a no-op for liveness, but it
+                    // still aliases an `inout` of the same root in this
+                    // call. Record every Var read and Copy field read in
+                    // the arg's expression — the walk stops at Call
+                    // boundaries: a nested call's args are that call's
+                    // own Rule-7 partition, fully evaluated before this
+                    // call starts.
+                    let mut stack = vec![*arg];
+                    while let Some(cur) = stack.pop() {
+                        let inst = self.tir.inst(cur);
+                        match inst.tag {
+                            // The read fact names the binding home
+                            // place (FieldAccess steps carry the
+                            // chain's root) — resolution is uniform.
+                            TirTag::Var | TirTag::FieldAccess => {
+                                push_unique(&mut borrowed, own.underlying_owner(cur));
+                            }
+                            TirTag::Call => continue,
+                            _ => {}
+                        }
+                        self.tir
+                            .walk_operands(cur, &mut |_, child, _| stack.push(child));
+                    }
+                }
+                continue;
+            }
+            // M9: a needs-drop field read in a borrow-mode argument
+            // borrows the ROOT struct owner for the call's duration.
+            if mode == ParamMode::Borrow && matches!(self.tir.inst(*arg).tag, TirTag::FieldAccess) {
+                push_unique(&mut borrowed, own.underlying_owner(*arg));
+                continue;
+            }
+            // M8.4.1.2: a `str(view)` materialization call passed as a
+            // borrow-mode arg READS the view's buffer at call time —
+            // the view's ROOT owner is immutably borrowed for the outer
+            // call's duration (E4).
+            if mode == ParamMode::Borrow && self.tir.inst(*arg).tag == TirTag::Call {
+                let inner = self.tir.call_view(*arg);
+                let vb_params = view_borrow_params(inner.name, self.pool);
+                if !vb_params.is_empty() {
+                    for &idx in vb_params {
+                        if let Some(&varg) = inner.args.get(idx)
+                            && let Some(root) =
+                                projection_root(own, self.tir, self.flow, self.pool, varg)
+                        {
+                            push_unique(&mut view_borrowed, root);
+                        }
+                    }
+                    continue;
+                }
+            }
+            // P6': a view re-borrowed into a `str` arg (ViewAsOwner)
+            // borrows the view's ROOT owner for the call's duration.
+            let owner =
+                if mode == ParamMode::Borrow && self.tir.inst(*arg).tag == TirTag::ViewAsOwner {
+                    projection_root(own, self.tir, self.flow, self.pool, *arg)
+                        .unwrap_or_else(|| own.underlying_owner(*arg))
+                } else {
+                    own.underlying_owner(*arg)
+                };
+            if mode == ParamMode::Borrow {
+                check_use_moved(self.tir, self.pool, own, sink, *arg, self.tir.span(*arg));
+                push_unique(&mut borrowed, owner);
+            } else {
+                push_unique(&mut moved, owner);
+            }
+        }
+        // Rule 7 (M8.3): at most one mutable borrow per owner in a
+        // call, and no immutable borrow / move alongside it.
+        for (pos, (owner, _span)) in inout_uses.iter().enumerate() {
+            if inout_uses[..pos].iter().any(|(o, _)| o == owner) {
+                continue;
+            }
+            let name = rule7_owner_name(own, self.tir, self.flow, self.pool, &view.args, *owner);
+            // (1) The same owner is mutably borrowed more than once —
+            // two notes at DISTINCT arg spans.
+            let occurrences: Vec<Span> = inout_uses
+                .iter()
+                .filter(|(o, _)| o == owner)
+                .map(|(_, s)| *s)
+                .collect();
+            if occurrences.len() > 1 {
+                let mut diag = Diag::error(
+                    self.tir.span(r),
+                    DiagCode::MutableAliasingViolation,
+                    format!(
+                        "cannot borrow {} as mutable more than once in the same call",
+                        name
+                    ),
+                );
+                diag = diag.with_note(Some(occurrences[0]), "first mutable borrow here");
+                diag = diag.with_note(Some(occurrences[1]), "second mutable borrow here");
+                diag = diag.with_help("a value can have one mutable borrow OR many immutable borrows in a call, never both (Rule 7)");
+                sink.emit(diag);
+            }
+            // (2) inout ∩ borrowed (a view arg counts as an immutable
+            // borrow of its root, E4).
+            if borrowed.contains(owner) || view_borrowed.contains(owner) {
+                sink.emit(
+                    Diag::error(
+                        self.tir.span(r),
+                        DiagCode::MutableAliasingViolation,
+                        format!(
+                            "cannot borrow {} as immutable while it is mutably borrowed in the same call",
+                            name
+                        ),
+                    )
+                    .with_help("a value can have one mutable borrow OR many immutable borrows in a call, never both (Rule 7)"),
+                );
+            }
+            // (3) inout ∩ moved.
+            if moved.contains(owner) {
+                sink.emit(
+                    Diag::error(
+                        self.tir.span(r),
+                        DiagCode::MutableAliasingViolation,
+                        format!(
+                            "cannot move {} while it is mutably borrowed in the same call",
+                            name
+                        ),
+                    )
+                    .with_help("a value can have one mutable borrow OR many immutable borrows in a call, never both (Rule 7)"),
+                );
+            }
+        }
+        // Overlap — same owner borrowed AND moved in one call.
+        for owner in borrowed.iter().filter(|o| moved.contains(o)) {
+            let name = owner_name_for_diag(*owner, self.flow, self.pool);
+            // Find spans of the conflicting arguments for this owner.
+            let mut borrow_span = None;
+            let mut move_span = None;
+            for (i, arg) in view.args.iter().enumerate() {
+                if !needs_tracking(self.tir.inst(*arg).ty, self.pool) {
+                    continue;
+                }
+                let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
+                // P6' (mirrors the Rule-7 partition above): a view
+                // re-borrowed into a `str` arg via ViewAsOwner borrows
+                // the view's ROOT owner.
+                // The read fact names the binding home place (a
+                // FieldAccess step carries the chain's ROOT place), so
+                // alias resolution is uniform; ViewAsOwner args resolve
+                // through the projection chain.
+                let arg_owner = if mode == ParamMode::Borrow
+                    && self.tir.inst(*arg).tag == TirTag::ViewAsOwner
+                {
+                    projection_root(own, self.tir, self.flow, self.pool, *arg)
+                        .unwrap_or_else(|| own.underlying_owner(*arg))
+                } else {
+                    own.underlying_owner(*arg)
+                };
+                if arg_owner == *owner {
+                    match mode {
+                        ParamMode::Borrow => borrow_span = Some(self.tir.span(*arg)),
+                        ParamMode::Move => move_span = Some(self.tir.span(*arg)),
+                        ParamMode::Inout => {}
+                    }
+                }
+            }
+            let mut diag = Diag::error(
+                self.tir.span(r),
+                DiagCode::MoveWhileBorrowedInCall,
+                format!("cannot move {} while it is borrowed in the same call", name),
+            );
+            if let Some(b_span) = borrow_span {
+                diag = diag.with_note(Some(b_span), "borrowed here");
+            }
+            if let Some(m_span) = move_span {
+                diag = diag.with_note(Some(m_span), "moved here");
+            }
+            diag = diag.with_help("borrows are live for the whole call; pass by `move` on a separate statement, or borrow in both positions");
+            sink.emit(diag);
+        }
+
+        // P2 freeze (final spec §3.2): a view argument keeps its root
+        // owner live for the whole call, so a `move` of the same owner
+        // in the same call is a freeze violation.
+        let mut view_move_overlap: Vec<Owner> = view_borrowed
+            .iter()
+            .filter(|o| moved.contains(o))
+            .copied()
+            .collect();
+        view_move_overlap.sort_by_key(owner_sort_key);
+        for owner in view_move_overlap {
+            // E0020/E0021 already cover owners that are `Moved` or
+            // `Borrowed` — don't double-report.
+            if matches!(
+                own.states.get(&owner),
+                Some(OwnerState::Moved { .. }) | Some(OwnerState::Borrowed)
+            ) {
+                continue;
+            }
+            let name = owner_name_for_diag(owner, self.flow, self.pool);
+            let mut diag = Diag::error(
+                self.tir.span(r),
+                DiagCode::SourceProjected,
+                format!("cannot move {name} while a slice of it is live"),
+            );
+            for arg in &view.args {
+                if self.pool.is_view(self.tir.inst(*arg).ty)
+                    && projection_root(own, self.tir, self.flow, self.pool, *arg) == Some(owner)
+                {
+                    diag = diag.with_note(Some(self.tir.span(*arg)), "slice passed here");
+                    break;
+                }
+            }
+            sink.emit(diag);
+        }
+
+        // Phase 3 — commit the moves.
+        for (i, arg) in view.args.iter().enumerate() {
+            let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
+            let arg_ty = self.tir.inst(*arg).ty;
+            // E2 (final spec §3.3): slices cannot be passed to `move`
+            // parameters. Backstop — sema rejects `move` on view-typed
+            // parameters already.
+            if mode == ParamMode::Move && self.pool.is_view(arg_ty) {
+                sink.emit(
+                    Diag::error(
+                        self.tir.span(r),
+                        DiagCode::ViewEscape,
+                        "cannot pass a slice to a `move` parameter",
+                    )
+                    .with_help("slices are non-escaping; pass by default (borrow), or take an owned `str` parameter"),
+                );
+                continue;
+            }
+            if mode == ParamMode::Move && needs_tracking(arg_ty, self.pool) {
+                let owner = own.underlying_owner(*arg);
+                // P2 freeze (final spec §3.2) — unless the view
+                // partition above already reported this owner.
+                if !view_borrowed.contains(&owner) {
+                    check_source_projected(
+                        self.tir,
+                        self.flow,
+                        self.pool,
+                        own,
+                        sink,
+                        owner,
+                        self.tir.span(r),
+                        "move",
+                        consumed_binding_name(self.tir, *arg),
+                    );
+                }
+                let consumed_name = consumed_binding_name(self.tir, *arg);
+                consume_for_assignment(
+                    self.tir,
+                    self.pool,
+                    own,
+                    sink,
+                    *arg,
+                    self.tir.span(r),
+                    consumed_name,
+                    r,
+                );
+            }
+        }
+        // `inout` args need no ownership transition: the callee only
+        // borrows the slot, and the binding keeps its pre-call owner.
+        // The stale-triple hazard (callee realloc'd/replaced the
+        // buffer) is handled in CODEGEN (named-binding Frees emit the
+        // binding's CURRENT `FatLocals`).
+    }
+
+    /// Aliasing read: the step's `read` fact names the binding home
+    /// place; the owner live in that home is recorded for the
+    /// post-walk last-use passes (replacing `collect_last_uses`), the
+    /// dead-store entry for the binding's name is cleared, and a view
+    /// read at its projection's last use queues the projection's
+    /// death.
+    fn analyze_var_read(&mut self, own: &mut Ownership, r: TirRef, dead: bool) {
+        let inst = *self.tir.inst(r);
+        let name = match inst.data {
+            TirData::Var(n) => n,
+            _ => unreachable!("Var must carry TirData::Var"),
+        };
+        // Error-shaped TIR can leave a `Var` unresolved (no read
+        // fact) — the old name-keyed walk skipped those reads; mirror
+        // that (the unit already carries sema's diagnostic).
+        let Some(read) = self.step_facts(r).read else {
+            return;
+        };
+        let owner = own.current_owner.get(&read).copied().unwrap_or(Owner(read));
+        if needs_tracking(inst.ty, self.pool) {
+            // Any read counts as "used" for dead-store purposes, even
+            // one that ultimately fires E0020. Clear by NAME: a reseat
+            // inside a branch is discarded by the merge, so the pending
+            // entry can survive under a branch-local owner key while
+            // the binding itself is read afterwards.
+            own.pending_dead_store.retain(|_, (n, _, _)| *n != name);
+            // Snapshot owner-at-read so the post-walk passes anchor to
+            // the owner live *at this read*.
+            Ownership::dense_set(&mut own.owner_at_read, r, owner);
+        } else if self.pool.is_view(inst.ty) {
+            // P4 lift (final spec §3.2): record the read; when it is
+            // the projection's precomputed last use (and not
+            // loop-deferred), the projection dies at the end of this
+            // statement.
+            Ownership::dense_set(&mut own.owner_at_read, r, owner);
+            // A view-typed PARAM read owns no projection here (its
+            // buffer belongs to the caller) — the dense view tables
+            // are inst-indexed, so param owners skip the death check.
+            if let Some(vi) = owner.inst_tirref(self.flow)
+                && Ownership::dense_get(&own.view_defer_loop, vi).is_none()
+                && Ownership::dense_get(&own.view_last_use, vi) == Some(r)
+            {
+                own.pending_dying.push(owner);
+            }
+        }
+        // Last-use recording (old `collect_last_uses` semantics): by
+        // NAME, latest DOCUMENT-order read wins; the per-read owner
+        // snapshot keys the owner-level map (a Param owner lands under
+        // its sentinel ref). The comparison uses the build's emission
+        // order, not visit order: dead continuation blocks walk after
+        // everything but emitted in place, and their reads must not
+        // displace live last uses.
+        if needs_tracking(inst.ty, self.pool) || self.pool.is_view(inst.ty) {
+            if !dead {
+                // Live blocks walk in document order: latest wins is a
+                // plain insert.
+                self.last_read_by_name.insert(name, r);
+                if let Some(o) = Ownership::dense_get(&own.owner_at_read, r) {
+                    self.last_use.insert(o.tirref(self.flow), r);
+                }
+            } else {
+                // Dead continuation blocks walk after everything but
+                // were emitted in place: their reads must not
+                // displace a live last use, so compare emission
+                // (document) order.
+                let order = self.order(r);
+                let later = match self.last_read_by_name.get(&name) {
+                    Some(&cur) => self.order(cur) < order,
+                    None => true,
+                };
+                if later {
+                    self.last_read_by_name.insert(name, r);
+                }
+                if let Some(o) = Ownership::dense_get(&own.owner_at_read, r) {
+                    let key = o.tirref(self.flow);
+                    let later = match self.last_use.get(&key) {
+                        Some(&cur) => self.order(cur) < order,
+                        None => true,
+                    };
+                    if later {
+                        self.last_use.insert(key, r);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Record a `Slice`/`ToView` whose base is a borrowed `str`/`bytes`
+    /// param. Only owner-typed bases promote, and only borrowed params
+    /// leak the promotion buffer. The enclosing statement comes from
+    /// the precomputed `stmt_of` table.
+    fn record_promo_candidate(&mut self, own: &mut Ownership, view_inst: TirRef, base: TirRef) {
+        let base_inst = self.tir.inst(base);
+        if !matches!(
+            self.pool.kind(base_inst.ty),
+            TypeKind::Str | TypeKind::Bytes
+        ) {
+            return;
+        }
+        // The base read fact must name a borrowed param's place
+        // directly (not a shadowing local seated on it).
+        let Some(base_place) = own.inst_place[base.index()] else {
+            return;
+        };
+        let ryo_core::flow::Place::Param { index, .. } = self.flow.place(base_place) else {
+            return;
+        };
+        if self.tir.params[*index as usize].mode != ParamMode::Borrow {
+            return;
+        }
+        let Some(stmt) = self.stmt_of[view_inst.index()] else {
+            return;
+        };
+        // Loop convergence re-walks insts; record each view inst once.
+        if own
+            .promo_candidates
+            .iter()
+            .any(|c| c.view_inst == view_inst)
+        {
+            return;
+        }
+        own.promo_candidates.push(PromoCandidate {
+            view_inst,
+            base,
+            stmt,
+        });
     }
 }
 
-/// True if `owner` is the value currently bound to an `inout str`
-/// parameter name. That value ESCAPES through the write-back pointer at
-/// function exit, so it can be reassigned (dropping the old pointee) but
-/// never moved out of the function — not even after a reassign replaced
-/// the original (Borrowed) param owner with a fresh Valid one.
-pub(crate) fn inout_escape_owner(own: &Ownership, owner: Owner) -> bool {
-    own.inout_str_params
-        .iter()
-        .any(|n| own.current_owner.get(n) == Some(&owner))
-}
-
-/// Use-site use-after-move authority (spec §5.3 Rule 1 — a move
-/// invalidates the original binding). Resolve the operand's
-/// underlying owner and emit E0020 if it is `Moved`. Called from every
-/// use site: consume sites, borrow-arg paths, and operand-read sites.
-pub(crate) fn check_use_moved(
+/// The `check_use_moved` half of the old `recurse_operands`: operand
+/// steps already ran (block iteration order), so only the parent's
+/// use-safety checks remain. Mirrors the old recursion's shapes.
+fn check_operands_moved(
     tir: &Tir,
     pool: &InternPool,
     own: &Ownership,
     sink: &mut DiagSink,
-    operand: TirRef,
-    span: Span,
+    r: TirRef,
 ) {
-    let owner = underlying_owner(own, operand);
-    if let Some(OwnerState::Moved { moved_at }) = own.states.get(&owner).cloned() {
-        let name = consumed_binding_name(tir, operand);
-        sink.emit(
-            Diag::error(span, DiagCode::UseAfterMove,
-                format!("use of moved value {}", format_binding(name, pool)))
-                .with_note(Some(moved_at), "value moved here")
-                .with_help("consider using the value before the move, or pass by default (borrow) instead of `move`"),
-        );
-    }
-}
-
-/// Which diagnostic the shared `consume_underlying` helper should
-/// emit on the `Borrowed` arm. `consume_for_assignment` and
-/// `analyze_return` run identical state transitions otherwise — the
-/// only thing that diverges is the error code / wording / help when
-/// the underlying owner is borrowed.
-pub(crate) enum BorrowedAction {
-    /// E0021 — `consume_for_assignment` site (VarDecl / Assign /
-    /// move-typed Call argument).
-    MoveOutOfParam,
-    /// E0022 — `analyze_return` site.
-    ReturnBorrowed,
-}
-
-/// Apply the consumption transition for a Move-typed initializer.
-/// Caller must have already populated origin/state for `init` via
-/// `visit_expr`. `site` is the consuming instruction (VarDecl /
-/// Assign / Return / move-typed Call), recorded in the W0003 hazard
-/// log when the consume lands.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn consume_for_assignment(
-    tir: &Tir,
-    pool: &InternPool,
-    own: &mut Ownership,
-    sink: &mut DiagSink,
-    init: TirRef,
-    span: Span,
-    name: Option<StringId>,
-    site: TirRef,
-) {
-    consume_underlying(
-        tir,
-        pool,
-        own,
-        sink,
-        init,
-        span,
-        name,
-        BorrowedAction::MoveOutOfParam,
-        site,
-    );
-}
-
-/// Shared transition for every consume site (assignment, return,
-/// move-typed Call argument). Walks back to the underlying owner,
-/// reads its state, and either:
-///
-/// * a needs-drop `FieldAccess` operand is rejected outright
-///   (`MoveOutOfField`, M9 — fields move only with the whole struct),
-/// * `Valid` → stamp `Moved { moved_at: span }`, clear any pending
-///   dead-store entry, and log a W0003 move-hazard at `site`,
-/// * `Borrowed` → emit E0021 or E0022 per `on_borrowed`,
-/// * `Moved` → emit E0020 (this site is the use-after-move check
-///   authority).
-/// * `NotTracked` → no-op.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn consume_underlying(
-    tir: &Tir,
-    pool: &InternPool,
-    own: &mut Ownership,
-    sink: &mut DiagSink,
-    operand: TirRef,
-    span: Span,
-    name: Option<StringId>,
-    on_borrowed: BorrowedAction,
-    site: TirRef,
-) {
-    // M9: consuming a needs-drop field read moves only the field out
-    // of its struct — rejected; the struct's fields move as one.
-    if check_field_move_out(tir, pool, sink, operand, span) {
-        return;
-    }
-    let underlying = underlying_owner(own, operand);
-    let mut state = own
-        .states
-        .get(&underlying)
-        .cloned()
-        .unwrap_or(OwnerState::NotTracked);
-    // A Valid value currently bound to an `inout str` param still escapes
-    // through the write-back pointer — moving it out would leave the slot
-    // holding a stale triple. Treat it as borrowed at consume sites.
-    if matches!(state, OwnerState::Valid) && inout_escape_owner(own, underlying) {
-        state = OwnerState::Borrowed;
-    }
-    match state {
-        OwnerState::Valid => {
-            own.pending_dead_store.remove(&underlying);
-            own.states
-                .insert(underlying, OwnerState::Moved { moved_at: span });
-            // W0003 case-B support: the consume is a move-hazard on the
-            // owner, anchored at the consuming instruction.
-            own.owner_hazards.push((underlying, site));
+    let inst = *tir.inst(r);
+    match inst.data {
+        TirData::UnOp(o) => {
+            if needs_tracking(tir.inst(o).ty, pool) {
+                check_use_moved(tir, pool, own, sink, o, tir.span(o));
+            }
         }
-        OwnerState::Borrowed => {
-            let (code, msg, help) = match on_borrowed {
-                BorrowedAction::MoveOutOfParam => (
-                    DiagCode::MoveOutOfBorrowedParam,
-                    format!(
-                        "cannot move out of borrowed parameter {}",
-                        format_binding(name, pool),
-                    ),
-                    "add `move` to the parameter declaration if you need ownership",
-                ),
-                BorrowedAction::ReturnBorrowed => (
-                    DiagCode::ReturnBorrowedValue,
-                    format!(
-                        "cannot return borrowed value {} (Rule 5)",
-                        format_binding(name, pool),
-                    ),
-                    "return a locally-allocated value, or accept the parameter as `move`",
-                ),
-            };
-            sink.emit(Diag::error(span, code, msg).with_help(help));
-        }
-        OwnerState::Moved { .. } => {
-            check_use_moved(tir, pool, own, sink, operand, span);
-        }
-        OwnerState::NotTracked => {}
-    }
-}
-
-/// Subtree TirRef set of a statement list — every ref reachable from
-/// each statement, matching `prune_branch_dead_projections`'s notion
-/// of "inside the branch".
-pub(crate) fn stmts_subtree(tir: &Tir, stmts: &[TirRef]) -> HashSet<TirRef> {
-    let mut set = HashSet::new();
-    for &s in stmts {
-        tir.collect_reachable(s, &mut set);
-    }
-    set
-}
-
-/// Collect every `Assign` value in `stmts` — including nested
-/// if/elif/else, while, and for bodies — that stores into `binding`
-/// (the pre-branch binding a shadowing arm took the name from). Used
-/// by `analyze_if_stmt`'s reseat-record: an arm that reseats the
-/// pre-branch binding and THEN shadows the name must still attribute
-/// the reseat to the pre-branch binding, wherever in the arm (however
-/// deeply nested) the reseat happened, or the pre-branch buffer leaks
-/// on the paths where the whole arm was skipped.
-fn collect_arm_reseats(
-    tir: &Tir,
-    pool: &InternPool,
-    sidecar: &FunctionSidecar,
-    stmts: &[TirRef],
-    binding: TirRef,
-    reseat_owners: &mut HashSet<Owner>,
-) {
-    for &s in stmts {
-        match tir.inst(s).tag {
-            TirTag::Assign => {
-                let av = tir.assign_view(s);
-                if sidecar.assign_binding[s.index()] == Some(binding)
-                    && needs_tracking(tir.inst(av.value).ty, pool)
-                {
-                    reseat_owners.insert(Owner::Inst(av.value));
+        TirData::BinOp { lhs, rhs } => {
+            for op in [lhs, rhs] {
+                if needs_tracking(tir.inst(op).ty, pool) {
+                    check_use_moved(tir, pool, own, sink, op, tir.span(op));
                 }
             }
-            TirTag::IfStmt => {
-                let view = tir.if_stmt_view(s);
-                collect_arm_reseats(tir, pool, sidecar, &view.then_stmts, binding, reseat_owners);
-                for elif in &view.elif_branches {
-                    collect_arm_reseats(tir, pool, sidecar, &elif.body, binding, reseat_owners);
-                }
-                if let Some(else_stmts) = &view.else_stmts {
-                    collect_arm_reseats(tir, pool, sidecar, else_stmts, binding, reseat_owners);
+        }
+        TirData::Slice { base, start, end } => {
+            // M8.4: slicing is a non-consuming read of the base.
+            if needs_tracking(tir.inst(base).ty, pool) {
+                check_use_moved(tir, pool, own, sink, base, tir.span(base));
+            }
+            for bound in [start, end].into_iter().flatten() {
+                if needs_tracking(tir.inst(bound).ty, pool) {
+                    check_use_moved(tir, pool, own, sink, bound, tir.span(bound));
                 }
             }
-            TirTag::WhileLoop => collect_arm_reseats(
-                tir,
-                pool,
-                sidecar,
-                &tir.while_loop_view(s).body,
-                binding,
-                reseat_owners,
-            ),
-            TirTag::ForRange => collect_arm_reseats(
-                tir,
-                pool,
-                sidecar,
-                &tir.for_range_view(s).body,
-                binding,
-                reseat_owners,
-            ),
-            _ => {}
         }
+        TirData::FieldAccess { object, .. } => {
+            // M9: a field access reads its object (non-consuming).
+            if needs_tracking(tir.inst(object).ty, pool) {
+                check_use_moved(tir, pool, own, sink, object, tir.span(object));
+            }
+        }
+        TirData::Extra(_)
+        | TirData::None
+        | TirData::Int(_)
+        | TirData::Float(_)
+        | TirData::Str(_)
+        | TirData::Bool(_)
+        | TirData::Var(_) => {}
     }
 }
 
-/// CFG join for `if` / `elif` / `else`. The naïve forward walk
-/// would let a move inside a then-branch persist past the merge
-/// regardless of whether else also moved — wrong for the spec's
-/// guarantee that conditionally-moved values are not safe to use
-/// after the join. Snapshot the lattice before each branch, walk
-/// each branch from the snapshot independently, then merge. If any
-/// branch that REACHES the merge left a value `Moved`, the post-`if`
-/// state is `Moved`; a branch that exits (Return/Break/Continue)
-/// contributes nothing. When no `else` is present, the implicit
-/// fall-through branch is the pre-`if` snapshot itself, so an
-/// unconsumed pre-`if` value stays usable after the join.
-pub(crate) fn analyze_if_stmt(
-    tir: &Tir,
-    pool: &InternPool,
+/// CFG join for `if` / `elif` / `else`, driven by the recorded Flow IR
+/// arm blocks. Semantics identical to the old statement-recursive
+/// `analyze_if_stmt`: snapshot, walk each arm from the snapshot, merge
+/// (any-Moved-wins over arms that reach the join), schedule
+/// arm-conditional Frees for owners that diverge across arms, record
+/// conditional reseats, prune projections whose last use is inside the
+/// cascade. Block membership replaces the old TIR subtree sets; the
+/// else-less fallthrough is the (empty) recorded else block, walked
+/// uniformly. Returns the cascade's join block (continuation).
+#[allow(clippy::too_many_arguments)]
+fn analyze_if_cascade(
+    w: &mut Walk<'_>,
     own: &mut Ownership,
     sink: &mut DiagSink,
     sidecar: &mut FunctionSidecar,
-    r: TirRef,
-) {
-    let view = tir.if_stmt_view(r);
-    // An arm whose end-state terminates on EVERY path (Return/Break/
-    // Continue, or an if whose arms all terminate) never reaches the
-    // merge block, so its Moved state is path-local to an exit (the
-    // return epilogue / loop-exit passes own destruction on those
-    // paths) and must not contribute to the join merge. The exemption
-    // must be must-terminate, not may-exit: an arm that merely
-    // CONTAINS a nested return but also falls through reaches the
-    // merge on that path, and its Moved state must keep contributing
-    // (otherwise a conditional move + post-if use slips past E0020).
-    // Same structural predicate as `if_may_fall_through` (loops.rs).
-    let arm_falls_through = |body: &[TirRef]| !body_must_terminate(tir, body);
-    let mut arm_falls_through_flags: Vec<bool> = Vec::with_capacity(2 + view.elif_branches.len());
-    visit_expr(tir, pool, own, sink, sidecar, view.cond);
+    fb: BlockId,
+    if_inst: TirRef,
+    epoch: u32,
+) -> Option<BlockId> {
+    let view = w.tir.if_stmt_view(if_inst);
+    let arms = w.flow.branch_arm_blocks(if_inst);
+    let join = arms.join;
     // P4 lift (final spec §3.2): a projection whose last use is the
     // condition is dead before any arm runs — drain now so every arm
-    // starts from the same freeze state. (A consume inside the
-    // condition itself was already checked above, before the drain.)
+    // starts from the same freeze state. (The condition's steps ran in
+    // `fb` before this dispatch.)
     drain_dying_views(own);
-    // Subtree sets for the per-arm freeze refinement: the whole if
-    // (same set `prune_branch_dead_projections` uses at the join) and,
-    // per arm, the arm's body statements (conditions belong to the
-    // shared flow, not to a specific arm).
-    let mut if_subtree: HashSet<TirRef> = HashSet::new();
-    tir.collect_reachable(r, &mut if_subtree);
 
-    // Allocate fresh BranchIds for this if's arms. Codegen consults
-    // `sidecar.if_branches` when lowering the if so each arm pushes
-    // the right BranchId onto its `branch_stack`.
-    let then_branch = BranchId(own.next_branch_id);
-    own.next_branch_id += 1;
-    let mut elif_branches: Vec<BranchId> = Vec::with_capacity(view.elif_branches.len());
-    for _ in &view.elif_branches {
-        elif_branches.push(BranchId(own.next_branch_id));
-        own.next_branch_id += 1;
+    // Arm body entries: then body, each elif's `then_` successor, the
+    // else/fallthrough block (empty for an else-less if).
+    let mut arm_entries: Vec<BlockId> = Vec::with_capacity(2 + view.elif_branches.len());
+    arm_entries.push(arms.then_block);
+    for &holder in &arms.elif_blocks {
+        let Terminator::Branch { then_, .. } = *w.flow.term(holder) else {
+            unreachable!("recorded elif block holds a Branch")
+        };
+        arm_entries.push(then_);
     }
-    // Mint a BranchId for the else/fall-through arm ALWAYS — an
-    // else-less if's fall-through still needs an id so the
-    // conditional DeadDrops can gate on it.
-    let else_branch = {
-        let id = BranchId(own.next_branch_id);
-        own.next_branch_id += 1;
-        Some(id)
+    arm_entries.push(arms.else_block);
+
+    // The full cascade block set (cond chains + arm regions) precomputed
+    // for the per-arm freeze refinement and the join-time prune — the
+    // Flow IR replacement for the old `collect_reachable` subtree sets.
+    let mut cascade_blocks: Vec<BlockId> = vec![fb];
+    let mut arm_regions: Vec<Vec<BlockId>> = Vec::with_capacity(arm_entries.len());
+    for &entry in &arm_entries {
+        let (region, _) = collect_region(w.flow, &mut w.region_scratch, entry, |b| {
+            RegionStop::At(join).kind(b)
+        });
+        cascade_blocks.extend_from_slice(&region);
+        arm_regions.push(region);
+    }
+    let mut cond_chains: Vec<(BlockId, BlockId)> = Vec::with_capacity(arms.elif_blocks.len());
+    let Terminator::Branch { else_, .. } = *w.flow.term(fb) else {
+        unreachable!("cascade entry block holds a Branch")
     };
-    sidecar.if_branches[r.index()] = Some(IfBranchIds {
-        then_branch,
-        elif_branches: elif_branches.clone(),
-        else_branch,
-    });
+    let mut prev_else = else_;
+    for &holder in &arms.elif_blocks {
+        let (chain, _) = collect_region(w.flow, &mut w.region_scratch, prev_else, |b| {
+            RegionStop::Through(holder).kind(b)
+        });
+        cascade_blocks.extend_from_slice(&chain);
+        cond_chains.push((prev_else, holder));
+        let Terminator::Branch { else_, .. } = *w.flow.term(holder) else {
+            unreachable!("recorded elif block holds a Branch")
+        };
+        prev_else = else_;
+    }
+    debug_assert_eq!(prev_else, arms.else_block, "cascade else chain");
+    let cascade_set: HashSet<BlockId> = cascade_blocks.iter().copied().collect();
 
     let snap = own.snapshot_branch();
+    let mut branch_results: Vec<BranchState> = Vec::with_capacity(arm_entries.len());
+    let mut falls_through: Vec<bool> = Vec::with_capacity(arm_entries.len());
+    let mut arm_lasts: Vec<Option<TirRef>> = Vec::with_capacity(arm_entries.len());
 
-    let then_subtree = stmts_subtree(tir, &view.then_stmts);
-    let saved = refine_view_liveness_for_arm(own, r, 0, &if_subtree, &then_subtree);
-    for stmt in &view.then_stmts {
-        analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
-    }
-    restore_view_last_use(own, saved);
-    let mut branch_results: Vec<BranchState> = Vec::with_capacity(2 + view.elif_branches.len());
-    branch_results.push(own.take_branch(snap.clone()));
-    arm_falls_through_flags.push(arm_falls_through(&view.then_stmts));
+    // Then arm (index 0).
+    let (state, falls, last) = walk_if_arm(
+        w,
+        own,
+        sink,
+        sidecar,
+        &arm_regions,
+        &cascade_set,
+        &snap,
+        0,
+        Some(arms.then_block),
+        join,
+        epoch,
+    );
+    branch_results.push(state);
+    falls_through.push(falls);
+    arm_lasts.push(last);
 
-    for (elif_index, elif) in view.elif_branches.iter().enumerate() {
-        visit_expr(tir, pool, own, sink, sidecar, elif.cond);
-        // See the then-cond note above: projections dying at an elif
-        // condition lift before its body runs.
-        drain_dying_views(own);
-        let elif_subtree = stmts_subtree(tir, &elif.body);
-        let saved =
-            refine_view_liveness_for_arm(own, r, 1 + elif_index, &if_subtree, &elif_subtree);
-        for stmt in &elif.body {
-            analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
-        }
-        restore_view_last_use(own, saved);
-        branch_results.push(own.take_branch(snap.clone()));
-        arm_falls_through_flags.push(arm_falls_through(&elif.body));
-    }
-
-    if let Some(else_stmts) = &view.else_stmts {
-        let else_subtree = stmts_subtree(tir, else_stmts);
-        let saved = refine_view_liveness_for_arm(
+    // Elif arms: the cond chain walks first (with the snapshot state,
+    // like the old visit_expr(elif.cond)), then the body.
+    for (e, _) in view.elif_branches.iter().enumerate() {
+        let (chain_entry, holder) = cond_chains[e];
+        w.walk_region(
             own,
-            r,
-            1 + view.elif_branches.len(),
-            &if_subtree,
-            &else_subtree,
+            sink,
+            sidecar,
+            chain_entry,
+            RegionStop::Through(holder),
+            epoch,
         );
-        for stmt in else_stmts {
-            analyze_stmt(tir, pool, own, sink, sidecar, *stmt);
-        }
-        restore_view_last_use(own, saved);
-        branch_results.push(own.take_branch(snap.clone()));
-        arm_falls_through_flags.push(arm_falls_through(else_stmts));
+        drain_dying_views(own);
+        let body = arm_entries[1 + e];
+        let (state, falls, last) = walk_if_arm(
+            w,
+            own,
+            sink,
+            sidecar,
+            &arm_regions,
+            &cascade_set,
+            &snap,
+            1 + e,
+            Some(body),
+            join,
+            epoch,
+        );
+        branch_results.push(state);
+        falls_through.push(falls);
+        arm_lasts.push(last);
+    }
+
+    // Else arm — uniform walk; for an else-less if the region is the
+    // empty synthetic fallthrough block, which contributes the
+    // pre-branch state and reaches the join (the old pseudo-arm).
+    let else_key = if view.else_stmts.is_some() {
+        Some(arms.else_block)
     } else {
-        // Else-less fall-through pseudo-arm: the pre-if state.
-        branch_results.push(snap.clone());
-        arm_falls_through_flags.push(true);
-    }
+        None
+    };
+    let last_index = arm_entries.len() - 1;
+    let (state, falls, last) = walk_if_arm(
+        w,
+        own,
+        sink,
+        sidecar,
+        &arm_regions,
+        &cascade_set,
+        &snap,
+        last_index,
+        else_key,
+        join,
+        epoch,
+    );
+    branch_results.push(state);
+    falls_through.push(falls);
+    arm_lasts.push(last);
 
-    // Schedule branch-gated Frees for owners that diverge across
-    // arms (Valid in some, Moved in others). For each Valid arm,
-    // anchor a Free after that arm's last body statement and gate
-    // it on the arm's BranchId. The post-merge state below stamps
-    // such owners as `Moved` (any-Moved-wins over the arms that
-    // REACH the merge), so the function-exit last-use pass will skip
-    // them — without these conditional Frees the Valid-arm
-    // allocation would leak.
-    //
-    // The `else_stmts.is_none()` path pushes the pre-if snapshot
-    // into `branch_results` for the implicit fall-through. We
-    // deliberately don't schedule conditional Frees against that
-    // pseudo-arm: the post-if last-use pass already covers any
-    // owner whose state remains `Valid` at function exit.
-    //
-    // Only arms that fall through participate: an arm that ends in
-    // Return/Break/Continue contributes no Moved state to the merge,
-    // so the merged state stays `Valid` and the last-use pass owns
-    // the Free — scheduling a branch-gated Free for the sibling arm
-    // here as well would double-free.
-    struct ArmInfo<'a> {
-        branch_id: BranchId,
-        last_stmt: Option<TirRef>,
-        state: &'a BranchState,
-        falls_through: bool,
-    }
-
-    let mut arms: Vec<ArmInfo> = Vec::with_capacity(branch_results.len());
-    arms.push(ArmInfo {
-        branch_id: then_branch,
-        last_stmt: view.then_stmts.last().copied(),
-        state: &branch_results[0],
-        falls_through: arm_falls_through_flags[0],
-    });
-    for (i, elif) in view.elif_branches.iter().enumerate() {
-        arms.push(ArmInfo {
-            branch_id: elif_branches[i],
-            last_stmt: elif.body.last().copied(),
-            state: &branch_results[1 + i],
-            falls_through: arm_falls_through_flags[1 + i],
-        });
-    }
-    if let Some(else_stmts) = &view.else_stmts {
-        arms.push(ArmInfo {
-            branch_id: else_branch.expect("else_branch must be Some when else_stmts is Some"),
-            last_stmt: else_stmts.last().copied(),
-            state: branch_results
-                .last()
-                .expect("else snapshot pushed by analyze_if_stmt"),
-            falls_through: *arm_falls_through_flags
-                .last()
-                .expect("else fall-through flag pushed"),
-        });
-    }
-
-    let all_keys: HashSet<Owner> = arms
-        .iter()
-        .flat_map(|a| a.state.states.keys().copied())
-        .collect();
-    // Sorted iteration for deterministic free_schedule order.
-    let mut all_keys: Vec<Owner> = all_keys.into_iter().collect();
-    all_keys.sort_by_key(owner_sort_key);
-    for owner in all_keys {
-        let is_tracked = match owner {
-            Owner::Inst(_) => true,
-            Owner::Param(name) => {
-                let idx = param_idx(&own.param_index, name);
-                needs_tracking(tir.params[idx].ty, pool)
+    // Schedule arm-conditional Frees for owners that diverge across
+    // arms (Valid in some, Moved in others): for each Valid arm, anchor
+    // a Free after that arm's last instruction — the anchor's block
+    // membership gates it to the arm's path. The else-less fallthrough
+    // pseudo-arm deliberately schedules nothing (the post-merge
+    // last-use pass covers owners still Valid at the join).
+    {
+        let is_tracked = |own: &Ownership, owner: Owner| match owner.inst_tirref(w.flow) {
+            Some(_) => true,
+            None => {
+                let idx = super::param_idx(&own.param_index, w.flow.place(owner.0).name());
+                needs_tracking(w.tir.params[idx].ty, w.pool)
             }
         };
-        if !is_tracked {
-            continue;
-        }
-        let any_moved = arms
+        let span_of = |_: &Ownership, owner: Owner| owner.span(w.flow, w.tir);
+        let mut all_keys: HashSet<Owner> = branch_results
             .iter()
-            .filter(|a| a.falls_through)
-            .any(|a| matches!(a.state.states.get(&owner), Some(OwnerState::Moved { .. })));
-        if !any_moved {
-            continue;
-        }
-        for arm in arms.iter().filter(|a| a.falls_through) {
-            if matches!(arm.state.states.get(&owner), Some(OwnerState::Valid))
-                && let Some(after) = arm.last_stmt
-            {
-                let span = match owner {
-                    Owner::Inst(r) => tir.span(r),
-                    Owner::Param(name) => {
-                        let idx = param_idx(&own.param_index, name);
-                        tir.params[idx].span
-                    }
-                };
-                sidecar.free_schedule.push(FreePoint {
-                    after,
-                    target: owner.tirref(&own.param_index),
-                    span,
-                    branch: Some(arm.branch_id),
-                });
+            .flat_map(|s| s.states.keys().copied())
+            .collect();
+        let mut all_keys: Vec<Owner> = all_keys.drain().collect();
+        all_keys.sort_by_key(owner_sort_key);
+        for owner in all_keys {
+            if !is_tracked(own, owner) {
+                continue;
             }
-            // Empty arm or sema-rejected case: skip. The M8.1
-            // grammar forbids empty arms.
+            let any_moved = branch_results.iter().zip(&falls_through).any(|(s, &ft)| {
+                ft && matches!(s.states.get(&owner), Some(OwnerState::Moved { .. }))
+            });
+            if !any_moved {
+                continue;
+            }
+            for (i, s) in branch_results.iter().enumerate() {
+                if !falls_through[i] {
+                    continue;
+                }
+                if matches!(s.states.get(&owner), Some(OwnerState::Valid))
+                    && let Some(after) = arm_lasts[i]
+                {
+                    sidecar.drops.push(DropOp {
+                        position: DropPosition::AfterStep { inst: after },
+                        target: owner.tirref(w.flow),
+                        span: span_of(own, owner),
+                    });
+                }
+            }
         }
     }
 
-    // Record conditional reseats — bindings that SOME arm
-    // reseated while other arms kept the pre-if owner. The dead-store
-    // drain (function exit) converts a record into arm-gated
-    // `ConditionalDeadDrop`s when the reassigned value is never read
-    // afterwards, so the pre-if buffer is also freed on the paths where
-    // the reassign did not happen. Includes the implicit fall-through
-    // pseudo-arm of an else-less if (its BranchId was minted above).
+    // Record conditional reseats — bindings that SOME arm reseated
+    // while other arms kept the pre-if owner. The dead-store drain
+    // converts a record into block-keyed `ConditionalDeadDrop`s when
+    // the reassigned value is never read afterwards.
     {
-        let mut arm_states: Vec<(BranchId, &BranchState, Option<&[TirRef]>)> =
+        let mut arm_states: Vec<(BlockId, &BranchState, &[BlockId])> =
             Vec::with_capacity(branch_results.len());
-        arm_states.push((then_branch, &branch_results[0], Some(&view.then_stmts)));
-        for (i, _) in view.elif_branches.iter().enumerate() {
-            arm_states.push((
-                elif_branches[i],
-                &branch_results[1 + i],
-                Some(&view.elif_branches[i].body),
-            ));
+        for (i, state) in branch_results.iter().enumerate() {
+            // The reseat record keys: then body block, the elif
+            // BRANCH-HOLDER blocks (codegen fires dead drops when it
+            // enters the arm), and the else/fallthrough block.
+            let key = if i == 0 {
+                arms.then_block
+            } else if i <= arms.elif_blocks.len() {
+                arms.elif_blocks[i - 1]
+            } else {
+                arms.else_block
+            };
+            arm_states.push((key, state, &arm_regions[i]));
         }
-        if let Some(else_stmts) = &view.else_stmts {
-            arm_states.push((
-                else_branch.expect("else/fall-through arm id minted"),
-                branch_results
-                    .last()
-                    .expect("else/fall-through snapshot pushed"),
-                Some(else_stmts),
-            ));
-        } else {
-            arm_states.push((
-                else_branch.expect("else/fall-through arm id minted"),
-                branch_results
-                    .last()
-                    .expect("else/fall-through snapshot pushed"),
-                None,
-            ));
-        }
-        for (name, owner_pre) in &snap.current_owner {
+        for (home, owner_pre) in &snap.current_owner {
             // Only tracked (Move-typed) locals need drops; Copy values
             // have no buffer, and params are covered by the exit-time
-            // param free.
-            let Owner::Inst(pre_ref) = owner_pre else {
-                continue;
+            // param free. The home's own type decides (params'
+            // home places are their own).
+            let home_ty = match w.flow.place(*home) {
+                ryo_core::flow::Place::Local { ty, .. } => *ty,
+                ryo_core::flow::Place::Param { ty, .. } => *ty,
+                _ => continue,
             };
-            if !needs_tracking(tir.inst(*pre_ref).ty, pool) {
+            if !needs_tracking(home_ty, w.pool) {
                 continue;
             }
-            let pre_binding = snap.binding_of_name.get(name).copied();
+            let name = w.flow.place(*home).name();
+            let pre_binding = snap.binding_of_name.get(&name).copied();
             let mut reseat_owners: HashSet<Owner> = HashSet::new();
-            let mut untouched_arms: Vec<BranchId> = Vec::new();
-            for (bid, b, arm_stmts) in &arm_states {
-                let owner_b = b.current_owner.get(name).copied().unwrap_or(*owner_pre);
-                let binding_b = b.binding_of_name.get(name).copied().or(pre_binding);
+            let mut untouched_arms: Vec<BlockId> = Vec::new();
+            for (block, b, region) in &arm_states {
+                let owner_b = b.current_owner.get(home).copied().unwrap_or(*owner_pre);
+                let binding_b = b.binding_of_name.get(&name).copied().or(pre_binding);
                 if binding_b == pre_binding {
-                    // The arm's end state is the SAME binding as before
-                    // the if: a differing owner is a genuine reseat of
-                    // the pre-branch binding.
                     if owner_b == *owner_pre {
-                        untouched_arms.push(*bid);
+                        untouched_arms.push(*block);
                     } else {
                         reseat_owners.insert(owner_b);
                     }
                 } else {
-                    // The arm shadows `name` with a binding declared
-                    // inside the arm. The arm-end owner belongs to that
-                    // arm-local shadow — it cannot leak on the arms
-                    // where the shadow never existed, so it must not
-                    // mint a dead drop for the pre-branch binding. But
-                    // the arm may have reseated the pre-branch binding
-                    // BEFORE the shadow took the name (`x = a; mut x =
-                    // b` in one arm) — also inside a NESTED conditional
-                    // (`if c2: x = a` then `mut x = b`): the nested
-                    // reseat's free_on_reassign covers only the nested
-                    // arm, and the enclosing arm's own record must
-                    // still capture the reseat or the pre-branch
-                    // buffer leaks on every path where the ENCLOSING
-                    // arm was skipped. Scan the arm recursively for
-                    // those earlier reseats and record their values, so
-                    // the dead-store drain can honor the record on one
-                    // of them and drop the pre-branch buffer on the
-                    // untouched arms.
-                    if let Some(stmts) = arm_stmts
-                        && let Some(binding) = pre_binding
-                    {
-                        collect_arm_reseats(tir, pool, sidecar, stmts, binding, &mut reseat_owners);
+                    // The arm shadows `name` with an arm-local binding
+                    // (a different home place). An earlier reseat of
+                    // the PRE-branch binding may hide anywhere in the
+                    // arm (including nested conditionals): scan the
+                    // arm's blocks for Assigns attributed to the
+                    // pre-branch binding.
+                    if let Some(binding) = pre_binding {
+                        collect_arm_reseats(
+                            w.tir,
+                            w.pool,
+                            sidecar,
+                            w.flow,
+                            region,
+                            binding,
+                            &mut reseat_owners,
+                        );
                     }
                 }
             }
@@ -987,11 +1788,11 @@ pub(crate) fn analyze_if_stmt(
                 && !own
                     .reseat_drops
                     .iter()
-                    .any(|d| d.if_stmt == r && d.name == *name)
+                    .any(|d| d.if_stmt == if_inst && d.name == name)
             {
                 own.reseat_drops.push(ReseatDrop {
-                    if_stmt: r,
-                    name: *name,
+                    if_stmt: if_inst,
+                    name,
                     pre_owner: *owner_pre,
                     reseat_owners,
                     untouched_arms,
@@ -1002,667 +1803,96 @@ pub(crate) fn analyze_if_stmt(
 
     // `own` already holds the pre-if non-monotone fields (installed by
     // the last take_branch) — merge every arm's end state into them.
-    // Arms that end in Return/Break/Continue contribute no Moved state
-    // (see merge_branches).
-    own.merge_branches(branch_results, &arm_falls_through_flags);
+    own.merge_branches(branch_results, &falls_through);
     // P4 (final spec §3.2): a view whose last use is inside this if is
     // dead at the join on every path — prune it from the merged freeze
-    // ranges (see prune_branch_dead_projections).
-    prune_branch_dead_projections(tir, own, r);
+    // ranges.
+    prune_branch_dead_projections(own, w.flow, &cascade_set);
+    w.last_inst = Some(if_inst);
+    Some(join)
 }
 
-pub(crate) fn visit_expr(
+/// Collect every `Assign` value in the arm's blocks (including nested
+/// conditionals) that stores into `binding` — the pre-branch binding a
+/// shadowing arm took the name from. Flow IR replacement for the old
+/// statement-recursive `collect_arm_reseats`: block membership covers
+/// exactly the arm's reachable blocks, and `sidecar.assign_binding`
+/// (stamped when each Assign step ran) attributes the reseat.
+pub(crate) fn collect_arm_reseats(
     tir: &Tir,
     pool: &InternPool,
-    own: &mut Ownership,
-    sink: &mut DiagSink,
-    sidecar: &mut FunctionSidecar,
-    r: TirRef,
+    sidecar: &FunctionSidecar,
+    flow: &Flow,
+    region: &[BlockId],
+    binding: TirRef,
+    reseat_owners: &mut HashSet<Owner>,
 ) {
-    let inst = *tir.inst(r);
-    match inst.tag {
-        // ---- Allocating instructions ----
-        // `StrConst`/`BytesConst` materialize a fresh heap string/bytes
-        // at runtime; `StrConcat`/`BytesConcat` produce a brand-new
-        // allocation from their two operands. All four enter the
-        // lattice as `Valid` with no upstream origin.
-        TirTag::StrConst | TirTag::BytesConst => {
-            if needs_tracking(inst.ty, pool) {
-                own.states.insert(Owner::Inst(r), OwnerState::Valid);
-                Ownership::dense_set(&mut own.origin, r, None);
-                own.temp_owners.insert(Owner::Inst(r));
+    for &b in region {
+        for step in flow.block_steps(b) {
+            if tir.inst(step.inst).tag != TirTag::Assign {
+                continue;
             }
-        }
-        TirTag::StrConcat | TirTag::BytesConcat => {
-            if needs_tracking(inst.ty, pool) {
-                own.states.insert(Owner::Inst(r), OwnerState::Valid);
-                Ownership::dense_set(&mut own.origin, r, None);
-                own.temp_owners.insert(Owner::Inst(r));
+            let av = tir.assign_view(step.inst);
+            if sidecar.assign_binding[step.inst.index()] == Some(binding)
+                && needs_tracking(tir.inst(av.value).ty, pool)
+                && let Some(p) = super::flow_owner_place(flow, av.value)
+            {
+                reseat_owners.insert(Owner(p));
             }
-            if let TirData::BinOp { lhs, rhs } = inst.data {
-                visit_expr(tir, pool, own, sink, sidecar, lhs);
-                visit_expr(tir, pool, own, sink, sidecar, rhs);
-                for op in [lhs, rhs] {
-                    if needs_tracking(tir.inst(op).ty, pool) {
-                        check_use_moved(tir, pool, own, sink, op, tir.span(op));
-                    }
-                }
-            }
-        }
-        // ---- Debug repr (M9.1) ----
-        // `DebugRepr` renders its operand without consuming it: the
-        // operand is visited as a plain read of its root (the
-        // `check_use_moved` below, same as `StrConcat`'s operands), and
-        // the result is a brand-new owned `str` temp — the
-        // result-temp seeding above `StrConcat` is copied verbatim, so
-        // the repr string is freed after its last use.
-        TirTag::DebugRepr => {
-            if needs_tracking(inst.ty, pool) {
-                own.states.insert(Owner::Inst(r), OwnerState::Valid);
-                Ownership::dense_set(&mut own.origin, r, None);
-                own.temp_owners.insert(Owner::Inst(r));
-            }
-            if let TirData::UnOp(operand) = inst.data {
-                visit_expr(tir, pool, own, sink, sidecar, operand);
-                if needs_tracking(tir.inst(operand).ty, pool) {
-                    check_use_moved(tir, pool, own, sink, operand, tir.span(operand));
-                }
-            }
-        }
-        // ---- Struct literal (M9) ----
-        // A needs-drop struct literal materializes a fresh owner, like
-        // `StrConst`. Its payload is `TirData::Extra`, so the
-        // `recurse_operands` catch-all deliberately does not descend —
-        // this arm is the ONLY walk of the field values, and the only
-        // place they are consumed (`Person{name=s}` MOVES `s`).
-        TirTag::StructLit => {
-            if needs_tracking(inst.ty, pool) {
-                own.states.insert(Owner::Inst(r), OwnerState::Valid);
-                Ownership::dense_set(&mut own.origin, r, None);
-                own.temp_owners.insert(Owner::Inst(r));
-            }
-            for &(_, value) in &tir.struct_lit_view(r).fields {
-                visit_expr(tir, pool, own, sink, sidecar, value);
-            }
-            consume_struct_lit_fields(tir, pool, own, sink, r);
-        }
-        // ---- Enum variant construction (M11) ----
-        // Whole-value model: an enum value is ONE `Owner`, exactly like
-        // a struct — see `analyze_enum_lit` in `structs.rs` (the payload
-        // is `TirData::Extra`, which `recurse_operands` never descends
-        // into, so this arm is the only walk of the payload args).
-        TirTag::EnumLit => analyze_enum_lit(tir, pool, own, sink, sidecar, r),
-        TirTag::Call => {
-            // A str-returning call (e.g. `int_to_str`) is a producer.
-            if needs_tracking(inst.ty, pool) {
-                own.states.insert(Owner::Inst(r), OwnerState::Valid);
-                Ownership::dense_set(&mut own.origin, r, None);
-                own.temp_owners.insert(Owner::Inst(r));
-            }
-            let view = tir.call_view(r);
-
-            // Phase 1 — materialise every arg's owner/state.
-            for arg in &view.args {
-                visit_expr(tir, pool, own, sink, sidecar, *arg);
-            }
-
-            // Phase 2 — use-safety check + borrow/move/inout partition.
-            let mut borrowed: Vec<Owner> = Vec::new();
-            let mut moved: Vec<Owner> = Vec::new();
-            // E4 (final spec §3.3): a view argument borrows its ROOT
-            // owner for the duration of the call — tracked separately
-            // from `borrowed` so a same-call move of the root is
-            // reported as a P2 freeze violation (SourceProjected)
-            // rather than as a plain borrow/move overlap (E0031).
-            let mut view_borrowed: Vec<Owner> = Vec::new();
-            // inout occurrences: (owner, arg span) — a Vec, not a Set, so
-            // a double-inout of one owner is detectable by count (Rule 7).
-            let mut inout_uses: Vec<(Owner, Span)> = Vec::new();
-            for (i, arg) in view.args.iter().enumerate() {
-                if is_borrowed_scalar_param(view.name, pool, i)
-                    && matches!(tir.inst(*arg).tag, TirTag::StrConst)
-                {
-                    // Undo the lattice seeding from visit_expr's StrConst
-                    // arm: the borrowed-scalar ABI never owns its argument,
-                    // so the arg is not an owner at all. `temp_owners` (the
-                    // anon-temp Free pass) AND `states` (the loop-exit
-                    // defensive emit, the if-arm divergence scan) must both
-                    // forget it — a Valid-but-never-scheduled owner that
-                    // only exists on a noreturn panic path otherwise earns
-                    // a defensive Free at every `break`, targeting a repr
-                    // codegen never materializes. `origin` /
-                    // `owner_at_read` entries are harmless to leave
-                    // populated — nothing resolves the arg as a read.
-                    own.temp_owners.remove(&Owner::Inst(*arg));
-                    own.states.remove(&Owner::Inst(*arg));
-                }
-                let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
-                let arg_ty = tir.inst(*arg).ty;
-                if mode == ParamMode::Inout {
-                    // Rule 7 (M8.3): resolve an aliasing identity even for
-                    // Copy scalars, which never enter the lattice.
-                    let owner = inout_owner(own, tir, *arg);
-                    check_use_moved(tir, pool, own, sink, *arg, tir.span(*arg));
-                    if needs_tracking(arg_ty, pool) {
-                        // P2 freeze (final spec §3.2): `inout` passing
-                        // mutates the owner.
-                        check_source_projected(
-                            tir,
-                            pool,
-                            own,
-                            sink,
-                            owner,
-                            tir.span(*arg),
-                            "mutate",
-                            consumed_binding_name(tir, *arg),
-                        );
-                    }
-                    inout_uses.push((owner, tir.span(*arg)));
-                    // W0003 case-B support: an `inout` pass mutates the
-                    // owner — a defensive-copy hazard on it.
-                    own.owner_hazards.push((owner, r));
-                    continue;
-                }
-                if !needs_tracking(arg_ty, pool) {
-                    if mode == ParamMode::Borrow && pool.is_view(arg_ty) {
-                        // A view arg borrows its root owner for the
-                        // call's duration (E4). `projection_root` looks
-                        // through ToView conversions (the implicit
-                        // str → strview coercion) to the underlying owner
-                        // — without this, `two(&s, s)` with an
-                        // (inout, strview) signature would escape the
-                        // Rule-7 partition.
-                        if let Some(root) = projection_root(own, tir, pool, *arg) {
-                            push_unique(&mut view_borrowed, root);
-                        }
-                    } else if mode == ParamMode::Borrow {
-                        // A Copy borrow is a no-op for liveness, but it still
-                        // aliases an `inout` of the same root in this call.
-                        // Record every Var read and Copy field read in the
-                        // arg's expression — `f(&c, c + 1)` and `f(&p.x, p.y +
-                        // 1.0)` collide the same way `f(&c, c)` / `f(&p.x, p)`
-                        // do. The walk stops at Call boundaries: a nested
-                        // call's args are that call's own Rule-7 partition,
-                        // fully evaluated before this call starts.
-                        // (A Copy `move` arg is rejected by sema's RedundantMove,
-                        // so only the Borrow arm is reachable from real code.)
-                        let mut stack = vec![*arg];
-                        while let Some(cur) = stack.pop() {
-                            let inst = tir.inst(cur);
-                            match inst.tag {
-                                TirTag::Var => {
-                                    push_unique(&mut borrowed, inout_owner(own, tir, cur));
-                                }
-                                TirTag::FieldAccess => {
-                                    if let Some(root) = struct_root(own, tir, cur) {
-                                        push_unique(&mut borrowed, root);
-                                    }
-                                }
-                                TirTag::Call => continue,
-                                _ => {}
-                            }
-                            tir.walk_operands(cur, &mut |_, child, _| stack.push(child));
-                        }
-                    }
-                    continue;
-                }
-                // M9: a needs-drop field read in a borrow-mode argument
-                // borrows the ROOT struct owner for the call's duration
-                // (mirrors the E4 view rule above): moving the whole
-                // struct in the same call is E0031. The phase-1 visit
-                // already ran the use-after-move check on the chain's
-                // base read.
-                if mode == ParamMode::Borrow && matches!(tir.inst(*arg).tag, TirTag::FieldAccess) {
-                    if let Some(root) = struct_root(own, tir, *arg) {
-                        push_unique(&mut borrowed, root);
-                    }
-                    continue;
-                }
-                // M8.4.1.2: a `str(view)` materialization call passed as
-                // a borrow-mode arg READS the view's buffer at call time
-                // — the view's ROOT owner is immutably borrowed for the
-                // outer call's duration (E4), exactly like passing the
-                // view itself. The ABI registry (`view_borrow_params`)
-                // names the callees this applies to; the copy result is a
-                // fresh owner with no aliasing identity, so it is not
-                // itself recorded in `borrowed`.
-                if mode == ParamMode::Borrow && tir.inst(*arg).tag == TirTag::Call {
-                    let inner = tir.call_view(*arg);
-                    let vb_params = view_borrow_params(inner.name, pool);
-                    if !vb_params.is_empty() {
-                        for &idx in vb_params {
-                            if let Some(&varg) = inner.args.get(idx)
-                                && let Some(root) = projection_root(own, tir, pool, varg)
-                            {
-                                push_unique(&mut view_borrowed, root);
-                            }
-                        }
-                        continue;
-                    }
-                }
-                // P6': a view re-borrowed into a `str` arg (ViewAsOwner)
-                // borrows the view's ROOT owner for the call's duration
-                // — look through the conversion exactly like the
-                // str → strview direction above, or `two(&s, s[0:1])`
-                // would escape the Rule-7 partition.
-                let owner =
-                    if mode == ParamMode::Borrow && tir.inst(*arg).tag == TirTag::ViewAsOwner {
-                        projection_root(own, tir, pool, *arg)
-                            .unwrap_or_else(|| underlying_owner(own, *arg))
-                    } else {
-                        underlying_owner(own, *arg)
-                    };
-                if mode == ParamMode::Borrow {
-                    check_use_moved(tir, pool, own, sink, *arg, tir.span(*arg));
-                    push_unique(&mut borrowed, owner);
-                } else {
-                    push_unique(&mut moved, owner);
-                }
-            }
-            // Rule 7 (M8.3): at most one mutable borrow per owner in a call,
-            // and no immutable borrow / move alongside it. Each DISTINCT
-            // inout owner is handled exactly once (the prefix scan skips
-            // repeat occurrences) so cases 2/3 don't re-fire per occurrence.
-            for (pos, (owner, _span)) in inout_uses.iter().enumerate() {
-                if inout_uses[..pos].iter().any(|(o, _)| o == owner) {
-                    continue;
-                }
-                let name = rule7_owner_name(own, tir, pool, &view.args, *owner);
-
-                // (1) The same owner is mutably borrowed more than once.
-                // Collect every occurrence so the two notes point at
-                // DISTINCT arg spans — the loop item's own span is
-                // occurrence 0, so reusing it for the "second" note would
-                // duplicate the "first" note's span.
-                let occurrences: Vec<Span> = inout_uses
-                    .iter()
-                    .filter(|(o, _)| o == owner)
-                    .map(|(_, s)| *s)
-                    .collect();
-                if occurrences.len() > 1 {
-                    let mut diag = Diag::error(
-                        tir.span(r),
-                        DiagCode::MutableAliasingViolation,
-                        format!(
-                            "cannot borrow {} as mutable more than once in the same call",
-                            name
-                        ),
-                    );
-                    diag = diag.with_note(Some(occurrences[0]), "first mutable borrow here");
-                    diag = diag.with_note(Some(occurrences[1]), "second mutable borrow here");
-                    diag = diag.with_help("a value can have one mutable borrow OR many immutable borrows in a call, never both (Rule 7)");
-                    sink.emit(diag);
-                }
-                // (2) inout ∩ borrowed (a view arg counts as an
-                // immutable borrow of its root, E4).
-                if borrowed.contains(owner) || view_borrowed.contains(owner) {
-                    sink.emit(
-                        Diag::error(
-                            tir.span(r),
-                            DiagCode::MutableAliasingViolation,
-                            format!(
-                                "cannot borrow {} as immutable while it is mutably borrowed in the same call",
-                                name
-                            ),
-                        )
-                        .with_help("a value can have one mutable borrow OR many immutable borrows in a call, never both (Rule 7)"),
-                    );
-                }
-                // (3) inout ∩ moved.
-                if moved.contains(owner) {
-                    sink.emit(
-                        Diag::error(
-                            tir.span(r),
-                            DiagCode::MutableAliasingViolation,
-                            format!(
-                                "cannot move {} while it is mutably borrowed in the same call",
-                                name
-                            ),
-                        )
-                        .with_help("a value can have one mutable borrow OR many immutable borrows in a call, never both (Rule 7)"),
-                    );
-                }
-            }
-            // Overlap — same owner borrowed AND moved in one call.
-            for owner in borrowed.iter().filter(|o| moved.contains(o)) {
-                let name = owner_name_for_diag(*owner, tir, pool);
-
-                // Find spans of the conflicting arguments for this owner
-                let mut borrow_span = None;
-                let mut move_span = None;
-                for (i, arg) in view.args.iter().enumerate() {
-                    if !needs_tracking(tir.inst(*arg).ty, pool) {
-                        continue;
-                    }
-                    let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
-                    // P6' (mirrors the Rule-7 partition above): a
-                    // view re-borrowed into a `str` arg via ViewAsOwner
-                    // borrows the view's ROOT owner — look through the
-                    // conversion or the "borrowed here" note is lost.
-                    let arg_owner = if mode == ParamMode::Borrow
-                        && tir.inst(*arg).tag == TirTag::ViewAsOwner
-                    {
-                        projection_root(own, tir, pool, *arg)
-                            .unwrap_or_else(|| underlying_owner(own, *arg))
-                    } else if matches!(tir.inst(*arg).tag, TirTag::FieldAccess) {
-                        // M9: a field-read borrow aliases the ROOT
-                        // struct owner (see the phase-2 partition).
-                        struct_root(own, tir, *arg).unwrap_or_else(|| underlying_owner(own, *arg))
-                    } else {
-                        underlying_owner(own, *arg)
-                    };
-                    if arg_owner == *owner {
-                        match mode {
-                            ParamMode::Borrow => borrow_span = Some(tir.span(*arg)),
-                            ParamMode::Move => move_span = Some(tir.span(*arg)),
-                            // inout overlaps are reported as E0032 above —
-                            // never as the "moved here" half of E0031.
-                            ParamMode::Inout => {}
-                        }
-                    }
-                }
-
-                let mut diag = Diag::error(
-                    tir.span(r),
-                    DiagCode::MoveWhileBorrowedInCall,
-                    format!("cannot move {} while it is borrowed in the same call", name),
-                );
-                if let Some(b_span) = borrow_span {
-                    diag = diag.with_note(Some(b_span), "borrowed here");
-                }
-                if let Some(m_span) = move_span {
-                    diag = diag.with_note(Some(m_span), "moved here");
-                }
-                diag = diag.with_help("borrows are live for the whole call; pass by `move` on a separate statement, or borrow in both positions");
-                sink.emit(diag);
-            }
-
-            // P2 freeze (final spec §3.2): a view argument keeps its
-            // root owner live for the whole call, so a `move` of the
-            // same owner in the same call is a freeze violation. The
-            // projection's own last use may be this very call — the
-            // borrow is call-bounded (E4) but the move is not.
-            let mut view_move_overlap: Vec<Owner> = view_borrowed
-                .iter()
-                .filter(|o| moved.contains(o))
-                .copied()
-                .collect();
-            view_move_overlap.sort_by_key(owner_sort_key);
-            for owner in view_move_overlap {
-                // E0020/E0021 already cover owners that are `Moved` or
-                // `Borrowed` — don't double-report (mirrors
-                // check_source_projected's "move" suppression).
-                if matches!(
-                    own.states.get(&owner),
-                    Some(OwnerState::Moved { .. }) | Some(OwnerState::Borrowed)
-                ) {
-                    continue;
-                }
-                let name = owner_name_for_diag(owner, tir, pool);
-                let mut diag = Diag::error(
-                    tir.span(r),
-                    DiagCode::SourceProjected,
-                    format!("cannot move {name} while a slice of it is live"),
-                );
-                // Note the view arg that keeps the owner live.
-                for arg in &view.args {
-                    if pool.is_view(tir.inst(*arg).ty)
-                        && projection_root(own, tir, pool, *arg) == Some(owner)
-                    {
-                        diag = diag.with_note(Some(tir.span(*arg)), "slice passed here");
-                        break;
-                    }
-                }
-                sink.emit(diag);
-            }
-
-            // Phase 3 — commit the moves.
-            for (i, arg) in view.args.iter().enumerate() {
-                let mode = view.modes.get(i).copied().unwrap_or(ParamMode::Borrow);
-                let arg_ty = tir.inst(*arg).ty;
-                // E2 (final spec §3.3): slices cannot be passed to
-                // `move` parameters. Backstop — sema rejects `move` on
-                // view-typed parameters already.
-                if mode == ParamMode::Move && pool.is_view(arg_ty) {
-                    sink.emit(
-                        Diag::error(
-                            tir.span(r),
-                            DiagCode::ViewEscape,
-                            "cannot pass a slice to a `move` parameter",
-                        )
-                        .with_help("slices are non-escaping; pass by default (borrow), or take an owned `str` parameter"),
-                    );
-                    continue;
-                }
-                if mode == ParamMode::Move && needs_tracking(arg_ty, pool) {
-                    let owner = underlying_owner(own, *arg);
-                    // P2 freeze (final spec §3.2) — unless the view
-                    // partition above already reported this owner.
-                    if !view_borrowed.contains(&owner) {
-                        check_source_projected(
-                            tir,
-                            pool,
-                            own,
-                            sink,
-                            owner,
-                            tir.span(r),
-                            "move",
-                            consumed_binding_name(tir, *arg),
-                        );
-                    }
-                    let consumed_name = consumed_binding_name(tir, *arg);
-                    consume_for_assignment(
-                        tir,
-                        pool,
-                        own,
-                        sink,
-                        *arg,
-                        tir.span(r),
-                        consumed_name,
-                        r,
-                    );
-                }
-            }
-
-            // `inout` args need no ownership transition: the callee only
-            // borrows the slot, and the binding keeps its pre-call owner.
-            // The stale-triple hazard (callee realloc'd/replaced the
-            // buffer) is handled in CODEGEN, where named-binding Frees
-            // emit the binding's CURRENT `FatLocals` instead of the
-            // producing inst's cached repr — the same pattern
-            // `free_on_reassign` already used.
-        }
-        // ---- Aliasing read ----
-        // `Var` is a non-consuming read. Record which SSA value it
-        // currently aliases so a later use-after-move diagnostic can
-        // walk back to the root owner. Reads of `Borrowed` owners are
-        // fine (Rule 2 — borrowed parameters can be freely read).
-        TirTag::Var => {
-            let name = match inst.data {
-                TirData::Var(n) => n,
-                _ => unreachable!("Var must carry TirData::Var"),
-            };
-            if let Some(&owner) = own.current_owner.get(&name) {
-                if needs_tracking(inst.ty, pool) {
-                    // Any read counts as "used" for dead-store purposes,
-                    // even if it ultimately fires E0020 — once the
-                    // programmer's code looked at the value, they
-                    // didn't ignore it. Clear by NAME, not by current-owner
-                    // key: a reseat inside a branch (Assign) is discarded
-                    // by the branch merge, so the pending entry can survive
-                    // under a branch-local owner key while the binding
-                    // itself is provably read afterwards.
-                    own.pending_dead_store.retain(|_, (n, _, _)| *n != name);
-                    Ownership::dense_set(&mut own.origin, r, Some(owner));
-                    // Snapshot owner-at-read so the post-walk
-                    // `collect_last_uses` anchors the last-use Free to the
-                    // owner that was live *at this read*, not whatever
-                    // `current_owner[name]` happens to be at function exit
-                    // (which would route pre-rebind reads to the post-
-                    // rebind owner — wrong target, double-free).
-                    Ownership::dense_set(&mut own.owner_at_read, r, owner);
-                } else if pool.is_view(inst.ty) {
-                    // P4 lift (final spec §3.2): record the read for
-                    // `collect_last_uses`; when it is the projection's
-                    // precomputed last use (and not loop-deferred), the
-                    // projection dies at the end of this statement.
-                    Ownership::dense_set(&mut own.owner_at_read, r, owner);
-                    if let Owner::Inst(vi) = owner
-                        && Ownership::dense_get(&own.view_defer_loop, vi).is_none()
-                        && Ownership::dense_get(&own.view_last_use, vi) == Some(r)
-                    {
-                        own.pending_dying.push(owner);
-                    }
-                }
-            }
-        }
-        // ---- Statement-tagged instructions in expression position ----
-        // Sema's `assert` desugars to an `IfStmt` handed back as the
-        // call's value, which the statement path wraps in an ExprStmt —
-        // so statement tags DO reach `visit_expr`. They need their real
-        // statement handlers: `recurse_operands` deliberately skips
-        // `Extra` payloads, so without this dispatch the condition and
-        // arms are never walked — reads inside them record no
-        // `owner_at_read` and clear no dead-store entry.
-        TirTag::IfStmt => analyze_if_stmt(tir, pool, own, sink, sidecar, r),
-        TirTag::WhileLoop => analyze_while_loop(tir, pool, own, sink, sidecar, r),
-        TirTag::ForRange => analyze_for_range(tir, pool, own, sink, sidecar, r),
-        // ---- View-creating instructions over borrowed params ----
-        // Same operand recursion as the catch-all (including its
-        // `check_use_moved` calls); additionally record the inst when
-        // its base is a borrowed `str`/`bytes` parameter so the
-        // promotion-free pass can schedule the buffer's release.
-        TirTag::Slice => {
-            recurse_operands(tir, pool, own, sink, sidecar, r);
-            if let TirData::Slice { base, .. } = inst.data {
-                record_promo_candidate(tir, pool, own, r, base);
-            }
-        }
-        TirTag::ToView => {
-            recurse_operands(tir, pool, own, sink, sidecar, r);
-            if let TirData::UnOp(operand) = inst.data {
-                record_promo_candidate(tir, pool, own, r, operand);
-            }
-        }
-        // ---- Everything else: recurse on operands so nested
-        // ---- producers/aliases are still observed.
-        _ => {
-            recurse_operands(tir, pool, own, sink, sidecar, r);
         }
     }
 }
 
-/// Record a `Slice`/`ToView` whose base is a borrowed `str`/`bytes`
-/// param. Only owner-typed bases promote (views pass through), and
-/// only borrowed params leak the promotion buffer.
-fn record_promo_candidate(
-    tir: &Tir,
-    pool: &InternPool,
-    own: &mut Ownership,
-    view_inst: TirRef,
-    base: TirRef,
-) {
-    let base_inst = tir.inst(base);
-    if !matches!(pool.kind(base_inst.ty), TypeKind::Str | TypeKind::Bytes) {
-        return;
-    }
-    let TirData::Var(name) = base_inst.data else {
-        return;
+/// Seat the value `init` resolves to as the current owner of the
+/// binding home place (the `VarDecl`/`Assign` step's write fact). The
+/// seat is the RESOLVED owner (a fresh temp for producers, the source
+/// binding's seated owner for `x = y`), never the home itself — free
+/// targets derived from it must map through the binding tables to the
+/// right home slot. After a consume, the source owner is `Moved`; the
+/// re-validated seat gives subsequent reads a `Valid` owner instead of
+/// tripping over the just-moved value.
+pub(crate) fn rebind_to_init(own: &mut Ownership, home: PlaceId, init: TirRef) -> Owner {
+    // The seat is the initializer EXPRESSION's own place: fresh for
+    // every rebind (a `Var` init seats the read's place — a slot
+    // distinct from the source binding's seated owner, so the source's
+    // `Moved` state is never resurrected), and value-identity for the
+    // free targets derived from it. A place-less initializer
+    // (error-shaped TIR) seats the shared untracked owner.
+    let owner = match own.inst_place[init.index()] {
+        Some(p) => Owner(p),
+        None => Owner(super::UNTRACKED_PLACE),
     };
-    // The name must currently resolve to the param itself, not a
-    // shadowing local.
-    if !matches!(own.current_owner.get(&name), Some(Owner::Param(_))) {
-        return;
+    // The untracked sentinel never enters the lattice (nothing owns
+    // it; stamping it Valid would put it in the exit-time passes).
+    if owner.0 != super::UNTRACKED_PLACE {
+        own.states.insert(owner, OwnerState::Valid);
     }
-    let Some(&idx) = own.param_index.get(&name) else {
-        return;
-    };
-    if tir.params[idx].mode != ParamMode::Borrow {
-        return;
-    }
-    let Some(stmt) = own.current_stmt else { return };
-    // Loop convergence re-walks insts; record each view inst once.
-    if own
-        .promo_candidates
-        .iter()
-        .any(|c| c.view_inst == view_inst)
-    {
-        return;
-    }
-    own.promo_candidates.push(PromoCandidate {
-        view_inst,
-        base,
-        stmt,
-    });
+    own.current_owner.insert(home, owner);
+    owner
 }
 
-pub(crate) fn recurse_operands(
-    tir: &Tir,
-    pool: &InternPool,
+/// Register a Move-typed binding into `pending_dead_store`. The owner
+/// key (`init`/`value` TirRef) is whatever currently owns the
+/// allocation; `decl_inst` is the `VarDecl`/`Assign` instruction's own
+/// TirRef and serves as the Free anchor if the binding turns out to be
+/// a dead store.
+pub(crate) fn register_pending_dead_store(
     own: &mut Ownership,
-    sink: &mut DiagSink,
-    sidecar: &mut FunctionSidecar,
-    r: TirRef,
+    owner: Owner,
+    name: StringId,
+    span: Span,
+    decl_inst: TirRef,
 ) {
-    let inst = *tir.inst(r);
-    match inst.data {
-        TirData::UnOp(o) => {
-            visit_expr(tir, pool, own, sink, sidecar, o);
-            if needs_tracking(tir.inst(o).ty, pool) {
-                check_use_moved(tir, pool, own, sink, o, tir.span(o));
-            }
-        }
-        TirData::BinOp { lhs, rhs } => {
-            visit_expr(tir, pool, own, sink, sidecar, lhs);
-            if needs_tracking(tir.inst(lhs).ty, pool) {
-                check_use_moved(tir, pool, own, sink, lhs, tir.span(lhs));
-            }
-            visit_expr(tir, pool, own, sink, sidecar, rhs);
-            if needs_tracking(tir.inst(rhs).ty, pool) {
-                check_use_moved(tir, pool, own, sink, rhs, tir.span(rhs));
-            }
-        }
-        TirData::Slice { base, start, end } => {
-            // M8.4: slicing is a non-consuming read of the base
-            // (final spec §3.2 P1); slicing a moved `str` is a
-            // use-after-move like any other read. Bounds are ints.
-            visit_expr(tir, pool, own, sink, sidecar, base);
-            if needs_tracking(tir.inst(base).ty, pool) {
-                check_use_moved(tir, pool, own, sink, base, tir.span(base));
-            }
-            for bound in [start, end].into_iter().flatten() {
-                visit_expr(tir, pool, own, sink, sidecar, bound);
-                if needs_tracking(tir.inst(bound).ty, pool) {
-                    check_use_moved(tir, pool, own, sink, bound, tir.span(bound));
-                }
-            }
-        }
-        TirData::FieldAccess { object, .. } => {
-            // M9: a field access reads its object (non-consuming,
-            // like a slice's base read). Field-level ownership rules
-            // live at the use sites, keyed on the chain's root owner:
-            // borrow-mode call args register the root in `structs.rs`
-            // (`struct_root`), consume sites reject needs-drop field
-            // reads via `check_field_move_out`.
-            visit_expr(tir, pool, own, sink, sidecar, object);
-            if needs_tracking(tir.inst(object).ty, pool) {
-                check_use_moved(tir, pool, own, sink, object, tir.span(object));
-            }
-        }
-        // `Extra`-shaped instructions (VarDecl, Assign, Call,
-        // IfStmt, WhileLoop, ForRange, CompoundAssign, FieldAssign,
-        // CompoundFieldAssign) have bespoke decoders and per-tag
-        // handling elsewhere; their operands are deliberately not
-        // descended into here so we avoid double-visits. `StructLit`
-        // (M9) and `EnumLit` (M11) are also `Extra`-shaped; their
-        // field/payload values are walked and consumed by
-        // `visit_expr`'s `StructLit`/`EnumLit` arms, not here.
-        TirData::Extra(_) => {}
-        TirData::None
-        | TirData::Int(_)
-        | TirData::Float(_)
-        | TirData::Str(_)
-        | TirData::Bool(_)
-        | TirData::Var(_) => {}
-    }
+    own.pending_dead_store
+        .insert(owner, (name, span, decl_inst));
+}
+
+/// True if `owner` is the value currently seated in an `inout str`
+/// parameter's home place (escapes through the write-back pointer at
+/// exit).
+pub(crate) fn inout_escape_owner(own: &Ownership, owner: Owner) -> bool {
+    own.inout_str_params.iter().any(|n| {
+        let idx = own.param_index[n];
+        own.current_owner.get(&own.param_places[idx]) == Some(&owner)
+    })
 }

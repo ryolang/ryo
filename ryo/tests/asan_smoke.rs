@@ -431,3 +431,149 @@ fn asan_enum_nested_wrapper() {
         "enum_nested_wrapper",
     );
 }
+
+// M12 match: heap-backed match drop paths under ASan. Mirrors the
+// valgrind_match_* lane in valgrind_smoke.rs; see the fixture comments
+// in tests/common/mod.rs for the drop path each one pins.
+
+#[test]
+fn asan_match_partial_move_wildcard_drop() {
+    run_asan_smoke(
+        common::find_fixture("match_partial_move_wildcard_drop"),
+        "match_partial_move_wildcard_drop",
+    );
+}
+
+#[test]
+fn asan_match_discarded_value() {
+    run_asan_smoke(
+        common::find_fixture("match_discarded_value"),
+        "match_discarded_value",
+    );
+}
+
+#[test]
+fn asan_match_temporary_drop_once() {
+    run_asan_smoke(
+        common::find_fixture("match_temporary_drop_once"),
+        "match_temporary_drop_once",
+    );
+}
+
+#[test]
+fn asan_match_break_in_arm_loop_leak() {
+    // Mirrors valgrind_match_break_in_arm_loop_leak: the jump-exit
+    // Free for the loop-local heap str fires on the break path (ASan
+    // catches the use-side of any schedule mistake; valgrind pins the
+    // leak itself).
+    run_asan_smoke(
+        common::find_fixture("match_break_in_arm_loop_leak"),
+        "match_break_in_arm_loop_leak",
+    );
+}
+
+#[test]
+fn asan_match_arm_vardecl_double_free() {
+    // Mirrors valgrind_match_arm_vardecl_double_free: the arm-local
+    // named str is freed exactly once (ASan double-free detection).
+    run_asan_smoke(
+        common::find_fixture("match_arm_vardecl_double_free"),
+        "match_arm_vardecl_double_free",
+    );
+}
+
+#[test]
+fn asan_match_arm_inout_realloc() {
+    // Mirrors valgrind_match_arm_inout_realloc: the arm-end free of an
+    // inout-reassigned arm-local str resolves the binding's current
+    // slot storage (ASan double-free detection on the stale triple).
+    run_asan_smoke(
+        common::find_fixture("match_arm_inout_realloc"),
+        "match_arm_inout_realloc",
+    );
+}
+
+#[test]
+fn asan_match_break_sibling_expr_arm_leak() {
+    // Mirrors valgrind_match_break_sibling_expr_arm_leak: the sibling
+    // expression arm's anchor must not cover the break — the loop-exit
+    // Free owns the break path (ASan leak detection).
+    run_asan_smoke(
+        common::find_fixture("match_break_sibling_expr_arm_leak"),
+        "match_break_sibling_expr_arm_leak",
+    );
+}
+
+#[test]
+fn asan_match_break_in_value_arm_loop_exit() {
+    // Mirrors valgrind_match_break_in_value_arm_loop_exit: the break
+    // inside a value-position match arm fires its loop-exit Free (ASan
+    // catches the use-side of any schedule mistake; valgrind pins the
+    // leak itself).
+    run_asan_smoke(
+        common::find_fixture("match_break_in_value_arm_loop_exit"),
+        "match_break_in_value_arm_loop_exit",
+    );
+}
+
+#[test]
+fn asan_match_value_arm_unconsumed_temporary() {
+    // Mirrors valgrind_match_value_arm_unconsumed_temporary: the dead
+    // payload bind's arm-gated Free is flushed inside the expression
+    // arm — freed exactly once, no use of released storage.
+    run_asan_smoke(
+        common::find_fixture("match_value_arm_unconsumed_temporary"),
+        "match_value_arm_unconsumed_temporary",
+    );
+}
+
+#[test]
+fn asan_match_nested_if_heap_reassignment() {
+    // Mirrors valgrind_match_nested_if_heap_reassignment: the
+    // replacement remains live after the nested if and is freed once
+    // after its final read.
+    run_asan_smoke(
+        common::find_fixture("match_nested_if_heap_reassignment"),
+        "match_nested_if_heap_reassignment",
+    );
+}
+
+#[test]
+fn asan_shadowed_heap_reassignment() {
+    run_asan_smoke(
+        include_str!("fixtures/shadowed_heap_reassignment.ryo"),
+        "shadowed_heap_reassignment",
+    );
+}
+
+#[test]
+fn asan_same_parameter_promotions() {
+    run_asan_smoke(
+        include_str!("fixtures/same_parameter_promotions.ryo"),
+        "same_parameter_promotions",
+    );
+}
+
+#[test]
+fn asan_nested_heap_shadows() {
+    run_asan_smoke(
+        include_str!("fixtures/nested_heap_shadows.ryo"),
+        "nested_heap_shadows",
+    );
+}
+
+#[test]
+fn asan_nested_heap_byte_shadows() {
+    run_asan_smoke(
+        include_str!("fixtures/nested_heap_byte_shadows.ryo"),
+        "nested_heap_byte_shadows",
+    );
+}
+
+#[test]
+fn asan_inout_parameter_shadow() {
+    run_asan_smoke(
+        include_str!("fixtures/inout_parameter_shadow.ryo"),
+        "inout_parameter_shadow",
+    );
+}

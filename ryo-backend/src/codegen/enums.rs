@@ -15,7 +15,7 @@ use cranelift::frontend::Switch;
 use cranelift::prelude::*;
 use cranelift_module::Module;
 use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
-use ryo_core::types::{EnumVariantView, InternPool, StringId, TypeId, TypeKind, VariantKind};
+use ryo_core::types::{EnumVariantView, InternPool, TypeId, TypeKind, VariantKind};
 
 use super::{Codegen, FunctionContext, STR_SLOT_SIZE, Terminator, ValueRepr};
 
@@ -34,7 +34,7 @@ pub(crate) fn is_enum_type(ty: TypeId, pool: &InternPool) -> bool {
 /// index, so an out-of-range tag is a compiler bug, never a runtime
 /// path. Distinct from user(1) (the post-panic continuation trap) so
 /// the two unreachable-by-construction sites stay distinguishable.
-fn invalid_tag_trap(builder: &mut FunctionBuilder) {
+pub(crate) fn invalid_tag_trap(builder: &mut FunctionBuilder) {
     builder
         .ins()
         .trap(TrapCode::user(2).expect("user trap code 2 is within Cranelift's encodable range"));
@@ -90,6 +90,21 @@ impl<M: Module> Codegen<M> {
                 builder.use_var(var)
             }
             TirTag::FieldAccess => Self::field_addr_of(builder, ctx, r)?.0,
+            TirTag::Match => {
+                // M12: an aggregate-result match writes each value arm's
+                // result into its pre-allocated result slot; the join
+                // prologue cached the slot address as `ValueRepr::Enum`
+                // when the Switch terminator was dispatched.
+                match Self::cached_repr(ctx, r) {
+                    Some(ValueRepr::Enum { addr }) => addr,
+                    other => {
+                        return Err(format!(
+                            "eval_inst_enum: match at %{} cached {other:?}, not an enum repr",
+                            r.index()
+                        ));
+                    }
+                }
+            }
             TirTag::Call => {
                 // Enum-returning call: emit_call handles sret and
                 // caches ValueRepr::Enum for r.
@@ -145,14 +160,15 @@ impl<M: Module> Codegen<M> {
     }
 
     /// Tag-dispatch skeleton shared by `emit_enum_copy`,
-    /// `emit_enum_drop`, `emit_enum_eq`, and `eval_enum_debug_repr`:
-    /// one case block per variant plus an `otherwise` block that traps
-    /// (the discriminant is always a valid variant index — a
-    /// compiler-invariant violation, never a runtime path). Emits the
-    /// `Switch` in the current block (terminating it) and returns the
-    /// case blocks in variant declaration order; the caller fills each
-    /// arm and jumps to its own merge block.
-    fn emit_tag_dispatch(
+    /// `emit_enum_drop`, `emit_enum_eq`, `eval_enum_debug_repr`, and
+    /// M12 match lowering (`codegen/match_.rs`): one case block per
+    /// variant plus an `otherwise` block that traps (the discriminant is
+    /// always a valid variant index — a compiler-invariant violation,
+    /// never a runtime path; match routes its wildcard arm here
+    /// instead). Emits the `Switch` in the current block (terminating
+    /// it) and returns the case blocks in variant declaration order; the
+    /// caller fills each arm and jumps to its own merge block.
+    pub(crate) fn emit_tag_dispatch(
         builder: &mut FunctionBuilder,
         case_count: usize,
         tag: Value,
@@ -464,6 +480,7 @@ impl<M: Module> Codegen<M> {
             view.name,
             Some(var),
         );
+        ctx.aggregate_binding_storage.insert(r, var);
         Ok(Terminator::None)
     }
 
@@ -508,8 +525,7 @@ impl<M: Module> Codegen<M> {
         let src = Self::eval_inst_enum(builder, ctx, operand)?;
         let ret_ty = ctx.tir.return_type;
         Self::emit_enum_copy(builder, ctx, sret, src, ret_ty)?;
-        Self::emit_due_frees(builder, ctx, r)?;
-        Self::emit_due_promo_frees(builder, ctx, r)?;
+        Self::fire_payload(builder, ctx, r)?;
         Self::emit_return(builder, ctx, &[])?;
         Ok(Terminator::Return)
     }
@@ -548,6 +564,7 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         target: TirRef,
+        binding: Option<TirRef>,
     ) -> Result<bool, String> {
         let ty = if let Some(idx) = target.as_param_index() {
             ctx.tir.params[idx as usize].ty
@@ -557,44 +574,23 @@ impl<M: Module> Codegen<M> {
         if !matches!(ctx.pool.kind(ty), TypeKind::Enum) {
             return Ok(false);
         }
-        let addr = match Self::free_binding_name(ctx, target)
-            .and_then(|name| Self::read_slot(&ctx.struct_locals, name))
-        {
-            Some(var) => builder.use_var(var),
-            None => match Self::cached_repr(ctx, target) {
+        let addr = if let Some(binding) = binding {
+            let var = ctx
+                .aggregate_binding_storage
+                .get(&binding)
+                .copied()
+                .ok_or_else(|| format!("aggregate release has no storage for {binding:?}"))?;
+            builder.use_var(var)
+        } else {
+            match Self::cached_repr(ctx, target) {
                 Some(ValueRepr::Enum { addr }) => addr,
                 _ => {
                     return Err(format!(
-                        "ownership pass scheduled Free for enum %{} but no enum local or ValueRepr is available",
-                        target.index()
+                        "aggregate release has no value storage for {target:?}"
                     ));
                 }
-            },
+            }
         };
-        Self::emit_enum_drop(builder, ctx, addr, ty)?;
-        Ok(true)
-    }
-
-    /// Enum arm of `emit_conditional_dead_drops` (M11): the pre-if
-    /// value of a conditionally-reassigned enum binding is dropped on
-    /// the arms that kept it (tag-dispatched payload drop). Returns
-    /// `Ok(true)` when `target` is an enum (handled), so the caller
-    /// skips the struct and fat paths.
-    pub(crate) fn try_emit_enum_dead_drop(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        name: StringId,
-        target: TirRef,
-    ) -> Result<bool, String> {
-        debug_assert!(!target.is_param());
-        let ty = ctx.tir.inst(target).ty;
-        if !matches!(ctx.pool.kind(ty), TypeKind::Enum) {
-            return Ok(false);
-        }
-        let Some(var) = Self::read_slot(&ctx.struct_locals, name) else {
-            return Ok(false);
-        };
-        let addr = builder.use_var(var);
         Self::emit_enum_drop(builder, ctx, addr, ty)?;
         Ok(true)
     }

@@ -3,6 +3,8 @@
 //! format is documented there.
 
 use super::{InstData, InstRef, InstTag, InternPool, StringId, Uir};
+use super::{UirArgTarget, UirArmBodyView, UirFieldTarget, UirPatternView};
+use crate::ast::LitPattern;
 use std::fmt;
 /// Renderable wrapper for `Uir::dump`, modelled on Zig's
 /// `Zir.dumpHir` listing format.
@@ -267,6 +269,28 @@ fn write_inst(
             }
             writeln!(f, "]")
         }
+        (InstTag::Match, InstData::Match { .. }) => {
+            let view = uir.match_view(r);
+            write!(f, "match %{} [", view.scrutinee.index())?;
+            for (i, arm) in view.arms.iter().enumerate() {
+                if i > 0 {
+                    write!(f, "; ")?;
+                }
+                write_match_pattern(f, pool, &arm.pattern)?;
+                write!(f, ": ")?;
+                match arm.body {
+                    UirArmBodyView::Expr(body) => write!(f, "expr %{}", body.index())?,
+                    UirArmBodyView::Stmts(words) => {
+                        let refs: Vec<_> = words
+                            .iter()
+                            .map(|w| format!("%{}", InstRef::from_raw(*w).index()))
+                            .collect();
+                        write!(f, "stmts [{}]", refs.join(", "))?;
+                    }
+                }
+            }
+            writeln!(f, "]")
+        }
         (InstTag::Borrow, InstData::Borrow(inner)) => {
             writeln!(f, "borrow %{}", inner.index())
         }
@@ -284,6 +308,81 @@ fn write_inst(
             )
         }
         (tag, data) => writeln!(f, "<malformed: {:?} / {:?}>", tag, data),
+    }
+}
+
+fn write_match_pattern(
+    f: &mut fmt::Formatter<'_>,
+    pool: &InternPool,
+    pattern: &UirPatternView<'_>,
+) -> fmt::Result {
+    match pattern {
+        UirPatternView::Wildcard => write!(f, "_"),
+        UirPatternView::Literal(lit) => write_match_lit(f, pool, lit),
+        UirPatternView::Variant {
+            enum_name,
+            variant,
+            args,
+        } => {
+            if let Some(e) = enum_name {
+                write!(f, "{}.", pool.str(*e))?;
+            }
+            write!(f, "{}", pool.str(*variant))?;
+            if let Some(args) = args {
+                let (open, close) = if args.by_position {
+                    ("(", ")")
+                } else {
+                    ("{", "}")
+                };
+                write!(f, "{open}")?;
+                for (i, (name, target)) in args.args().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    if let Some(n) = name {
+                        write!(f, "{}: ", pool.str(n))?;
+                    }
+                    match target {
+                        UirArgTarget::Wildcard => write!(f, "_")?,
+                        UirArgTarget::Bind(b) => write!(f, "{}", pool.str(b))?,
+                    }
+                }
+                write!(f, "{close}")?;
+            }
+            Ok(())
+        }
+        UirPatternView::Anon { fields } => {
+            let (open, close) = if fields.positional {
+                ("(", ")")
+            } else {
+                ("{", "}")
+            };
+            write!(f, "{open}")?;
+            for (i, (selector, target)) in fields.fields().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                if fields.positional {
+                    write!(f, "{selector}: ")?;
+                } else {
+                    write!(f, "{}: ", pool.str(StringId::from_raw(selector)))?;
+                }
+                match target {
+                    UirFieldTarget::Wildcard => write!(f, "_")?,
+                    UirFieldTarget::Bind(b) => write!(f, "{}", pool.str(b))?,
+                    UirFieldTarget::Literal(lit) => write_match_lit(f, pool, &lit)?,
+                }
+            }
+            write!(f, "{close}")
+        }
+    }
+}
+
+fn write_match_lit(f: &mut fmt::Formatter<'_>, pool: &InternPool, lit: &LitPattern) -> fmt::Result {
+    match lit {
+        LitPattern::Int(v) => write!(f, "{v}"),
+        LitPattern::Str(s) => write!(f, "{:?}", pool.str(*s)),
+        LitPattern::Bool(b) => write!(f, "{b}"),
     }
 }
 

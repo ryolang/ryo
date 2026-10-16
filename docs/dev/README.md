@@ -10,11 +10,14 @@ This directory contains implementation notes, architectural decisions, and desig
 
 | File | Content | Next Action |
 |---|---|---|
+| [pipeline_regression_checks.md](pipeline_regression_checks.md) | Differential, memory, diagnostic, and performance checks for the pipeline migration | **Run and record evidence** before migration acceptance |
+| [pipeline_migration.md](pipeline_migration.md) | Current pipeline audit, target Flow IR, and migration steps for ownership, cleanup, generics, comptime, and concurrency | **Implement and verify** the remaining contracts; keep the source audit current |
 | [pipeline_alignment.md](pipeline_alignment.md) | Zig-alignment plan — all phases shipped (UIR/TIR split, InternPool, diagnostics, lazy Sema); tracks pending comptime/generics substrate work, Zig divergence notes, and future considerations | **Implement** the pending features as their own roadmap milestones; **delete** once comptime/generics land |
 | [architecture_analysis.md](architecture_analysis.md) | Latest verified snapshot of the full compiler architecture (2026-08-24; data structures per stage, ranked weaknesses) + tiered improvement roadmap; source of a tranche of [ISSUES.md](../../ISSUES.md) entries | **Keep as reference**; implement roadmap tiers per ISSUES.md — refresh or delete when stale (older snapshots live in git history) |
 | [closure_representation.md](closure_representation.md) | Closure memory layout, capture, and calling-convention/ABI design | **Implement** when closures land (v0.2+) — then keep as reference |
 | [arc_optimizer.md](arc_optimizer.md) | Swift-style ARC retain/release-elision pass design for `shared[T]` | **Implement** post-M11 alongside `shared[T]` — then keep as reference |
 | [copy_elision.md](copy_elision.md) | Copy elision rules: guaranteed (G1-G4), permitted (P1-P4), forbidden cases, algorithm sketch | **Implement** in compiler v0.2+ — then keep as reference |
+| [pattern_matching.md](pattern_matching.md) | How the compiler delivers spec §4.6/§7.4 `match`: pipeline shape, exhaustiveness, arm typing, move-only bindings + E0133, merge strategy, arm-result ownership transfer, deferral registers | **Keep as reference** — update when M12.5/M12.6 lift the deferrals |
 | [stdlib_optimizations.md](stdlib_optimizations.md) | SSO, copy-on-write, sink-parameter conventions for `str` and collections | **Implement** in stdlib v0.2+ — then keep as reference |
 | [dyn_trait.md](dyn_trait.md) | Enum dispatch workaround for v0.1 (no `dyn Trait` yet), vtable explanation | **Delete** when `dyn Trait` is implemented in v0.3+ |
 | [cranelift_lessons.md](cranelift_lessons.md) | Hard-won Cranelift findings: C ABI struct-return limits, packed-`u128` runtime ABI, unexpressible call annotations, guard flag-fusion, instruction-count≠walltime | **Keep as reference** — read before optimization work in `ryo-backend` |
@@ -27,6 +30,7 @@ This directory contains implementation notes, architectural decisions, and desig
 |---|---|---|
 | [pl_references/zig.md](pl_references/zig.md) | Zig compiler/toolchain snapshot — the pipeline (lexer→ZIR→AIR) Ryo's middle-end is modelled on | **Keep** while the compiler tracks Zig's shape |
 | [pl_references/mojo.md](pl_references/mojo.md) | Mojo language snapshot — inspiration for the ownership pass (borrow-by-default, eager destruction) | **Keep** while the ownership pass tracks Mojo |
+| [pl_references/hylo.md](pl_references/hylo.md) | Hylo projections and access modes — reference for scope-locked views and owner protection | **Keep** as a projection-model reference |
 | [pl_references/rust.md](pl_references/rust.md) | Rust borrowck/`Arc` comparison — the bar for Ryo's ownership pass and `shared[T]` | **Keep** as comparison reference |
 | [pl_references/go.md](pl_references/go.md) | Go language/toolchain snapshot — inspiration for the concurrency model | **Keep** while the concurrency model tracks Go |
 | [pl_references/swift.md](pl_references/swift.md) | Swift compiler snapshot (latest release 6.3.3) — SIL ARC optimizer (`lib/SILOptimizer/ARC/`), the model for `shared[T]`'s implicit refcounting and Ryo's planned ARC elision pass | **Keep** while `shared[T]`/ARC-optimizer work tracks Swift |
@@ -37,7 +41,7 @@ This directory contains implementation notes, architectural decisions, and desig
 | File | Content | Next Action |
 |---|---|---|
 | [alpha_scope.md](alpha_scope.md) | Defines the v0.0.x alpha as a delivery slice of v0.1.0 | **Delete** when the alpha closes |
-| [design_issues.md](design_issues.md) | Open language-design questions, inconsistencies, and grey areas | **Resolve into spec** item by item — then delete |
+| [design_issues.md](design_issues.md) | Flaws, contradictions, and pending decisions in the existing spec | **Resolve into spec** item by item — then delete |
 | [built_in.md](built_in.md) | Compiler-side built-in/stdlib boundary: decision matrix, lang items (`&str`, `Error` layouts), `std.sys` glue layer, `no_std` floor (kept dev-side until runtime profiles are designed) — user-facing content absorbed into spec §4/§14 | **Keep as internals reference** — revisit when runtime profiles land |
 | [std.md](std.md) | `std.sys` hidden layer + `std.io` safe facade pattern and build sequencing (internals); hybrid architecture absorbed into spec §14 | **Keep as reference** — delete when `std.io` lands and the pattern is embodied in code |
 | [std_ext.md](std_ext.md) | Curated Rust crates to wrap for stdlib (serde_json, ureq, regex, chrono, rand) | **Move to spec** §14 or a dedicated stdlib contributor guide — then delete |
@@ -73,7 +77,7 @@ This directory contains implementation notes, architectural decisions, and desig
 | File | Content | Next Action |
 |---|---|---|
 | [implementation_roadmap.md](implementation_roadmap.md) | 27 milestones across 6 phases with detailed tasks, test counts, completion dates | **Keep updating** as milestones complete — delete when v1.0 ships |
-| [proposals.md](proposals.md) | Future feature designs: generics, iterators, comptime, SIMD, dynamic dispatch, Jupyter kernel | **Move accepted proposals to spec** as they're designed — delete when all are resolved |
+| [proposals.md](proposals.md) | New features, language extensions, and experimental proposals | **Move accepted proposals to spec** as they're designed — delete when all are resolved |
 | [proposals/wasm_target.md](proposals/wasm_target.md) | WASM compilation target proposal, deferred post-v0.1.0 | **Implement** at the WASM milestone (v0.4) — then delete |
 | [ryo-context-and-otel-proposal.md](ryo-context-and-otel-proposal.md) | Ambient request-scoped context (deadlines, cancellation, trace IDs) over the task tree + `std.otel` observability stdlib | **Implement** at the concurrency milestone (v0.4) — then delete |
 | [ryo-std-data-proposal.md](ryo-std-data-proposal.md) | Data-layer stdlib proposal: `std.db` (.sqlite/.postgres), `std.pool`, `std.cache`, `std.redis` | **Implement** across the v0.2→v0.4 stdlib milestones — then delete |

@@ -1,0 +1,52 @@
+fn f(a: str, c: bool):
+	if c:
+		v = a[0:8]
+		print(v)
+	else:
+		w = a[8:16]
+		print(w)
+
+fn statement_match(a: str, c: bool):
+	match c:
+		true:
+			v = a[0:8]
+			print(v)
+		false:
+			w = a[8:16]
+			print(w)
+
+fn value_match(a: str, c: bool) -> int:
+	n = match c:
+		true: a[0:8].len()
+		false: a[8:16].len()
+	return n
+
+fn early_return(a: str, c: bool):
+	if c:
+		v = a[0:8]
+		print(v)
+		return
+	w = a[8:16]
+	print(w)
+
+fn main():
+	f("abcdefghijklmnop", true)
+	f("abcdefghijklmnop", false)
+	f("abcdefgh" + "ijklmnop", true)
+	f("abcdefgh" + "ijklmnop", false)
+	f("abcdefghijklmnop012345678901234567890123456789" + "!", true)
+	f("abcdefghijklmnop012345678901234567890123456789" + "!", false)
+	statement_match("abcdefghijklmnop", true)
+	statement_match("abcdefghijklmnop", false)
+	statement_match("abcdefgh" + "ijklmnop", true)
+	statement_match("abcdefgh" + "ijklmnop", false)
+	statement_match("abcdefghijklmnop012345678901234567890123456789" + "!", true)
+	statement_match("abcdefghijklmnop012345678901234567890123456789" + "!", false)
+	early_return("abcdefghijklmnop", true)
+	early_return("abcdefghijklmnop", false)
+	early_return("abcdefgh" + "ijklmnop", true)
+	early_return("abcdefgh" + "ijklmnop", false)
+	early_return("abcdefghijklmnop012345678901234567890123456789" + "!", true)
+	early_return("abcdefghijklmnop012345678901234567890123456789" + "!", false)
+	print(value_match("abcdefgh" + "ijklmnop", true))
+	print(value_match("abcdefghijklmnop012345678901234567890123456789" + "!", false))

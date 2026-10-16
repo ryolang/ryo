@@ -1,10 +1,16 @@
-//! Cranelift codegen over TIR.
+//! Cranelift codegen over TIR, driven by the canonical Flow IR.
 //!
 //! Codegen consumes the typed instruction streams produced by
 //! `sema` (one [`Tir`] per function body) and lowers them to
 //! Cranelift IR. There is no [`crate::uir::Uir`] import here:
 //! every operand is already typed, every variable already
-//! resolved.
+//! resolved. Control structure comes from the Flow IR — one
+//! Cranelift block per Flow block, walked in DFS order from the
+//! entry (`codegen/control.rs` explains why raw construction order is
+//! not sufficient) —
+//! never from TIR statement lists: TIR remains readable for
+//! spans, types, and operation payloads (see `codegen/control.rs`
+//! for the driver and its construct discipline).
 //!
 //! Traversal is *index-driven* — operands are reached through
 //! [`TirRef`] indices into the current `Tir`'s `instructions`,
@@ -34,7 +40,10 @@ use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 use std::collections::{HashMap, HashSet};
 use target_lexicon::Triple;
 
+mod abi;
+use abi::{LoweredAbi, ValueAbi};
 mod arith;
+mod binding_storage;
 mod builtins;
 mod bytes;
 mod control;
@@ -43,11 +52,14 @@ mod enums;
 mod expr;
 mod frees;
 mod jit;
+mod literals;
+mod match_;
 mod ranges;
 mod recursion;
 mod str_ops;
 mod structs;
 mod tail;
+mod validate;
 mod views;
 
 pub(crate) use structs::{is_fat_type, is_struct_type};
@@ -63,16 +75,14 @@ const STR_SLOT_SIZE: u32 = 24;
 /// ptr/len/cap at 8/16/24.
 pub(crate) const PROMO_SLOT_SIZE: u32 = 32;
 
-/// How a statement or body ended the current block, if it did.
-/// Replaces the `bool` that conflated Break/Continue with Return:
-/// callers distinguish "block ended" (`!= None`) from "the function
-/// definitely returns" (`== Return`) explicitly.
+/// How a statement-level emitter ended the current block, if it did.
+/// The Flow-block driver dispatches control instructions as
+/// block terminators, so the only statement results left are "did not
+/// end the block" and "returned" (the struct/enum return paths).
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Terminator {
     None,
     Return,
-    Break,
-    Continue,
 }
 
 /// Builtins whose fat result codegen materializes inline — no runtime
@@ -88,6 +98,23 @@ pub(crate) enum Terminator {
 /// table to assert both stay in agreement.
 #[cfg(test)]
 pub(crate) const CODEGEN_INLINED_BUILTINS: &[&str] = &["bool_to_str"];
+
+/// True for instruction tags whose Flow IR steps are statement
+/// boundaries: after such a step the driver fires the end-of-statement
+/// free bookkeeping at resolved firing points, matching the old `emit_body`
+/// post-statement pass. Control instructions are never steps.
+pub(crate) fn is_statement_step(tag: TirTag) -> bool {
+    matches!(
+        tag,
+        TirTag::VarDecl
+            | TirTag::Assign
+            | TirTag::CompoundAssign
+            | TirTag::FieldAssign
+            | TirTag::CompoundFieldAssign
+            | TirTag::Destructure
+            | TirTag::ExprStmt
+    )
+}
 
 /// Interned-name ids resolved once per compilation (in `compile_all`)
 /// so per-function and per-instruction name dispatch — `main`
@@ -198,6 +225,7 @@ fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) ->
 }
 
 pub struct Codegen<M: Module> {
+    optional_optimizations: bool,
     builder_context: FunctionBuilderContext,
     ctx: codegen::Context,
     module: M,
@@ -227,7 +255,7 @@ pub struct Codegen<M: Module> {
     name_ids: CodegenNameIds,
     /// Names of functions whose bodies contain a syntactic
     /// tail-position self-call, collected by the pre-pass in
-    /// `prepare_compilation`. `build_signature` compiles marked
+    /// `prepare_compilation`. `lower_abi` compiles marked
     /// functions with `CallConv::Tail` — the only convention from
     /// which Cranelift allows `return_call`. Recomputed per
     /// compilation; empty before the first one.
@@ -240,22 +268,132 @@ pub struct Codegen<M: Module> {
     recursive_sccs: HashMap<StringId, u32>,
 }
 
+/// The drop fire map (see `build_drop_fire_map`): the three
+/// anchor-keyed dense buckets, the block-keyed at-terminator
+/// bucket, and the consumed flags.
+struct DropFireMap(
+    Vec<Vec<usize>>,
+    Vec<Vec<usize>>,
+    Vec<Vec<usize>>,
+    HashMap<ryo_core::flow::BlockId, Vec<usize>>,
+    HashMap<ryo_core::flow::BlockId, Vec<usize>>,
+    Vec<bool>,
+);
+
 /// Overflow guard message for the spec §18 checked-arithmetic traps.
 const OVERFLOW_MSG: &str = "integer overflow\n";
 
 /// Declared functions: `FuncId` plus the `Signature` built at
 /// declaration time, so `compile_function` can install it into
 /// `ctx.func` instead of rebuilding it.
-type DeclaredFunctions = HashMap<StringId, (FuncId, Signature)>;
+type DeclaredFunctions = HashMap<StringId, (FuncId, LoweredAbi)>;
 
-/// Per-loop codegen state: the Cranelift blocks that `break` and
-/// `continue` jump to.
-struct LoopContext {
-    exit_block: Block,
-    /// Where `continue` jumps. For while-loops this is the header
-    /// (re-evaluate condition); for for-range loops this is the
-    /// increment block (advance the counter before re-checking).
-    continue_target: Block,
+/// Undo-log marks for the four binding slot tables (`locals`,
+/// `fat_locals`, `view_locals`, `struct_locals`), captured when a
+/// control construct (if-cascade / loop / match) begins. Region-entry
+/// blocks and the construct's join restore the tables to these marks,
+/// giving every sibling region the pre-construct table state without
+/// any recursive body driver (the flat Flow-block driver has no
+/// enclosing scope to replay).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SlotMarks {
+    pub(crate) locals: usize,
+    pub(crate) fat_locals: usize,
+    pub(crate) view_locals: usize,
+    pub(crate) struct_locals: usize,
+}
+
+/// Per-`IfStmt` codegen state for the Flow-block driver.
+/// Created when the cascade-entry block's terminator is seen (BEFORE
+/// its condition steps emit, so the marks predate condition
+/// evaluations), consumed by the arm/elif/else/join block prologues.
+pub(crate) struct IfRecord {
+    /// `range_facts_undo.len()` before the cascade's condition.
+    pub(crate) outer_facts_mark: usize,
+    /// `assigned_log.len()` before the cascade.
+    pub(crate) scope_mark: usize,
+    /// Slot-table marks before the cascade.
+    pub(crate) slot_marks: SlotMarks,
+    /// Conditions whose FALSE path dominates later cascade blocks
+    /// (each elif cond block and the else arm): the entry cond first,
+    /// each elif cond appended when its branch emits.
+    pub(crate) negated_conds: Vec<TirRef>,
+    /// Whether the TIR carries an else arm (the Flow IR's else block
+    /// covers both the else body and the else-less fallthrough; only
+    /// the view distinguishes them).
+    pub(crate) has_else: bool,
+}
+
+/// Per-`while` state: the post-body restore targets (marks are taken
+/// when the body block's prologue runs — after the header's condition
+/// evaluation, exactly where the old recursive emitter took them).
+pub(crate) struct WhileRecord {
+    pub(crate) pre_facts_mark: usize,
+    pub(crate) scope_mark: usize,
+    pub(crate) slot_marks: SlotMarks,
+}
+
+/// Per-`for range` state: the induction counter plus the shadowed
+/// binding the loop variable replaced (restored at the exit block).
+pub(crate) struct ForRecord {
+    pub(crate) counter: Variable,
+    pub(crate) var_name: StringId,
+    pub(crate) saved_local: Option<Variable>,
+    pub(crate) saved_fact: Option<ranges::IntRange>,
+}
+
+pub(crate) enum LoopRecord {
+    While(WhileRecord),
+    For(ForRecord),
+}
+
+/// The block-level prologue the Flow-block driver runs when it REACHES
+/// a block (before block-start drops and steps): scope restores,
+/// condition-fact seeding, loop-variable binding, and match merge
+/// handling. Every variant names the construct record it reads.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum BlockPrologue {
+    None,
+    /// Then arm of an if-cascade: slot restore + true-polarity seed.
+    IfThen {
+        if_inst: TirRef,
+    },
+    /// Elif condition block: fact re-baseline (all negations so far).
+    IfElifCond {
+        if_inst: TirRef,
+    },
+    /// Elif arm body: slot restore + this elif's true-polarity seed.
+    IfElifBody {
+        if_inst: TirRef,
+        idx: usize,
+    },
+    /// Else arm (or else-less fallthrough): slot restore + fact
+    /// re-baseline with every negation.
+    IfElse {
+        if_inst: TirRef,
+    },
+    /// Cascade join: full fact join (restore, home invalidation,
+    /// fall-through negation seeding, assigned kills) + slot restore.
+    IfJoin {
+        if_inst: TirRef,
+    },
+    /// Match arm: slot restore, arm-start payload drops, binding moves.
+    MatchArm {
+        match_inst: TirRef,
+        arm: usize,
+    },
+    WhileBody {
+        loop_inst: TirRef,
+    },
+    WhileExit {
+        loop_inst: TirRef,
+    },
+    ForBody {
+        loop_inst: TirRef,
+    },
+    ForExit {
+        loop_inst: TirRef,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -322,6 +460,7 @@ impl ValueRepr {
 /// memory, so no block-param phis are needed.
 #[derive(Clone, Copy)]
 struct FatLocals {
+    binding: Option<TirRef>,
     ptr: Variable,
     len: Variable,
     cap: Variable,
@@ -347,6 +486,7 @@ struct ViewLocals {
 /// function-local — and because `TirRef` itself is scoped to a
 /// single `Tir`.
 pub(crate) struct FunctionContext<'a, M: Module> {
+    optional_optimizations: bool,
     module: &'a mut M,
     data_ctx: &'a mut DataDescription,
     string_data: &'a mut HashMap<StringId, DataId>,
@@ -359,7 +499,7 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     is_main: bool,
     /// Whether the function being lowered was compiled with
     /// `CallConv::Tail`: its name was in `Codegen`'s
-    /// `tail_candidates` when `build_signature` ran. `return_call` is
+    /// `tail_candidates` when `lower_abi` ran. `return_call` is
     /// only legal from a `tail`-convention function, so the tail path
     /// consults this before attempting one.
     tail_conv_candidate: bool,
@@ -374,17 +514,18 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// the TIR is in bounds). Binding names are not unique per
     /// function — a nested VarDecl shadows the outer slot — so every
     /// write goes through `write_slot`, which records the previous
-    /// slot value on `locals_undo`; `emit_scoped_body` replays the log
-    /// in reverse to restore the pre-scope state.
+    /// slot value on `locals_undo`; the Flow-block driver's region
+    /// prologues replay the log down to each construct's marks
+    /// so sibling regions never observe each other's bindings.
     locals: Vec<Option<Variable>>,
     locals_undo: Vec<(u32, Option<Variable>)>,
     /// Value-range facts for spec §18 guard elision: binding name →
     /// inclusive `[lo, hi]` bounds proven by dominating comparisons
     /// (see `codegen/ranges.rs` for the seeding rules). Dense
     /// `StringId::raw()`-indexed table with an undo log, scoped like
-    /// `locals`: `emit_scoped_body` and the if/while join handling
-    /// restore it via `restore_slots`, and any binding assigned inside
-    /// a restored scope is killed at the join via `assigned_log`.
+    /// `locals`: the driver's join/exit prologues restore it via
+    /// `restore_slots`, and any binding assigned inside a restored
+    /// scope is killed at the join via `assigned_log`.
     range_facts: Vec<Option<ranges::IntRange>>,
     range_facts_undo: Vec<(u32, Option<ranges::IntRange>)>,
     /// Flat log of every binding assigned (or passed as `inout`) since
@@ -396,6 +537,7 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// while this drives the resurrect-then-re-kill join invalidation.
     assigned_log: Vec<StringId>,
     func_ids: &'a DeclaredFunctions,
+    abi: &'a LoweredAbi,
     /// `TirRef → ValueRepr` memo. Materializing the same instruction
     /// twice in one function would either duplicate side effects
     /// (calls) or waste Cranelift IR; both are cheap-but-wrong.
@@ -413,12 +555,18 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     ///   (a) TIR instructions are unique per use — no shared
     ///       sub-expressions, so a `TirRef` is materialized in exactly
     ///       one block and read only where that block dominates;
-    ///   (b) `BoolAnd`/`BoolOr` merge values via block params (phi
-    ///       nodes), so the memoized `Value` is the merge-block param,
-    ///       which dominates every downstream use;
+    ///   (b) `BoolAnd`/`BoolOr` merge values via the short-circuit
+    ///       join block's I8 param (phi node), so the memoized `Value`
+    ///       is the join-block param, which dominates every downstream
+    ///       use;
     ///   (c) `IfStmt` is statement-level — no values flow out of
     ///       branches, so no branch-local value is ever read after the
-    ///       merge.
+    ///       merge. `TirTag::Match` (M12) is expression-level control
+    ///       flow, but its results flow out through a pre-allocated
+    ///       result slot (loaded/cached at the join by the MatchJoin
+    ///       prologue — never a block param), and arm-body expressions
+    ///       are scoped to their arm block (never read across the
+    ///       merge).
     /// If a future TIR producer introduces expression-level control
     /// flow (ternary if) or shared sub-expressions across blocks, this
     /// memo MUST be re-scoped per-block or reads will hit Cranelift
@@ -430,44 +578,161 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// `tir.params.len()`. Only fat (str/bytes) and view params ever
     /// land here.
     param_values: Vec<Option<ValueRepr>>,
-    /// Dense flag per `sidecar.free_schedule` index: true once that
-    /// entry's Free has been emitted in codegen. A given anchor TirRef
-    /// can be reached through both `eval_inst` and `eval_inst_fat`
-    /// (e.g. a `Var` materialized once as scalar and once as
-    /// fat-pointer), and the end-of-stmt sweep can also see anchors
-    /// that an earlier per-eval hook already fired. Without this guard
-    /// each path would emit the Free, double-freeing the allocation.
+    /// Dense flag per `sidecar.drops` index: true once that entry's
+    /// Free has been consumed — either emitted at its Flow fire
+    /// position or marked consumed by the lowering-time provably-inline
+    /// pre-filter (position-mechanical: elision is a lowering-time no-op-free decision,
+    /// not an ownership decision). Each drop lives in exactly one fire
+    /// bucket, so consumption is exactly once by construction; the flag
+    /// both guards the pre-filter against the fire paths and backs the
+    /// debug-only all-consumed assertion.
     freed_at: Vec<bool>,
-    /// Maps an anchor `TirRef` (`after`) to the indices of `sidecar.free_schedule`
-    /// that are anchored on it. Dense table indexed by `TirRef::index()`
-    /// (slot 0 unused — refs are 1-based); an empty Vec means no frees
-    /// anchor there. Anchors are never param sentinel refs.
-    free_by_after: Vec<Vec<usize>>,
-    /// Maps an `IfStmt` `TirRef` to the indices of
-    /// `sidecar.conditional_dead_drops` keyed on it. Dense table indexed
-    /// by `TirRef::index()` (slot 0 unused — refs are 1-based); an empty
-    /// Vec means the if has no dead drops. `emit_conditional_dead_drops`
-    /// consults it instead of re-scanning the whole per-function drop
-    /// list at the start of every arm (O(ifs × arms × drops)).
-    dead_drop_by_if: Vec<Vec<usize>>,
-    /// Unfired indices in `sidecar.free_schedule` that still need to be swept.
-    /// Used to avoid O(K * S) quadratic scaling during end-of-statement sweep.
-    pending_sweep: Vec<usize>,
-    loop_stack: Vec<LoopContext>,
+    /// Debug-only: per-drop flag marking drops consumed AT A FIRE
+    /// POINT (the fire-map buckets, including same-target duplicates
+    /// consumed there) — as opposed to the lowering-time pre-filter's
+    /// marks in `freed_at`. The split lets the place-resolution
+    /// assertion check every pre-elided drop against the elision
+    /// predicate (a pre-elided drop never resolved storage, so the
+    /// "has storage" leg must not excuse it) and every fired drop
+    /// against storage resolution.
+    #[cfg(debug_assertions)]
+    fire_marked: Vec<bool>,
+    /// Targets whose destruction has already been emitted in the
+    /// CURRENT block visit (position-mechanical) — cleared per block, so the dedup is
+    /// per-path, not global: the ownership pass deliberately
+    /// double-anchors some frees (the consumer step AND the enclosing
+    /// Return's epilogue, both firing in the same block's terminator
+    /// handling) — a sweep-era belt-and-suspenders that relied on the
+    /// duplicate's anchor being unmaterializable. Fired mechanically
+    /// from position, both duplicates would run, so the
+    /// once-per-target-per-path invariant is enforced at consumption: a
+    /// drop whose target was already destroyed in this block is consumed
+    /// as a no-op. Same-target drops in DIFFERENT blocks are different
+    /// paths and all fire. Elided (no-op) drops do NOT record their
+    /// target here — the buffer was never freed, so a later same-target
+    /// drop must still fire.
+    freed_targets: std::collections::HashSet<TirRef>,
+    /// The drop fire map (position-mechanical): scheduled drops keyed by their Flow
+    /// fire position, built once per function before emission. Firing
+    /// is mechanical from the Flow position — no cached-value
+    /// representation, pending-sweep state, or materialization order
+    /// decides whether a drop fires.
+    ///
+    /// * `fire_before_step[inst]` — `BeforeStep{inst}` drops, fired by
+    ///   the block driver immediately before the step emits.
+    /// * `fire_after_stmt[inst]` — `AfterStep` drops whose anchor is a
+    ///   step of the statement rooted at `inst` (a value-step anchor
+    ///   fires at its enclosing statement's end — after the consumer,
+    ///   the only sound position for a last-use free), fired by the
+    ///   post-statement hook.
+    /// * `fire_by_payload[inst]` — `AfterStep` drops anchored on a
+    ///   terminator payload (if/loop/match/return/break/continue
+    ///   instruction), fired by that construct's handler at its single
+    ///   emit position (the join/exit prologue, the terminator arm).
+    /// * `fire_at_term[block]` — `PreTerminator{block}` drops plus
+    ///   `AfterStep` drops whose anchor step has no enclosing statement
+    ///   (match-arm body expressions, deferred return operands), fired
+    ///   inside the block's terminator handler at its canonical point
+    ///   (after operand/body evaluation, before the jump/return).
+    fire_before_step: Vec<Vec<usize>>,
+    fire_after_stmt: Vec<Vec<usize>>,
+    fire_by_payload: Vec<Vec<usize>>,
+    fire_at_term: HashMap<ryo_core::flow::BlockId, Vec<usize>>,
+    /// `BlockStart` drops (position-mechanical unification): fired once per
+    /// Flow block, when the driver switches into the mapped Cranelift
+    /// block, BEFORE the block's steps. Two kinds share the bucket,
+    /// told apart at the fire point by target identity: match-arm-start
+    /// payload destruction (the block is an arm of a match and the
+    /// target is that match's scrutinee — codegen recomputes the arm's
+    /// unbound needs-drop fields and drops each) and conditional dead
+    /// drops of pre-branch buffers (target = the pre-branch owner,
+    /// resolved through the binding tables exactly as the old
+    /// block-start emission did).
+    fire_at_block_start: HashMap<ryo_core::flow::BlockId, Vec<usize>>,
+    /// ---- Flow-block driver state ----
+    /// One Cranelift block per Flow IR block, pre-created 1:1 before
+    /// the driver runs. The entry Flow block reuses the function's
+    /// entry block (index 0). The ONLY block params: a Flow block whose
+    /// first step is a `BoolAnd`/`BoolOr` (the short-circuit join) gets
+    /// one I8 param — the merged boolean. Every other value merge
+    /// (match results) rides a pre-allocated result slot, never a
+    /// block param.
+    flow_blocks: Vec<Block>,
+    /// Per-Flow-block sealing discipline: a block seals once every Flow
+    /// predecessor's terminator has been emitted (loop headers
+    /// naturally wait for their backedge); unreachable no-predecessor
+    /// blocks self-seal right after their own terminator. Entry starts
+    /// sealed.
+    flow_sealed: Vec<bool>,
+    /// Per-Flow-block count of emitted predecessor terminators, for
+    /// the sealing rule above.
+    flow_preds_emitted: Vec<u32>,
+    /// Debug-only visit state per Flow block: low 7 bits count
+    /// emissions (the driver must visit each block at most once), bit 7
+    /// marks the terminator dispatched (a tail call counts — the
+    /// `return_call` terminates the block). Release builds compile this
+    /// out entirely.
+    #[cfg(debug_assertions)]
+    flow_visit_state: Vec<u8>,
+    /// The prologue the driver runs when reaching each block (scope
+    /// restores / fact seeding / match merge handling).
+    block_prologue: Vec<BlockPrologue>,
+    /// Dense flag: the block's first step is a `BoolAnd`/`BoolOr` — its
+    /// Cranelift block carries the merged-boolean I8 param, and edges
+    /// INTO it pass the merge value (constant on the short-circuit
+    /// edge, the rhs value on the rhs edge).
+    bool_join: Vec<bool>,
+    /// Dense flag: the block's last step is an `ExprStmt` calling a
+    /// function, in tail position (last statement of the function body
+    /// or of an if-cascade arm body, no loop/match arm in between).
+    /// The driver defers the operand subtree so `try_emit_tail_call`
+    /// sees exactly the cache state the old recursive emitter saw.
+    tail_candidate: Vec<bool>,
+    /// Dense map: arm fallthrough block → the `IfStmt` it belongs to
+    /// (then block, elif body block, or else block). Drives the tail
+    /// recursion (`construct_is_last`) and confirms a Goto-target arm
+    /// region is an if arm.
+    if_arm_owner: Vec<Option<TirRef>>,
+    /// Dense map: block → the match whose join block it is. A match
+    /// join can coincide with another region entry (an elif whose
+    /// condition is a match holds its Branch in the condition's join
+    /// block, and a `while match …:` header is the match's join), so
+    /// the join handling (result caching + fact/slot restores) runs
+    /// from this map BEFORE the block's region prologue, independent
+    /// of the `block_prologue` variant.
+    match_join: Vec<Option<TirRef>>,
+    /// Dense map: a match arm's fallthrough block (the block ending in
+    /// `Goto { join }`) → (match, arm). Each falling-through arm
+    /// contributes exactly one such edge; the source can be deep inside
+    /// the arm (a nested value match's join), so a prologue-based
+    /// source check is not enough — the owner arm is found by a
+    /// forward walk from each arm block at map time.
+    match_fallthrough: Vec<Option<(TirRef, usize)>>,
+    /// Construct records, created when the construct's entry block is
+    /// emitted (marks taken then), consumed by prologues and handlers.
+    if_records: HashMap<TirRef, IfRecord>,
+    loop_records: HashMap<TirRef, LoopRecord>,
+    /// Per-match state for the Flow-block driver: fact/slot
+    /// marks (taken at the pre-step hook), the scrutinee home, the
+    /// merge shape, the pre-allocated result slot, and per-arm token
+    /// offsets. Created before the scrutinee steps emit, filled by the
+    /// Switch terminator handler, consumed by arm prologues, the join
+    /// prologue, and arm fallthroughs.
+    match_records: HashMap<TirRef, match_::MatchRecord>,
+    /// Whether the current function returns through a hidden sret
+    /// pointer (fat/struct/enum) — the synthesized fall-off return
+    /// needs it, recomputed from the signature per function.
+    has_sret: bool,
     /// Owned fat (str/bytes) bindings: three SSA `Variable`s (ptr, len,
     /// cap) per binding name. Dense `StringId::raw()`-indexed table with
     /// an undo log, same scoping discipline as `locals`.
     fat_locals: Vec<Option<FatLocals>>,
+    /// Storage survives lexical name restoration until its resolved cleanup fires.
+    /// Entries identify representation only; Flow establishes ownership.
+    fat_binding_storage: HashMap<TirRef, FatLocals>,
+    assignment_aliases: Vec<bool>,
+    cleanup_plan: ryo_core::flow::cleanup::CleanupPlan,
     fat_locals_undo: Vec<(u32, Option<FatLocals>)>,
-    /// Per-name mutation flags from `build_fat_mutation_tables`: a
-    /// provably-inline-initialized binding's free is elided only when
-    /// its name is NOT flagged here.
-    fat_mutated: Vec<bool>,
-    /// Per-inst view-base flags from `build_fat_mutation_tables`: a
-    /// provably-inline temp's free is elided only when its producing
-    /// inst is NOT a slice/`ToView` base (promotion would turn it into
-    /// a real heap buffer).
-    view_base_insts: Vec<bool>,
     /// Borrowed-param view bases (Slice/ToView) that were promoted
     /// through a scratch slot instead of the param's FatLocals: base
     /// inst → slot holding flag (offset 0) + promoted triple (8/16/24).
@@ -475,10 +740,6 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// Dense flag per `sidecar.promotion_frees` index (emission-time
     /// dedup, same discipline as `freed_at`).
     promo_freed_at: Vec<bool>,
-    /// Anchor `TirRef` → indices into `sidecar.promotion_frees`.
-    promo_free_by_after: Vec<Vec<usize>>,
-    /// Unfired `promotion_frees` indices for the end-of-statement sweep.
-    pending_promo_sweep: Vec<usize>,
     /// `strview` view bindings (M8.4): two SSA `Variable`s per binding,
     /// mirroring `fat_locals`. Views are non-owning — they never
     /// appear in the free schedule.
@@ -489,6 +750,7 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// `codegen/structs.rs`). Dense `StringId::raw()`-indexed table
     /// with an undo log, same scoping discipline as `locals`.
     struct_locals: Vec<Option<Variable>>,
+    aggregate_binding_storage: HashMap<TirRef, Variable>,
     struct_locals_undo: Vec<(u32, Option<Variable>)>,
     /// Free-target (initializer / Assign value / fat-param virtual ref)
     /// → binding-name map, built once per function by
@@ -503,34 +765,6 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// fat-param sentinel refs.
     free_binding_names: Vec<Option<StringId>>,
     free_binding_param_names: Vec<Option<StringId>>,
-    /// Binding name → its most recent write in program order (VarDecl
-    /// initializer or `Assign` value; fat params map to their sentinel
-    /// ref), built alongside `free_binding_names`. `emit_frees` only
-    /// takes the binding-path redirect when the FreePoint's target IS
-    /// this write — a stale/superseded target would free the binding's
-    /// current value instead of its own buffer. Keyed by BINDING
-    /// identity (the declaring VarDecl's ref, or a fat param's sentinel
-    /// ref), not by name: one name can denote several bindings (a
-    /// same-named shadow), and name-keyed lookup lets a later shadow's
-    /// writes suppress the branch-divergent-reseat redirect of an outer
-    /// binding's Free (the invalid-free + leak in the taken-arm reseat
-    /// + shadow composition).
-    binding_last_write: HashMap<TirRef, TirRef>,
-    /// Free-target (initializer / Assign value) → BINDING identity (the
-    /// declaring VarDecl's `TirRef`; `sidecar.assign_binding` for Assign
-    /// values), built alongside `free_binding_names`. Params need no
-    /// entry — their binding identity is their own sentinel ref (see
-    /// `free_binding_of`). `emit_frees` pairs this with
-    /// `binding_last_write` to keep the redirect's lineage tracking
-    /// per-binding while `fat_locals` stay name-keyed.
-    free_binding_of_insts: Vec<Option<TirRef>>,
-    /// Every `FreePoint` target in this function's schedule. `emit_frees`
-    /// consults it to distinguish a superseded redirect target whose
-    /// most recent write IS freed elsewhere (loop-carried reassign: do
-    /// not redirect — the write's own Free owns the home slot) from the
-    /// branch-divergent reseat (the write has no Free: the pre-branch
-    /// owner's Free must redirect to cover the path-correct buffer).
-    all_free_targets: std::collections::HashSet<TirRef>,
     /// M8.3 inout parameters: for each inout param's name, the
     /// caller-provided slot address (a function-entry block param)
     /// and its pointee `TypeId`. The write-back chokepoint stores each
@@ -543,6 +777,7 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// every name in the TIR is in bounds). Never scoped — params are
     /// bound at function entry — so it has no undo log.
     inout_ptrs: Vec<Option<(Value, TypeId)>>,
+    scalar_param_storage: Vec<Option<Variable>>,
     /// For fat-returning functions: the hidden sret pointer (first block param)
     /// through which the callee writes the (ptr, len, cap) triple.
     sret_ptr: Option<Value>,
@@ -551,18 +786,17 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// at `TirRef(1)` — so codegen must consult only the entry that
     /// belongs to this function. `compile_function` picks
     /// `sidecar.functions[i]`, positional with the `tirs` slice, and
-    /// threads the resulting per-function entry here. Both
-    /// unconditional (`branch: None`) and branch-gated
-    /// (`branch: Some(_)`) entries are filtered through
-    /// `branch_active`.
+    /// threads the resulting per-function entry here. Drops are
+    /// consumed mechanically at their anchor instructions; arm-only
+    /// drops are gated by block membership — their anchors are only
+    /// evaluated on the arm's path — not by any branch predicate.
     sidecar: &'a ryo_core::ownership::FunctionSidecar,
-    /// Active arm stack for conditional destruction. Each
-    /// entry is the `BranchId` of an enclosing if/elif/else arm
-    /// currently being lowered. `branch_active` walks this stack to
-    /// gate branch-tagged `FreePoint`s — `contains` (not `last()`)
-    /// so a Free anchored to a parent arm still fires from inside a
-    /// nested child arm of the same parent.
-    branch_stack: Vec<ryo_core::ownership::BranchId>,
+    /// The canonical Flow IR for this body — the backend's emission
+    /// driver: one pre-created Cranelift block per Flow block,
+    /// walked in DFS order from the entry, with per-step evaluation and
+    /// terminator handlers. Positional with the sidecar entry (both
+    /// are built once per pipeline run, right after sema).
+    flow: &'a ryo_core::flow::Flow,
     /// Module-level cache for compiler-generated guard messages;
     /// see `Codegen::guard_msg_data`.
     guard_msg_data: &'a mut HashMap<&'static str, DataId>,
@@ -599,6 +833,7 @@ impl<M: Module> Codegen<M> {
     fn from_module(module: M) -> Self {
         let int_type = module.target_config().pointer_type();
         Self {
+            optional_optimizations: true,
             builder_context: FunctionBuilderContext::new(),
             ctx: module.make_context(),
             module,
@@ -615,13 +850,20 @@ impl<M: Module> Codegen<M> {
 }
 
 /// Shared Cranelift flags for the AOT object pipeline.
-fn aot_shared_flags() -> Result<settings::Flags, String> {
+fn aot_shared_flags(optional_optimizations: bool) -> Result<settings::Flags, String> {
     let mut shared_builder = settings::builder();
     shared_builder
         .enable("is_pic")
         .map_err(|e| format!("Error enabling is_pic: {}", e))?;
     shared_builder
-        .set("opt_level", "speed")
+        .set(
+            "opt_level",
+            if optional_optimizations {
+                "speed"
+            } else {
+                "none"
+            },
+        )
         .map_err(|e| format!("Error setting opt_level: {}", e))?;
     shared_builder
         .set("preserve_frame_pointers", "true")
@@ -646,7 +888,14 @@ fn aot_shared_flags() -> Result<settings::Flags, String> {
 
 impl Codegen<ObjectModule> {
     pub fn new_aot(target_triple: Triple) -> Result<Self, String> {
-        let shared_flags = aot_shared_flags()?;
+        Self::new_aot_with_optimizations(target_triple, true)
+    }
+
+    pub fn new_aot_with_optimizations(
+        target_triple: Triple,
+        enabled: bool,
+    ) -> Result<Self, String> {
+        let shared_flags = aot_shared_flags(enabled)?;
 
         let isa = isa::lookup(target_triple.clone())
             .map_err(|e| format!("Unsupported target '{}': {}", target_triple, e))?
@@ -657,7 +906,9 @@ impl Codegen<ObjectModule> {
             ObjectBuilder::new(isa, "ryo_module", cranelift_module::default_libcall_names())
                 .map_err(|e| format!("Failed to create ObjectBuilder: {}", e))?;
 
-        Ok(Self::from_module(ObjectModule::new(obj_builder)))
+        let mut result = Self::from_module(ObjectModule::new(obj_builder));
+        result.optional_optimizations = enabled;
+        Ok(result)
     }
 
     pub fn finish(self) -> Result<Vec<u8>, String> {
@@ -675,10 +926,14 @@ impl<M: Module> Codegen<M> {
         pool: &InternPool,
     ) -> Result<DeclaredFunctions, String> {
         // Tail-call pre-pass: mark functions whose bodies contain a
-        // syntactic tail-position self-call, so `build_signature`
+        // syntactic tail-position self-call, so `lower_abi`
         // compiles them with CallConv::Tail (see
         // `tail::scan_tail_call_candidates` for the scope).
-        self.tail_candidates = tail::scan_tail_call_candidates(tirs, self.name_ids.main);
+        self.tail_candidates = if self.optional_optimizations {
+            tail::scan_tail_call_candidates(tirs, self.name_ids.main)
+        } else {
+            HashSet::new()
+        };
         // Stack-check pre-pass: find the call-graph cycles whose edges get
         // the stack-limit check (see `recursion` for the rationale).
         self.recursive_sccs = recursion::scan_recursive_sccs(tirs);
@@ -714,11 +969,12 @@ impl<M: Module> Codegen<M> {
     pub fn compile(
         &mut self,
         tirs: &[Tir],
+        flows: &[ryo_core::flow::Flow],
         pool: &InternPool,
         sidecar: &ryo_core::ownership::OwnershipSidecar,
         dump_ir: bool,
     ) -> Result<(FuncId, String), String> {
-        let (func_ids, ir_output) = self.compile_all(tirs, pool, sidecar, dump_ir)?;
+        let (func_ids, ir_output) = self.compile_all(tirs, flows, pool, sidecar, dump_ir)?;
 
         // Resolve "main" through the id cache `compile_all` built.
         // `astgen` always interns the string "main" (it does so
@@ -743,10 +999,11 @@ impl<M: Module> Codegen<M> {
     pub fn compile_and_dump_ir(
         &mut self,
         tirs: &[Tir],
+        flows: &[ryo_core::flow::Flow],
         pool: &InternPool,
         sidecar: &ryo_core::ownership::OwnershipSidecar,
     ) -> Result<String, String> {
-        Ok(self.compile_all(tirs, pool, sidecar, true)?.1)
+        Ok(self.compile_all(tirs, flows, pool, sidecar, true)?.1)
     }
 
     /// Shared driver for `compile` / `compile_and_dump_ir`: declare
@@ -757,20 +1014,45 @@ impl<M: Module> Codegen<M> {
     fn compile_all(
         &mut self,
         tirs: &[Tir],
+        flows: &[ryo_core::flow::Flow],
         pool: &InternPool,
         sidecar: &ryo_core::ownership::OwnershipSidecar,
         dump_ir: bool,
     ) -> Result<(DeclaredFunctions, String), String> {
-        debug_assert!(
-            bytes::no_unreachable_in(tirs),
-            "codegen requires sema to have produced TIR with no Unreachable instructions"
-        );
+        let checked = validate::require_backend_input(tirs, flows, sidecar, pool)?;
+        if !self.optional_optimizations
+            && sidecar
+                .functions
+                .iter()
+                .any(|body| body.consumed_concat_lhs.iter().any(Option::is_some))
+        {
+            return Err(
+                "unoptimized backend requires cleanup without allocation-reuse transfers".into(),
+            );
+        }
         self.name_ids = CodegenNameIds::resolve(pool);
         let func_ids = self.prepare_compilation(tirs, pool)?;
+        for (tir, flow) in tirs.iter().zip(flows) {
+            let calls = flow
+                .steps
+                .iter()
+                .filter_map(|step| (tir.inst(step.inst).tag == TirTag::Call).then_some(step.inst))
+                .chain(flow.terms.iter().filter_map(|term| match term {
+                    ryo_core::flow::Terminator::Call { call, .. } => Some(*call),
+                    _ => None,
+                }));
+            for inst in calls {
+                let call = tir.call_view(inst);
+                if let Some((_, abi)) = func_ids.get(&call.name) {
+                    abi.require_call(tir, inst)?;
+                }
+            }
+        }
 
         let mut ir_output = String::new();
-        for (i, tir) in tirs.iter().enumerate() {
-            let text = self.compile_function(tir, &func_ids, pool, sidecar, i, dump_ir)?;
+        for i in 0..tirs.len() {
+            let ready = checked.prepare_body(i)?;
+            let text = self.compile_function(ready, &func_ids, pool, dump_ir)?;
             if dump_ir {
                 ir_output.push_str(&text);
                 ir_output.push('\n');
@@ -788,7 +1070,10 @@ impl<M: Module> Codegen<M> {
         let mut func_ids = HashMap::new();
         for tir in tirs {
             let is_main = self.name_ids.main == Some(tir.name);
-            let sig = self.build_signature(tir, pool, is_main);
+            let abi = self.lower_abi(tir, pool, is_main);
+            debug_assert_eq!(&abi.target, self.module.isa().triple());
+            debug_assert_eq!(abi.pointer_type, self.module.isa().pointer_type());
+            debug_assert_eq!(abi.layout_context, pool.identity());
             let name_str = pool.str(tir.name);
             let linkage = if is_main {
                 Linkage::Export
@@ -797,66 +1082,201 @@ impl<M: Module> Codegen<M> {
             };
             let func_id = self
                 .module
-                .declare_function(name_str, linkage, &sig)
+                .declare_function(name_str, linkage, &abi.signature)
                 .map_err(|e| format!("Failed to declare function '{}': {}", name_str, e))?;
             // Keep the signature: `compile_function` installs it into
             // `ctx.func` instead of rebuilding it.
-            func_ids.insert(tir.name, (func_id, sig));
+            func_ids.insert(tir.name, (func_id, abi));
         }
         Ok(func_ids)
     }
 
+    /// position-mechanical: build the drop fire map — every scheduled drop keyed by its
+    /// Flow fire position (see the `FunctionContext` field docs) — and
+    /// run the lowering-time provably-inline pre-filter over the drop
+    /// list (frees that are guaranteed no-ops at runtime are marked
+    /// consumed, not swept; see `pre_elide_drops`). Position
+    /// interpretation is the shared resolver's job
+    /// (`ryo_core::flow::fire_points` — the single authority both sides
+    /// consume): this build only maps resolved points onto the emission
+    /// buckets; no private re-anchoring lives here. Nothing reads cached
+    /// values or emission progress.
+    #[allow(clippy::too_many_arguments)]
+    fn build_drop_fire_map(
+        tir: &Tir,
+        flow: &ryo_core::flow::Flow,
+        pool: &InternPool,
+        fat_mutated: &[bool],
+        view_base_insts: &[bool],
+        plan: &ryo_core::flow::cleanup::CleanupPlan,
+        optional_optimizations: bool,
+        func_sidecar: &ryo_core::ownership::FunctionSidecar,
+    ) -> DropFireMap {
+        let mut fire_before_step: Vec<Vec<usize>> = vec![Vec::new(); tir.instructions.len()];
+        let mut fire_after_stmt: Vec<Vec<usize>> = vec![Vec::new(); tir.instructions.len()];
+        let mut fire_by_payload: Vec<Vec<usize>> = vec![Vec::new(); tir.instructions.len()];
+        let mut fire_at_term: HashMap<ryo_core::flow::BlockId, Vec<usize>> = HashMap::new();
+        let mut fire_at_block_start: HashMap<ryo_core::flow::BlockId, Vec<usize>> = HashMap::new();
+        // The shared firing-point resolver is the single authority on
+        // position interpretation (ryo-core flow::fire_points): the
+        // buckets below are keyed FROM its resolutions — no private
+        // re-anchoring lives here anymore.
+        let fire_points = ryo_core::flow::fire_points::FirePoints::new(flow);
+        let positions = func_sidecar.drops.iter().map(|drop| drop.position).chain(
+            func_sidecar
+                .promotion_frees
+                .iter()
+                .map(|release| release.position),
+        );
+        for (idx, position) in positions.enumerate() {
+            match position {
+                ryo_core::flow::DropPosition::BlockStart { block } => {
+                    // The unified cleanup schedule: arm-start payload
+                    // destruction and conditional dead drops travel with
+                    // everything else. Under the 1:1 Flow-block →
+                    // Cranelift-block mapping each Flow block has
+                    // exactly one start — the driver fires this bucket
+                    // when it enters the block, before the block's
+                    // steps.
+                    debug_assert!(
+                        matches!(
+                            fire_points.resolve(position),
+                            ryo_core::flow::fire_points::FireVerdict::Resolved(p)
+                            if p.block == block && p.ordinal == 0
+                        ),
+                        "BlockStart resolves to the block's entry point"
+                    );
+                    fire_at_block_start.entry(block).or_default().push(idx);
+                }
+                ryo_core::flow::DropPosition::BeforeStep { inst } => {
+                    debug_assert!(
+                        matches!(
+                            fire_points.resolve(position),
+                            ryo_core::flow::fire_points::FireVerdict::Resolved(_)
+                        ),
+                        "BeforeStep anchors a real step"
+                    );
+                    debug_assert!(!inst.is_param(), "drop anchors are never param refs");
+                    fire_before_step[inst.index()].push(idx);
+                }
+                ryo_core::flow::DropPosition::PreTerminator { block } => {
+                    debug_assert!(
+                        matches!(
+                            fire_points.resolve(position),
+                            ryo_core::flow::fire_points::FireVerdict::Resolved(_)
+                        ),
+                        "PreTerminator names a real block"
+                    );
+                    fire_at_term.entry(block).or_default().push(idx);
+                }
+                ryo_core::flow::DropPosition::AfterStep { inst } => {
+                    debug_assert!(!inst.is_param(), "drop anchors are never param refs");
+                    match fire_points.resolve_after_step(inst) {
+                        ryo_core::flow::fire_points::AfterStepFire::StatementBoundary(p) => {
+                            // The enclosing statement's boundary: the
+                            // free lands after the statement's consumer
+                            // — the only sound position for a last-use
+                            // free (see the resolver's contract rule a).
+                            let root = flow.block_steps(p.block)[p.ordinal as usize - 1].inst;
+                            fire_after_stmt[root.index()].push(idx);
+                        }
+                        ryo_core::flow::fire_points::AfterStepFire::BlockTerminator(p) => {
+                            // No statement follows the anchor (the
+                            // anchor is in a match-arm body or a
+                            // deferred return operand): fire inside the
+                            // block's terminator handler.
+                            fire_at_term.entry(p.block).or_default().push(idx);
+                        }
+                        ryo_core::flow::fire_points::AfterStepFire::Payload(verdict) => {
+                            // Terminator payload (an if/loop/match/
+                            // return/break/continue instruction): the
+                            // construct's handler is the instruction's
+                            // single emit position.
+                            debug_assert!(
+                                !matches!(
+                                    verdict,
+                                    ryo_core::flow::fire_points::FireVerdict::Unresolved
+                                ),
+                                "payload anchor {inst:?} does not resolve"
+                            );
+                            fire_by_payload[inst.index()].push(idx);
+                        }
+                        ryo_core::flow::fire_points::AfterStepFire::Unresolved => {
+                            unreachable!(
+                                "cleanup drop anchored on {inst:?}, which is neither a Flow step nor a terminator payload"
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        let mut freed_at = vec![false; func_sidecar.drops.len()];
+        if optional_optimizations {
+            Self::pre_elide_drops(
+                tir,
+                pool,
+                fat_mutated,
+                view_base_insts,
+                flow,
+                plan,
+                func_sidecar,
+                &mut freed_at,
+            );
+        }
+        DropFireMap(
+            fire_before_step,
+            fire_after_stmt,
+            fire_by_payload,
+            fire_at_term,
+            fire_at_block_start,
+            freed_at,
+        )
+    }
+
     fn compile_function(
         &mut self,
-        tir: &Tir,
+        ready: validate::BackendReadyBody<'_>,
         func_ids: &DeclaredFunctions,
         pool: &InternPool,
-        sidecar: &ryo_core::ownership::OwnershipSidecar,
-        sidecar_index: usize,
         dump_ir: bool,
     ) -> Result<String, String> {
+        let (tir, flow, func_sidecar, cleanup_plan) = ready.into_parts();
         // Interned-name ids for this compilation (resolved by
         // `compile_all`); copied out so the block below can read them
         // while `builder` holds mutable borrows of `self`.
         let ids = self.name_ids;
-        let (func_id, sig) = func_ids
+        let (func_id, abi) = func_ids
             .get(&tir.name)
             .ok_or_else(|| format!("Function '{}' not declared", pool.str(tir.name)))?;
         let func_id = *func_id;
 
-        // Pick the per-function sidecar entry. `TirRef`s are scoped
-        // per-function (each `Tir` arena restarts at `TirRef(1)`), so
-        // threading the program-wide sidecar would let frees scheduled
-        // for one function fire at numerically-matching TirRefs in
-        // another. The sidecar is positional with the `tirs` slice —
-        // `ownership::check` pushes exactly one entry per body — so a
-        // missing entry is a pipeline contract violation, not a case
-        // to paper over with an empty sidecar (compiler-emitted
-        // helpers like `__ryo_panic` are imported runtime calls and
-        // never appear in `tirs`).
-        let func_sidecar = sidecar.functions.get(sidecar_index).ok_or_else(|| {
-            format!(
-                "ownership sidecar has no entry for '{}' (index {} of {})",
-                pool.str(tir.name),
-                sidecar_index,
-                sidecar.functions.len()
-            )
-        })?;
-        // The length check above cannot detect a `tirs` slice that was
-        // reordered or filtered between `ownership::check` and codegen
-        // (same length, wrong alignment): every index would resolve to
-        // a wrong-but-plausible sidecar. The name recorded at push
-        // time pins entry `i` to `tirs[i]`.
-        debug_assert_eq!(
-            func_sidecar.name, tir.name,
-            "ownership sidecar misaligned with tirs at index {}",
-            sidecar_index
+        let (free_binding_names, free_binding_param_names) =
+            Self::build_free_binding_names(tir, flow, pool);
+        let (fat_mutated, view_base_insts) = Self::build_fat_mutation_tables(tir, flow, pool);
+        let DropFireMap(
+            fire_before_step,
+            fire_after_stmt,
+            fire_by_payload,
+            fire_at_term,
+            fire_at_block_start,
+            freed_at,
+        ) = Self::build_drop_fire_map(
+            tir,
+            flow,
+            pool,
+            &fat_mutated,
+            &view_base_insts,
+            &cleanup_plan,
+            self.optional_optimizations,
+            func_sidecar,
         );
+
+        let assignment_aliases = Self::assignment_aliases(tir, flow);
 
         // The signature built at declaration time; cloning two small
         // Vecs beats rebuilding the signature (pool queries + per-param
         // ABI branching) a second time.
-        self.ctx.func.signature = sig.clone();
+        self.ctx.func.signature = abi.signature.clone();
 
         {
             let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
@@ -873,11 +1293,8 @@ impl<M: Module> Codegen<M> {
             let mut locals: Vec<Option<Variable>> = vec![None; pool.string_count()];
             let mut locals_undo: Vec<(u32, Option<Variable>)> = Vec::new();
 
-            let is_main = ids.main == Some(tir.name);
-            let returns_fat = !is_main && is_fat_type(tir.return_type, pool);
-            let returns_struct = !is_main && is_struct_type(tir.return_type, pool);
-            let returns_enum = !is_main && is_enum_type(tir.return_type, pool);
-            let has_sret = returns_fat || returns_struct || returns_enum;
+            let is_main = abi.hosted_main;
+            let has_sret = !is_main && abi.result.indirect_return();
             let mut block_idx: usize = if has_sret { 1 } else { 0 };
             let sret_ptr = if has_sret {
                 Some(builder.block_params(entry_block)[0])
@@ -893,8 +1310,8 @@ impl<M: Module> Codegen<M> {
             let mut struct_locals_undo: Vec<(u32, Option<Variable>)> = Vec::new();
             let mut inout_ptrs: Vec<Option<(Value, TypeId)>> = vec![None; pool.string_count()];
 
-            for param in tir.params.iter() {
-                if param.mode == ParamMode::Inout {
+            for (param_index, (param, lowered)) in tir.params.iter().zip(&abi.params).enumerate() {
+                if lowered.mode == ParamMode::Inout {
                     // inout param: a single pointer to the caller's slot,
                     // regardless of pointee type. Load the current value
                     // into Variables so the body's existing read/mutate
@@ -902,7 +1319,7 @@ impl<M: Module> Codegen<M> {
                     // write-back chokepoint before each `return_`.
                     let ptr = builder.block_params(entry_block)[block_idx];
                     block_idx += 1;
-                    if is_fat_type(param.ty, pool) {
+                    if lowered.value == ValueAbi::Fat {
                         // fat inout: load the fat-pointer triple into
                         // FatLocals so the body reads/mutates it like any
                         // fat local; write all three fields back before
@@ -927,6 +1344,7 @@ impl<M: Module> Codegen<M> {
                             &mut fat_locals_undo,
                             param.name,
                             Some(FatLocals {
+                                binding: Some(TirRef::param(param_index)),
                                 ptr: var_ptr,
                                 len: var_len,
                                 cap: var_cap,
@@ -934,7 +1352,7 @@ impl<M: Module> Codegen<M> {
                                 home_inline: false,
                             }),
                         );
-                    } else if is_struct_type(param.ty, pool) || is_enum_type(param.ty, pool) {
+                    } else if matches!(lowered.value, ValueAbi::Struct | ValueAbi::Enum) {
                         // Struct (M9 named / M10 anon) and enum (M11)
                         // inout pointees: mutations happen in place
                         // through the caller's slot — bind the pointer
@@ -959,7 +1377,7 @@ impl<M: Module> Codegen<M> {
                     inout_ptrs[param.name.raw() as usize] = Some((ptr, param.ty));
                     continue;
                 }
-                if is_fat_type(param.ty, pool) {
+                if lowered.value == ValueAbi::Fat {
                     let var_ptr = builder.declare_var(int_type);
                     let var_len = builder.declare_var(types::I64);
                     let var_cap = builder.declare_var(types::I64);
@@ -971,6 +1389,7 @@ impl<M: Module> Codegen<M> {
                         &mut fat_locals_undo,
                         param.name,
                         Some(FatLocals {
+                            binding: Some(TirRef::param(param_index)),
                             ptr: var_ptr,
                             len: var_len,
                             cap: var_cap,
@@ -979,7 +1398,7 @@ impl<M: Module> Codegen<M> {
                         }),
                     );
                     block_idx += 3;
-                } else if pool.is_view(param.ty) {
+                } else if lowered.value == ValueAbi::View {
                     // `strview` view param: two ABI words (ptr, len). Views
                     // are borrows — no cap, never freed.
                     let var_ptr = builder.declare_var(int_type);
@@ -996,7 +1415,7 @@ impl<M: Module> Codegen<M> {
                         }),
                     );
                     block_idx += 2;
-                } else if is_struct_type(param.ty, pool) || is_enum_type(param.ty, pool) {
+                } else if matches!(lowered.value, ValueAbi::Struct | ValueAbi::Enum) {
                     // Struct (M9 named / M10 anon) and enum (M11)
                     // params: a single pointer to the caller-side slot
                     // (borrow) or to a transferred field-wise copy
@@ -1020,41 +1439,6 @@ impl<M: Module> Codegen<M> {
                 }
             }
 
-            let mut free_by_after: Vec<Vec<usize>> = vec![Vec::new(); tir.instructions.len()];
-            for (idx, fp) in func_sidecar.free_schedule.iter().enumerate() {
-                debug_assert!(
-                    !fp.after.is_param(),
-                    "free anchors are never param sentinel refs"
-                );
-                free_by_after[fp.after.index()].push(idx);
-            }
-            let pending_sweep: Vec<usize> = (0..func_sidecar.free_schedule.len()).collect();
-            let mut dead_drop_by_if: Vec<Vec<usize>> = vec![Vec::new(); tir.instructions.len()];
-            for (idx, dd) in func_sidecar.conditional_dead_drops.iter().enumerate() {
-                debug_assert!(
-                    !dd.if_stmt.is_param(),
-                    "dead-drop keys are always real IfStmt refs"
-                );
-                dead_drop_by_if[dd.if_stmt.index()].push(idx);
-            }
-            let (
-                free_binding_names,
-                free_binding_param_names,
-                free_binding_of_insts,
-                binding_last_write,
-            ) = Self::build_free_binding_names(tir, pool, func_sidecar);
-            let (fat_mutated, view_base_insts) = Self::build_fat_mutation_tables(tir, pool, &ids);
-
-            let mut promo_free_by_after: Vec<Vec<usize>> = vec![Vec::new(); tir.instructions.len()];
-            for (idx, pf) in func_sidecar.promotion_frees.iter().enumerate() {
-                debug_assert!(
-                    !pf.after.is_param(),
-                    "promotion-free anchors are never param sentinel refs"
-                );
-                promo_free_by_after[pf.after.index()].push(idx);
-            }
-            let pending_promo_sweep: Vec<usize> = (0..func_sidecar.promotion_frees.len()).collect();
-
             // One scratch slot per borrowed-param view base scheduled
             // for a promotion free: flag word (offset 0) + promoted
             // triple (8/16/24), per PROMO_SLOT_SIZE.
@@ -1070,6 +1454,7 @@ impl<M: Module> Codegen<M> {
             }
 
             let mut ctx: FunctionContext<'_, M> = FunctionContext {
+                optional_optimizations: self.optional_optimizations,
                 module: &mut self.module,
                 data_ctx: &mut self.data_ctx,
                 string_data: &mut self.string_data,
@@ -1079,44 +1464,78 @@ impl<M: Module> Codegen<M> {
                 is_main,
                 tail_conv_candidate: self.tail_candidates.contains(&tir.name),
                 name_ids: ids,
+                scalar_param_storage: tir
+                    .params
+                    .iter()
+                    .map(|param| Self::read_slot(&locals, param.name))
+                    .collect(),
                 locals,
                 locals_undo,
                 range_facts: vec![None; pool.string_count()],
                 range_facts_undo: Vec::new(),
                 assigned_log: Vec::new(),
                 func_ids,
+                abi,
                 inst_values: vec![None; tir.instructions.len()],
                 param_values: vec![None; tir.params.len()],
-                freed_at: vec![false; func_sidecar.free_schedule.len()],
-                free_by_after,
-                dead_drop_by_if,
-                pending_sweep,
-                loop_stack: Vec::new(),
+                freed_at,
+                #[cfg(debug_assertions)]
+                fire_marked: vec![false; func_sidecar.drops.len()],
+                freed_targets: std::collections::HashSet::new(),
+                fire_before_step,
+                fire_after_stmt,
+                fire_by_payload,
+                fire_at_term,
+                fire_at_block_start,
+                flow_blocks: Vec::new(),
+                flow_sealed: Vec::new(),
+                #[cfg(debug_assertions)]
+                flow_visit_state: Vec::new(),
+                flow_preds_emitted: Vec::new(),
+                block_prologue: Vec::new(),
+                match_join: Vec::new(),
+                match_fallthrough: Vec::new(),
+                bool_join: Vec::new(),
+                tail_candidate: Vec::new(),
+                if_arm_owner: Vec::new(),
+                if_records: HashMap::new(),
+                loop_records: HashMap::new(),
+                match_records: HashMap::new(),
+                has_sret,
+                cleanup_plan,
+                assignment_aliases,
+                fat_binding_storage: tir
+                    .params
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, param)| {
+                        Self::read_slot(&fat_param_locals, param.name)
+                            .map(|storage| (TirRef::param(index), storage))
+                    })
+                    .collect(),
                 fat_locals: fat_param_locals,
                 fat_locals_undo,
-                fat_mutated,
-                view_base_insts,
                 promo_slots,
                 promo_freed_at: vec![false; func_sidecar.promotion_frees.len()],
-                promo_free_by_after,
-                pending_promo_sweep,
                 view_locals: view_param_locals,
                 view_locals_undo,
+                aggregate_binding_storage: tir
+                    .params
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, param)| {
+                        Self::read_slot(&struct_param_locals, param.name)
+                            .map(|storage| (TirRef::param(index), storage))
+                    })
+                    .collect(),
                 struct_locals: struct_param_locals,
                 struct_locals_undo,
                 free_binding_names,
                 free_binding_param_names,
-                free_binding_of_insts,
-                binding_last_write,
-                all_free_targets: func_sidecar
-                    .free_schedule
-                    .iter()
-                    .map(|fp| fp.target)
-                    .collect(),
                 inout_ptrs,
                 sret_ptr,
                 sidecar: func_sidecar,
-                branch_stack: Vec::new(),
+                flow,
                 guard_msg_data: &mut self.guard_msg_data,
                 runtime_fns: &mut self.runtime_fns,
                 panic_blocks: Vec::new(),
@@ -1214,48 +1633,19 @@ impl<M: Module> Codegen<M> {
             // Hoist string and bytes literals while the entry block is
             // still the current block: one from-literal call per distinct
             // literal per function, dominating every use.
-            Self::hoist_str_literals(&mut builder, &mut ctx)?;
-
-            let body_term = Self::emit_body(&mut builder, &mut ctx, &tir.body_stmts(), true)?;
-
-            if body_term == Terminator::None {
-                if is_main {
-                    let zero = builder.ins().iconst(int_type, 0);
-                    Self::emit_return(&mut builder, &mut ctx, &[zero])?;
-                } else if has_sret || tir.return_type == pool.void() {
-                    Self::emit_return(&mut builder, &mut ctx, &[])?;
-                } else {
-                    let zero = builder.ins().iconst(int_type, 0);
-                    Self::emit_return(&mut builder, &mut ctx, &[zero])?;
-                }
+            if ctx.optional_optimizations {
+                Self::hoist_str_literals(&mut builder, &mut ctx)?;
             }
 
-            // No scheduled Free may be dropped without a
-            // same-target substitute having fired. The ownership pass
-            // deliberately anchors some temp frees twice — once at the
-            // consuming sub-expression and once at the enclosing Return
-            // (its return-epilogue pass) — because codegen cannot sweep
-            // after a terminator. Firing the Return-anchored Free leaves
-            // the consumer-anchored duplicate in `pending_sweep`; that
-            // is fine as long as the target was freed once. A pending
-            // entry with NO fired same-target counterpart means the
-            // allocation leaks.
-            //
-            // This assertion covers the LEAK direction only. Double-free
-            // is prevented upstream in the ownership scheduler (the
-            // covered/on_path dedup), so no target-uniqueness check is
-            // needed here.
-            debug_assert!(
-                ctx.pending_sweep.iter().all(|&idx| {
-                    let target = ctx.sidecar.free_schedule[idx].target;
-                    ctx.freed_at
-                        .iter()
-                        .enumerate()
-                        .any(|(fired, &b)| b && ctx.sidecar.free_schedule[fired].target == target)
-                }),
-                "frees anchored to unmaterialized instructions were dropped: {:?}",
-                ctx.pending_sweep
-            );
+            // The backend drives emission from the canonical Flow
+            // IR — one pre-created Cranelift block per Flow block, walked
+            // in DFS order from the entry, with per-step evaluation through the
+            // `eval_inst` family and terminator handlers dispatching the
+            // block's explicit `Terminator`. No TIR statement list is
+            // traversed to discover branches, scopes, or cleanup paths.
+            Self::emit_flow_body(&mut builder, &mut ctx, entry_block)?;
+
+            Self::assert_backend_invariants(&ctx);
 
             Self::emit_deferred_panic_blocks(&mut builder, &mut ctx)?;
             Self::emit_stack_cold_block(&mut builder, &mut ctx)?;
@@ -1274,7 +1664,16 @@ impl<M: Module> Codegen<M> {
 
         self.module
             .define_function(func_id, &mut self.ctx)
-            .map_err(|e| format!("Failed to define function '{}': {}", pool.str(tir.name), e))?;
+            .map_err(|e| {
+                // Debug aid: surface the offending CLIF with the
+                // verifier errors (define_function's Display drops them).
+                format!(
+                    "Failed to define function '{}': {}\n{}",
+                    pool.str(tir.name),
+                    e,
+                    self.ctx.func
+                )
+            })?;
 
         self.ctx.clear();
         Ok(ir_text)
@@ -1292,16 +1691,20 @@ impl<M: Module> Codegen<M> {
         // Iterate by index ascending: identical input must emit
         // identical instruction order (a HashMap's iteration order is
         // randomized per run).
-        for idx in 0..ctx.inout_ptrs.len() {
-            let Some((ptr, ty)) = ctx.inout_ptrs[idx] else {
+        for (index, param) in ctx.tir.params.iter().enumerate() {
+            let name = param.name;
+            let Some((ptr, ty)) = ctx.inout_ptrs[name.raw() as usize] else {
                 continue;
             };
-            let name = StringId::from_raw(u32::try_from(idx).expect("StringId index out of range"));
             if is_fat_type(ty, ctx.pool) {
                 // fat pointee: store all three fat-pointer fields.
-                let sl = Self::read_slot(&ctx.fat_locals, name).ok_or_else(|| {
-                    format!("inout fat '{}' has no FatLocals", ctx.pool.str(name))
-                })?;
+                let sl = ctx
+                    .fat_binding_storage
+                    .get(&TirRef::param(index))
+                    .copied()
+                    .ok_or_else(|| {
+                        format!("inout fat '{}' has no FatLocals", ctx.pool.str(name))
+                    })?;
                 let p = builder.use_var(sl.ptr);
                 let l = builder.use_var(sl.len);
                 let c = builder.use_var(sl.cap);
@@ -1310,7 +1713,7 @@ impl<M: Module> Codegen<M> {
                 builder.ins().store(MemFlagsData::trusted(), c, ptr, 16);
             } else {
                 // Scalar pointee: a single store at offset 0.
-                let var = Self::read_slot(&ctx.locals, name).ok_or_else(|| {
+                let var = ctx.scalar_param_storage[index].ok_or_else(|| {
                     format!(
                         "inout scalar '{}' has no local Variable",
                         ctx.pool.str(name)
@@ -1332,135 +1735,49 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         vals: &[Value],
     ) -> Result<(), String> {
+        if vals.len() != ctx.abi.signature.returns.len() {
+            return Err("return values disagree with the lowered function ABI".into());
+        }
         Self::emit_inout_writeback(builder, ctx)?;
         builder.ins().return_(vals);
         Ok(())
     }
 
-    /// Emit a top-level statement instruction. Returns the statement's
-    /// [`Terminator`] — anything other than `Terminator::None` ends the
-    /// current block, and the caller stops the body walk on the first
-    /// one. `in_tail_position` marks the last statement of a body/scope
-    /// in tail position: a call operand there may lower to
-    /// `return_call`. `Return` statements are tail contexts regardless
-    /// of position.
-    fn emit_stmt(
+    /// Emit one Flow IR STEP: a statement-level instruction, or the
+    /// materialization of a value instruction whose consumers come
+    /// later in the block (steps are in evaluation order, so operand
+    /// steps populate the value caches before their consumers).
+    /// Statement-level steps also fire the end-of-statement free
+    /// bookkeeping at resolved firing points — the Flow-block driver's
+    /// analogue of the old `emit_body` post-statement pass.
+    ///
+    /// Control instructions (if/while/for/match/return/break/continue)
+    /// are NEVER steps — they are Flow IR block terminators, dispatched
+    /// by `emit_flow_block` — so reaching one here is an invariant
+    /// violation.
+    fn emit_step(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
-        in_tail_position: bool,
-    ) -> Result<Terminator, String> {
+    ) -> Result<(), String> {
         let inst = ctx.tir.inst(r);
         match inst.tag {
             // Variable declaration — family dispatch lives in
             // decls.rs (keeps this dispatcher under the
             // small-function ratchet).
-            TirTag::VarDecl => Self::emit_var_decl(builder, ctx, r),
-            TirTag::Return => {
-                let operand = match inst.data {
-                    TirData::UnOp(o) => o,
-                    _ => unreachable!("Return must carry TirData::UnOp"),
-                };
-                if is_fat_type(ctx.tir.return_type, ctx.pool) {
-                    let sret = ctx.sret_ptr.expect("fat-returning fn must have sret_ptr");
-                    let repr = Self::eval_inst_fat(builder, ctx, operand)?;
-                    let (ptr, len, cap) = match repr {
-                        ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
-                            (ptr, len, cap)
-                        }
-                        _ => unreachable!("fat return must produce a fat ValueRepr"),
-                    };
-                    builder.ins().store(MemFlagsData::trusted(), ptr, sret, 0);
-                    builder.ins().store(MemFlagsData::trusted(), len, sret, 8);
-                    builder.ins().store(MemFlagsData::trusted(), cap, sret, 16);
-                    Self::emit_due_frees(builder, ctx, r)?;
-                    Self::emit_due_promo_frees(builder, ctx, r)?;
-                    Self::emit_return(builder, ctx, &[])?;
-                } else if is_struct_type(ctx.tir.return_type, ctx.pool) {
-                    return Self::emit_struct_return(builder, ctx, r, operand);
-                } else if is_enum_type(ctx.tir.return_type, ctx.pool) {
-                    return Self::emit_enum_return(builder, ctx, r, operand);
-                } else {
-                    // A Return whose operand is a call is a tail
-                    // context regardless of position. An eligible
-                    // self-call is emitted as `return_call` (firing the
-                    // statement's due frees first) and `emit_return`
-                    // below is skipped — eligibility proved no inout
-                    // write-back is due and no free is anchored on the
-                    // call or this Return.
-                    let tail_emitted = matches!(ctx.tir.inst(operand).tag, TirTag::Call)
-                        && Self::try_emit_tail_call(builder, ctx, operand, Some(r), r)?;
-                    if !tail_emitted {
-                        let val = Self::eval_inst(builder, ctx, operand)?;
-                        Self::emit_due_frees(builder, ctx, r)?;
-                        Self::emit_due_promo_frees(builder, ctx, r)?;
-                        Self::emit_return(builder, ctx, &[val])?;
-                    }
-                }
-                Ok(Terminator::Return)
-            }
-            TirTag::ReturnVoid => {
-                // Bare `return` in a void function. If this is
-                // `main`, the C ABI demands an int return value.
-                if ctx.is_main {
-                    let zero = builder.ins().iconst(ctx.int_type, 0);
-                    Self::emit_due_frees(builder, ctx, r)?;
-                    Self::emit_due_promo_frees(builder, ctx, r)?;
-                    Self::emit_return(builder, ctx, &[zero])?;
-                } else {
-                    Self::emit_due_frees(builder, ctx, r)?;
-                    Self::emit_due_promo_frees(builder, ctx, r)?;
-                    Self::emit_return(builder, ctx, &[])?;
-                }
-                Ok(Terminator::Return)
+            TirTag::VarDecl => {
+                Self::emit_var_decl(builder, ctx, r)?;
             }
             TirTag::ExprStmt => {
                 let operand = match inst.data {
                     TirData::UnOp(o) => o,
                     _ => unreachable!("ExprStmt must carry TirData::UnOp"),
                 };
-                // The last statement of a body/scope in tail
-                // position whose operand is a call may be an eligible
-                // self-tail-call (e.g. the eager_destruction benchmark's
-                // trailing `recursive(x - 1)`); emit it as `return_call`
-                // and end the block. Ineligible calls fall through to
-                // the plain evaluation below.
-                if in_tail_position
-                    && matches!(ctx.tir.inst(operand).tag, TirTag::Call)
-                    && Self::try_emit_tail_call(builder, ctx, operand, None, r)?
-                {
-                    return Ok(Terminator::Return);
-                }
-                // Fat-typed operands (bare formatter calls, str(view),
-                // user str/bytes-returning calls) go through the fat entry
-                // point, which caches the triple for the scheduled temp
-                // Free; view-typed operands (bare slices) go through the
-                // view entry point; the scalar path rejects both.
-                let operand_ty = ctx.tir.inst(operand).ty;
-                if is_fat_type(operand_ty, ctx.pool) {
-                    let _ = Self::eval_inst_fat(builder, ctx, operand)?;
-                } else if ctx.pool.is_view(operand_ty) {
-                    let _ = Self::eval_inst_view(builder, ctx, operand)?;
-                } else if matches!(
-                    ctx.pool.kind(operand_ty),
-                    TypeKind::Struct | TypeKind::AnonStruct
-                ) {
-                    // Bare struct-valued statement (e.g. a discarded
-                    // struct-returning call): materialize so the call
-                    // is emitted; scheduled temp Frees handle the drop.
-                    let _ = Self::eval_inst_struct(builder, ctx, operand)?;
-                } else if matches!(ctx.pool.kind(operand_ty), TypeKind::Enum) {
-                    // Bare enum-valued statement (e.g. a discarded
-                    // enum-returning call): materialize so the call is
-                    // emitted; scheduled temp Frees handle the drop.
-                    let _ = Self::eval_inst_enum(builder, ctx, operand)?;
-                } else {
-                    let _ = Self::eval_inst(builder, ctx, operand)?;
-                }
-                Ok(Terminator::None)
+                Self::emit_expr_stmt_operand(builder, ctx, r, operand, false)?;
             }
-            TirTag::IfStmt => Self::generate_if_stmt(builder, ctx, r, in_tail_position),
-            TirTag::Assign => Self::emit_assign(builder, ctx, r),
+            TirTag::Assign => {
+                Self::emit_assign(builder, ctx, r)?;
+            }
             TirTag::CompoundAssign => {
                 let view = ctx.tir.compound_assign_view(r);
                 let rhs = Self::eval_inst(builder, ctx, view.value)?;
@@ -1482,56 +1799,129 @@ impl<M: Module> Codegen<M> {
 
                 Self::kill_fact(ctx, view.name);
                 builder.def_var(var, result);
-                Ok(Terminator::None)
-            }
-            TirTag::WhileLoop => Self::generate_while_loop(builder, ctx, r),
-            TirTag::ForRange => Self::generate_for_range(builder, ctx, r),
-            TirTag::Break => {
-                debug_assert!(
-                    ctx.loop_stack.last().is_some(),
-                    "break outside loop should be rejected by sema"
-                );
-                // Loop-exit Frees scheduled by the ownership pass are
-                // anchored on this Break instruction and must fire
-                // *before* the Cranelift `jump` terminator: the jump
-                // seals the current block, and the post-stmt sweep in
-                // `emit_body` skips Free emission on terminating
-                // statements. Without this call the Frees would
-                // simply never be emitted.
-                Self::emit_due_frees(builder, ctx, r)?;
-                Self::emit_due_promo_frees(builder, ctx, r)?;
-                let Some(loop_ctx) = ctx.loop_stack.last() else {
-                    return Err("codegen reached break outside loop".to_string());
-                };
-                builder.ins().jump(loop_ctx.exit_block, &[]);
-                Ok(Terminator::Break)
-            }
-            TirTag::Continue => {
-                debug_assert!(
-                    ctx.loop_stack.last().is_some(),
-                    "continue outside loop should be rejected by sema"
-                );
-                // See Break above for why the Frees must be emitted
-                // here instead of via the post-stmt sweep.
-                Self::emit_due_frees(builder, ctx, r)?;
-                Self::emit_due_promo_frees(builder, ctx, r)?;
-                let Some(loop_ctx) = ctx.loop_stack.last() else {
-                    return Err("codegen reached continue outside loop".to_string());
-                };
-                builder.ins().jump(loop_ctx.continue_target, &[]);
-                Ok(Terminator::Continue)
             }
             // M9 struct field assignment — lowered in codegen/structs.rs.
-            TirTag::FieldAssign => Self::emit_field_assign(builder, ctx, r),
-            TirTag::CompoundFieldAssign => Self::emit_compound_field_assign(builder, ctx, r),
+            TirTag::FieldAssign => {
+                Self::emit_field_assign(builder, ctx, r)?;
+            }
+            TirTag::CompoundFieldAssign => {
+                Self::emit_compound_field_assign(builder, ctx, r)?;
+            }
             // M10 destructuring — lowered in codegen/structs.rs.
-            TirTag::Destructure => Self::emit_destructure(builder, ctx, r),
-            other => Err(format!(
-                "emit_stmt: instruction at %{} is not a statement (tag={:?})",
-                r.index(),
-                other
-            )),
+            TirTag::Destructure => {
+                Self::emit_destructure(builder, ctx, r)?;
+            }
+            TirTag::Return
+            | TirTag::ReturnVoid
+            | TirTag::IfStmt
+            | TirTag::WhileLoop
+            | TirTag::ForRange
+            | TirTag::Break
+            | TirTag::Continue
+            | TirTag::Match => {
+                unreachable!(
+                    "emit_step: control instruction at %{} is a Flow terminator, never a step",
+                    r.index()
+                );
+            }
+            _ => {
+                // Value step: materialize it (memoized — a consumer
+                // later in the block reads the cached repr). Fat/view/
+                // struct/enum-typed values go through their family
+                // entry points, exactly like the old operand-driven
+                // evaluation did.
+                let ty = inst.ty;
+                if is_fat_type(ty, ctx.pool)
+                    && structs::writes_out_slot_ids(ctx.tir, &ctx.name_ids, r)
+                {
+                    // Slot-out producers (concat, producer builtins,
+                    // fat user calls) must NOT be materialized
+                    // eagerly: the VarDecl/Assign naming the binding
+                    // passes its home slot through
+                    // `eval_inst_fat_slot`, and an eager temp-slot
+                    // emission here would cache a repr that leaves
+                    // the home unwritten. The consumer's evaluation
+                    // materializes the producer instead — the same
+                    // lazy order as the old operand-driven emitter.
+                } else if is_fat_type(ty, ctx.pool) {
+                    let _ = Self::eval_inst_fat(builder, ctx, r)?;
+                } else if ctx.pool.is_view(ty) {
+                    let _ = Self::eval_inst_view(builder, ctx, r)?;
+                } else if matches!(ctx.pool.kind(ty), TypeKind::Struct | TypeKind::AnonStruct) {
+                    let _ = Self::eval_inst_struct(builder, ctx, r)?;
+                } else if matches!(ctx.pool.kind(ty), TypeKind::Enum) {
+                    let _ = Self::eval_inst_enum(builder, ctx, r)?;
+                } else {
+                    let _ = Self::eval_inst(builder, ctx, r)?;
+                }
+            }
         }
+        if is_statement_step(inst.tag) {
+            // position-mechanical: fire this statement's drop bucket — the AfterStep
+            // drops whose anchor step lives in this statement (the
+            // anchor's step index maps here at fire-map build time).
+            // Firing lands each free after the statement's consumer, the
+            // only sound position for a last-use free, including promotion releases.
+            Self::fire_after_statement(builder, ctx, r)?;
+        }
+        Ok(())
+    }
+
+    /// Evaluate an `ExprStmt` operand: the statement's value is
+    /// discarded, but the call's side effects must be emitted.
+    /// `in_tail_position` marks the last statement of a tail-allowed
+    /// body (function fall-off or if-cascade arm): a call operand there
+    /// may lower to `return_call`.
+    ///
+    /// The tail-attempt blocks (tail-candidate blocks) defer their
+    /// operand subtree to this function so the eligibility cache state
+    /// matches the old recursive emitter exactly.
+    fn emit_expr_stmt_operand(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        stmt: TirRef,
+        operand: TirRef,
+        in_tail_position: bool,
+    ) -> Result<bool, String> {
+        // The last statement of a body/scope in tail position whose
+        // operand is a call may be an eligible self-tail-call (e.g.
+        // the eager_destruction benchmark's trailing `recursive(x - 1)`);
+        // emit it as `return_call` and report the termination so the
+        // driver skips the block's terminator. Ineligible calls fall
+        // through to the plain evaluation below.
+        if in_tail_position
+            && matches!(ctx.tir.inst(operand).tag, TirTag::Call)
+            && Self::try_emit_tail_call(builder, ctx, operand, None, stmt)?
+        {
+            return Ok(true);
+        }
+        // Fat-typed operands (bare formatter calls, str(view),
+        // user str/bytes-returning calls) go through the fat entry
+        // point, which caches the triple for the scheduled temp Free;
+        // view-typed operands (bare slices) go through the view entry
+        // point; the scalar path rejects both.
+        let operand_ty = ctx.tir.inst(operand).ty;
+        if is_fat_type(operand_ty, ctx.pool) {
+            let _ = Self::eval_inst_fat(builder, ctx, operand)?;
+        } else if ctx.pool.is_view(operand_ty) {
+            let _ = Self::eval_inst_view(builder, ctx, operand)?;
+        } else if matches!(
+            ctx.pool.kind(operand_ty),
+            TypeKind::Struct | TypeKind::AnonStruct
+        ) {
+            // Bare struct-valued statement (e.g. a discarded
+            // struct-returning call): materialize so the call is
+            // emitted; scheduled temp Frees handle the drop.
+            let _ = Self::eval_inst_struct(builder, ctx, operand)?;
+        } else if matches!(ctx.pool.kind(operand_ty), TypeKind::Enum) {
+            // Bare enum-valued statement (e.g. a discarded
+            // enum-returning call): materialize so the call is
+            // emitted; scheduled temp Frees handle the drop.
+            let _ = Self::eval_inst_enum(builder, ctx, operand)?;
+        } else {
+            let _ = Self::eval_inst(builder, ctx, operand)?;
+        }
+        Ok(false)
     }
 }
 
