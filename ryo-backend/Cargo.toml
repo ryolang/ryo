@@ -17,6 +17,8 @@ tar = { workspace = true }
 xz2 = { workspace = true }
 zip = { workspace = true }
 dirs = { workspace = true }
+fs2 = "0.4"
+sha2 = { workspace = true }
 
 [build-dependencies]
 sha2 = { workspace = true }

@@ -1,11 +1,31 @@
+use fs2::FileExt;
 use ryo_core::errors::CompilerError;
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use xz2::read::XzDecoder;
 
 const ZIG_VERSION: &str = "0.16.0";
 
 pub fn ensure_zig() -> Result<PathBuf, CompilerError> {
+    let dir = toolchain_dir()?;
+    fs::create_dir_all(&dir).map_err(|e| {
+        CompilerError::ToolchainError(format!("Failed to create toolchain directory: {e}"))
+    })?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(install_lock_path(&dir))
+        .map_err(|e| {
+            CompilerError::ToolchainError(format!("Failed to open Zig install lock: {e}"))
+        })?;
+    lock.lock_exclusive().map_err(|e| {
+        CompilerError::ToolchainError(format!("Failed to lock Zig installation: {e}"))
+    })?;
+
     let zig_path = zig_binary_path()?;
     if zig_path.exists() {
         return Ok(zig_path);
@@ -33,6 +53,10 @@ fn zig_binary_path() -> Result<PathBuf, CompilerError> {
     Ok(base
         .join(format!("zig-{ZIG_VERSION}"))
         .join(format!("zig{}", std::env::consts::EXE_SUFFIX)))
+}
+
+fn install_lock_path(toolchain_dir: &Path) -> PathBuf {
+    toolchain_dir.join(format!(".zig-{ZIG_VERSION}.install.lock"))
 }
 
 fn toolchain_dir() -> Result<PathBuf, CompilerError> {
@@ -64,6 +88,75 @@ fn archive_ext(target: &str) -> &'static str {
     }
 }
 
+fn archive_sha256(target: &str) -> Option<&'static str> {
+    // Pinned from Zig's official release index:
+    // https://ziglang.org/download/index.json
+    match target {
+        "aarch64-macos" => Some("b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489"),
+        "x86_64-linux" => Some("70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"),
+        "aarch64-linux" => Some("ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17"),
+        "x86_64-windows" => {
+            Some("68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e")
+        }
+        _ => None,
+    }
+}
+
+fn sha256_file(path: &Path) -> Result<String, CompilerError> {
+    let mut file = fs::File::open(path).map_err(|e| {
+        CompilerError::ToolchainError(format!("Failed to open downloaded Zig archive: {e}"))
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(|e| {
+            CompilerError::ToolchainError(format!("Failed to read downloaded Zig archive: {e}"))
+        })?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let mut digest = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        use std::fmt::Write as _;
+        write!(&mut digest, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(digest)
+}
+
+fn verify_archive(path: &Path, target: &str) -> Result<(), CompilerError> {
+    let expected = archive_sha256(target).ok_or_else(|| {
+        CompilerError::ToolchainError(format!("No trusted Zig checksum for target {target}"))
+    })?;
+    let actual = sha256_file(path)?;
+    verify_digest(&actual, expected).map_err(|_| {
+        CompilerError::ToolchainError(format!(
+            "Zig archive checksum mismatch for {target}: expected {expected}, got {actual}"
+        ))
+    })
+}
+
+fn verify_digest(actual: &str, expected: &str) -> Result<(), CompilerError> {
+    if actual != expected {
+        return Err(CompilerError::ToolchainError(format!(
+            "SHA-256 mismatch: expected {expected}, got {actual}"
+        )));
+    }
+    Ok(())
+}
+
+fn install_staged_toolchain(source: &Path, desired_path: &Path) -> Result<(), CompilerError> {
+    if desired_path.exists() {
+        return Err(CompilerError::ToolchainError(format!(
+            "Zig installation directory already exists: {}",
+            desired_path.display()
+        )));
+    }
+    fs::rename(source, desired_path)
+        .map_err(|e| CompilerError::ToolchainError(format!("Failed to install Zig: {e}")))
+}
+
 fn download_zig() -> Result<(), CompilerError> {
     let target = zig_target()?;
     let ext = archive_ext(target);
@@ -78,10 +171,22 @@ fn download_zig() -> Result<(), CompilerError> {
     let temp_path = dest.join(&temp_name);
     let desired_path = dest.join(&desired_name);
 
-    fs::remove_dir_all(&temp_path).ok();
-
     fs::create_dir_all(&dest).map_err(|e| {
         CompilerError::ToolchainError(format!("Failed to create toolchain directory: {e}"))
+    })?;
+
+    if desired_path.exists() {
+        return Err(CompilerError::ToolchainError(format!(
+            "Zig installation directory exists without a usable binary: {}",
+            desired_path.display()
+        )));
+    }
+
+    // A leftover staging directory can only come from an interrupted install;
+    // the process-wide lock ensures no other installer is using it now.
+    fs::remove_dir_all(&temp_path).ok();
+    fs::create_dir_all(&temp_path).map_err(|e| {
+        CompilerError::ToolchainError(format!("Failed to create temp directory: {e}"))
     })?;
 
     eprintln!("Zig toolchain not found. Downloading zig {ZIG_VERSION} for {target}...");
@@ -90,45 +195,28 @@ fn download_zig() -> Result<(), CompilerError> {
         .call()
         .map_err(|e| CompilerError::ToolchainError(format!("Failed to download Zig: {e}")))?;
 
-    eprintln!("Extracting...");
-
-    // tar.xz streams response → XZ → tar (no large buffers). The zip
-    // path stages the download to a temp file (`ZipArchive` needs
-    // `Seek`) and deletes it right after extraction: the fallback
-    // below renames the whole temp dir when the archive has no inner
-    // zig-{target}-{version}/, which would otherwise carry the zip
-    // into the toolchain dir.
-    fs::create_dir_all(&temp_path).map_err(|e| {
-        CompilerError::ToolchainError(format!("Failed to create temp directory: {e}"))
+    let archive_path = temp_path.join(format!("zig-download.{ext}"));
+    let mut reader = response.into_body().into_reader();
+    let mut archive_file = fs::File::create(&archive_path)
+        .map_err(|e| CompilerError::ToolchainError(format!("Failed to stage Zig archive: {e}")))?;
+    std::io::copy(&mut reader, &mut archive_file)
+        .map_err(|e| CompilerError::ToolchainError(format!("Failed to download Zig: {e}")))?;
+    archive_file.flush().map_err(|e| {
+        CompilerError::ToolchainError(format!("Failed to flush downloaded Zig archive: {e}"))
     })?;
+    drop(archive_file);
+    verify_archive(&archive_path, target)?;
 
+    eprintln!("Extracting...");
     if ext == "zip" {
-        let zip_path = temp_path.join("zig-download.zip");
-        let mut reader = response.into_body().into_reader();
-        let mut file = fs::File::create(&zip_path).map_err(|e| {
-            fs::remove_dir_all(&temp_path).ok();
-            CompilerError::ToolchainError(format!("Failed to stage zip download: {e}"))
-        })?;
-        std::io::copy(&mut reader, &mut file).map_err(|e| {
-            fs::remove_dir_all(&temp_path).ok();
-            CompilerError::ToolchainError(format!("Failed to download Zig: {e}"))
-        })?;
-        drop(file);
-        extract_zip(&zip_path, &temp_path).inspect_err(|_| {
-            fs::remove_dir_all(&temp_path).ok();
-        })?;
-        // Deletion must succeed before the fallback rename below can
-        // run: a leftover staged zip would be carried into the
-        // toolchain dir, so a removal failure aborts the install.
-        fs::remove_file(&zip_path).map_err(|e| {
-            fs::remove_dir_all(&temp_path).ok();
-            CompilerError::ToolchainError(format!("Failed to remove staged zip: {e}"))
-        })?;
+        extract_zip(&archive_path, &temp_path)?;
     } else {
-        let decompressor = XzDecoder::new(response.into_body().into_reader());
+        let file = fs::File::open(&archive_path).map_err(|e| {
+            CompilerError::ToolchainError(format!("Failed to open Zig archive: {e}"))
+        })?;
+        let decompressor = XzDecoder::new(file);
         let mut archive = tar::Archive::new(decompressor);
         archive.unpack(&temp_path).map_err(|e| {
-            fs::remove_dir_all(&temp_path).ok();
             CompilerError::ToolchainError(format!("Failed to extract Zig archive: {e}"))
         })?;
     }
@@ -141,12 +229,11 @@ fn download_zig() -> Result<(), CompilerError> {
         temp_path.clone()
     };
 
-    fs::remove_dir_all(&desired_path).ok();
-
-    fs::rename(&source, &desired_path).map_err(|e| {
-        fs::remove_dir_all(&temp_path).ok();
-        CompilerError::ToolchainError(format!("Failed to install Zig: {e}"))
+    fs::remove_file(&archive_path).map_err(|e| {
+        CompilerError::ToolchainError(format!("Failed to remove staged Zig archive: {e}"))
     })?;
+
+    install_staged_toolchain(&source, &desired_path)?;
 
     fs::remove_dir_all(&temp_path).ok();
 
@@ -225,6 +312,71 @@ mod tests {
         assert_eq!(archive_ext("aarch64-macos"), "tar.xz");
         assert_eq!(archive_ext("x86_64-linux"), "tar.xz");
         assert_eq!(archive_ext("aarch64-linux"), "tar.xz");
+    }
+
+    #[test]
+    fn test_official_archive_checksums_cover_supported_targets() {
+        assert_eq!(
+            archive_sha256("aarch64-macos"),
+            Some("b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489")
+        );
+        assert_eq!(
+            archive_sha256("x86_64-linux"),
+            Some("70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00")
+        );
+        assert_eq!(
+            archive_sha256("aarch64-linux"),
+            Some("ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17")
+        );
+        assert_eq!(
+            archive_sha256("x86_64-windows"),
+            Some("68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e")
+        );
+        assert_eq!(archive_sha256("unsupported-target"), None);
+    }
+
+    #[test]
+    fn test_verify_sha256_accepts_matching_archive_and_rejects_mismatch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let archive = dir.path().join("archive");
+        fs::write(&archive, b"abc").unwrap();
+
+        assert!(
+            verify_digest(
+                &sha256_file(&archive).unwrap(),
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            )
+            .is_ok()
+        );
+        assert!(verify_digest(&sha256_file(&archive).unwrap(), "wrong checksum").is_err());
+    }
+
+    #[test]
+    fn test_install_staged_toolchain_preserves_existing_install() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source = dir.path().join("staged");
+        let desired = dir.path().join("zig-0.16.0");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("zig"), b"new binary").unwrap();
+        fs::create_dir_all(&desired).unwrap();
+        fs::write(desired.join("zig"), b"active binary").unwrap();
+
+        assert!(install_staged_toolchain(&source, &desired).is_err());
+        assert_eq!(fs::read(desired.join("zig")).unwrap(), b"active binary");
+        assert!(source.exists());
+    }
+
+    #[test]
+    fn test_install_staged_toolchain_publishes_new_install() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source = dir.path().join("staged");
+        let desired = dir.path().join("zig-0.16.0");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("zig"), b"new binary").unwrap();
+
+        install_staged_toolchain(&source, &desired).unwrap();
+        assert_eq!(fs::read(desired.join("zig")).unwrap(), b"new binary");
+        assert!(!source.exists());
     }
 
     #[test]
