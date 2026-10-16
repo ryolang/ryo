@@ -182,17 +182,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-073 — Zig download has no integrity verification and races concurrent installs
-
-**Severity:** Correctness / Hygiene
-**Area:** linker-toolchain
-
-**Files:** `ryo-backend/src/toolchain.rs` (`download_zig` :54-112)
-**Summary:** The tarball is streamed HTTPS → XZ → tar with no sha256/signature check even though ziglang.org publishes shasums and `.minisig` files — a supply-chain gap. The fixed temp dir `.zig-{v}-downloading` (:62) lets two concurrent first-runs delete each other's in-flight download (`remove_dir_all` at :67), and `remove_dir_all(&desired_path)` (:101) can delete a working toolchain out from under another running compile.
-**Resolution:** Hardcode the three pinned sha256s (one per supported target) and verify before extraction; use a pid-suffixed temp dir (matching `runtime_lib.rs`'s discipline) and atomic rename; never delete `desired_path` until the replacement is staged.
-
----
-
 ### I-076 — `str` ABI is hardcoded to 64-bit layout
 
 **Severity:** Correctness / Hygiene
@@ -646,19 +635,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-202 — `io_read_line` discards data in read buffer, causing input loss when lines are shorter than read chunk size
-
-**Severity:** Correctness / Hygiene
-**Area:** runtime
-
-**Files:** `runtime/src/lib.rs` (`read_line_from`, `ryo_read_line`)
-
-**Summary:** The M9.2 `read_line_from` function reads stdin in 128-byte chunks. When it finds the first `\n` in a chunk, it returns only the bytes up to that newline and **frees the entire buffer**, discarding any remaining bytes in the chunk. Crucially, the file position has already advanced by the full chunk size (not the line length), so subsequent `io_read_line()` calls skip the discarded data. Example: piping a file where lines 1-3 fit in the first 128-byte read will return line 1, then jump to the byte position after the chunk, skipping lines 2-3. Demonstrated by `cat README.md | cargo run -- run examples/echo.ryo` which loses the second and third lines of the file. Related: the oracle example documents this as "piping all answers at once starves it."
-
-**Resolution:** Fix in **Milestone 13.6** (buffering work). Preserve the unread portion of the chunk between calls by maintaining buffer state — the proper fix, and the one that also enables real buffering. (The minimal alternative, seeking the file position back after extracting the line, is not viable for piped stdin: pipes are not seekable.) After this lands, remove the workaround note from `examples/oracle.ryo`.
-
----
-
 ### I-208 — Lowercase type names half-work: enum defines and unit-accesses fine, payload construction redirects
 
 **Severity:** Correctness / Hygiene
@@ -783,4 +759,4 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
 
-<!-- issue-id high-water: 234 -->
+<!-- issue-id high-water: 240 -->
