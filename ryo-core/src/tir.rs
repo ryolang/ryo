@@ -2088,7 +2088,7 @@ impl Tir {
                 // `stmt` contains the target. Descend along the right arm.
                 match self.inst(stmt).tag {
                     TirTag::IfStmt => {
-                        let view = self.if_stmt_view(stmt);
+                        let view = self.if_stmt_view_borrowed(stmt);
                         set.insert(stmt);
                         self.collect_reachable(view.cond, set);
                         // Locate the arm containing `target`; only that
@@ -2098,34 +2098,18 @@ impl Tir {
                         if view
                             .then_stmts
                             .iter()
-                            .any(|&s| self.contains_reachable(s, target))
+                            .any(|s| self.contains_reachable(s, target))
                         {
-                            return self.collect_jump_path_iter(
-                                view.then_stmts.iter().copied(),
-                                target,
-                                set,
-                            );
+                            return self.collect_jump_path_iter(view.then_stmts, target, set);
                         }
-                        for elif in &view.elif_branches {
+                        for elif in view.elif_branches.iter() {
                             self.collect_reachable(elif.cond, set);
-                            if elif
-                                .body
-                                .iter()
-                                .any(|&s| self.contains_reachable(s, target))
-                            {
-                                return self.collect_jump_path_iter(
-                                    elif.body.iter().copied(),
-                                    target,
-                                    set,
-                                );
+                            if elif.body.iter().any(|s| self.contains_reachable(s, target)) {
+                                return self.collect_jump_path_iter(elif.body, target, set);
                             }
                         }
-                        if let Some(else_stmts) = &view.else_stmts {
-                            return self.collect_jump_path_iter(
-                                else_stmts.iter().copied(),
-                                target,
-                                set,
-                            );
+                        if let Some(else_stmts) = view.else_stmts {
+                            return self.collect_jump_path_iter(else_stmts, target, set);
                         }
                         return true;
                     }
