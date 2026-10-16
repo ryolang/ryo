@@ -1045,36 +1045,11 @@ fn analyze_function(
                     }
                     _ => lu,
                 }
-            } else if own
-                .loop_nesting
-                .ancestors_innermost_first(cand.stmt)
-                .next()
-                .is_some()
-            {
-                // Bound but never read, with the slice inside a loop.
-                // The liveness pre-pass's first-wins back-edge merge
-                // attributes in-loop reads of a loop-rebound view to
-                // the PRE-loop slice inst, leaving the in-loop slice
-                // with no recorded last use. Anchoring at the rebind
-                // statement fires every iteration, freeing the buffer
-                // the just-rebound view still points into. Anchoring
-                // at the enclosing loop's exit is equally unsound: the
-                // binding's slot holds the in-loop slice's final
-                // buffer, which a read after the loop still reaches —
-                // the loop-exit free releases it first (UAF). Anchor
-                // at the end of the function body instead, the same
-                // anchor the Owner::Param never-read path uses: views
-                // cannot escape the function, free-before-overwrite at
-                // the promotion site releases intermediate iterations,
-                // the entry-zeroed flag covers zero iterations, and
-                // the return-epilogue anchors below cover early exits.
-                match body_stmts.last().copied() {
-                    Some(last) => last,
-                    None => continue,
-                }
             } else {
-                // Bound but never read, outside any loop: free right
-                // after the statement that created the slice.
+                // No possible binding read reaches this view, so its
+                // promotion buffer can be freed at creation. Loop
+                // back-edges and zero-iteration exits are included in
+                // the view-liveness fixed point.
                 cand.stmt
             }
         } else {

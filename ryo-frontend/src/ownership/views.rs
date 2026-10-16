@@ -1,8 +1,8 @@
 //! M8.4 slice projections and view liveness — split from `mod.rs`.
 //!
 //! The liveness pre-pass (`collect_view_liveness`) simulates the walk's
-//! view-binding discipline (snapshot per branch arm, first-wins merge;
-//! entry-first-wins at loop back-edges) over Flow IR blocks and records
+//! view-binding discipline (snapshot per branch arm, union at joins;
+//! fixed-point merge at loop back-edges) over Flow IR blocks and records
 //! each bound view's last read. Per-arm read maps are keyed by the
 //! arm's Flow IR entry block as an [`Analysis`] tri-state: a
 //! missing/`Unavailable` entry never refines (unavailable information
@@ -359,19 +359,18 @@ pub(crate) struct ViewLiveness {
 /// map per arm.
 #[derive(Default)]
 pub(crate) struct Bindings {
-    map: HashMap<StringId, TirRef>,
-    log: Vec<(StringId, Option<TirRef>, Option<TirRef>)>,
+    map: HashMap<StringId, HashSet<Option<TirRef>>>,
+    log: Vec<(
+        StringId,
+        Option<HashSet<Option<TirRef>>>,
+        Option<HashSet<Option<TirRef>>>,
+    )>,
 }
 
 impl Bindings {
-    fn insert(&mut self, k: StringId, v: TirRef) {
-        let old = self.map.insert(k, v);
-        self.log.push((k, old, Some(v)));
-    }
-
-    fn remove(&mut self, k: StringId) {
-        let old = self.map.remove(&k);
-        self.log.push((k, old, None));
+    fn insert_all(&mut self, k: StringId, values: HashSet<Option<TirRef>>) {
+        let old = self.map.insert(k, values.clone());
+        self.log.push((k, old, Some(values)));
     }
 
     fn mark(&self) -> usize {
@@ -379,17 +378,10 @@ impl Bindings {
     }
 
     /// Restore the map to `mark` and return the segment's write set.
-    fn rollback(&mut self, mark: usize) -> HashMap<StringId, TirRef> {
-        let mut writes: HashMap<StringId, TirRef> = HashMap::new();
-        for &(k, _, new) in &self.log[mark..] {
-            match new {
-                Some(v) => {
-                    writes.insert(k, v);
-                }
-                None => {
-                    writes.remove(&k);
-                }
-            }
+    fn rollback(&mut self, mark: usize) -> HashMap<StringId, Option<HashSet<Option<TirRef>>>> {
+        let mut writes: HashMap<StringId, Option<HashSet<Option<TirRef>>>> = HashMap::new();
+        for (k, _, new) in &self.log[mark..] {
+            writes.insert(*k, new.clone());
         }
         while self.log.len() > mark {
             let (k, old, _) = self.log.pop().expect("log.len() > mark");
@@ -568,44 +560,83 @@ fn liveness_step(
     if inst.tag == TirTag::Var
         && pool.is_view(inst.ty)
         && let TirData::Var(name) = inst.data
-        && let Some(&view_inst) = bindings.map.get(&name)
+        && let Some(view_insts) = bindings.map.get(&name)
     {
         // Latest DOCUMENT-order read wins — emission order, not visit
         // order: dead continuation blocks walk late but emitted in
         // place, and must not displace a live last use.
         let order = flow.order_of(r).unwrap_or(0);
-        let later = match reads.get(&view_inst) {
-            Some(&cur) => flow.order_of(cur).unwrap_or(0) < order,
-            None => true,
-        };
-        if later {
-            reads.insert(view_inst, r);
+        for &view_inst in view_insts.iter().flatten() {
+            let later = match reads.get(&view_inst) {
+                Some(&cur) => flow.order_of(cur).unwrap_or(0) < order,
+                None => true,
+            };
+            if later {
+                reads.insert(view_inst, r);
+            }
         }
     }
     match inst.tag {
         TirTag::VarDecl => {
             let view = tir.var_decl_view(r);
             if pool.is_view(inst.ty)
-                && let Some(target) = view_binding_target(tir, &bindings.map, view.initializer)
+                && let Some(targets) = view_binding_targets(tir, &bindings.map, view.initializer)
             {
-                bindings.insert(view.name, target);
+                bindings.insert_all(view.name, targets);
             }
         }
         TirTag::Assign => {
             let view = tir.assign_view(r);
             if pool.is_view(inst.ty) {
-                match view_binding_target(tir, &bindings.map, view.value) {
-                    Some(target) => {
-                        bindings.insert(view.name, target);
+                match view_binding_targets(tir, &bindings.map, view.value) {
+                    Some(targets) => {
+                        bindings.insert_all(view.name, targets);
                     }
                     None => {
-                        bindings.remove(view.name);
+                        bindings.insert_all(view.name, HashSet::from([None]));
                     }
                 }
             }
         }
         _ => {}
     }
+}
+
+fn record_arm_reads(
+    arm_last_reads: &mut HashMap<BlockId, Analysis<HashMap<TirRef, TirRef>>>,
+    arm: BlockId,
+    reads: HashMap<TirRef, TirRef>,
+    flow: &Flow,
+) {
+    let current = arm_last_reads.remove(&arm);
+    let mut merged = match current {
+        Some(Analysis::Present(reads)) => reads,
+        _ => HashMap::new(),
+    };
+    merge_reads(&mut merged, reads, flow);
+    arm_last_reads.insert(arm, Analysis::Present(merged));
+}
+
+fn merge_reads(target: &mut HashMap<TirRef, TirRef>, reads: HashMap<TirRef, TirRef>, flow: &Flow) {
+    for (view, read) in reads {
+        let later = target.get(&view).is_none_or(|&current| {
+            flow.order_of(current).unwrap_or(0) < flow.order_of(read).unwrap_or(0)
+        });
+        if later {
+            target.insert(view, read);
+        }
+    }
+}
+
+fn union_binding_states(
+    base: &HashMap<StringId, HashSet<Option<TirRef>>>,
+    additional: &HashMap<StringId, HashSet<Option<TirRef>>>,
+) -> HashMap<StringId, HashSet<Option<TirRef>>> {
+    let mut merged = base.clone();
+    for (&name, targets) in additional {
+        merged.entry(name).or_default().extend(targets);
+    }
+    merged
 }
 
 /// If-cascade liveness: the mark/rollback arm discipline of the old
@@ -646,15 +677,12 @@ fn liveness_if(
         .collect();
 
     let mark = lw.bindings.mark();
-    let mut arm_maps: Vec<HashMap<StringId, TirRef>> = Vec::new();
+    let mut arm_maps: Vec<HashMap<StringId, Option<HashSet<Option<TirRef>>>>> = Vec::new();
     // Then arm.
     let mut then_reads = HashMap::new();
     lw.walk_list(tir, flow, pool, &arm_regions[0], epoch, &mut then_reads);
-    for (k, v) in &then_reads {
-        reads.insert(*k, *v);
-    }
-    lw.arm_last_reads
-        .insert(arm_entries[0], Analysis::Present(then_reads));
+    merge_reads(reads, then_reads.clone(), flow);
+    record_arm_reads(&mut lw.arm_last_reads, arm_entries[0], then_reads, flow);
     arm_maps.push(lw.bindings.rollback(mark));
     // Elif arms: cond chain first (enclosing scope), then the body.
     let Terminator::Branch { else_, .. } = *flow.term(fb) else {
@@ -669,11 +697,8 @@ fn liveness_if(
         lw.walk_list(tir, flow, pool, &chain, epoch, reads);
         let mut body_reads = HashMap::new();
         lw.walk_list(tir, flow, pool, &arm_regions[1 + e], epoch, &mut body_reads);
-        for (k, v) in &body_reads {
-            reads.insert(*k, *v);
-        }
-        lw.arm_last_reads
-            .insert(arm_entries[1 + e], Analysis::Present(body_reads));
+        merge_reads(reads, body_reads.clone(), flow);
+        record_arm_reads(&mut lw.arm_last_reads, arm_entries[1 + e], body_reads, flow);
         arm_maps.push(lw.bindings.rollback(mark));
         let Terminator::Branch { else_, .. } = *flow.term(holder) else {
             unreachable!("recorded elif block holds a Branch")
@@ -685,21 +710,26 @@ fn liveness_if(
     let last = arm_regions.len() - 1;
     let mut else_reads = HashMap::new();
     lw.walk_list(tir, flow, pool, &arm_regions[last], epoch, &mut else_reads);
-    for (k, v) in &else_reads {
-        reads.insert(*k, *v);
-    }
+    merge_reads(reads, else_reads.clone(), flow);
     if view.else_stmts.is_some() {
-        lw.arm_last_reads
-            .insert(arm_entries[last], Analysis::Present(else_reads));
+        record_arm_reads(&mut lw.arm_last_reads, arm_entries[last], else_reads, flow);
     }
     arm_maps.push(lw.bindings.rollback(mark));
-    // First-wins merge in arm order; `bindings` is already rolled back
-    // to the pre-if state.
-    for arm_writes in arm_maps {
-        for (k, v) in arm_writes {
-            if !lw.bindings.map.contains_key(&k) {
-                lw.bindings.insert(k, v);
+    // Keep every possible incoming view binding. The enclosing state is
+    // one possible path when an arm does not write the binding.
+    let entry = lw.bindings.map.clone();
+    let names: HashSet<StringId> = arm_maps.iter().flat_map(|m| m.keys().copied()).collect();
+    for name in names {
+        let mut values = HashSet::new();
+        for arm in &arm_maps {
+            match arm.get(&name) {
+                Some(Some(targets)) => values.extend(targets.iter().copied()),
+                Some(None) => {}
+                None => values.extend(entry.get(&name).into_iter().flatten().copied()),
             }
+        }
+        if !values.is_empty() {
+            lw.bindings.insert_all(name, values);
         }
     }
     Some(join)
@@ -732,40 +762,46 @@ fn liveness_match(
         None => super::RegionStop::At(BlockId::NONE),
     };
     let mark = lw.bindings.mark();
-    let mut arm_maps: Vec<HashMap<StringId, TirRef>> = Vec::with_capacity(arm_blocks.len());
+    let mut arm_maps: Vec<HashMap<StringId, Option<HashSet<Option<TirRef>>>>> =
+        Vec::with_capacity(arm_blocks.len());
     for (i, _arm) in view.arms().enumerate() {
         let (region, _) = collect_region(flow, &mut lw.region_scratch, arm_blocks[i], |b| {
             stop.kind(b)
         });
         let mut body_reads = HashMap::new();
         lw.walk_list(tir, flow, pool, &region, epoch, &mut body_reads);
-        for (k, v) in &body_reads {
-            reads.insert(*k, *v);
-        }
-        lw.arm_last_reads
-            .insert(arm_blocks[i], Analysis::Present(body_reads));
+        merge_reads(reads, body_reads.clone(), flow);
+        record_arm_reads(&mut lw.arm_last_reads, arm_blocks[i], body_reads, flow);
         arm_maps.push(lw.bindings.rollback(mark));
     }
-    for arm_writes in arm_maps {
-        for (k, v) in arm_writes {
-            if !lw.bindings.map.contains_key(&k) {
-                lw.bindings.insert(k, v);
+    let entry = lw.bindings.map.clone();
+    let names: HashSet<StringId> = arm_maps.iter().flat_map(|m| m.keys().copied()).collect();
+    for name in names {
+        let mut values = HashSet::new();
+        for arm in &arm_maps {
+            match arm.get(&name) {
+                Some(Some(targets)) => values.extend(targets.iter().copied()),
+                Some(None) => {}
+                None => values.extend(entry.get(&name).into_iter().flatten().copied()),
             }
+        }
+        if !values.is_empty() {
+            lw.bindings.insert_all(name, values);
         }
     }
     join
 }
 
-/// Loop liveness: the header (condition) steps record against the
-/// enclosing scope once; the body walks with entry-first-wins at the
-/// back-edge (one pass suffices: `last_use` records are monotone).
+/// Loop liveness: solve view bindings to a fixed point across the
+/// back-edge. The union includes the entry state, which preserves the
+/// zero-iteration path for reads after the loop.
 fn liveness_loop(
     lw: &mut LivenessWalk,
     tir: &Tir,
     flow: &Flow,
     pool: &InternPool,
     ph: BlockId,
-    epoch: u32,
+    _epoch: u32,
     reads: &mut HashMap<TirRef, TirRef>,
 ) -> Option<BlockId> {
     let (loop_inst, header) = match *flow.term(ph) {
@@ -782,11 +818,10 @@ fn liveness_loop(
         _ => unreachable!("loop test block holds the test"),
     };
     // Condition region (header + any complex-cond cascade, ending at
-    // the test block): recorded once against the enclosing scope.
+    // the test block).
     let (cond_region, _) = collect_region(flow, &mut lw.region_scratch, header, |b| {
         super::RegionStop::Through(test_block).kind(b)
     });
-    lw.walk_list(tir, flow, pool, &cond_region, epoch, reads);
     let (region, _) = collect_region(flow, &mut lw.region_scratch, body, |b| {
         if b == exit || b == test_block {
             StopKind::Skip
@@ -795,30 +830,54 @@ fn liveness_loop(
         }
     });
     let mark = lw.bindings.mark();
-    lw.walk_list(tir, flow, pool, &region, epoch, reads);
-    let writes = lw.bindings.rollback(mark);
-    for (k, v) in writes {
-        if !lw.bindings.map.contains_key(&k) {
-            lw.bindings.insert(k, v);
+    let entry = lw.bindings.map.clone();
+    let mut header_bindings = entry.clone();
+    loop {
+        lw.bindings.map.clone_from(&header_bindings);
+        let pass_epoch = lw.next_epoch();
+        lw.walk_list(tir, flow, pool, &cond_region, pass_epoch, reads);
+        lw.walk_list(tir, flow, pool, &region, pass_epoch, reads);
+        let body_exit = lw.bindings.map.clone();
+        lw.bindings.rollback(mark);
+
+        let next = union_binding_states(&entry, &body_exit);
+        if next == header_bindings {
+            header_bindings = next;
+            break;
+        }
+        header_bindings = next;
+    }
+    // Post-loop code may see either the original binding (zero
+    // iterations) or a value produced by the body. The fixed-point
+    // header state contains both possibilities.
+    for (name, targets) in header_bindings {
+        if entry.get(&name) != Some(&targets) {
+            lw.bindings.insert_all(name, targets);
         }
     }
     Some(exit)
 }
 
 /// The view instruction a `strview`-typed binding aliases: through
-/// `Var` copies to the original slice (P3), or the initializer itself.
-/// `None` for views of non-local storage (e.g. a `strview` parameter).
-pub(crate) fn view_binding_target(
+/// `Var` copies to its possible local slices (P3), or the initializer
+/// itself. `None` inside the set represents non-local storage (e.g. a
+/// `strview` parameter) and is ignored when recording local last uses.
+pub(crate) fn view_binding_targets(
     tir: &Tir,
-    bindings: &HashMap<StringId, TirRef>,
+    bindings: &HashMap<StringId, HashSet<Option<TirRef>>>,
     init: TirRef,
-) -> Option<TirRef> {
+) -> Option<HashSet<Option<TirRef>>> {
     match tir.inst(init).data {
-        TirData::Var(name) => bindings.get(&name).copied(),
-        TirData::Slice { .. } => Some(init),
+        TirData::Var(name) => Some(
+            bindings
+                .get(&name)
+                .cloned()
+                .unwrap_or_else(|| HashSet::from([None])),
+        ),
+        TirData::Slice { .. } => Some(HashSet::from([Some(init)])),
         // A bound ToView (`u: strview = s`) projects the operand's
         // owner full-range; the conversion inst stands in as the view.
-        _ if tir.inst(init).tag == TirTag::ToView => Some(init),
+        _ if tir.inst(init).tag == TirTag::ToView => Some(HashSet::from([Some(init)])),
         _ => None,
     }
 }
@@ -913,9 +972,8 @@ mod tests {
     use super::*;
 
     /// Nested mark/rollback invariant: an inner if's write set, merged
-    /// back with a guarded logged insert, must be picked up by the
-    /// enclosing arm's rollback, while a removal in the outer arm drops
-    /// that name from the outer write set.
+    /// back with a logged insert, must be picked up by the enclosing
+    /// arm's rollback; an explicit unknown binding must also survive.
     #[test]
     fn bindings_nested_rollback_picks_up_inner_merge_writes() {
         let mut bindings = Bindings::default();
@@ -930,26 +988,44 @@ mod tests {
             TirRef::from_raw(12),
         );
 
-        bindings.insert(a, va);
+        bindings.insert_all(a, HashSet::from([Some(va)]));
         let outer = bindings.mark();
-        bindings.insert(b, vb);
+        bindings.insert_all(b, HashSet::from([Some(vb)]));
         let inner = bindings.mark();
         // An inner if's logged merge write.
         if !bindings.map.contains_key(&c) {
-            bindings.insert(c, vc);
+            bindings.insert_all(c, HashSet::from([Some(vc)]));
         }
         let inner_writes = bindings.rollback(inner);
-        assert_eq!(inner_writes, HashMap::from([(c, vc)]));
-        assert_eq!(bindings.map, HashMap::from([(a, va), (b, vb)]));
+        assert_eq!(
+            inner_writes,
+            HashMap::from([(c, Some(HashSet::from([Some(vc)])))])
+        );
+        assert_eq!(
+            bindings.map,
+            HashMap::from([
+                (a, HashSet::from([Some(va)])),
+                (b, HashSet::from([Some(vb)]))
+            ])
+        );
         // Merge the inner write set the way the merge sites do.
         for (k, v) in inner_writes {
-            if !bindings.map.contains_key(&k) {
-                bindings.insert(k, v);
+            if let Some(values) = v {
+                bindings.insert_all(k, values);
             }
         }
-        bindings.remove(b);
+        bindings.insert_all(b, HashSet::from([None]));
         let outer_writes = bindings.rollback(outer);
-        assert_eq!(outer_writes, HashMap::from([(c, vc)]));
-        assert_eq!(bindings.map, HashMap::from([(a, va)]));
+        assert_eq!(
+            outer_writes,
+            HashMap::from([
+                (b, Some(HashSet::from([None]))),
+                (c, Some(HashSet::from([Some(vc)])))
+            ])
+        );
+        assert_eq!(
+            bindings.map,
+            HashMap::from([(a, HashSet::from([Some(va)]))])
+        );
     }
 }

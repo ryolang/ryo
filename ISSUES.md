@@ -502,17 +502,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-183 — View-liveness back-edge merge is one-pass first-wins; reads inside a loop are attributed to the pre-loop slice
-
-**Severity:** Cleanup
-**Area:** ownership
-
-**Files:** `ryo-frontend/src/ownership/views.rs` (`collect_view_liveness` / `view_liveness_loop_body` back-edge merge :603-621), `ryo-frontend/src/ownership/mod.rs` (promo scheduling fallback that compensates :700-731)
-**Summary:** The view-liveness pre-pass walks a loop body once and merges back-edge bindings first-wins, so a read of a view binding inside or after a loop is attributed to the binding's *pre-loop* slice inst, leaving an in-loop rebinding slice with no recorded last use. Consumers of `view_last_use` that release memory must compensate conservatively: the promotion-free scheduler anchors in-loop bound-never-read candidates at function end (over-liveness, sound) instead of at the true last read. The pre-loop slice's buffer can likewise be kept alive past its real last use.
-**Resolution:** Rewrite the loop-body liveness walk as a fixpoint (re-walk until `last_use` assignments converge) so post-loop and in-loop reads attribute to the most recent slice inst. Once attribution is exact, tighten the promotion-free fallback from the function-end anchor back to the true last use.
-
----
-
 ### I-184 — Promote-on-view spill slot is re-written and re-checked every loop iteration for a loop-invariant base
 
 **Severity:** Cleanup
@@ -564,7 +553,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Files:** `ryo-frontend/src/ownership/frees.rs` (`chain_outlives_loop_iteration`)
 **Summary:** Conservative miss in the `RedundantToBytes` lint's shared-loop clause, resolving toward no-warning (the lint's stated philosophy), so users merely miss a valid `as_bytes()` hint: `chain_outlives_loop_iteration` matches post-loop reads of the binding by NAME, so a same-named shadowed binding read after the loop also suppresses (in-loop copy `b = s.to_bytes()` read only inside the loop, then a fresh `b` declared and read after it). The name match is load-bearing — dropping it breaks the legitimate `mut`-binding-reassigned-in-loop suppression because the loop merge seats the post-loop read on a different owner than the in-loop copy chain (same reseating imprecision as the loop-merge owner work). (The entry's other half — a straight-line receiver hazard ranked after the copy's last use — is fixed: hazards now suppress only up to the chain's last read.)
-**Resolution:** Resolve post-loop `Var` reads through scope-aware binding identity instead of name matching; this needs the loop merge to preserve per-binding owner provenance (I-183 territory), not a local lint tweak. Extend the shared-loop regression tests when it lands.
+**Resolution:** Resolve post-loop `Var` reads through scope-aware binding identity instead of name matching; this needs the loop merge to preserve per-binding owner provenance, not a local lint tweak. Extend the shared-loop regression tests when it lands.
 
 ---
 
@@ -818,4 +807,4 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
 
-<!-- issue-id high-water: 240 -->
+<!-- issue-id high-water: 241 -->
