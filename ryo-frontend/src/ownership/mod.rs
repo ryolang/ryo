@@ -1363,58 +1363,16 @@ fn schedule_return_epilogue_frees(
 ) {
     let mut epilogue_emitted: HashSet<(TirRef, TirRef)> = HashSet::new();
     let fire_points = FirePoints::new(flow);
-    let return_block_reached_from = |start: BlockId, target: BlockId| {
-        let mut seen = HashSet::new();
-        let mut pending = vec![start];
-        while let Some(block) = pending.pop() {
-            if block == target {
-                return true;
-            }
-            if seen.insert(block) {
-                pending.extend_from_slice(flow.successors(block));
-            }
-        }
-        false
-    };
-    let drop_precedes_return = |fp: &DropOp, return_block: BlockId| {
-        let reaches_return = |point: ryo_core::flow::fire_points::FirePoint| {
-            point.block != return_block && return_block_reached_from(point.block, return_block)
-        };
-        match fire_points.resolve(fp.position) {
-            FireVerdict::Resolved(point) | FireVerdict::NonExact(point) => reaches_return(point),
-            FireVerdict::ResolvedPerArm(points) => points.into_iter().any(reaches_return),
-            FireVerdict::Unresolved => false,
-        }
-    };
     for (return_stmt, owners) in &own.return_epilogue {
-        let mut on_path: HashSet<TirRef> = HashSet::new();
-        let _ = tir.collect_jump_path(body_stmts, *return_stmt, &mut on_path);
-        // The return node is the path target, so `collect_jump_path`
-        // stops there without collecting expressions evaluated to form
-        // its return value (including value-match arms). Those arm
-        // scopes execute before reaching the return block.
-        tir.collect_reachable(*return_stmt, &mut on_path);
-        // A Free anchored after a branch CONTAINING the return never
-        // fires on the return's path — the branch statement does not
-        // complete before the return exits. Exclude ancestors from the
-        // covering set (the path walk counts them as "passed through",
-        // which is true for evaluation but false for after-anchoring).
-        let ancestors: HashSet<TirRef> = ancestor_branches_of(tir, *return_stmt)
-            .into_iter()
-            .collect();
-        // Bindings whose current value THIS return moves out (recorded
-        // by the walk's consume pass, keyed by the consumed owner — see
-        // below for why the owner named there is not the only one that
-        // must be suppressed).
-        let binding_of = |t: TirRef| -> Option<TirRef> {
-            decl_of_init.get(&t).or(assign_value_of.get(&t)).copied()
-        };
-        let consumed_bindings: HashSet<TirRef> = own
-            .owner_hazards
-            .iter()
-            .filter(|&&(_, site, _)| site == *return_stmt)
-            .filter_map(|&(o, _, _)| binding_of(o.tirref(flow)))
-            .collect();
+        let path = ReturnPath::new(
+            tir,
+            flow,
+            own,
+            body_stmts,
+            *return_stmt,
+            decl_of_init,
+            assign_value_of,
+        );
         // Epilogue Frees decided for THIS return, staged before they
         // join the `drops` schedule. The binding-covering scan must see
         // them: two owners of the SAME binding live at one return all
@@ -1435,7 +1393,10 @@ fn schedule_return_epilogue_frees(
             // (the in-loop reseated value). Destroying either here
             // frees the returned buffer: skip every owner of a binding
             // this return consumes.
-            if binding_of(r).is_some_and(|b| consumed_bindings.contains(&b)) {
+            if path
+                .binding_of(r)
+                .is_some_and(|b| path.consumed_bindings.contains(&b))
+            {
                 continue;
             }
             if !epilogue_emitted.insert((*return_stmt, r)) {
@@ -1448,39 +1409,15 @@ fn schedule_return_epilogue_frees(
             // return's operand fires only when its Flow point is before
             // the Return block, as for a match arm; a drop in the Return
             // block cannot sweep after the terminator.
-            let return_block = flow.term_block_of(*return_stmt);
-            let fires_on_this_path = |fp: &DropOp| -> bool {
-                let after = drop_anchor(fp);
-                if matches!(
-                    tir.inst(after).tag,
-                    TirTag::Return | TirTag::ReturnVoid | TirTag::Break | TirTag::Continue
-                ) {
-                    return false;
-                }
-                if !tir.contains_reachable(*return_stmt, after) {
-                    return true;
-                }
-                let Some(return_block) = return_block else {
-                    return false;
-                };
-                drop_precedes_return(fp, return_block)
-            };
-            let covered = anchored_drops(sidecar).any(|fp| {
-                fp.target == r
-                    && (on_path.contains(&drop_anchor(fp))
-                        // Match payload tokens are created at the match
-                        // terminator, outside the return expression's
-                        // TIR operand tree. Their arm-local last-use drop
-                        // can still cover this return when its firing
-                        // block reaches the return block.
-                        || (!r.is_param()
-                            && tir.inst(r).tag == TirTag::FieldAccess
-                            && return_block.is_some_and(|target| {
-                                drop_precedes_return(fp, target)
-                            })))
-                    && !ancestors.contains(&drop_anchor(fp))
-                    && fires_on_this_path(fp)
-            });
+            let covered = return_has_direct_covering_drop(
+                tir,
+                flow,
+                sidecar,
+                &fire_points,
+                &path,
+                *return_stmt,
+                r,
+            );
             if covered {
                 continue;
             }
@@ -1495,26 +1432,15 @@ fn schedule_return_epilogue_frees(
             // here would double-free it. Identity is by binding: a
             // same-named shadow's reassigns target a different binding
             // and must not suppress this owner's cleanup.
-            let ret_loops: Vec<TirRef> = own
-                .loop_nesting
-                .ancestors_innermost_first(*return_stmt)
-                .collect();
-            let certainly_executed = |a: TirRef| {
-                on_path.contains(&a)
-                    && !own
-                        .loop_nesting
-                        .ancestors_innermost_first(a)
-                        .any(|l| !ret_loops.contains(&l))
-            };
-            let superseded = binding_of(r).is_some_and(|binding| {
-                reassign_orders.get(&binding).is_some_and(|assigns| {
-                    assigns.iter().any(|&a| {
-                        order[a.index()] < order[return_stmt.index()]
-                            && certainly_executed(a)
-                            && tir.assign_view(a).value != r
-                    })
-                })
-            });
+            let superseded = return_owner_was_superseded(
+                tir,
+                own,
+                &path,
+                order,
+                *return_stmt,
+                r,
+                reassign_orders,
+            );
             if superseded {
                 continue;
             }
@@ -1531,12 +1457,12 @@ fn schedule_return_epilogue_frees(
             // Identity is the declaring VarDecl (never the name): a
             // same-named shadow is a different binding whose frees
             // redirect to a different home slot.
-            if let Some(binding) = binding_of(r) {
+            if let Some(binding) = path.binding_of(r) {
                 // Covered only when the covering Free anchors after
                 // EVERY reassign of the binding — otherwise the return
                 // may hold a value the covering Free did not release.
                 let covers = |fp: &DropOp| {
-                    binding_of(fp.target) == Some(binding)
+                    path.binding_of(fp.target) == Some(binding)
                         && reassign_orders.get(&binding).is_some_and(|v| {
                             !v.is_empty()
                                 && v.iter()
@@ -1551,9 +1477,16 @@ fn schedule_return_epilogue_frees(
                 // an anchor inside this return's own operand subtree
                 // or on a different exit never fires here.
                 let binding_covered = anchored_drops(sidecar).any(|fp| {
-                    on_path.contains(&drop_anchor(fp))
-                        && !ancestors.contains(&drop_anchor(fp))
-                        && fires_on_this_path(fp)
+                    path.on_path.contains(&drop_anchor(fp))
+                        && !path.ancestors.contains(&drop_anchor(fp))
+                        && drop_fires_on_return_path(
+                            tir,
+                            flow,
+                            &fire_points,
+                            &path,
+                            *return_stmt,
+                            fp,
+                        )
                         && covers(fp)
                 }) || staged.iter().any(covers);
                 if binding_covered {
@@ -1568,6 +1501,163 @@ fn schedule_return_epilogue_frees(
         }
         sidecar.drops.append(&mut staged);
     }
+}
+
+/// Facts used to decide whether an existing Free covers one return path.
+struct ReturnPath<'a> {
+    on_path: HashSet<TirRef>,
+    ancestors: HashSet<TirRef>,
+    consumed_bindings: HashSet<TirRef>,
+    return_block: Option<BlockId>,
+    decl_of_init: &'a HashMap<TirRef, TirRef>,
+    assign_value_of: &'a HashMap<TirRef, TirRef>,
+}
+
+impl<'a> ReturnPath<'a> {
+    fn new(
+        tir: &Tir,
+        flow: &Flow,
+        own: &Ownership,
+        body_stmts: &[TirRef],
+        return_stmt: TirRef,
+        decl_of_init: &'a HashMap<TirRef, TirRef>,
+        assign_value_of: &'a HashMap<TirRef, TirRef>,
+    ) -> Self {
+        let mut on_path = HashSet::new();
+        let _ = tir.collect_jump_path(body_stmts, return_stmt, &mut on_path);
+        // Collect the return expression too: value-match arms execute
+        // before control reaches the return block.
+        tir.collect_reachable(return_stmt, &mut on_path);
+        let ancestors = ancestor_branches_of(tir, return_stmt).into_iter().collect();
+        let binding_of = |t: TirRef| decl_of_init.get(&t).or(assign_value_of.get(&t)).copied();
+        let consumed_bindings = own
+            .owner_hazards
+            .iter()
+            .filter(|&&(_, site, _)| site == return_stmt)
+            .filter_map(|&(owner, _, _)| binding_of(owner.tirref(flow)))
+            .collect();
+        Self {
+            on_path,
+            ancestors,
+            consumed_bindings,
+            return_block: flow.term_block_of(return_stmt),
+            decl_of_init,
+            assign_value_of,
+        }
+    }
+
+    fn binding_of(&self, value: TirRef) -> Option<TirRef> {
+        self.decl_of_init
+            .get(&value)
+            .or(self.assign_value_of.get(&value))
+            .copied()
+    }
+}
+
+fn return_block_reachable(flow: &Flow, start: BlockId, target: BlockId) -> bool {
+    let mut seen = HashSet::new();
+    let mut pending = vec![start];
+    while let Some(block) = pending.pop() {
+        if block == target {
+            return true;
+        }
+        if seen.insert(block) {
+            pending.extend_from_slice(flow.successors(block));
+        }
+    }
+    false
+}
+
+fn drop_precedes_return(
+    flow: &Flow,
+    fire_points: &FirePoints,
+    drop: &DropOp,
+    return_block: BlockId,
+) -> bool {
+    let reaches_return = |point: ryo_core::flow::fire_points::FirePoint| {
+        point.block != return_block && return_block_reachable(flow, point.block, return_block)
+    };
+    match fire_points.resolve(drop.position) {
+        FireVerdict::Resolved(point) | FireVerdict::NonExact(point) => reaches_return(point),
+        FireVerdict::ResolvedPerArm(points) => points.into_iter().any(reaches_return),
+        FireVerdict::Unresolved => false,
+    }
+}
+
+fn drop_fires_on_return_path(
+    tir: &Tir,
+    flow: &Flow,
+    fire_points: &FirePoints,
+    path: &ReturnPath<'_>,
+    return_stmt: TirRef,
+    drop: &DropOp,
+) -> bool {
+    let anchor = drop_anchor(drop);
+    if matches!(
+        tir.inst(anchor).tag,
+        TirTag::Return | TirTag::ReturnVoid | TirTag::Break | TirTag::Continue
+    ) {
+        return false;
+    }
+    if !tir.contains_reachable(return_stmt, anchor) {
+        return true;
+    }
+    path.return_block
+        .is_some_and(|return_block| drop_precedes_return(flow, fire_points, drop, return_block))
+}
+
+fn return_has_direct_covering_drop(
+    tir: &Tir,
+    flow: &Flow,
+    sidecar: &FunctionSidecar,
+    fire_points: &FirePoints,
+    path: &ReturnPath<'_>,
+    return_stmt: TirRef,
+    owner: TirRef,
+) -> bool {
+    anchored_drops(sidecar).any(|drop| {
+        let anchor = drop_anchor(drop);
+        let match_payload_drop = !owner.is_param()
+            && tir.inst(owner).tag == TirTag::FieldAccess
+            && path.return_block.is_some_and(|return_block| {
+                drop_precedes_return(flow, fire_points, drop, return_block)
+            });
+        drop.target == owner
+            && (path.on_path.contains(&anchor) || match_payload_drop)
+            && !path.ancestors.contains(&anchor)
+            && drop_fires_on_return_path(tir, flow, fire_points, path, return_stmt, drop)
+    })
+}
+
+fn return_owner_was_superseded(
+    tir: &Tir,
+    own: &Ownership,
+    path: &ReturnPath<'_>,
+    order: &[u32],
+    return_stmt: TirRef,
+    owner: TirRef,
+    reassign_orders: &HashMap<TirRef, Vec<TirRef>>,
+) -> bool {
+    let return_loops: Vec<TirRef> = own
+        .loop_nesting
+        .ancestors_innermost_first(return_stmt)
+        .collect();
+    let certainly_executed = |assign: TirRef| {
+        path.on_path.contains(&assign)
+            && !own
+                .loop_nesting
+                .ancestors_innermost_first(assign)
+                .any(|loop_ref| !return_loops.contains(&loop_ref))
+    };
+    path.binding_of(owner).is_some_and(|binding| {
+        reassign_orders.get(&binding).is_some_and(|assigns| {
+            assigns.iter().any(|&assign| {
+                order[assign.index()] < order[return_stmt.index()]
+                    && certainly_executed(assign)
+                    && tir.assign_view(assign).value != owner
+            })
+        })
+    })
 }
 
 /// Reassign points per BINDING, plus owner-value → binding maps (see
