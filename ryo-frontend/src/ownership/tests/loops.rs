@@ -1136,6 +1136,56 @@ fn match_arms_with_continue_and_break_in_loop_converge() {
 }
 
 #[test]
+fn match_continue_arms_free_loop_local_before_continue() {
+    // Each continuing arm must release the current iteration's string.
+    let src = "fn main():\n\tmut i = 0\n\twhile i < 6:\n\t\ti += 1\n\t\ttext = int_to_str(i) + \" loop payload that needs heap storage\"\n\t\tmatch i:\n\t\t\t1:\n\t\t\t\tcontinue\n\t\t\t3:\n\t\t\t\tcontinue\n\t\t\t_:\n\t\t\t\tprint(text)\n\tprint(\"\\ndone\\n\")\n";
+    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "no errors expected; got {diags:?}"
+    );
+    let tir = &tirs[0];
+    let text_name = pool.intern_str("text");
+    let text_init = (1..tir.instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find_map(|r| {
+            if tir.inst(r).tag == ryo_core::tir::TirTag::VarDecl {
+                let decl = tir.var_decl_view(r);
+                (decl.name == text_name).then_some(decl.initializer)
+            } else {
+                None
+            }
+        })
+        .expect("text's initializer");
+    let continue_insts: Vec<_> = (1..tir.instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .filter(|&inst| tir.inst(inst).tag == ryo_core::tir::TirTag::Continue)
+        .collect();
+    assert_eq!(continue_insts.len(), 2, "expected both continue arms");
+    let f = take_function_sidecar(&mut sidecar, 0);
+    for inst in continue_insts {
+        assert_eq!(
+            f.drops
+                .iter()
+                .filter(|drop| {
+                    drop.target == text_init
+                        && matches!(
+                            drop.position,
+                            ryo_core::flow::DropPosition::AfterStep { inst: anchor }
+                                if anchor == inst
+                        )
+                })
+                .count(),
+            1,
+            "each continue must release text once after its instruction; got {:?}",
+            f.drops
+        );
+    }
+}
+
+#[test]
 fn loop_body_return_converges_and_does_not_poison_post_loop_use() {
     // Regression (G3 convergence test): a loop whose body's live exits
     // are Return-only (`while flag: return s`). The body moves `s` on a
