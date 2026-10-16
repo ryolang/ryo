@@ -259,7 +259,11 @@ impl FlowBuilder<'_> {
     // ---------- statements ----------
 
     fn emit_stmts(&mut self, stmts: &[TirRef]) {
-        for &stmt in stmts {
+        self.emit_stmts_iter(stmts.iter().copied());
+    }
+
+    fn emit_stmts_iter(&mut self, stmts: impl IntoIterator<Item = TirRef>) {
+        for stmt in stmts {
             self.emit_stmt(stmt);
         }
     }
@@ -645,7 +649,8 @@ impl FlowBuilder<'_> {
     // ---------- control constructs ----------
 
     fn build_if(&mut self, stmt: TirRef) {
-        let view = self.tir.if_stmt_view(stmt);
+        let tir = self.tir;
+        let view = tir.if_stmt_view_borrowed(stmt);
         self.emit_expr(view.cond);
 
         let then_block = self.new_block(false);
@@ -672,7 +677,7 @@ impl FlowBuilder<'_> {
 
         self.cur = then_block;
         self.push_scope();
-        self.emit_stmts(&view.then_stmts);
+        self.emit_stmts_iter(&view.then_stmts);
         self.pop_scope();
         self.close_region(self.cur, join);
 
@@ -699,7 +704,7 @@ impl FlowBuilder<'_> {
             );
             self.cur = body_block;
             self.push_scope();
-            self.emit_stmts(&elif.body);
+            self.emit_stmts_iter(&elif.body);
             self.pop_scope();
             self.close_region(self.cur, join);
         }
@@ -709,7 +714,7 @@ impl FlowBuilder<'_> {
         self.cur = else_block;
         if let Some(else_stmts) = &view.else_stmts {
             self.push_scope();
-            self.emit_stmts(else_stmts);
+            self.emit_stmts_iter(else_stmts);
             self.pop_scope();
         }
         self.close_region(self.cur, join);
