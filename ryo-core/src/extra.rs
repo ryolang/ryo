@@ -93,6 +93,18 @@ impl<'list, T: ExtraValue> IntoIterator for &'list ExtraList<'_, T> {
     }
 }
 
+impl<'a, T: ExtraValue> IntoIterator for ExtraList<'a, T> {
+    type Item = T;
+    type IntoIter = ExtraListIter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        ExtraListIter {
+            words: self.words.iter().copied(),
+            marker: PhantomData,
+        }
+    }
+}
+
 /// A `[offset, offset+len)` slice of an `extra: Vec<u32>` arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExtraRange {

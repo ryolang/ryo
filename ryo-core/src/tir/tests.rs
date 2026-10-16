@@ -68,6 +68,10 @@ fn build_simple_function_and_dump() {
     let ret = b.unary(TirTag::Return, pool.void(), add, sp());
     let tir = b.finish(&[ret]);
 
+    assert_eq!(
+        tir.body_stmts_view().into_iter().collect::<Vec<_>>(),
+        vec![ret]
+    );
     assert_eq!(tir.body_stmts(), vec![ret]);
     let out = format!("{}", dump(std::slice::from_ref(&tir), &pool));
     assert!(out.contains("fn main() -> int"));

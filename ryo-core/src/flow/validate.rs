@@ -107,7 +107,7 @@ fn check_instruction_coverage(flow: &Flow, tir: &Tir) {
         });
     }
 
-    for stmt in tir.body_stmts() {
+    for stmt in tir.body_stmts_view() {
         walk(tir, stmt, &mut seen, &covered);
     }
 }
@@ -149,7 +149,7 @@ fn check_def_before_use(flow: &Flow, tir: &Tir) {
             walk(tir, flow, child, seen);
         });
     }
-    for stmt in tir.body_stmts() {
+    for stmt in tir.body_stmts_view() {
         walk(tir, flow, stmt, &mut seen);
     }
 }

@@ -680,7 +680,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
     // avoid a cascade.
     if fcx.return_type != sema.pool.void()
         && !sema.pool.is_error(fcx.return_type)
-        && !tir.block_definitely_returns(&tir.body_stmts(), sema.pool)
+        && !tir.body_definitely_returns(sema.pool)
     {
         sema.sink.emit(Diag::error(
             body.span,

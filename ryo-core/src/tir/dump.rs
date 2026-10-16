@@ -34,7 +34,7 @@ impl<'a> fmt::Display for TirDump<'a> {
             writeln!(f, ") -> {}", self.pool.display(tir.return_type))?;
 
             write!(f, "  body:")?;
-            for r in tir.body_stmts() {
+            for r in tir.body_stmts_view() {
                 write!(f, " %{}", r.index())?;
             }
             writeln!(f)?;

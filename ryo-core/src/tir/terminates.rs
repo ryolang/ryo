@@ -34,13 +34,13 @@ use crate::types::InternPool;
 pub(super) fn block_terminates(
     insts: &[TypedInst],
     extra: &[u32],
-    stmts: &[TirRef],
+    stmts: impl IntoIterator<Item = TirRef>,
     pool: &InternPool,
     jumps: bool,
 ) -> bool {
     stmts
-        .iter()
-        .any(|&s| stmt_terminates(insts, extra, s, pool, jumps))
+        .into_iter()
+        .any(|s| stmt_terminates(insts, extra, s, pool, jumps))
 }
 
 fn stmt_terminates(
@@ -89,11 +89,11 @@ fn stmt_terminates(
                 return false;
             }
             let else_stmts = read_ref_list(slice, &mut pos);
-            block_terminates(insts, extra, &then_stmts, pool, jumps)
+            block_terminates(insts, extra, then_stmts.iter().copied(), pool, jumps)
                 && elif_bodies
                     .iter()
-                    .all(|body| block_terminates(insts, extra, body, pool, jumps))
-                && block_terminates(insts, extra, &else_stmts, pool, jumps)
+                    .all(|body| block_terminates(insts, extra, body.iter().copied(), pool, jumps))
+                && block_terminates(insts, extra, else_stmts.iter().copied(), pool, jumps)
         }
         _ => false,
     }

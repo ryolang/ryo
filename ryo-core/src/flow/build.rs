@@ -99,8 +99,10 @@ impl FlowBuilder<'_> {
             self.scopes[0].push((p.name, place));
         }
 
-        let body = self.tir.body_stmts();
-        self.emit_stmts(&body);
+        let tir = self.tir;
+        for stmt in tir.body_stmts_view() {
+            self.emit_stmt(stmt);
+        }
 
         // Void functions (and `main`) fall off the end; sema's E0036
         // guarantees non-void bodies end in an explicit return.

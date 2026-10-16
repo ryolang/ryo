@@ -219,7 +219,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Resolution:** Replace the remaining owned decoded lists with safe borrowed iterators. Keep the packed `u32` arena and its range bounds. Add `assert_eq!(size_of::<Inst>(), 24)` before any `InstData` refactor.
 **Update (2026-10-09, Milestone 11):** The M11 enum view decoders (`EnumLitView` in `uir.rs`/`tir.rs`) borrow the `extra` arena (`&[u32]`) and iterate fields with no per-decode `Vec`. The legacy view decoders listed above still collect; entry stays open for them.
 
-**Update (2026-10-16):** `Tir::walk_operands` and `Tir::call_view` no longer allocate decoded lists. UIR views, body-statement accessors, branch and loop views, and struct-literal views still allocate.
+**Update (2026-10-16):** `Tir::walk_operands` and `Tir::call_view` no longer allocate decoded lists. `Tir::body_stmts_view` now provides borrowed iteration and is used in flow construction, core validation/dumping, and function return-flow analysis. The compatibility `body_stmts()` collector, other UIR body access, branch and loop views, and struct-literal views still allocate.
 
 ---
 

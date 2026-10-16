@@ -523,11 +523,13 @@ impl Tir {
     }
 
     pub fn body_stmts(&self) -> Vec<TirRef> {
-        self.extra[self.body.as_range()]
-            .iter()
-            .copied()
-            .map(TirRef::from_raw)
-            .collect()
+        self.body_stmts_view().into_iter().collect()
+    }
+
+    /// Borrow the function body statement references from the extra arena.
+    /// The view decodes each reference as it is read and does not allocate.
+    pub fn body_stmts_view(&self) -> ExtraList<'_, TirRef> {
+        ExtraList::new(&self.extra[self.body.as_range()])
     }
 }
 
@@ -730,7 +732,13 @@ impl TirBuilder {
     /// fallthrough. Rules live in the shared free function so the
     /// finished-`Tir` and in-progress-builder answers never drift.
     pub fn block_definitely_returns(&self, stmts: &[TirRef], pool: &InternPool) -> bool {
-        terminates::block_terminates(&self.instructions, &self.extra, stmts, pool, false)
+        terminates::block_terminates(
+            &self.instructions,
+            &self.extra,
+            stmts.iter().copied(),
+            pool,
+            false,
+        )
     }
 
     /// The arm-termination sense used by M12 match arm typing: like
@@ -738,7 +746,13 @@ impl TirBuilder {
     /// ending in `break`/`continue` also counts as terminating (the
     /// arm is `never` at the join, never an E0135 fallthrough).
     pub fn block_definitely_terminates(&self, stmts: &[TirRef], pool: &InternPool) -> bool {
-        terminates::block_terminates(&self.instructions, &self.extra, stmts, pool, true)
+        terminates::block_terminates(
+            &self.instructions,
+            &self.extra,
+            stmts.iter().copied(),
+            pool,
+            true,
+        )
     }
 
     fn push(&mut self, tag: TirTag, ty: TypeId, data: TirData, span: Span) -> TirRef {
@@ -1749,7 +1763,7 @@ impl Tir {
             });
         }
         let mut seen: HashSet<TirRef> = HashSet::new();
-        for stmt in self.body_stmts() {
+        for stmt in self.body_stmts_view() {
             debug_assert!(
                 seen.insert(stmt),
                 "TIR body is not tree-shaped: statement raw={} is listed twice in the body roots",
@@ -1829,7 +1843,24 @@ impl Tir {
     /// A block definitely returns when ANY of its statements does —
     /// everything after that point is unreachable.
     pub fn block_definitely_returns(&self, stmts: &[TirRef], pool: &InternPool) -> bool {
-        terminates::block_terminates(&self.instructions, &self.extra, stmts, pool, false)
+        terminates::block_terminates(
+            &self.instructions,
+            &self.extra,
+            stmts.iter().copied(),
+            pool,
+            false,
+        )
+    }
+
+    /// Return whether the function body returns on every execution path.
+    pub fn body_definitely_returns(&self, pool: &InternPool) -> bool {
+        terminates::block_terminates(
+            &self.instructions,
+            &self.extra,
+            self.body_stmts_view(),
+            pool,
+            false,
+        )
     }
 
     /// The arm-termination sense used by M12 match arm typing: like
@@ -1837,7 +1868,13 @@ impl Tir {
     /// `break`/`continue` also counts as terminating (the arm is
     /// `never` at the join, never an E0135 fallthrough).
     pub fn block_definitely_terminates(&self, stmts: &[TirRef], pool: &InternPool) -> bool {
-        terminates::block_terminates(&self.instructions, &self.extra, stmts, pool, true)
+        terminates::block_terminates(
+            &self.instructions,
+            &self.extra,
+            stmts.iter().copied(),
+            pool,
+            true,
+        )
     }
 
     /// Collect the set of TirRefs evaluated on the path that reaches
