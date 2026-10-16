@@ -1281,6 +1281,46 @@ pub struct IfStmtView {
     pub else_stmts: Option<Vec<InstRef>>,
 }
 
+pub struct ElifRefView<'a> {
+    pub cond: InstRef,
+    pub body: ExtraList<'a, InstRef>,
+}
+
+pub struct ElifBranches<'a> {
+    words: &'a [u32],
+    remaining: usize,
+}
+
+impl<'a> Iterator for ElifBranches<'a> {
+    type Item = ElifRefView<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+        let cond = InstRef::from_raw(self.words[0]);
+        let count = self.words[1] as usize;
+        let body_end = 2 + count;
+        let body = ExtraList::new(&self.words[2..body_end]);
+        self.words = &self.words[body_end..];
+        Some(ElifRefView { cond, body })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl ExactSizeIterator for ElifBranches<'_> {}
+
+pub struct IfStmtRefView<'a> {
+    pub cond: InstRef,
+    pub then_stmts: ExtraList<'a, InstRef>,
+    pub elif_branches: ElifBranches<'a>,
+    pub else_stmts: Option<ExtraList<'a, InstRef>>,
+}
+
 impl Uir {
     pub fn call_view(&self, r: InstRef) -> CallView<'_> {
         let inst = self.inst(r);
@@ -1495,6 +1535,22 @@ impl Uir {
     }
 
     pub fn if_stmt_view(&self, r: InstRef) -> IfStmtView {
+        let view = self.if_stmt_ref_view(r);
+        IfStmtView {
+            cond: view.cond,
+            then_stmts: view.then_stmts.into_iter().collect(),
+            elif_branches: view
+                .elif_branches
+                .map(|elif| ElifView {
+                    cond: elif.cond,
+                    body: elif.body.into_iter().collect(),
+                })
+                .collect(),
+            else_stmts: view.else_stmts.map(|stmts| stmts.into_iter().collect()),
+        }
+    }
+
+    pub fn if_stmt_ref_view(&self, r: InstRef) -> IfStmtRefView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, InstTag::IfStmt));
         let range = match inst.data {
@@ -1511,16 +1567,15 @@ impl Uir {
 
         let elif_count = slice[pos] as usize;
         pos += 1;
-        let mut elif_branches = Vec::with_capacity(elif_count);
+        let elif_start = pos;
         for _ in 0..elif_count {
-            let elif_cond = InstRef::from_raw(slice[pos]);
-            pos += 1;
-            let body = read_ref_list(slice, &mut pos);
-            elif_branches.push(ElifView {
-                cond: elif_cond,
-                body,
-            });
+            let body_len = slice[pos + 1] as usize;
+            pos += 2 + body_len;
         }
+        let elif_branches = ElifBranches {
+            words: &slice[elif_start..pos],
+            remaining: elif_count,
+        };
 
         let has_else = slice[pos] != 0;
         pos += 1;
@@ -1530,7 +1585,7 @@ impl Uir {
             None
         };
 
-        IfStmtView {
+        IfStmtRefView {
             cond,
             then_stmts,
             elif_branches,
@@ -1539,14 +1594,10 @@ impl Uir {
     }
 }
 
-fn read_ref_list(slice: &[u32], pos: &mut usize) -> Vec<InstRef> {
+fn read_ref_list<'a>(slice: &'a [u32], pos: &mut usize) -> ExtraList<'a, InstRef> {
     let count = slice[*pos] as usize;
     *pos += 1;
-    let refs = slice[*pos..*pos + count]
-        .iter()
-        .copied()
-        .map(InstRef::from_raw)
-        .collect();
+    let refs = ExtraList::new(&slice[*pos..*pos + count]);
     *pos += count;
     refs
 }
@@ -1716,7 +1767,7 @@ mod tests {
         let view = uir.if_stmt_view(if_ref);
         assert_eq!(view.cond, cond);
         assert_eq!(view.then_stmts, vec![then_ret]);
-        assert!(view.elif_branches.is_empty());
+        assert_eq!(view.elif_branches.len(), 0);
         assert_eq!(view.else_stmts, Some(vec![else_ret]));
     }
 
@@ -1761,6 +1812,47 @@ mod tests {
         assert_eq!(view.elif_branches[1].cond, elif_cond2);
         assert_eq!(view.elif_branches[1].body, vec![elif2_a, elif2_b]);
         assert_eq!(view.else_stmts, Some(vec![else_ret]));
+    }
+
+    #[test]
+    fn borrowed_if_view_preserves_branch_order_and_empty_else() {
+        let mut b = UirBuilder::new();
+        let cond = b.bool_literal(true, sp());
+        let then_stmt = b.int_literal(1, sp());
+        let elif_cond1 = b.bool_literal(false, sp());
+        let elif_cond2 = b.bool_literal(true, sp());
+        let elif_stmt = b.int_literal(2, sp());
+        let with_empty_else = b.if_stmt(
+            cond,
+            &[then_stmt],
+            &[(elif_cond1, vec![]), (elif_cond2, vec![elif_stmt])],
+            Some(&[]),
+            sp(),
+        );
+        let without_else = b.if_stmt(cond, &[], &[], None, sp());
+        let uir = b.finish();
+
+        let view = uir.if_stmt_ref_view(with_empty_else);
+        assert_eq!(view.cond, cond);
+        assert_eq!(
+            view.then_stmts.into_iter().collect::<Vec<_>>(),
+            vec![then_stmt]
+        );
+        let elifs = view.elif_branches.collect::<Vec<_>>();
+        assert_eq!(elifs.len(), 2);
+        assert_eq!(elifs[0].cond, elif_cond1);
+        assert!(elifs[0].body.is_empty());
+        assert_eq!(elifs[1].cond, elif_cond2);
+        assert_eq!(
+            elifs[1].body.into_iter().collect::<Vec<_>>(),
+            vec![elif_stmt]
+        );
+        assert!(view.else_stmts.is_some_and(|stmts| stmts.is_empty()));
+
+        let view = uir.if_stmt_ref_view(without_else);
+        assert!(view.then_stmts.is_empty());
+        assert_eq!(view.elif_branches.len(), 0);
+        assert!(view.else_stmts.is_none());
     }
 
     #[test]

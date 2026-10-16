@@ -126,25 +126,24 @@ pub(crate) fn analyze_stmt(
                 .unary(TirTag::ExprStmt, sema.pool.void(), val_tir, span)
         }
         InstTag::IfStmt => {
-            let view = sema.uir.if_stmt_view(r);
+            let view = sema.uir.if_stmt_ref_view(r);
 
             let cond_tir = analyze_expr(sema, fcx, scope, view.cond);
             check_condition_bool(sema, fcx, cond_tir, view.cond);
 
-            let then_tirs = analyze_block(sema, fcx, scope, &view.then_stmts);
+            let then_tirs = analyze_block_iter(sema, fcx, scope, view.then_stmts.into_iter());
 
             let mut elif_tirs = Vec::with_capacity(view.elif_branches.len());
-            for elif in &view.elif_branches {
+            for elif in view.elif_branches {
                 let elif_cond_tir = analyze_expr(sema, fcx, scope, elif.cond);
                 check_condition_bool(sema, fcx, elif_cond_tir, elif.cond);
-                let elif_body_tirs = analyze_block(sema, fcx, scope, &elif.body);
+                let elif_body_tirs = analyze_block_iter(sema, fcx, scope, elif.body.into_iter());
                 elif_tirs.push((elif_cond_tir, elif_body_tirs));
             }
 
             let else_tirs = view
                 .else_stmts
-                .as_ref()
-                .map(|stmts| analyze_block(sema, fcx, scope, stmts));
+                .map(|stmts| analyze_block_iter(sema, fcx, scope, stmts.into_iter()));
 
             fcx.builder.if_stmt(
                 cond_tir,
