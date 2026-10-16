@@ -273,7 +273,7 @@ pub(crate) fn analyze_expr_allow_never(
             // span and the call still emits a well-formed TIR Call.
             let mut arg_tirs = Vec::with_capacity(view.args.len());
             for a in &view.args {
-                arg_tirs.push(analyze_expr(sema, fcx, scope, *a));
+                arg_tirs.push(analyze_expr(sema, fcx, scope, a));
             }
             check_call(sema, fcx, scope, &view, &arg_tirs, span)
         }
@@ -294,7 +294,7 @@ pub(crate) fn analyze_expr_allow_never(
             let receiver_ty = fcx.builder.ty_of(receiver_tir);
             let ids = sema.names;
 
-            for &arg in &view.args {
+            for arg in &view.args {
                 analyze_expr(sema, fcx, scope, arg);
             }
 
@@ -1191,7 +1191,7 @@ fn lowercase_enum_method_receiver(
     scope: &Scope,
     receiver: InstRef,
     method: StringId,
-    args: &[InstRef],
+    args: &ryo_core::uir::ExtraList<'_, InstRef>,
     span: Span,
 ) -> Option<TirRef> {
     if let InstTag::Var = sema.uir.inst(receiver).tag {
@@ -1218,7 +1218,7 @@ fn lowercase_enum_method_receiver(
                     sema.pool.str(method),
                 )),
             );
-            for &arg in args {
+            for arg in args {
                 analyze_expr(sema, fcx, scope, arg);
             }
             return Some(fcx.builder.unreachable(sema.pool.error_type(), span));
@@ -1247,7 +1247,7 @@ fn lowercase_enum_method_receiver(
                 DiagCode::NotAStruct,
                 format!("'{raw}' is a struct, not an enum — construct it as {raw}{example}"),
             ));
-            for &arg in args {
+            for arg in args {
                 analyze_expr(sema, fcx, scope, arg);
             }
             return Some(fcx.builder.unreachable(sema.pool.error_type(), span));

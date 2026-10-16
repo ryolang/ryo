@@ -1165,9 +1165,9 @@ impl UirBuilder {
 // ---------- Read-side helpers ----------
 
 /// Decoded view of an [`InstTag::Call`] payload.
-pub struct CallView {
+pub struct CallView<'a> {
     pub name: StringId,
-    pub args: Vec<InstRef>,
+    pub args: ExtraList<'a, InstRef>,
 }
 
 /// Decoded view of an [`InstTag::VarDecl`] payload.
@@ -1216,10 +1216,10 @@ pub struct ForRangeView {
 }
 
 /// Decoded view of an [`InstTag::MethodCall`] payload.
-pub struct MethodCallView {
+pub struct MethodCallView<'a> {
     pub receiver: InstRef,
     pub name: StringId,
-    pub args: Vec<InstRef>,
+    pub args: ExtraList<'a, InstRef>,
 }
 
 /// Decoded view of an [`InstTag::StructLit`] payload. Field
@@ -1270,7 +1270,7 @@ pub struct IfStmtView {
 }
 
 impl Uir {
-    pub fn call_view(&self, r: InstRef) -> CallView {
+    pub fn call_view(&self, r: InstRef) -> CallView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, InstTag::Call));
         let range = match inst.data {
@@ -1280,11 +1280,7 @@ impl Uir {
         let slice = &self.extra[range.as_range()];
         let name = StringId::from_raw(slice[call_extra::NAME]);
         let argc = slice[call_extra::ARGC] as usize;
-        let args = slice[call_extra::ARGS..call_extra::ARGS + argc]
-            .iter()
-            .copied()
-            .map(InstRef::from_raw)
-            .collect();
+        let args = ExtraList::new(&slice[call_extra::ARGS..call_extra::ARGS + argc]);
         CallView { name, args }
     }
 
@@ -1410,7 +1406,7 @@ impl Uir {
         }
     }
 
-    pub fn method_call_view(&self, r: InstRef) -> MethodCallView {
+    pub fn method_call_view(&self, r: InstRef) -> MethodCallView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, InstTag::MethodCall));
         let range = match inst.data {
@@ -1421,11 +1417,7 @@ impl Uir {
         let receiver = InstRef::from_raw(slice[method_call_extra::RECEIVER]);
         let name = StringId::from_raw(slice[method_call_extra::NAME]);
         let argc = slice[method_call_extra::ARGC] as usize;
-        let args = slice[method_call_extra::ARGS..method_call_extra::ARGS + argc]
-            .iter()
-            .copied()
-            .map(InstRef::from_raw)
-            .collect();
+        let args = ExtraList::new(&slice[method_call_extra::ARGS..method_call_extra::ARGS + argc]);
         MethodCallView {
             receiver,
             name,
@@ -1620,7 +1612,25 @@ mod tests {
         let uir = b.finish();
         let view = uir.call_view(call);
         assert_eq!(view.name, foo);
-        assert_eq!(view.args, vec![a, bb, cc]);
+        assert_eq!(view.args.iter().collect::<Vec<_>>(), vec![a, bb, cc]);
+    }
+
+    #[test]
+    fn method_call_payload_round_trips_through_extra() {
+        let mut pool = InternPool::new();
+        let method = pool.intern_str("combine");
+
+        let mut b = UirBuilder::new();
+        let receiver = b.int_literal(1, sp());
+        let a = b.int_literal(2, sp());
+        let bb = b.int_literal(3, sp());
+        let call = b.method_call(receiver, method, &[a, bb], sp());
+
+        let uir = b.finish();
+        let view = uir.method_call_view(call);
+        assert_eq!(view.receiver, receiver);
+        assert_eq!(view.name, method);
+        assert_eq!(view.args.iter().collect::<Vec<_>>(), vec![a, bb]);
     }
 
     #[test]

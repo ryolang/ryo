@@ -1386,7 +1386,7 @@ mod tests {
         };
         let view = uir.call_view(call_ref);
         assert_eq!(view.args.len(), 1);
-        let arg = view.args[0];
+        let arg = view.args.at(0);
         assert!(
             matches!(uir.inst(arg).tag, InstTag::Borrow),
             "call arg should lower to a Borrow inst"
@@ -1588,7 +1588,7 @@ mod tests {
         assert_eq!(call.args.len(), 2);
         // Args are `IntLiteral(1)`, `IntLiteral(2)`.
         for (arg, expected) in call.args.iter().zip([1i64, 2]) {
-            match uir.inst(*arg).data {
+            match uir.inst(arg).data {
                 InstData::Int(v) => assert_eq!(v, expected),
                 other => panic!("expected IntLiteral, got {:?}", other),
             }
