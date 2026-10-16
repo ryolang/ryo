@@ -78,6 +78,12 @@ pub type Span = SimpleSpan;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InstRef(NonZeroU32);
 
+impl ExtraValue for InstRef {
+    fn from_extra(raw: u32) -> Self {
+        Self::from_raw(raw)
+    }
+}
+
 impl InstRef {
     /// Convert from a `usize` array index. Caller guarantees `idx`
     /// is in `1..instructions.len()` (slot 0 is reserved).
@@ -113,8 +119,8 @@ impl InstRef {
 
 // ---------- ExtraRange ----------
 
-pub use crate::extra::ExtraRange;
 pub use crate::extra::enum_lit_extra;
+pub use crate::extra::{ExtraList, ExtraRange, ExtraValue};
 
 // ---------- Instruction tags ----------
 
@@ -482,11 +488,13 @@ impl Uir {
 
     /// Slice of [`InstRef`]s for the top-level statements of a body.
     pub fn body_stmts(&self, body: &FuncBody) -> Vec<InstRef> {
-        self.extra[body.body.as_range()]
-            .iter()
-            .copied()
-            .map(InstRef::from_raw)
-            .collect()
+        self.body_stmts_view(body).into_iter().collect()
+    }
+
+    /// Borrow the top-level statement references from the extra arena.
+    /// The view decodes each reference as it is read and does not allocate.
+    pub fn body_stmts_view(&self, body: &FuncBody) -> ExtraList<'_, InstRef> {
+        ExtraList::new(&self.extra[body.body.as_range()])
     }
 }
 
@@ -1735,6 +1743,12 @@ mod tests {
         let r = b.unary(InstTag::Return, s3, sp());
         b.add_function(main, vec![], pool.int(), &[e1, e2, r], sp());
         let uir = b.finish();
+        assert_eq!(
+            uir.body_stmts_view(&uir.func_bodies[0])
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![e1, e2, r]
+        );
         assert_eq!(uir.body_stmts(&uir.func_bodies[0]), vec![e1, e2, r]);
     }
 

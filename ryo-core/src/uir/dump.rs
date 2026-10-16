@@ -50,7 +50,7 @@ impl<'a> fmt::Display for UirDump<'a> {
             writeln!(f, ") -> {}", pool.display(body.return_type))?;
 
             write!(f, "  body:")?;
-            for r in uir.body_stmts(body) {
+            for r in uir.body_stmts_view(body) {
                 write!(f, " %{}", r.index())?;
             }
             writeln!(f)?;
