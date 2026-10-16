@@ -37,7 +37,7 @@ use super::{
     restore_view_last_use,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
-use ryo_core::flow::{BlockId, DropOp, DropPosition, PlaceId, Terminator, WriteKind};
+use ryo_core::flow::{BlockId, DropOp, DropPosition, Place, PlaceId, Terminator, WriteKind};
 use ryo_core::ownership::FunctionSidecar;
 use ryo_core::tir::{ChildKind, MatchArmView, MatchBodyView, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, StructField, TypeId};
@@ -271,6 +271,63 @@ pub(crate) fn analyze_match_switch(
                             span,
                         });
                     }
+                }
+            }
+        }
+        // A break/continue arm does not contribute its branch-local
+        // owners to the merged ownership state, so the later loop-exit
+        // pass cannot release them. Handle locals declared in the exit
+        // block while this arm's state is still available.
+        if !falls
+            && let Some(block) = arm_exit
+            && matches!(
+                w.flow.term(block),
+                Terminator::Break { .. } | Terminator::Continue { .. }
+            )
+        {
+            let mut local_owners: Vec<Owner> = w
+                .flow
+                .places
+                .iter()
+                .enumerate()
+                .filter_map(|(index, place)| {
+                    let Place::Local { decl, .. } = place else {
+                        return None;
+                    };
+                    if !w
+                        .flow
+                        .block_steps(block)
+                        .iter()
+                        .any(|step| step.inst == *decl)
+                    {
+                        return None;
+                    }
+                    let owner = *own.current_owner.get(&PlaceId(index as u32))?;
+                    matches!(own.states.get(&owner), Some(OwnerState::Valid)).then_some(owner)
+                })
+                .collect();
+            local_owners.sort_by_key(owner_sort_key);
+            local_owners.dedup();
+            for owner in local_owners {
+                let target = owner.tirref(w.flow);
+                let already_scheduled = sidecar.drops.iter().any(|drop| {
+                    if drop.target != target {
+                        return false;
+                    }
+                    match drop.position {
+                        DropPosition::AfterStep { inst } | DropPosition::BeforeStep { inst } => {
+                            w.flow.step_block_of(inst) == Some(block)
+                        }
+                        DropPosition::BlockStart { block: at }
+                        | DropPosition::PreTerminator { block: at } => at == block,
+                    }
+                });
+                if !already_scheduled {
+                    sidecar.drops.push(DropOp {
+                        position: DropPosition::PreTerminator { block },
+                        target,
+                        span: owner.span(w.flow, w.tir),
+                    });
                 }
             }
         }

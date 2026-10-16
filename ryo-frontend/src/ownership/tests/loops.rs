@@ -1124,6 +1124,18 @@ fn consume_then_rebind_in_loop_converges() {
 }
 
 #[test]
+fn match_arms_with_continue_and_break_in_loop_converge() {
+    let src = "fn main():\n\tmut i = 0\n\twhile i < 5:\n\t\ti += 1\n\t\tmatch i:\n\t\t\t2:\n\t\t\t\ttext = int_to_str(i) + \" continue payload that needs heap storage\"\n\t\t\t\tcontinue\n\t\t\t4:\n\t\t\t\ttext = int_to_str(i) + \" break payload that needs heap storage\"\n\t\t\t\tbreak\n\t\t\t_:\n\t\t\t\ttext = int_to_str(i) + \" ordinary payload that needs heap storage\"\n\t\t\t\tprint(text)\n\tprint(\"done\\n\")\n";
+    let diags = check_src(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "match arms with continue, break, and fallthrough must compile; got {diags:?}"
+    );
+}
+
+#[test]
 fn loop_body_return_converges_and_does_not_poison_post_loop_use() {
     // Regression (G3 convergence test): a loop whose body's live exits
     // are Return-only (`while flag: return s`). The body moves `s` on a

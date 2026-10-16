@@ -195,13 +195,12 @@ pub(crate) fn analyze_loop(
     // The four maps (states, current_owner, binding_of_name,
     // live_projections) therefore ASCEND the product order (never
     // removes a Moved, never shrinks a projection set, never changes a
-    // seated home). The fifth, pending_dead_store, is neither growing
-    // nor shrinking — its merged key set EQUALS the post-body key set
-    // ((entry ∩ after) ∪ after-locals = after's keys), and the walk is
-    // state-independent (every reachable transition fires regardless
-    // of the lattice state — the G3 finding), so `after` — hence the
-    // merged dead-store map — is identical on every pass and the map
-    // aligns after a single merge.
+    // seated home). The fifth, pending_dead_store, is rebuilt from the
+    // pre-loop snapshot on each pass. The merge retains pre-loop
+    // entries only when they remain pending and unions body-local
+    // entries. If the next walk uses merged body-local entries, it
+    // treats them as pre-existing. Match-arm intersection can then
+    // clear and restore them on alternating passes.
     //
     // Convergence test. `differ` compares the PREVIOUS entry against
     // the MERGED state now in `own` — the state the iteration actually
@@ -280,6 +279,12 @@ pub(crate) fn analyze_loop(
         // sidecar).
         let mut staging = FunctionSidecar::new(w.tir.name, w.tir.instructions.len());
         let pass_epoch = w.next_epoch();
+        // Recompute dead stores from the loop-entry state on every
+        // speculative pass. The merged entry can contain stores from
+        // the loop body. If a later pass treats them as pre-existing,
+        // match-arm intersection can alternate between keeping and
+        // dropping them.
+        own.pending_dead_store.clone_from(&snap.pending_dead_store);
         w.walk_phase(own, &mut scratch, &mut staging, &region, pass_epoch);
         // Move the post-body state out, installing an empty placeholder
         // — the merge overwrites all five fields below.
