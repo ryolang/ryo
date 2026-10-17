@@ -164,11 +164,11 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
     ) -> Result<Value, String> {
-        let view = ctx.tir.struct_lit_view(r);
+        let view = ctx.tir.struct_lit_ref_view(r);
         let slot = Self::struct_slot(builder, ctx, view.ty);
         let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
         let sview = ctx.pool.struct_view(view.ty);
-        for (field_index, value) in view.fields {
+        for (field_index, value) in view.fields() {
             let field = sview.fields[field_index as usize];
             Self::store_field_value(builder, ctx, addr, field.offset, field.ty, value)?;
         }
