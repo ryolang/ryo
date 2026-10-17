@@ -1244,6 +1244,20 @@ pub struct StructLitView {
     pub fields: Vec<(StringId, InstRef)>,
 }
 
+pub struct StructLitRefView<'a> {
+    pub name: Option<StringId>,
+    fields: &'a [u32],
+}
+
+impl StructLitRefView<'_> {
+    /// Field initializers in source order.
+    pub fn fields(&self) -> impl ExactSizeIterator<Item = (StringId, InstRef)> + '_ {
+        self.fields
+            .chunks_exact(2)
+            .map(|pair| (StringId::from_raw(pair[0]), InstRef::from_raw(pair[1])))
+    }
+}
+
 /// Decoded view of an [`InstTag::EnumLit`] payload (M11). Borrows the
 /// `extra` arena directly — decoding allocates nothing (contrast with
 /// [`StructLitView`]'s owned `Vec`); `fields()` yields `(field_index,
@@ -1490,6 +1504,14 @@ impl Uir {
     }
 
     pub fn struct_lit_view(&self, r: InstRef) -> StructLitView {
+        let view = self.struct_lit_ref_view(r);
+        StructLitView {
+            name: view.name,
+            fields: view.fields().collect(),
+        }
+    }
+
+    pub fn struct_lit_ref_view(&self, r: InstRef) -> StructLitRefView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, InstTag::StructLit));
         let range = match inst.data {
@@ -1502,15 +1524,11 @@ impl Uir {
             raw => Some(StringId::from_raw(raw)),
         };
         let n = slice[struct_lit_extra::NFIELDS] as usize;
-        let mut fields = Vec::with_capacity(n);
-        for i in 0..n {
-            let base = struct_lit_extra::FIELDS + 2 * i;
-            fields.push((
-                StringId::from_raw(slice[base]),
-                InstRef::from_raw(slice[base + 1]),
-            ));
+        let fields_end = struct_lit_extra::FIELDS + 2 * n;
+        StructLitRefView {
+            name,
+            fields: &slice[struct_lit_extra::FIELDS..fields_end],
         }
-        StructLitView { name, fields }
     }
 
     pub fn enum_lit_view(&self, r: InstRef) -> EnumLitView<'_> {
@@ -1955,6 +1973,12 @@ mod tests {
         let lit = b.struct_lit(Some(point), &[(x, one), (y, two)], sp());
 
         let uir = b.finish();
+        let borrowed = uir.struct_lit_ref_view(lit);
+        assert_eq!(borrowed.name, Some(point));
+        assert_eq!(
+            borrowed.fields().collect::<Vec<_>>(),
+            vec![(x, one), (y, two)]
+        );
         let view = uir.struct_lit_view(lit);
         assert_eq!(view.name, Some(point));
         assert_eq!(view.fields, vec![(x, one), (y, two)]);

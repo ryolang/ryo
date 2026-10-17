@@ -5,7 +5,7 @@ use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::extra::enum_lit_extra;
 use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, StructField, TypeId, TypeKind, VariantKind, ViewKind};
-use ryo_core::uir::{InstData, InstRef, InstTag, Span, StructLitView, Uir};
+use ryo_core::uir::{InstData, InstRef, InstTag, Span, StructLitRefView, Uir};
 
 /// Resolve a user-spelled variable read. The `__ryo_` namespace belongs
 /// to compiler-generated temporaries (nested-destructuring temps,
@@ -536,7 +536,7 @@ fn analyze_struct_lit(
     r: InstRef,
     span: Span,
 ) -> TirRef {
-    let view = sema.uir.struct_lit_view(r);
+    let view = sema.uir.struct_lit_ref_view(r);
     let Some(name) = view.name else {
         return analyze_anon_struct_lit(sema, fcx, scope, &view, span);
     };
@@ -562,7 +562,7 @@ fn analyze_struct_lit(
     // top is noise. Mistyped-but-present fields do not set this: a
     // type mismatch is not a shape error.
     let mut field_errored = false;
-    for (fname, value_ref) in view.fields {
+    for (fname, value_ref) in view.fields() {
         let fspan = sema.uir.span(value_ref);
         let Some(field) = sema.pool.struct_field(sty, fname) else {
             field_errored = true;
@@ -892,29 +892,29 @@ fn analyze_anon_struct_lit(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
-    view: &StructLitView,
+    view: &StructLitRefView<'_>,
     span: Span,
 ) -> TirRef {
     let error_ty = sema.pool.error_type();
-    let mut fields: Vec<(StringId, TypeId, TirRef)> = Vec::with_capacity(view.fields.len());
+    let mut fields: Vec<(StringId, TypeId, TirRef)> = Vec::with_capacity(view.fields().len());
     let mut poisoned = false;
-    for (fname, value_ref) in &view.fields {
-        let fspan = sema.uir.span(*value_ref);
-        if fields.iter().any(|(n, _, _)| n == fname) {
+    for (fname, value_ref) in view.fields() {
+        let fspan = sema.uir.span(value_ref);
+        if fields.iter().any(|(n, _, _)| *n == fname) {
             sema.sink.emit(Diag::error(
                 fspan,
                 DiagCode::DuplicateStructField,
                 format!(
                     "field '{}' is specified more than once",
-                    sema.pool.str(*fname)
+                    sema.pool.str(fname)
                 ),
             ));
             // Same recovery as the named path: analyze the duplicate's
             // initializer so its own errors still surface.
-            analyze_expr(sema, fcx, scope, *value_ref);
+            analyze_expr(sema, fcx, scope, value_ref);
             continue;
         }
-        let value = analyze_expr(sema, fcx, scope, *value_ref);
+        let value = analyze_expr(sema, fcx, scope, value_ref);
         let vty = fcx.builder.ty_of(value);
         if sema.pool.is_error(vty) {
             poisoned = true;
@@ -929,7 +929,7 @@ fn analyze_anon_struct_lit(
                 ),
             ));
         }
-        fields.push((*fname, vty, value));
+        fields.push((fname, vty, value));
     }
     if poisoned {
         return fcx.builder.unreachable(error_ty, span);
