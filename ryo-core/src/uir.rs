@@ -486,14 +486,9 @@ impl Uir {
         self.spans[r.index()]
     }
 
-    /// Slice of [`InstRef`]s for the top-level statements of a body.
-    pub fn body_stmts(&self, body: &FuncBody) -> Vec<InstRef> {
-        self.body_stmts_view(body).into_iter().collect()
-    }
-
     /// Borrow the top-level statement references from the extra arena.
     /// The view decodes each reference as it is read and does not allocate.
-    pub fn body_stmts_view(&self, body: &FuncBody) -> ExtraList<'_, InstRef> {
+    pub fn body_stmts(&self, body: &FuncBody) -> ExtraList<'_, InstRef> {
         ExtraList::new(&self.extra[body.body.as_range()])
     }
 }
@@ -1203,24 +1198,12 @@ pub struct CompoundFieldAssignView {
     pub value: InstRef,
 }
 
-pub struct WhileLoopView {
-    pub cond: InstRef,
-    pub body: Vec<InstRef>,
-}
-
-pub struct WhileLoopRefView<'a> {
+pub struct WhileLoopView<'a> {
     pub cond: InstRef,
     pub body: ExtraList<'a, InstRef>,
 }
 
-pub struct ForRangeView {
-    pub var_name: StringId,
-    pub start: InstRef,
-    pub end: InstRef,
-    pub body: Vec<InstRef>,
-}
-
-pub struct ForRangeRefView<'a> {
+pub struct ForRangeView<'a> {
     pub var_name: StringId,
     pub start: InstRef,
     pub end: InstRef,
@@ -1234,22 +1217,17 @@ pub struct MethodCallView<'a> {
     pub args: ExtraList<'a, InstRef>,
 }
 
-/// Decoded view of an [`InstTag::StructLit`] payload. Field
+/// Decoded borrowed view of an [`InstTag::StructLit`] payload. Field
 /// initializers are in source order. `name` of `None` is the M10
 /// anonymous literal (encoded as
 /// [`struct_lit_extra::UIR_ANON_STRUCT_NAME`]); sema infers the
 /// structural type from the field values instead of resolving a name.
-pub struct StructLitView {
-    pub name: Option<StringId>,
-    pub fields: Vec<(StringId, InstRef)>,
-}
-
-pub struct StructLitRefView<'a> {
+pub struct StructLitView<'a> {
     pub name: Option<StringId>,
     fields: &'a [u32],
 }
 
-impl StructLitRefView<'_> {
+impl StructLitView<'_> {
     /// Field initializers in source order.
     pub fn fields(&self) -> impl ExactSizeIterator<Item = (StringId, InstRef)> + '_ {
         self.fields
@@ -1259,8 +1237,7 @@ impl StructLitRefView<'_> {
 }
 
 /// Decoded view of an [`InstTag::EnumLit`] payload (M11). Borrows the
-/// `extra` arena directly — decoding allocates nothing (contrast with
-/// [`StructLitView`]'s owned `Vec`); `fields()` yields `(field_index,
+/// `extra` arena directly — decoding allocates nothing; `fields()` yields `(field_index,
 /// value)` pairs keyed by declaration-order payload-field index, in
 /// source order.
 pub struct EnumLitView<'a> {
@@ -1283,19 +1260,7 @@ impl EnumLitView<'_> {
     }
 }
 
-pub struct ElifView {
-    pub cond: InstRef,
-    pub body: Vec<InstRef>,
-}
-
-pub struct IfStmtView {
-    pub cond: InstRef,
-    pub then_stmts: Vec<InstRef>,
-    pub elif_branches: Vec<ElifView>,
-    pub else_stmts: Option<Vec<InstRef>>,
-}
-
-pub struct ElifRefView<'a> {
+pub struct ElifView<'a> {
     pub cond: InstRef,
     pub body: ExtraList<'a, InstRef>,
 }
@@ -1306,7 +1271,7 @@ pub struct ElifBranches<'a> {
 }
 
 impl<'a> Iterator for ElifBranches<'a> {
-    type Item = ElifRefView<'a>;
+    type Item = ElifView<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining == 0 {
@@ -1318,7 +1283,7 @@ impl<'a> Iterator for ElifBranches<'a> {
         let body_end = 2 + count;
         let body = ExtraList::new(&self.words[2..body_end]);
         self.words = &self.words[body_end..];
-        Some(ElifRefView { cond, body })
+        Some(ElifView { cond, body })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -1328,7 +1293,7 @@ impl<'a> Iterator for ElifBranches<'a> {
 
 impl ExactSizeIterator for ElifBranches<'_> {}
 
-pub struct IfStmtRefView<'a> {
+pub struct IfStmtView<'a> {
     pub cond: InstRef,
     pub then_stmts: ExtraList<'a, InstRef>,
     pub elif_branches: ElifBranches<'a>,
@@ -1433,15 +1398,7 @@ impl Uir {
         }
     }
 
-    pub fn while_loop_view(&self, r: InstRef) -> WhileLoopView {
-        let view = self.while_loop_ref_view(r);
-        WhileLoopView {
-            cond: view.cond,
-            body: view.body.into_iter().collect(),
-        }
-    }
-
-    pub fn while_loop_ref_view(&self, r: InstRef) -> WhileLoopRefView<'_> {
+    pub fn while_loop_view(&self, r: InstRef) -> WhileLoopView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, InstTag::WhileLoop));
         let range = match inst.data {
@@ -1451,20 +1408,10 @@ impl Uir {
         let slice = &self.extra[range.as_range()];
         let cond = InstRef::from_raw(slice[while_loop_extra::COND]);
         let body = ExtraList::new(&slice[while_loop_extra::BODY_START..]);
-        WhileLoopRefView { cond, body }
+        WhileLoopView { cond, body }
     }
 
-    pub fn for_range_view(&self, r: InstRef) -> ForRangeView {
-        let view = self.for_range_ref_view(r);
-        ForRangeView {
-            var_name: view.var_name,
-            start: view.start,
-            end: view.end,
-            body: view.body.into_iter().collect(),
-        }
-    }
-
-    pub fn for_range_ref_view(&self, r: InstRef) -> ForRangeRefView<'_> {
+    pub fn for_range_view(&self, r: InstRef) -> ForRangeView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, InstTag::ForRange));
         let range = match inst.data {
@@ -1476,7 +1423,7 @@ impl Uir {
         let start = InstRef::from_raw(slice[for_range_extra::START]);
         let end = InstRef::from_raw(slice[for_range_extra::END]);
         let body = ExtraList::new(&slice[for_range_extra::BODY_START..]);
-        ForRangeRefView {
+        ForRangeView {
             var_name,
             start,
             end,
@@ -1503,15 +1450,7 @@ impl Uir {
         }
     }
 
-    pub fn struct_lit_view(&self, r: InstRef) -> StructLitView {
-        let view = self.struct_lit_ref_view(r);
-        StructLitView {
-            name: view.name,
-            fields: view.fields().collect(),
-        }
-    }
-
-    pub fn struct_lit_ref_view(&self, r: InstRef) -> StructLitRefView<'_> {
+    pub fn struct_lit_view(&self, r: InstRef) -> StructLitView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, InstTag::StructLit));
         let range = match inst.data {
@@ -1525,7 +1464,7 @@ impl Uir {
         };
         let n = slice[struct_lit_extra::NFIELDS] as usize;
         let fields_end = struct_lit_extra::FIELDS + 2 * n;
-        StructLitRefView {
+        StructLitView {
             name,
             fields: &slice[struct_lit_extra::FIELDS..fields_end],
         }
@@ -1552,23 +1491,7 @@ impl Uir {
         }
     }
 
-    pub fn if_stmt_view(&self, r: InstRef) -> IfStmtView {
-        let view = self.if_stmt_ref_view(r);
-        IfStmtView {
-            cond: view.cond,
-            then_stmts: view.then_stmts.into_iter().collect(),
-            elif_branches: view
-                .elif_branches
-                .map(|elif| ElifView {
-                    cond: elif.cond,
-                    body: elif.body.into_iter().collect(),
-                })
-                .collect(),
-            else_stmts: view.else_stmts.map(|stmts| stmts.into_iter().collect()),
-        }
-    }
-
-    pub fn if_stmt_ref_view(&self, r: InstRef) -> IfStmtRefView<'_> {
+    pub fn if_stmt_view(&self, r: InstRef) -> IfStmtView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, InstTag::IfStmt));
         let range = match inst.data {
@@ -1603,7 +1526,7 @@ impl Uir {
             None
         };
 
-        IfStmtRefView {
+        IfStmtView {
             cond,
             then_stmts,
             elif_branches,
@@ -1680,7 +1603,10 @@ mod tests {
         let uir = b.finish();
         assert_eq!(uir.func_bodies.len(), 1);
         let body = &uir.func_bodies[0];
-        assert_eq!(uir.body_stmts(body), vec![ret]);
+        assert_eq!(
+            uir.body_stmts(body).into_iter().collect::<Vec<_>>(),
+            vec![ret]
+        );
 
         // dump produces a deterministic listing.
         let out = format!("{}", uir.dump(&pool));
@@ -1784,9 +1710,16 @@ mod tests {
         let uir = b.finish();
         let view = uir.if_stmt_view(if_ref);
         assert_eq!(view.cond, cond);
-        assert_eq!(view.then_stmts, vec![then_ret]);
+        assert_eq!(
+            view.then_stmts.into_iter().collect::<Vec<_>>(),
+            vec![then_ret]
+        );
         assert_eq!(view.elif_branches.len(), 0);
-        assert_eq!(view.else_stmts, Some(vec![else_ret]));
+        assert_eq!(
+            view.else_stmts
+                .map(|stmts| stmts.into_iter().collect::<Vec<_>>()),
+            Some(vec![else_ret])
+        );
     }
 
     #[test]
@@ -1823,13 +1756,27 @@ mod tests {
         let uir = b.finish();
         let view = uir.if_stmt_view(if_ref);
         assert_eq!(view.cond, cond);
-        assert_eq!(view.then_stmts, vec![then_ret]);
-        assert_eq!(view.elif_branches.len(), 2);
-        assert_eq!(view.elif_branches[0].cond, elif_cond1);
-        assert_eq!(view.elif_branches[0].body, vec![elif1_ret]);
-        assert_eq!(view.elif_branches[1].cond, elif_cond2);
-        assert_eq!(view.elif_branches[1].body, vec![elif2_a, elif2_b]);
-        assert_eq!(view.else_stmts, Some(vec![else_ret]));
+        assert_eq!(
+            view.then_stmts.into_iter().collect::<Vec<_>>(),
+            vec![then_ret]
+        );
+        let elifs = view.elif_branches.collect::<Vec<_>>();
+        assert_eq!(elifs.len(), 2);
+        assert_eq!(elifs[0].cond, elif_cond1);
+        assert_eq!(
+            elifs[0].body.into_iter().collect::<Vec<_>>(),
+            vec![elif1_ret]
+        );
+        assert_eq!(elifs[1].cond, elif_cond2);
+        assert_eq!(
+            elifs[1].body.into_iter().collect::<Vec<_>>(),
+            vec![elif2_a, elif2_b]
+        );
+        assert_eq!(
+            view.else_stmts
+                .map(|stmts| stmts.into_iter().collect::<Vec<_>>()),
+            Some(vec![else_ret])
+        );
     }
 
     #[test]
@@ -1850,7 +1797,7 @@ mod tests {
         let without_else = b.if_stmt(cond, &[], &[], None, sp());
         let uir = b.finish();
 
-        let view = uir.if_stmt_ref_view(with_empty_else);
+        let view = uir.if_stmt_view(with_empty_else);
         assert_eq!(view.cond, cond);
         assert_eq!(
             view.then_stmts.into_iter().collect::<Vec<_>>(),
@@ -1867,7 +1814,7 @@ mod tests {
         );
         assert!(view.else_stmts.is_some_and(|stmts| stmts.is_empty()));
 
-        let view = uir.if_stmt_ref_view(without_else);
+        let view = uir.if_stmt_view(without_else);
         assert!(view.then_stmts.is_empty());
         assert_eq!(view.elif_branches.len(), 0);
         assert!(view.else_stmts.is_none());
@@ -1890,15 +1837,15 @@ mod tests {
         let for_loop_without_body = b.for_range(name, start, end, &[], sp());
         let uir = b.finish();
 
-        let view = uir.while_loop_ref_view(while_loop);
+        let view = uir.while_loop_view(while_loop);
         assert_eq!(view.cond, cond);
         assert!(view.body.is_empty());
 
-        let view = uir.while_loop_ref_view(while_loop_with_body);
+        let view = uir.while_loop_view(while_loop_with_body);
         assert_eq!(view.cond, cond);
         assert_eq!(view.body.into_iter().collect::<Vec<_>>(), vec![while_body]);
 
-        let view = uir.for_range_ref_view(for_loop);
+        let view = uir.for_range_view(for_loop);
         assert_eq!(view.var_name, name);
         assert_eq!(view.start, start);
         assert_eq!(view.end, end);
@@ -1907,7 +1854,7 @@ mod tests {
             vec![first, second]
         );
 
-        let view = uir.for_range_ref_view(for_loop_without_body);
+        let view = uir.for_range_view(for_loop_without_body);
         assert_eq!(view.var_name, name);
         assert_eq!(view.start, start);
         assert_eq!(view.end, end);
@@ -1915,10 +1862,19 @@ mod tests {
 
         assert!(uir.while_loop_view(while_loop).body.is_empty());
         assert_eq!(
-            uir.while_loop_view(while_loop_with_body).body,
+            uir.while_loop_view(while_loop_with_body)
+                .body
+                .into_iter()
+                .collect::<Vec<_>>(),
             vec![while_body]
         );
-        assert_eq!(uir.for_range_view(for_loop).body, vec![first, second]);
+        assert_eq!(
+            uir.for_range_view(for_loop)
+                .body
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![first, second]
+        );
         assert!(uir.for_range_view(for_loop_without_body).body.is_empty());
     }
 
@@ -1937,12 +1893,11 @@ mod tests {
         b.add_function(main, vec![], pool.int(), &[e1, e2, r], sp());
         let uir = b.finish();
         assert_eq!(
-            uir.body_stmts_view(&uir.func_bodies[0])
+            uir.body_stmts(&uir.func_bodies[0])
                 .into_iter()
                 .collect::<Vec<_>>(),
             vec![e1, e2, r]
         );
-        assert_eq!(uir.body_stmts(&uir.func_bodies[0]), vec![e1, e2, r]);
     }
 
     #[test]
@@ -1973,15 +1928,9 @@ mod tests {
         let lit = b.struct_lit(Some(point), &[(x, one), (y, two)], sp());
 
         let uir = b.finish();
-        let borrowed = uir.struct_lit_ref_view(lit);
-        assert_eq!(borrowed.name, Some(point));
-        assert_eq!(
-            borrowed.fields().collect::<Vec<_>>(),
-            vec![(x, one), (y, two)]
-        );
         let view = uir.struct_lit_view(lit);
         assert_eq!(view.name, Some(point));
-        assert_eq!(view.fields, vec![(x, one), (y, two)]);
+        assert_eq!(view.fields().collect::<Vec<_>>(), vec![(x, one), (y, two)]);
     }
 
     #[test]
@@ -1996,7 +1945,7 @@ mod tests {
         let uir = b.finish();
         let view = uir.struct_lit_view(lit);
         assert_eq!(view.name, None);
-        assert_eq!(view.fields, vec![(x, one)]);
+        assert_eq!(view.fields().collect::<Vec<_>>(), vec![(x, one)]);
     }
 
     #[test]

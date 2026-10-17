@@ -93,7 +93,7 @@ pub(crate) fn consume_struct_lit_fields(
     sink: &mut DiagSink,
     lit: TirRef,
 ) {
-    let view = tir.struct_lit_ref_view(lit);
+    let view = tir.struct_lit_view(lit);
     for (_, value) in view.fields() {
         if !needs_tracking(tir.inst(value).ty, pool) {
             continue;

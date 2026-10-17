@@ -54,7 +54,7 @@ pub(crate) fn scan_tail_call_candidates(tirs: &[Tir], main: Option<StringId>) ->
                 is_self_call(tir, operand, name)
             }
             TirTag::IfStmt => {
-                let view = tir.if_stmt_view_borrowed(r);
+                let view = tir.if_stmt_view(r);
                 if list_qualifies(tir, view.then_stmts, name) {
                     return true;
                 }
@@ -80,7 +80,7 @@ pub(crate) fn scan_tail_call_candidates(tirs: &[Tir], main: Option<StringId>) ->
         .filter(|tir| {
             main != Some(tir.name)
                 && !tir.params.iter().any(|p| p.mode == ParamMode::Inout)
-                && list_qualifies(tir, tir.body_stmts_view(), tir.name)
+                && list_qualifies(tir, tir.body_stmts(), tir.name)
         })
         .map(|tir| tir.name)
         .collect()

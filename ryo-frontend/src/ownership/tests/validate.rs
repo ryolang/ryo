@@ -323,8 +323,7 @@ fn path_check_harness(
     let flow = build_flow(&tirs[idx], &pool);
     let main_ref = tirs[idx]
         .body_stmts()
-        .first()
-        .copied()
+        .get(0)
         .unwrap_or(ryo_core::tir::TirRef::from_raw(1));
     (tirs, pool, main_ref, flow, own, sc)
 }

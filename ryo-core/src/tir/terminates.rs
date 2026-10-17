@@ -26,8 +26,8 @@
 //!   — falls through.
 
 use super::{
-    TirData, TirRef, TirTag, TypedInst, assign_extra, compound_assign_extra, read_ref_list,
-    var_decl_extra,
+    TirData, TirRef, TirTag, TypedInst, assign_extra, compound_assign_extra, read_ref_list_view,
+    skip_ref_list, var_decl_extra,
 };
 use crate::types::InternPool;
 
@@ -75,25 +75,32 @@ fn stmt_terminates(
             // here. Word 0 is the cond — the arm blocks start at 1.
             let slice = extra_slice(extra, inst);
             let mut pos = 1;
-            let then_stmts = read_ref_list(slice, &mut pos);
+            let then_stmts = read_ref_list_view(slice, &mut pos);
             let elif_count = slice[pos] as usize;
             pos += 1;
-            let mut elif_bodies = Vec::with_capacity(elif_count);
+            let elif_start = pos;
             for _ in 0..elif_count {
                 pos += 1; // elif cond
-                elif_bodies.push(read_ref_list(slice, &mut pos));
+                skip_ref_list(slice, &mut pos);
             }
             let has_else = slice[pos] != 0;
             pos += 1;
             if !has_else {
                 return false;
             }
-            let else_stmts = read_ref_list(slice, &mut pos);
-            block_terminates(insts, extra, then_stmts.iter().copied(), pool, jumps)
-                && elif_bodies
-                    .iter()
-                    .all(|body| block_terminates(insts, extra, body.iter().copied(), pool, jumps))
-                && block_terminates(insts, extra, else_stmts.iter().copied(), pool, jumps)
+            let else_stmts = read_ref_list_view(slice, &mut pos);
+            if !block_terminates(insts, extra, then_stmts, pool, jumps) {
+                return false;
+            }
+            let mut elif_pos = elif_start;
+            for _ in 0..elif_count {
+                elif_pos += 1; // elif cond
+                let body = read_ref_list_view(slice, &mut elif_pos);
+                if !block_terminates(insts, extra, body, pool, jumps) {
+                    return false;
+                }
+            }
+            block_terminates(insts, extra, else_stmts, pool, jumps)
         }
         _ => false,
     }

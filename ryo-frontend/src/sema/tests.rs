@@ -92,7 +92,7 @@ pub(super) fn tir_named<'a>(tirs: &'a [Tir], pool: &InternPool, name: &str) -> &
 }
 
 pub(super) fn stmt_at(tir: &Tir, i: usize) -> TirRef {
-    tir.body_stmts()[i]
+    tir.body_stmts().at(i)
 }
 
 #[test]
@@ -360,8 +360,8 @@ fn variable_reference_type_resolved() {
     let (tirs, pool) = run("x = 42\ny = x").unwrap();
     let main = &tirs[0];
     let stmts = main.body_stmts();
-    let v = main.var_decl_view(stmts[1]);
-    assert_eq!(main.inst(stmts[1]).ty, pool.int());
+    let v = main.var_decl_view(stmts.at(1));
+    assert_eq!(main.inst(stmts.at(1)).ty, pool.int());
     assert_eq!(main.inst(v.initializer).ty, pool.int());
     assert!(matches!(main.inst(v.initializer).tag, TirTag::Var));
 }

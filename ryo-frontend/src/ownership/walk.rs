@@ -1568,7 +1568,7 @@ fn analyze_if_cascade(
     epoch: u32,
 ) -> Option<BlockId> {
     let tir = w.tir;
-    let view = tir.if_stmt_view_borrowed(if_inst);
+    let view = tir.if_stmt_view(if_inst);
     let arms = w.flow.branch_arm_blocks(if_inst);
     let join = arms.join;
     // P4 lift (final spec §3.2): a projection whose last use is the

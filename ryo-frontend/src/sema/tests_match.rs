@@ -1766,7 +1766,7 @@ fn break_arm_terminates_the_value_match_arm() {
     let main = tir_named(&tirs, &pool, "main");
     let while_stmt = stmt_at(main, 2);
     let while_body = main.while_loop_view(while_stmt).body;
-    let assign = while_body[0];
+    let assign = while_body.at(0);
     let m = main.assign_view(assign).value;
     assert_eq!(main.inst(m).ty, pool.int(), "break arm joins freely");
     let view = main.match_view(m);
@@ -1785,7 +1785,7 @@ fn continue_arm_terminates_the_value_match_arm() {
     let main = tir_named(&tirs, &pool, "main");
     let while_stmt = stmt_at(main, 2);
     let while_body = main.while_loop_view(while_stmt).body;
-    let m = main.assign_view(while_body[0]).value;
+    let m = main.assign_view(while_body.at(0)).value;
     assert_eq!(main.inst(m).ty, pool.int());
 }
 

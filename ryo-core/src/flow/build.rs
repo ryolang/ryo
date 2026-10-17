@@ -100,7 +100,7 @@ impl FlowBuilder<'_> {
         }
 
         let tir = self.tir;
-        for stmt in tir.body_stmts_view() {
+        for stmt in tir.body_stmts() {
             self.emit_stmt(stmt);
         }
 
@@ -650,7 +650,7 @@ impl FlowBuilder<'_> {
 
     fn build_if(&mut self, stmt: TirRef) {
         let tir = self.tir;
-        let view = tir.if_stmt_view_borrowed(stmt);
+        let view = tir.if_stmt_view(stmt);
         self.emit_expr(view.cond);
 
         let then_block = self.new_block(false);
@@ -734,7 +734,7 @@ impl FlowBuilder<'_> {
 
     fn build_while(&mut self, stmt: TirRef) {
         let tir = self.tir;
-        let view = tir.while_loop_ref_view(stmt);
+        let view = tir.while_loop_view(stmt);
         let header = self.new_block(false);
         let body = self.new_block(false);
         let exit = self.new_block(false);
@@ -788,7 +788,7 @@ impl FlowBuilder<'_> {
 
     fn build_for(&mut self, stmt: TirRef) {
         let tir = self.tir;
-        let view = tir.for_range_ref_view(stmt);
+        let view = tir.for_range_view(stmt);
         let header = self.new_block(false);
         let body = self.new_block(false);
         let exit = self.new_block(false);

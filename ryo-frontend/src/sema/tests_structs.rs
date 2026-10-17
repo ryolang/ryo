@@ -14,7 +14,7 @@ fn struct_literal_type_checks() {
     let main = tir_named(&tirs, &pool, "main");
     let decl = main.var_decl_view(stmt_at(main, 0));
     let view = main.struct_lit_view(decl.initializer);
-    assert_eq!(view.fields.len(), 2);
+    assert_eq!(view.fields().count(), 2);
     assert!(matches!(pool.kind(view.ty), TypeKind::Struct));
 }
 
@@ -27,7 +27,7 @@ fn struct_literal_fields_emitted_in_canonical_order() {
     let main = tir_named(&tirs, &pool, "main");
     let decl = main.var_decl_view(stmt_at(main, 0));
     let view = main.struct_lit_view(decl.initializer);
-    let indices: Vec<u32> = view.fields.iter().map(|&(i, _)| i).collect();
+    let indices: Vec<u32> = view.fields().map(|(i, _)| i).collect();
     assert_eq!(indices, vec![0, 1]);
 }
 

@@ -1397,35 +1397,33 @@ fn return_epilogue_ignores_loop_local_declared_after_return() {
         .position(|t| {
             t.body_stmts()
                 .iter()
-                .any(|&s| t.inst(s).tag == ryo_core::tir::TirTag::WhileLoop)
+                .any(|s| t.inst(s).tag == ryo_core::tir::TirTag::WhileLoop)
         })
         .expect("function with a while loop");
     let tir = &tirs[f_idx];
     let loop_stmt = tir
         .body_stmts()
         .iter()
-        .find(|&&s| tir.inst(s).tag == ryo_core::tir::TirTag::WhileLoop)
-        .copied()
+        .find(|&s| tir.inst(s).tag == ryo_core::tir::TirTag::WhileLoop)
         .expect("while loop stmt");
     let loop_body = tir.while_loop_view(loop_stmt).body;
     // The bounds-guard if's then-arm holds the early return.
     let early_return = loop_body
         .iter()
-        .find_map(|&s| {
+        .find_map(|s| {
             if tir.inst(s).tag != ryo_core::tir::TirTag::IfStmt {
                 return None;
             }
             let v = tir.if_stmt_view(s);
             v.then_stmts
-                .first()
-                .copied()
+                .get(0)
                 .filter(|&r| tir.inst(r).tag == ryo_core::tir::TirTag::Return)
         })
         .expect("guard if with early return");
     let k_init = loop_body
         .iter()
-        .find(|&&s| tir.inst(s).tag == ryo_core::tir::TirTag::VarDecl)
-        .map(|&s| tir.var_decl_view(s).initializer)
+        .find(|&s| tir.inst(s).tag == ryo_core::tir::TirTag::VarDecl)
+        .map(|s| tir.var_decl_view(s).initializer)
         .expect("var_decl for k");
     let schedule = &sidecar.functions[f_idx].drops;
     assert!(
@@ -1720,13 +1718,12 @@ fn last_use_in_loop_condition_comparison_anchors_after_loop() {
     let body = tir.body_stmts();
     let s_init = body
         .iter()
-        .find(|&&s| tir.inst(s).tag == ryo_core::tir::TirTag::VarDecl)
-        .map(|&s| tir.var_decl_view(s).initializer)
+        .find(|&s| tir.inst(s).tag == ryo_core::tir::TirTag::VarDecl)
+        .map(|s| tir.var_decl_view(s).initializer)
         .expect("var_decl for s");
     let while_stmt = body
         .iter()
-        .find(|&&s| tir.inst(s).tag == ryo_core::tir::TirTag::WhileLoop)
-        .copied()
+        .find(|&s| tir.inst(s).tag == ryo_core::tir::TirTag::WhileLoop)
         .expect("while loop stmt");
     let frees_for_s: Vec<_> = sidecar.functions[0]
         .drops
@@ -1762,13 +1759,13 @@ fn last_use_in_inline_assert_counts_as_use() {
     let body = tir.body_stmts();
     let s_init = body
         .iter()
-        .find(|&&s| tir.inst(s).tag == ryo_core::tir::TirTag::VarDecl)
-        .map(|&s| tir.var_decl_view(s).initializer)
+        .find(|&s| tir.inst(s).tag == ryo_core::tir::TirTag::VarDecl)
+        .map(|s| tir.var_decl_view(s).initializer)
         .expect("var_decl for s");
     // The desugared assert: an ExprStmt whose operand is an IfStmt.
     let assert_if = body
         .iter()
-        .find_map(|&s| {
+        .find_map(|s| {
             if tir.inst(s).tag != ryo_core::tir::TirTag::ExprStmt {
                 return None;
             }
@@ -1817,8 +1814,7 @@ fn cond_temp_free_anchors_after_if() {
     let if_stmt = tir
         .body_stmts()
         .iter()
-        .find(|&&s| tir.inst(s).tag == ryo_core::tir::TirTag::IfStmt)
-        .copied()
+        .find(|&s| tir.inst(s).tag == ryo_core::tir::TirTag::IfStmt)
         .expect("if stmt");
     // The anonymous `p + "x"` concat is the comparison's left operand.
     let cond = tir.if_stmt_view(if_stmt).cond;
@@ -1860,14 +1856,13 @@ fn compound_assign_rhs_method_call_counts_as_use() {
     let body = tir.body_stmts();
     let loop_stmt = body
         .iter()
-        .find(|&&s| tir.inst(s).tag == ryo_core::tir::TirTag::ForRange)
-        .copied()
+        .find(|&s| tir.inst(s).tag == ryo_core::tir::TirTag::ForRange)
         .expect("for-range stmt");
     let loop_body = tir.for_range_view(loop_stmt).body;
     let t_init = loop_body
         .iter()
-        .find(|&&s| tir.inst(s).tag == ryo_core::tir::TirTag::VarDecl)
-        .map(|&s| tir.var_decl_view(s).initializer)
+        .find(|&s| tir.inst(s).tag == ryo_core::tir::TirTag::VarDecl)
+        .map(|s| tir.var_decl_view(s).initializer)
         .expect("var_decl for t");
     let frees_for_t: Vec<_> = sidecar.functions[0]
         .drops

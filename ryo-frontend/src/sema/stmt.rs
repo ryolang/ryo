@@ -126,7 +126,7 @@ pub(crate) fn analyze_stmt(
                 .unary(TirTag::ExprStmt, sema.pool.void(), val_tir, span)
         }
         InstTag::IfStmt => {
-            let view = sema.uir.if_stmt_ref_view(r);
+            let view = sema.uir.if_stmt_view(r);
 
             let cond_tir = analyze_expr(sema, fcx, scope, view.cond);
             check_condition_bool(sema, fcx, cond_tir, view.cond);
@@ -225,7 +225,7 @@ pub(crate) fn analyze_stmt(
         InstTag::Destructure => analyze_destructure(sema, fcx, scope, r, span),
         InstTag::WhileLoop => {
             let uir = sema.uir;
-            let view = uir.while_loop_ref_view(r);
+            let view = uir.while_loop_view(r);
             let cond = view.cond;
             let body = view.body;
 
@@ -241,7 +241,7 @@ pub(crate) fn analyze_stmt(
         }
         InstTag::ForRange => {
             let uir = sema.uir;
-            let view = uir.for_range_ref_view(r);
+            let view = uir.for_range_view(r);
             let var_name = view.var_name;
             let start = view.start;
             let end = view.end;

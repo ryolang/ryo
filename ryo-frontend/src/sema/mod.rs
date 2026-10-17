@@ -668,7 +668,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
     };
 
     let uir = sema.uir;
-    let body_stmts = uir.body_stmts_view(body);
+    let body_stmts = uir.body_stmts(body);
     let mut stmt_refs: Vec<TirRef> = Vec::with_capacity(body_stmts.len());
     for stmt_ref in body_stmts {
         stmt_refs.push(analyze_stmt(sema, &mut fcx, &mut scope, stmt_ref));

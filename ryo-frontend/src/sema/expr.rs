@@ -5,7 +5,7 @@ use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::extra::enum_lit_extra;
 use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, StructField, TypeId, TypeKind, VariantKind, ViewKind};
-use ryo_core::uir::{InstData, InstRef, InstTag, Span, StructLitRefView, Uir};
+use ryo_core::uir::{InstData, InstRef, InstTag, Span, StructLitView, Uir};
 
 /// Resolve a user-spelled variable read. The `__ryo_` namespace belongs
 /// to compiler-generated temporaries (nested-destructuring temps,
@@ -536,7 +536,7 @@ fn analyze_struct_lit(
     r: InstRef,
     span: Span,
 ) -> TirRef {
-    let view = sema.uir.struct_lit_ref_view(r);
+    let view = sema.uir.struct_lit_view(r);
     let Some(name) = view.name else {
         return analyze_anon_struct_lit(sema, fcx, scope, &view, span);
     };
@@ -892,7 +892,7 @@ fn analyze_anon_struct_lit(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
-    view: &StructLitRefView<'_>,
+    view: &StructLitView<'_>,
     span: Span,
 ) -> TirRef {
     let error_ty = sema.pool.error_type();

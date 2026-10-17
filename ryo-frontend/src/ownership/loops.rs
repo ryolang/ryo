@@ -425,7 +425,7 @@ pub(crate) fn collect_loop_nesting(tir: &Tir, flow: &Flow) -> LoopNesting {
         let (loop_inst, header, bounds) = match *flow.term(b) {
             Terminator::While { loop_inst, header } => (loop_inst, header, None),
             Terminator::For { loop_inst, header } => {
-                let view = tir.for_range_ref_view(loop_inst);
+                let view = tir.for_range_view(loop_inst);
                 (loop_inst, header, Some((view.start, view.end)))
             }
             _ => continue,
@@ -588,7 +588,7 @@ pub(crate) fn outermost_loop_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
             let r = stmt_match(tir, r).unwrap_or(r);
             match tir.inst(r).tag {
                 TirTag::IfStmt => {
-                    let view = tir.if_stmt_view_borrowed(r);
+                    let view = tir.if_stmt_view(r);
                     if let Some(found) = walk(tir, &view.then_stmts, target, stack) {
                         return Some(found);
                     }
@@ -647,7 +647,7 @@ pub(crate) fn outermost_loop_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
         }
         None
     }
-    let body = tir.body_stmts_view();
+    let body = tir.body_stmts();
     walk(tir, &body, target, &mut Vec::new())
 }
 
@@ -680,7 +680,7 @@ pub(crate) fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> b
                     }
                 }
                 TirTag::IfStmt => {
-                    let view = tir.if_stmt_view_borrowed(r);
+                    let view = tir.if_stmt_view(r);
                     walk(tir, &view.then_stmts, name, stop, found, stopped);
                     for elif in &view.elif_branches {
                         walk(tir, &elif.body, name, stop, found, stopped);
@@ -713,7 +713,7 @@ pub(crate) fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> b
     }
     let mut found = false;
     let mut stopped = false;
-    let body = tir.body_stmts_view();
+    let body = tir.body_stmts();
     walk(tir, &body, name, stop, &mut found, &mut stopped);
     found
 }
@@ -727,7 +727,7 @@ pub(crate) fn body_may_return<S: TirStmtList + ?Sized>(tir: &Tir, stmts: &S) -> 
         match tir.inst(r).tag {
             TirTag::Return | TirTag::ReturnVoid => return true,
             TirTag::IfStmt => {
-                let view = tir.if_stmt_view_borrowed(r);
+                let view = tir.if_stmt_view(r);
                 if body_may_return(tir, &view.then_stmts)
                     || view
                         .elif_branches
@@ -780,7 +780,7 @@ pub(crate) fn body_must_terminate<S: TirStmtList + ?Sized>(tir: &Tir, stmts: &S)
     match tir.inst(last).tag {
         TirTag::Return | TirTag::ReturnVoid | TirTag::Break | TirTag::Continue => true,
         TirTag::IfStmt => {
-            let view = tir.if_stmt_view_borrowed(last);
+            let view = tir.if_stmt_view(last);
             if view.else_stmts.is_none() {
                 return false;
             }
@@ -819,7 +819,7 @@ pub(crate) fn body_must_terminate<S: TirStmtList + ?Sized>(tir: &Tir, stmts: &S)
 /// True when at least one path through the if reaches its merge block.
 /// Kept for the post-walk passes.
 pub(crate) fn if_may_fall_through(tir: &Tir, if_stmt: TirRef) -> bool {
-    let view = tir.if_stmt_view_borrowed(if_stmt);
+    let view = tir.if_stmt_view(if_stmt);
     if view.else_stmts.is_none() {
         return true;
     }
@@ -844,7 +844,7 @@ pub(crate) fn enclosing_if_main_cond(tir: &Tir, target: TirRef) -> Option<TirRef
             }
             match tir.inst(r).tag {
                 TirTag::IfStmt => {
-                    let view = tir.if_stmt_view_borrowed(r);
+                    let view = tir.if_stmt_view(r);
                     if tir.contains_reachable(view.cond, target) {
                         return Some(r);
                     }
@@ -885,7 +885,7 @@ pub(crate) fn enclosing_if_main_cond(tir: &Tir, target: TirRef) -> Option<TirRef
         }
         None
     }
-    let body = tir.body_stmts_view();
+    let body = tir.body_stmts();
     walk(tir, &body, target)
 }
 
@@ -895,7 +895,7 @@ pub(crate) fn branch_may_not_return(tir: &Tir, branch_stmt: TirRef) -> bool {
     let branch_stmt = stmt_match(tir, branch_stmt).unwrap_or(branch_stmt);
     match tir.inst(branch_stmt).tag {
         TirTag::IfStmt => {
-            let view = tir.if_stmt_view_borrowed(branch_stmt);
+            let view = tir.if_stmt_view(branch_stmt);
             !body_may_return(tir, &view.then_stmts)
                 && !view
                     .elif_branches
@@ -939,7 +939,7 @@ pub(crate) fn innermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
             }
             match tir.inst(r).tag {
                 TirTag::IfStmt => {
-                    let view = tir.if_stmt_view_borrowed(r);
+                    let view = tir.if_stmt_view(r);
                     if let Some(found) = walk(tir, &view.then_stmts, target) {
                         return Some(found);
                     }
@@ -996,7 +996,7 @@ pub(crate) fn innermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
         }
         None
     }
-    let body = tir.body_stmts_view();
+    let body = tir.body_stmts();
     walk(tir, &body, target)
 }
 
@@ -1024,7 +1024,7 @@ pub(crate) fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
             match tir.inst(r).tag {
                 TirTag::IfStmt => {
                     stack.push(r);
-                    let view = tir.if_stmt_view_borrowed(r);
+                    let view = tir.if_stmt_view(r);
                     let mut found = walk(tir, &view.then_stmts, target, stack);
                     for elif in &view.elif_branches {
                         if found.is_none() {
@@ -1091,7 +1091,7 @@ pub(crate) fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
         }
         None
     }
-    let body = tir.body_stmts_view();
+    let body = tir.body_stmts();
     walk(tir, &body, target, &mut Vec::new())
 }
 
@@ -1235,7 +1235,7 @@ pub(crate) fn ancestor_branches_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
             match tir.inst(r).tag {
                 TirTag::IfStmt => {
                     stack.push(r);
-                    let view = tir.if_stmt_view_borrowed(r);
+                    let view = tir.if_stmt_view(r);
                     let mut found = walk(tir, &view.then_stmts, target, stack);
                     for elif in &view.elif_branches {
                         if found.is_none() {
@@ -1310,7 +1310,7 @@ pub(crate) fn ancestor_branches_of(tir: &Tir, target: TirRef) -> Vec<TirRef> {
         }
         None
     }
-    let body = tir.body_stmts_view();
+    let body = tir.body_stmts();
     walk(tir, &body, target, &mut Vec::new()).unwrap_or_default()
 }
 
@@ -1347,7 +1347,7 @@ pub(crate) fn owner_binding_decl(
                     }
                 }
                 TirTag::IfStmt => {
-                    let view = tir.if_stmt_view_borrowed(r);
+                    let view = tir.if_stmt_view(r);
                     if let Some(found) = walk(tir, &view.then_stmts, owner, pool) {
                         return Some(found);
                     }
@@ -1407,7 +1407,7 @@ pub(crate) fn owner_binding_decl(
         }
         None
     }
-    let body = tir.body_stmts_view();
+    let body = tir.body_stmts();
     walk(tir, &body, owner, pool)
 }
 
@@ -1441,7 +1441,7 @@ fn collect_assign_writes<S: TirStmtList + ?Sized>(
                 out.push((r, view.name, view.value));
             }
             TirTag::IfStmt => {
-                let view = tir.if_stmt_view_borrowed(r);
+                let view = tir.if_stmt_view(r);
                 collect_assign_writes(tir, &view.then_stmts, out);
                 for elif in &view.elif_branches {
                     collect_assign_writes(tir, &elif.body, out);
@@ -1497,7 +1497,7 @@ fn assignments_immediately_after_loop<S: TirStmtList + ?Sized>(
         }
         let found = match tir.inst(stmt).tag {
             TirTag::IfStmt => {
-                let view = tir.if_stmt_view_borrowed(stmt);
+                let view = tir.if_stmt_view(stmt);
                 assignments_immediately_after_loop(tir, &view.then_stmts, loop_inst, out)
                     || view.elif_branches.iter().any(|arm| {
                         assignments_immediately_after_loop(tir, &arm.body, loop_inst, out)
@@ -1552,7 +1552,7 @@ impl<'a> LoopExitCtx<'a> {
             .map(|(_, _, value)| value)
             .collect();
         let mut following_assignments = Vec::new();
-        let root_stmts = tir.body_stmts_view();
+        let root_stmts = tir.body_stmts();
         assignments_immediately_after_loop(tir, &root_stmts, loop_inst, &mut following_assignments);
         let reassigned_after_loop_bindings = following_assignments
             .into_iter()
@@ -1605,7 +1605,7 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
                 }
             }
             TirTag::IfStmt => {
-                let view = tir.if_stmt_view_borrowed(r);
+                let view = tir.if_stmt_view(r);
                 schedule_loop_exit_frees_in(
                     tir,
                     flow,

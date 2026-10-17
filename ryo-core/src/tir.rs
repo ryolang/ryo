@@ -522,13 +522,9 @@ impl Tir {
         self.spans[r.index()]
     }
 
-    pub fn body_stmts(&self) -> Vec<TirRef> {
-        self.body_stmts_view().into_iter().collect()
-    }
-
     /// Borrow the function body statement references from the extra arena.
     /// The view decodes each reference as it is read and does not allocate.
-    pub fn body_stmts_view(&self) -> ExtraList<'_, TirRef> {
+    pub fn body_stmts(&self) -> ExtraList<'_, TirRef> {
         ExtraList::new(&self.extra[self.body.as_range()])
     }
 }
@@ -1293,13 +1289,8 @@ pub struct CompoundAssignView {
     pub value: TirRef,
 }
 
-pub struct TirElifView {
-    pub cond: TirRef,
-    pub body: Vec<TirRef>,
-}
-
 #[derive(Clone, Copy)]
-pub struct TirElifRefView<'a> {
+pub struct TirElifView<'a> {
     pub cond: TirRef,
     pub body: ExtraList<'a, TirRef>,
 }
@@ -1335,7 +1326,7 @@ pub struct TirElifIter<'a> {
 }
 
 impl<'a> Iterator for TirElifIter<'a> {
-    type Item = TirElifRefView<'a>;
+    type Item = TirElifView<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining == 0 {
@@ -1345,7 +1336,7 @@ impl<'a> Iterator for TirElifIter<'a> {
         self.pos += 1;
         let body = read_ref_list_view(self.words, &mut self.pos);
         self.remaining -= 1;
-        Some(TirElifRefView { cond, body })
+        Some(TirElifView { cond, body })
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -1356,7 +1347,7 @@ impl<'a> Iterator for TirElifIter<'a> {
 impl ExactSizeIterator for TirElifIter<'_> {}
 
 impl<'a> IntoIterator for TirElifList<'a> {
-    type Item = TirElifRefView<'a>;
+    type Item = TirElifView<'a>;
     type IntoIter = TirElifIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -1369,7 +1360,7 @@ impl<'a> IntoIterator for TirElifList<'a> {
 }
 
 impl<'list, 'words> IntoIterator for &'list TirElifList<'words> {
-    type Item = TirElifRefView<'words>;
+    type Item = TirElifView<'words>;
     type IntoIter = TirElifIter<'words>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -1377,57 +1368,33 @@ impl<'list, 'words> IntoIterator for &'list TirElifList<'words> {
     }
 }
 
-pub struct TirIfStmtRefView<'a> {
+pub struct TirIfStmtView<'a> {
     pub cond: TirRef,
     pub then_stmts: ExtraList<'a, TirRef>,
     pub elif_branches: TirElifList<'a>,
     pub else_stmts: Option<ExtraList<'a, TirRef>>,
 }
 
-pub struct TirIfStmtView {
-    pub cond: TirRef,
-    pub then_stmts: Vec<TirRef>,
-    pub elif_branches: Vec<TirElifView>,
-    pub else_stmts: Option<Vec<TirRef>>,
-}
-
-pub struct WhileLoopView {
-    pub cond: TirRef,
-    pub body: Vec<TirRef>,
-}
-
-pub struct WhileLoopRefView<'a> {
+pub struct WhileLoopView<'a> {
     pub cond: TirRef,
     pub body: ExtraList<'a, TirRef>,
 }
 
-pub struct ForRangeView {
-    pub var_name: StringId,
-    pub start: TirRef,
-    pub end: TirRef,
-    pub body: Vec<TirRef>,
-}
-
-pub struct ForRangeRefView<'a> {
+pub struct ForRangeView<'a> {
     pub var_name: StringId,
     pub start: TirRef,
     pub end: TirRef,
     pub body: ExtraList<'a, TirRef>,
 }
 
-/// Decoded view of a [`TirTag::StructLit`] payload (M9). Fields are
+/// Borrowed view of a [`TirTag::StructLit`] payload (M9). Fields are
 /// `(field_index, value)` pairs in canonical declaration order.
-pub struct StructLitView {
-    pub ty: TypeId,
-    pub fields: Vec<(u32, TirRef)>,
-}
-
-pub struct StructLitRefView<'a> {
+pub struct StructLitView<'a> {
     pub ty: TypeId,
     fields: &'a [u32],
 }
 
-impl StructLitRefView<'_> {
+impl StructLitView<'_> {
     /// `(field_index, value)` pairs in canonical declaration order.
     pub fn fields(&self) -> impl ExactSizeIterator<Item = (u32, TirRef)> + '_ {
         self.fields
@@ -1437,8 +1404,7 @@ impl StructLitRefView<'_> {
 }
 
 /// Decoded view of a [`TirTag::EnumLit`] payload (M11). Borrows the
-/// `extra` arena directly — decoding allocates nothing (contrast with
-/// [`StructLitView`]'s owned `Vec`); `fields()` yields `(field_index,
+/// `extra` arena directly — decoding allocates nothing; `fields()` yields `(field_index,
 /// value)` pairs keyed by declaration-order payload-field index, in
 /// the order sema encoded them.
 pub struct EnumLitView<'a> {
@@ -1524,52 +1490,8 @@ impl Tir {
         }
     }
 
-    pub fn if_stmt_view(&self, r: TirRef) -> TirIfStmtView {
-        let inst = self.inst(r);
-        debug_assert!(matches!(inst.tag, TirTag::IfStmt));
-        let range = match inst.data {
-            TirData::Extra(rng) => rng,
-            _ => unreachable!("IfStmt must carry TirData::Extra"),
-        };
-        let slice = &self.extra[range.as_range()];
-        let mut pos = 0;
-
-        let cond = TirRef::from_raw(slice[pos]);
-        pos += 1;
-
-        let then_stmts = read_ref_list(slice, &mut pos);
-
-        let elif_count = slice[pos] as usize;
-        pos += 1;
-        let mut elif_branches = Vec::with_capacity(elif_count);
-        for _ in 0..elif_count {
-            let elif_cond = TirRef::from_raw(slice[pos]);
-            pos += 1;
-            let body = read_ref_list(slice, &mut pos);
-            elif_branches.push(TirElifView {
-                cond: elif_cond,
-                body,
-            });
-        }
-
-        let has_else = slice[pos] != 0;
-        pos += 1;
-        let else_stmts = if has_else {
-            Some(read_ref_list(slice, &mut pos))
-        } else {
-            None
-        };
-
-        TirIfStmtView {
-            cond,
-            then_stmts,
-            elif_branches,
-            else_stmts,
-        }
-    }
-
     /// Borrow the branch statement lists in an `IfStmt` without collecting them.
-    pub fn if_stmt_view_borrowed(&self, r: TirRef) -> TirIfStmtRefView<'_> {
+    pub fn if_stmt_view(&self, r: TirRef) -> TirIfStmtView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, TirTag::IfStmt));
         let range = match inst.data {
@@ -1595,7 +1517,7 @@ impl Tir {
         pos += 1;
         let else_stmts = has_else.then(|| read_ref_list_view(slice, &mut pos));
 
-        TirIfStmtRefView {
+        TirIfStmtView {
             cond,
             then_stmts,
             elif_branches,
@@ -1603,15 +1525,7 @@ impl Tir {
         }
     }
 
-    pub fn while_loop_view(&self, r: TirRef) -> WhileLoopView {
-        let view = self.while_loop_ref_view(r);
-        WhileLoopView {
-            cond: view.cond,
-            body: view.body.into_iter().collect(),
-        }
-    }
-
-    pub fn while_loop_ref_view(&self, r: TirRef) -> WhileLoopRefView<'_> {
+    pub fn while_loop_view(&self, r: TirRef) -> WhileLoopView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, TirTag::WhileLoop));
         let range = match inst.data {
@@ -1621,7 +1535,7 @@ impl Tir {
         let slice = &self.extra[range.as_range()];
         let cond = TirRef::from_raw(slice[while_loop_extra::COND]);
         let body = ExtraList::new(&slice[while_loop_extra::BODY_START..]);
-        WhileLoopRefView { cond, body }
+        WhileLoopView { cond, body }
     }
 
     /// Borrow the statement refs in a `WhileLoop` body from the extra arena.
@@ -1636,17 +1550,7 @@ impl Tir {
         ExtraList::new(&slice[while_loop_extra::BODY_START..])
     }
 
-    pub fn for_range_view(&self, r: TirRef) -> ForRangeView {
-        let view = self.for_range_ref_view(r);
-        ForRangeView {
-            var_name: view.var_name,
-            start: view.start,
-            end: view.end,
-            body: view.body.into_iter().collect(),
-        }
-    }
-
-    pub fn for_range_ref_view(&self, r: TirRef) -> ForRangeRefView<'_> {
+    pub fn for_range_view(&self, r: TirRef) -> ForRangeView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, TirTag::ForRange));
         let range = match inst.data {
@@ -1658,7 +1562,7 @@ impl Tir {
         let start = TirRef::from_raw(slice[for_range_extra::START]);
         let end = TirRef::from_raw(slice[for_range_extra::END]);
         let body = ExtraList::new(&slice[for_range_extra::BODY_START..]);
-        ForRangeRefView {
+        ForRangeView {
             var_name,
             start,
             end,
@@ -1678,15 +1582,7 @@ impl Tir {
         ExtraList::new(&slice[for_range_extra::BODY_START..])
     }
 
-    pub fn struct_lit_view(&self, r: TirRef) -> StructLitView {
-        let view = self.struct_lit_ref_view(r);
-        StructLitView {
-            ty: view.ty,
-            fields: view.fields().collect(),
-        }
-    }
-
-    pub fn struct_lit_ref_view(&self, r: TirRef) -> StructLitRefView<'_> {
+    pub fn struct_lit_view(&self, r: TirRef) -> StructLitView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, TirTag::StructLit));
         let range = match inst.data {
@@ -1697,7 +1593,7 @@ impl Tir {
         let ty = TypeId::from_raw(slice[struct_lit_extra::TY]);
         let n = slice[struct_lit_extra::N_FIELDS] as usize;
         let fields_end = struct_lit_extra::FIELDS + 2 * n;
-        StructLitRefView {
+        StructLitView {
             ty,
             fields: &slice[struct_lit_extra::FIELDS..fields_end],
         }
@@ -1723,18 +1619,6 @@ impl Tir {
             args,
         }
     }
-}
-
-fn read_ref_list(slice: &[u32], pos: &mut usize) -> Vec<TirRef> {
-    let count = slice[*pos] as usize;
-    *pos += 1;
-    let refs = slice[*pos..*pos + count]
-        .iter()
-        .copied()
-        .map(TirRef::from_raw)
-        .collect();
-    *pos += count;
-    refs
 }
 
 fn read_ref_list_view<'a>(slice: &'a [u32], pos: &mut usize) -> ExtraList<'a, TirRef> {
@@ -1969,7 +1853,7 @@ impl Tir {
             });
         }
         let mut seen: HashSet<TirRef> = HashSet::new();
-        for stmt in self.body_stmts_view() {
+        for stmt in self.body_stmts() {
             debug_assert!(
                 seen.insert(stmt),
                 "TIR body is not tree-shaped: statement raw={} is listed twice in the body roots",
@@ -1977,15 +1861,6 @@ impl Tir {
             );
             walk(self, stmt, &mut seen);
         }
-    }
-
-    /// Slice of body statements for a `WhileLoop`/`ForRange`
-    /// instruction, materialized into an owned `Vec<TirRef>` so the
-    /// caller can re-borrow `self` for recursive walks. Returns `None`
-    /// for non-loop refs.
-    pub fn loop_body(&self, loop_inst: TirRef) -> Option<Vec<TirRef>> {
-        self.loop_body_view(loop_inst)
-            .map(|body| body.into_iter().collect())
     }
 
     /// Borrow a loop body from the extra arena without decoding it into a `Vec`.
@@ -2069,7 +1944,7 @@ impl Tir {
         terminates::block_terminates(
             &self.instructions,
             &self.extra,
-            self.body_stmts_view(),
+            self.body_stmts(),
             pool,
             false,
         )
@@ -2136,7 +2011,7 @@ impl Tir {
                 // `stmt` contains the target. Descend along the right arm.
                 match self.inst(stmt).tag {
                     TirTag::IfStmt => {
-                        let view = self.if_stmt_view_borrowed(stmt);
+                        let view = self.if_stmt_view(stmt);
                         set.insert(stmt);
                         self.collect_reachable(view.cond, set);
                         // Locate the arm containing `target`; only that
@@ -2175,12 +2050,12 @@ impl Tir {
                         set.insert(stmt);
                         match self.inst(stmt).tag {
                             TirTag::WhileLoop => {
-                                let view = self.while_loop_ref_view(stmt);
+                                let view = self.while_loop_view(stmt);
                                 self.collect_reachable(view.cond, set);
                                 return self.collect_jump_path_iter(view.body, target, set);
                             }
                             _ => {
-                                let view = self.for_range_ref_view(stmt);
+                                let view = self.for_range_view(stmt);
                                 self.collect_reachable(view.start, set);
                                 self.collect_reachable(view.end, set);
                                 return self.collect_jump_path_iter(view.body, target, set);

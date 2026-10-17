@@ -33,15 +33,12 @@ fn borrowed_struct_lit_view_iterates_canonical_fields() {
     let lit = b.struct_lit(int_ty, &[(0, first), (1, second)], sp());
     let tir = b.finish(&[lit]);
 
-    let borrowed = tir.struct_lit_ref_view(lit);
-    assert_eq!(borrowed.ty, int_ty);
+    let view = tir.struct_lit_view(lit);
+    assert_eq!(view.ty, int_ty);
     assert_eq!(
-        borrowed.fields().collect::<Vec<_>>(),
+        view.fields().collect::<Vec<_>>(),
         vec![(0, first), (1, second)]
     );
-    let owned = tir.struct_lit_view(lit);
-    assert_eq!(owned.ty, int_ty);
-    assert_eq!(owned.fields, vec![(0, first), (1, second)]);
 }
 
 #[test]
@@ -90,11 +87,7 @@ fn build_simple_function_and_dump() {
     let ret = b.unary(TirTag::Return, pool.void(), add, sp());
     let tir = b.finish(&[ret]);
 
-    assert_eq!(
-        tir.body_stmts_view().into_iter().collect::<Vec<_>>(),
-        vec![ret]
-    );
-    assert_eq!(tir.body_stmts(), vec![ret]);
+    assert_eq!(tir.body_stmts().into_iter().collect::<Vec<_>>(), vec![ret]);
     let out = format!("{}", dump(std::slice::from_ref(&tir), &pool));
     assert!(out.contains("fn main() -> int"));
     assert!(out.contains("= iconst 1"));
@@ -233,9 +226,16 @@ fn if_stmt_round_trips_through_extra() {
     let tir = b.finish(&[if_ref]);
     let view = tir.if_stmt_view(if_ref);
     assert_eq!(view.cond, cond);
-    assert_eq!(view.then_stmts, vec![then_ret]);
+    assert_eq!(
+        view.then_stmts.into_iter().collect::<Vec<_>>(),
+        vec![then_ret]
+    );
     assert!(view.elif_branches.is_empty());
-    assert_eq!(view.else_stmts, Some(vec![else_ret]));
+    assert_eq!(
+        view.else_stmts
+            .map(|stmts| stmts.into_iter().collect::<Vec<_>>()),
+        Some(vec![else_ret])
+    );
 }
 
 #[test]
@@ -263,7 +263,7 @@ fn borrowed_if_view_iterates_all_branches_without_losing_empty_else() {
     let without_else = b.if_stmt(empty_else_cond, &[], &[], None, void_ty, sp());
     let tir = b.finish(&[with_empty_else, without_else]);
 
-    let view = tir.if_stmt_view_borrowed(with_empty_else);
+    let view = tir.if_stmt_view(with_empty_else);
     assert_eq!(view.cond, cond);
     assert_eq!(
         view.then_stmts.into_iter().collect::<Vec<_>>(),
@@ -280,7 +280,7 @@ fn borrowed_if_view_iterates_all_branches_without_losing_empty_else() {
     );
     assert_eq!(view.else_stmts.unwrap().len(), 0);
 
-    let view = tir.if_stmt_view_borrowed(without_else);
+    let view = tir.if_stmt_view(without_else);
     assert!(view.elif_branches.is_empty());
     assert!(view.else_stmts.is_none());
 }
@@ -303,17 +303,14 @@ fn borrowed_loop_views_preserve_headers_and_bodies() {
     let for_loop = b.for_range(name, start, end, &[for_stmt], void_ty, sp());
     let tir = b.finish(&[while_loop, for_loop]);
 
-    let view = tir.while_loop_ref_view(while_loop);
+    let view = tir.while_loop_view(while_loop);
     assert_eq!(view.cond, cond);
     assert_eq!(view.body.into_iter().collect::<Vec<_>>(), vec![while_stmt]);
-    let view = tir.for_range_ref_view(for_loop);
+    let view = tir.for_range_view(for_loop);
     assert_eq!(view.var_name, name);
     assert_eq!(view.start, start);
     assert_eq!(view.end, end);
     assert_eq!(view.body.into_iter().collect::<Vec<_>>(), vec![for_stmt]);
-
-    assert_eq!(tir.while_loop_view(while_loop).body, vec![while_stmt]);
-    assert_eq!(tir.for_range_view(for_loop).body, vec![for_stmt]);
 }
 
 #[test]

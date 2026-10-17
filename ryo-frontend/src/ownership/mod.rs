@@ -727,7 +727,7 @@ fn analyze_function(
     // per-read `owner_at_read` snapshot keys the owner map).
     let last_use = std::mem::take(&mut w.last_use);
     let last_read_by_name = std::mem::take(&mut w.last_read_by_name);
-    let body_stmts = tir.body_stmts_view();
+    let body_stmts = tir.body_stmts();
     // P5 (final spec §3.2): root owner → every view that ever
     // projected it (sorted for deterministic iteration).
     // Program-order ranks, built once per function and shared by the

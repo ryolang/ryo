@@ -1360,7 +1360,7 @@ mod tests {
 
     /// Top-level statement at index `i` in `body`'s execution order.
     fn stmt_at(uir: &Uir, body: &ryo_core::uir::FuncBody, i: usize) -> InstRef {
-        uir.body_stmts(body)[i]
+        uir.body_stmts(body).at(i)
     }
 
     #[test]
@@ -1368,7 +1368,7 @@ mod tests {
         let (uir, pool) = parse_and_lower("x = 1.5").unwrap();
         let main = body_named(&uir, &pool, "main");
         let stmts = uir.body_stmts(main);
-        let v = uir.var_decl_view(stmts[0]);
+        let v = uir.var_decl_view(stmts.at(0));
         assert!(matches!(uir.inst(v.initializer).tag, InstTag::FloatLiteral));
     }
 
@@ -1379,7 +1379,7 @@ mod tests {
         // body is [VarDecl(c), ExprStmt(Call)]; the call's first arg
         // should be a Borrow inst whose operand is the Var(c) read.
         let stmts = uir.body_stmts(main);
-        let expr_stmt = uir.inst(stmts[1]);
+        let expr_stmt = uir.inst(stmts.at(1));
         let call_ref = match expr_stmt.data {
             InstData::UnOp(o) => o,
             _ => panic!("expected ExprStmt to carry UnOp"),
@@ -1415,7 +1415,7 @@ mod tests {
             2,
             "nested lowering emits the sub-pattern as its own statement"
         );
-        let sub = uir.destructure_view(stmts[1]);
+        let sub = uir.destructure_view(stmts.at(1));
         let value = uir.inst(sub.value);
         assert!(
             matches!(value.tag, InstTag::TempVar),
@@ -1433,7 +1433,7 @@ mod tests {
         let (uir, pool) = parse_and_lower("x: float = 1.5")
             .expect("`: float` annotation should resolve without diagnostics");
         let main = body_named(&uir, &pool, "main");
-        let v = uir.var_decl_view(uir.body_stmts(main)[0]);
+        let v = uir.var_decl_view(uir.body_stmts(main).at(0));
         assert_eq!(
             v.ty,
             Some(pool.float()),
@@ -1446,9 +1446,9 @@ mod tests {
         let (uir, pool) = parse_and_lower("x = 1 < 2\ny = 1 % 2").unwrap();
         let main = body_named(&uir, &pool, "main");
         let stmts = uir.body_stmts(main);
-        let lt = uir.var_decl_view(stmts[0]);
+        let lt = uir.var_decl_view(stmts.at(0));
         assert!(matches!(uir.inst(lt.initializer).tag, InstTag::Lt));
-        let m = uir.var_decl_view(stmts[1]);
+        let m = uir.var_decl_view(stmts.at(1));
         assert!(matches!(uir.inst(m.initializer).tag, InstTag::Mod));
     }
 
@@ -1485,7 +1485,7 @@ mod tests {
         let stmts = uir.body_stmts(main);
         assert_eq!(stmts.len(), 1);
 
-        let v = uir.var_decl_view(stmts[0]);
+        let v = uir.var_decl_view(stmts.at(0));
         assert_eq!(pool.str(v.name), "x");
         assert!(!v.mutable);
         assert!(matches!(uir.inst(v.initializer).tag, InstTag::IntLiteral));
@@ -1531,7 +1531,7 @@ mod tests {
         assert_eq!(main.return_type, pool.void());
         let stmts = uir.body_stmts(main);
         assert_eq!(stmts.len(), 1);
-        assert!(matches!(uir.inst(stmts[0]).tag, InstTag::ExprStmt));
+        assert!(matches!(uir.inst(stmts.at(0)).tag, InstTag::ExprStmt));
     }
 
     #[test]
@@ -1599,7 +1599,7 @@ mod tests {
     fn lower_and_operator() {
         let (uir, pool) = parse_and_lower("x = true and false").unwrap();
         let main = body_named(&uir, &pool, "main");
-        let v = uir.var_decl_view(uir.body_stmts(main)[0]);
+        let v = uir.var_decl_view(uir.body_stmts(main).at(0));
         assert!(matches!(uir.inst(v.initializer).tag, InstTag::And));
     }
 
@@ -1607,7 +1607,7 @@ mod tests {
     fn lower_or_operator() {
         let (uir, pool) = parse_and_lower("x = true or false").unwrap();
         let main = body_named(&uir, &pool, "main");
-        let v = uir.var_decl_view(uir.body_stmts(main)[0]);
+        let v = uir.var_decl_view(uir.body_stmts(main).at(0));
         assert!(matches!(uir.inst(v.initializer).tag, InstTag::Or));
     }
 
@@ -1615,7 +1615,7 @@ mod tests {
     fn lower_not_operator() {
         let (uir, pool) = parse_and_lower("x = not true").unwrap();
         let main = body_named(&uir, &pool, "main");
-        let v = uir.var_decl_view(uir.body_stmts(main)[0]);
+        let v = uir.var_decl_view(uir.body_stmts(main).at(0));
         assert!(matches!(uir.inst(v.initializer).tag, InstTag::Not));
     }
 
@@ -1626,8 +1626,8 @@ mod tests {
         let main = body_named(&uir, &pool, "main");
         let stmts = uir.body_stmts(main);
         assert_eq!(stmts.len(), 1);
-        assert!(matches!(uir.inst(stmts[0]).tag, InstTag::IfStmt));
-        let view = uir.if_stmt_view(stmts[0]);
+        assert!(matches!(uir.inst(stmts.at(0)).tag, InstTag::IfStmt));
+        let view = uir.if_stmt_view(stmts.at(0));
         assert_eq!(view.then_stmts.len(), 1);
         assert!(view.else_stmts.is_some());
     }
@@ -1639,10 +1639,10 @@ mod tests {
         let stmts = uir.body_stmts(main);
         assert_eq!(stmts.len(), 1);
         assert!(matches!(
-            uir.inst(stmts[0]).tag,
+            uir.inst(stmts.at(0)).tag,
             ryo_core::uir::InstTag::AssignOrDecl
         ));
-        let v = uir.assign_or_decl_view(stmts[0]);
+        let v = uir.assign_or_decl_view(stmts.at(0));
         assert_eq!(pool.str(v.name), "x");
     }
 
@@ -1674,10 +1674,10 @@ mod tests {
         let stmts = uir.body_stmts(main);
         assert_eq!(stmts.len(), 2);
         assert!(matches!(
-            uir.inst(stmts[1]).tag,
+            uir.inst(stmts.at(1)).tag,
             ryo_core::uir::InstTag::CompoundAssign
         ));
-        let v = uir.compound_assign_view(stmts[1]);
+        let v = uir.compound_assign_view(stmts.at(1));
         assert_eq!(pool.str(v.name), "x");
         assert_eq!(v.op, ryo_core::ast::CompoundOp::Add);
     }
@@ -1771,12 +1771,13 @@ mod tests {
         let (uir, pool) = parse_and_lower(src).unwrap();
         let main = body_named(&uir, &pool, "main");
         let stmts = uir.body_stmts(main);
-        let decl = uir.var_decl_view(stmts[0]);
+        let decl = uir.var_decl_view(stmts.at(0));
         let lit = uir.struct_lit_view(decl.initializer);
         assert_eq!(lit.name.map(|n| pool.str(n)), Some("Point"));
-        assert_eq!(lit.fields.len(), 1);
-        assert_eq!(pool.str(lit.fields[0].0), "x");
-        let q = uir.var_decl_view(stmts[1]);
+        let fields: Vec<_> = lit.fields().collect();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(pool.str(fields[0].0), "x");
+        let q = uir.var_decl_view(stmts.at(1));
         assert!(matches!(uir.inst(q.initializer).tag, InstTag::FieldAccess));
     }
 
@@ -1950,7 +1951,7 @@ mod type_literal_tests {
         let (uir, pool) = parse_and_lower("fn main():\n\tdm: {q: int, r: int} = {q=1, r=2}\n")
             .expect("type literal annotation should resolve");
         let main = body_named(&uir, &pool, "main");
-        let v = uir.var_decl_view(uir.body_stmts(main)[0]);
+        let v = uir.var_decl_view(uir.body_stmts(main).at(0));
         let ty = v.ty.expect("annotation must produce a declared type");
         assert!(matches!(pool.kind(ty), TypeKind::AnonStruct));
         assert_eq!(pool.display(ty).to_string(), "{q: int, r: int}");

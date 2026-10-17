@@ -654,7 +654,7 @@ fn liveness_if(
     epoch: u32,
     reads: &mut HashMap<TirRef, TirRef>,
 ) -> Option<BlockId> {
-    let view = tir.if_stmt_view_borrowed(if_inst);
+    let view = tir.if_stmt_view(if_inst);
     let arms = flow.branch_arm_blocks(if_inst);
     let join = arms.join;
     let mut arm_entries: Vec<BlockId> = Vec::with_capacity(2 + view.elif_branches.len());

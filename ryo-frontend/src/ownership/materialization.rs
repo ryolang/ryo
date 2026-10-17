@@ -86,7 +86,7 @@ fn collect_bound_call_sites_iter(
                 }
             }
             TirTag::IfStmt => {
-                let v = tir.if_stmt_view_borrowed(r);
+                let v = tir.if_stmt_view(r);
                 collect_bound_call_sites_iter(tir, v.then_stmts, pred, out);
                 for arm in &v.elif_branches {
                     collect_bound_call_sites_iter(tir, arm.body, pred, out);
@@ -159,7 +159,7 @@ pub(crate) fn warn_redundant_materialize(
     sink: &mut DiagSink,
 ) {
     let mut sites: Vec<(TirRef, TirRef)> = Vec::new();
-    collect_materialize_sites(tir, tir.body_stmts_view(), pool, ids, &mut sites);
+    collect_materialize_sites(tir, tir.body_stmts(), pool, ids, &mut sites);
     if sites.is_empty() {
         return;
     }
@@ -262,7 +262,7 @@ pub(crate) fn warn_redundant_to_bytes(
     let mut sites: Vec<(TirRef, TirRef)> = Vec::new();
     collect_bound_call_sites_iter(
         tir,
-        tir.body_stmts_view(),
+        tir.body_stmts(),
         &|t, r| is_to_bytes_call(t, ids, r),
         &mut sites,
     );
