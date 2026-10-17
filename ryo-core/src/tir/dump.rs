@@ -141,10 +141,10 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
             )
         }
         (TirTag::IfStmt, TirData::Extra(_)) => {
-            let view = tir.if_stmt_view(r);
+            let view = tir.if_stmt_view_borrowed(r);
             write!(f, "if_stmt cond=%{}", view.cond.index())?;
             write!(f, " then=[{}]", view.then_stmts.len())?;
-            for elif in &view.elif_branches {
+            for elif in view.elif_branches {
                 write!(
                     f,
                     " elif(cond=%{}, body=[{}])",
@@ -152,13 +152,13 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
                     elif.body.len()
                 )?;
             }
-            if let Some(else_s) = &view.else_stmts {
+            if let Some(else_s) = view.else_stmts {
                 write!(f, " else=[{}]", else_s.len())?;
             }
             writeln!(f)
         }
         (TirTag::WhileLoop, TirData::Extra(_)) => {
-            let v = tir.while_loop_view(r);
+            let v = tir.while_loop_ref_view(r);
             let body_refs: Vec<_> = v.body.iter().map(|b| format!("%{}", b.index())).collect();
             writeln!(
                 f,
@@ -168,7 +168,7 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
             )
         }
         (TirTag::ForRange, TirData::Extra(_)) => {
-            let v = tir.for_range_view(r);
+            let v = tir.for_range_ref_view(r);
             let body_refs: Vec<_> = v.body.iter().map(|b| format!("%{}", b.index())).collect();
             writeln!(
                 f,
@@ -182,9 +182,9 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
         (TirTag::Break, TirData::None) => writeln!(f, "break"),
         (TirTag::Continue, TirData::None) => writeln!(f, "continue"),
         (TirTag::StructLit, TirData::Extra(_)) => {
-            let view = tir.struct_lit_view(r);
+            let view = tir.struct_lit_ref_view(r);
             write!(f, "struct_lit {} {{", pool.display(view.ty))?;
-            for (i, (idx, v)) in view.fields.iter().enumerate() {
+            for (i, (idx, v)) in view.fields().enumerate() {
                 if i > 0 {
                     write!(f, ", ")?;
                 }

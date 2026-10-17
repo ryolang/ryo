@@ -130,10 +130,10 @@ fn write_inst(
             }
         }
         (InstTag::IfStmt, InstData::Extra(_)) => {
-            let view = uir.if_stmt_view(r);
+            let view = uir.if_stmt_ref_view(r);
             write!(f, "if_stmt cond=%{}", view.cond.index())?;
             write!(f, " then=[{}]", view.then_stmts.len())?;
-            for elif in &view.elif_branches {
+            for elif in view.elif_branches {
                 write!(
                     f,
                     " elif(cond=%{}, body=[{}])",
@@ -141,7 +141,7 @@ fn write_inst(
                     elif.body.len()
                 )?;
             }
-            if let Some(else_s) = &view.else_stmts {
+            if let Some(else_s) = view.else_stmts {
                 write!(f, " else=[{}]", else_s.len())?;
             }
             writeln!(f)
@@ -185,7 +185,7 @@ fn write_inst(
             )
         }
         (InstTag::WhileLoop, InstData::Extra(_)) => {
-            let v = uir.while_loop_view(r);
+            let v = uir.while_loop_ref_view(r);
             let body_refs: Vec<_> = v.body.iter().map(|b| format!("%{}", b.index())).collect();
             writeln!(
                 f,
@@ -195,7 +195,7 @@ fn write_inst(
             )
         }
         (InstTag::ForRange, InstData::Extra(_)) => {
-            let v = uir.for_range_view(r);
+            let v = uir.for_range_ref_view(r);
             let body_refs: Vec<_> = v.body.iter().map(|b| format!("%{}", b.index())).collect();
             writeln!(
                 f,
@@ -225,16 +225,16 @@ fn write_inst(
         (InstTag::Break, InstData::None) => writeln!(f, "break"),
         (InstTag::Continue, InstData::None) => writeln!(f, "continue"),
         (InstTag::StructLit, InstData::Extra(_)) => {
-            let view = uir.struct_lit_view(r);
+            let view = uir.struct_lit_ref_view(r);
             match view.name {
                 Some(name) => write!(f, "struct_lit {} {{", pool.str(name))?,
                 None => write!(f, "struct_lit <anon> {{")?,
             }
-            for (i, (fname, v)) in view.fields.iter().enumerate() {
+            for (i, (fname, v)) in view.fields().enumerate() {
                 if i > 0 {
                     write!(f, ", ")?;
                 }
-                write!(f, "{}: %{}", pool.str(*fname), v.index())?;
+                write!(f, "{}: %{}", pool.str(fname), v.index())?;
             }
             writeln!(f, "}}")
         }
