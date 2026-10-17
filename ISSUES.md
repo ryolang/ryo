@@ -209,20 +209,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-091 — UIR/TIR view decoders allocate a `Vec` per decode
-
-**Severity:** Cleanup
-**Area:** core-ir
-
-**Files:** `ryo-core/src/uir.rs` (`body_stmts`, `call_view`, `if_stmt_view`, `while_loop_view`, `for_range_view`, `method_call_view`, `struct_lit_view`), `ryo-core/src/tir.rs` (`body_stmts`, `if_stmt_view`, loop and struct-literal views), and their sema, ownership, and codegen callers.
-**Summary:** UIR/TIR view decoders still collect arena words into vectors for statement lists, branch and loop bodies, UIR call and method-call arguments, and struct fields. These paths run during sema, ownership, and codegen. `Tir::walk_operands` now visits call, struct, branch, and loop payloads directly. `Tir::call_view` now borrows its argument and mode words through lazy typed iterators. The 2026-08 arena review also found repeated `body_stmts()` allocations in sema and ownership. `ExtraRange.len` bounds the arena slice; payload list counts also appear in the payload encoding.
-**Resolution:** Replace the remaining owned decoded lists with safe borrowed iterators. Keep the packed `u32` arena and its range bounds. Add `assert_eq!(size_of::<Inst>(), 24)` before any `InstData` refactor.
-**Update (2026-10-09, Milestone 11):** The M11 enum view decoders (`EnumLitView` in `uir.rs`/`tir.rs`) borrow the `extra` arena (`&[u32]`) and iterate fields with no per-decode `Vec`. The legacy view decoders listed above still collect; entry stays open for them.
-
-**Update (2026-10-16):** TIR operand walks, TIR calls, and UIR calls no longer allocate decoded lists. TIR body views serve flow construction, core validation and dumps, return-flow analysis, UIR dumps, and sema. Flow construction and ownership scans borrow TIR `if` branches, loop bodies, and top-level function bodies; FlowBuilder also reads `while` and `for` headers through borrowed views. Jump-path scans read loop headers and bodies through borrowed views. Flow validation reads `for` bounds through a borrowed view. Sema decodes each UIR body once before it creates TIR statements. Compatibility body collectors, branch views, and struct-literal views still allocate.
-
----
-
 ### I-092 — Sema per-function and per-call allocation churn
 
 **Severity:** Cleanup
