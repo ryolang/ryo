@@ -1422,6 +1422,20 @@ pub struct StructLitView {
     pub fields: Vec<(u32, TirRef)>,
 }
 
+pub struct StructLitRefView<'a> {
+    pub ty: TypeId,
+    fields: &'a [u32],
+}
+
+impl StructLitRefView<'_> {
+    /// `(field_index, value)` pairs in canonical declaration order.
+    pub fn fields(&self) -> impl ExactSizeIterator<Item = (u32, TirRef)> + '_ {
+        self.fields
+            .chunks_exact(2)
+            .map(|pair| (pair[0], TirRef::from_raw(pair[1])))
+    }
+}
+
 /// Decoded view of a [`TirTag::EnumLit`] payload (M11). Borrows the
 /// `extra` arena directly — decoding allocates nothing (contrast with
 /// [`StructLitView`]'s owned `Vec`); `fields()` yields `(field_index,
@@ -1665,6 +1679,14 @@ impl Tir {
     }
 
     pub fn struct_lit_view(&self, r: TirRef) -> StructLitView {
+        let view = self.struct_lit_ref_view(r);
+        StructLitView {
+            ty: view.ty,
+            fields: view.fields().collect(),
+        }
+    }
+
+    pub fn struct_lit_ref_view(&self, r: TirRef) -> StructLitRefView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, TirTag::StructLit));
         let range = match inst.data {
@@ -1674,13 +1696,11 @@ impl Tir {
         let slice = &self.extra[range.as_range()];
         let ty = TypeId::from_raw(slice[struct_lit_extra::TY]);
         let n = slice[struct_lit_extra::N_FIELDS] as usize;
-        let fields = (0..n)
-            .map(|i| {
-                let base = struct_lit_extra::FIELDS + 2 * i;
-                (slice[base], TirRef::from_raw(slice[base + 1]))
-            })
-            .collect();
-        StructLitView { ty, fields }
+        let fields_end = struct_lit_extra::FIELDS + 2 * n;
+        StructLitRefView {
+            ty,
+            fields: &slice[struct_lit_extra::FIELDS..fields_end],
+        }
     }
 
     pub fn enum_lit_view(&self, r: TirRef) -> EnumLitView<'_> {

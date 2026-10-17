@@ -23,6 +23,28 @@ fn param_ref_predicates() {
 }
 
 #[test]
+fn borrowed_struct_lit_view_iterates_canonical_fields() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    let first = b.int_const(1, int_ty, sp());
+    let second = b.int_const(2, int_ty, sp());
+    let lit = b.struct_lit(int_ty, &[(0, first), (1, second)], sp());
+    let tir = b.finish(&[lit]);
+
+    let borrowed = tir.struct_lit_ref_view(lit);
+    assert_eq!(borrowed.ty, int_ty);
+    assert_eq!(
+        borrowed.fields().collect::<Vec<_>>(),
+        vec![(0, first), (1, second)]
+    );
+    let owned = tir.struct_lit_view(lit);
+    assert_eq!(owned.ty, int_ty);
+    assert_eq!(owned.fields, vec![(0, first), (1, second)]);
+}
+
+#[test]
 #[should_panic(expected = "Tir::inst called with a param sentinel ref")]
 fn inst_rejects_param_sentinel_with_clear_message() {
     let mut pool = InternPool::new();
