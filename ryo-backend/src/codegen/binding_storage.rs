@@ -14,8 +14,9 @@ impl<M: Module> Codegen<M> {
 
     /// Write a dense `StringId`-indexed slot table, pushing the
     /// previous slot value onto the table's undo log so scoped
-    /// emitters (`emit_scoped_body`, the if/while join handling) can
-    /// restore it via `restore_slots`.
+    /// emitters (`take_slot_marks`/`restore_slot_marks` in
+    /// `control.rs`, the if/while join handling) can restore it via
+    /// `restore_slots`.
     pub(crate) fn write_slot<T: Copy>(
         table: &mut [Option<T>],
         undo: &mut Vec<(u32, Option<T>)>,

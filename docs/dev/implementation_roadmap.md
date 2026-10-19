@@ -1459,7 +1459,7 @@ fn main():
 - `process_exit(code: int) -> never`
   - `ryo-frontend/src/builtins.rs`: `BUILTINS` entry with `BuiltinReturn::Never` (same mold as `panic`)
   - `ryo-frontend/src/sema/builtins.rs`: arm in `emit_builtin_call` — arity 1, argument must be `int`
-  - `ryo-backend/src/codegen/expr.rs`: arm in `emit_call_slot` mirroring the `__ryo_panic` arm: declare `ryo_exit(int_type)`, call, then emit trap (unreachable)
+  - `ryo-backend/src/codegen/expr/mod.rs`: arm in `emit_call_slot` mirroring the `__ryo_panic` arm: declare `ryo_exit(int_type)`, call, then emit trap (unreachable)
   - `runtime/src/lib.rs`: `ryo_exit(code)` wrapping the libc `exit` extern already declared there
   - `ryo-backend/src/codegen/jit.rs` (moved from `codegen/mod.rs` during implementation): add row to `runtime_symbols()` (full export set under Design decisions above)
 - `io_eprint(s) -> void` — **decided 2026-10-01: full type parity with `print`** via the shared `check_print_args` (the earlier `str | bytes | strview | bytesview` listing was the string-family subset): accepts `str`, `bytes`, views, `int`, `float`, `bool`, and structs via `DebugRepr`. No auto-newline — output is explicit, like `write()`

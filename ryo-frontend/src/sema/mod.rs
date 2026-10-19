@@ -716,6 +716,8 @@ pub(crate) struct FuncCtx {
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_borrows;
+#[cfg(test)]
 mod tests_bytes;
 
 #[cfg(test)]
@@ -725,7 +727,15 @@ mod tests_enums;
 #[cfg(test)]
 mod tests_match;
 #[cfg(test)]
+mod tests_match_arm_guards;
+#[cfg(test)]
+mod tests_match_exhaustiveness;
+#[cfg(test)]
+mod tests_match_typing;
+#[cfg(test)]
 mod tests_reserved;
+#[cfg(test)]
+mod tests_str_views;
 #[cfg(test)]
 mod tests_structs;
 #[cfg(test)]

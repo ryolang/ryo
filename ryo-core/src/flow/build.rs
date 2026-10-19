@@ -677,7 +677,7 @@ impl FlowBuilder<'_> {
 
         self.cur = then_block;
         self.push_scope();
-        self.emit_stmts_iter(&view.then_stmts);
+        self.emit_stmts_iter(view.then_stmts);
         self.pop_scope();
         self.close_region(self.cur, join);
 
@@ -704,7 +704,7 @@ impl FlowBuilder<'_> {
             );
             self.cur = body_block;
             self.push_scope();
-            self.emit_stmts_iter(&elif.body);
+            self.emit_stmts_iter(elif.body);
             self.pop_scope();
             self.close_region(self.cur, join);
         }
@@ -764,7 +764,7 @@ impl FlowBuilder<'_> {
         self.loops.push(LoopFrame { header, exit });
         self.cur = body;
         self.push_scope();
-        self.emit_stmts_iter(&view.body);
+        self.emit_stmts_iter(view.body);
         self.pop_scope();
         self.loops.pop();
         if !self.terminated(self.cur) {
@@ -832,7 +832,7 @@ impl FlowBuilder<'_> {
         self.cur = body;
         self.push_scope();
         self.bind(view.var_name, var);
-        self.emit_stmts_iter(&view.body);
+        self.emit_stmts_iter(view.body);
         self.pop_scope();
         self.loops.pop();
         if !self.terminated(self.cur) {

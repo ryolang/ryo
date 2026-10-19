@@ -760,10 +760,21 @@ See the appendix for a full workload example (bounded DB concurrency).
 ### 4.6 Cancellation Sources
 
 The cancellation-source table and the `fut.cancel()` / `fut.cancel_now()`
-contract are normative in spec §9.2.5 and §9.3.2. Runtime mechanics worth
-keeping here: every source is a sync request with async observation —
-cancellation sets a flag and wakes the task, and `task.scope` / `select`
-block until the cancelled siblings have settled.
+contract are normative in spec §9.2.5 and §9.3.2. Runtime mechanics:
+cancellation sets a flag and wakes the task. The request returns before the
+task handles it. The task handles cancellation at a suspension point, then
+unwinds its stack. `fut.cancel()` waits for that unwind. `fut.cancel_now()`
+returns after it sends the request and does not wait for the unwind.
+
+Task unwind and completion of external work are separate events. A native
+operation can continue to access its arguments after the task receives the
+cancellation request or reports its result. Keep scoped storage alive until
+all external accesses end. The state tracking and wait behavior for this case
+remain open; see “Cancellation, scoped borrows, and outstanding native work.”
+`task.scope` waits for cancelled child tasks to settle. `select` deregisters
+the losing wakers atomically. This document does not define graceful shutdown,
+which is an application-level policy for stopping new work and handling
+existing work.
 
 ### 4.7 Async Drop / Destructor-Yield Semantics
 
@@ -1296,9 +1307,10 @@ Sources: [Go preemption](https://go.dev/doc/go1.14),
 ### Cancellation, scoped borrows, and outstanding native work
 
 A cancellation request is not proof that execution or memory access ended.
-Distinguish result delivery, cleanup completion, and completion of outstanding
-accesses in the task state machine. Apply these distinctions to §4.7's
-destructor deadline and to blocking-pool requests.
+Track three events in the task state machine: result delivery, cleanup
+completion, and completion of outstanding accesses. These events can occur at
+different times. Apply these distinctions to §4.7's destructor deadline and
+to blocking-pool requests.
 
 Example: a scoped child passes parent-backed data to a native operation.
 Cancellation arrives while that operation continues on another thread.

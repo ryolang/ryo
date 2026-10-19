@@ -3,9 +3,12 @@
 use super::{FuncCtx, Scope, Sema, analyze_match, check_call};
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::extra::enum_lit_extra;
-use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
+use ryo_core::tir::{TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, StructField, TypeId, TypeKind, VariantKind, ViewKind};
 use ryo_core::uir::{InstData, InstRef, InstTag, Span, StructLitView, Uir};
+
+mod methods;
+mod operators;
 
 /// Resolve a user-spelled variable read. The `__ryo_` namespace belongs
 /// to compiler-generated temporaries (nested-destructuring temps,
@@ -279,7 +282,7 @@ pub(crate) fn analyze_expr_allow_never(
         }
         InstTag::MethodCall => {
             let view = sema.uir.method_call_view(r);
-            if let Some(recovery) = lowercase_enum_method_receiver(
+            if let Some(recovery) = methods::lowercase_enum_method_receiver(
                 sema,
                 fcx,
                 scope,
@@ -356,7 +359,7 @@ pub(crate) fn analyze_expr_allow_never(
                     fcx.builder
                         .binary(TirTag::ICmpEq, sema.pool.bool_(), len_tir, zero, span)
                 }
-                n if n == ids.to_str || n == ids.to_bytes => bridge_method_call(
+                n if n == ids.to_str || n == ids.to_bytes => methods::bridge_method_call(
                     sema,
                     fcx,
                     if n == ids.to_str {
@@ -377,7 +380,7 @@ pub(crate) fn analyze_expr_allow_never(
                     receiver_ty,
                     span,
                 ),
-                _ => unknown_method_error(sema, fcx, span, receiver_ty, view.name),
+                _ => methods::unknown_method_error(sema, fcx, span, receiver_ty, view.name),
             }
         }
         InstTag::Slice => {
@@ -1175,177 +1178,6 @@ pub(crate) fn field_list(pool: &ryo_core::types::InternPool, fields: &[StructFie
         .join(", ")
 }
 
-/// M11: `color.red(5)` where `color` is an enum — the parser only
-/// claims uppercase-led receivers for variant construction (spec §1
-/// PascalCase convention; a lowercase receiver keeps its method-call
-/// meaning), so a lowercase-named enum lands in the method-call path
-/// with its *type* as the receiver. Name the enum and point at the
-/// constructor spelling instead of the misleading "undefined
-/// variable". A bound variable of the same name still wins, matching
-/// the FieldAccess reinterpretation. Returns the error-typed
-/// recovery TIR when the check fired, `None` to continue ordinary
-/// method analysis.
-fn lowercase_enum_method_receiver(
-    sema: &mut Sema<'_>,
-    fcx: &mut FuncCtx,
-    scope: &Scope,
-    receiver: InstRef,
-    method: StringId,
-    args: &ryo_core::uir::ExtraList<'_, InstRef>,
-    span: Span,
-) -> Option<TirRef> {
-    if let InstTag::Var = sema.uir.inst(receiver).tag {
-        let name = match sema.uir.inst(receiver).data {
-            InstData::Var(name) => name,
-            _ => unreachable!("Var must carry InstData::Var"),
-        };
-        if scope.lookup(name).is_none() && sema.enum_types.contains_key(&name) {
-            let raw = sema.pool.str(name);
-            let mut chars = raw.chars();
-            let pascal = match chars.next() {
-                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-                None => String::new(),
-            };
-            sema.sink.emit(
-                Diag::error(
-                    span,
-                    DiagCode::UnknownEnum,
-                    format!("'{raw}' is an enum, not a value"),
-                )
-                .with_help(format!(
-                    "types are PascalCase by convention: declare the enum as \
-                     '{pascal}' and construct '{pascal}.{}(...)'",
-                    sema.pool.str(method),
-                )),
-            );
-            for arg in args {
-                analyze_expr(sema, fcx, scope, arg);
-            }
-            return Some(fcx.builder.unreachable(sema.pool.error_type(), span));
-        }
-        // `Point.make(1.0)` — a struct name in enum-construct
-        // position. Structs construct with braces, not `Name(...)`
-        // parens; name the brace spelling with the declared fields.
-        if scope.lookup(name).is_none()
-            && let Some(&sty) = sema.struct_types.get(&name)
-        {
-            let raw = sema.pool.str(name).to_string();
-            let example = {
-                let fields = sema.pool.struct_view(sty).fields;
-                let names = fields
-                    .iter()
-                    .map(|f| format!("{}=...", sema.pool.str(f.name)))
-                    .collect::<Vec<_>>();
-                if names.is_empty() {
-                    "{}".to_string()
-                } else {
-                    format!("{{{}}}", names.join(", "))
-                }
-            };
-            sema.sink.emit(Diag::error(
-                span,
-                DiagCode::NotAStruct,
-                format!("'{raw}' is a struct, not an enum — construct it as {raw}{example}"),
-            ));
-            for arg in args {
-                analyze_expr(sema, fcx, scope, arg);
-            }
-            return Some(fcx.builder.unreachable(sema.pool.error_type(), span));
-        }
-    }
-    None
-}
-
-/// Unknown receiver method: the generalized "X has no method 'Y'"
-/// diagnostic (M8.4 family). The name string is materialized only on
-/// this cold path — the dispatch itself compares interned ids.
-fn unknown_method_error(
-    sema: &mut Sema<'_>,
-    fcx: &mut FuncCtx,
-    span: Span,
-    receiver_ty: TypeId,
-    name_id: StringId,
-) -> TirRef {
-    let name = sema.pool.str(name_id);
-    sema.sink.emit(Diag::error(
-        span,
-        DiagCode::UndefinedFunction,
-        format!(
-            "{} has no method '{}'",
-            sema.pool.display(receiver_ty),
-            name
-        ),
-    ));
-    fcx.builder.unreachable(sema.pool.error_type(), span)
-}
-
-/// M8.4.2 bridging methods: `bytes`/`bytesview`.to_str() lowers to
-/// `__ryo_bytes_to_str` (a stopgap that panics at runtime on invalid
-/// UTF-8; becomes `Utf8Error!str` at M13), `str`/`strview`.to_bytes()
-/// lowers to `__ryo_str_to_bytes`. Wrong-family receivers keep the
-/// generalized "X has no method 'Y'" diagnostic. Only called for the
-/// `to_str` / `to_bytes` names.
-fn bridge_method_call(
-    sema: &mut Sema<'_>,
-    fcx: &mut FuncCtx,
-    method_name: &str,
-    args_empty: bool,
-    receiver_tir: TirRef,
-    receiver_ty: TypeId,
-    span: Span,
-) -> TirRef {
-    debug_assert!(matches!(method_name, "to_str" | "to_bytes"));
-    if !args_empty {
-        sema.sink.emit(Diag::error(
-            span,
-            DiagCode::ArityMismatch,
-            format!("{method_name}() takes no arguments"),
-        ));
-        return fcx.builder.unreachable(sema.pool.error_type(), span);
-    }
-    let (callee_name, ret_ty) = match method_name {
-        "to_str" => {
-            if !matches!(
-                sema.pool.kind(receiver_ty),
-                TypeKind::Bytes | TypeKind::View(ViewKind::Bytes)
-            ) {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::UndefinedFunction,
-                    format!(
-                        "{} has no method '{}'",
-                        sema.pool.display(receiver_ty),
-                        method_name
-                    ),
-                ));
-                return fcx.builder.unreachable(sema.pool.error_type(), span);
-            }
-            ("__ryo_bytes_to_str", sema.pool.str_())
-        }
-        _ => {
-            if !matches!(
-                sema.pool.kind(receiver_ty),
-                TypeKind::Str | TypeKind::View(ViewKind::Str)
-            ) {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::UndefinedFunction,
-                    format!(
-                        "{} has no method '{}'",
-                        sema.pool.display(receiver_ty),
-                        method_name
-                    ),
-                ));
-                return fcx.builder.unreachable(sema.pool.error_type(), span);
-            }
-            ("__ryo_str_to_bytes", sema.pool.bytes())
-        }
-    };
-    let callee = sema.pool.intern_str(callee_name);
-    fcx.builder
-        .call(callee, &[receiver_tir], &[ParamMode::Borrow], ret_ty, span)
-}
-
 /// `str`/`strview`.as_bytes(): a zero-copy projection of the string's
 /// UTF-8 bytes as a `bytesview` — the mirror of `to_bytes()`, which
 /// allocates and copies. Lowers to a `ToView` conversion typed
@@ -1510,7 +1342,7 @@ pub(crate) fn check_binary_op(
             DiagCode::TypeMismatch,
             format!(
                 "type mismatch in '{}': left is '{}', right is '{}'",
-                bin_op_symbol(tag),
+                operators::bin_op_symbol(tag),
                 sema.pool.display(lhs_ty),
                 sema.pool.display(rhs_ty),
             ),
@@ -1528,434 +1360,14 @@ pub(crate) fn check_binary_op(
         InstTag::Lt | InstTag::Gt | InstTag::LtEq | InstTag::GtEq
     );
     if matches!(tag, InstTag::And | InstTag::Or) {
-        emit_logical_operator(sema, fcx, tag, kind_ty, lhs, rhs, span)
+        operators::emit_logical_operator(sema, fcx, tag, kind_ty, lhs, rhs, span)
     } else if is_equality {
-        emit_equality_operator(sema, fcx, tag, kind_ty, lhs, rhs, span)
+        operators::emit_equality_operator(sema, fcx, tag, kind_ty, lhs, rhs, span)
     } else if is_ordering {
-        emit_ordering_operator(sema, fcx, tag, kind_ty, lhs, rhs, span)
+        operators::emit_ordering_operator(sema, fcx, tag, kind_ty, lhs, rhs, span)
     } else if tag == InstTag::Mod {
-        emit_modulo_operator(sema, fcx, tag, kind_ty, lhs, rhs, span)
+        operators::emit_modulo_operator(sema, fcx, tag, kind_ty, lhs, rhs, span)
     } else {
-        emit_arithmetic_operator(sema, fcx, tag, kind_ty, lhs, rhs, span)
-    }
-}
-
-fn emit_logical_operator(
-    sema: &mut Sema<'_>,
-    fcx: &mut FuncCtx,
-    tag: InstTag,
-    kind_ty: TypeId,
-    lhs: TirRef,
-    rhs: TirRef,
-    span: Span,
-) -> TirRef {
-    let kind = sema.pool.kind(kind_ty);
-    match kind {
-        TypeKind::Bool => {
-            let tir_tag = match tag {
-                InstTag::And => TirTag::BoolAnd,
-                InstTag::Or => TirTag::BoolOr,
-                _ => unreachable!(),
-            };
-            fcx.builder
-                .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
-        }
-        TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
-        _ => {
-            sema.sink.emit(Diag::error(
-                span,
-                DiagCode::UnsupportedOperator,
-                format!(
-                    "logical operator '{}' requires 'bool' operands, got '{}'",
-                    bin_op_symbol(tag),
-                    sema.pool.display(kind_ty),
-                ),
-            ));
-            fcx.builder.unreachable(sema.pool.error_type(), span)
-        }
-    }
-}
-
-fn emit_equality_operator(
-    sema: &mut Sema<'_>,
-    fcx: &mut FuncCtx,
-    tag: InstTag,
-    kind_ty: TypeId,
-    lhs: TirRef,
-    rhs: TirRef,
-    span: Span,
-) -> TirRef {
-    let kind = sema.pool.kind(kind_ty);
-    match kind {
-        TypeKind::Int | TypeKind::Bool => {
-            let tir_tag = match tag {
-                InstTag::Eq => TirTag::ICmpEq,
-                InstTag::NotEq => TirTag::ICmpNe,
-                _ => unreachable!(),
-            };
-            fcx.builder
-                .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
-        }
-        TypeKind::Float => {
-            let tir_tag = match tag {
-                InstTag::Eq => TirTag::FCmpEq,
-                InstTag::NotEq => TirTag::FCmpNe,
-                _ => unreachable!(),
-            };
-            fcx.builder
-                .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
-        }
-        TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
-        TypeKind::Str => {
-            let tir_tag = match tag {
-                InstTag::Eq => TirTag::StrCmpEq,
-                InstTag::NotEq => TirTag::StrCmpNe,
-                _ => unreachable!(),
-            };
-            fcx.builder
-                .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
-        }
-        TypeKind::Bytes => {
-            let tir_tag = match tag {
-                InstTag::Eq => TirTag::BytesCmpEq,
-                InstTag::NotEq => TirTag::BytesCmpNe,
-                _ => unreachable!(),
-            };
-            fcx.builder
-                .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
-        }
-        // M8.4 §3.3: view equality compares viewed contents. Same
-        // `StrCmpEq`/`StrCmpNe` (or M8.4.2 `BytesCmpEq`/`BytesCmpNe`)
-        // tags — operands are `{ptr, len}` pairs instead of full fat
-        // pointers (codegen Task 13).
-        TypeKind::View(ViewKind::Str) => {
-            let tir_tag = match tag {
-                InstTag::Eq => TirTag::StrCmpEq,
-                InstTag::NotEq => TirTag::StrCmpNe,
-                _ => unreachable!(),
-            };
-            fcx.builder
-                .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
-        }
-        TypeKind::View(ViewKind::Bytes) => {
-            let tir_tag = match tag {
-                InstTag::Eq => TirTag::BytesCmpEq,
-                InstTag::NotEq => TirTag::BytesCmpNe,
-                _ => unreachable!(),
-            };
-            fcx.builder
-                .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
-        }
-        // M9.1: memberwise struct equality is opt-in via
-        // `#[derive(Eq)]` (sema gate; codegen lands separately).
-        // `is_eq` is only meaningful on an error-free program —
-        // a rejected derive still leaves the flag set, but the
-        // driver short-circuits before codegen on any error.
-        TypeKind::Struct => {
-            if sema.pool.struct_view(kind_ty).is_eq() {
-                let tir_tag = match tag {
-                    InstTag::Eq => TirTag::StructEq,
-                    InstTag::NotEq => TirTag::StructNe,
-                    _ => unreachable!(),
-                };
-                fcx.builder
-                    .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
-            } else {
-                let name = sema.pool.display(kind_ty).to_string();
-                sema.sink.emit(
-                    Diag::error(
-                        span,
-                        DiagCode::EqDeriveRequired,
-                        format!(
-                            "binary operator `{}` requires `{}` to be `Eq`",
-                            bin_op_symbol(tag),
-                            name,
-                        ),
-                    )
-                    .with_help(format!("add `#[derive(Eq)]` to `{name}`")),
-                );
-                fcx.builder.unreachable(sema.pool.error_type(), span)
-            }
-        }
-        // M10: anonymous struct equality is structural — a shape
-        // is Eq-capable exactly when every field is
-        // (`is_eq_capable`, computed recursively; there is no
-        // stored flag and no opt-in attribute). Same memberwise
-        // lowering as named structs: the shared StructEq/StructNe
-        // codegen path reads the fields through `struct_view`,
-        // which anon structs populate too. One diagnostic per
-        // offending field, mirroring M9.1's derive validation.
-        TypeKind::AnonStruct => {
-            let view = sema.pool.struct_view(kind_ty);
-            let mut capable = true;
-            for f in &view.fields {
-                if sema.pool.is_eq_capable(f.ty) {
-                    continue;
-                }
-                capable = false;
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::AnonFieldNotEq,
-                    format!(
-                        "binary operator `{}` requires field '{}' of type '{}' to be Eq-capable",
-                        bin_op_symbol(tag),
-                        sema.pool.str(f.name),
-                        sema.pool.display(f.ty),
-                    ),
-                ));
-            }
-            if capable {
-                let tir_tag = match tag {
-                    InstTag::Eq => TirTag::StructEq,
-                    InstTag::NotEq => TirTag::StructNe,
-                    _ => unreachable!(),
-                };
-                fcx.builder
-                    .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
-            } else {
-                fcx.builder.unreachable(sema.pool.error_type(), span)
-            }
-        }
-        // M11: enum equality is opt-in via `#[derive(Eq)]`, exactly
-        // like M9.1 structs — the same EqDeriveRequired gate and
-        // fix-it note. The derive flag is sufficient: astgen's
-        // DeriveFieldNotEq check already rejected any payload field
-        // that is not Eq-capable (per variant) before the enum was
-        // defined, so a defined enum with the flag compares safely.
-        // Codegen lowers EnumEq/EnumNe as discriminant compare plus
-        // a tag-switch field-wise payload compare.
-        TypeKind::Enum => {
-            if sema.pool.enum_view(kind_ty).is_eq() {
-                let tir_tag = match tag {
-                    InstTag::Eq => TirTag::EnumEq,
-                    InstTag::NotEq => TirTag::EnumNe,
-                    _ => unreachable!(),
-                };
-                fcx.builder
-                    .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
-            } else {
-                let name = sema.pool.display(kind_ty).to_string();
-                sema.sink.emit(
-                    Diag::error(
-                        span,
-                        DiagCode::EqDeriveRequired,
-                        format!(
-                            "binary operator `{}` requires `{}` to be `Eq`",
-                            bin_op_symbol(tag),
-                            name,
-                        ),
-                    )
-                    .with_help(format!("add `#[derive(Eq)]` to `{name}`")),
-                );
-                fcx.builder.unreachable(sema.pool.error_type(), span)
-            }
-        }
-        TypeKind::Void | TypeKind::Never | TypeKind::View(_) => {
-            sema.sink.emit(Diag::error(
-                span,
-                DiagCode::UnsupportedOperator,
-                format!(
-                    "equality operator '{}' not supported for type '{}'",
-                    bin_op_symbol(tag),
-                    sema.pool.display(kind_ty),
-                ),
-            ));
-            fcx.builder.unreachable(sema.pool.error_type(), span)
-        }
-    }
-}
-
-fn emit_ordering_operator(
-    sema: &mut Sema<'_>,
-    fcx: &mut FuncCtx,
-    tag: InstTag,
-    kind_ty: TypeId,
-    lhs: TirRef,
-    rhs: TirRef,
-    span: Span,
-) -> TirRef {
-    let kind = sema.pool.kind(kind_ty);
-    match kind {
-        TypeKind::Int => {
-            let tir_tag = match tag {
-                InstTag::Lt => TirTag::ICmpLt,
-                InstTag::LtEq => TirTag::ICmpLe,
-                InstTag::Gt => TirTag::ICmpGt,
-                InstTag::GtEq => TirTag::ICmpGe,
-                _ => unreachable!(),
-            };
-            fcx.builder
-                .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
-        }
-        TypeKind::Float => {
-            let tir_tag = match tag {
-                InstTag::Lt => TirTag::FCmpLt,
-                InstTag::LtEq => TirTag::FCmpLe,
-                InstTag::Gt => TirTag::FCmpGt,
-                InstTag::GtEq => TirTag::FCmpGe,
-                _ => unreachable!(),
-            };
-            fcx.builder
-                .binary(tir_tag, sema.pool.bool_(), lhs, rhs, span)
-        }
-        TypeKind::Str => {
-            sema.sink.emit(Diag::error(
-                span,
-                DiagCode::UnsupportedOperator,
-                format!(
-                    "ordering operator '{}' not supported for type 'str' (yet)",
-                    bin_op_symbol(tag),
-                ),
-            ));
-            fcx.builder.unreachable(sema.pool.error_type(), span)
-        }
-        TypeKind::Bool
-        | TypeKind::Void
-        | TypeKind::Never
-        | TypeKind::AnonStruct
-        | TypeKind::Struct
-        | TypeKind::Bytes
-        | TypeKind::Enum
-        | TypeKind::View(_) => {
-            sema.sink.emit(Diag::error(
-                span,
-                DiagCode::UnsupportedOperator,
-                format!(
-                    "ordering operator '{}' not supported for type '{}'",
-                    bin_op_symbol(tag),
-                    sema.pool.display(kind_ty),
-                ),
-            ));
-            fcx.builder.unreachable(sema.pool.error_type(), span)
-        }
-        TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
-    }
-}
-
-fn emit_modulo_operator(
-    sema: &mut Sema<'_>,
-    fcx: &mut FuncCtx,
-    tag: InstTag,
-    kind_ty: TypeId,
-    lhs: TirRef,
-    rhs: TirRef,
-    span: Span,
-) -> TirRef {
-    let kind = sema.pool.kind(kind_ty);
-    match kind {
-        TypeKind::Int => fcx
-            .builder
-            .binary(TirTag::IMod, sema.pool.int(), lhs, rhs, span),
-        TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
-        _ => {
-            sema.sink.emit(Diag::error(
-                span,
-                DiagCode::UnsupportedOperator,
-                format!(
-                    "modulo operator '{}' not supported for type '{}'",
-                    bin_op_symbol(tag),
-                    sema.pool.display(kind_ty),
-                ),
-            ));
-            fcx.builder.unreachable(sema.pool.error_type(), span)
-        }
-    }
-}
-
-fn emit_arithmetic_operator(
-    sema: &mut Sema<'_>,
-    fcx: &mut FuncCtx,
-    tag: InstTag,
-    kind_ty: TypeId,
-    lhs: TirRef,
-    rhs: TirRef,
-    span: Span,
-) -> TirRef {
-    let kind = sema.pool.kind(kind_ty);
-    // Arithmetic: +, -, *, /
-    match kind {
-        TypeKind::Int => {
-            let tir_tag = match tag {
-                InstTag::Add => TirTag::IAdd,
-                InstTag::Sub => TirTag::ISub,
-                InstTag::Mul => TirTag::IMul,
-                InstTag::Div => TirTag::ISDiv,
-                _ => unreachable!(),
-            };
-            fcx.builder.binary(tir_tag, sema.pool.int(), lhs, rhs, span)
-        }
-        TypeKind::Float => {
-            let tir_tag = match tag {
-                InstTag::Add => TirTag::FAdd,
-                InstTag::Sub => TirTag::FSub,
-                InstTag::Mul => TirTag::FMul,
-                InstTag::Div => TirTag::FDiv,
-                _ => unreachable!(),
-            };
-            fcx.builder
-                .binary(tir_tag, sema.pool.float(), lhs, rhs, span)
-        }
-        TypeKind::Str => {
-            if tag != InstTag::Add {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::UnsupportedOperator,
-                    format!(
-                        "arithmetic operator '{}' not supported for type 'str'",
-                        bin_op_symbol(tag),
-                    ),
-                ));
-                return fcx.builder.unreachable(sema.pool.error_type(), span);
-            }
-            fcx.builder
-                .binary(TirTag::StrConcat, sema.pool.str_(), lhs, rhs, span)
-        }
-        TypeKind::Bytes => {
-            if tag != InstTag::Add {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::UnsupportedOperator,
-                    format!(
-                        "arithmetic operator '{}' not supported for type 'bytes'",
-                        bin_op_symbol(tag),
-                    ),
-                ));
-                return fcx.builder.unreachable(sema.pool.error_type(), span);
-            }
-            fcx.builder
-                .binary(TirTag::BytesConcat, sema.pool.bytes(), lhs, rhs, span)
-        }
-        TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
-        _ => {
-            sema.sink.emit(Diag::error(
-                span,
-                DiagCode::UnsupportedOperator,
-                format!(
-                    "arithmetic operator '{}' not supported for type '{}'",
-                    bin_op_symbol(tag),
-                    sema.pool.display(kind_ty),
-                ),
-            ));
-            fcx.builder.unreachable(sema.pool.error_type(), span)
-        }
-    }
-}
-
-pub(crate) fn bin_op_symbol(tag: InstTag) -> &'static str {
-    match tag {
-        InstTag::Add => "+",
-        InstTag::Sub => "-",
-        InstTag::Mul => "*",
-        InstTag::Div => "/",
-        InstTag::Mod => "%",
-        InstTag::Eq => "==",
-        InstTag::NotEq => "!=",
-        InstTag::Lt => "<",
-        InstTag::Gt => ">",
-        InstTag::LtEq => "<=",
-        InstTag::GtEq => ">=",
-        InstTag::And => "and",
-        InstTag::Or => "or",
-        _ => "?",
+        operators::emit_arithmetic_operator(sema, fcx, tag, kind_ty, lhs, rhs, span)
     }
 }

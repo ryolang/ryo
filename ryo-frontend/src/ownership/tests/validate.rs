@@ -540,7 +540,7 @@ fn path_double_destruction_checks_same_block_reentry() {
             }
             let mut seen = std::collections::HashSet::new();
             let mut stack = flow.successors(candidate).to_vec();
-            let cyclic = stack.iter().any(|&next| next == candidate);
+            let cyclic = stack.contains(&candidate);
             let mut reaches_self = cyclic;
             while !stack.is_empty() && !reaches_self {
                 let next = stack.pop().expect("stack is not empty");

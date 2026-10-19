@@ -357,14 +357,16 @@ pub(crate) struct ViewLiveness {
 /// map plus an undo log, so branch arms and loop bodies restore the
 /// pre-branch state by replaying the log instead of cloning the whole
 /// map per arm.
+type UndoEntry = (
+    StringId,
+    Option<HashSet<Option<TirRef>>>,
+    Option<HashSet<Option<TirRef>>>,
+);
+
 #[derive(Default)]
 pub(crate) struct Bindings {
     map: HashMap<StringId, HashSet<Option<TirRef>>>,
-    log: Vec<(
-        StringId,
-        Option<HashSet<Option<TirRef>>>,
-        Option<HashSet<Option<TirRef>>>,
-    )>,
+    log: Vec<UndoEntry>,
 }
 
 impl Bindings {

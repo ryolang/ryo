@@ -119,6 +119,18 @@ jobs:
           ./target/release/ryo build benchmarks/struct_records_reuse/struct_records_reuse.ryo
           ./target/release/ryo build benchmarks/struct_records_inout/struct_records_inout.ryo
           ./target/release/ryo build benchmarks/json_validate/json_validate.ryo
+      - name: Assert eager_destruction peak RSS bound
+        # I-100: automates the manual run_benchmarks.sh memory check.
+        # Bound has ~6x headroom over the measured ~1.3 MB footprint;
+        # it trips on heap-behavior regressions (lost eager
+        # destruction), not on precise memory accounting.
+        run: |
+          RSS_KB=$( { /usr/bin/time -f "%M" ./benchmarks/eager_destruction/eager_destruction > /dev/null; } 2>&1 | tail -n1 )
+          echo "eager_destruction peak RSS: $(( RSS_KB / 1024 )) MB (bound: 8 MB)"
+          if [ "$RSS_KB" -gt 8192 ]; then
+            echo "peak RSS ${RSS_KB} KB exceeds the 8192 KB bound"
+            exit 1
+          fi
       - name: Install cargo-codspeed
         uses: taiki-e/install-action@v2
         with:
