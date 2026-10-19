@@ -178,7 +178,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Files:** `ryo-backend/src/codegen/control.rs` (for-range loop emission — `term_for` :1220 / `term_for_test` :1247, the Flow-based successors of the removed `generate_for_range`)
 **Summary:** Currently, `for-range` loops have bespoke code generation that manually emits basic blocks, jump instructions, and raw counter increments. When general iterators are added, loops should be desugared during the AST-to-UIR phase into standard `while` loops that call `.next()`.
-**Resolution:** Once iterators land, remove the `generate_for_range` codegen entirely and rely on standard `while` codegen to emit loops.
+**Resolution:** Once iterators land, desugar `for` during AST-to-UIR lowering into standard `while` loops that call `.next()`, and remove the bespoke lowering from `term_for` / `term_for_test`.
 
 ---
 

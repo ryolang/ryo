@@ -24,8 +24,8 @@ pub mod call_extra {
 ///
 /// `TY_NONE_SENTINEL` is `u32::MAX`, which is outside any plausible
 /// `TypeId` range. Sema replaces it with the inferred type (and emits
-/// a TIR instruction whose `ty` slot is real); codegen never sees
-/// `TY_NONE_SENTINEL` after Phase 4 lands.
+/// a TIR instruction whose `ty` slot is real), so codegen never sees
+/// `TY_NONE_SENTINEL`.
 pub mod var_decl_extra {
     pub const NAME: usize = 0;
     pub const FLAGS: usize = 1;

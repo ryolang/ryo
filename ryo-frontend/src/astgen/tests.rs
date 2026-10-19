@@ -13,7 +13,7 @@ use chumsky::input::Input;
 use ryo_core::uir::InstData;
 
 pub(super) fn parse_and_lower(input: &str) -> Result<(Uir, InternPool), Vec<Diag>> {
-    // Phase-2 lex pipeline: logos + indent + intern in one
+    // Lex pipeline: logos + indent + intern in one
     // pass; identifiers come back as `StringId`. Lex diagnostics
     // go through `DiagSink` like every other stage, so assert
     // the sink stayed clean instead of unwrapping a `Result`.

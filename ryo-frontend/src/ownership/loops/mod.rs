@@ -255,9 +255,12 @@ pub(crate) fn analyze_loop(
     // toward Moved (≤ 2 per owner), a home or binding-map key inserted
     // (≤ 1 per binding), a projection view inserted (≤ 1 per view) —
     // owners, bindings, and views are all bounded by the instruction
-    // arena A — plus at most ONE dead-store alignment pass (the map is
-    // pass-constant, see above). Projection-set insertion was already
-    // counted at ≤ 1 unit per view, and the membership witness adds no
+    // arena A — plus at most ONE dead-store alignment pass (the fifth
+    // map is rebuilt from the pre-loop snapshot each pass, so it adds
+    // no ascension unit of its own: once the four monotone maps hold,
+    // the merged state repeats and the next compare converges — see
+    // above). Projection-set insertion was already counted at ≤ 1 unit
+    // per view, and the membership witness adds no
     // new ascension kind: the join is monotone (pointwise ≥ the
     // previous entry), so a membership difference between previous and
     // merged entry IS a strict set growth — at least one view inserted
