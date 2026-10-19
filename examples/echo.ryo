@@ -3,7 +3,9 @@
 # Usage:
 #     printf 'Hello\nWorld\n' | cargo run -- run examples/echo.ryo
 #
-# Read lines until an empty line or end of input.
+# Stops on an empty line: io_read_line returns "" both for an empty
+# line and at end of input (EOF has no distinct signal yet), so a
+# blank line mid-stream terminates the loop too.
 #
 fn main():
 	while true:
