@@ -1128,15 +1128,19 @@ pub(crate) fn last_use_anchor(
     // after its scrutinee read. The arm must read the payload first.
     // Match cleanup frees the payload on consuming arms. It frees the
     // whole enum on other arms. Suppress only a direct scrutinee read
-    // of the same binding.
-    let is_consuming_scrutinee_read = innermost_branch_of(tir, after).is_some_and(|candidate| {
-        tir.inst(candidate).tag == TirTag::Match
-            && tir.match_view(candidate).scrutinee == after
-            && !tir.match_by_move_owner_refs(candidate, pool).is_empty()
-            && binding.is_some_and(|(decl, _)| {
-                flow_owner_place(flow, after) == flow_owner_place(flow, decl)
-            })
-    });
+    // of the same binding. Match-free bodies (and anonymous owners)
+    // skip the innermost-branch walk entirely: it can only ever yield
+    // a `Match` candidate when the body contains one.
+    let is_consuming_scrutinee_read = tir.contains_match
+        && binding.is_some()
+        && innermost_branch_of(tir, after).is_some_and(|candidate| {
+            tir.inst(candidate).tag == TirTag::Match
+                && tir.match_view(candidate).scrutinee == after
+                && !tir.match_by_move_owner_refs(candidate, pool).is_empty()
+                && binding.is_some_and(|(decl, _)| {
+                    flow_owner_place(flow, after) == flow_owner_place(flow, decl)
+                })
+        });
     if is_consuming_scrutinee_read {
         return None;
     }
