@@ -13,7 +13,7 @@ pub(crate) fn check_call(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
-    view: &CallView,
+    view: &CallView<'_>,
     arg_tirs: &[TirRef],
     span: Span,
 ) -> TirRef {
@@ -170,7 +170,7 @@ pub(crate) fn check_call(
             // warning-free.
             if modes[idx] == ParamMode::Borrow
                 && fcx.builder.ty_of(*arg_tir) == exp_ty
-                && let Some(owner_name) = materialize_name(sema, *arg_uir)
+                && let Some(owner_name) = materialize_name(sema, arg_uir)
             {
                 let owner_ty = match owner_name {
                     "str" => sema.pool.str_(),
@@ -178,7 +178,7 @@ pub(crate) fn check_call(
                 };
                 if exp_ty == owner_ty {
                     sema.warnings.push(Diag::warning(
-                        sema.uir.span(*arg_uir),
+                        sema.uir.span(arg_uir),
                         DiagCode::RedundantMaterialize,
                         format!(
                             "redundant `{owner_name}(...)` — views pass to `{owner_name}` parameters via the re-borrow with no allocation (drop the `{owner_name}(...)` call)"
@@ -198,7 +198,7 @@ pub(crate) fn check_call(
                 // `inout` param is rejected by the `&` check below.
                 let v = fcx
                     .builder
-                    .view_as_owner(*arg_tir, exp_ty, sema.uir.span(*arg_uir));
+                    .view_as_owner(*arg_tir, exp_ty, sema.uir.span(arg_uir));
                 converted[idx] = v;
                 v
             } else if sema.pool.owner_view(actual) == Some(exp_ty) {
@@ -208,7 +208,7 @@ pub(crate) fn check_call(
                 // pool's owner → view table, not a bare kind comparison.
                 let v = fcx
                     .builder
-                    .to_view(*arg_tir, exp_ty, sema.uir.span(*arg_uir));
+                    .to_view(*arg_tir, exp_ty, sema.uir.span(arg_uir));
                 converted[idx] = v;
                 v
             } else {
@@ -218,7 +218,7 @@ pub(crate) fn check_call(
             if !sema.pool.compatible(actual, exp_ty) {
                 sema.sink.emit(with_struct_shape_notes(
                     Diag::error(
-                        sema.uir.span(*arg_uir),
+                        sema.uir.span(arg_uir),
                         DiagCode::TypeMismatch,
                         format!(
                             "call to '{}': argument {} has type '{}', expected '{}'",
@@ -235,12 +235,12 @@ pub(crate) fn check_call(
             }
 
             // --- M8.3: `&`/`inout` agreement + mutable-lvalue validation ---
-            let arg_is_borrow = matches!(sema.uir.inst(*arg_uir).tag, InstTag::Borrow);
+            let arg_is_borrow = matches!(sema.uir.inst(arg_uir).tag, InstTag::Borrow);
             let param_is_inout = modes[idx] == ParamMode::Inout;
             if arg_is_borrow && !param_is_inout {
                 sema.sink.emit(
                     Diag::error(
-                        sema.uir.span(*arg_uir),
+                        sema.uir.span(arg_uir),
                         DiagCode::BorrowMismatch,
                         format!(
                             "argument {} is passed by `&` but parameter is not `inout`",
@@ -252,7 +252,7 @@ pub(crate) fn check_call(
             } else if !arg_is_borrow && param_is_inout {
                 sema.sink.emit(
                     Diag::error(
-                        sema.uir.span(*arg_uir),
+                        sema.uir.span(arg_uir),
                         DiagCode::BorrowMismatch,
                         format!(
                             "`inout` parameter {} requires `&` at the call site",
@@ -264,13 +264,13 @@ pub(crate) fn check_call(
             } else if arg_is_borrow {
                 // Parameter is `inout` and arg is `&expr`: validate the
                 // borrow target is an assignable lvalue.
-                let inner = match sema.uir.inst(*arg_uir).data {
+                let inner = match sema.uir.inst(arg_uir).data {
                     InstData::Borrow(inner) => inner,
                     _ => unreachable!("Borrow must carry InstData::Borrow"),
                 };
                 if let Some(reason) = borrow_target_reason(sema, scope, inner) {
                     sema.sink.emit(Diag::error(
-                        sema.uir.span(*arg_uir),
+                        sema.uir.span(arg_uir),
                         DiagCode::BorrowMismatch,
                         format!("cannot borrow this expression as mutable: {}", reason),
                     ));

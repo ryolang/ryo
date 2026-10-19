@@ -667,8 +667,10 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
         destructure_temps: HashMap::new(),
     };
 
-    let mut stmt_refs: Vec<TirRef> = Vec::with_capacity(sema.uir.body_stmts(body).len());
-    for stmt_ref in sema.uir.body_stmts(body) {
+    let uir = sema.uir;
+    let body_stmts = uir.body_stmts(body);
+    let mut stmt_refs: Vec<TirRef> = Vec::with_capacity(body_stmts.len());
+    for stmt_ref in body_stmts {
         stmt_refs.push(analyze_stmt(sema, &mut fcx, &mut scope, stmt_ref));
     }
 
@@ -680,7 +682,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
     // avoid a cascade.
     if fcx.return_type != sema.pool.void()
         && !sema.pool.is_error(fcx.return_type)
-        && !tir.block_definitely_returns(&tir.body_stmts(), sema.pool)
+        && !tir.body_definitely_returns(sema.pool)
     {
         sema.sink.emit(Diag::error(
             body.span,
@@ -714,6 +716,8 @@ pub(crate) struct FuncCtx {
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_borrows;
+#[cfg(test)]
 mod tests_bytes;
 
 #[cfg(test)]
@@ -723,7 +727,15 @@ mod tests_enums;
 #[cfg(test)]
 mod tests_match;
 #[cfg(test)]
+mod tests_match_arm_guards;
+#[cfg(test)]
+mod tests_match_exhaustiveness;
+#[cfg(test)]
+mod tests_match_typing;
+#[cfg(test)]
 mod tests_reserved;
+#[cfg(test)]
+mod tests_str_views;
 #[cfg(test)]
 mod tests_structs;
 #[cfg(test)]

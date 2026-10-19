@@ -144,7 +144,7 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
             let view = tir.if_stmt_view(r);
             write!(f, "if_stmt cond=%{}", view.cond.index())?;
             write!(f, " then=[{}]", view.then_stmts.len())?;
-            for elif in &view.elif_branches {
+            for elif in view.elif_branches {
                 write!(
                     f,
                     " elif(cond=%{}, body=[{}])",
@@ -152,7 +152,7 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
                     elif.body.len()
                 )?;
             }
-            if let Some(else_s) = &view.else_stmts {
+            if let Some(else_s) = view.else_stmts {
                 write!(f, " else=[{}]", else_s.len())?;
             }
             writeln!(f)
@@ -184,7 +184,7 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
         (TirTag::StructLit, TirData::Extra(_)) => {
             let view = tir.struct_lit_view(r);
             write!(f, "struct_lit {} {{", pool.display(view.ty))?;
-            for (i, (idx, v)) in view.fields.iter().enumerate() {
+            for (i, (idx, v)) in view.fields().enumerate() {
                 if i > 0 {
                     write!(f, ", ")?;
                 }

@@ -99,8 +99,10 @@ impl FlowBuilder<'_> {
             self.scopes[0].push((p.name, place));
         }
 
-        let body = self.tir.body_stmts();
-        self.emit_stmts(&body);
+        let tir = self.tir;
+        for stmt in tir.body_stmts() {
+            self.emit_stmt(stmt);
+        }
 
         // Void functions (and `main`) fall off the end; sema's E0036
         // guarantees non-void bodies end in an explicit return.
@@ -257,7 +259,11 @@ impl FlowBuilder<'_> {
     // ---------- statements ----------
 
     fn emit_stmts(&mut self, stmts: &[TirRef]) {
-        for &stmt in stmts {
+        self.emit_stmts_iter(stmts.iter().copied());
+    }
+
+    fn emit_stmts_iter(&mut self, stmts: impl IntoIterator<Item = TirRef>) {
+        for stmt in stmts {
             self.emit_stmt(stmt);
         }
     }
@@ -498,7 +504,7 @@ impl FlowBuilder<'_> {
             }
             TirTag::Call if self.pool.is_never(inst.ty) => {
                 let view = self.tir.call_view(r);
-                for &arg in &view.args {
+                for arg in &view.args {
                     self.emit_expr(arg);
                 }
                 let next = self.new_block(true);
@@ -578,8 +584,8 @@ impl FlowBuilder<'_> {
             let call = self.tir.call_view(r);
             let offset = self.extra.len() as u32;
             let push = matches!(self.pool.str(call.name), "str_push" | "bytes_push");
-            for (index, &arg) in call.args.iter().enumerate() {
-                if (call.modes.get(index) == Some(&crate::tir::ParamMode::Inout)
+            for (index, arg) in call.args.iter().enumerate() {
+                if (call.modes.get(index) == Some(crate::tir::ParamMode::Inout)
                     || (push && index == 0))
                     && let Some(place) = self.resolve_view_base(arg)
                 {
@@ -643,7 +649,8 @@ impl FlowBuilder<'_> {
     // ---------- control constructs ----------
 
     fn build_if(&mut self, stmt: TirRef) {
-        let view = self.tir.if_stmt_view(stmt);
+        let tir = self.tir;
+        let view = tir.if_stmt_view(stmt);
         self.emit_expr(view.cond);
 
         let then_block = self.new_block(false);
@@ -670,7 +677,7 @@ impl FlowBuilder<'_> {
 
         self.cur = then_block;
         self.push_scope();
-        self.emit_stmts(&view.then_stmts);
+        self.emit_stmts_iter(view.then_stmts);
         self.pop_scope();
         self.close_region(self.cur, join);
 
@@ -697,7 +704,7 @@ impl FlowBuilder<'_> {
             );
             self.cur = body_block;
             self.push_scope();
-            self.emit_stmts(&elif.body);
+            self.emit_stmts_iter(elif.body);
             self.pop_scope();
             self.close_region(self.cur, join);
         }
@@ -707,7 +714,7 @@ impl FlowBuilder<'_> {
         self.cur = else_block;
         if let Some(else_stmts) = &view.else_stmts {
             self.push_scope();
-            self.emit_stmts(else_stmts);
+            self.emit_stmts_iter(else_stmts);
             self.pop_scope();
         }
         self.close_region(self.cur, join);
@@ -726,7 +733,8 @@ impl FlowBuilder<'_> {
     }
 
     fn build_while(&mut self, stmt: TirRef) {
-        let view = self.tir.while_loop_view(stmt);
+        let tir = self.tir;
+        let view = tir.while_loop_view(stmt);
         let header = self.new_block(false);
         let body = self.new_block(false);
         let exit = self.new_block(false);
@@ -756,7 +764,7 @@ impl FlowBuilder<'_> {
         self.loops.push(LoopFrame { header, exit });
         self.cur = body;
         self.push_scope();
-        self.emit_stmts(&view.body);
+        self.emit_stmts_iter(view.body);
         self.pop_scope();
         self.loops.pop();
         if !self.terminated(self.cur) {
@@ -779,7 +787,8 @@ impl FlowBuilder<'_> {
     }
 
     fn build_for(&mut self, stmt: TirRef) {
-        let view = self.tir.for_range_view(stmt);
+        let tir = self.tir;
+        let view = tir.for_range_view(stmt);
         let header = self.new_block(false);
         let body = self.new_block(false);
         let exit = self.new_block(false);
@@ -823,7 +832,7 @@ impl FlowBuilder<'_> {
         self.cur = body;
         self.push_scope();
         self.bind(view.var_name, var);
-        self.emit_stmts(&view.body);
+        self.emit_stmts_iter(view.body);
         self.pop_scope();
         self.loops.pop();
         if !self.terminated(self.cur) {

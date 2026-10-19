@@ -26,6 +26,18 @@ fn bytes_projection_freezes_owner() {
 }
 
 #[test]
+fn bytes_push_rejected_while_view_live() {
+    let diags = check_src(
+        "fn main():\n\tmut b = b\"\\x01\"\n\tv = b[0:1]\n\tbytes_push(&b, 2)\n\tprint(v)\n",
+    );
+    assert!(
+        diags.iter().any(|d| d.code == DiagCode::SourceProjected),
+        "expected SourceProjected, got {:?}",
+        diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn bytes_owner_free_defers_past_live_projection() {
     // P5: the owner's destruction defers past the view's last use —
     // no diagnostics, exactly one successful analysis.

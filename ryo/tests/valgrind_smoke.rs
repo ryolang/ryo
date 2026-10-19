@@ -661,6 +661,24 @@ fn valgrind_match_break_in_arm_loop_leak() {
 }
 
 #[test]
+fn valgrind_match_continue_dead_payload() {
+    // Free the unused by-move payload before this arm continues.
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_dead_payload_continue"),
+        "match_dead_payload_continue",
+    );
+}
+
+#[test]
+fn valgrind_match_continue_break_loop_cleanup() {
+    // The continue and break arms release each iteration's heap value.
+    run_valgrind_smoke_allocating(
+        common::find_fixture("match_continue_break_loop_cleanup"),
+        "match_continue_break_loop_cleanup",
+    );
+}
+
+#[test]
 fn valgrind_match_arm_vardecl_double_free() {
     // The arm-local VarDecl is named: exactly one Free for the
     // heap str. Pre-fix the anon-temp pass double-freed it (an

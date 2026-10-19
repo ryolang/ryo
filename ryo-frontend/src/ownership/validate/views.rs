@@ -177,7 +177,22 @@ pub(crate) fn validate_view_protection(ctx: &Ctx<'_>, summary: &mut ValidationSu
                     summary.views_not_proved += 1;
                     continue;
                 }
-                if reaches_without_cut(flow, &merged_cuts, &merged_est, e.point, *use_point) {
+                // A crossed establishment protects only the per-buffer
+                // promo lifecycle (a PromoRelease frees one promo
+                // generation; a use reached past a later promo
+                // establishment reads a newer buffer). A base-owner
+                // release does not get that shelter: promo generations
+                // derive from the base, so a base free can still dangle
+                // a use reached past a promo alloc.
+                let est_protects = e.kind == EventKind::PromoRelease;
+                if reaches_without_cut(
+                    flow,
+                    &merged_cuts,
+                    &merged_est,
+                    e.point,
+                    *use_point,
+                    est_protects,
+                ) {
                     debug_assert!(
                         false,
                         "view protection: a release of the base group at {:?}                          ({:?} target {:?}) can fire before the view's final use at                          {:?} (view {:?}) — a use-after-free",
@@ -203,7 +218,11 @@ pub(crate) fn validate_view_protection(ctx: &Ctx<'_>, summary: &mut ValidationSu
 /// or the promotion site's free-before-overwrite pattern — the
 /// release fires before the conditional alloc, which is sound); after
 /// a closing edge it belongs to the NEXT iteration — a per-iteration
-/// body local — whose uses read a different allocation.
+/// body local — whose uses read a different allocation. When
+/// `est_protects` is set (promo releases), ANY establishment crossed on
+/// the walk also discharges the pair — a use reached past an
+/// establishment reads a generation established after the released
+/// promo buffer's.
 ///
 /// The visited set is on points (finite: blocks × ordinals), so the
 /// cycles terminate; the `cycled` flag rides the stack.
@@ -213,19 +232,32 @@ fn reaches_without_cut(
     establishes: &HashMap<BlockId, Vec<u32>>,
     from: Point,
     to: Point,
+    est_protects: bool,
 ) -> bool {
-    let mut visited: HashSet<Point> = HashSet::new();
-    let mut stack = vec![(from, false)];
-    while let Some((p, cycled)) = stack.pop() {
+    // `crossed_est` tracks whether the path passed an establishment
+    // point: with `est_protects` (promo releases only), a use reached
+    // after ANY establishment on the walk reads a generation
+    // established after the released promo buffer's — the released
+    // buffer cannot dangle it (the one-behind release inside a loop
+    // body crosses the rebind's establishment before reaching the next
+    // iteration's read). Keyed in `visited` so both flag states of a
+    // point are explored.
+    let mut visited: HashSet<(Point, bool)> = HashSet::new();
+    let mut stack = vec![(from, false, false)];
+    while let Some((p, cycled, crossed_est)) = stack.pop() {
         if p == to {
             // A use AT an active establishment boundary reads the
             // generation the boundary establishes (the re-allocated
             // copy) — the released buffer cannot dangle it.
-            return !(cycled && in_ordinal_table(Some(establishes), p.block, p.ordinal));
+            return !((est_protects && crossed_est)
+                || (cycled && in_ordinal_table(Some(establishes), p.block, p.ordinal)));
         }
-        if !visited.insert(p) {
+        if !visited.insert((p, crossed_est)) {
             continue;
         }
+        let saw_establishment =
+            p != from && in_ordinal_table(Some(establishes), p.block, p.ordinal);
+        let crossed_est = crossed_est || saw_establishment;
         let steps = flow.block_steps(p.block).len() as u32;
         if p.ordinal < steps {
             let boundary = in_ordinal_table(Some(cuts), p.block, p.ordinal)
@@ -237,6 +269,7 @@ fn reaches_without_cut(
                         ordinal: p.ordinal + 1,
                     },
                     cycled,
+                    crossed_est,
                 ));
             }
         } else {
@@ -255,6 +288,7 @@ fn reaches_without_cut(
                         ordinal: 0,
                     },
                     cycled || closes,
+                    crossed_est,
                 ));
             }
         }

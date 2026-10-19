@@ -187,6 +187,8 @@ cargo test -- --nocapture       # Show output
 
 **Run Miri locally before pushing runtime changes** (`cargo +nightly miri test -p ryo-runtime`). Miri is installed on the dev machine, and any change to a runtime function that an existing test calls — especially one adding a libc/foreign call — can break the Miri job in ways `cargo test` cannot see (isolation-forbidden foreign calls fail only under Miri's interpreter).
 
+**Runtime FFI boundary:** Before changing `runtime/src/lib.rs`, preserve or document each exported function's C ABI contract: pointer validity and nullability, length and capacity bounds, ownership and lifetime, and aliasing requirements. Check generated callers when changing a contract. This reminder does not complete I-167; the systematic audit of all exported entry points remains open.
+
 ## Binary Inspection
 
 `objdump -d` / `otool -tV` (disassembly), `nm` (symbols), `xxd` (hex dump).

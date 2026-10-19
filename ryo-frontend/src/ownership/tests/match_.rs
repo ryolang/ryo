@@ -113,6 +113,46 @@ fn copy_payload_match_binds_freely() {
 }
 
 #[test]
+fn copy_payload_binding_shadow_keeps_outer_owner() {
+    // A Copy payload binding must not replace a same-named outer owner.
+    let src = "enum Number:\n\tValue(int)\n\tEmpty\n\nfn main():\n\tvalue = int_to_str(73) + \" outer heap-backed owner\"\n\tmatch Number.Value(9):\n\t\tValue(value):\n\t\t\tprint(int_to_str(value))\n\t\tEmpty:\n\t\t\tprint(\"empty\")\n\tprint(value)\n\tprint(\"\\n\")\n";
+    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "no errors expected; got {diags:?}"
+    );
+    let main_idx = tirs
+        .iter()
+        .position(|tir| pool.str(tir.name) == "main")
+        .expect("main's TIR");
+    let tir = &tirs[main_idx];
+    let value_name = pool.intern_str("value");
+    let outer_init = (1..tir.instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find_map(|r| {
+            if tir.inst(r).tag == ryo_core::tir::TirTag::VarDecl {
+                let decl = tir.var_decl_view(r);
+                (decl.name == value_name).then_some(decl.initializer)
+            } else {
+                None
+            }
+        })
+        .expect("outer value's initializer");
+    let f = take_function_sidecar(&mut sidecar, main_idx);
+    assert_eq!(
+        f.drops
+            .iter()
+            .filter(|drop| drop.target == outer_init)
+            .count(),
+        1,
+        "the outer string must keep one scope-exit release: {:?}",
+        f.drops
+    );
+}
+
+#[test]
 fn borrowed_scrutinee_amp_no_consumption() {
     // Bullet 4: `match &x:` — no consumption, post-match use OK. (The `&`
     // lowers away in sema; the scrutinee owner is an owned local in
@@ -362,6 +402,86 @@ fn dead_bind_in_returning_arm_single_epilogue_free() {
     assert!(
         diags.iter().any(|d| d.code == DiagCode::DeadStore),
         "the never-read bind still warns W0001; got {diags:?}"
+    );
+}
+
+#[test]
+fn local_before_returning_match_is_freed_once() {
+    // An unused local must be released once even when one match arm returns.
+    let src = "fn finish(should_return: bool):\n\towned = int_to_str(42) + \" payload that needs heap storage\"\n\tmatch should_return:\n\t\ttrue:\n\t\t\tprint(\"returning\\n\")\n\t\t\treturn\n\t\tfalse:\n\t\t\tprint(\"fall through\\n\")\n\tprint(\"after match\\n\")\n\nfn main():\n\tfinish(true)\n\tfinish(false)\n";
+    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "no errors expected; got {diags:?}"
+    );
+    let finish_idx = tirs
+        .iter()
+        .position(|tir| pool.str(tir.name) == "finish")
+        .expect("finish's TIR");
+    let tir = &tirs[finish_idx];
+    let owned_name = pool.intern_str("owned");
+    let owned_init = (1..tir.instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find_map(|r| {
+            if tir.inst(r).tag == ryo_core::tir::TirTag::VarDecl {
+                let decl = tir.var_decl_view(r);
+                (decl.name == owned_name).then_some(decl.initializer)
+            } else {
+                None
+            }
+        })
+        .expect("owned's initializer");
+    let f = take_function_sidecar(&mut sidecar, finish_idx);
+    assert_eq!(
+        f.drops
+            .iter()
+            .filter(|drop| drop.target == owned_init)
+            .count(),
+        1,
+        "the local must be released once across the return and fallthrough paths: {:?}",
+        f.drops
+    );
+}
+
+#[test]
+fn local_before_all_returning_match_arms_is_freed_once() {
+    // A local must be released when every match arm returns.
+    let src = "fn finish(flag: bool):\n\towned = int_to_str(17) + \" return payload that needs heap storage\"\n\tmatch flag:\n\t\ttrue:\n\t\t\treturn\n\t\tfalse:\n\t\t\treturn\n\nfn main():\n\tfinish(true)\n\tfinish(false)\n";
+    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "no errors expected; got {diags:?}"
+    );
+    let finish_idx = tirs
+        .iter()
+        .position(|tir| pool.str(tir.name) == "finish")
+        .expect("finish's TIR");
+    let tir = &tirs[finish_idx];
+    let owned_name = pool.intern_str("owned");
+    let owned_init = (1..tir.instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find_map(|r| {
+            if tir.inst(r).tag == ryo_core::tir::TirTag::VarDecl {
+                let decl = tir.var_decl_view(r);
+                (decl.name == owned_name).then_some(decl.initializer)
+            } else {
+                None
+            }
+        })
+        .expect("owned's initializer");
+    let f = take_function_sidecar(&mut sidecar, finish_idx);
+    assert_eq!(
+        f.drops
+            .iter()
+            .filter(|drop| drop.target == owned_init)
+            .count(),
+        1,
+        "the local must be released once across both return paths: {:?}",
+        f.drops
     );
 }
 
@@ -744,6 +864,100 @@ fn dead_bind_in_expr_arm_freed_exactly_once_in_arm() {
         frees[0].position.anchor_inst().unwrap(),
         body,
         "anchored at the arm-body expression (fired inside the arm)"
+    );
+}
+
+#[test]
+fn dead_payload_in_continue_arm_is_freed_before_continue() {
+    // Moving an unread heap payload out of the scrutinee and then
+    // continuing must release the payload on that iteration's path.
+    let src = "enum Item:\n\tText(str)\n\tEmpty\n\nfn main():\n\tmut i = 0\n\twhile i < 4:\n\t\ti += 1\n\t\titem = match i:\n\t\t\t1: Item.Text(int_to_str(i) + \" payload that needs heap storage\")\n\t\t\t_: Item.Empty\n\t\tmatch item:\n\t\t\tText(unused):\n\t\t\t\tcontinue\n\t\t\tEmpty:\n\t\t\t\tprint(\"empty\\n\")\n\tprint(\"done\\n\")\n";
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "no errors expected; got {diags:?}"
+    );
+    let f = main_sidecar(&mut sidecar, &pool);
+    let consuming_match = (1..tirs[0].instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(u32::try_from(i).expect("index fits u32")))
+        .find(|&r| {
+            tirs[0].inst(r).tag == ryo_core::tir::TirTag::Match
+                && !tirs[0].match_by_move_owner_refs(r, &pool).is_empty()
+        })
+        .expect("the match that moves `unused`");
+    let token = tirs[0]
+        .match_by_move_owner_refs(consuming_match, &pool)
+        .into_iter()
+        .next()
+        .expect("one by-move owner token for `unused`");
+    let continue_inst = (1..tirs[0].instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find(|&r| tirs[0].inst(r).tag == ryo_core::tir::TirTag::Continue)
+        .expect("the continue in the consuming match arm");
+    let flow = build_flow(&tirs[0], &pool);
+    let continue_block = flow
+        .terms
+        .iter()
+        .position(|term| matches!(term, ryo_core::flow::Terminator::Continue { .. }))
+        .map(|index| ryo_core::flow::BlockId(index as u32))
+        .expect("the continue's Flow block");
+    let frees: Vec<_> = f.drops.iter().filter(|drop| drop.target == token).collect();
+    assert_eq!(
+        frees.len(),
+        1,
+        "exactly one release for the unread payload; got {frees:?}"
+    );
+    assert!(
+        matches!(
+            frees[0].position,
+            ryo_core::flow::DropPosition::PreTerminator { block } if block == continue_block
+        ),
+        "release runs before the continue terminator; continue TIR is {continue_inst:?}, got {:?}",
+        frees[0].position
+    );
+
+    let item_init = (1..tirs[0].instructions.len())
+        .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
+        .find_map(|r| {
+            if tirs[0].inst(r).tag == ryo_core::tir::TirTag::VarDecl {
+                let decl = tirs[0].var_decl_view(r);
+                (pool.str(decl.name) == "item").then_some(decl.initializer)
+            } else {
+                None
+            }
+        })
+        .expect("the enum value matched by the consuming match");
+    let scrutinee_read = tirs[0].match_view(consuming_match).scrutinee;
+    assert!(
+        !f.drops.iter().any(|drop| {
+            drop.target == item_init
+                && matches!(
+                    drop.position,
+                    ryo_core::flow::DropPosition::AfterStep { inst } if inst == scrutinee_read
+                )
+        }),
+        "the whole enum owner cannot be freed after its scrutinee read, before payload extraction; got {:?}",
+        f.drops
+    );
+    assert!(
+        !f.drops.iter().any(|drop| {
+            drop.target == item_init
+                && matches!(
+                    drop.position,
+                    ryo_core::flow::DropPosition::PreTerminator { block }
+                        if block == continue_block
+                )
+                || drop.target == item_init
+                    && matches!(
+                        drop.position,
+                        ryo_core::flow::DropPosition::AfterStep { inst }
+                            if inst == continue_inst
+                    )
+        }),
+        "the consuming continue arm must not free the source enum after the payload token; got {:?}",
+        f.drops
     );
 }
 

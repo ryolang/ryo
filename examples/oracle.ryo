@@ -11,8 +11,6 @@
 # process_argc/process_argv take the querent's name, process_env tunes
 # the oracle's mood (unset -> stoic).
 #
-# Play it live in a terminal: io_read_line is an interim one-chunk read
-# (M13.6 owns buffering), so piping all answers at once starves it.
 fn main():
 	if process_argc() < 2:
 		io_eprint("usage: oracle <name> -- think of a number from 1 to 100; the oracle will find it\n")

@@ -306,494 +306,8 @@ pub(crate) fn take_test_ownership(name: ryo_core::types::StringId) -> Option<Own
 /// in this function; a TRANSFER moves ownership out (the buffer leaves
 /// this function alive — the callee must never release it). Both
 /// discharge a generation's obligation on the paths that execute them.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Event {
-    pub(crate) point: Point,
-    pub(crate) target: TirRef,
-    pub(crate) kind: EventKind,
-    pub(crate) pos: DropPosition,
-    pub(crate) exact: bool,
-    /// Sub-identity for FIELD-targeted releases: two events naming
-    /// different fields of one aggregate (or a field and the whole)
-    /// free DIFFERENT buffers — never a double-free pair. `None` = the
-    /// whole-place identity.
-    pub(crate) field: Option<TirRef>,
-}
-
-/// The event taxonomy (see the module header). `Destroy`/`Displace`/
-/// `PromoRelease` are releases; the `Transfer*`/`Consume` kinds are
-/// transfers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EventKind {
-    /// A static produced value with no allocation to destroy.
-    StaticNoop,
-    /// A scheduled `DropOp` destruction.
-    Destroy,
-    /// `free_on_reassign` / `field_free_on_reassign`: the old content's
-    /// release at a replacement store (fires before the write).
-    Displace,
-    /// A promotion-buffer free — a distinct allocation identity from
-    /// the borrowed original; a promo release covers only the promoted
-    /// copy.
-    PromoRelease,
-    /// Ownership moved out through a `Return` (a `Move` hazard at a
-    /// return site).
-    TransferReturn,
-    /// Ownership moved out through a move argument or a match consume.
-    TransferCall,
-    /// An in-place consuming concat: the old buffer's ownership moves
-    /// into the concat result (codegen skips the displacement free).
-    Consume,
-    /// An inout param's seated value leaves through the write-back
-    /// pointer at a function exit.
-    TransferInoutWriteback,
-    /// A by-value match arm read: ownership moves into the match
-    /// result — a transfer IN (the result's release frees the buffer
-    /// later, in this function).
-    TransferArm,
-}
-
-impl Event {
-    /// Releases free the buffer in this function (double-discharge
-    /// relevant).
-    pub(crate) fn is_release(&self) -> bool {
-        matches!(
-            self.kind,
-            EventKind::Destroy | EventKind::Displace | EventKind::PromoRelease
-        )
-    }
-
-    /// Transfers OUT: ownership leaves this function — a release on
-    /// either side of a transfer-out is a violation (freeing storage
-    /// whose ownership left, or freeing it twice).
-    fn is_transfer_out(&self) -> bool {
-        matches!(
-            self.kind,
-            EventKind::TransferReturn | EventKind::TransferCall | EventKind::TransferInoutWriteback
-        )
-    }
-}
-
-/// The identity TirRef of a place (for synthetic events' targets).
-fn scrutinee_owner_ref(flow: &Flow, place: PlaceId) -> TirRef {
-    match flow.place(place) {
-        Place::Param { index, .. } => TirRef::param(*index as usize),
-        Place::Local { decl, .. }
-        | Place::Token { inst: decl, .. }
-        | Place::Temp { producer: decl, .. }
-        | Place::MatchResult {
-            match_inst: decl, ..
-        }
-        | Place::LoopVar {
-            loop_inst: decl, ..
-        }
-        | Place::View { producer: decl, .. } => *decl,
-    }
-}
-
-/// The tag of a target for diagnostics — param sentinels have no
-/// instruction (their "tag" is their identity).
-pub(crate) fn tag_of(tir: &Tir, target: TirRef) -> String {
-    if target.is_param() {
-        return format!("{target:?} (param)");
-    }
-    format!("{:?}", tir.inst(target).tag)
-}
-
-/// The sub-identity of a field-targeted release: the target itself when
-/// it is a `FieldAccess` chain (one identity per field), else `None`
-/// (the whole place).
-pub(crate) fn field_key(tir: &Tir, target: TirRef) -> Option<TirRef> {
-    if target.is_param() {
-        return None;
-    }
-    matches!(tir.inst(target).tag, TirTag::FieldAccess).then_some(target)
-}
-
-/// All cleanup events per resolved place: scheduled destructions, the
-/// sidecar's displacement releases (minus the consumed-concat slots,
-/// whose free codegen skips — modelled as `Consume` transfers instead),
-/// and the walk-recorded transfers (`Move` hazards at return/call/match
-/// sites; inout write-backs at every exit). Events whose anchor can
-/// never fire (a payload on an all-diverging construct) are dropped; an
-/// IfStmt payload yields one event per non-diverging arm continuation.
-/// Promotion frees stay resolution-only here (their pairing checks land
-/// with the promo identity work) — see the header.
-pub(crate) fn collect_events(
-    tir: &Tir,
-    places: &TargetPlaces,
-    flow: &Flow,
-    fire_points: &FirePoints,
-    sidecar: &FunctionSidecar,
-    own: &Ownership,
-    pool: &InternPool,
-) -> HashMap<PlaceId, Vec<Event>> {
-    let mut out: HashMap<PlaceId, Vec<Event>> = HashMap::new();
-    let push = |place: PlaceId, event: Event, out: &mut HashMap<PlaceId, Vec<Event>>| {
-        let list = out.entry(place).or_default();
-        // Same (point, target, kind) twins collapse (the designed
-        // double-anchor is one obligation at one point).
-        if !list
-            .iter()
-            .any(|e| e.point == event.point && e.target == event.target && e.kind == event.kind)
-        {
-            list.push(event);
-        }
-    };
-    let storage = ryo_core::flow::cleanup::CleanupPlan::resolve(tir, flow, sidecar, pool)
-        .expect("cleanup positions resolve before event collection");
-    for (index, fp) in sidecar.drops.iter().enumerate() {
-        let actual = match storage.releases[index] {
-            ryo_core::flow::cleanup::ReleaseStorage::Binding(place) => Some(place),
-            ryo_core::flow::cleanup::ReleaseStorage::Value(target) => places.place(flow, target),
-        };
-        let Some(place) = actual else {
-            continue;
-        };
-        if place.0 == u32::MAX {
-            continue; // unresolvable target group — check (b) handles
-        }
-        for (point, exact) in position_points(fire_points, fp.position) {
-            push(
-                place,
-                Event {
-                    point,
-                    target: fp.target,
-                    kind: if storage.releases[index].is_static_noop(tir) {
-                        EventKind::StaticNoop
-                    } else {
-                        EventKind::Destroy
-                    },
-                    pos: fp.position,
-                    exact,
-                    field: field_key(tir, fp.target),
-                },
-                &mut out,
-            );
-        }
-    }
-    // Displacement releases: the old content's free at a replacement
-    // store. A consumed-concat Assign skips its `free_on_reassign` free
-    // at codegen (the buffer is consumed in place) — those slots become
-    // `Consume` transfers, not releases.
-    for (slot, target) in sidecar.free_on_reassign.iter().enumerate() {
-        let Some(target) = *target else { continue };
-        if sidecar.consumed_concat_lhs[slot].is_some() {
-            continue;
-        }
-        let Some(place) = places.place(flow, target) else {
-            continue;
-        };
-        if place.0 == u32::MAX {
-            continue;
-        }
-        let inst = TirRef::from_raw(slot as u32);
-        for (point, exact) in position_points(fire_points, DropPosition::BeforeStep { inst }) {
-            push(
-                place,
-                Event {
-                    point,
-                    target,
-                    kind: EventKind::Displace,
-                    pos: DropPosition::BeforeStep { inst },
-                    exact,
-                    field: field_key(tir, target),
-                },
-                &mut out,
-            );
-        }
-    }
-    for (slot, target) in sidecar.field_free_on_reassign.iter().enumerate() {
-        let Some(target) = *target else { continue };
-        let Some(place) = places.place(flow, target) else {
-            continue;
-        };
-        if place.0 == u32::MAX {
-            continue;
-        }
-        let inst = TirRef::from_raw(slot as u32);
-        for (point, exact) in position_points(fire_points, DropPosition::BeforeStep { inst }) {
-            push(
-                place,
-                Event {
-                    point,
-                    target,
-                    kind: EventKind::Displace,
-                    pos: DropPosition::BeforeStep { inst },
-                    exact,
-                    field: field_key(tir, target),
-                },
-                &mut out,
-            );
-        }
-    }
-    // Consumed-concat transfers: codegen skips the displacement free
-    // for a consumed-concat Assign — the old lhs buffer's ownership
-    // moves INTO the in-place concat result. The old buffer is the
-    // slot's `free_on_reassign` target (the consumed_concat slot names
-    // the concat itself, for codegen's in-place decision).
-    for (slot, value) in sidecar.consumed_concat_lhs.iter().enumerate() {
-        let Some(_concat) = *value else { continue };
-        let Some(target) = sidecar.free_on_reassign[slot] else {
-            continue;
-        };
-        let Some(place) = places.place(flow, target) else {
-            continue;
-        };
-        if place.0 == u32::MAX {
-            continue;
-        }
-        let inst = TirRef::from_raw(slot as u32);
-        for (point, exact) in position_points(fire_points, DropPosition::BeforeStep { inst }) {
-            push(
-                place,
-                Event {
-                    point,
-                    target,
-                    kind: EventKind::Consume,
-                    pos: DropPosition::BeforeStep { inst },
-                    exact,
-                    field: None,
-                },
-                &mut out,
-            );
-        }
-    }
-    // Walk-recorded transfers. `Move` hazards discharge the owner's
-    // obligation at the hazard's resolved point; `InoutPass`/`Mutate`
-    // hazards do not (see `Ownership::owner_hazards`).
-    for transfer in &sidecar.transfers {
-        let site = transfer.site;
-        let place = transfer.source;
-        if place.0 == u32::MAX {
-            continue;
-        }
-        // Only consumes that move ownership OUT of this function (or
-        // into a DIFFERENT un-unioned aggregate) are transfers. Binding
-        // seating (VarDecl/Assign/destructure) and match adoptions
-        // continue the identity inside ONE union — no event. Return
-        // sites transfer at the return block's terminator point (after
-        // the operand evaluation, before the exit). Call sites (move
-        // args) transfer at the consuming statement's boundary.
-        let (kind, resolved): (EventKind, Vec<(Point, bool)>) = match tir.inst(site).tag {
-            TirTag::Return | TirTag::ReturnVoid => (
-                EventKind::TransferReturn,
-                position_points(fire_points, DropPosition::AfterStep { inst: site }),
-            ),
-            TirTag::Match => {
-                // An arm-expression by-value read (including an arm
-                // literal): ownership moves into the match result — a
-                // transfer IN at the arm value's producer boundary. The
-                // scrutinee-adoption hazard gets one too; it is
-                // harmless (an earlier IN on the same union — the
-                // synthetic per-match events below keep the switch and
-                // join discharges explicit).
-                let Some(producer) = (!transfer.target.is_param()).then_some(transfer.target)
-                else {
-                    continue; // param arm read: documented corner
-                };
-                let Some(arm_block) = flow.step_block_of(producer) else {
-                    continue;
-                };
-                (
-                    EventKind::TransferArm,
-                    vec![(
-                        Point {
-                            block: arm_block,
-                            ordinal: flow.block_steps(arm_block).len() as u32,
-                        },
-                        true,
-                    )],
-                )
-            }
-            TirTag::Call => (
-                EventKind::TransferCall,
-                position_points(fire_points, DropPosition::AfterStep { inst: site }),
-            ),
-            // Aggregate seating: a struct/enum literal field's buffer
-            // moves into the aggregate — a different place, not a
-            // unioned home — so the field generation is discharged by
-            // the move itself (the aggregate's release frees it
-            // recursively). Binding seating (VarDecl/Assign/
-            // destructure) continues the identity in the SAME union and
-            // needs no event.
-            TirTag::FieldAssign | TirTag::StructLit | TirTag::EnumLit => (
-                EventKind::Consume,
-                position_points(fire_points, DropPosition::AfterStep { inst: site }),
-            ),
-            _ => continue,
-        };
-        for (point, exact) in resolved {
-            push(
-                place,
-                Event {
-                    point,
-                    target: transfer.target,
-                    kind,
-                    pos: DropPosition::AfterStep { inst: site },
-                    exact,
-                    field: None,
-                },
-                &mut out,
-            );
-        }
-    }
-    // Adoption: a by-move match's scrutinee content is consumed at the
-    // dispatch; a destructure adopts its bound fields into tokens the
-    // same way (on binding arms the tokens adopt it — the place union
-    // continues it; on non-binding arms there is no payload to
-    // release). One synthetic transfer IN per construct: at the switch
-    // block terminator for a match, at the destructure statement's
-    // boundary for a destructure (the unbound fields are released
-    // inline by the destructure itself).
-    for (match_inst, token_places) in flow.token_places_iter() {
-        if token_places.is_empty() {
-            continue;
-        }
-        let (scrutinee_place, dispatch): (PlaceId, Vec<(Point, bool)>) =
-            match tir.inst(match_inst).tag {
-                TirTag::Match => {
-                    let Some(sw_block) = flow.term_block_of(match_inst) else {
-                        continue;
-                    };
-                    let Some(sp) = (match flow.term(sw_block) {
-                        Terminator::Switch { scrutinee, .. } => flow_owner_place(flow, *scrutinee),
-                        _ => None,
-                    }) else {
-                        continue;
-                    };
-                    (
-                        sp,
-                        vec![(
-                            Point {
-                                block: sw_block,
-                                ordinal: flow.block_steps(sw_block).len() as u32,
-                            },
-                            true,
-                        )],
-                    )
-                }
-                TirTag::Destructure => {
-                    let Some(sp) = flow_owner_place(flow, tir.destructure_view(match_inst).rhs)
-                    else {
-                        continue;
-                    };
-                    (
-                        sp,
-                        position_points(fire_points, DropPosition::AfterStep { inst: match_inst }),
-                    )
-                }
-                _ => continue,
-            };
-        for (point, exact) in dispatch {
-            push(
-                scrutinee_place,
-                Event {
-                    point,
-                    target: scrutinee_owner_ref(flow, scrutinee_place),
-                    kind: EventKind::TransferArm,
-                    pos: DropPosition::AfterStep { inst: match_inst },
-                    exact,
-                    field: None,
-                },
-                &mut out,
-            );
-        }
-        // An arm-expression by-value read moves the adopted content
-        // into the match result: a synthetic transfer IN at the join
-        // discharges the token's arm-start adoption on result-flowing
-        // arms (statement arms discharge earlier — at their own frees;
-        // the scan stops at the first event). The synthetic sub-
-        // identity keeps it from pairing with the whole-scrutinee
-        // releases (different buffers).
-        if let TirTag::Match = tir.inst(match_inst).tag
-            && let Some(sw_block) = flow.term_block_of(match_inst)
-            && let Terminator::Switch {
-                join: Some(join), ..
-            } = flow.term(sw_block)
-        {
-            push(
-                scrutinee_place,
-                Event {
-                    point: Point {
-                        block: *join,
-                        ordinal: 0,
-                    },
-                    target: scrutinee_owner_ref(flow, scrutinee_place),
-                    kind: EventKind::TransferArm,
-                    pos: DropPosition::BlockStart { block: *join },
-                    exact: true,
-                    field: Some(match_inst),
-                },
-                &mut out,
-            );
-        }
-    }
-    // Inout write-backs: whatever is seated in an inout param leaves
-    // through the write-back pointer at EVERY exit — a transfer at each
-    // return's terminator point.
-    let param_place = |name: ryo_core::types::StringId| -> Option<PlaceId> {
-        let &idx = own.param_index.get(&name)?;
-        Some(own.param_places[idx])
-    };
-    for &name in &own.inout_str_params {
-        let Some(place) = param_place(name) else {
-            continue;
-        };
-        for b in flow.forward_order() {
-            if !matches!(
-                flow.term(b),
-                Terminator::Return { .. } | Terminator::ReturnVoid
-            ) {
-                continue;
-            }
-            let point = Point {
-                block: b,
-                ordinal: flow.block_steps(b).len() as u32,
-            };
-            push(
-                place,
-                Event {
-                    point,
-                    target: TirRef::param(own.param_index[&name]),
-                    kind: EventKind::TransferInoutWriteback,
-                    pos: DropPosition::PreTerminator { block: b },
-                    exact: true,
-                    field: None,
-                },
-                &mut out,
-            );
-        }
-    }
-    // Promotion-buffer releases: the promoted copy is a
-    // DISTINCT identity from the borrowed original — keyed here under
-    // the base's place so the double-discharge check relates releases
-    // of one buffer (borrowed params carry no callee obligations, so
-    // coverage adds nothing; the pairing check is `validate_promo`).
-    for pf in &sidecar.promotion_frees {
-        let Some(place) = places.place(flow, pf.base) else {
-            continue;
-        };
-        if place.0 == u32::MAX {
-            continue;
-        }
-        for (point, exact) in position_points(fire_points, pf.position) {
-            push(
-                place,
-                Event {
-                    point,
-                    target: pf.base,
-                    kind: EventKind::PromoRelease,
-                    pos: pf.position,
-                    exact,
-                    field: None,
-                },
-                &mut out,
-            );
-        }
-    }
-    out
-}
+mod events;
+pub(crate) use events::{Event, EventKind, collect_events, tag_of};
 
 /// Per-place generation tables, split by role:
 /// - `establish`: block → sorted step ordinals that ESTABLISH a
@@ -905,10 +419,14 @@ pub(crate) fn generation_table(
                 // mirrors the read owner (a by-value arm read, an
                 // identity rewrite); the obligation rides the owner's
                 // own group, so no self-establishment here.
-                if matches!(tir.inst(*producer).tag, TirTag::Var) {
-                    continue;
-                }
-                if let Some((b, ord)) = idx.get(*producer) {
+                let producer_tag = tir.inst(*producer).tag;
+                if !matches!(
+                    producer_tag,
+                    TirTag::Var | TirTag::StrConst | TirTag::BytesConst
+                ) && let Some((b, ord)) = idx.get(*producer)
+                {
+                    // Static strings and bytes have no allocation to
+                    // release, so they create no storage obligation.
                     est.entry(b).or_default().push(ord);
                 }
             }
@@ -1364,12 +882,33 @@ pub(crate) fn validate_no_path_double_destruction(
 ) {
     let reachable = reachable_blocks(flow);
     let roots = place_roots(tir, flow, own, sidecar);
-    // Group events by place-union root: one buffer, one obligation group.
+    let index = StepIndex::build(flow);
+    let by_root = group_path_events(events, &roots);
+    let reseat_cuts = reseat_cuts(flow, &index, &roots);
+    for ((root, allocation), evs) in &by_root {
+        // Cuts of ANY member place end a path (a Replace/FieldReplace
+        // displaces the seated content — the buffer identity changes).
+        let root_cuts = root_generation_cuts(
+            events,
+            &roots,
+            table,
+            &reseat_cuts,
+            *root,
+            allocation.is_some(),
+        );
+        check_path_event_group(tir, flow, &reachable, *root, evs, &root_cuts, summary);
+    }
+}
+
+/// Group events by place-union root. Promotion releases use their own
+/// allocation identity because they free a scratch copy, not the source.
+fn group_path_events(
+    events: &HashMap<PlaceId, Vec<Event>>,
+    roots: &[u32],
+) -> HashMap<(u32, Option<TirRef>), Vec<Event>> {
     let mut by_root: HashMap<(u32, Option<TirRef>), Vec<Event>> = HashMap::new();
     for (place, evs) in events {
         for event in evs {
-            // Each promotion site owns separate scratch storage. The borrowed
-            // source remains in the ordinary storage group.
             let allocation = (event.kind == EventKind::PromoRelease).then_some(event.target);
             by_root
                 .entry((roots[place.0 as usize], allocation))
@@ -1377,8 +916,12 @@ pub(crate) fn validate_no_path_double_destruction(
                 .push(*event);
         }
     }
-    let index = StepIndex::build(flow);
-    let mut reseat_cuts: HashMap<u32, Vec<(BlockId, u32)>> = HashMap::new();
+    by_root
+}
+
+/// Index replacement writes that start a new home generation for a root.
+fn reseat_cuts(flow: &Flow, index: &StepIndex, roots: &[u32]) -> HashMap<u32, Vec<(BlockId, u32)>> {
+    let mut cuts: HashMap<u32, Vec<(BlockId, u32)>> = HashMap::new();
     for step in &flow.steps {
         if let Some(write) = step.facts.write
             && matches!(
@@ -1387,188 +930,187 @@ pub(crate) fn validate_no_path_double_destruction(
             )
             && let Some(point) = index.get(step.inst)
         {
-            reseat_cuts
-                .entry(roots[write.place.0 as usize])
+            cuts.entry(roots[write.place.0 as usize])
                 .or_default()
                 .push(point);
         }
     }
-    for ((root, allocation), evs) in &by_root {
-        // Cuts of ANY member place end a path (a Replace/FieldReplace
-        // displaces the seated content — the buffer identity changes).
-        let root_cuts: HashMap<BlockId, Vec<u32>> = {
-            let mut m: HashMap<BlockId, Vec<u32>> = HashMap::new();
-            for place in events.keys() {
-                if allocation.is_some() || roots[place.0 as usize] != *root {
-                    continue;
-                }
-                if let Some(by_block) = table.cut.get(place) {
-                    for (&b, ords) in by_block {
-                        m.entry(b).or_default().extend_from_slice(ords);
-                    }
-                }
+    cuts
+}
+
+/// Collect every cut that ends a group's current generation.
+fn root_generation_cuts(
+    events: &HashMap<PlaceId, Vec<Event>>,
+    roots: &[u32],
+    table: &GenerationTable,
+    reseat_cuts: &HashMap<u32, Vec<(BlockId, u32)>>,
+    root: u32,
+    is_promotion: bool,
+) -> HashMap<BlockId, Vec<u32>> {
+    let mut cuts: HashMap<BlockId, Vec<u32>> = HashMap::new();
+    for place in events.keys() {
+        if is_promotion || roots[place.0 as usize] != root {
+            continue;
+        }
+        if let Some(by_block) = table.cut.get(place) {
+            for (&block, ordinals) in by_block {
+                cuts.entry(block).or_default().extend_from_slice(ordinals);
             }
-            // A reseat starts a new home generation even when the old value
-            // moved out and therefore needed no displacement release.
-            if allocation.is_none()
-                && let Some(cuts) = reseat_cuts.get(root)
-            {
-                for &(block, ordinal) in cuts {
-                    m.entry(block).or_default().push(ordinal);
-                }
-            }
-            for ords in m.values_mut() {
-                ords.sort_unstable();
-                ords.dedup();
-            }
-            m
-        };
-        let place_cuts = Some(&root_cuts);
-        let by_point: HashMap<Point, Vec<usize>> =
-            evs.iter()
-                .enumerate()
-                .fold(HashMap::new(), |mut m, (i, e)| {
-                    m.entry(e.point).or_insert_with(Vec::new).push(i);
-                    m
-                });
-        for e1 in evs {
-            if !reachable.contains(&e1.point.block) {
-                // Never fires — excluded from the path checks, counted
-                // (unreachable events create no false obligations).
-                summary.events_unreachable += 1;
+        }
+    }
+    // A reseat starts a new home generation even when the old value moved
+    // out and therefore needed no displacement release.
+    if !is_promotion && let Some(reseats) = reseat_cuts.get(&root) {
+        for &(block, ordinal) in reseats {
+            cuts.entry(block).or_default().push(ordinal);
+        }
+    }
+    for ordinals in cuts.values_mut() {
+        ordinals.sort_unstable();
+        ordinals.dedup();
+    }
+    cuts
+}
+
+fn index_events_by_point(events: &[Event]) -> HashMap<Point, Vec<usize>> {
+    events
+        .iter()
+        .enumerate()
+        .fold(HashMap::new(), |mut by_point, (index, event)| {
+            by_point.entry(event.point).or_default().push(index);
+            by_point
+        })
+}
+
+/// Check reachability between events within one storage-generation group.
+fn check_path_event_group(
+    tir: &Tir,
+    flow: &Flow,
+    reachable: &HashSet<BlockId>,
+    root: u32,
+    events: &[Event],
+    cuts: &HashMap<BlockId, Vec<u32>>,
+    summary: &mut ValidationSummary,
+) {
+    let place_cuts = Some(cuts);
+    let by_point = index_events_by_point(events);
+    for e1 in events {
+        if !reachable.contains(&e1.point.block) {
+            // Never fires — excluded from the path checks, counted
+            // (unreachable events create no false obligations).
+            summary.events_unreachable += 1;
+            continue;
+        }
+        let mut visited: HashSet<Point> = HashSet::new();
+        let mut parent: HashMap<Point, Point> = HashMap::new();
+        let mut stack: Vec<Point> = Vec::new();
+        push_successors(flow, place_cuts, e1.point, &mut stack);
+        for &next in &stack {
+            parent.insert(next, e1.point);
+        }
+        while let Some(p) = stack.pop() {
+            if !visited.insert(p) {
                 continue;
             }
-            let mut visited: HashSet<Point> = HashSet::new();
-            let mut parent: HashMap<Point, Point> = HashMap::new();
-            let mut stack: Vec<Point> = Vec::new();
-            push_successors(flow, place_cuts, e1.point, &mut stack);
-            for &next in &stack {
-                parent.insert(next, e1.point);
-            }
-            while let Some(p) = stack.pop() {
-                if !visited.insert(p) {
-                    continue;
-                }
-                if let Some(ids) = by_point.get(&p) {
-                    for &j in ids {
-                        let e2 = &evs[j];
-                        if e1.kind == EventKind::StaticNoop || e2.kind == EventKind::StaticNoop {
-                            continue;
-                        }
-                        // Transfer-to-transfer: neither side emits a
-                        // free — a second move of one storage is the
-                        // walk's E0020 jurisdiction, not a cleanup-
-                        // schedule violation.
-                        if !e1.is_release() && !e2.is_release() {
-                            continue;
-                        }
-                        // One release, one transfer. A transfer OUT
-                        // (return / move-arg / inout write-back) on
-                        // EITHER side is a violation — the callee must
-                        // never release storage whose ownership left
-                        // the function. A transfer IN (aggregate / arm
-                        // seating) reached FROM a release is a
-                        // free-before-adoption (UAF); a release reached
-                        // FROM a transfer IN is the normal lifecycle
-                        // (the aggregate's own release) — not a
-                        // violation.
-                        if e1.is_release() != e2.is_release() {
-                            let transfer = if e1.is_release() { e2 } else { e1 };
-                            if !transfer.is_transfer_out()
-                                && !std::ptr::eq(transfer as *const _, e2 as *const _)
-                            {
-                                continue; // IN(e1) -> release(e2): normal
-                            }
-                        }
-                        // The designed no-op twin: the very same event
-                        // (target + position + kind) at the reached point.
-                        if e2.target == e1.target && e2.pos == e1.pos && e2.kind == e1.kind {
-                            continue;
-                        }
-                        // Different fields of one aggregate (or a field
-                        // vs the whole) free different buffers — never
-                        // a double-discharge pair.
-                        if e1.field != e2.field {
-                            continue;
-                        }
-                        // Promotion releases are flag-guarded and
-                        // flag-CLEARING: the first frees the promoted
-                        // copy and clears the flag, every later release
-                        // of the same base is a designed no-op (the
-                        // return-epilogue copies exist exactly for
-                        // early-exit coverage).
-                        if e1.kind == EventKind::PromoRelease
-                            && e2.kind == EventKind::PromoRelease
-                            && e1.target == e2.target
-                        {
-                            continue;
-                        }
-                        // Codegen's per-block-visit `freed_targets` dedup
-                        // (cleared per block) consumes a same-target
-                        // release as a no-op when both fire in ONE visit
-                        // of one block — the documented co-located
-                        // double-anchor (consumer + epilogue in the same
-                        // block). Releases only (a transfer marks nothing
-                        // in `freed_targets`); never on a cycle (re-entry
-                        // clears the dedup) or across blocks (both fire).
-                        if e1.is_release()
-                            && e2.is_release()
-                            && e2.target == e1.target
-                            && e1.point.block == e2.point.block
-                            && !block_on_cycle(flow, e1.point.block)
-                        {
-                            continue;
-                        }
-                        // Provability gate: a pair is only PROVABLE when
-                        // both events fire exactly where modeled (every
-                        // resolved shape is exact except the resolver's
-                        // unresolvable-loop fallback); a pair containing
-                        // a non-exact event is NOT PROVED — counted,
-                        // never silently valid.
-                        summary.pairs_examined += 1;
-                        if !e1.exact || !e2.exact {
-                            summary.pairs_not_proved += 1;
-                            continue;
-                        }
-                        // Reconstruct one witnessing path (block chain).
-                        let mut path = vec![p];
-                        let mut cur = p;
-                        while cur != e1.point {
-                            cur = parent[&cur];
-                            path.push(cur);
-                        }
-                        path.reverse();
-                        debug_assert!(
-                            false,
-                            "path double discharge of place union {root}: event at {:?} \
+            if let Some(ids) = by_point.get(&p) {
+                for &j in ids {
+                    let e2 = &events[j];
+                    if !is_path_double_destruction_candidate(flow, e1, e2) {
+                        continue;
+                    }
+                    // Provability gate: a pair is only PROVABLE when
+                    // both events fire exactly where modeled (every
+                    // resolved shape is exact except the resolver's
+                    // unresolvable-loop fallback); a pair containing
+                    // a non-exact event is NOT PROVED — counted,
+                    // never silently valid.
+                    summary.pairs_examined += 1;
+                    if !e1.exact || !e2.exact {
+                        summary.pairs_not_proved += 1;
+                        continue;
+                    }
+                    // Reconstruct one witnessing path (block chain).
+                    let mut path = vec![p];
+                    let mut cur = p;
+                    while cur != e1.point {
+                        cur = parent[&cur];
+                        path.push(cur);
+                    }
+                    path.reverse();
+                    debug_assert!(
+                        false,
+                        "path double discharge of place union {root}: event at {:?} \
                              ({:?} kind {:?} target {:?} tag {:?}) reaches event at {:?} \
                              ({:?} kind {:?} target {:?} tag {:?}) with no intervening \
                              generation write — a release frees storage whose ownership \
                              already left, or frees it twice; witness blocks: {:?}",
-                            e1.point,
-                            e1.pos,
-                            e1.kind,
-                            e1.target,
-                            tag_of(tir, e1.target),
-                            e2.point,
-                            e2.pos,
-                            e2.kind,
-                            e2.target,
-                            tag_of(tir, e2.target),
-                            path.iter()
-                                .map(|p| (p.block, p.ordinal))
-                                .collect::<Vec<_>>()
-                        );
-                    }
+                        e1.point,
+                        e1.pos,
+                        e1.kind,
+                        e1.target,
+                        tag_of(tir, e1.target),
+                        e2.point,
+                        e2.pos,
+                        e2.kind,
+                        e2.target,
+                        tag_of(tir, e2.target),
+                        path.iter()
+                            .map(|p| (p.block, p.ordinal))
+                            .collect::<Vec<_>>()
+                    );
                 }
-                let before = stack.len();
-                push_successors(flow, place_cuts, p, &mut stack);
-                for &next in &stack[before..] {
-                    parent.entry(next).or_insert(p);
-                }
+            }
+            let before = stack.len();
+            push_successors(flow, place_cuts, p, &mut stack);
+            for &next in &stack[before..] {
+                parent.entry(next).or_insert(p);
             }
         }
     }
+}
+
+/// Apply event-kind and codegen-dedup rules before proving reachability
+/// is a double discharge of the same storage generation.
+fn is_path_double_destruction_candidate(flow: &Flow, first: &Event, second: &Event) -> bool {
+    if first.kind == EventKind::StaticNoop || second.kind == EventKind::StaticNoop {
+        return false;
+    }
+    // Transfer-to-transfer is the walk's E0020 jurisdiction, not a
+    // cleanup-schedule violation.
+    if !first.is_release() && !second.is_release() {
+        return false;
+    }
+    // A transfer out on either side is invalid. A transfer in reached
+    // from a release is use-after-free; a release reached from a
+    // transfer in is the normal lifecycle of the adopted value.
+    if first.is_release() != second.is_release() {
+        let transfer = if first.is_release() { second } else { first };
+        if !transfer.is_transfer_out() && !std::ptr::eq(transfer, second) {
+            return false;
+        }
+    }
+    // The identical event is the designed consumer + epilogue no-op.
+    if second.target == first.target && second.pos == first.pos && second.kind == first.kind {
+        return false;
+    }
+    // Different fields of one aggregate free different buffers.
+    if first.field != second.field {
+        return false;
+    }
+    // Promotion releases are flag-guarded and flag-clearing.
+    if first.kind == EventKind::PromoRelease
+        && second.kind == EventKind::PromoRelease
+        && first.target == second.target
+    {
+        return false;
+    }
+    // Same-target releases in one non-cyclic block visit are deduped by
+    // codegen. Re-entry clears that dedup, so cyclic blocks stay checked.
+    !(first.is_release()
+        && second.is_release()
+        && second.target == first.target
+        && first.point.block == second.point.block
+        && !block_on_cycle(flow, first.point.block))
 }
 
 /// The coverage verdict for one scan: `Proven` (an exact event

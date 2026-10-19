@@ -4,14 +4,14 @@ use super::{FuncCtx, Scope, Sema, borrow_target_reason};
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, TypeKind, ViewKind};
-use ryo_core::uir::{CallView, InstData, InstRef, InstTag, Span};
+use ryo_core::uir::{CallView, ExtraList, InstData, InstRef, InstTag, Span};
 
 /// Front-end validation for builtin calls.
 pub(crate) fn emit_builtin_call(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
-    view: &CallView,
+    view: &CallView<'_>,
     arg_tirs: &[TirRef],
     span: Span,
     builtin: &'static crate::builtins::BuiltinFunction,
@@ -20,35 +20,23 @@ pub(crate) fn emit_builtin_call(
     // Builtins never take ownership of their arguments — every arg
     // is borrowed regardless of declared type.
     let modes = vec![ParamMode::Borrow; arg_tirs.len()];
-    // --- M8.3: `&`/`inout` agreement for builtin calls (builtins
-    // bypass `check_call`, so the check is replayed here). `&` is only
-    // valid on an `inout` parameter — today only the first argument of
-    // str_push/bytes_push — everywhere else it is rejected, exactly
-    // like user-function calls. The push arms additionally validate
-    // the mutable lvalue of that first argument.
-    let builtin_modes: Vec<ParamMode> = if view.name == ids.str_push || view.name == ids.bytes_push
+    // Builtins bypass `check_call`, so check explicit `&` arguments
+    // before dispatching to their validation group.
+    check_builtin_borrow_modes(sema, view.name, &view.args);
+    if view.name == ids.process_exit
+        || view.name == ids.process_argc
+        || view.name == ids.process_argv
+        || view.name == ids.process_env
+        || view.name == ids.io_read_line
     {
-        vec![ParamMode::Inout, ParamMode::Borrow]
-    } else {
-        modes.clone()
-    };
-    for (idx, arg_uir) in view.args.iter().enumerate() {
-        let arg_is_borrow = matches!(sema.uir.inst(*arg_uir).tag, InstTag::Borrow);
-        let param_is_inout =
-            builtin_modes.get(idx).copied().unwrap_or(ParamMode::Borrow) == ParamMode::Inout;
-        if arg_is_borrow && !param_is_inout {
-            sema.sink.emit(
-                Diag::error(
-                    sema.uir.span(*arg_uir),
-                    DiagCode::BorrowMismatch,
-                    format!(
-                        "argument {} is passed by `&` but parameter is not `inout`",
-                        idx + 1
-                    ),
-                )
-                .with_help("remove the `&`, or declare the parameter `inout`"),
-            );
-        }
+        return emit_process_builtin(sema, fcx, view, arg_tirs, span, builtin, modes);
+    }
+    if view.name == ids.int_to_str || view.name == ids.float_to_str || view.name == ids.bool_to_str
+    {
+        return emit_conversion_builtin(sema, fcx, view, arg_tirs, span, builtin, modes);
+    }
+    if view.name == ids.str_push || view.name == ids.bytes_push {
+        return emit_push_builtin(sema, fcx, scope, view, arg_tirs, span, builtin);
     }
     match view.name {
         // M9.2: `io_eprint` is the exact twin of `print` — same
@@ -58,7 +46,25 @@ pub(crate) fn emit_builtin_call(
             emit_print_like(sema, fcx, view, arg_tirs, &modes, span, builtin)
         }
         n if n == ids.panic => emit_panic(sema, fcx, view, span),
-        // TODO(M24): interim call form — replaced by `process.exit`.
+        n if n == ids.assert => emit_assert(sema, fcx, view, arg_tirs, span),
+        _ => {
+            let ret_ty = builtin.return_type(sema.pool);
+            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+        }
+    }
+}
+
+fn emit_process_builtin(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    view: &CallView<'_>,
+    arg_tirs: &[TirRef],
+    span: Span,
+    builtin: &'static crate::builtins::BuiltinFunction,
+    modes: Vec<ParamMode>,
+) -> TirRef {
+    let ids = sema.names;
+    match view.name {
         n if n == ids.process_exit => {
             if view.args.len() != 1 {
                 sema.sink.emit(Diag::error(
@@ -77,7 +83,7 @@ pub(crate) fn emit_builtin_call(
             }
             if !matches!(sema.pool.kind(arg_ty), TypeKind::Int) {
                 sema.sink.emit(Diag::error(
-                    sema.uir.span(view.args[0]),
+                    sema.uir.span(view.args.at(0)),
                     DiagCode::TypeMismatch,
                     format!(
                         "process_exit() argument must be int, got {}",
@@ -89,8 +95,6 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
-        n if n == ids.assert => emit_assert(sema, fcx, view, arg_tirs, span),
-        // TODO(M22): interim call form — replaced by `process.args`.
         n if n == ids.process_argc => {
             if !view.args.is_empty() {
                 sema.sink.emit(Diag::error(
@@ -125,7 +129,7 @@ pub(crate) fn emit_builtin_call(
             }
             if !matches!(sema.pool.kind(arg_ty), TypeKind::Int) {
                 sema.sink.emit(Diag::error(
-                    sema.uir.span(view.args[0]),
+                    sema.uir.span(view.args.at(0)),
                     DiagCode::TypeMismatch,
                     format!(
                         "process_argv() argument must be int, got {}",
@@ -162,7 +166,7 @@ pub(crate) fn emit_builtin_call(
                 TypeKind::Str | TypeKind::View(ViewKind::Str)
             ) {
                 sema.sink.emit(Diag::error(
-                    sema.uir.span(view.args[0]),
+                    sema.uir.span(view.args.at(0)),
                     DiagCode::TypeMismatch,
                     format!(
                         "process_env() argument must be str, got {}",
@@ -193,6 +197,21 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
+        _ => unreachable!("builtin routed to the wrong validation group"),
+    }
+}
+
+fn emit_conversion_builtin(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    view: &CallView<'_>,
+    arg_tirs: &[TirRef],
+    span: Span,
+    builtin: &'static crate::builtins::BuiltinFunction,
+    modes: Vec<ParamMode>,
+) -> TirRef {
+    let ids = sema.names;
+    match view.name {
         n if n == ids.int_to_str => {
             if view.args.len() != 1 {
                 sema.sink.emit(Diag::error(
@@ -211,7 +230,7 @@ pub(crate) fn emit_builtin_call(
             }
             if !matches!(sema.pool.kind(arg_ty), TypeKind::Int) {
                 sema.sink.emit(Diag::error(
-                    sema.uir.span(view.args[0]),
+                    sema.uir.span(view.args.at(0)),
                     DiagCode::TypeMismatch,
                     format!(
                         "int_to_str() argument must be int, got {}",
@@ -241,7 +260,7 @@ pub(crate) fn emit_builtin_call(
             }
             if !matches!(sema.pool.kind(arg_ty), TypeKind::Float) {
                 sema.sink.emit(Diag::error(
-                    sema.uir.span(view.args[0]),
+                    sema.uir.span(view.args.at(0)),
                     DiagCode::TypeMismatch,
                     format!(
                         "float_to_str() argument must be float, got {}",
@@ -271,7 +290,7 @@ pub(crate) fn emit_builtin_call(
             }
             if !matches!(sema.pool.kind(arg_ty), TypeKind::Bool) {
                 sema.sink.emit(Diag::error(
-                    sema.uir.span(view.args[0]),
+                    sema.uir.span(view.args.at(0)),
                     DiagCode::TypeMismatch,
                     format!(
                         "bool_to_str() argument must be bool, got {}",
@@ -283,6 +302,21 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
+        _ => unreachable!("builtin routed to the wrong validation group"),
+    }
+}
+
+fn emit_push_builtin(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    view: &CallView<'_>,
+    arg_tirs: &[TirRef],
+    span: Span,
+    builtin: &'static crate::builtins::BuiltinFunction,
+) -> TirRef {
+    let ids = sema.names;
+    match view.name {
         n if n == ids.str_push => {
             // str_push(s: inout str, suffix: strview) -> void. Builtins
             // bypass `check_call`, so the `&`/`inout` agreement +
@@ -304,7 +338,7 @@ pub(crate) fn emit_builtin_call(
                 ));
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
-            let a0 = view.args[0];
+            let a0 = view.args.at(0);
             let t0 = fcx.builder.ty_of(arg_tirs[0]);
             let t1 = fcx.builder.ty_of(arg_tirs[1]);
             if !matches!(sema.pool.kind(t0), TypeKind::Str)
@@ -343,7 +377,7 @@ pub(crate) fn emit_builtin_call(
             warn_redundant_materialize_builtin_arg(
                 sema,
                 fcx,
-                view.args[1],
+                view.args.at(1),
                 arg_tirs[1],
                 "str_push",
             );
@@ -367,7 +401,7 @@ pub(crate) fn emit_builtin_call(
                 ));
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
-            let a0 = view.args[0];
+            let a0 = view.args.at(0);
             let t0 = fcx.builder.ty_of(arg_tirs[0]);
             let t1 = fcx.builder.ty_of(arg_tirs[1]);
             if !matches!(sema.pool.kind(t0), TypeKind::Bytes)
@@ -405,9 +439,27 @@ pub(crate) fn emit_builtin_call(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
-        _ => {
-            let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+        _ => unreachable!("builtin routed to the wrong validation group"),
+    }
+}
+
+fn check_builtin_borrow_modes(sema: &mut Sema<'_>, name: StringId, args: &ExtraList<'_, InstRef>) {
+    let push_modes = name == sema.names.str_push || name == sema.names.bytes_push;
+    for (idx, arg_uir) in args.iter().enumerate() {
+        let arg_is_borrow = matches!(sema.uir.inst(arg_uir).tag, InstTag::Borrow);
+        let param_is_inout = push_modes && idx == 0;
+        if arg_is_borrow && !param_is_inout {
+            sema.sink.emit(
+                Diag::error(
+                    sema.uir.span(arg_uir),
+                    DiagCode::BorrowMismatch,
+                    format!(
+                        "argument {} is passed by `&` but parameter is not `inout`",
+                        idx + 1
+                    ),
+                )
+                .with_help("remove the `&`, or declare the parameter `inout`"),
+            );
         }
     }
 }
@@ -474,7 +526,7 @@ pub(crate) fn warn_redundant_materialize_builtin_arg(
 pub(crate) fn emit_str_materialize(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
-    view: &CallView,
+    view: &CallView<'_>,
     arg_tirs: &[TirRef],
     span: Span,
 ) -> TirRef {
@@ -488,10 +540,10 @@ pub(crate) fn emit_str_materialize(
     }
     // Builtins never take `inout`: `&` is rejected exactly like the
     // table builtins (mirrors `int_to_str(&c)`).
-    if matches!(sema.uir.inst(view.args[0]).tag, InstTag::Borrow) {
+    if matches!(sema.uir.inst(view.args.at(0)).tag, InstTag::Borrow) {
         sema.sink.emit(
             Diag::error(
-                sema.uir.span(view.args[0]),
+                sema.uir.span(view.args.at(0)),
                 DiagCode::BorrowMismatch,
                 "argument 1 is passed by `&` but parameter is not `inout`".to_string(),
             )
@@ -508,7 +560,7 @@ pub(crate) fn emit_str_materialize(
     // valid UTF-8 by construction".
     if !matches!(sema.pool.kind(arg_ty), TypeKind::View(ViewKind::Str)) {
         sema.sink.emit(Diag::error(
-            sema.uir.span(view.args[0]),
+            sema.uir.span(view.args.at(0)),
             DiagCode::TypeMismatch,
             format!(
                 "str() argument must be strview, got {}",
@@ -541,7 +593,7 @@ pub(crate) fn emit_str_materialize(
 pub(crate) fn emit_bytes_materialize(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
-    view: &CallView,
+    view: &CallView<'_>,
     arg_tirs: &[TirRef],
     span: Span,
 ) -> TirRef {
@@ -555,10 +607,10 @@ pub(crate) fn emit_bytes_materialize(
     }
     // Builtins never take `inout`: `&` is rejected exactly like the
     // table builtins.
-    if matches!(sema.uir.inst(view.args[0]).tag, InstTag::Borrow) {
+    if matches!(sema.uir.inst(view.args.at(0)).tag, InstTag::Borrow) {
         sema.sink.emit(
             Diag::error(
-                sema.uir.span(view.args[0]),
+                sema.uir.span(view.args.at(0)),
                 DiagCode::BorrowMismatch,
                 "argument 1 is passed by `&` but parameter is not `inout`".to_string(),
             )
@@ -572,7 +624,7 @@ pub(crate) fn emit_bytes_materialize(
     }
     if !matches!(sema.pool.kind(arg_ty), TypeKind::View(ViewKind::Bytes)) {
         sema.sink.emit(Diag::error(
-            sema.uir.span(view.args[0]),
+            sema.uir.span(view.args.at(0)),
             DiagCode::TypeMismatch,
             format!(
                 "bytes() argument must be bytesview, got {}",
@@ -596,7 +648,7 @@ pub(crate) fn emit_bytes_materialize(
 pub(crate) fn emit_panic(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
-    view: &CallView,
+    view: &CallView<'_>,
     span: Span,
 ) -> TirRef {
     if view.args.len() != 1 {
@@ -608,15 +660,15 @@ pub(crate) fn emit_panic(
         ));
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
-    if !matches!(sema.uir.inst(view.args[0]).tag, InstTag::StrLiteral) {
+    if !matches!(sema.uir.inst(view.args.at(0)).tag, InstTag::StrLiteral) {
         sema.sink.emit(Diag::error(
-            sema.uir.span(view.args[0]),
+            sema.uir.span(view.args.at(0)),
             DiagCode::BuiltinArgKind,
             "panic() argument must be a string literal",
         ));
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
-    let user_msg_id = match sema.uir.inst(view.args[0]).data {
+    let user_msg_id = match sema.uir.inst(view.args.at(0)).data {
         InstData::Str(id) => id,
         _ => unreachable!("StrLiteral tag implies Str data"),
     };
@@ -626,7 +678,7 @@ pub(crate) fn emit_panic(
 pub(crate) fn emit_assert(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
-    view: &CallView,
+    view: &CallView<'_>,
     arg_tirs: &[TirRef],
     span: Span,
 ) -> TirRef {
@@ -645,7 +697,7 @@ pub(crate) fn emit_assert(
     let cond_ty = fcx.builder.ty_of(arg_tirs[0]);
     if !sema.pool.compatible(cond_ty, sema.pool.bool_()) {
         sema.sink.emit(Diag::error(
-            sema.uir.span(view.args[0]),
+            sema.uir.span(view.args.at(0)),
             DiagCode::TypeMismatch,
             format!(
                 "assert() condition must be 'bool', got '{}'",
@@ -655,16 +707,16 @@ pub(crate) fn emit_assert(
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
 
-    if !matches!(sema.uir.inst(view.args[1]).tag, InstTag::StrLiteral) {
+    if !matches!(sema.uir.inst(view.args.at(1)).tag, InstTag::StrLiteral) {
         sema.sink.emit(Diag::error(
-            sema.uir.span(view.args[1]),
+            sema.uir.span(view.args.at(1)),
             DiagCode::BuiltinArgKind,
             "assert() message must be a string literal",
         ));
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
 
-    let user_msg_id = match sema.uir.inst(view.args[1]).data {
+    let user_msg_id = match sema.uir.inst(view.args.at(1)).data {
         InstData::Str(id) => id,
         _ => unreachable!("StrLiteral tag implies Str data"),
     };
@@ -719,7 +771,7 @@ pub(crate) fn build_panic_call(
 pub(crate) fn check_print_args(
     sema: &mut Sema<'_>,
     fcx: &FuncCtx,
-    view: &CallView,
+    view: &CallView<'_>,
     arg_tirs: &[TirRef],
     span: Span,
     builtin: &str,
@@ -752,7 +804,7 @@ pub(crate) fn check_print_args(
             | TypeKind::Enum
     ) {
         sema.sink.emit(Diag::error(
-            sema.uir.span(view.args[0]),
+            sema.uir.span(view.args.at(0)),
             DiagCode::TypeMismatch,
             format!(
                 "{builtin}() argument must be str, strview, bytes, bytesview, int, float, bool, struct, enum, or tuple, got {}",
@@ -777,7 +829,7 @@ pub(crate) fn check_print_args(
 fn emit_print_like(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
-    view: &CallView,
+    view: &CallView<'_>,
     arg_tirs: &[TirRef],
     modes: &[ParamMode],
     span: Span,
@@ -827,7 +879,7 @@ fn emit_print_like(
     // `effective == arg_tirs` anyway, and for bytes the rewritten repr
     // call is str-typed, which would never match the `bytes` owner
     // type.
-    warn_redundant_materialize_builtin_arg(sema, fcx, view.args[0], arg_tirs[0], name);
+    warn_redundant_materialize_builtin_arg(sema, fcx, view.args.at(0), arg_tirs[0], name);
     let ret_ty = builtin.return_type(sema.pool);
     fcx.builder.call(view.name, effective, modes, ret_ty, span)
 }

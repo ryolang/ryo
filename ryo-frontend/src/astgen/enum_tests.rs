@@ -117,7 +117,7 @@ fn variant_construct_positional_lowers_to_enum_lit() {
                s = Shape.Circle(5.0)\n";
     let (uir, pool) = parse_and_lower(src).unwrap();
     let main = body_named(&uir, &pool, "main");
-    let v = uir.var_decl_view(uir.body_stmts(main)[0]);
+    let v = uir.var_decl_view(uir.body_stmts(main).at(0));
     assert!(matches!(uir.inst(v.initializer).tag, InstTag::EnumLit));
     let lit = uir.enum_lit_view(v.initializer);
     assert_eq!(lit.ty, uir.enum_decls[0].ty);
@@ -141,7 +141,7 @@ fn variant_construct_named_canonicalizes_against_decl_order() {
                r = Shape.Rectangle{height=2.0, width=1.0}\n";
     let (uir, pool) = parse_and_lower(src).unwrap();
     let main = body_named(&uir, &pool, "main");
-    let v = uir.var_decl_view(uir.body_stmts(main)[0]);
+    let v = uir.var_decl_view(uir.body_stmts(main).at(0));
     let lit = uir.enum_lit_view(v.initializer);
     assert_eq!(lit.variant_index, 0);
     assert!(
@@ -193,7 +193,7 @@ fn unknown_variant_construct_lowers_recovery_to_error_type() {
         "UnknownVariant must fire: {diags:?}"
     );
     let main = body_named(&uir, &pool, "main");
-    let v = uir.var_decl_view(uir.body_stmts(main)[0]);
+    let v = uir.var_decl_view(uir.body_stmts(main).at(0));
     let lit = uir.enum_lit_view(v.initializer);
     assert_eq!(lit.ty, pool.error_type(), "recovery node is poisoned");
 }

@@ -78,6 +78,12 @@ pub type Span = SimpleSpan;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InstRef(NonZeroU32);
 
+impl ExtraValue for InstRef {
+    fn from_extra(raw: u32) -> Self {
+        Self::from_raw(raw)
+    }
+}
+
 impl InstRef {
     /// Convert from a `usize` array index. Caller guarantees `idx`
     /// is in `1..instructions.len()` (slot 0 is reserved).
@@ -113,8 +119,8 @@ impl InstRef {
 
 // ---------- ExtraRange ----------
 
-pub use crate::extra::ExtraRange;
 pub use crate::extra::enum_lit_extra;
+pub use crate::extra::{ExtraList, ExtraRange, ExtraValue};
 
 // ---------- Instruction tags ----------
 
@@ -480,170 +486,11 @@ impl Uir {
         self.spans[r.index()]
     }
 
-    /// Slice of [`InstRef`]s for the top-level statements of a body.
-    pub fn body_stmts(&self, body: &FuncBody) -> Vec<InstRef> {
-        self.extra[body.body.as_range()]
-            .iter()
-            .copied()
-            .map(InstRef::from_raw)
-            .collect()
+    /// Borrow the top-level statement references from the extra arena.
+    /// The view decodes each reference as it is read and does not allocate.
+    pub fn body_stmts(&self, body: &FuncBody) -> ExtraList<'_, InstRef> {
+        ExtraList::new(&self.extra[body.body.as_range()])
     }
-}
-
-// ---------- Variable-payload encoding ----------
-
-/// Layout in `extra` for [`InstTag::Call`]:
-///
-/// ```text
-///   [0]  name:  StringId
-///   [1]  argc:  u32
-///   [2..2+argc] args: InstRef.raw()
-/// ```
-pub mod call_extra {
-    pub const NAME: usize = 0;
-    pub const ARGC: usize = 1;
-    pub const ARGS: usize = 2;
-}
-
-/// Layout in `extra` for [`InstTag::VarDecl`]:
-///
-/// ```text
-///   [0]  name:  StringId
-///   [1]  flags: u32  (bit 0 = mutable)
-///   [2]  ty:    u32  (TypeId, or `TY_NONE_SENTINEL` if no annotation)
-///   [3]  init:  InstRef.raw()
-/// ```
-///
-/// `TY_NONE_SENTINEL` is `u32::MAX`, which is outside any plausible
-/// `TypeId` range. Sema replaces it with the inferred type (and emits
-/// a TIR instruction whose `ty` slot is real); codegen never sees
-/// `TY_NONE_SENTINEL` after Phase 4 lands.
-pub mod var_decl_extra {
-    pub const NAME: usize = 0;
-    pub const FLAGS: usize = 1;
-    pub const TY: usize = 2;
-    pub const INIT: usize = 3;
-    pub const LEN: usize = 4;
-
-    pub const FLAG_MUTABLE: u32 = 1 << 0;
-    pub const TY_NONE_SENTINEL: u32 = u32::MAX;
-}
-
-/// Layout in `extra` for [`InstTag::AssignOrDecl`]:
-///
-/// ```text
-///   [0]  name:  StringId
-///   [1]  value: InstRef.raw()
-/// ```
-pub mod assign_or_decl_extra {
-    pub const NAME: usize = 0;
-    pub const VALUE: usize = 1;
-    pub const LEN: usize = 2;
-}
-
-/// Layout in `extra` for [`InstTag::CompoundAssign`]:
-///
-/// ```text
-///   [0]  name:  StringId
-///   [1]  op:    u32 (CompoundOp discriminant)
-///   [2]  value: InstRef.raw()
-/// ```
-pub mod compound_assign_extra {
-    pub const NAME: usize = 0;
-    pub const OP: usize = 1;
-    pub const VALUE: usize = 2;
-    pub const LEN: usize = 3;
-}
-
-/// Layout in `extra` for [`InstTag::MethodCall`]:
-///
-/// ```text
-///   [0]  receiver: InstRef.raw()
-///   [1]  name:     StringId.raw()
-///   [2]  argc:     u32
-///   [3..3+argc] args: InstRef.raw()
-/// ```
-pub mod method_call_extra {
-    pub const RECEIVER: usize = 0;
-    pub const NAME: usize = 1;
-    pub const ARGC: usize = 2;
-    pub const ARGS: usize = 3;
-}
-
-/// Layout in `extra` for [`InstTag::WhileLoop`]:
-///
-/// ```text
-///   [0]       cond:       InstRef.raw()
-///   [1]       body_count: u32
-///   [2..2+n]  body stmts: InstRef.raw() each
-/// ```
-pub mod while_loop_extra {
-    pub const COND: usize = 0;
-    pub const BODY_COUNT: usize = 1;
-    pub const BODY_START: usize = 2;
-}
-
-/// Layout in `extra` for [`InstTag::ForRange`]:
-///
-/// ```text
-///   [0]       var_name:   StringId.raw()
-///   [1]       start:      InstRef.raw()
-///   [2]       end:        InstRef.raw()
-///   [3]       body_count: u32
-///   [4..4+n]  body stmts: InstRef.raw() each
-/// ```
-pub mod for_range_extra {
-    pub const VAR_NAME: usize = 0;
-    pub const START: usize = 1;
-    pub const END: usize = 2;
-    pub const BODY_COUNT: usize = 3;
-    pub const BODY_START: usize = 4;
-}
-
-/// Layout in `extra` for [`InstTag::StructLit`]:
-///
-/// ```text
-///   [0]  name:     StringId (or `UIR_ANON_STRUCT_NAME` for an
-///                  anonymous literal — there is no declared name)
-///   [1]  n_fields: u32
-///   [2..2+2*n]     per field: [field_name: StringId.raw(), value: InstRef.raw()]
-/// ```
-pub mod struct_lit_extra {
-    pub const NAME: usize = 0;
-    pub const NFIELDS: usize = 1;
-    pub const FIELDS: usize = 2;
-    /// Anonymous-literal marker for the `NAME` slot (M10), mirroring
-    /// [`var_decl_extra::TY_NONE_SENTINEL`]: `u32::MAX` is outside any
-    /// plausible `StringId` range, so it can never collide with a real
-    /// (or user-interned) name. Sema infers the structural type from
-    /// the field values instead of looking the name up.
-    pub const UIR_ANON_STRUCT_NAME: u32 = u32::MAX;
-}
-
-/// Layout in `extra` for [`InstTag::FieldAssign`]:
-///
-/// ```text
-///   [0]  target: InstRef.raw() (FieldAccess chain)
-///   [1]  value:  InstRef.raw()
-/// ```
-pub mod field_assign_extra {
-    pub const TARGET: usize = 0;
-    pub const VALUE: usize = 1;
-    pub const LEN: usize = 2;
-}
-
-/// Layout in `extra` for [`InstTag::CompoundFieldAssign`]:
-///
-/// ```text
-///   [0]  target: InstRef.raw() (FieldAccess chain)
-///   [1]  op:     u32 (CompoundOp discriminant)
-///   [2]  value:  InstRef.raw()
-/// ```
-pub mod compound_field_assign_extra {
-    pub const TARGET: usize = 0;
-    pub const OP: usize = 1;
-    pub const VALUE: usize = 2;
-    pub const LEN: usize = 3;
 }
 
 // ---------- Builder ----------
@@ -1154,379 +1001,6 @@ impl UirBuilder {
     }
 }
 
-// ---------- Read-side helpers ----------
-
-/// Decoded view of an [`InstTag::Call`] payload.
-pub struct CallView {
-    pub name: StringId,
-    pub args: Vec<InstRef>,
-}
-
-/// Decoded view of an [`InstTag::VarDecl`] payload.
-pub struct VarDeclView {
-    pub name: StringId,
-    pub mutable: bool,
-    /// `None` when the source had no annotation.
-    pub ty: Option<TypeId>,
-    pub initializer: InstRef,
-}
-
-pub struct AssignOrDeclView {
-    pub name: StringId,
-    pub value: InstRef,
-}
-
-pub struct CompoundAssignView {
-    pub name: StringId,
-    pub op: CompoundOp,
-    pub value: InstRef,
-}
-
-/// Decoded view of an [`InstTag::FieldAssign`] payload (M9).
-pub struct FieldAssignView {
-    pub target: InstRef,
-    pub value: InstRef,
-}
-
-/// Decoded view of an [`InstTag::CompoundFieldAssign`] payload (M9).
-pub struct CompoundFieldAssignView {
-    pub target: InstRef,
-    pub op: CompoundOp,
-    pub value: InstRef,
-}
-
-pub struct WhileLoopView {
-    pub cond: InstRef,
-    pub body: Vec<InstRef>,
-}
-
-pub struct ForRangeView {
-    pub var_name: StringId,
-    pub start: InstRef,
-    pub end: InstRef,
-    pub body: Vec<InstRef>,
-}
-
-/// Decoded view of an [`InstTag::MethodCall`] payload.
-pub struct MethodCallView {
-    pub receiver: InstRef,
-    pub name: StringId,
-    pub args: Vec<InstRef>,
-}
-
-/// Decoded view of an [`InstTag::StructLit`] payload. Field
-/// initializers are in source order. `name` of `None` is the M10
-/// anonymous literal (encoded as
-/// [`struct_lit_extra::UIR_ANON_STRUCT_NAME`]); sema infers the
-/// structural type from the field values instead of resolving a name.
-pub struct StructLitView {
-    pub name: Option<StringId>,
-    pub fields: Vec<(StringId, InstRef)>,
-}
-
-/// Decoded view of an [`InstTag::EnumLit`] payload (M11). Borrows the
-/// `extra` arena directly — decoding allocates nothing (contrast with
-/// [`StructLitView`]'s owned `Vec`); `fields()` yields `(field_index,
-/// value)` pairs keyed by declaration-order payload-field index, in
-/// source order.
-pub struct EnumLitView<'a> {
-    pub ty: TypeId,
-    pub variant_index: u32,
-    /// Source used the parenthesized positional form (astgen-recorded;
-    /// see [`enum_lit_extra::FLAG_POSITIONAL`]).
-    pub positional: bool,
-    args: &'a [u32],
-}
-
-impl EnumLitView<'_> {
-    /// `(field_index, value)` pairs, in source order.
-    pub fn fields(&self) -> impl Iterator<Item = (u32, InstRef)> + '_ {
-        self.args
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|&[field_idx, raw]| (field_idx, InstRef::from_raw(raw)))
-    }
-}
-
-pub struct ElifView {
-    pub cond: InstRef,
-    pub body: Vec<InstRef>,
-}
-
-pub struct IfStmtView {
-    pub cond: InstRef,
-    pub then_stmts: Vec<InstRef>,
-    pub elif_branches: Vec<ElifView>,
-    pub else_stmts: Option<Vec<InstRef>>,
-}
-
-impl Uir {
-    pub fn call_view(&self, r: InstRef) -> CallView {
-        let inst = self.inst(r);
-        debug_assert!(matches!(inst.tag, InstTag::Call));
-        let range = match inst.data {
-            InstData::Extra(rng) => rng,
-            _ => unreachable!("Call must carry InstData::Extra"),
-        };
-        let slice = &self.extra[range.as_range()];
-        let name = StringId::from_raw(slice[call_extra::NAME]);
-        let argc = slice[call_extra::ARGC] as usize;
-        let args = slice[call_extra::ARGS..call_extra::ARGS + argc]
-            .iter()
-            .copied()
-            .map(InstRef::from_raw)
-            .collect();
-        CallView { name, args }
-    }
-
-    pub fn var_decl_view(&self, r: InstRef) -> VarDeclView {
-        let inst = self.inst(r);
-        debug_assert!(matches!(inst.tag, InstTag::VarDecl));
-        let range = match inst.data {
-            InstData::Extra(rng) => rng,
-            _ => unreachable!("VarDecl must carry InstData::Extra"),
-        };
-        let slice = &self.extra[range.as_range()];
-        let name = StringId::from_raw(slice[var_decl_extra::NAME]);
-        let mutable = slice[var_decl_extra::FLAGS] & var_decl_extra::FLAG_MUTABLE != 0;
-        let ty_raw = slice[var_decl_extra::TY];
-        let ty = if ty_raw == var_decl_extra::TY_NONE_SENTINEL {
-            None
-        } else {
-            Some(TypeId::from_raw(ty_raw))
-        };
-        let initializer = InstRef::from_raw(slice[var_decl_extra::INIT]);
-        VarDeclView {
-            name,
-            mutable,
-            ty,
-            initializer,
-        }
-    }
-
-    pub fn assign_or_decl_view(&self, r: InstRef) -> AssignOrDeclView {
-        let inst = self.inst(r);
-        debug_assert!(matches!(inst.tag, InstTag::AssignOrDecl));
-        let range = match inst.data {
-            InstData::Extra(rng) => rng,
-            _ => unreachable!("AssignOrDecl must carry InstData::Extra"),
-        };
-        let slice = &self.extra[range.as_range()];
-        AssignOrDeclView {
-            name: StringId::from_raw(slice[assign_or_decl_extra::NAME]),
-            value: InstRef::from_raw(slice[assign_or_decl_extra::VALUE]),
-        }
-    }
-
-    pub fn compound_assign_view(&self, r: InstRef) -> CompoundAssignView {
-        let inst = self.inst(r);
-        debug_assert!(matches!(inst.tag, InstTag::CompoundAssign));
-        let range = match inst.data {
-            InstData::Extra(rng) => rng,
-            _ => unreachable!("CompoundAssign must carry InstData::Extra"),
-        };
-        let slice = &self.extra[range.as_range()];
-        CompoundAssignView {
-            name: StringId::from_raw(slice[compound_assign_extra::NAME]),
-            op: CompoundOp::from_raw(slice[compound_assign_extra::OP]),
-            value: InstRef::from_raw(slice[compound_assign_extra::VALUE]),
-        }
-    }
-
-    pub fn field_assign_view(&self, r: InstRef) -> FieldAssignView {
-        let inst = self.inst(r);
-        debug_assert!(matches!(inst.tag, InstTag::FieldAssign));
-        let range = match inst.data {
-            InstData::Extra(rng) => rng,
-            _ => unreachable!("FieldAssign must carry InstData::Extra"),
-        };
-        let slice = &self.extra[range.as_range()];
-        FieldAssignView {
-            target: InstRef::from_raw(slice[field_assign_extra::TARGET]),
-            value: InstRef::from_raw(slice[field_assign_extra::VALUE]),
-        }
-    }
-
-    pub fn compound_field_assign_view(&self, r: InstRef) -> CompoundFieldAssignView {
-        let inst = self.inst(r);
-        debug_assert!(matches!(inst.tag, InstTag::CompoundFieldAssign));
-        let range = match inst.data {
-            InstData::Extra(rng) => rng,
-            _ => unreachable!("CompoundFieldAssign must carry InstData::Extra"),
-        };
-        let slice = &self.extra[range.as_range()];
-        CompoundFieldAssignView {
-            target: InstRef::from_raw(slice[compound_field_assign_extra::TARGET]),
-            op: CompoundOp::from_raw(slice[compound_field_assign_extra::OP]),
-            value: InstRef::from_raw(slice[compound_field_assign_extra::VALUE]),
-        }
-    }
-
-    pub fn while_loop_view(&self, r: InstRef) -> WhileLoopView {
-        let inst = self.inst(r);
-        debug_assert!(matches!(inst.tag, InstTag::WhileLoop));
-        let range = match inst.data {
-            InstData::Extra(rng) => rng,
-            _ => unreachable!("WhileLoop must carry InstData::Extra"),
-        };
-        let slice = &self.extra[range.as_range()];
-        let cond = InstRef::from_raw(slice[while_loop_extra::COND]);
-        let mut pos = while_loop_extra::BODY_COUNT;
-        let body = read_ref_list(slice, &mut pos);
-        WhileLoopView { cond, body }
-    }
-
-    pub fn for_range_view(&self, r: InstRef) -> ForRangeView {
-        let inst = self.inst(r);
-        debug_assert!(matches!(inst.tag, InstTag::ForRange));
-        let range = match inst.data {
-            InstData::Extra(rng) => rng,
-            _ => unreachable!("ForRange must carry InstData::Extra"),
-        };
-        let slice = &self.extra[range.as_range()];
-        let var_name = StringId::from_raw(slice[for_range_extra::VAR_NAME]);
-        let start = InstRef::from_raw(slice[for_range_extra::START]);
-        let end = InstRef::from_raw(slice[for_range_extra::END]);
-        let body_count = slice[for_range_extra::BODY_COUNT] as usize;
-        let body = slice[for_range_extra::BODY_START..for_range_extra::BODY_START + body_count]
-            .iter()
-            .copied()
-            .map(InstRef::from_raw)
-            .collect();
-        ForRangeView {
-            var_name,
-            start,
-            end,
-            body,
-        }
-    }
-
-    pub fn method_call_view(&self, r: InstRef) -> MethodCallView {
-        let inst = self.inst(r);
-        debug_assert!(matches!(inst.tag, InstTag::MethodCall));
-        let range = match inst.data {
-            InstData::Extra(rng) => rng,
-            _ => unreachable!("MethodCall must carry InstData::Extra"),
-        };
-        let slice = &self.extra[range.as_range()];
-        let receiver = InstRef::from_raw(slice[method_call_extra::RECEIVER]);
-        let name = StringId::from_raw(slice[method_call_extra::NAME]);
-        let argc = slice[method_call_extra::ARGC] as usize;
-        let args = slice[method_call_extra::ARGS..method_call_extra::ARGS + argc]
-            .iter()
-            .copied()
-            .map(InstRef::from_raw)
-            .collect();
-        MethodCallView {
-            receiver,
-            name,
-            args,
-        }
-    }
-
-    pub fn struct_lit_view(&self, r: InstRef) -> StructLitView {
-        let inst = self.inst(r);
-        debug_assert!(matches!(inst.tag, InstTag::StructLit));
-        let range = match inst.data {
-            InstData::Extra(rng) => rng,
-            _ => unreachable!("StructLit must carry InstData::Extra"),
-        };
-        let slice = &self.extra[range.as_range()];
-        let name = match slice[struct_lit_extra::NAME] {
-            struct_lit_extra::UIR_ANON_STRUCT_NAME => None,
-            raw => Some(StringId::from_raw(raw)),
-        };
-        let n = slice[struct_lit_extra::NFIELDS] as usize;
-        let mut fields = Vec::with_capacity(n);
-        for i in 0..n {
-            let base = struct_lit_extra::FIELDS + 2 * i;
-            fields.push((
-                StringId::from_raw(slice[base]),
-                InstRef::from_raw(slice[base + 1]),
-            ));
-        }
-        StructLitView { name, fields }
-    }
-
-    pub fn enum_lit_view(&self, r: InstRef) -> EnumLitView<'_> {
-        let inst = self.inst(r);
-        debug_assert!(matches!(inst.tag, InstTag::EnumLit));
-        let range = match inst.data {
-            InstData::Extra(rng) => rng,
-            _ => unreachable!("EnumLit must carry InstData::Extra"),
-        };
-        let slice = &self.extra[range.as_range()];
-        let ty = TypeId::from_raw(slice[enum_lit_extra::TY]);
-        let variant_index = slice[enum_lit_extra::VARIANT];
-        let positional = slice[enum_lit_extra::FLAGS] & enum_lit_extra::FLAG_POSITIONAL != 0;
-        let n = slice[enum_lit_extra::ARGC] as usize;
-        let args = &slice[enum_lit_extra::ARGS..enum_lit_extra::ARGS + 2 * n];
-        EnumLitView {
-            ty,
-            variant_index,
-            positional,
-            args,
-        }
-    }
-
-    pub fn if_stmt_view(&self, r: InstRef) -> IfStmtView {
-        let inst = self.inst(r);
-        debug_assert!(matches!(inst.tag, InstTag::IfStmt));
-        let range = match inst.data {
-            InstData::Extra(rng) => rng,
-            _ => unreachable!("IfStmt must carry InstData::Extra"),
-        };
-        let slice = &self.extra[range.as_range()];
-        let mut pos = 0;
-
-        let cond = InstRef::from_raw(slice[pos]);
-        pos += 1;
-
-        let then_stmts = read_ref_list(slice, &mut pos);
-
-        let elif_count = slice[pos] as usize;
-        pos += 1;
-        let mut elif_branches = Vec::with_capacity(elif_count);
-        for _ in 0..elif_count {
-            let elif_cond = InstRef::from_raw(slice[pos]);
-            pos += 1;
-            let body = read_ref_list(slice, &mut pos);
-            elif_branches.push(ElifView {
-                cond: elif_cond,
-                body,
-            });
-        }
-
-        let has_else = slice[pos] != 0;
-        pos += 1;
-        let else_stmts = if has_else {
-            Some(read_ref_list(slice, &mut pos))
-        } else {
-            None
-        };
-
-        IfStmtView {
-            cond,
-            then_stmts,
-            elif_branches,
-            else_stmts,
-        }
-    }
-}
-
-fn read_ref_list(slice: &[u32], pos: &mut usize) -> Vec<InstRef> {
-    let count = slice[*pos] as usize;
-    *pos += 1;
-    let refs = slice[*pos..*pos + count]
-        .iter()
-        .copied()
-        .map(InstRef::from_raw)
-        .collect();
-    *pos += count;
-    refs
-}
-
 mod dump;
 pub use dump::UirDump;
 mod destructure;
@@ -1536,6 +1010,18 @@ pub use match_::{
     UirAnonField, UirAnonFieldsView, UirArgTarget, UirArmBody, UirArmBodyView, UirFieldTarget,
     UirMatchArm, UirMatchArmView, UirMatchView, UirPattern, UirPatternView, UirVariantArgs,
     UirVariantArgsView, match_extra,
+};
+mod layout_docs;
+pub use layout_docs::{
+    assign_or_decl_extra, call_extra, compound_assign_extra, compound_field_assign_extra,
+    field_assign_extra, for_range_extra, method_call_extra, struct_lit_extra, var_decl_extra,
+    while_loop_extra,
+};
+mod views;
+pub use views::{
+    AssignOrDeclView, CallView, CompoundAssignView, CompoundFieldAssignView, ElifBranches,
+    ElifView, EnumLitView, FieldAssignView, ForRangeView, IfStmtView, MethodCallView,
+    StructLitView, VarDeclView, WhileLoopView,
 };
 
 #[cfg(test)]
@@ -1587,7 +1073,10 @@ mod tests {
         let uir = b.finish();
         assert_eq!(uir.func_bodies.len(), 1);
         let body = &uir.func_bodies[0];
-        assert_eq!(uir.body_stmts(body), vec![ret]);
+        assert_eq!(
+            uir.body_stmts(body).into_iter().collect::<Vec<_>>(),
+            vec![ret]
+        );
 
         // dump produces a deterministic listing.
         let out = format!("{}", uir.dump(&pool));
@@ -1612,7 +1101,25 @@ mod tests {
         let uir = b.finish();
         let view = uir.call_view(call);
         assert_eq!(view.name, foo);
-        assert_eq!(view.args, vec![a, bb, cc]);
+        assert_eq!(view.args.iter().collect::<Vec<_>>(), vec![a, bb, cc]);
+    }
+
+    #[test]
+    fn method_call_payload_round_trips_through_extra() {
+        let mut pool = InternPool::new();
+        let method = pool.intern_str("combine");
+
+        let mut b = UirBuilder::new();
+        let receiver = b.int_literal(1, sp());
+        let a = b.int_literal(2, sp());
+        let bb = b.int_literal(3, sp());
+        let call = b.method_call(receiver, method, &[a, bb], sp());
+
+        let uir = b.finish();
+        let view = uir.method_call_view(call);
+        assert_eq!(view.receiver, receiver);
+        assert_eq!(view.name, method);
+        assert_eq!(view.args.iter().collect::<Vec<_>>(), vec![a, bb]);
     }
 
     #[test]
@@ -1673,9 +1180,16 @@ mod tests {
         let uir = b.finish();
         let view = uir.if_stmt_view(if_ref);
         assert_eq!(view.cond, cond);
-        assert_eq!(view.then_stmts, vec![then_ret]);
-        assert!(view.elif_branches.is_empty());
-        assert_eq!(view.else_stmts, Some(vec![else_ret]));
+        assert_eq!(
+            view.then_stmts.into_iter().collect::<Vec<_>>(),
+            vec![then_ret]
+        );
+        assert_eq!(view.elif_branches.len(), 0);
+        assert_eq!(
+            view.else_stmts
+                .map(|stmts| stmts.into_iter().collect::<Vec<_>>()),
+            Some(vec![else_ret])
+        );
     }
 
     #[test]
@@ -1712,13 +1226,126 @@ mod tests {
         let uir = b.finish();
         let view = uir.if_stmt_view(if_ref);
         assert_eq!(view.cond, cond);
-        assert_eq!(view.then_stmts, vec![then_ret]);
-        assert_eq!(view.elif_branches.len(), 2);
-        assert_eq!(view.elif_branches[0].cond, elif_cond1);
-        assert_eq!(view.elif_branches[0].body, vec![elif1_ret]);
-        assert_eq!(view.elif_branches[1].cond, elif_cond2);
-        assert_eq!(view.elif_branches[1].body, vec![elif2_a, elif2_b]);
-        assert_eq!(view.else_stmts, Some(vec![else_ret]));
+        assert_eq!(
+            view.then_stmts.into_iter().collect::<Vec<_>>(),
+            vec![then_ret]
+        );
+        let elifs = view.elif_branches.collect::<Vec<_>>();
+        assert_eq!(elifs.len(), 2);
+        assert_eq!(elifs[0].cond, elif_cond1);
+        assert_eq!(
+            elifs[0].body.into_iter().collect::<Vec<_>>(),
+            vec![elif1_ret]
+        );
+        assert_eq!(elifs[1].cond, elif_cond2);
+        assert_eq!(
+            elifs[1].body.into_iter().collect::<Vec<_>>(),
+            vec![elif2_a, elif2_b]
+        );
+        assert_eq!(
+            view.else_stmts
+                .map(|stmts| stmts.into_iter().collect::<Vec<_>>()),
+            Some(vec![else_ret])
+        );
+    }
+
+    #[test]
+    fn borrowed_if_view_preserves_branch_order_and_empty_else() {
+        let mut b = UirBuilder::new();
+        let cond = b.bool_literal(true, sp());
+        let then_stmt = b.int_literal(1, sp());
+        let elif_cond1 = b.bool_literal(false, sp());
+        let elif_cond2 = b.bool_literal(true, sp());
+        let elif_stmt = b.int_literal(2, sp());
+        let with_empty_else = b.if_stmt(
+            cond,
+            &[then_stmt],
+            &[(elif_cond1, vec![]), (elif_cond2, vec![elif_stmt])],
+            Some(&[]),
+            sp(),
+        );
+        let without_else = b.if_stmt(cond, &[], &[], None, sp());
+        let uir = b.finish();
+
+        let view = uir.if_stmt_view(with_empty_else);
+        assert_eq!(view.cond, cond);
+        assert_eq!(
+            view.then_stmts.into_iter().collect::<Vec<_>>(),
+            vec![then_stmt]
+        );
+        let elifs = view.elif_branches.collect::<Vec<_>>();
+        assert_eq!(elifs.len(), 2);
+        assert_eq!(elifs[0].cond, elif_cond1);
+        assert!(elifs[0].body.is_empty());
+        assert_eq!(elifs[1].cond, elif_cond2);
+        assert_eq!(
+            elifs[1].body.into_iter().collect::<Vec<_>>(),
+            vec![elif_stmt]
+        );
+        assert!(view.else_stmts.is_some_and(|stmts| stmts.is_empty()));
+
+        let view = uir.if_stmt_view(without_else);
+        assert!(view.then_stmts.is_empty());
+        assert_eq!(view.elif_branches.len(), 0);
+        assert!(view.else_stmts.is_none());
+    }
+
+    #[test]
+    fn borrowed_loop_views_preserve_headers_and_bodies() {
+        let mut pool = InternPool::new();
+        let name = pool.intern_str("i");
+        let mut b = UirBuilder::new();
+        let cond = b.bool_literal(true, sp());
+        let while_loop = b.while_loop(cond, &[], sp());
+        let while_body = b.int_literal(3, sp());
+        let while_loop_with_body = b.while_loop(cond, &[while_body], sp());
+        let start = b.int_literal(0, sp());
+        let end = b.int_literal(4, sp());
+        let first = b.int_literal(1, sp());
+        let second = b.int_literal(2, sp());
+        let for_loop = b.for_range(name, start, end, &[first, second], sp());
+        let for_loop_without_body = b.for_range(name, start, end, &[], sp());
+        let uir = b.finish();
+
+        let view = uir.while_loop_view(while_loop);
+        assert_eq!(view.cond, cond);
+        assert!(view.body.is_empty());
+
+        let view = uir.while_loop_view(while_loop_with_body);
+        assert_eq!(view.cond, cond);
+        assert_eq!(view.body.into_iter().collect::<Vec<_>>(), vec![while_body]);
+
+        let view = uir.for_range_view(for_loop);
+        assert_eq!(view.var_name, name);
+        assert_eq!(view.start, start);
+        assert_eq!(view.end, end);
+        assert_eq!(
+            view.body.into_iter().collect::<Vec<_>>(),
+            vec![first, second]
+        );
+
+        let view = uir.for_range_view(for_loop_without_body);
+        assert_eq!(view.var_name, name);
+        assert_eq!(view.start, start);
+        assert_eq!(view.end, end);
+        assert!(view.body.is_empty());
+
+        assert!(uir.while_loop_view(while_loop).body.is_empty());
+        assert_eq!(
+            uir.while_loop_view(while_loop_with_body)
+                .body
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![while_body]
+        );
+        assert_eq!(
+            uir.for_range_view(for_loop)
+                .body
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![first, second]
+        );
+        assert!(uir.for_range_view(for_loop_without_body).body.is_empty());
     }
 
     #[test]
@@ -1735,7 +1362,12 @@ mod tests {
         let r = b.unary(InstTag::Return, s3, sp());
         b.add_function(main, vec![], pool.int(), &[e1, e2, r], sp());
         let uir = b.finish();
-        assert_eq!(uir.body_stmts(&uir.func_bodies[0]), vec![e1, e2, r]);
+        assert_eq!(
+            uir.body_stmts(&uir.func_bodies[0])
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![e1, e2, r]
+        );
     }
 
     #[test]
@@ -1768,7 +1400,7 @@ mod tests {
         let uir = b.finish();
         let view = uir.struct_lit_view(lit);
         assert_eq!(view.name, Some(point));
-        assert_eq!(view.fields, vec![(x, one), (y, two)]);
+        assert_eq!(view.fields().collect::<Vec<_>>(), vec![(x, one), (y, two)]);
     }
 
     #[test]
@@ -1783,7 +1415,7 @@ mod tests {
         let uir = b.finish();
         let view = uir.struct_lit_view(lit);
         assert_eq!(view.name, None);
-        assert_eq!(view.fields, vec![(x, one)]);
+        assert_eq!(view.fields().collect::<Vec<_>>(), vec![(x, one)]);
     }
 
     #[test]

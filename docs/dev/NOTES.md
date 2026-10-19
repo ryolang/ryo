@@ -1,5 +1,6 @@
 # TODO
 
+- FFI: https://verdagon.dev/blog/fearless-ffi
 - add support for https://build-server-protocol.github.io/
 - https://1brc.dev/ as exercise for the language
 - compare ryo with bend https://github.com/bendlang/bend/blob/main/guide/GUIDE.md

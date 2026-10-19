@@ -44,7 +44,7 @@ pub(crate) fn is_materialize_call(
     let view = tir.call_view(r);
     (ids.str_from_view == Some(view.name) || ids.bytes_from_view == Some(view.name))
         && view.args.len() == 1
-        && pool.is_view(tir.inst(view.args[0]).ty)
+        && pool.is_view(tir.inst(view.args.at(0)).ty)
 }
 
 /// True when `r` is a call to the `__ryo_str_to_bytes` bridge callee
@@ -65,13 +65,13 @@ pub(crate) fn is_to_bytes_call(tir: &Tir, ids: &SynthCalleeIds, r: TirRef) -> bo
 /// nested control flow like [`collect_named_inits`]. Unbound results
 /// (call arguments, return operands) are never collected: argument
 /// positions are the sema-side warning shapes' jurisdiction.
-pub(crate) fn collect_bound_call_sites(
+fn collect_bound_call_sites_iter(
     tir: &Tir,
-    stmts: &[TirRef],
+    stmts: impl IntoIterator<Item = TirRef>,
     pred: &dyn Fn(&Tir, TirRef) -> bool,
     out: &mut Vec<(TirRef, TirRef)>,
 ) {
-    for &r in stmts {
+    for r in stmts {
         match tir.inst(r).tag {
             TirTag::VarDecl => {
                 let init = tir.var_decl_view(r).initializer;
@@ -87,19 +87,19 @@ pub(crate) fn collect_bound_call_sites(
             }
             TirTag::IfStmt => {
                 let v = tir.if_stmt_view(r);
-                collect_bound_call_sites(tir, &v.then_stmts, pred, out);
+                collect_bound_call_sites_iter(tir, v.then_stmts, pred, out);
                 for arm in &v.elif_branches {
-                    collect_bound_call_sites(tir, &arm.body, pred, out);
+                    collect_bound_call_sites_iter(tir, arm.body, pred, out);
                 }
-                if let Some(else_stmts) = v.else_stmts.as_deref() {
-                    collect_bound_call_sites(tir, else_stmts, pred, out);
+                if let Some(else_stmts) = v.else_stmts {
+                    collect_bound_call_sites_iter(tir, else_stmts, pred, out);
                 }
             }
             TirTag::WhileLoop => {
-                collect_bound_call_sites(tir, &tir.while_loop_view(r).body, pred, out);
+                collect_bound_call_sites_iter(tir, tir.while_loop_body_view(r), pred, out);
             }
             TirTag::ForRange => {
-                collect_bound_call_sites(tir, &tir.for_range_view(r).body, pred, out);
+                collect_bound_call_sites_iter(tir, tir.for_range_body_view(r), pred, out);
             }
             _ => {}
         }
@@ -112,12 +112,12 @@ pub(crate) fn collect_bound_call_sites(
 /// jurisdiction, not case B's.
 pub(crate) fn collect_materialize_sites(
     tir: &Tir,
-    stmts: &[TirRef],
+    stmts: impl IntoIterator<Item = TirRef>,
     pool: &InternPool,
     ids: &SynthCalleeIds,
     out: &mut Vec<(TirRef, TirRef)>,
 ) {
-    collect_bound_call_sites(
+    collect_bound_call_sites_iter(
         tir,
         stmts,
         &|t, r| is_materialize_call(t, pool, ids, r),
@@ -159,7 +159,7 @@ pub(crate) fn warn_redundant_materialize(
     sink: &mut DiagSink,
 ) {
     let mut sites: Vec<(TirRef, TirRef)> = Vec::new();
-    collect_materialize_sites(tir, &tir.body_stmts(), pool, ids, &mut sites);
+    collect_materialize_sites(tir, tir.body_stmts(), pool, ids, &mut sites);
     if sites.is_empty() {
         return;
     }
@@ -188,7 +188,7 @@ pub(crate) fn warn_redundant_materialize(
         // The view's root must be local and resolvable; a `strview`
         // parameter's buffer belongs to the caller, and the pass
         // cannot judge mutations it cannot see — no warning.
-        let view_arg = tir.call_view(call).args[0];
+        let view_arg = tir.call_view(call).args.at(0);
         let Some(root) = projection_root(own, tir, flow, pool, view_arg) else {
             continue;
         };
@@ -260,9 +260,9 @@ pub(crate) fn warn_redundant_to_bytes(
 ) {
     let _ = (pool,);
     let mut sites: Vec<(TirRef, TirRef)> = Vec::new();
-    collect_bound_call_sites(
+    collect_bound_call_sites_iter(
         tir,
-        &tir.body_stmts(),
+        tir.body_stmts(),
         &|t, r| is_to_bytes_call(t, ids, r),
         &mut sites,
     );
@@ -295,7 +295,7 @@ pub(crate) fn warn_redundant_to_bytes(
         // lexical order against the last read. A receiver with no
         // local root (a view of caller storage) cannot be hazarded by
         // anything this function does.
-        let receiver = tir.call_view(call).args[0];
+        let receiver = tir.call_view(call).args.at(0);
         if let Some(root) = projection_root(own, tir, flow, pool, receiver) {
             let copy_rank = rank(call);
             // Latest read of any chain link: the point where the

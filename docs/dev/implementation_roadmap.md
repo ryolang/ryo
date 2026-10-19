@@ -1459,7 +1459,7 @@ fn main():
 - `process_exit(code: int) -> never`
   - `ryo-frontend/src/builtins.rs`: `BUILTINS` entry with `BuiltinReturn::Never` (same mold as `panic`)
   - `ryo-frontend/src/sema/builtins.rs`: arm in `emit_builtin_call` — arity 1, argument must be `int`
-  - `ryo-backend/src/codegen/expr.rs`: arm in `emit_call_slot` mirroring the `__ryo_panic` arm: declare `ryo_exit(int_type)`, call, then emit trap (unreachable)
+  - `ryo-backend/src/codegen/expr/mod.rs`: arm in `emit_call_slot` mirroring the `__ryo_panic` arm: declare `ryo_exit(int_type)`, call, then emit trap (unreachable)
   - `runtime/src/lib.rs`: `ryo_exit(code)` wrapping the libc `exit` extern already declared there
   - `ryo-backend/src/codegen/jit.rs` (moved from `codegen/mod.rs` during implementation): add row to `runtime_symbols()` (full export set under Design decisions above)
 - `io_eprint(s) -> void` — **decided 2026-10-01: full type parity with `print`** via the shared `check_print_args` (the earlier `str | bytes | strview | bytesview` listing was the string-family subset): accepts `str`, `bytes`, views, `int`, `float`, `bool`, and structs via `DebugRepr`. No auto-newline — output is explicit, like `write()`
@@ -4059,5 +4059,5 @@ This roadmap represents an **honest, achievable plan** for building Ryo v0.1.0 o
 ## References
 
 - Spec: [specification.md](../specification.md) — canonical language specification; this roadmap schedules its delivery
-- Dev: [alpha_scope.md](alpha_scope.md), [pipeline_alignment.md](pipeline_alignment.md), [architecture_analysis.md](architecture_analysis.md), [cranelift_lessons.md](cranelift_lessons.md) — implementation plans linked from milestones; architecture_analysis.md holds the latest verified codebase snapshot + improvement roadmap (2026-08-24; older snapshots live in git history); cranelift_lessons.md records the 2026-08 Cranelift/codegen findings (ABI limits, packed-`u128` runtime ABI, guard flag-fusion, measurement lessons) — read before optimization work in `ryo-backend`
+- Dev: [alpha_scope.md](alpha_scope.md), [pipeline_alignment.md](pipeline_alignment.md), [cranelift_lessons.md](cranelift_lessons.md) — implementation plans linked from milestones; cranelift_lessons.md records the 2026-08 Cranelift/codegen findings (ABI limits, packed-`u128` runtime ABI, guard flag-fusion, measurement lessons) — read before optimization work in `ryo-backend`
 - Milestone: alpha milestones tagged `[alpha]` inline; see [alpha_scope.md](alpha_scope.md) for the alpha delivery slice

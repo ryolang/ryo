@@ -33,6 +33,19 @@ fn validator_accepts_straight_line_last_use() {
     cv::validate_no_duplicate_destruction(&places, &flow, &sc);
 }
 
+#[test]
+fn validator_accepts_static_string_comparison_before_loop_break() {
+    let src = "fn main():\n\twhile true:\n\t\tif \"x\" == \"\":\n\t\t\tbreak\n";
+    let (diags, _, _, _) = check_src_full(src);
+    assert!(diags.is_empty(), "clean program; got {diags:?}");
+}
+
+#[test]
+fn validator_accepts_echo_example() {
+    let (diags, _, _, _) = check_src_full(include_str!("../../../../examples/echo.ryo"));
+    assert!(diags.is_empty(), "clean example; got {diags:?}");
+}
+
 /// Positive pin: if/else with borrows in both arms.
 #[test]
 fn validator_accepts_if_else_borrows() {
@@ -310,8 +323,7 @@ fn path_check_harness(
     let flow = build_flow(&tirs[idx], &pool);
     let main_ref = tirs[idx]
         .body_stmts()
-        .first()
-        .copied()
+        .get(0)
         .unwrap_or(ryo_core::tir::TirRef::from_raw(1));
     (tirs, pool, main_ref, flow, own, sc)
 }
@@ -433,6 +445,149 @@ fn path_double_destruction_flags_before_branch_and_at_join() {
     assert!(
         r.is_err(),
         "destruction before a branch and again at its reachable join must flag"
+    );
+}
+
+/// Negative pin: a release at the same point as a return transfer is
+/// still invalid. A transfer-out does not mark the target as freed, so
+/// codegen's same-block release dedup cannot make this pair safe.
+#[test]
+fn path_double_destruction_flags_release_and_return_transfer() {
+    let src = "fn identity(move s: str) -> str:\n\tprint(\"before\")\n\treturn s\n";
+    let (tirs, pool, _main, flow, own, sc) = path_check_harness(src, "identity");
+    let tir = tirs
+        .iter()
+        .find(|t| pool.str(t.name) == "identity")
+        .expect("the fixture's body");
+    let places = cv::TargetPlaces::build(tir, &flow, &pool);
+    let index = cv::StepIndex::build(&flow);
+    let fire_points = ryo_core::flow::fire_points::FirePoints::new(&flow);
+    let mut events = cv::collect_events(tir, &places, &flow, &fire_points, &sc, &own, &pool);
+    let transfer = events
+        .iter()
+        .flat_map(|(&place, events)| events.iter().map(move |event| (place, event)))
+        .find(|(_, event)| event.kind == cv::EventKind::TransferReturn)
+        .map(|(place, event)| (place, *event))
+        .expect("returning s creates a return-transfer event");
+    let (place, mut release) = transfer;
+    release.kind = cv::EventKind::Destroy;
+    release.point.ordinal = release
+        .point
+        .ordinal
+        .checked_sub(1)
+        .expect("the print step precedes the return transfer");
+    events
+        .get_mut(&place)
+        .expect("transfer place exists")
+        .push(release);
+    let table = cv::generation_table(tir, &flow, &pool, &index, &sc);
+    let mut summary = cv::ValidationSummary::default();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cv::validate_no_path_double_destruction(
+            tir,
+            &flow,
+            &own,
+            &sc,
+            &events,
+            &table,
+            &mut summary,
+        );
+    }));
+    assert!(
+        result.is_err(),
+        "a release at a return transfer point must flag"
+    );
+}
+
+/// Negative pin: codegen clears its same-target free dedup on loop
+/// re-entry, so distinct releases in one cyclic block must remain a
+/// double-destruction candidate.
+#[test]
+fn path_double_destruction_checks_same_block_reentry() {
+    let src = "fn main():\n\tmut i = 0\n\ts = \"a\" + \"b\"\n\twhile i < 2:\n\t\tprint(s)\n\t\ti = i + 1\n\tprint(s)\n";
+    let (tirs, pool, _main, flow, own, sc) = path_check_harness(src, "main");
+    let tir = tirs
+        .iter()
+        .find(|t| pool.str(t.name) == "main")
+        .expect("the fixture's body");
+    let places = cv::TargetPlaces::build(tir, &flow, &pool);
+    let index = cv::StepIndex::build(&flow);
+    let fire_points = ryo_core::flow::fire_points::FirePoints::new(&flow);
+    let mut events = cv::collect_events(tir, &places, &flow, &fire_points, &sc, &own, &pool);
+    let template = events
+        .iter()
+        .flat_map(|(&place, events)| events.iter().map(move |event| (place, event)))
+        .find(|(_, event)| event.kind == cv::EventKind::Destroy)
+        .map(|(place, event)| (place, *event))
+        .expect("the allocated string has a scheduled release");
+    let table = cv::generation_table(tir, &flow, &pool, &index, &sc);
+    let roots = cv::place_roots(tir, &flow, &own, &sc);
+    let reachable = cv::reachable_blocks(&flow);
+    let (place, template) = template;
+    let root = roots[place.0 as usize];
+
+    // Pick a cyclic block with two reachable ordinals and no generation
+    // cut for this storage at the first ordinal.
+    let block = (0..flow.blocks.len())
+        .map(|raw| ryo_core::flow::BlockId(raw as u32))
+        .find(|&candidate| {
+            if !reachable.contains(&candidate) {
+                return false;
+            }
+            let steps = flow.block_steps(candidate).len();
+            if steps < 2 {
+                return false;
+            }
+            let mut seen = std::collections::HashSet::new();
+            let mut stack = flow.successors(candidate).to_vec();
+            let cyclic = stack.contains(&candidate);
+            let mut reaches_self = cyclic;
+            while !stack.is_empty() && !reaches_self {
+                let next = stack.pop().expect("stack is not empty");
+                if next == candidate {
+                    reaches_self = true;
+                } else if seen.insert(next) {
+                    stack.extend_from_slice(flow.successors(next));
+                }
+            }
+            let cut_at_first = events.keys().any(|member| {
+                roots[member.0 as usize] == root
+                    && table
+                        .cut
+                        .get(member)
+                        .and_then(|by_block| by_block.get(&candidate))
+                        .is_some_and(|ordinals| ordinals.contains(&0))
+            });
+            reaches_self && !cut_at_first
+        })
+        .expect("the loop body has a cyclic block with two uncut ordinals");
+
+    let mut first = template;
+    first.point = cv::Point { block, ordinal: 0 };
+    first.pos = DropPosition::BlockStart { block };
+    let mut second = template;
+    second.point = cv::Point { block, ordinal: 1 };
+    second.pos = DropPosition::PreTerminator { block };
+    events
+        .get_mut(&place)
+        .expect("the release place exists")
+        .extend([first, second]);
+
+    let mut summary = cv::ValidationSummary::default();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cv::validate_no_path_double_destruction(
+            tir,
+            &flow,
+            &own,
+            &sc,
+            &events,
+            &table,
+            &mut summary,
+        );
+    }));
+    assert!(
+        result.is_err(),
+        "distinct same-target releases inside a cyclic block must flag"
     );
 }
 

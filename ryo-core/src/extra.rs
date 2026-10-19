@@ -5,6 +5,106 @@
 //! payload as a `(offset, len)` pair. Both IRs use the identical encoding, so
 //! the type lives here once rather than being byte-duplicated per module.
 
+use std::marker::PhantomData;
+
+/// Decode one word from a typed view over the `extra` arena.
+pub trait ExtraValue: Copy {
+    /// Convert one arena word to its typed value.
+    fn from_extra(raw: u32) -> Self;
+}
+
+/// A borrowed, lazily decoded list in the `extra` arena.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtraList<'a, T> {
+    words: &'a [u32],
+    marker: PhantomData<T>,
+}
+
+impl<'a, T: ExtraValue> ExtraList<'a, T> {
+    /// Create a borrowed view over arena words.
+    pub fn new(words: &'a [u32]) -> Self {
+        Self {
+            words,
+            marker: PhantomData,
+        }
+    }
+
+    /// Return the number of words in the list.
+    pub fn len(&self) -> usize {
+        self.words.len()
+    }
+
+    /// Return `true` when the list has no words.
+    pub fn is_empty(&self) -> bool {
+        self.words.is_empty()
+    }
+
+    /// Decode the item at `index`, if it exists.
+    pub fn get(&self, index: usize) -> Option<T> {
+        self.words.get(index).copied().map(T::from_extra)
+    }
+
+    /// Decode the item at `index`. Panic if the index is out of bounds.
+    pub fn at(&self, index: usize) -> T {
+        self.get(index).expect("extra list index out of bounds")
+    }
+
+    /// Return an iterator that decodes each word as it reads it.
+    pub fn iter(&self) -> ExtraListIter<'_, T> {
+        ExtraListIter {
+            words: self.words.iter().copied(),
+            marker: PhantomData,
+        }
+    }
+}
+
+/// An iterator that decodes words from an [`ExtraList`].
+pub struct ExtraListIter<'a, T> {
+    words: std::iter::Copied<std::slice::Iter<'a, u32>>,
+    marker: PhantomData<T>,
+}
+
+impl<T: ExtraValue> Iterator for ExtraListIter<'_, T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.words.next().map(T::from_extra)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.words.size_hint()
+    }
+}
+
+impl<T: ExtraValue> ExactSizeIterator for ExtraListIter<'_, T> {}
+
+impl<T: ExtraValue> DoubleEndedIterator for ExtraListIter<'_, T> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.words.next_back().map(T::from_extra)
+    }
+}
+
+impl<'list, T: ExtraValue> IntoIterator for &'list ExtraList<'_, T> {
+    type Item = T;
+    type IntoIter = ExtraListIter<'list, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, T: ExtraValue> IntoIterator for ExtraList<'a, T> {
+    type Item = T;
+    type IntoIter = ExtraListIter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        ExtraListIter {
+            words: self.words.iter().copied(),
+            marker: PhantomData,
+        }
+    }
+}
+
 /// A `[offset, offset+len)` slice of an `extra: Vec<u32>` arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExtraRange {

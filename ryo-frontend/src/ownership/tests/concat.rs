@@ -5,8 +5,7 @@ use super::common::*;
 fn single_assign(tir: &ryo_core::tir::Tir) -> TirRef {
     tir.body_stmts()
         .iter()
-        .find(|&&s| tir.inst(s).tag == TirTag::Assign)
-        .copied()
+        .find(|&s| tir.inst(s).tag == TirTag::Assign)
         .expect("assign stmt")
 }
 

@@ -23,6 +23,25 @@ fn param_ref_predicates() {
 }
 
 #[test]
+fn borrowed_struct_lit_view_iterates_canonical_fields() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    let first = b.int_const(1, int_ty, sp());
+    let second = b.int_const(2, int_ty, sp());
+    let lit = b.struct_lit(int_ty, &[(0, first), (1, second)], sp());
+    let tir = b.finish(&[lit]);
+
+    let view = tir.struct_lit_view(lit);
+    assert_eq!(view.ty, int_ty);
+    assert_eq!(
+        view.fields().collect::<Vec<_>>(),
+        vec![(0, first), (1, second)]
+    );
+}
+
+#[test]
 #[should_panic(expected = "Tir::inst called with a param sentinel ref")]
 fn inst_rejects_param_sentinel_with_clear_message() {
     let mut pool = InternPool::new();
@@ -68,7 +87,7 @@ fn build_simple_function_and_dump() {
     let ret = b.unary(TirTag::Return, pool.void(), add, sp());
     let tir = b.finish(&[ret]);
 
-    assert_eq!(tir.body_stmts(), vec![ret]);
+    assert_eq!(tir.body_stmts().into_iter().collect::<Vec<_>>(), vec![ret]);
     let out = format!("{}", dump(std::slice::from_ref(&tir), &pool));
     assert!(out.contains("fn main() -> int"));
     assert!(out.contains("= iconst 1"));
@@ -95,8 +114,11 @@ fn call_payload_round_trips() {
 
     let view = tir.call_view(call);
     assert_eq!(view.name, foo);
-    assert_eq!(view.args, vec![a, bb]);
-    assert_eq!(view.modes, vec![ParamMode::Borrow, ParamMode::Move]);
+    assert_eq!(view.args.iter().collect::<Vec<_>>(), vec![a, bb]);
+    assert_eq!(
+        view.modes.iter().collect::<Vec<_>>(),
+        vec![ParamMode::Borrow, ParamMode::Move]
+    );
 }
 
 #[test]
@@ -135,7 +157,7 @@ fn call_view_panics_on_corrupt_mode_word() {
     let mode_idx = rng.as_range().start + call_extra::ARGS + 1;
     tir.extra[mode_idx] = 99;
 
-    tir.call_view(call);
+    let _ = tir.call_view(call).modes.iter().next();
 }
 
 #[test]
@@ -204,9 +226,91 @@ fn if_stmt_round_trips_through_extra() {
     let tir = b.finish(&[if_ref]);
     let view = tir.if_stmt_view(if_ref);
     assert_eq!(view.cond, cond);
-    assert_eq!(view.then_stmts, vec![then_ret]);
+    assert_eq!(
+        view.then_stmts.into_iter().collect::<Vec<_>>(),
+        vec![then_ret]
+    );
     assert!(view.elif_branches.is_empty());
-    assert_eq!(view.else_stmts, Some(vec![else_ret]));
+    assert_eq!(
+        view.else_stmts
+            .map(|stmts| stmts.into_iter().collect::<Vec<_>>()),
+        Some(vec![else_ret])
+    );
+}
+
+#[test]
+fn borrowed_if_view_iterates_all_branches_without_losing_empty_else() {
+    let mut pool = InternPool::new();
+    let bool_ty = pool.bool_();
+    let int_ty = pool.int();
+    let void_ty = pool.void();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], void_ty, sp());
+    let cond = b.bool_const(true, bool_ty, sp());
+    let then_stmt = b.int_const(1, int_ty, sp());
+    let elif_cond_a = b.bool_const(false, bool_ty, sp());
+    let elif_stmt = b.int_const(2, int_ty, sp());
+    let elif_cond_b = b.bool_const(true, bool_ty, sp());
+    let empty_else_cond = b.bool_const(false, bool_ty, sp());
+    let with_empty_else = b.if_stmt(
+        cond,
+        &[then_stmt],
+        &[(elif_cond_a, vec![elif_stmt]), (elif_cond_b, vec![])],
+        Some(&[]),
+        void_ty,
+        sp(),
+    );
+    let without_else = b.if_stmt(empty_else_cond, &[], &[], None, void_ty, sp());
+    let tir = b.finish(&[with_empty_else, without_else]);
+
+    let view = tir.if_stmt_view(with_empty_else);
+    assert_eq!(view.cond, cond);
+    assert_eq!(
+        view.then_stmts.into_iter().collect::<Vec<_>>(),
+        vec![then_stmt]
+    );
+    let elifs: Vec<_> = view
+        .elif_branches
+        .iter()
+        .map(|arm| (arm.cond, arm.body.into_iter().collect::<Vec<_>>()))
+        .collect();
+    assert_eq!(
+        elifs,
+        vec![(elif_cond_a, vec![elif_stmt]), (elif_cond_b, vec![])]
+    );
+    assert_eq!(view.else_stmts.unwrap().len(), 0);
+
+    let view = tir.if_stmt_view(without_else);
+    assert!(view.elif_branches.is_empty());
+    assert!(view.else_stmts.is_none());
+}
+
+#[test]
+fn borrowed_loop_views_preserve_headers_and_bodies() {
+    let mut pool = InternPool::new();
+    let bool_ty = pool.bool_();
+    let int_ty = pool.int();
+    let void_ty = pool.void();
+    let main = pool.intern_str("main");
+    let name = pool.intern_str("i");
+    let mut b = TirBuilder::new(main, vec![], void_ty, sp());
+    let cond = b.bool_const(true, bool_ty, sp());
+    let while_stmt = b.int_const(1, int_ty, sp());
+    let start = b.int_const(0, int_ty, sp());
+    let end = b.int_const(4, int_ty, sp());
+    let for_stmt = b.int_const(2, int_ty, sp());
+    let while_loop = b.while_loop(cond, &[while_stmt], void_ty, sp());
+    let for_loop = b.for_range(name, start, end, &[for_stmt], void_ty, sp());
+    let tir = b.finish(&[while_loop, for_loop]);
+
+    let view = tir.while_loop_view(while_loop);
+    assert_eq!(view.cond, cond);
+    assert_eq!(view.body.into_iter().collect::<Vec<_>>(), vec![while_stmt]);
+    let view = tir.for_range_view(for_loop);
+    assert_eq!(view.var_name, name);
+    assert_eq!(view.start, start);
+    assert_eq!(view.end, end);
+    assert_eq!(view.body.into_iter().collect::<Vec<_>>(), vec![for_stmt]);
 }
 
 #[test]
@@ -474,6 +578,174 @@ fn walk_operands_visits_enum_lit_fields_and_enum_eq_ne_operands() {
         operands.push(child);
     });
     assert_eq!(operands, vec![d, e]);
+}
+
+#[test]
+fn walk_operands_visits_if_and_loop_payloads_in_order() {
+    let mut pool = InternPool::new();
+    let name = pool.intern_str("main");
+    let int_ty = pool.int();
+    let void_ty = pool.void();
+    let mut b = TirBuilder::new(name, vec![], void_ty, sp());
+    let refs: Vec<_> = (0..12)
+        .map(|value| b.int_const(value, int_ty, sp()))
+        .collect();
+    let [
+        cond,
+        then_a,
+        then_b,
+        elif_cond,
+        elif_stmt,
+        else_stmt,
+        while_cond,
+        while_a,
+        while_b,
+        start,
+        end,
+        for_stmt,
+    ] = refs[..]
+    else {
+        unreachable!()
+    };
+
+    let if_stmt = b.if_stmt(
+        cond,
+        &[then_a, then_b],
+        &[(elif_cond, vec![elif_stmt])],
+        Some(&[else_stmt]),
+        void_ty,
+        sp(),
+    );
+    let while_loop = b.while_loop(while_cond, &[while_a, while_b], void_ty, sp());
+    let for_loop = b.for_range(name, start, end, &[for_stmt], void_ty, sp());
+    let tir = b.finish(&[if_stmt, while_loop, for_loop]);
+
+    assert_eq!(
+        tir.loop_body_view(while_loop)
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        vec![while_a, while_b]
+    );
+    assert_eq!(
+        tir.loop_body_view(for_loop)
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        vec![for_stmt]
+    );
+
+    let mut edges = Vec::new();
+    tir.walk_operands(if_stmt, &mut |_parent, child, kind| {
+        edges.push((child, kind))
+    });
+    assert_eq!(
+        edges,
+        vec![
+            (cond, ChildKind::Operand),
+            (then_a, ChildKind::BodyStmt),
+            (then_b, ChildKind::BodyStmt),
+            (elif_cond, ChildKind::Operand),
+            (elif_stmt, ChildKind::BodyStmt),
+            (else_stmt, ChildKind::BodyStmt),
+        ]
+    );
+
+    edges.clear();
+    tir.walk_operands(while_loop, &mut |_parent, child, kind| {
+        edges.push((child, kind))
+    });
+    assert_eq!(
+        edges,
+        vec![
+            (while_cond, ChildKind::Operand),
+            (while_a, ChildKind::BodyStmt),
+            (while_b, ChildKind::BodyStmt),
+        ]
+    );
+
+    edges.clear();
+    tir.walk_operands(for_loop, &mut |_parent, child, kind| {
+        edges.push((child, kind))
+    });
+    assert_eq!(
+        edges,
+        vec![
+            (start, ChildKind::Operand),
+            (end, ChildKind::Operand),
+            (for_stmt, ChildKind::BodyStmt),
+        ]
+    );
+}
+
+#[test]
+fn collect_jump_path_iter_stops_after_the_target() {
+    let mut pool = InternPool::new();
+    let name = pool.intern_str("main");
+    let int_ty = pool.int();
+    let void_ty = pool.void();
+    let mut b = TirBuilder::new(name, vec![], void_ty, sp());
+    let before = b.int_const(1, int_ty, sp());
+    let target = b.int_const(2, int_ty, sp());
+    let after = b.int_const(3, int_ty, sp());
+    let tir = b.finish(&[before, target, after]);
+
+    let mut path = std::collections::HashSet::new();
+    assert!(tir.collect_jump_path_iter([before, target, after], target, &mut path));
+    assert!(path.contains(&before));
+    assert!(path.contains(&target));
+    assert!(!path.contains(&after));
+}
+
+#[test]
+fn collect_jump_path_iter_borrows_nested_loop_bodies() {
+    let mut pool = InternPool::new();
+    let name = pool.intern_str("main");
+    let loop_var = pool.intern_str("i");
+    let int_ty = pool.int();
+    let bool_ty = pool.bool_();
+    let void_ty = pool.void();
+    let mut b = TirBuilder::new(name, vec![], void_ty, sp());
+
+    let cond = b.bool_const(true, bool_ty, sp());
+    let while_before = b.int_const(1, int_ty, sp());
+    let while_target = b.int_const(2, int_ty, sp());
+    let while_after = b.int_const(3, int_ty, sp());
+    let while_loop = b.while_loop(
+        cond,
+        &[while_before, while_target, while_after],
+        void_ty,
+        sp(),
+    );
+
+    let start = b.int_const(0, int_ty, sp());
+    let end = b.int_const(4, int_ty, sp());
+    let for_before = b.int_const(5, int_ty, sp());
+    let for_target = b.int_const(6, int_ty, sp());
+    let for_after = b.int_const(7, int_ty, sp());
+    let for_loop = b.for_range(
+        loop_var,
+        start,
+        end,
+        &[for_before, for_target, for_after],
+        void_ty,
+        sp(),
+    );
+    let tir = b.finish(&[while_loop, for_loop]);
+
+    let mut path = std::collections::HashSet::new();
+    assert!(tir.collect_jump_path_iter([while_loop], while_target, &mut path));
+    for reachable in [while_loop, cond, while_before, while_target] {
+        assert!(path.contains(&reachable));
+    }
+    assert!(!path.contains(&while_after));
+
+    path.clear();
+    assert!(tir.collect_jump_path_iter([for_loop], for_target, &mut path));
+    for reachable in [for_loop, start, end, for_before, for_target] {
+        assert!(path.contains(&reachable));
+    }
+    assert!(!path.contains(&for_after));
 }
 
 #[test]

@@ -6,6 +6,7 @@
 use super::{Codegen, FunctionContext};
 use cranelift::prelude::*;
 use cranelift_module::Module;
+use ryo_core::extra::ExtraList;
 use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, TypeKind};
 use std::collections::HashSet;
@@ -32,8 +33,8 @@ pub(crate) fn scan_tail_call_candidates(tirs: &[Tir], main: Option<StringId>) ->
     // bodies are scanned for Return shapes only: a trailing ExprStmt
     // there is not in tail position (the loop may iterate again), and
     // over-marking a qualifying Return shape is harmless.
-    fn list_qualifies(tir: &Tir, stmts: &[TirRef], name: StringId) -> bool {
-        if let Some(&last) = stmts.last()
+    fn list_qualifies(tir: &Tir, stmts: ExtraList<'_, TirRef>, name: StringId) -> bool {
+        if let Some(last) = stmts.iter().next_back()
             && tir.inst(last).tag == TirTag::ExprStmt
         {
             let operand = match tir.inst(last).data {
@@ -44,7 +45,7 @@ pub(crate) fn scan_tail_call_candidates(tirs: &[Tir], main: Option<StringId>) ->
                 return true;
             }
         }
-        stmts.iter().any(|&r| match tir.inst(r).tag {
+        stmts.iter().any(|r| match tir.inst(r).tag {
             TirTag::Return => {
                 let operand = match tir.inst(r).data {
                     TirData::UnOp(o) => o,
@@ -54,23 +55,23 @@ pub(crate) fn scan_tail_call_candidates(tirs: &[Tir], main: Option<StringId>) ->
             }
             TirTag::IfStmt => {
                 let view = tir.if_stmt_view(r);
-                if list_qualifies(tir, &view.then_stmts, name) {
+                if list_qualifies(tir, view.then_stmts, name) {
                     return true;
                 }
                 if view
                     .elif_branches
                     .iter()
-                    .any(|elif| list_qualifies(tir, &elif.body, name))
+                    .any(|elif| list_qualifies(tir, elif.body, name))
                 {
                     return true;
                 }
-                match &view.else_stmts {
+                match view.else_stmts {
                     Some(else_stmts) => list_qualifies(tir, else_stmts, name),
                     None => false,
                 }
             }
-            TirTag::WhileLoop => list_qualifies(tir, &tir.while_loop_view(r).body, name),
-            TirTag::ForRange => list_qualifies(tir, &tir.for_range_view(r).body, name),
+            TirTag::WhileLoop => list_qualifies(tir, tir.while_loop_body_view(r), name),
+            TirTag::ForRange => list_qualifies(tir, tir.for_range_body_view(r), name),
             _ => false,
         })
     }
@@ -79,7 +80,7 @@ pub(crate) fn scan_tail_call_candidates(tirs: &[Tir], main: Option<StringId>) ->
         .filter(|tir| {
             main != Some(tir.name)
                 && !tir.params.iter().any(|p| p.mode == ParamMode::Inout)
-                && list_qualifies(tir, &tir.body_stmts(), tir.name)
+                && list_qualifies(tir, tir.body_stmts(), tir.name)
         })
         .map(|tir| tir.name)
         .collect()
@@ -136,8 +137,8 @@ impl<M: Module> Codegen<M> {
             return false;
         }
         let pool = ctx.pool;
-        for (i, &arg) in view.args.iter().enumerate() {
-            if view.modes.get(i) == Some(&ParamMode::Inout) {
+        for (i, arg) in view.args.iter().enumerate() {
+            if view.modes.get(i) == Some(ParamMode::Inout) {
                 return false;
             }
             if !matches!(

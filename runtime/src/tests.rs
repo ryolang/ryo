@@ -1091,8 +1091,7 @@ fn temp_file_with(content: &[u8]) -> (std::fs::File, std::path::PathBuf) {
     (f, path)
 }
 
-/// A line terminated by `\n` comes back without it — and the read
-/// stops at the newline, leaving later bytes unread.
+/// A line terminated by `\n` comes back without it.
 #[cfg(not(windows))]
 #[test]
 fn read_line_strips_trailing_newline() {
@@ -1105,13 +1104,14 @@ fn read_line_strips_trailing_newline() {
     use std::os::unix::io::AsRawFd;
 
     let (file, path) = temp_file_with(b"hello\nrest");
+    let mut state = ReadLineState::new();
     let mut slot = RyoStrFat {
         ptr: core::ptr::null_mut(),
         len: 0,
         cap: 0,
     };
     // SAFETY: valid out-slot; the file's fd is open and readable.
-    unsafe { read_line_from(file.as_raw_fd(), &mut slot) };
+    unsafe { read_line_from(&mut state, file.as_raw_fd(), &mut slot) };
     assert!(is_inline(slot.cap));
     assert_eq!(slot_content(&slot), b"hello");
     drop(file);
@@ -1134,13 +1134,14 @@ fn read_line_unterminated_final_line_is_returned_as_is() {
 
     let content = [b'x'; 300];
     let (file, path) = temp_file_with(&content);
+    let mut state = ReadLineState::new();
     let mut slot = RyoStrFat {
         ptr: core::ptr::null_mut(),
         len: 0,
         cap: 0,
     };
     // SAFETY: valid out-slot; the file's fd is open and readable.
-    unsafe { read_line_from(file.as_raw_fd(), &mut slot) };
+    unsafe { read_line_from(&mut state, file.as_raw_fd(), &mut slot) };
     assert!(!is_inline(slot.cap));
     assert_eq!(slot.len, 300);
     assert_eq!(slot_content(&slot), &content);
@@ -1165,6 +1166,7 @@ fn read_line_empty_file_yields_empty_slot() {
     use std::os::unix::io::AsRawFd;
 
     let (file, path) = temp_file_with(b"");
+    let mut state = ReadLineState::new();
     let mut slot = RyoStrFat {
         ptr: core::ptr::null_mut(),
         len: 0,
@@ -1172,9 +1174,74 @@ fn read_line_empty_file_yields_empty_slot() {
     };
     // SAFETY: valid out-slot; the file's fd is open at EOF, so the
     // first read returns 0.
-    unsafe { read_line_from(file.as_raw_fd(), &mut slot) };
+    unsafe { read_line_from(&mut state, file.as_raw_fd(), &mut slot) };
     assert!(is_inline(slot.cap));
     assert_eq!(inline_len(slot.cap), 0);
+    assert_eq!(slot_content(&slot), b"");
+    drop(file);
+    std::fs::remove_file(&path).expect("remove temp file");
+}
+
+/// Each call returns the next line even when one read contains several.
+#[cfg(not(windows))]
+#[test]
+fn read_line_preserves_multiple_lines_from_one_chunk() {
+    if cfg!(miri) {
+        return;
+    }
+    use std::os::unix::io::AsRawFd;
+
+    let (file, path) = temp_file_with(b"first\nsecond\nthird");
+    let mut state = ReadLineState::new();
+    for expected in [b"first".as_slice(), b"second", b"third"] {
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot; file fd is open and readable.
+        unsafe { read_line_from(&mut state, file.as_raw_fd(), &mut slot) };
+        assert_eq!(slot_content(&slot), expected);
+        // SAFETY: the returned slot may own heap storage for the line.
+        unsafe { ryo_str_free(slot.ptr, slot.cap) };
+    }
+    drop(file);
+    std::fs::remove_file(&path).expect("remove temp file");
+}
+
+/// Retaining bytes after a newline still works after buffer growth.
+#[cfg(not(windows))]
+#[test]
+fn read_line_preserves_tail_after_long_line() {
+    if cfg!(miri) {
+        return;
+    }
+    use std::os::unix::io::AsRawFd;
+
+    let mut content = vec![b'x'; 300];
+    content.extend_from_slice(b"\nnext\n");
+    let (file, path) = temp_file_with(&content);
+    let mut state = ReadLineState::new();
+    for expected in [&content[..300], b"next"] {
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot; file fd is open and readable.
+        unsafe { read_line_from(&mut state, file.as_raw_fd(), &mut slot) };
+        assert_eq!(slot_content(&slot), expected);
+        // SAFETY: the returned slot may own heap storage for the line.
+        unsafe { ryo_str_free(slot.ptr, slot.cap) };
+    }
+
+    let mut slot = RyoStrFat {
+        ptr: core::ptr::null_mut(),
+        len: 0,
+        cap: 0,
+    };
+    // SAFETY: valid out-slot; the trailing newline leaves EOF next.
+    unsafe { read_line_from(&mut state, file.as_raw_fd(), &mut slot) };
     assert_eq!(slot_content(&slot), b"");
     drop(file);
     std::fs::remove_file(&path).expect("remove temp file");

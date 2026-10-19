@@ -2,7 +2,7 @@
 
 use super::{Owner, Ownership, struct_base_name};
 use ryo_core::flow::Flow;
-use ryo_core::tir::{Tir, TirData, TirRef};
+use ryo_core::tir::{ExtraList, Tir, TirData, TirRef};
 use ryo_core::types::{InternPool, StringId};
 
 /// Render a binding name for inclusion in a diagnostic message.
@@ -52,17 +52,17 @@ pub(crate) fn rule7_owner_name(
     tir: &Tir,
     flow: &Flow,
     pool: &InternPool,
-    args: &[TirRef],
+    args: &ExtraList<'_, TirRef>,
     owner: Owner,
 ) -> String {
     for arg in args {
-        let name = match tir.inst(*arg).data {
+        let name = match tir.inst(arg).data {
             TirData::Var(name) => Some(name),
-            TirData::FieldAccess { .. } => struct_base_name(tir, *arg),
+            TirData::FieldAccess { .. } => struct_base_name(tir, arg),
             _ => None,
         };
         if let Some(name) = name
-            && own.underlying_owner(*arg) == owner
+            && own.underlying_owner(arg) == owner
         {
             return format!("`{}`", pool.str(name));
         }
