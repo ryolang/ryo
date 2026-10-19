@@ -849,6 +849,13 @@ fn liveness_loop(
         }
         header_bindings = next;
     }
+    // The fixed-point `clone_from` above bypassed the undo log, so the
+    // map still holds the last header state; reset it to the true
+    // pre-loop state. Otherwise the logged writes below record header
+    // values as `old`, and an enclosing arm's rollback would restore
+    // the loop's merged bindings instead of the pre-branch state,
+    // crediting sibling arms with reads of loop-rebound views.
+    lw.bindings.map.clone_from(&entry);
     // Post-loop code may see either the original binding (zero
     // iterations) or a value produced by the body. The fixed-point
     // header state contains both possibilities.

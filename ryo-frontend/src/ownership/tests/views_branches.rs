@@ -1130,6 +1130,84 @@ fn loop_rebinding_liveness_tracks_entry_and_back_edge_views() {
 }
 
 #[test]
+fn loop_rebind_stays_scoped_to_its_arm() {
+    // Regression: the liveness loop's fixed point restores the binding
+    // map via `clone_from`, which bypasses the undo log — the logged
+    // writes after the loop then carried the merged header state as
+    // `old`, so an enclosing arm rollback revived loop-rebound names
+    // and sibling-arm reads were credited to the loop's slice.
+    //   s: str = "hello"; t: str = "world"; v = s[0:2]
+    //   if cond:
+    //       while true:
+    //           v = t[0:2]   # rebound only on the then path
+    //           print(v)
+    //   else:
+    //       print(v)         # sees only the entry slice
+    // The else-arm read must not become the rebound slice's last use.
+    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::tir::TirBuilder;
+
+    let mut pool = InternPool::new();
+    let str_ty = pool.str_();
+    let view_ty = pool.str_view();
+    let int_ty = pool.int();
+    let bool_ty = pool.bool_();
+    let void = pool.void();
+    let main = pool.intern_str("main");
+    let s = pool.intern_str("s");
+    let t = pool.intern_str("t");
+    let v = pool.intern_str("v");
+    let print = pool.intern_str("print");
+    let span = SimpleSpan::new((), 0..0);
+
+    let mut tb = TirBuilder::new(main, vec![], void, span);
+    let s_lit = tb.str_const(pool.intern_str("source"), str_ty, span);
+    let s_decl = tb.var_decl(s, false, str_ty, s_lit, span);
+    let t_lit = tb.str_const(pool.intern_str("replacement"), str_ty, span);
+    let t_decl = tb.var_decl(t, false, str_ty, t_lit, span);
+    let s_read = tb.var(s, str_ty, span);
+    let zero = tb.int_const(0, int_ty, span);
+    let one = tb.int_const(1, int_ty, span);
+    let entry_slice = tb.slice(s_read, Some(zero), Some(one), view_ty, span);
+    let v_decl = tb.var_decl(v, false, view_ty, entry_slice, span);
+    let if_cond = tb.bool_const(true, bool_ty, span);
+    let while_cond = tb.bool_const(true, bool_ty, span);
+    let t_read = tb.var(t, str_ty, span);
+    let loop_zero = tb.int_const(0, int_ty, span);
+    let loop_one = tb.int_const(1, int_ty, span);
+    let rebound_slice = tb.slice(t_read, Some(loop_zero), Some(loop_one), view_ty, span);
+    let rebind = tb.assign(v, view_ty, rebound_slice, span);
+    let in_loop_read = tb.var(v, view_ty, span);
+    let in_loop_call = tb.call(
+        print,
+        &[in_loop_read],
+        &all_borrow(&[in_loop_read]),
+        void,
+        span,
+    );
+    let in_loop_stmt = tb.unary(TirTag::ExprStmt, void, in_loop_call, span);
+    let wl = tb.while_loop(while_cond, &[rebind, in_loop_stmt], void, span);
+    let else_read = tb.var(v, view_ty, span);
+    let else_call = tb.call(print, &[else_read], &all_borrow(&[else_read]), void, span);
+    let else_stmt = tb.unary(TirTag::ExprStmt, void, else_call, span);
+    let ifs = tb.if_stmt(if_cond, &[wl], &[], Some(&[else_stmt]), void, span);
+    let tir = tb.finish(&[s_decl, t_decl, v_decl, ifs]);
+    let flow = ryo_core::flow::Flow::build(&tir, &pool);
+
+    let liveness = collect_view_liveness(&tir, &flow, &pool, &LoopNesting::default());
+    assert_eq!(
+        liveness.last_use[entry_slice.index()],
+        Some(else_read),
+        "the zero-iteration path keeps the entry slice live through the else-arm read"
+    );
+    assert_eq!(
+        liveness.last_use[rebound_slice.index()],
+        Some(in_loop_read),
+        "the sibling-arm read must not be credited to the loop-rebound slice"
+    );
+}
+
+#[test]
 fn loop_deferred_view_survives_if_join_prune() {
     // Regression test (review Critical): prune_branch_dead_projections
     // must not kill a loop-deferred view at the if join.
