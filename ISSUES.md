@@ -768,19 +768,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-242 — test_slice_of_borrowed_param_rebound_in_loop fails locally, green in CI — environment-dependent ownership validation
-
-**Severity:** Correctness / Hygiene
-**Area:** ownership
-
-**Files:** ryo-frontend/src/ownership/validate/views.rs (:181), ryo/tests/integration_views.rs (:93), ryo-frontend/src/ownership (promotion-release scheduling)
-
-**Summary:** cargo test -p ryo --test integration_views test_slice_of_borrowed_param_rebound_in_loop panics in view-protection validation: 'a release of the base group at FirePoint { block: BlockId(2), ordinal: 3 } (PromoRelease target TirRef(11)) can fire before the view\'s final use at FirePoint { block: BlockId(2), ordinal: 0 } (view TirRef(4)) — a use-after-free'. Deterministic locally: 6/6 runs failed on macOS (rustc 1.98.0, debug profile) at commit a8cfd79, which predates the post-M12 file-split work — so the failure is pre-existing, not a split regression. The GitHub CI run for the M12 merge (f3a5744, CI workflow, Linux + macOS lanes) was green, so the validator\'s verdict differs by environment. Suspect order-dependence in fire-point/ordinal construction (hash-iteration or address ordering) in the promotion-release scheduling for loop-rebound views: same input, different scheduling order, different use/release comparison outcome.
-
-**Resolution:** First reproduce under scripts/run_linux_tests.sh (Docker) to learn whether it fails there; if it passes, bisect environment factors (toolchain version, test profile). Then pin the nondeterminism source in fire-point collection/ordinal assignment (canonical ordering instead of iteration order). Do not silence or weaken the assertion at views.rs:181 — whichever scheduling order is wrong, the free-timing difference it guards is real.
-
----
-
 ### I-243 — Unify test layout across ryo-frontend: one tests/ convention, one file-naming scheme
 
 **Severity:** Cleanup
@@ -801,4 +788,4 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
 
-<!-- issue-id high-water: 241 -->
+<!-- issue-id high-water: 243 -->
