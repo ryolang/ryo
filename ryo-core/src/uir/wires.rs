@@ -109,9 +109,38 @@ pub mod var_decl_extra {
 ///   [1]  value: InstRef.raw()
 /// ```
 pub mod assign_or_decl_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::ExtraRange;
+    use crate::types::StringId;
+    use crate::uir::InstRef;
+
     pub const NAME: usize = 0;
     pub const VALUE: usize = 1;
     pub const LEN: usize = 2;
+
+    pub struct AssignOrDeclView {
+        pub name: StringId,
+        pub value: InstRef,
+    }
+
+    /// Encode an `AssignOrDecl` payload into `extra`, returning its range.
+    pub fn encode(extra: &mut Vec<u32>, name: StringId, value: InstRef) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(name.raw());
+        extra.push(value.raw());
+        ExtraRange {
+            offset,
+            len: len_u32(LEN),
+        }
+    }
+
+    /// Decode an `AssignOrDecl` payload from its words.
+    pub fn decode(words: &[u32]) -> AssignOrDeclView {
+        AssignOrDeclView {
+            name: StringId::from_raw(words[NAME]),
+            value: InstRef::from_raw(words[VALUE]),
+        }
+    }
 }
 
 /// Layout in `extra` for [`InstTag::CompoundAssign`]:
@@ -122,10 +151,48 @@ pub mod assign_or_decl_extra {
 ///   [2]  value: InstRef.raw()
 /// ```
 pub mod compound_assign_extra {
+    use super::{extra_offset, len_u32};
+    use crate::ast::CompoundOp;
+    use crate::extra::ExtraRange;
+    use crate::types::StringId;
+    use crate::uir::InstRef;
+
     pub const NAME: usize = 0;
     pub const OP: usize = 1;
     pub const VALUE: usize = 2;
     pub const LEN: usize = 3;
+
+    pub struct CompoundAssignView {
+        pub name: StringId,
+        pub op: CompoundOp,
+        pub value: InstRef,
+    }
+
+    /// Encode a `CompoundAssign` payload into `extra`, returning its range.
+    pub fn encode(
+        extra: &mut Vec<u32>,
+        name: StringId,
+        op: CompoundOp,
+        value: InstRef,
+    ) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(name.raw());
+        extra.push(op as u32);
+        extra.push(value.raw());
+        ExtraRange {
+            offset,
+            len: len_u32(LEN),
+        }
+    }
+
+    /// Decode a `CompoundAssign` payload from its words.
+    pub fn decode(words: &[u32]) -> CompoundAssignView {
+        CompoundAssignView {
+            name: StringId::from_raw(words[NAME]),
+            op: CompoundOp::from_raw(words[OP]),
+            value: InstRef::from_raw(words[VALUE]),
+        }
+    }
 }
 
 /// Layout in `extra` for [`InstTag::MethodCall`]:
@@ -200,9 +267,38 @@ pub mod struct_lit_extra {
 ///   [1]  value:  InstRef.raw()
 /// ```
 pub mod field_assign_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::ExtraRange;
+    use crate::uir::InstRef;
+
     pub const TARGET: usize = 0;
     pub const VALUE: usize = 1;
     pub const LEN: usize = 2;
+
+    /// Decoded view of an [`InstTag::FieldAssign`] payload (M9).
+    pub struct FieldAssignView {
+        pub target: InstRef,
+        pub value: InstRef,
+    }
+
+    /// Encode a `FieldAssign` payload into `extra`, returning its range.
+    pub fn encode(extra: &mut Vec<u32>, target: InstRef, value: InstRef) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(target.raw());
+        extra.push(value.raw());
+        ExtraRange {
+            offset,
+            len: len_u32(LEN),
+        }
+    }
+
+    /// Decode a `FieldAssign` payload from its words.
+    pub fn decode(words: &[u32]) -> FieldAssignView {
+        FieldAssignView {
+            target: InstRef::from_raw(words[TARGET]),
+            value: InstRef::from_raw(words[VALUE]),
+        }
+    }
 }
 
 /// Layout in `extra` for [`InstTag::CompoundFieldAssign`]:
@@ -213,8 +309,47 @@ pub mod field_assign_extra {
 ///   [2]  value:  InstRef.raw()
 /// ```
 pub mod compound_field_assign_extra {
+    use super::{extra_offset, len_u32};
+    use crate::ast::CompoundOp;
+    use crate::extra::ExtraRange;
+    use crate::uir::InstRef;
+
     pub const TARGET: usize = 0;
     pub const OP: usize = 1;
     pub const VALUE: usize = 2;
     pub const LEN: usize = 3;
+
+    /// Decoded view of an [`InstTag::CompoundFieldAssign`] payload (M9).
+    pub struct CompoundFieldAssignView {
+        pub target: InstRef,
+        pub op: CompoundOp,
+        pub value: InstRef,
+    }
+
+    /// Encode a `CompoundFieldAssign` payload into `extra`, returning its
+    /// range.
+    pub fn encode(
+        extra: &mut Vec<u32>,
+        target: InstRef,
+        op: CompoundOp,
+        value: InstRef,
+    ) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(target.raw());
+        extra.push(op as u32);
+        extra.push(value.raw());
+        ExtraRange {
+            offset,
+            len: len_u32(LEN),
+        }
+    }
+
+    /// Decode a `CompoundFieldAssign` payload from its words.
+    pub fn decode(words: &[u32]) -> CompoundFieldAssignView {
+        CompoundFieldAssignView {
+            target: InstRef::from_raw(words[TARGET]),
+            op: CompoundOp::from_raw(words[OP]),
+            value: InstRef::from_raw(words[VALUE]),
+        }
+    }
 }

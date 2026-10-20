@@ -1,9 +1,12 @@
+pub use super::wires::assign_or_decl_extra::AssignOrDeclView;
+pub use super::wires::compound_assign_extra::CompoundAssignView;
+pub use super::wires::compound_field_assign_extra::CompoundFieldAssignView;
+pub use super::wires::field_assign_extra::FieldAssignView;
 pub use super::wires::var_decl_extra::VarDeclView;
 use super::{
-    CompoundOp, ExtraList, InstData, InstRef, InstTag, StringId, TypeId, Uir, assign_or_decl_extra,
-    call_extra, compound_assign_extra, compound_field_assign_extra, enum_lit_extra,
-    field_assign_extra, for_range_extra, method_call_extra, struct_lit_extra, var_decl_extra,
-    while_loop_extra,
+    ExtraList, InstData, InstRef, InstTag, StringId, TypeId, Uir, assign_or_decl_extra, call_extra,
+    compound_assign_extra, compound_field_assign_extra, enum_lit_extra, field_assign_extra,
+    for_range_extra, method_call_extra, struct_lit_extra, var_decl_extra, while_loop_extra,
 };
 
 // ---------- Read-side helpers ----------
@@ -12,30 +15,6 @@ use super::{
 pub struct CallView<'a> {
     pub name: StringId,
     pub args: ExtraList<'a, InstRef>,
-}
-
-pub struct AssignOrDeclView {
-    pub name: StringId,
-    pub value: InstRef,
-}
-
-pub struct CompoundAssignView {
-    pub name: StringId,
-    pub op: CompoundOp,
-    pub value: InstRef,
-}
-
-/// Decoded view of an [`InstTag::FieldAssign`] payload (M9).
-pub struct FieldAssignView {
-    pub target: InstRef,
-    pub value: InstRef,
-}
-
-/// Decoded view of an [`InstTag::CompoundFieldAssign`] payload (M9).
-pub struct CompoundFieldAssignView {
-    pub target: InstRef,
-    pub op: CompoundOp,
-    pub value: InstRef,
 }
 
 pub struct WhileLoopView<'a> {
@@ -174,11 +153,7 @@ impl Uir {
             InstData::Extra(rng) => rng,
             _ => unreachable!("AssignOrDecl must carry InstData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        AssignOrDeclView {
-            name: StringId::from_raw(slice[assign_or_decl_extra::NAME]),
-            value: InstRef::from_raw(slice[assign_or_decl_extra::VALUE]),
-        }
+        assign_or_decl_extra::decode(&self.extra[range.as_range()])
     }
 
     pub fn compound_assign_view(&self, r: InstRef) -> CompoundAssignView {
@@ -188,12 +163,7 @@ impl Uir {
             InstData::Extra(rng) => rng,
             _ => unreachable!("CompoundAssign must carry InstData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        CompoundAssignView {
-            name: StringId::from_raw(slice[compound_assign_extra::NAME]),
-            op: CompoundOp::from_raw(slice[compound_assign_extra::OP]),
-            value: InstRef::from_raw(slice[compound_assign_extra::VALUE]),
-        }
+        compound_assign_extra::decode(&self.extra[range.as_range()])
     }
 
     pub fn field_assign_view(&self, r: InstRef) -> FieldAssignView {
@@ -203,11 +173,7 @@ impl Uir {
             InstData::Extra(rng) => rng,
             _ => unreachable!("FieldAssign must carry InstData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        FieldAssignView {
-            target: InstRef::from_raw(slice[field_assign_extra::TARGET]),
-            value: InstRef::from_raw(slice[field_assign_extra::VALUE]),
-        }
+        field_assign_extra::decode(&self.extra[range.as_range()])
     }
 
     pub fn compound_field_assign_view(&self, r: InstRef) -> CompoundFieldAssignView {
@@ -217,12 +183,7 @@ impl Uir {
             InstData::Extra(rng) => rng,
             _ => unreachable!("CompoundFieldAssign must carry InstData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        CompoundFieldAssignView {
-            target: InstRef::from_raw(slice[compound_field_assign_extra::TARGET]),
-            op: CompoundOp::from_raw(slice[compound_field_assign_extra::OP]),
-            value: InstRef::from_raw(slice[compound_field_assign_extra::VALUE]),
-        }
+        compound_field_assign_extra::decode(&self.extra[range.as_range()])
     }
 
     pub fn while_loop_view(&self, r: InstRef) -> WhileLoopView<'_> {

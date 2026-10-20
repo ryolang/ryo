@@ -744,17 +744,8 @@ impl UirBuilder {
     }
 
     pub fn assign_or_decl(&mut self, name: StringId, value: InstRef, span: Span) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(name.raw());
-        self.uir.extra.push(value.raw());
-        self.push(
-            InstTag::AssignOrDecl,
-            InstData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(assign_or_decl_extra::LEN),
-            }),
-            span,
-        )
+        let range = assign_or_decl_extra::encode(&mut self.uir.extra, name, value);
+        self.push(InstTag::AssignOrDecl, InstData::Extra(range), span)
     }
 
     pub fn compound_assign(
@@ -764,18 +755,8 @@ impl UirBuilder {
         value: InstRef,
         span: Span,
     ) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(name.raw());
-        self.uir.extra.push(op as u32);
-        self.uir.extra.push(value.raw());
-        self.push(
-            InstTag::CompoundAssign,
-            InstData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(compound_assign_extra::LEN),
-            }),
-            span,
-        )
+        let range = compound_assign_extra::encode(&mut self.uir.extra, name, op, value);
+        self.push(InstTag::CompoundAssign, InstData::Extra(range), span)
     }
 
     pub fn while_loop(&mut self, cond: InstRef, body: &[InstRef], span: Span) -> InstRef {
@@ -937,17 +918,8 @@ impl UirBuilder {
     /// Emits a `FieldAssign` `target = value` (M9); `target` is a
     /// `FieldAccess` chain ref.
     pub fn field_assign(&mut self, target: InstRef, value: InstRef, span: Span) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(target.raw());
-        self.uir.extra.push(value.raw());
-        self.push(
-            InstTag::FieldAssign,
-            InstData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(field_assign_extra::LEN),
-            }),
-            span,
-        )
+        let range = field_assign_extra::encode(&mut self.uir.extra, target, value);
+        self.push(InstTag::FieldAssign, InstData::Extra(range), span)
     }
 
     /// Emits a `CompoundFieldAssign` `target op= value` (M9).
@@ -958,18 +930,8 @@ impl UirBuilder {
         value: InstRef,
         span: Span,
     ) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(target.raw());
-        self.uir.extra.push(op as u32);
-        self.uir.extra.push(value.raw());
-        self.push(
-            InstTag::CompoundFieldAssign,
-            InstData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(compound_field_assign_extra::LEN),
-            }),
-            span,
-        )
+        let range = compound_field_assign_extra::encode(&mut self.uir.extra, target, op, value);
+        self.push(InstTag::CompoundFieldAssign, InstData::Extra(range), span)
     }
 
     /// Register a resolved struct declaration in the side table (M9).
