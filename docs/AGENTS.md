@@ -6,7 +6,7 @@ Context for agents editing files in `docs/`.
 
 ## Scratch files
 
-* `docs/dev/superpowers/`  tree is scratch space for the agent/developer, not a committed artifact.
+* `docs/superpowers/`  tree is scratch space for the agent/developer, not a committed artifact (gitignored at `.gitignore:39`).
 
 ## When Writing Specification
 

@@ -1,9 +1,9 @@
 //! Statement and declaration grammar: newline handling, per-line error
 //! recovery, the statement-list driver, and every statement/declaration
 //! rule (assignment, var decls, if/while/for, fn defs, struct decls,
-//! type annotations). Split out of `parser.rs` to stay under the
+//! type annotations). Split out of `grammar.rs` to stay under the
 //! file-length limit (R2). The expression grammar — atoms, literals,
-//! binary precedence, and the postfix fold — stays in `parser.rs`,
+//! binary precedence, and the postfix fold — stays in `grammar.rs`,
 //! along with the field-key helpers both sides share.
 
 use super::*;
@@ -147,7 +147,7 @@ where
 /// (Arena nodes pushed inside a failed region are *not* rolled back
 /// — they stay as unreachable orphans, which is safe because no kept
 /// node references them; see the `Inspector` impl on `ParseState` in
-/// `parser.rs`.)
+/// `grammar.rs`.)
 ///
 /// `not_at_boundary` decides where the loop stops without running the
 /// statement grammar: the grammar is deep and a failed alternative
@@ -324,8 +324,8 @@ where
 }
 
 // The M10 destructuring-statement grammar (`bind_pattern`,
-// `destructure_stmt_parser`) lives in `parser/destructure.rs`, and the
-// M12 match-expression grammar in `parser/match_.rs` — both split out
+// `destructure_stmt_parser`) lives in `grammar/destructure.rs`, and the
+// M12 match-expression grammar in `grammar/match_.rs` — both split out
 // of this file to stay under the file-length limit (R2). The statement
 // dispatch below references them through those modules.
 

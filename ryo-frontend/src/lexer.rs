@@ -47,7 +47,7 @@ pub enum Token {
     IntLitMin,
     /// IEEE-754 `f64` literal stored as its bit pattern so `Token`
     /// can keep `Eq + Hash`. Decoded with `f64::from_bits` by
-    /// downstream consumers (parser/astgen).
+    /// downstream consumers (grammar/astgen).
     FloatLit(u64),
     StrLit(StringId),
     /// `b"..."` byte-string literal (M8.4.2). Payload is the DECODED

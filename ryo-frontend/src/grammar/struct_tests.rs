@@ -1,6 +1,6 @@
 //! Struct parser tests: struct declarations with attributes, struct and
 //! anonymous struct literals, positional field access, and field access
-//! and assignment targets. Split out of `parser/tests.rs` to stay under
+//! and assignment targets. Split out of `grammar/tests.rs` to stay under
 //! the file-length limit; the shared parse helpers live there as
 //! `pub(super)`.
 

@@ -10,7 +10,6 @@ ryo-frontend = { workspace = true }
 ryo-backend = { workspace = true }
 clap = { workspace = true }
 ariadne = { workspace = true }
-chumsky = { workspace = true }
 target-lexicon = { workspace = true }
 
 [lints]

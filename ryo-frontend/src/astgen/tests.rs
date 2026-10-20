@@ -6,8 +6,8 @@
 //! `type_literal_tests`.
 
 use super::*;
+use crate::grammar::{ParseState, program_parser};
 use crate::lexer::lex;
-use crate::parser::{ParseState, program_parser};
 use chumsky::Parser;
 use chumsky::input::Input;
 use ryo_core::uir::InstData;

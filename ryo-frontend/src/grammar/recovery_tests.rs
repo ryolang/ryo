@@ -1,7 +1,7 @@
 //! Parser error-recovery tests: broken statements recover to `Error`
 //! placeholder statements in a partial program, broken block headers
 //! swallow their indented body, and trailing garbage at EOF keeps the
-//! well-formed prefix. Split out of `parser/tests.rs` to stay under the
+//! well-formed prefix. Split out of `grammar/tests.rs` to stay under the
 //! file-length limit; the shared parse helpers live there as `pub(super)`.
 
 use super::tests::*;

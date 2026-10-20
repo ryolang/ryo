@@ -1,10 +1,10 @@
 //! Enum grammar (M11): `enum Name:` declarations with unit, tuple,
 //! and named payloads; `EnumName.Variant(...)` / `{...}` construction;
 //! and the attribute placement widened to enum definitions (the
-//! I-193 slice). Split out of `parser.rs` to stay under the
+//! I-193 slice). Split out of `grammar.rs` to stay under the
 //! file-length limit (R2). Variant *construction* does not live here:
 //! it folds out of the shared expression grammar's postfix
-//! method/field ops (see `type_name_ident` in `parser.rs`), so it
+//! method/field ops (see `type_name_ident` in `grammar.rs`), so it
 //! costs nothing on the plain-identifier hot path.
 
 use super::*;
@@ -47,7 +47,7 @@ where
 /// `.name` and `field_op` claims the field access, leaving `{...}`
 /// unconsumed — `obj.field{...}` keeps its historical
 /// field-access-then-garbage parse (the lowercase pin in
-/// `parser/enum_tests.rs`). `try_map_with` runs the gate in both
+/// `grammar/enum_tests.rs`). `try_map_with` runs the gate in both
 /// emit and check mode.
 ///
 /// The content has one recovery: `Shape.Rectangle{1.0, 2.0}` —

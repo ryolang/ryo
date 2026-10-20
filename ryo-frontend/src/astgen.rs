@@ -936,7 +936,7 @@ fn lower_destructure_pattern(
                     }
                     // Literal and variant patterns parse only in match
                     // arms; the destructure grammar cannot produce them
-                    // (see `parser/match_.rs`).
+                    // (see `grammar/match_.rs`).
                     ast::PatternKind::Literal(_) | ast::PatternKind::Variant { .. } => {
                         unreachable!("destructure patterns bind or skip only (match arms only)")
                     }

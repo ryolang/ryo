@@ -10,8 +10,8 @@ use ryo_backend::codegen::Codegen;
 use ryo_core::ownership::OwnershipSidecar;
 use ryo_core::tir::Tir;
 use ryo_core::types::InternPool;
+use ryo_frontend::grammar::{ParseState, program_parser};
 use ryo_frontend::lexer;
-use ryo_frontend::parser::{ParseState, program_parser};
 
 fn analyze(
     src: &str,

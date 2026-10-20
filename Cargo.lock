@@ -1244,7 +1244,6 @@ name = "ryo-driver"
 version = "0.1.0"
 dependencies = [
  "ariadne",
- "chumsky",
  "clap",
  "ryo-backend",
  "ryo-core",

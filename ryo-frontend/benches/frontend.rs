@@ -9,8 +9,8 @@
 use chumsky::Parser;
 use chumsky::input::Input;
 use ryo_core::types::InternPool;
+use ryo_frontend::grammar::{ParseState, program_parser};
 use ryo_frontend::lexer::{self, Span, Token};
-use ryo_frontend::parser::{ParseState, program_parser};
 
 fn main() {
     divan::main();

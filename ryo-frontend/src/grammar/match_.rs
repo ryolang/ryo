@@ -3,7 +3,7 @@
 //! (`42`, `-1`, `"quit"`, `true`), enum variants (`Option.Some(v)`,
 //! `Red`, `Coords{x=px}`), wildcards, and the M10 anonymous/positional
 //! shapes widened with literal field targets (`{x=0, y=_}`, `(0, _)`).
-//! Split out of `parser.rs` (R2). Match is an EXPRESSION atom: it
+//! Split out of `grammar.rs` (R2). Match is an EXPRESSION atom: it
 //! nests anywhere the shared expression parser is valid.
 //!
 //! Arm bodies come in three shapes, tried in order:

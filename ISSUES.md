@@ -109,7 +109,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Severity:** Correctness / Hygiene
 **Area:** frontend-parser
 
-**Files:** `ryo-core/src/ast.rs`, `ryo-frontend/src/parser.rs`, `ryo-frontend/src/sema/`, `ryo-backend/src/codegen/`
+**Files:** `ryo-core/src/ast.rs`, `ryo-frontend/src/grammar.rs`, `ryo-frontend/src/sema/`, `ryo-backend/src/codegen/`
 **Summary:** `if`/`elif`/`else` is a statement (`StmtKind::IfStmt`), not an expression. There is no way to write `x = if cond: a else: b` (ternary/conditional expression). The spec envisions `if` as an expression in certain contexts. Current codegen emits void for IfStmt and uses no phi-merge for values across branches.
 **Resolution:** Add `ExprKind::IfExpr` when the spec finalizes expression-if syntax. Codegen would use block params (like BoolAnd/BoolOr already do) to merge values at the join point. Watch codegen's value memoizer here: a Cranelift `Value` materialized in one block cannot be re-read from a block it does not dominate, so the memoized repr must be anchored to (or re-materialized at) the merge point.
 
@@ -154,7 +154,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Severity:** Correctness / Hygiene
 **Area:** frontend-parser
 
-**Files:** `ryo-frontend/src/parser/statements.rs` (for-range statement parser :368)
+**Files:** `ryo-frontend/src/grammar/statements.rs` (for-range statement parser :368)
 **Summary:** Python allows `range(stop)` (implied start=0) and `range(start, stop, step)`. Ryo's parser strictly enforces `range(start, end)` (exactly 2 arguments). This is documented v0.1 behaviour. Users coming from Python will inevitably try `for i in range(10):` and receive a generic arity error.
 **Resolution:** Consider supporting `range(end)` as sugar for `range(0, end)` in a future milestone. The 3-arg `range(start, end, step)` form requires a more complex increment block in codegen. Both are additive and non-breaking.
 
@@ -269,7 +269,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Severity:** Cleanup
 **Area:** ownership
 
-**Files:** measured by brace-depth scan, tests excluded — worst offenders (refs refreshed 2026-10-19, post-M12 split): `ryo-frontend/src/ownership/walk.rs` `analyze_assign` :738 (~144 raw / 107 code lines); `ryo-frontend/src/ownership/walk/cascades.rs` `analyze_if_cascade` :83 (~286 raw / 233 code — successor of the old `analyze_if_stmt`); `ryo-frontend/src/ownership/mod.rs` `analyze_function` :691 (~625 raw); `ryo-frontend/src/sema/stmt.rs` `analyze_stmt` :14 (360 code lines — at the ratchet); `ryo-frontend/src/sema/expr/mod.rs` `analyze_expr_allow_never` :102 (~395 raw), `check_binary_op` :1310; `ryo-frontend/src/sema/builtins.rs` `emit_builtin_call` :10 (~225); `ryo-frontend/src/sema/call.rs` `check_call` :12 (~220); `ryo-backend/src/codegen/expr/mod.rs` `eval_inst` :35, `eval_inst_fat_slot` `expr/fat_slot.rs:19`, `eval_inst_view` :728, `emit_call` :900; `ryo-backend/src/codegen/control.rs` `emit_flow_body` :91; `ryo-backend/src/codegen/mod.rs` `compile_function` :890 (~445 raw); `ryo-frontend/src/parser.rs` `expression_parser` :517; `ryo-core/src/uir/dump.rs` `write_inst` :72 and the same pattern in `ryo-core/src/tir/dump.rs` :53
+**Files:** measured by brace-depth scan, tests excluded — worst offenders (refs refreshed 2026-10-19, post-M12 split): `ryo-frontend/src/ownership/walk.rs` `analyze_assign` :738 (~144 raw / 107 code lines); `ryo-frontend/src/ownership/walk/cascades.rs` `analyze_if_cascade` :83 (~286 raw / 233 code — successor of the old `analyze_if_stmt`); `ryo-frontend/src/ownership/mod.rs` `analyze_function` :691 (~625 raw); `ryo-frontend/src/sema/stmt.rs` `analyze_stmt` :14 (360 code lines — at the ratchet); `ryo-frontend/src/sema/expr/mod.rs` `analyze_expr_allow_never` :102 (~395 raw), `check_binary_op` :1310; `ryo-frontend/src/sema/builtins.rs` `emit_builtin_call` :10 (~225); `ryo-frontend/src/sema/call.rs` `check_call` :12 (~220); `ryo-backend/src/codegen/expr/mod.rs` `eval_inst` :35, `eval_inst_fat_slot` `expr/fat_slot.rs:19`, `eval_inst_view` :728, `emit_call` :900; `ryo-backend/src/codegen/control.rs` `emit_flow_body` :91; `ryo-backend/src/codegen/mod.rs` `compile_function` :890 (~445 raw); `ryo-frontend/src/grammar.rs` `expression_parser` :517; `ryo-core/src/uir/dump.rs` `write_inst` :72 and the same pattern in `ryo-core/src/tir/dump.rs` :53
 **Summary:** R7 targets functions under 50 lines so a human reviewer can hold each one in their head. Sixteen functions sit between ~150 and ~410 lines, almost all of them giant per-tag dispatch `match`es in the hottest passes. These are the files every milestone touches; review cost and merge-conflict surface scale with their length. (Distinct from the since-resolved per-function CLIF-render cost problem, which tracked a *content* problem inside one of these functions, not size.)
 **Resolution:** Split the entry points into one helper per tag/arm family (`lower_match_expr`-style naming per R7), keeping the dispatch match as a thin table. Do it opportunistically when a function is next touched for a feature — starting with `analyze_function` and `analyze_stmt`, the two worst — rather than as one big-bang refactor. `clippy::too_many_lines` is denied workspace-wide with `too-many-lines-threshold = 360` as a ratchet; lower the threshold towards 50 as functions split.
 **Update (2026-10-09, Milestone 11):** Ahead of the enum codegen work the aggregate machinery moved out of the two ratchet-saturated codegen files into per-domain homes — `structs.rs`, `frees.rs`, `str_ops.rs`, and a new `enums.rs` — and the enum arms emit through per-variant helpers. The frontend giants listed above are untouched; entry stays open.
@@ -336,10 +336,10 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Severity:** Cleanup
 **Area:** frontend-parser
 
-**Files:** `ryo-frontend/src/parser.rs` (:577 — call args, :255 — method args), `ryo-frontend/src/parser/statements.rs` (:888 — params, :547 — elif branches)
+**Files:** `ryo-frontend/src/grammar.rs` (:577 — call args, :255 — method args), `ryo-frontend/src/grammar/statements.rs` (:888 — params, :547 — elif branches)
 **Summary:** Call args, method args, params, and elif branches are `collect::<Vec<_>>()`ed into a temporary, copied into the AST side arena by the builder, then dropped — a double buffer per node. Partly inherent to chumsky's `IterParser`; impact is small next to the win the arena already delivered.
 **Resolution:** A custom collector writing straight into the arena (chumsky 0.12 collects via `FromIterator`, so an arena-append adapter is feasible), or accept as-is. Measure before bothering.
-**Update (2026-10-09, Milestone 11):** Enum variant-construct args (`ryo-frontend/src/parser/enums.rs`) push straight into the AST side arenas as parsed — no intermediate `Vec`. The call/method-arg and params sites listed above still collect; entry stays open.
+**Update (2026-10-09, Milestone 11):** Enum variant-construct args (`ryo-frontend/src/grammar/enums.rs`) push straight into the AST side arenas as parsed — no intermediate `Vec`. The call/method-arg and params sites listed above still collect; entry stays open.
 
 ---
 
@@ -528,7 +528,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Severity:** Blocking
 **Area:** frontend-parser
 
-**Files:** `ryo-frontend/src/parser/statements.rs` (attribute placement rule; `attr_group_parser` :642), `ryo-frontend/src/parser/enums.rs` (`attributed_type_decl_parser` :368 — the placement gate), `ryo-frontend/src/lexer.rs`, `ryo-core/src/diag.rs` (`ParseDiag::UnknownAttribute`/`MisplacedAttribute` note text), `docs/specification.md` (§2, §19)
+**Files:** `ryo-frontend/src/grammar/statements.rs` (attribute placement rule; `attr_group_parser` :642), `ryo-frontend/src/grammar/enums.rs` (`attributed_type_decl_parser` :368 — the placement gate), `ryo-frontend/src/lexer.rs`, `ryo-core/src/diag.rs` (`ParseDiag::UnknownAttribute`/`MisplacedAttribute` note text), `docs/specification.md` (§2, §19)
 
 **Summary:** Milestone 9.1 introduced `#[...]` attributes restricted to struct definitions; an attribute before a function or any other item is a compile error (the misplaced-attribute diagnostic, "attributes are only supported on struct definitions"). Roadmap features that need function attributes — the testing framework's `#[test]`, contracts (`#[pre]`/`#[post]`), `#[no_mangle]` (spec §19) — are blocked until placement widens. The groundwork is already M26-ready: the lexer exposes `#[` everywhere and the parser's attribute *contents* are generic (`ident` + optional parenthesized comma-list), so the change is the placement rule, per-name recognition with per-item validation, and the misplaced-attribute message (`ParseDiag::MisplacedAttribute`).
 
@@ -585,7 +585,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Severity:** Correctness / Hygiene
 **Area:** frontend-parser
 
-**Files:** ryo-frontend/src/parser/enums.rs (uppercase receiver gate), ryo-frontend/src/sema/expr/methods.rs (lowercase_enum_method_receiver :25)
+**Files:** ryo-frontend/src/grammar/enums.rs (uppercase receiver gate), ryo-frontend/src/sema/expr/methods.rs (lowercase_enum_method_receiver :25)
 
 **Summary:** User-defined types are PascalCase by documented convention (docs/AGENTS.md), but the convention is enforced selectively: a lowercase enum (enum color: red(v: int)) defines without complaint, and unit access color.red works; only payload construction (color.red(5)) redirects — after the M11 fix with an enum-aware diagnostic and PascalCase hint, but still a use-site surprise for a definition the compiler accepted. Structs have no equivalent enforcement anywhere, so the two type kinds also differ from each other. DX review against the 'as simple as Go' bar: Go never half-accepts — its naming convention is enforced by style tooling and review culture (staticcheck, revive), not the compiler, and lowercase types are fully first-class; the language never accepts a definition and then surprises you at a use site.
 
@@ -736,9 +736,9 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Severity:** Cleanup
 **Area:** tooling
 
-**Files:** ryo-frontend/src/ownership/tests/ (dir form), ryo-frontend/src/{sema,parser,astgen} tests.rs + siblings, ryo-frontend/src/sema/tests/ (child dir of the tests.rs file module)
+**Files:** ryo-frontend/src/ownership/tests/ (dir form), ryo-frontend/src/{sema,grammar,astgen} tests.rs + siblings, ryo-frontend/src/sema/tests/ (child dir of the tests.rs file module)
 
-**Summary:** Three different test organizations coexist for the same job. (1) ownership uses a directory module: tests/mod.rs + 19 feature files. (2) sema/parser/astgen use a file module tests.rs with feature splits as siblings — but with two naming schemes: sema names them tests_<feature>.rs (tests_borrows, tests_str_views, tests_match_*), parser/astgen name them <feature>_tests.rs (struct_tests, enum_tests, match_tests). (3) sema additionally nests a child-module directory tests/ under its tests.rs file module (warning_buffer.rs). Root cause of the split: 'mod tests;' resolves to tests.rs OR tests/mod.rs, never both, so each module is locked into whichever form it first chose, and the 2026-10-19 size-cap splits followed whatever local precedent each module had. Costs: every contributor learns a per-module convention; future cap-driven splits land unpredictably; helper-visibility patterns (pub(super) widening) differ per form; grepping for a test requires knowing the local scheme. Cosmetic only — zero behavioral impact.
+**Summary:** Three different test organizations coexist for the same job. (1) ownership uses a directory module: tests/mod.rs + 19 feature files. (2) sema/grammar/astgen use a file module tests.rs with feature splits as siblings — but with two naming schemes: sema names them tests_<feature>.rs (tests_borrows, tests_str_views, tests_match_*), grammar/astgen name them <feature>_tests.rs (struct_tests, enum_tests, match_tests). (3) sema additionally nests a child-module directory tests/ under its tests.rs file module (warning_buffer.rs). Root cause of the split: 'mod tests;' resolves to tests.rs OR tests/mod.rs, never both, so each module is locked into whichever form it first chose, and the 2026-10-19 size-cap splits followed whatever local precedent each module had. Costs: every contributor learns a per-module convention; future cap-driven splits land unpredictably; helper-visibility patterns (pub(super) widening) differ per form; grepping for a test requires knowing the local scheme. Cosmetic only — zero behavioral impact.
 
 **Resolution:** Pick one convention and migrate purely (file moves + module-declaration updates, no test edits). Recommended: directory form everywhere (ownership/tests/ proves it scales), which also frees the sibling namespace and unifies helper sharing on one pattern; alternatively keep file form everywhere. Naming: pick one of tests_<feature>.rs or <feature>_tests.rs and rename the other set. Constraint to respect: a module cannot have both tests.rs and tests/mod.rs — convert, don't duplicate. Verify with cargo check -p ryo-frontend --tests and the full workspace suite. Low priority; natural fit for the next test-heavy milestone's opening sweep.
 
@@ -763,4 +763,4 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
 
-<!-- issue-id high-water: 244 -->
+<!-- issue-id high-water: 245 -->

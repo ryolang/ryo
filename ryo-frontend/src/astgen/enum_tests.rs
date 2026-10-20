@@ -8,8 +8,8 @@
 
 use super::tests::{body_named, parse_and_lower};
 use super::*;
+use crate::grammar::{ParseState, program_parser};
 use crate::lexer::lex;
-use crate::parser::{ParseState, program_parser};
 use chumsky::Parser;
 use chumsky::input::Input;
 use ryo_core::types::VariantKind;

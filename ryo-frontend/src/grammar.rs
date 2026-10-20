@@ -39,7 +39,7 @@ use ryo_core::types::{InternPool, StringId, VariantKind};
 // existing `use super::*;`.
 use statements::*;
 
-// Stable entry point — external callers use `crate::parser::program_parser`.
+// Stable entry point — external callers use `crate::grammar::program_parser`.
 pub use statements::program_parser;
 
 /// Chumsky parse state: the [`Ast`] arenas under construction plus
