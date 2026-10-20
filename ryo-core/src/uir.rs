@@ -32,8 +32,8 @@
 //! - `spans: Vec<Span>` — parallel to `instructions`, one span per
 //!   `InstRef`. Storing spans out-of-band keeps `Inst` itself small
 //!   (the tagged-enum payload already costs more than a `u32`; piling
-//!   `SimpleSpan` on top would double the per-inst footprint for no
-//!   reason — only diagnostics ever read spans).
+//!   a start/end span pair on top would double the per-inst footprint
+//!   for no reason — only diagnostics ever read spans).
 //!
 //! Function-level metadata lives in `func_bodies`. A function's body
 //! is a range into `extra` listing the [`InstRef`]s of the top-level
@@ -61,10 +61,9 @@
 use crate::ast::CompoundOp;
 use crate::tir::ParamMode;
 use crate::types::{InternPool, StringId, TypeId, VariantKind};
-use chumsky::span::{SimpleSpan, Span as _};
 use std::num::NonZeroU32;
 
-pub type Span = SimpleSpan;
+pub use crate::span::Span;
 
 // ---------- InstRef ----------
 
@@ -471,7 +470,7 @@ impl Uir {
         // Slot 0 is the reserved sentinel — never read, never
         // referenced. Pushing a placeholder keeps `InstRef` indices
         // 1-based without runtime checks on every read.
-        let placeholder_span = SimpleSpan::new((), 0..0);
+        let placeholder_span = Span::EMPTY;
         Uir {
             instructions: vec![Inst {
                 tag: InstTag::ReturnVoid,
@@ -887,7 +886,7 @@ mod tests {
     use super::*;
 
     fn sp() -> Span {
-        SimpleSpan::new((), 0..0)
+        Span::EMPTY
     }
 
     #[test]

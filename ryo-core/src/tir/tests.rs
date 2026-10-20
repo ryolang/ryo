@@ -1,7 +1,7 @@
 use super::*;
 
 fn sp() -> Span {
-    SimpleSpan::new((), 0..0)
+    Span::EMPTY
 }
 
 #[test]

@@ -64,7 +64,6 @@
 use super::{ChildKind, ExtraRange, Span, Tir, TirBuilder, TirData, TirRef, TirTag};
 use crate::ast::LitPattern;
 use crate::types::{InternPool, StringId, TypeId};
-use chumsky::span::Span as _;
 
 /// Layout constants for the [`TirTag::Match`] wire; see the module
 /// header for the full annotated layout.
@@ -645,9 +644,8 @@ fn decode_match_arm(slice: &[u32]) -> MatchArmView<'_> {
         "match arm_len exceeds the remaining wire"
     );
     let span = Span::new(
-        (),
-        slice[match_extra::PATTERN_SPAN_START] as usize
-            ..slice[match_extra::PATTERN_SPAN_END] as usize,
+        slice[match_extra::PATTERN_SPAN_START] as usize,
+        slice[match_extra::PATTERN_SPAN_END] as usize,
     );
     let mut pos = match_extra::DISC_PAYLOAD;
     let discriminant = match slice[match_extra::DISC_KIND] {
@@ -723,10 +721,9 @@ fn decode_match_arm(slice: &[u32]) -> MatchArmView<'_> {
 mod tests {
     use super::*;
     use crate::tir::ChildKind;
-    use chumsky::span::SimpleSpan;
 
     fn sp() -> Span {
-        SimpleSpan::new((), 0..0)
+        Span::EMPTY
     }
 
     #[test]

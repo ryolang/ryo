@@ -14,8 +14,8 @@
 //! literal and variant kinds parse only in match arms.
 
 use super::{Ast, ExprId, Ident, PatternId, StmtList};
+use crate::span::Span;
 use crate::types::StringId;
-use chumsky::span::SimpleSpan;
 
 /// A `[offset, offset+len)` slice of the `pattern_lists` side arena —
 /// the element list of a [`PatternKind::Positional`] pattern `(a, b)`,
@@ -94,7 +94,7 @@ impl MatchArmList {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pattern {
     pub kind: PatternKind,
-    pub span: SimpleSpan,
+    pub span: Span,
 }
 
 /// The kind of a destructuring or match pattern. Child lists are
@@ -233,7 +233,7 @@ impl Ast {
     }
 
     /// Source span attached to a destructuring pattern.
-    pub fn pattern_span(&self, id: PatternId) -> SimpleSpan {
+    pub fn pattern_span(&self, id: PatternId) -> Span {
         self.patterns[id.index()].span
     }
 
@@ -266,7 +266,7 @@ impl Ast {
     /// Push a pattern with its span and return its id; see
     /// [`Ast::push_expr`]. Slot 0 of `patterns` is the reserved
     /// sentinel.
-    fn push_pattern(&mut self, kind: PatternKind, span: SimpleSpan) -> PatternId {
+    fn push_pattern(&mut self, kind: PatternKind, span: Span) -> PatternId {
         let idx = self.patterns.len();
         self.patterns.push(Pattern { kind, span });
         PatternId::from_index(idx)
@@ -325,19 +325,19 @@ impl Ast {
     }
 
     /// `_` wildcard pattern (M10): binds nothing.
-    pub fn pattern_wildcard(&mut self, span: SimpleSpan) -> PatternId {
+    pub fn pattern_wildcard(&mut self, span: Span) -> PatternId {
         self.push_pattern(PatternKind::Wildcard, span)
     }
 
     /// A fresh binding pattern `name` (M10).
-    pub fn pattern_bind(&mut self, name: Ident, span: SimpleSpan) -> PatternId {
+    pub fn pattern_bind(&mut self, name: Ident, span: Span) -> PatternId {
         self.push_pattern(PatternKind::Bind(name), span)
     }
 
     /// `{q, r}` / `{x = quot}` / `{x=0, y=_}` anonymous struct
     /// pattern (M10, literal fields M12); the field list is copied
     /// into the `pattern_field_lists` side arena in written order.
-    pub fn pattern_anon(&mut self, fields: &[PatternField], span: SimpleSpan) -> PatternId {
+    pub fn pattern_anon(&mut self, fields: &[PatternField], span: Span) -> PatternId {
         let fields = self.push_pattern_field_list(fields);
         self.push_pattern(PatternKind::Anon { fields }, span)
     }
@@ -346,14 +346,14 @@ impl Ast {
     /// builds for the paren-less `a, b = e` statement form; the
     /// element list is copied into the `pattern_lists` side arena in
     /// written order.
-    pub fn pattern_positional(&mut self, elems: &[PatternId], span: SimpleSpan) -> PatternId {
+    pub fn pattern_positional(&mut self, elems: &[PatternId], span: Span) -> PatternId {
         let elems = self.push_pattern_list(elems);
         self.push_pattern(PatternKind::Positional(elems), span)
     }
 
     /// A literal match pattern `42` / `-1` / `"quit"` / `true` (M12);
     /// match arms only.
-    pub fn literal_pattern(&mut self, lit: LitPattern, span: SimpleSpan) -> PatternId {
+    pub fn literal_pattern(&mut self, lit: LitPattern, span: Span) -> PatternId {
         self.push_pattern(PatternKind::Literal(lit), span)
     }
 
@@ -365,7 +365,7 @@ impl Ast {
         enum_name: Option<StringId>,
         variant: StringId,
         args: Option<PatternVariantArgs>,
-        span: SimpleSpan,
+        span: Span,
     ) -> PatternId {
         self.push_pattern(
             PatternKind::Variant {
@@ -395,18 +395,13 @@ impl Ast {
     /// One arm of a `match` expression (M12): `pattern: body`. Scalar
     /// payload — the [`Ast::match_expr`] builder copies the arm list
     /// into the `match_arms` side arena.
-    pub fn match_arm(
-        &mut self,
-        pattern: PatternId,
-        body: MatchArmBody,
-        _span: SimpleSpan,
-    ) -> MatchArm {
+    pub fn match_arm(&mut self, pattern: PatternId, body: MatchArmBody, _span: Span) -> MatchArm {
         MatchArm { pattern, body }
     }
 
     /// `match scrutinee:` expression (M12); the arm list is copied
     /// into the `match_arms` side arena in written order.
-    pub fn match_expr(&mut self, scrutinee: ExprId, arms: &[MatchArm], span: SimpleSpan) -> ExprId {
+    pub fn match_expr(&mut self, scrutinee: ExprId, arms: &[MatchArm], span: Span) -> ExprId {
         let arms = self.push_match_arm_list(arms);
         self.push_expr(super::ExprKind::Match { scrutinee, arms }, span)
     }

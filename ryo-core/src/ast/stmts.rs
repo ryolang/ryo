@@ -14,15 +14,15 @@ use super::{
     CompoundOp, ElifList, EnumVariantDeclList, ExprId, ExprList, Ident, PatternId, StmtList,
     StructFieldDeclList, StructFieldInitList, TypeExpr,
 };
+use crate::span::Span;
 use crate::tir::ParamMode;
 use crate::types::VariantKind;
-use chumsky::span::SimpleSpan;
 
 /// A single statement: kind plus inline source span.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stmt {
     pub kind: StmtKind,
-    pub span: SimpleSpan,
+    pub span: Span,
 }
 
 /// The kind of statement. Expression children are [`ExprId`]
@@ -167,7 +167,7 @@ pub struct EnumDef {
 pub struct EnumVariantDecl {
     pub name: Ident,
     pub payload: EnumPayload,
-    pub span: SimpleSpan,
+    pub span: Span,
 }
 
 /// The payload of an enum variant (M11). Named payloads
@@ -232,5 +232,5 @@ pub struct Param {
     pub name: Ident,
     pub type_annotation: TypeExpr,
     pub mode: ParamMode,
-    pub span: SimpleSpan,
+    pub span: Span,
 }

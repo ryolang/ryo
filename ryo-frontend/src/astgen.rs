@@ -18,7 +18,6 @@
 //! threads it directly into `sema::analyze` and from there into
 //! `codegen::compile`; there is no intermediate tree-shaped IR.
 
-use chumsky::span::{SimpleSpan, Span as _};
 use ryo_core::ast;
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::types::{
@@ -30,10 +29,10 @@ use ryo_core::uir::{
 };
 use std::collections::{HashMap, HashSet};
 
-type Span = SimpleSpan;
+type Span = ryo_core::span::Span;
 
 fn synthetic_span() -> Span {
-    crate::spans::cspan(SimpleSpan::new((), 0..0))
+    Span::EMPTY
 }
 
 /// Pre-interned `StringId`s for the primitive type names.

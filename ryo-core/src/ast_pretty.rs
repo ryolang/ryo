@@ -728,10 +728,10 @@ fn write_optional_bound(
 mod tests {
     use super::*;
     use crate::ast::{BinaryOperator, Ident};
-    use chumsky::span::{SimpleSpan, Span};
+    use crate::span::Span;
 
-    fn span(start: usize, end: usize) -> SimpleSpan {
-        SimpleSpan::new((), start..end)
+    fn span(start: usize, end: usize) -> Span {
+        Span::new(start, end)
     }
 
     fn ident(pool: &mut InternPool, name: &str) -> Ident {

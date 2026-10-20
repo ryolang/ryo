@@ -3,7 +3,7 @@ use super::common::*;
 
 #[test]
 fn branch_ids_unique_across_post_loop_if() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -14,7 +14,7 @@ fn branch_ids_unique_across_post_loop_if() {
     let print_name = pool.intern_str("print");
     let lit_a = pool.intern_str("a");
     let lit_b = pool.intern_str("b");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     // fn main() -> void:
     //     while false:

@@ -72,7 +72,6 @@ use super::destructure_extra;
 use super::{ExtraRange, InstData, InstRef, InstTag, Span, Uir, UirBuilder};
 use crate::ast::LitPattern;
 use crate::types::StringId;
-use chumsky::span::Span as _;
 
 /// Layout constants for the [`InstTag::Match`] wire; see the module
 /// header for the full annotated layout.
@@ -573,9 +572,8 @@ fn decode_lit_at(slice: &[u32], pos: usize) -> (LitPattern, usize) {
 /// cursor that ends at `slice.len()` is a trusted-producer invariant.
 fn decode_match_arm(slice: &[u32]) -> UirMatchArmView<'_> {
     let span = Span::new(
-        (),
-        slice[match_extra::PATTERN_SPAN_START] as usize
-            ..slice[match_extra::PATTERN_SPAN_END] as usize,
+        slice[match_extra::PATTERN_SPAN_START] as usize,
+        slice[match_extra::PATTERN_SPAN_END] as usize,
     );
     let mut pos = match_extra::PATTERN_START;
     let pattern = match slice[match_extra::PATTERN_KIND] {
@@ -661,10 +659,9 @@ fn decode_match_arm(slice: &[u32]) -> UirMatchArmView<'_> {
 mod tests {
     use super::*;
     use crate::types::InternPool;
-    use chumsky::span::SimpleSpan;
 
     fn sp() -> Span {
-        SimpleSpan::new((), 0..0)
+        Span::EMPTY
     }
 
     #[test]

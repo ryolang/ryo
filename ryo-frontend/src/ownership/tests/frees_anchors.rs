@@ -7,7 +7,7 @@ fn conditional_dead_reassign_schedules_fallthrough_drop() {
     // The taken arm drops "a" (free_on_reassign) and the drain frees
     // "b"; the NOT-taken path must also free "a" — via an arm-gated
     // ConditionalDeadDrop for the pre-branch owner.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -15,7 +15,7 @@ fn conditional_dead_reassign_schedules_fallthrough_drop() {
     let void = pool.void();
     let main = pool.intern_str("main");
     let s = pool.intern_str("s");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit_a, span);
@@ -57,7 +57,7 @@ fn conditional_reassign_all_arms_reseated_no_drop() {
     // `if c: s = "b" else: s = "d"` — every arm reseats, so the
     // pre-branch buffer is dropped by free_on_reassign on every
     // path; no ConditionalDeadDrop may be scheduled.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -65,7 +65,7 @@ fn conditional_reassign_all_arms_reseated_no_drop() {
     let void = pool.void();
     let main = pool.intern_str("main");
     let s = pool.intern_str("s");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit_a, span);
@@ -99,7 +99,7 @@ fn loop_dead_reassign_anchors_after_loop() {
     // the zero-iteration path, leaking the pre-loop buffer. The
     // after-loop anchor emits the binding's current FatLocals —
     // final value on taken paths, pre-loop value on zero iterations.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -107,7 +107,7 @@ fn loop_dead_reassign_anchors_after_loop() {
     let void = pool.void();
     let main = pool.intern_str("main");
     let s = pool.intern_str("s");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit_a, span);
@@ -145,7 +145,7 @@ fn loop_dead_reassign_with_return_keeps_in_body_free() {
     // When the loop body can `return`, the after-loop anchor
     // is unreachable on the return path — the in-body Free must stay
     // alongside the after-loop one.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -153,7 +153,7 @@ fn loop_dead_reassign_with_return_keeps_in_body_free() {
     let void = pool.void();
     let main = pool.intern_str("main");
     let s = pool.intern_str("s");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit_a, span);
@@ -193,7 +193,7 @@ fn loop_local_dead_value_keeps_in_body_anchor() {
     // pre-loop binding — its Free must stay anchored in the body
     // (the binding's FatLocals don't exist on the zero-iteration
     // path).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -201,7 +201,7 @@ fn loop_local_dead_value_keeps_in_body_anchor() {
     let void = pool.void();
     let main = pool.intern_str("main");
     let t = pool.intern_str("t");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let lit_x = tb.str_const(pool.intern_str("x"), str_ty, span);
@@ -240,7 +240,7 @@ fn last_use_inside_loop_anchors_after_loop() {
     // iteration reads the freed buffer. The value is dead on ALL
     // paths only at the loop exit, so the Free must anchor after
     // the loop statement.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -250,7 +250,7 @@ fn last_use_inside_loop_anchors_after_loop() {
     let s = pool.intern_str("s");
     let i = pool.intern_str("i");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit_a, span);
@@ -289,7 +289,7 @@ fn last_use_inside_if_anchors_after_if() {
     // Same family through an if: `mut s = "a"; if d: print(s)` —
     // anchoring after the in-arm read leaks `s` on the not-taken
     // path; the merge point is where the value is dead on all paths.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -298,7 +298,7 @@ fn last_use_inside_if_anchors_after_if() {
     let main = pool.intern_str("main");
     let s = pool.intern_str("s");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit_a, span);
@@ -331,7 +331,7 @@ fn return_epilogue_frees_live_local() {
     // freed it — the last-use Free anchors in the sibling then-arm,
     // which the else path never reaches. An early return must
     // destroy the function's still-owned locals on ITS path.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -340,7 +340,7 @@ fn return_epilogue_frees_live_local() {
     let main = pool.intern_str("main");
     let s = pool.intern_str("s");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit_a, span);
@@ -372,13 +372,13 @@ fn return_epilogue_skips_consumed_return_value() {
     // `fn f() -> str: s = "a"; return s` — the returned value moved
     // out; an epilogue Free for it would be a use-after-free in the
     // caller.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{TirBuilder, TirData, TirTag};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
     let f = pool.intern_str("f");
     let s = pool.intern_str("s");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(f, vec![], str_ty, span);
     let lit = tb.str_const(pool.intern_str("a"), str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit, span);
@@ -407,7 +407,7 @@ fn return_epilogue_skips_dead_store_owned() {
     // `mut s = "a"; if d: return` with s never read: the dead-store
     // drain already frees `s` right after its declaration (covering
     // every path), so no epilogue Free may be added for it.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -415,7 +415,7 @@ fn return_epilogue_skips_dead_store_owned() {
     let void = pool.void();
     let main = pool.intern_str("main");
     let s = pool.intern_str("s");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit_a, span);
@@ -446,7 +446,7 @@ fn return_epilogue_covers_move_param() {
     // Valid at the early return; the callee must destroy it there
     // (the never-read param's Free anchors after the last body
     // stmt, which the early-return path never reaches).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -454,7 +454,7 @@ fn return_epilogue_covers_move_param() {
     let void = pool.void();
     let f = pool.intern_str("f");
     let s = pool.intern_str("s");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(
         f,
         vec![TirParam {
@@ -556,7 +556,7 @@ fn temp_last_use_inside_loop_not_reanchored() {
     // keep its per-iteration Free (each iteration allocates a fresh
     // value) — the re-anchor applies only to named pre-branch
     // bindings.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -566,7 +566,7 @@ fn temp_last_use_inside_loop_not_reanchored() {
     let i = pool.intern_str("i");
     let int_to_str = pool.intern_str("int_to_str");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let zero = tb.int_const(0, int_ty, span);
     let three = tb.int_const(3, int_ty, span);
@@ -603,7 +603,7 @@ fn temp_last_use_inside_loop_not_reanchored() {
 fn conditional_dead_reassign_gated_on_real_else() {
     // `if c: s = "b" else: <no reassign>` with s unread after —
     // the drop must name the REAL else arm's Flow IR block.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -612,7 +612,7 @@ fn conditional_dead_reassign_gated_on_real_else() {
     let main = pool.intern_str("main");
     let s = pool.intern_str("s");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit_a, span);

@@ -3,7 +3,7 @@ use super::common::*;
 
 #[test]
 fn inside_loop_temp_is_freed() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -13,7 +13,7 @@ fn inside_loop_temp_is_freed() {
     let main = pool.intern_str("main");
     let print_name = pool.intern_str("print");
     let inside = pool.intern_str("inside");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     // fn main() -> void:
     //     while true:
@@ -52,7 +52,7 @@ fn pre_loop_owner_last_use_in_loop_freed_at_loop_exit() {
     // A pre-loop owner whose last-use is inside a loop must be
     // freed on a `break` path that bypasses that last-use, as we
     // are exiting the loop and will never reach the last-use again.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -64,7 +64,7 @@ fn pre_loop_owner_last_use_in_loop_freed_at_loop_exit() {
     let s_name = pool.intern_str("s");
     let int_to_str = pool.intern_str("int_to_str");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     // fn main() -> void:
     //     s: str = int_to_str(0)
@@ -120,7 +120,7 @@ fn pre_loop_owner_continue_before_last_use_does_not_free_on_continue() {
     // A pre-loop owner whose last-use is inside a loop must NOT be
     // freed on a `continue` path, as we will loop back and might
     // read it in the next iteration (causing use-after-free).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -132,7 +132,7 @@ fn pre_loop_owner_continue_before_last_use_does_not_free_on_continue() {
     let s_name = pool.intern_str("s");
     let int_to_str = pool.intern_str("int_to_str");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     // fn main() -> void:
     //     s: str = int_to_str(0)
@@ -191,7 +191,7 @@ fn continue_jump_does_not_free_pre_loop_owner_uaf_guard() {
     // its last use. The defensive emit must NOT fire on continue (would
     // free the buffer the next iteration reads -> UAF). break still frees.
     // Construct: s = "x"; while c: if d: continue; print(s)
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -202,7 +202,7 @@ fn continue_jump_does_not_free_pre_loop_owner_uaf_guard() {
     let c = pool.intern_str("c");
     let d = pool.intern_str("d");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("x"), str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit, span);
@@ -240,7 +240,7 @@ fn continue_jump_does_not_free_pre_loop_owner_uaf_guard() {
 #[test]
 fn continue_jump_does_not_free_pre_loop_owner_uaf_guard_reassigned() {
     // Construct: s = "x"; while c: if d: continue; s = "y"
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -250,7 +250,7 @@ fn continue_jump_does_not_free_pre_loop_owner_uaf_guard_reassigned() {
     let s = pool.intern_str("s");
     let c = pool.intern_str("c");
     let d = pool.intern_str("d");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit1 = tb.str_const(pool.intern_str("x"), str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit1, span);
@@ -287,7 +287,7 @@ fn break_before_last_use_schedules_jump_free() {
     // `print(s)` last-use must trigger a Free anchored on the break
     // instr — otherwise the inside-loop allocation leaks on the break
     // path.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -299,7 +299,7 @@ fn break_before_last_use_schedules_jump_free() {
     let s_name = pool.intern_str("s");
     let int_to_str = pool.intern_str("int_to_str");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     // fn main() -> void:
     //     while true:
@@ -347,7 +347,7 @@ fn break_after_last_use_does_not_double_schedule() {
     // on any path that reaches it. The break/continue scheduler
     // must NOT add a redundant Free anchored on break, or codegen
     // would double-free.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -359,7 +359,7 @@ fn break_after_last_use_does_not_double_schedule() {
     let s_name = pool.intern_str("s");
     let int_to_str = pool.intern_str("int_to_str");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     // fn main() -> void:
     //     while true:
@@ -420,7 +420,7 @@ fn break_in_else_arm_sibling_print_schedules_jump_free() {
     // print's anchor before the break, but on the break path the
     // print never ran — so the buffer leaks unless we schedule a
     // jump-anchored Free here.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -432,7 +432,7 @@ fn break_in_else_arm_sibling_print_schedules_jump_free() {
     let s_name = pool.intern_str("s");
     let int_to_str = pool.intern_str("int_to_str");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     // fn main() -> void:
     //     while true:
@@ -492,7 +492,7 @@ fn break_in_else_arm_sibling_print_schedules_jump_free() {
 #[test]
 fn continue_before_last_use_schedules_jump_free() {
     // Symmetric regression for `continue` instead of `break`.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -504,7 +504,7 @@ fn continue_before_last_use_schedules_jump_free() {
     let s_name = pool.intern_str("s");
     let int_to_str = pool.intern_str("int_to_str");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     // fn main() -> void:
     //     while true:
@@ -547,7 +547,7 @@ fn continue_before_last_use_schedules_jump_free() {
 
 #[test]
 fn pre_loop_owner_read_only_in_loop_is_freed() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -558,7 +558,7 @@ fn pre_loop_owner_read_only_in_loop_is_freed() {
     let s_name = pool.intern_str("s");
     let print_name = pool.intern_str("print");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     // fn main() -> void:
     //     s: str = "hello"
@@ -616,7 +616,7 @@ fn diverged_loop_writes_branch_gated_free_exactly_once() {
     // the fix the scratch walk wrote that DropOp into the REAL sidecar
     // and the re-walk wrote it again — two entries for one arm, the
     // first anchored on a path the merge discarded.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -630,7 +630,7 @@ fn diverged_loop_writes_branch_gated_free_exactly_once() {
     let print = pool.intern_str("print");
     let m_lit = pool.intern_str("m");
     let x_lit = pool.intern_str("x");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_m = tb.str_const(m_lit, str_ty, span);
@@ -715,7 +715,7 @@ fn loop_nesting_chains_depth_three() {
     // correspondence to the old outermost-first stack indexing
     // (position `d` of the stack == the ancestor whose own depth is
     // `d`).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -727,7 +727,7 @@ fn loop_nesting_chains_depth_three() {
     let i = pool.intern_str("i");
     let print = pool.intern_str("print");
     let deep = pool.intern_str("deep");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let start = tb.int_const(0, int_ty, span);
@@ -778,7 +778,7 @@ fn loop_nesting_cond_match_arms_stay_at_loop_depth() {
     // the enclosing frame (it runs with the frame's depth, overwriting
     // the correct depth + 1 entries with shallower ones — consumers
     // like the view-liveness depth compare read this table).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{Discriminant, TirBuilder, TypedMatchArm, TypedMatchBody};
 
     let mut pool = InternPool::new();
@@ -787,7 +787,7 @@ fn loop_nesting_cond_match_arms_stay_at_loop_depth() {
     let void = pool.void();
     let main = pool.intern_str("main");
     let x = pool.intern_str("x");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let x_init = tb.int_const(0, int_ty, span);

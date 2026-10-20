@@ -16,7 +16,12 @@ pub(super) fn lex_and_parse(input: &str) -> Result<(Ast, InternPool), Vec<TestEr
         return Err(sink
             .into_diags()
             .into_iter()
-            .map(|d| Rich::custom(d.span, ParseDiag::Message(d.message)))
+            .map(|d| {
+                Rich::custom(
+                    SimpleSpan::new((), d.span.start..d.span.end),
+                    ParseDiag::Message(d.message),
+                )
+            })
             .collect());
     }
     let token_stream = tokens[..].split_token_span((0..input.len()).into());

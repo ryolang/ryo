@@ -4,5 +4,5 @@
 
 #[inline]
 pub fn cspan(s: chumsky::span::SimpleSpan) -> ryo_core::diag::Span {
-    s
+    ryo_core::span::Span::new(s.start, s.end)
 }

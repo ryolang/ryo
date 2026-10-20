@@ -4,7 +4,7 @@ use crate::builtins::is_borrowed_scalar_param;
 
 #[test]
 fn dead_store_schedules_free_after_decl() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -13,7 +13,7 @@ fn dead_store_schedules_free_after_decl() {
     let main = pool.intern_str("main");
     let s_name = pool.intern_str("s");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     // fn main() -> void: s: str = "hello"   # never read
     let mut tb = TirBuilder::new(main, vec![], void, span);
@@ -103,7 +103,7 @@ fn ryo_panic_str_arg_excluded_via_abi_registry() {
     // `builtins` ABI registry (`is_borrowed_scalar_param`) rather than
     // a `pool.str(name) == "__ryo_panic"` name-match, so the
     // anonymous-temp Free pass does not schedule a Free for it.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -113,7 +113,7 @@ fn ryo_panic_str_arg_excluded_via_abi_registry() {
     let main = pool.intern_str("main");
     let panic_name = pool.intern_str("__ryo_panic");
     let msg = pool.intern_str("boom");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     // fn main() -> void: __ryo_panic("boom", 4)
     let mut tb = TirBuilder::new(main, vec![], void, span);
@@ -160,7 +160,7 @@ fn ryo_panic_str_arg_excluded_via_abi_registry() {
 
 #[test]
 fn last_use_scheduled_for_unmoved_local() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -170,7 +170,7 @@ fn last_use_scheduled_for_unmoved_local() {
     let hello = pool.intern_str("hello");
     let s_name = pool.intern_str("s");
     let print_name = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     // fn main() -> void:
     //     s: str = "hello"
@@ -205,7 +205,7 @@ fn last_use_scheduled_for_unmoved_local() {
 
 #[test]
 fn reassignment_records_free_on_old_owner() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -216,7 +216,7 @@ fn reassignment_records_free_on_old_owner() {
     let hello = pool.intern_str("hello");
     let world = pool.intern_str("world");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     // fn main():
     //     mut s: str = "hello"
@@ -269,7 +269,7 @@ fn reassignment_records_free_on_old_owner() {
 
 #[test]
 fn concat_intermediate_freed_after_consumer() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
     use std::collections::HashSet;
 
@@ -280,7 +280,7 @@ fn concat_intermediate_freed_after_consumer() {
     let print = pool.intern_str("print");
     let a = pool.intern_str("a");
     let b = pool.intern_str("b");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     // print("a" + "b")
     let mut tb = TirBuilder::new(main, vec![], void, span);
@@ -312,7 +312,7 @@ fn concat_intermediate_freed_after_consumer() {
 
 #[test]
 fn last_use_uses_pre_rebind_owner_not_post() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -323,7 +323,7 @@ fn last_use_uses_pre_rebind_owner_not_post() {
     let alice = pool.intern_str("Alice");
     let bob = pool.intern_str("Bob");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     // fn main():
     //     mut n: str = "Alice"
@@ -384,14 +384,14 @@ fn last_use_uses_pre_rebind_owner_not_post() {
 
 #[test]
 fn unconsumed_move_param_schedules_free_at_function_end() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
     let void = pool.void();
     let consume = pool.intern_str("consume"); // fn consume(move s: str) -> void
     let s_name = pool.intern_str("s");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(
         consume,
         vec![TirParam {
@@ -429,7 +429,7 @@ fn read_move_param_frees_after_last_read_not_last_stmt() {
     // fn f(move s: str): print(s); print(42) — the param's Free
     // anchors after its last read (the `Var` inside print(s)),
     // not after the later statement that never touches it.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -438,7 +438,7 @@ fn read_move_param_frees_after_last_read_not_last_stmt() {
     let f = pool.intern_str("f");
     let s_name = pool.intern_str("s");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(
         f,
         vec![TirParam {
@@ -489,7 +489,7 @@ fn param_last_read_inside_loop_frees_after_loop() {
     // last read sits inside the loop; anchoring after it would fire
     // the Free per iteration (UAF on the next iteration's read), so
     // the Free moves to after the loop statement.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -499,7 +499,7 @@ fn param_last_read_inside_loop_frees_after_loop() {
     let s_name = pool.intern_str("s");
     let cond_name = pool.intern_str("cond");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(
         f,
         vec![
@@ -557,7 +557,7 @@ fn never_read_move_param_still_freed_once_after_last_stmt() {
     // fn f(move s: str): print(42) — a never-read owned param must
     // still be freed exactly once, anchored after the last body
     // statement (there is no last read to anchor on).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -566,7 +566,7 @@ fn never_read_move_param_still_freed_once_after_last_stmt() {
     let f = pool.intern_str("f");
     let s_name = pool.intern_str("s");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(
         f,
         vec![TirParam {
@@ -611,7 +611,7 @@ fn never_read_move_param_still_freed_once_after_last_stmt() {
 
 #[test]
 fn conditional_move_param_schedules_branch_gated_free() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -621,7 +621,7 @@ fn conditional_move_param_schedules_branch_gated_free() {
     let s_name = pool.intern_str("s");
     let cond_name = pool.intern_str("cond");
     let take = pool.intern_str("take");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(
         consume_cond,
@@ -680,7 +680,7 @@ fn rebind_then_reassign_does_not_double_free() {
     // current_owner.values() (s moved to temp_b). Without `named_inits`
     // containing temp_a, the anon-temp pass would schedule a second
     // Free for it -> double-free. It must be classified.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -690,7 +690,7 @@ fn rebind_then_reassign_does_not_double_free() {
     let s_name = pool.intern_str("s");
     let a = pool.intern_str("a");
     let b = pool.intern_str("b");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(a, str_ty, span);
@@ -741,7 +741,7 @@ fn rebind_then_reassign_does_not_double_free() {
 #[test]
 fn rebind_then_read_no_double_free() {
     // s = "a"; print(s)  -> temp_a backed by s, last-use frees it once.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -750,7 +750,7 @@ fn rebind_then_read_no_double_free() {
     let s = pool.intern_str("s");
     let a = pool.intern_str("a");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(a, str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit, span);
@@ -785,7 +785,7 @@ fn rebind_in_loop_converges_no_spurious_free() {
     // current_owner.values() and the anon-temp pass schedules a
     // spurious second Free -> double-free. Assert body_lit is
     // scheduled exactly once (static) rather than twice (dynamic).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -795,7 +795,7 @@ fn rebind_in_loop_converges_no_spurious_free() {
     let s = pool.intern_str("s");
     let a = pool.intern_str("a");
     let c = pool.intern_str("c");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(a, str_ty, span);
     let decl = tb.var_decl(s, true, str_ty, lit, span);
@@ -838,7 +838,7 @@ fn reassign_inside_if_still_frees_binding_at_last_use() {
     // reassign-target guard must not skip its last-use Free — on the
     // not-taken path the binding still owns `lit_a`. Codegen emits the
     // Free from the binding's current FatLocals (path-correct buffer).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -847,7 +847,7 @@ fn reassign_inside_if_still_frees_binding_at_last_use() {
     let main = pool.intern_str("main");
     let s = pool.intern_str("s");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit_a, span);

@@ -1,7 +1,6 @@
 use super::*;
 use chumsky::Parser;
 use chumsky::input::Input as _;
-use chumsky::span::{SimpleSpan, Span as _};
 use cranelift::codegen::ir::Value as ClifValue;
 use ryo_core::tir::{ParamMode, Tir, TirBuilder};
 use ryo_core::types::InternPool;
@@ -181,7 +180,7 @@ fn debug_repr_of_unit_enum_value_pushes_name_dot_variant() {
 /// home (non-inlined builtin excluded).
 #[test]
 fn writes_out_slot_matches_codegen_inlined_builtins() {
-    let span = || SimpleSpan::new((), 0..0);
+    let span = || ryo_core::span::Span::EMPTY;
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
     let bool_ty = pool.bool_();

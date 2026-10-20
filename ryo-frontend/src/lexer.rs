@@ -449,7 +449,12 @@ pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Toke
 ///
 /// `body_span` is the span of the unquoted body (the caller computes
 /// it: 1 byte past the opening quote for `"..."`, 2 for `b"..."`).
-fn unescape(inner: &str, body_span: Span, sink: &mut DiagSink, hex_escapes: bool) -> Vec<u8> {
+fn unescape(
+    inner: &str,
+    body_span: ryo_core::span::Span,
+    sink: &mut DiagSink,
+    hex_escapes: bool,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(inner.len());
     // Byte offset within `inner`; tracked manually (rather than
     // `char_indices`) because consuming an escape advances past
@@ -890,7 +895,7 @@ mod tests {
         assert_eq!(diags[0].code, DiagCode::InvalidCharacter);
         assert_eq!(diags[0].message, "invalid character '@'");
         // The `@` sits at byte 4 in "x = @\ny = 2".
-        assert_eq!(diags[0].span, SimpleSpan::new((), 4..5));
+        assert_eq!(diags[0].span, ryo_core::span::Span::new(4, 5));
         // Recovery: a Token::Error placeholder is pushed and lexing
         // continues past the bad byte — the rest of the stream is
         // intact.
@@ -936,7 +941,7 @@ mod tests {
         assert_eq!(diags[0].message, "unknown escape sequence '\\q'");
         // Byte layout: 0:s 1:' ' 2:= 3:' ' 4:'"' 5:a 6:\ 7:n 8:b
         // 9:\ 10:q 11:c 12:'"' — the escape spans 9..11.
-        assert_eq!(diags[0].span, SimpleSpan::new((), 9..11));
+        assert_eq!(diags[0].span, ryo_core::span::Span::new(9, 11));
         let str_tok = toks
             .iter()
             .find_map(|(t, _)| match t {

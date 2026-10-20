@@ -6,7 +6,7 @@ fn param_slice_read_defers_free_to_projection_last_use() {
     // slice projects the param, so its Free defers to the
     // projection's last use (the read inside print(v)), past the
     // param's own last direct read.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -17,7 +17,7 @@ fn param_slice_read_defers_free_to_projection_last_use() {
     let s_name = pool.intern_str("s");
     let v_name = pool.intern_str("v");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(
         f,
         vec![TirParam {
@@ -73,7 +73,7 @@ fn move_and_viewasowner_borrow_of_one_owner_reports_borrow_note() {
     // P6'-converted ViewAsOwner arg borrows the view's ROOT owner, so
     // E0031 must carry the "borrowed here" note (look through the
     // conversion, like the Rule-7 partition does).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -83,11 +83,11 @@ fn move_and_viewasowner_borrow_of_one_owner_reports_borrow_note() {
     let main = pool.intern_str("main");
     let s = pool.intern_str("s");
     let two = pool.intern_str("two");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     // Distinct spans for the move arg and the reborrow chain, so
     // the note can be pinned to the reborrow specifically.
-    let move_span = SimpleSpan::new((), 10..11);
-    let reborrow_span = SimpleSpan::new((), 20..26);
+    let move_span = Span::new(10, 11);
+    let reborrow_span = Span::new(20, 26);
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit, span);
@@ -135,7 +135,7 @@ fn view_creation_registers_projection() {
     // fn main(): s: str = "hello"; v = s[0:2]; print(v)
     // → no diags; root_owner[v] == s; s's free is anchored after
     //   print(v), not after decl (P5 deferral, final spec §3.2).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -148,7 +148,7 @@ fn view_creation_registers_projection() {
     let v = pool.intern_str("v");
     let print = pool.intern_str("print");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -195,7 +195,7 @@ fn view_creation_registers_projection() {
 fn freeze_blocks_move_while_view_live() {
     // s: str = "hello"; v = s[0:2]; consume(s)  (move-mode callee)
     // → SourceProjected at the consume call (P2, final spec §3.2).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -208,7 +208,7 @@ fn freeze_blocks_move_while_view_live() {
     let v = pool.intern_str("v");
     let consume = pool.intern_str("consume");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -252,7 +252,7 @@ fn freeze_blocks_move_while_view_live() {
 fn freeze_blocks_inout_while_view_live() {
     // s: str = "hello"; v = s[0:2]; str_push(&s, "!")
     // → SourceProjected (inout passing mutates the owner; P2).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -266,7 +266,7 @@ fn freeze_blocks_inout_while_view_live() {
     let str_push = pool.intern_str("str_push");
     let hello = pool.intern_str("hello");
     let bang = pool.intern_str("!");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -317,7 +317,7 @@ fn freeze_blocks_inout_while_view_live() {
 fn freeze_lifts_after_last_view_use() {
     // s: str = "hello"; v = s[0:2]; print(v); consume(s)
     // → no diags; s moves legally after v's last use (P4).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -331,7 +331,7 @@ fn freeze_lifts_after_last_view_use() {
     let print = pool.intern_str("print");
     let consume = pool.intern_str("consume");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -366,7 +366,7 @@ fn freeze_lifts_after_last_view_use() {
 fn reslice_projects_root_owner() {
     // s: str = "hello"; v = s[0:3]; w = v[1:2]; consume(s) while w live
     // → SourceProjected naming s; root_owner[w] == s (P3).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -380,7 +380,7 @@ fn reslice_projects_root_owner() {
     let w = pool.intern_str("w");
     let consume = pool.intern_str("consume");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -422,7 +422,7 @@ fn view_return_is_escape() {
     // → sema rejects at signature level (Task 5); this is the
     //   ownership backstop: hand-built TIR with a view return
     //   must produce ViewEscape (E1, final spec §3.3).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{TirBuilder, TirParam};
 
     let mut pool = InternPool::new();
@@ -431,7 +431,7 @@ fn view_return_is_escape() {
     let int_ty = pool.int();
     let bad = pool.intern_str("bad");
     let s = pool.intern_str("s");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let params = vec![TirParam {
         name: s,

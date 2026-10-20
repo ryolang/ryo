@@ -10,14 +10,11 @@ use super::*;
 
 /// Push a bind-or-wildcard pattern node: `_` lexes as an ordinary
 /// identifier, so the wildcard is recognized by name here.
-fn bind_pattern(state: &mut ParseState, name: StringId, span: SimpleSpan) -> PatternId {
+fn bind_pattern(state: &mut ParseState, name: StringId, span: ryo_core::span::Span) -> PatternId {
     if state.pool.str(name) == "_" {
-        state.pattern_wildcard(crate::spans::cspan(span))
+        state.pattern_wildcard(span)
     } else {
-        state.pattern_bind(
-            Ident::new(name, crate::spans::cspan(span)),
-            crate::spans::cspan(span),
-        )
+        state.pattern_bind(Ident::new(name, span), span)
     }
 }
 
@@ -78,8 +75,9 @@ where
     let bind_target = select! { Token::Ident(name) => name }
         .map_with(|name, e: &mut Mx<'a, '_, I>| (name, e.span()));
 
-    let bind = bind_target
-        .map_with(|(name, span), e: &mut Mx<'a, '_, I>| bind_pattern(e.state(), name, span));
+    let bind = bind_target.map_with(|(name, span), e: &mut Mx<'a, '_, I>| {
+        bind_pattern(e.state(), name, crate::spans::cspan(span))
+    });
 
     // One field of an anonymous pattern: a pun (`q`), a wildcard
     // field (`_` or `y = _`), or a rename (`x = quot`). Renaming a
@@ -157,9 +155,13 @@ where
             let start = first.1.start;
             let end = rest.last().map(|(_, s)| s.end).unwrap_or(first.1.end);
             let mut elems = Vec::with_capacity(rest.len() + 1);
-            elems.push(bind_pattern(e.state(), first.0, first.1));
+            elems.push(bind_pattern(
+                e.state(),
+                first.0,
+                crate::spans::cspan(first.1),
+            ));
             for (name, sp) in rest {
-                elems.push(bind_pattern(e.state(), name, sp));
+                elems.push(bind_pattern(e.state(), name, crate::spans::cspan(sp)));
             }
             let target = e
                 .state()

@@ -4,13 +4,12 @@ use crate::lexer::lex;
 use crate::parser::{ParseState, program_parser};
 use chumsky::Parser;
 use chumsky::input::Input;
-use chumsky::span::{SimpleSpan, Span as _};
 use ryo_core::tir::{Tir, TirData, TirTag};
 
 mod warning_buffer;
 
 pub(super) fn sp() -> Span {
-    SimpleSpan::new((), 0..0)
+    Span::EMPTY
 }
 
 pub(super) type RunOk = (Vec<Tir>, InternPool);

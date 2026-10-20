@@ -90,7 +90,7 @@ mod inspector;
 mod patterns;
 mod stmts;
 
-use chumsky::span::{SimpleSpan, Span as _};
+use crate::span::Span;
 pub use patterns::*;
 use std::fmt;
 use std::num::NonZeroU32;
@@ -292,7 +292,7 @@ impl EnumVariantDeclList {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Expr {
     pub kind: ExprKind,
-    pub span: SimpleSpan,
+    pub span: Span,
 }
 
 /// The kind of expression. Children are [`ExprId`] indices into the
@@ -399,11 +399,11 @@ pub enum Literal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ident {
     pub name: StringId,
-    pub span: SimpleSpan,
+    pub span: Span,
 }
 
 impl Ident {
-    pub fn new(name: StringId, span: SimpleSpan) -> Self {
+    pub fn new(name: StringId, span: Span) -> Self {
         Ident { name, span }
     }
 }
@@ -416,7 +416,7 @@ impl Ident {
 /// list-range payload plus the discriminant, 4-byte aligned).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypeExpr {
-    pub span: SimpleSpan,
+    pub span: Span,
     pub kind: TypeExprKind,
 }
 
@@ -443,7 +443,7 @@ pub enum TypeExprKind {
 }
 
 impl TypeExpr {
-    pub fn new(name: StringId, span: SimpleSpan) -> Self {
+    pub fn new(name: StringId, span: Span) -> Self {
         TypeExpr {
             span,
             kind: TypeExprKind::Name {
@@ -453,7 +453,7 @@ impl TypeExpr {
         }
     }
 
-    pub fn view(name: StringId, span: SimpleSpan) -> Self {
+    pub fn view(name: StringId, span: Span) -> Self {
         TypeExpr {
             span,
             kind: TypeExprKind::Name {
@@ -582,7 +582,7 @@ pub struct Ast {
     /// Span covering the first through last top-level statement;
     /// `0..0` for an empty program. Kept for the pretty-printer's
     /// `Program (start..end)` header.
-    span: SimpleSpan,
+    span: Span,
 }
 
 impl Default for Ast {
@@ -600,11 +600,11 @@ impl Ast {
         Ast {
             exprs: vec![Expr {
                 kind: ExprKind::Literal(Literal::Bool(false)),
-                span: SimpleSpan::new((), 0..0),
+                span: Span::EMPTY,
             }],
             stmts: vec![Stmt {
                 kind: StmtKind::Error,
-                span: SimpleSpan::new((), 0..0),
+                span: Span::EMPTY,
             }],
             expr_lists: Vec::new(),
             stmt_lists: Vec::new(),
@@ -615,7 +615,7 @@ impl Ast {
             type_expr_lists: Vec::new(),
             patterns: vec![Pattern {
                 kind: PatternKind::Wildcard,
-                span: SimpleSpan::new((), 0..0),
+                span: Span::EMPTY,
             }],
             pattern_lists: Vec::new(),
             pattern_field_lists: Vec::new(),
@@ -623,7 +623,7 @@ impl Ast {
             match_arms: Vec::new(),
             enum_variants: Vec::new(),
             top_level: Vec::new(),
-            span: SimpleSpan::new((), 0..0),
+            span: Span::EMPTY,
         }
     }
 
@@ -638,12 +638,12 @@ impl Ast {
     }
 
     /// Source span attached to an expression.
-    pub fn expr_span(&self, id: ExprId) -> SimpleSpan {
+    pub fn expr_span(&self, id: ExprId) -> Span {
         self.exprs[id.index()].span
     }
 
     /// Source span attached to a statement.
-    pub fn stmt_span(&self, id: StmtId) -> SimpleSpan {
+    pub fn stmt_span(&self, id: StmtId) -> Span {
         self.stmts[id.index()].span
     }
 
@@ -720,7 +720,7 @@ impl Ast {
 
     /// Span covering the whole program (first through last top-level
     /// statement; `0..0` for an empty program).
-    pub fn span(&self) -> SimpleSpan {
+    pub fn span(&self) -> Span {
         self.span
     }
 
@@ -730,9 +730,9 @@ impl Ast {
     pub fn set_top_level(&mut self, stmts: Vec<StmtId>) {
         self.span = match (stmts.first(), stmts.last()) {
             (Some(&first), Some(&last)) => {
-                SimpleSpan::new((), self.stmt_span(first).start..self.stmt_span(last).end)
+                Span::new(self.stmt_span(first).start, self.stmt_span(last).end)
             }
-            _ => SimpleSpan::new((), 0..0),
+            _ => Span::EMPTY,
         };
         self.top_level = stmts;
     }
@@ -744,7 +744,7 @@ impl Ast {
     /// Push an expression with its span and return its id. Slot 0
     /// is the reserved sentinel, so the first real expression lands
     /// at index 1.
-    fn push_expr(&mut self, kind: ExprKind, span: SimpleSpan) -> ExprId {
+    fn push_expr(&mut self, kind: ExprKind, span: Span) -> ExprId {
         let idx = self.exprs.len();
         self.exprs.push(Expr { kind, span });
         ExprId::from_index(idx)
@@ -752,7 +752,7 @@ impl Ast {
 
     /// Push a statement with its span and return its id; see
     /// [`Self::push_expr`].
-    fn push_stmt(&mut self, kind: StmtKind, span: SimpleSpan) -> StmtId {
+    fn push_stmt(&mut self, kind: StmtKind, span: Span) -> StmtId {
         let idx = self.stmts.len();
         self.stmts.push(Stmt { kind, span });
         StmtId::from_index(idx)
@@ -970,7 +970,7 @@ impl Ast {
 
     /// Parse-time push of one variant declaration into
     /// `enum_variants`.
-    pub fn push_enum_variant(&mut self, name: Ident, payload: EnumPayload, span: SimpleSpan) {
+    pub fn push_enum_variant(&mut self, name: Ident, payload: EnumPayload, span: Span) {
         self.enum_variants.push(EnumVariantDecl {
             name,
             payload,
@@ -993,45 +993,39 @@ impl Ast {
         }
     }
 
-    pub fn literal(&mut self, lit: Literal, span: SimpleSpan) -> ExprId {
+    pub fn literal(&mut self, lit: Literal, span: Span) -> ExprId {
         self.push_expr(ExprKind::Literal(lit), span)
     }
 
-    pub fn literal_int(&mut self, value: i64, span: SimpleSpan) -> ExprId {
+    pub fn literal_int(&mut self, value: i64, span: Span) -> ExprId {
         self.literal(Literal::Int(value), span)
     }
 
-    pub fn literal_float(&mut self, value: f64, span: SimpleSpan) -> ExprId {
+    pub fn literal_float(&mut self, value: f64, span: Span) -> ExprId {
         self.literal(Literal::Float(value), span)
     }
 
-    pub fn literal_str(&mut self, value: StringId, span: SimpleSpan) -> ExprId {
+    pub fn literal_str(&mut self, value: StringId, span: Span) -> ExprId {
         self.literal(Literal::Str(value), span)
     }
 
-    pub fn literal_bytes(&mut self, value: StringId, span: SimpleSpan) -> ExprId {
+    pub fn literal_bytes(&mut self, value: StringId, span: Span) -> ExprId {
         self.literal(Literal::Bytes(value), span)
     }
 
-    pub fn ident(&mut self, name: StringId, span: SimpleSpan) -> ExprId {
+    pub fn ident(&mut self, name: StringId, span: Span) -> ExprId {
         self.push_expr(ExprKind::Ident(name), span)
     }
 
-    pub fn binary(
-        &mut self,
-        op: BinaryOperator,
-        lhs: ExprId,
-        rhs: ExprId,
-        span: SimpleSpan,
-    ) -> ExprId {
+    pub fn binary(&mut self, op: BinaryOperator, lhs: ExprId, rhs: ExprId, span: Span) -> ExprId {
         self.push_expr(ExprKind::BinaryOp(lhs, op, rhs), span)
     }
 
-    pub fn unary(&mut self, op: UnaryOperator, operand: ExprId, span: SimpleSpan) -> ExprId {
+    pub fn unary(&mut self, op: UnaryOperator, operand: ExprId, span: Span) -> ExprId {
         self.push_expr(ExprKind::UnaryOp(op, operand), span)
     }
 
-    pub fn call(&mut self, name: StringId, args: &[ExprId], span: SimpleSpan) -> ExprId {
+    pub fn call(&mut self, name: StringId, args: &[ExprId], span: Span) -> ExprId {
         let args = self.push_expr_list(args);
         self.push_expr(ExprKind::Call(name, args), span)
     }
@@ -1041,7 +1035,7 @@ impl Ast {
         receiver: ExprId,
         method: StringId,
         args: &[ExprId],
-        span: SimpleSpan,
+        span: Span,
     ) -> ExprId {
         let args = self.push_expr_list(args);
         self.push_expr(
@@ -1055,7 +1049,7 @@ impl Ast {
     }
 
     /// Call-site mutable-borrow marker `&expr` (M8.3).
-    pub fn borrow(&mut self, inner: ExprId, span: SimpleSpan) -> ExprId {
+    pub fn borrow(&mut self, inner: ExprId, span: Span) -> ExprId {
         self.push_expr(ExprKind::Borrow(inner), span)
     }
 
@@ -1066,36 +1060,36 @@ impl Ast {
         base: ExprId,
         start: Option<ExprId>,
         end: Option<ExprId>,
-        span: SimpleSpan,
+        span: Span,
     ) -> ExprId {
         self.push_expr(ExprKind::Slice { base, start, end }, span)
     }
 
     /// Scalar indexing `base[index]` (M8.4.2).
-    pub fn index(&mut self, base: ExprId, index: ExprId, span: SimpleSpan) -> ExprId {
+    pub fn index(&mut self, base: ExprId, index: ExprId, span: Span) -> ExprId {
         self.push_expr(ExprKind::Index { base, index }, span)
     }
 
     /// `return <expr>`, or bare `return` when `value` is `None`.
-    pub fn return_stmt(&mut self, value: Option<ExprId>, span: SimpleSpan) -> StmtId {
+    pub fn return_stmt(&mut self, value: Option<ExprId>, span: Span) -> StmtId {
         self.push_stmt(StmtKind::Return(value), span)
     }
 
-    pub fn expr_stmt(&mut self, value: ExprId, span: SimpleSpan) -> StmtId {
+    pub fn expr_stmt(&mut self, value: ExprId, span: Span) -> StmtId {
         self.push_stmt(StmtKind::ExprStmt(value), span)
     }
 
-    pub fn break_stmt(&mut self, span: SimpleSpan) -> StmtId {
+    pub fn break_stmt(&mut self, span: Span) -> StmtId {
         self.push_stmt(StmtKind::Break, span)
     }
 
-    pub fn continue_stmt(&mut self, span: SimpleSpan) -> StmtId {
+    pub fn continue_stmt(&mut self, span: Span) -> StmtId {
         self.push_stmt(StmtKind::Continue, span)
     }
 
     /// Placeholder for an unparseable statement recovered by the
     /// parser; astgen lowers it to nothing.
-    pub fn error_stmt(&mut self, span: SimpleSpan) -> StmtId {
+    pub fn error_stmt(&mut self, span: Span) -> StmtId {
         self.push_stmt(StmtKind::Error, span)
     }
 
@@ -1105,7 +1099,7 @@ impl Ast {
         name: Ident,
         type_annotation: Option<TypeExpr>,
         initializer: ExprId,
-        span: SimpleSpan,
+        span: Span,
     ) -> StmtId {
         self.push_stmt(
             StmtKind::VarDecl(VarDecl {
@@ -1127,7 +1121,7 @@ impl Ast {
         name: Ident,
         fields: &[(StringId, TypeExpr)],
         attrs: StructAttrs,
-        span: SimpleSpan,
+        span: Span,
     ) -> StmtId {
         let fields = self.push_struct_field_decl_list(fields);
         self.push_stmt(
@@ -1150,7 +1144,7 @@ impl Ast {
         name: Ident,
         variants: EnumVariantDeclList,
         attrs: EnumAttrs,
-        span: SimpleSpan,
+        span: Span,
     ) -> StmtId {
         self.push_stmt(
             StmtKind::EnumDef(EnumDef {
@@ -1170,7 +1164,7 @@ impl Ast {
         &mut self,
         name: Option<Ident>,
         fields: &[(StringId, ExprId)],
-        span: SimpleSpan,
+        span: Span,
     ) -> ExprId {
         let fields = self.push_struct_field_init_list(fields);
         self.push_expr(
@@ -1189,7 +1183,7 @@ impl Ast {
         enum_name: Ident,
         variant: Ident,
         args: Option<VariantArgs>,
-        span: SimpleSpan,
+        span: Span,
     ) -> ExprId {
         self.push_expr(
             ExprKind::VariantConstruct(VariantConstruct {
@@ -1215,7 +1209,7 @@ impl Ast {
         id: ExprId,
         variant: Ident,
         args: Option<VariantArgs>,
-        span: SimpleSpan,
+        span: Span,
     ) -> ExprId {
         let node = &mut self.exprs[id.index()];
         let ExprKind::Ident(enum_name) = node.kind else {
@@ -1235,11 +1229,7 @@ impl Ast {
     /// written order. Yields the inline [`TypeExpr`] value — type
     /// expressions are packed into their parent node's payload, not
     /// arena-allocated.
-    pub fn type_expr_anon(
-        &mut self,
-        fields: &[(StringId, TypeExpr)],
-        span: SimpleSpan,
-    ) -> TypeExpr {
+    pub fn type_expr_anon(&mut self, fields: &[(StringId, TypeExpr)], span: Span) -> TypeExpr {
         let fields = self.push_type_field_list(fields);
         TypeExpr {
             span,
@@ -1250,7 +1240,7 @@ impl Ast {
     /// Positional type expression `(int, str)` (M10); the element
     /// list is copied into the `type_expr_lists` side arena in
     /// written order.
-    pub fn type_expr_positional(&mut self, elems: &[TypeExpr], span: SimpleSpan) -> TypeExpr {
+    pub fn type_expr_positional(&mut self, elems: &[TypeExpr], span: Span) -> TypeExpr {
         let elems = self.push_type_expr_list(elems);
         TypeExpr {
             span,
@@ -1262,16 +1252,16 @@ impl Ast {
     // `literal_pattern`, `match_expr`, ...) live in `ast/patterns.rs`.
 
     /// Destructuring assignment `pattern = value` (M10).
-    pub fn destructure(&mut self, target: PatternId, value: ExprId, span: SimpleSpan) -> StmtId {
+    pub fn destructure(&mut self, target: PatternId, value: ExprId, span: Span) -> StmtId {
         self.push_stmt(StmtKind::Destructure { target, value }, span)
     }
 
     /// Field access `object.field` (M9).
-    pub fn field_access(&mut self, object: ExprId, field: Ident, span: SimpleSpan) -> ExprId {
+    pub fn field_access(&mut self, object: ExprId, field: Ident, span: Span) -> ExprId {
         self.push_expr(ExprKind::FieldAccess { object, field }, span)
     }
 
-    pub fn assign_or_decl(&mut self, target: Ident, value: ExprId, span: SimpleSpan) -> StmtId {
+    pub fn assign_or_decl(&mut self, target: Ident, value: ExprId, span: Span) -> StmtId {
         self.push_stmt(StmtKind::AssignOrDecl { target, value }, span)
     }
 
@@ -1280,14 +1270,14 @@ impl Ast {
         target: Ident,
         op: CompoundOp,
         value: ExprId,
-        span: SimpleSpan,
+        span: Span,
     ) -> StmtId {
         self.push_stmt(StmtKind::CompoundAssign { target, op, value }, span)
     }
 
     /// Field-path assignment `p.x = v` (M9); `target` is the
     /// `FieldAccess` chain.
-    pub fn field_assign(&mut self, target: ExprId, value: ExprId, span: SimpleSpan) -> StmtId {
+    pub fn field_assign(&mut self, target: ExprId, value: ExprId, span: Span) -> StmtId {
         self.push_stmt(StmtKind::FieldAssign { target, value }, span)
     }
 
@@ -1297,12 +1287,12 @@ impl Ast {
         target: ExprId,
         op: CompoundOp,
         value: ExprId,
-        span: SimpleSpan,
+        span: Span,
     ) -> StmtId {
         self.push_stmt(StmtKind::CompoundFieldAssign { target, op, value }, span)
     }
 
-    pub fn while_loop(&mut self, cond: ExprId, body: &[StmtId], span: SimpleSpan) -> StmtId {
+    pub fn while_loop(&mut self, cond: ExprId, body: &[StmtId], span: Span) -> StmtId {
         let body = self.push_stmt_list(body);
         self.push_stmt(StmtKind::WhileLoop { cond, body }, span)
     }
@@ -1314,7 +1304,7 @@ impl Ast {
         start: ExprId,
         end: ExprId,
         body: &[StmtId],
-        span: SimpleSpan,
+        span: Span,
     ) -> StmtId {
         let body = self.push_stmt_list(body);
         self.push_stmt(
@@ -1338,7 +1328,7 @@ impl Ast {
         then_stmts: &[StmtId],
         elif_branches: &[(ExprId, StmtList)],
         else_stmts: Option<&[StmtId]>,
-        span: SimpleSpan,
+        span: Span,
     ) -> StmtId {
         let then_block = self.push_stmt_list(then_stmts);
         let elif_branches = self.push_elif_list(elif_branches);
@@ -1360,7 +1350,7 @@ impl Ast {
         params: &[Param],
         return_type: Option<TypeExpr>,
         body: &[StmtId],
-        span: SimpleSpan,
+        span: Span,
     ) -> StmtId {
         let body = self.push_stmt_list(body);
         self.push_stmt(
@@ -1381,8 +1371,8 @@ mod tests {
     use crate::tir::ParamMode;
     use crate::types::InternPool;
 
-    fn span(start: usize, end: usize) -> SimpleSpan {
-        SimpleSpan::new((), start..end)
+    fn span(start: usize, end: usize) -> Span {
+        Span::new(start, end)
     }
 
     #[test]
@@ -1564,7 +1554,7 @@ mod tests {
         let mut ast = Ast::new();
         let mut pool = InternPool::new();
         let id = pool.intern_bytes(b"\x01\x02");
-        let span = SimpleSpan::new((), 0..8);
+        let span = Span::new(0, 8);
         let e = ast.literal_bytes(id, span);
         match ast.expr(e).kind {
             ExprKind::Literal(Literal::Bytes(got)) => assert_eq!(got, id),
@@ -1578,7 +1568,7 @@ mod tests {
         let mut ast = Ast::new();
         let mut pool = InternPool::new();
         let b = pool.intern_str("b");
-        let span = SimpleSpan::new((), 0..4);
+        let span = Span::new(0, 4);
         let base = ast.ident(b, span);
         let idx = ast.literal_int(0, span);
         let e = ast.index(base, idx, span);

@@ -237,14 +237,14 @@ fn validator_rejects_distinct_targets_aliasing_one_place_at_one_position() {
 /// return statement.
 #[test]
 fn validator_accepts_same_target_double_anchor_by_design() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
     let void = pool.void();
     let consume = pool.intern_str("consume");
     let s_name = pool.intern_str("s");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(
         consume,
         vec![TirParam {
@@ -638,14 +638,14 @@ fn path_checks_accept_sibling_arm_drops() {
 /// checks.
 #[test]
 fn path_checks_accept_by_design_double_anchor() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
     let void = pool.void();
     let consume = pool.intern_str("consume");
     let s_name = pool.intern_str("s");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(
         consume,
         vec![TirParam {

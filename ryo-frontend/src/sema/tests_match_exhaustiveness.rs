@@ -11,7 +11,6 @@ use super::*;
 use crate::astgen;
 use crate::lexer::lex;
 use crate::parser::{ParseState, program_parser};
-use chumsky::span::Span as _;
 use chumsky::{Parser, input::Input};
 use ryo_core::tir::TirTag;
 use std::path::Path;
@@ -127,8 +126,7 @@ fn e0129_anchor_is_the_match_expression() {
         .expect("E0129 must fire");
     let match_start = src.find("\tmatch c:").expect("match line") + "\t".len();
     assert_eq!(
-        diag.span.start(),
-        match_start,
+        diag.span.start, match_start,
         "E0129 must start at the `match` keyword, got {:?}",
         diag.span
     );
@@ -284,7 +282,7 @@ fn arm_after_wildcard_is_w0005_for_every_shape() {
         warns[1].message
     );
     assert!(
-        warns[0].span.start() < warns[1].span.start(),
+        warns[0].span.start < warns[1].span.start,
         "spans follow arm order"
     );
     assert_eq!(diags.len(), 2, "no other diagnostics: {diags:?}");
@@ -333,8 +331,7 @@ fn duplicate_literal_arm_is_w0005_on_the_second() {
     let second = src.find("\t\t42: 2").expect("second arm line");
     let body = second + "\t\t42: ".len();
     assert_eq!(
-        warn.span.start(),
-        body,
+        warn.span.start, body,
         "W0005 must anchor on the redundant arm's body, got {:?}",
         warn.span
     );
@@ -358,8 +355,7 @@ fn duplicate_variant_arm_is_w0005_on_the_second() {
     let second = src.find("\t\tRed: 2").expect("second arm line");
     let body = second + "\t\tRed: ".len();
     assert_eq!(
-        warn.span.start(),
-        body,
+        warn.span.start, body,
         "W0005 must anchor on the redundant arm's body, got {:?}",
         warn.span
     );

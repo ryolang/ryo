@@ -15,9 +15,7 @@
 //! and cycle detection later is a pure additive change here instead
 //! of another diagnostics rewrite.
 
-use chumsky::span::{SimpleSpan, Span as _};
-
-pub type Span = SimpleSpan;
+pub use crate::span::Span;
 
 /// Soft cap on how many diagnostics a single sink will retain.
 ///
@@ -520,7 +518,7 @@ impl DiagSink {
             // its own DiagCode so downstream tooling can spot the
             // suppression note reliably.
             self.diags.push(Diag {
-                span: SimpleSpan::new((), 0..0),
+                span: Span::EMPTY,
                 severity: Severity::Note,
                 code: DiagCode::TooManyDiagnostics,
                 message: format!(
@@ -540,7 +538,7 @@ impl DiagSink {
 /// lets the pipeline map each failure mode to its own `DiagCode`
 /// without scraping message text; the structured variants are inline
 /// data with no heap allocation. `Display` produces the user-facing
-/// message (chumsky requires `C: Display` on the payload).
+/// message (the parser's custom error payload requires `Display`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseDiag {
     /// `a < b < c` / `a == b == c`; the `Rich` span points at the
@@ -797,7 +795,7 @@ mod tests {
     use super::*;
 
     fn span() -> Span {
-        SimpleSpan::new((), 0..0)
+        Span::EMPTY
     }
 
     #[test]

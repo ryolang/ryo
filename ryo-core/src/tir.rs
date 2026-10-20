@@ -59,13 +59,12 @@
 
 use crate::ast::CompoundOp;
 use crate::types::{InternPool, StringId, TypeId};
-use chumsky::span::{SimpleSpan, Span as _};
 use std::collections::HashSet;
 use std::num::NonZeroU32;
 
 mod version;
 
-pub type Span = SimpleSpan;
+pub use crate::span::Span;
 
 // ---------- TirRef ----------
 
@@ -567,7 +566,7 @@ impl TirBuilder {
         // Slot 0 is the reserved sentinel — never read, never
         // referenced. Pushing a placeholder keeps `TirRef` indices
         // 1-based without runtime checks on every read.
-        let placeholder_span = SimpleSpan::new((), 0..0);
+        let placeholder_span = Span::EMPTY;
         let placeholder = TypedInst {
             tag: TirTag::Unreachable,
             ty: TypeId::from_raw(u32::MAX),

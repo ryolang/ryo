@@ -7,7 +7,6 @@
 use super::tests::*;
 use super::tests_match::{match_in_var_init, match_stmt_operand};
 use super::*;
-use chumsky::span::Span as _;
 use ryo_core::tir::{Discriminant, MatchBinding, MatchBodyView, TirRef, TirTag};
 
 // ---------- Arm typing (E0133-E0135) + typed TIR Match ----------
@@ -204,8 +203,7 @@ fn arm_type_mismatch_is_e0134_naming_both_types() {
     }
     let body = src.find("\"s\"").expect("the str arm body");
     assert_eq!(
-        diag.span.start(),
-        body,
+        diag.span.start, body,
         "E0134 anchors on the offending arm body, got {:?}",
         diag.span
     );
@@ -234,11 +232,11 @@ fn arm_type_mismatch_notes_every_later_offender() {
         .find(|d| d.code == DiagCode::ArmTypeMismatch)
         .expect("E0134 must fire");
     let first = src.find("\"a\"").expect("the str arm body");
-    assert_eq!(diag.span.start(), first, "primary on the first offender");
+    assert_eq!(diag.span.start, first, "primary on the first offender");
     assert_eq!(diag.notes.len(), 1, "one note for the other arm: {diag:?}");
     let later = src.find("true\n").expect("the bool arm body");
     assert_eq!(
-        diag.notes[0].span.map(|s| s.start()),
+        diag.notes[0].span.map(|s| s.start),
         Some(later),
         "the note anchors on the later offender's body, got {:?}",
         diag.notes[0]
@@ -284,8 +282,7 @@ fn falling_statement_arm_in_value_match_is_e0135() {
         .expect("E0135 must fire");
     let body = src.find("x = 5").expect("the falling arm body");
     assert_eq!(
-        diag.span.start(),
-        body,
+        diag.span.start, body,
         "E0135 anchors on the falling arm body, got {:?}",
         diag.span
     );
@@ -482,8 +479,7 @@ fn arm_bindings_do_not_leak_past_the_match() {
         .expect("the post-match reference must not resolve");
     let use_site = src.rfind("print(v)").expect("the post-match use") + "print(".len();
     assert_eq!(
-        diag.span.start(),
-        use_site,
+        diag.span.start, use_site,
         "the unresolved use anchors on `v`, got {:?}",
         diag.span
     );

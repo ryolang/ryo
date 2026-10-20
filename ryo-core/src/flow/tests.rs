@@ -4,10 +4,9 @@
 use super::*;
 use crate::tir::{TirBuilder, TirTag, TypedMatchArm, TypedMatchBody};
 use crate::types::InternPool;
-use chumsky::span::{SimpleSpan, Span as _};
 
 fn sp() -> Span {
-    SimpleSpan::new((), 0..0)
+    Span::EMPTY
 }
 
 struct Ctx {

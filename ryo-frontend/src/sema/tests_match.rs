@@ -12,7 +12,6 @@
 
 use super::tests::*;
 use super::*;
-use chumsky::span::Span as _;
 use ryo_core::tir::{Discriminant, TirData, TirRef, TirTag};
 
 /// The operand of the statement at `stmt_idx` of `main` when it is an
@@ -86,8 +85,7 @@ fn void_scrutinee_is_rejected_with_e0136() {
     let line_start = src.find("\tmatch void_fn():").expect("match line");
     let scrut_start = line_start + "\tmatch ".len();
     assert_eq!(
-        diag.span.start(),
-        scrut_start,
+        diag.span.start, scrut_start,
         "E0136 must underline the scrutinee, got {:?}",
         diag.span
     );
@@ -419,7 +417,7 @@ fn two_broken_arms_both_report_and_anchor_per_arm() {
         2,
         "one E0131 per broken arm: {diags:?}"
     );
-    assert!(diags[0].span.start() < diags[1].span.start());
+    assert!(diags[0].span.start < diags[1].span.start);
 }
 
 #[test]
