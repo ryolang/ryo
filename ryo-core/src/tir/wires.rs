@@ -27,10 +27,55 @@ fn len_u32(len: usize) -> u32 {
 /// pass consumes these modes directly from the `CallView` payload to
 /// determine parameter move/borrow conventions.
 pub mod call_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::{ExtraList, ExtraRange, ExtraValue};
+    use crate::tir::{ParamMode, TirRef};
+    use crate::types::StringId;
+
     pub const NAME: usize = 0;
     pub const ARGC: usize = 1;
     pub const ARGS: usize = 2;
     // MODES occupies ARGS+argc .. ARGS+2*argc (one u32 per arg).
+
+    pub struct CallView<'a> {
+        pub name: StringId,
+        pub args: ExtraList<'a, TirRef>,
+        /// Per-argument call convention, parallel to `args`. Stamped by
+        /// sema from each callee parameter's `mode` field.
+        pub modes: ExtraList<'a, ParamMode>,
+    }
+
+    /// Encode a `Call` payload into `extra`, returning its range.
+    pub fn encode(
+        extra: &mut Vec<u32>,
+        name: StringId,
+        args: &[TirRef],
+        modes: &[ParamMode],
+    ) -> ExtraRange {
+        assert_eq!(
+            modes.len(),
+            args.len(),
+            "TirBuilder::call: one ParamMode per arg"
+        );
+        let offset = extra_offset(extra);
+        extra.push(name.raw());
+        extra.push(len_u32(args.len()));
+        extra.extend(args.iter().map(|a| a.to_extra()));
+        extra.extend(modes.iter().map(|m| m.to_extra()));
+        ExtraRange {
+            offset,
+            len: len_u32(ARGS + 2 * args.len()),
+        }
+    }
+
+    /// Decode a `Call` payload from its words.
+    pub fn decode<'a>(words: &'a [u32]) -> CallView<'a> {
+        let name = StringId::from_raw(words[NAME]);
+        let argc = words[ARGC] as usize;
+        let args = ExtraList::new(&words[ARGS..ARGS + argc]);
+        let modes = ExtraList::new(&words[ARGS + argc..ARGS + 2 * argc]);
+        CallView { name, args, modes }
+    }
 }
 
 /// Layout in `extra` for [`TirTag::VarDecl`]:
@@ -194,9 +239,38 @@ pub mod compound_assign_extra {
 ///   [2..2+n]  body stmts: TirRef.raw() each
 /// ```
 pub mod while_loop_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::{ExtraList, ExtraRange, ExtraValue};
+    use crate::tir::TirRef;
+
     pub const COND: usize = 0;
     pub const BODY_COUNT: usize = 1;
     pub const BODY_START: usize = 2;
+
+    pub struct WhileLoopView<'a> {
+        pub cond: TirRef,
+        pub body: ExtraList<'a, TirRef>,
+    }
+
+    /// Encode a `WhileLoop` payload into `extra`, returning its range.
+    pub fn encode(extra: &mut Vec<u32>, cond: TirRef, body: &[TirRef]) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(cond.raw());
+        extra.push(len_u32(body.len()));
+        extra.extend(body.iter().map(|s| s.to_extra()));
+        ExtraRange {
+            offset,
+            len: len_u32(BODY_START + body.len()),
+        }
+    }
+
+    /// Decode a `WhileLoop` payload from its words.
+    pub fn decode<'a>(words: &'a [u32]) -> WhileLoopView<'a> {
+        WhileLoopView {
+            cond: TirRef::from_raw(words[COND]),
+            body: ExtraList::new(&words[BODY_START..]),
+        }
+    }
 }
 
 /// Layout in `extra` for [`TirTag::ForRange`]:
@@ -209,11 +283,53 @@ pub mod while_loop_extra {
 ///   [4..4+n]  body stmts: TirRef.raw() each
 /// ```
 pub mod for_range_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::{ExtraList, ExtraRange, ExtraValue};
+    use crate::tir::TirRef;
+    use crate::types::StringId;
+
     pub const VAR_NAME: usize = 0;
     pub const START: usize = 1;
     pub const END: usize = 2;
     pub const BODY_COUNT: usize = 3;
     pub const BODY_START: usize = 4;
+
+    pub struct ForRangeView<'a> {
+        pub var_name: StringId,
+        pub start: TirRef,
+        pub end: TirRef,
+        pub body: ExtraList<'a, TirRef>,
+    }
+
+    /// Encode a `ForRange` payload into `extra`, returning its range.
+    pub fn encode(
+        extra: &mut Vec<u32>,
+        var_name: StringId,
+        start: TirRef,
+        end: TirRef,
+        body: &[TirRef],
+    ) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(var_name.raw());
+        extra.push(start.raw());
+        extra.push(end.raw());
+        extra.push(len_u32(body.len()));
+        extra.extend(body.iter().map(|s| s.to_extra()));
+        ExtraRange {
+            offset,
+            len: len_u32(BODY_START + body.len()),
+        }
+    }
+
+    /// Decode a `ForRange` payload from its words.
+    pub fn decode<'a>(words: &'a [u32]) -> ForRangeView<'a> {
+        ForRangeView {
+            var_name: StringId::from_raw(words[VAR_NAME]),
+            start: TirRef::from_raw(words[START]),
+            end: TirRef::from_raw(words[END]),
+            body: ExtraList::new(&words[BODY_START..]),
+        }
+    }
 }
 
 /// Layout in `extra` for [`TirTag::StructLit`] (M9):

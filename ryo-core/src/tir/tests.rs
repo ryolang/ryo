@@ -368,7 +368,13 @@ fn call_wire_fixture() {
     assert_eq!(range, ExtraRange { offset: 5, len: 2 });
     assert_eq!(&b.extra[5..7], &[7, 0]);
 
-    let pop = b.call(name, &[arg1, arg2], &[ParamMode::Move, ParamMode::Inout], int_ty, sp());
+    let pop = b.call(
+        name,
+        &[arg1, arg2],
+        &[ParamMode::Move, ParamMode::Inout],
+        int_ty,
+        sp(),
+    );
     let TirData::Extra(range2) = b.instructions[pop.index()].data else {
         panic!("Call must carry TirData::Extra");
     };

@@ -1,24 +1,19 @@
 pub use super::wires::assign_extra::AssignView;
+pub use super::wires::call_extra::CallView;
 pub use super::wires::compound_assign_extra::CompoundAssignView;
 pub use super::wires::compound_field_assign_extra::CompoundFieldAssignView;
 pub use super::wires::field_assign_extra::FieldAssignView;
+pub use super::wires::for_range_extra::ForRangeView;
 pub use super::wires::var_decl_extra::VarDeclView;
+pub use super::wires::while_loop_extra::WhileLoopView;
 use super::{
-    ExtraList, ParamMode, StringId, Tir, TirData, TirRef, TirTag, TypeId, assign_extra, call_extra,
+    ExtraList, Tir, TirData, TirRef, TirTag, TypeId, assign_extra, call_extra,
     compound_assign_extra, compound_field_assign_extra, enum_lit_extra, field_assign_extra,
     for_range_extra, read_ref_list_view, skip_ref_list, struct_lit_extra, var_decl_extra,
     while_loop_extra,
 };
 
 // ---------- Read-side helpers ----------
-
-pub struct CallView<'a> {
-    pub name: StringId,
-    pub args: ExtraList<'a, TirRef>,
-    /// Per-argument call convention, parallel to `args`. Stamped by
-    /// sema from each callee parameter's `mode` field.
-    pub modes: ExtraList<'a, ParamMode>,
-}
 
 #[derive(Clone, Copy)]
 pub struct TirElifView<'a> {
@@ -106,18 +101,6 @@ pub struct TirIfStmtView<'a> {
     pub else_stmts: Option<ExtraList<'a, TirRef>>,
 }
 
-pub struct WhileLoopView<'a> {
-    pub cond: TirRef,
-    pub body: ExtraList<'a, TirRef>,
-}
-
-pub struct ForRangeView<'a> {
-    pub var_name: StringId,
-    pub start: TirRef,
-    pub end: TirRef,
-    pub body: ExtraList<'a, TirRef>,
-}
-
 /// Borrowed view of a [`TirTag::StructLit`] payload (M9). Fields are
 /// `(field_index, value)` pairs in canonical declaration order.
 pub struct StructLitView<'a> {
@@ -168,12 +151,7 @@ impl Tir {
             TirData::Extra(rng) => rng,
             _ => unreachable!("Call must carry TirData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        let name = StringId::from_raw(slice[call_extra::NAME]);
-        let argc = slice[call_extra::ARGC] as usize;
-        let args = ExtraList::new(&slice[call_extra::ARGS..call_extra::ARGS + argc]);
-        let modes = ExtraList::new(&slice[call_extra::ARGS + argc..call_extra::ARGS + 2 * argc]);
-        CallView { name, args, modes }
+        call_extra::decode(&self.extra[range.as_range()])
     }
 
     pub fn var_decl_view(&self, r: TirRef) -> VarDeclView {
@@ -268,10 +246,7 @@ impl Tir {
             TirData::Extra(rng) => rng,
             _ => unreachable!("WhileLoop must carry TirData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        let cond = TirRef::from_raw(slice[while_loop_extra::COND]);
-        let body = ExtraList::new(&slice[while_loop_extra::BODY_START..]);
-        WhileLoopView { cond, body }
+        while_loop_extra::decode(&self.extra[range.as_range()])
     }
 
     /// Borrow the statement refs in a `WhileLoop` body from the extra arena.
@@ -282,8 +257,7 @@ impl Tir {
             TirData::Extra(rng) => rng,
             _ => unreachable!("WhileLoop must carry TirData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        ExtraList::new(&slice[while_loop_extra::BODY_START..])
+        while_loop_extra::decode(&self.extra[range.as_range()]).body
     }
 
     pub fn for_range_view(&self, r: TirRef) -> ForRangeView<'_> {
@@ -293,17 +267,7 @@ impl Tir {
             TirData::Extra(rng) => rng,
             _ => unreachable!("ForRange must carry TirData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        let var_name = StringId::from_raw(slice[for_range_extra::VAR_NAME]);
-        let start = TirRef::from_raw(slice[for_range_extra::START]);
-        let end = TirRef::from_raw(slice[for_range_extra::END]);
-        let body = ExtraList::new(&slice[for_range_extra::BODY_START..]);
-        ForRangeView {
-            var_name,
-            start,
-            end,
-            body,
-        }
+        for_range_extra::decode(&self.extra[range.as_range()])
     }
 
     /// Borrow the statement refs in a `ForRange` body from the extra arena.
@@ -314,8 +278,7 @@ impl Tir {
             TirData::Extra(rng) => rng,
             _ => unreachable!("ForRange must carry TirData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        ExtraList::new(&slice[for_range_extra::BODY_START..])
+        for_range_extra::decode(&self.extra[range.as_range()]).body
     }
 
     pub fn struct_lit_view(&self, r: TirRef) -> StructLitView<'_> {

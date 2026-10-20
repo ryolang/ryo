@@ -787,27 +787,8 @@ impl TirBuilder {
         ty: TypeId,
         span: Span,
     ) -> TirRef {
-        assert_eq!(
-            modes.len(),
-            args.len(),
-            "TirBuilder::call: one ParamMode per arg"
-        );
-        let offset = self.extra_offset();
-        self.extra.push(name.raw());
-        self.extra.push(Self::len_u32(args.len()));
-        for a in args {
-            self.extra.push(a.raw());
-        }
-        for m in modes {
-            self.extra.push(m.to_u32());
-        }
-        let len = Self::len_u32(call_extra::ARGS + 2 * args.len());
-        self.push(
-            TirTag::Call,
-            ty,
-            TirData::Extra(ExtraRange { offset, len }),
-            span,
-        )
+        let range = call_extra::encode(&mut self.extra, name, args, modes);
+        self.push(TirTag::Call, ty, TirData::Extra(range), span)
     }
 
     /// Emit a `VarDecl`. `var_ty` is the variable's resolved type
@@ -883,22 +864,8 @@ impl TirBuilder {
     }
 
     pub fn while_loop(&mut self, cond: TirRef, body: &[TirRef], ty: TypeId, span: Span) -> TirRef {
-        let offset = self.extra_offset();
-        self.extra.push(cond.raw());
-        self.extra.push(Self::len_u32(body.len()));
-        for &stmt in body {
-            self.extra.push(stmt.raw());
-        }
-        let len = while_loop_extra::BODY_START + body.len();
-        self.push(
-            TirTag::WhileLoop,
-            ty,
-            TirData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(len),
-            }),
-            span,
-        )
+        let range = while_loop_extra::encode(&mut self.extra, cond, body);
+        self.push(TirTag::WhileLoop, ty, TirData::Extra(range), span)
     }
 
     pub fn for_range(
@@ -910,24 +877,8 @@ impl TirBuilder {
         ty: TypeId,
         span: Span,
     ) -> TirRef {
-        let offset = self.extra_offset();
-        self.extra.push(var_name.raw());
-        self.extra.push(start.raw());
-        self.extra.push(end.raw());
-        self.extra.push(Self::len_u32(body.len()));
-        for &stmt in body {
-            self.extra.push(stmt.raw());
-        }
-        let len = for_range_extra::BODY_START + body.len();
-        self.push(
-            TirTag::ForRange,
-            ty,
-            TirData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(len),
-            }),
-            span,
-        )
+        let range = for_range_extra::encode(&mut self.extra, var_name, start, end, body);
+        self.push(TirTag::ForRange, ty, TirData::Extra(range), span)
     }
 
     /// Emit a `StructLit` (M9). `fields` are `(field_index, value)`
