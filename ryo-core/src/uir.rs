@@ -1475,6 +1475,80 @@ mod tests {
     }
 
     #[test]
+    fn if_stmt_wire_fixture() {
+        let mut b = UirBuilder::new();
+        b.uir.extra.extend([0xAAAA_AAAA; 5]);
+        let cond = InstRef::from_raw(11);
+        let t1 = InstRef::from_raw(21);
+        let c12 = InstRef::from_raw(12);
+        let b22 = InstRef::from_raw(22);
+        let c13 = InstRef::from_raw(13);
+        let e23 = InstRef::from_raw(23);
+
+        let no_else = b.if_stmt(cond, &[t1], &[], None, sp());
+        let InstData::Extra(range) = b.uir.inst(no_else).data else {
+            panic!("IfStmt must carry InstData::Extra");
+        };
+        assert_eq!(range, ExtraRange { offset: 5, len: 5 });
+        assert_eq!(&b.uir.extra[5..10], &[11, 1, 21, 0, 0]);
+
+        let empty_else = b.if_stmt(cond, &[t1], &[], Some(&[]), sp());
+        let InstData::Extra(range2) = b.uir.inst(empty_else).data else {
+            panic!("IfStmt must carry InstData::Extra");
+        };
+        assert_eq!(range2, ExtraRange { offset: 10, len: 6 });
+        assert_eq!(&b.uir.extra[10..16], &[11, 1, 21, 0, 1, 0]);
+
+        let all_empty = b.if_stmt(cond, &[], &[], None, sp());
+        let InstData::Extra(range3) = b.uir.inst(all_empty).data else {
+            panic!("IfStmt must carry InstData::Extra");
+        };
+        assert_eq!(range3, ExtraRange { offset: 16, len: 4 });
+        assert_eq!(&b.uir.extra[16..20], &[11, 0, 0, 0]);
+
+        let full = b.if_stmt(
+            cond,
+            &[t1],
+            &[(c12, vec![b22]), (c13, vec![])],
+            Some(&[e23]),
+            sp(),
+        );
+        let InstData::Extra(range4) = b.uir.inst(full).data else {
+            panic!("IfStmt must carry InstData::Extra");
+        };
+        assert_eq!(range4, ExtraRange { offset: 20, len: 12 });
+        assert_eq!(
+            &b.uir.extra[20..32],
+            &[11, 1, 21, 2, 12, 1, 22, 13, 0, 1, 1, 23]
+        );
+
+        let uir = shell_view(&[11, 1, 21, 0, 0], InstTag::IfStmt, 5);
+        let v = uir.if_stmt_view(shell_ref(&uir));
+        assert_eq!(v.cond, cond);
+        assert_eq!(v.then_stmts.len(), 1);
+        assert_eq!(v.then_stmts.at(0), t1);
+        assert!(v.else_stmts.is_none());
+        assert_eq!(v.elif_branches.len(), 0);
+
+        let uir = shell_view(&[11, 1, 21, 0, 1, 0], InstTag::IfStmt, 6);
+        let v = uir.if_stmt_view(shell_ref(&uir));
+        assert_eq!(v.else_stmts.unwrap().len(), 0);
+
+        let uir = shell_view(
+            &[11, 1, 21, 2, 12, 1, 22, 13, 0, 1, 1, 23],
+            InstTag::IfStmt,
+            12,
+        );
+        let v = uir.if_stmt_view(shell_ref(&uir));
+        let elifs = v
+            .elif_branches
+            .map(|e| (e.cond, e.body.len()))
+            .collect::<Vec<_>>();
+        assert_eq!(elifs, vec![(c12, 1), (c13, 0)]);
+        assert_eq!(v.else_stmts.unwrap().at(0), e23);
+    }
+
+    #[test]
     fn float_literal_round_trips() {
         let mut b = UirBuilder::new();
         let r = b.float_literal(2.5, sp());
