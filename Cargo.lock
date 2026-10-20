@@ -1236,7 +1236,6 @@ dependencies = [
 name = "ryo-core"
 version = "0.1.0"
 dependencies = [
- "chumsky",
  "hashbrown 0.17.1",
 ]
 

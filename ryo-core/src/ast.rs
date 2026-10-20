@@ -84,8 +84,7 @@
 //! arenas via `map_with`/`foldl_with` closures. Orphan nodes pushed
 //! by failed parser speculation stay in the arenas — they are
 //! unreachable from `top_level` and harmless. The rewind-truncation
-//! rationale lives on the `Inspector` impl on `ParseState` in
-//! `ryo-frontend`'s parser.
+//! rationale lives on `ParseState` in `ryo-frontend`'s parser.
 
 use crate::types::StringId;
 

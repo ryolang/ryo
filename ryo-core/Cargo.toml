@@ -5,7 +5,6 @@ edition = "2024"
 rust-version.workspace = true
 
 [dependencies]
-chumsky = { workspace = true }
 hashbrown = { workspace = true }
 
 [lints]
