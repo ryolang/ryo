@@ -670,26 +670,8 @@ impl UirBuilder {
         initializer: InstRef,
         span: Span,
     ) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(name.raw());
-        self.uir.extra.push(if mutable {
-            var_decl_extra::FLAG_MUTABLE
-        } else {
-            0
-        });
-        self.uir.extra.push(match ty {
-            Some(t) => t.raw(),
-            None => var_decl_extra::TY_NONE_SENTINEL,
-        });
-        self.uir.extra.push(initializer.raw());
-        self.push(
-            InstTag::VarDecl,
-            InstData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(var_decl_extra::LEN),
-            }),
-            span,
-        )
+        let range = var_decl_extra::encode(&mut self.uir.extra, name, mutable, ty, initializer);
+        self.push(InstTag::VarDecl, InstData::Extra(range), span)
     }
 
     /// Push a function body. `stmts` is the list of top-level

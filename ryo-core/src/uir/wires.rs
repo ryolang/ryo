@@ -1,5 +1,18 @@
 // ---------- Variable-payload encoding ----------
 
+/// Current `extra.len()` as a checked `u32` — the same overflow
+/// rejection `UirBuilder::extra_offset` performs, re-homed with the
+/// wire codecs so encoders live outside the builder.
+fn extra_offset(extra: &[u32]) -> u32 {
+    u32::try_from(extra.len()).expect("UIR extra arena exceeded u32::MAX words")
+}
+
+/// Convert a length-shaped `usize` (e.g. `args.len()`) to `u32`,
+/// panicking on overflow like `UirBuilder::len_u32`.
+fn len_u32(len: usize) -> u32 {
+    u32::try_from(len).expect("UIR list length exceeded u32::MAX")
+}
+
 /// Layout in `extra` for [`InstTag::Call`]:
 ///
 /// ```text
@@ -27,6 +40,11 @@ pub mod call_extra {
 /// a TIR instruction whose `ty` slot is real), so codegen never sees
 /// `TY_NONE_SENTINEL`.
 pub mod var_decl_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::ExtraRange;
+    use crate::types::{StringId, TypeId};
+    use crate::uir::InstRef;
+
     pub const NAME: usize = 0;
     pub const FLAGS: usize = 1;
     pub const TY: usize = 2;
@@ -35,6 +53,53 @@ pub mod var_decl_extra {
 
     pub const FLAG_MUTABLE: u32 = 1 << 0;
     pub const TY_NONE_SENTINEL: u32 = u32::MAX;
+
+    /// Decoded view of an [`InstTag::VarDecl`] payload. `ty` is `None`
+    /// when the source had no annotation.
+    pub struct VarDeclView {
+        pub name: StringId,
+        pub mutable: bool,
+        pub ty: Option<TypeId>,
+        pub initializer: InstRef,
+    }
+
+    /// Encode a `VarDecl` header into `extra`, returning its range.
+    pub fn encode(
+        extra: &mut Vec<u32>,
+        name: StringId,
+        mutable: bool,
+        ty: Option<TypeId>,
+        init: InstRef,
+    ) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(name.raw());
+        extra.push(if mutable { FLAG_MUTABLE } else { 0 });
+        extra.push(ty.map_or(TY_NONE_SENTINEL, |t| t.raw()));
+        extra.push(init.raw());
+        ExtraRange {
+            offset,
+            len: len_u32(LEN),
+        }
+    }
+
+    /// Decode a `VarDecl` header from its payload words.
+    pub fn decode(words: &[u32]) -> VarDeclView {
+        let name = StringId::from_raw(words[NAME]);
+        let mutable = words[FLAGS] & FLAG_MUTABLE != 0;
+        let ty_raw = words[TY];
+        let ty = if ty_raw == TY_NONE_SENTINEL {
+            None
+        } else {
+            Some(TypeId::from_raw(ty_raw))
+        };
+        let initializer = InstRef::from_raw(words[INIT]);
+        VarDeclView {
+            name,
+            mutable,
+            ty,
+            initializer,
+        }
+    }
 }
 
 /// Layout in `extra` for [`InstTag::AssignOrDecl`]:

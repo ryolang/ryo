@@ -1,3 +1,4 @@
+pub use super::wires::var_decl_extra::VarDeclView;
 use super::{
     CompoundOp, ExtraList, InstData, InstRef, InstTag, StringId, TypeId, Uir, assign_or_decl_extra,
     call_extra, compound_assign_extra, compound_field_assign_extra, enum_lit_extra,
@@ -11,15 +12,6 @@ use super::{
 pub struct CallView<'a> {
     pub name: StringId,
     pub args: ExtraList<'a, InstRef>,
-}
-
-/// Decoded view of an [`InstTag::VarDecl`] payload.
-pub struct VarDeclView {
-    pub name: StringId,
-    pub mutable: bool,
-    /// `None` when the source had no annotation.
-    pub ty: Option<TypeId>,
-    pub initializer: InstRef,
 }
 
 pub struct AssignOrDeclView {
@@ -172,22 +164,7 @@ impl Uir {
             InstData::Extra(rng) => rng,
             _ => unreachable!("VarDecl must carry InstData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        let name = StringId::from_raw(slice[var_decl_extra::NAME]);
-        let mutable = slice[var_decl_extra::FLAGS] & var_decl_extra::FLAG_MUTABLE != 0;
-        let ty_raw = slice[var_decl_extra::TY];
-        let ty = if ty_raw == var_decl_extra::TY_NONE_SENTINEL {
-            None
-        } else {
-            Some(TypeId::from_raw(ty_raw))
-        };
-        let initializer = InstRef::from_raw(slice[var_decl_extra::INIT]);
-        VarDeclView {
-            name,
-            mutable,
-            ty,
-            initializer,
-        }
+        var_decl_extra::decode(&self.extra[range.as_range()])
     }
 
     pub fn assign_or_decl_view(&self, r: InstRef) -> AssignOrDeclView {
