@@ -140,7 +140,7 @@ impl ExtraRange {
 /// declaration-order payload-field index: tuple variants carry the
 /// synthesized `"0"`, `"1"`, … names, so an index keeps the wire
 /// format name-free and uniform across unit/tuple/named variants. A
-/// `field_idx` of [`ORPHANED_FIELD`] marks a braced arg whose name
+/// `field_idx` of [`enum_lit_extra::ORPHANED_FIELD`] marks a braced arg whose name
 /// astgen did not recognize (E0038 already emitted); it binds nothing.
 /// Unit variants encode `argc = 0` (no trailing pairs).
 pub mod enum_lit_extra {

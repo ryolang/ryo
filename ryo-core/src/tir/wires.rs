@@ -14,7 +14,7 @@ pub(super) fn len_u32(len: usize) -> u32 {
     u32::try_from(len).expect("TIR list length exceeded u32::MAX")
 }
 
-/// Layout in `extra` for [`TirTag::Call`]:
+/// Layout in `extra` for [`crate::tir::TirTag::Call`]:
 ///
 /// ```text
 ///   [0]         name:  StringId
@@ -76,7 +76,7 @@ pub mod call_extra {
     }
 }
 
-/// Layout in `extra` for [`TirTag::VarDecl`]:
+/// Layout in `extra` for [`crate::tir::TirTag::VarDecl`]:
 ///
 /// ```text
 ///   [0]  name:    StringId
@@ -95,7 +95,7 @@ pub mod var_decl_extra {
 
     pub const FLAG_MUTABLE: u32 = 1 << 0;
 
-    /// Decoded view of a [`TirTag::VarDecl`] payload.
+    /// Decoded view of a [`crate::tir::TirTag::VarDecl`] payload.
     pub struct VarDeclView {
         pub name: StringId,
         pub mutable: bool,
@@ -129,7 +129,7 @@ pub mod var_decl_extra {
     }
 }
 
-/// Layout in `extra` for [`TirTag::Assign`]:
+/// Layout in `extra` for [`crate::tir::TirTag::Assign`]:
 ///
 /// ```text
 ///   [0]  name:  StringId
@@ -167,7 +167,7 @@ pub mod assign_extra {
     }
 }
 
-/// Layout in `extra` for [`TirTag::CompoundAssign`]:
+/// Layout in `extra` for [`crate::tir::TirTag::CompoundAssign`]:
 ///
 /// ```text
 ///   [0]  name:  StringId
@@ -215,7 +215,7 @@ pub mod compound_assign_extra {
     }
 }
 
-/// Layout in `extra` for [`TirTag::WhileLoop`]:
+/// Layout in `extra` for [`crate::tir::TirTag::WhileLoop`]:
 ///
 /// ```text
 ///   [0]       cond:       TirRef.raw()
@@ -253,7 +253,7 @@ pub mod while_loop_extra {
     }
 }
 
-/// Layout in `extra` for [`TirTag::ForRange`]:
+/// Layout in `extra` for [`crate::tir::TirTag::ForRange`]:
 ///
 /// ```text
 ///   [0]       var_name:   StringId
@@ -306,7 +306,7 @@ pub mod for_range_extra {
     }
 }
 
-/// Layout in `extra` for [`TirTag::StructLit`] (M9):
+/// Layout in `extra` for [`crate::tir::TirTag::StructLit`] (M9):
 ///
 /// ```text
 ///   [0]         struct_ty: TypeId raw
@@ -321,7 +321,7 @@ pub mod struct_lit_extra {
     use crate::tir::TirRef;
     use crate::types::TypeId;
 
-    /// Borrowed view of a [`TirTag::StructLit`] payload (M9). Fields are
+    /// Borrowed view of a [`crate::tir::TirTag::StructLit`] payload (M9). Fields are
     /// `(field_index, value)` pairs in canonical declaration order.
     pub struct StructLitView<'a> {
         pub ty: TypeId,
@@ -371,7 +371,7 @@ pub mod struct_lit_extra {
     }
 }
 
-/// Layout in `extra` for [`TirTag::FieldAssign`] (M9):
+/// Layout in `extra` for [`crate::tir::TirTag::FieldAssign`] (M9):
 ///
 /// ```text
 ///   [0]  target: TirRef.raw() (FieldAccess chain)
@@ -382,7 +382,7 @@ pub mod field_assign_extra {
     use crate::extra::ExtraRange;
     use crate::tir::TirRef;
 
-    /// Decoded view of a [`TirTag::FieldAssign`] payload (M9).
+    /// Decoded view of a [`crate::tir::TirTag::FieldAssign`] payload (M9).
     pub struct FieldAssignView {
         pub target: TirRef,
         pub value: TirRef,
@@ -409,7 +409,7 @@ pub mod field_assign_extra {
     }
 }
 
-/// Layout in `extra` for [`TirTag::CompoundFieldAssign`] (M9):
+/// Layout in `extra` for [`crate::tir::TirTag::CompoundFieldAssign`] (M9):
 ///
 /// ```text
 ///   [0]  target: TirRef.raw() (FieldAccess chain)
@@ -422,7 +422,7 @@ pub mod compound_field_assign_extra {
     use crate::extra::ExtraRange;
     use crate::tir::TirRef;
 
-    /// Decoded view of a [`TirTag::CompoundFieldAssign`] payload (M9).
+    /// Decoded view of a [`crate::tir::TirTag::CompoundFieldAssign`] payload (M9).
     pub struct CompoundFieldAssignView {
         pub target: TirRef,
         pub op: CompoundOp,
@@ -457,7 +457,7 @@ pub mod compound_field_assign_extra {
     }
 }
 
-/// Layout in `extra` for [`TirTag::IfStmt`]: the condition, a counted
+/// Layout in `extra` for [`crate::tir::TirTag::IfStmt`]: the condition, a counted
 /// then-list, an elif count, each elif condition followed by a counted
 /// body, an else marker (`0` = absent, `1` = present), and the counted
 /// else list when present.

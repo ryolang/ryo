@@ -756,6 +756,19 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-244 — Dump writers render Extra-carrying tags as <malformed>
+
+**Severity:** Correctness / Hygiene
+**Area:** core-ir
+
+**Files:** ryo-core/src/uir/dump.rs, ryo-core/src/tir/dump.rs
+
+**Summary:** The hand-written dump writers lack arms for some Extra-carrying instruction tags. Verified 2026-10-20 on examples/enums.ryo: the UIR dump renders every EnumLit as `<malformed: EnumLit / Extra(...)>`. The Match rendering gap is documented (pattern_matching.md known-limitations), but EnumLit is not. The wires themselves are healthy — decode, views, and round-trip fixtures all exist; this is a display gap only.
+
+**Resolution:** Add dump arms for the remaining Extra-carrying tags (EnumLit first; audit both dump writers for any other Extra tag without an arm, UIR and TIR). Dump output is a debugging surface; keep arms aligned with the wires.rs layout modules.
+
+---
+
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)

@@ -23,7 +23,12 @@
 //!   function body statement lists, packed `VarDecl` headers). Mirrors
 //!   the `extra: ArrayListUnmanaged(u32)` Zig uses in `Zir.zig` /
 //!   `InternPool.zig`. Anything that doesn't fit in a single
-//!   `InstData` lives here, indexed by an [`ExtraRange`].
+//!   `InstData` lives here, indexed by an [`ExtraRange`]. Per-payload
+//!   layouts (`*_extra` modules owning `encode`/`decode`/views) mostly
+//!   live in `wires`; the exceptions are `destructure_extra` (in
+//!   `destructure`), `match_extra` (in `match_`), and `enum_lit_extra`,
+//!   which is shared with TIR and lives in `crate::extra`. The
+//!   `wire_fixtures` module (test-only) pins each layout's exact words.
 //! - `spans: Vec<Span>` — parallel to `instructions`, one span per
 //!   `InstRef`. Storing spans out-of-band keeps `Inst` itself small
 //!   (the tagged-enum payload already costs more than a `u32`; piling
@@ -172,11 +177,11 @@ pub enum InstTag {
     // Unary. Operand in `data.un_op`.
     Neg,
 
-    /// Function call. Variable payload in `extra` — see [`call_extra`].
+    /// Function call. Variable payload in `extra` — see `call_extra`.
     Call,
 
     /// Variable declaration with optional annotation. Variable payload
-    /// in `extra` — see [`var_decl_extra`].
+    /// in `extra` — see `var_decl_extra`.
     VarDecl,
 
     /// `return <expr>`. Operand in `data.un_op`.
@@ -202,17 +207,17 @@ pub enum InstTag {
     IfStmt,
 
     /// Assignment or declaration (syntax ambiguity resolved later). Variable
-    /// payload in `extra` — see [`assign_or_decl_extra`].
+    /// payload in `extra` — see `assign_or_decl_extra`.
     AssignOrDecl,
 
     /// Compound assignment (`+=`, `-=`, etc.). Variable payload in `extra` —
-    /// see [`compound_assign_extra`].
+    /// see `compound_assign_extra`.
     CompoundAssign,
 
-    /// `while cond: body`. Variable payload in `extra` — see [`while_loop_extra`].
+    /// `while cond: body`. Variable payload in `extra` — see `while_loop_extra`.
     WhileLoop,
 
-    /// `for i in range(start, end): body`. Variable payload in `extra` — see [`for_range_extra`].
+    /// `for i in range(start, end): body`. Variable payload in `extra` — see `for_range_extra`.
     ForRange,
 
     /// `break` statement.
@@ -221,7 +226,7 @@ pub enum InstTag {
     /// `continue` statement.
     Continue,
 
-    /// Method call (e.g. `receiver.name(args)`). Variable payload in `extra` — see [`method_call_extra`].
+    /// Method call (e.g. `receiver.name(args)`). Variable payload in `extra` — see `method_call_extra`.
     MethodCall,
 
     /// Call-site mutable-borrow marker `&expr` (M8.3). The operand is
@@ -239,7 +244,7 @@ pub enum InstTag {
     Index,
 
     /// Struct literal `Name{field=value, ...}` (M9). Variable payload
-    /// in `extra` — see [`struct_lit_extra`]. The field initializers
+    /// in `extra` — see `struct_lit_extra`. The field initializers
     /// are in source order; sema canonicalizes them against the
     /// declaration.
     StructLit,
@@ -257,15 +262,15 @@ pub enum InstTag {
     FieldAccess,
 
     /// Field-path assignment `p.x = v` (M9). Variable payload in
-    /// `extra` — see [`field_assign_extra`].
+    /// `extra` — see `field_assign_extra`.
     FieldAssign,
 
     /// Compound field-path assignment `p.x += v` (M9). Variable
-    /// payload in `extra` — see [`compound_field_assign_extra`].
+    /// payload in `extra` — see `compound_field_assign_extra`.
     CompoundFieldAssign,
 
     /// Destructuring assignment `pattern = value` (M10). Variable
-    /// payload in `extra` — see [`destructure_extra`]; the value
+    /// payload in `extra` — see `destructure_extra`; the value
     /// expression is inline in [`InstData::Destructure`]. Astgen
     /// lowers nested patterns into a chain: each nested sub-pattern
     /// becomes its own `Destructure` over a synthesized
@@ -331,7 +336,7 @@ pub enum InstData {
     },
     /// Destructuring assignment `pattern = value` (M10): the value
     /// expression plus a plan of `(selector, bind)` pairs in
-    /// [`destructure_extra`]. `by_position` selects the selector
+    /// `destructure_extra`. `by_position` selects the selector
     /// encoding: element index (positional patterns) or field-name
     /// [`StringId`] (brace patterns).
     Destructure {
@@ -651,7 +656,7 @@ impl UirBuilder {
     }
 
     /// Emits a `VarDecl` with the header packed into `extra`.
-    /// `ty` of `None` is encoded as [`var_decl_extra::TY_NONE_SENTINEL`].
+    /// `ty` of `None` is encoded as `var_decl_extra::TY_NONE_SENTINEL`.
     pub fn var_decl(
         &mut self,
         name: StringId,
@@ -775,7 +780,7 @@ impl UirBuilder {
 
     /// Emits a `StructLit` with the struct name and the source-order
     /// field initializers packed into `extra` (M9). `name` of `None`
-    /// is encoded as [`struct_lit_extra::UIR_ANON_STRUCT_NAME`] (M10
+    /// is encoded as `struct_lit_extra::UIR_ANON_STRUCT_NAME` (M10
     /// anonymous literal); sema infers the structural type from the
     /// field values.
     pub fn struct_lit(

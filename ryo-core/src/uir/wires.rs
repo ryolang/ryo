@@ -14,7 +14,7 @@ pub(super) fn len_u32(len: usize) -> u32 {
     u32::try_from(len).expect("UIR list length exceeded u32::MAX")
 }
 
-/// Layout in `extra` for [`InstTag::Call`]:
+/// Layout in `extra` for [`crate::uir::InstTag::Call`]:
 ///
 /// ```text
 ///   [0]  name:  StringId
@@ -27,7 +27,7 @@ pub mod call_extra {
     use crate::types::StringId;
     use crate::uir::InstRef;
 
-    /// Decoded view of an [`InstTag::Call`] payload.
+    /// Decoded view of an [`crate::uir::InstTag::Call`] payload.
     pub struct CallView<'a> {
         pub name: StringId,
         pub args: ExtraList<'a, InstRef>,
@@ -54,7 +54,7 @@ pub mod call_extra {
     }
 }
 
-/// Layout in `extra` for [`InstTag::VarDecl`]:
+/// Layout in `extra` for [`crate::uir::InstTag::VarDecl`]:
 ///
 /// ```text
 ///   [0]  name:  StringId
@@ -76,7 +76,7 @@ pub mod var_decl_extra {
     pub const FLAG_MUTABLE: u32 = 1 << 0;
     pub const TY_NONE_SENTINEL: u32 = u32::MAX;
 
-    /// Decoded view of an [`InstTag::VarDecl`] payload. `ty` is `None`
+    /// Decoded view of an [`crate::uir::InstTag::VarDecl`] payload. `ty` is `None`
     /// when the source had no annotation.
     pub struct VarDeclView {
         pub name: StringId,
@@ -124,7 +124,7 @@ pub mod var_decl_extra {
     }
 }
 
-/// Layout in `extra` for [`InstTag::AssignOrDecl`]:
+/// Layout in `extra` for [`crate::uir::InstTag::AssignOrDecl`]:
 ///
 /// ```text
 ///   [0]  name:  StringId
@@ -161,7 +161,7 @@ pub mod assign_or_decl_extra {
     }
 }
 
-/// Layout in `extra` for [`InstTag::CompoundAssign`]:
+/// Layout in `extra` for [`crate::uir::InstTag::CompoundAssign`]:
 ///
 /// ```text
 ///   [0]  name:  StringId
@@ -208,7 +208,7 @@ pub mod compound_assign_extra {
     }
 }
 
-/// Layout in `extra` for [`InstTag::MethodCall`]:
+/// Layout in `extra` for [`crate::uir::InstTag::MethodCall`]:
 ///
 /// ```text
 ///   [0]  receiver: InstRef.raw()
@@ -222,7 +222,7 @@ pub mod method_call_extra {
     use crate::types::StringId;
     use crate::uir::InstRef;
 
-    /// Decoded view of an [`InstTag::MethodCall`] payload.
+    /// Decoded view of an [`crate::uir::InstTag::MethodCall`] payload.
     pub struct MethodCallView<'a> {
         pub receiver: InstRef,
         pub name: StringId,
@@ -261,7 +261,7 @@ pub mod method_call_extra {
     }
 }
 
-/// Layout in `extra` for [`InstTag::WhileLoop`]:
+/// Layout in `extra` for [`crate::uir::InstTag::WhileLoop`]:
 ///
 /// ```text
 ///   [0]       cond:       InstRef.raw()
@@ -299,7 +299,7 @@ pub mod while_loop_extra {
     }
 }
 
-/// Layout in `extra` for [`InstTag::ForRange`]:
+/// Layout in `extra` for [`crate::uir::InstTag::ForRange`]:
 ///
 /// ```text
 ///   [0]       var_name:   StringId.raw()
@@ -352,7 +352,7 @@ pub mod for_range_extra {
     }
 }
 
-/// Layout in `extra` for [`InstTag::StructLit`]:
+/// Layout in `extra` for [`crate::uir::InstTag::StructLit`]:
 ///
 /// ```text
 ///   [0]  name:     StringId (or `UIR_ANON_STRUCT_NAME` for an
@@ -373,10 +373,10 @@ pub mod struct_lit_extra {
     /// the field values instead of looking the name up.
     pub const UIR_ANON_STRUCT_NAME: u32 = u32::MAX;
 
-    /// Decoded borrowed view of an [`InstTag::StructLit`] payload. Field
+    /// Decoded borrowed view of an [`crate::uir::InstTag::StructLit`] payload. Field
     /// initializers are in source order. `name` of `None` is the M10
     /// anonymous literal (encoded as
-    /// [`UIR_ANON_STRUCT_NAME`]); sema infers
+    /// `UIR_ANON_STRUCT_NAME`); sema infers
     /// the structural type from the field values instead of resolving a
     /// name.
     pub struct StructLitView<'a> {
@@ -428,7 +428,7 @@ pub mod struct_lit_extra {
     }
 }
 
-/// Layout in `extra` for [`InstTag::FieldAssign`]:
+/// Layout in `extra` for [`crate::uir::InstTag::FieldAssign`]:
 ///
 /// ```text
 ///   [0]  target: InstRef.raw() (FieldAccess chain)
@@ -439,7 +439,7 @@ pub mod field_assign_extra {
     use crate::extra::ExtraRange;
     use crate::uir::InstRef;
 
-    /// Decoded view of an [`InstTag::FieldAssign`] payload (M9).
+    /// Decoded view of an [`crate::uir::InstTag::FieldAssign`] payload (M9).
     pub struct FieldAssignView {
         pub target: InstRef,
         pub value: InstRef,
@@ -465,7 +465,7 @@ pub mod field_assign_extra {
     }
 }
 
-/// Layout in `extra` for [`InstTag::CompoundFieldAssign`]:
+/// Layout in `extra` for [`crate::uir::InstTag::CompoundFieldAssign`]:
 ///
 /// ```text
 ///   [0]  target: InstRef.raw() (FieldAccess chain)
@@ -478,7 +478,7 @@ pub mod compound_field_assign_extra {
     use crate::extra::ExtraRange;
     use crate::uir::InstRef;
 
-    /// Decoded view of an [`InstTag::CompoundFieldAssign`] payload (M9).
+    /// Decoded view of an [`crate::uir::InstTag::CompoundFieldAssign`] payload (M9).
     pub struct CompoundFieldAssignView {
         pub target: InstRef,
         pub op: CompoundOp,
@@ -513,7 +513,7 @@ pub mod compound_field_assign_extra {
     }
 }
 
-/// Layout in `extra` for [`InstTag::IfStmt`]: the condition, a counted
+/// Layout in `extra` for [`crate::uir::InstTag::IfStmt`]: the condition, a counted
 /// then-list, an elif count, each elif condition followed by a counted
 /// body, an else marker (`0` = absent, `1` = present), and the counted
 /// else list when present.

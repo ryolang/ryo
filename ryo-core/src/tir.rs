@@ -32,7 +32,11 @@
 //!   nested.
 //! - `extra: Vec<u32>` — variable-size payloads (call argument
 //!   lists, packed `VarDecl` headers, body statement lists). Mirrors
-//!   the sidecar arena from UIR / `InternPool`.
+//!   the sidecar arena from UIR / `InternPool`. Per-payload layouts
+//!   (`*_extra` modules owning `encode`/`decode`/views) mostly live in
+//!   `wires`; the exceptions are `destructure_extra` (in `destructure`),
+//!   `match_extra` (in `match_`), and `enum_lit_extra`, which is shared
+//!   with UIR and lives in `crate::extra`.
 //! - `spans: Vec<Span>` — parallel to `instructions`, one span per
 //!   `TirRef`. Out-of-band so `TypedInst` itself stays compact.
 //!
@@ -236,19 +240,19 @@ pub enum TirTag {
     FNeg,
 
     /// Function call (user or builtin). Variable payload in `extra`
-    /// — see [`call_extra`].
+    /// — see `call_extra`.
     Call,
 
     /// Variable declaration with an initializer. Variable payload in
-    /// `extra` — see [`var_decl_extra`]; `TypedInst.ty` carries the
+    /// `extra` — see `var_decl_extra`; `TypedInst.ty` carries the
     /// *variable's* resolved type (Phase-3 side-table behaviour).
     VarDecl,
 
-    /// Reassignment to an existing mutable variable. Variable payload in `extra` — see [`assign_extra`].
+    /// Reassignment to an existing mutable variable. Variable payload in `extra` — see `assign_extra`.
     Assign,
 
     /// Compound assignment (`+=`, `-=`, etc.) to a mutable variable;
-    /// variable payload in `extra` — see [`compound_assign_extra`].
+    /// variable payload in `extra` — see `compound_assign_extra`.
     CompoundAssign,
 
     /// Slice projection `base[start:end]` → `strview` (M8.4).
@@ -291,10 +295,10 @@ pub enum TirTag {
     /// If/elif/else statement. Variable payload in `extra`.
     IfStmt,
 
-    /// `while cond: body`. Variable payload in `extra` — see [`while_loop_extra`].
+    /// `while cond: body`. Variable payload in `extra` — see `while_loop_extra`.
     WhileLoop,
 
-    /// `for var in range(start, end): body`. Variable payload in `extra` — see [`for_range_extra`].
+    /// `for var in range(start, end): body`. Variable payload in `extra` — see `for_range_extra`.
     ForRange,
 
     /// `break` statement.
@@ -310,7 +314,7 @@ pub enum TirTag {
     Unreachable,
 
     /// Struct literal `Name{field = value, ...}` (M9). Variable
-    /// payload in `extra` — see [`struct_lit_extra`]. Entries are in
+    /// payload in `extra` — see `struct_lit_extra`. Entries are in
     /// canonical (declaration-order) field order; `TypedInst.ty` is
     /// the struct type.
     StructLit,
@@ -330,17 +334,17 @@ pub enum TirTag {
     FieldAccess,
 
     /// Field-path assignment `p.x = v` (M9). Variable payload in
-    /// `extra` — see [`field_assign_extra`]; `TypedInst.ty` is the
+    /// `extra` — see `field_assign_extra`; `TypedInst.ty` is the
     /// field type.
     FieldAssign,
 
     /// Compound field-path assignment `p.x += v` (M9). Variable payload
-    /// in `extra` — see [`compound_field_assign_extra`]; `TypedInst.ty` is the field type.
+    /// in `extra` — see `compound_field_assign_extra`; `TypedInst.ty` is the field type.
     CompoundFieldAssign,
 
     /// Destructuring assignment `pattern = value` (M10): `(a, b) = e`,
     /// `{q, r} = e`. Variable payload in `extra` — see
-    /// [`destructure_extra`]; `TypedInst.ty` is the rhs struct type.
+    /// `destructure_extra`; `TypedInst.ty` is the rhs struct type.
     /// Codegen moves each bound field out of the rhs slot (or drops it
     /// inline for a wildcard); the ownership pass consumes the rhs
     /// owner at the statement and adopts the per-bound-field owner
