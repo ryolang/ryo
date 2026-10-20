@@ -351,6 +351,132 @@ fn compound_field_assign_wire_fixture() {
 }
 
 #[test]
+fn call_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let name = StringId::from_raw(7);
+    let arg1 = TirRef::from_raw(31);
+    let arg2 = TirRef::from_raw(32);
+
+    let empty = b.call(name, &[], &[], int_ty, sp());
+    let TirData::Extra(range) = b.instructions[empty.index()].data else {
+        panic!("Call must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 2 });
+    assert_eq!(&b.extra[5..7], &[7, 0]);
+
+    let pop = b.call(name, &[arg1, arg2], &[ParamMode::Move, ParamMode::Inout], int_ty, sp());
+    let TirData::Extra(range2) = b.instructions[pop.index()].data else {
+        panic!("Call must carry TirData::Extra");
+    };
+    assert_eq!(range2, ExtraRange { offset: 7, len: 6 });
+    assert_eq!(&b.extra[7..13], &[7, 2, 31, 32, 1, 2]);
+
+    let borrow = b.call(name, &[arg1], &[ParamMode::Borrow], int_ty, sp());
+    let TirData::Extra(range3) = b.instructions[borrow.index()].data else {
+        panic!("Call must carry TirData::Extra");
+    };
+    assert_eq!(range3, ExtraRange { offset: 13, len: 4 });
+    assert_eq!(&b.extra[13..17], &[7, 1, 31, 0]);
+
+    let (tir, r) = shell_with(&[7, 2, 31, 32, 1, 2], TirTag::Call, 6);
+    let v = tir.call_view(r);
+    assert_eq!(v.name, name);
+    assert_eq!(v.args.len(), 2);
+    assert_eq!(v.args.at(1), arg2);
+    assert_eq!(v.modes.len(), 2);
+    assert_eq!(v.modes.at(0), ParamMode::Move);
+    assert_eq!(v.modes.at(1), ParamMode::Inout);
+
+    let (tir, r) = shell_with(&[7, 0], TirTag::Call, 2);
+    let v = tir.call_view(r);
+    assert_eq!(v.args.len(), 0);
+    assert_eq!(v.modes.len(), 0);
+}
+
+#[test]
+fn while_loop_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let cond = TirRef::from_raw(11);
+    let s1 = TirRef::from_raw(21);
+    let s2 = TirRef::from_raw(22);
+
+    let empty = b.while_loop(cond, &[], int_ty, sp());
+    let TirData::Extra(range) = b.instructions[empty.index()].data else {
+        panic!("WhileLoop must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 2 });
+    assert_eq!(&b.extra[5..7], &[11, 0]);
+
+    let pop = b.while_loop(cond, &[s1, s2], int_ty, sp());
+    let TirData::Extra(range2) = b.instructions[pop.index()].data else {
+        panic!("WhileLoop must carry TirData::Extra");
+    };
+    assert_eq!(range2, ExtraRange { offset: 7, len: 4 });
+    assert_eq!(&b.extra[7..11], &[11, 2, 21, 22]);
+
+    let (tir, r) = shell_with(&[11, 2, 21, 22], TirTag::WhileLoop, 4);
+    let v = tir.while_loop_view(r);
+    assert_eq!(v.cond, cond);
+    assert_eq!(v.body.len(), 2);
+    assert_eq!(v.body.at(1), s2);
+    assert_eq!(tir.while_loop_body_view(r).len(), 2);
+
+    let (tir, r) = shell_with(&[11, 0], TirTag::WhileLoop, 2);
+    let v = tir.while_loop_view(r);
+    assert_eq!(v.body.len(), 0);
+    assert_eq!(tir.while_loop_body_view(r).len(), 0);
+}
+
+#[test]
+fn for_range_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let var_name = StringId::from_raw(7);
+    let start = TirRef::from_raw(5);
+    let end = TirRef::from_raw(9);
+    let s1 = TirRef::from_raw(21);
+    let s2 = TirRef::from_raw(22);
+
+    let empty = b.for_range(var_name, start, end, &[], int_ty, sp());
+    let TirData::Extra(range) = b.instructions[empty.index()].data else {
+        panic!("ForRange must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 4 });
+    assert_eq!(&b.extra[5..9], &[7, 5, 9, 0]);
+
+    let pop = b.for_range(var_name, start, end, &[s1, s2], int_ty, sp());
+    let TirData::Extra(range2) = b.instructions[pop.index()].data else {
+        panic!("ForRange must carry TirData::Extra");
+    };
+    assert_eq!(range2, ExtraRange { offset: 9, len: 6 });
+    assert_eq!(&b.extra[9..15], &[7, 5, 9, 2, 21, 22]);
+
+    let (tir, r) = shell_with(&[7, 5, 9, 2, 21, 22], TirTag::ForRange, 6);
+    let v = tir.for_range_view(r);
+    assert_eq!(v.var_name, var_name);
+    assert_eq!(v.start, start);
+    assert_eq!(v.end, end);
+    assert_eq!(v.body.len(), 2);
+    assert_eq!(tir.for_range_body_view(r).at(0), s1);
+
+    let (tir, r) = shell_with(&[7, 5, 9, 0], TirTag::ForRange, 4);
+    let v = tir.for_range_view(r);
+    assert_eq!(v.body.len(), 0);
+    assert_eq!(tir.for_range_body_view(r).len(), 0);
+}
+
+#[test]
 fn float_const_and_fadd_round_trip() {
     let mut pool = InternPool::new();
     let main = pool.intern_str("main");
