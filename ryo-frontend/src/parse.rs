@@ -6,8 +6,8 @@ use ryo_core::ast;
 use ryo_core::diag::{Diag, DiagCode, DiagSink, ParseDiag};
 use ryo_core::types::InternPool;
 
+use crate::grammar::{ParseState, program_parser};
 use crate::lexer::{self, Token};
-use crate::parser::{ParseState, program_parser};
 use crate::spans::cspan;
 
 /// Parse source text into an AST plus every diagnostic lexing and parsing

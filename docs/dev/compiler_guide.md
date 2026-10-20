@@ -75,7 +75,7 @@ See `docs/dev/pipeline_alignment.md` for what remains of the Zig-alignment plan 
 |---|---|
 | `ryo-frontend/src/lexer.rs` | Logos-based tokenizer; emits interned `Token` stream |
 | `ryo-frontend/src/indent.rs` | CPython-style Indent/Dedent token insertion over raw lexer output |
-| `ryo-frontend/src/parser.rs` | Chumsky-based parser over `Token` (produces AST) |
+| `ryo-frontend/src/grammar.rs` | Chumsky-based grammar over `Token` (produces AST) |
 | `ryo-frontend/src/parse.rs` | Source text → AST + diagnostics: lexing, `parse_with_state`, and the `Rich` → `Diag` conversion; the driver's parse entry point |
 | `ryo-frontend/src/astgen.rs` | AST → UIR structural lowering |
 | `ryo-frontend/src/sema.rs` | Semantic analysis: type-checks UIR, emits one TIR per function body |
@@ -136,7 +136,7 @@ The AST is a pair of typed arenas (`exprs` / `stmts`), not a pointer tree:
 - Add a builder method on `Ast` (pushes the value with its inline span, returns the id)
 - Consumers write plain exhaustive `match`es on `expr.kind` / `stmt.kind` — adding a variant makes the compiler flag every site you must update
 
-### 3. Add Parser Rule (ryo-frontend/src/parser.rs)
+### 3. Add Parser Rule (ryo-frontend/src/grammar.rs)
 Use Chumsky combinators: `just(Token::X)` for exact match, `.then()` for sequence, `.or_not()` for optional, `.repeated()` for repetition. The parser is stateful: the chumsky state is `ParseState` (`extra::Full<_, ParseState, ()>`, entered via `parse_with_state`), a frontend-owned wrapper pairing the `Ast` arenas with the intern pool, so node-producing combinators push through `e.state()` (derefs to `Ast`) and yield `ExprId` / `StmtId` (annotate the closure param as `e: &mut Mx<'a, '_, I>` so `e.state()` type-checks). Use `foldl_with` when folding needs state. `e.span()` yields chumsky's `SimpleSpan`; anything stored into the AST or a `Diag` crosses to core's own plain-data `Span` via `crate::spans::cspan` — `ryo-core` carries no chumsky dependency.
 ```rust
 let my_feature = just(Token::Keyword).ignore_then(expr.clone())
@@ -180,7 +180,7 @@ Language-grammar changes (new keywords, literals, operators, statement forms) mu
 Grammar builders like `expression_parser()` construct the full parser graph eagerly on every call (`recursive()` allocates a fresh slot each time). Calling one inside a rule that `program_parser()` instantiates per parse multiplies that fixed cost for every parse of every file. Example: the M10 destructuring rule called it 3× at 2 instantiation sites — 6 full grammar builds per parse (~20% slower parse_snippet); fixed in 8ff1ab7 by building the grammar once in `top_level_statement_parser` and threading it into rules as an `expr: impl Parser<...> + Clone` parameter (`Rc` clones are cheap).
 
 - **Adding a rule:** take the shared expression parser as a parameter; never build your own.
-- **Reviewing:** any new `expression_parser()` call site in `parser.rs` is a red flag.
+- **Reviewing:** any new `expression_parser()` call site in `grammar.rs` is a red flag.
 - **Verifying:** `cargo bench -p ryo-frontend -- parse_snippet` (A/B against the base commit; CodSpeed CI tracks these benches).
 - **Hot choices pay for failed alternatives.** In chumsky every failed alternative in a `choice()` costs `Rich`-merging bookkeeping, and the postfix loop ends *every* expression with a failed op — so adding a `.`-led op as a naked alternative to the postfix choice taxed every expression in every program (two enum ops regressed `parse_large` ~10% even in enum-free code; fixed in 2830679 by parsing one shared `.` and choosing among tails). New postfix-shaped syntax enters through the shared `dot_op` discriminator, never as an extra raw alternative. When you factor a shared prefix out of ops, spans contract to the tail — re-stamp them (`PostfixOp::with_span`) or every diagnostic underline shifts.
 

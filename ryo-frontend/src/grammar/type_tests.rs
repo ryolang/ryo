@@ -1,7 +1,7 @@
 //! Anonymous type-literal and tuple-sugar parser tests (M10): `{q: int,
 //! r: int}` type literals in every annotation position, `(a, b)` tuple
 //! literals, `(T1, T2)` positional type sugar, and positional field
-//! assignment and borrow targets. Split out of `parser/tests.rs` to stay
+//! assignment and borrow targets. Split out of `grammar/tests.rs` to stay
 //! under the file-length limit; the shared parse helpers live there as
 //! `pub(super)`.
 

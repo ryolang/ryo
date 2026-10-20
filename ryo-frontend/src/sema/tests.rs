@@ -1,7 +1,7 @@
 use super::*;
 use crate::astgen;
+use crate::grammar::{ParseState, program_parser};
 use crate::lexer::lex;
-use crate::parser::{ParseState, program_parser};
 use chumsky::Parser;
 use chumsky::input::Input;
 use ryo_core::tir::{Tir, TirData, TirTag};

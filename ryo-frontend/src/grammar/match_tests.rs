@@ -1,7 +1,7 @@
 //! Match-expression parser tests (M12): `match value:` with variant,
 //! literal, wildcard, anonymous, and positional arm patterns; expression
 //! and statement arm bodies; and match in expression position. Split out
-//! of `parser/tests.rs` per the R2 ruling — parser.rs has no headroom for
+//! of `grammar/tests.rs` per the R2 ruling — grammar.rs has no headroom for
 //! inline tests; the shared parse helpers live there as `pub(super)`.
 
 use super::tests::*;

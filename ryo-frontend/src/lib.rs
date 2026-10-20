@@ -1,10 +1,10 @@
 pub mod astgen;
 pub mod builtins;
+pub mod grammar;
 pub mod indent;
 pub mod lexer;
 pub mod ownership;
 pub mod parse;
-pub mod parser;
 pub mod pipeline;
 pub mod sema;
 pub mod spans;

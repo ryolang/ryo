@@ -56,7 +56,7 @@ pub(super) fn check_src_full(
     Vec<ryo_core::tir::Tir>,
     InternPool,
 ) {
-    use crate::parser::ParseState;
+    use crate::grammar::ParseState;
     use chumsky::Parser as _;
     use chumsky::input::Input as _;
     let mut pool = InternPool::new();
@@ -69,7 +69,7 @@ pub(super) fn check_src_full(
     );
     let token_stream = tokens[..].split_token_span((0..input.len()).into());
     let mut state = ParseState::new(pool);
-    crate::parser::program_parser()
+    crate::grammar::program_parser()
         .parse_with_state(token_stream, &mut state)
         .into_result()
         .expect("parse ok");

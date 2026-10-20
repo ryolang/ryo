@@ -4,7 +4,7 @@ use chumsky::input::Input as _;
 use cranelift::codegen::ir::Value as ClifValue;
 use ryo_core::tir::{ParamMode, Tir, TirBuilder};
 use ryo_core::types::InternPool;
-use ryo_frontend::parser::ParseState;
+use ryo_frontend::grammar::ParseState;
 use target_lexicon::Triple;
 
 /// M11 enum codegen harness: run the full frontend pipeline over `src`
@@ -46,7 +46,7 @@ fn analyze(
     assert!(!sink.has_errors(), "lex should succeed");
     let token_stream = tokens[..].split_token_span((0..src.len()).into());
     let mut state = ParseState::new(pool);
-    ryo_frontend::parser::program_parser()
+    ryo_frontend::grammar::program_parser()
         .parse_with_state(token_stream, &mut state)
         .into_result()
         .expect("parse should succeed");

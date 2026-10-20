@@ -2,8 +2,8 @@
 //! and named payloads; `EnumName.Variant(...)` / `EnumName.Variant{...}`
 //! construction; the unit-variant field-access disambiguation; and the
 //! attribute-placement widening (I-193 slice) with the `#[repr(C)]`
-//! rejection. Split out of `parser/tests.rs` per the R2 ruling —
-//! parser.rs has no headroom for inline tests; the shared parse
+//! rejection. Split out of `grammar/tests.rs` per the R2 ruling —
+//! grammar.rs has no headroom for inline tests; the shared parse
 //! helpers live there as `pub(super)`.
 
 use super::tests::*;

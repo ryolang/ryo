@@ -1,10 +1,10 @@
 //! Destructuring-statement grammar (M10): `pattern = value` in its
 //! paren-less, parenthesized, and braced forms. Split out of
-//! `parser.rs` to stay under the file-length limit (R2). The pattern
+//! `grammar.rs` to stay under the file-length limit (R2). The pattern
 //! shapes themselves are shared with match arms (M12) through the
 //! `PatternKind`/`PatternField` AST nodes — this module binds them
 //! only (no literals or variants: those parse solely inside match
-//! arms, see `parser/match_.rs`).
+//! arms, see `grammar/match_.rs`).
 
 use super::*;
 

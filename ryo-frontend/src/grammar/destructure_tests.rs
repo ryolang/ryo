@@ -1,7 +1,7 @@
 //! Destructuring-pattern parser tests (M10): `(a, b) = e`, `a, b = e`,
 //! `{q, r} = e`, `{x = quot} = e`, nesting, wildcards, trailing
 //! commas, and the `(a) = x` targeted error. Split out of
-//! `parser/tests.rs` to stay under the file-length limit; the shared
+//! `grammar/tests.rs` to stay under the file-length limit; the shared
 //! parse helpers live there as `pub(super)`.
 
 use super::tests::*;
