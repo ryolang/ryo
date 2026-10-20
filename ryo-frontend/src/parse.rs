@@ -10,6 +10,11 @@ use crate::lexer::{self, Token};
 use crate::parser::{ParseState, program_parser};
 use crate::spans::cspan;
 
+/// Parse source text into an AST plus every diagnostic lexing and parsing
+/// produced. `Ok` always carries the diagnostics (possibly empty; a
+/// recovered parse still yields a partial AST). `Err` means
+/// unrecoverable and carries the raw diagnostics — rendering is the
+/// caller's job.
 pub fn parse_source(
     input: &str,
     pool: &mut InternPool,
@@ -565,6 +570,28 @@ mod tests {
         assert_eq!(
             diag.message,
             "unknown attribute 'derive(Debug)'; Debug is automatic for every enum; known attributes: derive(Eq), repr(C)"
+        );
+    }
+
+    #[test]
+    fn indentation_failure_returns_raw_lex_diags_without_parsing() {
+        // Mixed tab/space indentation makes the lexer return an empty
+        // stream; the parse must bail before the parser runs and hand
+        // back the lex diagnostics as-is (the early-bail path).
+        let mut pool = InternPool::new();
+        let diags = match parse_source("fn f():\n\tx = 1\n        y = 2\n", &mut pool) {
+            Err(diags) => diags,
+            Ok(_) => panic!("space-indented line must not parse"),
+        };
+        let diag = diags
+            .iter()
+            .find(|d| d.code == DiagCode::ParseError)
+            .expect("the indentation diagnostic must surface");
+        assert!(
+            diag.message
+                .contains("spaces are not allowed for indentation"),
+            "unexpected message: {}",
+            diag.message
         );
     }
 }
