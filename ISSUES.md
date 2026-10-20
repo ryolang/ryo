@@ -197,19 +197,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-080 — UIR/TIR parallel-file duplication: `extra` layouts, match views, dumps, destructure walks
-
-**Severity:** Correctness / Hygiene
-**Area:** core-ir
-
-**Files:** `ryo-core/src/uir/layout_docs.rs` (`var_decl_extra` etc. :10-155), `ryo-core/src/tir/layout_docs.rs` (`call_extra` :16, `var_decl_extra` :34, `assign_extra` :49-61)
-**Summary:** tir.rs re-defines near-identical `extra`-layout modules with different layouts: `call_extra` appends a modes tail; `var_decl_extra` drops the `TY` slot (`LEN: 3` vs uir's `4`). Same names, same constants, different meanings — a footgun when editing one side. `ExtraRange` itself was also byte-duplicated (since unified into `ryo-core/src/extra.rs` :110, per the M11 update below), and `IfStmt` has no layout doc module at all in `tir/layout_docs.rs`.
-**Resolution:** Unify the shared pieces (`ExtraRange` at minimum) in one module; rename or document the layout differences explicitly; add the missing `if_stmt_extra` doc module.
-**Update (2026-10-09, Milestone 11):** `ExtraRange` is now unified in `ryo-core/src/extra.rs`, and the M11 enum encodings (`enum_lit_extra`, `EnumLitView`) were born on the shared type with no per-IR duplication. The layout documentation gaps above remain open.
-**Update (2026-10-19, post-M12 review):** Scope widened — the duplication is not limited to the `*_extra` layout modules. The two IRs exist as near-parallel file pairs, so every IR edit is a two-file coordination: `uir/match_.rs` (1161 lines) and `tir/match_.rs` (1176) re-implement the same match-view traversal (`match_expr`, `match_view`, arm accessors); `uir/dump.rs` (417) and `tir/dump.rs` (277) are parallel dump implementations; `uir/destructure.rs` (126) and `tir/destructure.rs` (167) are parallel destructure walks. The `*_extra` modules themselves moved into `uir/layout_docs.rs` vs `tir/layout_docs.rs` in the post-M12 file split; confirmed divergences under shared names: TIR `call_extra` appends a MODES tail, TIR `var_decl_extra` is LEN 3 vs UIR's 4, and `struct_lit_extra` is name-keyed in UIR (`uir/layout_docs.rs:119`) vs index-keyed in TIR (`tir/layout_docs.rs:108`) — a real wire-format difference, not just documentation drift. Resolution extended: treat each pair as one coordination unit — either generate or macro/table-drive the shared traversal/dump/destructure logic once, or explicitly document each pair as hand-kept-in-sync.
-
----
-
 ### I-092 — Sema per-function and per-call allocation churn
 
 **Severity:** Cleanup

@@ -1,4 +1,4 @@
-//! Literal wire fixtures for the fused UIR payload layouts (I-080).
+//! Literal wire fixtures for the fused UIR payload layouts.
 //!
 //! Encode fixtures pin the exact words a builder appends (and the
 //! `ExtraRange`) against a seeded arena; decode fixtures feed
