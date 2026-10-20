@@ -1190,6 +1190,112 @@ mod tests {
     }
 
     #[test]
+    fn assign_or_decl_wire_fixture() {
+        let mut b = UirBuilder::new();
+        b.uir.extra.extend([0xAAAA_AAAA; 5]);
+        let name = StringId::from_raw(7);
+        let value = InstRef::from_raw(11);
+
+        let r = b.assign_or_decl(name, value, sp());
+        let InstData::Extra(range) = b.uir.inst(r).data else {
+            panic!("AssignOrDecl must carry InstData::Extra");
+        };
+        assert_eq!(range, ExtraRange { offset: 5, len: 2 });
+        assert_eq!(&b.uir.extra[5..7], &[7, 11]);
+
+        let mut uir = Uir::new();
+        uir.extra.extend([7, 11]);
+        uir.instructions.push(Inst {
+            tag: InstTag::AssignOrDecl,
+            data: InstData::Extra(ExtraRange { offset: 0, len: 2 }),
+        });
+        uir.spans.push(sp());
+        let v = uir.assign_or_decl_view(InstRef::from_index(1));
+        assert_eq!(v.name, name);
+        assert_eq!(v.value, value);
+    }
+
+    #[test]
+    fn compound_assign_wire_fixture() {
+        let mut b = UirBuilder::new();
+        b.uir.extra.extend([0xAAAA_AAAA; 5]);
+        let name = StringId::from_raw(7);
+        let value = InstRef::from_raw(11);
+
+        let r = b.compound_assign(name, CompoundOp::Sub, value, sp());
+        let InstData::Extra(range) = b.uir.inst(r).data else {
+            panic!("CompoundAssign must carry InstData::Extra");
+        };
+        assert_eq!(range, ExtraRange { offset: 5, len: 3 });
+        assert_eq!(&b.uir.extra[5..8], &[7, 1, 11]);
+
+        let mut uir = Uir::new();
+        uir.extra.extend([7, 1, 11]);
+        uir.instructions.push(Inst {
+            tag: InstTag::CompoundAssign,
+            data: InstData::Extra(ExtraRange { offset: 0, len: 3 }),
+        });
+        uir.spans.push(sp());
+        let v = uir.compound_assign_view(InstRef::from_index(1));
+        assert_eq!(v.name, name);
+        assert!(matches!(v.op, CompoundOp::Sub));
+        assert_eq!(v.value, value);
+    }
+
+    #[test]
+    fn field_assign_wire_fixture() {
+        let mut b = UirBuilder::new();
+        b.uir.extra.extend([0xAAAA_AAAA; 5]);
+        let target = InstRef::from_raw(21);
+        let value = InstRef::from_raw(22);
+
+        let r = b.field_assign(target, value, sp());
+        let InstData::Extra(range) = b.uir.inst(r).data else {
+            panic!("FieldAssign must carry InstData::Extra");
+        };
+        assert_eq!(range, ExtraRange { offset: 5, len: 2 });
+        assert_eq!(&b.uir.extra[5..7], &[21, 22]);
+
+        let mut uir = Uir::new();
+        uir.extra.extend([21, 22]);
+        uir.instructions.push(Inst {
+            tag: InstTag::FieldAssign,
+            data: InstData::Extra(ExtraRange { offset: 0, len: 2 }),
+        });
+        uir.spans.push(sp());
+        let v = uir.field_assign_view(InstRef::from_index(1));
+        assert_eq!(v.target, target);
+        assert_eq!(v.value, value);
+    }
+
+    #[test]
+    fn compound_field_assign_wire_fixture() {
+        let mut b = UirBuilder::new();
+        b.uir.extra.extend([0xAAAA_AAAA; 5]);
+        let target = InstRef::from_raw(21);
+        let value = InstRef::from_raw(22);
+
+        let r = b.compound_field_assign(target, CompoundOp::Sub, value, sp());
+        let InstData::Extra(range) = b.uir.inst(r).data else {
+            panic!("CompoundFieldAssign must carry InstData::Extra");
+        };
+        assert_eq!(range, ExtraRange { offset: 5, len: 3 });
+        assert_eq!(&b.uir.extra[5..8], &[21, 1, 22]);
+
+        let mut uir = Uir::new();
+        uir.extra.extend([21, 1, 22]);
+        uir.instructions.push(Inst {
+            tag: InstTag::CompoundFieldAssign,
+            data: InstData::Extra(ExtraRange { offset: 0, len: 3 }),
+        });
+        uir.spans.push(sp());
+        let v = uir.compound_field_assign_view(InstRef::from_index(1));
+        assert_eq!(v.target, target);
+        assert!(matches!(v.op, CompoundOp::Sub));
+        assert_eq!(v.value, value);
+    }
+
+    #[test]
     fn float_literal_round_trips() {
         let mut b = UirBuilder::new();
         let r = b.float_literal(2.5, sp());
