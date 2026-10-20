@@ -650,8 +650,17 @@ fn if_stmt_wire_fixture() {
     let TirData::Extra(range4) = b.instructions[full.index()].data else {
         panic!("IfStmt must carry TirData::Extra");
     };
-    assert_eq!(range4, ExtraRange { offset: 20, len: 12 });
-    assert_eq!(&b.extra[20..32], &[11, 1, 21, 2, 12, 1, 22, 13, 0, 1, 1, 23]);
+    assert_eq!(
+        range4,
+        ExtraRange {
+            offset: 20,
+            len: 12
+        }
+    );
+    assert_eq!(
+        &b.extra[20..32],
+        &[11, 1, 21, 2, 12, 1, 22, 13, 0, 1, 1, 23]
+    );
 
     let (tir, r) = shell_with(&[11, 1, 21, 0, 0], TirTag::IfStmt, 5);
     let v = tir.if_stmt_view(r);

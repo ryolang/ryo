@@ -4,14 +4,15 @@ pub use super::wires::compound_assign_extra::CompoundAssignView;
 pub use super::wires::compound_field_assign_extra::CompoundFieldAssignView;
 pub use super::wires::field_assign_extra::FieldAssignView;
 pub use super::wires::for_range_extra::ForRangeView;
+pub use super::wires::if_stmt_extra::{ElifBranches, ElifView, IfStmtView};
 pub use super::wires::method_call_extra::MethodCallView;
 pub use super::wires::struct_lit_extra::StructLitView;
 pub use super::wires::var_decl_extra::VarDeclView;
 pub use super::wires::while_loop_extra::WhileLoopView;
 use super::{
-    ExtraList, InstData, InstRef, InstTag, Uir, assign_or_decl_extra, call_extra,
-    compound_assign_extra, compound_field_assign_extra, enum_lit_extra, field_assign_extra,
-    for_range_extra, method_call_extra, struct_lit_extra, var_decl_extra, while_loop_extra,
+    InstData, InstRef, InstTag, Uir, assign_or_decl_extra, call_extra, compound_assign_extra,
+    compound_field_assign_extra, enum_lit_extra, field_assign_extra, for_range_extra,
+    if_stmt_extra, method_call_extra, struct_lit_extra, var_decl_extra, while_loop_extra,
 };
 
 // ---------- Read-side helpers ----------
@@ -19,46 +20,6 @@ use super::{
 /// Decoded view of an [`InstTag::EnumLit`] payload (M11) — the wire is
 /// shared with TIR; see [`crate::extra::enum_lit_extra`].
 pub type EnumLitView<'a> = crate::extra::enum_lit_extra::EnumLitView<'a, InstRef>;
-
-pub struct ElifView<'a> {
-    pub cond: InstRef,
-    pub body: ExtraList<'a, InstRef>,
-}
-
-pub struct ElifBranches<'a> {
-    words: &'a [u32],
-    remaining: usize,
-}
-
-impl<'a> Iterator for ElifBranches<'a> {
-    type Item = ElifView<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining == 0 {
-            return None;
-        }
-        self.remaining -= 1;
-        let cond = InstRef::from_raw(self.words[0]);
-        let count = self.words[1] as usize;
-        let body_end = 2 + count;
-        let body = ExtraList::new(&self.words[2..body_end]);
-        self.words = &self.words[body_end..];
-        Some(ElifView { cond, body })
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.remaining, Some(self.remaining))
-    }
-}
-
-impl ExactSizeIterator for ElifBranches<'_> {}
-
-pub struct IfStmtView<'a> {
-    pub cond: InstRef,
-    pub then_stmts: ExtraList<'a, InstRef>,
-    pub elif_branches: ElifBranches<'a>,
-    pub else_stmts: Option<ExtraList<'a, InstRef>>,
-}
 
 impl Uir {
     pub fn call_view(&self, r: InstRef) -> CallView<'_> {
@@ -178,47 +139,6 @@ impl Uir {
             InstData::Extra(rng) => rng,
             _ => unreachable!("IfStmt must carry InstData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        let mut pos = 0;
-
-        let cond = InstRef::from_raw(slice[pos]);
-        pos += 1;
-
-        let then_stmts = read_ref_list(slice, &mut pos);
-
-        let elif_count = slice[pos] as usize;
-        pos += 1;
-        let elif_start = pos;
-        for _ in 0..elif_count {
-            let body_len = slice[pos + 1] as usize;
-            pos += 2 + body_len;
-        }
-        let elif_branches = ElifBranches {
-            words: &slice[elif_start..pos],
-            remaining: elif_count,
-        };
-
-        let has_else = slice[pos] != 0;
-        pos += 1;
-        let else_stmts = if has_else {
-            Some(read_ref_list(slice, &mut pos))
-        } else {
-            None
-        };
-
-        IfStmtView {
-            cond,
-            then_stmts,
-            elif_branches,
-            else_stmts,
-        }
+        if_stmt_extra::decode(&self.extra[range.as_range()])
     }
-}
-
-fn read_ref_list<'a>(slice: &'a [u32], pos: &mut usize) -> ExtraList<'a, InstRef> {
-    let count = slice[*pos] as usize;
-    *pos += 1;
-    let refs = ExtraList::new(&slice[*pos..*pos + count]);
-    *pos += count;
-    refs
 }

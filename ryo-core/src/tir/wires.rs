@@ -496,3 +496,172 @@ pub mod compound_field_assign_extra {
         }
     }
 }
+
+/// Layout in `extra` for [`TirTag::IfStmt`]: the condition, a counted
+/// then-list, an elif count, each elif condition followed by a counted
+/// body, an else marker (`0` = absent, `1` = present), and the counted
+/// else list when present.
+pub mod if_stmt_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::{ExtraList, ExtraRange};
+    use crate::tir::TirRef;
+    use crate::tir::{read_ref_list_view, skip_ref_list};
+
+    #[derive(Clone, Copy)]
+    pub struct TirElifView<'a> {
+        pub cond: TirRef,
+        pub body: ExtraList<'a, TirRef>,
+    }
+
+    #[derive(Clone, Copy)]
+    pub struct TirElifList<'a> {
+        words: &'a [u32],
+        count: usize,
+    }
+
+    impl<'a> TirElifList<'a> {
+        pub fn len(&self) -> usize {
+            self.count
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.count == 0
+        }
+
+        pub fn iter(&self) -> TirElifIter<'a> {
+            TirElifIter {
+                words: self.words,
+                pos: 0,
+                remaining: self.count,
+            }
+        }
+    }
+
+    pub struct TirElifIter<'a> {
+        words: &'a [u32],
+        pos: usize,
+        remaining: usize,
+    }
+
+    impl<'a> Iterator for TirElifIter<'a> {
+        type Item = TirElifView<'a>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.remaining == 0 {
+                return None;
+            }
+            let cond = TirRef::from_raw(self.words[self.pos]);
+            self.pos += 1;
+            let body = read_ref_list_view(self.words, &mut self.pos);
+            self.remaining -= 1;
+            Some(TirElifView { cond, body })
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (self.remaining, Some(self.remaining))
+        }
+    }
+
+    impl ExactSizeIterator for TirElifIter<'_> {}
+
+    impl<'a> IntoIterator for TirElifList<'a> {
+        type Item = TirElifView<'a>;
+        type IntoIter = TirElifIter<'a>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            TirElifIter {
+                words: self.words,
+                pos: 0,
+                remaining: self.count,
+            }
+        }
+    }
+
+    impl<'words> IntoIterator for &TirElifList<'words> {
+        type Item = TirElifView<'words>;
+        type IntoIter = TirElifIter<'words>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            self.iter()
+        }
+    }
+
+    pub struct TirIfStmtView<'a> {
+        pub cond: TirRef,
+        pub then_stmts: ExtraList<'a, TirRef>,
+        pub elif_branches: TirElifList<'a>,
+        pub else_stmts: Option<ExtraList<'a, TirRef>>,
+    }
+
+    /// Encode an `IfStmt` payload into `extra`, returning its range.
+    pub fn encode(
+        extra: &mut Vec<u32>,
+        cond: TirRef,
+        then_stmts: &[TirRef],
+        elif_branches: &[(TirRef, Vec<TirRef>)],
+        else_stmts: Option<&[TirRef]>,
+    ) -> ExtraRange {
+        let elif_words: usize = elif_branches.iter().map(|(_, body)| 2 + body.len()).sum();
+        let total =
+            1 + 1 + then_stmts.len() + 1 + elif_words + 1 + else_stmts.map_or(0, |s| 1 + s.len());
+        extra.reserve(total);
+
+        let offset = extra_offset(extra);
+        extra.push(cond.raw());
+        push_ref_list(extra, then_stmts);
+        extra.push(len_u32(elif_branches.len()));
+        for (elif_cond, elif_body) in elif_branches {
+            extra.push(elif_cond.raw());
+            push_ref_list(extra, elif_body);
+        }
+        match else_stmts {
+            Some(stmts) => {
+                extra.push(1);
+                push_ref_list(extra, stmts);
+            }
+            None => {
+                extra.push(0);
+            }
+        }
+        ExtraRange {
+            offset,
+            len: len_u32(extra.len() - offset as usize),
+        }
+    }
+
+    /// Decode an `IfStmt` payload from its words. The elif region is
+    /// pre-scanned to locate the else marker; per-branch refs decode
+    /// lazily through the borrowed lists.
+    pub fn decode(words: &[u32]) -> TirIfStmtView<'_> {
+        let mut pos = 1;
+        let cond = TirRef::from_raw(words[0]);
+        let then_stmts = read_ref_list_view(words, &mut pos);
+        let elif_count = words[pos] as usize;
+        pos += 1;
+        let elif_start = pos;
+        for _ in 0..elif_count {
+            pos += 1;
+            skip_ref_list(words, &mut pos);
+        }
+        let elif_branches = TirElifList {
+            words: &words[elif_start..pos],
+            count: elif_count,
+        };
+        let has_else = words[pos] != 0;
+        pos += 1;
+        let else_stmts = has_else.then(|| read_ref_list_view(words, &mut pos));
+        TirIfStmtView {
+            cond,
+            then_stmts,
+            elif_branches,
+            else_stmts,
+        }
+    }
+
+    fn push_ref_list(extra: &mut Vec<u32>, refs: &[TirRef]) {
+        extra.push(len_u32(refs.len()));
+        for r in refs {
+            extra.push(r.raw());
+        }
+    }
+}

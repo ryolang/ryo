@@ -4,107 +4,18 @@ pub use super::wires::compound_assign_extra::CompoundAssignView;
 pub use super::wires::compound_field_assign_extra::CompoundFieldAssignView;
 pub use super::wires::field_assign_extra::FieldAssignView;
 pub use super::wires::for_range_extra::ForRangeView;
+pub use super::wires::if_stmt_extra::{TirElifIter, TirElifList, TirElifView, TirIfStmtView};
 pub use super::wires::struct_lit_extra::StructLitView;
 pub use super::wires::var_decl_extra::VarDeclView;
 pub use super::wires::while_loop_extra::WhileLoopView;
 use super::{
     ExtraList, Tir, TirData, TirRef, TirTag, assign_extra, call_extra, compound_assign_extra,
     compound_field_assign_extra, enum_lit_extra, field_assign_extra, for_range_extra,
-    read_ref_list_view, skip_ref_list, struct_lit_extra, var_decl_extra, while_loop_extra,
+    if_stmt_extra, struct_lit_extra, var_decl_extra, while_loop_extra,
 };
 
 // ---------- Read-side helpers ----------
 
-#[derive(Clone, Copy)]
-pub struct TirElifView<'a> {
-    pub cond: TirRef,
-    pub body: ExtraList<'a, TirRef>,
-}
-
-#[derive(Clone, Copy)]
-pub struct TirElifList<'a> {
-    words: &'a [u32],
-    count: usize,
-}
-
-impl<'a> TirElifList<'a> {
-    pub fn len(&self) -> usize {
-        self.count
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.count == 0
-    }
-
-    pub fn iter(&self) -> TirElifIter<'a> {
-        TirElifIter {
-            words: self.words,
-            pos: 0,
-            remaining: self.count,
-        }
-    }
-}
-
-pub struct TirElifIter<'a> {
-    words: &'a [u32],
-    pos: usize,
-    remaining: usize,
-}
-
-impl<'a> Iterator for TirElifIter<'a> {
-    type Item = TirElifView<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining == 0 {
-            return None;
-        }
-        let cond = TirRef::from_raw(self.words[self.pos]);
-        self.pos += 1;
-        let body = read_ref_list_view(self.words, &mut self.pos);
-        self.remaining -= 1;
-        Some(TirElifView { cond, body })
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.remaining, Some(self.remaining))
-    }
-}
-
-impl ExactSizeIterator for TirElifIter<'_> {}
-
-impl<'a> IntoIterator for TirElifList<'a> {
-    type Item = TirElifView<'a>;
-    type IntoIter = TirElifIter<'a>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        TirElifIter {
-            words: self.words,
-            pos: 0,
-            remaining: self.count,
-        }
-    }
-}
-
-impl<'words> IntoIterator for &TirElifList<'words> {
-    type Item = TirElifView<'words>;
-    type IntoIter = TirElifIter<'words>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
-}
-
-pub struct TirIfStmtView<'a> {
-    pub cond: TirRef,
-    pub then_stmts: ExtraList<'a, TirRef>,
-    pub elif_branches: TirElifList<'a>,
-    pub else_stmts: Option<ExtraList<'a, TirRef>>,
-}
-
-/// Decoded view of a [`TirTag::EnumLit`] payload (M11). Borrows the
-/// `extra` arena directly — decoding allocates nothing; `fields()` yields `(field_index,
-/// value)` pairs keyed by declaration-order payload-field index, in
-/// the order sema encoded them.
 /// Decoded view of a [`TirTag::EnumLit`] payload (M11) — the wire is
 /// shared with UIR; see [`crate::extra::enum_lit_extra`].
 pub type EnumLitView<'a> = crate::extra::enum_lit_extra::EnumLitView<'a, TirRef>;
@@ -178,31 +89,7 @@ impl Tir {
             TirData::Extra(rng) => rng,
             _ => unreachable!("IfStmt must carry TirData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        let mut pos = 1;
-        let cond = TirRef::from_raw(slice[0]);
-        let then_stmts = read_ref_list_view(slice, &mut pos);
-        let elif_count = slice[pos] as usize;
-        pos += 1;
-        let elif_start = pos;
-        for _ in 0..elif_count {
-            pos += 1;
-            skip_ref_list(slice, &mut pos);
-        }
-        let elif_branches = TirElifList {
-            words: &slice[elif_start..pos],
-            count: elif_count,
-        };
-        let has_else = slice[pos] != 0;
-        pos += 1;
-        let else_stmts = has_else.then(|| read_ref_list_view(slice, &mut pos));
-
-        TirIfStmtView {
-            cond,
-            then_stmts,
-            elif_branches,
-            else_stmts,
-        }
+        if_stmt_extra::decode(&self.extra[range.as_range()])
     }
 
     pub fn while_loop_view(&self, r: TirRef) -> WhileLoopView<'_> {

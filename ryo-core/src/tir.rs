@@ -832,35 +832,9 @@ impl TirBuilder {
         ty: TypeId,
         span: Span,
     ) -> TirRef {
-        let elif_words: usize = elif_branches.iter().map(|(_, body)| 2 + body.len()).sum();
-        let total =
-            1 + 1 + then_stmts.len() + 1 + elif_words + 1 + else_stmts.map_or(0, |s| 1 + s.len());
-        self.extra.reserve(total);
-
-        let offset = self.extra_offset();
-        self.extra.push(cond.raw());
-        self.push_ref_list(then_stmts);
-        self.extra.push(Self::len_u32(elif_branches.len()));
-        for (elif_cond, elif_body) in elif_branches {
-            self.extra.push(elif_cond.raw());
-            self.push_ref_list(elif_body);
-        }
-        match else_stmts {
-            Some(stmts) => {
-                self.extra.push(1);
-                self.push_ref_list(stmts);
-            }
-            None => {
-                self.extra.push(0);
-            }
-        }
-        let len = Self::len_u32(self.extra.len() - offset as usize);
-        self.push(
-            TirTag::IfStmt,
-            ty,
-            TirData::Extra(ExtraRange { offset, len }),
-            span,
-        )
+        let range =
+            if_stmt_extra::encode(&mut self.extra, cond, then_stmts, elif_branches, else_stmts);
+        self.push(TirTag::IfStmt, ty, TirData::Extra(range), span)
     }
 
     pub fn while_loop(&mut self, cond: TirRef, body: &[TirRef], ty: TypeId, span: Span) -> TirRef {
@@ -1468,7 +1442,8 @@ pub use match_::{
 mod wires;
 pub use wires::{
     assign_extra, call_extra, compound_assign_extra, compound_field_assign_extra,
-    field_assign_extra, for_range_extra, struct_lit_extra, var_decl_extra, while_loop_extra,
+    field_assign_extra, for_range_extra, if_stmt_extra, struct_lit_extra, var_decl_extra,
+    while_loop_extra,
 };
 mod views;
 pub use views::{

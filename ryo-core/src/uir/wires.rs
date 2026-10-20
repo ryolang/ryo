@@ -559,3 +559,138 @@ pub mod compound_field_assign_extra {
         }
     }
 }
+
+/// Layout in `extra` for [`InstTag::IfStmt`]: the condition, a counted
+/// then-list, an elif count, each elif condition followed by a counted
+/// body, an else marker (`0` = absent, `1` = present), and the counted
+/// else list when present.
+pub mod if_stmt_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::{ExtraList, ExtraRange};
+    use crate::uir::InstRef;
+
+    pub struct ElifView<'a> {
+        pub cond: InstRef,
+        pub body: ExtraList<'a, InstRef>,
+    }
+
+    pub struct ElifBranches<'a> {
+        words: &'a [u32],
+        remaining: usize,
+    }
+
+    impl<'a> Iterator for ElifBranches<'a> {
+        type Item = ElifView<'a>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.remaining == 0 {
+                return None;
+            }
+            self.remaining -= 1;
+            let cond = InstRef::from_raw(self.words[0]);
+            let count = self.words[1] as usize;
+            let body_end = 2 + count;
+            let body = ExtraList::new(&self.words[2..body_end]);
+            self.words = &self.words[body_end..];
+            Some(ElifView { cond, body })
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (self.remaining, Some(self.remaining))
+        }
+    }
+
+    impl ExactSizeIterator for ElifBranches<'_> {}
+
+    pub struct IfStmtView<'a> {
+        pub cond: InstRef,
+        pub then_stmts: ExtraList<'a, InstRef>,
+        pub elif_branches: ElifBranches<'a>,
+        pub else_stmts: Option<ExtraList<'a, InstRef>>,
+    }
+
+    /// Encode an `IfStmt` payload into `extra`, returning its range.
+    pub fn encode(
+        extra: &mut Vec<u32>,
+        cond: InstRef,
+        then_stmts: &[InstRef],
+        elif_branches: &[(InstRef, Vec<InstRef>)],
+        else_stmts: Option<&[InstRef]>,
+    ) -> ExtraRange {
+        let elif_words: usize = elif_branches.iter().map(|(_, body)| 2 + body.len()).sum();
+        let total =
+            1 + 1 + then_stmts.len() + 1 + elif_words + 1 + else_stmts.map_or(0, |s| 1 + s.len());
+        extra.reserve(total);
+
+        let offset = extra_offset(extra);
+        extra.push(cond.raw());
+        push_ref_list(extra, then_stmts);
+        extra.push(len_u32(elif_branches.len()));
+        for (elif_cond, elif_body) in elif_branches {
+            extra.push(elif_cond.raw());
+            push_ref_list(extra, elif_body);
+        }
+        match else_stmts {
+            Some(stmts) => {
+                extra.push(1);
+                push_ref_list(extra, stmts);
+            }
+            None => {
+                extra.push(0);
+            }
+        }
+        ExtraRange {
+            offset,
+            len: len_u32(extra.len() - offset as usize),
+        }
+    }
+
+    /// Decode an `IfStmt` payload from its words. The elif region is
+    /// pre-scanned to locate the else marker; per-branch refs decode
+    /// lazily through the borrowed lists.
+    pub fn decode(words: &[u32]) -> IfStmtView<'_> {
+        let mut pos = 0;
+        let cond = InstRef::from_raw(words[pos]);
+        pos += 1;
+        let then_stmts = read_ref_list(words, &mut pos);
+        let elif_count = words[pos] as usize;
+        pos += 1;
+        let elif_start = pos;
+        for _ in 0..elif_count {
+            let body_len = words[pos + 1] as usize;
+            pos += 2 + body_len;
+        }
+        let elif_branches = ElifBranches {
+            words: &words[elif_start..pos],
+            remaining: elif_count,
+        };
+        let has_else = words[pos] != 0;
+        pos += 1;
+        let else_stmts = if has_else {
+            Some(read_ref_list(words, &mut pos))
+        } else {
+            None
+        };
+        IfStmtView {
+            cond,
+            then_stmts,
+            elif_branches,
+            else_stmts,
+        }
+    }
+
+    fn push_ref_list(extra: &mut Vec<u32>, refs: &[InstRef]) {
+        extra.push(len_u32(refs.len()));
+        for r in refs {
+            extra.push(r.raw());
+        }
+    }
+
+    fn read_ref_list<'a>(slice: &'a [u32], pos: &mut usize) -> ExtraList<'a, InstRef> {
+        let count = slice[*pos] as usize;
+        *pos += 1;
+        let refs = ExtraList::new(&slice[*pos..*pos + count]);
+        *pos += count;
+        refs
+    }
+}
