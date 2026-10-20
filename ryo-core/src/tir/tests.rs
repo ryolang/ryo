@@ -234,6 +234,122 @@ fn var_decl_decode_fixture() {
     assert_eq!(v.initializer, TirRef::from_raw(13));
 }
 
+fn shell_with(extra_words: &[u32], tag: TirTag, len: u32) -> (Tir, TirRef) {
+    // Build a minimal single-instruction `Tir` whose payload is the
+    // caller-supplied literal words — never encoder output.
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    let zero = b.int_const(0, int_ty, sp());
+    let mut tir = b.finish(&[zero]);
+    let start = tir.extra.len() as u32;
+    tir.extra.extend_from_slice(extra_words);
+    tir.instructions.push(TypedInst {
+        tag,
+        ty: int_ty,
+        data: TirData::Extra(ExtraRange { offset: start, len }),
+    });
+    tir.spans.push(sp());
+    let r = TirRef::from_raw((tir.instructions.len() - 1) as u32);
+    (tir, r)
+}
+
+#[test]
+fn assign_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let name = StringId::from_raw(7);
+    let value = TirRef::from_raw(13);
+
+    let r = b.assign(name, int_ty, value, sp());
+    let TirData::Extra(range) = b.instructions[r.index()].data else {
+        panic!("Assign must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 2 });
+    assert_eq!(&b.extra[5..7], &[7, 13]);
+    assert_eq!(b.instructions[r.index()].ty, int_ty);
+
+    let (tir, r) = shell_with(&[7, 13], TirTag::Assign, 2);
+    let v = tir.assign_view(r);
+    assert_eq!(v.name, name);
+    assert_eq!(v.value, value);
+}
+
+#[test]
+fn compound_assign_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let name = StringId::from_raw(7);
+    let value = TirRef::from_raw(13);
+
+    let r = b.compound_assign(name, CompoundOp::Sub, int_ty, value, sp());
+    let TirData::Extra(range) = b.instructions[r.index()].data else {
+        panic!("CompoundAssign must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 3 });
+    assert_eq!(&b.extra[5..8], &[7, 1, 13]);
+
+    let (tir, r) = shell_with(&[7, 1, 13], TirTag::CompoundAssign, 3);
+    let v = tir.compound_assign_view(r);
+    assert_eq!(v.name, name);
+    assert!(matches!(v.op, CompoundOp::Sub));
+    assert_eq!(v.value, value);
+}
+
+#[test]
+fn field_assign_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let target = TirRef::from_raw(21);
+    let value = TirRef::from_raw(22);
+
+    let r = b.field_assign(target, value, int_ty, sp());
+    let TirData::Extra(range) = b.instructions[r.index()].data else {
+        panic!("FieldAssign must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 2 });
+    assert_eq!(&b.extra[5..7], &[21, 22]);
+
+    let (tir, r) = shell_with(&[21, 22], TirTag::FieldAssign, 2);
+    let v = tir.field_assign_view(r);
+    assert_eq!(v.target, target);
+    assert_eq!(v.value, value);
+}
+
+#[test]
+fn compound_field_assign_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let target = TirRef::from_raw(21);
+    let value = TirRef::from_raw(22);
+
+    let r = b.compound_field_assign(target, CompoundOp::Sub, int_ty, value, sp());
+    let TirData::Extra(range) = b.instructions[r.index()].data else {
+        panic!("CompoundFieldAssign must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 3 });
+    assert_eq!(&b.extra[5..8], &[21, 1, 22]);
+
+    let (tir, r) = shell_with(&[21, 1, 22], TirTag::CompoundFieldAssign, 3);
+    let v = tir.compound_field_assign_view(r);
+    assert_eq!(v.target, target);
+    assert!(matches!(v.op, CompoundOp::Sub));
+    assert_eq!(v.value, value);
+}
+
 #[test]
 fn float_const_and_fadd_round_trip() {
     let mut pool = InternPool::new();
