@@ -15,7 +15,7 @@
 //! `map_with`/`foldl_with` closures, yielding [`ExprId`]s /
 //! [`StmtId`]s. The arenas are append-only: a backtracking
 //! alternative that pushed nodes before failing leaves them behind
-//! as unreachable orphans (the `Inspector` hooks on `Ast` are
+//! as unreachable orphans (the `Inspector` hooks on `ParseState` are
 //! no-ops by design — snapshotting and truncating on every rewind
 //! was measured to cost ~20% of parse time, and orphan nodes are
 //! never reachable from `top_level`).
@@ -97,10 +97,34 @@ impl std::ops::DerefMut for ParseState {
     }
 }
 
-// The `Inspector` hooks stay no-ops — the rewind-truncation rationale
-// lives on the `Ast` impl in `ryo-core` (snapshotting at every
-// choice/repeated boundary cost ~20% of parse time; orphan nodes are
-// unreachable from `top_level`).
+/// Chumsky parser-state integration: the rewind-truncation no-op
+/// `Inspector` hooks. The parser builds directly into the `Ast`
+/// arenas via `map_with`/`foldl_with` closures that call
+/// `e.state()`; the `ParseState` is the arena half of the parser
+/// state, paired with the intern pool.
+///
+/// The `Inspector` hooks are deliberately no-ops. A failed
+/// alternative (`or`/`choice` backtracking, `repeated` iteration
+/// rollbacks, error recovery) can push nodes before it fails, and
+/// those nodes stay in the arenas as unreachable orphans: the arenas
+/// are append-only and ids are stable, so a rewind can never
+/// invalidate a node that a kept id still references — the failed
+/// branch's ids simply never escape into a kept node. Orphans cost
+/// nothing downstream: consumers reach nodes only by following ids
+/// out of `top_level`, and the whole `Ast` is dropped once astgen
+/// has lowered it. On valid inputs speculation almost never pushes
+/// before failing (alternatives die on their first token), so the
+/// orphan count is zero in practice; the parser tests in
+/// `arena_tests.rs` assert that over the example corpus.
+///
+/// The alternative — snapshotting the arena lengths in `on_save` and
+/// truncating in `on_rewind`, chumsky's `TruncateState` pattern —
+/// was measured to cost ~20% of total parse time
+/// (`parse_large` in `ryo-frontend/benches/frontend.rs`): chumsky
+/// checkpoints at every `choice`/`repeated` boundary, so the hooks
+/// fire constantly even though they almost always truncate nothing.
+/// Exact arenas are not worth that; the `Ast` is a transient
+/// parse-to-astgen buffer, not a long-lived structure.
 impl<'src, I: chumsky::input::Input<'src>> chumsky::inspector::Inspector<'src, I> for ParseState {
     type Checkpoint = ();
 

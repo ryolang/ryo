@@ -146,7 +146,8 @@ where
 /// chumsky's rewind, so each broken line reports exactly once.
 /// (Arena nodes pushed inside a failed region are *not* rolled back
 /// — they stay as unreachable orphans, which is safe because no kept
-/// node references them; see the `Inspector` impl on `Ast`.)
+/// node references them; see the `Inspector` impl on `ParseState` in
+/// `parser.rs`.)
 ///
 /// `not_at_boundary` decides where the loop stops without running the
 /// statement grammar: the grammar is deep and a failed alternative

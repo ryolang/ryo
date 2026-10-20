@@ -79,14 +79,16 @@
 //!
 //! ## Parser-state integration
 //!
-//! The parser builds directly into the arenas with the `Ast` as the
-//! arena half of the chumsky state object (the parser-state wrapper
-//! in `ryo-frontend` pairs it with the intern pool); see the
-//! [`inspector`] module for rewind truncation.
+//! `Ast` is arena storage that `ryo-frontend`'s parser-state wrapper
+//! (`ParseState`) derefs to: the parser builds directly into the
+//! arenas via `map_with`/`foldl_with` closures. Orphan nodes pushed
+//! by failed parser speculation stay in the arenas — they are
+//! unreachable from `top_level` and harmless. The rewind-truncation
+//! rationale lives on the `Inspector` impl on `ParseState` in
+//! `ryo-frontend`'s parser.
 
 use crate::types::StringId;
 
-mod inspector;
 mod patterns;
 mod stmts;
 
@@ -707,8 +709,9 @@ impl Ast {
 
     /// Number of expression slots, including the reserved slot-0
     /// sentinel and any unreachable orphans left behind by parser
-    /// speculation (see the `Inspector` impl below). Exposed for
-    /// diagnostics and tests.
+    /// speculation — the arenas are append-only with stable ids, so
+    /// a failed branch's ids never escape into a kept node. Exposed
+    /// for diagnostics and tests.
     pub fn expr_count(&self) -> usize {
         self.exprs.len()
     }

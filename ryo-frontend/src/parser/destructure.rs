@@ -50,7 +50,7 @@ fn bind_pattern(state: &mut ParseState, name: StringId, span: ryo_core::span::Sp
 /// not to be followed by `=` (a bare `(a, b)` or `{x=1}` expression
 /// statement), the pattern nodes pushed before the failure stay in
 /// the arenas as unreachable orphans — deliberate (the `Inspector`
-/// hooks on `Ast` are no-ops; see `statement_list`).
+/// hooks on `ParseState` are no-ops; see `statement_list`).
 ///
 /// `value` is the right-hand-side expression grammar: the caller's
 /// shared expression parser (see `top_level_statement_parser`), so

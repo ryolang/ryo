@@ -1,6 +1,7 @@
 //! AST arena-accounting tests: after a successful parse every arena
 //! slot except the slot-0 sentinel must be reachable from `top_level`,
-//! which is what makes the `Inspector` no-op hooks safe. Split out of
+//! which is what makes the `Inspector` no-op hooks safe (see the
+//! `Inspector` impl on `ParseState` in `parser.rs`). Split out of
 //! `parser/tests.rs` to stay under the file-length limit; the shared
 //! parse helpers live there as `pub(super)`.
 
@@ -149,7 +150,7 @@ fn reachable_node_counts(ast: &Ast) -> (usize, usize) {
 
 #[test]
 fn successful_parses_leave_no_orphan_nodes() {
-    // The `Inspector` hooks on `Ast` are deliberate no-ops for
+    // The `Inspector` hooks on `ParseState` are deliberate no-ops for
     // performance (a truncating checkpoint cost ~20% of parse
     // time on `parse_large`). This guards the invariant that
     // makes that safe in practice: on valid input, speculative
