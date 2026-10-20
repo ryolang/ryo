@@ -11,6 +11,10 @@ use std::marker::PhantomData;
 pub trait ExtraValue: Copy {
     /// Convert one arena word to its typed value.
     fn from_extra(raw: u32) -> Self;
+
+    /// Encode this value as one arena word. The inverse of
+    /// [`Self::from_extra`] for every value each implementor writes.
+    fn to_extra(self) -> u32;
 }
 
 /// A borrowed, lazily decoded list in the `extra` arena.
@@ -158,4 +162,22 @@ pub mod enum_lit_extra {
     /// declared field — sema suppresses the derived missing-fields
     /// error the dropped binding would otherwise trigger.
     pub const ORPHANED_FIELD: u32 = u32::MAX;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tir::{ParamMode, TirRef};
+    use crate::uir::InstRef;
+
+    #[test]
+    fn extra_value_round_trips_through_to_extra() {
+        for raw in [1u32, 7, u32::MAX / 2] {
+            assert_eq!(InstRef::from_extra(raw).to_extra(), raw);
+            assert_eq!(TirRef::from_extra(raw).to_extra(), raw);
+        }
+        assert_eq!(ParamMode::from_extra(0).to_extra(), 0);
+        assert_eq!(ParamMode::from_extra(1).to_extra(), 1);
+        assert_eq!(ParamMode::from_extra(2).to_extra(), 2);
+    }
 }

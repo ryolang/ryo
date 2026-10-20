@@ -74,6 +74,10 @@ impl ExtraValue for TirRef {
     fn from_extra(raw: u32) -> Self {
         Self::from_raw(raw)
     }
+
+    fn to_extra(self) -> u32 {
+        self.raw()
+    }
 }
 
 impl TirRef {
@@ -389,6 +393,10 @@ impl ExtraValue for ParamMode {
         Self::from_u32(raw).unwrap_or_else(|| {
             unreachable!("call_extra mode word {raw} not written by ParamMode::to_u32")
         })
+    }
+
+    fn to_extra(self) -> u32 {
+        self.to_u32()
     }
 }
 

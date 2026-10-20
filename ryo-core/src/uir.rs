@@ -82,6 +82,10 @@ impl ExtraValue for InstRef {
     fn from_extra(raw: u32) -> Self {
         Self::from_raw(raw)
     }
+
+    fn to_extra(self) -> u32 {
+        self.raw()
+    }
 }
 
 impl InstRef {
