@@ -821,23 +821,8 @@ impl TirBuilder {
         initializer: TirRef,
         span: Span,
     ) -> TirRef {
-        let offset = self.extra_offset();
-        self.extra.push(name.raw());
-        self.extra.push(if mutable {
-            var_decl_extra::FLAG_MUTABLE
-        } else {
-            0
-        });
-        self.extra.push(initializer.raw());
-        self.push(
-            TirTag::VarDecl,
-            var_ty,
-            TirData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(var_decl_extra::LEN),
-            }),
-            span,
-        )
+        let range = var_decl_extra::encode(&mut self.extra, name, mutable, initializer);
+        self.push(TirTag::VarDecl, var_ty, TirData::Extra(range), span)
     }
 
     pub fn assign(&mut self, name: StringId, var_ty: TypeId, value: TirRef, span: Span) -> TirRef {

@@ -1,5 +1,18 @@
 // ---------- Variable-payload encoding ----------
 
+/// Current `extra.len()` as a checked `u32` — the same overflow
+/// rejection `TirBuilder::extra_offset` performs, re-homed with the
+/// wire codecs so encoders live outside the builder.
+fn extra_offset(extra: &[u32]) -> u32 {
+    u32::try_from(extra.len()).expect("TIR extra arena exceeded u32::MAX words")
+}
+
+/// Convert a length-shaped `usize` (e.g. `args.len()`) to `u32`,
+/// panicking on overflow like `TirBuilder::len_u32`.
+fn len_u32(len: usize) -> u32 {
+    u32::try_from(len).expect("TIR list length exceeded u32::MAX")
+}
+
 /// Layout in `extra` for [`TirTag::Call`]:
 ///
 /// ```text
@@ -32,12 +45,50 @@ pub mod call_extra {
 /// resolved variable type lives in the `TypedInst.ty` slot, never
 /// `Option`-shaped at this layer.
 pub mod var_decl_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::ExtraRange;
+    use crate::tir::TirRef;
+    use crate::types::StringId;
+
     pub const NAME: usize = 0;
     pub const FLAGS: usize = 1;
     pub const INIT: usize = 2;
     pub const LEN: usize = 3;
 
     pub const FLAG_MUTABLE: u32 = 1 << 0;
+
+    /// Decoded view of a [`TirTag::VarDecl`] payload.
+    pub struct VarDeclView {
+        pub name: StringId,
+        pub mutable: bool,
+        pub initializer: TirRef,
+    }
+
+    /// Encode a `VarDecl` header into `extra`, returning its range.
+    /// The resolved variable type travels in the `TypedInst.ty` slot,
+    /// never on the wire.
+    pub fn encode(extra: &mut Vec<u32>, name: StringId, mutable: bool, init: TirRef) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(name.raw());
+        extra.push(if mutable { FLAG_MUTABLE } else { 0 });
+        extra.push(init.raw());
+        ExtraRange {
+            offset,
+            len: len_u32(LEN),
+        }
+    }
+
+    /// Decode a `VarDecl` header from its payload words.
+    pub fn decode(words: &[u32]) -> VarDeclView {
+        let name = StringId::from_raw(words[NAME]);
+        let mutable = words[FLAGS] & FLAG_MUTABLE != 0;
+        let initializer = TirRef::from_raw(words[INIT]);
+        VarDeclView {
+            name,
+            mutable,
+            initializer,
+        }
+    }
 }
 
 /// Layout in `extra` for [`TirTag::Assign`]:

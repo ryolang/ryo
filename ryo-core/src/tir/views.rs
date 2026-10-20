@@ -1,3 +1,4 @@
+pub use super::wires::var_decl_extra::VarDeclView;
 use super::{
     CompoundOp, ExtraList, ParamMode, StringId, Tir, TirData, TirRef, TirTag, TypeId, assign_extra,
     call_extra, compound_assign_extra, enum_lit_extra, for_range_extra, read_ref_list_view,
@@ -12,12 +13,6 @@ pub struct CallView<'a> {
     /// Per-argument call convention, parallel to `args`. Stamped by
     /// sema from each callee parameter's `mode` field.
     pub modes: ExtraList<'a, ParamMode>,
-}
-
-pub struct VarDeclView {
-    pub name: StringId,
-    pub mutable: bool,
-    pub initializer: TirRef,
 }
 
 pub struct AssignView {
@@ -194,15 +189,7 @@ impl Tir {
             TirData::Extra(rng) => rng,
             _ => unreachable!("VarDecl must carry TirData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        let name = StringId::from_raw(slice[var_decl_extra::NAME]);
-        let mutable = slice[var_decl_extra::FLAGS] & var_decl_extra::FLAG_MUTABLE != 0;
-        let initializer = TirRef::from_raw(slice[var_decl_extra::INIT]);
-        VarDeclView {
-            name,
-            mutable,
-            initializer,
-        }
+        var_decl_extra::decode(&self.extra[range.as_range()])
     }
 
     pub fn assign_view(&self, r: TirRef) -> AssignView {
