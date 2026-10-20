@@ -5,36 +5,16 @@ pub use super::wires::compound_field_assign_extra::CompoundFieldAssignView;
 pub use super::wires::field_assign_extra::FieldAssignView;
 pub use super::wires::for_range_extra::ForRangeView;
 pub use super::wires::method_call_extra::MethodCallView;
+pub use super::wires::struct_lit_extra::StructLitView;
 pub use super::wires::var_decl_extra::VarDeclView;
 pub use super::wires::while_loop_extra::WhileLoopView;
 use super::{
-    ExtraList, InstData, InstRef, InstTag, StringId, TypeId, Uir, assign_or_decl_extra, call_extra,
+    ExtraList, InstData, InstRef, InstTag, TypeId, Uir, assign_or_decl_extra, call_extra,
     compound_assign_extra, compound_field_assign_extra, enum_lit_extra, field_assign_extra,
     for_range_extra, method_call_extra, struct_lit_extra, var_decl_extra, while_loop_extra,
 };
 
 // ---------- Read-side helpers ----------
-
-/// Decoded borrowed view of an [`InstTag::StructLit`] payload. Field
-/// initializers are in source order. `name` of `None` is the M10
-/// anonymous literal (encoded as
-/// [`struct_lit_extra::UIR_ANON_STRUCT_NAME`]); sema infers the
-/// structural type from the field values instead of resolving a name.
-pub struct StructLitView<'a> {
-    pub name: Option<StringId>,
-    fields: &'a [u32],
-}
-
-impl StructLitView<'_> {
-    /// Field initializers in source order.
-    pub fn fields(&self) -> impl ExactSizeIterator<Item = (StringId, InstRef)> + '_ {
-        self.fields
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| (StringId::from_raw(pair[0]), InstRef::from_raw(pair[1])))
-    }
-}
 
 /// Decoded view of an [`InstTag::EnumLit`] payload (M11). Borrows the
 /// `extra` arena directly — decoding allocates nothing; `fields()` yields `(field_index,
@@ -198,17 +178,7 @@ impl Uir {
             InstData::Extra(rng) => rng,
             _ => unreachable!("StructLit must carry InstData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        let name = match slice[struct_lit_extra::NAME] {
-            struct_lit_extra::UIR_ANON_STRUCT_NAME => None,
-            raw => Some(StringId::from_raw(raw)),
-        };
-        let n = slice[struct_lit_extra::NFIELDS] as usize;
-        let fields_end = struct_lit_extra::FIELDS + 2 * n;
-        StructLitView {
-            name,
-            fields: &slice[struct_lit_extra::FIELDS..fields_end],
-        }
+        struct_lit_extra::decode(&self.extra[range.as_range()])
     }
 
     pub fn enum_lit_view(&self, r: InstRef) -> EnumLitView<'_> {

@@ -885,24 +885,8 @@ impl TirBuilder {
     /// pairs in canonical (declaration) order — sema sorts before
     /// calling. `ty` is the struct type.
     pub fn struct_lit(&mut self, ty: TypeId, fields: &[(u32, TirRef)], span: Span) -> TirRef {
-        debug_assert!(
-            fields.windows(2).all(|w| w[0].0 < w[1].0),
-            "TirBuilder::struct_lit: fields must be sorted by field index"
-        );
-        let offset = self.extra_offset();
-        self.extra.push(ty.raw());
-        self.extra.push(Self::len_u32(fields.len()));
-        for &(idx, v) in fields {
-            self.extra.push(idx);
-            self.extra.push(v.raw());
-        }
-        let len = Self::len_u32(struct_lit_extra::FIELDS + 2 * fields.len());
-        self.push(
-            TirTag::StructLit,
-            ty,
-            TirData::Extra(ExtraRange { offset, len }),
-            span,
-        )
+        let range = struct_lit_extra::encode(&mut self.extra, ty, fields);
+        self.push(TirTag::StructLit, ty, TirData::Extra(range), span)
     }
 
     /// Emit an `EnumLit` `Name::Variant(args...)` (M11). `args` are

@@ -394,15 +394,75 @@ pub mod for_range_extra {
 ///   [2..2+2*n]     per field: [field_name: StringId.raw(), value: InstRef.raw()]
 /// ```
 pub mod struct_lit_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::ExtraRange;
+    use crate::types::StringId;
+    use crate::uir::InstRef;
+
     pub const NAME: usize = 0;
     pub const NFIELDS: usize = 1;
     pub const FIELDS: usize = 2;
+
     /// Anonymous-literal marker for the `NAME` slot (M10), mirroring
     /// [`var_decl_extra::TY_NONE_SENTINEL`]: `u32::MAX` is outside any
     /// plausible `StringId` range, so it can never collide with a real
     /// (or user-interned) name. Sema infers the structural type from
     /// the field values instead of looking the name up.
     pub const UIR_ANON_STRUCT_NAME: u32 = u32::MAX;
+
+    /// Decoded borrowed view of an [`InstTag::StructLit`] payload. Field
+    /// initializers are in source order. `name` of `None` is the M10
+    /// anonymous literal (encoded as
+    /// [`UIR_ANON_STRUCT_NAME`]); sema infers
+    /// the structural type from the field values instead of resolving a
+    /// name.
+    pub struct StructLitView<'a> {
+        pub name: Option<StringId>,
+        fields: &'a [u32],
+    }
+
+    impl StructLitView<'_> {
+        /// Field initializers in source order.
+        pub fn fields(&self) -> impl ExactSizeIterator<Item = (StringId, InstRef)> + '_ {
+            self.fields
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| (StringId::from_raw(pair[0]), InstRef::from_raw(pair[1])))
+        }
+    }
+
+    /// Encode a `StructLit` payload into `extra`, returning its range.
+    pub fn encode(
+        extra: &mut Vec<u32>,
+        name: Option<StringId>,
+        fields: &[(StringId, InstRef)],
+    ) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(name.map_or(UIR_ANON_STRUCT_NAME, |n| n.raw()));
+        extra.push(len_u32(fields.len()));
+        for &(fname, value) in fields {
+            extra.push(fname.raw());
+            extra.push(value.raw());
+        }
+        ExtraRange {
+            offset,
+            len: len_u32(FIELDS + 2 * fields.len()),
+        }
+    }
+
+    /// Decode a `StructLit` payload from its words.
+    pub fn decode(words: &[u32]) -> StructLitView<'_> {
+        let name = match words[NAME] {
+            UIR_ANON_STRUCT_NAME => None,
+            raw => Some(StringId::from_raw(raw)),
+        };
+        let n = words[NFIELDS] as usize;
+        StructLitView {
+            name,
+            fields: &words[FIELDS..FIELDS + 2 * n],
+        }
+    }
 }
 
 /// Layout in `extra` for [`InstTag::FieldAssign`]:

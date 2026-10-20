@@ -342,9 +342,63 @@ pub mod for_range_extra {
 ///               literal field order is irrelevant after sema)
 /// ```
 pub mod struct_lit_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::ExtraRange;
+    use crate::tir::TirRef;
+    use crate::types::TypeId;
+
     pub const TY: usize = 0;
     pub const N_FIELDS: usize = 1;
     pub const FIELDS: usize = 2;
+
+    /// Borrowed view of a [`TirTag::StructLit`] payload (M9). Fields are
+    /// `(field_index, value)` pairs in canonical declaration order.
+    pub struct StructLitView<'a> {
+        pub ty: TypeId,
+        fields: &'a [u32],
+    }
+
+    impl StructLitView<'_> {
+        /// `(field_index, value)` pairs in canonical declaration order.
+        pub fn fields(&self) -> impl ExactSizeIterator<Item = (u32, TirRef)> + '_ {
+            self.fields
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| (pair[0], TirRef::from_raw(pair[1])))
+        }
+    }
+
+    /// Encode a `StructLit` payload into `extra`, returning its range.
+    /// `fields` must be sorted by field index — sema sorts before
+    /// calling.
+    pub fn encode(extra: &mut Vec<u32>, ty: TypeId, fields: &[(u32, TirRef)]) -> ExtraRange {
+        debug_assert!(
+            fields.windows(2).all(|w| w[0].0 < w[1].0),
+            "TirBuilder::struct_lit: fields must be sorted by field index"
+        );
+        let offset = extra_offset(extra);
+        extra.push(ty.raw());
+        extra.push(len_u32(fields.len()));
+        for &(idx, v) in fields {
+            extra.push(idx);
+            extra.push(v.raw());
+        }
+        ExtraRange {
+            offset,
+            len: len_u32(FIELDS + 2 * fields.len()),
+        }
+    }
+
+    /// Decode a `StructLit` payload from its words.
+    pub fn decode(words: &[u32]) -> StructLitView<'_> {
+        let ty = TypeId::from_raw(words[TY]);
+        let n = words[N_FIELDS] as usize;
+        StructLitView {
+            ty,
+            fields: &words[FIELDS..FIELDS + 2 * n],
+        }
+    }
 }
 
 /// Layout in `extra` for [`TirTag::FieldAssign`] (M9):

@@ -804,21 +804,8 @@ impl UirBuilder {
         fields: &[(StringId, InstRef)],
         span: Span,
     ) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir
-            .extra
-            .push(name.map_or(struct_lit_extra::UIR_ANON_STRUCT_NAME, |n| n.raw()));
-        self.uir.extra.push(Self::len_u32(fields.len()));
-        for &(fname, value) in fields {
-            self.uir.extra.push(fname.raw());
-            self.uir.extra.push(value.raw());
-        }
-        let len = Self::len_u32(struct_lit_extra::FIELDS + 2 * fields.len());
-        self.push(
-            InstTag::StructLit,
-            InstData::Extra(ExtraRange { offset, len }),
-            span,
-        )
+        let range = struct_lit_extra::encode(&mut self.uir.extra, name, fields);
+        self.push(InstTag::StructLit, InstData::Extra(range), span)
     }
 
     /// Emits an `EnumLit` `Name::Variant(args...)` (M11) with the
@@ -1389,10 +1376,7 @@ mod tests {
         let uir = shell_view(&[7, 2, 101, 21, 102, 22], InstTag::StructLit, 6);
         let v = uir.struct_lit_view(shell_ref(&uir));
         assert_eq!(v.name, Some(name));
-        assert_eq!(
-            v.fields().collect::<Vec<_>>(),
-            vec![(f1, v1), (f2, v2)]
-        );
+        assert_eq!(v.fields().collect::<Vec<_>>(), vec![(f1, v1), (f2, v2)]);
 
         let uir = shell_view(&[u32::MAX, 0], InstTag::StructLit, 2);
         let v = uir.struct_lit_view(shell_ref(&uir));

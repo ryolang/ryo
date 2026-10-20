@@ -4,6 +4,7 @@ pub use super::wires::compound_assign_extra::CompoundAssignView;
 pub use super::wires::compound_field_assign_extra::CompoundFieldAssignView;
 pub use super::wires::field_assign_extra::FieldAssignView;
 pub use super::wires::for_range_extra::ForRangeView;
+pub use super::wires::struct_lit_extra::StructLitView;
 pub use super::wires::var_decl_extra::VarDeclView;
 pub use super::wires::while_loop_extra::WhileLoopView;
 use super::{
@@ -99,24 +100,6 @@ pub struct TirIfStmtView<'a> {
     pub then_stmts: ExtraList<'a, TirRef>,
     pub elif_branches: TirElifList<'a>,
     pub else_stmts: Option<ExtraList<'a, TirRef>>,
-}
-
-/// Borrowed view of a [`TirTag::StructLit`] payload (M9). Fields are
-/// `(field_index, value)` pairs in canonical declaration order.
-pub struct StructLitView<'a> {
-    pub ty: TypeId,
-    fields: &'a [u32],
-}
-
-impl StructLitView<'_> {
-    /// `(field_index, value)` pairs in canonical declaration order.
-    pub fn fields(&self) -> impl ExactSizeIterator<Item = (u32, TirRef)> + '_ {
-        self.fields
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| (pair[0], TirRef::from_raw(pair[1])))
-    }
 }
 
 /// Decoded view of a [`TirTag::EnumLit`] payload (M11). Borrows the
@@ -288,14 +271,7 @@ impl Tir {
             TirData::Extra(rng) => rng,
             _ => unreachable!("StructLit must carry TirData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        let ty = TypeId::from_raw(slice[struct_lit_extra::TY]);
-        let n = slice[struct_lit_extra::N_FIELDS] as usize;
-        let fields_end = struct_lit_extra::FIELDS + 2 * n;
-        StructLitView {
-            ty,
-            fields: &slice[struct_lit_extra::FIELDS..fields_end],
-        }
+        struct_lit_extra::decode(&self.extra[range.as_range()])
     }
 
     pub fn enum_lit_view(&self, r: TirRef) -> EnumLitView<'_> {
