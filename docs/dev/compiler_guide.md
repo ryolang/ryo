@@ -76,6 +76,7 @@ See `docs/dev/pipeline_alignment.md` for what remains of the Zig-alignment plan 
 | `ryo-frontend/src/lexer.rs` | Logos-based tokenizer; emits interned `Token` stream |
 | `ryo-frontend/src/indent.rs` | CPython-style Indent/Dedent token insertion over raw lexer output |
 | `ryo-frontend/src/parser.rs` | Chumsky-based parser over `Token` (produces AST) |
+| `ryo-frontend/src/parse.rs` | Source text → AST + diagnostics: lexing, `parse_with_state`, and the `Rich` → `Diag` conversion; the driver's parse entry point |
 | `ryo-frontend/src/astgen.rs` | AST → UIR structural lowering |
 | `ryo-frontend/src/sema.rs` | Semantic analysis: type-checks UIR, emits one TIR per function body |
 | `ryo-frontend/src/pipeline.rs` | BuiltProgram, AnalysisReady, and CleanupProgram transitions; immutable published bodies and cleanup |
@@ -185,7 +186,7 @@ Grammar builders like `expression_parser()` construct the full parser graph eage
 
 ## Error Handling
 
-Middle-end stages emit structured `Diag` values (see `ryo-core/src/diag.rs`). `astgen::generate` and `sema::analyze` accumulate diagnostics through a `DiagSink` so analysis can continue past the first error; `parse_source` (in `ryo-driver/src/pipeline.rs`) shares the same model. `lexer::lex` never fails hard — it recovers so the parser still sees a well-formed token stream — and the parser synchronizes at statement boundaries, yielding a diagnostic plus a partial AST with `Error` placeholder nodes (R10), so one syntax error never suppresses diagnostics for the rest of the file. The only early bail is an indentation failure, where the token stream is empty and parsing would be meaningless. All stages converge on the same Ariadne-backed `render_diags` and surface as a single `CompilerError::Diagnostics(Vec<Diag>)`. Other stages still use string-typed `CompilerError` variants: `IoError`, `CodegenError`, `LinkError`, `ToolchainError`, `ExecutionError`.
+Middle-end stages emit structured `Diag` values (see `ryo-core/src/diag.rs`). `astgen::generate` and `sema::analyze` accumulate diagnostics through a `DiagSink` so analysis can continue past the first error; `parse_source` (in `ryo-frontend/src/parse.rs`) shares the same model. `lexer::lex` never fails hard — it recovers so the parser still sees a well-formed token stream — and the parser synchronizes at statement boundaries, yielding a diagnostic plus a partial AST with `Error` placeholder nodes (R10), so one syntax error never suppresses diagnostics for the rest of the file. The only early bail is an indentation failure, where the token stream is empty and parsing would be meaningless. All stages converge on the same Ariadne-backed `render_diags` and surface as a single `CompilerError::Diagnostics(Vec<Diag>)`. Other stages still use string-typed `CompilerError` variants: `IoError`, `CodegenError`, `LinkError`, `ToolchainError`, `ExecutionError`.
 
 ## Testing
 

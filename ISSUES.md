@@ -757,23 +757,10 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-245 — Move Rich parse-error re-rendering from ryo-driver into ryo-frontend
-
-**Severity:** Correctness / Hygiene
-**Area:** driver-cli
-
-**Files:** ryo-driver/src/pipeline.rs (:40-41 imports, :222-280 rich_error_message + conversion), ryo-frontend/src/parser.rs
-
-**Summary:** I-104 removed chumsky from ryo-core and pinned the remaining couplings: frontend parser plumbing (legit) and this one — the driver re-renders chumsky Rich errors (rich_error_message, RichReason/RichPattern matching, Rich->Diag span conversion) because it owns parse-error rendering. That makes ryo-driver, the orchestration crate, depend on the parser crate's error types in production code.
-
-**Resolution:** Frontend exposes a rendering API (e.g. parser::render_parse_error(err, pool) -> rendered Diag values or message strings); driver drops its chumsky imports entirely. Natural fit with the already-noted driver strain (single-file pipeline.rs, clap vocabulary in the library) as one split+decouple pass.
-
----
-
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
 
-<!-- issue-id high-water: 244 -->
+<!-- issue-id high-water: 245 -->
