@@ -6,6 +6,7 @@ pub mod errors;
 pub mod extra;
 pub mod flow;
 pub mod ownership;
+pub mod span;
 pub mod tir;
 pub mod types;
 pub mod uir;
