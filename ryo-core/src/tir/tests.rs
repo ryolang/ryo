@@ -1094,7 +1094,7 @@ fn enum_lit_round_trips_through_extra() {
     assert_eq!(view.fields().collect::<Vec<_>>(), vec![(0, w), (1, h)]);
     assert_eq!(tir.inst(lit).ty, enum_ty);
 
-    // Wire layout is pinned: [TY, VARIANT, FLAGS, ARGC, (FIELD_IDX, REF) x ARGC].
+    // Wire layout is pinned: [TY, VARIANT, ARGC, FLAGS, (FIELD_IDX, REF) x ARGC].
     let inst = tir.inst(lit);
     let TirData::Extra(rng) = inst.data else {
         panic!("expected TirData::Extra, got {:?}", inst.data);
@@ -1102,8 +1102,8 @@ fn enum_lit_round_trips_through_extra() {
     let slice = &tir.extra[rng.as_range()];
     assert_eq!(slice[0], enum_ty.raw());
     assert_eq!(slice[1], 1);
-    assert_eq!(slice[3], 0);
     assert_eq!(slice[2], 2);
+    assert_eq!(slice[3], 0);
     assert_eq!(slice[4], 0);
     assert_eq!(slice[5], w.raw());
     assert_eq!(slice[6], 1);
