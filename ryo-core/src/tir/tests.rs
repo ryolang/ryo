@@ -517,6 +517,55 @@ fn struct_lit_wire_fixture() {
 }
 
 #[test]
+fn enum_lit_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let ty = TypeId::from_raw(3);
+    let w = TirRef::from_raw(21);
+    let h = TirRef::from_raw(22);
+
+    let two = b.enum_lit(ty, 1, false, &[(0, w), (1, h)], sp());
+    let TirData::Extra(range) = b.instructions[two.index()].data else {
+        panic!("EnumLit must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 8 });
+    assert_eq!(&b.extra[5..13], &[3, 1, 2, 0, 0, 21, 1, 22]);
+
+    let unit = b.enum_lit(ty, 1, false, &[], sp());
+    let TirData::Extra(range2) = b.instructions[unit.index()].data else {
+        panic!("EnumLit must carry TirData::Extra");
+    };
+    assert_eq!(range2, ExtraRange { offset: 13, len: 4 });
+    assert_eq!(&b.extra[13..17], &[3, 1, 0, 0]);
+
+    let pos = b.enum_lit(ty, 1, true, &[(0, w)], sp());
+    let TirData::Extra(range3) = b.instructions[pos.index()].data else {
+        panic!("EnumLit must carry TirData::Extra");
+    };
+    assert_eq!(range3, ExtraRange { offset: 17, len: 6 });
+    assert_eq!(&b.extra[17..23], &[3, 1, 1, 1, 0, 21]);
+
+    let (tir, r) = shell_with(&[3, 1, 2, 0, 0, 21, 1, 22], TirTag::EnumLit, 8);
+    let v = tir.enum_lit_view(r);
+    assert_eq!(v.ty, ty);
+    assert_eq!(v.variant_index, 1);
+    assert!(!v.positional);
+    assert_eq!(v.fields().collect::<Vec<_>>(), vec![(0, w), (1, h)]);
+
+    let (tir, r) = shell_with(&[3, 1, 0, 0], TirTag::EnumLit, 4);
+    let v = tir.enum_lit_view(r);
+    assert_eq!(v.fields().count(), 0);
+
+    let (tir, r) = shell_with(&[3, 1, 1, 1, 0, 21], TirTag::EnumLit, 6);
+    let v = tir.enum_lit_view(r);
+    assert!(v.positional);
+    assert_eq!(v.fields().collect::<Vec<_>>(), vec![(0, w)]);
+}
+
+#[test]
 fn float_const_and_fadd_round_trip() {
     let mut pool = InternPool::new();
     let main = pool.intern_str("main");

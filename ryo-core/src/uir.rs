@@ -1385,6 +1385,52 @@ mod tests {
     }
 
     #[test]
+    fn enum_lit_wire_fixture() {
+        let mut b = UirBuilder::new();
+        b.uir.extra.extend([0xAAAA_AAAA; 5]);
+        let ty = TypeId::from_raw(3);
+        let w = InstRef::from_raw(21);
+        let h = InstRef::from_raw(22);
+
+        let two = b.enum_lit(ty, 1, false, &[(0, w), (1, h)], sp());
+        let InstData::Extra(range) = b.uir.inst(two).data else {
+            panic!("EnumLit must carry InstData::Extra");
+        };
+        assert_eq!(range, ExtraRange { offset: 5, len: 8 });
+        assert_eq!(&b.uir.extra[5..13], &[3, 1, 2, 0, 0, 21, 1, 22]);
+
+        let unit = b.enum_lit(ty, 1, false, &[], sp());
+        let InstData::Extra(range2) = b.uir.inst(unit).data else {
+            panic!("EnumLit must carry InstData::Extra");
+        };
+        assert_eq!(range2, ExtraRange { offset: 13, len: 4 });
+        assert_eq!(&b.uir.extra[13..17], &[3, 1, 0, 0]);
+
+        let pos = b.enum_lit(ty, 1, true, &[(0, w)], sp());
+        let InstData::Extra(range3) = b.uir.inst(pos).data else {
+            panic!("EnumLit must carry InstData::Extra");
+        };
+        assert_eq!(range3, ExtraRange { offset: 17, len: 6 });
+        assert_eq!(&b.uir.extra[17..23], &[3, 1, 1, 1, 0, 21]);
+
+        let uir = shell_view(&[3, 1, 2, 0, 0, 21, 1, 22], InstTag::EnumLit, 8);
+        let v = uir.enum_lit_view(shell_ref(&uir));
+        assert_eq!(v.ty, ty);
+        assert_eq!(v.variant_index, 1);
+        assert!(!v.positional);
+        assert_eq!(v.fields().collect::<Vec<_>>(), vec![(0, w), (1, h)]);
+
+        let uir = shell_view(&[3, 1, 0, 0], InstTag::EnumLit, 4);
+        let v = uir.enum_lit_view(shell_ref(&uir));
+        assert_eq!(v.fields().count(), 0);
+
+        let uir = shell_view(&[3, 1, 1, 1, 0, 21], InstTag::EnumLit, 6);
+        let v = uir.enum_lit_view(shell_ref(&uir));
+        assert!(v.positional);
+        assert_eq!(v.fields().collect::<Vec<_>>(), vec![(0, w)]);
+    }
+
+    #[test]
     fn float_literal_round_trips() {
         let mut b = UirBuilder::new();
         let r = b.float_literal(2.5, sp());
