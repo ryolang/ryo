@@ -26,8 +26,8 @@
 //!   — falls through.
 
 use super::{
-    TirData, TirRef, TirTag, TypedInst, assign_extra, compound_assign_extra, read_ref_list_view,
-    skip_ref_list, var_decl_extra,
+    TirData, TirRef, TirTag, TypedInst, assign_extra, compound_assign_extra, if_stmt_extra,
+    var_decl_extra,
 };
 use crate::types::InternPool;
 
@@ -61,42 +61,29 @@ fn stmt_terminates(
             pool.is_never(insts[operand.index()].ty)
         }
         TirTag::VarDecl => {
-            pool.is_never(insts[extra_ref_at(extra, inst, var_decl_extra::INIT).index()].ty)
+            let view = var_decl_extra::decode(extra_slice(extra, inst));
+            pool.is_never(insts[view.initializer.index()].ty)
         }
         TirTag::Assign => {
-            pool.is_never(insts[extra_ref_at(extra, inst, assign_extra::VALUE).index()].ty)
+            let view = assign_extra::decode(extra_slice(extra, inst));
+            pool.is_never(insts[view.value.index()].ty)
         }
         TirTag::CompoundAssign => {
-            pool.is_never(insts[extra_ref_at(extra, inst, compound_assign_extra::VALUE).index()].ty)
+            let view = compound_assign_extra::decode(extra_slice(extra, inst));
+            pool.is_never(insts[view.value.index()].ty)
         }
         TirTag::IfStmt => {
-            // Decode the arm blocks straight from the wire (same layout
-            // `Tir::if_stmt_view` documents); only the bodies matter
-            // here. Word 0 is the cond — the arm blocks start at 1.
-            let slice = extra_slice(extra, inst);
-            let mut pos = 1;
-            let then_stmts = read_ref_list_view(slice, &mut pos);
-            let elif_count = slice[pos] as usize;
-            pos += 1;
-            let elif_start = pos;
-            for _ in 0..elif_count {
-                pos += 1; // elif cond
-                skip_ref_list(slice, &mut pos);
-            }
-            let has_else = slice[pos] != 0;
-            pos += 1;
-            if !has_else {
+            // Only the bodies matter here; the fused decoder reads the
+            // same wire `Tir::if_stmt_view` documents.
+            let view = if_stmt_extra::decode(extra_slice(extra, inst));
+            let Some(else_stmts) = view.else_stmts else {
+                return false;
+            };
+            if !block_terminates(insts, extra, view.then_stmts, pool, jumps) {
                 return false;
             }
-            let else_stmts = read_ref_list_view(slice, &mut pos);
-            if !block_terminates(insts, extra, then_stmts, pool, jumps) {
-                return false;
-            }
-            let mut elif_pos = elif_start;
-            for _ in 0..elif_count {
-                elif_pos += 1; // elif cond
-                let body = read_ref_list_view(slice, &mut elif_pos);
-                if !block_terminates(insts, extra, body, pool, jumps) {
+            for elif in &view.elif_branches {
+                if !block_terminates(insts, extra, elif.body, pool, jumps) {
                     return false;
                 }
             }
@@ -113,10 +100,4 @@ fn extra_slice<'a>(extra: &'a [u32], inst: &TypedInst) -> &'a [u32] {
         unreachable!("instruction must carry TirData::Extra");
     };
     &extra[rng.as_range()]
-}
-
-/// Word `offset` of an instruction's `extra` payload, read as a
-/// [`TirRef`].
-fn extra_ref_at(extra: &[u32], inst: &TypedInst, offset: usize) -> TirRef {
-    TirRef::from_raw(extra_slice(extra, inst)[offset])
 }
