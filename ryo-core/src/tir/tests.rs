@@ -182,6 +182,59 @@ fn var_decl_round_trips() {
 }
 
 #[test]
+fn var_decl_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let name = StringId::from_raw(7);
+    let init = TirRef::from_raw(13);
+
+    let decl = b.var_decl(name, true, int_ty, init, sp());
+    let TirData::Extra(range) = b.instructions[decl.index()].data else {
+        panic!("VarDecl must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 3 });
+    assert_eq!(&b.extra[5..8], &[7, 1, 13]);
+    assert_eq!(b.extra.len(), 8);
+
+    let decl2 = b.var_decl(name, false, int_ty, init, sp());
+    let TirData::Extra(range2) = b.instructions[decl2.index()].data else {
+        panic!("VarDecl must carry TirData::Extra");
+    };
+    assert_eq!(range2, ExtraRange { offset: 8, len: 3 });
+    assert_eq!(&b.extra[8..11], &[7, 0, 13]);
+}
+
+#[test]
+fn var_decl_decode_fixture() {
+    // Literal words, never encoder output: the payload words are
+    // replaced with independent literals before the view reads them.
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    let dummy = b.int_const(0, int_ty, sp());
+    let x = pool.intern_str("x");
+    let decl = b.var_decl(x, false, int_ty, dummy, sp());
+    let mut tir = b.finish(&[decl]);
+
+    let TirData::Extra(range) = tir.inst(decl).data else {
+        panic!("VarDecl must carry TirData::Extra");
+    };
+    let start = range.as_range().start;
+    tir.extra[start] = 7; // name
+    tir.extra[start + 1] = 1; // mutable
+    tir.extra[start + 2] = 13; // initializer
+
+    let v = tir.var_decl_view(decl);
+    assert_eq!(v.name, StringId::from_raw(7));
+    assert!(v.mutable);
+    assert_eq!(v.initializer, TirRef::from_raw(13));
+}
+
+#[test]
 fn float_const_and_fadd_round_trip() {
     let mut pool = InternPool::new();
     let main = pool.intern_str("main");
