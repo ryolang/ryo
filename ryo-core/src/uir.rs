@@ -1414,6 +1414,67 @@ mod tests {
     }
 
     #[test]
+    fn destructure_wire_fixture() {
+        let mut b = UirBuilder::new();
+        b.uir.extra.extend([0xAAAA_AAAA; 5]);
+        let value = InstRef::from_raw(11);
+        let plan = [
+            (0u32, None),
+            (1, Some(StringId::from_raw(0))),
+            (2, Some(StringId::from_raw(5))),
+        ];
+
+        let r = b.destructure(value, true, &plan, sp());
+        let InstData::Destructure {
+            plan: range,
+            by_position,
+            ..
+        } = b.uir.inst(r).data
+        else {
+            panic!("Destructure must carry InstData::Destructure");
+        };
+        assert!(by_position);
+        assert_eq!(range, ExtraRange { offset: 5, len: 7 });
+        assert_eq!(&b.uir.extra[5..12], &[3, 0, 0, 1, 1, 2, 6]);
+
+        let empty = b.destructure(value, false, &[], sp());
+        let InstData::Destructure {
+            plan: range2,
+            by_position: bp2,
+            ..
+        } = b.uir.inst(empty).data
+        else {
+            panic!("Destructure must carry InstData::Destructure");
+        };
+        assert!(!bp2);
+        assert_eq!(range2, ExtraRange { offset: 12, len: 1 });
+        assert_eq!(&b.uir.extra[12..13], &[0]);
+
+        let mut uir = Uir::new();
+        uir.extra.extend([3, 0, 0, 1, 1, 2, 6]);
+        uir.instructions.push(Inst {
+            tag: InstTag::Destructure,
+            data: InstData::Destructure {
+                value,
+                plan: ExtraRange { offset: 0, len: 7 },
+                by_position: true,
+            },
+        });
+        uir.spans.push(sp());
+        let v = uir.destructure_view(InstRef::from_index(1));
+        assert_eq!(v.value, value);
+        assert!(v.by_position);
+        assert_eq!(
+            v.plan,
+            vec![
+                (0, None),
+                (1, Some(StringId::from_raw(0))),
+                (2, Some(StringId::from_raw(5))),
+            ]
+        );
+    }
+
+    #[test]
     fn float_literal_round_trips() {
         let mut b = UirBuilder::new();
         let r = b.float_literal(2.5, sp());

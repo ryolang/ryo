@@ -566,6 +566,45 @@ fn enum_lit_wire_fixture() {
 }
 
 #[test]
+fn destructure_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let rhs = b.int_const(7, int_ty, sp());
+    let fty1 = TypeId::from_raw(3);
+    let fty2 = TypeId::from_raw(4);
+    let fields = [(0u32, None, fty1), (1, Some(StringId::from_raw(0)), fty2)];
+
+    let r = b.destructure(rhs, &fields, sp());
+    let TirData::Extra(range) = b.instructions[r.index()].data else {
+        panic!("Destructure must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 8 });
+    assert_eq!(&b.extra[5..13], &[1, 2, 0, 0, 3, 1, 1, 4]);
+
+    let (tir, r) = shell_with(&[1, 2, 0, 0, 3, 1, 1, 4], TirTag::Destructure, 8);
+    let v = tir.destructure_view(r);
+    assert_eq!(v.rhs, rhs);
+    assert_eq!(
+        v.fields,
+        vec![
+            DestructureField {
+                field_index: 0,
+                bind: None,
+                ty: fty1,
+            },
+            DestructureField {
+                field_index: 1,
+                bind: Some(StringId::from_raw(0)),
+                ty: fty2,
+            },
+        ]
+    );
+}
+
+#[test]
 fn float_const_and_fadd_round_trip() {
     let mut pool = InternPool::new();
     let main = pool.intern_str("main");
