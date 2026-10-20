@@ -6,7 +6,7 @@ fn toview_arg_counts_as_borrow_rule7() {
     // two(&s, s) — sema wraps the second arg in ToView; the
     // Rule-7 borrow partition must look through the conversion and
     // diagnose the aliasing (E0032).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -17,7 +17,7 @@ fn toview_arg_counts_as_borrow_rule7() {
     let two = pool.intern_str("two");
     let s = pool.intern_str("s");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -66,7 +66,7 @@ fn toview_read_counts_as_use_dead_store() {
     // conversion must count as used — no W0001. Here s's sole read
     // is the owned side of the mixed `str == strview` comparison:
     //   s: str = "hi"; other: str = "yo"; if s == other[0:1]: print("x")
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -79,7 +79,7 @@ fn toview_read_counts_as_use_dead_store() {
     let s = pool.intern_str("s");
     let other = pool.intern_str("other");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_hi = tb.str_const(pool.intern_str("hi"), str_ty, span);
@@ -118,7 +118,7 @@ fn viewasowner_arg_counts_as_borrow_rule7() {
     // two(&s, s[0:1]) — sema wraps the second arg in ViewAsOwner; the
     // Rule-7 borrow partition must look through the conversion and
     // diagnose the aliasing (E0032), same as the ToView case.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -130,7 +130,7 @@ fn viewasowner_arg_counts_as_borrow_rule7() {
     let two = pool.intern_str("two");
     let s = pool.intern_str("s");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -181,7 +181,7 @@ fn viewasowner_reborrow_is_call_scoped() {
     // P6': the re-borrow lives only for the call's duration — the
     // root owner can still be moved afterwards (no freeze, no
     // aliasing), unlike a bound slice projection.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -194,7 +194,7 @@ fn viewasowner_reborrow_is_call_scoped() {
     let eat = pool.intern_str("eat");
     let s = pool.intern_str("s");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -233,7 +233,7 @@ fn str_materialize_result_is_fresh_owner() {
     // the materialized copy is a fresh owner by construction (the
     // str-returning-Call seeding), so returning it is the sanctioned
     // escape fix: no diagnostics, no ownership special-casing.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder, TirData, TirParam, TirTag};
 
     let mut pool = InternPool::new();
@@ -242,7 +242,7 @@ fn str_materialize_result_is_fresh_owner() {
     let show = pool.intern_str("show");
     let text = pool.intern_str("text");
     let materialize = pool.intern_str("__ryo_str_from_view");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(
         show,
@@ -282,7 +282,7 @@ fn str_materialize_arg_counts_as_borrow_rule7() {
     // `s` for the call's duration (E4): the Rule-7 partition must
     // look through `__ryo_str_from_view` to the view's root, exactly
     // like the ViewAsOwner case (viewasowner_arg_counts_as_borrow_rule7).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -295,7 +295,7 @@ fn str_materialize_arg_counts_as_borrow_rule7() {
     let s = pool.intern_str("s");
     let hello = pool.intern_str("hello");
     let materialize = pool.intern_str("__ryo_str_from_view");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -360,7 +360,7 @@ fn loop_view_created_after_owner_mutation_dies_within_iteration() {
     // view pointer is ever read. (The unsound sibling — view
     // created OUTSIDE the loop, mutated inside — is covered by
     // `loop_deferred_view_survives_if_join_prune`.)
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -376,7 +376,7 @@ fn loop_view_created_after_owner_mutation_dies_within_iteration() {
     let str_push = pool.intern_str("str_push");
     let hello = pool.intern_str("hello");
     let bang = pool.intern_str("!");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -449,7 +449,7 @@ fn loop_view_live_at_back_edge_flags_earlier_mutation_on_rewalk() {
     // this test fail with 0 diagnostics. A refactor re-narrowing
     // the convergence comparison (e.g. back to Moved-ness only)
     // drops the re-walk and MUST fail this test.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -465,7 +465,7 @@ fn loop_view_live_at_back_edge_flags_earlier_mutation_on_rewalk() {
     let str_push = pool.intern_str("str_push");
     let hello = pool.intern_str("hello");
     let bang = pool.intern_str("!");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -522,7 +522,7 @@ fn view_and_move_args_same_owner_rejected() {
     // both args share root owner `s`. The view arg borrows the root
     // for the whole call (E4), so the move in the same call is a
     // P2 freeze violation: exactly one SourceProjected (E0035).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -534,7 +534,7 @@ fn view_and_move_args_same_owner_rejected() {
     let two = pool.intern_str("two");
     let s = pool.intern_str("s");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -599,7 +599,7 @@ fn p5_view_read_inside_if_arm_anchors_free_at_if_exit() {
     //   s: str = "hello"
     //   v = s[0:2]
     //   if true: print(v)
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -613,7 +613,7 @@ fn p5_view_read_inside_if_arm_anchors_free_at_if_exit() {
     let v = pool.intern_str("v");
     let print = pool.intern_str("print");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);

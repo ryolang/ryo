@@ -571,7 +571,7 @@ fn moving_payload_field_out_of_enum_rejected() {
     // shape) is rejected exactly like a struct field read. Hand-built
     // TIR — no source shape produces an enum-object FieldAccess consume
     // in M12, so the arm is exercised directly.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
     use ryo_core::types::{EnumVariantDef, StructFlags, VariantKind};
     let mut pool = InternPool::new();
@@ -602,7 +602,7 @@ fn moving_payload_field_out_of_enum_rejected() {
     );
     let o = pool.intern_str("o");
     let x = pool.intern_str("x");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let ov = tb.var(o, opt_ty, span);
     // A payload field read off the enum value, consumed by a VarDecl —

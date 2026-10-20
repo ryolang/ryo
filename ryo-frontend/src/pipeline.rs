@@ -91,7 +91,7 @@ mod tests {
 
     fn body(pool: &mut InternPool) -> Tir {
         let name = pool.intern_str("main");
-        let span = (0..0).into();
+        let span = ryo_core::span::Span::EMPTY;
         let mut builder = TirBuilder::new(name, vec![], pool.void(), span);
         let end = builder.return_void(pool.void(), span);
         builder.finish(&[end])

@@ -146,7 +146,8 @@ where
 /// chumsky's rewind, so each broken line reports exactly once.
 /// (Arena nodes pushed inside a failed region are *not* rolled back
 /// — they stay as unreachable orphans, which is safe because no kept
-/// node references them; see the `Inspector` impl on `Ast`.)
+/// node references them; see the `Inspector` impl on `ParseState` in
+/// `parser.rs`.)
 ///
 /// `not_at_boundary` decides where the loop stops without running the
 /// statement grammar: the grammar is deep and a failed alternative
@@ -184,7 +185,7 @@ where
         .map_with(|(s, tail), e: &mut Mx<'a, '_, I>| match tail {
             LineTail::Clean => s,
             LineTail::Garbage => {
-                let span = e.span();
+                let span = crate::spans::cspan(e.span());
                 e.state().error_stmt(span)
             }
         })
@@ -192,13 +193,13 @@ where
             skip_garbage()
                 .then_ignore(swallow_block())
                 .map_with(|_, e: &mut Mx<'a, '_, I>| {
-                    let span = e.span();
+                    let span = crate::spans::cspan(e.span());
                     e.state().error_stmt(span)
                 }),
         ))
         .recover_with(via_parser(skip_garbage().then_ignore(line_end).map_with(
             |_, e: &mut Mx<'a, '_, I>| {
-                let span = e.span();
+                let span = crate::spans::cspan(e.span());
                 e.state().error_stmt(span)
             },
         )));
@@ -252,7 +253,7 @@ where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     select! { Token::Ident(s) => s }
-        .map_with(|s, e: &mut Mx<'a, '_, I>| Ident::new(s, e.span()))
+        .map_with(|s, e: &mut Mx<'a, '_, I>| Ident::new(s, crate::spans::cspan(e.span())))
         .then(
             just(Token::Dot)
                 .ignore_then(field_key_ident())
@@ -266,7 +267,7 @@ where
 fn field_access_chain(ast: &mut Ast, root: Ident, fields: &[Ident]) -> ExprId {
     let mut target = ast.ident(root.name, root.span);
     for field in fields {
-        let span = SimpleSpan::new((), root.span.start..field.span.end);
+        let span = crate::spans::cspan(SimpleSpan::new((), root.span.start..field.span.end));
         target = ast.field_access(target, *field, span);
     }
     target
@@ -282,7 +283,7 @@ where
         .then_ignore(just(Token::Assign))
         .then(expr)
         .map_with(|((target, fields), value), e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             if fields.is_empty() {
                 e.state().assign_or_decl(target, value, span)
             } else {
@@ -311,7 +312,7 @@ where
         .then(op)
         .then(expr)
         .map_with(|(((target, fields), op), value), e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             if fields.is_empty() {
                 e.state().compound_assign(target, op, value, span)
             } else {
@@ -339,17 +340,17 @@ where
         let return_stmt = just(Token::Return)
             .ignore_then(expr.clone().or_not())
             .map_with(|expr, e: &mut Mx<'a, '_, I>| {
-                let span = e.span();
+                let span = crate::spans::cspan(e.span());
                 e.state().return_stmt(expr, span)
             });
 
         let break_stmt = just(Token::Break).map_with(|_, e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             e.state().break_stmt(span)
         });
 
         let continue_stmt = just(Token::Continue).map_with(|_, e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             e.state().continue_stmt(span)
         });
 
@@ -361,7 +362,7 @@ where
                 indented_block(body_stmt.clone()),
             ))
             .map_with(|(cond, body), e: &mut Mx<'a, '_, I>| {
-                let span = e.span();
+                let span = crate::spans::cspan(e.span());
                 e.state().while_loop(cond, &body, span)
             });
 
@@ -369,14 +370,14 @@ where
             .ignore_then(
                 select! { Token::Ident(s) => s }.map_with(|s, e: &mut Mx<'a, '_, I>| Ident {
                     name: s,
-                    span: e.span(),
+                    span: crate::spans::cspan(e.span()),
                 }),
             )
             .then_ignore(just(Token::In))
             .then(
                 select! { Token::Ident(s) => s }.map_with(|s, e: &mut Mx<'a, '_, I>| Ident {
                     name: s,
-                    span: e.span(),
+                    span: crate::spans::cspan(e.span()),
                 }),
             )
             .then_ignore(just(Token::LParen))
@@ -405,12 +406,12 @@ where
                 let end = args
                     .next()
                     .expect("arity checked above: range() has exactly 2 arguments");
-                let span = e.span();
+                let span = crate::spans::cspan(e.span());
                 Ok(e.state().for_range(var, iterator, start, end, &body, span))
             });
 
         let expr_stmt = expr.clone().map_with(|expr, e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             e.state().expr_stmt(expr, span)
         });
 
@@ -555,7 +556,7 @@ where
                     .into_iter()
                     .map(|(elif_cond, block)| (elif_cond, e.state().push_stmt_list(&block)))
                     .collect();
-                let span = e.span();
+                let span = crate::spans::cspan(e.span());
                 e.state().if_stmt(
                     cond,
                     &then_block,
@@ -608,7 +609,7 @@ where
         .to(None);
 
     select! { Token::Ident(name) => name }
-        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()))
+        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, crate::spans::cspan(e.span())))
         .then_ignore(just(Token::Colon))
         .then(body.or(no_body))
         .validate(|(name, fields), e: &mut Mx<'a, '_, I>, emitter| {
@@ -629,7 +630,7 @@ where
     just(Token::Struct)
         .ignore_then(struct_tail_parser())
         .map_with(|(name, fields), e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             e.state()
                 .struct_def(name, &fields, StructAttrs::default(), span)
         })
@@ -686,7 +687,7 @@ where
     // enum-declaration rules (same build-once discipline as `expr`).
     let enum_tail = enums::enum_tail_parser();
     let expr_stmt = expr.clone().map_with(|expr, e: &mut Mx<'a, '_, I>| {
-        let span = e.span();
+        let span = crate::spans::cspan(e.span());
         e.state().expr_stmt(expr, span)
     });
 
@@ -709,7 +710,7 @@ where
     // self-defensive regardless of choice order). Deliberately NOT
     // added to `body_statement_parser` — assignments are legal there.
     let assignment_guard = select! { Token::Ident(s) => s }
-        .map_with(|s, e: &mut Mx<'a, '_, I>| Ident::new(s, e.span()))
+        .map_with(|s, e: &mut Mx<'a, '_, I>| Ident::new(s, crate::spans::cspan(e.span())))
         .then(
             just(Token::Dot)
                 .ignore_then(field_key_ident())
@@ -739,7 +740,7 @@ where
             ));
         })
         .map_with(|_, e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             e.state().error_stmt(span)
         });
 
@@ -774,9 +775,11 @@ where
 {
     let view = just(Token::Amp)
         .ignore_then(select! { Token::Ident(name) => name })
-        .map_with(|name, e: &mut Mx<'a, '_, I>| TypeExpr::view(name, e.span()));
+        .map_with(|name, e: &mut Mx<'a, '_, I>| {
+            TypeExpr::view(name, crate::spans::cspan(e.span()))
+        });
     let plain = select! { Token::Ident(name) => name }
-        .map_with(|name, e: &mut Mx<'a, '_, I>| TypeExpr::new(name, e.span()));
+        .map_with(|name, e: &mut Mx<'a, '_, I>| TypeExpr::new(name, crate::spans::cspan(e.span())));
     // The view alternative comes first so the `&` is consumed before
     // the plain form can reject it.
     view.or(plain).boxed()
@@ -821,7 +824,7 @@ where
                 fields
             })
             .map_with(|fields, e: &mut Mx<'a, '_, I>| {
-                let span = e.span();
+                let span = crate::spans::cspan(e.span());
                 e.state().type_expr_anon(&fields, span)
             });
         // Positional sugar `(int, str)` — ≡ `{0: int, 1: str}`. The
@@ -843,7 +846,7 @@ where
             )
             .delimited_by(just(Token::LParen), just(Token::RParen))
             .map_with(|(first, rest), e: &mut Mx<'a, '_, I>| {
-                let span = e.span();
+                let span = crate::spans::cspan(e.span());
                 let mut elems = Vec::with_capacity(rest.len() + 1);
                 elems.push(first);
                 elems.extend(rest);
@@ -860,7 +863,7 @@ where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     let ident = select! { Token::Ident(name) => name }
-        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()));
+        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, crate::spans::cspan(e.span())));
 
     let param_mode = choice((
         just(Token::Move).to(ParamMode::Move),
@@ -871,8 +874,9 @@ where
 
     let param = param_mode
         .then(
-            select! { Token::Ident(name) => name }
-                .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span())),
+            select! { Token::Ident(name) => name }.map_with(|name, e: &mut Mx<'a, '_, I>| {
+                Ident::new(name, crate::spans::cspan(e.span()))
+            }),
         )
         .then_ignore(just(Token::Colon))
         .then(type_expr_parser())
@@ -881,7 +885,7 @@ where
                 name,
                 type_annotation,
                 mode,
-                span: e.span(),
+                span: crate::spans::cspan(e.span()),
             },
         );
 
@@ -902,7 +906,7 @@ where
         .then(block_header("fn", "the signature", body))
         .map_with(
             |(((name, params), return_type), body), e: &mut Mx<'a, '_, I>| {
-                let span = e.span();
+                let span = crate::spans::cspan(e.span());
                 e.state()
                     .function_def(name, &params, return_type, &body, span)
             },
@@ -919,7 +923,7 @@ where
     let mutable = just(Token::Mut).or_not().map(|m| m.is_some());
 
     let ident = select! { Token::Ident(name) => name }
-        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()));
+        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, crate::spans::cspan(e.span())));
 
     let type_annotation = just(Token::Colon).ignore_then(type_expr_parser()).or_not();
 
@@ -930,7 +934,7 @@ where
         .then(expr)
         .map_with(
             |(((mutable, name), type_annotation), initializer), e: &mut Mx<'a, '_, I>| {
-                let span = e.span();
+                let span = crate::spans::cspan(e.span());
                 e.state()
                     .var_decl(mutable, name, type_annotation, initializer, span)
             },

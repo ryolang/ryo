@@ -75,7 +75,7 @@ where
             }
         })
         .map_with(|_, e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             e.state().pattern_wildcard(span)
         });
 
@@ -100,7 +100,7 @@ where
         )),
     ));
     let literal = lit_value.map_with(|lit, e: &mut Mx<'a, '_, I>| {
-        let span = e.span();
+        let span = crate::spans::cspan(e.span());
         e.state().literal_pattern(lit, span)
     });
 
@@ -142,7 +142,7 @@ where
         .collect::<Vec<_>>()
         .delimited_by(just(Token::LBrace), just(Token::RBrace))
         .map_with(|fields, e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             e.state().pattern_anon(&fields, span)
         });
 
@@ -159,7 +159,7 @@ where
         )
         .delimited_by(just(Token::LParen), just(Token::RParen))
         .map_with(|(first, rest), e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             let mut elems = Vec::with_capacity(rest.len() + 1);
             elems.push(first);
             elems.extend(rest);
@@ -249,7 +249,7 @@ where
     ))
     .then(args)
     .map_with(|((enum_name, variant), args), e: &mut Mx<'a, '_, I>| {
-        let span = e.span();
+        let span = crate::spans::cspan(e.span());
         e.state().variant_pattern(enum_name, variant, args, span)
     });
 
@@ -257,7 +257,10 @@ where
     // elements, field targets go through their own sub-parsers), so
     // the whole-arm rejection lives on the arm line, not here.
     let bind = ident.map_with(|(name, span), e: &mut Mx<'a, '_, I>| {
-        e.state().pattern_bind(Ident::new(name, span), span)
+        e.state().pattern_bind(
+            Ident::new(name, crate::spans::cspan(span)),
+            crate::spans::cspan(span),
+        )
     });
 
     pat.define(choice((wildcard, literal, anon, positional, variant, bind)).boxed());
@@ -317,7 +320,7 @@ where
         .then_ignore(just(Token::Colon))
         .then(arm_body)
         .map_with(|(pattern, body), e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             e.state().match_arm(pattern, body, span)
         });
 
@@ -349,7 +352,7 @@ where
         .then(arms)
         .then_ignore(absorb_close_paren_newline)
         .map_with(|(scrutinee, arms), e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             e.state().match_expr(scrutinee, &arms, span)
         })
         .boxed()

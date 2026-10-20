@@ -10,7 +10,7 @@ use super::*;
 
 /// Push a bind-or-wildcard pattern node: `_` lexes as an ordinary
 /// identifier, so the wildcard is recognized by name here.
-fn bind_pattern(state: &mut ParseState, name: StringId, span: SimpleSpan) -> PatternId {
+fn bind_pattern(state: &mut ParseState, name: StringId, span: ryo_core::span::Span) -> PatternId {
     if state.pool.str(name) == "_" {
         state.pattern_wildcard(span)
     } else {
@@ -50,7 +50,7 @@ fn bind_pattern(state: &mut ParseState, name: StringId, span: SimpleSpan) -> Pat
 /// not to be followed by `=` (a bare `(a, b)` or `{x=1}` expression
 /// statement), the pattern nodes pushed before the failure stay in
 /// the arenas as unreachable orphans — deliberate (the `Inspector`
-/// hooks on `Ast` are no-ops; see `statement_list`).
+/// hooks on `ParseState` are no-ops; see `statement_list`).
 ///
 /// `value` is the right-hand-side expression grammar: the caller's
 /// shared expression parser (see `top_level_statement_parser`), so
@@ -75,8 +75,9 @@ where
     let bind_target = select! { Token::Ident(name) => name }
         .map_with(|name, e: &mut Mx<'a, '_, I>| (name, e.span()));
 
-    let bind = bind_target
-        .map_with(|(name, span), e: &mut Mx<'a, '_, I>| bind_pattern(e.state(), name, span));
+    let bind = bind_target.map_with(|(name, span), e: &mut Mx<'a, '_, I>| {
+        bind_pattern(e.state(), name, crate::spans::cspan(span))
+    });
 
     // One field of an anonymous pattern: a pun (`q`), a wildcard
     // field (`_` or `y = _`), or a rename (`x = quot`). Renaming a
@@ -109,7 +110,7 @@ where
         .collect::<Vec<_>>()
         .delimited_by(just(Token::LBrace), just(Token::RBrace))
         .map_with(|fields, e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             e.state().pattern_anon(&fields, span)
         });
 
@@ -127,7 +128,7 @@ where
         )
         .delimited_by(just(Token::LParen), just(Token::RParen))
         .map_with(|(first, rest), e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             let mut elems = Vec::with_capacity(rest.len() + 1);
             elems.push(first);
             elems.extend(rest);
@@ -150,17 +151,21 @@ where
         .then_ignore(just(Token::Assign))
         .then(value.clone())
         .map_with(|((first, rest), value), e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             let start = first.1.start;
             let end = rest.last().map(|(_, s)| s.end).unwrap_or(first.1.end);
             let mut elems = Vec::with_capacity(rest.len() + 1);
-            elems.push(bind_pattern(e.state(), first.0, first.1));
+            elems.push(bind_pattern(
+                e.state(),
+                first.0,
+                crate::spans::cspan(first.1),
+            ));
             for (name, sp) in rest {
-                elems.push(bind_pattern(e.state(), name, sp));
+                elems.push(bind_pattern(e.state(), name, crate::spans::cspan(sp)));
             }
             let target = e
                 .state()
-                .pattern_positional(&elems, SimpleSpan::new((), start..end));
+                .pattern_positional(&elems, crate::spans::cspan(SimpleSpan::new((), start..end)));
             e.state().destructure(target, value, span)
         });
 
@@ -170,7 +175,7 @@ where
         .then_ignore(just(Token::Assign))
         .then(value.clone())
         .map_with(|(target, value), e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             e.state().destructure(target, value, span)
         });
 
@@ -191,8 +196,8 @@ where
             },
         )
         .map_with(|((name, name_span), value), e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
-            let target = Ident::new(name, name_span);
+            let span = crate::spans::cspan(e.span());
+            let target = Ident::new(name, crate::spans::cspan(name_span));
             e.state().assign_or_decl(target, value, span)
         });
 

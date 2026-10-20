@@ -242,18 +242,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-104 — `ryo-core` depends on chumsky for `SimpleSpan` and an `Inspector` impl
-
-**Severity:** Cleanup
-**Area:** core-ir
-
-**Files:** `ryo-core/src/diag.rs` (:18-20), `ryo-core/Cargo.toml`
-**Summary:** The "core" IR/types crate pulls in a parser crate for one span type, coupling every consumer of `ryo-core` to chumsky's release cycle.
-**Resolution:** Define a small `Span` newtype in `ryo-core` and convert at the parser boundary (`pipeline.rs` already adapts spans).
-**Update (2026-10-19, post-M12 review):** The "solely for `SimpleSpan`" framing is understated. As of today chumsky imports appear in 12 `ryo-core` files (11 non-test: `ast.rs`, `ast/inspector.rs`, `ast/patterns.rs`, `ast/stmts.rs`, `ast_pretty.rs`, `diag.rs`, `errors.rs`, `tir.rs`, `tir/match_.rs`, `uir.rs`, `uir/match_.rs`), and the coupling is deeper than the span type: `ryo-core/src/ast/inspector.rs:36` implements chumsky's `Inspector` for `Ast` (the `TruncateState` pattern, documented at `ast.rs:80-86` and in that module) so the core AST is embedded in chumsky's parser-state protocol for rewind truncation during speculation. Decoupling therefore needs a `Span` newtype *and* a re-home for the inspector/parser-state behavior (e.g. a frontend- or driver-owned wrapper around `Ast`). Related: `ryo-driver` also couples to chumsky directly (`pipeline.rs:40-42` imports; `Rich` error re-rendering at `:223-225`), so the parser boundary where conversion happens should absorb both couplings in one pass.
-
----
-
 ### I-109 — No instruction→function reverse mapping in UIR
 
 **Severity:** Cleanup
@@ -775,4 +763,4 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
 
-<!-- issue-id high-water: 243 -->
+<!-- issue-id high-water: 244 -->

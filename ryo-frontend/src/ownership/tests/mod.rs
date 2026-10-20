@@ -52,7 +52,7 @@ fn needs_tracking_matches_move() {
 
 #[test]
 fn str_const_walk_no_panic() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -60,7 +60,7 @@ fn str_const_walk_no_panic() {
     let void = pool.void();
     let main = pool.intern_str("main");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     // fn main() -> void: <str_const "hello"> as expr_stmt
     let mut b = TirBuilder::new(main, vec![], void, span);
@@ -80,14 +80,14 @@ fn str_const_walk_no_panic() {
 
 #[test]
 fn borrowed_param_resolves_under_owner_param_as_borrowed() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
     let void = pool.void();
     let read = pool.intern_str("read"); // fn read(s: str) -> void  (borrowed param)
     let s_name = pool.intern_str("s");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(
         read,
         vec![TirParam {
@@ -125,7 +125,7 @@ fn double_consume_reports_uam_once_via_consume_authority() {
     // already-moved binding. The Var arm used to emit E0020 for it;
     // now the consume site (consume_underlying) is the authority
     // and must emit exactly once.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -133,7 +133,7 @@ fn double_consume_reports_uam_once_via_consume_authority() {
     let main = pool.intern_str("main");
     let x = pool.intern_str("x");
     let take = pool.intern_str("take");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
     let decl = tb.var_decl(x, false, str_ty, lit, span);
@@ -161,7 +161,7 @@ fn double_consume_reports_uam_once_via_consume_authority() {
 fn borrow_of_moved_value_still_reports_uam() {
     // print(moved_x) — borrow of a moved value, no consume. After the
     // Var arm is demoted, the borrow-arg check_use_moved must still fire.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -170,7 +170,7 @@ fn borrow_of_moved_value_still_reports_uam() {
     let x = pool.intern_str("x");
     let take = pool.intern_str("take");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
     let decl = tb.var_decl(x, false, str_ty, lit, span);
@@ -197,7 +197,7 @@ fn borrow_of_moved_value_still_reports_uam() {
 
 #[test]
 fn three_arm_if_with_conditional_move_and_loop_rebind() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     use std::collections::HashSet;
     let mut pool = InternPool::new();
@@ -209,7 +209,7 @@ fn three_arm_if_with_conditional_move_and_loop_rebind() {
     let s = pool.intern_str("s");
     let take = pool.intern_str("take");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_v = tb.str_const(pool.intern_str("v"), str_ty, span);
@@ -281,7 +281,7 @@ fn three_arm_if_with_conditional_move_and_loop_rebind() {
 
 #[test]
 fn move_and_borrow_of_same_owner_in_one_call_e0023_both_orderings() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     use ryo_core::types::TypeId;
     let mut pool = InternPool::new();
@@ -290,7 +290,7 @@ fn move_and_borrow_of_same_owner_in_one_call_e0023_both_orderings() {
     let main = pool.intern_str("main");
     let x = pool.intern_str("x");
     let f = pool.intern_str("f");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     fn build(
         tir: &mut TirBuilder,
@@ -363,7 +363,7 @@ fn move_and_borrow_of_same_owner_in_one_call_e0023_both_orderings() {
 
 #[test]
 fn two_borrows_of_one_owner_ok() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -371,7 +371,7 @@ fn two_borrows_of_one_owner_ok() {
     let main = pool.intern_str("main");
     let x = pool.intern_str("x");
     let f = pool.intern_str("f");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
     let decl = tb.var_decl(x, false, str_ty, lit, span);
@@ -398,7 +398,7 @@ fn two_borrows_of_one_owner_ok() {
 
 #[test]
 fn borrow_and_move_of_distinct_owners_ok() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -407,7 +407,7 @@ fn borrow_and_move_of_distinct_owners_ok() {
     let a = pool.intern_str("a");
     let b = pool.intern_str("b");
     let f = pool.intern_str("f");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let la = tb.str_const(pool.intern_str("va"), str_ty, span);
     let lb = tb.str_const(pool.intern_str("vb"), str_ty, span);
@@ -436,7 +436,7 @@ fn borrow_and_move_of_distinct_owners_ok() {
 
 #[test]
 fn single_move_arg_no_e0023() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -444,7 +444,7 @@ fn single_move_arg_no_e0023() {
     let main = pool.intern_str("main");
     let x = pool.intern_str("x");
     let f = pool.intern_str("f");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
     let decl = tb.var_decl(x, false, str_ty, lit, span);
@@ -469,7 +469,7 @@ fn single_move_arg_no_e0023() {
 
 #[test]
 fn copy_args_untracked_no_false_positive() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -479,7 +479,7 @@ fn copy_args_untracked_no_false_positive() {
     let n = pool.intern_str("n");
     let x = pool.intern_str("x");
     let f = pool.intern_str("f");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let ic = tb.int_const(1, int_ty, span);
     let dn = tb.var_decl(n, false, int_ty, ic, span);
@@ -508,7 +508,7 @@ fn copy_args_untracked_no_false_positive() {
 
 #[test]
 fn borrow_and_move_in_sequential_statements_ok() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -516,7 +516,7 @@ fn borrow_and_move_in_sequential_statements_ok() {
     let main = pool.intern_str("main");
     let x = pool.intern_str("x");
     let f = pool.intern_str("f");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
     let decl = tb.var_decl(x, false, str_ty, lit, span);
@@ -548,7 +548,7 @@ fn two_immutable_borrows_ok() {
     // f(c, c) — two immutable borrows of one int owner: no E0032
     // (Rule 7 many readers). Guards the untracked-Borrow recording
     // against false positives.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let int_ty = pool.int();
@@ -556,7 +556,7 @@ fn two_immutable_borrows_ok() {
     let main = pool.intern_str("main");
     let c = pool.intern_str("c");
     let f = pool.intern_str("f");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let ic = tb.int_const(1, int_ty, span);
     let decl = tb.var_decl(c, false, int_ty, ic, span);

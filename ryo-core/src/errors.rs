@@ -47,10 +47,10 @@ impl From<std::io::Error> for CompilerError {
 mod tests {
     use super::*;
     use crate::diag::{Diag, DiagCode};
-    use chumsky::span::{SimpleSpan, Span as _};
+    use crate::span::Span;
 
     fn err_diag() -> Diag {
-        Diag::error(SimpleSpan::new((), 0..0), DiagCode::TypeMismatch, "x")
+        Diag::error(Span::EMPTY, DiagCode::TypeMismatch, "x")
     }
 
     #[test]

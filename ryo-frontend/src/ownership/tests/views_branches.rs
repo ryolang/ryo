@@ -5,7 +5,7 @@ fn view_across_branches() {
     // s: str = "hello"; v = s[0:2]; if flag: print(v) else: print("x"); consume(s)
     // → legal: v's last use is inside the branch; freeze lifted at
     //   the join; P5 keeps s alive through the branch.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -21,7 +21,7 @@ fn view_across_branches() {
     let consume = pool.intern_str("consume");
     let hello = pool.intern_str("hello");
     let x = pool.intern_str("x");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -67,7 +67,7 @@ fn freeze_is_per_arm_precise_across_if_arms() {
     //   else: print(v)
     // → legal: on the then-path v's last read completes before the
     //   consume; the else-arm read is not on that path.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -82,7 +82,7 @@ fn freeze_is_per_arm_precise_across_if_arms() {
     let print = pool.intern_str("print");
     let consume = pool.intern_str("consume");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -136,7 +136,7 @@ fn per_arm_override_respects_loop_deferral() {
     //       print(v)              # global max read — outside any loop
     // → exactly one SourceProjected naming `s` (P4 deferral holds
     //   per arm: the in-loop read keeps v live through the loop).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -152,7 +152,7 @@ fn per_arm_override_respects_loop_deferral() {
     let str_push = pool.intern_str("str_push");
     let hello = pool.intern_str("hello");
     let x4 = pool.intern_str("xxxx");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -225,7 +225,7 @@ fn per_arm_kill_respects_loop_deferral() {
     //                         #   → loop-deferred → kill/override skipped
     // → exactly one SourceProjected naming `s` (v is live in the
     //   then-arm through the deferral exemption).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -240,7 +240,7 @@ fn per_arm_kill_respects_loop_deferral() {
     let print = pool.intern_str("print");
     let consume = pool.intern_str("consume");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -306,7 +306,7 @@ fn per_arm_kill_without_deferral_stays_scoped() {
     //   and the else move is rejected (the kill did not leak across
     //   arms — had the elif walk left the projection drained, the
     //   else-arm move would be silently accepted too).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -321,7 +321,7 @@ fn per_arm_kill_without_deferral_stays_scoped() {
     let print = pool.intern_str("print");
     let consume = pool.intern_str("consume");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -397,7 +397,7 @@ fn per_arm_override_applies_to_elif_arms() {
     //                                 #   last read → LEGAL
     //   else: print(v)                # global max read (later arm)
     // → no diagnostics.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -413,7 +413,7 @@ fn per_arm_override_applies_to_elif_arms() {
     let consume = pool.intern_str("consume");
     let hello = pool.intern_str("hello");
     let tee = pool.intern_str("t");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -476,7 +476,7 @@ fn view_created_in_loop_body_per_arm_kill_applies() {
     //       if c: str_push(&s, "!")   # no reads of v → kill → LEGAL
     //       else: print(v)
     // → no diagnostics (no spurious SourceProjected).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -492,7 +492,7 @@ fn view_created_in_loop_body_per_arm_kill_applies() {
     let str_push = pool.intern_str("str_push");
     let hello = pool.intern_str("hello");
     let bang = pool.intern_str("!");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -548,7 +548,7 @@ fn view_created_in_loop_body_freeze_holds_before_read() {
     //       v = s[0:2]
     //       if c: str_push(&s, "!"); print(v)   # mutation while v live
     // → exactly one SourceProjected naming `s`.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -564,7 +564,7 @@ fn view_created_in_loop_body_freeze_holds_before_read() {
     let str_push = pool.intern_str("str_push");
     let hello = pool.intern_str("hello");
     let bang = pool.intern_str("!");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -627,7 +627,7 @@ fn freeze_holds_before_arm_local_last_read() {
     //   if cond: consume(s); print(v)   # move precedes v's last read
     //   else: print(v)
     // → exactly one SourceProjected naming `s`.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -642,7 +642,7 @@ fn freeze_holds_before_arm_local_last_read() {
     let print = pool.intern_str("print");
     let consume = pool.intern_str("consume");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -700,7 +700,7 @@ fn freeze_holds_in_arm_when_view_read_after_join() {
     //   else: consume(s)      # v still live (read after the if)
     //   print(v)
     // → exactly one SourceProjected naming `s`.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -715,7 +715,7 @@ fn freeze_holds_in_arm_when_view_read_after_join() {
     let print = pool.intern_str("print");
     let consume = pool.intern_str("consume");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -773,7 +773,7 @@ fn move_in_arm_where_view_is_dead_ok_but_post_join_use_is_uam() {
     //   else: print(v)
     //   print(s)              # moved on the then-path → E0020
     // → exactly one UseAfterMove (and NO SourceProjected).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -788,7 +788,7 @@ fn move_in_arm_where_view_is_dead_ok_but_post_join_use_is_uam() {
     let print = pool.intern_str("print");
     let consume = pool.intern_str("consume");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -841,7 +841,7 @@ fn loop_deferred_view_stays_frozen_across_arm_without_read() {
     //       if cond: str_push(&s, "!")   # v unread on this arm's path
     //       else: print(v)               # …but re-read next iteration
     // → exactly one SourceProjected naming `s`.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -857,7 +857,7 @@ fn loop_deferred_view_stays_frozen_across_arm_without_read() {
     let str_push = pool.intern_str("str_push");
     let hello = pool.intern_str("hello");
     let bang = pool.intern_str("!");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -922,7 +922,7 @@ fn for_range_deferred_view_stays_frozen_across_arm_without_read() {
     //       if cond: str_push(&s, "!")   # v unread on this arm's path
     //       else: print(v)               # …but re-read next iteration
     // → exactly one SourceProjected naming `s`.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -939,7 +939,7 @@ fn for_range_deferred_view_stays_frozen_across_arm_without_read() {
     let str_push = pool.intern_str("str_push");
     let hello = pool.intern_str("hello");
     let bang = pool.intern_str("!");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -1000,7 +1000,7 @@ fn view_in_loop_body_converges() {
     // → converges (full-tuple comparison); no spurious
     //   SourceProjected on the second iteration; s freed after the
     //   loop.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -1014,7 +1014,7 @@ fn view_in_loop_body_converges() {
     let v = pool.intern_str("v");
     let print = pool.intern_str("print");
     let hello = pool.intern_str("hello");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
@@ -1058,7 +1058,7 @@ fn view_in_loop_body_converges() {
 
 #[test]
 fn loop_rebinding_liveness_tracks_entry_and_back_edge_views() {
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -1072,7 +1072,7 @@ fn loop_rebinding_liveness_tracks_entry_and_back_edge_views() {
     let t = pool.intern_str("t");
     let v = pool.intern_str("v");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let s_lit = tb.str_const(pool.intern_str("source"), str_ty, span);
@@ -1144,7 +1144,7 @@ fn loop_rebind_stays_scoped_to_its_arm() {
     //   else:
     //       print(v)         # sees only the entry slice
     // The else-arm read must not become the rebound slice's last use.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -1158,7 +1158,7 @@ fn loop_rebind_stays_scoped_to_its_arm() {
     let t = pool.intern_str("t");
     let v = pool.intern_str("v");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let s_lit = tb.str_const(pool.intern_str("source"), str_ty, span);
@@ -1220,7 +1220,7 @@ fn loop_deferred_view_survives_if_join_prune() {
     //   silently accepting a mutation whose realloc later iterations
     //   would read through v's stale pointer — the UAF class P2
     //   exists to reject.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -1236,7 +1236,7 @@ fn loop_deferred_view_survives_if_join_prune() {
     let str_push = pool.intern_str("str_push");
     let hello = pool.intern_str("hello");
     let bang = pool.intern_str("!");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);

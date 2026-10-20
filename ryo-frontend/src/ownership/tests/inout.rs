@@ -6,7 +6,7 @@ fn inout_same_owner_twice_rejected() {
     // swap(&c, &c) — two mutable borrows of one int owner in the same
     // call (Rule 7 case 1). The int args never enter the lattice, so
     // this exercises the name-based inout owner resolution.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let int_ty = pool.int();
@@ -14,7 +14,7 @@ fn inout_same_owner_twice_rejected() {
     let main = pool.intern_str("main");
     let c = pool.intern_str("c");
     let swap = pool.intern_str("swap");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let ic = tb.int_const(1, int_ty, span);
     let decl = tb.var_decl(c, false, int_ty, ic, span);
@@ -50,7 +50,7 @@ fn inout_same_owner_twice_rejected() {
 fn inout_and_borrow_same_owner_rejected() {
     // f(&c, c) — mutable borrow plus immutable borrow of one int owner
     // in the same call (Rule 7 case 2).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let int_ty = pool.int();
@@ -58,7 +58,7 @@ fn inout_and_borrow_same_owner_rejected() {
     let main = pool.intern_str("main");
     let c = pool.intern_str("c");
     let f = pool.intern_str("f");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let ic = tb.int_const(1, int_ty, span);
     let decl = tb.var_decl(c, false, int_ty, ic, span);
@@ -95,7 +95,7 @@ fn inout_and_move_same_owner_rejected() {
     // f(&x, move x) — mutable borrow plus move of one str owner in the
     // same call (Rule 7 case 3). The tracked str args exercise the
     // lattice-backed path of the overlap check.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -103,7 +103,7 @@ fn inout_and_move_same_owner_rejected() {
     let main = pool.intern_str("main");
     let x = pool.intern_str("x");
     let f = pool.intern_str("f");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
     let decl = tb.var_decl(x, false, str_ty, lit, span);
@@ -141,7 +141,7 @@ fn e0032_names_local_binding_not_value() {
     // rendered example shows the backticked binding name, not the
     // generic "value" that `owner_name_for_diag` falls back to for
     // locals (it inspects the initializer, not the read).
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let int_ty = pool.int();
@@ -149,7 +149,7 @@ fn e0032_names_local_binding_not_value() {
     let main = pool.intern_str("main");
     let c = pool.intern_str("c");
     let swap = pool.intern_str("swap");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let ic = tb.int_const(1, int_ty, span);
     let decl = tb.var_decl(c, false, int_ty, ic, span);
@@ -189,7 +189,7 @@ fn e0032_names_local_binding_not_value() {
 #[test]
 fn inout_distinct_owners_ok() {
     // swap(&a, &b) — mutable borrows of DISTINCT int owners: no E0032.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let int_ty = pool.int();
@@ -198,7 +198,7 @@ fn inout_distinct_owners_ok() {
     let a = pool.intern_str("a");
     let b = pool.intern_str("b");
     let swap = pool.intern_str("swap");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let ia = tb.int_const(1, int_ty, span);
     let ib = tb.int_const(2, int_ty, span);
@@ -236,14 +236,14 @@ fn inout_str_param_reassign_escapes_no_dead_store_no_free() {
     // replacement value escapes through the write-back pointer, so the
     // pass must NOT emit W0001 or free the new value; the OLD pointee
     // (the incoming buffer) must be dropped at the reassign.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
     let void = pool.void();
     let set = pool.intern_str("set");
     let s = pool.intern_str("s");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(
         set,
         vec![TirParam {
@@ -292,7 +292,7 @@ fn inout_str_param_reassign_inside_if_escapes() {
     // escapes via the write-back: no W0001, no Free for the rebound
     // value or the param, while the taken arm still drops the
     // incoming buffer.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -300,7 +300,7 @@ fn inout_str_param_reassign_inside_if_escapes() {
     let void = pool.void();
     let g = pool.intern_str("g");
     let s = pool.intern_str("s");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(
         g,
         vec![TirParam {
@@ -352,7 +352,7 @@ fn inout_str_param_move_out_after_reassign_rejected() {
     // The value bound to an inout str param escapes via the
     // write-back, so moving it out (even after a reassign made it a
     // fresh, Valid owner) must still be an error.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder, TirParam};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -360,7 +360,7 @@ fn inout_str_param_move_out_after_reassign_rejected() {
     let f = pool.intern_str("f");
     let g = pool.intern_str("g");
     let s = pool.intern_str("s");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(
         f,
         vec![TirParam {
@@ -397,14 +397,14 @@ fn inout_str_param_move_out_after_reassign_rejected() {
 fn inout_str_param_return_after_reassign_rejected() {
     // Returning the value currently bound to an inout str param
     // double-owns it (it also escapes via the write-back) — E0022.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder, TirData, TirParam, TirTag};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
     let void = pool.void();
     let f = pool.intern_str("f");
     let s = pool.intern_str("s");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(
         f,
         vec![TirParam {
@@ -448,7 +448,7 @@ fn inout_call_keeps_owner_and_frees_current_buffer() {
     // write-back triple after the reload), never the stale pre-call
     // repr. Assert the lattice invariants: owner unchanged, exactly
     // one Free for it, no diagnostics.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -457,7 +457,7 @@ fn inout_call_keeps_owner_and_frees_current_buffer() {
     let s = pool.intern_str("s");
     let set = pool.intern_str("set");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("hi"), str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit, span);
@@ -493,7 +493,7 @@ fn inout_call_inside_if_no_false_dead_store() {
     // `mut s = "a"; if c: set(&s); print(s)` — the
     // reseat happens inside the if-arm; the post-if read must clear
     // the dead-store entry across the branch merge.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -503,7 +503,7 @@ fn inout_call_inside_if_no_false_dead_store() {
     let s = pool.intern_str("s");
     let set = pool.intern_str("set");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("a"), str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit, span);
@@ -532,7 +532,7 @@ fn inout_call_inside_if_no_false_dead_store() {
 fn inout_call_inside_loop_no_false_dead_store() {
     // `mut s = ""; while i < 3: str_push(&s, "x") ...
     // print(s)` — same merge concern through the loop fixed point.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();
     let str_ty = pool.str_();
@@ -542,7 +542,7 @@ fn inout_call_inside_loop_no_false_dead_store() {
     let s = pool.intern_str("s");
     let set = pool.intern_str("set");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str(""), str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit, span);

@@ -90,7 +90,7 @@ where
     select! { Token::Ident(name) => name }
         .try_map_with(|name, e: &mut Mx<'a, '_, I>| {
             if e.state().postfix_head_enum.is_some() {
-                Ok(Ident::new(name, e.span()))
+                Ok(Ident::new(name, crate::spans::cspan(e.span())))
             } else {
                 Err(Rich::custom(e.span(), ParseDiag::ExpectedEnumTypeName))
             }
@@ -129,7 +129,7 @@ where
     select! { Token::Ident(name) => name }
         .try_map_with(|name, e: &mut Mx<'a, '_, I>| {
             if e.state().postfix_head_enum.is_some() {
-                Ok(Ident::new(name, e.span()))
+                Ok(Ident::new(name, crate::spans::cspan(e.span())))
             } else {
                 Err(Rich::custom(e.span(), ParseDiag::ExpectedEnumTypeName))
             }
@@ -216,7 +216,7 @@ where
         .ignore_then(choice((named_payload, tuple_payload)))
         .or_not();
     let variant = select! { Token::Ident(name) => name }
-        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()))
+        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, crate::spans::cspan(e.span())))
         .then(empty().map_with(|_, e: &mut Mx<'a, '_, I>| e.state().struct_field_decls_len()))
         .then(payload)
         .map_with(|((name, start), kind), e: &mut Mx<'a, '_, I>| {
@@ -224,7 +224,7 @@ where
                 kind: kind.unwrap_or(VariantKind::Unit),
                 fields: e.state().struct_field_decl_list_from(start),
             };
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             e.state().push_enum_variant(name, payload, span);
         });
 
@@ -252,9 +252,9 @@ where
     // stream itself proves single-line: a Newline between the names
     // breaks the `Comma`-separated repetition.
     let comma_variant = select! { Token::Ident(name) => name }
-        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()))
+        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, crate::spans::cspan(e.span())))
         .map_with(|name, e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             let start = e.state().struct_field_decls_len();
             let fields = e.state().struct_field_decl_list_from(start);
             e.state().push_enum_variant(
@@ -283,7 +283,7 @@ where
         });
 
     select! { Token::Ident(name) => name }
-        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()))
+        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, crate::spans::cspan(e.span())))
         .then_ignore(just(Token::Colon))
         .then(empty().map_with(|_, e: &mut Mx<'a, '_, I>| e.state().enum_variants_len()))
         .then(body.or(no_body).or(comma_variants))
@@ -345,7 +345,7 @@ where
     just(Token::Enum)
         .ignore_then(enum_tail)
         .map_with(|(name, variants), e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             e.state()
                 .enum_def(name, variants, EnumAttrs::default(), span)
         })
@@ -453,7 +453,7 @@ where
             (bits, target)
         })
         .map_with(|(bits, target), e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             match target {
                 Some(AttrTarget::Struct(name, fields)) => {
                     e.state().struct_def(name, &fields, bits, span)

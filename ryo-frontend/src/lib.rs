@@ -6,3 +6,4 @@ pub mod ownership;
 pub mod parser;
 pub mod pipeline;
 pub mod sema;
+pub mod spans;

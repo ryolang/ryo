@@ -7,7 +7,7 @@ use super::common::*;
 fn free_schedule_is_deterministic() {
     // Build a TIR with several owners + views; run `check` twice;
     // assert identical free_schedule.
-    use chumsky::span::{SimpleSpan, Span as _};
+    use ryo_core::span::Span;
     use ryo_core::tir::TirBuilder;
 
     let mut pool = InternPool::new();
@@ -22,7 +22,7 @@ fn free_schedule_is_deterministic() {
     let s3 = pool.intern_str("s3");
     let v = pool.intern_str("v");
     let print = pool.intern_str("print");
-    let span = SimpleSpan::new((), 0..0);
+    let span = Span::EMPTY;
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     // s1 = "a"; s2 = "b"; v = s1[0:1]; print(v); print(s2);
