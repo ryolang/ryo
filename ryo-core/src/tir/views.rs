@@ -1,8 +1,13 @@
+pub use super::wires::assign_extra::AssignView;
+pub use super::wires::compound_assign_extra::CompoundAssignView;
+pub use super::wires::compound_field_assign_extra::CompoundFieldAssignView;
+pub use super::wires::field_assign_extra::FieldAssignView;
 pub use super::wires::var_decl_extra::VarDeclView;
 use super::{
-    CompoundOp, ExtraList, ParamMode, StringId, Tir, TirData, TirRef, TirTag, TypeId, assign_extra,
-    call_extra, compound_assign_extra, enum_lit_extra, for_range_extra, read_ref_list_view,
-    skip_ref_list, struct_lit_extra, var_decl_extra, while_loop_extra,
+    ExtraList, ParamMode, StringId, Tir, TirData, TirRef, TirTag, TypeId, assign_extra, call_extra,
+    compound_assign_extra, compound_field_assign_extra, enum_lit_extra, field_assign_extra,
+    for_range_extra, read_ref_list_view, skip_ref_list, struct_lit_extra, var_decl_extra,
+    while_loop_extra,
 };
 
 // ---------- Read-side helpers ----------
@@ -13,17 +18,6 @@ pub struct CallView<'a> {
     /// Per-argument call convention, parallel to `args`. Stamped by
     /// sema from each callee parameter's `mode` field.
     pub modes: ExtraList<'a, ParamMode>,
-}
-
-pub struct AssignView {
-    pub name: StringId,
-    pub value: TirRef,
-}
-
-pub struct CompoundAssignView {
-    pub name: StringId,
-    pub op: CompoundOp,
-    pub value: TirRef,
 }
 
 #[derive(Clone, Copy)]
@@ -199,11 +193,7 @@ impl Tir {
             TirData::Extra(rng) => rng,
             _ => unreachable!("Assign must carry TirData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        AssignView {
-            name: StringId::from_raw(slice[assign_extra::NAME]),
-            value: TirRef::from_raw(slice[assign_extra::VALUE]),
-        }
+        assign_extra::decode(&self.extra[range.as_range()])
     }
 
     pub fn compound_assign_view(&self, r: TirRef) -> CompoundAssignView {
@@ -213,12 +203,27 @@ impl Tir {
             TirData::Extra(rng) => rng,
             _ => unreachable!("CompoundAssign must carry TirData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        CompoundAssignView {
-            name: StringId::from_raw(slice[compound_assign_extra::NAME]),
-            op: CompoundOp::from_raw(slice[compound_assign_extra::OP]),
-            value: TirRef::from_raw(slice[compound_assign_extra::VALUE]),
-        }
+        compound_assign_extra::decode(&self.extra[range.as_range()])
+    }
+
+    pub fn field_assign_view(&self, r: TirRef) -> FieldAssignView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, TirTag::FieldAssign));
+        let range = match inst.data {
+            TirData::Extra(rng) => rng,
+            _ => unreachable!("FieldAssign must carry TirData::Extra"),
+        };
+        field_assign_extra::decode(&self.extra[range.as_range()])
+    }
+
+    pub fn compound_field_assign_view(&self, r: TirRef) -> CompoundFieldAssignView {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, TirTag::CompoundFieldAssign));
+        let range = match inst.data {
+            TirData::Extra(rng) => rng,
+            _ => unreachable!("CompoundFieldAssign must carry TirData::Extra"),
+        };
+        compound_field_assign_extra::decode(&self.extra[range.as_range()])
     }
 
     /// Borrow the branch statement lists in an `IfStmt` without collecting them.

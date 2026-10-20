@@ -826,18 +826,8 @@ impl TirBuilder {
     }
 
     pub fn assign(&mut self, name: StringId, var_ty: TypeId, value: TirRef, span: Span) -> TirRef {
-        let offset = self.extra_offset();
-        self.extra.push(name.raw());
-        self.extra.push(value.raw());
-        self.push(
-            TirTag::Assign,
-            var_ty,
-            TirData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(assign_extra::LEN),
-            }),
-            span,
-        )
+        let range = assign_extra::encode(&mut self.extra, name, value);
+        self.push(TirTag::Assign, var_ty, TirData::Extra(range), span)
     }
 
     pub fn compound_assign(
@@ -848,19 +838,8 @@ impl TirBuilder {
         value: TirRef,
         span: Span,
     ) -> TirRef {
-        let offset = self.extra_offset();
-        self.extra.push(name.raw());
-        self.extra.push(op as u32);
-        self.extra.push(value.raw());
-        self.push(
-            TirTag::CompoundAssign,
-            var_ty,
-            TirData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(compound_assign_extra::LEN),
-            }),
-            span,
-        )
+        let range = compound_assign_extra::encode(&mut self.extra, name, op, value);
+        self.push(TirTag::CompoundAssign, var_ty, TirData::Extra(range), span)
     }
 
     pub fn if_stmt(
@@ -1042,18 +1021,8 @@ impl TirBuilder {
         ty: TypeId,
         span: Span,
     ) -> TirRef {
-        let offset = self.extra_offset();
-        self.extra.push(target.raw());
-        self.extra.push(value.raw());
-        self.push(
-            TirTag::FieldAssign,
-            ty,
-            TirData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(field_assign_extra::LEN),
-            }),
-            span,
-        )
+        let range = field_assign_extra::encode(&mut self.extra, target, value);
+        self.push(TirTag::FieldAssign, ty, TirData::Extra(range), span)
     }
 
     /// Emit a `CompoundFieldAssign` `target op= value` (M9); `ty` is
@@ -1066,19 +1035,8 @@ impl TirBuilder {
         value: TirRef,
         span: Span,
     ) -> TirRef {
-        let offset = self.extra_offset();
-        self.extra.push(target.raw());
-        self.extra.push(op as u32);
-        self.extra.push(value.raw());
-        self.push(
-            TirTag::CompoundFieldAssign,
-            ty,
-            TirData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(compound_field_assign_extra::LEN),
-            }),
-            span,
-        )
+        let range = compound_field_assign_extra::encode(&mut self.extra, target, op, value);
+        self.push(TirTag::CompoundFieldAssign, ty, TirData::Extra(range), span)
     }
 
     pub fn break_stmt(&mut self, ty: TypeId, span: Span) -> TirRef {
@@ -1581,9 +1539,6 @@ pub use dump::{TirDump, dump};
 #[cfg(test)]
 mod tests;
 
-mod field_assign;
-pub use field_assign::{CompoundFieldAssignView, FieldAssignView};
-
 mod destructure;
 pub use destructure::{DestructureField, DestructureView, destructure_extra};
 
@@ -1600,6 +1555,7 @@ pub use wires::{
 };
 mod views;
 pub use views::{
-    AssignView, CallView, CompoundAssignView, EnumLitView, ForRangeView, StructLitView,
-    TirElifIter, TirElifList, TirElifView, TirIfStmtView, VarDeclView, WhileLoopView,
+    AssignView, CallView, CompoundAssignView, CompoundFieldAssignView, EnumLitView,
+    FieldAssignView, ForRangeView, StructLitView, TirElifIter, TirElifList, TirElifView,
+    TirIfStmtView, VarDeclView, WhileLoopView,
 };

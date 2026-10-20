@@ -98,9 +98,39 @@ pub mod var_decl_extra {
 ///   [1]  value: TirRef.raw()
 /// ```
 pub mod assign_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::ExtraRange;
+    use crate::tir::TirRef;
+    use crate::types::StringId;
+
     pub const NAME: usize = 0;
     pub const VALUE: usize = 1;
     pub const LEN: usize = 2;
+
+    pub struct AssignView {
+        pub name: StringId,
+        pub value: TirRef,
+    }
+
+    /// Encode an `Assign` payload into `extra`, returning its range.
+    /// The assigned type travels in the `TypedInst.ty` slot, not here.
+    pub fn encode(extra: &mut Vec<u32>, name: StringId, value: TirRef) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(name.raw());
+        extra.push(value.raw());
+        ExtraRange {
+            offset,
+            len: len_u32(LEN),
+        }
+    }
+
+    /// Decode an `Assign` payload from its words.
+    pub fn decode(words: &[u32]) -> AssignView {
+        AssignView {
+            name: StringId::from_raw(words[NAME]),
+            value: TirRef::from_raw(words[VALUE]),
+        }
+    }
 }
 
 /// Layout in `extra` for [`TirTag::CompoundAssign`]:
@@ -111,10 +141,49 @@ pub mod assign_extra {
 ///   [2]  value: TirRef.raw()
 /// ```
 pub mod compound_assign_extra {
+    use super::{extra_offset, len_u32};
+    use crate::ast::CompoundOp;
+    use crate::extra::ExtraRange;
+    use crate::tir::TirRef;
+    use crate::types::StringId;
+
     pub const NAME: usize = 0;
     pub const OP: usize = 1;
     pub const VALUE: usize = 2;
     pub const LEN: usize = 3;
+
+    pub struct CompoundAssignView {
+        pub name: StringId,
+        pub op: CompoundOp,
+        pub value: TirRef,
+    }
+
+    /// Encode a `CompoundAssign` payload into `extra`, returning its
+    /// range. The assigned type travels in the `TypedInst.ty` slot.
+    pub fn encode(
+        extra: &mut Vec<u32>,
+        name: StringId,
+        op: CompoundOp,
+        value: TirRef,
+    ) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(name.raw());
+        extra.push(op as u32);
+        extra.push(value.raw());
+        ExtraRange {
+            offset,
+            len: len_u32(LEN),
+        }
+    }
+
+    /// Decode a `CompoundAssign` payload from its words.
+    pub fn decode(words: &[u32]) -> CompoundAssignView {
+        CompoundAssignView {
+            name: StringId::from_raw(words[NAME]),
+            op: CompoundOp::from_raw(words[OP]),
+            value: TirRef::from_raw(words[VALUE]),
+        }
+    }
 }
 
 /// Layout in `extra` for [`TirTag::WhileLoop`]:
@@ -169,9 +238,39 @@ pub mod struct_lit_extra {
 ///   [1]  value:  TirRef.raw()
 /// ```
 pub mod field_assign_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::ExtraRange;
+    use crate::tir::TirRef;
+
     pub const TARGET: usize = 0;
     pub const VALUE: usize = 1;
     pub const LEN: usize = 2;
+
+    /// Decoded view of a [`TirTag::FieldAssign`] payload (M9).
+    pub struct FieldAssignView {
+        pub target: TirRef,
+        pub value: TirRef,
+    }
+
+    /// Encode a `FieldAssign` payload into `extra`, returning its range.
+    /// The field type travels in the `TypedInst.ty` slot.
+    pub fn encode(extra: &mut Vec<u32>, target: TirRef, value: TirRef) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(target.raw());
+        extra.push(value.raw());
+        ExtraRange {
+            offset,
+            len: len_u32(LEN),
+        }
+    }
+
+    /// Decode a `FieldAssign` payload from its words.
+    pub fn decode(words: &[u32]) -> FieldAssignView {
+        FieldAssignView {
+            target: TirRef::from_raw(words[TARGET]),
+            value: TirRef::from_raw(words[VALUE]),
+        }
+    }
 }
 
 /// Layout in `extra` for [`TirTag::CompoundFieldAssign`] (M9):
@@ -182,8 +281,47 @@ pub mod field_assign_extra {
 ///   [2]  value:  TirRef.raw()
 /// ```
 pub mod compound_field_assign_extra {
+    use super::{extra_offset, len_u32};
+    use crate::ast::CompoundOp;
+    use crate::extra::ExtraRange;
+    use crate::tir::TirRef;
+
     pub const TARGET: usize = 0;
     pub const OP: usize = 1;
     pub const VALUE: usize = 2;
     pub const LEN: usize = 3;
+
+    /// Decoded view of a [`TirTag::CompoundFieldAssign`] payload (M9).
+    pub struct CompoundFieldAssignView {
+        pub target: TirRef,
+        pub op: CompoundOp,
+        pub value: TirRef,
+    }
+
+    /// Encode a `CompoundFieldAssign` payload into `extra`, returning
+    /// its range. The field type travels in the `TypedInst.ty` slot.
+    pub fn encode(
+        extra: &mut Vec<u32>,
+        target: TirRef,
+        op: CompoundOp,
+        value: TirRef,
+    ) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(target.raw());
+        extra.push(op as u32);
+        extra.push(value.raw());
+        ExtraRange {
+            offset,
+            len: len_u32(LEN),
+        }
+    }
+
+    /// Decode a `CompoundFieldAssign` payload from its words.
+    pub fn decode(words: &[u32]) -> CompoundFieldAssignView {
+        CompoundFieldAssignView {
+            target: TirRef::from_raw(words[TARGET]),
+            op: CompoundOp::from_raw(words[OP]),
+            value: TirRef::from_raw(words[VALUE]),
+        }
+    }
 }
