@@ -161,7 +161,7 @@ Full alpha definition, litmus test, non-goals, release tagging, and gating test 
   - ✅ `struct Expression`, `enum ExprKind::Literal`, `struct Ident`, `struct TypeExpr`
   - ✅ Include spans (`chumsky::SimpleSpan`)
   - ✅ Added `BinaryOperator` and `UnaryOperator` enums for expression support
-- ✅ Implement parser using `chumsky` (`src/parser.rs`)
+- ✅ Implement parser using `chumsky` (`ryo-frontend/src/grammar.rs`, renamed from `parser.rs` 2026-10-21)
 - ✅ Parse variable declarations with pattern: `[mut] ident [: type] = expression`
 - ✅ Support full expressions including binary ops (+, -, *, /) and unary ops (-)
 - ✅ Integrate parser with lexer output in `main.rs`
