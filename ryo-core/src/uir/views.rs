@@ -1,8 +1,12 @@
 pub use super::wires::assign_or_decl_extra::AssignOrDeclView;
+pub use super::wires::call_extra::CallView;
 pub use super::wires::compound_assign_extra::CompoundAssignView;
 pub use super::wires::compound_field_assign_extra::CompoundFieldAssignView;
 pub use super::wires::field_assign_extra::FieldAssignView;
+pub use super::wires::for_range_extra::ForRangeView;
+pub use super::wires::method_call_extra::MethodCallView;
 pub use super::wires::var_decl_extra::VarDeclView;
+pub use super::wires::while_loop_extra::WhileLoopView;
 use super::{
     ExtraList, InstData, InstRef, InstTag, StringId, TypeId, Uir, assign_or_decl_extra, call_extra,
     compound_assign_extra, compound_field_assign_extra, enum_lit_extra, field_assign_extra,
@@ -10,31 +14,6 @@ use super::{
 };
 
 // ---------- Read-side helpers ----------
-
-/// Decoded view of an [`InstTag::Call`] payload.
-pub struct CallView<'a> {
-    pub name: StringId,
-    pub args: ExtraList<'a, InstRef>,
-}
-
-pub struct WhileLoopView<'a> {
-    pub cond: InstRef,
-    pub body: ExtraList<'a, InstRef>,
-}
-
-pub struct ForRangeView<'a> {
-    pub var_name: StringId,
-    pub start: InstRef,
-    pub end: InstRef,
-    pub body: ExtraList<'a, InstRef>,
-}
-
-/// Decoded view of an [`InstTag::MethodCall`] payload.
-pub struct MethodCallView<'a> {
-    pub receiver: InstRef,
-    pub name: StringId,
-    pub args: ExtraList<'a, InstRef>,
-}
 
 /// Decoded borrowed view of an [`InstTag::StructLit`] payload. Field
 /// initializers are in source order. `name` of `None` is the M10
@@ -129,11 +108,7 @@ impl Uir {
             InstData::Extra(rng) => rng,
             _ => unreachable!("Call must carry InstData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        let name = StringId::from_raw(slice[call_extra::NAME]);
-        let argc = slice[call_extra::ARGC] as usize;
-        let args = ExtraList::new(&slice[call_extra::ARGS..call_extra::ARGS + argc]);
-        CallView { name, args }
+        call_extra::decode(&self.extra[range.as_range()])
     }
 
     pub fn var_decl_view(&self, r: InstRef) -> VarDeclView {
@@ -193,10 +168,7 @@ impl Uir {
             InstData::Extra(rng) => rng,
             _ => unreachable!("WhileLoop must carry InstData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        let cond = InstRef::from_raw(slice[while_loop_extra::COND]);
-        let body = ExtraList::new(&slice[while_loop_extra::BODY_START..]);
-        WhileLoopView { cond, body }
+        while_loop_extra::decode(&self.extra[range.as_range()])
     }
 
     pub fn for_range_view(&self, r: InstRef) -> ForRangeView<'_> {
@@ -206,17 +178,7 @@ impl Uir {
             InstData::Extra(rng) => rng,
             _ => unreachable!("ForRange must carry InstData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        let var_name = StringId::from_raw(slice[for_range_extra::VAR_NAME]);
-        let start = InstRef::from_raw(slice[for_range_extra::START]);
-        let end = InstRef::from_raw(slice[for_range_extra::END]);
-        let body = ExtraList::new(&slice[for_range_extra::BODY_START..]);
-        ForRangeView {
-            var_name,
-            start,
-            end,
-            body,
-        }
+        for_range_extra::decode(&self.extra[range.as_range()])
     }
 
     pub fn method_call_view(&self, r: InstRef) -> MethodCallView<'_> {
@@ -226,16 +188,7 @@ impl Uir {
             InstData::Extra(rng) => rng,
             _ => unreachable!("MethodCall must carry InstData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        let receiver = InstRef::from_raw(slice[method_call_extra::RECEIVER]);
-        let name = StringId::from_raw(slice[method_call_extra::NAME]);
-        let argc = slice[method_call_extra::ARGC] as usize;
-        let args = ExtraList::new(&slice[method_call_extra::ARGS..method_call_extra::ARGS + argc]);
-        MethodCallView {
-            receiver,
-            name,
-            args,
-        }
+        method_call_extra::decode(&self.extra[range.as_range()])
     }
 
     pub fn struct_lit_view(&self, r: InstRef) -> StructLitView<'_> {

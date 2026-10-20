@@ -646,18 +646,8 @@ impl UirBuilder {
 
     /// Emits a `Call` with name and arg list packed into `extra`.
     pub fn call(&mut self, name: StringId, args: &[InstRef], span: Span) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(name.raw());
-        self.uir.extra.push(Self::len_u32(args.len()));
-        for arg in args {
-            self.uir.extra.push(arg.raw());
-        }
-        let len = Self::len_u32(call_extra::ARGS + args.len());
-        self.push(
-            InstTag::Call,
-            InstData::Extra(ExtraRange { offset, len }),
-            span,
-        )
+        let range = call_extra::encode(&mut self.uir.extra, name, args);
+        self.push(InstTag::Call, InstData::Extra(range), span)
     }
 
     /// Emits a `VarDecl` with the header packed into `extra`.
@@ -760,21 +750,8 @@ impl UirBuilder {
     }
 
     pub fn while_loop(&mut self, cond: InstRef, body: &[InstRef], span: Span) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(cond.raw());
-        self.uir.extra.push(Self::len_u32(body.len()));
-        for &stmt in body {
-            self.uir.extra.push(stmt.raw());
-        }
-        let len = while_loop_extra::BODY_START + body.len();
-        self.push(
-            InstTag::WhileLoop,
-            InstData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(len),
-            }),
-            span,
-        )
+        let range = while_loop_extra::encode(&mut self.uir.extra, cond, body);
+        self.push(InstTag::WhileLoop, InstData::Extra(range), span)
     }
 
     pub fn for_range(
@@ -785,23 +762,8 @@ impl UirBuilder {
         body: &[InstRef],
         span: Span,
     ) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(var_name.raw());
-        self.uir.extra.push(start.raw());
-        self.uir.extra.push(end.raw());
-        self.uir.extra.push(Self::len_u32(body.len()));
-        for &stmt in body {
-            self.uir.extra.push(stmt.raw());
-        }
-        let len = for_range_extra::BODY_START + body.len();
-        self.push(
-            InstTag::ForRange,
-            InstData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(len),
-            }),
-            span,
-        )
+        let range = for_range_extra::encode(&mut self.uir.extra, var_name, start, end, body);
+        self.push(InstTag::ForRange, InstData::Extra(range), span)
     }
 
     pub fn break_stmt(&mut self, span: Span) -> InstRef {
@@ -827,19 +789,8 @@ impl UirBuilder {
         args: &[InstRef],
         span: Span,
     ) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(receiver.raw());
-        self.uir.extra.push(name.raw());
-        self.uir.extra.push(Self::len_u32(args.len()));
-        for arg in args {
-            self.uir.extra.push(arg.raw());
-        }
-        let len = Self::len_u32(method_call_extra::ARGS + args.len());
-        self.push(
-            InstTag::MethodCall,
-            InstData::Extra(ExtraRange { offset, len }),
-            span,
-        )
+        let range = method_call_extra::encode(&mut self.uir.extra, receiver, name, args);
+        self.push(InstTag::MethodCall, InstData::Extra(range), span)
     }
 
     /// Emits a `StructLit` with the struct name and the source-order

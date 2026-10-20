@@ -21,9 +21,40 @@ fn len_u32(len: usize) -> u32 {
 ///   [2..2+argc] args: InstRef.raw()
 /// ```
 pub mod call_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::{ExtraList, ExtraRange, ExtraValue};
+    use crate::types::StringId;
+    use crate::uir::InstRef;
+
     pub const NAME: usize = 0;
     pub const ARGC: usize = 1;
     pub const ARGS: usize = 2;
+
+    /// Decoded view of an [`InstTag::Call`] payload.
+    pub struct CallView<'a> {
+        pub name: StringId,
+        pub args: ExtraList<'a, InstRef>,
+    }
+
+    /// Encode a `Call` payload into `extra`, returning its range.
+    pub fn encode(extra: &mut Vec<u32>, name: StringId, args: &[InstRef]) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(name.raw());
+        extra.push(len_u32(args.len()));
+        extra.extend(args.iter().map(|a| a.to_extra()));
+        ExtraRange {
+            offset,
+            len: len_u32(ARGS + args.len()),
+        }
+    }
+
+    /// Decode a `Call` payload from its words.
+    pub fn decode<'a>(words: &'a [u32]) -> CallView<'a> {
+        let name = StringId::from_raw(words[NAME]);
+        let argc = words[ARGC] as usize;
+        let args = ExtraList::new(&words[ARGS..ARGS + argc]);
+        CallView { name, args }
+    }
 }
 
 /// Layout in `extra` for [`InstTag::VarDecl`]:
@@ -204,10 +235,53 @@ pub mod compound_assign_extra {
 ///   [3..3+argc] args: InstRef.raw()
 /// ```
 pub mod method_call_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::{ExtraList, ExtraRange, ExtraValue};
+    use crate::types::StringId;
+    use crate::uir::InstRef;
+
     pub const RECEIVER: usize = 0;
     pub const NAME: usize = 1;
     pub const ARGC: usize = 2;
     pub const ARGS: usize = 3;
+
+    /// Decoded view of an [`InstTag::MethodCall`] payload.
+    pub struct MethodCallView<'a> {
+        pub receiver: InstRef,
+        pub name: StringId,
+        pub args: ExtraList<'a, InstRef>,
+    }
+
+    /// Encode a `MethodCall` payload into `extra`, returning its range.
+    pub fn encode(
+        extra: &mut Vec<u32>,
+        receiver: InstRef,
+        name: StringId,
+        args: &[InstRef],
+    ) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(receiver.raw());
+        extra.push(name.raw());
+        extra.push(len_u32(args.len()));
+        extra.extend(args.iter().map(|a| a.to_extra()));
+        ExtraRange {
+            offset,
+            len: len_u32(ARGS + args.len()),
+        }
+    }
+
+    /// Decode a `MethodCall` payload from its words.
+    pub fn decode<'a>(words: &'a [u32]) -> MethodCallView<'a> {
+        let receiver = InstRef::from_raw(words[RECEIVER]);
+        let name = StringId::from_raw(words[NAME]);
+        let argc = words[ARGC] as usize;
+        let args = ExtraList::new(&words[ARGS..ARGS + argc]);
+        MethodCallView {
+            receiver,
+            name,
+            args,
+        }
+    }
 }
 
 /// Layout in `extra` for [`InstTag::WhileLoop`]:
@@ -218,9 +292,38 @@ pub mod method_call_extra {
 ///   [2..2+n]  body stmts: InstRef.raw() each
 /// ```
 pub mod while_loop_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::{ExtraList, ExtraRange, ExtraValue};
+    use crate::uir::InstRef;
+
     pub const COND: usize = 0;
     pub const BODY_COUNT: usize = 1;
     pub const BODY_START: usize = 2;
+
+    pub struct WhileLoopView<'a> {
+        pub cond: InstRef,
+        pub body: ExtraList<'a, InstRef>,
+    }
+
+    /// Encode a `WhileLoop` payload into `extra`, returning its range.
+    pub fn encode(extra: &mut Vec<u32>, cond: InstRef, body: &[InstRef]) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(cond.raw());
+        extra.push(len_u32(body.len()));
+        extra.extend(body.iter().map(|s| s.to_extra()));
+        ExtraRange {
+            offset,
+            len: len_u32(BODY_START + body.len()),
+        }
+    }
+
+    /// Decode a `WhileLoop` payload from its words.
+    pub fn decode<'a>(words: &'a [u32]) -> WhileLoopView<'a> {
+        WhileLoopView {
+            cond: InstRef::from_raw(words[COND]),
+            body: ExtraList::new(&words[BODY_START..]),
+        }
+    }
 }
 
 /// Layout in `extra` for [`InstTag::ForRange`]:
@@ -233,11 +336,53 @@ pub mod while_loop_extra {
 ///   [4..4+n]  body stmts: InstRef.raw() each
 /// ```
 pub mod for_range_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::{ExtraList, ExtraRange, ExtraValue};
+    use crate::types::StringId;
+    use crate::uir::InstRef;
+
     pub const VAR_NAME: usize = 0;
     pub const START: usize = 1;
     pub const END: usize = 2;
     pub const BODY_COUNT: usize = 3;
     pub const BODY_START: usize = 4;
+
+    pub struct ForRangeView<'a> {
+        pub var_name: StringId,
+        pub start: InstRef,
+        pub end: InstRef,
+        pub body: ExtraList<'a, InstRef>,
+    }
+
+    /// Encode a `ForRange` payload into `extra`, returning its range.
+    pub fn encode(
+        extra: &mut Vec<u32>,
+        var_name: StringId,
+        start: InstRef,
+        end: InstRef,
+        body: &[InstRef],
+    ) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(var_name.raw());
+        extra.push(start.raw());
+        extra.push(end.raw());
+        extra.push(len_u32(body.len()));
+        extra.extend(body.iter().map(|s| s.to_extra()));
+        ExtraRange {
+            offset,
+            len: len_u32(BODY_START + body.len()),
+        }
+    }
+
+    /// Decode a `ForRange` payload from its words.
+    pub fn decode<'a>(words: &'a [u32]) -> ForRangeView<'a> {
+        ForRangeView {
+            var_name: StringId::from_raw(words[VAR_NAME]),
+            start: InstRef::from_raw(words[START]),
+            end: InstRef::from_raw(words[END]),
+            body: ExtraList::new(&words[BODY_START..]),
+        }
+    }
 }
 
 /// Layout in `extra` for [`InstTag::StructLit`]:
