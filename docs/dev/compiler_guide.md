@@ -34,6 +34,16 @@ The middle-end is split into two flat-arena IRs modeled after Zig's ZIR/AIR:
 - **UIR** (`ryo-core/src/uir.rs`) — Untyped IR. Flat `(tag, data)` instruction stream in a program-wide arena, produced by `astgen.rs` from the AST. Sub-expressions are not nested; they live as their own entries reached via `InstRef` indices. Side arenas: `extra: Vec<u32>` for variable-size payloads, `spans` parallel to instructions.
 - **TIR** (`ryo-core/src/tir.rs`) — Typed IR. Same flat shape as UIR but **one arena per function body**, and every instruction carries its resolved `TypeId`. Produced by `sema.rs` from UIR and consumed by `codegen/`. Per-function arenas make generic/inline duplication a `Tir::clone` away.
 
+**Wire payloads.** Variable-size instruction payloads (arg lists, body statement lists, call modes) are `u32` words in the `extra: Vec<u32>` arena, referenced by `ExtraRange`. Each layout is one module in `ryo-core/src/uir/wires.rs` / `tir/wires.rs` owning its `encode`, `decode`, and view struct together. UIR and TIR layouts stay deliberately separate because the two IRs genuinely diverge (call modes, type slots, keying). Literal fixtures in `uir/wire_fixtures.rs` pin the exact words against the encoders.
+
+A declarative macro DSL (one declaration per layout generating all three members) was spike-tested and not adopted at the current ~10 low-churn layouts. Revisit only when at least two of these hold:
+
+- layout count grows past ~15
+- a second wire-wide operation beyond traversal appears (clone/remap for instance bodies)
+- a serialized versioned format ships (incremental compilation artifacts)
+
+The serialized case wants a schema in the rmeta style, not the in-memory macro.
+
 **Mapping to Zig.** When cross-referencing the Zig compiler source for reference:
 
 | Ryo  | Zig file       | Role |
@@ -87,6 +97,8 @@ See `docs/dev/pipeline_alignment.md` for what remains of the Zig-alignment plan 
 | `ryo-core/src/ast.rs` | Surface-syntax AST: typed arenas (`Vec<Expr>` / `Vec<Stmt>` indexed by `ExprId` / `StmtId`, with `ExprKind` / `StmtKind` payload enums, list side arenas, and inline spans); identifiers/types/strings stored as `StringId` |
 | `ryo-core/src/uir.rs` | Untyped IR data structures (flat, program-wide arena) |
 | `ryo-core/src/tir.rs` | Typed IR data structures (flat, per-function arena) |
+| `ryo-core/src/uir/wires.rs` / `tir/wires.rs` | Wire payload layouts: one `encode`/`decode`/view module per variable-size payload, deliberately separate per IR (see "Wire payloads" above) |
+| `ryo-core/src/uir/wire_fixtures.rs` | Literal word fixtures pinning each UIR payload layout against its encoder |
 | `ryo-core/src/flow.rs` | Canonical control flow per function body: indexed blocks + exhaustive terminators (branch/switch/loop-backedge/return/diverging call), the place table (binding identity never keyed by name), per-step read/write/view facts, and `DropOp` positions — the shared execution-structure + storage-identity model for ownership analysis and codegen |
 | `ryo-core/src/flow/cleanup.rs` | Resolve releases to declaring Flow places or displaced produced values |
 | `ryo-core/src/ownership.rs` | Ownership sidecars, transfer records, promotion lifetimes, and validation outcomes |
@@ -136,7 +148,7 @@ let my_feature = just(Token::Keyword).ignore_then(expr.clone())
 ⚠️ Never call `expression_parser()` inside a statement rule — take the shared parser as a parameter (see "Parser Grammar Construction").
 
 ### 4. Add UIR Instruction (ryo-core/src/uir.rs)
-UIR is **untyped**. Add a tag to the `Inst` tag enum (and a payload in `InstData` if needed). For variable-size payloads (arg lists, body statement lists), encode them into the `extra: Vec<u32>` arena and reference them via `ExtraRange`. Add a span entry parallel to the instruction. Avoid nesting: each sub-expression is its own `InstRef`.
+UIR is **untyped**. Add a tag to the `Inst` tag enum (and a payload in `InstData` if needed). For variable-size payloads (arg lists, body statement lists), encode them into the `extra: Vec<u32>` arena and reference them via `ExtraRange`: reuse an existing `*_extra` module in `ryo-core/src/uir/wires.rs` if the shape fits, otherwise add a module there owning `encode`, `decode`, and the view struct together, plus a literal fixture in `uir/wire_fixtures.rs`. Add a span entry parallel to the instruction. Avoid nesting: each sub-expression is its own `InstRef`.
 
 ### 5. Add AstGen Case (ryo-frontend/src/astgen.rs)
 In `astgen::generate` (and the per-stmt/per-expr helpers), match the new variant and translate it into UIR instructions, following child ids via `ast.expr(id)` / `ast.stmt(id)` / `ast.stmt_list(range)`. AstGen does *no* type checking — it only flattens the AST into UIR, interns identifiers via `InternPool`, and emits diagnostics through the `DiagSink` for structural issues.
