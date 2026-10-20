@@ -33,7 +33,7 @@ use std::collections::{HashMap, HashSet};
 type Span = SimpleSpan;
 
 fn synthetic_span() -> Span {
-    SimpleSpan::new((), 0..0)
+    crate::spans::cspan(SimpleSpan::new((), 0..0))
 }
 
 /// Pre-interned `StringId`s for the primitive type names.

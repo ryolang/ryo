@@ -38,7 +38,6 @@ impl From<LinkMode> for linker::LinkMode {
 
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::error::{Rich, RichPattern, RichReason};
-use chumsky::span::Span as _;
 use chumsky::{Parser, prelude::*};
 use ryo_backend::codegen;
 use ryo_backend::linker;
@@ -174,7 +173,7 @@ fn parse_source(
     let (ast, parsed_pool) = state.into_parts();
     *pool = parsed_pool;
     for e in &errs {
-        let span = chumsky::span::SimpleSpan::new((), e.span().start..e.span().end);
+        let span = ryo_frontend::spans::cspan(*e.span());
         match e.reason() {
             // Parser-emitted custom errors carry their own `DiagCode`.
             // Most are self-contained; `UnknownAttribute` carries

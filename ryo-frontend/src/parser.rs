@@ -180,11 +180,11 @@ where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     select! { Token::Ident(name) => name }
-        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()))
+        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, crate::spans::cspan(e.span())))
         .or(
             select! { Token::IntLit(n) => n }.map_with(|n, e: &mut Mx<'a, '_, I>| {
                 let name = positional_field_name(n, &mut e.state().pool);
-                Ident::new(name, e.span())
+                Ident::new(name, crate::spans::cspan(e.span()))
             }),
         )
 }
@@ -247,7 +247,7 @@ where
     // every atom ends its postfix loop on a failed op, and one failed
     // `.` is far cheaper than one per alternative (`with_span` below).
     let method_op = select! { Token::Ident(name) => name }
-        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()))
+        .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, crate::spans::cspan(e.span())))
         .then(
             enums::paren_arg(expr.clone())
                 .separated_by(just(Token::Comma))
@@ -279,11 +279,13 @@ where
         Positional(Ident),
         StrayFloat(SimpleSpan),
     }
-    let named_key = select! { Token::Ident(name) => name }
-        .map_with(|name, e: &mut Mx<'a, '_, I>| AccessKey::Named(Ident::new(name, e.span())));
+    let named_key =
+        select! { Token::Ident(name) => name }.map_with(|name, e: &mut Mx<'a, '_, I>| {
+            AccessKey::Named(Ident::new(name, crate::spans::cspan(e.span())))
+        });
     let positional_key = select! { Token::IntLit(n) => n }.map_with(|n, e: &mut Mx<'a, '_, I>| {
         let name = positional_field_name(n, &mut e.state().pool);
-        AccessKey::Positional(Ident::new(name, e.span()))
+        AccessKey::Positional(Ident::new(name, crate::spans::cspan(e.span())))
     });
     let stray_float_key = select! { Token::FloatLit(_) => () }
         .map_with(|_, e: &mut Mx<'a, '_, I>| AccessKey::StrayFloat(e.span()));
@@ -405,14 +407,14 @@ where
                                     positional: Some(list),
                                     named: None,
                                 }),
-                                SimpleSpan::new((), start..span.end),
+                                crate::spans::cspan(SimpleSpan::new((), start..span.end)),
                             )
                         }
                         None => e.state().method_call(
                             receiver,
                             method.name,
                             &positional,
-                            SimpleSpan::new((), start..span.end),
+                            crate::spans::cspan(SimpleSpan::new((), start..span.end)),
                         ),
                     }
                 }
@@ -438,7 +440,7 @@ where
                             positional: None,
                             named: Some(list),
                         }),
-                        SimpleSpan::new((), start..span.end),
+                        crate::spans::cspan(SimpleSpan::new((), start..span.end)),
                     )
                 }
                 PostfixOp::RecoveredPositionalBraces(variant, values, span) => {
@@ -463,7 +465,7 @@ where
                             positional: Some(list),
                             named: None,
                         }),
-                        SimpleSpan::new((), start..span.end),
+                        crate::spans::cspan(SimpleSpan::new((), start..span.end)),
                     )
                 }
                 PostfixOp::RecoveredMissingParens(variant, arg, span) => {
@@ -491,22 +493,26 @@ where
                             positional: Some(list),
                             named: None,
                         }),
-                        SimpleSpan::new((), start..span.end),
+                        crate::spans::cspan(SimpleSpan::new((), start..span.end)),
                     )
                 }
-                PostfixOp::Field(field, span) => {
-                    e.state()
-                        .field_access(receiver, field, SimpleSpan::new((), start..span.end))
-                }
+                PostfixOp::Field(field, span) => e.state().field_access(
+                    receiver,
+                    field,
+                    crate::spans::cspan(SimpleSpan::new((), start..span.end)),
+                ),
                 PostfixOp::Missing => receiver,
-                PostfixOp::Slice(lo, hi, span) => {
-                    e.state()
-                        .slice(receiver, lo, hi, SimpleSpan::new((), start..span.end))
-                }
-                PostfixOp::Index(index, span) => {
-                    e.state()
-                        .index(receiver, index, SimpleSpan::new((), start..span.end))
-                }
+                PostfixOp::Slice(lo, hi, span) => e.state().slice(
+                    receiver,
+                    lo,
+                    hi,
+                    crate::spans::cspan(SimpleSpan::new((), start..span.end)),
+                ),
+                PostfixOp::Index(index, span) => e.state().index(
+                    receiver,
+                    index,
+                    crate::spans::cspan(SimpleSpan::new((), start..span.end)),
+                ),
             };
             e.state().postfix_head_enum = type_name_ident(result, e).map(|id| id.name);
             result
@@ -541,7 +547,7 @@ where
                 Token::False => Literal::Bool(false),
             }
             .map_with(|lit, e: &mut Mx<'a, '_, I>| {
-                let span = e.span();
+                let span = crate::spans::cspan(e.span());
                 e.state().literal(lit, span)
             });
 
@@ -554,7 +560,7 @@ where
                         .delimited_by(just(Token::LParen), just(Token::RParen)),
                 )
                 .map_with(|(name, args), e: &mut Mx<'a, '_, I>| {
-                    let span = e.span();
+                    let span = crate::spans::cspan(e.span());
                     // `name = value` in a plain call's parens: named
                     // arguments are unsupported (method flavor — an
                     // atom call has no variant to name).
@@ -568,7 +574,9 @@ where
             // consume input. Field order stays in source order —
             // sema canonicalizes against the declaration.
             let struct_literal = select! { Token::Ident(name) => name }
-                .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, e.span()))
+                .map_with(|name, e: &mut Mx<'a, '_, I>| {
+                    Ident::new(name, crate::spans::cspan(e.span()))
+                })
                 .then(
                     field_init
                         .clone()
@@ -578,7 +586,7 @@ where
                         .delimited_by(just(Token::LBrace), just(Token::RBrace)),
                 )
                 .map_with(|(name, fields), e: &mut Mx<'a, '_, I>| {
-                    let span = e.span();
+                    let span = crate::spans::cspan(e.span());
                     e.state().struct_literal(Some(name), &fields, span)
                 });
 
@@ -602,13 +610,13 @@ where
                     fields
                 })
                 .map_with(|fields, e: &mut Mx<'a, '_, I>| {
-                    let span = e.span();
+                    let span = crate::spans::cspan(e.span());
                     e.state().struct_literal(None, &fields, span)
                 });
 
             let ident_expr =
                 select! { Token::Ident(name) => name }.map_with(|name, e: &mut Mx<'a, '_, I>| {
-                    let span = e.span();
+                    let span = crate::spans::cspan(e.span());
                     e.state().ident(name, span)
                 });
 
@@ -627,14 +635,14 @@ where
                         .collect::<Vec<_>>(),
                 )
                 .map_with(|(inner, fields), e: &mut Mx<'a, '_, I>| {
-                    let span = e.span();
+                    let span = crate::spans::cspan(e.span());
                     let mut target = inner;
                     for field in fields {
                         let start = e.state().expr_span(target).start;
                         target = e.state().field_access(
                             target,
                             field,
-                            SimpleSpan::new((), start..field.span.end),
+                            crate::spans::cspan(SimpleSpan::new((), start..field.span.end)),
                         );
                     }
                     e.state().borrow(target, span)
@@ -687,12 +695,12 @@ where
                         // Recovered `()`: an empty anonymous literal.
                         // Sema tolerates the empty field list silently
                         // (the E0109 contract), so E0111 stands alone.
-                        let span = e.span();
+                        let span = crate::spans::cspan(e.span());
                         e.state().struct_literal(None, &[], span)
                     }
                     Some((first, None)) => first,
                     Some((first, Some(rest))) => {
-                        let span = e.span();
+                        let span = crate::spans::cspan(e.span());
                         let mut fields = Vec::with_capacity(rest.len() + 1);
                         fields.push((positional_field_name(0, &mut e.state().pool), first));
                         for (i, value) in rest.into_iter().enumerate() {
@@ -731,7 +739,7 @@ where
             just(Token::Sub)
                 .then(just(Token::IntLitMin))
                 .map_with(|_, e: &mut Mx<'a, '_, I>| {
-                    let span = e.span();
+                    let span = crate::spans::cspan(e.span());
                     e.state().literal_int(i64::MIN, span)
                 });
 
@@ -746,7 +754,7 @@ where
                 .collect::<Vec<_>>()
                 .then(postfix)
                 .map_with(|(ops, expr), e: &mut Mx<'a, '_, I>| {
-                    let span = e.span();
+                    let span = crate::spans::cspan(e.span());
                     let mut result = expr;
                     for op in ops.into_iter().rev() {
                         result = e.state().unary(op, result, span);
@@ -767,8 +775,12 @@ where
         {
             let start = e.state().expr_span(left).start;
             let end = e.state().expr_span(right).end;
-            e.state()
-                .binary(op, left, right, SimpleSpan::new((), start..end))
+            e.state().binary(
+                op,
+                left,
+                right,
+                crate::spans::cspan(SimpleSpan::new((), start..end)),
+            )
         }
 
         let term = unary.clone().foldl_with(

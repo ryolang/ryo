@@ -12,9 +12,12 @@ use super::*;
 /// identifier, so the wildcard is recognized by name here.
 fn bind_pattern(state: &mut ParseState, name: StringId, span: SimpleSpan) -> PatternId {
     if state.pool.str(name) == "_" {
-        state.pattern_wildcard(span)
+        state.pattern_wildcard(crate::spans::cspan(span))
     } else {
-        state.pattern_bind(Ident::new(name, span), span)
+        state.pattern_bind(
+            Ident::new(name, crate::spans::cspan(span)),
+            crate::spans::cspan(span),
+        )
     }
 }
 
@@ -109,7 +112,7 @@ where
         .collect::<Vec<_>>()
         .delimited_by(just(Token::LBrace), just(Token::RBrace))
         .map_with(|fields, e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             e.state().pattern_anon(&fields, span)
         });
 
@@ -127,7 +130,7 @@ where
         )
         .delimited_by(just(Token::LParen), just(Token::RParen))
         .map_with(|(first, rest), e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             let mut elems = Vec::with_capacity(rest.len() + 1);
             elems.push(first);
             elems.extend(rest);
@@ -150,7 +153,7 @@ where
         .then_ignore(just(Token::Assign))
         .then(value.clone())
         .map_with(|((first, rest), value), e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             let start = first.1.start;
             let end = rest.last().map(|(_, s)| s.end).unwrap_or(first.1.end);
             let mut elems = Vec::with_capacity(rest.len() + 1);
@@ -160,7 +163,7 @@ where
             }
             let target = e
                 .state()
-                .pattern_positional(&elems, SimpleSpan::new((), start..end));
+                .pattern_positional(&elems, crate::spans::cspan(SimpleSpan::new((), start..end)));
             e.state().destructure(target, value, span)
         });
 
@@ -170,7 +173,7 @@ where
         .then_ignore(just(Token::Assign))
         .then(value.clone())
         .map_with(|(target, value), e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
+            let span = crate::spans::cspan(e.span());
             e.state().destructure(target, value, span)
         });
 
@@ -191,8 +194,8 @@ where
             },
         )
         .map_with(|((name, name_span), value), e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
-            let target = Ident::new(name, name_span);
+            let span = crate::spans::cspan(e.span());
+            let target = Ident::new(name, crate::spans::cspan(name_span));
             e.state().assign_or_decl(target, value, span)
         });
 

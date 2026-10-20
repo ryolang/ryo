@@ -400,7 +400,7 @@ pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Toke
                     // control bytes (e.g. a lone `\r`) render readably.
                     let text = input[span.clone()].escape_debug().to_string();
                     sink.emit(Diag::error(
-                        SimpleSpan::new((), span.clone()),
+                        crate::spans::cspan(SimpleSpan::new((), span.clone())),
                         DiagCode::InvalidCharacter,
                         format!("invalid character '{}'", text),
                     ));
@@ -419,7 +419,11 @@ pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Toke
             // unusable, so hand back an empty stream; the driver
             // skips parsing when it sees this together with sink
             // errors.
-            sink.emit(Diag::error(e.span, DiagCode::ParseError, e.message));
+            sink.emit(Diag::error(
+                crate::spans::cspan(e.span),
+                DiagCode::ParseError,
+                e.message,
+            ));
             return Vec::new();
         }
     };
@@ -497,7 +501,7 @@ fn unescape(inner: &str, body_span: Span, sink: &mut DiagSink, hex_escapes: bool
                             let start = body_span.start.saturating_add(i);
                             let end = start.saturating_add(2);
                             sink.emit(Diag::error(
-                                SimpleSpan::new((), start..end),
+                                crate::spans::cspan(SimpleSpan::new((), start..end)),
                                 DiagCode::UnknownEscape,
                                 "invalid '\\xNN' escape: exactly two hex digits required"
                                     .to_string(),
@@ -518,7 +522,7 @@ fn unescape(inner: &str, body_span: Span, sink: &mut DiagSink, hex_escapes: bool
                     let start = body_span.start.saturating_add(i);
                     let end = start.saturating_add(1).saturating_add(c.len_utf8());
                     sink.emit(Diag::error(
-                        SimpleSpan::new((), start..end),
+                        crate::spans::cspan(SimpleSpan::new((), start..end)),
                         DiagCode::UnknownEscape,
                         format!("unknown escape sequence '\\{}'", c),
                     ));
@@ -565,7 +569,7 @@ fn intern_token(
             Ok(n) => Token::FloatLit(n.to_bits()),
             Err(_) => {
                 sink.emit(Diag::error(
-                    span,
+                    crate::spans::cspan(span),
                     DiagCode::ParseError,
                     format!("invalid float literal: '{}'", s),
                 ));
@@ -577,7 +581,7 @@ fn intern_token(
             Err(_) if s.parse::<u64>() == Ok(i64::MAX as u64 + 1) => Token::IntLitMin,
             Err(_) => {
                 sink.emit(Diag::error(
-                    span,
+                    crate::spans::cspan(span),
                     DiagCode::ParseError,
                     format!("invalid integer literal: '{}'", s),
                 ));
@@ -590,8 +594,10 @@ fn intern_token(
             // the parser sees a single `StrLit(StringId)` token
             // pointing at the user-visible bytes.
             let inner = &s[1..s.len() - 1];
-            let body_span =
-                SimpleSpan::new((), span.start.saturating_add(1)..span.end.saturating_sub(1));
+            let body_span = crate::spans::cspan(SimpleSpan::new(
+                (),
+                span.start.saturating_add(1)..span.end.saturating_sub(1),
+            ));
             let decoded = unescape(inner, body_span, sink, false);
             // `inner` is UTF-8 source text and every escape above
             // decodes to ASCII or re-encodes a `char`, so the decoded
@@ -607,14 +613,16 @@ fn intern_token(
             let inner = &s[2..s.len() - 1];
             if !inner.is_ascii() {
                 sink.emit(Diag::error(
-                    span,
+                    crate::spans::cspan(span),
                     DiagCode::InvalidCharacter,
                     "bytes literal must be ASCII; use \\xNN escapes for non-ASCII bytes"
                         .to_string(),
                 ));
             }
-            let body_span =
-                SimpleSpan::new((), span.start.saturating_add(2)..span.end.saturating_sub(1));
+            let body_span = crate::spans::cspan(SimpleSpan::new(
+                (),
+                span.start.saturating_add(2)..span.end.saturating_sub(1),
+            ));
             let decoded = unescape(inner, body_span, sink, true);
             Token::BytesLit(pool.intern_bytes(&decoded))
         }
