@@ -1257,6 +1257,160 @@ mod tests {
         assert_eq!(v.value, value);
     }
 
+    fn shell_view(words: &[u32], tag: InstTag, len: u32) -> Uir {
+        let mut uir = Uir::new();
+        let start = uir.extra.len() as u32;
+        uir.extra.extend_from_slice(words);
+        uir.instructions.push(Inst {
+            tag,
+            data: InstData::Extra(ExtraRange { offset: start, len }),
+        });
+        uir.spans.push(sp());
+        uir
+    }
+
+    fn shell_ref(uir: &Uir) -> InstRef {
+        InstRef::from_index(uir.instructions.len() - 1)
+    }
+
+    #[test]
+    fn call_wire_fixture() {
+        let mut b = UirBuilder::new();
+        b.uir.extra.extend([0xAAAA_AAAA; 5]);
+        let name = StringId::from_raw(7);
+        let a = InstRef::from_raw(21);
+        let bb = InstRef::from_raw(22);
+
+        let empty = b.call(name, &[], sp());
+        let InstData::Extra(range) = b.uir.inst(empty).data else {
+            panic!("Call must carry InstData::Extra");
+        };
+        assert_eq!(range, ExtraRange { offset: 5, len: 2 });
+        assert_eq!(&b.uir.extra[5..7], &[7, 0]);
+
+        let pop = b.call(name, &[a, bb], sp());
+        let InstData::Extra(range2) = b.uir.inst(pop).data else {
+            panic!("Call must carry InstData::Extra");
+        };
+        assert_eq!(range2, ExtraRange { offset: 7, len: 4 });
+        assert_eq!(&b.uir.extra[7..11], &[7, 2, 21, 22]);
+
+        let uir = shell_view(&[7, 0], InstTag::Call, 2);
+        let v = uir.call_view(shell_ref(&uir));
+        assert_eq!(v.name, name);
+        assert_eq!(v.args.len(), 0);
+
+        let uir = shell_view(&[7, 2, 21, 22], InstTag::Call, 4);
+        let v = uir.call_view(shell_ref(&uir));
+        assert_eq!(v.args.len(), 2);
+        assert_eq!(v.args.at(1), bb);
+    }
+
+    #[test]
+    fn method_call_wire_fixture() {
+        let mut b = UirBuilder::new();
+        b.uir.extra.extend([0xAAAA_AAAA; 5]);
+        let receiver = InstRef::from_raw(11);
+        let name = StringId::from_raw(7);
+        let a = InstRef::from_raw(21);
+        let bb = InstRef::from_raw(22);
+
+        let empty = b.method_call(receiver, name, &[], sp());
+        let InstData::Extra(range) = b.uir.inst(empty).data else {
+            panic!("MethodCall must carry InstData::Extra");
+        };
+        assert_eq!(range, ExtraRange { offset: 5, len: 3 });
+        assert_eq!(&b.uir.extra[5..8], &[11, 7, 0]);
+
+        let pop = b.method_call(receiver, name, &[a, bb], sp());
+        let InstData::Extra(range2) = b.uir.inst(pop).data else {
+            panic!("MethodCall must carry InstData::Extra");
+        };
+        assert_eq!(range2, ExtraRange { offset: 8, len: 5 });
+        assert_eq!(&b.uir.extra[8..13], &[11, 7, 2, 21, 22]);
+
+        let uir = shell_view(&[11, 7, 0], InstTag::MethodCall, 3);
+        let v = uir.method_call_view(shell_ref(&uir));
+        assert_eq!(v.receiver, receiver);
+        assert_eq!(v.name, name);
+        assert_eq!(v.args.len(), 0);
+
+        let uir = shell_view(&[11, 7, 2, 21, 22], InstTag::MethodCall, 5);
+        let v = uir.method_call_view(shell_ref(&uir));
+        assert_eq!(v.args.len(), 2);
+        assert_eq!(v.args.at(0), a);
+    }
+
+    #[test]
+    fn while_loop_wire_fixture() {
+        let mut b = UirBuilder::new();
+        b.uir.extra.extend([0xAAAA_AAAA; 5]);
+        let cond = InstRef::from_raw(11);
+        let s1 = InstRef::from_raw(21);
+        let s2 = InstRef::from_raw(22);
+
+        let empty = b.while_loop(cond, &[], sp());
+        let InstData::Extra(range) = b.uir.inst(empty).data else {
+            panic!("WhileLoop must carry InstData::Extra");
+        };
+        assert_eq!(range, ExtraRange { offset: 5, len: 2 });
+        assert_eq!(&b.uir.extra[5..7], &[11, 0]);
+
+        let pop = b.while_loop(cond, &[s1, s2], sp());
+        let InstData::Extra(range2) = b.uir.inst(pop).data else {
+            panic!("WhileLoop must carry InstData::Extra");
+        };
+        assert_eq!(range2, ExtraRange { offset: 7, len: 4 });
+        assert_eq!(&b.uir.extra[7..11], &[11, 2, 21, 22]);
+
+        let uir = shell_view(&[11, 0], InstTag::WhileLoop, 2);
+        let v = uir.while_loop_view(shell_ref(&uir));
+        assert_eq!(v.cond, cond);
+        assert_eq!(v.body.len(), 0);
+
+        let uir = shell_view(&[11, 2, 21, 22], InstTag::WhileLoop, 4);
+        let v = uir.while_loop_view(shell_ref(&uir));
+        assert_eq!(v.body.len(), 2);
+        assert_eq!(v.body.at(1), s2);
+    }
+
+    #[test]
+    fn for_range_wire_fixture() {
+        let mut b = UirBuilder::new();
+        b.uir.extra.extend([0xAAAA_AAAA; 5]);
+        let var_name = StringId::from_raw(7);
+        let start = InstRef::from_raw(5);
+        let end = InstRef::from_raw(9);
+        let s1 = InstRef::from_raw(21);
+        let s2 = InstRef::from_raw(22);
+
+        let empty = b.for_range(var_name, start, end, &[], sp());
+        let InstData::Extra(range) = b.uir.inst(empty).data else {
+            panic!("ForRange must carry InstData::Extra");
+        };
+        assert_eq!(range, ExtraRange { offset: 5, len: 4 });
+        assert_eq!(&b.uir.extra[5..9], &[7, 5, 9, 0]);
+
+        let pop = b.for_range(var_name, start, end, &[s1, s2], sp());
+        let InstData::Extra(range2) = b.uir.inst(pop).data else {
+            panic!("ForRange must carry InstData::Extra");
+        };
+        assert_eq!(range2, ExtraRange { offset: 9, len: 6 });
+        assert_eq!(&b.uir.extra[9..15], &[7, 5, 9, 2, 21, 22]);
+
+        let uir = shell_view(&[7, 5, 9, 0], InstTag::ForRange, 4);
+        let v = uir.for_range_view(shell_ref(&uir));
+        assert_eq!(v.var_name, var_name);
+        assert_eq!(v.start, start);
+        assert_eq!(v.end, end);
+        assert_eq!(v.body.len(), 0);
+
+        let uir = shell_view(&[7, 5, 9, 2, 21, 22], InstTag::ForRange, 6);
+        let v = uir.for_range_view(shell_ref(&uir));
+        assert_eq!(v.body.len(), 2);
+        assert_eq!(v.body.at(0), s1);
+    }
+
     #[test]
     fn float_literal_round_trips() {
         let mut b = UirBuilder::new();
