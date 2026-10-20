@@ -32,7 +32,11 @@
 //!   nested.
 //! - `extra: Vec<u32>` — variable-size payloads (call argument
 //!   lists, packed `VarDecl` headers, body statement lists). Mirrors
-//!   the sidecar arena from UIR / `InternPool`.
+//!   the sidecar arena from UIR / `InternPool`. Per-payload layouts
+//!   (`*_extra` modules owning `encode`/`decode`/views) mostly live in
+//!   `wires`; the exceptions are `destructure_extra` (in `destructure`),
+//!   `match_extra` (in `match_`), and `enum_lit_extra`, which is shared
+//!   with UIR and lives in `crate::extra`.
 //! - `spans: Vec<Span>` — parallel to `instructions`, one span per
 //!   `TirRef`. Out-of-band so `TypedInst` itself stays compact.
 //!
@@ -73,6 +77,10 @@ pub struct TirRef(NonZeroU32);
 impl ExtraValue for TirRef {
     fn from_extra(raw: u32) -> Self {
         Self::from_raw(raw)
+    }
+
+    fn to_extra(self) -> u32 {
+        self.raw()
     }
 }
 
@@ -232,19 +240,19 @@ pub enum TirTag {
     FNeg,
 
     /// Function call (user or builtin). Variable payload in `extra`
-    /// — see [`call_extra`].
+    /// — see `call_extra`.
     Call,
 
     /// Variable declaration with an initializer. Variable payload in
-    /// `extra` — see [`var_decl_extra`]; `TypedInst.ty` carries the
+    /// `extra` — see `var_decl_extra`; `TypedInst.ty` carries the
     /// *variable's* resolved type (Phase-3 side-table behaviour).
     VarDecl,
 
-    /// Reassignment to an existing mutable variable. Variable payload in `extra` — see [`assign_extra`].
+    /// Reassignment to an existing mutable variable. Variable payload in `extra` — see `assign_extra`.
     Assign,
 
     /// Compound assignment (`+=`, `-=`, etc.) to a mutable variable;
-    /// variable payload in `extra` — see [`compound_assign_extra`].
+    /// variable payload in `extra` — see `compound_assign_extra`.
     CompoundAssign,
 
     /// Slice projection `base[start:end]` → `strview` (M8.4).
@@ -287,10 +295,10 @@ pub enum TirTag {
     /// If/elif/else statement. Variable payload in `extra`.
     IfStmt,
 
-    /// `while cond: body`. Variable payload in `extra` — see [`while_loop_extra`].
+    /// `while cond: body`. Variable payload in `extra` — see `while_loop_extra`.
     WhileLoop,
 
-    /// `for var in range(start, end): body`. Variable payload in `extra` — see [`for_range_extra`].
+    /// `for var in range(start, end): body`. Variable payload in `extra` — see `for_range_extra`.
     ForRange,
 
     /// `break` statement.
@@ -306,7 +314,7 @@ pub enum TirTag {
     Unreachable,
 
     /// Struct literal `Name{field = value, ...}` (M9). Variable
-    /// payload in `extra` — see [`struct_lit_extra`]. Entries are in
+    /// payload in `extra` — see `struct_lit_extra`. Entries are in
     /// canonical (declaration-order) field order; `TypedInst.ty` is
     /// the struct type.
     StructLit,
@@ -326,17 +334,17 @@ pub enum TirTag {
     FieldAccess,
 
     /// Field-path assignment `p.x = v` (M9). Variable payload in
-    /// `extra` — see [`field_assign_extra`]; `TypedInst.ty` is the
+    /// `extra` — see `field_assign_extra`; `TypedInst.ty` is the
     /// field type.
     FieldAssign,
 
     /// Compound field-path assignment `p.x += v` (M9). Variable payload
-    /// in `extra` — see [`compound_field_assign_extra`]; `TypedInst.ty` is the field type.
+    /// in `extra` — see `compound_field_assign_extra`; `TypedInst.ty` is the field type.
     CompoundFieldAssign,
 
     /// Destructuring assignment `pattern = value` (M10): `(a, b) = e`,
     /// `{q, r} = e`. Variable payload in `extra` — see
-    /// [`destructure_extra`]; `TypedInst.ty` is the rhs struct type.
+    /// `destructure_extra`; `TypedInst.ty` is the rhs struct type.
     /// Codegen moves each bound field out of the rhs slot (or drops it
     /// inline for a wildcard); the ownership pass consumes the rhs
     /// owner at the statement and adopts the per-bound-field owner
@@ -389,6 +397,10 @@ impl ExtraValue for ParamMode {
         Self::from_u32(raw).unwrap_or_else(|| {
             unreachable!("call_extra mode word {raw} not written by ParamMode::to_u32")
         })
+    }
+
+    fn to_extra(self) -> u32 {
+        self.to_u32()
     }
 }
 
@@ -779,27 +791,8 @@ impl TirBuilder {
         ty: TypeId,
         span: Span,
     ) -> TirRef {
-        assert_eq!(
-            modes.len(),
-            args.len(),
-            "TirBuilder::call: one ParamMode per arg"
-        );
-        let offset = self.extra_offset();
-        self.extra.push(name.raw());
-        self.extra.push(Self::len_u32(args.len()));
-        for a in args {
-            self.extra.push(a.raw());
-        }
-        for m in modes {
-            self.extra.push(m.to_u32());
-        }
-        let len = Self::len_u32(call_extra::ARGS + 2 * args.len());
-        self.push(
-            TirTag::Call,
-            ty,
-            TirData::Extra(ExtraRange { offset, len }),
-            span,
-        )
+        let range = call_extra::encode(&mut self.extra, name, args, modes);
+        self.push(TirTag::Call, ty, TirData::Extra(range), span)
     }
 
     /// Emit a `VarDecl`. `var_ty` is the variable's resolved type
@@ -813,38 +806,13 @@ impl TirBuilder {
         initializer: TirRef,
         span: Span,
     ) -> TirRef {
-        let offset = self.extra_offset();
-        self.extra.push(name.raw());
-        self.extra.push(if mutable {
-            var_decl_extra::FLAG_MUTABLE
-        } else {
-            0
-        });
-        self.extra.push(initializer.raw());
-        self.push(
-            TirTag::VarDecl,
-            var_ty,
-            TirData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(var_decl_extra::LEN),
-            }),
-            span,
-        )
+        let range = var_decl_extra::encode(&mut self.extra, name, mutable, initializer);
+        self.push(TirTag::VarDecl, var_ty, TirData::Extra(range), span)
     }
 
     pub fn assign(&mut self, name: StringId, var_ty: TypeId, value: TirRef, span: Span) -> TirRef {
-        let offset = self.extra_offset();
-        self.extra.push(name.raw());
-        self.extra.push(value.raw());
-        self.push(
-            TirTag::Assign,
-            var_ty,
-            TirData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(assign_extra::LEN),
-            }),
-            span,
-        )
+        let range = assign_extra::encode(&mut self.extra, name, value);
+        self.push(TirTag::Assign, var_ty, TirData::Extra(range), span)
     }
 
     pub fn compound_assign(
@@ -855,19 +823,8 @@ impl TirBuilder {
         value: TirRef,
         span: Span,
     ) -> TirRef {
-        let offset = self.extra_offset();
-        self.extra.push(name.raw());
-        self.extra.push(op as u32);
-        self.extra.push(value.raw());
-        self.push(
-            TirTag::CompoundAssign,
-            var_ty,
-            TirData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(compound_assign_extra::LEN),
-            }),
-            span,
-        )
+        let range = compound_assign_extra::encode(&mut self.extra, name, op, value);
+        self.push(TirTag::CompoundAssign, var_ty, TirData::Extra(range), span)
     }
 
     pub fn if_stmt(
@@ -879,54 +836,14 @@ impl TirBuilder {
         ty: TypeId,
         span: Span,
     ) -> TirRef {
-        let elif_words: usize = elif_branches.iter().map(|(_, body)| 2 + body.len()).sum();
-        let total =
-            1 + 1 + then_stmts.len() + 1 + elif_words + 1 + else_stmts.map_or(0, |s| 1 + s.len());
-        self.extra.reserve(total);
-
-        let offset = self.extra_offset();
-        self.extra.push(cond.raw());
-        self.push_ref_list(then_stmts);
-        self.extra.push(Self::len_u32(elif_branches.len()));
-        for (elif_cond, elif_body) in elif_branches {
-            self.extra.push(elif_cond.raw());
-            self.push_ref_list(elif_body);
-        }
-        match else_stmts {
-            Some(stmts) => {
-                self.extra.push(1);
-                self.push_ref_list(stmts);
-            }
-            None => {
-                self.extra.push(0);
-            }
-        }
-        let len = Self::len_u32(self.extra.len() - offset as usize);
-        self.push(
-            TirTag::IfStmt,
-            ty,
-            TirData::Extra(ExtraRange { offset, len }),
-            span,
-        )
+        let range =
+            if_stmt_extra::encode(&mut self.extra, cond, then_stmts, elif_branches, else_stmts);
+        self.push(TirTag::IfStmt, ty, TirData::Extra(range), span)
     }
 
     pub fn while_loop(&mut self, cond: TirRef, body: &[TirRef], ty: TypeId, span: Span) -> TirRef {
-        let offset = self.extra_offset();
-        self.extra.push(cond.raw());
-        self.extra.push(Self::len_u32(body.len()));
-        for &stmt in body {
-            self.extra.push(stmt.raw());
-        }
-        let len = while_loop_extra::BODY_START + body.len();
-        self.push(
-            TirTag::WhileLoop,
-            ty,
-            TirData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(len),
-            }),
-            span,
-        )
+        let range = while_loop_extra::encode(&mut self.extra, cond, body);
+        self.push(TirTag::WhileLoop, ty, TirData::Extra(range), span)
     }
 
     pub fn for_range(
@@ -938,48 +855,16 @@ impl TirBuilder {
         ty: TypeId,
         span: Span,
     ) -> TirRef {
-        let offset = self.extra_offset();
-        self.extra.push(var_name.raw());
-        self.extra.push(start.raw());
-        self.extra.push(end.raw());
-        self.extra.push(Self::len_u32(body.len()));
-        for &stmt in body {
-            self.extra.push(stmt.raw());
-        }
-        let len = for_range_extra::BODY_START + body.len();
-        self.push(
-            TirTag::ForRange,
-            ty,
-            TirData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(len),
-            }),
-            span,
-        )
+        let range = for_range_extra::encode(&mut self.extra, var_name, start, end, body);
+        self.push(TirTag::ForRange, ty, TirData::Extra(range), span)
     }
 
     /// Emit a `StructLit` (M9). `fields` are `(field_index, value)`
     /// pairs in canonical (declaration) order — sema sorts before
     /// calling. `ty` is the struct type.
     pub fn struct_lit(&mut self, ty: TypeId, fields: &[(u32, TirRef)], span: Span) -> TirRef {
-        debug_assert!(
-            fields.windows(2).all(|w| w[0].0 < w[1].0),
-            "TirBuilder::struct_lit: fields must be sorted by field index"
-        );
-        let offset = self.extra_offset();
-        self.extra.push(ty.raw());
-        self.extra.push(Self::len_u32(fields.len()));
-        for &(idx, v) in fields {
-            self.extra.push(idx);
-            self.extra.push(v.raw());
-        }
-        let len = Self::len_u32(struct_lit_extra::FIELDS + 2 * fields.len());
-        self.push(
-            TirTag::StructLit,
-            ty,
-            TirData::Extra(ExtraRange { offset, len }),
-            span,
-        )
+        let range = struct_lit_extra::encode(&mut self.extra, ty, fields);
+        self.push(TirTag::StructLit, ty, TirData::Extra(range), span)
     }
 
     /// Emit an `EnumLit` `Name::Variant(args...)` (M11). `args` are
@@ -998,26 +883,8 @@ impl TirBuilder {
         args: &[(u32, TirRef)],
         span: Span,
     ) -> TirRef {
-        let offset = self.extra_offset();
-        self.extra.push(ty.raw());
-        self.extra.push(variant);
-        self.extra.push(Self::len_u32(args.len()));
-        self.extra.push(if positional {
-            enum_lit_extra::FLAG_POSITIONAL
-        } else {
-            0
-        });
-        for &(field_idx, value) in args {
-            self.extra.push(field_idx);
-            self.extra.push(value.raw());
-        }
-        let len = Self::len_u32(enum_lit_extra::ARGS + 2 * args.len());
-        self.push(
-            TirTag::EnumLit,
-            ty,
-            TirData::Extra(ExtraRange { offset, len }),
-            span,
-        )
+        let range = enum_lit_extra::encode(&mut self.extra, ty, variant, args, positional);
+        self.push(TirTag::EnumLit, ty, TirData::Extra(range), span)
     }
 
     /// Emit a `FieldAccess` (M9). `field_index` is the canonical
@@ -1049,18 +916,8 @@ impl TirBuilder {
         ty: TypeId,
         span: Span,
     ) -> TirRef {
-        let offset = self.extra_offset();
-        self.extra.push(target.raw());
-        self.extra.push(value.raw());
-        self.push(
-            TirTag::FieldAssign,
-            ty,
-            TirData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(field_assign_extra::LEN),
-            }),
-            span,
-        )
+        let range = field_assign_extra::encode(&mut self.extra, target, value);
+        self.push(TirTag::FieldAssign, ty, TirData::Extra(range), span)
     }
 
     /// Emit a `CompoundFieldAssign` `target op= value` (M9); `ty` is
@@ -1073,19 +930,8 @@ impl TirBuilder {
         value: TirRef,
         span: Span,
     ) -> TirRef {
-        let offset = self.extra_offset();
-        self.extra.push(target.raw());
-        self.extra.push(op as u32);
-        self.extra.push(value.raw());
-        self.push(
-            TirTag::CompoundFieldAssign,
-            ty,
-            TirData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(compound_field_assign_extra::LEN),
-            }),
-            span,
-        )
+        let range = compound_field_assign_extra::encode(&mut self.extra, target, op, value);
+        self.push(TirTag::CompoundFieldAssign, ty, TirData::Extra(range), span)
     }
 
     pub fn break_stmt(&mut self, ty: TypeId, span: Span) -> TirRef {
@@ -1134,15 +980,6 @@ fn read_ref_list_view<'a>(slice: &'a [u32], pos: &mut usize) -> ExtraList<'a, Ti
 fn skip_ref_list(slice: &[u32], pos: &mut usize) {
     let count = slice[*pos] as usize;
     *pos += 1 + count;
-}
-
-fn walk_ref_list(slice: &[u32], pos: &mut usize, mut visit: impl FnMut(TirRef)) {
-    let count = slice[*pos] as usize;
-    *pos += 1;
-    for &raw in &slice[*pos..*pos + count] {
-        visit(TirRef::from_raw(raw));
-    }
-    *pos += count;
 }
 
 // ---------- Structural reachability ----------
@@ -1202,18 +1039,13 @@ impl Tir {
             }
             TirData::Extra(_) => match inst.tag {
                 TirTag::Call => {
-                    let slice = self.extra_slice(r);
-                    let argc = slice[call_extra::ARGC] as usize;
-                    for &raw in &slice[call_extra::ARGS..call_extra::ARGS + argc] {
-                        f(r, TirRef::from_raw(raw), ChildKind::Operand);
+                    for arg in self.call_view(r).args {
+                        f(r, arg, ChildKind::Operand);
                     }
                 }
                 TirTag::StructLit => {
-                    let slice = self.extra_slice(r);
-                    let n = slice[struct_lit_extra::N_FIELDS] as usize;
-                    for i in 0..n {
-                        let value = slice[struct_lit_extra::FIELDS + 2 * i + 1];
-                        f(r, TirRef::from_raw(value), ChildKind::Operand);
+                    for (_, value) in self.struct_lit_view(r).fields() {
+                        f(r, value, ChildKind::Operand);
                     }
                 }
                 TirTag::EnumLit => {
@@ -1275,48 +1107,37 @@ impl Tir {
                     }
                 }
                 TirTag::IfStmt => {
-                    let slice = self.extra_slice(r);
-                    let cond = TirRef::from_raw(slice[0]);
-                    f(r, cond, ChildKind::Operand);
-                    let mut pos = 1;
-                    walk_ref_list(slice, &mut pos, |s| f(r, s, ChildKind::BodyStmt));
-                    let elif_count = slice[pos] as usize;
-                    pos += 1;
-                    for _ in 0..elif_count {
-                        let cond = TirRef::from_raw(slice[pos]);
-                        pos += 1;
-                        f(r, cond, ChildKind::Operand);
-                        walk_ref_list(slice, &mut pos, |s| f(r, s, ChildKind::BodyStmt));
+                    let v = self.if_stmt_view(r);
+                    f(r, v.cond, ChildKind::Operand);
+                    for s in v.then_stmts {
+                        f(r, s, ChildKind::BodyStmt);
                     }
-                    if slice[pos] != 0 {
-                        pos += 1;
-                        walk_ref_list(slice, &mut pos, |s| f(r, s, ChildKind::BodyStmt));
+                    for elif in &v.elif_branches {
+                        f(r, elif.cond, ChildKind::Operand);
+                        for s in elif.body {
+                            f(r, s, ChildKind::BodyStmt);
+                        }
+                    }
+                    if let Some(stmts) = v.else_stmts {
+                        for s in stmts {
+                            f(r, s, ChildKind::BodyStmt);
+                        }
                     }
                 }
                 TirTag::WhileLoop => {
-                    let slice = self.extra_slice(r);
-                    f(
-                        r,
-                        TirRef::from_raw(slice[while_loop_extra::COND]),
-                        ChildKind::Operand,
-                    );
-                    let mut pos = while_loop_extra::BODY_COUNT;
-                    walk_ref_list(slice, &mut pos, |s| f(r, s, ChildKind::BodyStmt));
+                    let v = self.while_loop_view(r);
+                    f(r, v.cond, ChildKind::Operand);
+                    for s in v.body {
+                        f(r, s, ChildKind::BodyStmt);
+                    }
                 }
                 TirTag::ForRange => {
-                    let slice = self.extra_slice(r);
-                    f(
-                        r,
-                        TirRef::from_raw(slice[for_range_extra::START]),
-                        ChildKind::Operand,
-                    );
-                    f(
-                        r,
-                        TirRef::from_raw(slice[for_range_extra::END]),
-                        ChildKind::Operand,
-                    );
-                    let mut pos = for_range_extra::BODY_COUNT;
-                    walk_ref_list(slice, &mut pos, |s| f(r, s, ChildKind::BodyStmt));
+                    let v = self.for_range_view(r);
+                    f(r, v.start, ChildKind::Operand);
+                    f(r, v.end, ChildKind::Operand);
+                    for s in v.body {
+                        f(r, s, ChildKind::BodyStmt);
+                    }
                 }
                 _ => {}
             },
@@ -1588,11 +1409,8 @@ pub use dump::{TirDump, dump};
 #[cfg(test)]
 mod tests;
 
-mod field_assign;
-pub use field_assign::{CompoundFieldAssignView, FieldAssignView};
-
 mod destructure;
-pub use destructure::{DestructureField, DestructureView, destructure_extra};
+pub use destructure::{DestructureField, DestructureView};
 
 mod match_;
 pub use match_::{
@@ -1600,13 +1418,15 @@ pub use match_::{
     TypedMatchBody, match_extra,
 };
 
-mod layout_docs;
-pub use layout_docs::{
+mod wires;
+pub(crate) use wires::{
     assign_extra, call_extra, compound_assign_extra, compound_field_assign_extra,
-    field_assign_extra, for_range_extra, struct_lit_extra, var_decl_extra, while_loop_extra,
+    field_assign_extra, for_range_extra, if_stmt_extra, struct_lit_extra, var_decl_extra,
+    while_loop_extra,
 };
 mod views;
 pub use views::{
-    AssignView, CallView, CompoundAssignView, EnumLitView, ForRangeView, StructLitView,
-    TirElifIter, TirElifList, TirElifView, TirIfStmtView, VarDeclView, WhileLoopView,
+    AssignView, CallView, CompoundAssignView, CompoundFieldAssignView, EnumLitView,
+    FieldAssignView, ForRangeView, StructLitView, TirElifIter, TirElifList, TirElifView,
+    TirIfStmtView, VarDeclView, WhileLoopView,
 };

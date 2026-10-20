@@ -154,7 +154,7 @@ fn call_view_panics_on_corrupt_mode_word() {
     let TirData::Extra(rng) = inst.data else {
         panic!("Call must carry TirData::Extra")
     };
-    let mode_idx = rng.as_range().start + call_extra::ARGS + 1;
+    let mode_idx = rng.as_range().start + 3;
     tir.extra[mode_idx] = 99;
 
     let _ = tir.call_view(call).modes.iter().next();
@@ -179,6 +179,613 @@ fn var_decl_round_trips() {
     assert!(v.mutable);
     assert_eq!(v.initializer, init);
     assert_eq!(tir.inst(decl).ty, int_ty);
+}
+
+#[test]
+fn var_decl_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let name = StringId::from_raw(7);
+    let init = TirRef::from_raw(13);
+
+    let decl = b.var_decl(name, true, int_ty, init, sp());
+    let TirData::Extra(range) = b.instructions[decl.index()].data else {
+        panic!("VarDecl must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 3 });
+    assert_eq!(&b.extra[5..8], &[7, 1, 13]);
+    assert_eq!(b.extra.len(), 8);
+
+    let decl2 = b.var_decl(name, false, int_ty, init, sp());
+    let TirData::Extra(range2) = b.instructions[decl2.index()].data else {
+        panic!("VarDecl must carry TirData::Extra");
+    };
+    assert_eq!(range2, ExtraRange { offset: 8, len: 3 });
+    assert_eq!(&b.extra[8..11], &[7, 0, 13]);
+}
+
+#[test]
+fn var_decl_decode_fixture() {
+    // Literal words, never encoder output: the payload words are
+    // replaced with independent literals before the view reads them.
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    let dummy = b.int_const(0, int_ty, sp());
+    let x = pool.intern_str("x");
+    let decl = b.var_decl(x, false, int_ty, dummy, sp());
+    let mut tir = b.finish(&[decl]);
+
+    let TirData::Extra(range) = tir.inst(decl).data else {
+        panic!("VarDecl must carry TirData::Extra");
+    };
+    let start = range.as_range().start;
+    tir.extra[start] = 7; // name
+    tir.extra[start + 1] = 1; // mutable
+    tir.extra[start + 2] = 13; // initializer
+
+    let v = tir.var_decl_view(decl);
+    assert_eq!(v.name, StringId::from_raw(7));
+    assert!(v.mutable);
+    assert_eq!(v.initializer, TirRef::from_raw(13));
+}
+
+fn shell_with(extra_words: &[u32], tag: TirTag, len: u32) -> (Tir, TirRef) {
+    // Build a minimal single-instruction `Tir` whose payload is the
+    // caller-supplied literal words — never encoder output.
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    let zero = b.int_const(0, int_ty, sp());
+    let mut tir = b.finish(&[zero]);
+    let start = tir.extra.len() as u32;
+    tir.extra.extend_from_slice(extra_words);
+    tir.instructions.push(TypedInst {
+        tag,
+        ty: int_ty,
+        data: TirData::Extra(ExtraRange { offset: start, len }),
+    });
+    tir.spans.push(sp());
+    let r = TirRef::from_raw((tir.instructions.len() - 1) as u32);
+    (tir, r)
+}
+
+#[test]
+fn assign_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let name = StringId::from_raw(7);
+    let value = TirRef::from_raw(13);
+
+    let r = b.assign(name, int_ty, value, sp());
+    let TirData::Extra(range) = b.instructions[r.index()].data else {
+        panic!("Assign must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 2 });
+    assert_eq!(&b.extra[5..7], &[7, 13]);
+    assert_eq!(b.instructions[r.index()].ty, int_ty);
+
+    let (tir, r) = shell_with(&[7, 13], TirTag::Assign, 2);
+    let v = tir.assign_view(r);
+    assert_eq!(v.name, name);
+    assert_eq!(v.value, value);
+}
+
+#[test]
+fn compound_assign_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let name = StringId::from_raw(7);
+    let value = TirRef::from_raw(13);
+
+    let r = b.compound_assign(name, CompoundOp::Sub, int_ty, value, sp());
+    let TirData::Extra(range) = b.instructions[r.index()].data else {
+        panic!("CompoundAssign must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 3 });
+    assert_eq!(&b.extra[5..8], &[7, 1, 13]);
+
+    let (tir, r) = shell_with(&[7, 1, 13], TirTag::CompoundAssign, 3);
+    let v = tir.compound_assign_view(r);
+    assert_eq!(v.name, name);
+    assert!(matches!(v.op, CompoundOp::Sub));
+    assert_eq!(v.value, value);
+}
+
+#[test]
+fn field_assign_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let target = TirRef::from_raw(21);
+    let value = TirRef::from_raw(22);
+
+    let r = b.field_assign(target, value, int_ty, sp());
+    let TirData::Extra(range) = b.instructions[r.index()].data else {
+        panic!("FieldAssign must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 2 });
+    assert_eq!(&b.extra[5..7], &[21, 22]);
+
+    let (tir, r) = shell_with(&[21, 22], TirTag::FieldAssign, 2);
+    let v = tir.field_assign_view(r);
+    assert_eq!(v.target, target);
+    assert_eq!(v.value, value);
+}
+
+#[test]
+fn compound_field_assign_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let target = TirRef::from_raw(21);
+    let value = TirRef::from_raw(22);
+
+    let r = b.compound_field_assign(target, CompoundOp::Sub, int_ty, value, sp());
+    let TirData::Extra(range) = b.instructions[r.index()].data else {
+        panic!("CompoundFieldAssign must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 3 });
+    assert_eq!(&b.extra[5..8], &[21, 1, 22]);
+
+    let (tir, r) = shell_with(&[21, 1, 22], TirTag::CompoundFieldAssign, 3);
+    let v = tir.compound_field_assign_view(r);
+    assert_eq!(v.target, target);
+    assert!(matches!(v.op, CompoundOp::Sub));
+    assert_eq!(v.value, value);
+}
+
+#[test]
+fn call_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let name = StringId::from_raw(7);
+    let arg1 = TirRef::from_raw(31);
+    let arg2 = TirRef::from_raw(32);
+
+    let empty = b.call(name, &[], &[], int_ty, sp());
+    let TirData::Extra(range) = b.instructions[empty.index()].data else {
+        panic!("Call must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 2 });
+    assert_eq!(&b.extra[5..7], &[7, 0]);
+
+    let pop = b.call(
+        name,
+        &[arg1, arg2],
+        &[ParamMode::Move, ParamMode::Inout],
+        int_ty,
+        sp(),
+    );
+    let TirData::Extra(range2) = b.instructions[pop.index()].data else {
+        panic!("Call must carry TirData::Extra");
+    };
+    assert_eq!(range2, ExtraRange { offset: 7, len: 6 });
+    assert_eq!(&b.extra[7..13], &[7, 2, 31, 32, 1, 2]);
+
+    let borrow = b.call(name, &[arg1], &[ParamMode::Borrow], int_ty, sp());
+    let TirData::Extra(range3) = b.instructions[borrow.index()].data else {
+        panic!("Call must carry TirData::Extra");
+    };
+    assert_eq!(range3, ExtraRange { offset: 13, len: 4 });
+    assert_eq!(&b.extra[13..17], &[7, 1, 31, 0]);
+
+    let (tir, r) = shell_with(&[7, 2, 31, 32, 1, 2], TirTag::Call, 6);
+    let v = tir.call_view(r);
+    assert_eq!(v.name, name);
+    assert_eq!(v.args.len(), 2);
+    assert_eq!(v.args.at(1), arg2);
+    assert_eq!(v.modes.len(), 2);
+    assert_eq!(v.modes.at(0), ParamMode::Move);
+    assert_eq!(v.modes.at(1), ParamMode::Inout);
+
+    let (tir, r) = shell_with(&[7, 0], TirTag::Call, 2);
+    let v = tir.call_view(r);
+    assert_eq!(v.args.len(), 0);
+    assert_eq!(v.modes.len(), 0);
+}
+
+#[test]
+fn while_loop_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let cond = TirRef::from_raw(11);
+    let s1 = TirRef::from_raw(21);
+    let s2 = TirRef::from_raw(22);
+
+    let empty = b.while_loop(cond, &[], int_ty, sp());
+    let TirData::Extra(range) = b.instructions[empty.index()].data else {
+        panic!("WhileLoop must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 2 });
+    assert_eq!(&b.extra[5..7], &[11, 0]);
+
+    let pop = b.while_loop(cond, &[s1, s2], int_ty, sp());
+    let TirData::Extra(range2) = b.instructions[pop.index()].data else {
+        panic!("WhileLoop must carry TirData::Extra");
+    };
+    assert_eq!(range2, ExtraRange { offset: 7, len: 4 });
+    assert_eq!(&b.extra[7..11], &[11, 2, 21, 22]);
+
+    let (tir, r) = shell_with(&[11, 2, 21, 22], TirTag::WhileLoop, 4);
+    let v = tir.while_loop_view(r);
+    assert_eq!(v.cond, cond);
+    assert_eq!(v.body.len(), 2);
+    assert_eq!(v.body.at(1), s2);
+    assert_eq!(tir.while_loop_body_view(r).len(), 2);
+
+    let (tir, r) = shell_with(&[11, 0], TirTag::WhileLoop, 2);
+    let v = tir.while_loop_view(r);
+    assert_eq!(v.body.len(), 0);
+    assert_eq!(tir.while_loop_body_view(r).len(), 0);
+}
+
+#[test]
+fn for_range_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let var_name = StringId::from_raw(7);
+    let start = TirRef::from_raw(5);
+    let end = TirRef::from_raw(9);
+    let s1 = TirRef::from_raw(21);
+    let s2 = TirRef::from_raw(22);
+
+    let empty = b.for_range(var_name, start, end, &[], int_ty, sp());
+    let TirData::Extra(range) = b.instructions[empty.index()].data else {
+        panic!("ForRange must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 4 });
+    assert_eq!(&b.extra[5..9], &[7, 5, 9, 0]);
+
+    let pop = b.for_range(var_name, start, end, &[s1, s2], int_ty, sp());
+    let TirData::Extra(range2) = b.instructions[pop.index()].data else {
+        panic!("ForRange must carry TirData::Extra");
+    };
+    assert_eq!(range2, ExtraRange { offset: 9, len: 6 });
+    assert_eq!(&b.extra[9..15], &[7, 5, 9, 2, 21, 22]);
+
+    let (tir, r) = shell_with(&[7, 5, 9, 2, 21, 22], TirTag::ForRange, 6);
+    let v = tir.for_range_view(r);
+    assert_eq!(v.var_name, var_name);
+    assert_eq!(v.start, start);
+    assert_eq!(v.end, end);
+    assert_eq!(v.body.len(), 2);
+    assert_eq!(tir.for_range_body_view(r).at(0), s1);
+
+    let (tir, r) = shell_with(&[7, 5, 9, 0], TirTag::ForRange, 4);
+    let v = tir.for_range_view(r);
+    assert_eq!(v.body.len(), 0);
+    assert_eq!(tir.for_range_body_view(r).len(), 0);
+}
+
+#[test]
+fn struct_lit_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let ty = TypeId::from_raw(3);
+    let value = TirRef::from_raw(31);
+
+    let one = b.struct_lit(ty, &[(0, value)], sp());
+    let TirData::Extra(range) = b.instructions[one.index()].data else {
+        panic!("StructLit must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 4 });
+    assert_eq!(&b.extra[5..9], &[3, 1, 0, 31]);
+
+    let empty = b.struct_lit(ty, &[], sp());
+    let TirData::Extra(range2) = b.instructions[empty.index()].data else {
+        panic!("StructLit must carry TirData::Extra");
+    };
+    assert_eq!(range2, ExtraRange { offset: 9, len: 2 });
+    assert_eq!(&b.extra[9..11], &[3, 0]);
+
+    let (tir, r) = shell_with(&[3, 1, 0, 31], TirTag::StructLit, 4);
+    let v = tir.struct_lit_view(r);
+    assert_eq!(v.ty, ty);
+    assert_eq!(v.fields().collect::<Vec<_>>(), vec![(0, value)]);
+
+    let (tir, r) = shell_with(&[3, 0], TirTag::StructLit, 2);
+    let v = tir.struct_lit_view(r);
+    assert_eq!(v.fields().count(), 0);
+}
+
+#[test]
+fn enum_lit_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let ty = TypeId::from_raw(3);
+    let w = TirRef::from_raw(21);
+    let h = TirRef::from_raw(22);
+
+    let two = b.enum_lit(ty, 1, false, &[(0, w), (1, h)], sp());
+    let TirData::Extra(range) = b.instructions[two.index()].data else {
+        panic!("EnumLit must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 8 });
+    assert_eq!(&b.extra[5..13], &[3, 1, 2, 0, 0, 21, 1, 22]);
+
+    let unit = b.enum_lit(ty, 1, false, &[], sp());
+    let TirData::Extra(range2) = b.instructions[unit.index()].data else {
+        panic!("EnumLit must carry TirData::Extra");
+    };
+    assert_eq!(range2, ExtraRange { offset: 13, len: 4 });
+    assert_eq!(&b.extra[13..17], &[3, 1, 0, 0]);
+
+    let pos = b.enum_lit(ty, 1, true, &[(0, w)], sp());
+    let TirData::Extra(range3) = b.instructions[pos.index()].data else {
+        panic!("EnumLit must carry TirData::Extra");
+    };
+    assert_eq!(range3, ExtraRange { offset: 17, len: 6 });
+    assert_eq!(&b.extra[17..23], &[3, 1, 1, 1, 0, 21]);
+
+    let (tir, r) = shell_with(&[3, 1, 2, 0, 0, 21, 1, 22], TirTag::EnumLit, 8);
+    let v = tir.enum_lit_view(r);
+    assert_eq!(v.ty, ty);
+    assert_eq!(v.variant_index, 1);
+    assert!(!v.positional);
+    assert_eq!(v.fields().collect::<Vec<_>>(), vec![(0, w), (1, h)]);
+
+    let (tir, r) = shell_with(&[3, 1, 0, 0], TirTag::EnumLit, 4);
+    let v = tir.enum_lit_view(r);
+    assert_eq!(v.fields().count(), 0);
+
+    let (tir, r) = shell_with(&[3, 1, 1, 1, 0, 21], TirTag::EnumLit, 6);
+    let v = tir.enum_lit_view(r);
+    assert!(v.positional);
+    assert_eq!(v.fields().collect::<Vec<_>>(), vec![(0, w)]);
+}
+
+#[test]
+fn destructure_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let rhs = b.int_const(7, int_ty, sp());
+    let fty1 = TypeId::from_raw(3);
+    let fty2 = TypeId::from_raw(4);
+    let fields = [(0u32, None, fty1), (1, Some(StringId::from_raw(0)), fty2)];
+
+    let r = b.destructure(rhs, &fields, sp());
+    let TirData::Extra(range) = b.instructions[r.index()].data else {
+        panic!("Destructure must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 8 });
+    assert_eq!(&b.extra[5..13], &[1, 2, 0, 0, 3, 1, 1, 4]);
+
+    let (tir, r) = shell_with(&[1, 2, 0, 0, 3, 1, 1, 4], TirTag::Destructure, 8);
+    let v = tir.destructure_view(r);
+    assert_eq!(v.rhs, rhs);
+    assert_eq!(
+        v.fields,
+        vec![
+            DestructureField {
+                field_index: 0,
+                bind: None,
+                ty: fty1,
+            },
+            DestructureField {
+                field_index: 1,
+                bind: Some(StringId::from_raw(0)),
+                ty: fty2,
+            },
+        ]
+    );
+}
+
+#[test]
+fn if_stmt_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let cond = TirRef::from_raw(11);
+    let t1 = TirRef::from_raw(21);
+    let c12 = TirRef::from_raw(12);
+    let b22 = TirRef::from_raw(22);
+    let c13 = TirRef::from_raw(13);
+    let e23 = TirRef::from_raw(23);
+
+    let no_else = b.if_stmt(cond, &[t1], &[], None, int_ty, sp());
+    let TirData::Extra(range) = b.instructions[no_else.index()].data else {
+        panic!("IfStmt must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 5 });
+    assert_eq!(&b.extra[5..10], &[11, 1, 21, 0, 0]);
+
+    let empty_else = b.if_stmt(cond, &[t1], &[], Some(&[]), int_ty, sp());
+    let TirData::Extra(range2) = b.instructions[empty_else.index()].data else {
+        panic!("IfStmt must carry TirData::Extra");
+    };
+    assert_eq!(range2, ExtraRange { offset: 10, len: 6 });
+    assert_eq!(&b.extra[10..16], &[11, 1, 21, 0, 1, 0]);
+
+    let all_empty = b.if_stmt(cond, &[], &[], None, int_ty, sp());
+    let TirData::Extra(range3) = b.instructions[all_empty.index()].data else {
+        panic!("IfStmt must carry TirData::Extra");
+    };
+    assert_eq!(range3, ExtraRange { offset: 16, len: 4 });
+    assert_eq!(&b.extra[16..20], &[11, 0, 0, 0]);
+
+    let full = b.if_stmt(
+        cond,
+        &[t1],
+        &[(c12, vec![b22]), (c13, vec![])],
+        Some(&[e23]),
+        int_ty,
+        sp(),
+    );
+    let TirData::Extra(range4) = b.instructions[full.index()].data else {
+        panic!("IfStmt must carry TirData::Extra");
+    };
+    assert_eq!(
+        range4,
+        ExtraRange {
+            offset: 20,
+            len: 12
+        }
+    );
+    assert_eq!(
+        &b.extra[20..32],
+        &[11, 1, 21, 2, 12, 1, 22, 13, 0, 1, 1, 23]
+    );
+
+    let (tir, r) = shell_with(&[11, 1, 21, 0, 0], TirTag::IfStmt, 5);
+    let v = tir.if_stmt_view(r);
+    assert_eq!(v.cond, cond);
+    assert_eq!(v.then_stmts.len(), 1);
+    assert!(v.else_stmts.is_none());
+    assert_eq!(v.elif_branches.len(), 0);
+
+    let (tir, r) = shell_with(&[11, 1, 21, 0, 1, 0], TirTag::IfStmt, 6);
+    let v = tir.if_stmt_view(r);
+    assert_eq!(v.else_stmts.unwrap().len(), 0);
+
+    let (tir, r) = shell_with(
+        &[11, 1, 21, 2, 12, 1, 22, 13, 0, 1, 1, 23],
+        TirTag::IfStmt,
+        12,
+    );
+    let v = tir.if_stmt_view(r);
+    let elifs = v
+        .elif_branches
+        .iter()
+        .map(|e| (e.cond, e.body.len()))
+        .collect::<Vec<_>>();
+    assert_eq!(elifs, vec![(c12, 1), (c13, 0)]);
+    assert_eq!(v.else_stmts.unwrap().at(0), e23);
+}
+
+#[test]
+fn terminates_parity_through_builder_and_tir() {
+    fn case(
+        f: impl FnOnce(&mut TirBuilder, TypeId, TypeId, TypeId, TypeId, StringId) -> TirRef,
+    ) -> (bool, bool, bool, bool) {
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let never = pool.never();
+        let void = pool.void();
+        let name = pool.intern_str("x");
+        let main = pool.intern_str("main");
+        let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+        let stmt = f(&mut b, int_ty, never, void, int_ty, name);
+        let r = b.block_definitely_returns(&[stmt], &pool);
+        let t = b.block_definitely_terminates(&[stmt], &pool);
+        let tir = b.finish(&[stmt]);
+        let r2 = tir.block_definitely_returns(&[stmt], &pool);
+        let t2 = tir.block_definitely_terminates(&[stmt], &pool);
+        (r, t, r2, t2)
+    }
+
+    // (builder returns sense, builder terminates sense, tir returns,
+    // tir terminates) — the two senses must agree across the
+    // pre-finish and post-finish queries.
+    let if_all = case(|b, i, _n, v, _i2, _name| {
+        let c = b.int_const(0, i, sp());
+        let a1 = b.int_const(1, i, sp());
+        let a2 = b.int_const(2, i, sp());
+        let r1 = b.unary(TirTag::Return, v, a1, sp());
+        let r2 = b.unary(TirTag::Return, v, a2, sp());
+        b.if_stmt(c, &[r1], &[], Some(&[r2]), i, sp())
+    });
+    assert_eq!(if_all, (true, true, true, true));
+
+    let if_no_else = case(|b, i, _n, v, _i2, _name| {
+        let c = b.int_const(0, i, sp());
+        let a1 = b.int_const(1, i, sp());
+        let r1 = b.unary(TirTag::Return, v, a1, sp());
+        b.if_stmt(c, &[r1], &[], None, i, sp())
+    });
+    assert_eq!(if_no_else, (false, false, false, false));
+
+    let if_empty_else = case(|b, i, _n, v, _i2, _name| {
+        let c = b.int_const(0, i, sp());
+        let a1 = b.int_const(1, i, sp());
+        let r1 = b.unary(TirTag::Return, v, a1, sp());
+        b.if_stmt(c, &[r1], &[], Some(&[]), i, sp())
+    });
+    assert_eq!(if_empty_else, (false, false, false, false));
+
+    let if_mid_falls = case(|b, i, _n, v, _i2, _name| {
+        let c = b.int_const(0, i, sp());
+        let a1 = b.int_const(1, i, sp());
+        let r1 = b.unary(TirTag::Return, v, a1, sp());
+        let ec1 = b.int_const(2, i, sp());
+        let a3 = b.int_const(3, i, sp());
+        let er1 = b.unary(TirTag::Return, v, a3, sp());
+        let ec2 = b.int_const(4, i, sp());
+        let ez = b.int_const(5, i, sp());
+        let a6 = b.int_const(6, i, sp());
+        let r2 = b.unary(TirTag::Return, v, a6, sp());
+        b.if_stmt(
+            c,
+            &[r1],
+            &[(ec1, vec![er1]), (ec2, vec![ez])],
+            Some(&[r2]),
+            i,
+            sp(),
+        )
+    });
+    assert_eq!(if_mid_falls, (false, false, false, false));
+
+    let vd_never = case(|b, i, n, _v, _i2, name| {
+        let d = b.unreachable(n, sp());
+        b.var_decl(name, false, i, d, sp())
+    });
+    assert_eq!(vd_never, (true, true, true, true));
+
+    let vd_plain = case(|b, i, _n, _v, _i2, name| {
+        let z = b.int_const(0, i, sp());
+        b.var_decl(name, false, i, z, sp())
+    });
+    assert_eq!(vd_plain, (false, false, false, false));
+
+    let as_never = case(|b, i, n, _v, _i2, name| {
+        let d = b.unreachable(n, sp());
+        b.assign(name, i, d, sp())
+    });
+    assert_eq!(as_never, (true, true, true, true));
+
+    let ca_never = case(|b, i, n, _v, _i2, name| {
+        let d = b.unreachable(n, sp());
+        b.compound_assign(name, CompoundOp::Add, i, d, sp())
+    });
+    assert_eq!(ca_never, (true, true, true, true));
+
+    let brk = case(|b, i, _n, _v, _i2, _name| b.break_stmt(i, sp()));
+    assert_eq!(brk, (false, true, false, true));
 }
 
 #[test]
@@ -487,20 +1094,20 @@ fn enum_lit_round_trips_through_extra() {
     assert_eq!(view.fields().collect::<Vec<_>>(), vec![(0, w), (1, h)]);
     assert_eq!(tir.inst(lit).ty, enum_ty);
 
-    // Wire layout is pinned: [TY, VARIANT, FLAGS, ARGC, (FIELD_IDX, REF) x ARGC].
+    // Wire layout is pinned: [TY, VARIANT, ARGC, FLAGS, (FIELD_IDX, REF) x ARGC].
     let inst = tir.inst(lit);
     let TirData::Extra(rng) = inst.data else {
         panic!("expected TirData::Extra, got {:?}", inst.data);
     };
     let slice = &tir.extra[rng.as_range()];
-    assert_eq!(slice[enum_lit_extra::TY], enum_ty.raw());
-    assert_eq!(slice[enum_lit_extra::VARIANT], 1);
-    assert_eq!(slice[enum_lit_extra::FLAGS], 0);
-    assert_eq!(slice[enum_lit_extra::ARGC], 2);
-    assert_eq!(slice[enum_lit_extra::ARGS], 0);
-    assert_eq!(slice[enum_lit_extra::ARGS + 1], w.raw());
-    assert_eq!(slice[enum_lit_extra::ARGS + 2], 1);
-    assert_eq!(slice[enum_lit_extra::ARGS + 3], h.raw());
+    assert_eq!(slice[0], enum_ty.raw());
+    assert_eq!(slice[1], 1);
+    assert_eq!(slice[2], 2);
+    assert_eq!(slice[3], 0);
+    assert_eq!(slice[4], 0);
+    assert_eq!(slice[5], w.raw());
+    assert_eq!(slice[6], 1);
+    assert_eq!(slice[7], h.raw());
 }
 
 #[test]

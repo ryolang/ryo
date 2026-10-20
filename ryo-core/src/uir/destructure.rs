@@ -3,7 +3,7 @@
 //! the 2000-line CI gate. Astgen is the only producer (see
 //! `astgen.rs::lower_destructure_pattern`); sema is the only consumer.
 
-use super::{ExtraRange, InstData, InstRef, InstTag, Span, Uir, UirBuilder};
+use super::{InstData, InstRef, InstTag, Span, Uir, UirBuilder};
 use crate::types::StringId;
 
 /// Layout in `extra` for [`InstTag::Destructure`]:
@@ -22,11 +22,11 @@ use crate::types::StringId;
 /// already IS the canonical field index, for brace patterns sema
 /// resolves the name against the struct shape.
 pub mod destructure_extra {
+    use super::UirDestructureView;
+    use crate::extra::ExtraRange;
     use crate::types::StringId;
-
-    pub const N_ENTRIES: usize = 0;
-    pub const ENTRIES: usize = 1;
-    pub const ENTRY_LEN: usize = 2;
+    use crate::uir::InstRef;
+    use crate::uir::wires::{extra_offset, len_u32};
 
     /// Encode a bind name: 0 for a wildcard, else `raw + 1` (raw 0 is
     /// a real interned string — the pool pre-interns "derive" — so the
@@ -38,6 +38,41 @@ pub mod destructure_extra {
     /// Decode a bind word produced by [`Self::encode_bind`].
     pub fn decode_bind(word: u32) -> Option<StringId> {
         (word > 0).then(|| StringId::from_raw(word - 1))
+    }
+
+    /// Encode a destructure plan into `extra`, returning its range.
+    /// The value ref and `by_position` are inline in
+    /// [`InstData::Destructure`](crate::uir::InstData::Destructure),
+    /// not on the wire.
+    pub fn encode(extra: &mut Vec<u32>, plan: &[(u32, Option<StringId>)]) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(len_u32(plan.len()));
+        for &(selector, bind) in plan {
+            extra.push(selector);
+            extra.push(encode_bind(bind));
+        }
+        ExtraRange {
+            offset,
+            len: len_u32(1 + plan.len() * 2),
+        }
+    }
+
+    /// Decode a destructure plan from its words; `value` and
+    /// `by_position` come from the instruction's inline data.
+    pub fn decode(words: &[u32], value: InstRef, by_position: bool) -> UirDestructureView {
+        let n = words[0] as usize;
+        debug_assert_eq!(words.len(), 1 + n * 2, "destructure plan length mismatch");
+        let plan = (0..n)
+            .map(|i| {
+                let base = 1 + i * 2;
+                (words[base], decode_bind(words[base + 1]))
+            })
+            .collect();
+        UirDestructureView {
+            value,
+            by_position,
+            plan,
+        }
     }
 }
 
@@ -62,18 +97,12 @@ impl UirBuilder {
         plan: &[(u32, Option<StringId>)],
         span: Span,
     ) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(Self::len_u32(plan.len()));
-        for &(selector, bind) in plan {
-            self.uir.extra.push(selector);
-            self.uir.extra.push(destructure_extra::encode_bind(bind));
-        }
-        let len = Self::len_u32(destructure_extra::ENTRIES + plan.len() * 2);
+        let range = destructure_extra::encode(&mut self.uir.extra, plan);
         self.push(
             InstTag::Destructure,
             InstData::Destructure {
                 value,
-                plan: ExtraRange { offset, len },
+                plan: range,
                 by_position,
             },
             span,
@@ -104,23 +133,6 @@ impl Uir {
             } => (value, plan, by_position),
             _ => unreachable!("Destructure must carry InstData::Destructure"),
         };
-        let slice = &self.extra[plan_range.as_range()];
-        let n = slice[destructure_extra::N_ENTRIES] as usize;
-        debug_assert_eq!(
-            slice.len(),
-            destructure_extra::ENTRIES + n * destructure_extra::ENTRY_LEN,
-            "destructure plan length mismatch"
-        );
-        let plan = (0..n)
-            .map(|i| {
-                let base = destructure_extra::ENTRIES + i * destructure_extra::ENTRY_LEN;
-                (slice[base], destructure_extra::decode_bind(slice[base + 1]))
-            })
-            .collect();
-        UirDestructureView {
-            value,
-            by_position,
-            plan,
-        }
+        destructure_extra::decode(&self.extra[plan_range.as_range()], value, by_position)
     }
 }

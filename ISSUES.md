@@ -197,19 +197,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-080 — UIR/TIR parallel-file duplication: `extra` layouts, match views, dumps, destructure walks
-
-**Severity:** Correctness / Hygiene
-**Area:** core-ir
-
-**Files:** `ryo-core/src/uir/layout_docs.rs` (`var_decl_extra` etc. :10-155), `ryo-core/src/tir/layout_docs.rs` (`call_extra` :16, `var_decl_extra` :34, `assign_extra` :49-61)
-**Summary:** tir.rs re-defines near-identical `extra`-layout modules with different layouts: `call_extra` appends a modes tail; `var_decl_extra` drops the `TY` slot (`LEN: 3` vs uir's `4`). Same names, same constants, different meanings — a footgun when editing one side. `ExtraRange` itself was also byte-duplicated (since unified into `ryo-core/src/extra.rs` :110, per the M11 update below), and `IfStmt` has no layout doc module at all in `tir/layout_docs.rs`.
-**Resolution:** Unify the shared pieces (`ExtraRange` at minimum) in one module; rename or document the layout differences explicitly; add the missing `if_stmt_extra` doc module.
-**Update (2026-10-09, Milestone 11):** `ExtraRange` is now unified in `ryo-core/src/extra.rs`, and the M11 enum encodings (`enum_lit_extra`, `EnumLitView`) were born on the shared type with no per-IR duplication. The layout documentation gaps above remain open.
-**Update (2026-10-19, post-M12 review):** Scope widened — the duplication is not limited to the `*_extra` layout modules. The two IRs exist as near-parallel file pairs, so every IR edit is a two-file coordination: `uir/match_.rs` (1161 lines) and `tir/match_.rs` (1176) re-implement the same match-view traversal (`match_expr`, `match_view`, arm accessors); `uir/dump.rs` (417) and `tir/dump.rs` (277) are parallel dump implementations; `uir/destructure.rs` (126) and `tir/destructure.rs` (167) are parallel destructure walks. The `*_extra` modules themselves moved into `uir/layout_docs.rs` vs `tir/layout_docs.rs` in the post-M12 file split; confirmed divergences under shared names: TIR `call_extra` appends a MODES tail, TIR `var_decl_extra` is LEN 3 vs UIR's 4, and `struct_lit_extra` is name-keyed in UIR (`uir/layout_docs.rs:119`) vs index-keyed in TIR (`tir/layout_docs.rs:108`) — a real wire-format difference, not just documentation drift. Resolution extended: treat each pair as one coordination unit — either generate or macro/table-drive the shared traversal/dump/destructure logic once, or explicitly document each pair as hand-kept-in-sync.
-
----
-
 ### I-092 — Sema per-function and per-call allocation churn
 
 **Severity:** Cleanup
@@ -766,6 +753,19 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** Three different test organizations coexist for the same job. (1) ownership uses a directory module: tests/mod.rs + 19 feature files. (2) sema/parser/astgen use a file module tests.rs with feature splits as siblings — but with two naming schemes: sema names them tests_<feature>.rs (tests_borrows, tests_str_views, tests_match_*), parser/astgen name them <feature>_tests.rs (struct_tests, enum_tests, match_tests). (3) sema additionally nests a child-module directory tests/ under its tests.rs file module (warning_buffer.rs). Root cause of the split: 'mod tests;' resolves to tests.rs OR tests/mod.rs, never both, so each module is locked into whichever form it first chose, and the 2026-10-19 size-cap splits followed whatever local precedent each module had. Costs: every contributor learns a per-module convention; future cap-driven splits land unpredictably; helper-visibility patterns (pub(super) widening) differ per form; grepping for a test requires knowing the local scheme. Cosmetic only — zero behavioral impact.
 
 **Resolution:** Pick one convention and migrate purely (file moves + module-declaration updates, no test edits). Recommended: directory form everywhere (ownership/tests/ proves it scales), which also frees the sibling namespace and unifies helper sharing on one pattern; alternatively keep file form everywhere. Naming: pick one of tests_<feature>.rs or <feature>_tests.rs and rename the other set. Constraint to respect: a module cannot have both tests.rs and tests/mod.rs — convert, don't duplicate. Verify with cargo check -p ryo-frontend --tests and the full workspace suite. Low priority; natural fit for the next test-heavy milestone's opening sweep.
+
+---
+
+### I-244 — Dump writers render Extra-carrying tags as <malformed>
+
+**Severity:** Correctness / Hygiene
+**Area:** core-ir
+
+**Files:** ryo-core/src/uir/dump.rs, ryo-core/src/tir/dump.rs
+
+**Summary:** The hand-written dump writers lack arms for some Extra-carrying instruction tags. Verified 2026-10-20 on examples/enums.ryo: the UIR dump renders every EnumLit as `<malformed: EnumLit / Extra(...)>`. The Match rendering gap is documented (pattern_matching.md known-limitations), but EnumLit is not. The wires themselves are healthy — decode, views, and round-trip fixtures all exist; this is a display gap only.
+
+**Resolution:** Add dump arms for the remaining Extra-carrying tags (EnumLit first; audit both dump writers for any other Extra tag without an arm, UIR and TIR). Dump output is a debugging surface; keep arms aligned with the wires.rs layout modules.
 
 ---
 

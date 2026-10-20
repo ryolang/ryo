@@ -23,7 +23,12 @@
 //!   function body statement lists, packed `VarDecl` headers). Mirrors
 //!   the `extra: ArrayListUnmanaged(u32)` Zig uses in `Zir.zig` /
 //!   `InternPool.zig`. Anything that doesn't fit in a single
-//!   `InstData` lives here, indexed by an [`ExtraRange`].
+//!   `InstData` lives here, indexed by an [`ExtraRange`]. Per-payload
+//!   layouts (`*_extra` modules owning `encode`/`decode`/views) mostly
+//!   live in `wires`; the exceptions are `destructure_extra` (in
+//!   `destructure`), `match_extra` (in `match_`), and `enum_lit_extra`,
+//!   which is shared with TIR and lives in `crate::extra`. The
+//!   `wire_fixtures` module (test-only) pins each layout's exact words.
 //! - `spans: Vec<Span>` — parallel to `instructions`, one span per
 //!   `InstRef`. Storing spans out-of-band keeps `Inst` itself small
 //!   (the tagged-enum payload already costs more than a `u32`; piling
@@ -81,6 +86,10 @@ pub struct InstRef(NonZeroU32);
 impl ExtraValue for InstRef {
     fn from_extra(raw: u32) -> Self {
         Self::from_raw(raw)
+    }
+
+    fn to_extra(self) -> u32 {
+        self.raw()
     }
 }
 
@@ -168,11 +177,11 @@ pub enum InstTag {
     // Unary. Operand in `data.un_op`.
     Neg,
 
-    /// Function call. Variable payload in `extra` — see [`call_extra`].
+    /// Function call. Variable payload in `extra` — see `call_extra`.
     Call,
 
     /// Variable declaration with optional annotation. Variable payload
-    /// in `extra` — see [`var_decl_extra`].
+    /// in `extra` — see `var_decl_extra`.
     VarDecl,
 
     /// `return <expr>`. Operand in `data.un_op`.
@@ -198,17 +207,17 @@ pub enum InstTag {
     IfStmt,
 
     /// Assignment or declaration (syntax ambiguity resolved later). Variable
-    /// payload in `extra` — see [`assign_or_decl_extra`].
+    /// payload in `extra` — see `assign_or_decl_extra`.
     AssignOrDecl,
 
     /// Compound assignment (`+=`, `-=`, etc.). Variable payload in `extra` —
-    /// see [`compound_assign_extra`].
+    /// see `compound_assign_extra`.
     CompoundAssign,
 
-    /// `while cond: body`. Variable payload in `extra` — see [`while_loop_extra`].
+    /// `while cond: body`. Variable payload in `extra` — see `while_loop_extra`.
     WhileLoop,
 
-    /// `for i in range(start, end): body`. Variable payload in `extra` — see [`for_range_extra`].
+    /// `for i in range(start, end): body`. Variable payload in `extra` — see `for_range_extra`.
     ForRange,
 
     /// `break` statement.
@@ -217,7 +226,7 @@ pub enum InstTag {
     /// `continue` statement.
     Continue,
 
-    /// Method call (e.g. `receiver.name(args)`). Variable payload in `extra` — see [`method_call_extra`].
+    /// Method call (e.g. `receiver.name(args)`). Variable payload in `extra` — see `method_call_extra`.
     MethodCall,
 
     /// Call-site mutable-borrow marker `&expr` (M8.3). The operand is
@@ -235,7 +244,7 @@ pub enum InstTag {
     Index,
 
     /// Struct literal `Name{field=value, ...}` (M9). Variable payload
-    /// in `extra` — see [`struct_lit_extra`]. The field initializers
+    /// in `extra` — see `struct_lit_extra`. The field initializers
     /// are in source order; sema canonicalizes them against the
     /// declaration.
     StructLit,
@@ -253,15 +262,15 @@ pub enum InstTag {
     FieldAccess,
 
     /// Field-path assignment `p.x = v` (M9). Variable payload in
-    /// `extra` — see [`field_assign_extra`].
+    /// `extra` — see `field_assign_extra`.
     FieldAssign,
 
     /// Compound field-path assignment `p.x += v` (M9). Variable
-    /// payload in `extra` — see [`compound_field_assign_extra`].
+    /// payload in `extra` — see `compound_field_assign_extra`.
     CompoundFieldAssign,
 
     /// Destructuring assignment `pattern = value` (M10). Variable
-    /// payload in `extra` — see [`destructure_extra`]; the value
+    /// payload in `extra` — see `destructure_extra`; the value
     /// expression is inline in [`InstData::Destructure`]. Astgen
     /// lowers nested patterns into a chain: each nested sub-pattern
     /// becomes its own `Destructure` over a synthesized
@@ -327,7 +336,7 @@ pub enum InstData {
     },
     /// Destructuring assignment `pattern = value` (M10): the value
     /// expression plus a plan of `(selector, bind)` pairs in
-    /// [`destructure_extra`]. `by_position` selects the selector
+    /// `destructure_extra`. `by_position` selects the selector
     /// encoding: element index (positional patterns) or field-name
     /// [`StringId`] (brace patterns).
     Destructure {
@@ -642,22 +651,12 @@ impl UirBuilder {
 
     /// Emits a `Call` with name and arg list packed into `extra`.
     pub fn call(&mut self, name: StringId, args: &[InstRef], span: Span) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(name.raw());
-        self.uir.extra.push(Self::len_u32(args.len()));
-        for arg in args {
-            self.uir.extra.push(arg.raw());
-        }
-        let len = Self::len_u32(call_extra::ARGS + args.len());
-        self.push(
-            InstTag::Call,
-            InstData::Extra(ExtraRange { offset, len }),
-            span,
-        )
+        let range = call_extra::encode(&mut self.uir.extra, name, args);
+        self.push(InstTag::Call, InstData::Extra(range), span)
     }
 
     /// Emits a `VarDecl` with the header packed into `extra`.
-    /// `ty` of `None` is encoded as [`var_decl_extra::TY_NONE_SENTINEL`].
+    /// `ty` of `None` is encoded as `var_decl_extra::TY_NONE_SENTINEL`.
     pub fn var_decl(
         &mut self,
         name: StringId,
@@ -666,26 +665,8 @@ impl UirBuilder {
         initializer: InstRef,
         span: Span,
     ) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(name.raw());
-        self.uir.extra.push(if mutable {
-            var_decl_extra::FLAG_MUTABLE
-        } else {
-            0
-        });
-        self.uir.extra.push(match ty {
-            Some(t) => t.raw(),
-            None => var_decl_extra::TY_NONE_SENTINEL,
-        });
-        self.uir.extra.push(initializer.raw());
-        self.push(
-            InstTag::VarDecl,
-            InstData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(var_decl_extra::LEN),
-            }),
-            span,
-        )
+        let range = var_decl_extra::encode(&mut self.uir.extra, name, mutable, ty, initializer);
+        self.push(InstTag::VarDecl, InstData::Extra(range), span)
     }
 
     /// Push a function body. `stmts` is the list of top-level
@@ -727,48 +708,19 @@ impl UirBuilder {
         else_stmts: Option<&[InstRef]>,
         span: Span,
     ) -> InstRef {
-        let elif_words: usize = elif_branches.iter().map(|(_, body)| 2 + body.len()).sum();
-        let total =
-            1 + 1 + then_stmts.len() + 1 + elif_words + 1 + else_stmts.map_or(0, |s| 1 + s.len());
-        self.uir.extra.reserve(total);
-
-        let offset = self.extra_offset();
-        self.uir.extra.push(cond.raw());
-        self.push_ref_list(then_stmts);
-        self.uir.extra.push(Self::len_u32(elif_branches.len()));
-        for (elif_cond, elif_body) in elif_branches {
-            self.uir.extra.push(elif_cond.raw());
-            self.push_ref_list(elif_body);
-        }
-        match else_stmts {
-            Some(stmts) => {
-                self.uir.extra.push(1);
-                self.push_ref_list(stmts);
-            }
-            None => {
-                self.uir.extra.push(0);
-            }
-        }
-        let len = Self::len_u32(self.uir.extra.len() - offset as usize);
-        self.push(
-            InstTag::IfStmt,
-            InstData::Extra(ExtraRange { offset, len }),
-            span,
-        )
+        let range = if_stmt_extra::encode(
+            &mut self.uir.extra,
+            cond,
+            then_stmts,
+            elif_branches,
+            else_stmts,
+        );
+        self.push(InstTag::IfStmt, InstData::Extra(range), span)
     }
 
     pub fn assign_or_decl(&mut self, name: StringId, value: InstRef, span: Span) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(name.raw());
-        self.uir.extra.push(value.raw());
-        self.push(
-            InstTag::AssignOrDecl,
-            InstData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(assign_or_decl_extra::LEN),
-            }),
-            span,
-        )
+        let range = assign_or_decl_extra::encode(&mut self.uir.extra, name, value);
+        self.push(InstTag::AssignOrDecl, InstData::Extra(range), span)
     }
 
     pub fn compound_assign(
@@ -778,36 +730,13 @@ impl UirBuilder {
         value: InstRef,
         span: Span,
     ) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(name.raw());
-        self.uir.extra.push(op as u32);
-        self.uir.extra.push(value.raw());
-        self.push(
-            InstTag::CompoundAssign,
-            InstData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(compound_assign_extra::LEN),
-            }),
-            span,
-        )
+        let range = compound_assign_extra::encode(&mut self.uir.extra, name, op, value);
+        self.push(InstTag::CompoundAssign, InstData::Extra(range), span)
     }
 
     pub fn while_loop(&mut self, cond: InstRef, body: &[InstRef], span: Span) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(cond.raw());
-        self.uir.extra.push(Self::len_u32(body.len()));
-        for &stmt in body {
-            self.uir.extra.push(stmt.raw());
-        }
-        let len = while_loop_extra::BODY_START + body.len();
-        self.push(
-            InstTag::WhileLoop,
-            InstData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(len),
-            }),
-            span,
-        )
+        let range = while_loop_extra::encode(&mut self.uir.extra, cond, body);
+        self.push(InstTag::WhileLoop, InstData::Extra(range), span)
     }
 
     pub fn for_range(
@@ -818,23 +747,8 @@ impl UirBuilder {
         body: &[InstRef],
         span: Span,
     ) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(var_name.raw());
-        self.uir.extra.push(start.raw());
-        self.uir.extra.push(end.raw());
-        self.uir.extra.push(Self::len_u32(body.len()));
-        for &stmt in body {
-            self.uir.extra.push(stmt.raw());
-        }
-        let len = for_range_extra::BODY_START + body.len();
-        self.push(
-            InstTag::ForRange,
-            InstData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(len),
-            }),
-            span,
-        )
+        let range = for_range_extra::encode(&mut self.uir.extra, var_name, start, end, body);
+        self.push(InstTag::ForRange, InstData::Extra(range), span)
     }
 
     pub fn break_stmt(&mut self, span: Span) -> InstRef {
@@ -860,24 +774,13 @@ impl UirBuilder {
         args: &[InstRef],
         span: Span,
     ) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(receiver.raw());
-        self.uir.extra.push(name.raw());
-        self.uir.extra.push(Self::len_u32(args.len()));
-        for arg in args {
-            self.uir.extra.push(arg.raw());
-        }
-        let len = Self::len_u32(method_call_extra::ARGS + args.len());
-        self.push(
-            InstTag::MethodCall,
-            InstData::Extra(ExtraRange { offset, len }),
-            span,
-        )
+        let range = method_call_extra::encode(&mut self.uir.extra, receiver, name, args);
+        self.push(InstTag::MethodCall, InstData::Extra(range), span)
     }
 
     /// Emits a `StructLit` with the struct name and the source-order
     /// field initializers packed into `extra` (M9). `name` of `None`
-    /// is encoded as [`struct_lit_extra::UIR_ANON_STRUCT_NAME`] (M10
+    /// is encoded as `struct_lit_extra::UIR_ANON_STRUCT_NAME` (M10
     /// anonymous literal); sema infers the structural type from the
     /// field values.
     pub fn struct_lit(
@@ -886,21 +789,8 @@ impl UirBuilder {
         fields: &[(StringId, InstRef)],
         span: Span,
     ) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir
-            .extra
-            .push(name.map_or(struct_lit_extra::UIR_ANON_STRUCT_NAME, |n| n.raw()));
-        self.uir.extra.push(Self::len_u32(fields.len()));
-        for &(fname, value) in fields {
-            self.uir.extra.push(fname.raw());
-            self.uir.extra.push(value.raw());
-        }
-        let len = Self::len_u32(struct_lit_extra::FIELDS + 2 * fields.len());
-        self.push(
-            InstTag::StructLit,
-            InstData::Extra(ExtraRange { offset, len }),
-            span,
-        )
+        let range = struct_lit_extra::encode(&mut self.uir.extra, name, fields);
+        self.push(InstTag::StructLit, InstData::Extra(range), span)
     }
 
     /// Emits an `EnumLit` `Name::Variant(args...)` (M11) with the
@@ -918,25 +808,8 @@ impl UirBuilder {
         args: &[(u32, InstRef)],
         span: Span,
     ) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(ty.raw());
-        self.uir.extra.push(variant);
-        self.uir.extra.push(Self::len_u32(args.len()));
-        self.uir.extra.push(if positional {
-            enum_lit_extra::FLAG_POSITIONAL
-        } else {
-            0
-        });
-        for &(field_idx, value) in args {
-            self.uir.extra.push(field_idx);
-            self.uir.extra.push(value.raw());
-        }
-        let len = Self::len_u32(enum_lit_extra::ARGS + 2 * args.len());
-        self.push(
-            InstTag::EnumLit,
-            InstData::Extra(ExtraRange { offset, len }),
-            span,
-        )
+        let range = enum_lit_extra::encode(&mut self.uir.extra, ty, variant, args, positional);
+        self.push(InstTag::EnumLit, InstData::Extra(range), span)
     }
 
     /// Emits a `FieldAccess` `object.field` (M9).
@@ -951,17 +824,8 @@ impl UirBuilder {
     /// Emits a `FieldAssign` `target = value` (M9); `target` is a
     /// `FieldAccess` chain ref.
     pub fn field_assign(&mut self, target: InstRef, value: InstRef, span: Span) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(target.raw());
-        self.uir.extra.push(value.raw());
-        self.push(
-            InstTag::FieldAssign,
-            InstData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(field_assign_extra::LEN),
-            }),
-            span,
-        )
+        let range = field_assign_extra::encode(&mut self.uir.extra, target, value);
+        self.push(InstTag::FieldAssign, InstData::Extra(range), span)
     }
 
     /// Emits a `CompoundFieldAssign` `target op= value` (M9).
@@ -972,18 +836,8 @@ impl UirBuilder {
         value: InstRef,
         span: Span,
     ) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(target.raw());
-        self.uir.extra.push(op as u32);
-        self.uir.extra.push(value.raw());
-        self.push(
-            InstTag::CompoundFieldAssign,
-            InstData::Extra(ExtraRange {
-                offset,
-                len: Self::len_u32(compound_field_assign_extra::LEN),
-            }),
-            span,
-        )
+        let range = compound_field_assign_extra::encode(&mut self.uir.extra, target, op, value);
+        self.push(InstTag::CompoundFieldAssign, InstData::Extra(range), span)
     }
 
     /// Register a resolved struct declaration in the side table (M9).
@@ -1004,18 +858,19 @@ impl UirBuilder {
 mod dump;
 pub use dump::UirDump;
 mod destructure;
-pub use destructure::{UirDestructureView, destructure_extra};
+pub use destructure::UirDestructureView;
+pub(crate) use destructure::destructure_extra;
 mod match_;
 pub use match_::{
     UirAnonField, UirAnonFieldsView, UirArgTarget, UirArmBody, UirArmBodyView, UirFieldTarget,
     UirMatchArm, UirMatchArmView, UirMatchView, UirPattern, UirPatternView, UirVariantArgs,
     UirVariantArgsView, match_extra,
 };
-mod layout_docs;
-pub use layout_docs::{
+mod wires;
+pub(crate) use wires::{
     assign_or_decl_extra, call_extra, compound_assign_extra, compound_field_assign_extra,
-    field_assign_extra, for_range_extra, method_call_extra, struct_lit_extra, var_decl_extra,
-    while_loop_extra,
+    field_assign_extra, for_range_extra, if_stmt_extra, method_call_extra, struct_lit_extra,
+    var_decl_extra, while_loop_extra,
 };
 mod views;
 pub use views::{
@@ -1023,6 +878,9 @@ pub use views::{
     ElifView, EnumLitView, FieldAssignView, ForRangeView, IfStmtView, MethodCallView,
     StructLitView, VarDeclView, WhileLoopView,
 };
+
+#[cfg(test)]
+mod wire_fixtures;
 
 #[cfg(test)]
 mod tests {
@@ -1525,21 +1383,21 @@ mod tests {
         assert!(!view.positional, "braced named form clears the flag");
         assert_eq!(view.fields().collect::<Vec<_>>(), vec![(0, w), (1, h)]);
 
-        // Wire layout is pinned: [TY, VARIANT, FLAGS, ARGC, (FIELD_IDX, REF) x ARGC].
+        // Wire layout is pinned: [TY, VARIANT, ARGC, FLAGS, (FIELD_IDX, REF) x ARGC].
         let inst = uir.inst(lit);
         let range = match inst.data {
             InstData::Extra(rng) => rng,
             other => panic!("expected InstData::Extra, got {:?}", other),
         };
         let slice = &uir.extra[range.as_range()];
-        assert_eq!(slice[enum_lit_extra::TY], enum_ty.raw());
-        assert_eq!(slice[enum_lit_extra::VARIANT], 1);
-        assert_eq!(slice[enum_lit_extra::FLAGS], 0);
-        assert_eq!(slice[enum_lit_extra::ARGC], 2);
-        assert_eq!(slice[enum_lit_extra::ARGS], 0);
-        assert_eq!(slice[enum_lit_extra::ARGS + 1], w.raw());
-        assert_eq!(slice[enum_lit_extra::ARGS + 2], 1);
-        assert_eq!(slice[enum_lit_extra::ARGS + 3], h.raw());
+        assert_eq!(slice[0], enum_ty.raw());
+        assert_eq!(slice[1], 1);
+        assert_eq!(slice[2], 2);
+        assert_eq!(slice[3], 0);
+        assert_eq!(slice[4], 0);
+        assert_eq!(slice[5], w.raw());
+        assert_eq!(slice[6], 1);
+        assert_eq!(slice[7], h.raw());
     }
 
     #[test]

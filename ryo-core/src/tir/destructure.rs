@@ -3,7 +3,7 @@
 //! under the 2000-line CI gate. Sema is the only producer; codegen
 //! and the ownership pass are the consumers.
 
-use super::{ExtraRange, Span, Tir, TirBuilder, TirData, TirRef, TirTag};
+use super::{Span, Tir, TirBuilder, TirData, TirRef, TirTag};
 use crate::types::{StringId, TypeId};
 
 /// Layout in `extra` for [`TirTag::Destructure`]:
@@ -21,12 +21,11 @@ use crate::types::{StringId, TypeId};
 /// `TypedInst.ty` carries the rhs struct type. Entries are in written
 /// (pattern) order, resolved by sema to canonical field indices.
 pub mod destructure_extra {
-    use crate::types::StringId;
-
-    pub const RHS: usize = 0;
-    pub const N_FIELDS: usize = 1;
-    pub const FIELDS: usize = 2;
-    pub const FIELD_LEN: usize = 3;
+    use super::{DestructureField, DestructureView};
+    use crate::extra::ExtraRange;
+    use crate::tir::TirRef;
+    use crate::tir::wires::{extra_offset, len_u32};
+    use crate::types::{StringId, TypeId};
 
     /// Encode a bind name: 0 for a wildcard, else `raw + 1`.
     pub fn encode_bind(bind: Option<StringId>) -> u32 {
@@ -36,6 +35,58 @@ pub mod destructure_extra {
     /// Decode a bind word produced by [`Self::encode_bind`].
     pub fn decode_bind(word: u32) -> Option<StringId> {
         (word > 0).then(|| StringId::from_raw(word - 1))
+    }
+
+    /// Encode a `Destructure` payload into `extra`, returning its
+    /// range. The rhs ref is word 0 of the wire; the instruction's
+    /// type is the rhs's struct type (`ty_of(rhs)`) — the caller keeps
+    /// it on the `TypedInst.ty` slot.
+    pub fn encode(
+        extra: &mut Vec<u32>,
+        rhs: TirRef,
+        fields: &[(u32, Option<StringId>, TypeId)],
+    ) -> ExtraRange {
+        debug_assert!(
+            !fields.is_empty(),
+            "TirBuilder::destructure: a struct always has at least one field"
+        );
+        debug_assert!(
+            fields
+                .iter()
+                .zip(fields.iter().skip(1))
+                .all(|(a, b)| a.0 != b.0),
+            "TirBuilder::destructure: duplicate field index in plan"
+        );
+        let offset = extra_offset(extra);
+        extra.push(rhs.raw());
+        extra.push(len_u32(fields.len()));
+        for &(field_index, bind, ty) in fields {
+            extra.push(field_index);
+            extra.push(encode_bind(bind));
+            extra.push(ty.raw());
+        }
+        ExtraRange {
+            offset,
+            len: len_u32(2 + fields.len() * 3),
+        }
+    }
+
+    /// Decode a `Destructure` payload from its words.
+    pub fn decode(words: &[u32]) -> DestructureView {
+        let rhs = TirRef::from_raw(words[0]);
+        let n = words[1] as usize;
+        debug_assert_eq!(words.len(), 2 + n * 3, "destructure plan length mismatch");
+        let fields = (0..n)
+            .map(|i| {
+                let base = 2 + i * 3;
+                DestructureField {
+                    field_index: words[base],
+                    bind: decode_bind(words[base + 1]),
+                    ty: TypeId::from_raw(words[base + 2]),
+                }
+            })
+            .collect();
+        DestructureView { rhs, fields }
     }
 }
 
@@ -73,33 +124,9 @@ impl TirBuilder {
         fields: &[(u32, Option<StringId>, TypeId)],
         span: Span,
     ) -> TirRef {
-        debug_assert!(
-            !fields.is_empty(),
-            "TirBuilder::destructure: a struct always has at least one field"
-        );
-        debug_assert!(
-            fields
-                .iter()
-                .zip(fields.iter().skip(1))
-                .all(|(a, b)| a.0 != b.0),
-            "TirBuilder::destructure: duplicate field index in plan"
-        );
-        let offset = self.extra_offset();
-        self.extra.push(rhs.raw());
-        self.extra.push(Self::len_u32(fields.len()));
-        for &(field_index, bind, ty) in fields {
-            self.extra.push(field_index);
-            self.extra.push(destructure_extra::encode_bind(bind));
-            self.extra.push(ty.raw());
-        }
-        let len = Self::len_u32(destructure_extra::FIELDS + fields.len() * 3);
+        let range = destructure_extra::encode(&mut self.extra, rhs, fields);
         let ty = self.ty_of(rhs);
-        self.push(
-            TirTag::Destructure,
-            ty,
-            TirData::Extra(ExtraRange { offset, len }),
-            span,
-        )
+        self.push(TirTag::Destructure, ty, TirData::Extra(range), span)
     }
 }
 
@@ -111,25 +138,7 @@ impl Tir {
             TirData::Extra(rng) => rng,
             _ => unreachable!("Destructure must carry TirData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        let rhs = TirRef::from_raw(slice[destructure_extra::RHS]);
-        let n = slice[destructure_extra::N_FIELDS] as usize;
-        debug_assert_eq!(
-            slice.len(),
-            destructure_extra::FIELDS + n * destructure_extra::FIELD_LEN,
-            "destructure plan length mismatch"
-        );
-        let fields = (0..n)
-            .map(|i| {
-                let base = destructure_extra::FIELDS + i * destructure_extra::FIELD_LEN;
-                DestructureField {
-                    field_index: slice[base],
-                    bind: destructure_extra::decode_bind(slice[base + 1]),
-                    ty: TypeId::from_raw(slice[base + 2]),
-                }
-            })
-            .collect();
-        DestructureView { rhs, fields }
+        destructure_extra::decode(&self.extra[range.as_range()])
     }
 
     /// The owner tokens of a `Destructure` (M10): one [`TirRef`] per
