@@ -8,10 +8,9 @@ pub use super::wires::struct_lit_extra::StructLitView;
 pub use super::wires::var_decl_extra::VarDeclView;
 pub use super::wires::while_loop_extra::WhileLoopView;
 use super::{
-    ExtraList, Tir, TirData, TirRef, TirTag, TypeId, assign_extra, call_extra,
-    compound_assign_extra, compound_field_assign_extra, enum_lit_extra, field_assign_extra,
-    for_range_extra, read_ref_list_view, skip_ref_list, struct_lit_extra, var_decl_extra,
-    while_loop_extra,
+    ExtraList, Tir, TirData, TirRef, TirTag, assign_extra, call_extra, compound_assign_extra,
+    compound_field_assign_extra, enum_lit_extra, field_assign_extra, for_range_extra,
+    read_ref_list_view, skip_ref_list, struct_lit_extra, var_decl_extra, while_loop_extra,
 };
 
 // ---------- Read-side helpers ----------
@@ -106,25 +105,9 @@ pub struct TirIfStmtView<'a> {
 /// `extra` arena directly — decoding allocates nothing; `fields()` yields `(field_index,
 /// value)` pairs keyed by declaration-order payload-field index, in
 /// the order sema encoded them.
-pub struct EnumLitView<'a> {
-    pub ty: TypeId,
-    pub variant_index: u32,
-    /// Construction's source form as sema recorded it (wire parity
-    /// with UIR; codegen and ownership ignore it).
-    pub positional: bool,
-    args: &'a [u32],
-}
-
-impl EnumLitView<'_> {
-    /// `(field_index, value)` pairs, in the order sema encoded them.
-    pub fn fields(&self) -> impl Iterator<Item = (u32, TirRef)> + '_ {
-        self.args
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|&[field_idx, raw]| (field_idx, TirRef::from_raw(raw)))
-    }
-}
+/// Decoded view of a [`TirTag::EnumLit`] payload (M11) — the wire is
+/// shared with UIR; see [`crate::extra::enum_lit_extra`].
+pub type EnumLitView<'a> = crate::extra::enum_lit_extra::EnumLitView<'a, TirRef>;
 
 impl Tir {
     pub fn call_view(&self, r: TirRef) -> CallView<'_> {
@@ -281,17 +264,6 @@ impl Tir {
             TirData::Extra(rng) => rng,
             _ => unreachable!("EnumLit must carry TirData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        let ty = TypeId::from_raw(slice[enum_lit_extra::TY]);
-        let variant_index = slice[enum_lit_extra::VARIANT];
-        let positional = slice[enum_lit_extra::FLAGS] & enum_lit_extra::FLAG_POSITIONAL != 0;
-        let n = slice[enum_lit_extra::ARGC] as usize;
-        let args = &slice[enum_lit_extra::ARGS..enum_lit_extra::ARGS + 2 * n];
-        EnumLitView {
-            ty,
-            variant_index,
-            positional,
-            args,
-        }
+        enum_lit_extra::decode(&self.extra[range.as_range()])
     }
 }

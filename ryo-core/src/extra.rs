@@ -144,6 +144,10 @@ impl ExtraRange {
 /// astgen did not recognize (E0038 already emitted); it binds nothing.
 /// Unit variants encode `argc = 0` (no trailing pairs).
 pub mod enum_lit_extra {
+    use super::{ExtraRange, ExtraValue};
+    use crate::types::TypeId;
+    use std::marker::PhantomData;
+
     pub const TY: usize = 0;
     pub const VARIANT: usize = 1;
     pub const ARGC: usize = 2;
@@ -162,6 +166,83 @@ pub mod enum_lit_extra {
     /// declared field — sema suppresses the derived missing-fields
     /// error the dropped binding would otherwise trigger.
     pub const ORPHANED_FIELD: u32 = u32::MAX;
+
+    /// Current `extra.len()` as a checked `u32` — the same overflow
+    /// rejection the per-IR wire modules perform (the panic text is
+    /// shared because the codec no longer lives in one IR's builder).
+    fn extra_offset(extra: &[u32]) -> u32 {
+        u32::try_from(extra.len()).expect("extra arena exceeded u32::MAX words")
+    }
+
+    /// Convert a length-shaped `usize` to `u32`, panicking on overflow.
+    fn len_u32(len: usize) -> u32 {
+        u32::try_from(len).expect("extra list length exceeded u32::MAX")
+    }
+
+    /// Decoded view of an enum literal payload (M11) — shared by UIR
+    /// (`InstRef` values) and TIR (`TirRef` values); the wires are
+    /// byte-identical (each stores `Ref::raw()` in the value slots).
+    /// Borrows the `extra` arena directly — decoding allocates nothing;
+    /// `fields()` yields `(field_index, value)` pairs keyed by
+    /// declaration-order payload-field index.
+    pub struct EnumLitView<'a, R: ExtraValue> {
+        pub ty: TypeId,
+        pub variant_index: u32,
+        /// Source used the parenthesized positional form — see
+        /// [`FLAG_POSITIONAL`].
+        pub positional: bool,
+        args: &'a [u32],
+        marker: PhantomData<R>,
+    }
+
+    impl<R: ExtraValue> EnumLitView<'_, R> {
+        /// `(field_index, value)` pairs, in source order.
+        pub fn fields(&self) -> impl Iterator<Item = (u32, R)> + '_ {
+            self.args
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&[field_idx, raw]| (field_idx, R::from_extra(raw)))
+        }
+    }
+
+    /// Encode an enum literal payload into `extra`, returning its range.
+    pub fn encode<R: ExtraValue>(
+        extra: &mut Vec<u32>,
+        ty: TypeId,
+        variant_index: u32,
+        args: &[(u32, R)],
+        positional: bool,
+    ) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.push(ty.raw());
+        extra.push(variant_index);
+        extra.push(len_u32(args.len()));
+        extra.push(if positional { FLAG_POSITIONAL } else { 0 });
+        for &(field_idx, value) in args {
+            extra.push(field_idx);
+            extra.push(value.to_extra());
+        }
+        ExtraRange {
+            offset,
+            len: len_u32(ARGS + 2 * args.len()),
+        }
+    }
+
+    /// Decode an enum literal payload from its words.
+    pub fn decode<R: ExtraValue>(words: &[u32]) -> EnumLitView<'_, R> {
+        let ty = TypeId::from_raw(words[TY]);
+        let variant_index = words[VARIANT];
+        let positional = words[FLAGS] & FLAG_POSITIONAL != 0;
+        let n = words[ARGC] as usize;
+        EnumLitView {
+            ty,
+            variant_index,
+            positional,
+            args: &words[ARGS..ARGS + 2 * n],
+            marker: PhantomData,
+        }
+    }
 }
 
 #[cfg(test)]

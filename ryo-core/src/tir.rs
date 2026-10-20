@@ -905,26 +905,8 @@ impl TirBuilder {
         args: &[(u32, TirRef)],
         span: Span,
     ) -> TirRef {
-        let offset = self.extra_offset();
-        self.extra.push(ty.raw());
-        self.extra.push(variant);
-        self.extra.push(Self::len_u32(args.len()));
-        self.extra.push(if positional {
-            enum_lit_extra::FLAG_POSITIONAL
-        } else {
-            0
-        });
-        for &(field_idx, value) in args {
-            self.extra.push(field_idx);
-            self.extra.push(value.raw());
-        }
-        let len = Self::len_u32(enum_lit_extra::ARGS + 2 * args.len());
-        self.push(
-            TirTag::EnumLit,
-            ty,
-            TirData::Extra(ExtraRange { offset, len }),
-            span,
-        )
+        let range = enum_lit_extra::encode(&mut self.extra, ty, variant, args, positional);
+        self.push(TirTag::EnumLit, ty, TirData::Extra(range), span)
     }
 
     /// Emit a `FieldAccess` (M9). `field_index` is the canonical

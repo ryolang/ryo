@@ -9,36 +9,16 @@ pub use super::wires::struct_lit_extra::StructLitView;
 pub use super::wires::var_decl_extra::VarDeclView;
 pub use super::wires::while_loop_extra::WhileLoopView;
 use super::{
-    ExtraList, InstData, InstRef, InstTag, TypeId, Uir, assign_or_decl_extra, call_extra,
+    ExtraList, InstData, InstRef, InstTag, Uir, assign_or_decl_extra, call_extra,
     compound_assign_extra, compound_field_assign_extra, enum_lit_extra, field_assign_extra,
     for_range_extra, method_call_extra, struct_lit_extra, var_decl_extra, while_loop_extra,
 };
 
 // ---------- Read-side helpers ----------
 
-/// Decoded view of an [`InstTag::EnumLit`] payload (M11). Borrows the
-/// `extra` arena directly — decoding allocates nothing; `fields()` yields `(field_index,
-/// value)` pairs keyed by declaration-order payload-field index, in
-/// source order.
-pub struct EnumLitView<'a> {
-    pub ty: TypeId,
-    pub variant_index: u32,
-    /// Source used the parenthesized positional form (astgen-recorded;
-    /// see [`enum_lit_extra::FLAG_POSITIONAL`]).
-    pub positional: bool,
-    args: &'a [u32],
-}
-
-impl EnumLitView<'_> {
-    /// `(field_index, value)` pairs, in source order.
-    pub fn fields(&self) -> impl Iterator<Item = (u32, InstRef)> + '_ {
-        self.args
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|&[field_idx, raw]| (field_idx, InstRef::from_raw(raw)))
-    }
-}
+/// Decoded view of an [`InstTag::EnumLit`] payload (M11) — the wire is
+/// shared with TIR; see [`crate::extra::enum_lit_extra`].
+pub type EnumLitView<'a> = crate::extra::enum_lit_extra::EnumLitView<'a, InstRef>;
 
 pub struct ElifView<'a> {
     pub cond: InstRef,
@@ -188,18 +168,7 @@ impl Uir {
             InstData::Extra(rng) => rng,
             _ => unreachable!("EnumLit must carry InstData::Extra"),
         };
-        let slice = &self.extra[range.as_range()];
-        let ty = TypeId::from_raw(slice[enum_lit_extra::TY]);
-        let variant_index = slice[enum_lit_extra::VARIANT];
-        let positional = slice[enum_lit_extra::FLAGS] & enum_lit_extra::FLAG_POSITIONAL != 0;
-        let n = slice[enum_lit_extra::ARGC] as usize;
-        let args = &slice[enum_lit_extra::ARGS..enum_lit_extra::ARGS + 2 * n];
-        EnumLitView {
-            ty,
-            variant_index,
-            positional,
-            args,
-        }
+        enum_lit_extra::decode(&self.extra[range.as_range()])
     }
 
     pub fn if_stmt_view(&self, r: InstRef) -> IfStmtView<'_> {

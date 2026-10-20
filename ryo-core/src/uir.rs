@@ -823,25 +823,8 @@ impl UirBuilder {
         args: &[(u32, InstRef)],
         span: Span,
     ) -> InstRef {
-        let offset = self.extra_offset();
-        self.uir.extra.push(ty.raw());
-        self.uir.extra.push(variant);
-        self.uir.extra.push(Self::len_u32(args.len()));
-        self.uir.extra.push(if positional {
-            enum_lit_extra::FLAG_POSITIONAL
-        } else {
-            0
-        });
-        for &(field_idx, value) in args {
-            self.uir.extra.push(field_idx);
-            self.uir.extra.push(value.raw());
-        }
-        let len = Self::len_u32(enum_lit_extra::ARGS + 2 * args.len());
-        self.push(
-            InstTag::EnumLit,
-            InstData::Extra(ExtraRange { offset, len }),
-            span,
-        )
+        let range = enum_lit_extra::encode(&mut self.uir.extra, ty, variant, args, positional);
+        self.push(InstTag::EnumLit, InstData::Extra(range), span)
     }
 
     /// Emits a `FieldAccess` `object.field` (M9).
