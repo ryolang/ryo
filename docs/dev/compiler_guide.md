@@ -136,11 +136,11 @@ The AST is a pair of typed arenas (`exprs` / `stmts`), not a pointer tree:
 - Consumers write plain exhaustive `match`es on `expr.kind` / `stmt.kind` — adding a variant makes the compiler flag every site you must update
 
 ### 3. Add Parser Rule (ryo-frontend/src/parser.rs)
-Use Chumsky combinators: `just(Token::X)` for exact match, `.then()` for sequence, `.or_not()` for optional, `.repeated()` for repetition. The parser is stateful: the `Ast` arenas are the chumsky state (`extra::Full<_, Ast, _>`, entered via `parse_with_state`), so node-producing combinators push through `e.state()` and yield `ExprId` / `StmtId` (annotate the closure param as `e: &mut Mx<'a, '_, I>` so `e.state()` type-checks). Use `foldl_with` when folding needs state.
+Use Chumsky combinators: `just(Token::X)` for exact match, `.then()` for sequence, `.or_not()` for optional, `.repeated()` for repetition. The parser is stateful: the chumsky state is `ParseState` (`extra::Full<_, ParseState, ()>`, entered via `parse_with_state`), a frontend-owned wrapper pairing the `Ast` arenas with the intern pool, so node-producing combinators push through `e.state()` (derefs to `Ast`) and yield `ExprId` / `StmtId` (annotate the closure param as `e: &mut Mx<'a, '_, I>` so `e.state()` type-checks). Use `foldl_with` when folding needs state. `e.span()` yields chumsky's `SimpleSpan`; anything stored into the AST or a `Diag` crosses to core's own plain-data `Span` via `crate::spans::cspan` — `ryo-core` carries no chumsky dependency.
 ```rust
 let my_feature = just(Token::Keyword).ignore_then(expr.clone())
     .map_with(|expr, e: &mut Mx<'a, '_, I>| {
-        let span = e.span();
+        let span = crate::spans::cspan(e.span());
         e.state().my_feature(expr, span)
     });
 ```
