@@ -1015,8 +1015,8 @@ pub use match_::{
     UirMatchArm, UirMatchArmView, UirMatchView, UirPattern, UirPatternView, UirVariantArgs,
     UirVariantArgsView, match_extra,
 };
-mod layout_docs;
-pub use layout_docs::{
+mod wires;
+pub use wires::{
     assign_or_decl_extra, call_extra, compound_assign_extra, compound_field_assign_extra,
     field_assign_extra, for_range_extra, method_call_extra, struct_lit_extra, var_decl_extra,
     while_loop_extra,
