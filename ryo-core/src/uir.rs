@@ -1150,6 +1150,64 @@ mod tests {
     }
 
     #[test]
+    fn var_decl_wire_fixture() {
+        let mut b = UirBuilder::new();
+        b.uir.extra.extend([0xAAAA_AAAA; 5]);
+        let name = StringId::from_raw(7);
+        let init = InstRef::from_raw(11);
+        let ty = TypeId::from_raw(3);
+
+        let annotated = b.var_decl(name, true, Some(ty), init, sp());
+        let InstData::Extra(range) = b.uir.inst(annotated).data else {
+            panic!("VarDecl must carry InstData::Extra");
+        };
+        assert_eq!(range, ExtraRange { offset: 5, len: 4 });
+        assert_eq!(&b.uir.extra[5..9], &[7, 1, 3, 11]);
+        assert_eq!(b.uir.extra.len(), 9);
+
+        let inferred = b.var_decl(name, false, None, init, sp());
+        let InstData::Extra(range2) = b.uir.inst(inferred).data else {
+            panic!("VarDecl must carry InstData::Extra");
+        };
+        assert_eq!(range2, ExtraRange { offset: 9, len: 4 });
+        assert_eq!(&b.uir.extra[9..13], &[7, 0, u32::MAX, 11]);
+    }
+
+    #[test]
+    fn var_decl_decode_fixture() {
+        // Literal words, never encoder output: payloads and ranges are
+        // supplied independently of any builder push sequence.
+        let mut uir = Uir::new();
+        uir.extra.extend([7, 1, 3, 11, 7, 0, u32::MAX, 11]);
+        uir.instructions.push(Inst {
+            tag: InstTag::VarDecl,
+            data: InstData::Extra(ExtraRange { offset: 0, len: 4 }),
+        });
+        uir.spans.push(sp());
+        uir.instructions.push(Inst {
+            tag: InstTag::VarDecl,
+            data: InstData::Extra(ExtraRange { offset: 4, len: 4 }),
+        });
+        uir.spans.push(sp());
+
+        let name = StringId::from_raw(7);
+        let init = InstRef::from_raw(11);
+        let ty = TypeId::from_raw(3);
+
+        let v1 = uir.var_decl_view(InstRef::from_index(1));
+        assert_eq!(v1.name, name);
+        assert!(v1.mutable);
+        assert_eq!(v1.ty, Some(ty));
+        assert_eq!(v1.initializer, init);
+
+        let v2 = uir.var_decl_view(InstRef::from_index(2));
+        assert_eq!(v2.name, name);
+        assert!(!v2.mutable);
+        assert_eq!(v2.ty, None);
+        assert_eq!(v2.initializer, init);
+    }
+
+    #[test]
     fn float_literal_round_trips() {
         let mut b = UirBuilder::new();
         let r = b.float_literal(2.5, sp());
