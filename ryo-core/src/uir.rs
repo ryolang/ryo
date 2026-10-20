@@ -1363,6 +1363,44 @@ mod tests {
     }
 
     #[test]
+    fn struct_lit_wire_fixture() {
+        let mut b = UirBuilder::new();
+        b.uir.extra.extend([0xAAAA_AAAA; 5]);
+        let name = StringId::from_raw(7);
+        let f1 = StringId::from_raw(101);
+        let f2 = StringId::from_raw(102);
+        let v1 = InstRef::from_raw(21);
+        let v2 = InstRef::from_raw(22);
+
+        let named = b.struct_lit(Some(name), &[(f1, v1), (f2, v2)], sp());
+        let InstData::Extra(range) = b.uir.inst(named).data else {
+            panic!("StructLit must carry InstData::Extra");
+        };
+        assert_eq!(range, ExtraRange { offset: 5, len: 6 });
+        assert_eq!(&b.uir.extra[5..11], &[7, 2, 101, 21, 102, 22]);
+
+        let anon = b.struct_lit(None, &[], sp());
+        let InstData::Extra(range2) = b.uir.inst(anon).data else {
+            panic!("StructLit must carry InstData::Extra");
+        };
+        assert_eq!(range2, ExtraRange { offset: 11, len: 2 });
+        assert_eq!(&b.uir.extra[11..13], &[u32::MAX, 0]);
+
+        let uir = shell_view(&[7, 2, 101, 21, 102, 22], InstTag::StructLit, 6);
+        let v = uir.struct_lit_view(shell_ref(&uir));
+        assert_eq!(v.name, Some(name));
+        assert_eq!(
+            v.fields().collect::<Vec<_>>(),
+            vec![(f1, v1), (f2, v2)]
+        );
+
+        let uir = shell_view(&[u32::MAX, 0], InstTag::StructLit, 2);
+        let v = uir.struct_lit_view(shell_ref(&uir));
+        assert_eq!(v.name, None);
+        assert_eq!(v.fields().count(), 0);
+    }
+
+    #[test]
     fn float_literal_round_trips() {
         let mut b = UirBuilder::new();
         let r = b.float_literal(2.5, sp());

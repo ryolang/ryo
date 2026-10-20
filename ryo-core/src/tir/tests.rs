@@ -483,6 +483,40 @@ fn for_range_wire_fixture() {
 }
 
 #[test]
+fn struct_lit_wire_fixture() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let main = pool.intern_str("main");
+    let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+    b.extra.extend([0xAAAA_AAAA; 5]);
+    let ty = TypeId::from_raw(3);
+    let value = TirRef::from_raw(31);
+
+    let one = b.struct_lit(ty, &[(0, value)], sp());
+    let TirData::Extra(range) = b.instructions[one.index()].data else {
+        panic!("StructLit must carry TirData::Extra");
+    };
+    assert_eq!(range, ExtraRange { offset: 5, len: 4 });
+    assert_eq!(&b.extra[5..9], &[3, 1, 0, 31]);
+
+    let empty = b.struct_lit(ty, &[], sp());
+    let TirData::Extra(range2) = b.instructions[empty.index()].data else {
+        panic!("StructLit must carry TirData::Extra");
+    };
+    assert_eq!(range2, ExtraRange { offset: 9, len: 2 });
+    assert_eq!(&b.extra[9..11], &[3, 0]);
+
+    let (tir, r) = shell_with(&[3, 1, 0, 31], TirTag::StructLit, 4);
+    let v = tir.struct_lit_view(r);
+    assert_eq!(v.ty, ty);
+    assert_eq!(v.fields().collect::<Vec<_>>(), vec![(0, value)]);
+
+    let (tir, r) = shell_with(&[3, 0], TirTag::StructLit, 2);
+    let v = tir.struct_lit_view(r);
+    assert_eq!(v.fields().count(), 0);
+}
+
+#[test]
 fn float_const_and_fadd_round_trip() {
     let mut pool = InternPool::new();
     let main = pool.intern_str("main");
