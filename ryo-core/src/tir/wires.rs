@@ -33,10 +33,7 @@ pub mod call_extra {
     use crate::tir::{ParamMode, TirRef};
     use crate::types::StringId;
 
-    pub const NAME: usize = 0;
-    pub const ARGC: usize = 1;
-    pub const ARGS: usize = 2;
-    // MODES occupies ARGS+argc .. ARGS+2*argc (one u32 per arg).
+    // MODES occupies 2+argc .. 2+2*argc (one u32 per arg).
 
     pub struct CallView<'a> {
         pub name: StringId,
@@ -65,16 +62,16 @@ pub mod call_extra {
         extra.extend(modes.iter().map(|m| m.to_extra()));
         ExtraRange {
             offset,
-            len: len_u32(ARGS + 2 * args.len()),
+            len: len_u32(2 + 2 * args.len()),
         }
     }
 
     /// Decode a `Call` payload from its words.
     pub fn decode<'a>(words: &'a [u32]) -> CallView<'a> {
-        let name = StringId::from_raw(words[NAME]);
-        let argc = words[ARGC] as usize;
-        let args = ExtraList::new(&words[ARGS..ARGS + argc]);
-        let modes = ExtraList::new(&words[ARGS + argc..ARGS + 2 * argc]);
+        let name = StringId::from_raw(words[0]);
+        let argc = words[1] as usize;
+        let args = ExtraList::new(&words[2..2 + argc]);
+        let modes = ExtraList::new(&words[2 + argc..2 + 2 * argc]);
         CallView { name, args, modes }
     }
 }
@@ -96,11 +93,6 @@ pub mod var_decl_extra {
     use crate::tir::TirRef;
     use crate::types::StringId;
 
-    pub const NAME: usize = 0;
-    pub const FLAGS: usize = 1;
-    pub const INIT: usize = 2;
-    pub const LEN: usize = 3;
-
     pub const FLAG_MUTABLE: u32 = 1 << 0;
 
     /// Decoded view of a [`TirTag::VarDecl`] payload.
@@ -120,15 +112,15 @@ pub mod var_decl_extra {
         extra.push(init.raw());
         ExtraRange {
             offset,
-            len: len_u32(LEN),
+            len: len_u32(3),
         }
     }
 
     /// Decode a `VarDecl` header from its payload words.
     pub fn decode(words: &[u32]) -> VarDeclView {
-        let name = StringId::from_raw(words[NAME]);
-        let mutable = words[FLAGS] & FLAG_MUTABLE != 0;
-        let initializer = TirRef::from_raw(words[INIT]);
+        let name = StringId::from_raw(words[0]);
+        let mutable = words[1] & FLAG_MUTABLE != 0;
+        let initializer = TirRef::from_raw(words[2]);
         VarDeclView {
             name,
             mutable,
@@ -149,10 +141,6 @@ pub mod assign_extra {
     use crate::tir::TirRef;
     use crate::types::StringId;
 
-    pub const NAME: usize = 0;
-    pub const VALUE: usize = 1;
-    pub const LEN: usize = 2;
-
     pub struct AssignView {
         pub name: StringId,
         pub value: TirRef,
@@ -166,15 +154,15 @@ pub mod assign_extra {
         extra.push(value.raw());
         ExtraRange {
             offset,
-            len: len_u32(LEN),
+            len: len_u32(2),
         }
     }
 
     /// Decode an `Assign` payload from its words.
     pub fn decode(words: &[u32]) -> AssignView {
         AssignView {
-            name: StringId::from_raw(words[NAME]),
-            value: TirRef::from_raw(words[VALUE]),
+            name: StringId::from_raw(words[0]),
+            value: TirRef::from_raw(words[1]),
         }
     }
 }
@@ -192,11 +180,6 @@ pub mod compound_assign_extra {
     use crate::extra::ExtraRange;
     use crate::tir::TirRef;
     use crate::types::StringId;
-
-    pub const NAME: usize = 0;
-    pub const OP: usize = 1;
-    pub const VALUE: usize = 2;
-    pub const LEN: usize = 3;
 
     pub struct CompoundAssignView {
         pub name: StringId,
@@ -218,16 +201,16 @@ pub mod compound_assign_extra {
         extra.push(value.raw());
         ExtraRange {
             offset,
-            len: len_u32(LEN),
+            len: len_u32(3),
         }
     }
 
     /// Decode a `CompoundAssign` payload from its words.
     pub fn decode(words: &[u32]) -> CompoundAssignView {
         CompoundAssignView {
-            name: StringId::from_raw(words[NAME]),
-            op: CompoundOp::from_raw(words[OP]),
-            value: TirRef::from_raw(words[VALUE]),
+            name: StringId::from_raw(words[0]),
+            op: CompoundOp::from_raw(words[1]),
+            value: TirRef::from_raw(words[2]),
         }
     }
 }
@@ -244,10 +227,6 @@ pub mod while_loop_extra {
     use crate::extra::{ExtraList, ExtraRange, ExtraValue};
     use crate::tir::TirRef;
 
-    pub const COND: usize = 0;
-    pub const BODY_COUNT: usize = 1;
-    pub const BODY_START: usize = 2;
-
     pub struct WhileLoopView<'a> {
         pub cond: TirRef,
         pub body: ExtraList<'a, TirRef>,
@@ -261,15 +240,15 @@ pub mod while_loop_extra {
         extra.extend(body.iter().map(|s| s.to_extra()));
         ExtraRange {
             offset,
-            len: len_u32(BODY_START + body.len()),
+            len: len_u32(2 + body.len()),
         }
     }
 
     /// Decode a `WhileLoop` payload from its words.
     pub fn decode<'a>(words: &'a [u32]) -> WhileLoopView<'a> {
         WhileLoopView {
-            cond: TirRef::from_raw(words[COND]),
-            body: ExtraList::new(&words[BODY_START..]),
+            cond: TirRef::from_raw(words[0]),
+            body: ExtraList::new(&words[2..]),
         }
     }
 }
@@ -288,12 +267,6 @@ pub mod for_range_extra {
     use crate::extra::{ExtraList, ExtraRange, ExtraValue};
     use crate::tir::TirRef;
     use crate::types::StringId;
-
-    pub const VAR_NAME: usize = 0;
-    pub const START: usize = 1;
-    pub const END: usize = 2;
-    pub const BODY_COUNT: usize = 3;
-    pub const BODY_START: usize = 4;
 
     pub struct ForRangeView<'a> {
         pub var_name: StringId,
@@ -318,17 +291,17 @@ pub mod for_range_extra {
         extra.extend(body.iter().map(|s| s.to_extra()));
         ExtraRange {
             offset,
-            len: len_u32(BODY_START + body.len()),
+            len: len_u32(4 + body.len()),
         }
     }
 
     /// Decode a `ForRange` payload from its words.
     pub fn decode<'a>(words: &'a [u32]) -> ForRangeView<'a> {
         ForRangeView {
-            var_name: StringId::from_raw(words[VAR_NAME]),
-            start: TirRef::from_raw(words[START]),
-            end: TirRef::from_raw(words[END]),
-            body: ExtraList::new(&words[BODY_START..]),
+            var_name: StringId::from_raw(words[0]),
+            start: TirRef::from_raw(words[1]),
+            end: TirRef::from_raw(words[2]),
+            body: ExtraList::new(&words[4..]),
         }
     }
 }
@@ -347,10 +320,6 @@ pub mod struct_lit_extra {
     use crate::extra::ExtraRange;
     use crate::tir::TirRef;
     use crate::types::TypeId;
-
-    pub const TY: usize = 0;
-    pub const N_FIELDS: usize = 1;
-    pub const FIELDS: usize = 2;
 
     /// Borrowed view of a [`TirTag::StructLit`] payload (M9). Fields are
     /// `(field_index, value)` pairs in canonical declaration order.
@@ -387,17 +356,17 @@ pub mod struct_lit_extra {
         }
         ExtraRange {
             offset,
-            len: len_u32(FIELDS + 2 * fields.len()),
+            len: len_u32(2 + 2 * fields.len()),
         }
     }
 
     /// Decode a `StructLit` payload from its words.
     pub fn decode(words: &[u32]) -> StructLitView<'_> {
-        let ty = TypeId::from_raw(words[TY]);
-        let n = words[N_FIELDS] as usize;
+        let ty = TypeId::from_raw(words[0]);
+        let n = words[1] as usize;
         StructLitView {
             ty,
-            fields: &words[FIELDS..FIELDS + 2 * n],
+            fields: &words[2..2 + 2 * n],
         }
     }
 }
@@ -413,10 +382,6 @@ pub mod field_assign_extra {
     use crate::extra::ExtraRange;
     use crate::tir::TirRef;
 
-    pub const TARGET: usize = 0;
-    pub const VALUE: usize = 1;
-    pub const LEN: usize = 2;
-
     /// Decoded view of a [`TirTag::FieldAssign`] payload (M9).
     pub struct FieldAssignView {
         pub target: TirRef,
@@ -431,15 +396,15 @@ pub mod field_assign_extra {
         extra.push(value.raw());
         ExtraRange {
             offset,
-            len: len_u32(LEN),
+            len: len_u32(2),
         }
     }
 
     /// Decode a `FieldAssign` payload from its words.
     pub fn decode(words: &[u32]) -> FieldAssignView {
         FieldAssignView {
-            target: TirRef::from_raw(words[TARGET]),
-            value: TirRef::from_raw(words[VALUE]),
+            target: TirRef::from_raw(words[0]),
+            value: TirRef::from_raw(words[1]),
         }
     }
 }
@@ -456,11 +421,6 @@ pub mod compound_field_assign_extra {
     use crate::ast::CompoundOp;
     use crate::extra::ExtraRange;
     use crate::tir::TirRef;
-
-    pub const TARGET: usize = 0;
-    pub const OP: usize = 1;
-    pub const VALUE: usize = 2;
-    pub const LEN: usize = 3;
 
     /// Decoded view of a [`TirTag::CompoundFieldAssign`] payload (M9).
     pub struct CompoundFieldAssignView {
@@ -483,16 +443,16 @@ pub mod compound_field_assign_extra {
         extra.push(value.raw());
         ExtraRange {
             offset,
-            len: len_u32(LEN),
+            len: len_u32(3),
         }
     }
 
     /// Decode a `CompoundFieldAssign` payload from its words.
     pub fn decode(words: &[u32]) -> CompoundFieldAssignView {
         CompoundFieldAssignView {
-            target: TirRef::from_raw(words[TARGET]),
-            op: CompoundOp::from_raw(words[OP]),
-            value: TirRef::from_raw(words[VALUE]),
+            target: TirRef::from_raw(words[0]),
+            op: CompoundOp::from_raw(words[1]),
+            value: TirRef::from_raw(words[2]),
         }
     }
 }

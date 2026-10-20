@@ -861,7 +861,7 @@ pub use match_::{
     UirVariantArgsView, match_extra,
 };
 mod wires;
-pub use wires::{
+pub(crate) use wires::{
     assign_or_decl_extra, call_extra, compound_assign_extra, compound_field_assign_extra,
     field_assign_extra, for_range_extra, if_stmt_extra, method_call_extra, struct_lit_extra,
     var_decl_extra, while_loop_extra,
@@ -1384,14 +1384,14 @@ mod tests {
             other => panic!("expected InstData::Extra, got {:?}", other),
         };
         let slice = &uir.extra[range.as_range()];
-        assert_eq!(slice[enum_lit_extra::TY], enum_ty.raw());
-        assert_eq!(slice[enum_lit_extra::VARIANT], 1);
-        assert_eq!(slice[enum_lit_extra::FLAGS], 0);
-        assert_eq!(slice[enum_lit_extra::ARGC], 2);
-        assert_eq!(slice[enum_lit_extra::ARGS], 0);
-        assert_eq!(slice[enum_lit_extra::ARGS + 1], w.raw());
-        assert_eq!(slice[enum_lit_extra::ARGS + 2], 1);
-        assert_eq!(slice[enum_lit_extra::ARGS + 3], h.raw());
+        assert_eq!(slice[0], enum_ty.raw());
+        assert_eq!(slice[1], 1);
+        assert_eq!(slice[3], 0);
+        assert_eq!(slice[2], 2);
+        assert_eq!(slice[4], 0);
+        assert_eq!(slice[5], w.raw());
+        assert_eq!(slice[6], 1);
+        assert_eq!(slice[7], h.raw());
     }
 
     #[test]

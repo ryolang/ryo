@@ -148,12 +148,6 @@ pub mod enum_lit_extra {
     use crate::types::TypeId;
     use std::marker::PhantomData;
 
-    pub const TY: usize = 0;
-    pub const VARIANT: usize = 1;
-    pub const ARGC: usize = 2;
-    pub const FLAGS: usize = 3;
-    pub const ARGS: usize = 4;
-
     /// Source used the parenthesized positional form `Variant(args)`,
     /// set by astgen; the braced named form clears it. Sema reads it
     /// to enforce the Brace Law on named payloads (D11: named variants
@@ -225,21 +219,21 @@ pub mod enum_lit_extra {
         }
         ExtraRange {
             offset,
-            len: len_u32(ARGS + 2 * args.len()),
+            len: len_u32(4 + 2 * args.len()),
         }
     }
 
     /// Decode an enum literal payload from its words.
     pub fn decode<R: ExtraValue>(words: &[u32]) -> EnumLitView<'_, R> {
-        let ty = TypeId::from_raw(words[TY]);
-        let variant_index = words[VARIANT];
-        let positional = words[FLAGS] & FLAG_POSITIONAL != 0;
-        let n = words[ARGC] as usize;
+        let ty = TypeId::from_raw(words[0]);
+        let variant_index = words[1];
+        let positional = words[3] & FLAG_POSITIONAL != 0;
+        let n = words[2] as usize;
         EnumLitView {
             ty,
             variant_index,
             positional,
-            args: &words[ARGS..ARGS + 2 * n],
+            args: &words[4..4 + 2 * n],
             marker: PhantomData,
         }
     }

@@ -1415,7 +1415,7 @@ pub use match_::{
 };
 
 mod wires;
-pub use wires::{
+pub(crate) use wires::{
     assign_extra, call_extra, compound_assign_extra, compound_field_assign_extra,
     field_assign_extra, for_range_extra, if_stmt_extra, struct_lit_extra, var_decl_extra,
     while_loop_extra,

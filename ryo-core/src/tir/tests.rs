@@ -154,7 +154,7 @@ fn call_view_panics_on_corrupt_mode_word() {
     let TirData::Extra(rng) = inst.data else {
         panic!("Call must carry TirData::Extra")
     };
-    let mode_idx = rng.as_range().start + call_extra::ARGS + 1;
+    let mode_idx = rng.as_range().start + 3;
     tir.extra[mode_idx] = 99;
 
     let _ = tir.call_view(call).modes.iter().next();
@@ -1100,14 +1100,14 @@ fn enum_lit_round_trips_through_extra() {
         panic!("expected TirData::Extra, got {:?}", inst.data);
     };
     let slice = &tir.extra[rng.as_range()];
-    assert_eq!(slice[enum_lit_extra::TY], enum_ty.raw());
-    assert_eq!(slice[enum_lit_extra::VARIANT], 1);
-    assert_eq!(slice[enum_lit_extra::FLAGS], 0);
-    assert_eq!(slice[enum_lit_extra::ARGC], 2);
-    assert_eq!(slice[enum_lit_extra::ARGS], 0);
-    assert_eq!(slice[enum_lit_extra::ARGS + 1], w.raw());
-    assert_eq!(slice[enum_lit_extra::ARGS + 2], 1);
-    assert_eq!(slice[enum_lit_extra::ARGS + 3], h.raw());
+    assert_eq!(slice[0], enum_ty.raw());
+    assert_eq!(slice[1], 1);
+    assert_eq!(slice[3], 0);
+    assert_eq!(slice[2], 2);
+    assert_eq!(slice[4], 0);
+    assert_eq!(slice[5], w.raw());
+    assert_eq!(slice[6], 1);
+    assert_eq!(slice[7], h.raw());
 }
 
 #[test]
