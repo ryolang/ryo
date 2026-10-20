@@ -28,10 +28,6 @@ pub mod destructure_extra {
     use crate::uir::InstRef;
     use crate::uir::wires::{extra_offset, len_u32};
 
-    pub const N_ENTRIES: usize = 0;
-    pub const ENTRIES: usize = 1;
-    pub const ENTRY_LEN: usize = 2;
-
     /// Encode a bind name: 0 for a wildcard, else `raw + 1` (raw 0 is
     /// a real interned string — the pool pre-interns "derive" — so the
     /// wildcard sentinel must live outside the raw id space).
@@ -57,22 +53,18 @@ pub mod destructure_extra {
         }
         ExtraRange {
             offset,
-            len: len_u32(ENTRIES + plan.len() * ENTRY_LEN),
+            len: len_u32(1 + plan.len() * 2),
         }
     }
 
     /// Decode a destructure plan from its words; `value` and
     /// `by_position` come from the instruction's inline data.
     pub fn decode(words: &[u32], value: InstRef, by_position: bool) -> UirDestructureView {
-        let n = words[N_ENTRIES] as usize;
-        debug_assert_eq!(
-            words.len(),
-            ENTRIES + n * ENTRY_LEN,
-            "destructure plan length mismatch"
-        );
+        let n = words[0] as usize;
+        debug_assert_eq!(words.len(), 1 + n * 2, "destructure plan length mismatch");
         let plan = (0..n)
             .map(|i| {
-                let base = ENTRIES + i * ENTRY_LEN;
+                let base = 1 + i * 2;
                 (words[base], decode_bind(words[base + 1]))
             })
             .collect();

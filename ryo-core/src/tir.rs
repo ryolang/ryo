@@ -1406,7 +1406,7 @@ pub use dump::{TirDump, dump};
 mod tests;
 
 mod destructure;
-pub use destructure::{DestructureField, DestructureView, destructure_extra};
+pub use destructure::{DestructureField, DestructureView};
 
 mod match_;
 pub use match_::{

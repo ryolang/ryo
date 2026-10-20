@@ -853,7 +853,8 @@ impl UirBuilder {
 mod dump;
 pub use dump::UirDump;
 mod destructure;
-pub use destructure::{UirDestructureView, destructure_extra};
+pub use destructure::UirDestructureView;
+pub(crate) use destructure::destructure_extra;
 mod match_;
 pub use match_::{
     UirAnonField, UirAnonFieldsView, UirArgTarget, UirArmBody, UirArmBodyView, UirFieldTarget,

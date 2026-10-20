@@ -27,11 +27,6 @@ pub mod destructure_extra {
     use crate::tir::wires::{extra_offset, len_u32};
     use crate::types::{StringId, TypeId};
 
-    pub const RHS: usize = 0;
-    pub const N_FIELDS: usize = 1;
-    pub const FIELDS: usize = 2;
-    pub const FIELD_LEN: usize = 3;
-
     /// Encode a bind name: 0 for a wildcard, else `raw + 1`.
     pub fn encode_bind(bind: Option<StringId>) -> u32 {
         bind.map_or(0, |s| s.raw() + 1)
@@ -72,22 +67,18 @@ pub mod destructure_extra {
         }
         ExtraRange {
             offset,
-            len: len_u32(FIELDS + fields.len() * FIELD_LEN),
+            len: len_u32(2 + fields.len() * 3),
         }
     }
 
     /// Decode a `Destructure` payload from its words.
     pub fn decode(words: &[u32]) -> DestructureView {
-        let rhs = TirRef::from_raw(words[RHS]);
-        let n = words[N_FIELDS] as usize;
-        debug_assert_eq!(
-            words.len(),
-            FIELDS + n * FIELD_LEN,
-            "destructure plan length mismatch"
-        );
+        let rhs = TirRef::from_raw(words[0]);
+        let n = words[1] as usize;
+        debug_assert_eq!(words.len(), 2 + n * 3, "destructure plan length mismatch");
         let fields = (0..n)
             .map(|i| {
-                let base = FIELDS + i * FIELD_LEN;
+                let base = 2 + i * 3;
                 DestructureField {
                     field_index: words[base],
                     bind: decode_bind(words[base + 1]),
