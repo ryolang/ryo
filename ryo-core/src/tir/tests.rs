@@ -689,6 +689,106 @@ fn if_stmt_wire_fixture() {
 }
 
 #[test]
+fn terminates_parity_through_builder_and_tir() {
+    fn case(
+        f: impl FnOnce(&mut TirBuilder, TypeId, TypeId, TypeId, TypeId, StringId) -> TirRef,
+    ) -> (bool, bool, bool, bool) {
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let never = pool.never();
+        let void = pool.void();
+        let name = pool.intern_str("x");
+        let main = pool.intern_str("main");
+        let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+        let stmt = f(&mut b, int_ty, never, void, int_ty, name);
+        let r = b.block_definitely_returns(&[stmt], &pool);
+        let t = b.block_definitely_terminates(&[stmt], &pool);
+        let tir = b.finish(&[stmt]);
+        let r2 = tir.block_definitely_returns(&[stmt], &pool);
+        let t2 = tir.block_definitely_terminates(&[stmt], &pool);
+        (r, t, r2, t2)
+    }
+
+    // (builder returns sense, builder terminates sense, tir returns,
+    // tir terminates) — the two senses must agree across the
+    // pre-finish and post-finish queries.
+    let if_all = case(|b, i, _n, v, _i2, _name| {
+        let c = b.int_const(0, i, sp());
+        let a1 = b.int_const(1, i, sp());
+        let a2 = b.int_const(2, i, sp());
+        let r1 = b.unary(TirTag::Return, v, a1, sp());
+        let r2 = b.unary(TirTag::Return, v, a2, sp());
+        b.if_stmt(c, &[r1], &[], Some(&[r2]), i, sp())
+    });
+    assert_eq!(if_all, (true, true, true, true));
+
+    let if_no_else = case(|b, i, _n, v, _i2, _name| {
+        let c = b.int_const(0, i, sp());
+        let a1 = b.int_const(1, i, sp());
+        let r1 = b.unary(TirTag::Return, v, a1, sp());
+        b.if_stmt(c, &[r1], &[], None, i, sp())
+    });
+    assert_eq!(if_no_else, (false, false, false, false));
+
+    let if_empty_else = case(|b, i, _n, v, _i2, _name| {
+        let c = b.int_const(0, i, sp());
+        let a1 = b.int_const(1, i, sp());
+        let r1 = b.unary(TirTag::Return, v, a1, sp());
+        b.if_stmt(c, &[r1], &[], Some(&[]), i, sp())
+    });
+    assert_eq!(if_empty_else, (false, false, false, false));
+
+    let if_mid_falls = case(|b, i, _n, v, _i2, _name| {
+        let c = b.int_const(0, i, sp());
+        let a1 = b.int_const(1, i, sp());
+        let r1 = b.unary(TirTag::Return, v, a1, sp());
+        let ec1 = b.int_const(2, i, sp());
+        let a3 = b.int_const(3, i, sp());
+        let er1 = b.unary(TirTag::Return, v, a3, sp());
+        let ec2 = b.int_const(4, i, sp());
+        let ez = b.int_const(5, i, sp());
+        let a6 = b.int_const(6, i, sp());
+        let r2 = b.unary(TirTag::Return, v, a6, sp());
+        b.if_stmt(
+            c,
+            &[r1],
+            &[(ec1, vec![er1]), (ec2, vec![ez])],
+            Some(&[r2]),
+            i,
+            sp(),
+        )
+    });
+    assert_eq!(if_mid_falls, (false, false, false, false));
+
+    let vd_never = case(|b, i, n, _v, _i2, name| {
+        let d = b.unreachable(n, sp());
+        b.var_decl(name, false, i, d, sp())
+    });
+    assert_eq!(vd_never, (true, true, true, true));
+
+    let vd_plain = case(|b, i, _n, _v, _i2, name| {
+        let z = b.int_const(0, i, sp());
+        b.var_decl(name, false, i, z, sp())
+    });
+    assert_eq!(vd_plain, (false, false, false, false));
+
+    let as_never = case(|b, i, n, _v, _i2, name| {
+        let d = b.unreachable(n, sp());
+        b.assign(name, i, d, sp())
+    });
+    assert_eq!(as_never, (true, true, true, true));
+
+    let ca_never = case(|b, i, n, _v, _i2, name| {
+        let d = b.unreachable(n, sp());
+        b.compound_assign(name, CompoundOp::Add, i, d, sp())
+    });
+    assert_eq!(ca_never, (true, true, true, true));
+
+    let brk = case(|b, i, _n, _v, _i2, _name| b.break_stmt(i, sp()));
+    assert_eq!(brk, (false, true, false, true));
+}
+
+#[test]
 fn float_const_and_fadd_round_trip() {
     let mut pool = InternPool::new();
     let main = pool.intern_str("main");
