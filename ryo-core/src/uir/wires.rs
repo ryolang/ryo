@@ -2,14 +2,15 @@
 
 /// Current `extra.len()` as a checked `u32` — the same overflow
 /// rejection `UirBuilder::extra_offset` performs, re-homed with the
-/// wire codecs so encoders live outside the builder.
-fn extra_offset(extra: &[u32]) -> u32 {
+/// wire codecs so encoders live outside the builder. `pub(super)` so
+/// sibling wire homes (`destructure`) share the checked conversion.
+pub(super) fn extra_offset(extra: &[u32]) -> u32 {
     u32::try_from(extra.len()).expect("UIR extra arena exceeded u32::MAX words")
 }
 
 /// Convert a length-shaped `usize` (e.g. `args.len()`) to `u32`,
 /// panicking on overflow like `UirBuilder::len_u32`.
-fn len_u32(len: usize) -> u32 {
+pub(super) fn len_u32(len: usize) -> u32 {
     u32::try_from(len).expect("UIR list length exceeded u32::MAX")
 }
 
