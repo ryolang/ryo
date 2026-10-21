@@ -3,6 +3,7 @@
 # line, arm name, and warmup value matches the old script byte-for-byte
 # (modulo the $ryo substitution point for the ryo binary path).
 name = "mandelbrot"
+category = "Algorithms"
 descriptor = "401x501 grid, max 80 iterations — float codegen"
 warmup = 3
 

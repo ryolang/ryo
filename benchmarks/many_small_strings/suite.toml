@@ -3,6 +3,7 @@
 # line, arm name, and warmup value matches the old script byte-for-byte
 # (modulo the $ryo substitution point for the ryo binary path).
 name = "many_small_strings"
+category = "Strings"
 descriptor = "500,000 build-and-drop strings"
 warmup = 3
 

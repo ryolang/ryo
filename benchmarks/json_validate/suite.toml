@@ -3,6 +3,7 @@
 # line, arm name, and warmup value matches the old script byte-for-byte
 # (modulo the $ryo substitution point for the ryo binary path).
 name = "json_validate"
+category = "Parsing"
 descriptor = "30,000-record JSON document, 12 validation passes — byte-scanning validation"
 warmup = 3
 

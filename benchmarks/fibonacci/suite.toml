@@ -3,6 +3,7 @@
 # line, arm name, and warmup value matches the old script byte-for-byte
 # (modulo the $ryo substitution point for the ryo binary path).
 name = "fibonacci"
+category = "Algorithms"
 descriptor = "Recursive fib(40): raw call-overhead comparison across languages"
 warmup = 3
 expect = "fib(40) = 102334155"

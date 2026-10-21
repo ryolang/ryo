@@ -3,6 +3,7 @@
 # line, arm name, and warmup value matches the old script byte-for-byte
 # (modulo the $ryo substitution point for the ryo binary path).
 name = "doubling_concat"
+category = "Strings"
 descriptor = "20 doublings, 16 B to 16 MiB — fresh-buffer concat path"
 warmup = 3
 

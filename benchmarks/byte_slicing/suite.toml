@@ -3,6 +3,7 @@
 # line, arm name, and warmup value matches the old script byte-for-byte
 # (modulo the $ryo substitution point for the ryo binary path).
 name = "byte_slicing"
+category = "Strings"
 descriptor = "Scan 688 KiB via views, count 16384 matches (bytes)"
 warmup = 3
 

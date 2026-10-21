@@ -3,6 +3,7 @@
 # line, arm name, and warmup value matches the old script byte-for-byte
 # (modulo the $ryo substitution point for the ryo binary path).
 name = "string_building"
+category = "Strings"
 descriptor = "50,000 reassign-concat iterations — string runtime ABI measure"
 warmup = 3
 

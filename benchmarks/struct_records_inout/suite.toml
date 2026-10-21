@@ -3,6 +3,7 @@
 # line, arm name, and warmup value matches the old script byte-for-byte
 # (modulo the $ryo substitution point for the ryo binary path).
 name = "struct_records_inout"
+category = "Structs"
 descriptor = "500,000 record build-mutate-score rounds — inout update"
 warmup = 3
 expect = "assert passed, struct_records_inout is correct"

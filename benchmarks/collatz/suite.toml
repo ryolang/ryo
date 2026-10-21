@@ -3,6 +3,7 @@
 # line, arm name, and warmup value matches the old script byte-for-byte
 # (modulo the $ryo substitution point for the ryo binary path).
 name = "collatz"
+category = "Algorithms"
 descriptor = "Total stopping times for seeds 1..1,000,000 — integer loop codegen"
 warmup = 3
 

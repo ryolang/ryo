@@ -3,6 +3,7 @@
 # line, arm name, and warmup value matches the old script byte-for-byte
 # (modulo the $ryo substitution point for the ryo binary path).
 name = "eager_destruction"
+category = "Lifecycle"
 descriptor = "Recursion depth 50,000 — scope-based drop vs manual drop vs eager destruction"
 warmup = 3
 # exit-code-only: programs print nothing

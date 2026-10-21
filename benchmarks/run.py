@@ -54,6 +54,7 @@ class Suite:
     default_expect: str | None
     arms: list[Arm]
     dir: Path
+    category: str | None = None
 
 
 # Run strings never pass through a shell, so shell metacharacters are banned.
@@ -92,6 +93,10 @@ def load_suite(path: Path) -> Suite:
     if not isinstance(descriptor, str):
         raise ManifestError(f"{path}: 'descriptor' must be a string")
 
+    category = data.get("category")
+    if category is not None and (not isinstance(category, str) or not category):
+        raise ManifestError(f"{path}: 'category' must be a non-empty string")
+
     warmup = data.get("warmup", 3)
     if not isinstance(warmup, int) or isinstance(warmup, bool):
         raise ManifestError(f"{path}: 'warmup' must be an integer, got {warmup!r}")
@@ -126,6 +131,7 @@ def load_suite(path: Path) -> Suite:
         default_expect=default_expect,
         arms=arms,
         dir=path.resolve().parent,
+        category=category,
     )
 
 

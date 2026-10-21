@@ -96,6 +96,31 @@ run = "./a"
     assert load_suite(path).warmup == 20
 
 
+def test_category_loads(tmp_path):
+    path = write_suite(
+        tmp_path,
+        'name = "s"\ncategory = "Strings"\n\n[[arm]]\nname = "A"\nlanguage = "rust"\nrun = "/bin/echo a"\nexpect = "a"\n',
+    )
+    assert load_suite(path).category == "Strings"
+
+
+def test_category_defaults_to_none(tmp_path):
+    path = write_suite(
+        tmp_path,
+        'name = "s"\n\n[[arm]]\nname = "A"\nlanguage = "rust"\nrun = "/bin/echo a"\nexpect = "a"\n',
+    )
+    assert load_suite(path).category is None
+
+
+def test_category_must_be_string(tmp_path):
+    path = write_suite(
+        tmp_path,
+        'name = "s"\ncategory = 42\n\n[[arm]]\nname = "A"\nlanguage = "rust"\nrun = "/bin/echo a"\nexpect = "a"\n',
+    )
+    with pytest.raises(ManifestError):
+        load_suite(path)
+
+
 def test_group_key_loads(tmp_path):
     path = write_suite(
         tmp_path,
