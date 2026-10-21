@@ -1,5 +1,11 @@
 # Eager Destruction & Recursion Benchmark
 
+## Overview
+
+* **Focus:** Eager memory deallocation at last use (Eager Destruction / ASAP Destruction) vs. scope-based (RAII) destruction under deep recursion.
+* **Languages compared:** Rust (Scope-Based vs. Manual Drop) and Ryo.
+* **Highlights:** Ryo AOT is the fastest arm of the suite (1.7 ms, 1.69–2.00x over the Rust arms and the JIT) at **6.10x less memory** than scope-based Rust (1.36 MB vs 8.30 MB max RSS — checkpoint 2026-10-07 below). Eager destruction keeps heap at O(1), and since codegen now emits `return_call` for the tail-recursive call, deep recursion runs in O(1) stack with no depth ceiling — the `tail_calls` end-to-end test completes 10,000,000 calls (this suite itself measures depth 50,000) where pre-tail-call builds SIGSEGV'd at ~262,000. Non-tail recursion aborts cleanly with a `stack overflow` diagnostic (exit 101) instead of crashing blindly.
+
 This benchmark demonstrates and compares **Eager Destruction** (freeing of heap resources at their point of last use) in **Ryo** against scope-based destruction (RAII) in **Rust**.
 
 This is the exact compiler optimization and language feature showcased in Mojo's famous "Mojo vs. Rust: what are the differences?" blog post, where eager destruction is used to optimize memory and enable safer deep recursion without manual cleanups.
@@ -132,29 +138,4 @@ What moved:
 1. **Fastest and leanest:** Ryo's AOT binary is the fastest arm of the suite (1.7 ms, 1.69–2.00x over the other arms) and the leanest by a wide margin — its RSS (1.36 MB) is 6.10x more efficient than Rust scope-based RAII, because `return_call` makes the recursion's stack footprint O(1): the 50,000 simultaneously-live frames that dominated the earlier checkpoints are never materialized.
 2. **Stack Safety under Deep Recursion:** Rust **crashes with a stack overflow just above 74,556 recursive calls** (re-verified 2026-09-15: depth 74,556 succeeds, 74,600 aborts — both the scope-based and manual-`drop` arms, even with release-level `-O`, due to conservative LLVM tail call heuristics). **Ryo has no depth ceiling for this program**: codegen emits `return_call` for the tail-recursive call, so recursion runs in O(1) stack — 10,000,000 calls complete cleanly (verified 2026-10-07). Pre-tail-call builds ceilinged at ~262,000 frames (0x20 bytes each) before reaching the OS stack limit; that ceiling was a property of the old call + return codegen, not of the language. For *non-tail* recursion the failure modes differ: Rust detects the overflow and aborts cleanly (`thread 'main' has overflowed its stack`, exit 134), while Ryo's stack-limit check (emitted before every recursive call) aborts with `stack overflow` on stderr and exit 101 (verified 2026-10-07) — no more blind SIGSEGV.
 3. **The Power of Compact Stack Frames:** In recursive scope-based RAII, Rust must keep active references, drop flags, and landing pads in each stack frame until the recursion unwinds. By contrast, Ryo's **Milestone 8.1 Eager Destruction** statically releases the string *before* entering recursion — and with SSO plus the provably-inline elision, short strings (≤ 22 bytes) never touch the heap at all and the compiler can prove the free is a no-op, so no free call is even emitted. Tail *position* is what makes the call eligible for tail-call optimization, and codegen now delivers it: the recursive call is emitted as a Cranelift `return_call` rather than a normal `call` followed by `return`, so no per-recursion frame is materialized and the depth ceiling in takeaway #2 is gone.
-4. **Observing the Crash:** To observe Rust's stack overflow and Ryo's stack safety first-hand, edit the `main()` function in `eager_destruction.ryo` and `eager_destruction.rs` to change `50000` to `74600` (or higher), then re-run `uv run benchmarks/run.py run --benchmarks eager_destruction`. Ryo's tail recursion no longer overflows at any depth; to see Ryo's own overflow diagnostic, use a non-tail-recursive shape (e.g. `return rec(x - 1) + 1`), which aborts with `stack overflow` on stderr and exit 101 once the stack limit is reached.
-
----
-
-## How to Run the Benchmark
-
-### Prerequisites
-Make sure you have:
-- `rustc`
-- `hyperfine`
-- A release compiler binary for Ryo (the runner builds `target/release/ryo` automatically when it is the resolved binary; override with `--ryo-bin PATH` or `$RYO_BIN`)
-
-### Running the Suite
-From the repository root:
-
-```bash
-uv run benchmarks/run.py run --benchmarks eager_destruction
-```
-
-The suite is driven by the `suite.toml` manifest in this directory. It:
-1. Builds the Rust programs with maximum optimizations (`-O`).
-2. Builds the Ryo program using AOT.
-3. Measures and displays the Maximum Resident Set Size (RSS) memory of each.
-4. Executes performance comparison runs using `hyperfine`.
-
-Add `--dry-run` to build every arm and run only the checksum correctness gate (no hyperfine), or `--languages rust,ryo` to limit the arms.
+4. **Observing the Crash:** To observe Rust's stack overflow and Ryo's stack safety first-hand, edit the `main()` function in `eager_destruction.ryo` and `eager_destruction.rs` to change `50000` to `74600` (or higher), then re-run this suite. Ryo's tail recursion no longer overflows at any depth; to see Ryo's own overflow diagnostic, use a non-tail-recursive shape (e.g. `return rec(x - 1) + 1`), which aborts with `stack overflow` on stderr and exit 101 once the stack limit is reached.

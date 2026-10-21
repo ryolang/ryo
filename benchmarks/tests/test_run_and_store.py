@@ -121,9 +121,10 @@ def test_append_prunes_to_20(tmp_path):
 def test_append_stamps_one_date_per_run(tmp_path):
     """Every arm recorded by one append shares its run's date.
 
-    `render_summary_table` matches the fastest arm to the Ryo AOT anchor by
-    exact date equality; per-arm timestamps would never repeat within a run
-    and the vs-fastest column would render "—" forever.
+    `render_summary_table` matches the other arms to the Ryo AOT anchor by
+    exact date equality (vs. fastest, vs. leanest, and the Version cell);
+    per-arm timestamps would never repeat within a run and those columns
+    would render "—" forever.
     """
     store = Store.load(tmp_path / "data" / "synthetic.json")
     suite = write_suite(

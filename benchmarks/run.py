@@ -678,9 +678,10 @@ class Store:
         return cls(path=path, repo_url=repo_url, entries={})
 
     def append(self, suite_result: SuiteResult) -> None:
-        # One timestamp for the whole run: `render_summary_table`'s
-        # vs-fastest ratio matches arms by exact date equality, and a
-        # per-arm timestamp would never repeat across a run.
+        # One timestamp for the whole run: `render_summary_table` matches
+        # arms to the Ryo-AOT anchor by exact date equality (vs. fastest,
+        # vs. leanest, and the Version cell), and a per-arm timestamp would
+        # never repeat across a run.
         run_date = _epoch_ms()
         for arm_result in suite_result.arm_results:
             key = store_key(suite_result.suite, arm_result.arm)
@@ -1245,8 +1246,10 @@ def _splice_readme(path: Path, text: str, start: str, end: str, content: str) ->
         raise MarkerError(f"{path}: {exc}") from exc
 
 
-_SUMMARY_HEADER = "| Suite | Ryo AOT | Peak RSS | vs. fastest | Measured |"
-_SUMMARY_SEPARATOR = "|---|---|---|---|---|"
+_SUMMARY_HEADER = (
+    "| Suite | Languages | Ryo AOT | Peak RSS | vs. fastest | vs. leanest | Version | Measured |"
+)
+_SUMMARY_SEPARATOR = "|---|---|---|---|---|---|---|---|"
 
 
 def _key_arm_name(key: str) -> str:
@@ -1309,42 +1312,114 @@ def _fastest_of_run(store: Store) -> tuple[str, dict] | None:
     return (best[2], best[3]) if best is not None else None
 
 
-def render_summary_table(stores: dict[str, Store]) -> str:
+def _rss_bench(entry: dict | None) -> dict | None:
+    """The entry's memory_peak_rss bench, or None when absent or never measured."""
+    if entry is None:
+        return None
+    return next(
+        (
+            b
+            for b in entry["benches"]
+            if b["name"] == "memory_peak_rss" and b["value"] is not None
+        ),
+        None,
+    )
+
+
+def _leanest_of_run(store: Store) -> tuple[str, dict] | None:
+    """(key, entry) with the lowest peak RSS across the suite's latest entries."""
+    best: tuple[int, float, str, dict] | None = None
+    for key in sorted(store.entries):
+        entry = store.latest(key)
+        bench = _rss_bench(entry)
+        if bench is None:
+            continue
+        candidate = (0, bench["value"], key, entry)
+        if best is None or candidate[1] < best[1]:
+            best = candidate
+    return (best[2], best[3]) if best is not None else None
+
+
+def _same_run_toolchains(suite: Suite, store: Store, run_date: int) -> list[str]:
+    """Toolchain strings of the suite's arms measured in the anchor's run.
+
+    One toolchain per arm, extracted from the time bench's ``extra`` by the
+    same ``_toolchain_from_extra`` the per-suite tables use; deduped, ryo
+    first, then manifest arm order. An arm whose latest entry is missing or
+    from another run contributes nothing.
+    """
+    toolchains: list[str] = []
+    for arm in suite.arms:
+        entry = store.latest(store_key(suite, arm))
+        if entry is None or entry["date"] != run_date:
+            continue
+        bench = _time_bench(entry)
+        if bench is None:
+            continue
+        toolchain = _toolchain_from_extra(bench.get("extra"))
+        if toolchain != _NO_MEASUREMENT and toolchain not in toolchains:
+            toolchains.append(toolchain)
+    # Stable: ryo toolchains first, manifest order preserved within each band.
+    toolchains.sort(key=lambda t: 0 if t.startswith("ryo") else 1)
+    return toolchains
+
+
+def render_summary_table(suites: list[Suite], stores: dict[str, Store]) -> str:
     """Render the root summary table across suites, one row per suite.
 
     Every cell is anchored to the suite's Ryo-AOT entry's own run: its time,
     peak RSS, and date/commit. ``vs. fastest`` (Ryo-AOT time / fastest arm's
-    time) is filled only when the fastest arm's latest entry shares that run
-    (same ``date``) — a ratio across different runs is dishonest, so it
-    renders ``—`` instead. Suites with no Ryo-AOT anchor entry render no row
-    at all, so a fresh clone's summary is header-only until suites are
-    measured. Rows are alphabetical so the output never depends on how the
-    suites were selected.
+    time) and ``vs. leanest`` (Ryo-AOT RSS / leanest arm's RSS) are filled
+    only when the comparison arm's latest entry shares that run (same
+    ``date``) — a ratio across different runs is dishonest, so it renders
+    ``—`` instead; a zero leanest RSS would divide by zero and also renders
+    ``—``. ``Languages`` lists the manifest's arm names; ``Version``
+    composes the same run's toolchain strings (see ``_same_run_toolchains``).
+    Suites with no Ryo-AOT anchor entry render no row at all, so a fresh
+    clone's summary is header-only until suites are measured. Rows are
+    alphabetical so the output never depends on how the suites were
+    selected.
     """
     lines = [_SUMMARY_HEADER, _SUMMARY_SEPARATOR]
     # Canonical order: alphabetical, independent of how suites were selected.
-    for suite_name in sorted(stores):
-        store = stores[suite_name]
+    for suite in sorted(suites, key=lambda s: s.name):
+        store = stores[suite.name]
         anchor = _ryo_aot_anchor(store)
         if anchor is None:
             continue
         _, entry = anchor
         benches = {b["name"]: b for b in entry["benches"]}
         time_str = f"{_format_cell_value(benches['time']['value'])} ms"
+        anchor_rss = _rss_bench(entry)
         rss_str = _NO_MEASUREMENT
-        rss_bench = benches.get("memory_peak_rss")
-        if rss_bench is not None and rss_bench["value"] is not None:
-            rss_str = f"{_format_cell_value(rss_bench['value'])} MB"
+        if anchor_rss is not None:
+            rss_str = f"{_format_cell_value(anchor_rss['value'])} MB"
         ratio_str = _NO_MEASUREMENT
         fastest = _fastest_of_run(store)
         if fastest is not None and fastest[1]["date"] == entry["date"]:
             fastest_time = _time_bench(fastest[1])["value"]
             ratio_str = f"{benches['time']['value'] / fastest_time:.2f}x"
+        lean_str = _NO_MEASUREMENT
+        leanest = _leanest_of_run(store)
+        if (
+            leanest is not None
+            and leanest[1]["date"] == entry["date"]
+            and anchor_rss is not None
+        ):
+            min_rss = _rss_bench(leanest[1])["value"]
+            if min_rss > 0:
+                lean_str = f"{anchor_rss['value'] / min_rss:.2f}x"
+        languages_str = ", ".join(arm.name for arm in suite.arms)
+        toolchains = _same_run_toolchains(suite, store, entry["date"])
+        version_str = " / ".join(toolchains) if toolchains else _NO_MEASUREMENT
         date = datetime.fromtimestamp(entry["date"] / 1000, tz=timezone.utc).strftime(
             "%Y-%m-%d"
         )
         measured_str = f"{date} (commit {entry['commit']['id']})"
-        lines.append(f"| {suite_name} | {time_str} | {rss_str} | {ratio_str} | {measured_str} |")
+        lines.append(
+            f"| [{suite.name}](./{suite.dir.name}/) | {languages_str} | {time_str} "
+            f"| {rss_str} | {ratio_str} | {lean_str} | {version_str} | {measured_str} |"
+        )
     return "\n".join(lines)
 
 
@@ -1434,7 +1509,7 @@ def cmd_update_readme(args: argparse.Namespace) -> int:
             )
         root_path = _REPO_ROOT / "benchmarks" / "README.md"
         root_text = _read_readme(root_path)
-        summary = render_summary_table(stores)
+        summary = render_summary_table(all_suites, stores)
         plans.append(
             (
                 root_path,

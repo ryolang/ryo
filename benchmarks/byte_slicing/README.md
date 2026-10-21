@@ -1,5 +1,11 @@
 # Byte Slicing Benchmark
 
+## Overview
+
+* **Focus:** The same scan workload on raw bytes — `bytesview` / `&[u8]` / `[UInt8]` slices with no UTF-8 char-boundary validation anywhere. Split out of string_slicing (2026-09-17) so each suite compares like with like; the delta between the two isolates Ryo's `str` boundary-validation cost.
+* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Highlights:** Ryo AOT (2.7 ms) lands **within noise of Swift** (2.5 ms) at 1.70x behind Rust; the ~0.6–0.7 ms delta against Ryo's string_slicing row is exactly the UTF-8 char-boundary validation cost.
+
 **Focus:** Byte-level zero-copy views. Same workload as [`string_slicing`](../string_slicing/) — build a 688 KiB buffer in-program (doubling concat of a 43-byte seed), then scan it through 3-byte view slices counting `fox` occurrences — but every arm operates on raw bytes: Ryo `bytes`/`bytesview`, Rust `&[u8]`, Swift `[UInt8]`. No UTF-8 char-boundary validation anywhere; this is the like-for-like comparison for byte scanning, split out of `string_slicing` on 2026-09-17 when that benchmark's Rust and Swift arms were converted to string semantics.
 
 **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
@@ -20,15 +26,3 @@ Hyperfine `--warmup 3 --shell=none`; peak RSS is hyperfine 2.0's per-run memory 
 <!-- BENCH:END -->
 
 Ryo AOT lands within noise of Swift here — the remaining 1.70× to Rust is the §18 checked-arithmetic guards (three per iteration), the promote-on-view per-iteration spill (I-184), and Cranelift-vs-LLVM mid-end quality.
-
-## How to Run
-
-Prerequisites: `hyperfine`, `rustc`, `swiftc`. The runner builds the release compiler automatically when it uses the repo default `target/release/ryo` (override with `--ryo-bin PATH` or `$RYO_BIN`).
-
-From the repository root:
-
-```bash
-uv run benchmarks/run.py run --benchmarks byte_slicing
-```
-
-Add `--dry-run` to build every arm and run only the checksum correctness gate (no hyperfine), or `--languages rust,swift,...` to limit the arms.

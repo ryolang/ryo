@@ -45,6 +45,15 @@ run = "/bin/echo b"
 expect = "b"
 """
 
+THREE_ARM_SUITE = TWO_ARM_SUITE + """
+
+[[arm]]
+name = "Ryo (JIT)"
+language = "ryo"
+run = "/bin/echo c"
+expect = "c"
+"""
+
 
 def make_entry(
     time_ms: float,
@@ -140,7 +149,14 @@ def test_splice_block_missing_markers_raise_marker_error():
         splice_block("<!-- BENCH:END -->\n<!-- BENCH:START -->\n", BENCH_START, BENCH_END, "x")
 
 
+SUMMARY_HEADER = (
+    "| Suite | Languages | Ryo AOT | Peak RSS | vs. fastest | vs. leanest | Version | Measured |"
+)
+SUMMARY_SEPARATOR = "|---|---|---|---|---|---|---|---|"
+
+
 def test_render_summary_table_anchors_to_ryo_aot_arm(tmp_path):
+    suite = write_suite(tmp_path / "suite", THREE_ARM_SUITE)
     store = write_store(
         tmp_path / "data" / "synthetic.json",
         {
@@ -149,16 +165,93 @@ def test_render_summary_table_anchors_to_ryo_aot_arm(tmp_path):
             "synthetic/Ryo (JIT)": [make_entry(55.0, 9.0, toolchain="ryo 0.1.0")],
         },
     )
-    assert render_summary_table({"synthetic": store}) == (
-        "| Suite | Ryo AOT | Peak RSS | vs. fastest | Measured |\n"
-        "|---|---|---|---|---|\n"
-        "| synthetic | 2.7 ms | 2.75 MB | 1.69x | 2026-10-21 (commit abc1234) |"
+    assert render_summary_table([suite], {"synthetic": store}) == (
+        f"{SUMMARY_HEADER}\n"
+        f"{SUMMARY_SEPARATOR}\n"
+        "| [synthetic](./suite/) | Rust, Ryo (AOT), Ryo (JIT) | 2.7 ms | 2.75 MB "
+        "| 1.69x | 1.00x | ryo 0.1.0 / rustc 1.85.0 | 2026-10-21 (commit abc1234) |"
     )
+
+
+def test_render_summary_table_falls_back_to_ryo_toolchain_without_aot_name(tmp_path):
+    suite = write_suite(
+        tmp_path / "suite",
+        """
+name = "synthetic"
+warmup = 3
+
+[[arm]]
+name = "Rust"
+language = "rust"
+run = "/bin/echo a"
+expect = "a"
+
+[[arm]]
+name = "Ryo (JIT)"
+language = "ryo"
+run = "/bin/echo b"
+expect = "b"
+""",
+    )
+    store = write_store(
+        tmp_path / "data" / "synthetic.json",
+        {
+            "synthetic/Rust": [make_entry(1.6, 4.5, toolchain="rustc 1.85.0")],
+            "synthetic/Ryo (JIT)": [make_entry(55.0, 9.0, toolchain="ryo 0.1.0")],
+        },
+    )
+    table = render_summary_table([suite], {"synthetic": store})
+    # The JIT arm anchors the row, and the ratios run against Rust (same run).
+    assert (
+        "| [synthetic](./suite/) | Rust, Ryo (JIT) | 55 ms | 9 MB "
+        "| 34.38x | 2.00x | ryo 0.1.0 / rustc 1.85.0 | 2026-10-21 (commit abc1234) |"
+    ) in table
+
+
+def test_render_summary_table_languages_come_from_the_manifest(tmp_path):
+    """The Languages cell lists the manifest's arm names in manifest order,
+    independent of which arms have store entries."""
+    suite = write_suite(
+        tmp_path / "reversed",
+        """
+name = "reversed"
+warmup = 3
+
+[[arm]]
+name = "Swift"
+language = "swift"
+run = "/bin/echo a"
+expect = "a"
+
+[[arm]]
+name = "Rust"
+language = "rust"
+run = "/bin/echo b"
+expect = "b"
+
+[[arm]]
+name = "Ryo (AOT)"
+language = "ryo"
+run = "/bin/echo c"
+expect = "c"
+""",
+    )
+    store = write_store(
+        tmp_path / "data" / "reversed.json",
+        {
+            "reversed/Rust": [make_entry(1.6, 4.5, toolchain="rustc 1.85.0")],
+            "reversed/Ryo (AOT)": [make_entry(2.7, 2.75, toolchain="ryo 0.1.0")],
+        },
+    )
+    table = render_summary_table([suite], {"reversed": store})
+    assert "| [reversed](./reversed/) | Swift, Rust, Ryo (AOT) |" in table
 
 
 def test_render_summary_table_ratio_dash_when_fastest_is_from_older_run(tmp_path):
     """The fastest arm's latest entry predates the Ryo-AOT run; a ratio across
-    different runs is dishonest, so the cell renders —."""
+    different runs is dishonest, so the cell renders —. The Rust arm is also
+    from that older run, so its toolchain drops out of the Version cell too."""
+    suite = write_suite(tmp_path / "suite", TWO_ARM_SUITE)
     store = write_store(
         tmp_path / "data" / "synthetic.json",
         {
@@ -166,25 +259,87 @@ def test_render_summary_table_ratio_dash_when_fastest_is_from_older_run(tmp_path
             "synthetic/Ryo (AOT)": [make_entry(2.7, 2.75, toolchain="ryo 0.1.0")],
         },
     )
-    table = render_summary_table({"synthetic": store})
-    assert "| synthetic | 2.7 ms | 2.75 MB | — | 2026-10-21 (commit abc1234) |" in table
+    table = render_summary_table([suite], {"synthetic": store})
+    assert (
+        "| [synthetic](./suite/) | Rust, Ryo (AOT) | 2.7 ms | 2.75 MB "
+        "| — | 1.00x | ryo 0.1.0 | 2026-10-21 (commit abc1234) |"
+    ) in table
 
 
-def test_render_summary_table_falls_back_to_ryo_toolchain_without_aot_name(tmp_path):
+def test_render_summary_table_leanest_ratio_and_dash_cases(tmp_path):
+    """vs. leanest mirrors vs. fastest on memory_peak_rss: filled only when the
+    leanest arm's latest entry shares the anchor's run."""
+    suite = write_suite(tmp_path / "suite", THREE_ARM_SUITE)
+    store = write_store(
+        tmp_path / "data" / "synthetic.json",
+        {
+            # Same run as the anchor: fastest arm, not the leanest.
+            "synthetic/Rust": [make_entry(1.6, 4.5, toolchain="rustc 1.85.0")],
+            "synthetic/Ryo (AOT)": [make_entry(2.7, 2.75, toolchain="ryo 0.1.0")],
+            # Leaner than everything, but from an older run: the ratio is —.
+            "synthetic/Ryo (JIT)": [make_entry(55.0, 0.5, toolchain="ryo 0.1.0", date=OLDER_EPOCH_MS)],
+        },
+    )
+    table = render_summary_table([suite], {"synthetic": store})
+    assert "| 1.69x | — |" in table
+
+
+def test_render_summary_table_leanest_dash_when_min_rss_is_zero(tmp_path):
+    """A zero min RSS would divide by zero; the cell renders — instead."""
+    suite = write_suite(tmp_path / "suite", THREE_ARM_SUITE)
     store = write_store(
         tmp_path / "data" / "synthetic.json",
         {
             "synthetic/Rust": [make_entry(1.6, 4.5, toolchain="rustc 1.85.0")],
+            "synthetic/Ryo (AOT)": [make_entry(2.7, 2.75, toolchain="ryo 0.1.0")],
+            "synthetic/Ryo (JIT)": [make_entry(55.0, 0.0, toolchain="ryo 0.1.0")],
+        },
+    )
+    table = render_summary_table([suite], {"synthetic": store})
+    assert "| 1.69x | — |" in table
+
+
+def test_render_summary_table_version_ryo_first_then_manifest_order(tmp_path):
+    """Version composes toolchains from same-run entries only: ryo first, then
+    manifest arm order, deduped (the two ryo arms share one version string)."""
+    suite = write_suite(tmp_path / "suite", THREE_ARM_SUITE)
+    store = write_store(
+        tmp_path / "data" / "synthetic.json",
+        {
+            "synthetic/Rust": [make_entry(1.6, 4.5, toolchain="rustc 1.85.0")],
+            "synthetic/Ryo (AOT)": [make_entry(2.7, 2.75, toolchain="ryo 0.1.0")],
             "synthetic/Ryo (JIT)": [make_entry(55.0, 9.0, toolchain="ryo 0.1.0")],
         },
     )
-    table = render_summary_table({"synthetic": store})
-    # The JIT arm anchors the row, and the ratio runs against Rust (same run).
-    assert "| synthetic | 55 ms | 9 MB | 34.38x | 2026-10-21 (commit abc1234) |" in table
+    table = render_summary_table([suite], {"synthetic": store})
+    assert "ryo 0.1.0 / rustc 1.85.0" in table
+    assert table.count("ryo 0.1.0") == 1
+
+
+def test_render_summary_table_version_omits_missing_and_other_run_entries(tmp_path):
+    """An arm whose entry is missing, or whose latest entry is from another
+    run, contributes no toolchain to the Version cell."""
+    suite = write_suite(tmp_path / "suite", THREE_ARM_SUITE)
+    store = write_store(
+        tmp_path / "data" / "synthetic.json",
+        {
+            "synthetic/Rust": [make_entry(1.6, 4.5, toolchain="rustc 1.85.0", date=OLDER_EPOCH_MS)],
+            "synthetic/Ryo (AOT)": [make_entry(2.7, 2.75, toolchain="ryo 0.1.0")],
+            # No synthetic/Ryo (JIT) entry at all.
+        },
+    )
+    table = render_summary_table([suite], {"synthetic": store})
+    row = "| [synthetic](./suite/) | Rust, Ryo (AOT), Ryo (JIT) | 2.7 ms | 2.75 MB "
+    assert row + "| — | 1.00x | ryo 0.1.0 | 2026-10-21 (commit abc1234) |" in table
+    assert "rustc" not in table
 
 
 def test_render_summary_table_skips_anchorless_suites(tmp_path):
     """Suites with no Ryo-AOT anchor entry render no row at all."""
+    suite = write_suite(
+        tmp_path / "anchored",
+        TWO_ARM_SUITE.replace('name = "synthetic"', 'name = "anchored"'),
+    )
     anchored = write_store(
         tmp_path / "data" / "anchored.json",
         {
@@ -196,10 +351,17 @@ def test_render_summary_table_skips_anchorless_suites(tmp_path):
         tmp_path / "data" / "anchorless.json",
         {"anchorless/Rust": [make_entry(1.6, 4.5, toolchain="rustc 1.85.0")]},
     )
-    assert render_summary_table({"anchorless": anchorless, "anchored": anchored}) == (
-        "| Suite | Ryo AOT | Peak RSS | vs. fastest | Measured |\n"
-        "|---|---|---|---|---|\n"
-        "| anchored | 2.7 ms | 2.75 MB | 1.00x | 2026-10-21 (commit abc1234) |"
+    anchorless_suite = write_suite(
+        tmp_path / "anchorless",
+        TWO_ARM_SUITE.replace('name = "synthetic"', 'name = "anchorless"'),
+    )
+    assert render_summary_table(
+        [anchorless_suite, suite], {"anchorless": anchorless, "anchored": anchored}
+    ) == (
+        f"{SUMMARY_HEADER}\n"
+        f"{SUMMARY_SEPARATOR}\n"
+        "| [anchored](./anchored/) | Rust, Ryo (AOT) | 2.7 ms | 2.75 MB "
+        "| 1.00x | 1.00x | ryo 0.1.0 / rustc 1.85.0 | 2026-10-21 (commit abc1234) |"
     )
 
 
@@ -286,9 +448,10 @@ def test_cmd_update_readme_splices_suite_and_root_readmes(
         "# Benchmarks\n"
         "\n"
         "<!-- BENCH-SUMMARY:START -->\n"
-        "| Suite | Ryo AOT | Peak RSS | vs. fastest | Measured |\n"
-        "|---|---|---|---|---|\n"
-        "| synthetic | 2.7 ms | 2.75 MB | 1.00x | 2026-10-21 (commit abc1234) |\n"
+        f"{SUMMARY_HEADER}\n"
+        f"{SUMMARY_SEPARATOR}\n"
+        "| [synthetic](./suite/) | Rust, Ryo (AOT) | 2.7 ms | 2.75 MB "
+        "| 1.00x | 1.00x | ryo 0.1.0 / rustc 1.85.0 | 2026-10-21 (commit abc1234) |\n"
         "<!-- BENCH-SUMMARY:END -->\n"
         "\n"
         "Curated prose stays.\n"
@@ -409,8 +572,8 @@ def test_cmd_update_readme_benchmarks_filter_keeps_all_suites_in_root_summary(
     assert two_readme.read_text(encoding="utf-8") == two_text
     # The root summary still carries both suites' rows.
     summary = root_readme.read_text(encoding="utf-8")
-    assert "| synthetic | 2.7 ms |" in summary
-    assert "| two | 3.3 ms |" in summary
+    assert "| [synthetic](./suite/) |" in summary
+    assert "| [two](./two/) |" in summary
 
 
 def test_cmd_update_readme_missing_suite_markers_is_hard_error_with_zero_mutation(

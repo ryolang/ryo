@@ -1,5 +1,11 @@
 # Struct Records Reuse Benchmark
 
+## Overview
+
+* **Focus:** The keep-original record update — same record, but the caller uses `p` again after `birthday`, so the update cannot consume it. Rust and Ryo pay an explicit clone, Swift/Go/Python share cheaply; tracking measure for the record-update ergonomics gap (I-172) and what `shared[T]` or a small-string optimization would buy.
+* **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+* **Highlights:** Post-SSO (2026-09-14) Ryo AOT is **second behind Swift** at 14.7 ms — ahead of Go (25.8 ms) and Rust (32.3 ms) — with the manual `p.name + ""` clone now an inline-to-inline concat that never touches the heap. The residual gap to Swift is the clone-ergonomics story (I-172: `Clone` trait or `shared[T]`), not string allocation; Ryo runs 10.2x faster than Python at the lightest RSS of the suite (1.36 MB).
+
 **Focus:** The keep-original record update — what `struct_records` cannot measure. Runs 500,000 rounds of `make_person(i)` → `birthday(p)` → `score(p) + score(q)` on a `Person{name: str, age: int}` record, where the caller **uses `p` again after the update**, so `birthday` cannot consume it. This is the duplicate-and-modify case, and each language pays its own price for keeping both records alive: Rust clones the `String` explicitly (`p.name.clone()` — alloc + memcpy), Swift's value copy retains (SSO keeps the name inline, nearly free), Go shallow-copies the header and shares the immutable backing bytes (GC owns lifetime), Python bumps a refcount, and Ryo writes the clone by hand as `p.name + ""` (borrow the field, concat with empty string, fresh owned `str` — the only way to duplicate a `str` today, since E0043 rejects field moves, structs cannot hold borrows, and there is no `clone` builtin or `shared[T]` yet). **All five languages do the same work and assert the same checksum (54,777,780)** — the difference is purely what "keep the original" costs.
 
 **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
@@ -29,15 +35,3 @@ Re-measured after the string-runtime rework shipped the small-string optimizatio
 | **Python** | 3.14.7 | 150.3 ms ± 2.6 ms | 12.32x slower | 14.58 MB |
 
 Ryo AOT went from 28.7 ms (fourth, 2.40x behind Swift) to 14.7 ms — **second**, ahead of Go (25.8 ms) and Rust (32.3 ms). Swift still leads: its value copy is a plain inline copy with no concat step at all, while Ryo still runs the `p.name + ""` concat machinery (inline, but a copy with length/tag fixups). Closing that residual is the clone-ergonomics story — the `Clone` trait or a `shared[T]` field — not string allocation. Ryo AOT runs **10.2x faster than Python** with ~11x less memory, again at the lightest RSS of the suite.
-
-## How to Run
-
-Prerequisites: `hyperfine`, `rustc`, `swiftc`, `go`, `python3`. The runner builds the release compiler automatically when it uses the repo default `target/release/ryo` (override with `--ryo-bin PATH` or `$RYO_BIN`).
-
-From the repository root:
-
-```bash
-uv run benchmarks/run.py run --benchmarks struct_records_reuse
-```
-
-Add `--dry-run` to build every arm and run only the checksum correctness gate (no hyperfine), or `--languages rust,swift,...` to limit the arms.

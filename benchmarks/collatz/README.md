@@ -1,5 +1,11 @@
 # Collatz Benchmark
 
+## Overview
+
+* **Focus:** Integer loop/branch — total stopping time for seeds 1..1,000,000; a hot flat loop complementing fibonacci's recursion profile.
+* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Highlights:** Ryo AOT runs at **2.14x Rust** (239.0 ms; measured 2026-10-21), decomposed by disassembly diff into ~1.6x the spec §18 checked-arithmetic policy (equally-checked Rust measures ~1.6x, on par with Swift's 1.63x) plus ~1.3x Cranelift aarch64 lowering gaps (`srem x, 2` not folded to a bit test, unfused `sadd_overflow` branches per I-165 — `smul_overflow` fused in 0.136.1 —, unstrength-reduced `mul x, 3`). See below for the breakdown.
+
 **Focus:** Integer loop/branch codegen. Sum of Collatz total stopping times for seeds 1..1,000,000 — a hot integer loop with a data-dependent branch and a function call per seed, complementing fibonacci's deep-recursion call profile with a flat iterative one.
 
 **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
@@ -37,15 +43,3 @@ Per even-path iteration (of 131.4M total loop iterations across the 1M seeds): u
 5. Minor: `collatz_steps` is never inlined (Cranelift has no inliner), so each of the 1M seeds pays a frame-setting call — Swift doesn't inline either and still hits 164 ms.
 
 Closing the residual ~1.3x is compiler work, not a language cost: the `srem`-by-power-of-two fold, `imul`-by-small-constant strength reduction, and the I-165 flag fusion are all Cranelift/codegen items; a TIR-level inliner would address (5).
-
-## How to Run
-
-Prerequisites: `hyperfine`, `rustc`, `swiftc`. The runner builds the release compiler automatically when it uses the repo default `target/release/ryo` (override with `--ryo-bin PATH` or `$RYO_BIN`).
-
-From the repository root:
-
-```bash
-uv run benchmarks/run.py run --benchmarks collatz
-```
-
-Add `--dry-run` to build every arm and run only the checksum correctness gate (no hyperfine), or `--languages rust,swift,...` to limit the arms.

@@ -1,5 +1,11 @@
 # String Building Benchmark
 
+## Overview
+
+* **Focus:** Runtime string ABI + eager destruction — concat over 50,000 iterations; the direct before/after measure for the packed-`u128` runtime ABI.
+* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Highlights:** After the SSO + consuming-concat rework (2026-09-14) Ryo AOT runs at **Rust parity** (1.6 ms vs 1.5 ms) at the lightest RSS — the pre-rework 12.33x gap was allocation policy (a fresh exact-size buffer per concat), not codegen. See below for the full before/after story.
+
 **Focus:** Runtime string ABI + eager destruction. Concat over 50,000 iterations (`s = s + "x"` — now spelled identically in Rust and Ryo). Historically every iteration allocated a fresh buffer through `ryo_str_concat` and eagerly freed the previous one at the reassign; since 2026-09-14 a provably-consuming reassign-concat appends in place with growth headroom, so the loop is amortized O(n) (see the checkpoint below). This is the direct before/after measure for the packed-`u128` string runtime ABI (commit `7d0a047`, return-by-value replacing the per-call-site out-pointer stack slot) — the ABI decision and its rationale are recorded on `pack_pair` in `runtime/src/lib.rs` and pinned by the `clif_string_ops_use_packed_return_no_stack_slots` integration test.
 
 **Languages compared:** Rust, Swift, Ryo (AOT vs JIT), and Python.
@@ -34,15 +40,3 @@ Re-measured after the string-runtime rework landed: `str` is now a tagged 24-byt
 | **Python** | 3.14.7 | 36.4 ms ± 0.4 ms | 24.03x slower | 14.73 MB |
 
 The ~12x gap is closed: Ryo AOT went from 17.7 ms to 1.6 ms, within noise of Rust (1.5 ms) — parity, as predicted above. Peak RSS dropped 2.25 → 1.48 MB, the lightest arm. A same-day re-run on a busier machine confirmed the ranking (Ryo AOT 1.7 ms vs Rust 1.7 ms).
-
-## How to Run
-
-Prerequisites: `hyperfine`, `rustc`, `swiftc`, `python3`. The runner builds the release compiler automatically when it uses the repo default `target/release/ryo` (override with `--ryo-bin PATH` or `$RYO_BIN`).
-
-From the repository root:
-
-```bash
-uv run benchmarks/run.py run --benchmarks string_building
-```
-
-Add `--dry-run` to build every arm and run only the checksum correctness gate (no hyperfine), or `--languages rust,swift,...` to limit the arms.
