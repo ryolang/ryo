@@ -11,16 +11,22 @@ runner: `run` times every arm via hyperfine, `table` renders results, and
 Subcommands: run, table, update-readme.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import tomllib
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -459,13 +465,547 @@ def _ryo_version(path: str) -> str:
     return proc.stdout.strip() or "unavailable"
 
 
+# Retention bound per store key: the historical store is append-only, and
+# each series keeps only its newest entries so committed files stay small.
+_STORE_RETENTION = 20
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _epoch_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _git(args: list[str]) -> str:
+    """Run a read-only git query in the repo root; "" on any failure."""
+    try:
+        proc = subprocess.run(["git", *args], cwd=_REPO_ROOT, capture_output=True, text=True)
+    except OSError:
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
+def _repo_url() -> str:
+    return _git(["config", "--get", "remote.origin.url"]).removesuffix(".git")
+
+
+def _git_commit_id() -> str:
+    return _git(["rev-parse", "--short", "HEAD"])
+
+
+def _git_commit_message() -> str:
+    return _git(["log", "-1", "--pretty=%s"])
+
+
+def _git_commit_timestamp() -> int:
+    stamp = _git(["log", "-1", "--pretty=%ct"])
+    return int(stamp) if stamp.isdigit() else 0
+
+
+def _platform_string() -> str:
+    """Machine identity as os/arch/model, e.g. Darwin/arm64/Apple M3 Max.
+
+    Bare-metal timings are only interpretable next to the machine they were
+    captured on, so the model name is stamped via sysctl hw.model.
+    """
+    os_name = platform.system() or "unknown"
+    arch = platform.machine() or "unknown"
+    model = ""
+    try:
+        proc = subprocess.run(["sysctl", "-n", "hw.model"], capture_output=True, text=True)
+        if proc.returncode == 0:
+            model = proc.stdout.strip()
+    except OSError:
+        pass
+    return f"{os_name}/{arch}/{model}" if model else f"{os_name}/{arch}"
+
+
+def _hyperfine_version() -> str:
+    binary = shutil.which("hyperfine")
+    if binary is None:
+        return "unavailable"
+    try:
+        proc = subprocess.run([binary, "--version"], capture_output=True, text=True)
+    except OSError:
+        return "unavailable"
+    if proc.returncode != 0:
+        return "unavailable"
+    return proc.stdout.strip().removeprefix("hyperfine").strip() or "unavailable"
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def store_key(suite: Suite, arm: Arm) -> str:
+    """History-series key for one arm; the group segment is omitted when absent."""
+    return f"{suite.name}/{arm.group + '/' if arm.group else ''}{arm.name}"
+
+
+@dataclass
+class ArmResult:
+    """One measured arm: the manifest arm plus its parsed timing."""
+
+    arm: Arm
+    timing: ArmTiming
+
+
+@dataclass
+class SuiteResult:
+    suite: Suite
+    date: str
+    git_commit: str
+    platform: str
+    hyperfine_version: str
+    ryo: RyoInfo
+    versions: dict[str, str]
+    arm_results: list[ArmResult]
+
+    def to_run_json(self, previous: Store | None) -> dict:
+        """Agent-contract JSON for one suite.
+
+        Per-arm ``previous`` (the store's latest entry for the arm's key) is
+        included when the store has an earlier measurement.
+        """
+        arms = []
+        for arm_result in self.arm_results:
+            timing = arm_result.timing
+            arm_json = {
+                "name": arm_result.arm.name,
+                "language": arm_result.arm.language,
+                "time_ms": {
+                    "mean": timing.time_ms_mean,
+                    "stddev": timing.time_ms_stddev,
+                    "min": timing.time_ms_min,
+                    "max": timing.time_ms_max,
+                },
+                "peak_rss_mb": {"mean": timing.rss_mb_mean},
+                "hyperfine": {},
+            }
+            if previous is not None:
+                entry = previous.latest(store_key(self.suite, arm_result.arm))
+                if entry is not None:
+                    benches = {b["name"]: b["value"] for b in entry["benches"]}
+                    arm_json["previous"] = {
+                        "time_ms_mean": benches.get("time"),
+                        "peak_rss_mb_mean": benches.get("memory_peak_rss"),
+                    }
+            arms.append(arm_json)
+        return {
+            "name": self.suite.name,
+            "descriptor": self.suite.descriptor,
+            "versions": self.versions,
+            "arms": arms,
+        }
+
+
+@dataclass
+class Store:
+    """github-action-benchmark-compatible historical store for one suite.
+
+    Shape: {"lastUpdate": <epoch ms>, "repoUrl": <git remote>, "entries":
+    {key: [{commit: {id, message, timestamp, url}, date, tool: "custom",
+    benches: [...]}]}}. ``append`` prunes each key's series to the newest
+    ``_STORE_RETENTION`` entries; ``save`` rewrites the whole file.
+    """
+
+    path: Path
+    repo_url: str
+    entries: dict[str, list[dict]]
+    last_update: int = 0
+
+    @classmethod
+    def load(cls, path: Path) -> Store:
+        repo_url = _repo_url()
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return cls(
+                path=path,
+                repo_url=data.get("repoUrl") or repo_url,
+                entries=data.get("entries") or {},
+                last_update=data.get("lastUpdate") or 0,
+            )
+        return cls(path=path, repo_url=repo_url, entries={})
+
+    def append(self, suite_result: SuiteResult) -> None:
+        for arm_result in suite_result.arm_results:
+            key = store_key(suite_result.suite, arm_result.arm)
+            series = self.entries.setdefault(key, [])
+            series.append(self._entry(suite_result, arm_result))
+            del series[:-_STORE_RETENTION]
+
+    def latest(self, key: str) -> dict | None:
+        series = self.entries.get(key)
+        return series[-1] if series else None
+
+    def save(self) -> None:
+        self.last_update = _epoch_ms()
+        _write_json(
+            self.path,
+            {"lastUpdate": self.last_update, "repoUrl": self.repo_url, "entries": self.entries},
+        )
+
+    def _entry(self, suite_result: SuiteResult, arm_result: ArmResult) -> dict:
+        commit_id = suite_result.git_commit
+        language = arm_result.arm.language
+        tool = TOOL_FOR_LANGUAGE.get(language.lower(), language)
+        if tool == "$ryo":
+            tool = "ryo"
+        toolchain = suite_result.versions.get(language, "unavailable")
+        timing = arm_result.timing
+        return {
+            "commit": {
+                "id": commit_id,
+                "message": _git_commit_message(),
+                "timestamp": _git_commit_timestamp(),
+                "url": f"{self.repo_url}/commit/{commit_id}" if self.repo_url else "",
+            },
+            "date": _epoch_ms(),
+            "tool": "custom",
+            "benches": [
+                {
+                    "name": "time",
+                    "value": timing.time_ms_mean,
+                    "unit": "ms",
+                    "extra": (
+                        f"mean wall clock; hyperfine {suite_result.hyperfine_version}; "
+                        f"{tool} {toolchain}"
+                    ),
+                },
+                {
+                    "name": "memory_peak_rss",
+                    "value": timing.rss_mb_mean,
+                    "unit": "MB",
+                    "extra": "max resident set size; mean of runs",
+                },
+            ],
+        }
+
+
+@dataclass
+class RunSummary:
+    exit_code: int
+    suites: list[SuiteResult]
+    failures: list[str]
+    skipped: list[dict]
+
+
+class SelectionError(ValueError):
+    """A --benchmarks name matches no discovered suite."""
+
+
+def _split_names(raw: str | None) -> list[str] | None:
+    if raw is None:
+        return None
+    return [name.strip() for name in raw.split(",") if name.strip()]
+
+
+def _validate_languages(suites: list[Suite], languages: list[str] | None) -> str | None:
+    """Return an error string for --languages names no selected arm speaks.
+
+    A typo'd language name is programmer error, not environment, so it fails
+    immediately instead of silently running nothing.
+    """
+    if not languages:
+        return None
+    known = {arm.language.lower() for suite in suites for arm in suite.arms}
+    unknown = [name for name in languages if name.lower() not in known]
+    if unknown:
+        available = ", ".join(sorted(known))
+        return f"unknown --languages name(s): {', '.join(unknown)} (available: {available})"
+    return None
+
+
+def _select_suites(filter_raw: str | None) -> list[Suite]:
+    """Discover benchmarks/*/suite.toml and optionally filter by suite name."""
+    paths = sorted((_REPO_ROOT / "benchmarks").glob("*/suite.toml"))
+    suites = [load_suite(path) for path in paths]
+    wanted = _split_names(filter_raw)
+    if wanted is None:
+        return suites
+    by_name = {suite.name: suite for suite in suites}
+    unknown = [name for name in wanted if name not in by_name]
+    if unknown:
+        available = ", ".join(sorted(by_name))
+        raise SelectionError(
+            f"unknown --benchmarks name(s): {', '.join(unknown)} (available: {available})"
+        )
+    return [by_name[name] for name in wanted]
+
+
+def _run_suite(
+    suite: Suite,
+    arms: list[Arm],
+    ryo: RyoInfo,
+    dry_run: bool,
+    git_commit: str,
+    platform_str: str,
+    hyperfine_version: str,
+) -> tuple[SuiteResult | None, str | None]:
+    """Build, gate, and time each arm in manifest order.
+
+    Arms are pipelined one at a time so a mid-suite failure — a later arm
+    failing the correctness gate, or hyperfine dying on a flaky arm — leaves
+    the already measured arms' results intact for the run JSON. The caller
+    writes the store only when the returned failure is None.
+    """
+    arm_results: list[ArmResult] = []
+    versions: dict[str, str] = {}
+    versions_captured = False
+
+    def snapshot() -> SuiteResult:
+        return SuiteResult(
+            suite=suite,
+            date=_utc_now_iso(),
+            git_commit=git_commit,
+            platform=platform_str,
+            hyperfine_version=hyperfine_version,
+            ryo=ryo,
+            versions=versions,
+            arm_results=list(arm_results),
+        )
+
+    for arm in arms:
+        try:
+            build_arm(arm, suite, ryo.path)
+        except BuildError as exc:
+            return snapshot(), (
+                f"suite '{suite.name}': build failed for arm '{arm.name}': {exc.output.strip()}"
+            )
+        try:
+            matched, output = check_output(arm, suite, ryo.path)
+        except OSError as exc:
+            return snapshot(), (
+                f"suite '{suite.name}': correctness gate failed for arm '{arm.name}': "
+                f"cannot execute: {exc}"
+            )
+        if not matched:
+            return snapshot(), (
+                f"suite '{suite.name}': correctness gate failed for arm '{arm.name}': "
+                f"expected {arm.expect!r}, got {output!r}"
+            )
+        if dry_run:
+            continue
+        if not versions_captured:
+            versions = capture_versions(suite, arms, ryo.path)
+            versions_captured = True
+        label = f"{suite.name}/{arm.name}"
+        try:
+            raw = run_hyperfine(substitute_run(arm.run, ryo.path), suite.warmup, suite.dir, label)
+        except HyperfineError as exc:
+            return snapshot(), (
+                f"suite '{suite.name}': hyperfine failed for arm '{arm.name}': "
+                f"{exc.stderr.strip()}"
+            )
+        arm_results.append(ArmResult(arm=arm, timing=parse_summary(raw)))
+
+    if dry_run:
+        return None, None
+    return snapshot(), None
+
+
+def run_suites(
+    suites: list[Suite],
+    languages: list[str] | None = None,
+    ryo: RyoInfo | None = None,
+    store_dir: Path | None = None,
+    json_path: Path | None = None,
+    dry_run: bool = False,
+    strict: bool = False,
+) -> RunSummary:
+    """Run the build/gate/benchmark pipeline for every suite and accumulate results.
+
+    Arms whose toolchain is missing are skipped (warning to stderr, entry in
+    the skipped list) unless strict, in which case the run fails before any
+    benchmarking. The store is written only for suites with no hard failure;
+    the run JSON is flushed after each suite in which at least one arm ran.
+    Exit code: 0 = every selected arm ran, 2 = one or more arms skipped and
+    none hard-failed, 1 = any hard failure.
+    """
+    language_error = _validate_languages(suites, languages)
+    if language_error is not None:
+        print(f"error: {language_error}", file=sys.stderr)
+        return RunSummary(exit_code=1, suites=[], failures=[language_error], skipped=[])
+    if ryo is None:
+        ryo = resolve_ryo(None, needs_build=False)
+    if store_dir is None:
+        store_dir = _REPO_ROOT / "benchmarks" / "data"
+
+    language_filter = {name.lower() for name in languages} if languages else None
+    platform_str = _platform_string()
+    hyperfine_version = _hyperfine_version()
+    git_commit = _git_commit_id()
+    generated_at = _utc_now_iso()
+    platform_os, _, platform_rest = platform_str.partition("/")
+    platform_arch = platform_rest.partition("/")[0]
+
+    results: list[SuiteResult] = []
+    suite_jsons: list[dict] = []
+    failures: list[str] = []
+    skipped: list[dict] = []
+
+    for suite in suites:
+        selected = [
+            arm
+            for arm in suite.arms
+            if language_filter is None or arm.language.lower() in language_filter
+        ]
+        missing = missing_tools(suite, selected, ryo.path)
+        if missing and strict:
+            detail = ", ".join(f"arm '{arm.name}' needs '{tool}'" for arm, tool in missing)
+            failure = f"suite '{suite.name}': missing toolchain(s) under --strict: {detail}"
+            print(f"error: {failure}", file=sys.stderr)
+            return RunSummary(
+                exit_code=1, suites=results, failures=failures + [failure], skipped=skipped
+            )
+
+        runnable: list[Arm] = []
+        for arm in selected:
+            tool = next((tool for candidate, tool in missing if candidate is arm), None)
+            if tool is not None:
+                print(
+                    f"warning: suite '{suite.name}': skipping arm '{arm.name}' "
+                    f"({arm.language}): missing toolchain '{tool}'",
+                    file=sys.stderr,
+                )
+                skipped.append(
+                    {
+                        "arm": arm.name,
+                        "language": arm.language,
+                        "reason": f"missing toolchain: {tool}",
+                    }
+                )
+            else:
+                runnable.append(arm)
+        if not runnable:
+            continue
+
+        result, failure = _run_suite(
+            suite, runnable, ryo, dry_run, git_commit, platform_str, hyperfine_version
+        )
+        if failure is not None:
+            failures.append(failure)
+            print(f"error: {failure}", file=sys.stderr)
+        if result is None:
+            if failure is None:
+                print(
+                    f"[{suite.name}] dry-run OK: {len(runnable)} arm(s) built and passed "
+                    "the correctness gate",
+                    file=sys.stderr,
+                )
+            continue
+        if not result.arm_results:
+            # Nothing measured for this suite (e.g. the first arm failed the
+            # gate); any failure is already recorded above.
+            continue
+
+        results.append(result)
+        if failure is None:
+            store = Store.load(store_dir / f"{suite.name}.json")
+            suite_json = result.to_run_json(previous=store)
+            store.append(result)
+            store.save()
+            print(
+                f"[{suite.name}] {len(result.arm_results)} arm(s) measured; store updated",
+                file=sys.stderr,
+            )
+        else:
+            suite_json = result.to_run_json(previous=None)
+        suite_jsons.append(suite_json)
+
+        if json_path is not None:
+            _write_json(
+                json_path,
+                {
+                    "generated_at": generated_at,
+                    "git_commit": git_commit,
+                    "platform": {"os": platform_os, "arch": platform_arch},
+                    "hyperfine_version": hyperfine_version,
+                    "ryo": {"path": ryo.path, "version": ryo.version, "built": ryo.built},
+                    "status": "partial" if (failures or skipped) else "complete",
+                    "skipped": skipped,
+                    "suites": suite_jsons,
+                },
+            )
+
+    exit_code = 1 if failures else (2 if skipped else 0)
+    return RunSummary(exit_code=exit_code, suites=results, failures=failures, skipped=skipped)
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    """Entry point for the ``run`` subcommand: select, resolve, run, report."""
+    try:
+        suites = _select_suites(getattr(args, "benchmarks", None))
+    except (SelectionError, ManifestError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    languages = _split_names(getattr(args, "languages", None))
+    language_error = _validate_languages(suites, languages)
+    if language_error is not None:
+        print(f"error: {language_error}", file=sys.stderr)
+        return 1
+
+    ryo = resolve_ryo(getattr(args, "ryo_bin", None), needs_build=True)
+    if ryo.built:
+        print(f"ryo: built {ryo.path} ({ryo.version})", file=sys.stderr)
+    else:
+        print(f"ryo: {ryo.path} ({ryo.version})", file=sys.stderr)
+
+    summary = run_suites(
+        suites,
+        languages=languages,
+        ryo=ryo,
+        json_path=Path(args.json_path) if getattr(args, "json_path", None) else None,
+        dry_run=bool(getattr(args, "dry_run", False)),
+        strict=bool(getattr(args, "strict", False)),
+    )
+    return summary.exit_code
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="benchmarks/run.py",
         description="Centralized benchmark runner driven by suite.toml manifests.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True, metavar="command")
-    subparsers.add_parser("run", help="Time every arm of a suite via hyperfine.")
+    run_parser = subparsers.add_parser("run", help="Time every arm of a suite via hyperfine.")
+    run_parser.add_argument(
+        "--benchmarks",
+        metavar="NAMES",
+        help="Comma-separated suite names to run (default: every discovered suite).",
+    )
+    run_parser.add_argument(
+        "--languages",
+        metavar="NAMES",
+        help="Comma-separated arm languages to run (default: every arm).",
+    )
+    run_parser.add_argument(
+        "--json",
+        dest="json_path",
+        metavar="PATH",
+        help="Write the incremental run JSON to PATH after each completed suite.",
+    )
+    run_parser.add_argument(
+        "--ryo-bin",
+        metavar="PATH",
+        help="Path to the ryo binary (default: $RYO_BIN or target/release/ryo).",
+    )
+    run_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Build and run the correctness gate only; never invoke hyperfine.",
+    )
+    run_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Fail before benchmarking when a selected toolchain is missing.",
+    )
     subparsers.add_parser("table", help="Render results tables from the data store.")
     subparsers.add_parser(
         "update-readme", help="Splice result tables into suite READMEs."
@@ -473,7 +1013,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "run":
-        raise SystemExit("not implemented yet")
+        return cmd_run(args)
     if args.command == "table":
         raise SystemExit("not implemented yet")
     raise SystemExit("not implemented yet")
