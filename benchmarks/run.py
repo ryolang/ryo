@@ -744,8 +744,8 @@ class Store:
 
 # --- table rendering (the `table` subcommand) ---
 
-_TABLE_HEADER = "| Arm | Time | Peak RSS | Version |"
-_TABLE_SEPARATOR = "|---|---|---|---|"
+_TABLE_HEADER = "| Language or Arm | Version | Mean Time | Speed vs Best | Memory |"
+_TABLE_SEPARATOR = "|---|---|---|---|---|"
 _NO_MEASUREMENT = "—"
 
 
@@ -759,6 +759,31 @@ def _toolchain_from_extra(extra: str | None) -> str:
     if not extra:
         return _NO_MEASUREMENT
     return extra.split("; ")[-1].strip() or _NO_MEASUREMENT
+
+
+def _bare_version(entry: dict | None) -> str:
+    """Version from the time bench's ``extra`` toolchain, tool name stripped.
+
+    "rustc 1.98.0" -> "1.98.0"; "ryo 0.1.0-dev.20261021+sha" keeps the full
+    version after the tool name. "—" when the entry or its toolchain is absent.
+    """
+    bench = _time_bench(entry)
+    if bench is None:
+        return _NO_MEASUREMENT
+    toolchain = _toolchain_from_extra(bench.get("extra"))
+    if toolchain == _NO_MEASUREMENT:
+        return toolchain
+    tokens = toolchain.split(maxsplit=1)
+    return tokens[1] if len(tokens) > 1 else tokens[0]
+
+
+def _speed_vs_best(value: float, fastest: float | None) -> str:
+    """Ratio of ``value`` to the group's fastest measured time."""
+    if fastest is None:
+        return _NO_MEASUREMENT
+    if value == fastest:
+        return "1.00x"
+    return f"{value / fastest:.2f}x slower"
 
 
 def _hyperfine_from_extra(extra: str | None) -> str | None:
@@ -783,18 +808,28 @@ def _grouped_arms(arms: list[Arm]) -> list[tuple[str | None, list[Arm]]]:
     return groups
 
 
-def _table_cells(arm: Arm, entry: dict | None) -> list[str]:
-    time_str = rss_str = version_str = _NO_MEASUREMENT
-    if entry is not None:
-        benches = {b["name"]: b for b in entry["benches"]}
-        time_bench = benches.get("time")
-        if time_bench is not None and time_bench["value"] is not None:
-            time_str = f"{_format_cell_value(time_bench['value'])} ms"
-            version_str = _toolchain_from_extra(time_bench.get("extra"))
-        rss_bench = benches.get("memory_peak_rss")
-        if rss_bench is not None and rss_bench["value"] is not None:
-            rss_str = f"{_format_cell_value(rss_bench['value'])} MB"
-    return [arm.name, time_str, rss_str, version_str]
+def _table_cells(arm: Arm, entry: dict | None, speed: str, star_memory: bool) -> list[str]:
+    """One five-column row: arm, bare version, mean time, speed vs best, memory.
+
+    ``entry`` is None for unmeasured arms, so every cell renders "—". The
+    memory cell carries a leading "⭐ " when ``star_memory`` is set (the arm's
+    RSS equals the group's lowest measured RSS).
+    """
+    time_bench = _time_bench(entry)
+    time_str = (
+        f"{_format_cell_value(time_bench['value'])} ms"
+        if time_bench is not None
+        else _NO_MEASUREMENT
+    )
+    rss_bench = _rss_bench(entry)
+    rss_str = (
+        f"{_format_cell_value(rss_bench['value'])} MB"
+        if rss_bench is not None
+        else _NO_MEASUREMENT
+    )
+    if star_memory:
+        rss_str = f"⭐ {rss_str}"
+    return [arm.name, _bare_version(entry), time_str, speed, rss_str]
 
 
 def _caption(platform_str: str, newest: dict | None, warmup: int) -> str:
@@ -819,11 +854,15 @@ def render_suite_table(suite: Suite, store: Store) -> str:
 
     One table per group of consecutive arms (ungrouped arms share a single
     table, grouped tables carry a ``#### <group>`` heading); every table is
-    followed by the caption line. Arms with no store entry, or whose memory
-    bench was never measured, render "—" in the affected cells. The caption's
-    date/commit/hyperfine come from the table's newest entry; the platform is
-    stamped at render time (the store schema has no machine field) and the
-    warmup comes from the manifest.
+    followed by the caption line. Within a group, measured arms sort by
+    ascending mean time — fastest first, each row's Speed vs Best expressed
+    against the group's fastest measured time ("1.00x" for the fastest) — and
+    unmeasured arms (no store entry, or no measured time bench) render "—" in
+    every cell and sort last in manifest order. The Memory cell of the arm
+    whose RSS equals the group's lowest measured RSS carries a "⭐ ". The
+    caption's date/commit/hyperfine come from the table's newest entry; the
+    platform is stamped at render time (the store schema has no machine field)
+    and the warmup comes from the manifest.
     """
     platform_str = _platform_string()
     sections = []
@@ -832,11 +871,35 @@ def render_suite_table(suite: Suite, store: Store) -> str:
         lines.append(_TABLE_HEADER)
         lines.append(_TABLE_SEPARATOR)
         newest: dict | None = None
+        measured: list[tuple[float, Arm, dict]] = []
+        unmeasured: list[tuple[Arm, dict | None]] = []
         for arm in arms:
             entry = store.latest(store_key(suite, arm))
             if entry is not None and (newest is None or entry["date"] > newest["date"]):
                 newest = entry
-            lines.append("| " + " | ".join(_table_cells(arm, entry)) + " |")
+            bench = _time_bench(entry)
+            if bench is None:
+                unmeasured.append((arm, entry))
+            else:
+                measured.append((bench["value"], arm, entry))
+        measured.sort(key=lambda row: row[0])
+        group_fastest = measured[0][0] if measured else None
+        rss_values = [
+            bench["value"] for _, _, entry in measured if (bench := _rss_bench(entry)) is not None
+        ]
+        group_leanest = min(rss_values) if rss_values else None
+        for time, arm, entry in measured:
+            rss_bench = _rss_bench(entry)
+            star = (
+                group_leanest is not None
+                and rss_bench is not None
+                and rss_bench["value"] == group_leanest
+            )
+            cells = _table_cells(arm, entry, _speed_vs_best(time, group_fastest), star)
+            lines.append("| " + " | ".join(cells) + " |")
+        for arm, _ in unmeasured:
+            cells = _table_cells(arm, None, _NO_MEASUREMENT, False)
+            lines.append("| " + " | ".join(cells) + " |")
         lines.append(_caption(platform_str, newest, suite.warmup))
         sections.append("\n".join(lines))
     return "\n\n".join(sections)

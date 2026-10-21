@@ -30,6 +30,23 @@ run = "/bin/echo b"
 expect = "b"
 """
 
+UNMEASURED_FIRST_SUITE = """
+name = "synthetic"
+warmup = 3
+
+[[arm]]
+name = "Swift"
+language = "swift"
+run = "/bin/echo b"
+expect = "b"
+
+[[arm]]
+name = "Rust"
+language = "rust"
+run = "/bin/echo a"
+expect = "a"
+"""
+
 GROUPED_SUITE = """
 name = "grouped"
 warmup = 5
@@ -112,10 +129,10 @@ def test_ungrouped_suite_renders_exact_table(tmp_path, fixed_platform):
         },
     )
     assert render_suite_table(suite, store) == (
-        "| Arm | Time | Peak RSS | Version |\n"
-        "|---|---|---|---|\n"
-        "| Rust | 12.3 ms | 4.5 MB | rustc 1.85.0 |\n"
-        "| Swift | 7 ms | — | swiftc 6.3.3 |\n"
+        "| Language or Arm | Version | Mean Time | Speed vs Best | Memory |\n"
+        "|---|---|---|---|---|\n"
+        "| Swift | 6.3.3 | 7 ms | 1.00x | — |\n"
+        "| Rust | 1.85.0 | 12.3 ms | 1.76x slower | ⭐ 4.5 MB |\n"
         "Measured on Darwin/arm64/Apple M3 Max, 2026-10-21 "
         "(commit abc1234, hyperfine 2.0.0, warmup 3)"
     )
@@ -132,16 +149,16 @@ def test_grouped_suite_renders_heading_per_group(tmp_path, fixed_platform):
     )
     assert render_suite_table(suite, store) == (
         "#### hand-rolled\n"
-        "| Arm | Time | Peak RSS | Version |\n"
-        "|---|---|---|---|\n"
-        "| Ryo (AOT) | 2.7 ms | 2.75 MB | ryo 0.1.0 |\n"
+        "| Language or Arm | Version | Mean Time | Speed vs Best | Memory |\n"
+        "|---|---|---|---|---|\n"
+        "| Ryo (AOT) | 0.1.0 | 2.7 ms | 1.00x | ⭐ 2.75 MB |\n"
         "Measured on Darwin/arm64/Apple M3 Max, 2026-10-21 "
         "(commit abc1234, hyperfine 2.0.0, warmup 5)\n"
         "\n"
         "#### stdlib\n"
-        "| Arm | Time | Peak RSS | Version |\n"
-        "|---|---|---|---|\n"
-        "| Go | 1.6 ms | 3 MB | go 1.24.0 |\n"
+        "| Language or Arm | Version | Mean Time | Speed vs Best | Memory |\n"
+        "|---|---|---|---|---|\n"
+        "| Go | 1.24.0 | 1.6 ms | 1.00x | ⭐ 3 MB |\n"
         "Measured on Darwin/arm64/Apple M3 Max, 2026-10-21 "
         "(commit abc1234, hyperfine 2.0.0, warmup 5)"
     )
@@ -149,7 +166,7 @@ def test_grouped_suite_renders_heading_per_group(tmp_path, fixed_platform):
 
 def test_missing_memory_bench_renders_dash(tmp_path, fixed_platform):
     """A hyperfine export without memory_peak_resident stores rss value None;
-    the Peak RSS cell must render as — while time still renders."""
+    the Memory cell must render as — while time still renders."""
     suite = write_suite(tmp_path, TWO_ARM_SUITE)
     store = write_store(
         tmp_path / "data" / "synthetic.json",
@@ -159,11 +176,11 @@ def test_missing_memory_bench_renders_dash(tmp_path, fixed_platform):
         },
     )
     table = render_suite_table(suite, store)
-    assert "| Swift | 7 ms | — | swiftc 6.3.3 |" in table
-    assert "| Rust | 12.3 ms | 4.5 MB | rustc 1.85.0 |" in table
+    assert "| Swift | 6.3.3 | 7 ms | 1.00x | — |" in table
+    assert "| Rust | 1.85.0 | 12.3 ms | 1.76x slower | ⭐ 4.5 MB |" in table
 
 
-def test_version_cell_comes_from_store_extra_toolchain_string(tmp_path, fixed_platform):
+def test_version_cell_is_bare_version_stripped_of_tool_name(tmp_path, fixed_platform):
     toolchain = "ryo 0.1.0-dev.20261021+63078ac"
     suite = write_suite(tmp_path, GROUPED_SUITE)
     store = write_store(
@@ -174,7 +191,56 @@ def test_version_cell_comes_from_store_extra_toolchain_string(tmp_path, fixed_pl
         },
     )
     table = render_suite_table(suite, store)
-    assert f"| Ryo (AOT) | 2.7 ms | 2.75 MB | {toolchain} |" in table
+    assert "| Ryo (AOT) | 0.1.0-dev.20261021+63078ac | 2.7 ms | 1.00x | ⭐ 2.75 MB |" in table
+
+
+def test_table_uses_historical_format_and_sorts_fastest_first(tmp_path, fixed_platform):
+    suite = write_suite(tmp_path, TWO_ARM_SUITE)
+    store = write_store(
+        tmp_path / "data" / "synthetic.json",
+        {
+            "synthetic/Rust": [make_entry(100.0, 1.5, toolchain="rustc 1.98.0")],
+            "synthetic/Swift": [
+                make_entry(200.0, 1.4, toolchain="ryo 0.1.0-dev.20261021+63078ac")
+            ],
+        },
+    )
+    text = render_suite_table(suite, store)
+    assert "| Language or Arm | Version | Mean Time | Speed vs Best | Memory |" in text
+    assert "| Rust | 1.98.0 | 100 ms | 1.00x | 1.5 MB |" in text
+    assert "| Swift | 0.1.0-dev.20261021+63078ac | 200 ms | 2.00x slower | ⭐ 1.4 MB |" in text
+    assert text.index("| Rust |") < text.index("| Swift |")
+
+
+def test_table_stars_leanest_memory_only(tmp_path, fixed_platform):
+    """The lowest measured RSS cell carries ⭐; every other Memory cell does not."""
+    suite = write_suite(tmp_path, TWO_ARM_SUITE)
+    store = write_store(
+        tmp_path / "data" / "synthetic.json",
+        {
+            "synthetic/Rust": [make_entry(100.0, 1.5, toolchain="rustc 1.98.0")],
+            "synthetic/Swift": [make_entry(50.0, 1.4, toolchain="swiftc 6.3.3")],
+        },
+    )
+    text = render_suite_table(suite, store)
+    # Swift is fastest now, so ⭐ must ride on memory, not on row order.
+    assert "| Swift | 6.3.3 | 50 ms | 1.00x | ⭐ 1.4 MB |" in text
+    assert "| Rust | 1.98.0 | 100 ms | 2.00x slower | 1.5 MB |" in text
+    assert text.count("⭐") == 1
+
+
+def test_unmeasured_arm_renders_dashes_and_sorts_last(tmp_path, fixed_platform):
+    """An arm with no store entry renders — in every cell, after the measured
+    arms, regardless of its manifest position."""
+    suite = write_suite(tmp_path, UNMEASURED_FIRST_SUITE)
+    store = write_store(
+        tmp_path / "data" / "synthetic.json",
+        {"synthetic/Rust": [make_entry(12.3, 4.5, toolchain="rustc 1.85.0")]},
+    )
+    text = render_suite_table(suite, store)
+    assert "| Swift | — | — | — | — |" in text
+    assert "| Rust | 1.85.0 | 12.3 ms | 1.00x | ⭐ 4.5 MB |" in text
+    assert text.index("| Rust |") < text.index("| Swift |")
 
 
 def _patch_discovery(monkeypatch, tmp_path: Path, suite: run.Suite) -> None:
@@ -193,7 +259,7 @@ def test_cmd_table_prints_to_stdout(tmp_path, fixed_platform, monkeypatch, capsy
     assert cmd_table(argparse.Namespace(benchmarks=None, out=None)) == 0
 
     out = capsys.readouterr().out
-    assert out.startswith("| Arm | Time | Peak RSS | Version |\n")
+    assert out.startswith("| Language or Arm | Version | Mean Time | Speed vs Best | Memory |\n")
     assert "(commit abc1234, hyperfine 2.0.0, warmup 3)" in out
     assert out.endswith("\n")
 
@@ -212,7 +278,9 @@ def test_cmd_table_writes_out_file_instead_of_stdout(
     assert cmd_table(argparse.Namespace(benchmarks=None, out=str(out_path))) == 0
 
     text = out_path.read_text(encoding="utf-8")
-    assert text.startswith("#### hand-rolled\n| Arm | Time | Peak RSS | Version |")
+    assert text.startswith(
+        "#### hand-rolled\n| Language or Arm | Version | Mean Time | Speed vs Best | Memory |"
+    )
     assert "(commit abc1234, hyperfine 2.0.0, warmup 5)" in text
     assert text.endswith("\n")
     assert capsys.readouterr().out == ""

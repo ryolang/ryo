@@ -434,10 +434,10 @@ def test_cmd_update_readme_splices_suite_and_root_readmes(
         "Rust takes 12.3 ms here.\n"
         "\n"
         "<!-- BENCH:START -->\n"
-        "| Arm | Time | Peak RSS | Version |\n"
-        "|---|---|---|---|\n"
-        "| Rust | 12.3 ms | 4.5 MB | rustc 1.85.0 |\n"
-        "| Ryo (AOT) | 2.7 ms | 2.75 MB | ryo 0.1.0 |\n"
+        "| Language or Arm | Version | Mean Time | Speed vs Best | Memory |\n"
+        "|---|---|---|---|---|\n"
+        "| Ryo (AOT) | 0.1.0 | 2.7 ms | 1.00x | ⭐ 2.75 MB |\n"
+        "| Rust | 1.85.0 | 12.3 ms | 4.56x slower | 4.5 MB |\n"
         "Measured on Darwin/arm64/Apple M3 Max, 2026-10-21 "
         "(commit abc1234, hyperfine 2.0.0, warmup 3)\n"
         "<!-- BENCH:END -->\n"
@@ -568,7 +568,7 @@ def test_cmd_update_readme_benchmarks_filter_keeps_all_suites_in_root_summary(
     assert cmd_update_readme(argparse.Namespace(benchmarks="synthetic")) == 0
 
     # Only the selected suite's README is spliced.
-    assert "| Ryo (AOT) | 2.7 ms |" in suite_readme.read_text(encoding="utf-8")
+    assert "| Ryo (AOT) | 0.1.0 | 2.7 ms |" in suite_readme.read_text(encoding="utf-8")
     assert two_readme.read_text(encoding="utf-8") == two_text
     # The root summary still carries both suites' rows.
     summary = root_readme.read_text(encoding="utf-8")
