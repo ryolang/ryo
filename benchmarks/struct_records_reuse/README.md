@@ -19,6 +19,19 @@ Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09
 <!-- BENCH:START -->
 <!-- BENCH:END -->
 
+### Checkpoint: pre-SSO baseline (2026-09-11)
+
+Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-11, at Ryo revision `e2db4c6`; later branch commits through `b3b7d25` touch only benchmark files and docs — no compiler code — so these numbers remain directly comparable with suites re-measured at `b3b7d25`. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
+
+| Candidate | Version | Mean time | vs fastest | Max RSS |
+|---|---|---|---|---|
+| **Swift** | 6.3.3 | 12.0 ms ± 0.7 ms | 1.00x | 1.58 MB |
+| **Go** | 1.27.1 | 24.9 ms ± 0.5 ms | 2.08x slower | 9.80 MB |
+| **Ryo (AOT)** | 0.1.0-dev.20260911+e2db4c6 | 28.7 ms ± 0.7 ms | 2.40x slower | 1.36 MB |
+| **Ryo (JIT)** | 0.1.0-dev.20260911+e2db4c6 | 31.3 ms ± 0.7 ms | 2.61x slower | 5.33 MB |
+| **Rust** | 1.98.0 | 31.6 ms ± 0.8 ms | 2.64x slower | 1.52 MB |
+| **Python** | 3.14.7 | 148.9 ms ± 2.2 ms | 12.44x slower | 14.61 MB |
+
 The ranking is the cost of sharing, read directly. Swift wins because SSO keeps every name inline — its "clone" never touches the heap. Go is second: no clone at all, just a shared header — paid for in GC headroom (9.80 MB RSS, 7x Ryo's). Ryo and Rust both pay a real per-round alloc + memcpy and land together, Ryo AOT ahead of Rust (28.7 vs 31.6 ms) on the strength of cheaper string formatting; Ryo's deficit here is ergonomic, not runtime — `p.name + ""` *is* the clone, and it performs like one. The gap to Swift/Go at this checkpoint is what `shared[T]` (retain instead of copy) or a small-string optimization would close; the small-string optimization shipped on 2026-09-14 (names ≤ 23 bytes live inline in the record) — the re-checkpoint below shows Ryo AOT jumping past Go and Rust to second behind Swift, so the residual gap is the clone-ergonomics/`shared[T]` story, not string allocation. Ryo AOT runs **5.2x faster than Python** with ~11x less memory, again at the lightest RSS of the suite.
 
 ### Checkpoint: SSO + consuming concat (2026-09-14)

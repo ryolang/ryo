@@ -31,6 +31,17 @@ Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09
 <!-- BENCH:START -->
 <!-- BENCH:END -->
 
+### Checkpoint: baseline (2026-09-17)
+
+Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-17 — first run with all arms string-semantic and idiomatic; before this date the Rust and Swift arms scanned raw bytes, so older tables in git history are not comparable (that workload now lives in [`byte_slicing`](../byte_slicing/)). Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
+
+| Candidate | Version | Mean time | vs fastest | Max RSS |
+|---|---|---|---|---|
+| **Rust** | 1.98.0 | 1.8 ms ± 0.2 ms | 1.00x | 2.88 MB |
+| **Ryo (AOT)** | 0.1.0-dev.20260917+63078ac | 3.4 ms ± 0.2 ms | 1.89x slower | 2.75 MB |
+| **Ryo (JIT)** | 0.1.0-dev.20260917+63078ac | 4.9 ms ± 0.3 ms | 2.72x slower | 7.05 MB |
+| **Swift** | 6.3.3 | 17.6 ms ± 1.4 ms | 9.78x slower | 7.03 MB |
+
 ## Known tradeoff: growth headroom on doubling concat (2026-09-15)
 
 CodSpeed's memory mode flags this benchmark as a **+48.8% peak-allocation regression** (1.0 → 1.5 MB) after the string-runtime rework — with the allocation count unchanged at 14. The arithmetic is exact: the 14 doubling concats (`s = s + s` on a 43-byte seed) now route through the growth path, and `growth_cap` rounds every buffer up to the next power of two, so iteration *i* allocates 64×2^i bytes instead of exactly 43×2^i — and 64/43 = 1.488. This is the cost side of the same policy that makes `s = s + suffix` amortized O(1) in string_building; a doubling concat is the one append pattern where headroom can **never** be reused (the next iteration always needs 2×len, beyond any constant-factor slack), so the slack is pure overhead here. It does not show up in process RSS: 0.5 MB of heap slack sits under the ~2.7 MB process baseline, and Ryo AOT still measures the lowest RSS of the suite.
