@@ -26,8 +26,6 @@ One fairness note: hyperfine times whole processes, so every arm's in-program st
 
 ## Benchmarks & Performance Results
 
-Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-17 — first run with all arms string-semantic and idiomatic; before this date the Rust and Swift arms scanned raw bytes, so older tables in git history are not comparable (that workload now lives in [`byte_slicing`](../byte_slicing/)). Hyperfine `--warmup 3 --shell=none`; peak RSS is hyperfine 2.0's per-run memory measurement, reported as the mean of runs. The table's caption records the machine, date, and compiler commit of the newest measurement.
-
 <!-- BENCH:START -->
 <!-- BENCH:END -->
 
