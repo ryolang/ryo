@@ -12,7 +12,12 @@ Subcommands: run, table, update-readme.
 """
 
 import argparse
+import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +53,23 @@ class Suite:
 # expanded by the runner itself, not by a shell.
 _RUN_METACHARS = ("|", "&&", ">", "<", ";")
 _SUBSTITUTION_POINT = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*")
+
+
+def substitute_run(cmd: str, ryo_bin: str) -> str:
+    """Expand a manifest run string into a concrete command line.
+
+    Replaces the literal ``$ryo`` substitution point with the ryo binary
+    path, then expands environment variables. Run strings never pass
+    through a shell, where an unset variable would expand to an empty
+    string; here it is a manifest error instead.
+    """
+    expanded = os.path.expandvars(cmd.replace("$ryo", ryo_bin))
+    leftover = _SUBSTITUTION_POINT.search(expanded)
+    if leftover is not None:
+        raise ManifestError(
+            f"run string references unset variable {leftover.group(0)!r}: {cmd!r}"
+        )
+    return expanded
 
 
 def load_suite(path: Path) -> Suite:
@@ -152,6 +174,89 @@ def _load_arm(raw: object, index: int, default_expect: str | None, path: Path) -
         group=group,
         version=version,
     )
+
+
+class HyperfineError(RuntimeError):
+    """A hyperfine invocation failed for one benchmark arm."""
+
+    def __init__(self, label: str, stderr: str) -> None:
+        self.label = label
+        self.stderr = stderr
+        super().__init__(f"hyperfine failed for arm {label!r}: {stderr.strip()}")
+
+
+@dataclass
+class ArmTiming:
+    time_ms_mean: float
+    time_ms_stddev: float
+    time_ms_min: float
+    time_ms_max: float
+    rss_mb_mean: float | None
+
+
+# Hyperfine schema-2 exports always use base units (seconds, bytes). The
+# unit fields in the JSON are read through these maps so a future unit
+# change fails loudly at the lookup instead of silently mis-converting.
+_TIME_UNIT_TO_MS = {"second": 1000.0}
+_RSS_UNIT_TO_MB = {"byte": 1.0 / (1024.0 * 1024.0)}
+
+
+def parse_summary(result: dict) -> ArmTiming:
+    """Convert one schema-2 result's summary to display units (ms, MB)."""
+    summary = result["summary"]
+    wall = summary["time_wall_clock"]
+    rss = summary.get("memory_peak_resident")
+    to_ms = _TIME_UNIT_TO_MS[wall["unit"]]
+    return ArmTiming(
+        time_ms_mean=round(wall["mean"] * to_ms, 3),
+        time_ms_stddev=round(wall["stddev"] * to_ms, 3),
+        time_ms_min=round(wall["min"] * to_ms, 3),
+        time_ms_max=round(wall["max"] * to_ms, 3),
+        rss_mb_mean=None if rss is None else round(rss["mean"] * _RSS_UNIT_TO_MB[rss["unit"]], 3),
+    )
+
+
+def run_hyperfine(cmd: str, warmup: int, cwd: Path, label: str) -> dict:
+    """Time one command with a single hyperfine invocation.
+
+    Returns the schema-2 result dict for the command (``results[0]``).
+    The export file lives in the system temp dir and is removed in a
+    ``finally`` block so a failed run never litters the suite directory.
+    """
+    binary = shutil.which("hyperfine")
+    if binary is None:
+        raise RuntimeError("hyperfine executable not found on PATH; install hyperfine 2.x")
+
+    export_file = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+    export_path = export_file.name
+    export_file.close()
+    try:
+        proc = subprocess.run(
+            [
+                binary,
+                "--warmup",
+                str(warmup),
+                "--shell=none",
+                "--export-json",
+                export_path,
+                cmd,
+            ],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            raise HyperfineError(label, proc.stderr)
+        with open(export_path, encoding="utf-8") as f:
+            data = json.load(f)
+    finally:
+        Path(export_path).unlink(missing_ok=True)
+
+    assert data["schema_version"] == 2, (
+        f"{label}: hyperfine export has schema_version "
+        f"{data.get('schema_version')!r}, expected 2"
+    )
+    return data["results"][0]
 
 
 def main(argv: list[str] | None = None) -> int:
