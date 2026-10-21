@@ -64,8 +64,8 @@ run = "ruby fib.rb"
 [[arm]]
 name = "Python"
 language = "python"
-run = "uv run --python 3.14 fib.py"
-version = "uv run --python 3.14 python --version | awk '{print $2}'"
+run = "uv run --python 3.15 fib.py"
+version = "uv run --python 3.15 python --version | awk '{print $2}'"
 
 [[arm]]
 name = "Julia"

@@ -288,7 +288,7 @@ BUILTIN_VERSION_CMDS: dict[str, str] = {
     ),
     "kotlin": r"kotlinc -version 2>&1 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' | head -1",
     "java": "java -version 2>&1 | head -1 | awk -F '\"' '{print $2}'",
-    "python": "uv run --python 3.14 python --version | awk '{print $2}'",
+    "python": "uv run --python 3.15 python --version | awk '{print $2}'",
     "bun": "~/.bun/bin/bun --version",
     "elixir": "elixir --version | grep Elixir | awk '{print $2}'",
     "ruby": "ruby --version | awk '{print $2}'",

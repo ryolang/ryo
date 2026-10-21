@@ -29,8 +29,8 @@ version = "go version | cut -d' ' -f3 | sed 's/^go//'"
 [[arm]]
 name = "Python"
 language = "python"
-run = "python3 json_validate.py"
-version = "python3 --version | cut -d' ' -f2"
+run = "uv run --python 3.15 json_validate.py"
+version = "uv run --python 3.15 python --version | awk '{print $2}'"
 
 [[arm]]
 name = "Ryo (AOT)"

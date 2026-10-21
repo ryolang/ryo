@@ -35,5 +35,5 @@ version = "$ryo --version 2>&1 || echo 'dev'"
 [[arm]]
 name = "Python"
 language = "python"
-run = "python3 string_building.py"
-version = "python3 --version | cut -d' ' -f2"
+run = "uv run --python 3.15 string_building.py"
+version = "uv run --python 3.15 python --version | awk '{print $2}'"
