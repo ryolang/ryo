@@ -634,10 +634,14 @@ class Store:
         return cls(path=path, repo_url=repo_url, entries={})
 
     def append(self, suite_result: SuiteResult) -> None:
+        # One timestamp for the whole run: `render_summary_table`'s
+        # vs-fastest ratio matches arms by exact date equality, and a
+        # per-arm timestamp would never repeat across a run.
+        run_date = _epoch_ms()
         for arm_result in suite_result.arm_results:
             key = store_key(suite_result.suite, arm_result.arm)
             series = self.entries.setdefault(key, [])
-            series.append(self._entry(suite_result, arm_result))
+            series.append(self._entry(suite_result, arm_result, run_date))
             del series[:-_STORE_RETENTION]
 
     def latest(self, key: str) -> dict | None:
@@ -651,7 +655,7 @@ class Store:
             {"lastUpdate": self.last_update, "repoUrl": self.repo_url, "entries": self.entries},
         )
 
-    def _entry(self, suite_result: SuiteResult, arm_result: ArmResult) -> dict:
+    def _entry(self, suite_result: SuiteResult, arm_result: ArmResult, run_date: int) -> dict:
         commit_id = suite_result.git_commit
         language = arm_result.arm.language
         tool = TOOL_FOR_LANGUAGE.get(language.lower(), language)
@@ -666,7 +670,7 @@ class Store:
                 "timestamp": _git_commit_timestamp(),
                 "url": f"{self.repo_url}/commit/{commit_id}" if self.repo_url else "",
             },
-            "date": _epoch_ms(),
+            "date": run_date,
             "tool": "custom",
             "benches": [
                 {

@@ -117,6 +117,52 @@ def test_append_prunes_to_20(tmp_path):
     assert series[-1]["benches"][0]["value"] == 24.0
 
 
+def test_append_stamps_one_date_per_run(tmp_path):
+    """Every arm recorded by one append shares its run's date.
+
+    `render_summary_table` matches the fastest arm to the Ryo AOT anchor by
+    exact date equality; per-arm timestamps would never repeat within a run
+    and the vs-fastest column would render "—" forever.
+    """
+    store = Store.load(tmp_path / "data" / "synthetic.json")
+    suite = write_suite(
+        tmp_path,
+        """
+name = "synthetic"
+warmup = 0
+
+[[arm]]
+name = "A"
+language = "C"
+run = "/bin/echo a"
+expect = "a"
+
+[[arm]]
+name = "B"
+language = "C"
+run = "/bin/echo b"
+expect = "b"
+""",
+    )
+    timing = ArmTiming(
+        time_ms_mean=1.0, time_ms_stddev=0.1, time_ms_min=1.0, time_ms_max=1.0, rss_mb_mean=2.0
+    )
+    store.append(
+        SuiteResult(
+            suite=suite,
+            date="2026-10-21T12:00:00Z",
+            git_commit="abc1234",
+            platform="Darwin/arm64/Apple M3 Max",
+            hyperfine_version="2.0.0",
+            ryo=RyoInfo(path="/x/ryo", version="0.1.0", built=False),
+            versions={"C": "1.0"},
+            arm_results=[ArmResult(arm=a, timing=timing) for a in suite.arms],
+        )
+    )
+    dates = {store.entries[f"synthetic/{name}"][-1]["date"] for name in ("A", "B")}
+    assert len(dates) == 1
+
+
 def test_key_grammar_with_group(tmp_path):
     store = Store.load(tmp_path / "data" / "json_parse.json")
     store.append(
