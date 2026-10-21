@@ -14,6 +14,7 @@ from run import (
     BuildError,
     RyoInfo,
     Suite,
+    _normalize_repo_url,
     build_arm,
     capture_versions,
     check_output,
@@ -135,7 +136,7 @@ def test_resolve_ryo_explicit_skips_build(monkeypatch):
     info = resolve_ryo("/bin/false", needs_build=True)
     assert isinstance(info, RyoInfo)
     assert info.built is False
-    assert info.path == "/bin/false"
+    assert info.path == str(Path("/bin/false").resolve())
 
 
 def test_resolve_ryo_default_records_version():
@@ -199,3 +200,20 @@ def test_select_suites_skip_ignored_excludes_the_repo_local_sweeps():
     assert "fibonacci" in names
     for local in ("csv_parse", "json_parse", "startup_latency"):
         assert local not in names
+
+
+# --- Repo URL normalization for store commit links ---
+
+
+def test_normalize_repo_url_converts_ssh_remotes_to_https():
+    """scp-like and ssh:// remotes would yield non-resolvable commit URLs in
+    the store; https remotes pass through unchanged."""
+    assert _normalize_repo_url("git@github.com:ryolang/ryo") == "https://github.com/ryolang/ryo"
+    assert (
+        _normalize_repo_url("ssh://git@github.com/ryolang/ryo")
+        == "https://github.com/ryolang/ryo"
+    )
+    assert (
+        _normalize_repo_url("https://github.com/ryolang/ryo")
+        == "https://github.com/ryolang/ryo"
+    )

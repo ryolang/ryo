@@ -1,6 +1,6 @@
 {
   "lastUpdate": 1792594465329,
-  "repoUrl": "git@github.com:ryolang/ryo",
+  "repoUrl": "https://github.com/ryolang/ryo",
   "entries": {
     "collatz/Rust": [
       {
@@ -8,7 +8,7 @@
           "id": "bddd4e1",
           "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
           "timestamp": 1792592637,
-          "url": "git@github.com:ryolang/ryo/commit/bddd4e1"
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
         },
         "date": 1792593316637,
         "tool": "custom",
@@ -32,7 +32,7 @@
           "id": "bddd4e1",
           "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
           "timestamp": 1792592637,
-          "url": "git@github.com:ryolang/ryo/commit/bddd4e1"
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
         },
         "date": 1792594020818,
         "tool": "custom",
@@ -56,7 +56,7 @@
           "id": "bddd4e1",
           "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
           "timestamp": 1792592637,
-          "url": "git@github.com:ryolang/ryo/commit/bddd4e1"
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
         },
         "date": 1792594465233,
         "tool": "custom",
@@ -82,7 +82,7 @@
           "id": "bddd4e1",
           "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
           "timestamp": 1792592637,
-          "url": "git@github.com:ryolang/ryo/commit/bddd4e1"
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
         },
         "date": 1792593316662,
         "tool": "custom",
@@ -106,7 +106,7 @@
           "id": "bddd4e1",
           "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
           "timestamp": 1792592637,
-          "url": "git@github.com:ryolang/ryo/commit/bddd4e1"
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
         },
         "date": 1792594020842,
         "tool": "custom",
@@ -130,7 +130,7 @@
           "id": "bddd4e1",
           "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
           "timestamp": 1792592637,
-          "url": "git@github.com:ryolang/ryo/commit/bddd4e1"
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
         },
         "date": 1792594465233,
         "tool": "custom",
@@ -156,7 +156,7 @@
           "id": "bddd4e1",
           "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
           "timestamp": 1792592637,
-          "url": "git@github.com:ryolang/ryo/commit/bddd4e1"
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
         },
         "date": 1792593316686,
         "tool": "custom",
@@ -180,7 +180,7 @@
           "id": "bddd4e1",
           "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
           "timestamp": 1792592637,
-          "url": "git@github.com:ryolang/ryo/commit/bddd4e1"
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
         },
         "date": 1792594020866,
         "tool": "custom",
@@ -204,7 +204,7 @@
           "id": "bddd4e1",
           "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
           "timestamp": 1792592637,
-          "url": "git@github.com:ryolang/ryo/commit/bddd4e1"
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
         },
         "date": 1792594465233,
         "tool": "custom",
@@ -230,7 +230,7 @@
           "id": "bddd4e1",
           "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
           "timestamp": 1792592637,
-          "url": "git@github.com:ryolang/ryo/commit/bddd4e1"
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
         },
         "date": 1792593316713,
         "tool": "custom",
@@ -254,7 +254,7 @@
           "id": "bddd4e1",
           "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
           "timestamp": 1792592637,
-          "url": "git@github.com:ryolang/ryo/commit/bddd4e1"
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
         },
         "date": 1792594020890,
         "tool": "custom",
@@ -278,7 +278,7 @@
           "id": "bddd4e1",
           "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
           "timestamp": 1792592637,
-          "url": "git@github.com:ryolang/ryo/commit/bddd4e1"
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
         },
         "date": 1792594465233,
         "tool": "custom",

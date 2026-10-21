@@ -753,7 +753,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Files:** codspeed.yml, .github/workflows/codspeed.yml, benchmarks/*/suite.toml
 
-**Summary:** Residue of I-174, descoped by maintainer decision 2026-10-21: the centralized benchmark runner now owns per-suite manifests; CodSpeed registration (root codspeed.yml 12 exec entries + the same 12-binary AOT build list duplicated in both jobs of .github/workflows/codspeed.yml) should be generated from the same manifests. Mapping target: CodSpeed's current unified config schema (https://github.com/CodSpeedHQ/codspeed/blob/main/schemas/codspeed.schema.json) with per-target ids/options, not a regeneration of the legacy root codspeed.yml.
+**Summary:** Residue of the benchmark-runner centralization (per-suite `run_benchmarks.sh` scripts replaced by `benchmarks/run.py`), descoped by maintainer decision 2026-10-21: the centralized benchmark runner now owns per-suite manifests; CodSpeed registration (root codspeed.yml 12 exec entries + the same 12-binary AOT build list duplicated in both jobs of .github/workflows/codspeed.yml) should be generated from the same manifests. Mapping target: CodSpeed's current unified config schema (https://github.com/CodSpeedHQ/codspeed/blob/main/schemas/codspeed.schema.json) with per-target ids/options, not a regeneration of the legacy root codspeed.yml.
 
 **Resolution:** Add an emit-codspeed mode to benchmarks/run.py driven by a codspeed flag in suite.toml; regenerate codspeed.yml and the workflow build list; verify byte-identical against the current 12-suite lists.
 

@@ -355,6 +355,64 @@ expect = "a"
     assert "dataless" not in summary
 
 
+def test_cmd_update_readme_benchmarks_filter_keeps_all_suites_in_root_summary(
+    tmp_path, fixed_platform, monkeypatch
+):
+    """--benchmarks scopes the per-suite splices only; the root summary must
+    still be rebuilt from every discovered suite, or a filtered run would
+    silently delete the other suites' committed rows."""
+    suite_one = write_suite(tmp_path / "suite", TWO_ARM_SUITE)
+    suite_two = write_suite(
+        tmp_path / "two", TWO_ARM_SUITE.replace('name = "synthetic"', 'name = "two"')
+    )
+    write_store(
+        tmp_path / "benchmarks" / "data" / "synthetic.json",
+        {
+            "synthetic/Rust": [make_entry(12.3, 4.5, toolchain="rustc 1.85.0")],
+            "synthetic/Ryo (AOT)": [make_entry(2.7, 2.75, toolchain="ryo 0.1.0")],
+        },
+    )
+    write_store(
+        tmp_path / "benchmarks" / "data" / "two.json",
+        {
+            "two/Rust": [make_entry(9.1, 4.0, toolchain="rustc 1.85.0")],
+            "two/Ryo (AOT)": [make_entry(3.3, 2.5, toolchain="ryo 0.1.0")],
+        },
+    )
+    suite_readme = tmp_path / "suite" / "README.md"
+    suite_readme.write_text(
+        "# Synthetic\n\n<!-- BENCH:START -->\n<!-- BENCH:END -->\n", encoding="utf-8"
+    )
+    two_text = "# Two\n\n<!-- BENCH:START -->\n<!-- BENCH:END -->\n"
+    two_readme = tmp_path / "two" / "README.md"
+    two_readme.write_text(two_text, encoding="utf-8")
+    root_readme = tmp_path / "benchmarks" / "README.md"
+    root_readme.write_text(
+        "# Benchmarks\n\n<!-- BENCH-SUMMARY:START -->\n<!-- BENCH-SUMMARY:END -->\n",
+        encoding="utf-8",
+    )
+    all_suites = [suite_one, suite_two]
+
+    def fake_select(raw, **kwargs):
+        if raw is None:
+            return all_suites
+        wanted = set(raw.split(","))
+        return [suite for suite in all_suites if suite.name in wanted]
+
+    monkeypatch.setattr(run, "_select_suites", fake_select)
+    monkeypatch.setattr(run, "_REPO_ROOT", tmp_path)
+
+    assert cmd_update_readme(argparse.Namespace(benchmarks="synthetic")) == 0
+
+    # Only the selected suite's README is spliced.
+    assert "| Ryo (AOT) | 2.7 ms |" in suite_readme.read_text(encoding="utf-8")
+    assert two_readme.read_text(encoding="utf-8") == two_text
+    # The root summary still carries both suites' rows.
+    summary = root_readme.read_text(encoding="utf-8")
+    assert "| synthetic | 2.7 ms |" in summary
+    assert "| two | 3.3 ms |" in summary
+
+
 def test_cmd_update_readme_missing_suite_markers_is_hard_error_with_zero_mutation(
     tmp_path, fixed_platform, monkeypatch, capsys
 ):

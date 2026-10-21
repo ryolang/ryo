@@ -14,7 +14,7 @@ One fairness note: the Swift arm pays a one-time `[UInt8](s.utf8)` materializati
 
 ## Benchmarks & Performance Results
 
-Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-17. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l`.
+Hyperfine `--warmup 3 --shell=none`; peak RSS is hyperfine 2.0's per-run memory measurement, reported as the mean of runs. The table's caption records the machine, date, and compiler commit of the newest measurement.
 
 <!-- BENCH:START -->
 <!-- BENCH:END -->

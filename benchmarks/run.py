@@ -306,6 +306,32 @@ TOOL_FOR_LANGUAGE: dict[str, str] = {
     "ryo": "$ryo",
 }
 
+# Language -> the name a version string is displayed under. Where this map
+# is silent, the gating binary's name is used. ``uv`` gates Python arms but
+# "uv 3.14.4" mislabels a CPython version; ryo arms can override the builtin
+# version one-liner with a raw ``$ryo --version``, which echoes the tool name.
+_VERSION_DISPLAY_NAME: dict[str, str] = {
+    "python": "python",
+    "ryo": "ryo",
+}
+
+
+def _version_label(language: str, toolchain: str) -> str:
+    """Version-cell label: display name + toolchain, de-duplicated.
+
+    A toolchain string that already begins with the display name (raw
+    ``$ryo --version`` overrides echo "ryo ...") loses exactly one leading
+    duplicate, so the label never reads "ryo ryo 0.1.0-dev".
+    """
+    tool = TOOL_FOR_LANGUAGE.get(language.lower(), language)
+    if tool == "$ryo":
+        tool = "ryo"
+    display = _VERSION_DISPLAY_NAME.get(language.lower(), tool)
+    prefix = f"{display} "
+    if toolchain.startswith(prefix):
+        toolchain = toolchain[len(prefix):]
+    return f"{display} {toolchain}"
+
 
 def missing_tools(suite: Suite, arms: list[Arm], ryo_bin: str) -> list[tuple[Arm, str]]:
     """Return (arm, missing binary) for selected arms whose toolchain is absent.
@@ -490,8 +516,26 @@ def _git(args: list[str]) -> str:
     return proc.stdout.strip()
 
 
+def _normalize_repo_url(remote: str) -> str:
+    """Normalize scp-like (``git@github.com:org/repo``) and ``ssh://`` remotes
+    to ``https://`` so the store's commit links resolve; https remotes (and
+    anything unrecognized) pass through unchanged.
+    """
+    if remote.startswith("ssh://"):
+        rest = remote.removeprefix("ssh://")
+        if "@" in rest:
+            rest = rest.split("@", 1)[1]
+        return "https://" + rest.lstrip("/")
+    if remote.startswith("git@") and ":" in remote:
+        host, _, path = remote[len("git@"):].partition(":")
+        return f"https://{host}/{path}"
+    return remote
+
+
 def _repo_url() -> str:
-    return _git(["config", "--get", "remote.origin.url"]).removesuffix(".git")
+    return _normalize_repo_url(
+        _git(["config", "--get", "remote.origin.url"]).removesuffix(".git")
+    )
 
 
 def _git_commit_id() -> str:
@@ -658,10 +702,9 @@ class Store:
     def _entry(self, suite_result: SuiteResult, arm_result: ArmResult, run_date: int) -> dict:
         commit_id = suite_result.git_commit
         language = arm_result.arm.language
-        tool = TOOL_FOR_LANGUAGE.get(language.lower(), language)
-        if tool == "$ryo":
-            tool = "ryo"
-        toolchain = suite_result.versions.get(language, "unavailable")
+        toolchain = _version_label(
+            language, suite_result.versions.get(language, "unavailable")
+        )
         timing = arm_result.timing
         return {
             "commit": {
@@ -679,7 +722,7 @@ class Store:
                     "unit": "ms",
                     "extra": (
                         f"mean wall clock; hyperfine {suite_result.hyperfine_version}; "
-                        f"{tool} {toolchain}"
+                        f"{toolchain}"
                     ),
                 },
                 {
@@ -1344,8 +1387,11 @@ def cmd_update_readme(args: argparse.Namespace) -> int:
 
     Per suite README: the suite's canonical table into its ``BENCH`` block;
     root benchmarks/README.md: the cross-suite summary into its
-    ``BENCH-SUMMARY`` block. All splices are planned before anything is
-    written, so a missing marker pair is a hard error with zero file mutation.
+    ``BENCH-SUMMARY`` block. ``--benchmarks`` scopes only the per-suite
+    splices; the summary is always rebuilt from every discovered suite, so a
+    filtered run cannot silently delete other suites' committed rows. All
+    splices are planned before anything is written, so a missing marker pair
+    is a hard error with zero file mutation.
     Writes are in place and atomic (temp file + rename), and a write is
     skipped entirely when the content is unchanged. Stale-prose warnings go
     to stderr and never affect the exit code.
@@ -1355,11 +1401,18 @@ def cmd_update_readme(args: argparse.Namespace) -> int:
             getattr(args, "benchmarks", None),
             skip_ignored=not getattr(args, "include_ignored", False),
         )
+        # The root summary must reflect every discovered suite: building it
+        # from the --benchmarks selection would rewrite the committed table
+        # with only the selected rows, silently deleting the rest.
+        all_suites = _select_suites(
+            None,
+            skip_ignored=not getattr(args, "include_ignored", False),
+        )
     except (SelectionError, ManifestError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     store_dir = _REPO_ROOT / "benchmarks" / "data"
-    stores = {suite.name: Store.load(store_dir / f"{suite.name}.json") for suite in suites}
+    stores = {suite.name: Store.load(store_dir / f"{suite.name}.json") for suite in all_suites}
 
     try:
         plans: list[tuple[Path, str, str, str]] = []

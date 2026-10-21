@@ -14,6 +14,7 @@ from run import (
     Store,
     Suite,
     SuiteResult,
+    _version_label,
     load_suite,
     run_suites,
     store_key,
@@ -190,6 +191,19 @@ def test_store_file_shape_matches_spec(tmp_path):
     assert {"name", "value", "unit", "extra"} <= set(entry["benches"][0])
 
 
+def test_version_label_uses_display_name_and_dedupes_tool_name():
+    """The Version cell shows the language's display name, not the gating
+    binary (uv gates Python arms), and a raw ``$ryo --version`` override that
+    echoes the tool name must not double it."""
+    assert _version_label("python", "3.14.4") == "python 3.14.4"
+    assert _version_label("ryo", "ryo 0.1.0-dev.20261021+abcdef1") == "ryo 0.1.0-dev.20261021+abcdef1"
+    assert _version_label("ryo", "0.1.0") == "ryo 0.1.0"
+    # Languages without a display-name entry keep the gating-binary form.
+    assert _version_label("rust", "1.98.0") == "rustc 1.98.0"
+    assert _version_label("go", "1.27.2") == "go 1.27.2"
+    assert _version_label("C", "unavailable") == "C unavailable"
+
+
 def test_roundtrip(tmp_path):
     path = tmp_path / "data" / "synthetic.json"
     store = Store.load(path)
@@ -241,7 +255,7 @@ expect = ""
     assert len(summary.suites[0].arm_results) == 1
     assert any("Boom" in failure for failure in summary.failures)
     # The suite hard-failed: no store file, but the healthy arm kept its
-    # result in the incremental run JSON (Review Focus #1).
+    # result in the incremental run JSON.
     assert not (tmp_path / "data" / "synthetic.json").exists()
     run_json = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
     assert len(run_json["suites"][0]["arms"]) == 1
