@@ -687,6 +687,106 @@ class Store:
         }
 
 
+# --- table rendering (the `table` subcommand) ---
+
+_TABLE_HEADER = "| Arm | Time | Peak RSS | Version |"
+_TABLE_SEPARATOR = "|---|---|---|---|"
+_NO_MEASUREMENT = "—"
+
+
+def _format_cell_value(value: float) -> str:
+    """Minimal decimal rendering: 7.0 -> "7", 2.75 -> "2.75" (no noisy .0 tail)."""
+    return f"{value:g}"
+
+
+def _toolchain_from_extra(extra: str | None) -> str:
+    """Toolchain identity from a time bench's ``extra`` ("...; hyperfine X; rustc 1.85.0")."""
+    if not extra:
+        return _NO_MEASUREMENT
+    return extra.split("; ")[-1].strip() or _NO_MEASUREMENT
+
+
+def _hyperfine_from_extra(extra: str | None) -> str | None:
+    if not extra:
+        return None
+    for segment in extra.split("; "):
+        if segment.startswith("hyperfine "):
+            version = segment.removeprefix("hyperfine ").strip()
+            return version or None
+    return None
+
+
+def _grouped_arms(arms: list[Arm]) -> list[tuple[str | None, list[Arm]]]:
+    """Consecutive arms sharing a group key, in manifest order (None = ungrouped)."""
+    groups: list[tuple[str | None, list[Arm]]] = []
+    for arm in arms:
+        key = arm.group or None
+        if groups and groups[-1][0] == key:
+            groups[-1][1].append(arm)
+        else:
+            groups.append((key, [arm]))
+    return groups
+
+
+def _table_cells(arm: Arm, entry: dict | None) -> list[str]:
+    time_str = rss_str = version_str = _NO_MEASUREMENT
+    if entry is not None:
+        benches = {b["name"]: b for b in entry["benches"]}
+        time_bench = benches.get("time")
+        if time_bench is not None and time_bench["value"] is not None:
+            time_str = f"{_format_cell_value(time_bench['value'])} ms"
+            version_str = _toolchain_from_extra(time_bench.get("extra"))
+        rss_bench = benches.get("memory_peak_rss")
+        if rss_bench is not None and rss_bench["value"] is not None:
+            rss_str = f"{_format_cell_value(rss_bench['value'])} MB"
+    return [arm.name, time_str, rss_str, version_str]
+
+
+def _caption(platform_str: str, newest: dict | None, warmup: int) -> str:
+    """Generator-owned caption: machine, newest measurement's date/commit, hyperfine, warmup."""
+    if newest is None:
+        date = commit = hyperfine = _NO_MEASUREMENT
+    else:
+        date = datetime.fromtimestamp(newest["date"] / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+        commit = newest["commit"]["id"]
+        time_bench = next((b for b in newest["benches"] if b["name"] == "time"), None)
+        hyperfine = (
+            _hyperfine_from_extra(time_bench.get("extra") if time_bench else None) or "unavailable"
+        )
+    return (
+        f"Measured on {platform_str}, {date} "
+        f"(commit {commit}, hyperfine {hyperfine}, warmup {warmup})"
+    )
+
+
+def render_suite_table(suite: Suite, store: Store) -> str:
+    """Render the canonical Markdown results tables for one suite from the store.
+
+    One table per group of consecutive arms (ungrouped arms share a single
+    table, grouped tables carry a ``#### <group>`` heading); every table is
+    followed by the caption line. Arms with no store entry, or whose memory
+    bench was never measured, render "—" in the affected cells. The caption's
+    date/commit/hyperfine come from the table's newest entry; the platform is
+    stamped at render time (the store schema has no machine field) and the
+    warmup comes from the manifest.
+    """
+    platform_str = _platform_string()
+    sections = []
+    for group, arms in _grouped_arms(suite.arms):
+        lines = [f"#### {group}"] if group is not None else []
+        lines.append(_TABLE_HEADER)
+        lines.append(_TABLE_SEPARATOR)
+        newest: dict | None = None
+        for arm in arms:
+            entry = store.latest(store_key(suite, arm))
+            if entry is not None and (newest is None or entry["date"] > newest["date"]):
+                newest = entry
+            lines.append("| " + " | ".join(_table_cells(arm, entry)) + " |")
+        lines.append(_caption(platform_str, newest, suite.warmup))
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
+
+
 @dataclass
 class RunSummary:
     exit_code: int
@@ -985,6 +1085,27 @@ def cmd_run(args: argparse.Namespace) -> int:
     return summary.exit_code
 
 
+def cmd_table(args: argparse.Namespace) -> int:
+    """Entry point for the ``table`` subcommand: render canonical tables from the store."""
+    try:
+        suites = _select_suites(getattr(args, "benchmarks", None))
+    except (SelectionError, ManifestError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    store_dir = _REPO_ROOT / "benchmarks" / "data"
+    chunks = [
+        render_suite_table(suite, Store.load(store_dir / f"{suite.name}.json"))
+        for suite in suites
+    ]
+    text = "\n\n".join(chunks) + "\n"
+    out = getattr(args, "out", None)
+    if out:
+        Path(out).write_text(text, encoding="utf-8")
+    else:
+        print(text, end="")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="benchmarks/run.py",
@@ -1023,7 +1144,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Fail before benchmarking when a selected toolchain is missing.",
     )
-    subparsers.add_parser("table", help="Render results tables from the data store.")
+    table_parser = subparsers.add_parser(
+        "table", help="Render results tables from the data store."
+    )
+    table_parser.add_argument(
+        "--benchmarks",
+        metavar="NAMES",
+        help="Comma-separated suite names to render (default: every discovered suite).",
+    )
+    table_parser.add_argument(
+        "--out",
+        metavar="PATH",
+        help="Write the rendered tables to PATH instead of printing to stdout.",
+    )
     subparsers.add_parser(
         "update-readme", help="Splice result tables into suite READMEs."
     )
@@ -1032,7 +1165,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         return cmd_run(args)
     if args.command == "table":
-        raise SystemExit("not implemented yet")
+        return cmd_table(args)
     raise SystemExit("not implemented yet")
 
 
