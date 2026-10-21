@@ -1,5 +1,5 @@
 # Benchmark suite manifest for the centralized runner (benchmarks/run.py).
-# Transcribed from run_benchmarks.sh (see ISSUES.md I-174): every run/build
+# Transcribed from run_benchmarks.sh (per-suite scripts deleted when the runner was centralized): every run/build
 # line, arm name, and warmup value matches the old script byte-for-byte
 # (modulo the $ryo substitution point for the ryo binary path).
 name = "string_building"

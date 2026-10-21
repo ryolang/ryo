@@ -134,7 +134,7 @@ uv run benchmarks/run.py run --benchmarks eager_destruction --dry-run
 
 ### Runner Contract
 
-The runner's behavior is fixed by the manifests and the data store, not by wrapper-script copies (I-174):
+The runner's behavior is fixed by the manifests and the data store, not by the per-suite wrapper-script copies this runner replaced:
 
 * **Subcommands.** `run` builds each arm, verifies its checksum output, then times it with `hyperfine` (peak RSS via `/usr/bin/time -l` on macOS, `%M` on Linux) and appends the numbers to the suite's store under `benchmarks/data/`. `table` renders the canonical tables from the store to stdout. `update-readme` splices those tables into the README marker blocks (see the checkpoint convention below).
 * **Flags.** `run` takes `--benchmarks NAMES`, `--languages NAMES`, `--dry-run` (stop after the checksum gate; never invoke hyperfine), `--strict` (fail before benchmarking when a selected toolchain is missing), `--ryo-bin PATH`, and `--json PATH` (write the incremental run JSON after each suite). `table` and `update-readme` take `--benchmarks` (and `table` takes `--out PATH`).

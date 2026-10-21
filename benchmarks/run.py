@@ -7,7 +7,7 @@
 Replaces the copy-pasted benchmarks/*/run_benchmarks.sh scripts with one
 runner: `run` times every arm via hyperfine, `table` renders results, and
 `update-readme` splices them into suite READMEs and the root summary table.
-See ISSUES.md I-174.
+Replaces the copy-pasted per-suite run_benchmarks.sh scripts (deleted).
 
 Subcommands: run, table, update-readme.
 """
