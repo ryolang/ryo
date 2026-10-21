@@ -17,30 +17,20 @@ Before running the benchmarks, ensure you have the following tools installed and
 - `kotlinc` and `temurin` (jvm)
 - `hyperfine`
 
-You must also have a built Ryo compiler binary. By default, `run_benchmarks.sh` expects the `ryo` binary to be built in release mode at `../../target/release/ryo`. You can ensure this by running `cargo build --release` from the repository root before starting the benchmarks.
+You must also have a built Ryo compiler binary. The central runner uses the release build at `target/release/ryo` by default and runs `cargo build --release` for you when it does; override the binary with `--ryo-bin PATH` or the `RYO_BIN` environment variable (see the [root benchmark README](../README.md#general-prerequisites) for the full contract).
 
 ## Setup
-In the `benchmarks/fibonacci` directory, run:
+From the repository root, run:
 ```bash
-./run_benchmarks.sh
+uv run benchmarks/run.py run --benchmarks fibonacci
 ```
+Add `--dry-run` to build every arm and run only the checksum correctness gate (no hyperfine), or `--languages rust,go,...` to limit the arms.
 
 ## Results
 Calculating the 40th Fibonacci number recursively (Time taken):
 
-| Language | Version | Mean Time | Speed vs Rust | Memory (Max Resident) |
-|----------|---------|-----------|---------------|-----------------------|
-| **Rust** | 1.98.0 | ~272.2 ms | 1.00x         | 1.45 MB               |
-| **Kotlin**| 2.4.20 (java 26.0.2.1) | ~278.8 ms | 1.02x slower | 44.86 MB     |
-| **Go**   | 1.27.1 | ~300.5 ms | 1.10x slower  | 3.75 MB               |
-| **Swift**| 6.3.3 | ~339.4 ms | 1.25x slower  | 1.56 MB               |
-| **Ryo (AOT)** | 0.1.0-dev.20260929+228adbb | ~362.5 ms | 1.33x slower | **1.34 MB**           |
-| **Ryo (JIT)** | 0.1.0-dev.20260929+228adbb | ~364.6 ms | 1.34x slower | 4.69 MB               |
-| **Bun (TS)**  | 1.3.13 | ~407.4 ms | 1.50x slower | 27.44 MB              |
-| **Julia** | 1.12.7 | ~421.4 ms | 1.55x slower | 213.66 MB             |
-| **Elixir**    | 1.20.4 | ~975.1 ms | 3.58x slower | 90.20 MB              |
-| **Python**| 3.14.4 | ~5.258 s | 19.32x slower  | 19.27 MB               |
-| **Ruby** | 4.0.6 | ~5.856 s | 21.51x slower | 18.19 MB              |
+<!-- BENCH:START -->
+<!-- BENCH:END -->
 
 *(Measured with `hyperfine` on macOS, Apple M3 Pro, 2026-09-29 (Cranelift 0.136.1 checkpoint). Ryo is compiled using `--release`.)*
 

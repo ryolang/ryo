@@ -12,14 +12,8 @@
 
 Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-24. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux). Each run: generate the 2,947,781-byte document, then validate it 12 times.
 
-| Candidate | Version | Mean time | vs fastest | Max RSS |
-|---|---|---|---|---|
-| **Rust** | 1.98.0 | 4.9 ms ± 0.1 ms | 1.00x | 5.91 MB |
-| **Swift** | 6.3.3 | 31.8 ms ± 0.5 ms | 6.49x slower | 10.38 MB |
-| **Go** | 1.27.1 | 37.8 ms ± 0.5 ms | 7.71x slower | 13.48 MB |
-| **Ryo (AOT)** | 0.1.0-dev.20260924 | 102.4 ms ± 9.8 ms | 20.90x slower | 5.69 MB |
-| **Ryo (JIT)** | 0.1.0-dev.20260924 | 122.4 ms ± 3.6 ms | 24.98x slower | 11.55 MB |
-| **Python** | 3.14.7 | 2290 ms ± 88 ms | 467.35x slower | 25.19 MB |
+<!-- BENCH:START -->
+<!-- BENCH:END -->
 
 Ryo AOT runs **22.4x faster than Python** and has the **lightest RSS of all six arms** at 5.69 MB — below Rust's 5.91 MB. That wasn't the original result: the first version of this benchmark used `to_bytes()` (an owned copy), holding two document buffers at the peak for 8.52 MB. The compiler's W0004 lint (`RedundantToBytes`) flagged the benchmark's own `to_bytes()` sites as never-mutated, never-escaping, and switching them to `as_bytes()` — a zero-copy `bytesview` projection of the string, added alongside the lint — removed the copy entirely. Rust's 5.91 MB is likewise one document buffer (`as_bytes()` borrows the `String`), and both sides carry the same doubling-growth capacity overshoot from building the document.
 
@@ -27,8 +21,12 @@ The time gap tells a different story: Rust reaches ~7 GB/s per validation pass w
 
 ## How to Run
 
-Prerequisites: `hyperfine`, `rustc`, `swiftc`, `go`, `python3`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).
+Prerequisites: `hyperfine`, `rustc`, `swiftc`, `go`, `python3`. The runner builds the release compiler automatically when it uses the repo default `target/release/ryo` (override with `--ryo-bin PATH` or `$RYO_BIN`).
+
+From the repository root:
 
 ```bash
-./run_benchmarks.sh
+uv run benchmarks/run.py run --benchmarks json_validate
 ```
+
+Add `--dry-run` to build every arm and run only the checksum correctness gate (no hyperfine), or `--languages rust,swift,...` to limit the arms.

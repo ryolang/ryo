@@ -8,12 +8,8 @@
 
 Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-29 (Cranelift 0.136.1 checkpoint). Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
 
-| Candidate | Version | Mean time | vs fastest | Max RSS |
-|---|---|---|---|---|
-| **Rust** | 1.98.0 | 112.6 ms ± 1.5 ms | 1.00x | 1.44 MB |
-| **Swift** | 6.3.3 | 178.1 ms ± 2.9 ms | 1.58x slower | 5.55 MB |
-| **Ryo (AOT)** | 0.1.0-dev.20260929+228adbb | 237.6 ms ± 2.7 ms | 2.11x slower | 1.34 MB |
-| **Ryo (JIT)** | 0.1.0-dev.20260929+228adbb | 230.1 ms ± 1.1 ms | 2.04x slower | 4.98 MB |
+<!-- BENCH:START -->
+<!-- BENCH:END -->
 
 ## Why Ryo trails Rust here
 
@@ -37,8 +33,12 @@ Closing the residual ~1.3x is compiler work, not a language cost: the `srem`-by-
 
 ## How to Run
 
-Prerequisites: `hyperfine`, `rustc`, `swiftc`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).
+Prerequisites: `hyperfine`, `rustc`, `swiftc`. The runner builds the release compiler automatically when it uses the repo default `target/release/ryo` (override with `--ryo-bin PATH` or `$RYO_BIN`).
+
+From the repository root:
 
 ```bash
-./run_benchmarks.sh
+uv run benchmarks/run.py run --benchmarks collatz
 ```
+
+Add `--dry-run` to build every arm and run only the checksum correctness gate (no hyperfine), or `--languages rust,swift,...` to limit the arms.

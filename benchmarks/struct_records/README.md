@@ -12,14 +12,8 @@ This flat-loop record workload is the interim form. Once `list[T]` lands (M22, s
 
 Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-11. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
 
-| Candidate | Version | Mean time | vs fastest | Max RSS |
-|---|---|---|---|---|
-| **Swift** | 6.3.3 | 11.8 ms ± 0.4 ms | 1.00x | 1.56 MB |
-| **Ryo (AOT)** | 0.1.0-dev.20260911+a151528 | 20.6 ms ± 0.6 ms | 1.74x slower | 1.39 MB |
-| **Ryo (JIT)** | 0.1.0-dev.20260911+a151528 | 22.8 ms ± 0.6 ms | 1.94x slower | 5.36 MB |
-| **Rust** | 1.98.0 | 24.4 ms ± 0.6 ms | 2.07x slower | 1.52 MB |
-| **Go** | 1.27.1 | 25.6 ms ± 0.8 ms | 2.17x slower | 9.30 MB |
-| **Python** | 3.14.7 | 132.2 ms ± 2.1 ms | 11.21x slower | 14.59 MB |
+<!-- BENCH:START -->
+<!-- BENCH:END -->
 
 Ryo AOT **beats both Rust and Go** here (20.6 ms vs 24.4 / 25.6 ms). The earlier Ryo arm re-derived the name per round because field-level moves are rejected (E0043); rewriting `birthday` to take the record by `move` and mutate the field in place — the idiomatic Ryo shape — removed the per-round `int_to_str` + concat + alloc/free entirely (36.9 ms → ~20 ms) and unified the checksum across all five languages. What remains is pure aggregate ABI traffic, where Ryo's eager-destruction scheduling and sret returns hold up well; Rust additionally pays `format!` machinery per round, and Go pays its GC twice over — in walltime (write barriers, allocation pacing) and most visibly in memory (9.30 MB RSS vs Ryo's 1.39 MB, the classic GC headroom tax). Swift still wins outright at this checkpoint: its small-string optimization keeps every name inline (≤ 10 UTF-8 bytes) and its value copy is cheap — Ryo closed exactly that gap on 2026-09-14 (see the checkpoint below). Ryo AOT runs **6.4x faster than Python** with ~10x less memory, at the lightest RSS of the suite.
 
@@ -40,8 +34,12 @@ Ryo AOT went from 20.6 ms (1.74x behind Swift) to 11.4 ms — now the **fastest 
 
 ## How to Run
 
-Prerequisites: `hyperfine`, `rustc`, `swiftc`, `go`, `python3`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).
+Prerequisites: `hyperfine`, `rustc`, `swiftc`, `go`, `python3`. The runner builds the release compiler automatically when it uses the repo default `target/release/ryo` (override with `--ryo-bin PATH` or `$RYO_BIN`).
+
+From the repository root:
 
 ```bash
-./run_benchmarks.sh
+uv run benchmarks/run.py run --benchmarks struct_records
 ```
+
+Add `--dry-run` to build every arm and run only the checksum correctness gate (no hyperfine), or `--languages rust,swift,...` to limit the arms.

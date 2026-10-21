@@ -8,7 +8,16 @@ We target both execution speed and memory efficiency (specifically focusing on R
 
 **Idiomatic convention:** every benchmark is written the way a developer would naturally write it in that language. Never adapt another language's implementation to work around something Ryo doesn't support yet (e.g. moving a field out of a struct) — the cost of Ryo's current limitations is part of what the suite measures. Where that makes workloads diverge, checksums are per-language and the benchmark's README must say so explicitly.
 
-**Checkpoint convention:** run the full suite before each release and after merging any change that touches generated-code shape (`ryo-backend/src/codegen/`, the Cranelift pin, ownership sidecar consumption); record results in each benchmark's README so the trend is visible in git history. Every results table must include a **Version** column capturing each language toolchain's version at measurement time (`rustc --version`, `swiftc --version`, `python3 --version`, `ryo --version`) — timings without versions are not reproducible.
+**Checkpoint convention:** run the full suite before each release and after merging any change that touches generated-code shape (`ryo-backend/src/codegen/`, the Cranelift pin, ownership sidecar consumption); results land in the per-suite data store and the README tables are regenerated from it, so the trend is visible in git history. Every results table must include a **Version** column capturing each language toolchain's version at measurement time (`rustc --version`, `swiftc --version`, `python3 --version`, `ryo --version`) — timings without versions are not reproducible.
+
+---
+
+## Current Results
+
+The Ryo (AOT) anchor row per suite, regenerated from the data store by `uv run benchmarks/run.py update-readme` — do not edit the table by hand (see the checkpoint convention below).
+
+<!-- BENCH-SUMMARY:START -->
+<!-- BENCH-SUMMARY:END -->
 
 ---
 
@@ -109,19 +118,25 @@ JIT and AOT land within noise of each other (~1.33–1.34×) because both share 
 
 ## General Prerequisites
 
-To run these benchmarks, you will need `hyperfine` and a built release binary of the Ryo compiler:
+To run these benchmarks you need `hyperfine`, the per-language toolchains the selected suites compare (each suite README lists its arms), and `uv`. Every suite is driven from the repository root by the central runner `benchmarks/run.py`, which discovers each suite's `suite.toml` manifest — there are no per-suite scripts:
 
 ```bash
-# Build the Ryo compiler in release mode from the repository root
-cargo build --release
+# Time every arm of a suite (drop --benchmarks to run every discovered suite)
+uv run benchmarks/run.py run --benchmarks eager_destruction
+
+# Build-only correctness gate: build every arm and run its checksum, no hyperfine
+uv run benchmarks/run.py run --benchmarks eager_destruction --dry-run
 ```
 
-Each benchmark directory contains its own `run_benchmarks.sh` wrapper script. Navigate to any subdirectory and execute the script:
+### Runner Contract
 
-```bash
-cd benchmarks/eager_destruction
-./run_benchmarks.sh
-```
+The runner's behavior is fixed by the manifests and the data store, not by wrapper-script copies (I-174):
+
+* **Subcommands.** `run` builds each arm, verifies its checksum output, then times it with `hyperfine` (peak RSS via `/usr/bin/time -l` on macOS, `%M` on Linux) and appends the numbers to the suite's store under `benchmarks/data/`. `table` renders the canonical tables from the store to stdout. `update-readme` splices those tables into the README marker blocks (see the checkpoint convention below).
+* **Flags.** `run` takes `--benchmarks NAMES`, `--languages NAMES`, `--dry-run` (stop after the checksum gate; never invoke hyperfine), `--strict` (fail before benchmarking when a selected toolchain is missing), `--ryo-bin PATH`, and `--json PATH` (write the incremental run JSON after each suite). `table` and `update-readme` take `--benchmarks` (and `table` takes `--out PATH`).
+* **Ryo binary precedence.** `--ryo-bin PATH` wins, then `$RYO_BIN`, then the repo's own `target/release/ryo`. Only that last default is ever built by the runner (`cargo build --release`, pinned to the repo root no matter where the runner is invoked); an explicit override must already exist.
+* **Store keys and retention.** The store is keyed `<suite>/<group>/<arm>` (the group segment appears only in suites that define groups) and keeps the newest 20 entries per key. Entries come only from real `run` invocations — never backfilled or hand-edited — so every rendered row traces to an actual measurement with its date and commit.
+* **Ryo (AOT) arms chain the compiler build.** Each suite's Ryo (AOT) arm begins its manifest build line with `cargo build --release`, so the benchmarked binary always comes from the just-built compiler at the measured revision. That chain is deliberate — it stays faithful to the old per-suite scripts even where it duplicates the runner's own auto-build.
 
 ---
 
@@ -157,4 +172,11 @@ samply record ../../target/release/ryo run fib.ryo
 
 ## Manual Checkpoint Convention
 
-Run the full suite (every subdirectory's `run_benchmarks.sh`) **before each release** and **after merging any change that touches generated-code shape** (`ryo-backend/src/codegen/`, the Cranelift pin, ownership sidecar consumption). Record results in each benchmark's README so the trend is visible in git history. These runs are manual only — they never run in CI.
+Run the full suite **before each release** and **after merging any change that touches generated-code shape** (`ryo-backend/src/codegen/`, the Cranelift pin, ownership sidecar consumption):
+
+```bash
+uv run benchmarks/run.py run            # every discovered suite
+uv run benchmarks/run.py update-readme  # splice the new tables into the READMEs
+```
+
+The numbers land in the per-suite store (`benchmarks/data/<suite>.json`); `update-readme` renders the canonical table into each suite README's `<!-- BENCH:START -->` / `<!-- BENCH:END -->` block and the cross-suite summary into this README's `<!-- BENCH-SUMMARY:START -->` / `<!-- BENCH-SUMMARY:END -->` block. Never edit a generated block by hand and never copy numbers into it — a rendered row exists only because a real `run` measured it. Hand-written tables survive only as dated checkpoint history below the generated block in each suite README, and prose that cites specific numbers (e.g. "1.7 ms") goes stale when the table moves — update-readme warns about those. These runs are manual only — they never run in CI.

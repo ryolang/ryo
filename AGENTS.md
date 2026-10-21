@@ -103,7 +103,7 @@ cargo fmt --check                # Check code formatting style
 
 GitHub Actions runs on pushes to `main` and PRs targeting `main` (see `.github/workflows/ci.yml` for the authoritative job list): the file-length check, `cargo fmt --check`, `cargo clippy --workspace --all-targets`, and `cargo test --workspace` across Linux and macOS (plus a Windows test job, ASan/Valgrind leak checks, and a Miri job over the `ryo-runtime` crate's tests). `RUSTFLAGS=-Dwarnings` is set env-wide, so warnings are errors in every job. All jobs must pass for merge.
 
-**Performance is a CI gate.** CodSpeed comments on PRs report both walltime and simulation (compile-time) regressions. A double-digit regression on a tracked benchmark is a defect: fix it in the PR or record a deliberate decision, never merge silently. Before merging codegen changes, run the affected benchmarks via `benchmarks/<name>/run_benchmarks.sh` and compare against the README's latest checkpoint. Local walltime A/B can miss compile-time regressions that the simulation metric isolates — trust the CodSpeed gate for compile-time claims.
+**Performance is a CI gate.** CodSpeed comments on PRs report both walltime and simulation (compile-time) regressions. A double-digit regression on a tracked benchmark is a defect: fix it in the PR or record a deliberate decision, never merge silently. Before merging codegen changes, run the affected benchmarks via `uv run benchmarks/run.py run --benchmarks <name>` and compare against the README's latest checkpoint. Local walltime A/B can miss compile-time regressions that the simulation metric isolates — trust the CodSpeed gate for compile-time claims.
 
 ---
 

@@ -113,18 +113,14 @@ Two codegen changes move the numbers:
 - **RSS fell** (5.11 → 4.34 MB). Slot-out producer results (`int_to_str` here) previously landed in a temp slot and were copied word-by-word into the binding's slot; fat bindings now have a canonical home slot the producer writes directly, shrinking `recursive`'s frame from 0x30 to 0x20 bytes — the measured −0.77 MB over 50,000 simultaneously live frames matches the 16-byte-per-frame shrink exactly. The memory-efficiency lead over Rust scope-based RAII widens from 1.62x to 1.91x, recovering about a third of the SSO footprint tradeoff.
 - **The provably-inline free elision removes the last per-frame call.** `int_to_str`'s output is at most 20 bytes, so it is always SSO-inline and `ryo_str_free` on it is a guaranteed no-op; codegen now proves this (via a registry-annotated output bound plus a home-provenance flag, cleared conservatively at control-flow joins) and emits no free call at all. Disassembly of `recursive` shows exactly one extern call (`ryo_int_to_str`, writing the home directly) before the recursive call — no temp copy, no `ryo_str_free`. Wall time is flat (2.0 → 2.2 ms, within the ±0.5 ms noise): the elided call was already a cheap early-return on the inline tag.
 - **Depth ceiling rose** (re-verified 2026-09-21): clean runs up to **262,000** recursive calls, SIGSEGV at 265,000 — the 0x20 frame simply packs more calls into the same OS stack.
-- **CodSpeed memory mode reads 0 B for this benchmark by design.** Memory mode tracks heap allocator events, and the benchmark performs zero heap allocations on its hot path — every string is SSO-inline — so "no timeline / 0 B" is the expected reading, not a broken run. The RSS footprint is stack (50,000 simultaneously live frames), which allocation tracking does not instrument; the `run_benchmarks.sh` Max-RSS measurement is the right tool for it.
+- **CodSpeed memory mode reads 0 B for this benchmark by design.** Memory mode tracks heap allocator events, and the benchmark performs zero heap allocations on its hot path — every string is SSO-inline — so "no timeline / 0 B" is the expected reading, not a broken run. The RSS footprint is stack (50,000 simultaneously live frames), which allocation tracking does not instrument; the runner's Max-RSS measurement is the right tool for it.
 
 ### Checkpoint: tail calls + recursive-call stack check (2026-10-07)
 
 Re-measured on the same machine after codegen began emitting Cranelift `return_call` for the tail-recursive call and the stack-limit check moved from every function's prologue to recursive-call cycle edges, at `0.1.0-dev.20261007+d3ea2bc` (hyperfine `--warmup 3 --shell=none`):
 
-| Benchmark Candidate | Version | Max RSS | Memory Efficiency (vs Rust Scope-Based) | Mean time | vs fastest |
-|---------------------|---------|---------|------------------------------------------|-----------|------------|
-| **Ryo (AOT, Eager)** | `0.1.0-dev.20261007+d3ea2bc` | **1.36 MB** | **6.10x more efficient** | **1.7 ms ± 0.3 ms** | **1.00x (fastest)** |
-| Ryo (JIT, Eager) | `0.1.0-dev.20261007+d3ea2bc` | 5.00 MB | 1.66x more efficient | 2.9 ms ± 0.3 ms | 1.69x slower |
-| Rust (Manual Drop) | 1.98.0 | 6.81 MB | 1.22x more efficient | 3.3 ms ± 0.2 ms | 1.87x slower |
-| Rust (Scope-Based) | 1.98.0 | 8.30 MB | 1.00x (baseline) | 3.5 ms ± 0.3 ms | 2.00x slower |
+<!-- BENCH:START -->
+<!-- BENCH:END -->
 
 What moved:
 
@@ -136,7 +132,7 @@ What moved:
 1. **Fastest and leanest:** Ryo's AOT binary is the fastest arm of the suite (1.7 ms, 1.69–2.00x over the other arms) and the leanest by a wide margin — its RSS (1.36 MB) is 6.10x more efficient than Rust scope-based RAII, because `return_call` makes the recursion's stack footprint O(1): the 50,000 simultaneously-live frames that dominated the earlier checkpoints are never materialized.
 2. **Stack Safety under Deep Recursion:** Rust **crashes with a stack overflow just above 74,556 recursive calls** (re-verified 2026-09-15: depth 74,556 succeeds, 74,600 aborts — both the scope-based and manual-`drop` arms, even with release-level `-O`, due to conservative LLVM tail call heuristics). **Ryo has no depth ceiling for this program**: codegen emits `return_call` for the tail-recursive call, so recursion runs in O(1) stack — 10,000,000 calls complete cleanly (verified 2026-10-07). Pre-tail-call builds ceilinged at ~262,000 frames (0x20 bytes each) before reaching the OS stack limit; that ceiling was a property of the old call + return codegen, not of the language. For *non-tail* recursion the failure modes differ: Rust detects the overflow and aborts cleanly (`thread 'main' has overflowed its stack`, exit 134), while Ryo's stack-limit check (emitted before every recursive call) aborts with `stack overflow` on stderr and exit 101 (verified 2026-10-07) — no more blind SIGSEGV.
 3. **The Power of Compact Stack Frames:** In recursive scope-based RAII, Rust must keep active references, drop flags, and landing pads in each stack frame until the recursion unwinds. By contrast, Ryo's **Milestone 8.1 Eager Destruction** statically releases the string *before* entering recursion — and with SSO plus the provably-inline elision, short strings (≤ 22 bytes) never touch the heap at all and the compiler can prove the free is a no-op, so no free call is even emitted. Tail *position* is what makes the call eligible for tail-call optimization, and codegen now delivers it: the recursive call is emitted as a Cranelift `return_call` rather than a normal `call` followed by `return`, so no per-recursion frame is materialized and the depth ceiling in takeaway #2 is gone.
-4. **Observing the Crash:** To observe Rust's stack overflow and Ryo's stack safety first-hand, edit the `main()` function in `eager_destruction.ryo` and `eager_destruction.rs` to change `50000` to `74600` (or higher), then re-run `./run_benchmarks.sh`. Ryo's tail recursion no longer overflows at any depth; to see Ryo's own overflow diagnostic, use a non-tail-recursive shape (e.g. `return rec(x - 1) + 1`), which aborts with `stack overflow` on stderr and exit 101 once the stack limit is reached.
+4. **Observing the Crash:** To observe Rust's stack overflow and Ryo's stack safety first-hand, edit the `main()` function in `eager_destruction.ryo` and `eager_destruction.rs` to change `50000` to `74600` (or higher), then re-run `uv run benchmarks/run.py run --benchmarks eager_destruction`. Ryo's tail recursion no longer overflows at any depth; to see Ryo's own overflow diagnostic, use a non-tail-recursive shape (e.g. `return rec(x - 1) + 1`), which aborts with `stack overflow` on stderr and exit 101 once the stack limit is reached.
 
 ---
 
@@ -146,16 +142,19 @@ What moved:
 Make sure you have:
 - `rustc`
 - `hyperfine`
-- A built release compiler binary for Ryo (`cargo build --release` from the repository root)
+- A release compiler binary for Ryo (the runner builds `target/release/ryo` automatically when it is the resolved binary; override with `--ryo-bin PATH` or `$RYO_BIN`)
 
-### Running the Script
-Simply run the wrapper script inside this directory:
+### Running the Suite
+From the repository root:
+
 ```bash
-./run_benchmarks.sh
+uv run benchmarks/run.py run --benchmarks eager_destruction
 ```
 
-It will:
-1. Build the Rust programs with maximum optimizations (`-O`).
-2. Build the Ryo program using AOT.
-3. Measure and display the Maximum Resident Set Size (RSS) memory of each.
-4. Execute performance comparison runs using `hyperfine`.
+The suite is driven by the `suite.toml` manifest in this directory. It:
+1. Builds the Rust programs with maximum optimizations (`-O`).
+2. Builds the Ryo program using AOT.
+3. Measures and displays the Maximum Resident Set Size (RSS) memory of each.
+4. Executes performance comparison runs using `hyperfine`.
+
+Add `--dry-run` to build every arm and run only the checksum correctness gate (no hyperfine), or `--languages rust,ryo` to limit the arms.

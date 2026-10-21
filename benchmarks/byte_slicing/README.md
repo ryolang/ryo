@@ -16,19 +16,19 @@ One fairness note: the Swift arm pays a one-time `[UInt8](s.utf8)` materializati
 
 Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-17. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l`.
 
-| Candidate | Version | Mean time | vs fastest | Max RSS |
-|---|---|---|---|---|
-| **Rust** | 1.98.0 | 1.6 ms ± 0.1 ms | 1.00x | 2.88 MB |
-| **Swift** | 6.3.3 | 2.5 ms ± 0.1 ms | 1.57x slower | 7.09 MB |
-| **Ryo (AOT)** | 0.1.0-dev.20260917+63078ac | 2.7 ms ± 0.1 ms | 1.70x slower | 2.75 MB |
-| **Ryo (JIT)** | 0.1.0-dev.20260917+63078ac | 4.2 ms ± 0.1 ms | 2.62x slower | 6.97 MB |
+<!-- BENCH:START -->
+<!-- BENCH:END -->
 
 Ryo AOT lands within noise of Swift here — the remaining 1.70× to Rust is the §18 checked-arithmetic guards (three per iteration), the promote-on-view per-iteration spill (I-184), and Cranelift-vs-LLVM mid-end quality.
 
 ## How to Run
 
-Prerequisites: `hyperfine`, `rustc`, `swiftc`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).
+Prerequisites: `hyperfine`, `rustc`, `swiftc`. The runner builds the release compiler automatically when it uses the repo default `target/release/ryo` (override with `--ryo-bin PATH` or `$RYO_BIN`).
+
+From the repository root:
 
 ```bash
-./run_benchmarks.sh
+uv run benchmarks/run.py run --benchmarks byte_slicing
 ```
+
+Add `--dry-run` to build every arm and run only the checksum correctness gate (no hyperfine), or `--languages rust,swift,...` to limit the arms.
