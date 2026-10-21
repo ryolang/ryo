@@ -1,5 +1,5 @@
 {
-  "lastUpdate": 1792594445810,
+  "lastUpdate": 1792621289758,
   "repoUrl": "https://github.com/ryolang/ryo",
   "entries": {
     "fibonacci/Rust": [
@@ -98,6 +98,30 @@
             "extra": "max resident set size; mean of runs"
           }
         ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 263.58,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; rustc 1.99.1"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.482,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
       }
     ],
     "fibonacci/Kotlin": [
@@ -168,6 +192,30 @@
           {
             "name": "memory_peak_rss",
             "value": 44.647,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 269.675,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; kotlinc 2.4.21"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 44.633,
             "unit": "MB",
             "extra": "max resident set size; mean of runs"
           }
@@ -246,6 +294,30 @@
             "extra": "max resident set size; mean of runs"
           }
         ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 295.1,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; go 1.27.3"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 3.881,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
       }
     ],
     "fibonacci/Swift": [
@@ -310,6 +382,30 @@
           {
             "name": "time",
             "value": 329.754,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; swiftc 6.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.609,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 329.675,
             "unit": "ms",
             "extra": "mean wall clock; hyperfine 2.0.0; swiftc 6.4"
           },
@@ -418,6 +514,30 @@
             "extra": "max resident set size; mean of runs"
           }
         ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 361.187,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0-dev.20261022+63c9cba"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.35,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
       }
     ],
     "fibonacci/Ryo (JIT)": [
@@ -516,6 +636,30 @@
             "extra": "max resident set size; mean of runs"
           }
         ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 383.871,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0-dev.20261022+63c9cba"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 5.514,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
       }
     ],
     "fibonacci/Bun (TS)": [
@@ -586,6 +730,30 @@
           {
             "name": "memory_peak_rss",
             "value": 27.433,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 402.576,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; bun 1.3.13"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 27.438,
             "unit": "MB",
             "extra": "max resident set size; mean of runs"
           }
@@ -664,6 +832,30 @@
             "extra": "max resident set size; mean of runs"
           }
         ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 916.317,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; elixir 1.20.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 90.094,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
       }
     ],
     "fibonacci/Ruby": [
@@ -728,6 +920,30 @@
           {
             "name": "time",
             "value": 6313.351,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ruby 2.6.10p210"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 28.0,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 6252.58,
             "unit": "ms",
             "extra": "mean wall clock; hyperfine 2.0.0; ruby 2.6.10p210"
           },
@@ -812,6 +1028,30 @@
             "extra": "max resident set size; mean of runs"
           }
         ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 4997.219,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; python 3.14.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 15.983,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
       }
     ],
     "fibonacci/Julia": [
@@ -882,6 +1122,30 @@
           {
             "name": "memory_peak_rss",
             "value": 193.684,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 415.231,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; julia 1.13.2"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 193.602,
             "unit": "MB",
             "extra": "max resident set size; mean of runs"
           }

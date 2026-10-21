@@ -27,18 +27,18 @@ Calculating the 40th Fibonacci number recursively (Time taken):
 <!-- BENCH:START -->
 | Language or Arm | Version | Mean Time | Speed vs Best | Memory |
 |---|---|---|---|---|
-| Rust | 1.98.0 | 267.655 ms | 1.00x | 1.476 MB |
-| Kotlin | 2.4.21 | 280.338 ms | 1.05x slower | 44.647 MB |
-| Go | 1.27.2 | 301.492 ms | 1.13x slower | 3.942 MB |
-| Swift | 6.4 | 329.754 ms | 1.23x slower | 1.609 MB |
-| Ryo (AOT) | 0.1.0 | 359.464 ms | 1.34x slower | ⭐ 1.37 MB |
-| Ryo (JIT) | 0.1.0 | 389.487 ms | 1.46x slower | 5.475 MB |
-| Bun (TS) | 1.3.13 | 406.479 ms | 1.52x slower | 27.433 MB |
-| Julia | 1.13.1 | 429.82 ms | 1.61x slower | 193.684 MB |
-| Elixir | 1.20.4 | 990.888 ms | 3.70x slower | 89.569 MB |
-| Python | 3.14.4 | 5068.66 ms | 18.94x slower | 16 MB |
-| Ruby | 2.6.10p210 | 6313.35 ms | 23.59x slower | 28 MB |
-Measured on Darwin/arm64/Mac15,6, 2026-10-21 (commit bddd4e1, hyperfine 2.0.0, warmup 3)
+| Rust | 1.99.1 | 263.58 ms | 1.00x | 1.482 MB |
+| Kotlin | 2.4.21 | 269.675 ms | 1.02x slower | 44.633 MB |
+| Go | 1.27.3 | 295.1 ms | 1.12x slower | 3.881 MB |
+| Swift | 6.4 | 329.675 ms | 1.25x slower | 1.609 MB |
+| Ryo (AOT) | 0.1.0-dev.20261022+63c9cba | 361.187 ms | 1.37x slower | ⭐ 1.35 MB |
+| Ryo (JIT) | 0.1.0-dev.20261022+63c9cba | 383.871 ms | 1.46x slower | 5.514 MB |
+| Bun (TS) | 1.3.13 | 402.576 ms | 1.53x slower | 27.438 MB |
+| Julia | 1.13.2 | 415.231 ms | 1.58x slower | 193.602 MB |
+| Elixir | 1.20.4 | 916.317 ms | 3.48x slower | 90.094 MB |
+| Python | 3.14.4 | 4997.22 ms | 18.96x slower | 15.983 MB |
+| Ruby | 2.6.10p210 | 6252.58 ms | 23.72x slower | 28 MB |
+Measured on Darwin/arm64/Mac15,6, 2026-10-21 (commit 63c9cba, hyperfine 2.0.0, warmup 3)
 <!-- BENCH:END -->
 
 ### Checkpoint: Cranelift 0.136.1 (2026-09-29)

@@ -1,5 +1,5 @@
 {
-  "lastUpdate": 1792594465329,
+  "lastUpdate": 1792621759859,
   "repoUrl": "https://github.com/ryolang/ryo",
   "entries": {
     "collatz/Rust": [
@@ -70,6 +70,30 @@
           {
             "name": "memory_peak_rss",
             "value": 1.463,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "280990f",
+          "message": "docs: fix --languages example and flag details in benchmarks guide",
+          "timestamp": 1792621476,
+          "url": "https://github.com/ryolang/ryo/commit/280990f"
+        },
+        "date": 1792621759768,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 104.392,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; rustc 1.99.1"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.495,
             "unit": "MB",
             "extra": "max resident set size; mean of runs"
           }
@@ -148,6 +172,30 @@
             "extra": "max resident set size; mean of runs"
           }
         ]
+      },
+      {
+        "commit": {
+          "id": "280990f",
+          "message": "docs: fix --languages example and flag details in benchmarks guide",
+          "timestamp": 1792621476,
+          "url": "https://github.com/ryolang/ryo/commit/280990f"
+        },
+        "date": 1792621759768,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 163.709,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; swiftc 6.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 5.577,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
       }
     ],
     "collatz/Ryo (AOT)": [
@@ -222,6 +270,30 @@
             "extra": "max resident set size; mean of runs"
           }
         ]
+      },
+      {
+        "commit": {
+          "id": "280990f",
+          "message": "docs: fix --languages example and flag details in benchmarks guide",
+          "timestamp": 1792621476,
+          "url": "https://github.com/ryolang/ryo/commit/280990f"
+        },
+        "date": 1792621759768,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 215.607,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0-dev.20261022+280990f"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.368,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
       }
     ],
     "collatz/Ryo (JIT)": [
@@ -292,6 +364,30 @@
           {
             "name": "memory_peak_rss",
             "value": 5.704,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "280990f",
+          "message": "docs: fix --languages example and flag details in benchmarks guide",
+          "timestamp": 1792621476,
+          "url": "https://github.com/ryolang/ryo/commit/280990f"
+        },
+        "date": 1792621759768,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 215.136,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0-dev.20261022+280990f"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 5.74,
             "unit": "MB",
             "extra": "max resident set size; mean of runs"
           }
