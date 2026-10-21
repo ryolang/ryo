@@ -1599,6 +1599,52 @@ def cmd_update_readme(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- matrix rendering ---
+
+_MATRIX_COLUMN_ORDER: list[str] = [
+    "ryo-aot",
+    "ryo-jit",
+    "rust",
+    "swift",
+    "go",
+    "python",
+    "kotlin",
+    "bun",
+    "elixir",
+    "ruby",
+    "julia",
+]
+_MATRIX_COLUMN_LABELS: dict[str, str] = {"ryo-aot": "Ryo AOT", "ryo-jit": "Ryo JIT", "bun": "Bun (TS)"}
+
+
+def _matrix_column_key(arm: Arm) -> str:
+    """Stable matrix column for an arm: the ryo arms split by JIT vs AOT
+    (anything not named JIT is the AOT default), other arms use their language."""
+    if arm.language.lower() == "ryo":
+        return "ryo-jit" if "jit" in arm.name.lower() else "ryo-aot"
+    return arm.language.lower()
+
+
+def _ratio_emoji(ratio: float) -> str:
+    """Speed-vs-best bucket: ⭐ fastest, 🟩 within 20%, 🟨 within 3x, 🟥 beyond."""
+    if ratio <= 1.0 + 1e-9:
+        return "⭐"
+    if ratio <= 1.2:
+        return "🟩"
+    if ratio <= 3.0:
+        return "🟨"
+    return "🟥"
+
+
+def _format_ratio(ratio: float) -> str:
+    """Compact ratio suffix: two decimals under 10x, one under 100x, whole above."""
+    if ratio < 10:
+        return f"{ratio:.2f}×"
+    if ratio < 100:
+        return f"{ratio:.1f}×"
+    return f"{ratio:.0f}×"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="benchmarks/run.py",
