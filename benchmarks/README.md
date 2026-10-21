@@ -25,6 +25,33 @@ Cross-suite summary of the Ryo (AOT) anchor row per suite, regenerated from the 
 
 ---
 
+## Benchmark Matrix
+
+Per-language matrix across suites — one row per suite, one column per language — regenerated from the data store by `uv run benchmarks/run.py update-readme`; do not edit the tables by hand. Library-comparison arms fold into their language's column (fastest wins); per-library detail lives in the suite READMEs.
+
+<!-- BENCH-MATRIX:START -->
+⭐ fastest in row · 🟩 within 20% · 🟨 within 3× · 🟥 beyond 3×
+**Runtime (mean)**
+| Suite | Ryo AOT | Ryo JIT | Rust | Swift | Go | Python | Kotlin | Bun (TS) | Elixir | Ruby | Julia |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **Algorithms** |  |  |  |  |  |  |  |  |  |  |  |
+| [collatz](./collatz/)<br>2026-10-21 | 🟨 239.027 [2.14×] (0.1.0) | 🟨 255.785 [2.29×] (0.1.0) | ⭐ 111.626 [1.00×] (1.98.0) | 🟨 181.625 [1.63×] (6.4) | — | — | — | — | — | — | — |
+| [fibonacci](./fibonacci/)<br>2026-10-21 | 🟨 359.464 [1.34×] (0.1.0) | 🟨 389.487 [1.46×] (0.1.0) | ⭐ 267.655 [1.00×] (1.98.0) | 🟨 329.754 [1.23×] (6.4) | 🟩 301.492 [1.13×] (1.27.2) | 🟥 5068.66 [18.9×] (3.14.4) | 🟩 280.338 [1.05×] (2.4.21) | 🟨 406.479 [1.52×] (1.3.13) | 🟥 990.888 [3.70×] (1.20.4) | 🟥 6313.35 [23.6×] (2.6.10p210) | 🟨 429.82 [1.61×] (1.13.1) |
+| **Summary (geomean)** | 🟨 1.70× | 🟨 1.83× | ⭐ 1.00× | 🟨 1.42× | 🟩 1.13× | 🟥 18.9× | 🟩 1.05× | 🟨 1.52× | 🟥 3.70× | 🟥 23.6× | 🟨 1.61× |
+
+**Peak memory (max RSS)**
+| Suite | Ryo AOT | Ryo JIT | Rust | Swift | Go | Python | Kotlin | Bun (TS) | Elixir | Ruby | Julia |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **Algorithms** |  |  |  |  |  |  |  |  |  |  |  |
+| [collatz](./collatz/)<br>2026-10-21 | ⭐ 1.352 [1.00×] (0.1.0) | 🟥 5.704 [4.22×] (0.1.0) | 🟩 1.463 [1.08×] (1.98.0) | 🟥 5.576 [4.12×] (6.4) | — | — | — | — | — | — | — |
+| [fibonacci](./fibonacci/)<br>2026-10-21 | ⭐ 1.37 [1.00×] (0.1.0) | 🟥 5.475 [4.00×] (0.1.0) | 🟩 1.476 [1.08×] (1.98.0) | 🟩 1.609 [1.17×] (6.4) | 🟨 3.942 [2.88×] (1.27.2) | 🟥 16 [11.7×] (3.14.4) | 🟥 44.647 [32.6×] (2.4.21) | 🟥 27.433 [20.0×] (1.3.13) | 🟥 89.569 [65.4×] (1.20.4) | 🟥 28 [20.4×] (2.6.10p210) | 🟥 193.684 [141×] (1.13.1) |
+| **Summary (geomean)** | ⭐ 1.00× | 🟥 4.11× | 🟩 1.08× | 🟨 2.20× | 🟨 2.88× | 🟥 11.7× | 🟥 32.6× | 🟥 20.0× | 🟥 65.4× | 🟥 20.4× | 🟥 141× |
+
+*Cells show each suite's best arm per language — mean time or peak RSS, ratio vs. the fastest arm in the row; the summary row is a per-column geomean of those ratios.*
+<!-- BENCH-MATRIX:END -->
+
+---
+
 ## General Prerequisites
 
 To run these benchmarks you need `hyperfine`, the per-language toolchains the selected suites compare (each suite README lists its arms), and `uv`. Every suite is driven from the repository root by the central runner `benchmarks/run.py`, which discovers each suite's `suite.toml` manifest — there are no per-suite scripts:
@@ -41,7 +68,7 @@ uv run benchmarks/run.py run --benchmarks eager_destruction --dry-run
 
 The runner's behavior is fixed by the manifests and the data store, not by the per-suite wrapper-script copies this runner replaced:
 
-* **Subcommands.** `run` builds each arm, verifies its checksum output, then times it with `hyperfine` (peak RSS from hyperfine 2.0's native memory measurement, reported as the mean of runs) and appends the numbers to the suite's store under `benchmarks/data/`. `table` renders the canonical tables from the store to stdout. `update-readme` splices those tables into the README marker blocks (see the checkpoint convention below); suites with no store data yet are left untouched, so a bare `update-readme` on a fresh clone changes nothing.
+* **Subcommands.** `run` builds each arm, verifies its checksum output, then times it with `hyperfine` (peak RSS from hyperfine 2.0's native memory measurement, reported as the mean of runs) and appends the numbers to the suite's store under `benchmarks/data/`. `table` renders the canonical tables from the store to stdout. `update-readme` splices those tables into the README marker blocks (see the checkpoint convention below); suites with no store data yet are left untouched, so a bare `update-readme` on a fresh clone changes nothing. `matrix` renders the cross-suite per-language matrix (the `## Benchmark Matrix` section below) from the store.
 * **Flags.** `run` takes `--benchmarks NAMES`, `--languages NAMES`, `--dry-run` (stop after the checksum gate; never invoke hyperfine), `--strict` (fail before benchmarking when a selected toolchain is missing), `--ryo-bin PATH`, and `--json PATH` (write the incremental run JSON after each suite). `table` and `update-readme` take `--benchmarks` (and `table` takes `--out PATH`). Both also take `--include-ignored` to act on git-ignored (local) suites — see below.
 * **Committed vs. local suites.** Discovery is git-aware: `table` and `update-readme` skip manifests git marks ignored (the local `csv_parse`, `json_parse`, and `startup_latency` sweeps), so committed READMEs and the summary only ever carry committed suites. `run` always discovers everything — local sweeps stay a legitimate target. To render or splice a local suite, pass `--include-ignored`.
 * **Ryo binary precedence.** `--ryo-bin PATH` wins, then `$RYO_BIN`, then the repo's own `target/release/ryo`. Only that last default is ever built by the runner (`cargo build --release`, pinned to the repo root no matter where the runner is invoked); an explicit override must already exist.

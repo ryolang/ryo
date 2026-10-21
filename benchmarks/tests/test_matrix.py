@@ -1,6 +1,7 @@
 """Tests for the cross-suite matrix rendering: cell helpers (column keys,
-ratio emoji buckets, ratio formatting), the render_matrix assembly, and the
-cmd_matrix subcommand entry point."""
+ratio emoji buckets, ratio formatting), the render_matrix assembly, the
+cmd_matrix subcommand entry point, and the stale-prose regex treatment of
+the matrix marker block."""
 
 import argparse
 import json
@@ -17,6 +18,7 @@ from run import (
     cmd_matrix,
     load_suite,
     render_matrix,
+    stale_prose_warnings,
 )
 
 EPOCH_MS = int(datetime(2026, 10, 21, tzinfo=timezone.utc).timestamp() * 1000)
@@ -330,3 +332,15 @@ def test_cmd_matrix_unknown_benchmarks_name_errors(tmp_path, monkeypatch, capsys
     ) == 1
 
     assert "unknown --benchmarks name(s): bogus" in capsys.readouterr().err
+
+
+def test_marker_block_regex_excludes_matrix():
+    readme = "prose 1.7 ms\n<!-- BENCH-MATRIX:START -->\n| x |\n| 2.75 |\n<!-- BENCH-MATRIX:END -->\n"
+    assert stale_prose_warnings(readme, "| 1.7 |") == []
+
+
+def test_marker_block_regex_excludes_matrix_unit_numbers():
+    """Unit-carrying numbers inside the matrix block are generated content,
+    not prose — without the regex exclusion they scan as stale citations."""
+    readme = "prose\n<!-- BENCH-MATRIX:START -->\n| 2.75 ms |\n<!-- BENCH-MATRIX:END -->\n"
+    assert stale_prose_warnings(readme, "| 1.7 |") == []

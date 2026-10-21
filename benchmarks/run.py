@@ -1281,11 +1281,14 @@ def cmd_matrix(args: argparse.Namespace) -> int:
 
 # Generated blocks live between these marker pairs; everything outside them is
 # human-owned prose. Suite READMEs carry per-suite tables, the root
-# benchmarks/README.md carries one summary table across suites.
+# benchmarks/README.md carries one summary table and one per-language matrix
+# across suites.
 BENCH_START = "<!-- BENCH:START -->"
 BENCH_END = "<!-- BENCH:END -->"
 SUMMARY_START = "<!-- BENCH-SUMMARY:START -->"
 SUMMARY_END = "<!-- BENCH-SUMMARY:END -->"
+MATRIX_START = "<!-- BENCH-MATRIX:START -->"
+MATRIX_END = "<!-- BENCH-MATRIX:END -->"
 
 
 class MarkerError(ValueError):
@@ -1519,9 +1522,10 @@ def render_summary_table(suites: list[Suite], stores: dict[str, Store]) -> str:
 # Numbers carrying a benchmark unit (``12.3 ms``, ``4.5 MB``, ``1.7x``) — the
 # shape prose uses when it cites a measurement inline.
 _STALE_PROSE_VALUE = re.compile(r"(\d+(?:\.\d+)?)\s?(?:ms|MB|x)\b")
-# A generated block, either marker pair, spanning to its end marker.
+# A generated block, any of the three marker pairs, spanning to its end marker.
 _MARKER_BLOCK = re.compile(
-    r"<!-- BENCH(?:-SUMMARY)?:START -->.*?<!-- BENCH(?:-SUMMARY)?:END -->", re.DOTALL
+    r"<!-- BENCH(?:-(?:SUMMARY|MATRIX))?:START -->.*?<!-- BENCH(?:-(?:SUMMARY|MATRIX))?:END -->",
+    re.DOTALL,
 )
 _TABLE_VALUE = re.compile(r"\d+(?:\.\d+)?")
 
@@ -1555,11 +1559,12 @@ def cmd_update_readme(args: argparse.Namespace) -> int:
 
     Per suite README: the suite's canonical table into its ``BENCH`` block;
     root benchmarks/README.md: the cross-suite summary into its
-    ``BENCH-SUMMARY`` block. ``--benchmarks`` scopes only the per-suite
-    splices; the summary is always rebuilt from every discovered suite, so a
-    filtered run cannot silently delete other suites' committed rows. All
-    splices are planned before anything is written, so a missing marker pair
-    is a hard error with zero file mutation.
+    ``BENCH-SUMMARY`` block and the per-language matrix into its
+    ``BENCH-MATRIX`` block. ``--benchmarks`` scopes only the per-suite
+    splices; the summary and matrix are always rebuilt from every discovered
+    suite, so a filtered run cannot silently delete other suites' committed
+    rows. All splices are planned before anything is written, so a missing
+    marker pair is a hard error with zero file mutation.
     Writes are in place and atomic (temp file + rename), and a write is
     skipped entirely when the content is unchanged. Stale-prose warnings go
     to stderr and never affect the exit code.
@@ -1603,12 +1608,20 @@ def cmd_update_readme(args: argparse.Namespace) -> int:
         root_path = _REPO_ROOT / "benchmarks" / "README.md"
         root_text = _read_readme(root_path)
         summary = render_summary_table(all_suites, stores)
+        summary_text = _splice_readme(
+            root_path, root_text, SUMMARY_START, SUMMARY_END, summary
+        )
+        # The matrix block follows the same all-discovered-suites rule as the
+        # summary, spliced into the already summary-spliced root text.
+        matrix = render_matrix(all_suites, stores)
         plans.append(
             (
                 root_path,
                 root_text,
-                _splice_readme(root_path, root_text, SUMMARY_START, SUMMARY_END, summary),
-                summary,
+                _splice_readme(
+                    root_path, summary_text, MATRIX_START, MATRIX_END, matrix
+                ),
+                summary + "\n" + matrix,
             )
         )
     except MarkerError as exc:

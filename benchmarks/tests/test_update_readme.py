@@ -1,5 +1,5 @@
 """Tests for the `update-readme` subcommand: marker-block splicing, the root
-summary table, and stale-prose warnings."""
+summary and matrix tables, and stale-prose warnings."""
 
 import argparse
 import json
@@ -12,12 +12,15 @@ import run
 from run import (
     BENCH_END,
     BENCH_START,
+    MATRIX_END,
+    MATRIX_START,
     SUMMARY_END,
     SUMMARY_START,
     MarkerError,
     Store,
     cmd_update_readme,
     load_suite,
+    render_matrix,
     render_summary_table,
     splice_block,
     stale_prose_warnings,
@@ -395,7 +398,7 @@ def test_cmd_update_readme_splices_suite_and_root_readmes(
     tmp_path, fixed_platform, monkeypatch
 ):
     suite = write_suite(tmp_path / "suite", TWO_ARM_SUITE)
-    write_store(
+    store = write_store(
         tmp_path / "benchmarks" / "data" / "synthetic.json",
         {
             "synthetic/Rust": [make_entry(12.3, 4.5, toolchain="rustc 1.85.0")],
@@ -420,6 +423,9 @@ def test_cmd_update_readme_splices_suite_and_root_readmes(
         "\n"
         "<!-- BENCH-SUMMARY:START -->\n"
         "<!-- BENCH-SUMMARY:END -->\n"
+        "\n"
+        "<!-- BENCH-MATRIX:START -->\n"
+        "<!-- BENCH-MATRIX:END -->\n"
         "\n"
         "Curated prose stays.\n",
         encoding="utf-8",
@@ -454,6 +460,10 @@ def test_cmd_update_readme_splices_suite_and_root_readmes(
         "| 1.00x | 1.00x | ryo 0.1.0 / rustc 1.85.0 | 2026-10-21 (commit abc1234) |\n"
         "<!-- BENCH-SUMMARY:END -->\n"
         "\n"
+        "<!-- BENCH-MATRIX:START -->\n"
+        f"{render_matrix([suite], {'synthetic': store})}\n"
+        "<!-- BENCH-MATRIX:END -->\n"
+        "\n"
         "Curated prose stays.\n"
     )
 
@@ -463,6 +473,48 @@ def test_cmd_update_readme_splices_suite_and_root_readmes(
     assert cmd_update_readme(argparse.Namespace(benchmarks=None)) == 0
     assert suite_readme.read_text(encoding="utf-8") == suite_before
     assert root_readme.read_text(encoding="utf-8") == root_before
+
+
+def test_update_readme_splices_matrix_block(tmp_path, fixed_platform, monkeypatch):
+    """The root README's BENCH-MATRIX block is re-spliced from every discovered
+    suite (the same skip-ignored rule as the summary), and a second run is a
+    byte-identical no-op."""
+    suite = write_suite(tmp_path / "suite", TWO_ARM_SUITE)
+    write_store(
+        tmp_path / "benchmarks" / "data" / "synthetic.json",
+        {
+            "synthetic/Rust": [make_entry(12.3, 4.5, toolchain="rustc 1.85.0")],
+            "synthetic/Ryo (AOT)": [make_entry(2.7, 2.75, toolchain="ryo 0.1.0")],
+        },
+    )
+    suite_readme = tmp_path / "suite" / "README.md"
+    suite_readme.write_text(
+        "# Synthetic\n\n<!-- BENCH:START -->\n<!-- BENCH:END -->\n", encoding="utf-8"
+    )
+    root_readme = tmp_path / "benchmarks" / "README.md"
+    root_readme.write_text(
+        "# Benchmarks\n"
+        "\n"
+        "<!-- BENCH-SUMMARY:START -->\n"
+        "<!-- BENCH-SUMMARY:END -->\n"
+        "\n"
+        "<!-- BENCH-MATRIX:START -->\n"
+        "<!-- BENCH-MATRIX:END -->\n",
+        encoding="utf-8",
+    )
+    _patch_discovery(monkeypatch, tmp_path, suite)
+
+    assert cmd_update_readme(argparse.Namespace(benchmarks=None)) == 0
+
+    text = root_readme.read_text(encoding="utf-8")
+    block = text.split(MATRIX_START)[1].split(MATRIX_END)[0]
+    assert "**Summary (geomean)**" in block
+    assert "[synthetic](./suite/)" in block
+
+    # Idempotent: a second run rewrites nothing.
+    before = root_readme.read_text(encoding="utf-8")
+    assert cmd_update_readme(argparse.Namespace(benchmarks=None)) == 0
+    assert root_readme.read_text(encoding="utf-8") == before
 
 
 def test_cmd_update_readme_leaves_dataless_suite_readme_untouched(
@@ -503,7 +555,13 @@ expect = "a"
     dataless_readme.write_text(dataless_text, encoding="utf-8")
     root_readme = tmp_path / "benchmarks" / "README.md"
     root_readme.write_text(
-        "# Benchmarks\n\n<!-- BENCH-SUMMARY:START -->\n<!-- BENCH-SUMMARY:END -->\n",
+        "# Benchmarks\n"
+        "\n"
+        "<!-- BENCH-SUMMARY:START -->\n"
+        "<!-- BENCH-SUMMARY:END -->\n"
+        "\n"
+        "<!-- BENCH-MATRIX:START -->\n"
+        "<!-- BENCH-MATRIX:END -->\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(run, "_select_suites", lambda raw, **kwargs: [measured, dataless])
@@ -551,7 +609,13 @@ def test_cmd_update_readme_benchmarks_filter_keeps_all_suites_in_root_summary(
     two_readme.write_text(two_text, encoding="utf-8")
     root_readme = tmp_path / "benchmarks" / "README.md"
     root_readme.write_text(
-        "# Benchmarks\n\n<!-- BENCH-SUMMARY:START -->\n<!-- BENCH-SUMMARY:END -->\n",
+        "# Benchmarks\n"
+        "\n"
+        "<!-- BENCH-SUMMARY:START -->\n"
+        "<!-- BENCH-SUMMARY:END -->\n"
+        "\n"
+        "<!-- BENCH-MATRIX:START -->\n"
+        "<!-- BENCH-MATRIX:END -->\n",
         encoding="utf-8",
     )
     all_suites = [suite_one, suite_two]
@@ -588,7 +652,13 @@ def test_cmd_update_readme_missing_suite_markers_is_hard_error_with_zero_mutatio
     suite_readme.write_text("# Synthetic\n\nNo markers here.\n", encoding="utf-8")
     root_readme = tmp_path / "benchmarks" / "README.md"
     root_text = (
-        "# Benchmarks\n\n<!-- BENCH-SUMMARY:START -->\n<!-- BENCH-SUMMARY:END -->\n"
+        "# Benchmarks\n"
+        "\n"
+        "<!-- BENCH-SUMMARY:START -->\n"
+        "<!-- BENCH-SUMMARY:END -->\n"
+        "\n"
+        "<!-- BENCH-MATRIX:START -->\n"
+        "<!-- BENCH-MATRIX:END -->\n"
     )
     root_readme.write_text(root_text, encoding="utf-8")
     _patch_discovery(monkeypatch, tmp_path, suite)
@@ -630,7 +700,13 @@ def test_cmd_update_readme_missing_readme_file_is_marker_error(
         {"synthetic/Rust": [make_entry(1.6, 4.5, toolchain="rustc 1.85.0")]},
     )
     (tmp_path / "benchmarks" / "README.md").write_text(
-        "# Benchmarks\n\n<!-- BENCH-SUMMARY:START -->\n<!-- BENCH-SUMMARY:END -->\n",
+        "# Benchmarks\n"
+        "\n"
+        "<!-- BENCH-SUMMARY:START -->\n"
+        "<!-- BENCH-SUMMARY:END -->\n"
+        "\n"
+        "<!-- BENCH-MATRIX:START -->\n"
+        "<!-- BENCH-MATRIX:END -->\n",
         encoding="utf-8",
     )
     # No suite README.md is written at all.
@@ -657,7 +733,13 @@ def test_cmd_update_readme_prints_stale_prose_warnings_to_stderr(
         encoding="utf-8",
     )
     (tmp_path / "benchmarks" / "README.md").write_text(
-        "# Benchmarks\n\n<!-- BENCH-SUMMARY:START -->\n<!-- BENCH-SUMMARY:END -->\n",
+        "# Benchmarks\n"
+        "\n"
+        "<!-- BENCH-SUMMARY:START -->\n"
+        "<!-- BENCH-SUMMARY:END -->\n"
+        "\n"
+        "<!-- BENCH-MATRIX:START -->\n"
+        "<!-- BENCH-MATRIX:END -->\n",
         encoding="utf-8",
     )
     _patch_discovery(monkeypatch, tmp_path, suite)

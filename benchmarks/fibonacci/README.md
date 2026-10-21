@@ -25,19 +25,19 @@ These benchmarks compare a standard recursive calculation of `fibonacci(40)` acr
 Calculating the 40th Fibonacci number recursively (Time taken):
 
 <!-- BENCH:START -->
-| Arm | Time | Peak RSS | Version |
-|---|---|---|---|
-| Rust | 267.655 ms | 1.476 MB | rustc 1.98.0 |
-| Kotlin | 280.338 ms | 44.647 MB | kotlinc 2.4.21 |
-| Go | 301.492 ms | 3.942 MB | go 1.27.2 |
-| Swift | 329.754 ms | 1.609 MB | swiftc 6.4 |
-| Ryo (AOT) | 359.464 ms | 1.37 MB | ryo 0.1.0 |
-| Ryo (JIT) | 389.487 ms | 5.475 MB | ryo 0.1.0 |
-| Bun (TS) | 406.479 ms | 27.433 MB | bun 1.3.13 |
-| Elixir | 990.888 ms | 89.569 MB | elixir 1.20.4 |
-| Ruby | 6313.35 ms | 28 MB | ruby 2.6.10p210 |
-| Python | 5068.66 ms | 16 MB | uv 3.14.4 |
-| Julia | 429.82 ms | 193.684 MB | julia 1.13.1 |
+| Language or Arm | Version | Mean Time | Speed vs Best | Memory |
+|---|---|---|---|---|
+| Rust | 1.98.0 | 267.655 ms | 1.00x | 1.476 MB |
+| Kotlin | 2.4.21 | 280.338 ms | 1.05x slower | 44.647 MB |
+| Go | 1.27.2 | 301.492 ms | 1.13x slower | 3.942 MB |
+| Swift | 6.4 | 329.754 ms | 1.23x slower | 1.609 MB |
+| Ryo (AOT) | 0.1.0 | 359.464 ms | 1.34x slower | ⭐ 1.37 MB |
+| Ryo (JIT) | 0.1.0 | 389.487 ms | 1.46x slower | 5.475 MB |
+| Bun (TS) | 1.3.13 | 406.479 ms | 1.52x slower | 27.433 MB |
+| Julia | 1.13.1 | 429.82 ms | 1.61x slower | 193.684 MB |
+| Elixir | 1.20.4 | 990.888 ms | 3.70x slower | 89.569 MB |
+| Python | 3.14.4 | 5068.66 ms | 18.94x slower | 16 MB |
+| Ruby | 2.6.10p210 | 6313.35 ms | 23.59x slower | 28 MB |
 Measured on Darwin/arm64/Mac15,6, 2026-10-21 (commit bddd4e1, hyperfine 2.0.0, warmup 3)
 <!-- BENCH:END -->
 
