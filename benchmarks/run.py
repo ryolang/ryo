@@ -849,20 +849,37 @@ def run_suites(
     failures: list[str] = []
     skipped: list[dict] = []
 
-    for suite in suites:
-        selected = [
-            arm
-            for arm in suite.arms
-            if language_filter is None or arm.language.lower() in language_filter
+    selected_by_suite = [
+        (
+            suite,
+            [
+                arm
+                for arm in suite.arms
+                if language_filter is None or arm.language.lower() in language_filter
+            ],
+        )
+        for suite in suites
+    ]
+
+    if strict:
+        # Preflight every selected suite before benchmarking anything: with
+        # --strict a missing toolchain anywhere fails the whole run up front.
+        missing_all = [
+            (suite, arm, tool)
+            for suite, selected in selected_by_suite
+            for arm, tool in missing_tools(suite, selected, ryo.path)
         ]
-        missing = missing_tools(suite, selected, ryo.path)
-        if missing and strict:
-            detail = ", ".join(f"arm '{arm.name}' needs '{tool}'" for arm, tool in missing)
-            failure = f"suite '{suite.name}': missing toolchain(s) under --strict: {detail}"
-            print(f"error: {failure}", file=sys.stderr)
-            return RunSummary(
-                exit_code=1, suites=results, failures=failures + [failure], skipped=skipped
+        if missing_all:
+            detail = ", ".join(
+                f"suite '{suite.name}' arm '{arm.name}' needs '{tool}'"
+                for suite, arm, tool in missing_all
             )
+            failure = f"missing toolchain(s) under --strict: {detail}"
+            print(f"error: {failure}", file=sys.stderr)
+            return RunSummary(exit_code=1, suites=[], failures=[failure], skipped=[])
+
+    for suite, selected in selected_by_suite:
+        missing = missing_tools(suite, selected, ryo.path)
 
         runnable: list[Arm] = []
         for arm in selected:

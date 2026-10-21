@@ -66,6 +66,7 @@ def make_result(
 
 
 def write_suite(tmp_path: Path, text: str) -> Suite:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     manifest = tmp_path / "suite.toml"
     manifest.write_text(text.strip(), encoding="utf-8")
     return load_suite(manifest)
@@ -279,6 +280,64 @@ expect = "b"
     assert summary.suites == []
     assert not (tmp_path / "data").exists()
     assert not (tmp_path / "run.json").exists()
+
+
+def test_strict_preflight_fails_before_any_benchmarking(tmp_path, monkeypatch):
+    # Suite A is fully runnable; suite B is missing a toolchain. Under
+    # --strict the run must fail before ANY benchmarking: A is not timed and
+    # no store is written for it.
+    suite_a = write_suite(
+        tmp_path / "a",
+        """
+name = "suite_a"
+warmup = 0
+
+[[arm]]
+name = "Echo A"
+language = "C"
+run = "/bin/echo a"
+expect = "a"
+
+[[arm]]
+name = "Echo B"
+language = "C"
+run = "/bin/echo b"
+expect = "b"
+""",
+    )
+    suite_b = write_suite(
+        tmp_path / "b",
+        """
+name = "suite_b"
+warmup = 0
+
+[[arm]]
+name = "Rust"
+language = "Rust"
+run = "/bin/echo a"
+expect = "a"
+""",
+    )
+    monkeypatch.setitem(run.TOOL_FOR_LANGUAGE, "rust", "ryo-test-missing-tool")
+
+    def no_benchmark(*args, **kwargs):
+        raise AssertionError("strict preflight must run before any benchmarking")
+
+    monkeypatch.setattr(run, "run_hyperfine", no_benchmark)
+    summary = run_suites(
+        [suite_a, suite_b],
+        languages=None,
+        ryo=FAKE_RYO,
+        store_dir=tmp_path / "data",
+        json_path=tmp_path / "run.json",
+        strict=True,
+    )
+
+    assert summary.exit_code == 1
+    assert summary.suites == []
+    assert not (tmp_path / "data" / "suite_a.json").exists()
+    assert not (tmp_path / "run.json").exists()
+    assert any("suite_b" in failure and "Rust" in failure for failure in summary.failures)
 
 
 def test_unknown_language_name_errors(tmp_path, capsys):
