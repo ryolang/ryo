@@ -21,6 +21,7 @@ import platform
 import re
 import shlex
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -1643,6 +1644,154 @@ def _format_ratio(ratio: float) -> str:
     if ratio < 100:
         return f"{ratio:.1f}×"
     return f"{ratio:.0f}×"
+
+
+_MATRIX_LEGEND = "⭐ fastest in row · 🟩 within 20% · 🟨 within 3× · 🟥 beyond 3×"
+_MATRIX_NO_DATA = "*(no measurements yet)*"
+_MATRIX_FOOTNOTE = (
+    "*Cells show each suite's best arm per language — mean time or peak RSS, ratio vs. "
+    "the fastest arm in the row; the summary row is a per-column geomean of those ratios.*"
+)
+# (metric key, table caption, bench extractor); the extractors are the same
+# store-inspection helpers the per-suite tables and summary table use.
+_MATRIX_METRICS = (
+    ("time", "**Runtime (mean)**", _time_bench),
+    ("memory", "**Peak memory (max RSS)**", _rss_bench),
+)
+
+
+def _matrix_row(suite: Suite, store: Store) -> dict[str, dict[str, tuple[float, dict]]]:
+    """Per-metric best cells for one suite: column -> (value, winning entry).
+
+    Several arms can map to one column (e.g. two Rust arms); the lowest value
+    wins — fastest time, leanest RSS — because the matrix shows the best a
+    language achieves per suite. Entries whose bench is missing (never
+    measured, or RSS not recorded by hyperfine) contribute nothing.
+    """
+    metrics: dict[str, dict[str, tuple[float, dict]]] = {
+        metric: {} for metric, _, _ in _MATRIX_METRICS
+    }
+    for arm in suite.arms:
+        entry = store.latest(store_key(suite, arm))
+        column = _matrix_column_key(arm)
+        for metric, _, extract in _MATRIX_METRICS:
+            bench = extract(entry)
+            if bench is None:
+                continue
+            cell = metrics[metric].get(column)
+            if cell is None or bench["value"] < cell[0]:
+                metrics[metric][column] = (bench["value"], entry)
+    return metrics
+
+
+def _matrix_columns(rows: list[dict[str, tuple[float, dict]]]) -> list[str]:
+    """Column order: known languages (_MATRIX_COLUMN_ORDER) first, the rest sorted."""
+    present = {column for cells in rows for column in cells}
+    return [c for c in _MATRIX_COLUMN_ORDER if c in present] + sorted(
+        present - set(_MATRIX_COLUMN_ORDER)
+    )
+
+
+def _matrix_grouped(
+    rows: list[tuple[Suite, dict[str, tuple[float, dict]]]],
+) -> list[tuple[str, list[tuple[Suite, dict[str, tuple[float, dict]]]]]]:
+    """Rows by category: alphabetical groups, uncategorized suites last as "Other"."""
+    grouped: dict[str, list[tuple[Suite, dict[str, tuple[float, dict]]]]] = {}
+    for suite, cells in sorted(rows, key=lambda row: row[0].name):
+        grouped.setdefault(suite.category or "Other", []).append((suite, cells))
+    return [
+        (category, grouped[category])
+        for category in sorted(grouped, key=lambda c: (c == "Other", c))
+    ]
+
+
+def _matrix_summary_row(
+    metric_rows: list[tuple[Suite, dict[str, tuple[float, dict]]]],
+    columns: list[str],
+) -> list[str]:
+    """Geomean of the cell ratios per column, badged against the best geomean."""
+    geomeans: list[float | None] = []
+    for column in columns:
+        ratios = [
+            cells[column][0] / min(value for value, _ in cells.values())
+            for _, cells in metric_rows
+            if column in cells
+        ]
+        geomeans.append(statistics.geometric_mean(ratios) if ratios else None)
+    best = min(geo for geo in geomeans if geo is not None)
+    return ["**Summary (geomean)**"] + [
+        _NO_MEASUREMENT if geo is None else f"{_ratio_emoji(geo / best)} {_format_ratio(geo)}"
+        for geo in geomeans
+    ]
+
+
+def _matrix_table(
+    metric_rows: list[tuple[Suite, dict[str, tuple[float, dict]]]],
+    columns: list[str],
+) -> str:
+    """One metric's Markdown table: header, category group rows, geomean summary."""
+    header = "| Suite | " + " | ".join(
+        _MATRIX_COLUMN_LABELS.get(column, column.capitalize()) for column in columns
+    ) + " |"
+    lines = [header, "|" + "---|" * (len(columns) + 1)]
+    for category, rows in _matrix_grouped(metric_rows):
+        lines.append("| " + " | ".join([f"**{category}**"] + [""] * len(columns)) + " |")
+        for suite, cells in rows:
+            best = min(value for value, _ in cells.values())
+            newest = max(entry["date"] for _, entry in cells.values())
+            date = datetime.fromtimestamp(newest / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+            row = [f"[{suite.name}](./{suite.dir.name}/)<br>{date}"]
+            for column in columns:
+                cell = cells.get(column)
+                if cell is None:
+                    row.append(_NO_MEASUREMENT)
+                    continue
+                value, entry = cell
+                ratio = value / best
+                row.append(
+                    f"{_ratio_emoji(ratio)} {_format_cell_value(value)} "
+                    f"[{_format_ratio(ratio)}] ({_bare_version(entry)})"
+                )
+            lines.append("| " + " | ".join(row) + " |")
+    lines.append("| " + " | ".join(_matrix_summary_row(metric_rows, columns)) + " |")
+    return "\n".join(lines)
+
+
+def render_matrix(suites: list[Suite], stores: dict[str, Store]) -> str:
+    """Render the cross-suite language matrix: legend, one table per metric, footnote.
+
+    Rows are suites grouped by category (alphabetical groups, uncategorized
+    suites last under "Other", alphabetical within a group); columns are
+    languages — canonical order first, unknown languages appended sorted —
+    and a column exists only while at least one suite has a measured cell in
+    it. Each cell is the suite's best arm for that language: value, ratio vs.
+    the row's fastest cell, and the bare toolchain version. The final row is
+    a per-column geomean of the cell ratios over measured rows. Suites with
+    nothing measured for a metric are omitted from that metric's table (a
+    metric no suite measured gets no table at all); when nothing is measured
+    anywhere, the legend and footnote frame the no-data placeholder.
+    """
+    per_metric: dict[str, list[tuple[Suite, dict[str, tuple[float, dict]]]]] = {
+        metric: [] for metric, _, _ in _MATRIX_METRICS
+    }
+    for suite in sorted(suites, key=lambda s: s.name):
+        cells = _matrix_row(suite, stores[suite.name])
+        for metric, _, _ in _MATRIX_METRICS:
+            if cells[metric]:
+                per_metric[metric].append((suite, cells[metric]))
+
+    if not any(per_metric.values()):
+        return "\n".join([_MATRIX_LEGEND, "", _MATRIX_NO_DATA, "", _MATRIX_FOOTNOTE])
+
+    sections = [_MATRIX_LEGEND]
+    for metric, caption, _ in _MATRIX_METRICS:
+        rows = per_metric[metric]
+        if not rows:
+            continue
+        table = _matrix_table(rows, _matrix_columns([cells for _, cells in rows]))
+        sections += [caption, table, ""]
+    sections.append(_MATRIX_FOOTNOTE)
+    return "\n".join(sections)
 
 
 def main(argv: list[str] | None = None) -> int:

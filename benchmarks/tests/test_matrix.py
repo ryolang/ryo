@@ -1,13 +1,70 @@
-"""Tests for the cross-suite matrix rendering cell helpers: column keys,
-ratio emoji buckets, and ratio formatting."""
+"""Tests for the cross-suite matrix rendering: cell helpers (column keys,
+ratio emoji buckets, ratio formatting) and the render_matrix assembly."""
 
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from run import Arm, Store, _format_ratio, _matrix_column_key, _ratio_emoji
+from run import (
+    Arm,
+    Store,
+    _format_ratio,
+    _matrix_column_key,
+    _ratio_emoji,
+    load_suite,
+    render_matrix,
+)
 
 EPOCH_MS = int(datetime(2026, 10, 21, tzinfo=timezone.utc).timestamp() * 1000)
+DAY_MS = 86_400_000
+
+# One Rust + one Ryo (AOT) arm; suite name/category are filled in per fixture.
+RUST_RYO_TOML = """
+name = "{name}"
+{category}[[arm]]
+name = "Rust"
+language = "rust"
+run = "/bin/echo a"
+expect = "a"
+
+[[arm]]
+name = "Ryo (AOT)"
+language = "ryo"
+run = "/bin/echo b"
+expect = "b"
+"""
+
+TWO_RUST_TOML = """
+name = "solo"
+
+[[arm]]
+name = "Rust"
+language = "rust"
+run = "/bin/echo a"
+expect = "a"
+
+[[arm]]
+name = "Rust serde_json"
+language = "rust"
+run = "/bin/echo c"
+expect = "c"
+"""
+
+RUST_NIM_TOML = """
+name = "solo"
+
+[[arm]]
+name = "Rust"
+language = "rust"
+run = "/bin/echo a"
+expect = "a"
+
+[[arm]]
+name = "Nim"
+language = "nim"
+run = "/bin/echo d"
+expect = "d"
+"""
 
 
 def make_entry(
@@ -50,6 +107,41 @@ def write_store(path: Path, entries: dict[str, list[dict]]) -> Store:
     return Store.load(path)
 
 
+def write_suite(directory: Path, text: str):
+    directory.mkdir(parents=True, exist_ok=True)
+    manifest = directory / "suite.toml"
+    manifest.write_text(text.strip(), encoding="utf-8")
+    return load_suite(manifest)
+
+
+def rust_ryo_suites(tmp_path: Path) -> tuple:
+    """alpha (category Strings) and beta (category Algorithms), Rust + Ryo arms."""
+    alpha = write_suite(
+        tmp_path / "alpha",
+        RUST_RYO_TOML.format(name="alpha", category='category = "Strings"\n'),
+    )
+    beta = write_suite(
+        tmp_path / "beta",
+        RUST_RYO_TOML.format(name="beta", category='category = "Algorithms"\n'),
+    )
+    return alpha, beta
+
+
+def alpha_beta_stores(tmp_path: Path, ryo_ms: float) -> dict:
+    stores = {}
+    for name, ryo_rss in (("alpha", 1.4), ("beta", 1.4)):
+        stores[name] = write_store(
+            tmp_path / name / "store.json",
+            {
+                f"{name}/Rust": [make_entry(100.0, 1.5)],
+                f"{name}/Ryo (AOT)": [
+                    make_entry(ryo_ms, ryo_rss, toolchain="ryo 0.1.0")
+                ],
+            },
+        )
+    return stores
+
+
 def test_ryo_column_key_variants():
     aot = Arm(name="Ryo (AOT, Eager)", language="ryo", run="x", build=None, expect=None, group=None, version=None)
     jit = Arm(name="Ryo (JIT)", language="ryo", run="x", build=None, expect=None, group=None, version=None)
@@ -73,3 +165,109 @@ def test_format_ratio():
     assert _format_ratio(2.1413) == "2.14×"
     assert _format_ratio(18.94) == "18.9×"
     assert _format_ratio(138.4) == "138×"
+
+
+def test_render_matrix_full_block(tmp_path):
+    alpha, beta = rust_ryo_suites(tmp_path)
+    stores = alpha_beta_stores(tmp_path, ryo_ms=200.0)
+    stores["beta"] = write_store(
+        tmp_path / "beta" / "store.json",
+        {
+            "beta/Rust": [make_entry(100.0, 1.5)],
+            "beta/Ryo (AOT)": [make_entry(400.0, 1.4, toolchain="ryo 0.1.0")],
+        },
+    )
+    text = render_matrix([alpha, beta], stores)
+    assert "⭐ fastest in row" in text  # legend
+    assert "**Runtime (mean)**" in text  # caption above the table, not a table row
+    assert "| **Runtime (mean)** |" not in text
+    # Ryo AOT is the first column.
+    assert "| [alpha](./alpha/)<br>2026-10-21 | 🟨 200 [2.00×] (0.1.0) |" in text
+    assert "| [beta](./beta/)<br>2026-10-21 | 🟥 400 [4.00×] (0.1.0) |" in text
+    # sqrt(2*4)=2.83; 2.83 <= 3.0 -> 🟨.
+    assert "| **Summary (geomean)** | 🟨 2.83× | ⭐ 1.00× |" in text
+    assert "| **Algorithms** |" in text and "| **Strings** |" in text
+    assert text.index("| **Algorithms** |") < text.index("| **Strings** |")
+    assert "**Peak memory (max RSS)**" in text
+
+
+def test_render_matrix_single_measured_arm_row(tmp_path):
+    solo = write_suite(tmp_path / "solo", RUST_RYO_TOML.format(name="solo", category=""))
+    store = write_store(
+        tmp_path / "solo" / "store.json",
+        {"solo/Rust": [make_entry(100.0, 1.5, toolchain="rustc 1.98.0")]},
+    )
+    text = render_matrix([solo], {"solo": store})
+    assert "| [solo](./solo/)<br>2026-10-21 | ⭐ 100 [1.00×] (1.98.0) |" in text
+
+
+def test_render_matrix_no_data_renders_placeholder(tmp_path):
+    suite = write_suite(tmp_path / "solo", RUST_RYO_TOML.format(name="solo", category=""))
+    empty_store = write_store(tmp_path / "solo" / "store.json", {})
+    assert "*(no measurements yet)*" in render_matrix([suite], {suite.name: empty_store})
+
+
+def test_render_matrix_fastest_arm_wins_language_column(tmp_path):
+    solo = write_suite(tmp_path / "solo", TWO_RUST_TOML)
+    store = write_store(
+        tmp_path / "solo" / "store.json",
+        {
+            "solo/Rust": [make_entry(500.0, 2.0)],
+            "solo/Rust serde_json": [make_entry(50.0, 2.0)],
+        },
+    )
+    text = render_matrix([solo], {"solo": store})
+    assert "| [solo](./solo/)<br>2026-10-21 | ⭐ 50 [1.00×] (1.85.0) |" in text
+    assert "500" not in text
+
+
+def test_render_matrix_newest_date_wins(tmp_path):
+    solo = write_suite(tmp_path / "solo", RUST_RYO_TOML.format(name="solo", category=""))
+    store = write_store(
+        tmp_path / "solo" / "store.json",
+        {
+            "solo/Ryo (AOT)": [make_entry(200.0, 1.4, toolchain="ryo 0.1.0")],
+            "solo/Rust": [make_entry(100.0, 1.5, date=EPOCH_MS - DAY_MS)],
+        },
+    )
+    text = render_matrix([solo], {"solo": store})
+    assert "| [solo](./solo/)<br>2026-10-21 |" in text
+
+
+def test_render_matrix_missing_rss_keeps_time_cell(tmp_path):
+    alpha, _ = rust_ryo_suites(tmp_path)
+    gamma = write_suite(tmp_path / "gamma", RUST_RYO_TOML.format(name="gamma", category=""))
+    stores = alpha_beta_stores(tmp_path, ryo_ms=200.0)
+    stores["gamma"] = write_store(
+        tmp_path / "gamma" / "store.json",
+        {
+            "gamma/Rust": [make_entry(100.0, 1.5, toolchain="rustc 1.98.0")],
+            "gamma/Ryo (AOT)": [make_entry(200.0, None, toolchain="ryo 0.1.0")],
+        },
+    )
+    text = render_matrix([alpha, gamma], stores)
+    # Time cell intact even though the entry has no RSS.
+    assert "| [gamma](./gamma/)<br>2026-10-21 | 🟨 200 [2.00×] (0.1.0) |" in text
+    # Memory table: the RSS-less arm renders "—" in its column.
+    assert "| [gamma](./gamma/)<br>2026-10-21 | — | ⭐ 1.5 [1.00×] (1.98.0) |" in text
+    # gamma is uncategorized, so its group sorts after the real categories.
+    assert "| **Other** |" in text
+    assert text.index("| **Strings** |") < text.index("| **Other** |")
+
+
+def test_render_matrix_unknown_language_appends_column(tmp_path):
+    solo = write_suite(tmp_path / "solo", RUST_NIM_TOML)
+    store = write_store(
+        tmp_path / "solo" / "store.json",
+        {
+            "solo/Rust": [make_entry(100.0, 1.5)],
+            "solo/Nim": [make_entry(400.0, 1.5, toolchain="nim 2.0.0")],
+        },
+    )
+    text = render_matrix([solo], {"solo": store})
+    assert "| Suite | Rust | Nim |" in text  # unknown language last, capitalized
+    row = (
+        "| [solo](./solo/)<br>2026-10-21 | ⭐ 100 [1.00×] (1.85.0) "
+        "| 🟥 400 [4.00×] (2.0.0) |"
+    )
+    assert row in text
