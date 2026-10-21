@@ -25,19 +25,19 @@ These benchmarks compare a standard recursive calculation of `fibonacci(40)` acr
 Calculating the 40th Fibonacci number recursively (Time taken):
 
 <!-- BENCH:START -->
-| Language or Arm | Version | Mean Time | Speed vs Best | Memory |
-|---|---|---|---|---|
-| Rust | 1.99.1 | 263.58 ms | 1.00x | 1.482 MB |
-| Kotlin | 2.4.21 | 269.675 ms | 1.02x slower | 44.633 MB |
-| Go | 1.27.3 | 295.1 ms | 1.12x slower | 3.881 MB |
-| Swift | 6.4 | 329.675 ms | 1.25x slower | 1.609 MB |
-| Ryo (AOT) | 0.1.0-dev.20261022+63c9cba | 361.187 ms | 1.37x slower | ⭐ 1.35 MB |
-| Ryo (JIT) | 0.1.0-dev.20261022+63c9cba | 383.871 ms | 1.46x slower | 5.514 MB |
-| Bun (TS) | 1.3.13 | 402.576 ms | 1.53x slower | 27.438 MB |
-| Julia | 1.13.2 | 415.231 ms | 1.58x slower | 193.602 MB |
-| Elixir | 1.20.4 | 916.317 ms | 3.48x slower | 90.094 MB |
-| Python | 3.14.4 | 4997.22 ms | 18.96x slower | 15.983 MB |
-| Ruby | 2.6.10p210 | 6252.58 ms | 23.72x slower | 28 MB |
+| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |
+|---|---|---|---|---|---|
+| Rust | 1.99.1 | 263.58 ms | 1.00x | 1.482 MB (+0.4%) | -1.5% |
+| Kotlin | 2.4.21 | 269.675 ms | 1.02x slower | 44.633 MB (-0.0%) | -3.8% |
+| Go | 1.27.3 | 295.1 ms | 1.12x slower | 3.881 MB (-1.5%) | -2.1% |
+| Swift | 6.4 | 329.675 ms | 1.25x slower | 1.609 MB (+0.0%) | -0.0% |
+| Ryo (AOT) | 0.1.0-dev.20261022+63c9cba | 361.187 ms | 1.37x slower | ⭐ 1.35 MB (-1.5%) | +0.5% |
+| Ryo (JIT) | 0.1.0-dev.20261022+63c9cba | 383.871 ms | 1.46x slower | 5.514 MB (+0.7%) | -1.4% |
+| Bun (TS) | 1.3.13 | 402.576 ms | 1.53x slower | 27.438 MB (+0.0%) | -1.0% |
+| Julia | 1.13.2 | 415.231 ms | 1.58x slower | 193.602 MB (-0.0%) | -3.4% |
+| Elixir | 1.20.4 | 916.317 ms | 3.48x slower | 90.094 MB (+0.6%) | -7.5% |
+| Python | 3.14.4 | 4997.22 ms | 18.96x slower | 15.983 MB (-0.1%) | -1.4% |
+| Ruby | 2.6.10p210 | 6252.58 ms | 23.72x slower | 28 MB (+0.0%) | -1.0% |
 Measured on Darwin/arm64/Mac15,6, 2026-10-21 (commit 63c9cba, hyperfine 2.0.0, warmup 3)
 <!-- BENCH:END -->
 
