@@ -435,17 +435,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-174 — Benchmark runner mechanism is copy-pasted across 11 suites; centralize into a shared framework
-
-**Severity:** Cleanup
-**Area:** ci-benchmarks
-
-**Files:** `benchmarks/*/run_benchmarks.sh` (11 copies, ~1,030 lines total), `benchmarks/README.md` (idiomatic/checkpoint conventions), `codspeed.yml`, `.github/workflows/codspeed.yml`
-**Summary:** Every benchmark suite carries its own `run_benchmarks.sh`, and they are literally copies: the struct_records_reuse and struct_records_inout scripts were created by `sed`-substituting the suite name into the struct_records one. Each copy re-implements the same mechanism — prerequisite checks, `cargo build --release`, per-language compile lines, the compiler-version banner, the macOS/Linux `measure_mem` switch, the hyperfine invocation — with the suite-specific part (which arms exist, build commands, run commands) interleaved rather than declared. Drift is already visible: only some suites have Go or Python arms, the version-banner formats differ subtly, the table format and Version-column convention live only in prose in the global README, and adding a suite means another 100-line fork (two were added on 2026-09-11). The same duplication extends to registration: a new suite must be added to the root `codspeed.yml` exec list *and* both AOT build lists in `.github/workflows/codspeed.yml` by hand.
-**Resolution:** One shared runner (a single script, or a small `xtask`-style tool) where each suite declares its arms — name, source file, build command, run command — in one manifest (e.g. a TOML/YAML per suite or one central file), and the framework does everything else: prereq checks, builds, correctness run (assert checksum) before timing, version capture, RSS measurement, hyperfine, and emitting the README results table (Version column included) in the canonical format. Suite registration for CodSpeed should be generated from the same manifest so `codspeed.yml` and the workflow lists can't drift from the suites. Migrate the existing 11 suites and delete the per-suite scripts.
-
----
-
 ### I-184 — Promote-on-view spill slot is re-written and re-checked every loop iteration for a loop-invariant base
 
 **Severity:** Cleanup
@@ -757,10 +746,23 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-246 — Generate CodSpeed suite registration from suite manifests
+
+**Severity:** Cleanup
+**Area:** ci-benchmarks
+
+**Files:** codspeed.yml, .github/workflows/codspeed.yml, benchmarks/*/suite.toml
+
+**Summary:** Residue of I-174, descoped by maintainer decision 2026-10-21: the centralized benchmark runner now owns per-suite manifests; CodSpeed registration (root codspeed.yml 12 exec entries + the same 12-binary AOT build list duplicated in both jobs of .github/workflows/codspeed.yml) should be generated from the same manifests. Mapping target: CodSpeed's current unified config schema (https://github.com/CodSpeedHQ/codspeed/blob/main/schemas/codspeed.schema.json) with per-target ids/options, not a regeneration of the legacy root codspeed.yml.
+
+**Resolution:** Add an emit-codspeed mode to benchmarks/run.py driven by a codspeed flag in suite.toml; regenerate codspeed.yml and the workflow build list; verify byte-identical against the current 12-suite lists.
+
+---
+
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
 
-<!-- issue-id high-water: 245 -->
+<!-- issue-id high-water: 246 -->

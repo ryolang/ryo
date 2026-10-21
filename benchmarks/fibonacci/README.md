@@ -30,9 +30,21 @@ Add `--dry-run` to build every arm and run only the checksum correctness gate (n
 Calculating the 40th Fibonacci number recursively (Time taken):
 
 <!-- BENCH:START -->
+| Arm | Time | Peak RSS | Version |
+|---|---|---|---|
+| Rust | 267.655 ms | 1.476 MB | rustc 1.98.0 |
+| Kotlin | 280.338 ms | 44.647 MB | kotlinc 2.4.21 |
+| Go | 301.492 ms | 3.942 MB | go 1.27.2 |
+| Swift | 329.754 ms | 1.609 MB | swiftc 6.4 |
+| Ryo (AOT) | 359.464 ms | 1.37 MB | ryo 0.1.0 |
+| Ryo (JIT) | 389.487 ms | 5.475 MB | ryo 0.1.0 |
+| Bun (TS) | 406.479 ms | 27.433 MB | bun 1.3.13 |
+| Elixir | 990.888 ms | 89.569 MB | elixir 1.20.4 |
+| Ruby | 6313.35 ms | 28 MB | ruby 2.6.10p210 |
+| Python | 5068.66 ms | 16 MB | uv 3.14.4 |
+| Julia | 429.82 ms | 193.684 MB | julia 1.13.1 |
+Measured on Darwin/arm64/Mac15,6, 2026-10-21 (commit bddd4e1, hyperfine 2.0.0, warmup 3)
 <!-- BENCH:END -->
-
-*(Measured with `hyperfine` on macOS, Apple M3 Pro, 2026-09-29 (Cranelift 0.136.1 checkpoint). Ryo is compiled using `--release`.)*
 
 ### Checkpoint: Cranelift 0.136.1 (2026-09-29)
 
@@ -47,8 +59,8 @@ Outcome vs the provisional target (fib(40) AOT ≤ 1.25× Rust): **missed** — 
 See [`../README.md`](../README.md#why-ryo-trails-rust-here-checked-arithmetic-is-intentional) for why Ryo currently trails Rust on this benchmark (spec §18 checked arithmetic) and what is planned to close the gap.
 
 ### Notes on Memory Usage
-Ryo's Ahead-Of-Time (AOT) compiled binary stands out aggressively in memory footprint—claiming the **lightest memory usage of all languages tested** (1.34 MB vs Rust's 1.45 MB).
+Ryo's Ahead-Of-Time (AOT) compiled binary stands out aggressively in memory footprint—claiming the **lightest memory usage of all languages tested** (1.37 MB vs Rust's 1.48 MB).
 
-Even operating entirely as a JIT script interpreting/compiling source code directly, Ryo's compiler (via Cranelift) maintains an incredibly small memory footprint (~4.8 MB).
+Even operating entirely as a JIT script interpreting/compiling source code directly, Ryo's compiler (via Cranelift) maintains an incredibly small memory footprint (~5.5 MB).
 
 
