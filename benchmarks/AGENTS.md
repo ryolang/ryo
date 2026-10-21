@@ -1,6 +1,10 @@
 # Benchmarks Directory Conventions
 
-Entry point for agents working under `benchmarks/`. The full runner contract, checkpoint convention, and philosophy live in [README.md](README.md) and the per-suite READMEs — this file only covers how to run suites and refresh the checkpoint tables.
+Entry point for agents working under `benchmarks/`. The full runner contract, checkpoint convention, and philosophy live in [README.md](README.md) and the per-suite READMEs — this file covers how to write arms, run suites, and refresh the checkpoint tables.
+
+## Authoring Arms
+
+* **Idiomatic implementations only** (same [idiomatic convention](README.md) as the root README): every arm is written the way a developer would naturally write it in that language — the suites compare idiomatic implementations to discover Ryo's flaws, not who is faster with tricky hacks. Never adapt another language's implementation to work around something Ryo doesn't support yet (e.g. moving a field out of a struct); the cost of Ryo's current limitations is part of what the suite measures. Where idiomatic code makes workloads diverge, checksums are per-language and the suite README must say so explicitly.
 
 ## Running Benchmarks
 
