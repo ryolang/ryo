@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -257,6 +258,205 @@ def run_hyperfine(cmd: str, warmup: int, cwd: Path, label: str) -> dict:
         f"{data.get('schema_version')!r}, expected 2"
     )
     return data["results"][0]
+
+
+# Version one-liners transcribed from the legacy benchmarks/*/run_benchmarks.sh
+# scripts. Unlike run strings they run through a shell; failures read back as
+# "unavailable" (or "dev"/"not installed" where the one-liner plans for an
+# absent tool).
+BUILTIN_VERSION_CMDS: dict[str, str] = {
+    "rust": "rustc --version | cut -d' ' -f2",
+    "go": "go version | awk '{print $3}' | sed 's/go//'",
+    "swift": (
+        "swiftc --version | head -1 | awk "
+        "'{for (i = 1; i < NF; i++) if ($i == \"Swift\" && $(i+1) == \"version\") "
+        "{ print $(i+2); exit }}'"
+    ),
+    "kotlin": r"kotlinc -version 2>&1 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' | head -1",
+    "java": "java -version 2>&1 | head -1 | awk -F '\"' '{print $2}'",
+    "python": "uv run --python 3.14 python --version | awk '{print $2}'",
+    "bun": "~/.bun/bin/bun --version",
+    "elixir": "elixir --version | grep Elixir | awk '{print $2}'",
+    "ruby": "ruby --version | awk '{print $2}'",
+    "julia": "julia --version 2>/dev/null | awk '{print $3}' || echo 'not installed'",
+    "ryo": r"$ryo --version 2>&1 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' || echo 'dev'",
+}
+
+# Language -> the binary whose presence gates the arm. The "$ryo" marker is
+# resolved against the ryo_bin path handed in by the caller; bun also accepts
+# the ~/.bun/bin install location the version one-liner assumes.
+TOOL_FOR_LANGUAGE: dict[str, str] = {
+    "rust": "rustc",
+    "go": "go",
+    "swift": "swiftc",
+    "kotlin": "kotlinc",
+    "java": "java",
+    "python": "uv",
+    "bun": "bun",
+    "elixir": "elixir",
+    "ruby": "ruby",
+    "julia": "julia",
+    "ryo": "$ryo",
+}
+
+
+def missing_tools(suite: Suite, arms: list[Arm], ryo_bin: str) -> list[tuple[Arm, str]]:
+    """Return (arm, missing binary) for selected arms whose toolchain is absent.
+
+    The missing-toolchain policy belongs to the caller: the default run flow
+    warns and skips loudly, --strict turns the list into a hard error.
+    """
+    missing = []
+    for arm in arms:
+        tool = TOOL_FOR_LANGUAGE.get(arm.language.lower())
+        if tool is None:
+            continue
+        if tool == "$ryo":
+            if not Path(ryo_bin).is_file() and shutil.which(ryo_bin) is None:
+                missing.append((arm, ryo_bin))
+        elif tool == "bun":
+            fallback = Path.home() / ".bun" / "bin" / "bun"
+            if shutil.which("bun") is None and not fallback.is_file():
+                missing.append((arm, "bun"))
+        elif shutil.which(tool) is None:
+            missing.append((arm, tool))
+    return missing
+
+
+def capture_versions(suite: Suite, arms: list[Arm], ryo_bin: str) -> dict[str, str]:
+    """Capture one version string per language across the selected arms.
+
+    An arm-level ``version`` override wins over the builtin one-liner for its
+    language, and the first arm of a language defines the entry. One-liners
+    run through a shell in the suite directory; any failure reads back as
+    "unavailable" instead of aborting the run.
+    """
+    versions: dict[str, str] = {}
+    for arm in arms:
+        if arm.language in versions:
+            continue
+        cmd = arm.version or BUILTIN_VERSION_CMDS.get(arm.language.lower())
+        if cmd is None:
+            continue
+        cmd = cmd.replace("$ryo", ryo_bin)
+        try:
+            proc = subprocess.run(
+                cmd, shell=True, cwd=suite.dir, capture_output=True, text=True
+            )
+        except OSError:
+            versions[arm.language] = "unavailable"
+            continue
+        versions[arm.language] = (
+            proc.stdout.strip() if proc.returncode == 0 else "unavailable"
+        )
+    return versions
+
+
+class BuildError(RuntimeError):
+    """An arm's build command failed; carries the combined build output."""
+
+    def __init__(self, arm_name: str, output: str) -> None:
+        self.arm_name = arm_name
+        self.output = output
+        super().__init__(f"build failed for arm {arm_name!r}: {output.strip()}")
+
+
+_BUILD_TIMEOUT_SECONDS = 600
+
+
+def build_arm(arm: Arm, suite: Suite, ryo_bin: str) -> None:
+    """Run an arm's build command in the suite directory.
+
+    Build strings pass through a shell (unlike run strings) and may use
+    redirects, so only substitution points are expanded — the run-string
+    metacharacter ban does not apply. A non-zero exit or timeout raises
+    BuildError carrying the combined output; the legacy scripts sent it to
+    /dev/null, the runner surfaces it.
+    """
+    if arm.build is None:
+        return
+    cmd = os.path.expandvars(arm.build.replace("$ryo", ryo_bin))
+    try:
+        proc = subprocess.run(
+            cmd,
+            shell=True,
+            cwd=suite.dir,
+            capture_output=True,
+            text=True,
+            timeout=_BUILD_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        partial = ""
+        if isinstance(exc.stdout, str):
+            partial += exc.stdout
+        if isinstance(exc.stderr, str):
+            partial += exc.stderr
+        raise BuildError(
+            arm.name, f"timed out after {_BUILD_TIMEOUT_SECONDS}s\n{partial}"
+        ) from exc
+    if proc.returncode != 0:
+        raise BuildError(arm.name, proc.stdout + proc.stderr)
+
+
+def check_output(arm: Arm, suite: Suite, ryo_bin: str) -> tuple[bool, str]:
+    """Run an arm once, directly (no shell), and check its output.
+
+    With a non-empty expected string, success is an exact match against the
+    stripped stdout. An empty expected string means exit-code-only: success is
+    a zero return code and the output reads back as "".
+    """
+    argv = shlex.split(substitute_run(arm.run, ryo_bin))
+    proc = subprocess.run(argv, cwd=suite.dir, capture_output=True, text=True)
+    expect = arm.expect if arm.expect is not None else ""
+    if expect == "":
+        return proc.returncode == 0, ""
+    stdout = proc.stdout.strip()
+    return stdout == expect, stdout
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_DEFAULT_RYO_BIN = (_REPO_ROOT / "target" / "release" / "ryo").resolve()
+
+
+@dataclass
+class RyoInfo:
+    path: str
+    version: str
+    built: bool
+
+
+def resolve_ryo(explicit: str | None, needs_build: bool) -> RyoInfo:
+    """Resolve the ryo binary, building the repo default on demand.
+
+    Precedence: --ryo-bin > $RYO_BIN > the repo's target/release/ryo. Only
+    the default repo binary is ever built here: when it wins and needs_build
+    is set, ``cargo build --release`` runs with the working directory pinned
+    to the repo root so the build lands in the expected target directory no
+    matter where the runner was invoked from.
+    """
+    chosen = explicit or os.environ.get("RYO_BIN") or str(_DEFAULT_RYO_BIN)
+    path = str(Path(chosen).resolve())
+    built = False
+    if needs_build and Path(path) == _DEFAULT_RYO_BIN:
+        proc = subprocess.run(
+            ["cargo", "build", "--release"],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        built = proc.returncode == 0
+    return RyoInfo(path=path, version=_ryo_version(path), built=built)
+
+
+def _ryo_version(path: str) -> str:
+    """Best-effort ``ryo --version`` probe; "unavailable" on any failure."""
+    try:
+        proc = subprocess.run([path, "--version"], capture_output=True, text=True)
+    except OSError:
+        return "unavailable"
+    if proc.returncode != 0:
+        return "unavailable"
+    return proc.stdout.strip() or "unavailable"
 
 
 def main(argv: list[str] | None = None) -> int:
