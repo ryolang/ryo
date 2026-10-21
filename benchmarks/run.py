@@ -6,7 +6,8 @@
 
 Replaces the copy-pasted benchmarks/*/run_benchmarks.sh scripts with one
 runner: `run` times every arm via hyperfine, `table` renders results, and
-`update-readme` splices them into suite READMEs. See ISSUES.md I-174.
+`update-readme` splices them into suite READMEs and the root summary table.
+See ISSUES.md I-174.
 
 Subcommands: run, table, update-readme.
 """
@@ -1106,6 +1107,254 @@ def cmd_table(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- update-readme: splicing generated tables into READMEs ---
+
+# Generated blocks live between these marker pairs; everything outside them is
+# human-owned prose. Suite READMEs carry per-suite tables, the root
+# benchmarks/README.md carries one summary table across suites.
+BENCH_START = "<!-- BENCH:START -->"
+BENCH_END = "<!-- BENCH:END -->"
+SUMMARY_START = "<!-- BENCH-SUMMARY:START -->"
+SUMMARY_END = "<!-- BENCH-SUMMARY:END -->"
+
+
+class MarkerError(ValueError):
+    """A target README is missing its marker pair (or the file itself)."""
+
+
+def splice_block(text: str, start: str, end: str, content: str) -> str:
+    """Replace the block between ``start`` and ``end`` (markers kept) with ``content``.
+
+    The markers themselves, and all text outside them, survive verbatim. Raises
+    ``MarkerError`` when either marker is absent — including an ``end`` that
+    only appears before ``start`` — and the caller must then leave the source
+    file untouched.
+    """
+    start_idx = text.find(start)
+    if start_idx == -1:
+        raise MarkerError(f"missing start marker {start!r}")
+    end_idx = text.find(end, start_idx + len(start))
+    if end_idx == -1:
+        raise MarkerError(f"missing end marker {end!r} after {start!r}")
+    return text[: start_idx + len(start)] + "\n" + content + "\n" + text[end_idx:]
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` via a same-directory temp file + rename.
+
+    A reader never observes a half-written README, and a failed write leaves
+    the original file in place (the temp file is unlinked).
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _read_readme(path: Path) -> str:
+    if not path.is_file():
+        raise MarkerError(f"{path}: README not found")
+    return path.read_text(encoding="utf-8")
+
+
+def _splice_readme(path: Path, text: str, start: str, end: str, content: str) -> str:
+    try:
+        return splice_block(text, start, end, content)
+    except MarkerError as exc:
+        raise MarkerError(f"{path}: {exc}") from exc
+
+
+_SUMMARY_HEADER = "| Suite | Ryo AOT | Peak RSS | vs. fastest | Measured |"
+_SUMMARY_SEPARATOR = "|---|---|---|---|---|"
+
+
+def _key_arm_name(key: str) -> str:
+    """Arm name segment of a store key (the last `/`-separated segment)."""
+    return key.rsplit("/", 1)[-1]
+
+
+def _time_bench(entry: dict | None) -> dict | None:
+    """The entry's time bench, or None when absent or never measured."""
+    if entry is None:
+        return None
+    return next(
+        (b for b in entry["benches"] if b["name"] == "time" and b["value"] is not None),
+        None,
+    )
+
+
+def _ryo_aot_anchor(store: Store) -> tuple[str, dict] | None:
+    """(key, entry) of the suite's Ryo AOT anchor row, or None.
+
+    Ranking: an arm literally named "Ryo (AOT)" wins; otherwise a Ryo-named
+    AOT variant (e.g. "Ryo (AOT, Eager)"); otherwise any arm whose store
+    entry's toolchain is ryo. Among same-ranked candidates the fastest time
+    wins (a suite may repeat "Ryo (AOT)" across groups, e.g. json_parse).
+    """
+    candidates: list[tuple[int, float, str, dict]] = []
+    for key in sorted(store.entries):
+        entry = store.latest(key)
+        bench = _time_bench(entry)
+        if bench is None:
+            continue
+        name = _key_arm_name(key).lower()
+        if name == "ryo (aot)":
+            rank = 0
+        elif name.startswith("ryo") and "aot" in name:
+            rank = 1
+        elif _toolchain_from_extra(bench.get("extra")).startswith("ryo"):
+            rank = 2
+        else:
+            continue
+        candidates.append((rank, bench["value"], key, entry))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: (c[0], c[1], c[2]))
+    _, _, key, entry = candidates[0]
+    return key, entry
+
+
+def _fastest_of_run(store: Store) -> tuple[str, dict] | None:
+    """(key, entry) with the lowest measured time across the suite's latest entries."""
+    best: tuple[int, float, str, dict] | None = None
+    for key in sorted(store.entries):
+        entry = store.latest(key)
+        bench = _time_bench(entry)
+        if bench is None:
+            continue
+        candidate = (0, bench["value"], key, entry)
+        if best is None or candidate[1] < best[1]:
+            best = candidate
+    return (best[2], best[3]) if best is not None else None
+
+
+def render_summary_table(stores: dict[str, Store]) -> str:
+    """Render the root summary table across suites, one row per suite.
+
+    Every cell is anchored to the suite's Ryo-AOT entry's own run: its time,
+    peak RSS, and date/commit. ``vs. fastest`` (Ryo-AOT time / fastest arm's
+    time) is filled only when the fastest arm's latest entry shares that run
+    (same ``date``) — a ratio across different runs is dishonest, so it
+    renders ``—`` instead. Suites with no Ryo arm render ``—`` across the row.
+    """
+    lines = [_SUMMARY_HEADER, _SUMMARY_SEPARATOR]
+    for suite_name, store in stores.items():
+        anchor = _ryo_aot_anchor(store)
+        time_str = rss_str = ratio_str = measured_str = _NO_MEASUREMENT
+        if anchor is not None:
+            _, entry = anchor
+            benches = {b["name"]: b for b in entry["benches"]}
+            time_str = f"{_format_cell_value(benches['time']['value'])} ms"
+            rss_bench = benches.get("memory_peak_rss")
+            if rss_bench is not None and rss_bench["value"] is not None:
+                rss_str = f"{_format_cell_value(rss_bench['value'])} MB"
+            fastest = _fastest_of_run(store)
+            if fastest is not None and fastest[1]["date"] == entry["date"]:
+                fastest_time = _time_bench(fastest[1])["value"]
+                ratio_str = f"{benches['time']['value'] / fastest_time:.2f}x"
+            date = datetime.fromtimestamp(entry["date"] / 1000, tz=timezone.utc).strftime(
+                "%Y-%m-%d"
+            )
+            measured_str = f"{date} (commit {entry['commit']['id']})"
+        lines.append(f"| {suite_name} | {time_str} | {rss_str} | {ratio_str} | {measured_str} |")
+    return "\n".join(lines)
+
+
+# Numbers carrying a benchmark unit (``12.3 ms``, ``4.5 MB``, ``1.7x``) — the
+# shape prose uses when it cites a measurement inline.
+_STALE_PROSE_VALUE = re.compile(r"(\d+(?:\.\d+)?)\s?(?:ms|MB|x)\b")
+# A generated block, either marker pair, spanning to its end marker.
+_MARKER_BLOCK = re.compile(
+    r"<!-- BENCH(?:-SUMMARY)?:START -->.*?<!-- BENCH(?:-SUMMARY)?:END -->", re.DOTALL
+)
+_TABLE_VALUE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def stale_prose_warnings(readme_text: str, table_text: str) -> list[str]:
+    """Flag prose numbers that disagree with the generated table (warning only).
+
+    Numbers with benchmark units (``12.3 ms``, ``4.5 MB``, ``1.7x``) are
+    scanned in the README text outside the marker blocks; any whose numeric
+    value appears in no cell of the spliced table is stale. Heuristic — it
+    compares numeric tokens, never units, so false positives are tolerated.
+    """
+    prose = _MARKER_BLOCK.sub("", readme_text)
+    table_values = set(_TABLE_VALUE.findall(table_text))
+    warnings: list[str] = []
+    flagged: set[str] = set()
+    for match in _STALE_PROSE_VALUE.finditer(prose):
+        value = match.group(1)
+        if value in table_values or value in flagged:
+            continue
+        flagged.add(value)
+        warnings.append(
+            f'prose mentions "{match.group(0)}" but {value} '
+            "appears in no generated-table cell"
+        )
+    return warnings
+
+
+def cmd_update_readme(args: argparse.Namespace) -> int:
+    """Entry point for the ``update-readme`` subcommand: splice tables into READMEs.
+
+    Per suite README: the suite's canonical table into its ``BENCH`` block;
+    root benchmarks/README.md: the cross-suite summary into its
+    ``BENCH-SUMMARY`` block. All splices are planned before anything is
+    written, so a missing marker pair is a hard error with zero file mutation.
+    Writes are in place and atomic (temp file + rename), and a write is
+    skipped entirely when the content is unchanged. Stale-prose warnings go
+    to stderr and never affect the exit code.
+    """
+    try:
+        suites = _select_suites(getattr(args, "benchmarks", None))
+    except (SelectionError, ManifestError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    store_dir = _REPO_ROOT / "benchmarks" / "data"
+    stores = {suite.name: Store.load(store_dir / f"{suite.name}.json") for suite in suites}
+
+    try:
+        plans: list[tuple[Path, str, str, str]] = []
+        for suite in suites:
+            readme_path = suite.dir / "README.md"
+            text = _read_readme(readme_path)
+            table = render_suite_table(suite, stores[suite.name])
+            plans.append(
+                (
+                    readme_path,
+                    text,
+                    _splice_readme(readme_path, text, BENCH_START, BENCH_END, table),
+                    table,
+                )
+            )
+        root_path = _REPO_ROOT / "benchmarks" / "README.md"
+        root_text = _read_readme(root_path)
+        summary = render_summary_table(stores)
+        plans.append(
+            (
+                root_path,
+                root_text,
+                _splice_readme(root_path, root_text, SUMMARY_START, SUMMARY_END, summary),
+                summary,
+            )
+        )
+    except MarkerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    for path, old_text, new_text, table in plans:
+        if new_text != old_text:
+            _write_atomic(path, new_text)
+        for warning in stale_prose_warnings(old_text, table):
+            print(f"warning: {path}: {warning}", file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="benchmarks/run.py",
@@ -1157,8 +1406,13 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PATH",
         help="Write the rendered tables to PATH instead of printing to stdout.",
     )
-    subparsers.add_parser(
+    update_parser = subparsers.add_parser(
         "update-readme", help="Splice result tables into suite READMEs."
+    )
+    update_parser.add_argument(
+        "--benchmarks",
+        metavar="NAMES",
+        help="Comma-separated suite names to update (default: every discovered suite).",
     )
     args = parser.parse_args(argv)
 
@@ -1166,6 +1420,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_run(args)
     if args.command == "table":
         return cmd_table(args)
+    if args.command == "update-readme":
+        return cmd_update_readme(args)
     raise SystemExit("not implemented yet")
 
 
