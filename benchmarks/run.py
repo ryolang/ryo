@@ -286,7 +286,7 @@ BUILTIN_VERSION_CMDS: dict[str, str] = {
     "elixir": "elixir --version | grep Elixir | awk '{print $2}'",
     "ruby": "ruby --version | awk '{print $2}'",
     "julia": "julia --version 2>/dev/null | awk '{print $3}' || echo 'not installed'",
-    "ryo": r"$ryo --version 2>&1 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' || echo 'dev'",
+    "ryo": r"($ryo --version 2>&1 || echo 'ryo dev') | sed -e 's/^ryo //'",
 }
 
 # Language -> the binary whose presence gates the arm. The "$ryo" marker is

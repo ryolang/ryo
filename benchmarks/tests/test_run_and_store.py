@@ -15,6 +15,7 @@ from run import (
     Suite,
     SuiteResult,
     _version_label,
+    capture_versions,
     load_suite,
     run_suites,
     store_key,
@@ -203,6 +204,17 @@ def test_version_label_uses_display_name_and_dedupes_tool_name():
     assert _version_label("rust", "1.98.0") == "rustc 1.98.0"
     assert _version_label("go", "1.27.2") == "go 1.27.2"
     assert _version_label("C", "unavailable") == "C unavailable"
+
+
+def test_ryo_version_probe_keeps_full_version(tmp_path):
+    fake = tmp_path / "ryo"
+    fake.write_text('#!/bin/sh\necho "ryo 0.1.0-dev.20261021+abcdef1"\n')
+    fake.chmod(0o755)
+    path = tmp_path / "suite.toml"
+    path.write_text('name = "s"\n\n[[arm]]\nname = "Ryo (AOT)"\nlanguage = "ryo"\nrun = "/bin/echo x"\nexpect = "x"\n')
+    suite = load_suite(path)
+    versions = capture_versions(suite, suite.arms, str(fake))
+    assert versions["ryo"] == "0.1.0-dev.20261021+abcdef1"
 
 
 def test_roundtrip(tmp_path):
