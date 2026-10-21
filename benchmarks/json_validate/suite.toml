@@ -1,0 +1,45 @@
+# Benchmark suite manifest for the centralized runner (benchmarks/run.py).
+# Transcribed from run_benchmarks.sh (see ISSUES.md I-174): every run/build
+# line, arm name, and warmup value matches the old script byte-for-byte
+# (modulo the $ryo substitution point for the ryo binary path).
+name = "json_validate"
+descriptor = "30,000-record JSON document, 12 validation passes — byte-scanning validation"
+warmup = 3
+
+[[arm]]
+name = "Rust"
+language = "rust"
+build = "rustc -O json_validate.rs -o json_validate_rs"
+run = "./json_validate_rs"
+
+[[arm]]
+name = "Swift"
+language = "swift"
+build = "swiftc -O json_validate.swift -o json_validate_swift"
+run = "./json_validate_swift"
+
+[[arm]]
+name = "Go"
+language = "go"
+build = "go build -o json_validate_go json_validate.go"
+run = "./json_validate_go"
+version = "go version | cut -d' ' -f3 | sed 's/^go//'"
+
+[[arm]]
+name = "Python"
+language = "python"
+run = "python3 json_validate.py"
+version = "python3 --version | cut -d' ' -f2"
+
+[[arm]]
+name = "Ryo (AOT)"
+language = "ryo"
+build = "(cd ../.. && cargo build --release > /dev/null) && $ryo build json_validate.ryo > /dev/null"
+run = "./json_validate"
+version = "$ryo --version 2>&1 || echo 'dev'"
+
+[[arm]]
+name = "Ryo (JIT)"
+language = "ryo"
+run = "$ryo run json_validate.ryo"
+version = "$ryo --version 2>&1 || echo 'dev'"

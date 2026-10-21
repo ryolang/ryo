@@ -1,0 +1,32 @@
+# Benchmark suite manifest for the centralized runner (benchmarks/run.py).
+# Transcribed from run_benchmarks.sh (see ISSUES.md I-174): every run/build
+# line, arm name, and warmup value matches the old script byte-for-byte
+# (modulo the $ryo substitution point for the ryo binary path).
+name = "collatz"
+descriptor = "Total stopping times for seeds 1..1,000,000 — integer loop codegen"
+warmup = 3
+
+[[arm]]
+name = "Rust"
+language = "rust"
+build = "rustc -O collatz.rs -o collatz_rs"
+run = "./collatz_rs"
+
+[[arm]]
+name = "Swift"
+language = "swift"
+build = "swiftc -O collatz.swift -o collatz_swift"
+run = "./collatz_swift"
+
+[[arm]]
+name = "Ryo (AOT)"
+language = "ryo"
+build = "(cd ../.. && cargo build --release > /dev/null) && $ryo build collatz.ryo > /dev/null"
+run = "./collatz"
+version = "$ryo --version 2>&1 || echo 'dev'"
+
+[[arm]]
+name = "Ryo (JIT)"
+language = "ryo"
+run = "$ryo run collatz.ryo"
+version = "$ryo --version 2>&1 || echo 'dev'"
