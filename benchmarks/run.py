@@ -1254,6 +1254,29 @@ def cmd_table(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_matrix(args: argparse.Namespace) -> int:
+    """Entry point for the ``matrix`` subcommand: render the cross-suite matrix from the store."""
+    try:
+        suites = _select_suites(
+            getattr(args, "benchmarks", None),
+            skip_ignored=not getattr(args, "include_ignored", False),
+        )
+    except (SelectionError, ManifestError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    store_dir = _REPO_ROOT / "benchmarks" / "data"
+    stores = {
+        suite.name: Store.load(store_dir / f"{suite.name}.json") for suite in suites
+    }
+    text = render_matrix(suites, stores) + "\n"
+    out = getattr(args, "out", None)
+    if out:
+        Path(out).write_text(text, encoding="utf-8")
+    else:
+        print(text, end="")
+    return 0
+
+
 # --- update-readme: splicing generated tables into READMEs ---
 
 # Generated blocks live between these marker pairs; everything outside them is
@@ -1850,6 +1873,24 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Also render git-ignored (local) suites such as csv_parse.",
     )
+    matrix_parser = subparsers.add_parser(
+        "matrix", help="Render the cross-suite matrix from the data store."
+    )
+    matrix_parser.add_argument(
+        "--benchmarks",
+        metavar="NAMES",
+        help="Comma-separated suite names to render (default: every discovered suite).",
+    )
+    matrix_parser.add_argument(
+        "--out",
+        metavar="PATH",
+        help="Write the rendered matrix to PATH instead of printing to stdout.",
+    )
+    matrix_parser.add_argument(
+        "--include-ignored",
+        action="store_true",
+        help="Also render git-ignored (local) suites such as csv_parse.",
+    )
     update_parser = subparsers.add_parser(
         "update-readme", help="Splice result tables into suite READMEs."
     )
@@ -1869,6 +1910,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_run(args)
     if args.command == "table":
         return cmd_table(args)
+    if args.command == "matrix":
+        return cmd_matrix(args)
     if args.command == "update-readme":
         return cmd_update_readme(args)
     raise SystemExit("not implemented yet")

@@ -1,16 +1,20 @@
 """Tests for the cross-suite matrix rendering: cell helpers (column keys,
-ratio emoji buckets, ratio formatting) and the render_matrix assembly."""
+ratio emoji buckets, ratio formatting), the render_matrix assembly, and the
+cmd_matrix subcommand entry point."""
 
+import argparse
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import run
 from run import (
     Arm,
     Store,
     _format_ratio,
     _matrix_column_key,
     _ratio_emoji,
+    cmd_matrix,
     load_suite,
     render_matrix,
 )
@@ -271,3 +275,58 @@ def test_render_matrix_unknown_language_appends_column(tmp_path):
         "| 🟥 400 [4.00×] (2.0.0) |"
     )
     assert row in text
+
+
+def _patch_discovery(monkeypatch, tmp_path: Path, suite) -> None:
+    """Mirror test_table._patch_discovery: fixed selection, repo root at tmp."""
+    monkeypatch.setattr(run, "_select_suites", lambda raw, **kwargs: [suite])
+    monkeypatch.setattr(run, "_REPO_ROOT", tmp_path)
+
+
+def _write_solo(tmp_path: Path):
+    """One uncategorized suite with a store under benchmarks/data, as cmd_matrix finds it."""
+    suite = write_suite(tmp_path / "suite", RUST_RYO_TOML.format(name="solo", category=""))
+    store = write_store(
+        tmp_path / "benchmarks" / "data" / "solo.json",
+        {
+            "solo/Rust": [make_entry(100.0, 1.5)],
+            "solo/Ryo (AOT)": [make_entry(200.0, 1.4, toolchain="ryo 0.1.0")],
+        },
+    )
+    return suite, store
+
+
+def test_cmd_matrix_prints_to_stdout(tmp_path, monkeypatch, capsys):
+    suite, store = _write_solo(tmp_path)
+    _patch_discovery(monkeypatch, tmp_path, suite)
+
+    assert cmd_matrix(argparse.Namespace(benchmarks=None, out=None, include_ignored=False)) == 0
+
+    assert capsys.readouterr().out == render_matrix([suite], {"solo": store}) + "\n"
+
+
+def test_cmd_matrix_writes_out_file_instead_of_stdout(
+    tmp_path, monkeypatch, capsys
+):
+    suite, store = _write_solo(tmp_path)
+    _patch_discovery(monkeypatch, tmp_path, suite)
+
+    out_path = tmp_path / "matrix.md"
+    assert cmd_matrix(
+        argparse.Namespace(benchmarks=None, out=str(out_path), include_ignored=False)
+    ) == 0
+
+    text = out_path.read_text(encoding="utf-8")
+    assert text == render_matrix([suite], {"solo": store}) + "\n"
+    assert capsys.readouterr().out == ""
+
+
+def test_cmd_matrix_unknown_benchmarks_name_errors(tmp_path, monkeypatch, capsys):
+    write_suite(tmp_path / "benchmarks" / "solo", RUST_RYO_TOML.format(name="solo", category=""))
+    monkeypatch.setattr(run, "_REPO_ROOT", tmp_path)
+
+    assert cmd_matrix(
+        argparse.Namespace(benchmarks="bogus", out=None, include_ignored=False)
+    ) == 1
+
+    assert "unknown --benchmarks name(s): bogus" in capsys.readouterr().err
