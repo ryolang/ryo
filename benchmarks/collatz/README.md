@@ -4,7 +4,7 @@
 
 * **Focus:** Integer loop/branch — total stopping time for seeds 1..1,000,000; a hot flat loop complementing fibonacci's recursion profile.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
-* **Highlights:** Ryo AOT runs at **2.14x Rust** (239.0 ms; measured 2026-10-21), decomposed by disassembly diff into ~1.6x the spec §18 checked-arithmetic policy (equally-checked Rust measures ~1.6x, on par with Swift's 1.63x) plus ~1.3x Cranelift aarch64 lowering gaps (`srem x, 2` not folded to a bit test, unfused `sadd_overflow` branches per I-165 — `smul_overflow` fused in 0.136.1 —, unstrength-reduced `mul x, 3`). See below for the breakdown.
+* **Highlights:** Ryo AOT runs at **2.07x Rust** (215.6 ms; measured 2026-10-21), decomposed by disassembly diff into ~1.6x the spec §18 checked-arithmetic policy (equally-checked Rust measures ~1.6x, on par with Swift's 1.63x) plus ~1.3x Cranelift aarch64 lowering gaps (`srem x, 2` not folded to a bit test, unfused `sadd_overflow` branches per I-165 — `smul_overflow` fused in 0.136.1 —, unstrength-reduced `mul x, 3`). See below for the breakdown.
 
 **Focus:** Integer loop/branch codegen. Sum of Collatz total stopping times for seeds 1..1,000,000 — a hot integer loop with a data-dependent branch and a function call per seed, complementing fibonacci's deep-recursion call profile with a flat iterative one.
 
@@ -32,7 +32,7 @@ The control experiment settles the policy question: the 1.00x Rust baseline is c
 
 **Checkpoint 2026-09-29 (Cranelift 0.135.1 → 0.136.1):** every candidate measured ~8% slower than on 2026-09-11 (machine-wide drift — Rust, Swift, and Ryo all moved together), so ratios are the honest signal: vs Rust 2.07x → 2.11x, vs Swift 1.31x → 1.33x. The 0.136.1 upgrade did land real instruction-level wins here (see the numbered list below: the `smul_overflow` guard lost its `cset`+`tst`, and the `srem`-by-2 sequence re-formed as `cmp`+`b.eq`), but odd-path iterations are a minority of the 131.4M total, and out-of-order hardware absorbs the rest — consistent with the parked-micro-optimization finding in the suite README. JIT measuring slightly faster than AOT (2.04x vs 2.11x) is run-to-run noise, as before.
 
-Why fibonacci loses less (1.34x) under the same policy: there the per-call cost is dominated by call/return and recursion overhead, which amortizes the guard bloat. Collatz is the opposite — the loop body is the entire cost, and `n` is a loop-carried serial dependency, so per-iteration bloat hits 1:1.
+Why fibonacci loses less (1.37x) under the same policy: there the per-call cost is dominated by call/return and recursion overhead, which amortizes the guard bloat. Collatz is the opposite — the loop body is the entire cost, and `n` is a loop-carried serial dependency, so per-iteration bloat hits 1:1.
 
 Per even-path iteration (of 131.4M total loop iterations across the 1M seeds): unchecked Rust is 7 instructions with a branchless `csinc` select (1 conditional branch); checked Rust and Swift are ~8 instructions / 3 branches; Ryo is ~14 instructions / 3 branches plus 2 unconditional (was ~16 before the 0.136.1 bump). The CLIF Ryo emits is clean (`srem`, `sdiv`, `smul_overflow`, `sadd_overflow`, `brif` — verifiable via `ryo ir --emit clif`); the bloat is all in Cranelift's aarch64 lowering:
 

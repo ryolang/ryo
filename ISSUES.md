@@ -759,6 +759,32 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-247 — Restore migration-deleted per-suite benchmark tables as dated checkpoints
+
+**Severity:** Correctness / Hygiene
+**Area:** ci-benchmarks
+
+**Files:** benchmarks/byte_slicing/README.md, benchmarks/mandelbrot/README.md, benchmarks/struct_records/README.md, benchmarks/struct_records_inout/README.md, benchmarks/struct_records_reuse/README.md, benchmarks/string_slicing/README.md, benchmarks/eager_destruction/README.md
+
+**Summary:** The I-174 migration deleted hand-written results tables in six suite READMEs (byte_slicing, mandelbrot, struct_records, struct_records_inout, struct_records_reuse, string_slicing) while Highlights/overview prose still cites their numbers; the benchmarks/AGENTS.md convention says hand-written history survives as dated checkpoints below the generated block. Also: eager_destruction's BENCH markers sit inside its dated 2026-10-07 checkpoint heading, so a future update-readme would render new data inside a dated section.
+
+**Resolution:** Restore each deleted table from git history (pre-migration) into a dated checkpoint section below the generated block; move eager_destruction's markers into their own "Current results" section.
+
+---
+
+### I-248 — Benchmark runner hardening: surface failed compiler build, quote $ryo path
+
+**Severity:** Correctness / Hygiene
+**Area:** tooling
+
+**Files:** benchmarks/run.py
+
+**Summary:** resolve_ryo records built=False when the runner-triggered cargo build --release fails but the run continues (potentially benchmarking a stale target/release/ryo whose recorded version then mislabels the store); and $ryo is substituted unquoted into run/build/version strings, breaking on repo paths containing spaces.
+
+**Resolution:** Raise/abort with cargo output when the auto-build fails; shlex.quote the ryo binary path at substitution points.
+
+---
+
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)

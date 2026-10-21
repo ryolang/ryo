@@ -4,7 +4,7 @@
 
 * **Focus:** Deep function recursion, standard integer arithmetic, and basic execution overhead.
 * **Languages compared:** Rust, Go, Swift, Kotlin, Bun (TypeScript), Julia, Elixir, Python, Ruby, and Ryo.
-* **Highlights:** Ryo AOT achieves the **lightest memory usage of all languages tested** (1.37 MB max resident size). On execution speed, Ryo currently runs at ~1.34× Rust's time on `fib(40)` — see the note below for why.
+* **Highlights:** Ryo AOT achieves the **lightest memory usage of all languages tested** (1.35 MB max resident size). On execution speed, Ryo currently runs at ~1.37× Rust's time on `fib(40)` — see the note below for why.
 
 ## Why Ryo trails Rust here: checked arithmetic is intentional
 
@@ -15,7 +15,7 @@ The fair like-for-like is **Swift**, which also traps on overflow and sits at ~1
 * Value-range guard elision **landed** (commit `d6aee06`, [checkpoint 2026-08-26](#checkpoint-value-range-guard-elision-2026-08-26)): `if n <= 1: return n` proves `n - 1` and `n - 2` cannot overflow, so those guards are no longer emitted. Measured walltime change was ~zero — the elided branches were perfectly predicted — and the residual gap is structural (middle-end transforms), not the guards.
 * The one surviving guard on the outer `fibonacci(n - 1) + fibonacci(n - 2)` addition lowers to an unfused `cset` + `tst` + `b.ne`; the flag-fusing fix is tracked as **I-165** (`ISSUES.md`). Cranelift itself is pinned and upgraded regularly (0.136.1 at the time of writing; the 0.136.1 upgrade fused `smul_overflow` guards on aarch64 but not yet `sadd`/`ssub`, and left the fib hot path byte-identical — [checkpoint 2026-09-29](#checkpoint-cranelift-01361-2026-09-29)).
 
-AOT lands at ~1.34× and JIT at ~1.46× Rust's time; the ~30 ms delta is the compiler's compile-and-startup cost inside the timed `ryo run` invocation, not codegen — both share the same Cranelift codegen (both at `opt_level=speed`).
+AOT lands at ~1.37× and JIT at ~1.46× Rust's time; the ~23 ms delta is the compiler's compile-and-startup cost inside the timed `ryo run` invocation, not codegen — both share the same Cranelift codegen (both at `opt_level=speed`).
 
 These benchmarks compare a standard recursive calculation of `fibonacci(40)` across different languages using `hyperfine`. 
 
@@ -54,7 +54,7 @@ Outcome vs the provisional target (fib(40) AOT ≤ 1.25× Rust): **missed** — 
 See [Why Ryo trails Rust here](#why-ryo-trails-rust-here-checked-arithmetic-is-intentional) for why Ryo currently trails Rust on this benchmark (spec §18 checked arithmetic) and what is planned to close the gap.
 
 ### Notes on Memory Usage
-Ryo's Ahead-Of-Time (AOT) compiled binary stands out aggressively in memory footprint—claiming the **lightest memory usage of all languages tested** (1.37 MB vs Rust's 1.48 MB).
+Ryo's Ahead-Of-Time (AOT) compiled binary stands out aggressively in memory footprint—claiming the **lightest memory usage of all languages tested** (1.35 MB vs Rust's 1.48 MB).
 
 Even operating entirely as a JIT script interpreting/compiling source code directly, Ryo's compiler (via Cranelift) maintains an incredibly small memory footprint (~5.5 MB).
 
