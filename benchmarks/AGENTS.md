@@ -8,15 +8,15 @@ All suites are driven from the repo root by the central runner `run.py` (PEP 723
 
 ```bash
 uv run benchmarks/run.py run --benchmarks collatz     # one suite (drop the flag for all suites)
-uv run benchmarks/run.py run --benchmarks fibonacci --languages rust,ryo_aot
+uv run benchmarks/run.py run --benchmarks fibonacci --languages rust,ryo
 uv run benchmarks/run.py run --benchmarks collatz --dry-run    # build + checksum gate only, no hyperfine
 uv run benchmarks/run.py run --strict                  # fail before benchmarking if a toolchain is missing
-uv run benchmarks/run.py run --ryo-bin PATH            # override the ryo binary (default: target/release/ryo)
+uv run benchmarks/run.py run --ryo-bin PATH            # override the ryo binary (--ryo-bin > $RYO_BIN > target/release/ryo)
 uv run benchmarks/run.py run --json PATH               # incremental run JSON, written after each suite
 ```
 
 * `collatz` is the fast smoke suite; fibonacci with all arms takes 20–60 min — run it in the background.
-* `run` always discovers the git-ignored local suites (`csv_parse`, `json_parse`, `startup_latency`); `table`/`update-readme` skip them unless you pass `--include-ignored`.
+* `run` always discovers the git-ignored local suites (`csv_parse`, `json_parse`, `startup_latency`); `table`/`update-readme`/`matrix` skip them unless you pass `--include-ignored`.
 * Never run two benchmarks concurrently — CPU contention skews the timings.
 
 ## Updating Checkpoint Tables
