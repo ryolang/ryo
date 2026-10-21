@@ -700,6 +700,11 @@ class Store:
         series = self.entries.get(key)
         return series[-1] if series else None
 
+    def previous(self, key: str) -> dict | None:
+        """The entry before latest for a key, or None when fewer than 2 exist."""
+        series = self.entries.get(key)
+        return series[-2] if series and len(series) >= 2 else None
+
     def save(self) -> None:
         self.last_update = _epoch_ms()
         _write_json(
@@ -745,9 +750,17 @@ class Store:
 
 # --- table rendering (the `table` subcommand) ---
 
-_TABLE_HEADER = "| Language or Arm | Version | Mean Time | Speed vs Best | Memory |"
-_TABLE_SEPARATOR = "|---|---|---|---|---|"
+_TABLE_HEADER = "| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |"
+_TABLE_SEPARATOR = "|---|---|---|---|---|---|"
 _NO_MEASUREMENT = "—"
+
+
+def _delta_pct(current: float | None, previous: float | None) -> str:
+    """Signed one-decimal percent change at full precision; "—" when either
+    side is missing or previous == 0. Negative = improvement (lower is better)."""
+    if current is None or previous is None or previous == 0:
+        return _NO_MEASUREMENT
+    return f"{(current - previous) / previous * 100:+.1f}%"
 
 
 def _format_cell_value(value: float) -> str:
@@ -809,28 +822,41 @@ def _grouped_arms(arms: list[Arm]) -> list[tuple[str | None, list[Arm]]]:
     return groups
 
 
-def _table_cells(arm: Arm, entry: dict | None, speed: str, star_memory: bool) -> list[str]:
-    """One five-column row: arm, bare version, mean time, speed vs best, memory.
+def _table_cells(
+    arm: Arm, entry: dict | None, speed: str, star_memory: bool, previous: dict | None
+) -> list[str]:
+    """One six-column row: arm, bare version, mean time, speed vs best, memory,
+    time delta vs the previous store entry.
 
     ``entry`` is None for unmeasured arms, so every cell renders "—". The
     memory cell carries a leading "⭐ " when ``star_memory`` is set (the arm's
-    RSS equals the group's lowest measured RSS).
+    RSS equals the group's lowest measured RSS) and appends the signed RSS
+    delta vs ``previous`` when that delta is not "—". The last cell is the
+    signed time delta vs ``previous`` ("—" with fewer than two store entries).
     """
     time_bench = _time_bench(entry)
-    time_str = (
-        f"{_format_cell_value(time_bench['value'])} ms"
-        if time_bench is not None
-        else _NO_MEASUREMENT
-    )
+    if time_bench is None:
+        time_str = time_delta = _NO_MEASUREMENT
+    else:
+        time_str = f"{_format_cell_value(time_bench['value'])} ms"
+        prev_time = _time_bench(previous)
+        time_delta = _delta_pct(
+            time_bench["value"], prev_time["value"] if prev_time is not None else None
+        )
     rss_bench = _rss_bench(entry)
-    rss_str = (
-        f"{_format_cell_value(rss_bench['value'])} MB"
-        if rss_bench is not None
-        else _NO_MEASUREMENT
-    )
+    if rss_bench is None:
+        rss_str = _NO_MEASUREMENT
+    else:
+        rss_str = f"{_format_cell_value(rss_bench['value'])} MB"
+        prev_rss = _rss_bench(previous)
+        rss_delta = _delta_pct(
+            rss_bench["value"], prev_rss["value"] if prev_rss is not None else None
+        )
+        if rss_delta != _NO_MEASUREMENT:
+            rss_str = f"{rss_str} ({rss_delta})"
     if star_memory:
         rss_str = f"⭐ {rss_str}"
-    return [arm.name, _bare_version(entry), time_str, speed, rss_str]
+    return [arm.name, _bare_version(entry), time_str, speed, rss_str, time_delta]
 
 
 def _caption(platform_str: str, newest: dict | None, warmup: int) -> str:
@@ -860,8 +886,10 @@ def render_suite_table(suite: Suite, store: Store) -> str:
     against the group's fastest measured time ("1.00x" for the fastest) — and
     unmeasured arms (no store entry, or no measured time bench) render "—" in
     every cell and sort last in manifest order. The Memory cell of the arm
-    whose RSS equals the group's lowest measured RSS carries a "⭐ ". The
-    caption's date/commit/hyperfine come from the table's newest entry; the
+    whose RSS equals the group's lowest measured RSS carries a "⭐ ", and both
+    the Memory cell and the trailing Δ prev cell carry the signed change vs
+    the arm's previous store entry when one exists. The caption's
+    date/commit/hyperfine come from the table's newest entry; the
     platform is stamped at render time (the store schema has no machine field)
     and the warmup comes from the manifest.
     """
@@ -872,34 +900,38 @@ def render_suite_table(suite: Suite, store: Store) -> str:
         lines.append(_TABLE_HEADER)
         lines.append(_TABLE_SEPARATOR)
         newest: dict | None = None
-        measured: list[tuple[float, Arm, dict]] = []
-        unmeasured: list[tuple[Arm, dict | None]] = []
+        measured: list[tuple[float, Arm, dict, dict | None]] = []
+        unmeasured: list[tuple[Arm, dict | None, dict | None]] = []
         for arm in arms:
-            entry = store.latest(store_key(suite, arm))
+            key = store_key(suite, arm)
+            entry = store.latest(key)
+            previous = store.previous(key)
             if entry is not None and (newest is None or entry["date"] > newest["date"]):
                 newest = entry
             bench = _time_bench(entry)
             if bench is None:
-                unmeasured.append((arm, entry))
+                unmeasured.append((arm, entry, previous))
             else:
-                measured.append((bench["value"], arm, entry))
+                measured.append((bench["value"], arm, entry, previous))
         measured.sort(key=lambda row: row[0])
         group_fastest = measured[0][0] if measured else None
         rss_values = [
-            bench["value"] for _, _, entry in measured if (bench := _rss_bench(entry)) is not None
+            bench["value"]
+            for _, _, entry, _ in measured
+            if (bench := _rss_bench(entry)) is not None
         ]
         group_leanest = min(rss_values) if rss_values else None
-        for time, arm, entry in measured:
+        for time, arm, entry, previous in measured:
             rss_bench = _rss_bench(entry)
             star = (
                 group_leanest is not None
                 and rss_bench is not None
                 and rss_bench["value"] == group_leanest
             )
-            cells = _table_cells(arm, entry, _speed_vs_best(time, group_fastest), star)
+            cells = _table_cells(arm, entry, _speed_vs_best(time, group_fastest), star, previous)
             lines.append("| " + " | ".join(cells) + " |")
-        for arm, _ in unmeasured:
-            cells = _table_cells(arm, None, _NO_MEASUREMENT, False)
+        for arm, _, previous in unmeasured:
+            cells = _table_cells(arm, None, _NO_MEASUREMENT, False, previous)
             lines.append("| " + " | ".join(cells) + " |")
         lines.append(_caption(platform_str, newest, suite.warmup))
         sections.append("\n".join(lines))
