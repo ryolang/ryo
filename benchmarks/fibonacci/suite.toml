@@ -36,6 +36,7 @@ name = "Ryo (AOT)"
 language = "ryo"
 build = "cargo build --release > /dev/null && $ryo build fib.ryo > /dev/null"
 run = "./fib"
+expect = "assert passed, fib(40) is correct"
 
 [[arm]]
 name = "Ryo (JIT)"
@@ -47,6 +48,7 @@ expect = "assert passed, fib(40) is correct"
 name = "Bun (TS)"
 language = "bun"
 run = "$HOME/.bun/bin/bun run fib.ts"
+version = "~/.bun/bin/bun --version"
 
 [[arm]]
 name = "Elixir"
@@ -62,6 +64,7 @@ run = "ruby fib.rb"
 name = "Python"
 language = "python"
 run = "uv run --python 3.14 fib.py"
+version = "uv run --python 3.14 python --version | awk '{print $2}'"
 
 [[arm]]
 name = "Julia"
