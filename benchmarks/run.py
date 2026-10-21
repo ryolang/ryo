@@ -826,9 +826,35 @@ def _validate_languages(suites: list[Suite], languages: list[str] | None) -> str
     return None
 
 
-def _select_suites(filter_raw: str | None) -> list[Suite]:
-    """Discover benchmarks/*/suite.toml and optionally filter by suite name."""
+def _is_git_ignored(path: Path) -> bool:
+    """True when git considers the manifest local-only (ignored).
+
+    ``table`` and ``update-readme`` exclude ignored manifests (the local
+    csv_parse/json_parse/startup_latency sweeps) so committed artifacts only
+    ever carry committed suites. When git cannot answer — missing binary, not
+    a work tree — err on inclusion so behavior matches un-git-aware discovery.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "check-ignore", "-q", str(path)],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+        )
+    except OSError:
+        return False
+    return proc.returncode == 0
+
+
+def _select_suites(filter_raw: str | None, *, skip_ignored: bool = False) -> list[Suite]:
+    """Discover benchmarks/*/suite.toml and optionally filter by suite name.
+
+    With ``skip_ignored`` (artifact subcommands), manifests that git marks
+    ignored drop out unless the caller passes ``--include-ignored``. ``run``
+    keeps the default so local sweeps stay runnable.
+    """
     paths = sorted((_REPO_ROOT / "benchmarks").glob("*/suite.toml"))
+    if skip_ignored:
+        paths = [path for path in paths if not _is_git_ignored(path)]
     suites = [load_suite(path) for path in paths]
     wanted = _split_names(filter_raw)
     if wanted is None:
@@ -1093,7 +1119,10 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_table(args: argparse.Namespace) -> int:
     """Entry point for the ``table`` subcommand: render canonical tables from the store."""
     try:
-        suites = _select_suites(getattr(args, "benchmarks", None))
+        suites = _select_suites(
+            getattr(args, "benchmarks", None),
+            skip_ignored=not getattr(args, "include_ignored", False),
+        )
     except (SelectionError, ManifestError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -1244,27 +1273,34 @@ def render_summary_table(stores: dict[str, Store]) -> str:
     peak RSS, and date/commit. ``vs. fastest`` (Ryo-AOT time / fastest arm's
     time) is filled only when the fastest arm's latest entry shares that run
     (same ``date``) — a ratio across different runs is dishonest, so it
-    renders ``—`` instead. Suites with no Ryo arm render ``—`` across the row.
+    renders ``—`` instead. Suites with no Ryo-AOT anchor entry render no row
+    at all, so a fresh clone's summary is header-only until suites are
+    measured. Rows are alphabetical so the output never depends on how the
+    suites were selected.
     """
     lines = [_SUMMARY_HEADER, _SUMMARY_SEPARATOR]
-    for suite_name, store in stores.items():
+    # Canonical order: alphabetical, independent of how suites were selected.
+    for suite_name in sorted(stores):
+        store = stores[suite_name]
         anchor = _ryo_aot_anchor(store)
-        time_str = rss_str = ratio_str = measured_str = _NO_MEASUREMENT
-        if anchor is not None:
-            _, entry = anchor
-            benches = {b["name"]: b for b in entry["benches"]}
-            time_str = f"{_format_cell_value(benches['time']['value'])} ms"
-            rss_bench = benches.get("memory_peak_rss")
-            if rss_bench is not None and rss_bench["value"] is not None:
-                rss_str = f"{_format_cell_value(rss_bench['value'])} MB"
-            fastest = _fastest_of_run(store)
-            if fastest is not None and fastest[1]["date"] == entry["date"]:
-                fastest_time = _time_bench(fastest[1])["value"]
-                ratio_str = f"{benches['time']['value'] / fastest_time:.2f}x"
-            date = datetime.fromtimestamp(entry["date"] / 1000, tz=timezone.utc).strftime(
-                "%Y-%m-%d"
-            )
-            measured_str = f"{date} (commit {entry['commit']['id']})"
+        if anchor is None:
+            continue
+        _, entry = anchor
+        benches = {b["name"]: b for b in entry["benches"]}
+        time_str = f"{_format_cell_value(benches['time']['value'])} ms"
+        rss_str = _NO_MEASUREMENT
+        rss_bench = benches.get("memory_peak_rss")
+        if rss_bench is not None and rss_bench["value"] is not None:
+            rss_str = f"{_format_cell_value(rss_bench['value'])} MB"
+        ratio_str = _NO_MEASUREMENT
+        fastest = _fastest_of_run(store)
+        if fastest is not None and fastest[1]["date"] == entry["date"]:
+            fastest_time = _time_bench(fastest[1])["value"]
+            ratio_str = f"{benches['time']['value'] / fastest_time:.2f}x"
+        date = datetime.fromtimestamp(entry["date"] / 1000, tz=timezone.utc).strftime(
+            "%Y-%m-%d"
+        )
+        measured_str = f"{date} (commit {entry['commit']['id']})"
         lines.append(f"| {suite_name} | {time_str} | {rss_str} | {ratio_str} | {measured_str} |")
     return "\n".join(lines)
 
@@ -1315,7 +1351,10 @@ def cmd_update_readme(args: argparse.Namespace) -> int:
     to stderr and never affect the exit code.
     """
     try:
-        suites = _select_suites(getattr(args, "benchmarks", None))
+        suites = _select_suites(
+            getattr(args, "benchmarks", None),
+            skip_ignored=not getattr(args, "include_ignored", False),
+        )
     except (SelectionError, ManifestError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -1325,6 +1364,10 @@ def cmd_update_readme(args: argparse.Namespace) -> int:
     try:
         plans: list[tuple[Path, str, str, str]] = []
         for suite in suites:
+            if not stores[suite.name].entries:
+                # Nothing measured yet: leave the README's block untouched so
+                # bare runs stay byte-identical on a fresh clone.
+                continue
             readme_path = suite.dir / "README.md"
             text = _read_readme(readme_path)
             table = render_suite_table(suite, stores[suite.name])
@@ -1410,6 +1453,11 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PATH",
         help="Write the rendered tables to PATH instead of printing to stdout.",
     )
+    table_parser.add_argument(
+        "--include-ignored",
+        action="store_true",
+        help="Also render git-ignored (local) suites such as csv_parse.",
+    )
     update_parser = subparsers.add_parser(
         "update-readme", help="Splice result tables into suite READMEs."
     )
@@ -1417,6 +1465,11 @@ def main(argv: list[str] | None = None) -> int:
         "--benchmarks",
         metavar="NAMES",
         help="Comma-separated suite names to update (default: every discovered suite).",
+    )
+    update_parser.add_argument(
+        "--include-ignored",
+        action="store_true",
+        help="Also splice git-ignored (local) suites such as csv_parse.",
     )
     args = parser.parse_args(argv)
 

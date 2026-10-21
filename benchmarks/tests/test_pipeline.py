@@ -146,3 +146,56 @@ def test_resolve_ryo_default_records_version():
     info = resolve_ryo(None, needs_build=False)
     assert info.built is False
     assert info.version != ""
+
+
+# --- Discovery: committed vs. gitignored local suites ---
+
+MINIMAL_MANIFEST = """
+name = "{name}"
+warmup = 0
+
+[[arm]]
+name = "A"
+language = "C"
+run = "/bin/echo a"
+expect = "a"
+"""
+
+
+def _write_manifest(root: Path, suite_dir: str, name: str) -> None:
+    directory = root / "benchmarks" / suite_dir
+    directory.mkdir(parents=True)
+    (directory / "suite.toml").write_text(
+        MINIMAL_MANIFEST.format(name=name), encoding="utf-8"
+    )
+
+
+def test_select_suites_skip_ignored_drops_gitignored_manifests(tmp_path, monkeypatch):
+    """Artifact subcommands see committed suites only unless told otherwise."""
+    _write_manifest(tmp_path, "committed", "committed")
+    _write_manifest(tmp_path, "local", "local")
+    monkeypatch.setattr(run, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(run, "_is_git_ignored", lambda path: path.parent.name == "local")
+
+    assert [s.name for s in run._select_suites(None, skip_ignored=True)] == ["committed"]
+    assert {s.name for s in run._select_suites(None)} == {"committed", "local"}
+
+
+def test_is_git_ignored_falls_back_to_including_when_git_cannot_answer(monkeypatch):
+    def no_git(*args, **kwargs):
+        raise OSError("git not found")
+
+    monkeypatch.setattr(run.subprocess, "run", no_git)
+    assert run._is_git_ignored(Path("suite.toml")) is False
+
+
+@pytest.mark.skipif(
+    not (Path(run.__file__).resolve().parent.parent / ".git").is_dir(),
+    reason="needs the real repo checkout with its gitignored local sweeps",
+)
+def test_select_suites_skip_ignored_excludes_the_repo_local_sweeps():
+    """The live failure this fixes: bare update-readme chokes on local suites."""
+    names = [s.name for s in run._select_suites(None, skip_ignored=True)]
+    assert "fibonacci" in names
+    for local in ("csv_parse", "json_parse", "startup_latency"):
+        assert local not in names

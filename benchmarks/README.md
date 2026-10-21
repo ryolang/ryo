@@ -19,8 +19,8 @@ The Ryo (AOT) anchor row per suite, regenerated from the data store by `uv run b
 <!-- BENCH-SUMMARY:START -->
 | Suite | Ryo AOT | Peak RSS | vs. fastest | Measured |
 |---|---|---|---|---|
-| fibonacci | 359.464 ms | 1.37 MB | 1.34x | 2026-10-21 (commit bddd4e1) |
 | collatz | 239.027 ms | 1.352 MB | 2.14x | 2026-10-21 (commit bddd4e1) |
+| fibonacci | 359.464 ms | 1.37 MB | 1.34x | 2026-10-21 (commit bddd4e1) |
 <!-- BENCH-SUMMARY:END -->
 
 ---
@@ -44,7 +44,7 @@ The fair like-for-like is **Swift**, which also traps on overflow and sits at ~1
 * Value-range guard elision **landed** (commit `d6aee06`, checkpoint 2026-08-26 in [`fibonacci/README.md`](./fibonacci/README.md#checkpoint-value-range-guard-elision-2026-08-26)): `if n <= 1: return n` proves `n - 1` and `n - 2` cannot overflow, so those guards are no longer emitted. Measured walltime change was ~zero — the elided branches were perfectly predicted — and the residual gap is structural (middle-end transforms), not the guards.
 * The one surviving guard on the outer `fibonacci(n - 1) + fibonacci(n - 2)` addition lowers to an unfused `cset` + `tst` + `b.ne`; the flag-fusing fix is tracked as **I-165** (`ISSUES.md`). Cranelift itself is pinned and upgraded regularly (0.136.1 at the time of writing; the 0.136.1 upgrade fused `smul_overflow` guards on aarch64 but not yet `sadd`/`ssub`, and left the fib hot path byte-identical — checkpoint 2026-09-29 in [`fibonacci/README.md`](./fibonacci/README.md)).
 
-JIT and AOT land within noise of each other (~1.34× and ~1.46× respectively) because both share the same Cranelift codegen (both at `opt_level=speed`).
+AOT lands at ~1.34× and JIT at ~1.46× Rust's time; the ~30 ms delta is the compiler's compile-and-startup cost inside the timed `ryo run` invocation, not codegen — both share the same Cranelift codegen (both at `opt_level=speed`).
 
 ### 2. [Eager Destruction Benchmark](./eager_destruction/)
 
@@ -136,8 +136,9 @@ uv run benchmarks/run.py run --benchmarks eager_destruction --dry-run
 
 The runner's behavior is fixed by the manifests and the data store, not by the per-suite wrapper-script copies this runner replaced:
 
-* **Subcommands.** `run` builds each arm, verifies its checksum output, then times it with `hyperfine` (peak RSS via `/usr/bin/time -l` on macOS, `%M` on Linux) and appends the numbers to the suite's store under `benchmarks/data/`. `table` renders the canonical tables from the store to stdout. `update-readme` splices those tables into the README marker blocks (see the checkpoint convention below).
-* **Flags.** `run` takes `--benchmarks NAMES`, `--languages NAMES`, `--dry-run` (stop after the checksum gate; never invoke hyperfine), `--strict` (fail before benchmarking when a selected toolchain is missing), `--ryo-bin PATH`, and `--json PATH` (write the incremental run JSON after each suite). `table` and `update-readme` take `--benchmarks` (and `table` takes `--out PATH`).
+* **Subcommands.** `run` builds each arm, verifies its checksum output, then times it with `hyperfine` (peak RSS from hyperfine 2.0's native memory measurement, reported as the mean of runs) and appends the numbers to the suite's store under `benchmarks/data/`. `table` renders the canonical tables from the store to stdout. `update-readme` splices those tables into the README marker blocks (see the checkpoint convention below); suites with no store data yet are left untouched, so a bare `update-readme` on a fresh clone changes nothing.
+* **Flags.** `run` takes `--benchmarks NAMES`, `--languages NAMES`, `--dry-run` (stop after the checksum gate; never invoke hyperfine), `--strict` (fail before benchmarking when a selected toolchain is missing), `--ryo-bin PATH`, and `--json PATH` (write the incremental run JSON after each suite). `table` and `update-readme` take `--benchmarks` (and `table` takes `--out PATH`). Both also take `--include-ignored` to act on git-ignored (local) suites — see below.
+* **Committed vs. local suites.** Discovery is git-aware: `table` and `update-readme` skip manifests git marks ignored (the local `csv_parse`, `json_parse`, and `startup_latency` sweeps), so committed READMEs and the summary only ever carry committed suites. `run` always discovers everything — local sweeps stay a legitimate target. To render or splice a local suite, pass `--include-ignored`.
 * **Ryo binary precedence.** `--ryo-bin PATH` wins, then `$RYO_BIN`, then the repo's own `target/release/ryo`. Only that last default is ever built by the runner (`cargo build --release`, pinned to the repo root no matter where the runner is invoked); an explicit override must already exist.
 * **Store keys and retention.** The store is keyed `<suite>/<group>/<arm>` (the group segment appears only in suites that define groups) and keeps the newest 20 entries per key. Entries come only from real `run` invocations — never backfilled or hand-edited — so every rendered row traces to an actual measurement with its date and commit.
 * **Ryo (AOT) arms chain the compiler build.** Each suite's Ryo (AOT) arm begins its manifest build line with `cargo build --release`, so the benchmarked binary always comes from the just-built compiler at the measured revision. That chain is deliberate — it stays faithful to the old per-suite scripts even where it duplicates the runner's own auto-build.

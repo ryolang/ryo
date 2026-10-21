@@ -178,7 +178,7 @@ def test_version_cell_comes_from_store_extra_toolchain_string(tmp_path, fixed_pl
 
 
 def _patch_discovery(monkeypatch, tmp_path: Path, suite: run.Suite) -> None:
-    monkeypatch.setattr(run, "_select_suites", lambda raw: [suite])
+    monkeypatch.setattr(run, "_select_suites", lambda raw, **kwargs: [suite])
     monkeypatch.setattr(run, "_REPO_ROOT", tmp_path)
 
 

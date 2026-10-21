@@ -99,7 +99,7 @@ def fixed_platform(monkeypatch):
 
 
 def _patch_discovery(monkeypatch, tmp_path: Path, suite: run.Suite) -> None:
-    monkeypatch.setattr(run, "_select_suites", lambda raw: [suite])
+    monkeypatch.setattr(run, "_select_suites", lambda raw, **kwargs: [suite])
     monkeypatch.setattr(run, "_REPO_ROOT", tmp_path)
 
 
@@ -183,15 +183,23 @@ def test_render_summary_table_falls_back_to_ryo_toolchain_without_aot_name(tmp_p
     assert "| synthetic | 55 ms | 9 MB | 34.38x | 2026-10-21 (commit abc1234) |" in table
 
 
-def test_render_summary_table_without_ryo_arm_renders_dashes(tmp_path):
-    store = write_store(
-        tmp_path / "data" / "synthetic.json",
-        {"synthetic/Rust": [make_entry(1.6, 4.5, toolchain="rustc 1.85.0")]},
+def test_render_summary_table_skips_anchorless_suites(tmp_path):
+    """Suites with no Ryo-AOT anchor entry render no row at all."""
+    anchored = write_store(
+        tmp_path / "data" / "anchored.json",
+        {
+            "anchored/Rust": [make_entry(3.0, 4.5, toolchain="rustc 1.85.0")],
+            "anchored/Ryo (AOT)": [make_entry(2.7, 2.75, toolchain="ryo 0.1.0")],
+        },
     )
-    assert render_summary_table({"synthetic": store}) == (
+    anchorless = write_store(
+        tmp_path / "data" / "anchorless.json",
+        {"anchorless/Rust": [make_entry(1.6, 4.5, toolchain="rustc 1.85.0")]},
+    )
+    assert render_summary_table({"anchorless": anchorless, "anchored": anchored}) == (
         "| Suite | Ryo AOT | Peak RSS | vs. fastest | Measured |\n"
         "|---|---|---|---|---|\n"
-        "| synthetic | — | — | — | — |"
+        "| anchored | 2.7 ms | 2.75 MB | 1.00x | 2026-10-21 (commit abc1234) |"
     )
 
 
@@ -294,11 +302,67 @@ def test_cmd_update_readme_splices_suite_and_root_readmes(
     assert root_readme.read_text(encoding="utf-8") == root_before
 
 
+def test_cmd_update_readme_leaves_dataless_suite_readme_untouched(
+    tmp_path, fixed_platform, monkeypatch
+):
+    """A discovered suite with no store data is skipped, not dash-filled.
+
+    Bare ``update-readme`` on a fresh clone must reproduce the committed
+    READMEs exactly: suites nobody has measured keep their blocks as-is.
+    """
+    measured = write_suite(tmp_path / "suite", TWO_ARM_SUITE)
+    dataless = write_suite(
+        tmp_path / "dataless",
+        """
+name = "dataless"
+warmup = 0
+
+[[arm]]
+name = "Rust"
+language = "rust"
+run = "/bin/echo a"
+expect = "a"
+""",
+    )
+    write_store(
+        tmp_path / "benchmarks" / "data" / "synthetic.json",
+        {
+            "synthetic/Rust": [make_entry(12.3, 4.5, toolchain="rustc 1.85.0")],
+            "synthetic/Ryo (AOT)": [make_entry(2.7, 2.75, toolchain="ryo 0.1.0")],
+        },
+    )
+    suite_readme = tmp_path / "suite" / "README.md"
+    suite_readme.write_text(
+        "# Synthetic\n\n<!-- BENCH:START -->\n<!-- BENCH:END -->\n", encoding="utf-8"
+    )
+    dataless_text = "# Dataless\n\n<!-- BENCH:START -->\n<!-- BENCH:END -->\n"
+    dataless_readme = tmp_path / "dataless" / "README.md"
+    dataless_readme.write_text(dataless_text, encoding="utf-8")
+    root_readme = tmp_path / "benchmarks" / "README.md"
+    root_readme.write_text(
+        "# Benchmarks\n\n<!-- BENCH-SUMMARY:START -->\n<!-- BENCH-SUMMARY:END -->\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(run, "_select_suites", lambda raw, **kwargs: [measured, dataless])
+    monkeypatch.setattr(run, "_REPO_ROOT", tmp_path)
+
+    assert cmd_update_readme(argparse.Namespace(benchmarks=None)) == 0
+
+    # The unmeasured suite's README and block are byte-identical afterwards.
+    assert dataless_readme.read_text(encoding="utf-8") == dataless_text
+    summary = root_readme.read_text(encoding="utf-8")
+    assert "synthetic" in summary
+    assert "dataless" not in summary
+
+
 def test_cmd_update_readme_missing_suite_markers_is_hard_error_with_zero_mutation(
     tmp_path, fixed_platform, monkeypatch, capsys
 ):
     suite = write_suite(tmp_path / "suite", TWO_ARM_SUITE)
-    write_store(tmp_path / "benchmarks" / "data" / "synthetic.json", {})
+    write_store(
+        tmp_path / "benchmarks" / "data" / "synthetic.json",
+        {"synthetic/Rust": [make_entry(1.6, 4.5, toolchain="rustc 1.85.0")]},
+    )
     suite_readme = tmp_path / "suite" / "README.md"
     suite_readme.write_text("# Synthetic\n\nNo markers here.\n", encoding="utf-8")
     root_readme = tmp_path / "benchmarks" / "README.md"
@@ -340,7 +404,10 @@ def test_cmd_update_readme_missing_readme_file_is_marker_error(
     tmp_path, fixed_platform, monkeypatch, capsys
 ):
     suite = write_suite(tmp_path / "suite", TWO_ARM_SUITE)
-    write_store(tmp_path / "benchmarks" / "data" / "synthetic.json", {})
+    write_store(
+        tmp_path / "benchmarks" / "data" / "synthetic.json",
+        {"synthetic/Rust": [make_entry(1.6, 4.5, toolchain="rustc 1.85.0")]},
+    )
     (tmp_path / "benchmarks" / "README.md").write_text(
         "# Benchmarks\n\n<!-- BENCH-SUMMARY:START -->\n<!-- BENCH-SUMMARY:END -->\n",
         encoding="utf-8",
