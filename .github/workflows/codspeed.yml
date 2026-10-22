@@ -92,20 +92,7 @@ jobs:
       - name: Build Ryo compiler
         run: cargo build --release
       - name: Compile Ryo AOT binaries
-        # `ryo build` writes the binary next to the source.
-        run: |
-          ./target/release/ryo build benchmarks/fibonacci/fib.ryo
-          ./target/release/ryo build benchmarks/eager_destruction/eager_destruction.ryo
-          ./target/release/ryo build benchmarks/string_building/string_building.ryo
-          ./target/release/ryo build benchmarks/doubling_concat/doubling_concat.ryo
-          ./target/release/ryo build benchmarks/many_small_strings/many_small_strings.ryo
-          ./target/release/ryo build benchmarks/string_slicing/string_slicing.ryo
-          ./target/release/ryo build benchmarks/mandelbrot/mandelbrot.ryo
-          ./target/release/ryo build benchmarks/collatz/collatz.ryo
-          ./target/release/ryo build benchmarks/struct_records/struct_records.ryo
-          ./target/release/ryo build benchmarks/struct_records_reuse/struct_records_reuse.ryo
-          ./target/release/ryo build benchmarks/struct_records_inout/struct_records_inout.ryo
-          ./target/release/ryo build benchmarks/json_validate/json_validate.ryo
+        run: ./scripts/build_aot_benchmarks.sh
       - name: Install cargo-codspeed
         uses: taiki-e/install-action@v2
         with:
@@ -134,20 +121,7 @@ jobs:
       - name: Build Ryo compiler
         run: cargo build --release
       - name: Compile Ryo AOT binaries
-        # `ryo build` writes the binary next to the source.
-        run: |
-          ./target/release/ryo build benchmarks/fibonacci/fib.ryo
-          ./target/release/ryo build benchmarks/eager_destruction/eager_destruction.ryo
-          ./target/release/ryo build benchmarks/string_building/string_building.ryo
-          ./target/release/ryo build benchmarks/doubling_concat/doubling_concat.ryo
-          ./target/release/ryo build benchmarks/many_small_strings/many_small_strings.ryo
-          ./target/release/ryo build benchmarks/string_slicing/string_slicing.ryo
-          ./target/release/ryo build benchmarks/mandelbrot/mandelbrot.ryo
-          ./target/release/ryo build benchmarks/collatz/collatz.ryo
-          ./target/release/ryo build benchmarks/struct_records/struct_records.ryo
-          ./target/release/ryo build benchmarks/struct_records_reuse/struct_records_reuse.ryo
-          ./target/release/ryo build benchmarks/struct_records_inout/struct_records_inout.ryo
-          ./target/release/ryo build benchmarks/json_validate/json_validate.ryo
+        run: ./scripts/build_aot_benchmarks.sh
       - name: Install cargo-codspeed
         uses: taiki-e/install-action@v2
         with:
