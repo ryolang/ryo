@@ -20,6 +20,9 @@ mod common;
 use std::process::Command;
 
 fn run_asan_smoke(source: &str, name: &str) {
+    if !common::smoke_lane_active(name) {
+        return;
+    }
     let (_tmp, exe) = common::build_and_link_host_cc(source, name, &["-fsanitize=address"]);
 
     // Liveness guard: a passing suite is only meaningful if the binary

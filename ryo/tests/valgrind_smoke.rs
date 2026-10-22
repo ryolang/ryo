@@ -110,6 +110,9 @@ fn run_valgrind_smoke_allocating(source: &str, name: &str) {
 /// the smoke is skipped), so [`run_valgrind_smoke_allocating`] can
 /// apply its visibility guard on top.
 fn run_valgrind_smoke_impl(source: &str, name: &str) -> Option<std::process::Output> {
+    if !common::smoke_lane_active(name) {
+        return None;
+    }
     if !require_valgrind(name) {
         return None;
     }
