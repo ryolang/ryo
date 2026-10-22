@@ -2,7 +2,7 @@
 
 ## Overview
 
-* **Focus:** The same scan workload on raw bytes — `bytesview` / `&[u8]` / `[UInt8]` slices over a 688 KiB in-program-built buffer, with no UTF-8 char-boundary validation anywhere. Split out of string_slicing (2026-09-17) so each suite compares like with like; the delta between the two isolates Ryo's `str` boundary-validation cost.
+* **Focus:** The same scan workload on raw bytes — `bytesview` / `&[u8]` / `[UInt8]` slices over a 688 KiB in-program-built buffer (doubling a 43-byte seed), with no UTF-8 char-boundary validation anywhere. Split out of string_slicing (2026-09-17) so each suite compares like with like; the delta between the two isolates Ryo's `str` boundary-validation cost.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
 * **What to look for:** the UTF-8 char-boundary validation cost — this is the raw-byte twin of string_slicing, so the Ryo delta between the two suites isolates exactly that; the checkpoint below breaks it down.
 
