@@ -82,17 +82,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-027 — Restricted float literal grammar
-
-**Severity:** Correctness / Hygiene
-**Area:** frontend-lexer
-
-**Files:** `ryo-frontend/src/lexer.rs` (`RawToken::Float` regex `[0-9]+\.[0-9]+`)
-**Summary:** Float literals must have digits on both sides of the dot. None of `.5`, `5.`, `1e10`, `1.5e-3`, `1_000_000.0` parse. Sufficient for M7's example programs but obviously incomplete.
-**Resolution:** Extend the regex to cover `[0-9]+(_[0-9]+)*(\.[0-9]+(_[0-9]+)*)?([eE][+-]?[0-9]+)?` (or break it into named sub-patterns). Mirror the same underscore + exponent treatment for integer literals at the same time so the two grammars stay parallel. Watch out for ambiguities with method-call syntax (`5.bit_count()`) once methods land.
-
----
-
 ### I-029 — AST loses `Eq` because `Literal::Float` carries an `f64`
 
 **Severity:** Correctness / Hygiene
