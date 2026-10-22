@@ -554,7 +554,7 @@ fn unescape(
                     // The digit scan is capped at six, so a longer run
                     // leaves a non-`}` next char and falls into the
                     // malformed arm.
-                    let has_brace = inner[i + 2..].chars().next() == Some('{');
+                    let has_brace = inner[i + 2..].starts_with('{');
                     let digits_start = i + 3;
                     let mut j = digits_start;
                     if has_brace {
@@ -567,8 +567,16 @@ fn unescape(
                             j += 1;
                         }
                     }
-                    let digits = &inner[digits_start..j];
-                    let terminated = has_brace && inner[j..].chars().next() == Some('}');
+                    // Without `{` the scan never ran, so slice only when a
+                    // brace is present — `digits_start` may otherwise be
+                    // past the end (`"\u"`) or inside a multi-byte char
+                    // (`"\ué"`).
+                    let digits = if has_brace {
+                        &inner[digits_start..j]
+                    } else {
+                        ""
+                    };
+                    let terminated = has_brace && inner[j..].starts_with('}');
                     let scalar = if terminated && !digits.is_empty() {
                         u32::from_str_radix(digits, 16)
                             .ok()
@@ -1213,11 +1221,11 @@ mod tests {
 
     #[test]
     fn lex_float_literal_underscore_separators() {
-        let (toks, _) = lex_strings("1_000.0 3.14_15 2.5e1_0");
+        let (toks, _) = lex_strings("1_000.0 3.25_5 2.5e1_0");
         assert_eq!(toks.len(), 3);
         assert_eq!(toks[0], Token::FloatLit(1000f64.to_bits()));
         match toks[1] {
-            Token::FloatLit(bits) => assert!((f64::from_bits(bits) - 3.1415).abs() < 1e-12),
+            Token::FloatLit(bits) => assert!((f64::from_bits(bits) - 3.255).abs() < 1e-12),
             ref t => panic!("expected FloatLit, got {:?}", t),
         }
         assert_eq!(toks[2], Token::FloatLit(2.5e10f64.to_bits()));
@@ -1438,7 +1446,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn lex_string_hex_escape_is_unicode_scalar() {
         // M13.7: `\xHH` in a string literal is U+00HH, UTF-8 encoded
         // (Python semantics, spec §2) — `\xFF` decodes to two bytes,
@@ -1534,6 +1541,11 @@ mod tests {
             r#"x = "\u{41""#,
             r#"x = "\u{ZZ}""#,
             r#"x = "\u{000000041}""#,
+            // `\u` with no `{`: the digit scan must not slice past the
+            // end (or into a multi-byte char) looking for digits.
+            r#"x = "\u""#,
+            r#"x = "a\u""#,
+            r#"x = "\ué""#,
         ] {
             let mut pool = InternPool::new();
             let mut sink = DiagSink::new();
