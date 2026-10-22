@@ -1,19 +1,25 @@
 # Doubling Concat Benchmark
 
-**Focus:** Runtime allocation strategy under exponential growth. `s = s + s` for 20 iterations (16 B → 16 MiB): each doubling allocates a fresh `cap == len` buffer through `ryo_str_concat` / `ryo_str_alloc` and eagerly frees the previous one, so live string memory stays bounded by the old-plus-new buffers (≈1.5× the final size at the peak doubling) instead of growing with the history; measured total RSS below is ~2× the final size once baseline process and allocator overhead are included.
+## Overview
 
-**Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Focus:** Runtime allocation strategy — `s = s + s` exponential growth to 16 MiB, stressing `ryo_str_alloc` / `ryo_str_concat`; eager destruction frees each superseded buffer, so live string memory stays bounded instead of growing with the history.
+* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **What to look for:** allocation policy under exponential growth — whether live memory stays bounded through the doublings rather than accumulating; the checkpoint below has the post-rework re-measurement.
 
 ## Benchmarks & Performance Results
 
-Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-11. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
+Hyperfine `--warmup 3 --shell=none`; peak RSS is hyperfine 2.0's per-run memory measurement, reported as the mean of runs. The table's caption records the machine, date, and compiler commit of the newest measurement.
 
-| Candidate | Version | Mean time | vs fastest | Max RSS |
-|---|---|---|---|---|
-| **Ryo (AOT)** | 0.1.0-dev.20260911+b3b7d25 | 3.5 ms ± 0.1 ms | 1.00x | 33.42 MB |
-| **Rust** | 1.98.0 | 3.7 ms ± 0.2 ms | 1.06x slower | 35.64 MB |
-| **Swift** | 6.3.3 | 4.0 ms ± 0.1 ms | 1.13x slower | 34.03 MB |
-| **Ryo (JIT)** | 0.1.0-dev.20260911+b3b7d25 | 4.7 ms ± 0.6 ms | 1.34x slower | 37.03 MB |
+<!-- BENCH:START -->
+| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |
+|---|---|---|---|---|---|
+| Rust | 1.99.1 | 4.608 ms | 1.00x | 35.689 MB | — |
+| Swift | 6.4 | 5.302 ms | 1.15x slower | 34.078 MB | — |
+| Ryo (JIT) | 0.1.0-dev.20261022+1012fd4 | 5.995 ms | 1.30x slower | 37.685 MB | — |
+| Ryo (AOT) | 0.1.0-dev.20261022+1012fd4 | 6.379 ms | 1.38x slower | ⭐ 33.417 MB | — |
+
+Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
+<!-- BENCH:END -->
 
 ### Checkpoint: SSO + consuming concat (2026-09-14)
 
@@ -27,11 +33,3 @@ Re-measured after the string-runtime rework (tagged 24-byte slot: inline ≤ 23 
 | **Ryo (JIT)** | 0.1.0-dev.20260915+c598378 | 4.8 ms ± 0.8 ms | 1.31x slower | 37.16 MB |
 
 Measurement note: all four rows come from a single full-suite hyperfine run on 2026-09-15 (same protocol for every arm, hyperfine outlier warnings present on Swift/JIT — treat the 1.01x AOT-vs-Rust margin as a tie). The Ryo rows include the scratch-slot fix that followed this checkpoint, which does not touch the doubling path; timings match the 2026-09-14 checkpoint within noise.
-
-## How to Run
-
-Prerequisites: `hyperfine`, `rustc`, `swiftc`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).
-
-```bash
-./run_benchmarks.sh
-```

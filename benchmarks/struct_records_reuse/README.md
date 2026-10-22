@@ -1,12 +1,29 @@
 # Struct Records Reuse Benchmark
 
-**Focus:** The keep-original record update — what `struct_records` cannot measure. Runs 500,000 rounds of `make_person(i)` → `birthday(p)` → `score(p) + score(q)` on a `Person{name: str, age: int}` record, where the caller **uses `p` again after the update**, so `birthday` cannot consume it. This is the duplicate-and-modify case, and each language pays its own price for keeping both records alive: Rust clones the `String` explicitly (`p.name.clone()` — alloc + memcpy), Swift's value copy retains (SSO keeps the name inline, nearly free), Go shallow-copies the header and shares the immutable backing bytes (GC owns lifetime), Python bumps a refcount, and Ryo writes the clone by hand as `p.name + ""` (borrow the field, concat with empty string, fresh owned `str` — the only way to duplicate a `str` today, since E0043 rejects field moves, structs cannot hold borrows, and there is no `clone` builtin or `shared[T]` yet). **All five languages do the same work and assert the same checksum (54,777,780)** — the difference is purely what "keep the original" costs.
+## Overview
 
-**Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+* **Focus:** The keep-original record update — same record, but the caller uses `p` again after `birthday`, so the update cannot consume it. All five arms do the same work and assert the same checksum — the difference is purely what "keep the original" costs. Rust and Ryo pay an explicit clone, Swift/Go/Python share cheaply; tracking measure for the record-update ergonomics gap (I-172) and what `shared[T]` or a small-string optimization would buy.
+* **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+* **What to look for:** what keeping the original record costs — the suite exists to price the clone-ergonomics gap (I-172: `Clone` trait or `shared[T]`); the checkpoints below track it.
 
 **Why this suite exists:** it is the tracking measure for the record-update ergonomics gap (`ISSUES.md` I-172). In the consuming case (`struct_records`) Ryo matches Rust's move semantics and beats it on walltime; here Ryo must clone like Rust, but through an ugly manual idiom, while the share-friendly languages get the update for free. When the `Clone` trait or `shared[T]` lands, this benchmark is where the win shows up.
 
 ## Benchmarks & Performance Results
+
+<!-- BENCH:START -->
+| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |
+|---|---|---|---|---|---|
+| Swift | 6.4 | 12.072 ms | 1.00x | 1.625 MB | — |
+| Ryo (AOT) | 0.1.0-dev.20261022+1012fd4 | 14.626 ms | 1.21x slower | ⭐ 1.37 MB | — |
+| Ryo (JIT) | 0.1.0-dev.20261022+1012fd4 | 15.783 ms | 1.31x slower | 6.041 MB | — |
+| Go | 1.27.3 | 26.167 ms | 2.17x slower | 9.337 MB | — |
+| Rust | 1.99.1 | 32.063 ms | 2.66x slower | 1.589 MB | — |
+| Python | 3.15.0 | 123.295 ms | 10.21x slower | 17.29 MB | — |
+
+Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
+<!-- BENCH:END -->
+
+### Checkpoint: pre-SSO baseline (2026-09-11)
 
 Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-11, at Ryo revision `e2db4c6`; later branch commits through `b3b7d25` touch only benchmark files and docs — no compiler code — so these numbers remain directly comparable with suites re-measured at `b3b7d25`. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
 
@@ -35,11 +52,3 @@ Re-measured after the string-runtime rework shipped the small-string optimizatio
 | **Python** | 3.14.7 | 150.3 ms ± 2.6 ms | 12.32x slower | 14.58 MB |
 
 Ryo AOT went from 28.7 ms (fourth, 2.40x behind Swift) to 14.7 ms — **second**, ahead of Go (25.8 ms) and Rust (32.3 ms). Swift still leads: its value copy is a plain inline copy with no concat step at all, while Ryo still runs the `p.name + ""` concat machinery (inline, but a copy with length/tag fixups). Closing that residual is the clone-ergonomics story — the `Clone` trait or a `shared[T]` field — not string allocation. Ryo AOT runs **10.2x faster than Python** with ~11x less memory, again at the lightest RSS of the suite.
-
-## How to Run
-
-Prerequisites: `hyperfine`, `rustc`, `swiftc`, `go`, `python3`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).
-
-```bash
-./run_benchmarks.sh
-```

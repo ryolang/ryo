@@ -1,0 +1,33 @@
+# Benchmark suite manifest for the centralized runner (benchmarks/run.py).
+# Transcribed from run_benchmarks.sh (per-suite scripts deleted when the runner was centralized): every run/build
+# line, arm name, and warmup value matches the old script byte-for-byte
+# (modulo the $ryo substitution point for the ryo binary path).
+name = "eager_destruction"
+category = "Lifecycle"
+descriptor = "Recursion depth 50,000 — scope-based drop vs manual drop vs eager destruction"
+warmup = 3
+# exit-code-only: programs print nothing
+expect = ""
+
+[[arm]]
+name = "Rust (Scope-Based)"
+language = "rust"
+build = "rustc -O eager_destruction.rs -o eager_destruction_rs"
+run = "./eager_destruction_rs"
+
+[[arm]]
+name = "Rust (Manual Drop)"
+language = "rust"
+build = "rustc -O eager_destruction_manual_drop.rs -o eager_destruction_manual_drop_rs"
+run = "./eager_destruction_manual_drop_rs"
+
+[[arm]]
+name = "Ryo (AOT, Eager)"
+language = "ryo"
+build = "(cd ../.. && cargo build --release > /dev/null) && $ryo build eager_destruction.ryo > /dev/null"
+run = "./eager_destruction"
+
+[[arm]]
+name = "Ryo (JIT, Eager)"
+language = "ryo"
+run = "$ryo run eager_destruction.ryo"

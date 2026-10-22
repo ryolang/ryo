@@ -1,14 +1,33 @@
 # Struct Records Benchmark
 
-**Focus:** Aggregate ABI traffic, idiomatic per language. Runs 500,000 rounds of `make_person(i)` → `birthday(p)` → `score(q)` on a `Person{name: str, age: int}` record — the natural "update one field, keep the rest" struct update. Each language expresses it the way a developer actually would: Rust moves the `name` field out (partial move, free), Swift value-copies it (COW-backed `String`, cheap), Go shallow-copies the struct (string header shares immutable backing bytes; GC owns lifetime), Python shares the `str` reference (free), and Ryo takes the parameter by `move` and mutates the field in place (`mut q = p; q.age = q.age + 1`). Ryo rejects moving a *single field* out of a struct (E0043 — fields move only with the whole struct) and has no clone builtin, but whole-struct moves are the idiomatic answer here, so **all five languages do the same work and assert the same checksum (27,638,890)**. Note the `move` is not a Ryo-specific shortcut: it matches Rust's by-value parameter exactly — both consume the caller's record and transfer the name allocation with zero heap traffic; Swift/Go/Python keep the original usable and pay for that flexibility in ARC retains, GC headroom, or refcounting. Rust runs its drop glue, Swift its ARC retain/release traffic on the `String` field, Go its GC, Python its object model (`__slots__` class), and Ryo its eager-destruction scheduling.
+## Overview
 
-**Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+* **Focus:** Aggregate ABI traffic — 500,000 rounds of build → update → score on a `str + int` record, idiomatic per language; stresses struct returns, field-wise copies, and drop glue across a heap field. All five arms do the same work and assert the same checksum — the comparison is like-for-like. Ryo AOT currently beats Rust and Go here; only Swift's small-string optimization keeps it ahead.
+* **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+* **What to look for:** aggregate ABI traffic — struct returns, field-wise copies, and drop glue with short names inline after SSO; the two checkpoints below tell the ranking story.
 
 ## Evolution note: this benchmark must mutate to B
 
 This flat-loop record workload is the interim form. Once `list[T]` lands (M22, see `docs/dev/implementation_roadmap.md`), this benchmark **must** evolve into the AoS *particles* workload: a `list[Particle]` of structs with `x/y/z` float fields, integrated over N time steps — the array-of-structs layout comparison Ryo vs Rust vs Swift vs Python. That is the comparison that actually exercises contiguous aggregate storage, iteration over struct elements, and in-place field mutation at scale. When it does, this synthetic loop retires or survives as the flat-loop baseline leg.
 
 ## Benchmarks & Performance Results
+
+Hyperfine `--warmup 3 --shell=none`; peak RSS is hyperfine 2.0's per-run memory measurement, reported as the mean of runs. The table's caption records the machine, date, and compiler commit of the newest measurement.
+
+<!-- BENCH:START -->
+| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |
+|---|---|---|---|---|---|
+| Ryo (AOT) | 0.1.0-dev.20261022+1012fd4 | 10.533 ms | 1.00x | ⭐ 1.354 MB | — |
+| Swift | 6.4 | 11.896 ms | 1.13x slower | 1.609 MB | — |
+| Ryo (JIT) | 0.1.0-dev.20261022+1012fd4 | 12.294 ms | 1.17x slower | 6.012 MB | — |
+| Rust | 1.99.1 | 24.479 ms | 2.32x slower | 1.542 MB | — |
+| Go | 1.27.3 | 25.911 ms | 2.46x slower | 9.312 MB | — |
+| Python | 3.15.0 | 113.693 ms | 10.79x slower | 17.287 MB | — |
+
+Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
+<!-- BENCH:END -->
+
+### Checkpoint: pre-SSO baseline (2026-09-11)
 
 Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-11. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
 
@@ -37,11 +56,3 @@ Re-measured after the string-runtime rework: `str` is now a tagged 24-byte slot 
 | **Python** | 3.14.7 | 132.1 ms ± 2.6 ms | 11.60x slower | 14.56 MB |
 
 Ryo AOT went from 20.6 ms (1.74x behind Swift) to 11.4 ms — now the **fastest arm**, ahead of Swift (12.1 ms), at the lightest RSS of the suite. A same-day re-run on a busier machine confirmed the ranking (Ryo AOT 12.3 ms vs Swift 13.4 ms).
-
-## How to Run
-
-Prerequisites: `hyperfine`, `rustc`, `swiftc`, `go`, `python3`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).
-
-```bash
-./run_benchmarks.sh
-```

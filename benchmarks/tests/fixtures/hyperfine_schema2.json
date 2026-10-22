@@ -1,0 +1,91 @@
+{
+  "schema_version": 2,
+  "metadata": {
+    "hyperfine_version": "2.0.0",
+    "start_time": "2026-10-21T12:00:00Z",
+    "platform": {
+      "os": "Darwin",
+      "architecture": "arm64"
+    }
+  },
+  "primary_metric": "time_wall_clock",
+  "results": [
+    {
+      "command": "./fib_ryo",
+      "measurements": [
+        {
+          "time_wall_clock": {
+            "value": 0.4151,
+            "unit": "second"
+          },
+          "memory_peak_resident": {
+            "value": 13840384.0,
+            "unit": "byte"
+          },
+          "exit_code": 0
+        },
+        {
+          "time_wall_clock": {
+            "value": 0.4095,
+            "unit": "second"
+          },
+          "memory_peak_resident": {
+            "value": 13844480.0,
+            "unit": "byte"
+          },
+          "exit_code": 0
+        }
+      ],
+      "summary": {
+        "time_wall_clock": {
+          "unit": "second",
+          "count": 2,
+          "mean": 0.4123,
+          "stddev": 0.0051,
+          "median": 0.4123,
+          "min": 0.4059,
+          "max": 0.4234
+        },
+        "memory_peak_resident": {
+          "unit": "byte",
+          "count": 2,
+          "mean": 13841203.0,
+          "stddev": 4096.0,
+          "median": 13841203.0,
+          "min": 13840384,
+          "max": 13844480
+        }
+      }
+    },
+    {
+      "command": "./fib_rs",
+      "measurements": [
+        {
+          "time_wall_clock": {
+            "value": 0.1018,
+            "unit": "second"
+          },
+          "exit_code": 0
+        },
+        {
+          "time_wall_clock": {
+            "value": 0.103,
+            "unit": "second"
+          },
+          "exit_code": 0
+        }
+      ],
+      "summary": {
+        "time_wall_clock": {
+          "unit": "second",
+          "count": 2,
+          "mean": 0.1024,
+          "stddev": 0.0012,
+          "median": 0.1024,
+          "min": 0.1009,
+          "max": 0.1048
+        }
+      }
+    }
+  ]
+}

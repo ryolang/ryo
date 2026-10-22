@@ -1,0 +1,33 @@
+# Benchmark suite manifest for the centralized runner (benchmarks/run.py).
+# Transcribed from run_benchmarks.sh (per-suite scripts deleted when the runner was centralized): every run/build
+# line, arm name, and warmup value matches the old script byte-for-byte
+# (modulo the $ryo substitution point for the ryo binary path).
+name = "many_small_strings"
+category = "Strings"
+descriptor = "500,000 build-and-drop strings"
+warmup = 3
+
+[[arm]]
+name = "Rust"
+language = "rust"
+build = "rustc -O many_small_strings.rs -o many_small_strings_rs"
+run = "./many_small_strings_rs"
+
+[[arm]]
+name = "Swift"
+language = "swift"
+build = "swiftc -O many_small_strings.swift -o many_small_strings_swift"
+run = "./many_small_strings_swift"
+
+[[arm]]
+name = "Ryo (AOT)"
+language = "ryo"
+build = "(cd ../.. && cargo build --release > /dev/null) && $ryo build many_small_strings.ryo > /dev/null"
+run = "./many_small_strings"
+version = "$ryo --version 2>&1 || echo 'dev'"
+
+[[arm]]
+name = "Ryo (JIT)"
+language = "ryo"
+run = "$ryo run many_small_strings.ryo"
+version = "$ryo --version 2>&1 || echo 'dev'"

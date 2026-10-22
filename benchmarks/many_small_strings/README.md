@@ -1,19 +1,25 @@
 # Many Small Strings Benchmark
 
-**Focus:** Flat-loop alloc/free churn. Builds 500,000 short strings (`int_to_str(i) + "!"`), keeps none — each iteration's buffer is freed at its last use inside the same iteration. Complements `eager_destruction` (which stresses deep-recursion lifetimes) with high-frequency flat-loop churn through `ryo_int_to_str`, `ryo_str_concat`, and `ryo_str_free`.
+## Overview
 
-**Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Focus:** Flat-loop alloc/free churn — 500,000 short strings built and dropped, complementing eager_destruction's recursion angle.
+* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **What to look for:** how per-allocation string overhead scales across runtimes — the suite's point is whether short-lived short strings ever touch the heap; the SSO checkpoint below has the before/after.
 
 ## Benchmarks & Performance Results
 
-Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-11. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
+Hyperfine `--warmup 3 --shell=none`; peak RSS is hyperfine 2.0's per-run memory measurement, reported as the mean of runs. The table's caption records the machine, date, and compiler commit of the newest measurement.
 
-| Candidate | Version | Mean time | vs fastest | Max RSS |
-|---|---|---|---|---|
-| **Rust** | 1.98.0 | 10.3 ms ± 0.3 ms | 1.00x | 1.50 MB |
-| **Swift** | 6.3.3 | 10.5 ms ± 0.5 ms | 1.03x slower | 1.58 MB |
-| **Ryo (AOT)** | 0.1.0-dev.20260911+b3b7d25 | 19.0 ms ± 0.5 ms | 1.86x slower | 1.38 MB |
-| **Ryo (JIT)** | 0.1.0-dev.20260911+b3b7d25 | 20.9 ms ± 0.7 ms | 2.04x slower | 4.88 MB |
+<!-- BENCH:START -->
+| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |
+|---|---|---|---|---|---|
+| Ryo (AOT) | 0.1.0-dev.20261022+1012fd4 | 8.497 ms | 1.00x | ⭐ 1.37 MB | — |
+| Ryo (JIT) | 0.1.0-dev.20261022+1012fd4 | 10.134 ms | 1.19x slower | 5.57 MB | — |
+| Rust | 1.99.1 | 10.559 ms | 1.24x slower | 1.537 MB | — |
+| Swift | 6.4 | 10.598 ms | 1.25x slower | 1.609 MB | — |
+
+Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
+<!-- BENCH:END -->
 
 ### Checkpoint: SSO + consuming concat (2026-09-14)
 
@@ -27,11 +33,3 @@ Re-measured after the string-runtime rework: `str` is now a tagged 24-byte slot 
 | **Ryo (JIT)** | 0.1.0-dev.20260914+75d0f1e | 11.4 ms ± 0.6 ms | 1.18x slower | 5.02 MB |
 
 Ryo AOT went from 19.0 ms (1.86x behind Rust) to 9.6 ms — now the **fastest arm**, ahead of both Rust (10.5 ms) and Swift (10.6 ms), at the lightest RSS. A same-day re-run on a busier machine confirmed the ranking (Ryo AOT 10.7 ms vs Rust 11.5 ms, Swift 11.8 ms).
-
-## How to Run
-
-Prerequisites: `hyperfine`, `rustc`, `swiftc`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).
-
-```bash
-./run_benchmarks.sh
-```

@@ -1,8 +1,10 @@
 # String Building Benchmark
 
-**Focus:** Runtime string ABI + eager destruction. Concat over 50,000 iterations (`s = s + "x"` — now spelled identically in Rust and Ryo). Historically every iteration allocated a fresh buffer through `ryo_str_concat` and eagerly freed the previous one at the reassign; since 2026-09-14 a provably-consuming reassign-concat appends in place with growth headroom, so the loop is amortized O(n) (see the checkpoint below). This is the direct before/after measure for the packed-`u128` string runtime ABI (commit `7d0a047`, return-by-value replacing the per-call-site out-pointer stack slot) — the ABI decision and its rationale are recorded on `pack_pair` in `runtime/src/lib.rs` and pinned by the `clif_string_ops_use_packed_return_no_stack_slots` integration test.
+## Overview
 
-**Languages compared:** Rust, Swift, Ryo (AOT vs JIT), and Python.
+* **Focus:** Runtime string ABI + eager destruction — concat over 50,000 iterations; the direct before/after measure for the packed-`u128` runtime ABI (a past experiment — landed in `7d0a047`, superseded 2026-09; see `docs/dev/cranelift_lessons.md`).
+* **Languages compared:** Rust, Swift, Ryo (AOT vs JIT), and Python.
+* **What to look for:** runtime string ABI + allocation policy, not codegen — the arms are now the same program, so the row prices `ryo_str_concat` semantics; the essay and checkpoint below carry the before/after story.
 
 ## Why Ryo trailed here: same source, different allocation policy
 
@@ -14,15 +16,19 @@ The amortized fast path also exists explicitly as `str_push(&s, "x")` (capacity 
 
 ## Benchmarks & Performance Results
 
-Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-11. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
+Hyperfine `--warmup 3 --shell=none`; peak RSS is hyperfine 2.0's per-run memory measurement, reported as the mean of runs. The table's caption records the machine, date, and compiler commit of the newest measurement.
 
-| Candidate | Version | Mean time | vs fastest | Max RSS |
-|---|---|---|---|---|
-| **Rust** | 1.98.0 | 1.4 ms ± 0.0 ms | 1.00x | 1.61 MB |
-| **Swift** | 6.3.3 | 2.4 ms ± 0.1 ms | 1.64x slower | 1.81 MB |
-| **Ryo (AOT)** | 0.1.0-dev.20260911+f25e95a | 17.7 ms ± 1.5 ms | 12.33x slower | 2.25 MB |
-| **Ryo (JIT)** | 0.1.0-dev.20260911+f25e95a | 18.6 ms ± 0.4 ms | 12.95x slower | 5.73 MB |
-| **Python** | 3.14.7 | 36.1 ms ± 1.4 ms | 25.11x slower | 14.75 MB |
+<!-- BENCH:START -->
+| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |
+|---|---|---|---|---|---|
+| Rust | 1.99.1 | 1.44 ms | 1.00x | 1.65 MB | — |
+| Ryo (AOT) | 0.1.0-dev.20261022+1012fd4 | 1.573 ms | 1.09x slower | ⭐ 1.494 MB | — |
+| Swift | 6.4 | 2.314 ms | 1.61x slower | 1.859 MB | — |
+| Ryo (JIT) | 0.1.0-dev.20261022+1012fd4 | 2.833 ms | 1.97x slower | 5.698 MB | — |
+| Python | 3.15.0 | 36.72 ms | 25.50x slower | 17.602 MB | — |
+
+Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
+<!-- BENCH:END -->
 
 Python (CPython 3.14.7) runs the same `s += "x"` loop interpreted; its ~25x gap over Rust is interpreter overhead, and its ~2x gap over Ryo shows the interpreted baseline is slower than Ryo's compiled O(n²) concat even before any allocation-policy fix landed.
 
@@ -39,11 +45,3 @@ Re-measured after the string-runtime rework landed: `str` is now a tagged 24-byt
 | **Python** | 3.14.7 | 36.4 ms ± 0.4 ms | 24.03x slower | 14.73 MB |
 
 The ~12x gap is closed: Ryo AOT went from 17.7 ms to 1.6 ms, within noise of Rust (1.5 ms) — parity, as predicted above. Peak RSS dropped 2.25 → 1.48 MB, the lightest arm. A same-day re-run on a busier machine confirmed the ranking (Ryo AOT 1.7 ms vs Rust 1.7 ms).
-
-## How to Run
-
-Prerequisites: `hyperfine`, `rustc`, `swiftc`, `python3`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).
-
-```bash
-./run_benchmarks.sh
-```

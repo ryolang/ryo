@@ -1,0 +1,47 @@
+# Benchmark suite manifest for the centralized runner (benchmarks/run.py).
+# Transcribed from run_benchmarks.sh (per-suite scripts deleted when the runner was centralized): every run/build
+# line, arm name, and warmup value matches the old script byte-for-byte
+# (modulo the $ryo substitution point for the ryo binary path).
+name = "struct_records_reuse"
+category = "Structs"
+descriptor = "500,000 record build-update-reuse rounds — keep-original update"
+warmup = 3
+expect = "assert passed, struct_records_reuse is correct"
+
+[[arm]]
+name = "Rust"
+language = "rust"
+build = "rustc -O struct_records_reuse.rs -o struct_records_reuse_rs"
+run = "./struct_records_reuse_rs"
+
+[[arm]]
+name = "Swift"
+language = "swift"
+build = "swiftc -O struct_records_reuse.swift -o struct_records_reuse_swift"
+run = "./struct_records_reuse_swift"
+
+[[arm]]
+name = "Go"
+language = "go"
+build = "go build -o struct_records_reuse_go struct_records_reuse.go"
+run = "./struct_records_reuse_go"
+version = "go version | cut -d' ' -f3 | sed 's/^go//'"
+
+[[arm]]
+name = "Python"
+language = "python"
+run = "uv run --python 3.15 struct_records_reuse.py"
+version = "uv run --python 3.15 python --version | awk '{print $2}'"
+
+[[arm]]
+name = "Ryo (AOT)"
+language = "ryo"
+build = "(cd ../.. && cargo build --release > /dev/null) && $ryo build struct_records_reuse.ryo > /dev/null"
+run = "./struct_records_reuse"
+version = "$ryo --version 2>&1 || echo 'dev'"
+
+[[arm]]
+name = "Ryo (JIT)"
+language = "ryo"
+run = "$ryo run struct_records_reuse.ryo"
+version = "$ryo --version 2>&1 || echo 'dev'"

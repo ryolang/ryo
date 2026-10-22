@@ -8,120 +8,89 @@ We target both execution speed and memory efficiency (specifically focusing on R
 
 **Idiomatic convention:** every benchmark is written the way a developer would naturally write it in that language. Never adapt another language's implementation to work around something Ryo doesn't support yet (e.g. moving a field out of a struct) — the cost of Ryo's current limitations is part of what the suite measures. Where that makes workloads diverge, checksums are per-language and the benchmark's README must say so explicitly.
 
-**Checkpoint convention:** run the full suite before each release and after merging any change that touches generated-code shape (`ryo-backend/src/codegen/`, the Cranelift pin, ownership sidecar consumption); record results in each benchmark's README so the trend is visible in git history. Every results table must include a **Version** column capturing each language toolchain's version at measurement time (`rustc --version`, `swiftc --version`, `python3 --version`, `ryo --version`) — timings without versions are not reproducible.
+**Checkpoint convention:** run the full suite before each release and after merging any change that touches generated-code shape (`ryo-backend/src/codegen/`, the Cranelift pin, ownership sidecar consumption); results land in the per-suite data store and the README tables are regenerated from it, so the trend is visible in git history. Every results table must include a **Version** column capturing each language toolchain's version at measurement time (`rustc --version`, `swiftc --version`, `python3 --version`, `ryo --version`) — timings without versions are not reproducible.
 
 ---
 
-## Benchmark Directory
+## Benchmark Matrix
 
-We maintain self-contained, reproducible benchmarks in separate subdirectories:
+Per-language matrix across suites — one row per suite, one column per language — regenerated from the data store by `uv run benchmarks/run.py update-readme`; do not edit the tables by hand. Library-comparison arms fold into their language's column (fastest wins); per-library detail lives in the suite READMEs.
 
-### 1. [Fibonacci Benchmark](./fibonacci/)
+<!-- BENCH-MATRIX:START -->
+⭐ fastest in row · 🟩 within 20% · 🟨 within 3× · 🟥 beyond 3×
+**Runtime (mean)**
+| Suite | Ryo AOT | Ryo JIT | Rust | Swift | Go | Python | Kotlin | Bun (TS) | Elixir | Ruby | Julia |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **Algorithms** |  |  |  |  |  |  |  |  |  |  |  |
+| [collatz](./collatz/)<br>2026-10-22 | 🟨 234.233 [2.08×] (0.1.0-dev.20261022+1012fd4) | 🟨 233.308 [2.07×] (0.1.0-dev.20261022+1012fd4) | ⭐ 112.637 [1.00×] (1.99.1) | 🟨 175.254 [1.56×] (6.4) | — | — | — | — | — | — | — |
+| [fibonacci](./fibonacci/)<br>2026-10-22 | 🟨 375.421 [1.35×] (0.1.0-dev.20261022+1012fd4) | 🟨 403.351 [1.45×] (0.1.0-dev.20261022+1012fd4) | ⭐ 278.001 [1.00×] (1.99.1) | 🟨 357.573 [1.29×] (6.4) | 🟩 306.954 [1.10×] (1.27.3) | 🟥 5388.1 [19.4×] (3.15.0) | 🟩 296.2 [1.07×] (2.4.21) | 🟨 421.819 [1.52×] (1.3.13) | 🟥 958.776 [3.45×] (1.20.4) | 🟥 6427.91 [23.1×] (2.6.10p210) | 🟨 437.615 [1.57×] (1.13.2) |
+| [mandelbrot](./mandelbrot/)<br>2026-10-22 | 🟩 15.45 [1.14×] (0.1.0-dev.20261022+1012fd4) | 🟨 17.133 [1.26×] (0.1.0-dev.20261022+1012fd4) | ⭐ 13.56 [1.00×] (1.99.1) | 🟩 14.587 [1.08×] (6.4) | — | — | — | — | — | — | — |
+| **Lifecycle** |  |  |  |  |  |  |  |  |  |  |  |
+| [eager_destruction](./eager_destruction/)<br>2026-10-22 | ⭐ 2.063 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟨 3.091 [1.50×] (0.1.0-dev.20261022+1012fd4) | 🟨 3.74 [1.81×] (1.99.1) | — | — | — | — | — | — | — | — |
+| **Parsing** |  |  |  |  |  |  |  |  |  |  |  |
+| [json_validate](./json_validate/)<br>2026-10-22 | 🟥 92.4 [17.1×] (0.1.0-dev.20261022+1012fd4) | 🟥 118.102 [21.9×] (0.1.0-dev.20261022+1012fd4) | ⭐ 5.395 [1.00×] (1.99.1) | 🟥 33.704 [6.25×] (6.4) | 🟥 41.326 [7.66×] (1.27.3) | 🟥 2197.2 [407×] (3.15.0) | — | — | — | — | — |
+| **Strings** |  |  |  |  |  |  |  |  |  |  |  |
+| [byte_slicing](./byte_slicing/)<br>2026-10-22 | 🟨 3.409 [1.91×] (0.1.0-dev.20261022+1012fd4) | 🟨 5.143 [2.88×] (0.1.0-dev.20261022+1012fd4) | ⭐ 1.787 [1.00×] (1.99.1) | 🟨 3.372 [1.89×] (6.4) | — | — | — | — | — | — | — |
+| [doubling_concat](./doubling_concat/)<br>2026-10-22 | 🟨 6.379 [1.38×] (0.1.0-dev.20261022+1012fd4) | 🟨 5.995 [1.30×] (0.1.0-dev.20261022+1012fd4) | ⭐ 4.608 [1.00×] (1.99.1) | 🟩 5.302 [1.15×] (6.4) | — | — | — | — | — | — | — |
+| [many_small_strings](./many_small_strings/)<br>2026-10-22 | ⭐ 8.497 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟩 10.134 [1.19×] (0.1.0-dev.20261022+1012fd4) | 🟨 10.559 [1.24×] (1.99.1) | 🟨 10.598 [1.25×] (6.4) | — | — | — | — | — | — | — |
+| [string_building](./string_building/)<br>2026-10-22 | 🟩 1.573 [1.09×] (0.1.0-dev.20261022+1012fd4) | 🟨 2.833 [1.97×] (0.1.0-dev.20261022+1012fd4) | ⭐ 1.44 [1.00×] (1.99.1) | 🟨 2.314 [1.61×] (6.4) | — | 🟥 36.72 [25.5×] (3.15.0) | — | — | — | — | — |
+| [string_slicing](./string_slicing/)<br>2026-10-22 | 🟨 3.493 [1.82×] (0.1.0-dev.20261022+1012fd4) | 🟨 4.992 [2.60×] (0.1.0-dev.20261022+1012fd4) | ⭐ 1.919 [1.00×] (1.99.1) | 🟥 18.499 [9.64×] (6.4) | — | — | — | — | — | — | — |
+| **Structs** |  |  |  |  |  |  |  |  |  |  |  |
+| [struct_records](./struct_records/)<br>2026-10-22 | ⭐ 10.533 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟩 12.294 [1.17×] (0.1.0-dev.20261022+1012fd4) | 🟨 24.479 [2.32×] (1.99.1) | 🟩 11.896 [1.13×] (6.4) | 🟨 25.911 [2.46×] (1.27.3) | 🟥 113.693 [10.8×] (3.15.0) | — | — | — | — | — |
+| [struct_records_inout](./struct_records_inout/)<br>2026-10-22 | ⭐ 10.941 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟩 12.431 [1.14×] (0.1.0-dev.20261022+1012fd4) | 🟨 24.468 [2.24×] (1.99.1) | 🟩 12.322 [1.13×] (6.4) | 🟨 26.265 [2.40×] (1.27.3) | 🟥 95.276 [8.71×] (3.15.0) | — | — | — | — | — |
+| [struct_records_reuse](./struct_records_reuse/)<br>2026-10-22 | 🟨 14.626 [1.21×] (0.1.0-dev.20261022+1012fd4) | 🟨 15.783 [1.31×] (0.1.0-dev.20261022+1012fd4) | 🟨 32.063 [2.66×] (1.99.1) | ⭐ 12.072 [1.00×] (6.4) | 🟨 26.167 [2.17×] (1.27.3) | 🟥 123.295 [10.2×] (3.15.0) | — | — | — | — | — |
+| **Summary (geomean)** | 🟨 1.57× | 🟨 1.92× | 🟨 1.30× | 🟨 1.73× | 🟨 2.55× | 🟥 24.0× | ⭐ 1.07× | 🟨 1.52× | 🟥 3.45× | 🟥 23.1× | 🟨 1.57× |
 
-* **Focus:** Deep function recursion, standard integer arithmetic, and basic execution overhead.
-* **Languages compared:** Rust, Go, Swift, Kotlin, Bun (TypeScript), Julia, Elixir, Python, Ruby, and Ryo.
-* **Highlights:** Ryo AOT achieves the **lightest memory usage of all languages tested** (1.34 MB max resident size). On execution speed, Ryo currently runs at ~1.33× Rust's time on `fib(40)` — see the note below for why.
+**Peak memory (max RSS)**
+| Suite | Ryo AOT | Ryo JIT | Rust | Swift | Go | Python | Kotlin | Bun (TS) | Elixir | Ruby | Julia |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **Algorithms** |  |  |  |  |  |  |  |  |  |  |  |
+| [collatz](./collatz/)<br>2026-10-22 | ⭐ 1.369 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟥 5.722 [4.18×] (0.1.0-dev.20261022+1012fd4) | 🟩 1.492 [1.09×] (1.99.1) | 🟥 5.576 [4.07×] (6.4) | — | — | — | — | — | — | — |
+| [fibonacci](./fibonacci/)<br>2026-10-22 | ⭐ 1.352 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟥 5.478 [4.05×] (0.1.0-dev.20261022+1012fd4) | 🟩 1.478 [1.09×] (1.99.1) | 🟩 1.609 [1.19×] (6.4) | 🟨 3.895 [2.88×] (1.27.3) | 🟥 17.206 [12.7×] (3.15.0) | 🟥 44.669 [33.0×] (2.4.21) | 🟥 27.428 [20.3×] (1.3.13) | 🟥 90.241 [66.7×] (1.20.4) | 🟥 27.997 [20.7×] (2.6.10p210) | 🟥 193.627 [143×] (1.13.2) |
+| [mandelbrot](./mandelbrot/)<br>2026-10-22 | ⭐ 1.37 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟥 5.833 [4.26×] (0.1.0-dev.20261022+1012fd4) | 🟩 1.493 [1.09×] (1.99.1) | 🟥 5.577 [4.07×] (6.4) | — | — | — | — | — | — | — |
+| **Lifecycle** |  |  |  |  |  |  |  |  |  |  |  |
+| [eager_destruction](./eager_destruction/)<br>2026-10-22 | ⭐ 1.369 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟥 5.505 [4.02×] (0.1.0-dev.20261022+1012fd4) | 🟥 6.813 [4.98×] (1.99.1) | — | — | — | — | — | — | — | — |
+| **Parsing** |  |  |  |  |  |  |  |  |  |  |  |
+| [json_validate](./json_validate/)<br>2026-10-22 | ⭐ 5.698 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟨 12.466 [2.19×] (0.1.0-dev.20261022+1012fd4) | 🟩 5.895 [1.03×] (1.99.1) | 🟨 10.407 [1.83×] (6.4) | 🟨 13.915 [2.44×] (1.27.3) | 🟥 28.012 [4.92×] (3.15.0) | — | — | — | — | — |
+| **Strings** |  |  |  |  |  |  |  |  |  |  |  |
+| [byte_slicing](./byte_slicing/)<br>2026-10-22 | ⭐ 2.76 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟨 7.6 [2.75×] (0.1.0-dev.20261022+1012fd4) | 🟩 2.908 [1.05×] (1.99.1) | 🟨 7.11 [2.58×] (6.4) | — | — | — | — | — | — | — |
+| [doubling_concat](./doubling_concat/)<br>2026-10-22 | ⭐ 33.417 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟩 37.685 [1.13×] (0.1.0-dev.20261022+1012fd4) | 🟩 35.689 [1.07×] (1.99.1) | 🟩 34.078 [1.02×] (6.4) | — | — | — | — | — | — | — |
+| [many_small_strings](./many_small_strings/)<br>2026-10-22 | ⭐ 1.37 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟥 5.57 [4.07×] (0.1.0-dev.20261022+1012fd4) | 🟩 1.537 [1.12×] (1.99.1) | 🟩 1.609 [1.17×] (6.4) | — | — | — | — | — | — | — |
+| [string_building](./string_building/)<br>2026-10-22 | ⭐ 1.494 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟥 5.698 [3.81×] (0.1.0-dev.20261022+1012fd4) | 🟩 1.65 [1.10×] (1.99.1) | 🟨 1.859 [1.24×] (6.4) | — | 🟥 17.602 [11.8×] (3.15.0) | — | — | — | — | — |
+| [string_slicing](./string_slicing/)<br>2026-10-22 | ⭐ 2.756 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟨 7.699 [2.79×] (0.1.0-dev.20261022+1012fd4) | 🟩 2.916 [1.06×] (1.99.1) | 🟨 7.045 [2.56×] (6.4) | — | — | — | — | — | — | — |
+| **Structs** |  |  |  |  |  |  |  |  |  |  |  |
+| [struct_records](./struct_records/)<br>2026-10-22 | ⭐ 1.354 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟥 6.012 [4.44×] (0.1.0-dev.20261022+1012fd4) | 🟩 1.542 [1.14×] (1.99.1) | 🟩 1.609 [1.19×] (6.4) | 🟥 9.312 [6.88×] (1.27.3) | 🟥 17.287 [12.8×] (3.15.0) | — | — | — | — | — |
+| [struct_records_inout](./struct_records_inout/)<br>2026-10-22 | ⭐ 1.354 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟥 5.955 [4.40×] (0.1.0-dev.20261022+1012fd4) | 🟩 1.546 [1.14×] (1.99.1) | 🟩 1.61 [1.19×] (6.4) | 🟥 9.354 [6.91×] (1.27.3) | 🟥 17.294 [12.8×] (3.15.0) | — | — | — | — | — |
+| [struct_records_reuse](./struct_records_reuse/)<br>2026-10-22 | ⭐ 1.37 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟥 6.041 [4.41×] (0.1.0-dev.20261022+1012fd4) | 🟩 1.589 [1.16×] (1.99.1) | 🟩 1.625 [1.19×] (6.4) | 🟥 9.337 [6.82×] (1.27.3) | 🟥 17.29 [12.6×] (3.15.0) | — | — | — | — | — |
+| **Summary (geomean)** | ⭐ 1.00× | 🟥 3.37× | 🟨 1.23× | 🟨 1.70× | 🟥 4.69× | 🟥 10.7× | 🟥 33.0× | 🟥 20.3× | 🟥 66.7× | 🟥 20.7× | 🟥 143× |
 
-#### Why Ryo trails Rust here: checked arithmetic is intentional
-
-The 1.00× Rust baseline is compiled in release mode, where integer overflow **wraps silently** — it pays nothing for safety. Ryo's spec (§18) mandates the opposite: every integer `+`, `-`, `*` is checked and **panics on overflow** (spec §18), so each operation carries one predicted-not-taken branch. On this benchmark — three integer ops per recursive call and nothing else — that is the worst possible case for the policy.
-
-The fair like-for-like is **Swift**, which also traps on overflow and sits at ~1.25× Rust. Ryo's remaining margin over Swift is not semantic but mechanical: Cranelift lowers each surviving `sadd`/`ssub` overflow check to `cset` + `tst` + `b.ne` (~3 extra instructions per op; verified by disassembly) instead of a single branch on the CPU overflow flag. Closing that gap is tracked as compiler work, not accepted as a language cost:
-
-* Value-range guard elision **landed** (commit `d6aee06`, checkpoint 2026-08-26 in [`fibonacci/README.md`](./fibonacci/README.md#checkpoint-value-range-guard-elision-2026-08-26)): `if n <= 1: return n` proves `n - 1` and `n - 2` cannot overflow, so those guards are no longer emitted. Measured walltime change was ~zero — the elided branches were perfectly predicted — and the residual gap is structural (middle-end transforms), not the guards.
-* The one surviving guard on the outer `fibonacci(n - 1) + fibonacci(n - 2)` addition lowers to an unfused `cset` + `tst` + `b.ne`; the flag-fusing fix is tracked as **I-165** (`ISSUES.md`). Cranelift itself is pinned and upgraded regularly (0.136.1 at the time of writing; the 0.136.1 upgrade fused `smul_overflow` guards on aarch64 but not yet `sadd`/`ssub`, and left the fib hot path byte-identical — checkpoint 2026-09-29 in [`fibonacci/README.md`](./fibonacci/README.md)).
-
-JIT and AOT land within noise of each other (~1.33–1.34×) because both share the same Cranelift codegen (both at `opt_level=speed`).
-
-### 2. [Eager Destruction Benchmark](./eager_destruction/)
-
-* **Focus:** Eager memory deallocation at last use (Eager Destruction / ASAP Destruction) vs. scope-based (RAII) destruction under deep recursion.
-* **Languages compared:** Rust (Scope-Based vs. Manual Drop) and Ryo.
-* **Highlights:** Ryo AOT is the fastest arm of the suite (1.7 ms, 1.69–2.00x over the Rust arms and the JIT) at **6.10x less memory** than scope-based Rust (1.36 MB vs 8.30 MB max RSS — checkpoint 2026-10-07 in [`eager_destruction/README.md`](./eager_destruction/README.md)). Eager destruction keeps heap at O(1), and since codegen now emits `return_call` for the tail-recursive call, deep recursion runs in O(1) stack with no depth ceiling — the `tail_calls` end-to-end test completes 10,000,000 calls (this suite itself measures depth 50,000) where pre-tail-call builds SIGSEGV'd at ~262,000. Non-tail recursion aborts cleanly with a `stack overflow` diagnostic (exit 101) instead of crashing blindly.
-
-### 3. [String Building Benchmark](./string_building/)
-
-* **Focus:** Runtime string ABI + eager destruction — concat over 50,000 iterations; the direct before/after measure for the packed-`u128` runtime ABI.
-* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
-* **Highlights:** After the SSO + consuming-concat rework (2026-09-14) Ryo AOT runs at **Rust parity** (1.6 ms vs 1.5 ms) at the lightest RSS — the pre-rework 12.33x gap was allocation policy (a fresh exact-size buffer per concat), not codegen. See the benchmark's README for the full before/after story.
-
-### 4. [String Slicing Benchmark](./string_slicing/)
-
-* **Focus:** Zero-copy string views — scan a 688 KiB in-program-generated string counting substring matches through string-semantic slices (`strview` / `&str` with boundary validation / `String.UTF8View`), copying and storing nothing.
-* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
-* **Highlights:** Ryo AOT (3.4 ms, 1.89x slower than Rust) sits **far ahead of Swift** (17.6 ms, 9.78x) — the scan loop makes **zero runtime calls** after slice/compare inlining. The residual gap to Rust is §18 checked-arithmetic guards, the promote-on-view spill (I-184), and Cranelift mid-end quality.
-
-### 5. [Byte Slicing Benchmark](./byte_slicing/)
-
-* **Focus:** The same scan workload on raw bytes — `bytesview` / `&[u8]` / `[UInt8]` slices with no UTF-8 char-boundary validation anywhere. Split out of string_slicing (2026-09-17) so each suite compares like with like; the delta between the two isolates Ryo's `str` boundary-validation cost.
-* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
-* **Highlights:** Ryo AOT (2.7 ms) lands **within noise of Swift** (2.5 ms) at 1.70x behind Rust; the ~0.6–0.7 ms delta against Ryo's string_slicing row is exactly the UTF-8 char-boundary validation cost.
-
-### 6. [Mandelbrot Benchmark](./mandelbrot/)
-
-* **Focus:** Float codegen — 401×501 grid, max 80 iterations per pixel; no overflow guards in play, the cleanest Cranelift readout.
-* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
-* **Highlights:** Ryo AOT is **1.11x slower than Rust** (14.6 vs 13.2 ms) — with no overflow guards in play for floats, this is the cleanest readout of Cranelift floating-point codegen and it is near parity.
-
-### 7. [Collatz Benchmark](./collatz/)
-
-* **Focus:** Integer loop/branch — total stopping time for seeds 1..1,000,000; a hot flat loop complementing fibonacci's recursion profile.
-* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
-* **Highlights:** Ryo AOT runs at **2.11x Rust** (237.6 ms; checkpoint 2026-09-29, Cranelift 0.136.1), decomposed by disassembly diff into ~1.6x the spec §18 checked-arithmetic policy (equally-checked Rust measures ~1.6x, on par with Swift's 1.58x) plus ~1.3x Cranelift aarch64 lowering gaps (`srem x, 2` not folded to a bit test, unfused `sadd_overflow` branches per I-165 — `smul_overflow` fused in 0.136.1 —, unstrength-reduced `mul x, 3`). See the benchmark's README for the breakdown.
-
-### 8. [Doubling Concat Benchmark](./doubling_concat/)
-
-* **Focus:** Runtime allocation strategy — `s = s + s` exponential growth to 16 MiB, stressing `ryo_str_alloc` / `ryo_str_concat`.
-* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
-* **Highlights:** Ryo AOT is the **fastest arm, tied with Rust** at 3.7 ms (1.01x, within noise) at the lowest RSS (33.4 MB) — eager destruction keeps live string memory bounded at ~1.5x the final size through the doublings.
-
-### 9. [Many Small Strings Benchmark](./many_small_strings/)
-
-* **Focus:** Flat-loop alloc/free churn — 500,000 short strings built and dropped, complementing eager_destruction's recursion angle.
-* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
-* **Highlights:** After the SSO rework (2026-09-14) Ryo AOT is the **fastest arm** (9.6 ms vs Rust 10.5, Swift 10.6) at the lightest RSS (1.34 MB) — ≤ 23-byte strings are inline slots, so the per-iteration string never touches the heap.
-
-### 10. [Struct Records Benchmark](./struct_records/)
-
-* **Focus:** Aggregate ABI traffic — 500,000 rounds of build → update → score on a `str + int` record, idiomatic per language; stresses struct returns, field-wise copies, and drop glue across a heap field. Ryo AOT currently beats Rust and Go here; only Swift's small-string optimization keeps it ahead.
-* **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
-* **Highlights:** After the SSO rework (2026-09-14) Ryo AOT is the **fastest arm** at 11.4 ms — ahead of Swift (12.1 ms), Rust (24.8 ms), and Go (26.0 ms) — at the lightest RSS of the suite (1.36 MB). With every name ≤ 23 bytes living inline in the record, the per-round heap alloc/free is gone; Ryo runs 11.6x faster than Python with ~11x less memory.
-
-### 11. [Struct Records Reuse Benchmark](./struct_records_reuse/)
-
-* **Focus:** The keep-original record update — same record, but the caller uses `p` again after `birthday`, so the update cannot consume it. Rust and Ryo pay an explicit clone, Swift/Go/Python share cheaply; tracking measure for the record-update ergonomics gap (I-172) and what `shared[T]` or a small-string optimization would buy.
-* **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
-* **Highlights:** Post-SSO (2026-09-14) Ryo AOT is **second behind Swift** at 14.7 ms — ahead of Go (25.8 ms) and Rust (32.3 ms) — with the manual `p.name + ""` clone now an inline-to-inline concat that never touches the heap. The residual gap to Swift is the clone-ergonomics story (I-172: `Clone` trait or `shared[T]`), not string allocation; Ryo runs 10.2x faster than Python at the lightest RSS of the suite (1.36 MB).
-
-### 12. [Struct Records Inout Benchmark](./struct_records_inout/)
-
-* **Focus:** Imperative update-in-place through a mutable borrow (`inout` / `&mut` / pointer / attribute store) — no new record, no clone, no sret. Verifies that choosing between inout and the consuming move+return form costs nothing, so the idiom choice can be driven by intent.
-* **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
-* **Highlights:** Post-SSO (2026-09-14) Ryo AOT is the **fastest arm** at 11.1 ms — ahead of Swift (12.3 ms), Rust (25.5 ms), and Go (25.9 ms) — and the design claim holds at the new level: inout matches the consuming update (11.1 ms vs 11.4 ms in `struct_records`), so the choice between the two idioms remains free. Ryo runs 10.1x faster than Python at the lightest RSS (1.36 MB).
-
-### 13. [JSON Validate Benchmark](./json_validate/)
-
-* **Focus:** Byte-scanning recursive-descent parsing — a full JSON grammar validator over a `bytesview` / `&[u8]` / `[UInt8]` / `[]byte` / `bytes` (structure only, values discarded; a value-tree parser is blocked on enums M11, pattern matching M12, collections M22, error unions M13). 30,000-record document generated in-program, then validated 12 times.
-* **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
-* **Highlights:** Ryo AOT runs **22.4x faster than Python** (102 ms vs 2,290 ms) and at 5.69 MB has the **lightest RSS of all six arms** — after the W0004 lint (`RedundantToBytes`) flagged the benchmark's own `to_bytes()` copies and they were switched to the zero-copy `as_bytes()` view. On time it trails Rust by 21x — far wider than byte_slicing's 1.7x on a flat scan: the deep per-byte call tree (no Cranelift inliner) plus §18 checked-arithmetic guards on every position update compound where a flat loop amortized them (tracked as I-188; guard fusion is I-165).
+*Cells show each suite's best arm per language — mean time or peak RSS, ratio vs. the fastest arm in the row; the summary row is a per-column geomean of those ratios.*
+<!-- BENCH-MATRIX:END -->
 
 ---
 
 ## General Prerequisites
 
-To run these benchmarks, you will need `hyperfine` and a built release binary of the Ryo compiler:
+To run these benchmarks you need `hyperfine`, the per-language toolchains the selected suites compare (each suite README lists its arms), and `uv`. Every suite is driven from the repository root by the central runner `benchmarks/run.py`, which discovers each suite's `suite.toml` manifest — there are no per-suite scripts:
 
 ```bash
-# Build the Ryo compiler in release mode from the repository root
-cargo build --release
+# Time every arm of a suite (drop --benchmarks to run every discovered suite)
+uv run benchmarks/run.py run --benchmarks eager_destruction
+
+# Build-only correctness gate: build every arm and run its checksum, no hyperfine
+uv run benchmarks/run.py run --benchmarks eager_destruction --dry-run
 ```
 
-Each benchmark directory contains its own `run_benchmarks.sh` wrapper script. Navigate to any subdirectory and execute the script:
+### Runner Contract
 
-```bash
-cd benchmarks/eager_destruction
-./run_benchmarks.sh
-```
+The runner's behavior is fixed by the manifests and the data store, not by the per-suite wrapper-script copies this runner replaced:
+
+* **Subcommands.** `run` builds each arm, verifies its checksum output, then times it with `hyperfine` (peak RSS from hyperfine 2.0's native memory measurement, reported as the mean of runs) and appends the numbers to the suite's store under `benchmarks/data/`. `table` renders the canonical tables from the store to stdout. `update-readme` splices those tables into the README marker blocks (see the checkpoint convention below); suites with no store data yet are left untouched, so a bare `update-readme` on a fresh clone changes nothing. `matrix` renders the cross-suite per-language matrix (the `## Benchmark Matrix` section below) from the store.
+* **Flags.** `run` takes `--benchmarks NAMES`, `--languages NAMES`, `--dry-run` (stop after the checksum gate; never invoke hyperfine), `--strict` (fail before benchmarking when a selected toolchain is missing), `--ryo-bin PATH`, and `--json PATH` (write the incremental run JSON after each suite). `table` and `update-readme` take `--benchmarks` (and `table` takes `--out PATH`). Both also take `--include-ignored` to act on git-ignored (local) suites — see below.
+* **Committed vs. local suites.** Discovery is git-aware: `table` and `update-readme` skip manifests git marks ignored (the local `csv_parse`, `json_parse`, and `startup_latency` sweeps), so committed READMEs and the matrix only ever carry committed suites. `run` always discovers everything — local sweeps stay a legitimate target. To render or splice a local suite, pass `--include-ignored`.
+* **Ryo binary precedence.** `--ryo-bin PATH` wins, then `$RYO_BIN`, then the repo's own `target/release/ryo`. Only that last default is ever built by the runner (`cargo build --release`, pinned to the repo root no matter where the runner is invoked); an explicit override must already exist.
+* **Store keys and retention.** The store is keyed `<suite>/<group>/<arm>` (the group segment appears only in suites that define groups) and keeps the newest 20 entries per key. Entries come only from real `run` invocations — never backfilled or hand-edited — so every rendered row traces to an actual measurement with its date and commit.
+* **Ryo (AOT) arms chain the compiler build.** Each suite's Ryo (AOT) arm begins its manifest build line with `cargo build --release`, so the benchmarked binary always comes from the just-built compiler at the measured revision. That chain is deliberate — it stays faithful to the old per-suite scripts even where it duplicates the runner's own auto-build.
 
 ---
 
@@ -157,4 +126,11 @@ samply record ../../target/release/ryo run fib.ryo
 
 ## Manual Checkpoint Convention
 
-Run the full suite (every subdirectory's `run_benchmarks.sh`) **before each release** and **after merging any change that touches generated-code shape** (`ryo-backend/src/codegen/`, the Cranelift pin, ownership sidecar consumption). Record results in each benchmark's README so the trend is visible in git history. These runs are manual only — they never run in CI.
+Run the full suite **before each release** and **after merging any change that touches generated-code shape** (`ryo-backend/src/codegen/`, the Cranelift pin, ownership sidecar consumption):
+
+```bash
+uv run benchmarks/run.py run            # every discovered suite
+uv run benchmarks/run.py update-readme  # splice the new tables into the READMEs
+```
+
+The numbers land in the per-suite store (`benchmarks/data/<suite>.json`); `update-readme` renders the canonical table into each suite README's `<!-- BENCH:START -->` / `<!-- BENCH:END -->` block and the per-language matrix into this README's `<!-- BENCH-MATRIX:START -->` / `<!-- BENCH-MATRIX:END -->` block. Never edit a generated block by hand and never copy numbers into it — a rendered row exists only because a real `run` measured it. Hand-written tables survive only as dated checkpoint history below the generated block in each suite README, and prose that cites specific numbers (e.g. "1.7 ms") goes stale when the table moves — update-readme warns about those. These runs are manual only — they never run in CI.

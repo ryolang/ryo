@@ -1,1 +1,6 @@
 README_parsers.md
+__pycache__/
+# Local-only sweep suites (gitignored manifests) still write store data on `run`:
+data/csv_parse.json
+data/json_parse.json
+data/startup_latency.json

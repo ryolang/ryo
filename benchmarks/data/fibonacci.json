@@ -1,0 +1,1420 @@
+{
+  "lastUpdate": 1792655746839,
+  "repoUrl": "https://github.com/ryolang/ryo",
+  "entries": {
+    "fibonacci/Rust": [
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593297578,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 290.896,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; rustc 1.98.0"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.48,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593510194,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 267.741,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; rustc 1.98.0"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.474,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593788901,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 258.667,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; rustc 1.98.0"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.477,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792594445502,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 267.655,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; rustc 1.98.0"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.476,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 263.58,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; rustc 1.99.1"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.482,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655746531,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 278.001,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; rustc 1.99.1"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.478,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ],
+    "fibonacci/Kotlin": [
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593297603,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 280.335,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; kotlinc 2.4.21"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 44.626,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593788925,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 268.855,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; kotlinc 2.4.21"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 44.656,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792594445502,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 280.338,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; kotlinc 2.4.21"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 44.647,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 269.675,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; kotlinc 2.4.21"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 44.633,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655746531,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 296.2,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; kotlinc 2.4.21"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 44.669,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ],
+    "fibonacci/Go": [
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593297627,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 701.069,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; go 1.27.2"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 3.93,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593788950,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 297.559,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; go 1.27.2"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 3.888,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792594445502,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 301.492,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; go 1.27.2"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 3.942,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 295.1,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; go 1.27.3"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 3.881,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655746531,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 306.954,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; go 1.27.3"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 3.895,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ],
+    "fibonacci/Swift": [
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593297650,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 658.544,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; swiftc 6.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.613,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593788976,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 336.079,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; swiftc 6.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.609,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792594445502,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 329.754,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; swiftc 6.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.609,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 329.675,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; swiftc 6.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.609,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655746531,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 357.573,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; swiftc 6.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.609,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ],
+    "fibonacci/Ryo (AOT)": [
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593297673,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 728.234,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.367,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593510219,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 374.582,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.369,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593789002,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 360.616,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.369,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792594445502,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 359.464,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.37,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 361.187,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0-dev.20261022+63c9cba"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.35,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655746531,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 375.421,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0-dev.20261022+1012fd4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.352,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ],
+    "fibonacci/Ryo (JIT)": [
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593297697,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 720.27,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 5.495,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593510245,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 395.007,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 5.469,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593789028,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 386.18,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 5.469,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792594445502,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 389.487,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 5.475,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 383.871,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0-dev.20261022+63c9cba"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 5.514,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655746531,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 403.351,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0-dev.20261022+1012fd4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 5.478,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ],
+    "fibonacci/Bun (TS)": [
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593297721,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 566.171,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; bun 1.3.13"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 27.377,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593789055,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 408.97,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; bun 1.3.13"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 27.442,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792594445502,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 406.479,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; bun 1.3.13"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 27.433,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 402.576,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; bun 1.3.13"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 27.438,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655746531,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 421.819,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; bun 1.3.13"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 27.428,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ],
+    "fibonacci/Elixir": [
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593297745,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 990.956,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; elixir 1.20.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 89.319,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593789081,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 970.359,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; elixir 1.20.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 89.159,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792594445502,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 990.888,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; elixir 1.20.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 89.569,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 916.317,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; elixir 1.20.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 90.094,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655746531,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 958.776,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; elixir 1.20.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 90.241,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ],
+    "fibonacci/Ruby": [
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593297768,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 6322.689,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ruby 2.6.10p210"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 27.994,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593789106,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 6370.46,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ruby 2.6.10p210"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 28.002,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792594445502,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 6313.351,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ruby 2.6.10p210"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 28.0,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 6252.58,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ruby 2.6.10p210"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 28.0,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655746531,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 6427.915,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ruby 2.6.10p210"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 27.997,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ],
+    "fibonacci/Python": [
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593297793,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 5011.271,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; uv 3.14.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 15.959,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593789132,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 5019.724,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; uv 3.14.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 15.975,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792594445502,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 5068.664,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; uv 3.14.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 16.0,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 4997.219,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; python 3.14.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 15.983,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655746531,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 5388.103,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; python 3.15.0"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 17.206,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ],
+    "fibonacci/Julia": [
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593297817,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 435.582,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; julia 1.13.1"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 193.656,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792593789158,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 424.467,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; julia 1.13.1"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 193.692,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "bddd4e1",
+          "message": "fix: migrate benchmark READMEs to generated tables, delete per-suite scripts (I-174)",
+          "timestamp": 1792592637,
+          "url": "https://github.com/ryolang/ryo/commit/bddd4e1"
+        },
+        "date": 1792594445502,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 429.82,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; julia 1.13.1"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 193.684,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "63c9cba",
+          "message": "docs: add benchmarks/AGENTS.md entry-point guide",
+          "timestamp": 1792621160,
+          "url": "https://github.com/ryolang/ryo/commit/63c9cba"
+        },
+        "date": 1792621289484,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 415.231,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; julia 1.13.2"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 193.602,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655746531,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 437.615,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; julia 1.13.2"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 193.627,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ]
+  }
+}

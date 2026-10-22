@@ -1,8 +1,10 @@
 # String Slicing Benchmark
 
-**Focus:** Zero-copy string views. Builds a 688 KiB string in-program (doubling concat of a 43-byte seed), then scans it through string slices counting `fox` occurrences — `count_fox` borrows the string and every comparison is a view into the original buffer; nothing is copied or stored. Every arm is **string-semantic and idiomatic** (per the repository convention): Ryo `strview` byte-offset slices with UTF-8 char-boundary validation, Rust `&str` direct slicing (same boundary validation, panics on a split character), Swift `Substring` windows walked by `String.Index`. One documented divergence: Swift's window is 3 **Characters** (its `String.Index` cannot split a Character — boundary correctness is structural, not a paid check), while Ryo and Rust slice 3 **bytes** with validation; for this ASCII-only input the windows coincide. For the raw-byte variant of the same workload (`bytesview` / `&[u8]` / `[UInt8]`, no UTF-8 semantics anywhere) see [`byte_slicing`](../byte_slicing/).
+## Overview
 
-**Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Focus:** Zero-copy string views — scan a 688 KiB in-program-generated string counting substring matches through string-semantic slices (`strview` / `&str` with boundary validation / `String.UTF8View`), copying and storing nothing. Every arm is string-semantic and idiomatic per the repository convention, with one documented divergence: Swift walks 3 Characters (its `String.Index` cannot split one) where Ryo and Rust slice 3 bytes with validation — identical on this ASCII input. The raw-byte twin lives in [`byte_slicing`](../byte_slicing/).
+* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **What to look for:** string-ABI sensitivity — the scan loop makes zero runtime calls after inlining, so the residual gap is §18 guards, the promote-on-view spill (I-184), and mid-end quality; *Why Ryo trails Rust here* and the baseline checkpoint below have the breakdown.
 
 ## Why Ryo trails Rust here
 
@@ -20,6 +22,19 @@ One fairness note: hyperfine times whole processes, so every arm's in-program st
 
 ## Benchmarks & Performance Results
 
+<!-- BENCH:START -->
+| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |
+|---|---|---|---|---|---|
+| Rust | 1.99.1 | 1.919 ms | 1.00x | 2.916 MB | — |
+| Ryo (AOT) | 0.1.0-dev.20261022+1012fd4 | 3.493 ms | 1.82x slower | ⭐ 2.756 MB | — |
+| Ryo (JIT) | 0.1.0-dev.20261022+1012fd4 | 4.992 ms | 2.60x slower | 7.699 MB | — |
+| Swift | 6.4 | 18.499 ms | 9.64x slower | 7.045 MB | — |
+
+Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
+<!-- BENCH:END -->
+
+### Checkpoint: baseline (2026-09-17)
+
 Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-17 — first run with all arms string-semantic and idiomatic; before this date the Rust and Swift arms scanned raw bytes, so older tables in git history are not comparable (that workload now lives in [`byte_slicing`](../byte_slicing/)). Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
 
 | Candidate | Version | Mean time | vs fastest | Max RSS |
@@ -32,11 +47,3 @@ Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09
 ## Known tradeoff: growth headroom on doubling concat (2026-09-15)
 
 CodSpeed's memory mode flags this benchmark as a **+48.8% peak-allocation regression** (1.0 → 1.5 MB) after the string-runtime rework — with the allocation count unchanged at 14. The arithmetic is exact: the 14 doubling concats (`s = s + s` on a 43-byte seed) now route through the growth path, and `growth_cap` rounds every buffer up to the next power of two, so iteration *i* allocates 64×2^i bytes instead of exactly 43×2^i — and 64/43 = 1.488. This is the cost side of the same policy that makes `s = s + suffix` amortized O(1) in string_building; a doubling concat is the one append pattern where headroom can **never** be reused (the next iteration always needs 2×len, beyond any constant-factor slack), so the slack is pure overhead here. It does not show up in process RSS: 0.5 MB of heap slack sits under the ~2.7 MB process baseline, and Ryo AOT still measures the lowest RSS of the suite.
-
-## How to Run
-
-Prerequisites: `hyperfine`, `rustc`, `swiftc`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).
-
-```bash
-./run_benchmarks.sh
-```

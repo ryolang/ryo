@@ -1,0 +1,33 @@
+# Benchmark suite manifest for the centralized runner (benchmarks/run.py).
+# Transcribed from run_benchmarks.sh (per-suite scripts deleted when the runner was centralized): every run/build
+# line, arm name, and warmup value matches the old script byte-for-byte
+# (modulo the $ryo substitution point for the ryo binary path).
+name = "byte_slicing"
+category = "Strings"
+descriptor = "Scan 688 KiB via views, count 16384 matches (bytes)"
+warmup = 3
+
+[[arm]]
+name = "Rust"
+language = "rust"
+build = "rustc -O byte_slicing.rs -o byte_slicing_rs"
+run = "./byte_slicing_rs"
+
+[[arm]]
+name = "Swift"
+language = "swift"
+build = "swiftc -O byte_slicing.swift -o byte_slicing_swift"
+run = "./byte_slicing_swift"
+
+[[arm]]
+name = "Ryo (AOT)"
+language = "ryo"
+build = "(cd ../.. && cargo build --release > /dev/null) && $ryo build byte_slicing.ryo > /dev/null"
+run = "./byte_slicing"
+version = "$ryo --version 2>&1 || echo 'dev'"
+
+[[arm]]
+name = "Ryo (JIT)"
+language = "ryo"
+run = "$ryo run byte_slicing.ryo"
+version = "$ryo --version 2>&1 || echo 'dev'"

@@ -1,8 +1,10 @@
 # Byte Slicing Benchmark
 
-**Focus:** Byte-level zero-copy views. Same workload as [`string_slicing`](../string_slicing/) — build a 688 KiB buffer in-program (doubling concat of a 43-byte seed), then scan it through 3-byte view slices counting `fox` occurrences — but every arm operates on raw bytes: Ryo `bytes`/`bytesview`, Rust `&[u8]`, Swift `[UInt8]`. No UTF-8 char-boundary validation anywhere; this is the like-for-like comparison for byte scanning, split out of `string_slicing` on 2026-09-17 when that benchmark's Rust and Swift arms were converted to string semantics.
+## Overview
 
-**Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **Focus:** The same scan workload on raw bytes — `bytesview` / `&[u8]` / `[UInt8]` slices over a 688 KiB in-program-built buffer (doubling a 43-byte seed), with no UTF-8 char-boundary validation anywhere. Split out of string_slicing (2026-09-17) so each suite compares like with like; the delta between the two isolates Ryo's `str` boundary-validation cost.
+* **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **What to look for:** the UTF-8 char-boundary validation cost — this is the raw-byte twin of string_slicing, so the Ryo delta between the two suites isolates exactly that; the checkpoint below breaks it down.
 
 ## What it isolates
 
@@ -14,6 +16,21 @@ One fairness note: the Swift arm pays a one-time `[UInt8](s.utf8)` materializati
 
 ## Benchmarks & Performance Results
 
+Hyperfine `--warmup 3 --shell=none`; peak RSS is hyperfine 2.0's per-run memory measurement, reported as the mean of runs. The table's caption records the machine, date, and compiler commit of the newest measurement.
+
+<!-- BENCH:START -->
+| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |
+|---|---|---|---|---|---|
+| Rust | 1.99.1 | 1.787 ms | 1.00x | 2.908 MB | — |
+| Swift | 6.4 | 3.372 ms | 1.89x slower | 7.11 MB | — |
+| Ryo (AOT) | 0.1.0-dev.20261022+1012fd4 | 3.409 ms | 1.91x slower | ⭐ 2.76 MB | — |
+| Ryo (JIT) | 0.1.0-dev.20261022+1012fd4 | 5.143 ms | 2.88x slower | 7.6 MB | — |
+
+Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
+<!-- BENCH:END -->
+
+### Checkpoint: baseline (2026-09-17)
+
 Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-17. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l`.
 
 | Candidate | Version | Mean time | vs fastest | Max RSS |
@@ -24,11 +41,3 @@ Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09
 | **Ryo (JIT)** | 0.1.0-dev.20260917+63078ac | 4.2 ms ± 0.1 ms | 2.62x slower | 6.97 MB |
 
 Ryo AOT lands within noise of Swift here — the remaining 1.70× to Rust is the §18 checked-arithmetic guards (three per iteration), the promote-on-view per-iteration spill (I-184), and Cranelift-vs-LLVM mid-end quality.
-
-## How to Run
-
-Prerequisites: `hyperfine`, `rustc`, `swiftc`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).
-
-```bash
-./run_benchmarks.sh
-```

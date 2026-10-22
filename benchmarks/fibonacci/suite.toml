@@ -1,0 +1,73 @@
+# Benchmark suite manifest for the centralized runner (benchmarks/run.py).
+# Transcribed from run_benchmarks.sh (per-suite scripts deleted when the runner was centralized): every run/build
+# line, arm name, and warmup value matches the old script byte-for-byte
+# (modulo the $ryo substitution point for the ryo binary path).
+name = "fibonacci"
+category = "Algorithms"
+descriptor = "Recursive fib(40): raw call-overhead comparison across languages"
+warmup = 3
+expect = "fib(40) = 102334155"
+
+[[arm]]
+name = "Rust"
+language = "rust"
+build = "rustc -O fib.rs -o fib_rs"
+run = "./fib_rs"
+
+[[arm]]
+name = "Kotlin"
+language = "kotlin"
+build = "kotlinc fib.kt -include-runtime -d fib.jar"
+run = "java -jar fib.jar"
+
+[[arm]]
+name = "Go"
+language = "go"
+build = "go build -o fib_go fib.go"
+run = "./fib_go"
+
+[[arm]]
+name = "Swift"
+language = "swift"
+build = "swiftc -O fib.swift -o fib_swift"
+run = "./fib_swift"
+
+[[arm]]
+name = "Ryo (AOT)"
+language = "ryo"
+build = "cargo build --release > /dev/null && $ryo build fib.ryo > /dev/null"
+run = "./fib"
+expect = "assert passed, fib(40) is correct"
+
+[[arm]]
+name = "Ryo (JIT)"
+language = "ryo"
+run = "$ryo run fib.ryo"
+expect = "assert passed, fib(40) is correct"
+
+[[arm]]
+name = "Bun (TS)"
+language = "bun"
+run = "$HOME/.bun/bin/bun run fib.ts"
+version = "~/.bun/bin/bun --version"
+
+[[arm]]
+name = "Elixir"
+language = "elixir"
+run = "elixir fib.exs"
+
+[[arm]]
+name = "Ruby"
+language = "ruby"
+run = "ruby fib.rb"
+
+[[arm]]
+name = "Python"
+language = "python"
+run = "uv run --python 3.15 fib.py"
+version = "uv run --python 3.15 python --version | awk '{print $2}'"
+
+[[arm]]
+name = "Julia"
+language = "julia"
+run = "julia fib.jl"

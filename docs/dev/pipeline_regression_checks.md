@@ -201,12 +201,10 @@ Compare baseline and candidate using the same fixture, machine, toolchain, optio
 Separate clean, warm, and repeated workloads. Report repetitions and variability.
 Measure compiler peak memory and generated-program memory separately.
 
-Run affected application benchmarks through their existing scripts, for example:
+Run affected application benchmarks through the central runner, for example:
 
 ```bash
-./benchmarks/eager_destruction/run_benchmarks.sh
-./benchmarks/string_slicing/run_benchmarks.sh
-./benchmarks/struct_records_inout/run_benchmarks.sh
+uv run benchmarks/run.py run --benchmarks eager_destruction,string_slicing,struct_records_inout
 ```
 
 Use the corresponding README checkpoint and a baseline run under matching conditions.

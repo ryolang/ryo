@@ -1,12 +1,29 @@
 # Struct Records Inout Benchmark
 
-**Focus:** Imperative update-in-place through a mutable borrow — the third record-update idiom, alongside the consuming update ([`struct_records`](../struct_records/)) and the keep-original update ([`struct_records_reuse`](../struct_records_reuse/)). Runs 500,000 rounds of `make_person(i)` → `birthday(&p)` → `score(p)` on a `Person{name: str, age: int}` record, where `birthday` mutates the caller's record in place and returns nothing. Each language spells it its own way: Ryo `fn birthday(inout p: Person)` called as `birthday(&p)`, Rust `&mut Person`, Swift `inout Person` (also `&p` at the call site), Go `*Person`, and Python plain attribute mutation on the shared object reference. No new record is created, so no clone, move, retain, or sret return is involved — this isolates the mutable-borrow call itself. **All five languages do the same work and assert the same checksum (27,638,890).**
+## Overview
 
-**Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+* **Focus:** Imperative update-in-place through a mutable borrow (`inout` / `&mut` / pointer / attribute store) — no new record, no clone, no sret. All five arms do the same work and assert the same checksum, so any gap prices the mutable-borrow call itself; the point is that choosing between inout and the consuming move+return form costs nothing.
+* **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+* **What to look for:** call-overhead profile — inout should match the consuming move+return form, so the idiom choice stays free; the checkpoints below verify the claim held post-SSO.
 
 **Why this suite exists:** the inout idiom is Ryo's zero-ceremony answer to "change my record" — mutation is visible at the call site (`&p`), the binding must be `mut`, and Rule 7 rejects aliasing hazards at compile time. This benchmark verifies the performance half of that story: choosing between inout and the consuming move+return form should cost nothing, so users can pick by intent rather than by speed.
 
 ## Benchmarks & Performance Results
+
+<!-- BENCH:START -->
+| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |
+|---|---|---|---|---|---|
+| Ryo (AOT) | 0.1.0-dev.20261022+1012fd4 | 10.941 ms | 1.00x | ⭐ 1.354 MB | — |
+| Swift | 6.4 | 12.322 ms | 1.13x slower | 1.61 MB | — |
+| Ryo (JIT) | 0.1.0-dev.20261022+1012fd4 | 12.431 ms | 1.14x slower | 5.955 MB | — |
+| Rust | 1.99.1 | 24.468 ms | 2.24x slower | 1.546 MB | — |
+| Go | 1.27.3 | 26.265 ms | 2.40x slower | 9.354 MB | — |
+| Python | 3.15.0 | 95.276 ms | 8.71x slower | 17.294 MB | — |
+
+Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
+<!-- BENCH:END -->
+
+### Checkpoint: pre-SSO baseline (2026-09-11)
 
 Measured on **macOS 26.6.2 on a MacBook Pro (Apple M3 Pro, 18 GB RAM)**, 2026-09-11, at Ryo revision `af2cae3`; later branch commits through `b3b7d25` touch only benchmark files and docs — no compiler code — so these numbers remain directly comparable with suites re-measured at `b3b7d25`. Hyperfine `--warmup 3 --shell=none`; peak RSS via `/usr/bin/time -l` (macOS) or `%M` (Linux).
 
@@ -35,11 +52,3 @@ Re-measured after the string-runtime rework shipped the small-string optimizatio
 | **Python** | 3.14.7 | 112.1 ms ± 1.9 ms | 10.07x slower | 14.55 MB |
 
 Ryo AOT went from 20.2 ms (1.72x behind Swift) to 11.1 ms — now the **fastest arm**, ahead of Swift (12.3 ms). The suite's design claim now holds at the new level: inout matches the consuming update's post-SSO time (11.1 ms here vs 11.4 ms in `struct_records` — still a wash), so the choice between the two idioms remains free. Ryo AOT runs **10.1x faster than Python** with ~11x less memory, again at the lightest RSS.
-
-## How to Run
-
-Prerequisites: `hyperfine`, `rustc`, `swiftc`, `go`, `python3`, plus a release build of the compiler (`cargo build --release` from the repository root — the script runs it for you).
-
-```bash
-./run_benchmarks.sh
-```
