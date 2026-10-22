@@ -27,6 +27,7 @@ Hyperfine `--warmup 3 --shell=none`; peak RSS is hyperfine 2.0's per-run memory 
 | Rust | 1.99.1 | 24.479 ms | 2.32x slower | 1.542 MB | — |
 | Go | 1.27.3 | 25.911 ms | 2.46x slower | 9.312 MB | — |
 | Python | 3.15.0 | 113.693 ms | 10.79x slower | 17.287 MB | — |
+
 Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
 <!-- BENCH:END -->
 

@@ -33,6 +33,7 @@ One fairness note: hyperfine times whole processes, so every arm's in-program st
 | Ryo (AOT) | 0.1.0-dev.20261022+1012fd4 | 3.493 ms | 1.82x slower | ⭐ 2.756 MB | — |
 | Ryo (JIT) | 0.1.0-dev.20261022+1012fd4 | 4.992 ms | 2.60x slower | 7.699 MB | — |
 | Swift | 6.4 | 18.499 ms | 9.64x slower | 7.045 MB | — |
+
 Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
 <!-- BENCH:END -->
 

@@ -133,6 +133,7 @@ def test_ungrouped_suite_renders_exact_table(tmp_path, fixed_platform):
         "|---|---|---|---|---|---|\n"
         "| Swift | 6.3.3 | 7 ms | 1.00x | — | — |\n"
         "| Rust | 1.85.0 | 12.3 ms | 1.76x slower | ⭐ 4.5 MB | — |\n"
+        "\n"
         "Measured on Darwin/arm64/Apple M3 Max, 2026-10-21 "
         "(commit abc1234, hyperfine 2.0.0, warmup 3)"
     )
@@ -152,6 +153,7 @@ def test_grouped_suite_renders_heading_per_group(tmp_path, fixed_platform):
         "| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |\n"
         "|---|---|---|---|---|---|\n"
         "| Ryo (AOT) | 0.1.0 | 2.7 ms | 1.00x | ⭐ 2.75 MB | — |\n"
+        "\n"
         "Measured on Darwin/arm64/Apple M3 Max, 2026-10-21 "
         "(commit abc1234, hyperfine 2.0.0, warmup 5)\n"
         "\n"
@@ -159,6 +161,7 @@ def test_grouped_suite_renders_heading_per_group(tmp_path, fixed_platform):
         "| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |\n"
         "|---|---|---|---|---|---|\n"
         "| Go | 1.24.0 | 1.6 ms | 1.00x | ⭐ 3 MB | — |\n"
+        "\n"
         "Measured on Darwin/arm64/Apple M3 Max, 2026-10-21 "
         "(commit abc1234, hyperfine 2.0.0, warmup 5)"
     )

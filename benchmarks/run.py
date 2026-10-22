@@ -932,6 +932,7 @@ def render_suite_table(suite: Suite, store: Store) -> str:
         for arm, _, previous in unmeasured:
             cells = _table_cells(arm, None, _NO_MEASUREMENT, False, previous)
             lines.append("| " + " | ".join(cells) + " |")
+        lines.append("")
         lines.append(_caption(platform_str, newest, suite.warmup))
         sections.append("\n".join(lines))
     return "\n\n".join(sections)

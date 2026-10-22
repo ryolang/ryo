@@ -38,6 +38,7 @@ Calculating the 40th Fibonacci number recursively (Time taken):
 | Elixir | 1.20.4 | 958.776 ms | 3.45x slower | 90.241 MB (+0.2%) | +4.6% |
 | Python | 3.15.0 | 5388.1 ms | 19.38x slower | 17.206 MB (+7.7%) | +7.8% |
 | Ruby | 2.6.10p210 | 6427.91 ms | 23.12x slower | 27.997 MB (-0.0%) | +2.8% |
+
 Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
 <!-- BENCH:END -->
 

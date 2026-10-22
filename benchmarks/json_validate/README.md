@@ -27,6 +27,7 @@ Hyperfine `--warmup 3 --shell=none`; peak RSS is hyperfine 2.0's per-run memory 
 | Ryo (AOT) | 0.1.0-dev.20261022+1012fd4 | 92.4 ms | 17.13x slower | ⭐ 5.698 MB | — |
 | Ryo (JIT) | 0.1.0-dev.20261022+1012fd4 | 118.102 ms | 21.89x slower | 12.466 MB | — |
 | Python | 3.15.0 | 2197.2 ms | 407.27x slower | 28.012 MB | — |
+
 Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
 <!-- BENCH:END -->
 

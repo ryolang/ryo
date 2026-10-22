@@ -222,6 +222,7 @@ def test_cmd_update_readme_splices_suite_and_root_readmes(
         "|---|---|---|---|---|---|\n"
         "| Ryo (AOT) | 0.1.0 | 2.7 ms | 1.00x | ⭐ 2.75 MB | — |\n"
         "| Rust | 1.85.0 | 12.3 ms | 4.56x slower | 4.5 MB | — |\n"
+        "\n"
         "Measured on Darwin/arm64/Apple M3 Max, 2026-10-21 "
         "(commit abc1234, hyperfine 2.0.0, warmup 3)\n"
         "<!-- BENCH:END -->\n"

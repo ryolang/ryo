@@ -23,6 +23,7 @@
 | Rust | 1.99.1 | 24.468 ms | 2.24x slower | 1.546 MB | — |
 | Go | 1.27.3 | 26.265 ms | 2.40x slower | 9.354 MB | — |
 | Python | 3.15.0 | 95.276 ms | 8.71x slower | 17.294 MB | — |
+
 Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
 <!-- BENCH:END -->
 
