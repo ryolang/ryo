@@ -12,19 +12,6 @@ We target both execution speed and memory efficiency (specifically focusing on R
 
 ---
 
-## Current Results
-
-Cross-suite summary of the Ryo (AOT) anchor row per suite, regenerated from the data store by `uv run benchmarks/run.py update-readme` — do not edit the table by hand (see the checkpoint convention below). Each row links the suite and lists its arms, then shows the Ryo-AOT time and peak RSS, the same-run ratios against the fastest and leanest arms (`—` when no same-run comparison exists), and the toolchains measured in that run.
-
-<!-- BENCH-SUMMARY:START -->
-| Suite | Languages | Ryo AOT | Peak RSS | vs. fastest | vs. leanest | Version | Measured |
-|---|---|---|---|---|---|---|---|
-| [collatz](./collatz/) | Rust, Swift, Ryo (AOT), Ryo (JIT) | 215.607 ms | 1.368 MB | 2.07x | 1.00x | ryo 0.1.0-dev.20261022+280990f / rustc 1.99.1 / swiftc 6.4 | 2026-10-21 (commit 280990f) |
-| [fibonacci](./fibonacci/) | Rust, Kotlin, Go, Swift, Ryo (AOT), Ryo (JIT), Bun (TS), Elixir, Ruby, Python, Julia | 361.187 ms | 1.35 MB | 1.37x | 1.00x | ryo 0.1.0-dev.20261022+63c9cba / rustc 1.99.1 / kotlinc 2.4.21 / go 1.27.3 / swiftc 6.4 / bun 1.3.13 / elixir 1.20.4 / ruby 2.6.10p210 / python 3.14.4 / julia 1.13.2 | 2026-10-21 (commit 63c9cba) |
-<!-- BENCH-SUMMARY:END -->
-
----
-
 ## Benchmark Matrix
 
 Per-language matrix across suites — one row per suite, one column per language — regenerated from the data store by `uv run benchmarks/run.py update-readme`; do not edit the tables by hand. Library-comparison arms fold into their language's column (fastest wins); per-library detail lives in the suite READMEs.
@@ -70,7 +57,7 @@ The runner's behavior is fixed by the manifests and the data store, not by the p
 
 * **Subcommands.** `run` builds each arm, verifies its checksum output, then times it with `hyperfine` (peak RSS from hyperfine 2.0's native memory measurement, reported as the mean of runs) and appends the numbers to the suite's store under `benchmarks/data/`. `table` renders the canonical tables from the store to stdout. `update-readme` splices those tables into the README marker blocks (see the checkpoint convention below); suites with no store data yet are left untouched, so a bare `update-readme` on a fresh clone changes nothing. `matrix` renders the cross-suite per-language matrix (the `## Benchmark Matrix` section below) from the store.
 * **Flags.** `run` takes `--benchmarks NAMES`, `--languages NAMES`, `--dry-run` (stop after the checksum gate; never invoke hyperfine), `--strict` (fail before benchmarking when a selected toolchain is missing), `--ryo-bin PATH`, and `--json PATH` (write the incremental run JSON after each suite). `table` and `update-readme` take `--benchmarks` (and `table` takes `--out PATH`). Both also take `--include-ignored` to act on git-ignored (local) suites — see below.
-* **Committed vs. local suites.** Discovery is git-aware: `table` and `update-readme` skip manifests git marks ignored (the local `csv_parse`, `json_parse`, and `startup_latency` sweeps), so committed READMEs and the summary only ever carry committed suites. `run` always discovers everything — local sweeps stay a legitimate target. To render or splice a local suite, pass `--include-ignored`.
+* **Committed vs. local suites.** Discovery is git-aware: `table` and `update-readme` skip manifests git marks ignored (the local `csv_parse`, `json_parse`, and `startup_latency` sweeps), so committed READMEs and the matrix only ever carry committed suites. `run` always discovers everything — local sweeps stay a legitimate target. To render or splice a local suite, pass `--include-ignored`.
 * **Ryo binary precedence.** `--ryo-bin PATH` wins, then `$RYO_BIN`, then the repo's own `target/release/ryo`. Only that last default is ever built by the runner (`cargo build --release`, pinned to the repo root no matter where the runner is invoked); an explicit override must already exist.
 * **Store keys and retention.** The store is keyed `<suite>/<group>/<arm>` (the group segment appears only in suites that define groups) and keeps the newest 20 entries per key. Entries come only from real `run` invocations — never backfilled or hand-edited — so every rendered row traces to an actual measurement with its date and commit.
 * **Ryo (AOT) arms chain the compiler build.** Each suite's Ryo (AOT) arm begins its manifest build line with `cargo build --release`, so the benchmarked binary always comes from the just-built compiler at the measured revision. That chain is deliberate — it stays faithful to the old per-suite scripts even where it duplicates the runner's own auto-build.
@@ -116,4 +103,4 @@ uv run benchmarks/run.py run            # every discovered suite
 uv run benchmarks/run.py update-readme  # splice the new tables into the READMEs
 ```
 
-The numbers land in the per-suite store (`benchmarks/data/<suite>.json`); `update-readme` renders the canonical table into each suite README's `<!-- BENCH:START -->` / `<!-- BENCH:END -->` block and the cross-suite summary into this README's `<!-- BENCH-SUMMARY:START -->` / `<!-- BENCH-SUMMARY:END -->` block. Never edit a generated block by hand and never copy numbers into it — a rendered row exists only because a real `run` measured it. Hand-written tables survive only as dated checkpoint history below the generated block in each suite README, and prose that cites specific numbers (e.g. "1.7 ms") goes stale when the table moves — update-readme warns about those. These runs are manual only — they never run in CI.
+The numbers land in the per-suite store (`benchmarks/data/<suite>.json`); `update-readme` renders the canonical table into each suite README's `<!-- BENCH:START -->` / `<!-- BENCH:END -->` block and the per-language matrix into this README's `<!-- BENCH-MATRIX:START -->` / `<!-- BENCH-MATRIX:END -->` block. Never edit a generated block by hand and never copy numbers into it — a rendered row exists only because a real `run` measured it. Hand-written tables survive only as dated checkpoint history below the generated block in each suite README, and prose that cites specific numbers (e.g. "1.7 ms") goes stale when the table moves — update-readme warns about those. These runs are manual only — they never run in CI.

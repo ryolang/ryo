@@ -29,12 +29,12 @@ Run the full suite before each release and after any change that touches generat
 
 ```bash
 uv run benchmarks/run.py run             # measure; appends to benchmarks/data/<suite>.json
-uv run benchmarks/run.py update-readme   # splice regenerated tables into suite READMEs, the root summary, and the matrix section
+uv run benchmarks/run.py update-readme   # splice regenerated tables into suite READMEs and the matrix section in the root README
 uv run benchmarks/run.py update-readme   # re-run: must change nothing (fixed point)
 uv run benchmarks/run.py matrix          # print the matrix without splicing
 ```
 
 * `benchmarks/data/<suite>.json` is the only source of truth — keyed `<suite>/<group>/<arm>`, newest-20 entries per key, fed only by real `run` invocations.
-* Never hand-edit a generated block or copy numbers into it (`<!-- BENCH:START/END -->` per suite README, `<!-- BENCH-SUMMARY:START/END -->` and `<!-- BENCH-MATRIX:START/END -->` in the root README) — `update-readme` owns them.
-* Hand-written dated checkpoint history lives below the generated block in each suite README — and it is write-only-when-significant: add a new checkpoint entry only when meaningful work landed or a performance improvement is worth narrating for that suite, never per-run. Regular `run` + `update-readme` cycles refresh only the generated tables (per-suite blocks, root summary, matrix).
+* Never hand-edit a generated block or copy numbers into it (`<!-- BENCH:START/END -->` per suite README, `<!-- BENCH-MATRIX:START/END -->` in the root README) — `update-readme` owns them.
+* Hand-written dated checkpoint history lives below the generated block in each suite README — and it is write-only-when-significant: add a new checkpoint entry only when meaningful work landed or a performance improvement is worth narrating for that suite, never per-run. Regular `run` + `update-readme` cycles refresh only the generated tables (per-suite blocks and the root matrix).
 * Prose citing specific numbers (e.g. "1.7 ms") goes stale as the table moves; `update-readme` warns about it on stderr — warning only, not an error.

@@ -6,7 +6,7 @@
 
 Replaces the copy-pasted benchmarks/*/run_benchmarks.sh scripts with one
 runner: `run` times every arm via hyperfine, `table` renders results, and
-`update-readme` splices them into suite READMEs and the root summary table.
+`update-readme` splices them into suite READMEs and the root matrix table.
 Replaces the copy-pasted per-suite run_benchmarks.sh scripts (deleted).
 
 Subcommands: run, table, update-readme.
@@ -685,10 +685,9 @@ class Store:
         return cls(path=path, repo_url=repo_url, entries={})
 
     def append(self, suite_result: SuiteResult) -> None:
-        # One timestamp for the whole run: `render_summary_table` matches
-        # arms to the Ryo-AOT anchor by exact date equality (vs. fastest,
-        # vs. leanest, and the Version cell), and a per-arm timestamp would
-        # never repeat across a run.
+        # One timestamp for the whole run: same-run comparisons (ratios,
+        # version cells) match arms by exact date equality, and a per-arm
+        # timestamp would never repeat across a run.
         run_date = _epoch_ms()
         for arm_result in suite_result.arm_results:
             key = store_key(suite_result.suite, arm_result.arm)
@@ -1313,12 +1312,9 @@ def cmd_matrix(args: argparse.Namespace) -> int:
 
 # Generated blocks live between these marker pairs; everything outside them is
 # human-owned prose. Suite READMEs carry per-suite tables, the root
-# benchmarks/README.md carries one summary table and one per-language matrix
-# across suites.
+# benchmarks/README.md carries one per-language matrix across suites.
 BENCH_START = "<!-- BENCH:START -->"
 BENCH_END = "<!-- BENCH:END -->"
-SUMMARY_START = "<!-- BENCH-SUMMARY:START -->"
-SUMMARY_END = "<!-- BENCH-SUMMARY:END -->"
 MATRIX_START = "<!-- BENCH-MATRIX:START -->"
 MATRIX_END = "<!-- BENCH-MATRIX:END -->"
 
@@ -1374,17 +1370,6 @@ def _splice_readme(path: Path, text: str, start: str, end: str, content: str) ->
         raise MarkerError(f"{path}: {exc}") from exc
 
 
-_SUMMARY_HEADER = (
-    "| Suite | Languages | Ryo AOT | Peak RSS | vs. fastest | vs. leanest | Version | Measured |"
-)
-_SUMMARY_SEPARATOR = "|---|---|---|---|---|---|---|---|"
-
-
-def _key_arm_name(key: str) -> str:
-    """Arm name segment of a store key (the last `/`-separated segment)."""
-    return key.rsplit("/", 1)[-1]
-
-
 def _time_bench(entry: dict | None) -> dict | None:
     """The entry's time bench, or None when absent or never measured."""
     if entry is None:
@@ -1393,51 +1378,6 @@ def _time_bench(entry: dict | None) -> dict | None:
         (b for b in entry["benches"] if b["name"] == "time" and b["value"] is not None),
         None,
     )
-
-
-def _ryo_aot_anchor(store: Store) -> tuple[str, dict] | None:
-    """(key, entry) of the suite's Ryo AOT anchor row, or None.
-
-    Ranking: an arm literally named "Ryo (AOT)" wins; otherwise a Ryo-named
-    AOT variant (e.g. "Ryo (AOT, Eager)"); otherwise any arm whose store
-    entry's toolchain is ryo. Among same-ranked candidates the fastest time
-    wins (a suite may repeat "Ryo (AOT)" across groups, e.g. json_parse).
-    """
-    candidates: list[tuple[int, float, str, dict]] = []
-    for key in sorted(store.entries):
-        entry = store.latest(key)
-        bench = _time_bench(entry)
-        if bench is None:
-            continue
-        name = _key_arm_name(key).lower()
-        if name == "ryo (aot)":
-            rank = 0
-        elif name.startswith("ryo") and "aot" in name:
-            rank = 1
-        elif _toolchain_from_extra(bench.get("extra")).startswith("ryo"):
-            rank = 2
-        else:
-            continue
-        candidates.append((rank, bench["value"], key, entry))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda c: (c[0], c[1], c[2]))
-    _, _, key, entry = candidates[0]
-    return key, entry
-
-
-def _fastest_of_run(store: Store) -> tuple[str, dict] | None:
-    """(key, entry) with the lowest measured time across the suite's latest entries."""
-    best: tuple[int, float, str, dict] | None = None
-    for key in sorted(store.entries):
-        entry = store.latest(key)
-        bench = _time_bench(entry)
-        if bench is None:
-            continue
-        candidate = (0, bench["value"], key, entry)
-        if best is None or candidate[1] < best[1]:
-            best = candidate
-    return (best[2], best[3]) if best is not None else None
 
 
 def _rss_bench(entry: dict | None) -> dict | None:
@@ -1454,109 +1394,12 @@ def _rss_bench(entry: dict | None) -> dict | None:
     )
 
 
-def _leanest_of_run(store: Store) -> tuple[str, dict] | None:
-    """(key, entry) with the lowest peak RSS across the suite's latest entries."""
-    best: tuple[int, float, str, dict] | None = None
-    for key in sorted(store.entries):
-        entry = store.latest(key)
-        bench = _rss_bench(entry)
-        if bench is None:
-            continue
-        candidate = (0, bench["value"], key, entry)
-        if best is None or candidate[1] < best[1]:
-            best = candidate
-    return (best[2], best[3]) if best is not None else None
-
-
-def _same_run_toolchains(suite: Suite, store: Store, run_date: int) -> list[str]:
-    """Toolchain strings of the suite's arms measured in the anchor's run.
-
-    One toolchain per arm, extracted from the time bench's ``extra`` by the
-    same ``_toolchain_from_extra`` the per-suite tables use; deduped, ryo
-    first, then manifest arm order. An arm whose latest entry is missing or
-    from another run contributes nothing.
-    """
-    toolchains: list[str] = []
-    for arm in suite.arms:
-        entry = store.latest(store_key(suite, arm))
-        if entry is None or entry["date"] != run_date:
-            continue
-        bench = _time_bench(entry)
-        if bench is None:
-            continue
-        toolchain = _toolchain_from_extra(bench.get("extra"))
-        if toolchain != _NO_MEASUREMENT and toolchain not in toolchains:
-            toolchains.append(toolchain)
-    # Stable: ryo toolchains first, manifest order preserved within each band.
-    toolchains.sort(key=lambda t: 0 if t.startswith("ryo") else 1)
-    return toolchains
-
-
-def render_summary_table(suites: list[Suite], stores: dict[str, Store]) -> str:
-    """Render the root summary table across suites, one row per suite.
-
-    Every cell is anchored to the suite's Ryo-AOT entry's own run: its time,
-    peak RSS, and date/commit. ``vs. fastest`` (Ryo-AOT time / fastest arm's
-    time) and ``vs. leanest`` (Ryo-AOT RSS / leanest arm's RSS) are filled
-    only when the comparison arm's latest entry shares that run (same
-    ``date``) — a ratio across different runs is dishonest, so it renders
-    ``—`` instead; a zero leanest RSS would divide by zero and also renders
-    ``—``. ``Languages`` lists the manifest's arm names; ``Version``
-    composes the same run's toolchain strings (see ``_same_run_toolchains``).
-    Suites with no Ryo-AOT anchor entry render no row at all, so a fresh
-    clone's summary is header-only until suites are measured. Rows are
-    alphabetical so the output never depends on how the suites were
-    selected.
-    """
-    lines = [_SUMMARY_HEADER, _SUMMARY_SEPARATOR]
-    # Canonical order: alphabetical, independent of how suites were selected.
-    for suite in sorted(suites, key=lambda s: s.name):
-        store = stores[suite.name]
-        anchor = _ryo_aot_anchor(store)
-        if anchor is None:
-            continue
-        _, entry = anchor
-        benches = {b["name"]: b for b in entry["benches"]}
-        time_str = f"{_format_cell_value(benches['time']['value'])} ms"
-        anchor_rss = _rss_bench(entry)
-        rss_str = _NO_MEASUREMENT
-        if anchor_rss is not None:
-            rss_str = f"{_format_cell_value(anchor_rss['value'])} MB"
-        ratio_str = _NO_MEASUREMENT
-        fastest = _fastest_of_run(store)
-        if fastest is not None and fastest[1]["date"] == entry["date"]:
-            fastest_time = _time_bench(fastest[1])["value"]
-            ratio_str = f"{benches['time']['value'] / fastest_time:.2f}x"
-        lean_str = _NO_MEASUREMENT
-        leanest = _leanest_of_run(store)
-        if (
-            leanest is not None
-            and leanest[1]["date"] == entry["date"]
-            and anchor_rss is not None
-        ):
-            min_rss = _rss_bench(leanest[1])["value"]
-            if min_rss > 0:
-                lean_str = f"{anchor_rss['value'] / min_rss:.2f}x"
-        languages_str = ", ".join(arm.name for arm in suite.arms)
-        toolchains = _same_run_toolchains(suite, store, entry["date"])
-        version_str = " / ".join(toolchains) if toolchains else _NO_MEASUREMENT
-        date = datetime.fromtimestamp(entry["date"] / 1000, tz=timezone.utc).strftime(
-            "%Y-%m-%d"
-        )
-        measured_str = f"{date} (commit {entry['commit']['id']})"
-        lines.append(
-            f"| [{suite.name}](./{suite.dir.name}/) | {languages_str} | {time_str} "
-            f"| {rss_str} | {ratio_str} | {lean_str} | {version_str} | {measured_str} |"
-        )
-    return "\n".join(lines)
-
-
 # Numbers carrying a benchmark unit (``12.3 ms``, ``4.5 MB``, ``1.7x``) — the
 # shape prose uses when it cites a measurement inline.
 _STALE_PROSE_VALUE = re.compile(r"(\d+(?:\.\d+)?)\s?(?:ms|MB|x)\b")
-# A generated block, any of the three marker pairs, spanning to its end marker.
+# A generated block, either marker pair, spanning to its end marker.
 _MARKER_BLOCK = re.compile(
-    r"<!-- BENCH(?:-(?:SUMMARY|MATRIX))?:START -->.*?<!-- BENCH(?:-(?:SUMMARY|MATRIX))?:END -->",
+    r"<!-- BENCH(?:-MATRIX)?:START -->.*?<!-- BENCH(?:-MATRIX)?:END -->",
     re.DOTALL,
 )
 _TABLE_VALUE = re.compile(r"\d+(?:\.\d+)?")
@@ -1590,13 +1433,12 @@ def cmd_update_readme(args: argparse.Namespace) -> int:
     """Entry point for the ``update-readme`` subcommand: splice tables into READMEs.
 
     Per suite README: the suite's canonical table into its ``BENCH`` block;
-    root benchmarks/README.md: the cross-suite summary into its
-    ``BENCH-SUMMARY`` block and the per-language matrix into its
+    root benchmarks/README.md: the per-language matrix into its
     ``BENCH-MATRIX`` block. ``--benchmarks`` scopes only the per-suite
-    splices; the summary and matrix are always rebuilt from every discovered
-    suite, so a filtered run cannot silently delete other suites' committed
-    rows. All splices are planned before anything is written, so a missing
-    marker pair is a hard error with zero file mutation.
+    splices; the matrix is always rebuilt from every discovered suite, so a
+    filtered run cannot silently delete other suites' committed rows. All
+    splices are planned before anything is written, so a missing marker pair
+    is a hard error with zero file mutation.
     Writes are in place and atomic (temp file + rename), and a write is
     skipped entirely when the content is unchanged. Stale-prose warnings go
     to stderr and never affect the exit code.
@@ -1606,7 +1448,7 @@ def cmd_update_readme(args: argparse.Namespace) -> int:
             getattr(args, "benchmarks", None),
             skip_ignored=not getattr(args, "include_ignored", False),
         )
-        # The root summary must reflect every discovered suite: building it
+        # The root matrix must reflect every discovered suite: building it
         # from the --benchmarks selection would rewrite the committed table
         # with only the selected rows, silently deleting the rest.
         all_suites = _select_suites(
@@ -1639,21 +1481,14 @@ def cmd_update_readme(args: argparse.Namespace) -> int:
             )
         root_path = _REPO_ROOT / "benchmarks" / "README.md"
         root_text = _read_readme(root_path)
-        summary = render_summary_table(all_suites, stores)
-        summary_text = _splice_readme(
-            root_path, root_text, SUMMARY_START, SUMMARY_END, summary
-        )
-        # The matrix block follows the same all-discovered-suites rule as the
-        # summary, spliced into the already summary-spliced root text.
+        # The matrix block follows the all-discovered-suites rule above.
         matrix = render_matrix(all_suites, stores)
         plans.append(
             (
                 root_path,
                 root_text,
-                _splice_readme(
-                    root_path, summary_text, MATRIX_START, MATRIX_END, matrix
-                ),
-                summary + "\n" + matrix,
+                _splice_readme(root_path, root_text, MATRIX_START, MATRIX_END, matrix),
+                matrix,
             )
         )
     except MarkerError as exc:
@@ -1721,7 +1556,7 @@ _MATRIX_FOOTNOTE = (
     "the fastest arm in the row; the summary row is a per-column geomean of those ratios.*"
 )
 # (metric key, table caption, bench extractor); the extractors are the same
-# store-inspection helpers the per-suite tables and summary table use.
+# store-inspection helpers the per-suite tables and matrix use.
 _MATRIX_METRICS = (
     ("time", "**Runtime (mean)**", _time_bench),
     ("memory", "**Peak memory (max RSS)**", _rss_bench),
