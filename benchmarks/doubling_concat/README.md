@@ -2,13 +2,9 @@
 
 ## Overview
 
-* **Focus:** Runtime allocation strategy — `s = s + s` exponential growth to 16 MiB, stressing `ryo_str_alloc` / `ryo_str_concat`.
+* **Focus:** Runtime allocation strategy — `s = s + s` exponential growth to 16 MiB, stressing `ryo_str_alloc` / `ryo_str_concat`; eager destruction frees each superseded buffer, so live string memory stays bounded instead of growing with the history.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
-* **Highlights:** Ryo AOT is the **fastest arm, tied with Rust** at 3.7 ms (1.01x, within noise) at the lowest RSS (33.4 MB) — eager destruction keeps live string memory bounded at ~1.5x the final size through the doublings.
-
-**Focus:** Runtime allocation strategy under exponential growth. `s = s + s` for 20 iterations (16 B → 16 MiB): each doubling allocates a fresh `cap == len` buffer through `ryo_str_concat` / `ryo_str_alloc` and eagerly frees the previous one, so live string memory stays bounded by the old-plus-new buffers (≈1.5× the final size at the peak doubling) instead of growing with the history; measured total RSS below is ~2× the final size once baseline process and allocator overhead are included.
-
-**Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **What to look for:** allocation policy under exponential growth — whether live memory stays bounded through the doublings rather than accumulating; the checkpoint below has the post-rework re-measurement.
 
 ## Benchmarks & Performance Results
 

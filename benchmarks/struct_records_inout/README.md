@@ -2,13 +2,9 @@
 
 ## Overview
 
-* **Focus:** Imperative update-in-place through a mutable borrow (`inout` / `&mut` / pointer / attribute store) — no new record, no clone, no sret. Verifies that choosing between inout and the consuming move+return form costs nothing, so the idiom choice can be driven by intent.
+* **Focus:** Imperative update-in-place through a mutable borrow (`inout` / `&mut` / pointer / attribute store) — no new record, no clone, no sret. All five arms do the same work and assert the same checksum, so any gap prices the mutable-borrow call itself; the point is that choosing between inout and the consuming move+return form costs nothing.
 * **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
-* **Highlights:** Post-SSO (2026-09-14) Ryo AOT is the **fastest arm** at 11.1 ms — ahead of Swift (12.3 ms), Rust (25.5 ms), and Go (25.9 ms) — and the design claim holds at the new level: inout matches the consuming update (11.1 ms vs 11.4 ms in `struct_records`), so the choice between the two idioms remains free. Ryo runs 10.1x faster than Python at the lightest RSS (1.36 MB).
-
-**Focus:** Imperative update-in-place through a mutable borrow — the third record-update idiom, alongside the consuming update ([`struct_records`](../struct_records/)) and the keep-original update ([`struct_records_reuse`](../struct_records_reuse/)). Runs 500,000 rounds of `make_person(i)` → `birthday(&p)` → `score(p)` on a `Person{name: str, age: int}` record, where `birthday` mutates the caller's record in place and returns nothing. Each language spells it its own way: Ryo `fn birthday(inout p: Person)` called as `birthday(&p)`, Rust `&mut Person`, Swift `inout Person` (also `&p` at the call site), Go `*Person`, and Python plain attribute mutation on the shared object reference. No new record is created, so no clone, move, retain, or sret return is involved — this isolates the mutable-borrow call itself. **All five languages do the same work and assert the same checksum (27,638,890).**
-
-**Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+* **What to look for:** call-overhead profile — inout should match the consuming move+return form, so the idiom choice stays free; the checkpoints below verify the claim held post-SSO.
 
 **Why this suite exists:** the inout idiom is Ryo's zero-ceremony answer to "change my record" — mutation is visible at the call site (`&p`), the binding must be `mut`, and Rule 7 rejects aliasing hazards at compile time. This benchmark verifies the performance half of that story: choosing between inout and the consuming move+return form should cost nothing, so users can pick by intent rather than by speed.
 

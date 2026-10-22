@@ -2,13 +2,9 @@
 
 ## Overview
 
-* **Focus:** Float codegen — 401×501 grid, max 80 iterations per pixel; no overflow guards in play, the cleanest Cranelift readout.
+* **Focus:** Float codegen — 401×501 grid, max 80 iterations per pixel on a scalarized `zr`/`zi` loop (no complex type yet); no overflow guards in play, the cleanest Cranelift readout.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
-* **Highlights:** Ryo AOT is **1.11x slower than Rust** (14.6 vs 13.2 ms) — with no overflow guards in play for floats, this is the cleanest readout of Cranelift floating-point codegen and it is near parity.
-
-**Focus:** Float codegen. Mandelbrot escape-iteration sum over a 401×501 grid (max 80 iterations per pixel, `zr`/`zi` scalarized — no complex numbers or arrays in the language yet). No overflow guards are in play for floats, so this is the cleanest readout of raw Cranelift floating-point codegen.
-
-**Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **What to look for:** the cleanest readout of Cranelift floating-point codegen — with no overflow guards in play, the float loop stands or falls on lowering quality alone; the baseline checkpoint below anchors the near-parity story.
 
 ## Benchmarks & Performance Results
 

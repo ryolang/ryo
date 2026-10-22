@@ -2,13 +2,9 @@
 
 ## Overview
 
-* **Focus:** Aggregate ABI traffic — 500,000 rounds of build → update → score on a `str + int` record, idiomatic per language; stresses struct returns, field-wise copies, and drop glue across a heap field. Ryo AOT currently beats Rust and Go here; only Swift's small-string optimization keeps it ahead.
+* **Focus:** Aggregate ABI traffic — 500,000 rounds of build → update → score on a `str + int` record, idiomatic per language; stresses struct returns, field-wise copies, and drop glue across a heap field. All five arms do the same work and assert the same checksum — the comparison is like-for-like. Ryo AOT currently beats Rust and Go here; only Swift's small-string optimization keeps it ahead.
 * **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
-* **Highlights:** After the SSO rework (2026-09-14) Ryo AOT is the **fastest arm** at 11.4 ms — ahead of Swift (12.1 ms), Rust (24.8 ms), and Go (26.0 ms) — at the lightest RSS of the suite (1.36 MB). With every name ≤ 23 bytes living inline in the record, the per-round heap alloc/free is gone; Ryo runs 11.6x faster than Python with ~11x less memory.
-
-**Focus:** Aggregate ABI traffic, idiomatic per language. Runs 500,000 rounds of `make_person(i)` → `birthday(p)` → `score(q)` on a `Person{name: str, age: int}` record — the natural "update one field, keep the rest" struct update. Each language expresses it the way a developer actually would: Rust moves the `name` field out (partial move, free), Swift value-copies it (COW-backed `String`, cheap), Go shallow-copies the struct (string header shares immutable backing bytes; GC owns lifetime), Python shares the `str` reference (free), and Ryo takes the parameter by `move` and mutates the field in place (`mut q = p; q.age = q.age + 1`). Ryo rejects moving a *single field* out of a struct (E0043 — fields move only with the whole struct) and has no clone builtin, but whole-struct moves are the idiomatic answer here, so **all five languages do the same work and assert the same checksum (27,638,890)**. Note the `move` is not a Ryo-specific shortcut: it matches Rust's by-value parameter exactly — both consume the caller's record and transfer the name allocation with zero heap traffic; Swift/Go/Python keep the original usable and pay for that flexibility in ARC retains, GC headroom, or refcounting. Rust runs its drop glue, Swift its ARC retain/release traffic on the `String` field, Go its GC, Python its object model (`__slots__` class), and Ryo its eager-destruction scheduling.
-
-**Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
+* **What to look for:** aggregate ABI traffic — struct returns, field-wise copies, and drop glue with short names inline after SSO; the two checkpoints below tell the ranking story.
 
 ## Evolution note: this benchmark must mutate to B
 

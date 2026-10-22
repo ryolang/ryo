@@ -4,11 +4,7 @@
 
 * **Focus:** Flat-loop alloc/free churn — 500,000 short strings built and dropped, complementing eager_destruction's recursion angle.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
-* **Highlights:** After the SSO rework (2026-09-14) Ryo AOT is the **fastest arm** (9.6 ms vs Rust 10.5, Swift 10.6) at the lightest RSS (1.34 MB) — ≤ 23-byte strings are inline slots, so the per-iteration string never touches the heap.
-
-**Focus:** Flat-loop alloc/free churn. Builds 500,000 short strings (`int_to_str(i) + "!"`), keeps none — each iteration's buffer is freed at its last use inside the same iteration. Complements `eager_destruction` (which stresses deep-recursion lifetimes) with high-frequency flat-loop churn through `ryo_int_to_str`, `ryo_str_concat`, and `ryo_str_free`.
-
-**Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **What to look for:** how per-allocation string overhead scales across runtimes — the suite's point is whether short-lived short strings ever touch the heap; the SSO checkpoint below has the before/after.
 
 ## Benchmarks & Performance Results
 

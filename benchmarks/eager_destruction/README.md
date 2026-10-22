@@ -4,7 +4,7 @@
 
 * **Focus:** Eager memory deallocation at last use (Eager Destruction / ASAP Destruction) vs. scope-based (RAII) destruction under deep recursion.
 * **Languages compared:** Rust (Scope-Based vs. Manual Drop) and Ryo.
-* **Highlights:** Ryo AOT is the fastest arm of the suite (1.7 ms, 1.69–2.00x over the Rust arms and the JIT) at **6.10x less memory** than scope-based Rust (1.36 MB vs 8.30 MB max RSS — checkpoint 2026-10-07 below). Eager destruction keeps heap at O(1), and since codegen now emits `return_call` for the tail-recursive call, deep recursion runs in O(1) stack with no depth ceiling — the `tail_calls` end-to-end test completes 10,000,000 calls (this suite itself measures depth 50,000) where pre-tail-call builds SIGSEGV'd at ~262,000. Non-tail recursion aborts cleanly with a `stack overflow` diagnostic (exit 101) instead of crashing blindly.
+* **What to look for:** memory shape under deep recursion, not walltime — eager destruction keeps the heap at O(1) and tail-call codegen keeps the stack at O(1), where scope-based destruction pays per frame; the dated checkpoints below narrate the SSO tradeoff and the tail-call collapse.
 
 This benchmark demonstrates and compares **Eager Destruction** (freeing of heap resources at their point of last use) in **Ryo** against scope-based destruction (RAII) in **Rust**.
 

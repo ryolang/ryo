@@ -4,11 +4,7 @@
 
 * **Focus:** Integer loop/branch — total stopping time for seeds 1..1,000,000; a hot flat loop complementing fibonacci's recursion profile.
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
-* **Highlights:** Ryo AOT runs at **2.07x Rust** (215.6 ms; measured 2026-10-21), decomposed by disassembly diff into ~1.6x the spec §18 checked-arithmetic policy (equally-checked Rust measures ~1.6x, on par with Swift's 1.63x) plus ~1.3x Cranelift aarch64 lowering gaps (`srem x, 2` not folded to a bit test, unfused `sadd_overflow` branches per I-165 — `smul_overflow` fused in 0.136.1 —, unstrength-reduced `mul x, 3`). See below for the breakdown.
-
-**Focus:** Integer loop/branch codegen. Sum of Collatz total stopping times for seeds 1..1,000,000 — a hot integer loop with a data-dependent branch and a function call per seed, complementing fibonacci's deep-recursion call profile with a flat iterative one.
-
-**Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **What to look for:** Ryo's gap to Rust is mostly the spec §18 checked-arithmetic policy plus Cranelift aarch64 lowering, not codegen shape — the disassembly-level diagnosis is in *Analysis: Why Ryo trails Rust here* below.
 
 ## Benchmarks & Performance Results
 
@@ -25,7 +21,7 @@ Hyperfine `--warmup 3 --shell=none`; peak RSS is hyperfine 2.0's per-run memory 
 Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
 <!-- BENCH:END -->
 
-## Why Ryo trails Rust here
+### Analysis: Why Ryo trails Rust here (diagnosed 2026-09-22)
 
 Disassembly-level diagnosis (2026-09-22: `objdump` diff of the three `collatz_steps` loops plus a control build; ratios reproduce the 2026-09-11 checkpoint). The 2.14x decomposes into ~1.6x the spec §18 checked-arithmetic policy — shared with Swift — and ~1.3x Cranelift aarch64 lowering gaps. JIT and AOT land within noise of each other because both share the same Cranelift codegen.
 

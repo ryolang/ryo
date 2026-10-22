@@ -4,15 +4,11 @@
 
 * **Focus:** Byte-scanning recursive-descent parsing — a full JSON grammar validator over a `bytesview` / `&[u8]` / `[UInt8]` / `[]byte` / `bytes` (structure only, values discarded; a value-tree parser is blocked on enums M11, pattern matching M12, collections M22, error unions M13). 30,000-record document generated in-program, then validated 12 times.
 * **Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
-* **Highlights:** Ryo AOT runs **22.4x faster than Python** (102 ms vs 2,290 ms) and at 5.69 MB has the **lightest RSS of all six arms** — after the W0004 lint (`RedundantToBytes`) flagged the benchmark's own `to_bytes()` copies and they were switched to the zero-copy `as_bytes()` view. On time it trails Rust by 21x — far wider than byte_slicing's 1.7x on a flat scan: the deep per-byte call tree (no Cranelift inliner) plus §18 checked-arithmetic guards on every position update compound where a flat loop amortized them (tracked as I-188; guard fusion is I-165).
-
-**Focus:** Byte-scanning recursive-descent parsing — the workload shape of a real JSON parser's hot loop. A full JSON grammar validator (objects, arrays, strings with escapes and `\uXXXX`, the complete number grammar, literals, whitespace, nesting) walks a 2.95 MB in-program-generated document of 30,000 records and discards values; 12 validation passes per run. Complements byte_slicing's flat scan with deep call structure, per-byte dispatch, and mutual recursion (`parse_value` ↔ `parse_object` / `parse_array`).
+* **What to look for:** call-overhead compounding — every byte goes through a deep dispatch tree with no inliner, so per-byte call cost and §18 guards multiply instead of amortizing; the baseline checkpoint below dissects the gap (tracked as I-188, guard fusion as I-165).
 
 **Why validation and not parsing:** a full JSON parser that produces a value tree is blocked on unimplemented language milestones — enums (M11), pattern matching (M12), list/map collections (M22), error unions (M13), plus file I/O. This PoC therefore validates structure and discards values, returning positions instead of trees. The comparison stays meaningful because the scan/validate loop — byte dispatch, string scanning, number lexing — is where real JSON parsers spend most of their time; value-tree construction is the smaller, allocation-bound share.
 
 **Identical algorithm in all five languages:** the same functions, the same `-1`-on-error sentinel, the same in-program document generation (`str_push` / `String::push_str` / `String +=` / `strings.Builder` / `"".join`), the same assert battery, no JSON libraries anywhere. Data is generated in-program because Ryo has no file I/O yet.
-
-**Languages compared:** Rust, Swift, Go, Python, and Ryo (AOT vs JIT).
 
 ## Benchmarks & Performance Results
 

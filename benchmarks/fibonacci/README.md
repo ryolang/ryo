@@ -4,7 +4,7 @@
 
 * **Focus:** Deep function recursion, standard integer arithmetic, and basic execution overhead.
 * **Languages compared:** Rust, Go, Swift, Kotlin, Bun (TypeScript), Julia, Elixir, Python, Ruby, and Ryo.
-* **Highlights:** Ryo AOT achieves the **lightest memory usage of all languages tested** (1.35 MB max resident size). On execution speed, Ryo currently runs at ~1.37× Rust's time on `fib(40)` — see the note below for why.
+* **What to look for:** the checked-arithmetic policy's worst case — three integer ops per call and nothing else to amortize the guards — plus the lightest memory footprint on the table; the diagnosis and both dated checkpoints are below.
 
 ## Why Ryo trails Rust here: checked arithmetic is intentional
 
@@ -12,14 +12,10 @@ The 1.00× Rust baseline is compiled in release mode, where integer overflow **w
 
 The fair like-for-like is **Swift**, which also traps on overflow and sits at ~1.23× Rust. Ryo's remaining margin over Swift is not semantic but mechanical: Cranelift lowers each surviving `sadd`/`ssub` overflow check to `cset` + `tst` + `b.ne` (~3 extra instructions per op; verified by disassembly) instead of a single branch on the CPU overflow flag. Closing that gap is tracked as compiler work, not accepted as a language cost:
 
-* Value-range guard elision **landed** (commit `d6aee06`, [checkpoint 2026-08-26](#checkpoint-value-range-guard-elision-2026-08-26)): `if n <= 1: return n` proves `n - 1` and `n - 2` cannot overflow, so those guards are no longer emitted. Measured walltime change was ~zero — the elided branches were perfectly predicted — and the residual gap is structural (middle-end transforms), not the guards.
-* The one surviving guard on the outer `fibonacci(n - 1) + fibonacci(n - 2)` addition lowers to an unfused `cset` + `tst` + `b.ne`; the flag-fusing fix is tracked as **I-165** (`ISSUES.md`). Cranelift itself is pinned and upgraded regularly (0.136.1 at the time of writing; the 0.136.1 upgrade fused `smul_overflow` guards on aarch64 but not yet `sadd`/`ssub`, and left the fib hot path byte-identical — [checkpoint 2026-09-29](#checkpoint-cranelift-01361-2026-09-29)).
+* Value-range guard elision **landed** (commit `d6aee06`) — `if n <= 1: return n` proves `n - 1` / `n - 2` cannot overflow, so those guards are gone; see the [checkpoint 2026-08-26](#checkpoint-value-range-guard-elision-2026-08-26).
+* The one surviving guard on the outer addition still lowers unfused; the flag-fusing fix is tracked as **I-165** (`ISSUES.md`), and the [checkpoint 2026-09-29](#checkpoint-cranelift-01361-2026-09-29) covers the latest Cranelift bump.
 
 AOT lands at ~1.37× and JIT at ~1.46× Rust's time; the ~23 ms delta is the compiler's compile-and-startup cost inside the timed `ryo run` invocation, not codegen — both share the same Cranelift codegen (both at `opt_level=speed`).
-
-These benchmarks compare a standard recursive calculation of `fibonacci(40)` across different languages using `hyperfine`. 
-
-*Note: Ryo's recursive function capability works correctly and is competitive with the natively-compiled languages; see the table below and the note on checked arithmetic [above](#why-ryo-trails-rust-here-checked-arithmetic-is-intentional).*
 
 ## Results
 Calculating the 40th Fibonacci number recursively (Time taken):

@@ -2,13 +2,9 @@
 
 ## Overview
 
-* **Focus:** Zero-copy string views — scan a 688 KiB in-program-generated string counting substring matches through string-semantic slices (`strview` / `&str` with boundary validation / `String.UTF8View`), copying and storing nothing.
+* **Focus:** Zero-copy string views — scan a 688 KiB in-program-generated string counting substring matches through string-semantic slices (`strview` / `&str` with boundary validation / `String.UTF8View`), copying and storing nothing. Every arm is string-semantic and idiomatic per the repository convention, with one documented divergence: Swift walks 3 Characters (its `String.Index` cannot split one) where Ryo and Rust slice 3 bytes with validation — identical on this ASCII input. The raw-byte twin lives in [`byte_slicing`](../byte_slicing/).
 * **Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
-* **Highlights:** Ryo AOT (3.4 ms, 1.89x slower than Rust) sits **far ahead of Swift** (17.6 ms, 9.78x) — the scan loop makes **zero runtime calls** after slice/compare inlining. The residual gap to Rust is §18 checked-arithmetic guards, the promote-on-view spill (I-184), and Cranelift mid-end quality.
-
-**Focus:** Zero-copy string views. Builds a 688 KiB string in-program (doubling concat of a 43-byte seed), then scans it through string slices counting `fox` occurrences — `count_fox` borrows the string and every comparison is a view into the original buffer; nothing is copied or stored. Every arm is **string-semantic and idiomatic** (per the repository convention): Ryo `strview` byte-offset slices with UTF-8 char-boundary validation, Rust `&str` direct slicing (same boundary validation, panics on a split character), Swift `Substring` windows walked by `String.Index`. One documented divergence: Swift's window is 3 **Characters** (its `String.Index` cannot split a Character — boundary correctness is structural, not a paid check), while Ryo and Rust slice 3 **bytes** with validation; for this ASCII-only input the windows coincide. For the raw-byte variant of the same workload (`bytesview` / `&[u8]` / `[UInt8]`, no UTF-8 semantics anywhere) see [`byte_slicing`](../byte_slicing/).
-
-**Languages compared:** Rust, Swift, and Ryo (AOT vs JIT).
+* **What to look for:** string-ABI sensitivity — the scan loop makes zero runtime calls after inlining, so the residual gap is §18 guards, the promote-on-view spill (I-184), and mid-end quality; *Why Ryo trails Rust here* and the baseline checkpoint below have the breakdown.
 
 ## Why Ryo trails Rust here
 
