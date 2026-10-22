@@ -2,7 +2,8 @@ name: Install Zig toolchain
 description: >-
   Restores the pinned Zig toolchain (ZIG_VERSION in
   ryo-backend/src/toolchain.rs) from the actions cache, installing on a
-  miss. Canonical copy of the block formerly duplicated per job (I-102).
+  miss. Canonical copy of the block formerly duplicated per job; the
+  smoke suites and dedicated sanitizer lanes depend on it.
 runs:
   using: composite
   steps:

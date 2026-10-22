@@ -115,9 +115,9 @@ jobs:
           prefix-key: asan
       - uses: ./.github/actions/zig-toolchain
       - name: Run ASan smoke suite
-        # The suite self-skips under CI outside RYO_SMOKE_LANE (I-102); the
-        # guard step below keeps this lane from passing vacuously if the
-        # env above is lost.
+        # The suite self-skips under CI outside RYO_SMOKE_LANE; the guard
+        # step below keeps this lane from passing vacuously if the env
+        # above is lost.
         run: cargo test --test asan_smoke 2>&1 | tee asan_smoke.log
       - name: Liveness guard (suite must not self-skip)
         # A dropped RYO_SMOKE_LANE env makes every test skip-and-pass, so
@@ -179,9 +179,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y valgrind
       - uses: ./.github/actions/zig-toolchain
       - name: Run Valgrind smoke suite
-        # The suite self-skips under CI outside RYO_SMOKE_LANE (I-102); the
-        # guard step below keeps this lane from passing vacuously if the
-        # env above is lost.
+        # The suite self-skips under CI outside RYO_SMOKE_LANE; the guard
+        # step below keeps this lane from passing vacuously if the env
+        # above is lost.
         run: cargo test --test valgrind_smoke 2>&1 | tee valgrind_smoke.log
       - name: Liveness guard (suite must not self-skip)
         # A dropped RYO_SMOKE_LANE env makes every test skip-and-pass, so

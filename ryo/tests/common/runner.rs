@@ -26,11 +26,10 @@ fn zig_path() -> PathBuf {
         .clone()
 }
 
-/// Whether a smoke suite may run in this environment (I-102 lane split):
-/// under CI the dedicated `asan`/`valgrind` jobs are the sole runners of
-/// these suites and set `RYO_SMOKE_LANE=1`; the general `cargo test
-/// --workspace` lane — which would duplicate that work per matrix leg —
-/// skips them. Local runs (`CI` unset) and the Docker Linux script always
+/// Whether a smoke suite may run in this environment: under CI the
+/// dedicated `asan`/`valgrind` jobs are the sole runners of these suites
+/// and set `RYO_SMOKE_LANE=1`; the general `cargo test --workspace` lane —
+/// which would duplicate that work per matrix leg — skips them. Local runs (`CI` unset) and the Docker Linux script always
 /// run the suites, preserving today's local behavior.
 pub fn smoke_lane_active(name: &str) -> bool {
     if std::env::var_os("RYO_SMOKE_LANE").is_some() || std::env::var_os("CI").is_none() {
