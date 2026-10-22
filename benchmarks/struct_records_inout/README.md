@@ -15,6 +15,15 @@
 ## Benchmarks & Performance Results
 
 <!-- BENCH:START -->
+| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |
+|---|---|---|---|---|---|
+| Ryo (AOT) | 0.1.0-dev.20261022+1012fd4 | 10.941 ms | 1.00x | ⭐ 1.354 MB | — |
+| Swift | 6.4 | 12.322 ms | 1.13x slower | 1.61 MB | — |
+| Ryo (JIT) | 0.1.0-dev.20261022+1012fd4 | 12.431 ms | 1.14x slower | 5.955 MB | — |
+| Rust | 1.99.1 | 24.468 ms | 2.24x slower | 1.546 MB | — |
+| Go | 1.27.3 | 26.265 ms | 2.40x slower | 9.354 MB | — |
+| Python | 3.15.0 | 95.276 ms | 8.71x slower | 17.294 MB | — |
+Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
 <!-- BENCH:END -->
 
 ### Checkpoint: pre-SSO baseline (2026-09-11)

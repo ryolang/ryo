@@ -27,18 +27,18 @@ Calculating the 40th Fibonacci number recursively (Time taken):
 <!-- BENCH:START -->
 | Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |
 |---|---|---|---|---|---|
-| Rust | 1.99.1 | 263.58 ms | 1.00x | 1.482 MB (+0.4%) | -1.5% |
-| Kotlin | 2.4.21 | 269.675 ms | 1.02x slower | 44.633 MB (-0.0%) | -3.8% |
-| Go | 1.27.3 | 295.1 ms | 1.12x slower | 3.881 MB (-1.5%) | -2.1% |
-| Swift | 6.4 | 329.675 ms | 1.25x slower | 1.609 MB (+0.0%) | -0.0% |
-| Ryo (AOT) | 0.1.0-dev.20261022+63c9cba | 361.187 ms | 1.37x slower | ⭐ 1.35 MB (-1.5%) | +0.5% |
-| Ryo (JIT) | 0.1.0-dev.20261022+63c9cba | 383.871 ms | 1.46x slower | 5.514 MB (+0.7%) | -1.4% |
-| Bun (TS) | 1.3.13 | 402.576 ms | 1.53x slower | 27.438 MB (+0.0%) | -1.0% |
-| Julia | 1.13.2 | 415.231 ms | 1.58x slower | 193.602 MB (-0.0%) | -3.4% |
-| Elixir | 1.20.4 | 916.317 ms | 3.48x slower | 90.094 MB (+0.6%) | -7.5% |
-| Python | 3.14.4 | 4997.22 ms | 18.96x slower | 15.983 MB (-0.1%) | -1.4% |
-| Ruby | 2.6.10p210 | 6252.58 ms | 23.72x slower | 28 MB (+0.0%) | -1.0% |
-Measured on Darwin/arm64/Mac15,6, 2026-10-21 (commit 63c9cba, hyperfine 2.0.0, warmup 3)
+| Rust | 1.99.1 | 278.001 ms | 1.00x | 1.478 MB (-0.3%) | +5.5% |
+| Kotlin | 2.4.21 | 296.2 ms | 1.07x slower | 44.669 MB (+0.1%) | +9.8% |
+| Go | 1.27.3 | 306.954 ms | 1.10x slower | 3.895 MB (+0.4%) | +4.0% |
+| Swift | 6.4 | 357.573 ms | 1.29x slower | 1.609 MB (+0.0%) | +8.5% |
+| Ryo (AOT) | 0.1.0-dev.20261022+1012fd4 | 375.421 ms | 1.35x slower | ⭐ 1.352 MB (+0.1%) | +3.9% |
+| Ryo (JIT) | 0.1.0-dev.20261022+1012fd4 | 403.351 ms | 1.45x slower | 5.478 MB (-0.7%) | +5.1% |
+| Bun (TS) | 1.3.13 | 421.819 ms | 1.52x slower | 27.428 MB (-0.0%) | +4.8% |
+| Julia | 1.13.2 | 437.615 ms | 1.57x slower | 193.627 MB (+0.0%) | +5.4% |
+| Elixir | 1.20.4 | 958.776 ms | 3.45x slower | 90.241 MB (+0.2%) | +4.6% |
+| Python | 3.15.0 | 5388.1 ms | 19.38x slower | 17.206 MB (+7.7%) | +7.8% |
+| Ruby | 2.6.10p210 | 6427.91 ms | 23.12x slower | 27.997 MB (-0.0%) | +2.8% |
+Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
 <!-- BENCH:END -->
 
 ### Checkpoint: Cranelift 0.136.1 (2026-09-29)

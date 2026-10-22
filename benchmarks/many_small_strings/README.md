@@ -15,6 +15,13 @@
 Hyperfine `--warmup 3 --shell=none`; peak RSS is hyperfine 2.0's per-run memory measurement, reported as the mean of runs. The table's caption records the machine, date, and compiler commit of the newest measurement.
 
 <!-- BENCH:START -->
+| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |
+|---|---|---|---|---|---|
+| Ryo (AOT) | 0.1.0-dev.20261022+1012fd4 | 8.497 ms | 1.00x | ⭐ 1.37 MB | — |
+| Ryo (JIT) | 0.1.0-dev.20261022+1012fd4 | 10.134 ms | 1.19x slower | 5.57 MB | — |
+| Rust | 1.99.1 | 10.559 ms | 1.24x slower | 1.537 MB | — |
+| Swift | 6.4 | 10.598 ms | 1.25x slower | 1.609 MB | — |
+Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
 <!-- BENCH:END -->
 
 ### Checkpoint: SSO + consuming concat (2026-09-14)

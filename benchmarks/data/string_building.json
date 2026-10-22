@@ -1,0 +1,136 @@
+{
+  "lastUpdate": 1792655956467,
+  "repoUrl": "https://github.com/ryolang/ryo",
+  "entries": {
+    "string_building/Rust": [
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655956349,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 1.44,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; rustc 1.99.1"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.65,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ],
+    "string_building/Swift": [
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655956349,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 2.314,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; swiftc 6.4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.859,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ],
+    "string_building/Ryo (AOT)": [
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655956349,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 1.573,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0-dev.20261022+1012fd4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.494,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ],
+    "string_building/Ryo (JIT)": [
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655956349,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 2.833,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0-dev.20261022+1012fd4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 5.698,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ],
+    "string_building/Python": [
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655956349,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 36.72,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; python 3.15.0"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 17.602,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ]
+  }
+}

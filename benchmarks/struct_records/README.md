@@ -19,6 +19,15 @@ This flat-loop record workload is the interim form. Once `list[T]` lands (M22, s
 Hyperfine `--warmup 3 --shell=none`; peak RSS is hyperfine 2.0's per-run memory measurement, reported as the mean of runs. The table's caption records the machine, date, and compiler commit of the newest measurement.
 
 <!-- BENCH:START -->
+| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |
+|---|---|---|---|---|---|
+| Ryo (AOT) | 0.1.0-dev.20261022+1012fd4 | 10.533 ms | 1.00x | ⭐ 1.354 MB | — |
+| Swift | 6.4 | 11.896 ms | 1.13x slower | 1.609 MB | — |
+| Ryo (JIT) | 0.1.0-dev.20261022+1012fd4 | 12.294 ms | 1.17x slower | 6.012 MB | — |
+| Rust | 1.99.1 | 24.479 ms | 2.32x slower | 1.542 MB | — |
+| Go | 1.27.3 | 25.911 ms | 2.46x slower | 9.312 MB | — |
+| Python | 3.15.0 | 113.693 ms | 10.79x slower | 17.287 MB | — |
+Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
 <!-- BENCH:END -->
 
 ### Checkpoint: pre-SSO baseline (2026-09-11)

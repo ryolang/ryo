@@ -1,0 +1,110 @@
+{
+  "lastUpdate": 1792655516139,
+  "repoUrl": "https://github.com/ryolang/ryo",
+  "entries": {
+    "eager_destruction/Rust (Scope-Based)": [
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655516025,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 3.785,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; rustc 1.99.1"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 8.333,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ],
+    "eager_destruction/Rust (Manual Drop)": [
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655516025,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 3.74,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; rustc 1.99.1"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 6.813,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ],
+    "eager_destruction/Ryo (AOT, Eager)": [
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655516025,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 2.063,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0-dev.20261022+1012fd4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 1.369,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ],
+    "eager_destruction/Ryo (JIT, Eager)": [
+      {
+        "commit": {
+          "id": "1012fd4",
+          "message": "refactor: drop cross-suite summary, matrix supersedes it",
+          "timestamp": 1792655250,
+          "url": "https://github.com/ryolang/ryo/commit/1012fd4"
+        },
+        "date": 1792655516025,
+        "tool": "custom",
+        "benches": [
+          {
+            "name": "time",
+            "value": 3.091,
+            "unit": "ms",
+            "extra": "mean wall clock; hyperfine 2.0.0; ryo 0.1.0-dev.20261022+1012fd4"
+          },
+          {
+            "name": "memory_peak_rss",
+            "value": 5.505,
+            "unit": "MB",
+            "extra": "max resident set size; mean of runs"
+          }
+        ]
+      }
+    ]
+  }
+}

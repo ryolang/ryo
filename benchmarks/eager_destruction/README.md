@@ -89,6 +89,13 @@ Measurements executed on **macOS 26.6.2 (Build 25G83) on a MacBook Pro (Apple M3
 ## Current results
 
 <!-- BENCH:START -->
+| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |
+|---|---|---|---|---|---|
+| Ryo (AOT, Eager) | 0.1.0-dev.20261022+1012fd4 | 2.063 ms | 1.00x | ⭐ 1.369 MB | — |
+| Ryo (JIT, Eager) | 0.1.0-dev.20261022+1012fd4 | 3.091 ms | 1.50x slower | 5.505 MB | — |
+| Rust (Manual Drop) | 1.99.1 | 3.74 ms | 1.81x slower | 6.813 MB | — |
+| Rust (Scope-Based) | 1.99.1 | 3.785 ms | 1.83x slower | 8.333 MB | — |
+Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
 <!-- BENCH:END -->
 
 ### Checkpoint: SSO string runtime (2026-09-15)

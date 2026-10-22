@@ -23,6 +23,14 @@ The amortized fast path also exists explicitly as `str_push(&s, "x")` (capacity 
 Hyperfine `--warmup 3 --shell=none`; peak RSS is hyperfine 2.0's per-run memory measurement, reported as the mean of runs. The table's caption records the machine, date, and compiler commit of the newest measurement.
 
 <!-- BENCH:START -->
+| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |
+|---|---|---|---|---|---|
+| Rust | 1.99.1 | 1.44 ms | 1.00x | 1.65 MB | — |
+| Ryo (AOT) | 0.1.0-dev.20261022+1012fd4 | 1.573 ms | 1.09x slower | ⭐ 1.494 MB | — |
+| Swift | 6.4 | 2.314 ms | 1.61x slower | 1.859 MB | — |
+| Ryo (JIT) | 0.1.0-dev.20261022+1012fd4 | 2.833 ms | 1.97x slower | 5.698 MB | — |
+| Python | 3.15.0 | 36.72 ms | 25.50x slower | 17.602 MB | — |
+Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
 <!-- BENCH:END -->
 
 Python (CPython 3.14.7) runs the same `s += "x"` loop interpreted; its ~25x gap over Rust is interpreter overhead, and its ~2x gap over Ryo shows the interpreted baseline is slower than Ryo's compiled O(n²) concat even before any allocation-policy fix landed.

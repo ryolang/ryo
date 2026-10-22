@@ -17,11 +17,11 @@ Hyperfine `--warmup 3 --shell=none`; peak RSS is hyperfine 2.0's per-run memory 
 <!-- BENCH:START -->
 | Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |
 |---|---|---|---|---|---|
-| Rust | 1.99.1 | 104.392 ms | 1.00x | 1.495 MB (+2.2%) | -6.5% |
-| Swift | 6.4 | 163.709 ms | 1.57x slower | 5.577 MB (+0.0%) | -9.9% |
-| Ryo (JIT) | 0.1.0-dev.20261022+280990f | 215.136 ms | 2.06x slower | 5.74 MB (+0.6%) | -15.9% |
-| Ryo (AOT) | 0.1.0-dev.20261022+280990f | 215.607 ms | 2.07x slower | ⭐ 1.368 MB (+1.2%) | -9.8% |
-Measured on Darwin/arm64/Mac15,6, 2026-10-21 (commit 280990f, hyperfine 2.0.0, warmup 3)
+| Rust | 1.99.1 | 112.637 ms | 1.00x | 1.492 MB (-0.2%) | +7.9% |
+| Swift | 6.4 | 175.254 ms | 1.56x slower | 5.576 MB (-0.0%) | +7.1% |
+| Ryo (JIT) | 0.1.0-dev.20261022+1012fd4 | 233.308 ms | 2.07x slower | 5.722 MB (-0.3%) | +8.4% |
+| Ryo (AOT) | 0.1.0-dev.20261022+1012fd4 | 234.233 ms | 2.08x slower | ⭐ 1.369 MB (+0.1%) | +8.6% |
+Measured on Darwin/arm64/Mac15,6, 2026-10-22 (commit 1012fd4, hyperfine 2.0.0, warmup 3)
 <!-- BENCH:END -->
 
 ## Why Ryo trails Rust here
