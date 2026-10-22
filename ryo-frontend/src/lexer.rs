@@ -206,10 +206,23 @@ pub(crate) enum RawToken<'a> {
 
     // Float regex is declared *before* the int regex purely for
     // readability; logos picks the longest match regardless.
-    #[regex(r"[0-9]+\.[0-9]+")]
+    // Two float shapes: dotted (fraction optional exponent) and dotless
+    // (exponent required) — `1e5` is a float, a bare `1` stays an int.
+    #[regex(r"[0-9]+(_[0-9]+)*\.[0-9]+(_[0-9]+)*([eE][+-]?[0-9]+(_[0-9]+)*)?|[0-9]+(_[0-9]+)*[eE][+-]?[0-9]+(_[0-9]+)*")]
     Float(&'a str),
-    #[regex(r"[0-9]+")]
+    #[regex(r"[0-9]+(_[0-9]+)*")]
     Int(&'a str),
+    // Base-prefixed integers (spec §2); value materialized at lex time
+    // per radix, sharing the decimal i64 / IntLitMin rules. The
+    // malformed variant is declared after the valid forms so equal-length
+    // matches (`0xFG`: valid matches `0xF`, malformed matches all of it)
+    // resolve to the dedicated error, and valid literals always win ties.
+    #[regex(r"0[xX]_?[0-9a-fA-F]+(_[0-9a-fA-F]+)*")]
+    #[regex(r"0[oO]_?[0-7]+(_[0-7]+)*")]
+    #[regex(r"0[bB]_?[01]+(_[01]+)*")]
+    RadixInt(&'a str),
+    #[regex(r"0[xXoObB][0-9a-zA-Z_]*")]
+    MalformedInt(&'a str),
     #[regex(r#""([^"\\]|\\.)*""#)]
     Str(&'a str),
     // `b"..."` beats `Ident` by longest match.
@@ -443,17 +456,27 @@ pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Toke
 /// through `sink` as an `UnknownEscape` error pointing at exactly the
 /// bytes of the escape.
 ///
-/// `hex_escapes` enables `\xNN` (exactly two hex digits, M8.4.2) —
-/// accepted in bytes literals only; in string literals `\xNN` stays an
-/// `UnknownEscape` until M13.7 (Literal Completeness).
+/// `mode` selects the literal kind (spec §2): in `"..."` strings,
+/// `\xHH` decodes to U+00HH UTF-8 encoded (Python semantics) and
+/// `\u{...}` decodes a Unicode scalar; in `b"..."` bytes literals
+/// (M8.4.2), `\xNN` decodes one raw byte and `\u{...}` is not an
+/// escape.
 ///
 /// `body_span` is the span of the unquoted body (the caller computes
 /// it: 1 byte past the opening quote for `"..."`, 2 for `b"..."`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EscapeMode {
+    /// `"..."` — `\xHH` is U+00HH UTF-8 encoded; `\u{...}` enabled.
+    Str,
+    /// `b"..."` — `\xNN` is one raw byte; `\u{...}` is not an escape.
+    Bytes,
+}
+
 fn unescape(
     inner: &str,
     body_span: ryo_core::span::Span,
     sink: &mut DiagSink,
-    hex_escapes: bool,
+    mode: EscapeMode,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(inner.len());
     // Byte offset within `inner`; tracked manually (rather than
@@ -494,12 +517,21 @@ fn unescape(
                     out.push(0);
                     i += 2;
                 }
-                Some('x') if hex_escapes => {
-                    // `\xNN` — exactly two hex digits.
+                Some('x') => {
+                    // `\x` — exactly two hex digits. Bytes literals get
+                    // the raw byte (M8.4.2); strings get U+00HH,
+                    // UTF-8 encoded (Python semantics, spec §2).
                     let digits = inner.get(i + 2..i + 4);
                     match digits.and_then(|d| u8::from_str_radix(d, 16).ok()) {
                         Some(byte) => {
-                            out.push(byte);
+                            if mode == EscapeMode::Bytes {
+                                out.push(byte);
+                            } else {
+                                let mut buf = [0u8; 4];
+                                out.extend_from_slice(
+                                    char::from(byte).encode_utf8(&mut buf).as_bytes(),
+                                );
+                            }
                             i += 4;
                         }
                         None => {
@@ -514,6 +546,79 @@ fn unescape(
                             out.push(b'\\');
                             out.push(b'x');
                             i += 2;
+                        }
+                    }
+                }
+                Some('u') if mode == EscapeMode::Str => {
+                    // `\u{HHHH}` — `\u{`, 1-6 hex digits, `}` (spec §2).
+                    // The digit scan is capped at six, so a longer run
+                    // leaves a non-`}` next char and falls into the
+                    // malformed arm.
+                    let has_brace = inner[i + 2..].starts_with('{');
+                    let digits_start = i + 3;
+                    let mut j = digits_start;
+                    if has_brace {
+                        while j - digits_start < 6
+                            && inner[j..]
+                                .chars()
+                                .next()
+                                .is_some_and(|c| c.is_ascii_hexdigit())
+                        {
+                            j += 1;
+                        }
+                    }
+                    // Without `{` the scan never ran, so slice only when a
+                    // brace is present — `digits_start` may otherwise be
+                    // past the end (`"\u"`) or inside a multi-byte char
+                    // (`"\ué"`).
+                    let digits = if has_brace {
+                        &inner[digits_start..j]
+                    } else {
+                        ""
+                    };
+                    let terminated = has_brace && inner[j..].starts_with('}');
+                    let scalar = if terminated && !digits.is_empty() {
+                        u32::from_str_radix(digits, 16)
+                            .ok()
+                            .and_then(char::from_u32)
+                    } else {
+                        None
+                    };
+                    match scalar {
+                        Some(c) => {
+                            let mut buf = [0u8; 4];
+                            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                            i = j + 1;
+                        }
+                        None => {
+                            // Two error shapes: hex that parses but is
+                            // not a scalar (surrogate / above
+                            // U+10FFFF), and malformed syntax (missing
+                            // `{`, no digits, non-hex digit,
+                            // unterminated, more than six digits).
+                            // Both preserve the source text verbatim.
+                            let malformed = !terminated || digits.is_empty();
+                            let end_off = if !has_brace {
+                                i + 2
+                            } else if terminated {
+                                j + 1
+                            } else {
+                                j
+                            };
+                            let start = body_span.start.saturating_add(i);
+                            let end = body_span.start.saturating_add(end_off);
+                            let message = if malformed {
+                                "invalid '\\u{...}' escape: expected 1-6 hex digits and a closing brace"
+                            } else {
+                                "invalid '\\u{...}' escape: not a Unicode scalar (surrogate or above U+10FFFF)"
+                            };
+                            sink.emit(Diag::error(
+                                crate::spans::cspan(SimpleSpan::new((), start..end)),
+                                DiagCode::UnknownEscape,
+                                message.to_string(),
+                            ));
+                            out.extend_from_slice(&inner.as_bytes()[i..end_off]);
+                            i = end_off;
                         }
                     }
                 }
@@ -570,7 +675,11 @@ fn intern_token(
         // recover with a zero literal so the parser doesn't choke on
         // a placeholder token and cascade a spurious parse error on
         // top of the real problem.
-        RawToken::Float(s) => match s.parse::<f64>() {
+        //
+        // Underscore separators (`1_000`, spec §2) are lexical only:
+        // stripped before parsing so the std parsers see plain digits;
+        // diagnostics still echo the original spelling.
+        RawToken::Float(s) => match s.replace('_', "").parse::<f64>() {
             Ok(n) => Token::FloatLit(n.to_bits()),
             Err(_) => {
                 sink.emit(Diag::error(
@@ -581,18 +690,51 @@ fn intern_token(
                 Token::FloatLit(0f64.to_bits())
             }
         },
-        RawToken::Int(s) => match s.parse::<i64>() {
-            Ok(n) => Token::IntLit(n),
-            Err(_) if s.parse::<u64>() == Ok(i64::MAX as u64 + 1) => Token::IntLitMin,
-            Err(_) => {
-                sink.emit(Diag::error(
-                    crate::spans::cspan(span),
-                    DiagCode::ParseError,
-                    format!("invalid integer literal: '{}'", s),
-                ));
-                Token::IntLit(0)
+        RawToken::Int(s) => {
+            let digits = s.replace('_', "");
+            match digits.parse::<i64>() {
+                Ok(n) => Token::IntLit(n),
+                Err(_) if digits.parse::<u64>() == Ok(i64::MAX as u64 + 1) => Token::IntLitMin,
+                Err(_) => {
+                    sink.emit(Diag::error(
+                        crate::spans::cspan(span),
+                        DiagCode::ParseError,
+                        format!("invalid integer literal: '{}'", s),
+                    ));
+                    Token::IntLit(0)
+                }
             }
-        },
+        }
+        RawToken::RadixInt(s) => {
+            let digits = s.replace('_', "");
+            let (radix, magnitude) = match &digits[..2] {
+                "0x" | "0X" => (16, &digits[2..]),
+                "0o" | "0O" => (8, &digits[2..]),
+                _ => (2, &digits[2..]),
+            };
+            match i64::from_str_radix(magnitude, radix) {
+                Ok(n) => Token::IntLit(n),
+                Err(_) if u64::from_str_radix(magnitude, radix) == Ok(i64::MAX as u64 + 1) => {
+                    Token::IntLitMin
+                }
+                Err(_) => {
+                    sink.emit(Diag::error(
+                        crate::spans::cspan(span),
+                        DiagCode::ParseError,
+                        format!("invalid integer literal: '{}'", s),
+                    ));
+                    Token::IntLit(0)
+                }
+            }
+        }
+        RawToken::MalformedInt(s) => {
+            sink.emit(Diag::error(
+                crate::spans::cspan(span),
+                DiagCode::ParseError,
+                format!("invalid integer literal: '{}'", s),
+            ));
+            Token::IntLit(0)
+        }
         RawToken::Str(s) => {
             // Strip the surrounding quotes (regex guarantees they
             // balance) and decode standard escape sequences here so
@@ -603,7 +745,7 @@ fn intern_token(
                 (),
                 span.start.saturating_add(1)..span.end.saturating_sub(1),
             ));
-            let decoded = unescape(inner, body_span, sink, false);
+            let decoded = unescape(inner, body_span, sink, EscapeMode::Str);
             // `inner` is UTF-8 source text and every escape above
             // decodes to ASCII or re-encodes a `char`, so the decoded
             // body is always valid UTF-8.
@@ -628,7 +770,7 @@ fn intern_token(
                 (),
                 span.start.saturating_add(2)..span.end.saturating_sub(1),
             ));
-            let decoded = unescape(inner, body_span, sink, true);
+            let decoded = unescape(inner, body_span, sink, EscapeMode::Bytes);
             Token::BytesLit(pool.intern_bytes(&decoded))
         }
         RawToken::Ident(s) => Token::Ident(pool.intern_str(s)),
@@ -1053,6 +1195,119 @@ mod tests {
     }
 
     #[test]
+    fn lex_float_scientific_notation() {
+        let (toks, _) = lex_strings("1.23e-10 1.0e+5 2.5E3");
+        assert_eq!(toks.len(), 3);
+        match toks[0] {
+            Token::FloatLit(bits) => assert!((f64::from_bits(bits) - 1.23e-10).abs() < 1e-30),
+            ref t => panic!("expected FloatLit, got {:?}", t),
+        }
+        assert_eq!(toks[1], Token::FloatLit(100000f64.to_bits()));
+        assert_eq!(toks[2], Token::FloatLit(2500f64.to_bits()));
+    }
+
+    #[test]
+    fn lex_int_literal_underscore_separators() {
+        let (toks, _) = lex_strings("1_000 9_223_372_036_854_775_807 9_223_372_036_854_775_808");
+        assert_eq!(
+            toks,
+            vec![
+                Token::IntLit(1000),
+                Token::IntLit(i64::MAX),
+                Token::IntLitMin,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_float_literal_underscore_separators() {
+        let (toks, _) = lex_strings("1_000.0 3.25_5 2.5e1_0");
+        assert_eq!(toks.len(), 3);
+        assert_eq!(toks[0], Token::FloatLit(1000f64.to_bits()));
+        match toks[1] {
+            Token::FloatLit(bits) => assert!((f64::from_bits(bits) - 3.255).abs() < 1e-12),
+            ref t => panic!("expected FloatLit, got {:?}", t),
+        }
+        assert_eq!(toks[2], Token::FloatLit(2.5e10f64.to_bits()));
+    }
+
+    #[test]
+    fn lex_float_scientific_without_dot() {
+        let (toks, _) = lex_strings("1e5 1E5 1e-5 1_0e2");
+        assert_eq!(toks.len(), 4);
+        assert_eq!(toks[0], Token::FloatLit(100000f64.to_bits()));
+        assert_eq!(toks[1], Token::FloatLit(100000f64.to_bits()));
+        assert_eq!(toks[2], Token::FloatLit(1e-5f64.to_bits()));
+        assert_eq!(toks[3], Token::FloatLit(1000f64.to_bits()));
+    }
+
+    #[test]
+    fn lex_int_hex_octal_binary_literals() {
+        let (toks, _) = lex_strings("0xFF 0Xff 0xFF_FF 0o77 0b11 0b1_0");
+        assert_eq!(
+            toks,
+            vec![
+                Token::IntLit(255),
+                Token::IntLit(255),
+                Token::IntLit(65535),
+                Token::IntLit(63),
+                Token::IntLit(3),
+                Token::IntLit(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_int_prefixed_i64_min_spells_intlitmin() {
+        // The i64::MIN magnitude is spellable in any base (spec §2):
+        // the parser folds `- IntLitMin` to i64::MIN.
+        let (toks, _) = lex_strings("0x8000_0000_0000_0000 0o1000000000000000000000");
+        assert_eq!(toks, vec![Token::IntLitMin, Token::IntLitMin]);
+    }
+
+    #[test]
+    fn lex_int_prefixed_overflow_emits_error() {
+        // A prefixed literal above the i64::MIN magnitude is an error
+        // until sized unsigned types land (M17.1) — same recovery as
+        // decimal overflow: one diagnostic, IntLit(0).
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let toks = lex("0x1_0000_0000_0000_0000", &mut pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagCode::ParseError);
+        assert_eq!(
+            diags[0].message,
+            "invalid integer literal: '0x1_0000_0000_0000_0000'"
+        );
+        assert!(toks.iter().any(|(t, _)| *t == Token::IntLit(0)));
+    }
+
+    #[test]
+    fn lex_int_malformed_prefix_digits_emits_dedicated_error() {
+        // Bad digits after a base prefix get one dedicated diagnostic
+        // instead of fragmenting into int + ident tokens.
+        for (src, msg) in [
+            ("0xFG", "invalid integer literal: '0xFG'"),
+            ("0o78", "invalid integer literal: '0o78'"),
+            ("0b12", "invalid integer literal: '0b12'"),
+            ("0x", "invalid integer literal: '0x'"),
+        ] {
+            let mut pool = InternPool::new();
+            let mut sink = DiagSink::new();
+            let toks = lex(src, &mut pool, &mut sink);
+            let diags = sink.into_diags();
+            assert_eq!(diags.len(), 1, "src={src}");
+            assert_eq!(diags[0].code, DiagCode::ParseError, "src={src}");
+            assert_eq!(diags[0].message, msg, "src={src}");
+            assert!(
+                toks.iter().any(|(t, _)| *t == Token::IntLit(0)),
+                "src={src}: recovery token IntLit(0) present: {toks:?}"
+            );
+        }
+    }
+
+    #[test]
     fn lex_float_does_not_swallow_int() {
         let (toks, _) = lex_strings("3 14");
         assert_eq!(toks, vec![Token::IntLit(3), Token::IntLit(14)]);
@@ -1191,17 +1446,149 @@ mod tests {
     }
 
     #[test]
-    fn string_literal_still_rejects_hex_escape() {
-        // `\xNN` is bytes-literal-only at M8.4.2; string escapes grow at M13.7.
+    fn lex_string_hex_escape_is_unicode_scalar() {
+        // M13.7: `\xHH` in a string literal is U+00HH, UTF-8 encoded
+        // (Python semantics, spec §2) — `\xFF` decodes to two bytes,
+        // unlike the bytes literal's raw-byte `\xNN`.
         let mut pool = InternPool::new();
         let mut sink = DiagSink::new();
-        let _ = lex(r#"x = "\x41""#, &mut pool, &mut sink);
+        let toks = lex(r#"x = "\x41\xFF""#, &mut pool, &mut sink);
+        assert!(sink.into_diags().is_empty());
+        let id = toks
+            .iter()
+            .find_map(|(t, _)| match t {
+                Token::StrLit(id) => Some(*id),
+                _ => None,
+            })
+            .expect("string token present");
+        assert_eq!(pool.str(id), "A\u{00FF}");
+        assert_eq!(pool.str(id).as_bytes(), &[0x41, 0xC3, 0xBF]);
+    }
+
+    #[test]
+    fn lex_string_hex_escape_requires_two_digits() {
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let toks = lex(r#"x = "\x4""#, &mut pool, &mut sink);
         let diags = sink.into_diags();
-        assert!(
-            diags.iter().any(|d| d.code == DiagCode::UnknownEscape),
-            "expected UnknownEscape, got {:?}",
-            diags
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagCode::UnknownEscape);
+        assert_eq!(
+            diags[0].message,
+            "invalid '\\xNN' escape: exactly two hex digits required"
         );
+        let id = toks
+            .iter()
+            .find_map(|(t, _)| match t {
+                Token::StrLit(id) => Some(*id),
+                _ => None,
+            })
+            .expect("string token present");
+        assert_eq!(pool.str(id), "\\x4");
+    }
+
+    #[test]
+    fn lex_string_unicode_escape() {
+        // `\u{...}` decodes a Unicode scalar: 1-6 hex digits (at most),
+        // UTF-8 encoded. U+10FFFF is the largest scalar.
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let toks = lex(r#"x = "\u{41}\u{1F600}\u{10FFFF}""#, &mut pool, &mut sink);
+        assert!(sink.into_diags().is_empty());
+        let id = toks
+            .iter()
+            .find_map(|(t, _)| match t {
+                Token::StrLit(id) => Some(*id),
+                _ => None,
+            })
+            .expect("string token present");
+        assert_eq!(pool.str(id), "A\u{1F600}\u{10FFFF}");
+    }
+
+    #[test]
+    fn lex_string_unicode_escape_rejects_bad_scalars() {
+        // Surrogates and values above U+10FFFF are not Unicode scalars.
+        for src in [r#"x = "\u{D800}""#, r#"x = "\u{110000}""#] {
+            let mut pool = InternPool::new();
+            let mut sink = DiagSink::new();
+            let toks = lex(src, &mut pool, &mut sink);
+            let diags = sink.into_diags();
+            assert_eq!(diags.len(), 1, "src={src}");
+            assert_eq!(diags[0].code, DiagCode::UnknownEscape, "src={src}");
+            assert!(
+                diags[0].message.contains("not a Unicode scalar"),
+                "src={src}: {:?}",
+                diags[0].message
+            );
+            let id = toks
+                .iter()
+                .find_map(|(t, _)| match t {
+                    Token::StrLit(id) => Some(*id),
+                    _ => None,
+                })
+                .expect("string token present");
+            let body = &src[src.find('"').unwrap() + 1..src.rfind('"').unwrap()];
+            assert_eq!(pool.str(id), body, "src={src}: preserved verbatim");
+        }
+    }
+
+    #[test]
+    fn lex_string_unicode_escape_requires_braced_digits() {
+        // Malformed shapes: no digits, unterminated, non-hex digit, or
+        // more than six digits.
+        for src in [
+            r#"x = "\u{""#,
+            r#"x = "\u{41""#,
+            r#"x = "\u{ZZ}""#,
+            r#"x = "\u{000000041}""#,
+            // `\u` with no `{`: the digit scan must not slice past the
+            // end (or into a multi-byte char) looking for digits.
+            r#"x = "\u""#,
+            r#"x = "a\u""#,
+            r#"x = "\ué""#,
+        ] {
+            let mut pool = InternPool::new();
+            let mut sink = DiagSink::new();
+            let toks = lex(src, &mut pool, &mut sink);
+            let diags = sink.into_diags();
+            assert_eq!(diags.len(), 1, "src={src}");
+            assert_eq!(diags[0].code, DiagCode::UnknownEscape, "src={src}");
+            assert!(
+                diags[0].message.contains("expected 1-6 hex digits"),
+                "src={src}: {:?}",
+                diags[0].message
+            );
+            let id = toks
+                .iter()
+                .find_map(|(t, _)| match t {
+                    Token::StrLit(id) => Some(*id),
+                    _ => None,
+                })
+                .expect("string token present");
+            let body = &src[src.find('"').unwrap() + 1..src.rfind('"').unwrap()];
+            assert_eq!(pool.str(id), body, "src={src}: preserved verbatim");
+        }
+    }
+
+    #[test]
+    fn lex_bytes_unicode_escape_stays_unknown() {
+        // `\u{...}` is string-only; in bytes literals it remains an
+        // unknown escape, preserved verbatim.
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let toks = lex(r#"x = b"\u{41}""#, &mut pool, &mut sink);
+        let diags = sink.into_diags();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagCode::UnknownEscape);
+        assert_eq!(diags[0].message, "unknown escape sequence '\\u'");
+        let id = toks
+            .iter()
+            .find_map(|(t, _)| match t {
+                Token::BytesLit(id) => Some(*id),
+                _ => None,
+            })
+            .expect("bytes token present");
+        assert_eq!(pool.bytes_payload(id), b"\\u{41}");
     }
 
     #[test]

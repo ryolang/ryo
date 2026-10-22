@@ -46,7 +46,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [ ] [Milestone 13 — Error Types & Unions [alpha]](#milestone-13-error-types--unions-alpha)
 - [ ] [Milestone 13.5 — Default Parameters & Named Arguments](#milestone-135-default-parameters--named-arguments) *(deferred — see sequencing note below)*
 - [ ] [Milestone 13.6 — `io_read_line` Gains Error Unions](#milestone-136-io_read_line-gains-error-unions) *(lands directly after M13)*
-- [ ] [Milestone 13.7 — Literal Completeness (Hex/Octal/Binary Ints, Escapes)](#milestone-137-literal-completeness-hexoctalbinary-ints-escapes) *(deferred — no dependencies; slots in anywhere)*
+- [x] [Milestone 13.7 — Literal Completeness ✅ COMPLETE](#milestone-137-literal-completeness) *(landed ad hoc 2026-10-22 — scientific notation, underscores, base prefixes, full escape set)*
 
 > **Sequencing note (2026-09):** Next-up order is the alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M16** — followed by the rest of Phase 3. M10 is no longer a standalone milestone in effort terms: per D11 its grouping machinery folds into M9, so what ships between M9.1 and M11 is only the positional-sugar layer (parser forms + destructuring, depends on M9). **M12.5, M12.6, M13.5, and M13.7 are deferred past the core cluster.** M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"), and M9's former dependency on its named-argument parsing is stale — D11 moved struct literals to brace construction with its own grammar. M13.7 has no dependencies and slots in as filler. M13.5 remains v0.1-scope but may slip to v0.2 if the core cluster absorbs the schedule. **M9.2 (throwaway CLI intrinsics)** has no dependencies and slots in alongside the core cluster any time after M9.1; **M13.6** lands directly after M13, before M16, migrating the M9.2 `io_read_line` placeholder to real error unions. **M12.5** (advanced pattern matching — nested patterns, guards, or-patterns, and the rest of M12's deferral register) is v0.2 work, not alpha-gating; the only pattern features alpha needs beyond M12 ship inside M13 (error-union match) and M16 (`?T`/`none` patterns) themselves.
 
@@ -1963,25 +1963,11 @@ fn main():
 - The returned `str` is owned by the caller under the normal rules; the runtime buffer is scratch
 - Dependencies: Milestone 13 (error types & unions), Milestone 9.2 (the placeholder being replaced)
 
-### Milestone 13.7: Literal Completeness (Hex/Octal/Binary Ints, Escapes)
+### Milestone 13.7: Literal Completeness
 
-**Goal:** Implement the literal forms spec §3 documents but the lexer never got: non-decimal integer literals and the full escape set.
+**Status:** ✅ COMPLETE — landed ad hoc (2026-10-22), outside the milestone sequence.
 
-**Status:** ⏳ Deferred — no dependencies; slots in anywhere past the alpha core cluster (see the sequencing note in the milestone index).
-
-**Tasks:**
-
-- Integer literals: hex `0xFF`, octal `0o77`, binary `0b11`, underscore separators `1_000` (and `1_000.0` for floats) — all produce the existing `int`/`float`; same i64 range rules and `IntLitMin` handling as decimal
-- String escapes: `\xHH` and `\u{HHHH}`. Both are Unicode-scalar semantics (Python-style): `\xFF` in a `"..."` literal means U+00FF, UTF-8 encoded — two bytes, not one. Bytes literals are the raw-byte form and keep their M8.4.2 rule: `\xNN` accepts the full 0x00–0xFF range there
-- Tests: all bases, separators, escape ranges, rejection cases (bad digits, `\x` with fewer than two hex digits, `\u{}` surrogates / above U+10FFFF)
-
-**Visible Progress:** Byte-oriented code reads naturally (`bytes_push(&b, 0xFF)`); string literals accept the full spec §3 escape set.
-
-**Implementation Notes:**
-
-- Lexer-scoped change: the raw int token gains prefixed forms; conversion to `i64` happens at lex time like decimal today
-- `\u{HHHH}` encodes the scalar as UTF-8 into the decoded literal — no `char` type required (that is Milestone 17.2)
-- Dependencies: none
+**Landed ad hoc (2026-10-22):** the full spec §2 literal surface — scientific notation (`1.23e-10`, signed/uppercase/dotless exponents), underscore separators (`1_000`, `1_000.0`), base-prefixed integers (`0xFF` / `0o77` / `0b11`, the `IntLitMin` magnitude spellable in any base, malformed prefixes get a dedicated diagnostic), and the string escape set (`\xHH` as U+00HH UTF-8 encoded, Python semantics; `\u{...}` Unicode scalars with surrogate/range/malformed rejections; bytes literals keep raw-byte `\xNN`, and `\u{...}` stays an unknown escape there). All lexer-scoped; the decoded value is materialized at lex time, so parser/AST/sema/codegen are untouched.
 
 ## Phase 3: Type System & Memory Safety
 
@@ -2127,14 +2113,15 @@ fn main():
 
 **Design questions this milestone owns:**
 
-- Literal coercion: when does an `int` literal type as `u8` (contextual typing), and what are the comparison/arithmetic rules between sized types and `int`? Ryo has no implicit numeric conversions today (the `bool` philosophy, §4.2) — without an answer, `b[i] == 0x02` does not compile
-- Conversion spelling: explicit `int` ↔ sized-type conversions and their checked/narrowing behavior
+- Literal coercion — **decided (spec §4.2)**: an `int` literal takes the sized type in a typed context (annotation, parameter, arithmetic/comparison operand) when the value fits, checked at compile time; variables get no implicit conversions — mixed-type arithmetic on variables is a compile error with an explicit-conversion diagnostic. This answers the `b[i] == 0x02` case
+- Conversion spelling — **decided (spec §4.2/§18)**: `int` ↔ sized-type conversions preserve the value and trap on non-fitting values in all build modes; same-width signed↔unsigned traps too (no implicit bit reinterpretation)
 - Overflow semantics per sized type (GAP-2 froze traps-in-all-build-modes for `int`, spec §18; sized types follow)
 
 **Tasks:**
 
 - Pool tags + `TypeKind` entries for `i8`/`i16`/`i32`/`u8`/`u16`/`u32`/`u64`/`usize`/`float32`; annotation resolution; display
-- Cranelift lowering (`I8`–`I64`, `F32`) with explicit extend/reduce at conversions; no implicit widening
+- Integer escape-hatch spellings (`wrapping_*` conversions / same-width reinterpret) — spec §18 promises the family; trapping conversions must not ship without a legal spelling for intentional bit-level conversion
+- Cranelift lowering (`I8`–`I64`, `F32`) with explicit extend/reduce at conversions; checked narrowing (compare + trap per §18); no implicit widening
 - Resolves the M8.4.2 interim: `b[i]` yields `u8`, `bytes_push` takes `u8` (pre-alpha breaking change, pre-announced in the M8.4.2 notes)
 - Indexed stores `b[i] = v` on `mut bytes` bindings (bounds-checked, panics) — deferred from M8.4.2 alongside the element type
 - Benchmark: add `benchmarks/byte_sieve/` (Sieve of Eratosthenes over a `mut bytes` buffer) as the tracking measure for byte-index codegen — expressible only once indexed stores land here
