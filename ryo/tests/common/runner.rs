@@ -1,22 +1,29 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 fn runtime_lib_path() -> PathBuf {
     PathBuf::from(env!("RYO_RUNTIME_LIB"))
 }
 
 fn zig_path() -> PathBuf {
-    let output = Command::new(env!("CARGO_BIN_EXE_ryo"))
-        .args(["toolchain", "status", "--path"])
-        .output()
-        .expect("failed to execute ryo toolchain status --path");
-    assert!(
-        output.status.success(),
-        "failed to get zig path from ryo: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    PathBuf::from(path_str)
+    // Queried by every zig-linked fixture; one `ryo toolchain status --path`
+    // spawn per suite process instead of one per fixture.
+    static ZIG_PATH: OnceLock<PathBuf> = OnceLock::new();
+    ZIG_PATH
+        .get_or_init(|| {
+            let output = Command::new(env!("CARGO_BIN_EXE_ryo"))
+                .args(["toolchain", "status", "--path"])
+                .output()
+                .expect("failed to execute ryo toolchain status --path");
+            assert!(
+                output.status.success(),
+                "failed to get zig path from ryo: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        })
+        .clone()
 }
 
 /// Whether a smoke suite may run in this environment (I-102 lane split):
