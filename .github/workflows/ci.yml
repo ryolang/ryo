@@ -75,20 +75,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: test
-      - name: Get Zig version
-        id: zig-version
-        run: |
-          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' ryo-backend/src/toolchain.rs | cut -d'"' -f2)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - name: Cache Zig toolchain
-        id: zig-cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.ryo/toolchain
-          key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
-      - name: Install Zig toolchain
-        if: steps.zig-cache.outputs.cache-hit != 'true'
-        run: cargo run -- toolchain install
+      - uses: ./.github/actions/zig-toolchain
       - run: cargo test --workspace
       # The param-sentinel guards in Tir::inst/span are hard assert!s so a
       # contract violation fails clearly in release too — run their
@@ -108,26 +95,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: windows
-      - name: Get Zig version
-        id: zig-version
-        shell: bash
-        run: |
-          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' ryo-backend/src/toolchain.rs | cut -d'"' -f2)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - name: Cache Zig toolchain
-        id: zig-cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.ryo/toolchain
-          key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
-      - name: Install Zig toolchain
-        if: steps.zig-cache.outputs.cache-hit != 'true'
-        run: cargo run -- toolchain install
+      - uses: ./.github/actions/zig-toolchain
       - run: cargo test --workspace
 
   asan:
     name: ASan leak check
     runs-on: ubuntu-latest
+    env:
+      RYO_SMOKE_LANE: "1"
     permissions:
       contents: read
     steps:
@@ -138,21 +113,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: asan
-      - name: Get Zig version
-        id: zig-version
-        run: |
-          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' ryo-backend/src/toolchain.rs | cut -d'"' -f2)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - name: Cache Zig toolchain
-        id: zig-cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.ryo/toolchain
-          key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
-      - name: Install Zig toolchain
-        if: steps.zig-cache.outputs.cache-hit != 'true'
-        run: cargo run -- toolchain install
-      - run: cargo test --test asan_smoke
+      - uses: ./.github/actions/zig-toolchain
+      - name: Run ASan smoke suite
+        # The suite self-skips under CI unless RYO_SMOKE_LANE is exactly
+        # "1"; the guard steps below keep this lane from passing vacuously
+        # if the env above is lost. --nocapture is load-bearing: libtest
+        # captures passing-test stderr, so without it the skip marker
+        # never reaches the log and the first guard cannot trip.
+        run: cargo test --test asan_smoke -- --nocapture 2>&1 | tee asan_smoke.log
+      - name: Liveness guard (suite must not self-skip)
+        # A dropped RYO_SMOKE_LANE env makes every test skip-and-pass, so
+        # "ok. N passed" alone is not proof of life — the skip marker is.
+        run: "! grep -q 'smoke suite runs in the dedicated CI lane' asan_smoke.log"
+      - name: Liveness guard (suite must run some tests)
+        run: "grep -Eq 'test result: ok\\. [1-9][0-9]* passed' asan_smoke.log"
 
   miri:
     name: Miri (runtime)
@@ -193,6 +167,8 @@ jobs:
   valgrind:
     name: Valgrind leak check
     runs-on: ubuntu-latest
+    env:
+      RYO_SMOKE_LANE: "1"
     permissions:
       contents: read
     steps:
@@ -205,21 +181,25 @@ jobs:
           prefix-key: valgrind
       - name: Install Valgrind
         run: sudo apt-get update && sudo apt-get install -y valgrind
-      - name: Get Zig version
-        id: zig-version
-        run: |
-          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' ryo-backend/src/toolchain.rs | cut -d'"' -f2)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - name: Cache Zig toolchain
-        id: zig-cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.ryo/toolchain
-          key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
-      - name: Install Zig toolchain
-        if: steps.zig-cache.outputs.cache-hit != 'true'
-        run: cargo run -- toolchain install
-      - run: cargo test --test valgrind_smoke
+      - uses: ./.github/actions/zig-toolchain
+      - name: Run Valgrind smoke suite
+        # The suite self-skips under CI unless RYO_SMOKE_LANE is exactly
+        # "1"; the guard steps below keep this lane from passing vacuously
+        # if the env above is lost. --nocapture is load-bearing: libtest
+        # captures passing-test stderr, so without it the skip marker
+        # never reaches the log and the first guard cannot trip.
+        run: cargo test --test valgrind_smoke -- --nocapture 2>&1 | tee valgrind_smoke.log
+      - name: Liveness guard (suite must not self-skip)
+        # A dropped RYO_SMOKE_LANE env makes every test skip-and-pass, so
+        # "ok. N passed" alone is not proof of life — the skip marker is.
+        run: "! grep -q 'smoke suite runs in the dedicated CI lane' valgrind_smoke.log"
+      - name: Liveness guard (suite must run some tests)
+        run: "grep -Eq 'test result: ok\\. [1-9][0-9]* passed' valgrind_smoke.log"
+      - name: Liveness guard (valgrind must be present)
+        # A broken or missing valgrind makes require_valgrind skip-and-pass
+        # every test ("valgrind not installed"), which the guards above
+        # cannot see — the same vacuous-pass shape in a different message.
+        run: "! grep -q 'valgrind not installed' valgrind_smoke.log"
       # The smoke suites above link fixtures through the AOT linker with
       # the default musl target; pin the glibc link mode too so a
       # regression in `--link glibc` can't slip past CI.

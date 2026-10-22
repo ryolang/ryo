@@ -37,23 +37,6 @@ jobs:
         with:
           prefix-key: examples
 
-      - name: Get Zig version
-        id: zig-version
-        run: |
-          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' ryo-backend/src/toolchain.rs | cut -d'"' -f2)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Cache Zig toolchain
-        id: zig-cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.ryo/toolchain
-          key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
-
-      - name: Install Zig toolchain
-        if: steps.zig-cache.outputs.cache-hit != 'true'
-        run: cargo run -- toolchain install
-
       - name: Build Ryo compiler
         run: cargo build --release
 

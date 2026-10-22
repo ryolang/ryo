@@ -1,0 +1,25 @@
+name: Install Zig toolchain
+description: >-
+  Restores the pinned Zig toolchain (ZIG_VERSION in
+  ryo-backend/src/toolchain.rs) from the actions cache, installing on a
+  miss. Canonical copy of the block formerly duplicated per job; the
+  smoke suites and dedicated sanitizer lanes depend on it.
+runs:
+  using: composite
+  steps:
+    - name: Get Zig version
+      id: zig-version
+      shell: bash
+      run: |
+        VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' ryo-backend/src/toolchain.rs | cut -d'"' -f2)
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+    - name: Cache Zig toolchain
+      id: zig-cache
+      uses: actions/cache@v6
+      with:
+        path: ~/.ryo/toolchain
+        key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
+    - name: Install Zig toolchain
+      if: steps.zig-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: cargo run -- toolchain install

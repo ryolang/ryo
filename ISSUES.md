@@ -220,17 +220,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-102 — Smoke suites duplicate work across lanes and fixture builds
-
-**Severity:** Cleanup
-**Area:** ci-benchmarks
-
-**Files:** `ryo/tests/asan_smoke.rs`, `ryo/tests/valgrind_smoke.rs`, `ryo/tests/common/fixtures.rs` (`RYO_FIXTURES` :1), `ryo/tests/common/runner.rs` (`build_and_link` :40), `.github/workflows/ci.yml` (:83)
-**Summary:** Both suites iterate the same 11 fixtures (`common/fixtures.rs:1` — the `RYO_FIXTURES` table runs to :1516), compiling+linking each twice per full run; each `build_and_link` also shells out to `ryo toolchain status --path` to find zig (`common/runner.rs:40-58`). `cargo test --workspace` in the test lane already includes `asan_smoke`, so it runs twice on ubuntu (test lane + dedicated asan lane); valgrind "runs" (silently skips when the binary is absent) in lanes without valgrind.
-**Resolution:** Share fixture compilation across suites, cache the zig path, and exclude the smoke suites from the default test lane (or from the dedicated lanes).
-
----
-
 ### I-109 — No instruction→function reverse mapping in UIR
 
 **Severity:** Cleanup
