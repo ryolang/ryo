@@ -1129,13 +1129,7 @@ impl<'a> Walk<'a> {
             }
             // P6': a view re-borrowed into a `str` arg (ViewAsOwner)
             // borrows the view's ROOT owner for the call's duration.
-            let owner =
-                if mode == ParamMode::Borrow && self.tir.inst(arg).tag == TirTag::ViewAsOwner {
-                    projection_root(own, self.tir, self.flow, self.pool, arg)
-                        .unwrap_or_else(|| own.underlying_owner(arg))
-                } else {
-                    own.underlying_owner(arg)
-                };
+            let owner = self.call_arg_owner(own, mode, arg);
             if mode == ParamMode::Borrow {
                 check_use_moved(self.tir, self.pool, own, sink, arg, self.tir.span(arg));
                 push_unique(&mut borrowed, owner);
@@ -1159,6 +1153,19 @@ impl<'a> Walk<'a> {
         // The stale-triple hazard (callee realloc'd/replaced the
         // buffer) is handled in CODEGEN (named-binding Frees emit the
         // binding's CURRENT `FatLocals`).
+    }
+
+    /// The owner an argument contributes to Rule-7 partition and aliasing
+    /// checks. For a borrow-mode `ViewAsOwner` re-borrow, this is the
+    /// projection's root owner when one exists; otherwise the argument's
+    /// underlying owner (P6', E4).
+    fn call_arg_owner(&self, own: &Ownership, mode: ParamMode, arg: TirRef) -> Owner {
+        if mode == ParamMode::Borrow && self.tir.inst(arg).tag == TirTag::ViewAsOwner {
+            projection_root(own, self.tir, self.flow, self.pool, arg)
+                .unwrap_or_else(|| own.underlying_owner(arg))
+        } else {
+            own.underlying_owner(arg)
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1249,13 +1256,7 @@ impl<'a> Walk<'a> {
                 // FieldAccess step carries the chain's ROOT place), so
                 // alias resolution is uniform; ViewAsOwner args resolve
                 // through the projection chain.
-                let arg_owner =
-                    if mode == ParamMode::Borrow && self.tir.inst(arg).tag == TirTag::ViewAsOwner {
-                        projection_root(own, self.tir, self.flow, self.pool, arg)
-                            .unwrap_or_else(|| own.underlying_owner(arg))
-                    } else {
-                        own.underlying_owner(arg)
-                    };
+                let arg_owner = self.call_arg_owner(own, mode, arg);
                 if arg_owner == *owner {
                     match mode {
                         ParamMode::Borrow => borrow_span = Some(self.tir.span(arg)),
