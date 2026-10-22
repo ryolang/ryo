@@ -10,7 +10,7 @@ Context for agents editing files in `docs/`.
 
 ## When Writing Specification
 
-* Ryo is a general programming language — no system programming features needed
+* Ryo is a general-purpose programming language; systems-programming features (explicit sizes, `#[repr(C)]`/FFI, volatile MMIO) land deliberately when a target domain needs them — don't add systems surface speculatively
 * Ryo prioritizes DX
 * The spec covers both implemented and future features. Do not annotate implementation status in the spec or in docs — status is owned by `docs/dev/implementation_roadmap.md`.
 * Built-in types are lowercase, user-defined types are PascalCase
