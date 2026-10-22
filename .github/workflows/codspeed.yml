@@ -88,20 +88,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: codspeed-aot
-      - name: Get Zig version
-        id: zig-version
-        run: |
-          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' ryo-backend/src/toolchain.rs | cut -d'"' -f2)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - name: Cache Zig toolchain
-        id: zig-cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.ryo/toolchain
-          key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
-      - name: Install Zig toolchain
-        if: steps.zig-cache.outputs.cache-hit != 'true'
-        run: cargo run -- toolchain install
+      - uses: ./.github/actions/zig-toolchain
       - name: Build Ryo compiler
         run: cargo build --release
       - name: Compile Ryo AOT binaries
@@ -143,20 +130,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: codspeed-aot-memory
-      - name: Get Zig version
-        id: zig-version
-        run: |
-          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' ryo-backend/src/toolchain.rs | cut -d'"' -f2)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - name: Cache Zig toolchain
-        id: zig-cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.ryo/toolchain
-          key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
-      - name: Install Zig toolchain
-        if: steps.zig-cache.outputs.cache-hit != 'true'
-        run: cargo run -- toolchain install
+      - uses: ./.github/actions/zig-toolchain
       - name: Build Ryo compiler
         run: cargo build --release
       - name: Compile Ryo AOT binaries

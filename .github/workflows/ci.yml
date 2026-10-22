@@ -75,20 +75,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: test
-      - name: Get Zig version
-        id: zig-version
-        run: |
-          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' ryo-backend/src/toolchain.rs | cut -d'"' -f2)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - name: Cache Zig toolchain
-        id: zig-cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.ryo/toolchain
-          key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
-      - name: Install Zig toolchain
-        if: steps.zig-cache.outputs.cache-hit != 'true'
-        run: cargo run -- toolchain install
+      - uses: ./.github/actions/zig-toolchain
       - run: cargo test --workspace
       # The param-sentinel guards in Tir::inst/span are hard assert!s so a
       # contract violation fails clearly in release too — run their
@@ -108,21 +95,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: windows
-      - name: Get Zig version
-        id: zig-version
-        shell: bash
-        run: |
-          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' ryo-backend/src/toolchain.rs | cut -d'"' -f2)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - name: Cache Zig toolchain
-        id: zig-cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.ryo/toolchain
-          key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
-      - name: Install Zig toolchain
-        if: steps.zig-cache.outputs.cache-hit != 'true'
-        run: cargo run -- toolchain install
+      - uses: ./.github/actions/zig-toolchain
       - run: cargo test --workspace
 
   asan:
@@ -138,20 +111,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: asan
-      - name: Get Zig version
-        id: zig-version
-        run: |
-          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' ryo-backend/src/toolchain.rs | cut -d'"' -f2)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - name: Cache Zig toolchain
-        id: zig-cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.ryo/toolchain
-          key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
-      - name: Install Zig toolchain
-        if: steps.zig-cache.outputs.cache-hit != 'true'
-        run: cargo run -- toolchain install
+      - uses: ./.github/actions/zig-toolchain
       - run: cargo test --test asan_smoke
 
   miri:
@@ -205,20 +165,7 @@ jobs:
           prefix-key: valgrind
       - name: Install Valgrind
         run: sudo apt-get update && sudo apt-get install -y valgrind
-      - name: Get Zig version
-        id: zig-version
-        run: |
-          VERSION=$(grep -o 'const ZIG_VERSION: &str = "[^"]*"' ryo-backend/src/toolchain.rs | cut -d'"' -f2)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - name: Cache Zig toolchain
-        id: zig-cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.ryo/toolchain
-          key: zig-${{ steps.zig-version.outputs.version }}-${{ runner.os }}-${{ runner.arch }}
-      - name: Install Zig toolchain
-        if: steps.zig-cache.outputs.cache-hit != 'true'
-        run: cargo run -- toolchain install
+      - uses: ./.github/actions/zig-toolchain
       - run: cargo test --test valgrind_smoke
       # The smoke suites above link fixtures through the AOT linker with
       # the default musl target; pin the glibc link mode too so a
