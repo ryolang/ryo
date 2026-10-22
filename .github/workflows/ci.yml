@@ -126,7 +126,7 @@ jobs:
         # "ok. N passed" alone is not proof of life — the skip marker is.
         run: "! grep -q 'smoke suite runs in the dedicated CI lane' asan_smoke.log"
       - name: Liveness guard (suite must run some tests)
-        run: grep -Eq 'test result: ok\. [1-9][0-9]* passed' asan_smoke.log
+        run: "grep -Eq 'test result: ok\\. [1-9][0-9]* passed' asan_smoke.log"
 
   miri:
     name: Miri (runtime)
@@ -194,7 +194,12 @@ jobs:
         # "ok. N passed" alone is not proof of life — the skip marker is.
         run: "! grep -q 'smoke suite runs in the dedicated CI lane' valgrind_smoke.log"
       - name: Liveness guard (suite must run some tests)
-        run: grep -Eq 'test result: ok\. [1-9][0-9]* passed' valgrind_smoke.log
+        run: "grep -Eq 'test result: ok\\. [1-9][0-9]* passed' valgrind_smoke.log"
+      - name: Liveness guard (valgrind must be present)
+        # A broken or missing valgrind makes require_valgrind skip-and-pass
+        # every test ("valgrind not installed"), which the guards above
+        # cannot see — the same vacuous-pass shape in a different message.
+        run: "! grep -q 'valgrind not installed' valgrind_smoke.log"
       # The smoke suites above link fixtures through the AOT linker with
       # the default musl target; pin the glibc link mode too so a
       # regression in `--link glibc` can't slip past CI.
