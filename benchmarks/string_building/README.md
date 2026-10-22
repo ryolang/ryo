@@ -2,7 +2,7 @@
 
 ## Overview
 
-* **Focus:** Runtime string ABI + eager destruction — concat over 50,000 iterations; the direct before/after measure for the packed-`u128` runtime ABI (landed in `7d0a047`; guarded by test `clif_string_ops_use_packed_return_no_stack_slots`).
+* **Focus:** Runtime string ABI + eager destruction — concat over 50,000 iterations; the direct before/after measure for the packed-`u128` runtime ABI (a past experiment — landed in `7d0a047`, superseded 2026-09; see `docs/dev/cranelift_lessons.md`).
 * **Languages compared:** Rust, Swift, Ryo (AOT vs JIT), and Python.
 * **What to look for:** runtime string ABI + allocation policy, not codegen — the arms are now the same program, so the row prices `ryo_str_concat` semantics; the essay and checkpoint below carry the before/after story.
 
