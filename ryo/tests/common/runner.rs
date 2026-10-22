@@ -29,10 +29,15 @@ fn zig_path() -> PathBuf {
 /// Whether a smoke suite may run in this environment: under CI the
 /// dedicated `asan`/`valgrind` jobs are the sole runners of these suites
 /// and set `RYO_SMOKE_LANE=1`; the general `cargo test --workspace` lane —
-/// which would duplicate that work per matrix leg — skips them. Local runs (`CI` unset) and the Docker Linux script always
-/// run the suites, preserving today's local behavior.
+/// which would duplicate that work per matrix leg — skips them. Local
+/// runs (`CI` unset) and the Docker Linux script always run the suites,
+/// preserving today's local behavior. The exact-value rule mirrors
+/// `require_valgrind`'s opt-out, so `RYO_SMOKE_LANE=0`/`""` still skip.
+/// Note the skip reason goes through libtest's captured stderr: it is
+/// only visible with `--nocapture` (same as `require_valgrind`'s
+/// messages), which the dedicated CI lanes pass.
 pub fn smoke_lane_active(name: &str) -> bool {
-    if std::env::var_os("RYO_SMOKE_LANE").is_some() || std::env::var_os("CI").is_none() {
+    if std::env::var("RYO_SMOKE_LANE").as_deref() == Ok("1") || std::env::var_os("CI").is_none() {
         return true;
     }
     eprintln!(
