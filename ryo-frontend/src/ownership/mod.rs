@@ -1014,6 +1014,27 @@ fn analyze_function(
                 Some(if_stmt) if if_may_fall_through(tir, if_stmt) => if_stmt,
                 _ => anchor,
             };
+            // A P5-deferred anchor can land inside an if arm (a view of
+            // the temp used only there). When the producer dominates the
+            // if and the if falls through, re-anchor at the if: the
+            // merge fires the Free on every path, where the producer's
+            // slot is initialized. An arm anchor leaks on the not-taken
+            // paths (path coverage proves it). A producer created
+            // inside the conditional keeps the arm anchor: its slot is
+            // uninitialized on the other paths, so a merge-anchored
+            // Free would release garbage.
+            let anchor = match outermost_branch_of(tir, anchor) {
+                Some(branch_stmt)
+                    if tir.inst(branch_stmt).tag == TirTag::IfStmt
+                        && if_may_fall_through(tir, branch_stmt)
+                        && !tir.contains_reachable(branch_stmt, t)
+                        && order.get(t.index()).copied().unwrap_or(0)
+                            < order.get(branch_stmt.index()).copied().unwrap_or(0) =>
+                {
+                    branch_stmt
+                }
+                _ => anchor,
+            };
             sidecar.drops.push(DropOp {
                 position: DropPosition::AfterStep { inst: anchor },
                 target: t,
