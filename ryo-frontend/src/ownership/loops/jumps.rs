@@ -17,6 +17,7 @@ use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow};
 use ryo_core::ownership::FunctionSidecar;
 use ryo_core::tir::{ExtraList, MatchBodyView, Tir, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 
 /// Iterative dominator sets over the Flow CFG, dense per block id.
@@ -88,9 +89,11 @@ pub(crate) struct LoopExitCtx<'a> {
     top_level: HashMap<TirRef, TirRef>,
     loop_carried_owners: HashSet<TirRef>,
     reassigned_after_loop_bindings: HashSet<TirRef>,
-    /// Dominator sets for the owning function's Flow CFG, shared by
-    /// every jump in this loop (see `compute_dominators`).
-    doms: Vec<HashSet<BlockId>>,
+    /// Dominator sets for the owning function's Flow CFG (see
+    /// `compute_dominators`). Computed lazily — only the break
+    /// defensive-emit path needs them — and shared by every loop in
+    /// the function, so loops that never reach that path pay nothing.
+    doms: &'a OnceCell<Vec<HashSet<BlockId>>>,
 }
 
 /// Collect every `Assign` (site, name, value) reachable from `stmts`,
@@ -200,7 +203,7 @@ fn assignments_immediately_after_loop<S: TirStmtList + ?Sized>(
 impl<'a> LoopExitCtx<'a> {
     fn new(
         tir: &'a Tir,
-        flow: &Flow,
+        doms: &'a OnceCell<Vec<HashSet<BlockId>>>,
         sidecar: &FunctionSidecar,
         loop_inst: TirRef,
     ) -> Option<Self> {
@@ -238,7 +241,7 @@ impl<'a> LoopExitCtx<'a> {
             top_level,
             loop_carried_owners,
             reassigned_after_loop_bindings,
-            doms: compute_dominators(flow),
+            doms,
         })
     }
 }
@@ -246,6 +249,7 @@ impl<'a> LoopExitCtx<'a> {
 /// Schedule unconditional Frees on `break`/`continue` paths. Runs after
 /// the last-use, anonymous-temp, and dead-store passes have populated
 /// `sidecar.drops`. Kept statement-recursive (see the module header).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
     tir: &Tir,
     flow: &ryo_core::flow::Flow,
@@ -254,6 +258,7 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
     sidecar: &mut FunctionSidecar,
     stmts: &S,
     enclosing: Option<&LoopExitCtx<'_>>,
+    doms: &OnceCell<Vec<HashSet<BlockId>>>,
 ) {
     for r in stmts.iter_refs() {
         let r = stmt_match(tir, r).unwrap_or(r);
@@ -265,7 +270,7 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
                 }
             }
             TirTag::WhileLoop | TirTag::ForRange => {
-                if let Some(ctx) = LoopExitCtx::new(tir, flow, sidecar, r) {
+                if let Some(ctx) = LoopExitCtx::new(tir, doms, sidecar, r) {
                     schedule_loop_exit_frees_in(
                         tir,
                         flow,
@@ -274,6 +279,7 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
                         sidecar,
                         &ctx.body,
                         Some(&ctx),
+                        doms,
                     );
                 }
             }
@@ -287,21 +293,24 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
                     sidecar,
                     &view.then_stmts,
                     enclosing,
+                    doms,
                 );
                 for elif in &view.elif_branches {
                     schedule_loop_exit_frees_in(
-                        tir, flow, pool, own, sidecar, &elif.body, enclosing,
+                        tir, flow, pool, own, sidecar, &elif.body, enclosing, doms,
                     );
                 }
                 if let Some(else_stmts) = &view.else_stmts {
                     schedule_loop_exit_frees_in(
-                        tir, flow, pool, own, sidecar, else_stmts, enclosing,
+                        tir, flow, pool, own, sidecar, else_stmts, enclosing, doms,
                     );
                 }
             }
             TirTag::Match => {
                 for body in match_arm_bodies(tir, r) {
-                    schedule_loop_exit_frees_in(tir, flow, pool, own, sidecar, &body, enclosing);
+                    schedule_loop_exit_frees_in(
+                        tir, flow, pool, own, sidecar, &body, enclosing, doms,
+                    );
                 }
             }
             _ => {}
@@ -309,7 +318,9 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
         if !matches!(inst.tag, TirTag::WhileLoop | TirTag::ForRange) {
             visit_operand_matches(tir, r, &mut |m| {
                 for body in match_arm_bodies(tir, m) {
-                    schedule_loop_exit_frees_in(tir, flow, pool, own, sidecar, &body, enclosing);
+                    schedule_loop_exit_frees_in(
+                        tir, flow, pool, own, sidecar, &body, enclosing, doms,
+                    );
                 }
             });
         }
@@ -504,7 +515,13 @@ pub(crate) fn schedule_break_continue_frees(
             let producer_dominates = flow
                 .step_block_of(r)
                 .or_else(|| flow.term_block_of(r))
-                .is_some_and(|b| dominates(&ctx.doms, b, jump_block));
+                .is_some_and(|b| {
+                    dominates(
+                        ctx.doms.get_or_init(|| compute_dominators(flow)),
+                        b,
+                        jump_block,
+                    )
+                });
             if !producer_dominates {
                 continue;
             }

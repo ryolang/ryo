@@ -1267,7 +1267,10 @@ fn analyze_function(
     // Loop-exit Frees run LAST so they can inspect the now-complete
     // `drops` schedule and only add jump-anchored Frees for inside-loop
     // owners that no earlier pass already covered.
-    schedule_loop_exit_frees_in(tir, flow, pool, &own, sidecar, &body_stmts, None);
+    // Dominators are built on demand (break defensive emit only) and
+    // shared across every loop in this function.
+    let doms = std::cell::OnceCell::new();
+    schedule_loop_exit_frees_in(tir, flow, pool, &own, sidecar, &body_stmts, None, &doms);
 
     schedule_return_epilogue_frees(
         tir,
