@@ -23,10 +23,20 @@ use std::collections::{HashMap, HashSet};
 /// Function graphs are small (tens of blocks), so the textbook
 /// set-intersection fixpoint is the cheapest correct choice.
 fn compute_dominators(flow: &Flow) -> Vec<HashSet<BlockId>> {
-    let all: HashSet<BlockId> = flow.forward_order().collect();
-    let mut doms: Vec<HashSet<BlockId>> = flow
-        .forward_order()
-        .map(|b| {
+    let order: Vec<BlockId> = flow.forward_order().collect();
+    // The dense `doms[b.0]` indexing below relies on forward_order
+    // yielding EVERY block (unreachable ones included) in id order
+    // (Flow::forward_order is `(0..blocks.len()).map(BlockId)` today).
+    // Pin that contract: if it ever changes to skip unreachable blocks
+    // or yield a propagation order, this must become BlockId-keyed.
+    debug_assert!(
+        order.iter().enumerate().all(|(i, &b)| b.0 as usize == i),
+        "compute_dominators requires forward_order to yield all blocks in id order"
+    );
+    let all: HashSet<BlockId> = order.iter().copied().collect();
+    let mut doms: Vec<HashSet<BlockId>> = order
+        .iter()
+        .map(|&b| {
             if b == flow.entry {
                 HashSet::from([b])
             } else {
@@ -37,7 +47,7 @@ fn compute_dominators(flow: &Flow) -> Vec<HashSet<BlockId>> {
     let mut changed = true;
     while changed {
         changed = false;
-        for b in flow.forward_order() {
+        for &b in &order {
             if b == flow.entry {
                 continue;
             }
