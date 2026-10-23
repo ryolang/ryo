@@ -13,11 +13,57 @@ use super::super::{
     stmt_match, visit_operand_matches,
 };
 use super::{TirStmtList, declared_before_stmt};
-use ryo_core::flow::{DropOp, DropPosition};
+use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow};
 use ryo_core::ownership::FunctionSidecar;
 use ryo_core::tir::{ExtraList, MatchBodyView, Tir, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
 use std::collections::{HashMap, HashSet};
+
+/// Iterative dominator sets over the Flow CFG, dense per block id.
+/// Function graphs are small (tens of blocks), so the textbook
+/// set-intersection fixpoint is the cheapest correct choice.
+fn compute_dominators(flow: &Flow) -> Vec<HashSet<BlockId>> {
+    let all: HashSet<BlockId> = flow.forward_order().collect();
+    let mut doms: Vec<HashSet<BlockId>> = flow
+        .forward_order()
+        .map(|b| {
+            if b == flow.entry {
+                HashSet::from([b])
+            } else {
+                all.clone()
+            }
+        })
+        .collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for b in flow.forward_order() {
+            if b == flow.entry {
+                continue;
+            }
+            let preds = flow.predecessors(b);
+            let mut new_dom = HashSet::from([b]);
+            if let Some((&first, rest)) = preds.split_first() {
+                let mut intersect = doms[first.0 as usize].clone();
+                for &p in rest {
+                    intersect.retain(|blk| doms[p.0 as usize].contains(blk));
+                }
+                new_dom.extend(intersect);
+            }
+            if new_dom != doms[b.0 as usize] {
+                doms[b.0 as usize] = new_dom;
+                changed = true;
+            }
+        }
+    }
+    doms
+}
+
+/// `def` dominates `use_` when every path from the entry to `use_`
+/// passes through `def`.
+fn dominates(doms: &[HashSet<BlockId>], def: BlockId, use_: BlockId) -> bool {
+    def == use_ || doms[use_.0 as usize].contains(&def)
+}
 
 // ---------- Post-walk jump-exit free scheduling (kept TIR-based) ----------
 
@@ -32,6 +78,9 @@ pub(crate) struct LoopExitCtx<'a> {
     top_level: HashMap<TirRef, TirRef>,
     loop_carried_owners: HashSet<TirRef>,
     reassigned_after_loop_bindings: HashSet<TirRef>,
+    /// Dominator sets for the owning function's Flow CFG, shared by
+    /// every jump in this loop (see `compute_dominators`).
+    doms: Vec<HashSet<BlockId>>,
 }
 
 /// Collect every `Assign` (site, name, value) reachable from `stmts`,
@@ -139,7 +188,12 @@ fn assignments_immediately_after_loop<S: TirStmtList + ?Sized>(
 }
 
 impl<'a> LoopExitCtx<'a> {
-    fn new(tir: &'a Tir, sidecar: &FunctionSidecar, loop_inst: TirRef) -> Option<Self> {
+    fn new(
+        tir: &'a Tir,
+        flow: &Flow,
+        sidecar: &FunctionSidecar,
+        loop_inst: TirRef,
+    ) -> Option<Self> {
         let body = tir.loop_body_view(loop_inst)?;
         let mut inside_loop: HashSet<TirRef> = HashSet::new();
         tir.collect_loop_body_refs(loop_inst, &mut inside_loop);
@@ -174,6 +228,7 @@ impl<'a> LoopExitCtx<'a> {
             top_level,
             loop_carried_owners,
             reassigned_after_loop_bindings,
+            doms: compute_dominators(flow),
         })
     }
 }
@@ -200,7 +255,7 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
                 }
             }
             TirTag::WhileLoop | TirTag::ForRange => {
-                if let Some(ctx) = LoopExitCtx::new(tir, sidecar, r) {
+                if let Some(ctx) = LoopExitCtx::new(tir, flow, sidecar, r) {
                     schedule_loop_exit_frees_in(
                         tir,
                         flow,
@@ -420,6 +475,24 @@ pub(crate) fn schedule_break_continue_frees(
             continue;
         }
         if is_break {
+            // The Free fires where its anchor fires: the producer must
+            // dominate the jump's block, i.e. have run on every path
+            // reaching this break. Owners produced after the loop — or
+            // in a branch that can bypass them — do not dominate it;
+            // anchoring their Free here releases storage before the
+            // value exists (validator: path double discharge) and the
+            // bogus target poisons CleanupPlan's Binding/Value redirect
+            // for the owners it actually covers (the
+            // bug_reports/bug_str_concat_after_break.ryo family).
+            let Some(jump_block) = flow.term_block_of(jump_inst) else {
+                continue;
+            };
+            let producer_dominates = flow
+                .step_block_of(r)
+                .is_some_and(|b| dominates(&ctx.doms, b, jump_block));
+            if !producer_dominates {
+                continue;
+            }
             sidecar.drops.push(DropOp {
                 position: DropPosition::AfterStep { inst: jump_inst },
                 target: r,

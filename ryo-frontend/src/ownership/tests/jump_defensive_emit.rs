@@ -73,12 +73,15 @@ fn break_loop_before_concat_loop_schedule_shape() {
         .while_loop_view(loop2)
         .body
         .iter()
-        .find(|&s| tir.inst(s).tag == TirTag::StrConcat)
+        .find(|&s| tir.inst(s).tag == TirTag::Assign)
+        .map(|a| tir.assign_view(a).value)
         .expect("concat in loop 2");
     let x_const = tir
         .body_stmts()
         .iter()
-        .find(|&s| tir.inst(s).tag == TirTag::StrConst)
+        .filter(|&s| tir.inst(s).tag == TirTag::VarDecl)
+        .map(|d| tir.var_decl_view(d).initializer)
+        .find(|&i| tir.inst(i).tag == TirTag::StrConst)
         .expect("\"x\" const");
     let sc = take_function_sidecar(&mut sidecar, 0);
     assert!(
