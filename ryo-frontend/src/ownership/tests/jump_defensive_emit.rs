@@ -175,3 +175,74 @@ fn break_gate_uses_cfg_dominance_not_textual_order() {
         sc.drops
     );
 }
+
+#[test]
+fn break_defensive_emit_covers_consumerless_match_result() {
+    // A match result with NO consumer is the one Valid-owner shape no
+    // source construct produces (sema always gives a value match a
+    // consumer, and the anonymous-temp pass skips consumerless temps by
+    // design) — but it is exactly the coverage case the break defensive
+    // emit exists for. The match instruction is a Switch terminator
+    // payload, so the dominance gate can only resolve its block through
+    // term_block_of: with step_block_of alone the owner is skipped
+    // unconditionally and silently leaks. RED-pinned by removing the
+    // or_else — the schedule then contains no drop for the match.
+    use ryo_core::span::Span;
+    use ryo_core::tir::{Discriminant, TirBuilder, TypedMatchArm, TypedMatchBody};
+    let mut pool = InternPool::new();
+    let str_ty = pool.str_();
+    let int_ty = pool.int();
+    let bool_ty = pool.bool_();
+    let void = pool.void();
+    let main = pool.intern_str("main");
+    let span = Span::EMPTY;
+
+    // fn main() -> void:
+    //     match 1:              # bare value match, result never consumed
+    //         _:
+    //             "a"
+    //     while true:
+    //         break
+    let mut tb = TirBuilder::new(main, vec![], void, span);
+    let scrut = tb.int_const(1, int_ty, span);
+    let arm_value = tb.str_const(pool.intern_str("a"), str_ty, span);
+    let m = tb.match_expr(
+        scrut,
+        str_ty,
+        &[TypedMatchArm {
+            span,
+            discriminant: Discriminant::Wildcard,
+            bindings: &[],
+            guards: &[],
+            body: TypedMatchBody::Expr(arm_value),
+        }],
+        span,
+    );
+    let cond = tb.bool_const(true, bool_ty, span);
+    let brk = tb.break_stmt(void, span);
+    let wl = tb.while_loop(cond, &[brk], void, span);
+    let tir = tb.finish(&[m, wl]);
+
+    let mut sink = DiagSink::new();
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
+    let sidecar = take_function_sidecar(&mut sidecar, 0);
+    let frees: Vec<_> = sidecar.drops.iter().filter(|d| d.target == m).collect();
+    assert_eq!(
+        frees.len(),
+        1,
+        "the consumerless match result dominates the break and must receive \
+         exactly one defensive-emit free; schedule = {:?}",
+        sidecar.drops
+    );
+    assert_eq!(
+        frees[0].position.anchor_inst().unwrap(),
+        brk,
+        "the free is anchored at the break; schedule = {:?}",
+        sidecar.drops
+    );
+}
