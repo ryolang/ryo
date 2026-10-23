@@ -19,21 +19,36 @@ pub(crate) fn document_rank(flow: &Flow, r: TirRef) -> u32 {
 /// own `anchor` and its projections' last uses by program order. A
 /// projection that is never read defers nothing — no one can observe
 /// the buffer through it.
+///
+/// A projection's final use lives in the view-liveness table
+/// (`view_last_use`), never in `last_use`: a view is consumed by its
+/// binding/assign, not Var-read, so the owner-at-read-keyed table has
+/// no entry for it. Reading only `last_use` let a base's destruction
+/// anchor at a branch exit that fires before a reseated view's final
+/// use (view-protection UAF). Type-agnostic — the tables are keyed by
+/// view instruction, so strview/bytesview and future slice[T]/list[T]/
+/// map[K][V] views defer their bases identically.
 pub(crate) fn defer_anchor(
     anchor: TirRef,
     owner: &Owner,
     projections_of: &HashMap<Owner, Vec<TirRef>>,
     last_use: &HashMap<TirRef, TirRef>,
+    view_last_use: &[Option<TirRef>],
     order: &[u32],
 ) -> TirRef {
     let rank = |r: TirRef| order.get(r.index()).copied().unwrap_or(0);
     let mut best = anchor;
     if let Some(views) = projections_of.get(owner) {
         for &view in views {
-            if let Some(&read) = last_use.get(&view)
-                && rank(read) > rank(best)
-            {
-                best = read;
+            let uses = last_use
+                .get(&view)
+                .copied()
+                .into_iter()
+                .chain(Ownership::dense_get(view_last_use, view));
+            for read in uses {
+                if rank(read) > rank(best) {
+                    best = read;
+                }
             }
         }
     }

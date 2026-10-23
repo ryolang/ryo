@@ -13,11 +13,68 @@ use super::super::{
     stmt_match, visit_operand_matches,
 };
 use super::{TirStmtList, declared_before_stmt};
-use ryo_core::flow::{DropOp, DropPosition};
+use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow};
 use ryo_core::ownership::FunctionSidecar;
 use ryo_core::tir::{ExtraList, MatchBodyView, Tir, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
+
+/// Iterative dominator sets over the Flow CFG, dense per block id.
+/// Function graphs are small (tens of blocks), so the textbook
+/// set-intersection fixpoint is the cheapest correct choice.
+fn compute_dominators(flow: &Flow) -> Vec<HashSet<BlockId>> {
+    let order: Vec<BlockId> = flow.forward_order().collect();
+    // The dense `doms[b.0]` indexing below relies on forward_order
+    // yielding EVERY block (unreachable ones included) in id order
+    // (Flow::forward_order is `(0..blocks.len()).map(BlockId)` today).
+    // Pin that contract: if it ever changes to skip unreachable blocks
+    // or yield a propagation order, this must become BlockId-keyed.
+    debug_assert!(
+        order.iter().enumerate().all(|(i, &b)| b.0 as usize == i),
+        "compute_dominators requires forward_order to yield all blocks in id order"
+    );
+    let all: HashSet<BlockId> = order.iter().copied().collect();
+    let mut doms: Vec<HashSet<BlockId>> = order
+        .iter()
+        .map(|&b| {
+            if b == flow.entry {
+                HashSet::from([b])
+            } else {
+                all.clone()
+            }
+        })
+        .collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &b in &order {
+            if b == flow.entry {
+                continue;
+            }
+            let preds = flow.predecessors(b);
+            let mut new_dom = HashSet::from([b]);
+            if let Some((&first, rest)) = preds.split_first() {
+                let mut intersect = doms[first.0 as usize].clone();
+                for &p in rest {
+                    intersect.retain(|blk| doms[p.0 as usize].contains(blk));
+                }
+                new_dom.extend(intersect);
+            }
+            if new_dom != doms[b.0 as usize] {
+                doms[b.0 as usize] = new_dom;
+                changed = true;
+            }
+        }
+    }
+    doms
+}
+
+/// `def` dominates `use_` when every path from the entry to `use_`
+/// passes through `def`.
+fn dominates(doms: &[HashSet<BlockId>], def: BlockId, use_: BlockId) -> bool {
+    def == use_ || doms[use_.0 as usize].contains(&def)
+}
 
 // ---------- Post-walk jump-exit free scheduling (kept TIR-based) ----------
 
@@ -32,6 +89,11 @@ pub(crate) struct LoopExitCtx<'a> {
     top_level: HashMap<TirRef, TirRef>,
     loop_carried_owners: HashSet<TirRef>,
     reassigned_after_loop_bindings: HashSet<TirRef>,
+    /// Dominator sets for the owning function's Flow CFG (see
+    /// `compute_dominators`). Computed lazily — only the break
+    /// defensive-emit path needs them — and shared by every loop in
+    /// the function, so loops that never reach that path pay nothing.
+    doms: &'a OnceCell<Vec<HashSet<BlockId>>>,
 }
 
 /// Collect every `Assign` (site, name, value) reachable from `stmts`,
@@ -139,7 +201,12 @@ fn assignments_immediately_after_loop<S: TirStmtList + ?Sized>(
 }
 
 impl<'a> LoopExitCtx<'a> {
-    fn new(tir: &'a Tir, sidecar: &FunctionSidecar, loop_inst: TirRef) -> Option<Self> {
+    fn new(
+        tir: &'a Tir,
+        doms: &'a OnceCell<Vec<HashSet<BlockId>>>,
+        sidecar: &FunctionSidecar,
+        loop_inst: TirRef,
+    ) -> Option<Self> {
         let body = tir.loop_body_view(loop_inst)?;
         let mut inside_loop: HashSet<TirRef> = HashSet::new();
         tir.collect_loop_body_refs(loop_inst, &mut inside_loop);
@@ -174,6 +241,7 @@ impl<'a> LoopExitCtx<'a> {
             top_level,
             loop_carried_owners,
             reassigned_after_loop_bindings,
+            doms,
         })
     }
 }
@@ -181,6 +249,7 @@ impl<'a> LoopExitCtx<'a> {
 /// Schedule unconditional Frees on `break`/`continue` paths. Runs after
 /// the last-use, anonymous-temp, and dead-store passes have populated
 /// `sidecar.drops`. Kept statement-recursive (see the module header).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
     tir: &Tir,
     flow: &ryo_core::flow::Flow,
@@ -189,6 +258,7 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
     sidecar: &mut FunctionSidecar,
     stmts: &S,
     enclosing: Option<&LoopExitCtx<'_>>,
+    doms: &OnceCell<Vec<HashSet<BlockId>>>,
 ) {
     for r in stmts.iter_refs() {
         let r = stmt_match(tir, r).unwrap_or(r);
@@ -200,7 +270,7 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
                 }
             }
             TirTag::WhileLoop | TirTag::ForRange => {
-                if let Some(ctx) = LoopExitCtx::new(tir, sidecar, r) {
+                if let Some(ctx) = LoopExitCtx::new(tir, doms, sidecar, r) {
                     schedule_loop_exit_frees_in(
                         tir,
                         flow,
@@ -209,6 +279,7 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
                         sidecar,
                         &ctx.body,
                         Some(&ctx),
+                        doms,
                     );
                 }
             }
@@ -222,21 +293,24 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
                     sidecar,
                     &view.then_stmts,
                     enclosing,
+                    doms,
                 );
                 for elif in &view.elif_branches {
                     schedule_loop_exit_frees_in(
-                        tir, flow, pool, own, sidecar, &elif.body, enclosing,
+                        tir, flow, pool, own, sidecar, &elif.body, enclosing, doms,
                     );
                 }
                 if let Some(else_stmts) = &view.else_stmts {
                     schedule_loop_exit_frees_in(
-                        tir, flow, pool, own, sidecar, else_stmts, enclosing,
+                        tir, flow, pool, own, sidecar, else_stmts, enclosing, doms,
                     );
                 }
             }
             TirTag::Match => {
                 for body in match_arm_bodies(tir, r) {
-                    schedule_loop_exit_frees_in(tir, flow, pool, own, sidecar, &body, enclosing);
+                    schedule_loop_exit_frees_in(
+                        tir, flow, pool, own, sidecar, &body, enclosing, doms,
+                    );
                 }
             }
             _ => {}
@@ -244,7 +318,9 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
         if !matches!(inst.tag, TirTag::WhileLoop | TirTag::ForRange) {
             visit_operand_matches(tir, r, &mut |m| {
                 for body in match_arm_bodies(tir, m) {
-                    schedule_loop_exit_frees_in(tir, flow, pool, own, sidecar, &body, enclosing);
+                    schedule_loop_exit_frees_in(
+                        tir, flow, pool, own, sidecar, &body, enclosing, doms,
+                    );
                 }
             });
         }
@@ -420,6 +496,45 @@ pub(crate) fn schedule_break_continue_frees(
             continue;
         }
         if is_break {
+            // The Free fires where its anchor fires: the producer must
+            // dominate the jump's block, i.e. have run on every path
+            // reaching this break. Owners produced after the loop — or
+            // in a branch that can bypass them — do not dominate it;
+            // anchoring their Free here releases storage before the
+            // value exists (validator: path double discharge) and the
+            // bogus target poisons CleanupPlan's Binding/Value redirect
+            // for the owners it actually covers (the
+            // break-before-later-loop-reassign crash family).
+            let Some(jump_block) = flow.term_block_of(jump_inst) else {
+                continue;
+            };
+            // Terminator-backed owners (match results, loop vars)
+            // identify with a terminator payload rather than a step —
+            // resolve those through the terminator's block. A match
+            // RESULT is different: it is materialized at the match JOIN,
+            // after the Switch, so an arm's nested-loop break can be
+            // dominated by the Switch yet sit before the result exists
+            // on that path — resolve MatchResult producers to the join.
+            let producer_block = if flow.match_result(r).is_some() {
+                match flow.term_block_of(r).map(|b| *flow.term(b)) {
+                    Some(ryo_core::flow::Terminator::Switch {
+                        join: Some(join), ..
+                    }) => Some(join),
+                    _ => None,
+                }
+            } else {
+                flow.step_block_of(r).or_else(|| flow.term_block_of(r))
+            };
+            let producer_dominates = producer_block.is_some_and(|b| {
+                dominates(
+                    ctx.doms.get_or_init(|| compute_dominators(flow)),
+                    b,
+                    jump_block,
+                )
+            });
+            if !producer_dominates {
+                continue;
+            }
             sidecar.drops.push(DropOp {
                 position: DropPosition::AfterStep { inst: jump_inst },
                 target: r,

@@ -1289,3 +1289,53 @@ fn loop_deferred_view_survives_if_join_prune() {
         diags[0].message
     );
 }
+
+#[test]
+fn view_reseat_in_branch_defers_base_release() {
+    // A view binding initialized from a literal, conditionally reseated
+    // to a view of another base, then read after the branch: the base's
+    // destruction must defer past the reseated view's final use. The
+    // last-use pass used to anchor the base's Free at the branch exit
+    // (the join block start), firing before the join's read of the view
+    // — a use-after-free caught by view protection.
+    let src = "fn main():\n\ts = \"hello\"\n\tmut v = \"\"[:]\n\tif v.len() == 0:\n\t\tv = s[0:2]\n\tprint(int_to_str(v.len()))\n\tprint(\"\\n\")\n";
+    let diags = check_src(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.severity == ryo_core::diag::Severity::Error),
+        "no errors expected; got: {diags:?}"
+    );
+}
+
+#[test]
+fn bytesview_reseat_in_branch_defers_base_release() {
+    // The bytesview spelling of the same shape — the deferral is
+    // type-agnostic (slice[T]/list[T]/map views ride the same tables).
+    let src = "fn main():\n\tb = b\"hello\"\n\tmut v = b\"\"[0:0]\n\tif v.len() == 0:\n\t\tv = b[1:3]\n\tprint(int_to_str(v.len()))\n\tprint(\"\\n\")\n";
+    let diags = check_src(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.severity == ryo_core::diag::Severity::Error),
+        "no errors expected; got: {diags:?}"
+    );
+}
+
+#[test]
+fn temp_view_used_in_branch_frees_at_merge() {
+    // An anonymous concat with a view into it, the view read inside an
+    // if-arm: the P5 deferral anchors the concat's Free at that read,
+    // so the not-taken path reached the exit with no release — path
+    // coverage proved a leak (validate.rs path-coverage panic). The
+    // producer dominates the if, so the Free must re-anchor at the if
+    // itself, firing at the merge on every path.
+    let src = "fn main():\n\ta = \"hello\"\n\tv = (a + \"x\")[0:2]\n\tmut c = 0\n\tif c < 1:\n\t\tprint(int_to_str(v.len()))\n\tprint(\"done\\n\")\n";
+    let diags = check_src(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.severity == ryo_core::diag::Severity::Error),
+        "no errors expected; got: {diags:?}"
+    );
+}

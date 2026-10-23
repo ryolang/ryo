@@ -8,6 +8,7 @@ mod frees_reassign;
 mod frees_w0003;
 mod frees_w0004;
 mod inout;
+mod jump_defensive_emit;
 mod loops;
 mod match_;
 mod merge;

@@ -739,6 +739,19 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-249 — W0003's recommended fix is inexpressible; decide empty-view/empty-collection init syntax
+
+**Severity:** Correctness / Hygiene
+**Area:** ownership
+
+**Files:** ryo-frontend/src/ownership (W0003 emission), docs/specification.md (eventual syntax decision)
+
+**Summary:** RedundantMaterialize (W0003) fires when a str(...) copy 'never escapes and its source is never mutated' and recommends using the view directly. When the copy's purpose is TYPE CONVERSION (slice view -> owned str, e.g. int_str = str(s[start:dot]) into an str binding), following the advice is a compile error (E0012: a slice yields strview) — the recommendation is unreachable, a false positive for the materialize-where-owned-is-required pattern. The warning-free spellings today: keep str(...), or declare the binding strview end-to-end, which currently needs the noisy full-slice 'mut v = ""[:]' as the empty view. The empty-initializer syntax should be decided BEFORE slice[T]/list[T]/map[K,V] land so all view/collection types stay consistent. Options: (a) annotation-driven literal coercion 'mut v: strview = ""' (Rust/Swift style; minimal, literal-backed only), (b) context-typed builtin empty() (none-style precedent; uniform across collections; needs return-type-driven builtin resolution), (c) typed empty literals for collections (Pythonic, DX-consistent). Note M22's draft already uses constructor-style 'list[int]()'. The W0003 escape heuristic should also learn the conversion-purpose shape regardless of the syntax decision.
+
+**Resolution:** Pending language-owner decision. The W0003 heuristic fix (recognize materialize-for-conversion) is independent of the syntax choice and can land first.
+
+---
+
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
