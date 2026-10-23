@@ -1452,3 +1452,26 @@ fn early_return_under_shadow_writes_back_the_declared_parameter() {
         "innerouter_0123456789012345678901234567890123456789!",
     );
 }
+
+#[test]
+fn break_concat_after_break_e2e() {
+    // bug_reports/bug_str_concat_after_break.ryo: a break in one loop must
+    // not schedule frees of concat temps produced in a later loop (the
+    // jump-exit defensive emit used to crash the compiler — debug panic in
+    // the validator, "cleanup target has no storage" in release).
+    assert_ryo_output(
+        "concat_after_break.ryo",
+        "fn main():\n\tmut i = 0\n\twhile i < 10:\n\t\tbreak\n\tmut result = \"x\"\n\tmut j = 0\n\twhile j < 3:\n\t\tresult = result + \"0\"\n\t\tj += 1\n\tprint(result)\n",
+        "x000",
+    );
+}
+
+#[test]
+fn fixed7_concat_after_break_e2e() {
+    // bug_reports/bug_str_copy_concat_loop.ryo, verbatim.
+    assert_ryo_output(
+        "fixed7_after_break.ryo",
+        include_str!("../../bug_reports/bug_str_copy_concat_loop.ryo"),
+        "3.1415900\n",
+    );
+}
