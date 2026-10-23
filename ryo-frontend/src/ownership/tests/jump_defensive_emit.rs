@@ -175,6 +175,87 @@ fn break_gate_uses_cfg_dominance_not_textual_order() {
 }
 
 #[test]
+fn break_defensive_emit_match_result_resolves_to_join() {
+    // One match arm contains a nested loop whose break fires BEFORE the
+    // arm produces its value; another arm produces the result. The
+    // result is materialized at the match JOIN, after the Switch — so
+    // the Switch block dominates the nested break but the join does
+    // not. Resolving the MatchResult producer to the Switch (via
+    // term_block_of) lets the defensive emit schedule a Free at that
+    // break for a result the break path never wrote — an unwritten
+    // slot. The gate must resolve MatchResult producers to the join.
+    // (Consumerless result, manufactured with TirBuilder: sema always
+    // gives value matches a consumer, and a consumed result is covered
+    // by the anon-temp pass and never reaches this gate.)
+    use ryo_core::span::Span;
+    use ryo_core::tir::{Discriminant, TirBuilder, TypedMatchArm, TypedMatchBody};
+    let mut pool = InternPool::new();
+    let str_ty = pool.str_();
+    let int_ty = pool.int();
+    let bool_ty = pool.bool_();
+    let void = pool.void();
+    let main = pool.intern_str("main");
+    let span = Span::EMPTY;
+
+    // fn main() -> void:
+    //     match 1:
+    //         0:
+    //             while true:
+    //                 break
+    //             "a"
+    //         _:
+    //             "b"
+    let mut tb = TirBuilder::new(main, vec![], void, span);
+    let scrut = tb.int_const(1, int_ty, span);
+    let inner_cond = tb.bool_const(true, bool_ty, span);
+    let inner_break = tb.break_stmt(void, span);
+    let inner_loop = tb.while_loop(inner_cond, &[inner_break], void, span);
+    let a_val = tb.str_const(pool.intern_str("a"), str_ty, span);
+    let b_val = tb.str_const(pool.intern_str("b"), str_ty, span);
+    let m = tb.match_expr(
+        scrut,
+        str_ty,
+        &[
+            TypedMatchArm {
+                span,
+                discriminant: Discriminant::Int(0),
+                bindings: &[],
+                guards: &[],
+                body: TypedMatchBody::Stmts(&[inner_loop, a_val]),
+            },
+            TypedMatchArm {
+                span,
+                discriminant: Discriminant::Wildcard,
+                bindings: &[],
+                guards: &[],
+                body: TypedMatchBody::Expr(b_val),
+            },
+        ],
+        span,
+    );
+    let tir = tb.finish(&[m]);
+
+    let mut sink = DiagSink::new();
+    let mut sidecar = check(
+        std::slice::from_ref(&tir),
+        &[ryo_core::flow::Flow::build(&tir, &pool)],
+        &pool,
+        &mut sink,
+    );
+    let sidecar = take_function_sidecar(&mut sidecar, 0);
+    assert!(
+        !sidecar
+            .drops
+            .iter()
+            .any(|d| d.target == m && d.position.anchor_inst() == Some(inner_break)),
+        "no free of the match result at the arm's nested-loop break — \
+         the join (where the result is produced) does not dominate it; \
+         schedule = {:?}",
+        sidecar.drops
+    );
+}
+
+#[test]
 fn break_defensive_emit_covers_consumerless_match_result() {
     // A match result with NO consumer is the one Valid-owner shape no
     // source construct produces (sema always gives a value match a

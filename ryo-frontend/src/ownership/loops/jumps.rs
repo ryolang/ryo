@@ -508,20 +508,30 @@ pub(crate) fn schedule_break_continue_frees(
             let Some(jump_block) = flow.term_block_of(jump_inst) else {
                 continue;
             };
-            // Match-result and loop-var owners identify with terminator
-            // payloads (the match / loop instruction) rather than steps —
-            // resolve those through the terminator's block so a
-            // dominating producer of that class still qualifies.
-            let producer_dominates = flow
-                .step_block_of(r)
-                .or_else(|| flow.term_block_of(r))
-                .is_some_and(|b| {
-                    dominates(
-                        ctx.doms.get_or_init(|| compute_dominators(flow)),
-                        b,
-                        jump_block,
-                    )
-                });
+            // Terminator-backed owners (match results, loop vars)
+            // identify with a terminator payload rather than a step —
+            // resolve those through the terminator's block. A match
+            // RESULT is different: it is materialized at the match JOIN,
+            // after the Switch, so an arm's nested-loop break can be
+            // dominated by the Switch yet sit before the result exists
+            // on that path — resolve MatchResult producers to the join.
+            let producer_block = if flow.match_result(r).is_some() {
+                match flow.term_block_of(r).map(|b| *flow.term(b)) {
+                    Some(ryo_core::flow::Terminator::Switch {
+                        join: Some(join), ..
+                    }) => Some(join),
+                    _ => None,
+                }
+            } else {
+                flow.step_block_of(r).or_else(|| flow.term_block_of(r))
+            };
+            let producer_dominates = producer_block.is_some_and(|b| {
+                dominates(
+                    ctx.doms.get_or_init(|| compute_dominators(flow)),
+                    b,
+                    jump_block,
+                )
+            });
             if !producer_dominates {
                 continue;
             }
