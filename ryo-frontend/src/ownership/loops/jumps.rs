@@ -493,7 +493,7 @@ pub(crate) fn schedule_break_continue_frees(
             // value exists (validator: path double discharge) and the
             // bogus target poisons CleanupPlan's Binding/Value redirect
             // for the owners it actually covers (the
-            // bug_reports/bug_str_concat_after_break.ryo family).
+            // break-before-later-loop-reassign crash family).
             let Some(jump_block) = flow.term_block_of(jump_inst) else {
                 continue;
             };

@@ -1,6 +1,4 @@
-//! Regression tests for the jump-exit defensive-emit double-discharge
-//! (bug_reports/bug_str_concat_after_break.ryo and
-//! bug_reports/bug_str_copy_concat_loop.ryo, same root cause).
+//! Regression tests for the jump-exit defensive-emit double-discharge.
 //!
 //! A `break` in one loop used to anchor frees of values produced in
 //! LATER loops: the defensive sweep in `schedule_break_continue_frees`
@@ -30,7 +28,7 @@ const CALL_AFTER_BREAK: &str = "fn main():\n\tmut i = 0\n\twhile i < 10:\n\t\tbr
 /// Negative control: `continue` never receives the defensive emit.
 const CONCAT_AFTER_CONTINUE: &str = "fn main():\n\tmut i = 0\n\twhile i < 10:\n\t\ti += 1\n\t\tif i == 5:\n\t\t\tcontinue\n\tmut result = \"x\"\n\tmut j = 0\n\twhile j < 3:\n\t\tresult = result + \"0\"\n\t\tj += 1\n\tprint(result)\n";
 
-/// The exact bug_reports/bug_str_copy_concat_loop.ryo source: a `break`
+/// A fixed-7 float formatter (reduced from a real program): a `break`
 /// in the dot-search loop, then two more loops whose StrConcat temps
 /// the sweep targeted (7 defensive emits at that break).
 const FIXED7_AFTER_BREAK: &str = "fn pow10_int(exp: int) -> int:\n\tmut r = 1\n\tmut i = 0\n\twhile i < exp:\n\t\tr = r * 10\n\t\ti += 1\n\treturn r\n\nfn format_fixed_7(v: float) -> str:\n\ts = float_to_str(v)\n\tb = s.as_bytes()\n\tmut sign = \"\"\n\tmut start = 0\n\tif b[0] == 45:\n\t\tsign = \"-\"\n\t\tstart = 1\n\tmut dot = -1\n\tmut i = start\n\twhile i < b.len():\n\t\tif b[i] == 46:\n\t\t\tdot = i\n\t\t\tbreak\n\t\ti += 1\n\tmut int_str = \"\"\n\tmut frac_str = \"\"\n\tif dot < 0:\n\t\tint_str = str(s[start:b.len()])\n\t\tfrac_str = \"\"\n\telse:\n\t\tint_str = str(s[start:dot])\n\t\tfrac_str = str(s[dot + 1:b.len()])\n\tmut int_val = 0\n\tmut k = 0\n\twhile k < int_str.len():\n\t\tc = int_str.as_bytes()[k]\n\t\tint_val = int_val * 10 + (c - 48)\n\t\tk += 1\n\tmut frac_len = frac_str.len()\n\tmut frac_val = 0\n\tif frac_len > 0:\n\t\tmut take = frac_len\n\t\tif take > 8:\n\t\t\ttake = 8\n\t\tk = 0\n\t\twhile k < take:\n\t\t\tc = frac_str.as_bytes()[k]\n\t\t\tfrac_val = frac_val * 10 + (c - 48)\n\t\t\tk += 1\n\t\tif frac_len > 7:\n\t\t\tdigit8 = frac_val % 10\n\t\t\tfrac_val = frac_val / 10\n\t\t\tif digit8 >= 5:\n\t\t\t\tfrac_val += 1\n\t\telif frac_len < 7:\n\t\t\tfrac_val = frac_val * pow10_int(7 - frac_len)\n\tif frac_val >= 10000000:\n\t\tfrac_val = 0\n\t\tint_val += 1\n\tmut result = sign + int_to_str(int_val) + \".\"\n\tmut frac_out = int_to_str(frac_val)\n\tmut zeros = 7 - frac_out.len()\n\twhile zeros > 0:\n\t\tresult = result + \"0\"\n\t\tzeros -= 1\n\tresult = result + frac_out\n\treturn result\n\nfn main():\n\tprint(format_fixed_7(3.14159))\n\tprint(\"\\n\")\n";

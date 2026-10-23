@@ -495,7 +495,8 @@ fn return_epilogue_ignores_loop_local_declared_after_return() {
     // producer is unreachable from it, and the epilogue covered-dedup
     // cannot see the real last-use Free (anchored later, inside the
     // loop body). Scheduling that Free made codegen abort with "no
-    // ValueRepr cached" (bug_reports/bug_codegen_free_no_valuerepr.ryo).
+    // ValueRepr cached" (a loop-local declared after an early-returning
+    // guard).
     let src = "fn adv(inout p: int):\n\tp += 1\n\nfn f(s: str) -> str:\n\tmut p = 0\n\twhile true:\n\t\tif p >= 10:\n\t\t\treturn \"<none>\"\n\t\tk = str(s[0:2])\n\t\tadv(&p)\n\t\tif k == s:\n\t\t\treturn k\n\treturn \"<none>\"\n";
     let (diags, sidecar, tirs, _pool) = check_src_full(src);
     assert!(
