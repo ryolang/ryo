@@ -1289,3 +1289,35 @@ fn loop_deferred_view_survives_if_join_prune() {
         diags[0].message
     );
 }
+
+#[test]
+fn view_reseat_in_branch_defers_base_release() {
+    // A view binding initialized from a literal, conditionally reseated
+    // to a view of another base, then read after the branch: the base's
+    // destruction must defer past the reseated view's final use. The
+    // last-use pass used to anchor the base's Free at the branch exit
+    // (the join block start), firing before the join's read of the view
+    // — a use-after-free caught by view protection.
+    let src = "fn main():\n\ts = \"hello\"\n\tmut v = \"\"[:]\n\tif v.len() == 0:\n\t\tv = s[0:2]\n\tprint(int_to_str(v.len()))\n\tprint(\"\\n\")\n";
+    let diags = check_src(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.severity == ryo_core::diag::Severity::Error),
+        "no errors expected; got: {diags:?}"
+    );
+}
+
+#[test]
+fn bytesview_reseat_in_branch_defers_base_release() {
+    // The bytesview spelling of the same shape — the deferral is
+    // type-agnostic (slice[T]/list[T]/map views ride the same tables).
+    let src = "fn main():\n\tb = b\"hello\"\n\tmut v = b\"\"[0:0]\n\tif v.len() == 0:\n\t\tv = b[1:3]\n\tprint(int_to_str(v.len()))\n\tprint(\"\\n\")\n";
+    let diags = check_src(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.severity == ryo_core::diag::Severity::Error),
+        "no errors expected; got: {diags:?}"
+    );
+}

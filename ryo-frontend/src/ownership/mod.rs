@@ -825,7 +825,14 @@ fn analyze_function(
                 if let Some(&after) = last_use.get(&r) {
                     // P5 (final spec §3.2): defer the destruction to
                     // the last use of any projection of this owner.
-                    let after = defer_anchor(after, owner, &projections_of, &last_use, &order);
+                    let after = defer_anchor(
+                        after,
+                        owner,
+                        &projections_of,
+                        &last_use,
+                        &own.view_last_use,
+                        &order,
+                    );
                     // Conditional last use: a named binding whose LAST
                     // READ is inside a branch/loop is re-anchored by
                     // `last_use_anchor` (see loops.rs) — normally to
@@ -914,7 +921,14 @@ fn analyze_function(
                         // P5 (final spec §3.2): defer the destruction to
                         // the last use of any projection of this param
                         // (a slice of it keeps the buffer alive).
-                        let after = defer_anchor(after, owner, &projections_of, &last_use, &order);
+                        let after = defer_anchor(
+                            after,
+                            owner,
+                            &projections_of,
+                            &last_use,
+                            &own.view_last_use,
+                            &order,
+                        );
                         // Conditional last use: same re-anchor as `Inst`
                         // owners — a last read inside a branch frees at
                         // the branch's exit. Anchoring after the read
@@ -978,7 +992,14 @@ fn analyze_function(
             // P5 (final spec §3.2): a sliced temp stays alive until
             // the projection's last use (e.g. `v = (a + b)[0:1]` keeps
             // the concat buffer alive through reads of `v`).
-            let anchor = defer_anchor(consumer, &temp, &projections_of, &last_use, &order);
+            let anchor = defer_anchor(
+                consumer,
+                &temp,
+                &projections_of,
+                &last_use,
+                &own.view_last_use,
+                &order,
+            );
             // A temp PRODUCED in an if's main condition exists on every
             // path through the branch (the condition is always
             // evaluated), so anchor its Free after the if itself: codegen
@@ -1033,6 +1054,7 @@ fn analyze_function(
                     &Owner(own.inst_place[cand.view_inst.index()].expect("view owner place")),
                     &projections_of,
                     &last_use,
+                    &own.view_last_use,
                     &order,
                 );
                 // Conditional last use: re-anchor to the branch exit —
