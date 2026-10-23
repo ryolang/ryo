@@ -2195,6 +2195,7 @@ fn main():
 - Bounds checking at runtime; out-of-range slicing panics
 - `[T]` array literals create stack-allocated fixed-size arrays in v0.1; growable `list[T]` lands in M22
 - Dependencies: Milestone 8.2 (immutable borrows), Milestone 8.3 (`inout [T]` slices)
+- **Open design decision — empty-view/empty-collection initializer syntax (I-249).** `strview` today has no literal: the empty view is the full-slice spell `""[:]` (see the W0003 discussion there — the redundant-materialize hint pushes users toward view-typed bindings, which needed the base-deferral fix in PR #198). `slice[T]` inherits the gap, and M22's draft already assumes constructor-style `list[int]()`. Decide one consistent story before shipping slice[T]/list[T] — annotated literal coercion (`mut v: strview = ""`), a context-typed `empty()` builtin, or typed empty literals — so views and collections do not grow two idioms.
 
 ### Milestone 22: Collections (List, Map)
 
