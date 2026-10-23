@@ -123,3 +123,55 @@ fn continue_loop_before_concat_loop_ok() {
     let (diags, _sidecar, _tirs, _pool) = check_src_full(CONCAT_AFTER_CONTINUE);
     assert_no_errors(&diags);
 }
+
+/// A producer inside an `if` BEFORE the loop: textually (and in
+/// emission order) earlier than the break, but its block does not
+/// dominate the jump's block — the not-taken arm bypasses it. The
+/// dominance gate must skip it anyway; an emission-order gate
+/// (`order_of(r) < order_of(jump)`) would wrongly emit. Verified by
+/// mutation: weakening the gate to emission order makes this test fail
+/// with the path double-discharge panic.
+const IF_BEFORE_LOOP_PRODUCER: &str = "fn main():\n\tmut s = \"x\"\n\tmut c = 0\n\tif c < 1:\n\t\ts = s + \"b\"\n\tmut i = 0\n\twhile i < 10:\n\t\tbreak\n\tprint(s)\n";
+
+#[test]
+fn break_gate_uses_cfg_dominance_not_textual_order() {
+    let (diags, mut sidecar, tirs, _pool) = check_src_full(IF_BEFORE_LOOP_PRODUCER);
+    assert_no_errors(&diags);
+    let tir = &tirs[0];
+    let if_stmt = tir
+        .body_stmts()
+        .iter()
+        .find(|&s| tir.inst(s).tag == TirTag::IfStmt)
+        .expect("preceding if");
+    let producer = tir
+        .if_stmt_view(if_stmt)
+        .then_stmts
+        .iter()
+        .find(|&s| tir.inst(s).tag == TirTag::Assign)
+        .map(|a| tir.assign_view(a).value)
+        .expect("producer in the if arm");
+    assert_eq!(
+        tir.inst(producer).tag,
+        TirTag::StrConcat,
+        "producer is the if-arm concat"
+    );
+    let loop_inst = tir
+        .body_stmts()
+        .iter()
+        .find(|&s| tir.inst(s).tag == TirTag::WhileLoop)
+        .expect("loop with break");
+    let break_stmt = tir
+        .while_loop_view(loop_inst)
+        .body
+        .iter()
+        .find(|&s| tir.inst(s).tag == TirTag::Break)
+        .expect("break in loop");
+    let sc = take_function_sidecar(&mut sidecar, 0);
+    assert!(
+        !sc.drops
+            .iter()
+            .any(|d| d.position.anchor_inst() == Some(break_stmt) && d.target == producer),
+        "a non-dominating earlier producer must not be break-anchored; schedule = {:?}",
+        sc.drops
+    );
+}

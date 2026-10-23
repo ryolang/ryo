@@ -487,8 +487,13 @@ pub(crate) fn schedule_break_continue_frees(
             let Some(jump_block) = flow.term_block_of(jump_inst) else {
                 continue;
             };
+            // Match-result and loop-var owners identify with terminator
+            // payloads (the match / loop instruction) rather than steps —
+            // resolve those through the terminator's block so a
+            // dominating producer of that class still qualifies.
             let producer_dominates = flow
                 .step_block_of(r)
+                .or_else(|| flow.term_block_of(r))
                 .is_some_and(|b| dominates(&ctx.doms, b, jump_block));
             if !producer_dominates {
                 continue;
