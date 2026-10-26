@@ -40,9 +40,9 @@ impl From<LinkMode> for linker::LinkMode {
 
 /// Resolve `--emit` flag values into a normalized set. Membership
 /// is what governs printing; the source order on the command line
-/// is intentionally discarded. An empty list selects nothing —
-/// `ir_command` layers its legacy default (AST + CLIF) on top of
-/// an empty list, while `run`/`build` default to silence.
+/// is intentionally discarded. An empty list selects nothing;
+/// `ir_command` selects all five sections in that case, while
+/// `run`/`build` default to silence.
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct EmitSet {
     pub ast: bool,

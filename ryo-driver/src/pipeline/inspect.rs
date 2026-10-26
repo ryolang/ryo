@@ -32,9 +32,7 @@ pub fn parse_command(file: &Path) -> Result<(), CompilerError> {
 /// Drive `ryo ir` with the requested set of IR sections.
 ///
 /// `emit` is the user-supplied `--emit=<kind>[,<kind>...]` list.
-/// Empty means "use the legacy default" (`Ast` + `Clif`) so
-/// existing scripts that just call `ryo ir <file>` keep their
-/// output.
+/// Empty prints all five sections: AST, UIR, TIR, Flow, and CLIF.
 ///
 /// Sections are normalized into pipeline order before printing
 /// (AST → UIR → TIR → Flow → CLIF) so flag order is irrelevant. Stages
