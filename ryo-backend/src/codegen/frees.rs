@@ -132,9 +132,8 @@ impl<M: Module> Codegen<M> {
     ///   cap == 0 is the static sentinel, so `ryo_*_free` returns
     ///   immediately (this subsumes the old `is_static_cap_zero`
     ///   probe for literal producers);
-    /// * provably-inline producers (runtime builtins whose output never
-    ///   exceeds `INLINE_CAP`; mirrored from `builtins::max_output_len`
-    ///   — the backend agreement test pins the two), elided on the
+    /// * provably-inline producers (runtime builtins whose core metadata
+    ///   bounds their output to `INLINE_CAP`), elided on the
     ///   binding path when the binding is never mutated and on the
     ///   temp path when the producer is not a view base (promotion
     ///   would swap the cached triple for a heap one).
@@ -171,12 +170,10 @@ impl<M: Module> Codegen<M> {
             let target = drop.target;
             let static_literal = !target.is_param()
                 && matches!(tir.inst(target).tag, TirTag::StrConst | TirTag::BytesConst);
-            // Provably-inline producer predicate (mirrors
-            // `provably_inline_producer`; the producer set is pinned
-            // against the frontend registry by the backend test).
+            // Keep this predicate aligned with `provably_inline_producer`.
             let inline_producer = !target.is_param()
                 && tir.inst(target).tag == TirTag::Call
-                && Self::producer_max_output_len(pool.str(tir.call_view(target).name))
+                && ryo_core::builtins::max_output_len(pool.str(tir.call_view(target).name))
                     .is_some_and(|max| max as usize <= ryo_runtime::INLINE_CAP);
             // Mirror `emit_frees`' two branches exactly (the redirect's
             // applicability is a lowering-time lineage fact), so a mark
@@ -231,29 +228,13 @@ impl<M: Module> Codegen<M> {
         *opcode == Opcode::Iconst && imm.bits() == 0
     }
 
-    /// Statically-known upper bound on a producer builtin's output
-    /// bytes. `int_to_str(i64)` is at most 20 chars; `bool_to_str` 5.
-    /// `float_to_str` is deliberately absent: ryu's f64 worst case is
-    /// 24 bytes, one over `INLINE_CAP`. Mirrors the frontend registry
-    /// (`builtins.rs::max_output_len`) — the backend cannot depend on
-    /// the frontend, so a ryo-backend test asserts the two agree.
-    pub(crate) fn producer_max_output_len(name: &str) -> Option<u8> {
-        match name {
-            "int_to_str" => Some(20),
-            "bool_to_str" => Some(5),
-            _ => None,
-        }
-    }
-
     /// True when `target` is a call to a producer whose output is
     /// provably always SSO-inline (max ≤ `INLINE_CAP`): the runtime
     /// tags the cap word inline, so `ryo_*_free` on the value is a
     /// guaranteed no-op and codegen may elide it (generalizing the
     /// cap==0 static-literal elision in `is_static_cap_zero`). This
-    /// infers a property of the produced VALUE (its runtime SSO
-    /// inline-ability, mirrored from the frontend's
-    /// `builtins::max_output_len`) — not a Flow IR or ownership-pass
-    /// fact.
+    /// infers a property of the produced VALUE from core's canonical
+    /// builtin metadata — not a Flow IR or ownership-pass fact.
     pub(crate) fn provably_inline_producer(ctx: &FunctionContext<'_, M>, target: TirRef) -> bool {
         if target.is_param() {
             return false;
@@ -263,7 +244,7 @@ impl<M: Module> Codegen<M> {
             return false;
         }
         let name = ctx.pool.str(ctx.tir.call_view(target).name);
-        Self::producer_max_output_len(name)
+        ryo_core::builtins::max_output_len(name)
             .is_some_and(|max| max as usize <= ryo_runtime::INLINE_CAP)
     }
 
@@ -744,8 +725,10 @@ impl<M: Module> Codegen<M> {
                     );
                 let inline_producer = !target.is_param()
                     && ctx.tir.inst(target).tag == ryo_core::tir::TirTag::Call
-                    && Self::producer_max_output_len(ctx.pool.str(ctx.tir.call_view(target).name))
-                        .is_some_and(|max| max as usize <= ryo_runtime::INLINE_CAP);
+                    && ryo_core::builtins::max_output_len(
+                        ctx.pool.str(ctx.tir.call_view(target).name),
+                    )
+                    .is_some_and(|max| max as usize <= ryo_runtime::INLINE_CAP);
                 let redirect = match ctx.cleanup_plan.releases[idx] {
                     ryo_core::flow::cleanup::ReleaseStorage::Binding(place) => {
                         Some(ctx.flow.place(place).name())

@@ -256,20 +256,15 @@ fn mutable_bool_to_str_initialized_binding_gets_home() {
 
 #[test]
 fn registry_bounds_match_codegen_elision() {
-    // Coherence pin between the frontend registry annotation
-    // (`builtins.rs::max_output_len`) and the backend's elision
-    // behavior: a builtin annotated at-or-under the SSO inline
-    // capacity (23 bytes) must get its free elided; anything else
-    // must keep it. If one table changes without the other, this
-    // test fails.
-    let mut pool = InternPool::new();
+    // A builtin whose canonical core metadata bounds its output at or
+    // under the SSO inline capacity (23 bytes) must get its free elided;
+    // anything else must keep it.
     for (name, arg) in [
         ("int_to_str", "42"),
         ("bool_to_str", "true"),
         ("float_to_str", "1.5"),
     ] {
-        let id = pool.intern_str(name);
-        let bound = ryo_frontend::builtins::max_output_len(id, &pool);
+        let bound = ryo_core::builtins::max_output_len(name);
         let provably_inline = bound.is_some_and(|max| max as usize <= 23);
         let src = format!("fn main():\n\ts: str = {name}({arg})\n\tprint(s)\n");
         let obj = object_bytes(&src);
