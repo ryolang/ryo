@@ -8,7 +8,7 @@ We target both execution speed and memory efficiency (specifically focusing on R
 
 **Idiomatic convention:** every benchmark is written the way a developer would naturally write it in that language. Never adapt another language's implementation to work around something Ryo doesn't support yet (e.g. moving a field out of a struct) — the cost of Ryo's current limitations is part of what the suite measures. Where that makes workloads diverge, checksums are per-language and the benchmark's README must say so explicitly.
 
-**Checkpoint convention:** run the full suite before each release and after merging any change that touches generated-code shape (`ryo-backend/src/codegen/`, the Cranelift pin, ownership sidecar consumption); results land in the per-suite data store and the README tables are regenerated from it, so the trend is visible in git history. Every results table must include a **Version** column capturing each language toolchain's version at measurement time (`rustc --version`, `swiftc --version`, `python3 --version`, `ryo --version`) — timings without versions are not reproducible.
+**Checkpoint convention:** run the full suite before each release and after merging any change that touches generated-code shape (`ryo-backend/src/codegen/`, the Cranelift pin, ownership sidecar consumption); results land in the per-suite data store and the README tables are regenerated from it, so the trend is visible in git history. Every per-suite results table must include a **Version** column capturing each language toolchain's version at measurement time (`rustc --version`, `swiftc --version`, `python3 --version`, `ryo --version`) — timings without versions are not reproducible. The root matrix omits versions; its detailed per-suite tables retain them.
 
 ---
 
@@ -22,46 +22,46 @@ Per-language matrix across suites — one row per suite, one column per language
 | Suite | Ryo AOT | Ryo JIT | Rust | Swift | Go | Python | Kotlin | Bun (TS) | Elixir | Ruby | Julia |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | **Algorithms** |  |  |  |  |  |  |  |  |  |  |  |
-| [collatz](./collatz/)<br>2026-10-22 | 🟨 234.233 [2.08×] (0.1.0-dev.20261022+1012fd4) | 🟨 233.308 [2.07×] (0.1.0-dev.20261022+1012fd4) | ⭐ 112.637 [1.00×] (1.99.1) | 🟨 175.254 [1.56×] (6.4) | — | — | — | — | — | — | — |
-| [fibonacci](./fibonacci/)<br>2026-10-22 | 🟨 375.421 [1.35×] (0.1.0-dev.20261022+1012fd4) | 🟨 403.351 [1.45×] (0.1.0-dev.20261022+1012fd4) | ⭐ 278.001 [1.00×] (1.99.1) | 🟨 357.573 [1.29×] (6.4) | 🟩 306.954 [1.10×] (1.27.3) | 🟥 5388.1 [19.4×] (3.15.0) | 🟩 296.2 [1.07×] (2.4.21) | 🟨 421.819 [1.52×] (1.3.13) | 🟥 958.776 [3.45×] (1.20.4) | 🟥 6427.91 [23.1×] (2.6.10p210) | 🟨 437.615 [1.57×] (1.13.2) |
-| [mandelbrot](./mandelbrot/)<br>2026-10-22 | 🟩 15.45 [1.14×] (0.1.0-dev.20261022+1012fd4) | 🟨 17.133 [1.26×] (0.1.0-dev.20261022+1012fd4) | ⭐ 13.56 [1.00×] (1.99.1) | 🟩 14.587 [1.08×] (6.4) | — | — | — | — | — | — | — |
+| [collatz](./collatz/)<br>2026-10-22 | 🟨 234.233 [2.08×] | 🟨 233.308 [2.07×] | ⭐ 112.637 [1.00×] | 🟨 175.254 [1.56×] | — | — | — | — | — | — | — |
+| [fibonacci](./fibonacci/)<br>2026-10-22 | 🟨 375.421 [1.35×] | 🟨 403.351 [1.45×] | ⭐ 278.001 [1.00×] | 🟨 357.573 [1.29×] | 🟩 306.954 [1.10×] | 🟥 5388.1 [19.4×] | 🟩 296.2 [1.07×] | 🟨 421.819 [1.52×] | 🟥 958.776 [3.45×] | 🟥 6427.91 [23.1×] | 🟨 437.615 [1.57×] |
+| [mandelbrot](./mandelbrot/)<br>2026-10-22 | 🟩 15.45 [1.14×] | 🟨 17.133 [1.26×] | ⭐ 13.56 [1.00×] | 🟩 14.587 [1.08×] | — | — | — | — | — | — | — |
 | **Lifecycle** |  |  |  |  |  |  |  |  |  |  |  |
-| [eager_destruction](./eager_destruction/)<br>2026-10-22 | ⭐ 2.063 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟨 3.091 [1.50×] (0.1.0-dev.20261022+1012fd4) | 🟨 3.74 [1.81×] (1.99.1) | — | — | — | — | — | — | — | — |
+| [eager_destruction](./eager_destruction/)<br>2026-10-22 | ⭐ 2.063 [1.00×] | 🟨 3.091 [1.50×] | 🟨 3.74 [1.81×] | — | — | — | — | — | — | — | — |
 | **Parsing** |  |  |  |  |  |  |  |  |  |  |  |
-| [json_validate](./json_validate/)<br>2026-10-22 | 🟥 92.4 [17.1×] (0.1.0-dev.20261022+1012fd4) | 🟥 118.102 [21.9×] (0.1.0-dev.20261022+1012fd4) | ⭐ 5.395 [1.00×] (1.99.1) | 🟥 33.704 [6.25×] (6.4) | 🟥 41.326 [7.66×] (1.27.3) | 🟥 2197.2 [407×] (3.15.0) | — | — | — | — | — |
+| [json_validate](./json_validate/)<br>2026-10-22 | 🟥 92.4 [17.1×] | 🟥 118.102 [21.9×] | ⭐ 5.395 [1.00×] | 🟥 33.704 [6.25×] | 🟥 41.326 [7.66×] | 🟥 2197.2 [407×] | — | — | — | — | — |
 | **Strings** |  |  |  |  |  |  |  |  |  |  |  |
-| [byte_slicing](./byte_slicing/)<br>2026-10-22 | 🟨 3.409 [1.91×] (0.1.0-dev.20261022+1012fd4) | 🟨 5.143 [2.88×] (0.1.0-dev.20261022+1012fd4) | ⭐ 1.787 [1.00×] (1.99.1) | 🟨 3.372 [1.89×] (6.4) | — | — | — | — | — | — | — |
-| [doubling_concat](./doubling_concat/)<br>2026-10-22 | 🟨 6.379 [1.38×] (0.1.0-dev.20261022+1012fd4) | 🟨 5.995 [1.30×] (0.1.0-dev.20261022+1012fd4) | ⭐ 4.608 [1.00×] (1.99.1) | 🟩 5.302 [1.15×] (6.4) | — | — | — | — | — | — | — |
-| [many_small_strings](./many_small_strings/)<br>2026-10-22 | ⭐ 8.497 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟩 10.134 [1.19×] (0.1.0-dev.20261022+1012fd4) | 🟨 10.559 [1.24×] (1.99.1) | 🟨 10.598 [1.25×] (6.4) | — | — | — | — | — | — | — |
-| [string_building](./string_building/)<br>2026-10-22 | 🟩 1.573 [1.09×] (0.1.0-dev.20261022+1012fd4) | 🟨 2.833 [1.97×] (0.1.0-dev.20261022+1012fd4) | ⭐ 1.44 [1.00×] (1.99.1) | 🟨 2.314 [1.61×] (6.4) | — | 🟥 36.72 [25.5×] (3.15.0) | — | — | — | — | — |
-| [string_slicing](./string_slicing/)<br>2026-10-22 | 🟨 3.493 [1.82×] (0.1.0-dev.20261022+1012fd4) | 🟨 4.992 [2.60×] (0.1.0-dev.20261022+1012fd4) | ⭐ 1.919 [1.00×] (1.99.1) | 🟥 18.499 [9.64×] (6.4) | — | — | — | — | — | — | — |
+| [byte_slicing](./byte_slicing/)<br>2026-10-22 | 🟨 3.409 [1.91×] | 🟨 5.143 [2.88×] | ⭐ 1.787 [1.00×] | 🟨 3.372 [1.89×] | — | — | — | — | — | — | — |
+| [doubling_concat](./doubling_concat/)<br>2026-10-22 | 🟨 6.379 [1.38×] | 🟨 5.995 [1.30×] | ⭐ 4.608 [1.00×] | 🟩 5.302 [1.15×] | — | — | — | — | — | — | — |
+| [many_small_strings](./many_small_strings/)<br>2026-10-22 | ⭐ 8.497 [1.00×] | 🟩 10.134 [1.19×] | 🟨 10.559 [1.24×] | 🟨 10.598 [1.25×] | — | — | — | — | — | — | — |
+| [string_building](./string_building/)<br>2026-10-22 | 🟩 1.573 [1.09×] | 🟨 2.833 [1.97×] | ⭐ 1.44 [1.00×] | 🟨 2.314 [1.61×] | — | 🟥 36.72 [25.5×] | — | — | — | — | — |
+| [string_slicing](./string_slicing/)<br>2026-10-22 | 🟨 3.493 [1.82×] | 🟨 4.992 [2.60×] | ⭐ 1.919 [1.00×] | 🟥 18.499 [9.64×] | — | — | — | — | — | — | — |
 | **Structs** |  |  |  |  |  |  |  |  |  |  |  |
-| [struct_records](./struct_records/)<br>2026-10-22 | ⭐ 10.533 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟩 12.294 [1.17×] (0.1.0-dev.20261022+1012fd4) | 🟨 24.479 [2.32×] (1.99.1) | 🟩 11.896 [1.13×] (6.4) | 🟨 25.911 [2.46×] (1.27.3) | 🟥 113.693 [10.8×] (3.15.0) | — | — | — | — | — |
-| [struct_records_inout](./struct_records_inout/)<br>2026-10-22 | ⭐ 10.941 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟩 12.431 [1.14×] (0.1.0-dev.20261022+1012fd4) | 🟨 24.468 [2.24×] (1.99.1) | 🟩 12.322 [1.13×] (6.4) | 🟨 26.265 [2.40×] (1.27.3) | 🟥 95.276 [8.71×] (3.15.0) | — | — | — | — | — |
-| [struct_records_reuse](./struct_records_reuse/)<br>2026-10-22 | 🟨 14.626 [1.21×] (0.1.0-dev.20261022+1012fd4) | 🟨 15.783 [1.31×] (0.1.0-dev.20261022+1012fd4) | 🟨 32.063 [2.66×] (1.99.1) | ⭐ 12.072 [1.00×] (6.4) | 🟨 26.167 [2.17×] (1.27.3) | 🟥 123.295 [10.2×] (3.15.0) | — | — | — | — | — |
+| [struct_records](./struct_records/)<br>2026-10-22 | ⭐ 10.533 [1.00×] | 🟩 12.294 [1.17×] | 🟨 24.479 [2.32×] | 🟩 11.896 [1.13×] | 🟨 25.911 [2.46×] | 🟥 113.693 [10.8×] | — | — | — | — | — |
+| [struct_records_inout](./struct_records_inout/)<br>2026-10-22 | ⭐ 10.941 [1.00×] | 🟩 12.431 [1.14×] | 🟨 24.468 [2.24×] | 🟩 12.322 [1.13×] | 🟨 26.265 [2.40×] | 🟥 95.276 [8.71×] | — | — | — | — | — |
+| [struct_records_reuse](./struct_records_reuse/)<br>2026-10-22 | 🟨 14.626 [1.21×] | 🟨 15.783 [1.31×] | 🟨 32.063 [2.66×] | ⭐ 12.072 [1.00×] | 🟨 26.167 [2.17×] | 🟥 123.295 [10.2×] | — | — | — | — | — |
 | **Summary (geomean)** | 🟨 1.57× | 🟨 1.92× | 🟨 1.30× | 🟨 1.73× | 🟨 2.55× | 🟥 24.0× | ⭐ 1.07× | 🟨 1.52× | 🟥 3.45× | 🟥 23.1× | 🟨 1.57× |
 
 **Peak memory (max RSS)**
 | Suite | Ryo AOT | Ryo JIT | Rust | Swift | Go | Python | Kotlin | Bun (TS) | Elixir | Ruby | Julia |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | **Algorithms** |  |  |  |  |  |  |  |  |  |  |  |
-| [collatz](./collatz/)<br>2026-10-22 | ⭐ 1.369 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟥 5.722 [4.18×] (0.1.0-dev.20261022+1012fd4) | 🟩 1.492 [1.09×] (1.99.1) | 🟥 5.576 [4.07×] (6.4) | — | — | — | — | — | — | — |
-| [fibonacci](./fibonacci/)<br>2026-10-22 | ⭐ 1.352 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟥 5.478 [4.05×] (0.1.0-dev.20261022+1012fd4) | 🟩 1.478 [1.09×] (1.99.1) | 🟩 1.609 [1.19×] (6.4) | 🟨 3.895 [2.88×] (1.27.3) | 🟥 17.206 [12.7×] (3.15.0) | 🟥 44.669 [33.0×] (2.4.21) | 🟥 27.428 [20.3×] (1.3.13) | 🟥 90.241 [66.7×] (1.20.4) | 🟥 27.997 [20.7×] (2.6.10p210) | 🟥 193.627 [143×] (1.13.2) |
-| [mandelbrot](./mandelbrot/)<br>2026-10-22 | ⭐ 1.37 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟥 5.833 [4.26×] (0.1.0-dev.20261022+1012fd4) | 🟩 1.493 [1.09×] (1.99.1) | 🟥 5.577 [4.07×] (6.4) | — | — | — | — | — | — | — |
+| [collatz](./collatz/)<br>2026-10-22 | ⭐ 1.369 [1.00×] | 🟥 5.722 [4.18×] | 🟩 1.492 [1.09×] | 🟥 5.576 [4.07×] | — | — | — | — | — | — | — |
+| [fibonacci](./fibonacci/)<br>2026-10-22 | ⭐ 1.352 [1.00×] | 🟥 5.478 [4.05×] | 🟩 1.478 [1.09×] | 🟩 1.609 [1.19×] | 🟨 3.895 [2.88×] | 🟥 17.206 [12.7×] | 🟥 44.669 [33.0×] | 🟥 27.428 [20.3×] | 🟥 90.241 [66.7×] | 🟥 27.997 [20.7×] | 🟥 193.627 [143×] |
+| [mandelbrot](./mandelbrot/)<br>2026-10-22 | ⭐ 1.37 [1.00×] | 🟥 5.833 [4.26×] | 🟩 1.493 [1.09×] | 🟥 5.577 [4.07×] | — | — | — | — | — | — | — |
 | **Lifecycle** |  |  |  |  |  |  |  |  |  |  |  |
-| [eager_destruction](./eager_destruction/)<br>2026-10-22 | ⭐ 1.369 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟥 5.505 [4.02×] (0.1.0-dev.20261022+1012fd4) | 🟥 6.813 [4.98×] (1.99.1) | — | — | — | — | — | — | — | — |
+| [eager_destruction](./eager_destruction/)<br>2026-10-22 | ⭐ 1.369 [1.00×] | 🟥 5.505 [4.02×] | 🟥 6.813 [4.98×] | — | — | — | — | — | — | — | — |
 | **Parsing** |  |  |  |  |  |  |  |  |  |  |  |
-| [json_validate](./json_validate/)<br>2026-10-22 | ⭐ 5.698 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟨 12.466 [2.19×] (0.1.0-dev.20261022+1012fd4) | 🟩 5.895 [1.03×] (1.99.1) | 🟨 10.407 [1.83×] (6.4) | 🟨 13.915 [2.44×] (1.27.3) | 🟥 28.012 [4.92×] (3.15.0) | — | — | — | — | — |
+| [json_validate](./json_validate/)<br>2026-10-22 | ⭐ 5.698 [1.00×] | 🟨 12.466 [2.19×] | 🟩 5.895 [1.03×] | 🟨 10.407 [1.83×] | 🟨 13.915 [2.44×] | 🟥 28.012 [4.92×] | — | — | — | — | — |
 | **Strings** |  |  |  |  |  |  |  |  |  |  |  |
-| [byte_slicing](./byte_slicing/)<br>2026-10-22 | ⭐ 2.76 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟨 7.6 [2.75×] (0.1.0-dev.20261022+1012fd4) | 🟩 2.908 [1.05×] (1.99.1) | 🟨 7.11 [2.58×] (6.4) | — | — | — | — | — | — | — |
-| [doubling_concat](./doubling_concat/)<br>2026-10-22 | ⭐ 33.417 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟩 37.685 [1.13×] (0.1.0-dev.20261022+1012fd4) | 🟩 35.689 [1.07×] (1.99.1) | 🟩 34.078 [1.02×] (6.4) | — | — | — | — | — | — | — |
-| [many_small_strings](./many_small_strings/)<br>2026-10-22 | ⭐ 1.37 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟥 5.57 [4.07×] (0.1.0-dev.20261022+1012fd4) | 🟩 1.537 [1.12×] (1.99.1) | 🟩 1.609 [1.17×] (6.4) | — | — | — | — | — | — | — |
-| [string_building](./string_building/)<br>2026-10-22 | ⭐ 1.494 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟥 5.698 [3.81×] (0.1.0-dev.20261022+1012fd4) | 🟩 1.65 [1.10×] (1.99.1) | 🟨 1.859 [1.24×] (6.4) | — | 🟥 17.602 [11.8×] (3.15.0) | — | — | — | — | — |
-| [string_slicing](./string_slicing/)<br>2026-10-22 | ⭐ 2.756 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟨 7.699 [2.79×] (0.1.0-dev.20261022+1012fd4) | 🟩 2.916 [1.06×] (1.99.1) | 🟨 7.045 [2.56×] (6.4) | — | — | — | — | — | — | — |
+| [byte_slicing](./byte_slicing/)<br>2026-10-22 | ⭐ 2.76 [1.00×] | 🟨 7.6 [2.75×] | 🟩 2.908 [1.05×] | 🟨 7.11 [2.58×] | — | — | — | — | — | — | — |
+| [doubling_concat](./doubling_concat/)<br>2026-10-22 | ⭐ 33.417 [1.00×] | 🟩 37.685 [1.13×] | 🟩 35.689 [1.07×] | 🟩 34.078 [1.02×] | — | — | — | — | — | — | — |
+| [many_small_strings](./many_small_strings/)<br>2026-10-22 | ⭐ 1.37 [1.00×] | 🟥 5.57 [4.07×] | 🟩 1.537 [1.12×] | 🟩 1.609 [1.17×] | — | — | — | — | — | — | — |
+| [string_building](./string_building/)<br>2026-10-22 | ⭐ 1.494 [1.00×] | 🟥 5.698 [3.81×] | 🟩 1.65 [1.10×] | 🟨 1.859 [1.24×] | — | 🟥 17.602 [11.8×] | — | — | — | — | — |
+| [string_slicing](./string_slicing/)<br>2026-10-22 | ⭐ 2.756 [1.00×] | 🟨 7.699 [2.79×] | 🟩 2.916 [1.06×] | 🟨 7.045 [2.56×] | — | — | — | — | — | — | — |
 | **Structs** |  |  |  |  |  |  |  |  |  |  |  |
-| [struct_records](./struct_records/)<br>2026-10-22 | ⭐ 1.354 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟥 6.012 [4.44×] (0.1.0-dev.20261022+1012fd4) | 🟩 1.542 [1.14×] (1.99.1) | 🟩 1.609 [1.19×] (6.4) | 🟥 9.312 [6.88×] (1.27.3) | 🟥 17.287 [12.8×] (3.15.0) | — | — | — | — | — |
-| [struct_records_inout](./struct_records_inout/)<br>2026-10-22 | ⭐ 1.354 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟥 5.955 [4.40×] (0.1.0-dev.20261022+1012fd4) | 🟩 1.546 [1.14×] (1.99.1) | 🟩 1.61 [1.19×] (6.4) | 🟥 9.354 [6.91×] (1.27.3) | 🟥 17.294 [12.8×] (3.15.0) | — | — | — | — | — |
-| [struct_records_reuse](./struct_records_reuse/)<br>2026-10-22 | ⭐ 1.37 [1.00×] (0.1.0-dev.20261022+1012fd4) | 🟥 6.041 [4.41×] (0.1.0-dev.20261022+1012fd4) | 🟩 1.589 [1.16×] (1.99.1) | 🟩 1.625 [1.19×] (6.4) | 🟥 9.337 [6.82×] (1.27.3) | 🟥 17.29 [12.6×] (3.15.0) | — | — | — | — | — |
+| [struct_records](./struct_records/)<br>2026-10-22 | ⭐ 1.354 [1.00×] | 🟥 6.012 [4.44×] | 🟩 1.542 [1.14×] | 🟩 1.609 [1.19×] | 🟥 9.312 [6.88×] | 🟥 17.287 [12.8×] | — | — | — | — | — |
+| [struct_records_inout](./struct_records_inout/)<br>2026-10-22 | ⭐ 1.354 [1.00×] | 🟥 5.955 [4.40×] | 🟩 1.546 [1.14×] | 🟩 1.61 [1.19×] | 🟥 9.354 [6.91×] | 🟥 17.294 [12.8×] | — | — | — | — | — |
+| [struct_records_reuse](./struct_records_reuse/)<br>2026-10-22 | ⭐ 1.37 [1.00×] | 🟥 6.041 [4.41×] | 🟩 1.589 [1.16×] | 🟩 1.625 [1.19×] | 🟥 9.337 [6.82×] | 🟥 17.29 [12.6×] | — | — | — | — | — |
 | **Summary (geomean)** | ⭐ 1.00× | 🟥 3.37× | 🟨 1.23× | 🟨 1.70× | 🟥 4.69× | 🟥 10.7× | 🟥 33.0× | 🟥 20.3× | 🟥 66.7× | 🟥 20.7× | 🟥 143× |
 
 *Cells show each suite's best arm per language — mean time or peak RSS, ratio vs. the fastest arm in the row; the summary row is a per-column geomean of those ratios.*

@@ -1650,11 +1650,11 @@ def _matrix_table(
                 if cell is None:
                     row.append(_NO_MEASUREMENT)
                     continue
-                value, entry = cell
+                value, _ = cell
                 ratio = value / best
                 row.append(
                     f"{_ratio_emoji(ratio)} {_format_cell_value(value)} "
-                    f"[{_format_ratio(ratio)}] ({_bare_version(entry)})"
+                    f"[{_format_ratio(ratio)}]"
                 )
             lines.append("| " + " | ".join(row) + " |")
     lines.append("| " + " | ".join(_matrix_summary_row(metric_rows, columns)) + " |")
@@ -1668,9 +1668,10 @@ def render_matrix(suites: list[Suite], stores: dict[str, Store]) -> str:
     suites last under "Other", alphabetical within a group); columns are
     languages — canonical order first, unknown languages appended sorted —
     and a column exists only while at least one suite has a measured cell in
-    it. Each cell is the suite's best arm for that language: value, ratio vs.
-    the row's fastest cell, and the bare toolchain version. The final row is
-    a per-column geomean of the cell ratios over measured rows. Suites with
+    it. Each cell is the suite's best arm for that language: value and ratio
+    vs. the row's fastest cell. Toolchain versions stay in the per-suite
+    tables. The final row is a per-column geomean of the cell ratios over
+    measured rows. Suites with
     nothing measured for a metric are omitted from that metric's table (a
     metric no suite measured gets no table at all); when nothing is measured
     anywhere, the legend and footnote frame the no-data placeholder.

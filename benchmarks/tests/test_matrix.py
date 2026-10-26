@@ -188,8 +188,10 @@ def test_render_matrix_full_block(tmp_path):
     assert "**Runtime (mean)**" in text  # caption above the table, not a table row
     assert "| **Runtime (mean)** |" not in text
     # Ryo AOT is the first column.
-    assert "| [alpha](./alpha/)<br>2026-10-21 | 🟨 200 [2.00×] (0.1.0) |" in text
-    assert "| [beta](./beta/)<br>2026-10-21 | 🟥 400 [4.00×] (0.1.0) |" in text
+    assert "| [alpha](./alpha/)<br>2026-10-21 | 🟨 200 [2.00×] |" in text
+    assert "| [beta](./beta/)<br>2026-10-21 | 🟥 400 [4.00×] |" in text
+    assert "(0.1.0)" not in text
+    assert "(1.85.0)" not in text
     # sqrt(2*4)=2.83; 2.83 <= 3.0 -> 🟨.
     assert "| **Summary (geomean)** | 🟨 2.83× | ⭐ 1.00× |" in text
     assert "| **Algorithms** |" in text and "| **Strings** |" in text
@@ -204,7 +206,7 @@ def test_render_matrix_single_measured_arm_row(tmp_path):
         {"solo/Rust": [make_entry(100.0, 1.5, toolchain="rustc 1.98.0")]},
     )
     text = render_matrix([solo], {"solo": store})
-    assert "| [solo](./solo/)<br>2026-10-21 | ⭐ 100 [1.00×] (1.98.0) |" in text
+    assert "| [solo](./solo/)<br>2026-10-21 | ⭐ 100 [1.00×] |" in text
 
 
 def test_render_matrix_no_data_renders_placeholder(tmp_path):
@@ -223,7 +225,7 @@ def test_render_matrix_fastest_arm_wins_language_column(tmp_path):
         },
     )
     text = render_matrix([solo], {"solo": store})
-    assert "| [solo](./solo/)<br>2026-10-21 | ⭐ 50 [1.00×] (1.85.0) |" in text
+    assert "| [solo](./solo/)<br>2026-10-21 | ⭐ 50 [1.00×] |" in text
     assert "500" not in text
 
 
@@ -253,9 +255,9 @@ def test_render_matrix_missing_rss_keeps_time_cell(tmp_path):
     )
     text = render_matrix([alpha, gamma], stores)
     # Time cell intact even though the entry has no RSS.
-    assert "| [gamma](./gamma/)<br>2026-10-21 | 🟨 200 [2.00×] (0.1.0) |" in text
+    assert "| [gamma](./gamma/)<br>2026-10-21 | 🟨 200 [2.00×] |" in text
     # Memory table: the RSS-less arm renders "—" in its column.
-    assert "| [gamma](./gamma/)<br>2026-10-21 | — | ⭐ 1.5 [1.00×] (1.98.0) |" in text
+    assert "| [gamma](./gamma/)<br>2026-10-21 | — | ⭐ 1.5 [1.00×] |" in text
     # gamma is uncategorized, so its group sorts after the real categories.
     assert "| **Other** |" in text
     assert text.index("| **Strings** |") < text.index("| **Other** |")
@@ -273,8 +275,8 @@ def test_render_matrix_unknown_language_appends_column(tmp_path):
     text = render_matrix([solo], {"solo": store})
     assert "| Suite | Rust | Nim |" in text  # unknown language last, capitalized
     row = (
-        "| [solo](./solo/)<br>2026-10-21 | ⭐ 100 [1.00×] (1.85.0) "
-        "| 🟥 400 [4.00×] (2.0.0) |"
+        "| [solo](./solo/)<br>2026-10-21 | ⭐ 100 [1.00×] "
+        "| 🟥 400 [4.00×] |"
     )
     assert row in text
 

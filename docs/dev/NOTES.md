@@ -1,6 +1,5 @@
 # TODO
 
-- remove versions from the root benchmark keep them on the in-site benches only
 - cache valgrin docker image for CI it takes 9m 29s just to install it
 - FFI: https://verdagon.dev/blog/fearless-ffi
 - add support for https://build-server-protocol.github.io/
