@@ -101,7 +101,9 @@ def make_entry(
 def write_store(path: Path, entries: dict[str, list[dict]]) -> Store:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"lastUpdate": 0, "repoUrl": "https://example.test/ryo", "entries": entries}),
+        json.dumps(
+            {"lastUpdate": 0, "repoUrl": "https://example.test/ryo", "entries": entries}
+        ),
         encoding="utf-8",
     )
     return Store.load(path)
@@ -144,7 +146,9 @@ def test_grouped_suite_renders_heading_per_group(tmp_path, fixed_platform):
     store = write_store(
         tmp_path / "data" / "grouped.json",
         {
-            "grouped/hand-rolled/Ryo (AOT)": [make_entry(2.7, 2.75, toolchain="ryo 0.1.0")],
+            "grouped/hand-rolled/Ryo (AOT)": [
+                make_entry(2.7, 2.75, toolchain="ryo 0.1.0")
+            ],
             "grouped/stdlib/Go": [make_entry(1.6, 3.0, toolchain="go 1.24.0")],
         },
     )
@@ -189,12 +193,17 @@ def test_version_cell_is_bare_version_stripped_of_tool_name(tmp_path, fixed_plat
     store = write_store(
         tmp_path / "data" / "grouped.json",
         {
-            "grouped/hand-rolled/Ryo (AOT)": [make_entry(2.7, 2.75, toolchain=toolchain)],
+            "grouped/hand-rolled/Ryo (AOT)": [
+                make_entry(2.7, 2.75, toolchain=toolchain)
+            ],
             "grouped/stdlib/Go": [make_entry(1.6, 3.0, toolchain="go 1.24.0")],
         },
     )
     table = render_suite_table(suite, store)
-    assert "| Ryo (AOT) | 0.1.0-dev.20261021+63078ac | 2.7 ms | 1.00x | ⭐ 2.75 MB | — |" in table
+    assert (
+        "| Ryo (AOT) | 0.1.0-dev.20261021+63078ac | 2.7 ms | 1.00x | ⭐ 2.75 MB | — |"
+        in table
+    )
 
 
 def test_table_uses_historical_format_and_sorts_fastest_first(tmp_path, fixed_platform):
@@ -209,9 +218,15 @@ def test_table_uses_historical_format_and_sorts_fastest_first(tmp_path, fixed_pl
         },
     )
     text = render_suite_table(suite, store)
-    assert "| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |" in text
+    assert (
+        "| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |"
+        in text
+    )
     assert "| Rust | 1.98.0 | 100 ms | 1.00x | 1.5 MB | — |" in text
-    assert "| Swift | 0.1.0-dev.20261021+63078ac | 200 ms | 2.00x slower | ⭐ 1.4 MB | — |" in text
+    assert (
+        "| Swift | 0.1.0-dev.20261021+63078ac | 200 ms | 2.00x slower | ⭐ 1.4 MB | — |"
+        in text
+    )
     assert text.index("| Rust |") < text.index("| Swift |")
 
 
@@ -262,7 +277,9 @@ def test_cmd_table_prints_to_stdout(tmp_path, fixed_platform, monkeypatch, capsy
     assert cmd_table(argparse.Namespace(benchmarks=None, out=None)) == 0
 
     out = capsys.readouterr().out
-    assert out.startswith("| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |\n")
+    assert out.startswith(
+        "| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |\n"
+    )
     assert "(commit abc1234, hyperfine 2.0.0, warmup 3)" in out
     assert out.endswith("\n")
 
@@ -273,7 +290,11 @@ def test_cmd_table_writes_out_file_instead_of_stdout(
     suite = write_suite(tmp_path / "suite", GROUPED_SUITE)
     write_store(
         tmp_path / "benchmarks" / "data" / "grouped.json",
-        {"grouped/hand-rolled/Ryo (AOT)": [make_entry(2.7, 2.75, toolchain="ryo 0.1.0")]},
+        {
+            "grouped/hand-rolled/Ryo (AOT)": [
+                make_entry(2.7, 2.75, toolchain="ryo 0.1.0")
+            ]
+        },
     )
     _patch_discovery(monkeypatch, tmp_path, suite)
 
@@ -305,7 +326,10 @@ def test_delta_prev_column_two_entries(tmp_path, fixed_platform):
         },
     )
     text = render_suite_table(suite, store)
-    assert "| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |" in text
+    assert (
+        "| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |"
+        in text
+    )
     assert "| Rust | 1.98.0 | 90 ms | 1.00x | 1.4 MB (-6.7%) | -10.0% |" in text
 
 
@@ -346,4 +370,7 @@ def test_star_and_memory_delta_coexist(tmp_path, fixed_platform):
         },
     )
     text = render_suite_table(suite, store)
-    assert "| Swift | 6.3.3 | 200 ms | 4.00x slower | ⭐ 1.4 MB (-6.7%) | +100.0% |" in text
+    assert (
+        "| Swift | 6.3.3 | 200 ms | 4.00x slower | ⭐ 1.4 MB (-6.7%) | +100.0% |"
+        in text
+    )

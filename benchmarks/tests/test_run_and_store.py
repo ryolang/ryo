@@ -147,7 +147,11 @@ expect = "b"
 """,
     )
     timing = ArmTiming(
-        time_ms_mean=1.0, time_ms_stddev=0.1, time_ms_min=1.0, time_ms_max=1.0, rss_mb_mean=2.0
+        time_ms_mean=1.0,
+        time_ms_stddev=0.1,
+        time_ms_min=1.0,
+        time_ms_max=1.0,
+        rss_mb_mean=2.0,
     )
     store.append(
         SuiteResult(
@@ -168,7 +172,9 @@ expect = "b"
 def test_key_grammar_with_group(tmp_path):
     store = Store.load(tmp_path / "data" / "json_parse.json")
     store.append(
-        make_result(tmp_path, suite_name="json_parse", group="hand-rolled", arm_name="Ryo (AOT)")
+        make_result(
+            tmp_path, suite_name="json_parse", group="hand-rolled", arm_name="Ryo (AOT)"
+        )
     )
     assert set(store.entries) == {"json_parse/hand-rolled/Ryo (AOT)"}
     plain = make_result(tmp_path)
@@ -180,7 +186,9 @@ def test_store_file_shape_matches_spec(tmp_path):
     store.append(make_result(tmp_path))
     store.save()
 
-    data = json.loads((tmp_path / "data" / "synthetic.json").read_text(encoding="utf-8"))
+    data = json.loads(
+        (tmp_path / "data" / "synthetic.json").read_text(encoding="utf-8")
+    )
     assert set(data) == {"lastUpdate", "repoUrl", "entries"}
     assert isinstance(data["lastUpdate"], int)
     (entry,) = data["entries"]["synthetic/A"]
@@ -197,7 +205,10 @@ def test_version_label_uses_display_name_and_dedupes_tool_name():
     binary (uv gates Python arms), and a raw ``$ryo --version`` override that
     echoes the tool name must not double it."""
     assert _version_label("python", "3.14.4") == "python 3.14.4"
-    assert _version_label("ryo", "ryo 0.1.0-dev.20261021+abcdef1") == "ryo 0.1.0-dev.20261021+abcdef1"
+    assert (
+        _version_label("ryo", "ryo 0.1.0-dev.20261021+abcdef1")
+        == "ryo 0.1.0-dev.20261021+abcdef1"
+    )
     assert _version_label("ryo", "0.1.0") == "ryo 0.1.0"
     # Languages without a display-name entry keep the gating-binary form.
     assert _version_label("rust", "1.98.0") == "rustc 1.98.0"
@@ -210,7 +221,9 @@ def test_ryo_version_probe_keeps_full_version(tmp_path):
     fake.write_text('#!/bin/sh\necho "ryo 0.1.0-dev.20261021+abcdef1"\n')
     fake.chmod(0o755)
     path = tmp_path / "suite.toml"
-    path.write_text('name = "s"\n\n[[arm]]\nname = "Ryo (AOT)"\nlanguage = "ryo"\nrun = "/bin/echo x"\nexpect = "x"\n')
+    path.write_text(
+        'name = "s"\n\n[[arm]]\nname = "Ryo (AOT)"\nlanguage = "ryo"\nrun = "/bin/echo x"\nexpect = "x"\n'
+    )
     suite = load_suite(path)
     versions = capture_versions(suite, suite.arms, str(fake))
     assert versions["ryo"] == "0.1.0-dev.20261021+abcdef1"
@@ -234,7 +247,9 @@ def test_roundtrip(tmp_path):
     loaded.save()
     reloaded = Store.load(path)
     assert len(reloaded.entries["synthetic/A"]) == 3
-    assert reloaded.latest("synthetic/A")["benches"][0]["value"] == 3.0
+    latest = reloaded.latest("synthetic/A")
+    assert latest is not None
+    assert latest["benches"][0]["value"] == 3.0
 
 
 # --- Orchestration tests (real /bin/echo arms + real hyperfine) ---
@@ -409,7 +424,9 @@ expect = "a"
     assert summary.suites == []
     assert not (tmp_path / "data" / "suite_a.json").exists()
     assert not (tmp_path / "run.json").exists()
-    assert any("suite_b" in failure and "Rust" in failure for failure in summary.failures)
+    assert any(
+        "suite_b" in failure and "Rust" in failure for failure in summary.failures
+    )
 
 
 def test_unknown_language_name_errors(tmp_path, capsys):
