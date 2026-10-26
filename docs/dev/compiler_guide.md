@@ -81,7 +81,7 @@ See `docs/dev/pipeline_alignment.md` for what remains of the Zig-alignment plan 
 | `ryo-frontend/src/sema.rs` | Semantic analysis: type-checks UIR, emits one TIR per function body |
 | `ryo-frontend/src/pipeline.rs` | BuiltProgram, AnalysisReady, and CleanupProgram transitions; immutable published bodies and cleanup |
 | `ryo-frontend/src/ownership/mod.rs` | Post-sema, pre-codegen ownership flow analysis |
-| `ryo-frontend/src/builtins.rs` | Builtin function and runtime ABI callee registry |
+| `ryo-frontend/src/builtins.rs` | Frontend-only interned builtin names and reserved-name handling |
 
 #### 4. Code Generation and Linking Crate (`ryo-backend`)
 | File | Role |
@@ -95,6 +95,7 @@ See `docs/dev/pipeline_alignment.md` for what remains of the Zig-alignment plan 
 #### 5. Shared Core Crate (`ryo-core`)
 | File | Role |
 |------|------|
+| `ryo-core/src/builtins.rs` | Canonical builtin function and runtime ABI callee registry shared by frontend and backend |
 | `ryo-core/src/ast.rs` | Surface-syntax AST: typed arenas (`Vec<Expr>` / `Vec<Stmt>` indexed by `ExprId` / `StmtId`, with `ExprKind` / `StmtKind` payload enums, list side arenas, and inline spans); identifiers/types/strings stored as `StringId` |
 | `ryo-core/src/uir.rs` | Untyped IR data structures (flat, program-wide arena) |
 | `ryo-core/src/tir.rs` | Typed IR data structures (flat, per-function arena) |

@@ -1,6 +1,7 @@
 pub mod artifact;
 pub mod ast;
 pub mod ast_pretty;
+pub mod builtins;
 pub mod diag;
 pub mod errors;
 pub mod extra;
