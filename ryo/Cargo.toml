@@ -6,7 +6,6 @@ rust-version.workspace = true
 
 [dependencies]
 ryo-driver = { workspace = true }
-ryo-backend = { workspace = true }
 ryo-core = { workspace = true }
 clap = { workspace = true }
 

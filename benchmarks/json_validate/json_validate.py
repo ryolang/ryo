@@ -229,7 +229,9 @@ def main():
         parts.append(str(i))
         parts.append(', "name": "user')
         parts.append(str(i))
-        parts.append('", "tags": ["a", "b"], "active": true, "score": 1.5, "misc": null}')
+        parts.append(
+            '", "tags": ["a", "b"], "active": true, "score": 1.5, "misc": null}'
+        )
     parts.append("]")
     s = "".join(parts)
 

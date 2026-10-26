@@ -40,7 +40,12 @@ def make_arm(**overrides) -> Arm:
 
 def make_suite(tmp_path: Path, arms: list[Arm]) -> Suite:
     return Suite(
-        name="suite", descriptor="", warmup=3, default_expect=None, arms=arms, dir=tmp_path
+        name="suite",
+        descriptor="",
+        warmup=3,
+        default_expect=None,
+        arms=arms,
+        dir=tmp_path,
     )
 
 
@@ -79,7 +84,9 @@ run = "julia fib.jl"
     # A missing toolchain for a deselected arm is not reported.
     assert missing_tools(suite, [rust_arm], "/nonexistent/ryo") == []
     # A missing toolchain for a selected arm is reported as (arm, binary).
-    assert missing_tools(suite, [julia_arm], "/nonexistent/ryo") == [(julia_arm, "julia")]
+    assert missing_tools(suite, [julia_arm], "/nonexistent/ryo") == [
+        (julia_arm, "julia")
+    ]
 
 
 def test_version_override_wins(tmp_path):
@@ -176,9 +183,13 @@ def test_select_suites_skip_ignored_drops_gitignored_manifests(tmp_path, monkeyp
     _write_manifest(tmp_path, "committed", "committed")
     _write_manifest(tmp_path, "local", "local")
     monkeypatch.setattr(run, "_REPO_ROOT", tmp_path)
-    monkeypatch.setattr(run, "_is_git_ignored", lambda path: path.parent.name == "local")
+    monkeypatch.setattr(
+        run, "_is_git_ignored", lambda path: path.parent.name == "local"
+    )
 
-    assert [s.name for s in run._select_suites(None, skip_ignored=True)] == ["committed"]
+    assert [s.name for s in run._select_suites(None, skip_ignored=True)] == [
+        "committed"
+    ]
     assert {s.name for s in run._select_suites(None)} == {"committed", "local"}
 
 
@@ -208,7 +219,10 @@ def test_select_suites_skip_ignored_excludes_the_repo_local_sweeps():
 def test_normalize_repo_url_converts_ssh_remotes_to_https():
     """scp-like and ssh:// remotes would yield non-resolvable commit URLs in
     the store; https remotes pass through unchanged."""
-    assert _normalize_repo_url("git@github.com:ryolang/ryo") == "https://github.com/ryolang/ryo"
+    assert (
+        _normalize_repo_url("git@github.com:ryolang/ryo")
+        == "https://github.com/ryolang/ryo"
+    )
     assert (
         _normalize_repo_url("ssh://git@github.com/ryolang/ryo")
         == "https://github.com/ryolang/ryo"

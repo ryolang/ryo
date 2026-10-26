@@ -104,8 +104,8 @@ fn build_and_link_with(
     assert!(status.success(), "ryo build failed for {name}");
 
     // Step 2: relink (object extension matches the AOT pipeline:
-    // `.obj` on Windows, `.o` elsewhere — see pipeline.rs
-    // get_output_filenames)
+    // `.obj` on Windows, `.o` elsewhere — see get_output_filenames
+    // in ryo-driver/src/pipeline/build.rs)
     let obj = tmp.path().join(format!(
         "{name}.{}",
         if cfg!(windows) { "obj" } else { "o" }

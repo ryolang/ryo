@@ -88,7 +88,9 @@ def load_suite(path: Path) -> Suite:
 
     name = data.get("name")
     if not isinstance(name, str) or not name:
-        raise ManifestError(f"{path}: suite is missing required key 'name' (non-empty string)")
+        raise ManifestError(
+            f"{path}: suite is missing required key 'name' (non-empty string)"
+        )
 
     descriptor = data.get("descriptor", "")
     if not isinstance(descriptor, str):
@@ -104,7 +106,9 @@ def load_suite(path: Path) -> Suite:
 
     default_expect = data.get("expect")
     if default_expect is not None and not isinstance(default_expect, str):
-        raise ManifestError(f"{path}: 'expect' must be a string, got {default_expect!r}")
+        raise ManifestError(
+            f"{path}: 'expect' must be a string, got {default_expect!r}"
+        )
 
     raw_arms = data.get("arm", [])
     if not isinstance(raw_arms, list):
@@ -143,7 +147,9 @@ def _load_arm(raw: object, index: int, default_expect: str | None, path: Path) -
 
     for key in ("name", "language", "run"):
         if not isinstance(raw.get(key), str) or not raw[key]:
-            raise ManifestError(f"{where}: arm is missing required key {key!r} (non-empty string)")
+            raise ManifestError(
+                f"{where}: arm is missing required key {key!r} (non-empty string)"
+            )
 
     name = raw["name"]
     if "/" in name:
@@ -227,7 +233,9 @@ def parse_summary(result: dict) -> ArmTiming:
         time_ms_stddev=round(wall["stddev"] * to_ms, 3),
         time_ms_min=round(wall["min"] * to_ms, 3),
         time_ms_max=round(wall["max"] * to_ms, 3),
-        rss_mb_mean=None if rss is None else round(rss["mean"] * _RSS_UNIT_TO_MB[rss["unit"]], 3),
+        rss_mb_mean=None
+        if rss is None
+        else round(rss["mean"] * _RSS_UNIT_TO_MB[rss["unit"]], 3),
     )
 
 
@@ -240,7 +248,9 @@ def run_hyperfine(cmd: str, warmup: int, cwd: Path, label: str) -> dict:
     """
     binary = shutil.which("hyperfine")
     if binary is None:
-        raise RuntimeError("hyperfine executable not found on PATH; install hyperfine 2.x")
+        raise RuntimeError(
+            "hyperfine executable not found on PATH; install hyperfine 2.x"
+        )
 
     export_file = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
     export_path = export_file.name
@@ -283,7 +293,7 @@ BUILTIN_VERSION_CMDS: dict[str, str] = {
     "go": "go version | awk '{print $3}' | sed 's/go//'",
     "swift": (
         "swiftc --version | head -1 | awk "
-        "'{for (i = 1; i < NF; i++) if ($i == \"Swift\" && $(i+1) == \"version\") "
+        '\'{for (i = 1; i < NF; i++) if ($i == "Swift" && $(i+1) == "version") '
         "{ print $(i+2); exit }}'"
     ),
     "kotlin": r"kotlinc -version 2>&1 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' | head -1",
@@ -336,7 +346,7 @@ def _version_label(language: str, toolchain: str) -> str:
     display = _VERSION_DISPLAY_NAME.get(language.lower(), tool)
     prefix = f"{display} "
     if toolchain.startswith(prefix):
-        toolchain = toolchain[len(prefix):]
+        toolchain = toolchain[len(prefix) :]
     return f"{display} {toolchain}"
 
 
@@ -505,7 +515,9 @@ _STORE_RETENTION = 20
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
 
 
 def _epoch_ms() -> int:
@@ -515,7 +527,9 @@ def _epoch_ms() -> int:
 def _git(args: list[str]) -> str:
     """Run a read-only git query in the repo root; "" on any failure."""
     try:
-        proc = subprocess.run(["git", *args], cwd=_REPO_ROOT, capture_output=True, text=True)
+        proc = subprocess.run(
+            ["git", *args], cwd=_REPO_ROOT, capture_output=True, text=True
+        )
     except OSError:
         return ""
     if proc.returncode != 0:
@@ -534,7 +548,7 @@ def _normalize_repo_url(remote: str) -> str:
             rest = rest.split("@", 1)[1]
         return "https://" + rest.lstrip("/")
     if remote.startswith("git@") and ":" in remote:
-        host, _, path = remote[len("git@"):].partition(":")
+        host, _, path = remote[len("git@") :].partition(":")
         return f"https://{host}/{path}"
     return remote
 
@@ -568,7 +582,9 @@ def _platform_string() -> str:
     arch = platform.machine() or "unknown"
     model = ""
     try:
-        proc = subprocess.run(["sysctl", "-n", "hw.model"], capture_output=True, text=True)
+        proc = subprocess.run(
+            ["sysctl", "-n", "hw.model"], capture_output=True, text=True
+        )
         if proc.returncode == 0:
             model = proc.stdout.strip()
     except OSError:
@@ -708,10 +724,16 @@ class Store:
         self.last_update = _epoch_ms()
         _write_json(
             self.path,
-            {"lastUpdate": self.last_update, "repoUrl": self.repo_url, "entries": self.entries},
+            {
+                "lastUpdate": self.last_update,
+                "repoUrl": self.repo_url,
+                "entries": self.entries,
+            },
         )
 
-    def _entry(self, suite_result: SuiteResult, arm_result: ArmResult, run_date: int) -> dict:
+    def _entry(
+        self, suite_result: SuiteResult, arm_result: ArmResult, run_date: int
+    ) -> dict:
         commit_id = suite_result.git_commit
         language = arm_result.arm.language
         toolchain = _version_label(
@@ -749,7 +771,9 @@ class Store:
 
 # --- table rendering (the `table` subcommand) ---
 
-_TABLE_HEADER = "| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |"
+_TABLE_HEADER = (
+    "| Language or Arm | Version | Mean Time | Speed vs Best | Memory | Δ prev |"
+)
 _TABLE_SEPARATOR = "|---|---|---|---|---|---|"
 _NO_MEASUREMENT = "—"
 
@@ -863,11 +887,14 @@ def _caption(platform_str: str, newest: dict | None, warmup: int) -> str:
     if newest is None:
         date = commit = hyperfine = _NO_MEASUREMENT
     else:
-        date = datetime.fromtimestamp(newest["date"] / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+        date = datetime.fromtimestamp(newest["date"] / 1000, tz=timezone.utc).strftime(
+            "%Y-%m-%d"
+        )
         commit = newest["commit"]["id"]
         time_bench = next((b for b in newest["benches"] if b["name"] == "time"), None)
         hyperfine = (
-            _hyperfine_from_extra(time_bench.get("extra") if time_bench else None) or "unavailable"
+            _hyperfine_from_extra(time_bench.get("extra") if time_bench else None)
+            or "unavailable"
         )
     return (
         f"Measured on {platform_str}, {date} "
@@ -908,7 +935,7 @@ def render_suite_table(suite: Suite, store: Store) -> str:
             if entry is not None and (newest is None or entry["date"] > newest["date"]):
                 newest = entry
             bench = _time_bench(entry)
-            if bench is None:
+            if entry is None or bench is None:
                 unmeasured.append((arm, entry, previous))
             else:
                 measured.append((bench["value"], arm, entry, previous))
@@ -927,7 +954,9 @@ def render_suite_table(suite: Suite, store: Store) -> str:
                 and rss_bench is not None
                 and rss_bench["value"] == group_leanest
             )
-            cells = _table_cells(arm, entry, _speed_vs_best(time, group_fastest), star, previous)
+            cells = _table_cells(
+                arm, entry, _speed_vs_best(time, group_fastest), star, previous
+            )
             lines.append("| " + " | ".join(cells) + " |")
         for arm, _, previous in unmeasured:
             cells = _table_cells(arm, None, _NO_MEASUREMENT, False, previous)
@@ -991,7 +1020,9 @@ def _is_git_ignored(path: Path) -> bool:
     return proc.returncode == 0
 
 
-def _select_suites(filter_raw: str | None, *, skip_ignored: bool = False) -> list[Suite]:
+def _select_suites(
+    filter_raw: str | None, *, skip_ignored: bool = False
+) -> list[Suite]:
     """Discover benchmarks/*/suite.toml and optionally filter by suite name.
 
     With ``skip_ignored`` (artifact subcommands), manifests that git marks
@@ -1073,7 +1104,9 @@ def _run_suite(
             versions_captured = True
         label = f"{suite.name}/{arm.name}"
         try:
-            raw = run_hyperfine(substitute_run(arm.run, ryo.path), suite.warmup, suite.dir, label)
+            raw = run_hyperfine(
+                substitute_run(arm.run, ryo.path), suite.warmup, suite.dir, label
+            )
         except HyperfineError as exc:
             return snapshot(), (
                 f"suite '{suite.name}': hyperfine failed for arm '{arm.name}': "
@@ -1220,7 +1253,11 @@ def run_suites(
                     "git_commit": git_commit,
                     "platform": {"os": platform_os, "arch": platform_arch},
                     "hyperfine_version": hyperfine_version,
-                    "ryo": {"path": ryo.path, "version": ryo.version, "built": ryo.built},
+                    "ryo": {
+                        "path": ryo.path,
+                        "version": ryo.version,
+                        "built": ryo.built,
+                    },
                     "status": "partial" if (failures or skipped) else "complete",
                     "skipped": skipped,
                     "suites": suite_jsons,
@@ -1228,7 +1265,9 @@ def run_suites(
             )
 
     exit_code = 1 if failures else (2 if skipped else 0)
-    return RunSummary(exit_code=exit_code, suites=results, failures=failures, skipped=skipped)
+    return RunSummary(
+        exit_code=exit_code, suites=results, failures=failures, skipped=skipped
+    )
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -1347,7 +1386,9 @@ def _write_atomic(path: Path, text: str) -> None:
     A reader never observes a half-written README, and a failed write leaves
     the original file in place (the temp file is unlinked).
     """
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+    )
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -1460,7 +1501,9 @@ def cmd_update_readme(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     store_dir = _REPO_ROOT / "benchmarks" / "data"
-    stores = {suite.name: Store.load(store_dir / f"{suite.name}.json") for suite in all_suites}
+    stores = {
+        suite.name: Store.load(store_dir / f"{suite.name}.json") for suite in all_suites
+    }
 
     try:
         plans: list[tuple[Path, str, str, str]] = []
@@ -1519,7 +1562,11 @@ _MATRIX_COLUMN_ORDER: list[str] = [
     "ruby",
     "julia",
 ]
-_MATRIX_COLUMN_LABELS: dict[str, str] = {"ryo-aot": "Ryo AOT", "ryo-jit": "Ryo JIT", "bun": "Bun (TS)"}
+_MATRIX_COLUMN_LABELS: dict[str, str] = {
+    "ryo-aot": "Ryo AOT",
+    "ryo-jit": "Ryo JIT",
+    "bun": "Bun (TS)",
+}
 
 
 def _matrix_column_key(arm: Arm) -> str:
@@ -1580,7 +1627,7 @@ def _matrix_row(suite: Suite, store: Store) -> dict[str, dict[str, tuple[float, 
         column = _matrix_column_key(arm)
         for metric, _, extract in _MATRIX_METRICS:
             bench = extract(entry)
-            if bench is None:
+            if entry is None or bench is None:
                 continue
             cell = metrics[metric].get(column)
             if cell is None or bench["value"] < cell[0]:
@@ -1624,7 +1671,9 @@ def _matrix_summary_row(
         geomeans.append(statistics.geometric_mean(ratios) if ratios else None)
     best = min(geo for geo in geomeans if geo is not None)
     return ["**Summary (geomean)**"] + [
-        _NO_MEASUREMENT if geo is None else f"{_ratio_emoji(geo / best)} {_format_ratio(geo)}"
+        _NO_MEASUREMENT
+        if geo is None
+        else f"{_ratio_emoji(geo / best)} {_format_ratio(geo)}"
         for geo in geomeans
     ]
 
@@ -1634,27 +1683,35 @@ def _matrix_table(
     columns: list[str],
 ) -> str:
     """One metric's Markdown table: header, category group rows, geomean summary."""
-    header = "| Suite | " + " | ".join(
-        _MATRIX_COLUMN_LABELS.get(column, column.capitalize()) for column in columns
-    ) + " |"
+    header = (
+        "| Suite | "
+        + " | ".join(
+            _MATRIX_COLUMN_LABELS.get(column, column.capitalize()) for column in columns
+        )
+        + " |"
+    )
     lines = [header, "|" + "---|" * (len(columns) + 1)]
     for category, rows in _matrix_grouped(metric_rows):
-        lines.append("| " + " | ".join([f"**{category}**"] + [""] * len(columns)) + " |")
+        lines.append(
+            "| " + " | ".join([f"**{category}**"] + [""] * len(columns)) + " |"
+        )
         for suite, cells in rows:
             best = min(value for value, _ in cells.values())
             newest = max(entry["date"] for _, entry in cells.values())
-            date = datetime.fromtimestamp(newest / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+            date = datetime.fromtimestamp(newest / 1000, tz=timezone.utc).strftime(
+                "%Y-%m-%d"
+            )
             row = [f"[{suite.name}](./{suite.dir.name}/)<br>{date}"]
             for column in columns:
                 cell = cells.get(column)
                 if cell is None:
                     row.append(_NO_MEASUREMENT)
                     continue
-                value, entry = cell
+                value, _ = cell
                 ratio = value / best
                 row.append(
                     f"{_ratio_emoji(ratio)} {_format_cell_value(value)} "
-                    f"[{_format_ratio(ratio)}] ({_bare_version(entry)})"
+                    f"[{_format_ratio(ratio)}]"
                 )
             lines.append("| " + " | ".join(row) + " |")
     lines.append("| " + " | ".join(_matrix_summary_row(metric_rows, columns)) + " |")
@@ -1668,9 +1725,10 @@ def render_matrix(suites: list[Suite], stores: dict[str, Store]) -> str:
     suites last under "Other", alphabetical within a group); columns are
     languages — canonical order first, unknown languages appended sorted —
     and a column exists only while at least one suite has a measured cell in
-    it. Each cell is the suite's best arm for that language: value, ratio vs.
-    the row's fastest cell, and the bare toolchain version. The final row is
-    a per-column geomean of the cell ratios over measured rows. Suites with
+    it. Each cell is the suite's best arm for that language: value and ratio
+    vs. the row's fastest cell. Toolchain versions stay in the per-suite
+    tables. The final row is a per-column geomean of the cell ratios over
+    measured rows. Suites with
     nothing measured for a metric are omitted from that metric's table (a
     metric no suite measured gets no table at all); when nothing is measured
     anywhere, the legend and footnote frame the no-data placeholder.
@@ -1704,7 +1762,9 @@ def main(argv: list[str] | None = None) -> int:
         description="Centralized benchmark runner driven by suite.toml manifests.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True, metavar="command")
-    run_parser = subparsers.add_parser("run", help="Time every arm of a suite via hyperfine.")
+    run_parser = subparsers.add_parser(
+        "run", help="Time every arm of a suite via hyperfine."
+    )
     run_parser.add_argument(
         "--benchmarks",
         metavar="NAMES",

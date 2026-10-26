@@ -1199,7 +1199,6 @@ version = "0.1.0"
 dependencies = [
  "build-support",
  "clap",
- "ryo-backend",
  "ryo-core",
  "ryo-driver",
  "sha2",
@@ -1244,7 +1243,6 @@ name = "ryo-driver"
 version = "0.1.0"
 dependencies = [
  "ariadne",
- "clap",
  "ryo-backend",
  "ryo-core",
  "ryo-frontend",

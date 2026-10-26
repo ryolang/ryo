@@ -1,9 +1,45 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-use ryo_backend::toolchain;
 use ryo_core::errors::CompilerError;
-use ryo_driver::pipeline::{self, EmitKind};
+use ryo_driver::pipeline;
+use ryo_driver::toolchain;
+
+#[derive(Clone, Copy, ValueEnum)]
+enum EmitKind {
+    Ast,
+    Uir,
+    Tir,
+    Flow,
+    Clif,
+}
+
+impl From<EmitKind> for pipeline::EmitKind {
+    fn from(kind: EmitKind) -> Self {
+        match kind {
+            EmitKind::Ast => Self::Ast,
+            EmitKind::Uir => Self::Uir,
+            EmitKind::Tir => Self::Tir,
+            EmitKind::Flow => Self::Flow,
+            EmitKind::Clif => Self::Clif,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum LinkMode {
+    Musl,
+    Glibc,
+}
+
+impl From<LinkMode> for pipeline::LinkMode {
+    fn from(mode: LinkMode) -> Self {
+        match mode {
+            LinkMode::Musl => Self::Musl,
+            LinkMode::Glibc => Self::Glibc,
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "ryo")]
@@ -70,7 +106,7 @@ enum Commands {
         /// checker (its malloc is not intercepted — a leak check
         /// reports zero allocations); use glibc when leak-checking.
         #[arg(long, value_enum, default_value = "musl")]
-        link: pipeline::LinkMode,
+        link: LinkMode,
     },
     /// Manage the Ryo toolchain (Zig linker)
     Toolchain {
@@ -127,8 +163,12 @@ fn run_command(cli: Cli) -> Result<std::process::ExitCode, CompilerError> {
     match cli.command {
         Commands::Lex { file } => pipeline::lex_command(&file)?,
         Commands::Parse { file } => pipeline::parse_command(&file)?,
-        Commands::Ir { file, emit } => pipeline::ir_command(&file, &emit)?,
+        Commands::Ir { file, emit } => {
+            let emit = emit.into_iter().map(Into::into).collect::<Vec<_>>();
+            pipeline::ir_command(&file, &emit)?;
+        }
         Commands::Run { file, emit, args } => {
+            let emit = emit.into_iter().map(Into::into).collect::<Vec<_>>();
             let program_exit = pipeline::run_file(&file, &emit, &args)?;
             // Propagate the JIT program's own exit code. Ryo's
             // `main` is void today (the C-ABI shim returns 0), so
@@ -139,7 +179,10 @@ fn run_command(cli: Cli) -> Result<std::process::ExitCode, CompilerError> {
                 program_exit.clamp(0, 255) as u8
             ));
         }
-        Commands::Build { file, emit, link } => pipeline::build_file(&file, &emit, link)?,
+        Commands::Build { file, emit, link } => {
+            let emit = emit.into_iter().map(Into::into).collect::<Vec<_>>();
+            pipeline::build_file(&file, &emit, link.into())?;
+        }
         Commands::Toolchain { action } => match action {
             ToolchainAction::Install => {
                 toolchain::ensure_zig()?;

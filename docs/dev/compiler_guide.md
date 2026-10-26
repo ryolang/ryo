@@ -62,13 +62,19 @@ See `docs/dev/pipeline_alignment.md` for what remains of the Zig-alignment plan 
 #### 1. Binary Executive Crate (`ryo`)
 | File | Role |
 |------|------|
-| `ryo/src/main.rs` | CLI definition (clap) and command dispatch |
+| `ryo/src/main.rs` | CLI definition (clap), argument-to-driver conversion, and command dispatch; all compiler and toolchain operations go through `ryo-driver` |
 | `ryo/build.rs` | Git version status parsing and JIT/AOT runtime building script |
 
 #### 2. Driver Orchestration Crate (`ryo-driver`)
 | File | Role |
 |------|------|
-| `ryo-driver/src/pipeline.rs` | Shares frontend artifact transitions across JIT, AOT, and IR inspection; coordinates codegen, linking, and execution |
+| `ryo-driver/src/pipeline/mod.rs` | Public pipeline facade and shared source loading / frontend analysis |
+| `ryo-driver/src/pipeline/options.rs` | CLI-independent emission and link options |
+| `ryo-driver/src/pipeline/diagnostics.rs` | Diagnostic rendering, finalization, and stable diagnostic-code mapping |
+| `ryo-driver/src/pipeline/emit.rs` | Token, AST, UIR, TIR, Flow, and Cranelift IR display |
+| `ryo-driver/src/pipeline/inspect.rs` | Lex, parse, and staged IR inspection commands |
+| `ryo-driver/src/pipeline/run.rs` / `build.rs` | JIT execution and AOT object generation / linking |
+| `ryo-driver/src/toolchain.rs` | Toolchain operations exposed to the CLI without a direct binary-to-backend dependency |
 
 #### 3. Frontend Compilation Crate (`ryo-frontend`)
 | File | Role |

@@ -45,7 +45,9 @@ run = "/bin/echo b"
 expect = "b"
 """
 
-THREE_ARM_SUITE = TWO_ARM_SUITE + """
+THREE_ARM_SUITE = (
+    TWO_ARM_SUITE
+    + """
 
 [[arm]]
 name = "Ryo (JIT)"
@@ -53,6 +55,7 @@ language = "ryo"
 run = "/bin/echo c"
 expect = "c"
 """
+)
 
 
 def make_entry(
@@ -89,7 +92,9 @@ def make_entry(
 def write_store(path: Path, entries: dict[str, list[dict]]) -> Store:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"lastUpdate": 0, "repoUrl": "https://example.test/ryo", "entries": entries}),
+        json.dumps(
+            {"lastUpdate": 0, "repoUrl": "https://example.test/ryo", "entries": entries}
+        ),
         encoding="utf-8",
     )
     return Store.load(path)
@@ -146,7 +151,9 @@ def test_splice_block_missing_markers_raise_marker_error():
         splice_block("<!-- BENCH:START -->\n", BENCH_START, BENCH_END, "x")
     # An end marker appearing only before the start marker is still missing.
     with pytest.raises(MarkerError):
-        splice_block("<!-- BENCH:END -->\n<!-- BENCH:START -->\n", BENCH_START, BENCH_END, "x")
+        splice_block(
+            "<!-- BENCH:END -->\n<!-- BENCH:START -->\n", BENCH_START, BENCH_END, "x"
+        )
 
 
 def test_stale_prose_warnings_flag_values_absent_from_table():
@@ -265,10 +272,7 @@ def test_update_readme_splices_matrix_block(tmp_path, fixed_platform, monkeypatc
     )
     root_readme = tmp_path / "benchmarks" / "README.md"
     root_readme.write_text(
-        "# Benchmarks\n"
-        "\n"
-        "<!-- BENCH-MATRIX:START -->\n"
-        "<!-- BENCH-MATRIX:END -->\n",
+        "# Benchmarks\n\n<!-- BENCH-MATRIX:START -->\n<!-- BENCH-MATRIX:END -->\n",
         encoding="utf-8",
     )
     _patch_discovery(monkeypatch, tmp_path, suite)
@@ -324,13 +328,12 @@ expect = "a"
     dataless_readme.write_text(dataless_text, encoding="utf-8")
     root_readme = tmp_path / "benchmarks" / "README.md"
     root_readme.write_text(
-        "# Benchmarks\n"
-        "\n"
-        "<!-- BENCH-MATRIX:START -->\n"
-        "<!-- BENCH-MATRIX:END -->\n",
+        "# Benchmarks\n\n<!-- BENCH-MATRIX:START -->\n<!-- BENCH-MATRIX:END -->\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr(run, "_select_suites", lambda raw, **kwargs: [measured, dataless])
+    monkeypatch.setattr(
+        run, "_select_suites", lambda raw, **kwargs: [measured, dataless]
+    )
     monkeypatch.setattr(run, "_REPO_ROOT", tmp_path)
 
     assert cmd_update_readme(argparse.Namespace(benchmarks=None)) == 0
@@ -375,10 +378,7 @@ def test_cmd_update_readme_benchmarks_filter_keeps_all_suites_in_root_matrix(
     two_readme.write_text(two_text, encoding="utf-8")
     root_readme = tmp_path / "benchmarks" / "README.md"
     root_readme.write_text(
-        "# Benchmarks\n"
-        "\n"
-        "<!-- BENCH-MATRIX:START -->\n"
-        "<!-- BENCH-MATRIX:END -->\n",
+        "# Benchmarks\n\n<!-- BENCH-MATRIX:START -->\n<!-- BENCH-MATRIX:END -->\n",
         encoding="utf-8",
     )
     all_suites = [suite_one, suite_two]
@@ -415,10 +415,7 @@ def test_cmd_update_readme_missing_suite_markers_is_hard_error_with_zero_mutatio
     suite_readme.write_text("# Synthetic\n\nNo markers here.\n", encoding="utf-8")
     root_readme = tmp_path / "benchmarks" / "README.md"
     root_text = (
-        "# Benchmarks\n"
-        "\n"
-        "<!-- BENCH-MATRIX:START -->\n"
-        "<!-- BENCH-MATRIX:END -->\n"
+        "# Benchmarks\n\n<!-- BENCH-MATRIX:START -->\n<!-- BENCH-MATRIX:END -->\n"
     )
     root_readme.write_text(root_text, encoding="utf-8")
     _patch_discovery(monkeypatch, tmp_path, suite)
@@ -428,7 +425,9 @@ def test_cmd_update_readme_missing_suite_markers_is_hard_error_with_zero_mutatio
     captured = capsys.readouterr()
     assert "error" in captured.err
     assert captured.out == ""
-    assert suite_readme.read_text(encoding="utf-8") == "# Synthetic\n\nNo markers here.\n"
+    assert (
+        suite_readme.read_text(encoding="utf-8") == "# Synthetic\n\nNo markers here.\n"
+    )
     assert root_readme.read_text(encoding="utf-8") == root_text
 
 
@@ -448,7 +447,9 @@ def test_cmd_update_readme_missing_root_markers_leaves_suite_readme_untouched(
 
     assert "error" in capsys.readouterr().err
     assert suite_readme.read_text(encoding="utf-8") == suite_text
-    assert root_readme.read_text(encoding="utf-8") == "# Benchmarks\n\nNo markers here.\n"
+    assert (
+        root_readme.read_text(encoding="utf-8") == "# Benchmarks\n\nNo markers here.\n"
+    )
 
 
 def test_cmd_update_readme_missing_readme_file_is_marker_error(
@@ -460,10 +461,7 @@ def test_cmd_update_readme_missing_readme_file_is_marker_error(
         {"synthetic/Rust": [make_entry(1.6, 4.5, toolchain="rustc 1.85.0")]},
     )
     (tmp_path / "benchmarks" / "README.md").write_text(
-        "# Benchmarks\n"
-        "\n"
-        "<!-- BENCH-MATRIX:START -->\n"
-        "<!-- BENCH-MATRIX:END -->\n",
+        "# Benchmarks\n\n<!-- BENCH-MATRIX:START -->\n<!-- BENCH-MATRIX:END -->\n",
         encoding="utf-8",
     )
     # No suite README.md is written at all.
@@ -490,10 +488,7 @@ def test_cmd_update_readme_prints_stale_prose_warnings_to_stderr(
         encoding="utf-8",
     )
     (tmp_path / "benchmarks" / "README.md").write_text(
-        "# Benchmarks\n"
-        "\n"
-        "<!-- BENCH-MATRIX:START -->\n"
-        "<!-- BENCH-MATRIX:END -->\n",
+        "# Benchmarks\n\n<!-- BENCH-MATRIX:START -->\n<!-- BENCH-MATRIX:END -->\n",
         encoding="utf-8",
     )
     _patch_discovery(monkeypatch, tmp_path, suite)

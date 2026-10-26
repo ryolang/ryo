@@ -554,7 +554,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Severity:** Cleanup
 **Area:** core-ir
 
-**Files:** ryo-core/src/flow.rs, ryo-core/src/flow/, ryo-core/src/tir.rs, ryo-frontend/src/ownership/, ryo-driver/src/pipeline.rs, ryo-backend/src/codegen/, docs/dev/pipeline_migration.md, benchmarks/json_validate/, benchmarks/collatz/
+**Files:** ryo-core/src/flow.rs, ryo-core/src/flow/, ryo-core/src/tir.rs, ryo-frontend/src/ownership/, ryo-driver/src/pipeline/, ryo-backend/src/codegen/, docs/dev/pipeline_migration.md, benchmarks/json_validate/, benchmarks/collatz/
 
 **Summary:** I-186 and I-188 record call overhead, but their proposed TIR/backend placement predates the Flow pipeline. Record the implementation sequence from docs/dev/pipeline_migration.md. Small JSON validator helpers are candidates for bounded inlining. The expected speedup is unmeasured. Cranelift 0.136.1 also provides `Context::inline` and the `Inline` trait. Evaluate these as optional backend machinery, not as a replacement for language-level Flow inlining. Ryo must supply verified, legalized callee bodies with matching signatures and bounded selection rules. A backend experiment must preserve cleanup, source provenance, and stack-guard behavior. Reference: [Cranelift inlining infrastructure](https://docs.rs/cranelift-codegen/latest/cranelift_codegen/inline/index.html).
 
@@ -580,7 +580,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Severity:** Cleanup
 **Area:** codegen
 
-**Files:** ryo-backend/src/codegen/mod.rs, ryo-backend/src/codegen/jit.rs, ryo-driver/src/pipeline.rs, ryo/src/main.rs, docs/dev/ryo-incremental-compilation.md
+**Files:** ryo-backend/src/codegen/mod.rs, ryo-backend/src/codegen/jit.rs, ryo-driver/src/pipeline/, ryo/src/main.rs, docs/dev/ryo-incremental-compilation.md
 
 **Summary:** AOT construction uses isa::lookup(target_triple) without explicit CPU features. The JIT builder already detects host features. AOT therefore cannot select an explicit native CPU profile for programs that can benefit from optional instructions. This is an optimization opportunity, not a measured regression.
 
@@ -632,7 +632,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Severity:** Cleanup
 **Area:** codegen
 
-**Files:** ryo-backend/Cargo.toml, ryo-backend/src/codegen/mod.rs, ryo-backend/src/codegen/jit.rs, ryo-driver/src/pipeline.rs, docs/dev/ryo-incremental-compilation.md
+**Files:** ryo-backend/Cargo.toml, ryo-backend/src/codegen/mod.rs, ryo-backend/src/codegen/jit.rs, ryo-driver/src/pipeline/, docs/dev/ryo-incremental-compilation.md
 
 **Summary:** Ryo does not enable the Cranelift incremental-cache Cargo feature or use its compiled-function cache primitives. Cranelift 0.136.1 provides Context::compile_with_cache and lower-level serialization helpers. These can reduce repeated code generation, but do not improve emitted machine code or replace frontend dependency tracking.
 
