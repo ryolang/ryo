@@ -44,7 +44,7 @@
 //! decide whether to proceed to codegen — codegen itself must never
 //! see an `Unreachable`.
 //!
-//! Warnings (W0002/W0003 case A) are buffered on [`Sema`] and returned
+//! Warnings (W0001/W0002/W0003 case A) are buffered on [`Sema`] and returned
 //! to the caller, which flushes them only when the whole unit —
 //! including the ownership pass — is error-free. A warning from an
 //! early decl must not pile onto an error discovered by any later
@@ -129,6 +129,8 @@ struct Binding {
     /// this purpose (`inout` mutation borrows are the ownership pass's
     /// jurisdiction).
     borrowed: bool,
+    used: std::cell::Cell<bool>,
+    dead_store_span: Option<Span>,
 }
 
 pub(crate) struct Scope<'a> {
@@ -151,8 +153,45 @@ impl<'a> Scope<'a> {
                 ty,
                 mutable,
                 borrowed,
+                used: std::cell::Cell::new(false),
+                dead_store_span: None,
             },
         );
+    }
+
+    fn insert_dead_store_binding(
+        &mut self,
+        name: StringId,
+        ty: TypeId,
+        mutable: bool,
+        borrowed: bool,
+        span: Span,
+    ) {
+        self.insert_binding(name, ty, mutable, borrowed);
+        if let Some(binding) = self.bindings.get_mut(&name) {
+            binding.dead_store_span = Some(span);
+        }
+    }
+
+    fn drain_dead_stores(&self, sema: &mut Sema<'_>) {
+        let mut dead: Vec<(StringId, Span)> = self
+            .bindings
+            .iter()
+            .filter_map(|(&name, binding)| {
+                (!binding.used.get())
+                    .then_some(binding.dead_store_span)
+                    .flatten()
+                    .map(|span| (name, span))
+            })
+            .collect();
+        dead.sort_by_key(|(name, span)| (span.start, span.end, name.raw()));
+        for (name, span) in dead {
+            sema.warnings.push(Diag::warning(
+                span,
+                DiagCode::DeadStore,
+                format!("value `{}` is declared but never used", sema.pool.str(name)),
+            ));
+        }
     }
 
     fn contains_in_current(&self, name: StringId) -> bool {
@@ -160,10 +199,12 @@ impl<'a> Scope<'a> {
     }
 
     fn lookup(&self, name: StringId) -> Option<TypeId> {
-        self.bindings
-            .get(&name)
-            .map(|b| b.ty)
-            .or_else(|| self.parent?.lookup(name))
+        if let Some(binding) = self.bindings.get(&name) {
+            binding.used.set(true);
+            Some(binding.ty)
+        } else {
+            self.parent?.lookup(name)
+        }
     }
 
     fn lookup_full(&self, name: StringId) -> Option<(TypeId, bool)> {
@@ -209,7 +250,7 @@ pub fn analyze(
     tirs
 }
 
-/// Like [`analyze`], but returns the buffered warnings (W0002/W0003
+/// Like [`analyze`], but returns the buffered warnings (W0001/W0002/W0003
 /// case A) instead of flushing them, so the caller can hold them past
 /// later pipeline stages (ownership) and emit them only when the whole
 /// unit — every stage — is error-free.
@@ -231,7 +272,7 @@ pub struct Sema<'a> {
     uir: &'a Uir,
     pool: &'a mut InternPool,
     sink: &'a mut DiagSink,
-    /// Buffered warnings (W0002/W0003 case A). `Sema::run` returns
+    /// Buffered warnings (W0001/W0002/W0003 case A). `Sema::run` returns
     /// them to the caller instead of emitting, so a warning from an
     /// early decl never piles onto an error found by a later stage
     /// (ownership); the caller flushes them only when the whole unit
@@ -673,6 +714,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
     for stmt_ref in body_stmts {
         stmt_refs.push(analyze_stmt(sema, &mut fcx, &mut scope, stmt_ref));
     }
+    scope.drain_dead_stores(sema);
 
     let tir = fcx.builder.finish(&stmt_refs);
 

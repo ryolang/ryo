@@ -10,7 +10,7 @@ use super::{
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow, Terminator};
 use ryo_core::ownership::{FunctionSidecar, PromoFree};
-use ryo_core::tir::{ExtraList, Span, Tir, TirRef, TirTag};
+use ryo_core::tir::{ExtraList, Tir, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
 use std::collections::{HashMap, HashSet};
 
@@ -456,7 +456,7 @@ pub(crate) fn drain_dead_stores(
     // schedule a Free anchored after the declaring instruction. Skip
     // owners already covered by `free_on_reassign` to avoid double-frees.
     // (`reassign_targets` was computed above for the last-use pass.)
-    let mut sorted_dead: Vec<(Owner, (StringId, Span, TirRef))> = own
+    let mut sorted_dead: Vec<(Owner, super::DeadStoreEntry)> = own
         .pending_dead_store
         .iter()
         .map(|(o, v)| (*o, *v))
@@ -466,7 +466,7 @@ pub(crate) fn drain_dead_stores(
         .collect();
 
     sorted_dead.sort_by_key(|(o, _)| owner_sort_key(o));
-    for (owner, (name, span, decl_inst)) in &sorted_dead {
+    for (owner, (name, span, decl_inst, _)) in &sorted_dead {
         // Bound to an `inout str` param: the value escapes through the
         // write-back — it IS used, just not by any TIR instruction the
         // pass can see. Checked by NAME (not by current owner): a rebind

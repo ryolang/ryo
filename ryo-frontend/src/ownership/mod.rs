@@ -191,6 +191,8 @@ pub(crate) fn anchored_drops(sidecar: &FunctionSidecar) -> impl Iterator<Item = 
 /// `current_owner[facts.read].unwrap_or(facts.read)`, so
 /// reassignment reseats ownership without disturbing the producing
 /// value's state.
+pub(crate) type DeadStoreEntry = (StringId, Span, TirRef, PlaceId);
+
 #[derive(Default, Clone)]
 pub(crate) struct Ownership {
     pub states: HashMap<Owner, OwnerState>,
@@ -244,8 +246,9 @@ pub(crate) struct Ownership {
     /// (move/return). Whatever remains at function end is a dead
     /// store — surfaced as W0001, plus a Free for live owned values.
     /// The third tuple element is the declaring/assigning instruction's
-    /// own `TirRef`, used as the anchor for the dead-store Free.
-    pub pending_dead_store: HashMap<Owner, (StringId, Span, TirRef /* decl_inst */)>,
+    /// own `TirRef`, used as the Free anchor; the fourth is the lexical
+    /// binding home, which keeps same-named shadows independent.
+    pub pending_dead_store: HashMap<Owner, DeadStoreEntry>,
 
     /// SSA values that allocated heap-owned strings during the
     /// forward walk: `StrConst`, `StrConcat`, and Move-typed `Call`
@@ -670,7 +673,8 @@ fn initialize_function_ownership(tir: &Tir, flow: &Flow, pool: &InternPool) -> O
     // entirely. Non-inout parameters participate in dead-store analysis;
     // inout write-back is caller-visible even without an explicit read.
     for (idx, param) in tir.params.iter().enumerate() {
-        let owner = Owner(own.param_places[idx]);
+        let home = own.param_places[idx];
+        let owner = Owner(home);
         if needs_tracking(param.ty, pool) {
             let state = match param.mode {
                 ParamMode::Move => OwnerState::Valid,
@@ -689,6 +693,7 @@ fn initialize_function_ownership(tir: &Tir, flow: &Flow, pool: &InternPool) -> O
             register_pending_dead_store(
                 &mut own,
                 owner,
+                home,
                 param.name,
                 param.span,
                 TirRef::param(idx),

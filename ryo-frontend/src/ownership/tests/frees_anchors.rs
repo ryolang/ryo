@@ -663,10 +663,9 @@ fn last_use_in_loop_condition_comparison_anchors_after_loop() {
     // `while`, not after the in-loop read (which fires mid-loop).
     let src = "fn main():\n\tmut s: str = \"\"\n\tfor i in range(0, 8):\n\t\tstr_push(&s, \"fox \")\n\tmut i = 0\n\tmut count = 0\n\twhile i + 3 <= s.len():\n\t\tif s[i:i+3] == \"fox\":\n\t\t\tcount += 1\n\t\ti += 1\n\tassert(count == 8, \"count\")\n";
     let (diags, sidecar, tirs, _pool) = check_src_full(src);
-    assert!(
-        !diags.iter().any(|d| d.code == DiagCode::DeadStore),
-        "no dead-store warning expected; got: {diags:?}"
-    );
+    assert_eq!(diags.len(), 1, "got {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::DeadStore);
+    assert_eq!(diags[0].message, "value `i` is declared but never used");
     let tir = &tirs[0];
     let body = tir.body_stmts();
     let s_init = body
@@ -699,13 +698,15 @@ fn last_use_in_loop_condition_comparison_anchors_after_loop() {
 #[test]
 fn last_use_in_inline_assert_counts_as_use() {
     // `assert(s.len() == ...)` desugars to ExprStmt(IfStmt); the read
-    // inside the desugared condition must be walked: no W0001, and the
-    // owner's single Free anchors after the desugared if — never a
+    // inside the desugared condition must be walked: no W0001 for s, and
+    // the owner's single Free anchors after the desugared if — never a
     // dead-store Free after the build loop.
     let src = "fn main():\n\tmut s: str = \"\"\n\tfor i in range(0, 25):\n\t\ts = s + \"fox \"\n\tassert(s.len() == 100, \"len\")\n\tprint(\"ok\\n\")\n";
     let (diags, sidecar, tirs, _pool) = check_src_full(src);
     assert!(
-        !diags.iter().any(|d| d.code == DiagCode::DeadStore),
+        !diags
+            .iter()
+            .any(|d| d.code == DiagCode::DeadStore && d.message.contains("`s`")),
         "assert-condition read must count as a use; got: {diags:?}"
     );
     let tir = &tirs[0];

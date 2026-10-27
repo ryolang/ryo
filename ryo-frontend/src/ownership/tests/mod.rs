@@ -636,10 +636,9 @@ fn dead_store_warns_for_params_and_views_without_freeing_borrows() {
         .expect("view-producing slice");
     let sidecar = take_function_sidecar(&mut sidecar, 0);
     assert!(
-        sidecar
-            .drops
-            .iter()
-            .all(|d| d.target != TirRef::param(1) && d.target != view),
+        sidecar.drops.iter().all(|d| {
+            d.target != TirRef::param(1) && d.target != TirRef::param(2) && d.target != view
+        }),
         "borrowed parameters and views must not be freed: {:?}",
         sidecar.drops
     );
@@ -662,5 +661,67 @@ fn dead_store_tracks_copy_and_view_reassignment() {
             "value `x` is declared but never used",
         ],
         "diagnostics: {diags:?}"
+    );
+}
+
+#[test]
+fn dead_store_distinguishes_shadowed_bindings() {
+    let outer = "fn main():\n\tmut x = 1\n\tif true:\n\t\tmut x = 2\n\t\tprint(x)\n";
+    let diags = check_src(outer);
+    let dead: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == DiagCode::DeadStore)
+        .collect();
+    assert_eq!(dead.len(), 1, "outer binding must warn: {diags:?}");
+    assert_eq!(dead[0].span.start, outer.find("mut x = 1").unwrap());
+
+    let inner = "fn main():\n\tmut x = 1\n\tif true:\n\t\tmut x = 2\n\tprint(x)\n";
+    let diags = check_src(inner);
+    let dead: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == DiagCode::DeadStore)
+        .collect();
+    assert_eq!(dead.len(), 1, "inner binding must warn: {diags:?}");
+    assert_eq!(dead[0].span.start, inner.find("mut x = 2").unwrap());
+}
+
+#[test]
+fn inout_copy_reassignment_does_not_warn() {
+    let diags = check_src(
+        "fn set_int(inout x: int):\n\tx = 2\n\nfn set_float(inout x: float):\n\tx = 2.0\n",
+    );
+    assert!(
+        !diags.iter().any(|d| d.code == DiagCode::DeadStore),
+        "inout writes are caller-visible: {diags:?}"
+    );
+}
+
+#[test]
+fn dead_store_warns_for_copy_match_and_destructure_bindings() {
+    let src = "enum Option:\n\tSome(int)\n\tNone\n\nfn main():\n\t(unused, used) = (1, 2)\n\tprint(used)\n\tvalue = Option.Some(1)\n\tmatch value:\n\t\tSome(unused):\n\t\t\tprint(\"some\")\n\t\tNone:\n\t\t\tprint(\"none\")\n";
+    let diags = check_src(src);
+    let dead: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == DiagCode::DeadStore)
+        .collect();
+    assert_eq!(
+        dead.len(),
+        2,
+        "both unread Copy bindings must warn: {diags:?}"
+    );
+    assert!(
+        dead.iter()
+            .all(|d| d.message == "value `unused` is declared but never used"),
+        "diagnostics: {diags:?}"
+    );
+}
+
+#[test]
+fn dead_store_warns_for_unused_loop_variable() {
+    let diags = check_src("fn main():\n\tfor i in range(0, 3):\n\t\tprint(\"x\")\n");
+    assert!(
+        diags.iter().any(|d| d.code == DiagCode::DeadStore
+            && d.message == "value `i` is declared but never used"),
+        "unused loop variable must warn: {diags:?}"
     );
 }

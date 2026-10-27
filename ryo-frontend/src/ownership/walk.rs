@@ -713,7 +713,7 @@ impl<'a> Walk<'a> {
         // The walk clears this entry on any later read or consumption; a
         // surviving entry at function end fires W0001. Non-owning bindings
         // key by home so they never collide with their initializer's owner.
-        register_pending_dead_store(own, dead_store_owner, view.name, self.tir.span(r), r);
+        register_pending_dead_store(own, dead_store_owner, home, view.name, self.tir.span(r), r);
         // First-declared rank for the loop-carried scan. Live blocks
         // walk in document order, so the first visit wins; a dead-code
         // declaration walks late but was emitted in place, so its rank
@@ -756,6 +756,12 @@ impl<'a> Walk<'a> {
             _ => None,
         };
         let value_ty = self.tir.inst(view.value).ty;
+        let inout_param = match self.flow.place(home) {
+            ryo_core::flow::Place::Param { index, .. } => {
+                self.tir.params[*index as usize].mode == ParamMode::Inout
+            }
+            _ => false,
+        };
         if needs_tracking(value_ty, self.pool) {
             // Capture the old owner before consume_for_assignment /
             // rebind overwrite current_owner[name]. Only emit the Free
@@ -857,9 +863,9 @@ impl<'a> Walk<'a> {
                 own.pending_dead_store.remove(&seat);
                 own.current_owner.insert(home, home_owner);
                 own.states.insert(home_owner, OwnerState::Valid);
-                register_pending_dead_store(own, home_owner, view.name, span, r);
+                register_pending_dead_store(own, home_owner, home, view.name, span, r);
             } else {
-                register_pending_dead_store(own, seat, view.name, span, r);
+                register_pending_dead_store(own, seat, home, view.name, span, r);
             }
         } else if self.pool.is_view(value_ty) {
             // P3/P4 (final spec §3.2): rebinding a view registers the
@@ -876,13 +882,11 @@ impl<'a> Walk<'a> {
             {
                 own.pending_dying.push(old);
             }
+        }
+        if !needs_tracking(value_ty, self.pool) && !inout_param {
             own.pending_dead_store
-                .retain(|_, (n, _, _)| *n != view.name);
-            register_pending_dead_store(own, Owner(home), view.name, self.tir.span(r), r);
-        } else {
-            own.pending_dead_store
-                .retain(|_, (n, _, _)| *n != view.name);
-            register_pending_dead_store(own, Owner(home), view.name, self.tir.span(r), r);
+                .retain(|_, (_, _, _, entry_home)| *entry_home != home);
+            register_pending_dead_store(own, Owner(home), home, view.name, self.tir.span(r), r);
         }
     }
 
@@ -1400,11 +1404,10 @@ impl<'a> Walk<'a> {
         };
         let owner = own.current_owner.get(&read).copied().unwrap_or(Owner(read));
         // Any read counts as "used" for dead-store purposes, even one
-        // that ultimately fires E0020. Clear by NAME: a reseat inside a
-        // branch is discarded by the merge, so the pending entry can
-        // survive under a branch-local owner key while the binding itself
-        // is read afterwards.
-        own.pending_dead_store.retain(|_, (n, _, _)| *n != name);
+        // that ultimately fires E0020. Clear by lexical home so shadowed
+        // bindings and branch-local owner reseats stay independent.
+        own.pending_dead_store
+            .retain(|_, (_, _, _, entry_home)| *entry_home != read);
         if needs_tracking(inst.ty, self.pool) {
             // Snapshot owner-at-read so the post-walk passes anchor to
             // the owner live *at this read*.

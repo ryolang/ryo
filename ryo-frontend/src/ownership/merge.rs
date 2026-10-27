@@ -2,7 +2,7 @@
 
 use super::{Owner, OwnerState, Ownership};
 use ryo_core::flow::PlaceId;
-use ryo_core::tir::{Span, TirRef};
+use ryo_core::tir::TirRef;
 use ryo_core::types::StringId;
 use std::collections::{HashMap, HashSet};
 
@@ -21,7 +21,7 @@ pub(crate) struct BranchState {
     /// declaring `VarDecl` inst, or a param's virtual ref) — the
     /// scope-resolution record, seeded from write facts only.
     pub binding_of_name: HashMap<StringId, TirRef>,
-    pub pending_dead_store: HashMap<Owner, (StringId, Span, TirRef)>,
+    pub pending_dead_store: HashMap<Owner, super::DeadStoreEntry>,
     pub live_projections: HashMap<Owner, Vec<Owner>>,
 }
 
@@ -285,8 +285,8 @@ pub(crate) fn binding_state_writes(
 /// Shared by `Ownership::merge_branches` (N sides) and
 /// `merge_non_monotone` (one side: the post-body snapshot).
 pub(crate) fn merge_pending_dead_store(
-    dst: &mut HashMap<Owner, (StringId, Span, TirRef)>,
-    branches: &[&HashMap<Owner, (StringId, Span, TirRef)>],
+    dst: &mut HashMap<Owner, super::DeadStoreEntry>,
+    branches: &[&HashMap<Owner, super::DeadStoreEntry>],
 ) {
     let pre_branch_keys: HashSet<Owner> = dst.keys().copied().collect();
     dst.retain(|k, _| branches.iter().all(|b| b.contains_key(k)));

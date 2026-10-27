@@ -475,6 +475,8 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Resolution:** Compare full field-access paths (or a path-prefix disjointness test) in the Rule-7 partition instead of root owners; keep the root-owner fallback for non-struct bases. When it lands, differentiate the E0032 message so the aliasing case (`&p.a, &p.a`) can name the field. Until then the workaround is splitting the call per field.
 
+**Priority recommendation:** High-priority ownership correction after M13, M13.8, and M16. Schedule around M21 and before M22; M21 can retain conservative indexed-element rejection. This is not alpha-blocking because current behavior is conservative and has documented workarounds, but it should not slip to v0.2. Methods will not fix free functions that borrow multiple fields, and collections increase the value of place-based tracking.
+
 ---
 
 ### I-196 — Lint: warn when an `inout` parameter is never mutated in the callee (pass by borrow instead)

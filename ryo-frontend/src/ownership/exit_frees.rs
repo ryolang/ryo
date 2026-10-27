@@ -434,7 +434,7 @@ pub(crate) fn convert_honored_reseat_drops(
         }
     };
     let mut honored: HashSet<usize> = HashSet::new();
-    for (owner, (name, _, _)) in &own.pending_dead_store {
+    for (owner, (name, _, _, _)) in &own.pending_dead_store {
         for (idx, drop) in own.reseat_drops.iter().enumerate() {
             if drop.name == *name && drop.reseat_owners.contains(owner) {
                 match (binding_of_owner(&drop.pre_owner), binding_of_owner(owner)) {
