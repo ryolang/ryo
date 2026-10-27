@@ -1,8 +1,9 @@
 //! Cleanup scheduling and destruction anchors.
 
 use super::{
-    HazardKind, Owner, OwnerState, Ownership, anchored_after, inout_escape_owner, last_use_anchor,
-    outermost_branch_of, owner_sort_key, param_idx,
+    HazardKind, Owner, OwnerState, Ownership, anchored_after, enclosing_if_main_cond,
+    if_may_fall_through, inout_escape_owner, last_use_anchor, outermost_branch_of, owner_sort_key,
+    param_idx,
 };
 use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow, Terminator};
 use ryo_core::ownership::FunctionSidecar;
@@ -184,6 +185,105 @@ pub(crate) fn schedule_last_use_frees(
                 });
             }
         }
+    }
+}
+
+pub(crate) fn schedule_anonymous_temp_frees(
+    ctx: &CleanupContext<'_>,
+    own: &Ownership,
+    sidecar: &mut FunctionSidecar,
+) {
+    // Anonymous-temporary frees: temp_owners still Valid at function
+    // exit need their own Free anchored after their single consumer —
+    // UNLESS the temp was ever a named binding's initializer/value, in
+    // which case its Free is owned by the last-use / dead-store /
+    // free_on_reassign / loop-exit pass and must be skipped here to
+    // avoid a double-free.
+    //
+    // This "was a named init" predicate is a TIR-shape fact, not a
+    // lattice-state fact, so it is derived statically via
+    // `collect_named_inits`. The old implementation carried a
+    // walk; the static set is merge-immune where a
+    // `current_owner.values()` derivation would not be (it drops a
+    // loop-rebound temp at the loop merge but the temp is still freed
+    // by the loop-exit pass, so the dynamic classifier would schedule
+    // a spurious second Free). The static set is provably equivalent
+    // to the old sticky set across all cases.
+    let named_inits: HashSet<TirRef> = collect_named_inits(ctx.tir, ctx.flow);
+    let mut consumer_of: HashMap<TirRef, TirRef> = HashMap::new();
+    find_consumers(ctx.flow, ctx.tir.instructions.len(), &mut consumer_of);
+    let mut sorted_temps: Vec<Owner> = own.temp_owners.iter().copied().collect();
+    sorted_temps.sort_by_key(owner_sort_key);
+    for temp in sorted_temps {
+        // Temps always name an instruction, never a param.
+        let Some(t) = temp.inst_tirref(ctx.flow) else {
+            continue;
+        };
+        if named_inits.contains(&t) {
+            // Freed by the last-use / dead-store / free_on_reassign /
+            // loop-exit pass — skip to avoid a double-free.
+            continue;
+        }
+        if !matches!(own.states.get(&temp), Some(OwnerState::Valid)) {
+            // Already moved (flowed into a `move` arg, return, etc.).
+            continue;
+        }
+        if let Some(&consumer) = consumer_of.get(&t) {
+            // P5 (final spec §3.2): a sliced temp stays alive until
+            // the projection's last use (e.g. `v = (a + b)[0:1]` keeps
+            // the concat buffer alive through reads of `v`).
+            let anchor = defer_anchor(
+                consumer,
+                &temp,
+                ctx.projections_of,
+                ctx.last_use,
+                &own.view_last_use,
+                ctx.order,
+            );
+            // A temp PRODUCED in an if's main condition exists on every
+            // path through the branch (the condition is always
+            // evaluated), so anchor its Free after the if itself: codegen
+            // then emits it in the merge block on all paths. Anchoring
+            // after the consumer lets the end-of-statement sweep fire
+            // inside the taken arm only, leaking the temp on every
+            // not-taken path. Skip when no path reaches the merge block
+            // (every arm returns or jumps out) — the anchor would never
+            // fire there; the return-epilogue / loop-exit passes own
+            // those paths.
+            let anchor = match enclosing_if_main_cond(ctx.tir, t) {
+                Some(if_stmt) if if_may_fall_through(ctx.tir, if_stmt) => if_stmt,
+                _ => anchor,
+            };
+            // A P5-deferred anchor can land inside an if arm (a view of
+            // the temp used only there). When the producer dominates the
+            // if and the if falls through, re-anchor at the if: the
+            // merge fires the Free on every path, where the producer's
+            // slot is initialized. An arm anchor leaks on the not-taken
+            // paths (path coverage proves it). A producer created
+            // inside the conditional keeps the arm anchor: its slot is
+            // uninitialized on the other paths, so a merge-anchored
+            // Free would release garbage.
+            let anchor = match outermost_branch_of(ctx.tir, anchor) {
+                Some(branch_stmt)
+                    if ctx.tir.inst(branch_stmt).tag == TirTag::IfStmt
+                        && if_may_fall_through(ctx.tir, branch_stmt)
+                        && !ctx.tir.contains_reachable(branch_stmt, t)
+                        && ctx.order.get(t.index()).copied().unwrap_or(0)
+                            < ctx.order.get(branch_stmt.index()).copied().unwrap_or(0) =>
+                {
+                    branch_stmt
+                }
+                _ => anchor,
+            };
+            sidecar.drops.push(DropOp {
+                position: DropPosition::AfterStep { inst: anchor },
+                target: t,
+                span: ctx.tir.span(t),
+            });
+        }
+        // No consumer = unreachable from any body statement; can't
+        // happen in well-formed TIR. Don't emit (no consumer means
+        // codegen's inst_values won't have ptr/cap either).
     }
 }
 
