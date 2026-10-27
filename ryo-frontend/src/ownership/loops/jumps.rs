@@ -97,23 +97,6 @@ pub(crate) struct LoopExitCtx<'a> {
     doms: &'a OnceCell<Vec<HashSet<BlockId>>>,
 }
 
-#[derive(Default)]
-struct LoopExitScratch {
-    on_path: HashSet<TirRef>,
-    covers_this_jump: HashSet<TirRef>,
-    free_inside_loop: HashSet<TirRef>,
-    consumed_scrutinees: HashSet<TirRef>,
-}
-
-impl LoopExitScratch {
-    fn clear(&mut self) {
-        self.on_path.clear();
-        self.covers_this_jump.clear();
-        self.free_inside_loop.clear();
-        self.consumed_scrutinees.clear();
-    }
-}
-
 /// Collect every `Assign` (site, name, value) reachable from `stmts`,
 /// descending through if/loop bodies. Kept for `LoopExitCtx`.
 fn collect_assign_writes<S: TirStmtList + ?Sized>(
@@ -282,18 +265,7 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
     enclosing: Option<&LoopExitCtx<'_>>,
     doms: &OnceCell<Vec<HashSet<BlockId>>>,
 ) {
-    let mut scratch = LoopExitScratch::default();
-    schedule_loop_exit_frees_in_inner(
-        tir,
-        flow,
-        pool,
-        own,
-        sidecar,
-        stmts,
-        enclosing,
-        doms,
-        &mut scratch,
-    );
+    schedule_loop_exit_frees_in_inner(tir, flow, pool, own, sidecar, stmts, enclosing, doms);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -306,7 +278,6 @@ fn schedule_loop_exit_frees_in_inner<S: TirStmtList + ?Sized>(
     stmts: &S,
     enclosing: Option<&LoopExitCtx<'_>>,
     doms: &OnceCell<Vec<HashSet<BlockId>>>,
-    scratch: &mut LoopExitScratch,
 ) {
     for r in stmts.iter_refs() {
         let r = stmt_match(tir, r).unwrap_or(r);
@@ -314,12 +285,11 @@ fn schedule_loop_exit_frees_in_inner<S: TirStmtList + ?Sized>(
         match inst.tag {
             TirTag::Break | TirTag::Continue => {
                 if let Some(ctx) = enclosing {
-                    schedule_break_continue_frees(tir, flow, pool, own, sidecar, r, ctx, scratch);
+                    schedule_break_continue_frees(tir, flow, pool, own, sidecar, r, ctx);
                 }
             }
             TirTag::WhileLoop | TirTag::ForRange => {
                 if let Some(ctx) = LoopExitCtx::new(tir, doms, own, sidecar, r) {
-                    let mut nested_scratch = LoopExitScratch::default();
                     schedule_loop_exit_frees_in_inner(
                         tir,
                         flow,
@@ -329,7 +299,6 @@ fn schedule_loop_exit_frees_in_inner<S: TirStmtList + ?Sized>(
                         &ctx.body,
                         Some(&ctx),
                         doms,
-                        &mut nested_scratch,
                     );
                 }
             }
@@ -344,23 +313,22 @@ fn schedule_loop_exit_frees_in_inner<S: TirStmtList + ?Sized>(
                     &view.then_stmts,
                     enclosing,
                     doms,
-                    scratch,
                 );
                 for elif in &view.elif_branches {
                     schedule_loop_exit_frees_in_inner(
-                        tir, flow, pool, own, sidecar, &elif.body, enclosing, doms, scratch,
+                        tir, flow, pool, own, sidecar, &elif.body, enclosing, doms,
                     );
                 }
                 if let Some(else_stmts) = &view.else_stmts {
                     schedule_loop_exit_frees_in_inner(
-                        tir, flow, pool, own, sidecar, else_stmts, enclosing, doms, scratch,
+                        tir, flow, pool, own, sidecar, else_stmts, enclosing, doms,
                     );
                 }
             }
             TirTag::Match => {
                 for body in match_arm_bodies(tir, r) {
                     schedule_loop_exit_frees_in_inner(
-                        tir, flow, pool, own, sidecar, &body, enclosing, doms, scratch,
+                        tir, flow, pool, own, sidecar, &body, enclosing, doms,
                     );
                 }
             }
@@ -370,7 +338,7 @@ fn schedule_loop_exit_frees_in_inner<S: TirStmtList + ?Sized>(
             visit_operand_matches(tir, r, &mut |m| {
                 for body in match_arm_bodies(tir, m) {
                     schedule_loop_exit_frees_in_inner(
-                        tir, flow, pool, own, sidecar, &body, enclosing, doms, scratch,
+                        tir, flow, pool, own, sidecar, &body, enclosing, doms,
                     );
                 }
             });
@@ -430,30 +398,29 @@ fn schedule_break_continue_frees(
     sidecar: &mut FunctionSidecar,
     jump_inst: TirRef,
     ctx: &LoopExitCtx<'_>,
-    scratch: &mut LoopExitScratch,
 ) {
     let inside_loop = &ctx.inside_loop;
 
-    scratch.clear();
-    let LoopExitScratch {
-        on_path,
-        covers_this_jump,
-        free_inside_loop,
-        consumed_scrutinees,
-    } = scratch;
+    let mut on_path: HashSet<TirRef> = HashSet::new();
+    let mut covers_this_jump: HashSet<TirRef> = HashSet::new();
+    let mut free_inside_loop: HashSet<TirRef> = HashSet::new();
+    let mut consumed_scrutinees = HashSet::new();
     match ctx.top_level.get(&jump_inst) {
         Some(&enclosing_stmt) => {
             for stmt in ctx.body.iter().take_while(|&s| s != enclosing_stmt) {
-                tir.collect_reachable(stmt, on_path);
+                tir.collect_reachable(stmt, &mut on_path);
             }
-            let _ =
-                tir.collect_jump_path(std::slice::from_ref(&enclosing_stmt), jump_inst, on_path);
-            prune_sibling_match_arms(tir, enclosing_stmt, jump_inst, on_path);
+            let _ = tir.collect_jump_path(
+                std::slice::from_ref(&enclosing_stmt),
+                jump_inst,
+                &mut on_path,
+            );
+            prune_sibling_match_arms(tir, enclosing_stmt, jump_inst, &mut on_path);
         }
         None => {
-            let _ = tir.collect_jump_path_iter(ctx.body, jump_inst, on_path);
+            let _ = tir.collect_jump_path_iter(ctx.body, jump_inst, &mut on_path);
             for stmt in ctx.body.iter() {
-                prune_sibling_match_arms(tir, stmt, jump_inst, on_path);
+                prune_sibling_match_arms(tir, stmt, jump_inst, &mut on_path);
             }
         }
     }
