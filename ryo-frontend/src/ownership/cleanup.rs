@@ -2,9 +2,10 @@
 
 use super::{
     HazardKind, Owner, OwnerState, Ownership, UNTRACKED_PLACE, anchored_after, body_may_return,
-    branch_may_not_return, declared_before_stmt, enclosing_if_main_cond, if_may_fall_through,
-    inout_escape_owner, last_use_anchor, outermost_branch_of, outermost_loop_of, owner_sort_key,
-    param_idx,
+    branch_may_not_return, convert_honored_reseat_drops, declared_before_stmt,
+    enclosing_if_main_cond, if_may_fall_through, inout_escape_owner, last_use_anchor,
+    outermost_branch_of, outermost_loop_of, owner_sort_key, param_idx, schedule_loop_exit_frees_in,
+    schedule_return_epilogue_frees, suppress_redundant_exit_frees,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow, Terminator};
@@ -536,6 +537,104 @@ pub(crate) fn drain_dead_stores(
             format!("value `{}` is declared but never used", ctx.pool.str(*name)),
         ));
     }
+}
+
+pub(crate) fn finalize_cleanup(
+    ctx: &CleanupContext<'_>,
+    own: &Ownership,
+    sidecar: &mut FunctionSidecar,
+    optional_optimizations: bool,
+    sink: &mut DiagSink,
+) {
+    // Convert honored reseat records into block-start DropOps (see the
+    // helper for the honoring rules).
+    convert_honored_reseat_drops(
+        ctx.tir,
+        own,
+        ctx.flow,
+        sidecar,
+        ctx.decl_of_init,
+        ctx.assign_value_of,
+    );
+
+    // Drop redundant branch-exit Frees of branch-reseated values before
+    // the loop-exit / return-epilogue passes dedup against the schedule.
+    suppress_redundant_exit_frees(
+        ctx.tir,
+        ctx.flow,
+        sidecar,
+        ctx.order,
+        ctx.decl_of_init,
+        ctx.assign_value_of,
+        ctx.reassign_orders,
+    );
+
+    // Loop-exit Frees run LAST so they can inspect the now-complete
+    // `drops` schedule and only add jump-anchored Frees for inside-loop
+    // owners that no earlier pass already covered.
+    // Dominators are built on demand (break defensive emit only) and
+    // shared across every loop in this function.
+    let doms = std::cell::OnceCell::new();
+    schedule_loop_exit_frees_in(
+        ctx.tir,
+        ctx.flow,
+        ctx.pool,
+        own,
+        sidecar,
+        &ctx.body_stmts,
+        None,
+        &doms,
+    );
+
+    schedule_return_epilogue_frees(
+        ctx.tir,
+        ctx.flow,
+        own,
+        sidecar,
+        &ctx.body_stmts,
+        ctx.order,
+        ctx.decl_of_init,
+        ctx.assign_value_of,
+        ctx.reassign_orders,
+    );
+
+    if !optional_optimizations {
+        sidecar.consumed_concat_lhs.fill(None);
+    }
+    sidecar.transfers = own
+        .owner_hazards
+        .iter()
+        .filter_map(|&(owner, site, kind)| {
+            (kind == HazardKind::Move).then_some(ryo_core::ownership::StorageTransfer {
+                source: owner.0,
+                target: owner.tirref(ctx.flow),
+                site,
+            })
+        })
+        .collect();
+    sidecar
+        .transfers
+        .sort_by_key(|transfer| (transfer.site.raw(), transfer.source.0));
+    sidecar.transfers.dedup();
+
+    // backend validators: debug-only cleanup-schedule completeness validator (see
+    // `cleanup_validation`). Runs after every scheduling pass so the sidecar is
+    // final; any broken invariant is a compiler bug, so panic. The path
+    // checks run only on bodies the analysis itself found clean (an
+    // errored body's best-effort schedule never reaches codegen).
+    #[cfg(debug_assertions)]
+    {
+        let summary = super::cleanup_validation::validate_cleanup(
+            ctx.tir,
+            ctx.flow,
+            ctx.pool,
+            own,
+            sidecar,
+            !sink.has_errors(),
+        );
+        sidecar.validation = Some(summary);
+    }
+    sidecar.seal();
 }
 
 /// Document-order rank: the build's emission stamp
