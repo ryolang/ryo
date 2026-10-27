@@ -586,3 +586,81 @@ fn two_immutable_borrows_ok() {
         "two immutable borrows of one owner are fine (Rule 7 many readers); got {diags:?}"
     );
 }
+
+#[test]
+fn dead_store_warns_for_every_local_type() {
+    let diags = check_src(include_str!(
+        "../../../../bug_reports/bug_w0001_unused_var_only_move_types.ryo"
+    ));
+    let mut names: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == DiagCode::DeadStore)
+        .map(|d| d.message.as_str())
+        .collect();
+    names.sort_unstable();
+    let mut expected = vec![
+        "value `unused_bool` is declared but never used",
+        "value `unused_enum` is declared but never used",
+        "value `unused_float` is declared but never used",
+        "value `unused_int` is declared but never used",
+        "value `unused_str` is declared but never used",
+        "value `unused_struct` is declared but never used",
+        "value `unused_tuple` is declared but never used",
+    ];
+    expected.sort_unstable();
+    assert_eq!(names, expected, "diagnostics: {diags:?}");
+}
+
+#[test]
+fn dead_store_warns_for_params_and_views_without_freeing_borrows() {
+    let src = "fn consume(unused_int: int, unused_str: str, unused_view: strview):\n\traw = \"abc\"\n\tunused_local_view = raw[0:1]\n";
+    let (diags, mut sidecar, tirs, _pool) = check_src_full(src);
+    let mut names: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == DiagCode::DeadStore)
+        .map(|d| d.message.as_str())
+        .collect();
+    names.sort_unstable();
+    let mut expected = vec![
+        "value `unused_int` is declared but never used",
+        "value `unused_local_view` is declared but never used",
+        "value `unused_str` is declared but never used",
+        "value `unused_view` is declared but never used",
+    ];
+    expected.sort_unstable();
+    assert_eq!(names, expected, "diagnostics: {diags:?}");
+
+    let view = (1..tirs[0].instructions.len())
+        .map(|i| TirRef::from_raw(i as u32))
+        .find(|&r| tirs[0].inst(r).tag == TirTag::Slice)
+        .expect("view-producing slice");
+    let sidecar = take_function_sidecar(&mut sidecar, 0);
+    assert!(
+        sidecar
+            .drops
+            .iter()
+            .all(|d| d.target != TirRef::param(1) && d.target != view),
+        "borrowed parameters and views must not be freed: {:?}",
+        sidecar.drops
+    );
+}
+
+#[test]
+fn dead_store_tracks_copy_and_view_reassignment() {
+    let src = "fn main():\n\tmut x = 1\n\tx = 2\n\traw = \"abc\"\n\tmut view = raw[0:1]\n\tview = raw[1:2]\n";
+    let diags = check_src(src);
+    let mut names: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == DiagCode::DeadStore)
+        .map(|d| d.message.as_str())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec![
+            "value `view` is declared but never used",
+            "value `x` is declared but never used",
+        ],
+        "diagnostics: {diags:?}"
+    );
+}

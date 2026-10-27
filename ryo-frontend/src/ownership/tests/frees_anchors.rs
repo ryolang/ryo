@@ -802,7 +802,9 @@ fn compound_assign_rhs_method_call_counts_as_use() {
     let src = "fn main():\n\tmut total = 0\n\tfor i in range(0, 10):\n\t\tt = int_to_str(i) + \"!\"\n\t\ttotal += t.len()\n\tprint(\"ok\\n\")\n";
     let (diags, sidecar, tirs, _pool) = check_src_full(src);
     assert!(
-        !diags.iter().any(|d| d.code == DiagCode::DeadStore),
+        !diags
+            .iter()
+            .any(|d| d.code == DiagCode::DeadStore && d.message.contains("`t`")),
         "method-call receiver read must count as a use; got: {diags:?}"
     );
     let tir = &tirs[0];

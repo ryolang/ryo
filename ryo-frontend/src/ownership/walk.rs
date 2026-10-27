@@ -663,10 +663,9 @@ impl<'a> Walk<'a> {
 
     // ---------- statement-step handlers (operand visits removed) ----------
 
-    /// Move-typed `VarDecl` is a consumer: the new binding takes
-    /// ownership of the initializer's underlying value. The initializer
-    /// ran as operand steps; this handler does the binding reseat,
-    /// freeze check, consume and dead-store registration.
+    /// A Move-typed `VarDecl` consumes its initializer; view and Copy
+    /// declarations only establish their binding state. Every declaration
+    /// registers for dead-store analysis.
     fn analyze_var_decl(
         &mut self,
         own: &mut Ownership,
@@ -681,7 +680,7 @@ impl<'a> Walk<'a> {
         // The declaration's write fact names the binding's home place.
         let home = self.step_facts(r).write.expect("VarDecl writes").place;
         own.binding_of_name.insert(view.name, r);
-        if needs_tracking(init_ty, self.pool) {
+        let dead_store_owner = if needs_tracking(init_ty, self.pool) {
             let span = self.tir.span(r);
             let consumed_name = consumed_binding_name(self.tir, init);
             // P2 freeze (final spec §3.2): the consume moves the owner.
@@ -697,12 +696,7 @@ impl<'a> Walk<'a> {
                 consumed_name,
             );
             consume_for_assignment(self.tir, self.pool, own, sink, init, span, consumed_name, r);
-            let seat = rebind_to_init(own, home, init);
-            // Register the new binding as pending dead-store, keyed by
-            // the seat (free targets derive from it). The walk clears
-            // this entry on any later read or consumption; a surviving
-            // entry at function end fires W0001.
-            register_pending_dead_store(own, seat, view.name, span, r);
+            rebind_to_init(own, home, init)
         } else if self.pool.is_view(init_ty) {
             // P3 (final spec §3.2): binding a slice registers a
             // projection against the root owner (re-slices resolve
@@ -711,9 +705,15 @@ impl<'a> Walk<'a> {
             let view_owner = own.underlying_owner(init);
             own.current_owner.insert(home, view_owner);
             register_projection(own, self.tir, self.flow, self.pool, init, view_owner);
+            Owner(home)
         } else {
             own.current_owner.insert(home, Owner(home));
-        }
+            Owner(home)
+        };
+        // The walk clears this entry on any later read or consumption; a
+        // surviving entry at function end fires W0001. Non-owning bindings
+        // key by home so they never collide with their initializer's owner.
+        register_pending_dead_store(own, dead_store_owner, view.name, self.tir.span(r), r);
         // First-declared rank for the loop-carried scan. Live blocks
         // walk in document order, so the first visit wins; a dead-code
         // declaration walks late but was emitted in place, so its rank
@@ -732,9 +732,8 @@ impl<'a> Walk<'a> {
         }
     }
 
-    /// Reassignment to a Move-typed binding: same consumption rules as
-    /// `VarDecl`; the existing binding name is reseated to whichever
-    /// SSA value owns the new underlying allocation.
+    /// Reassignment consumes Move-typed values and reseats their owner;
+    /// view and Copy assignments update only binding and dead-store state.
     fn analyze_assign(
         &mut self,
         own: &mut Ownership,
@@ -877,6 +876,13 @@ impl<'a> Walk<'a> {
             {
                 own.pending_dying.push(old);
             }
+            own.pending_dead_store
+                .retain(|_, (n, _, _)| *n != view.name);
+            register_pending_dead_store(own, Owner(home), view.name, self.tir.span(r), r);
+        } else {
+            own.pending_dead_store
+                .retain(|_, (n, _, _)| *n != view.name);
+            register_pending_dead_store(own, Owner(home), view.name, self.tir.span(r), r);
         }
     }
 
@@ -1393,13 +1399,13 @@ impl<'a> Walk<'a> {
             return;
         };
         let owner = own.current_owner.get(&read).copied().unwrap_or(Owner(read));
+        // Any read counts as "used" for dead-store purposes, even one
+        // that ultimately fires E0020. Clear by NAME: a reseat inside a
+        // branch is discarded by the merge, so the pending entry can
+        // survive under a branch-local owner key while the binding itself
+        // is read afterwards.
+        own.pending_dead_store.retain(|_, (n, _, _)| *n != name);
         if needs_tracking(inst.ty, self.pool) {
-            // Any read counts as "used" for dead-store purposes, even
-            // one that ultimately fires E0020. Clear by NAME: a reseat
-            // inside a branch is discarded by the merge, so the pending
-            // entry can survive under a branch-local owner key while
-            // the binding itself is read afterwards.
-            own.pending_dead_store.retain(|_, (n, _, _)| *n != name);
             // Snapshot owner-at-read so the post-walk passes anchor to
             // the owner live *at this read*.
             Ownership::dense_set(&mut own.owner_at_read, r, owner);

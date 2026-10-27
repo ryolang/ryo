@@ -452,9 +452,9 @@ pub(crate) fn drain_dead_stores(
     // when the whole unit is error-free, so an error from any function
     // — analyzed before or after this one — silences them all.
 
-    // Dead-store survivors: emit W0001 and schedule a Free anchored
-    // after the declaring instruction. Skip owners already covered by
-    // `free_on_reassign` to avoid double-freeing the same allocation.
+    // Dead-store survivors: emit W0001 and, for live owned values,
+    // schedule a Free anchored after the declaring instruction. Skip
+    // owners already covered by `free_on_reassign` to avoid double-frees.
     // (`reassign_targets` was computed above for the last-use pass.)
     let mut sorted_dead: Vec<(Owner, (StringId, Span, TirRef))> = own
         .pending_dead_store
@@ -486,6 +486,9 @@ pub(crate) fn drain_dead_stores(
             DiagCode::DeadStore,
             format!("value `{}` is declared but never used", ctx.pool.str(*name)),
         ));
+        if decl_inst.is_param() || !matches!(own.states.get(owner), Some(OwnerState::Valid)) {
+            continue;
+        }
         if ctx.reassign_targets.contains(owner) {
             // The reassignment Free already covers this owner;
             // emitting another dead-store Free would double-free.

@@ -435,17 +435,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-191 — W0001 unused-value warning only fires for Move-typed bindings
-
-**Severity:** Correctness / Hygiene
-**Area:** ownership
-
-**Files:** `ryo-frontend/src/ownership/walk.rs` (`analyze_var_decl` :670 / `analyze_assign` :738 — the VarDecl/Assign arms), `ryo-frontend/src/ownership/mod.rs:76` (`needs_tracking` gate)
-**Summary:** The "declared but never used" warning (W0001, `DiagCode::DeadStore`) registers a binding into `pending_dead_store` only when `needs_tracking(ty)` (i.e. `is_move_type(ty)`) holds, so Copy-typed locals (`int`/`float`/`bool`) are walked as `OwnerState::NotTracked` and never checked. Function parameters are never checked at all (any type), and view-typed locals register a projection but no dead-store entry. Reproduced from `bug_reports/bug_w0001_unused_var_only_move_types.ryo` (2026-09-24 build, still present at `87ea62b`). Result: the user gets a warning for `unused_str` but silence for `unused_int` in the same function.
-**Resolution:** Add a Copy-type path — sema-level usage counting is the natural fit since the ownership pass intentionally skips Copy types — plus parameter and view handling. Decide whether params and views warn by default or sit behind a stricter lint tier, and keep the warning text uniform across type kinds.
-
----
-
 ### I-192 — Evaluate linking the `ryo` compiler binary itself against musl
 
 **Severity:** Correctness / Hygiene

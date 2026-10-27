@@ -51,10 +51,10 @@ pub(crate) fn schedule_return_epilogue_frees<S: TirStmtList + ?Sized>(
         // covers the rest — but only if the scan can observe it.
         let mut staged: Vec<DropOp> = Vec::new();
         for owner in owners {
-            if own.pending_dead_store.contains_key(owner) {
+            let r = owner.tirref(flow);
+            if !r.is_param() && own.pending_dead_store.contains_key(owner) {
                 continue;
             }
-            let r = owner.tirref(flow);
             // A return that moves a binding's value hands the home
             // slot's content to the caller (sret / register copy). The
             // consume record names the owner the read resolved to —

@@ -303,7 +303,7 @@ pub enum DiagCode {
     /// Rule 7 violation: a value has more than one mutable borrow, or a
     /// mutable and an immutable/moved use, in the same call (M8.3).
     MutableAliasingViolation,
-    /// A Move-typed value is declared (or assigned) but never used.
+    /// A value or parameter is declared (or assigned) but never used.
     DeadStore,
     /// A scope-locked view escaped: returned from a function, passed
     /// to a `move` parameter, or otherwise stored beyond its function
