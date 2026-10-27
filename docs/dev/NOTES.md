@@ -1,6 +1,7 @@
 # TODO
 
 - cache Valgrind Docker image for CI; it takes 9 minutes 29 seconds just to install it
+- https://github.com/rust-lang/compiler-builtins/blob/main/libm/README.md
 - FFI: https://verdagon.dev/blog/fearless-ffi
 - add support for https://build-server-protocol.github.io/
 - https://1brc.dev/ as exercise for the language
@@ -19,7 +20,6 @@
   cargo crap --workspace --lcov lcov.info                     # 2. analyze
   ```
 
-- [ ] https://github.com/ludo-technologies/polyscan `npx polyscan analyze .`
 - [ ] <https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md>
 - [ ] FFI tests: sqlite(included), raylib(external)
 - [ ] [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/)
