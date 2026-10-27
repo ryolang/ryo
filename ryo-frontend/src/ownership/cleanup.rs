@@ -1,8 +1,8 @@
 //! Cleanup scheduling and destruction anchors.
 
 use super::{
-    HazardKind, Owner, OwnerState, Ownership, UNTRACKED_PLACE, anchored_after, body_may_return,
-    branch_may_not_return, convert_honored_reseat_drops, declared_before_stmt,
+    HazardKind, Owner, OwnerState, Ownership, PromoCandidate, UNTRACKED_PLACE, anchored_after,
+    body_may_return, branch_may_not_return, convert_honored_reseat_drops, declared_before_stmt,
     enclosing_if_main_cond, if_may_fall_through, inout_escape_owner, last_use_anchor,
     outermost_branch_of, outermost_loop_of, owner_sort_key, param_idx, schedule_loop_exit_frees_in,
     schedule_return_epilogue_frees, suppress_redundant_exit_frees,
@@ -305,78 +305,101 @@ pub(crate) fn schedule_anonymous_temp_frees(
     }
 }
 
+fn promotion_anchor(ctx: &CleanupContext<'_>, own: &Ownership, cand: PromoCandidate) -> TirRef {
+    let rank = |r: TirRef| ctx.order.get(r.index()).copied().unwrap_or(0);
+    let bound = own.root_owner.contains_key(&Owner(
+        own.inst_place[cand.view_inst.index()].expect("view owner place"),
+    ));
+    if !bound {
+        // Transient slice (e.g. `print(s[0:1])`): the projection
+        // dies with its enclosing statement.
+        return cand.stmt;
+    }
+    if let Some(loop_ref) = Ownership::dense_get(&own.view_defer_loop, cand.view_inst) {
+        // Created outside a loop, last read inside it: dies at
+        // the loop's exit. The creation dominates the loop, so
+        // the scratch slot is initialized on every path here.
+        loop_ref
+    } else if let Some(lu) = Ownership::dense_get(&own.view_last_use, cand.view_inst) {
+        // P5: a reslice of this view (e.g. `w = s[0:2];
+        // v = w[0:1]`) keeps the same promotion buffer alive —
+        // defer to the last use of any projection of this view,
+        // exactly as owner frees do.
+        let lu = defer_anchor(
+            lu,
+            &Owner(own.inst_place[cand.view_inst.index()].expect("view owner place")),
+            ctx.projections_of,
+            ctx.last_use,
+            &own.view_last_use,
+            ctx.order,
+        );
+        // Conditional last use: re-anchor to the branch exit —
+        // but only when the view's creation dominates the
+        // branch, else the slot may be uninitialized on the
+        // skipped path (mirrors the declared-before check of
+        // the Owner::Param free path).
+        match outermost_branch_of(ctx.tir, lu) {
+            Some(branch_stmt)
+                if branch_may_not_return(ctx.tir, branch_stmt)
+                    && rank(cand.view_inst) < rank(branch_stmt) =>
+            {
+                branch_stmt
+            }
+            _ => lu,
+        }
+    } else {
+        // No possible binding read reaches this view, so its
+        // promotion buffer can be freed at creation. Loop
+        // back-edges and zero-iteration exits are included in
+        // the view-liveness fixed point.
+        cand.stmt
+    }
+}
+
+fn schedule_promotion_exit_frees(
+    ctx: &CleanupContext<'_>,
+    sidecar: &mut FunctionSidecar,
+    exit_stmt: TirRef,
+    promo_anchors: &[(TirRef, TirRef)],
+    emitted: &mut HashSet<(TirRef, TirRef)>,
+) {
+    // Each candidate's normal free has one anchor, so returns and the
+    // synthesized fallthrough return need backstop frees on paths that
+    // bypass it. Flag-conditional emission makes duplicate path coverage
+    // harmless. Skip a normal anchor on this statement and dedupe repeated
+    // exits through the shared set, preserving candidate order.
+    for &(base, normal_anchor) in promo_anchors {
+        if normal_anchor == exit_stmt {
+            continue;
+        }
+        if !emitted.insert((exit_stmt, base)) {
+            continue;
+        }
+        sidecar.promotion_frees.push(PromoFree {
+            position: DropPosition::AfterStep { inst: exit_stmt },
+            base,
+            span: ctx.tir.span(exit_stmt),
+        });
+    }
+}
+
 pub(crate) fn schedule_promotion_frees(
     ctx: &CleanupContext<'_>,
     own: &mut Ownership,
     sidecar: &mut FunctionSidecar,
     block_order: &[BlockId],
 ) {
-    // Promotion-buffer frees for borrowed-param view bases: codegen
-    // promotes the callee's inline copy of the param to heap so the
-    // view addresses stable memory; the buffer is freed at the view's
-    // death. Only bases recorded by the walk qualify (borrowed,
-    // owner-typed, param-rooted).
     let candidates = std::mem::take(&mut own.promo_candidates);
-    // (base, normal anchor) pairs, kept for the return epilogue below.
+    // (base, normal anchor) pairs, kept for the exit epilogues below.
     let mut promo_anchors: Vec<(TirRef, TirRef)> = Vec::with_capacity(candidates.len());
     for cand in candidates {
-        let rank = |r: TirRef| ctx.order.get(r.index()).copied().unwrap_or(0);
-        let bound = own.root_owner.contains_key(&Owner(
-            own.inst_place[cand.view_inst.index()].expect("view owner place"),
-        ));
-        let after = if bound {
-            if let Some(loop_ref) = Ownership::dense_get(&own.view_defer_loop, cand.view_inst) {
-                // Created outside a loop, last read inside it: dies at
-                // the loop's exit. The creation dominates the loop, so
-                // the scratch slot is initialized on every path here.
-                loop_ref
-            } else if let Some(lu) = Ownership::dense_get(&own.view_last_use, cand.view_inst) {
-                // P5: a reslice of this view (e.g. `w = s[0:2];
-                // v = w[0:1]`) keeps the same promotion buffer alive —
-                // defer to the last use of any projection of this view,
-                // exactly as owner frees do.
-                let lu = defer_anchor(
-                    lu,
-                    &Owner(own.inst_place[cand.view_inst.index()].expect("view owner place")),
-                    ctx.projections_of,
-                    ctx.last_use,
-                    &own.view_last_use,
-                    ctx.order,
-                );
-                // Conditional last use: re-anchor to the branch exit —
-                // but only when the view's creation dominates the
-                // branch, else the slot may be uninitialized on the
-                // skipped path (mirrors the declared-before check of
-                // the Owner::Param free path).
-                match outermost_branch_of(ctx.tir, lu) {
-                    Some(branch_stmt)
-                        if branch_may_not_return(ctx.tir, branch_stmt)
-                            && rank(cand.view_inst) < rank(branch_stmt) =>
-                    {
-                        branch_stmt
-                    }
-                    _ => lu,
-                }
-            } else {
-                // No possible binding read reaches this view, so its
-                // promotion buffer can be freed at creation. Loop
-                // back-edges and zero-iteration exits are included in
-                // the view-liveness fixed point.
-                cand.stmt
-            }
-        } else {
-            // Transient slice (e.g. `print(s[0:1])`): the projection
-            // dies with its enclosing statement.
-            cand.stmt
-        };
+        let after = promotion_anchor(ctx, own, cand);
         sidecar.promotion_frees.push(PromoFree {
             position: DropPosition::AfterStep { inst: after },
             base: cand.base,
             span: ctx.tir.span(cand.view_inst),
         });
-        // The allocation identity — codegen promotes on the
-        // view write (flag-guarded conditional heap triple); the
-        // validator pairs this point with the base's releases.
+        // Pair the allocation identity with the base's releases.
         sidecar.promo_allocs.push(PromoFree {
             position: DropPosition::AfterStep {
                 inst: cand.view_inst,
@@ -387,46 +410,19 @@ pub(crate) fn schedule_promotion_frees(
         promo_anchors.push((cand.base, after));
     }
 
-    // Return epilogue for promotion buffers, mirroring the owner
-    // return-epilogue pass below: each promo free above has exactly one
-    // anchor, so any path that returns before it leaks the buffer (the
-    // last use inside the return operand lands the anchor on a sub-inst
-    // the end-of-statement sweep skips on terminators; a loop-deferred
-    // anchor is bypassed by a `return` inside the loop). Anchor a copy
-    // of every candidate's free at every Return/ReturnVoid — the
-    // flag-conditional, flag-clearing emission makes the extra anchors
-    // harmless no-ops on paths that already freed (or never promoted)
-    // the buffer. Codegen's Return arms fire due promo frees before the
-    // `return_` terminator. Deduped against the candidate's normal
-    // anchor when that anchor IS the return statement.
     let mut return_stmts: Vec<TirRef> = Vec::new();
     collect_return_stmts(ctx.flow, block_order, &mut return_stmts);
     let mut promo_epilogue_emitted: HashSet<(TirRef, TirRef)> = HashSet::new();
     for return_stmt in return_stmts {
-        for &(base, normal_anchor) in &promo_anchors {
-            if normal_anchor == return_stmt {
-                continue;
-            }
-            if !promo_epilogue_emitted.insert((return_stmt, base)) {
-                continue;
-            }
-            sidecar.promotion_frees.push(PromoFree {
-                position: DropPosition::AfterStep { inst: return_stmt },
-                base,
-                span: ctx.tir.span(return_stmt),
-            });
-        }
+        schedule_promotion_exit_frees(
+            ctx,
+            sidecar,
+            return_stmt,
+            &promo_anchors,
+            &mut promo_epilogue_emitted,
+        );
     }
 
-    // Fallthrough backstop: a body that can reach its end without an
-    // explicit return exits through codegen's synthesized return, which
-    // has no TIR statement for the return epilogue above to anchor on —
-    // e.g. a view whose only use is inside a returning if-arm keeps its
-    // in-arm anchor, and the not-taken path falls through with the
-    // promotion buffer still live. Anchor a copy of every candidate's
-    // free after the final body statement; flag-conditional emission
-    // keeps it a harmless no-op on paths that already freed (or never
-    // promoted) the buffer.
     if let Some(last) = ctx.body_stmts.iter().next_back() {
         let may_fall_through = match ctx.tir.inst(last).tag {
             TirTag::Return | TirTag::ReturnVoid => false,
@@ -434,19 +430,13 @@ pub(crate) fn schedule_promotion_frees(
             _ => true,
         };
         if may_fall_through {
-            for &(base, normal_anchor) in &promo_anchors {
-                if normal_anchor == last {
-                    continue;
-                }
-                if !promo_epilogue_emitted.insert((last, base)) {
-                    continue;
-                }
-                sidecar.promotion_frees.push(PromoFree {
-                    position: DropPosition::AfterStep { inst: last },
-                    base,
-                    span: ctx.tir.span(last),
-                });
-            }
+            schedule_promotion_exit_frees(
+                ctx,
+                sidecar,
+                last,
+                &promo_anchors,
+                &mut promo_epilogue_emitted,
+            );
         }
     }
 }
