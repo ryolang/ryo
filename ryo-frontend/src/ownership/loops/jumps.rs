@@ -89,11 +89,29 @@ pub(crate) struct LoopExitCtx<'a> {
     top_level: HashMap<TirRef, TirRef>,
     loop_carried_owners: HashSet<TirRef>,
     reassigned_after_loop_bindings: HashSet<TirRef>,
+    sorted_owners: Vec<Owner>,
     /// Dominator sets for the owning function's Flow CFG (see
     /// `compute_dominators`). Computed lazily — only the break
     /// defensive-emit path needs them — and shared by every loop in
     /// the function, so loops that never reach that path pay nothing.
     doms: &'a OnceCell<Vec<HashSet<BlockId>>>,
+}
+
+#[derive(Default)]
+struct LoopExitScratch {
+    on_path: HashSet<TirRef>,
+    covers_this_jump: HashSet<TirRef>,
+    free_inside_loop: HashSet<TirRef>,
+    consumed_scrutinees: HashSet<TirRef>,
+}
+
+impl LoopExitScratch {
+    fn clear(&mut self) {
+        self.on_path.clear();
+        self.covers_this_jump.clear();
+        self.free_inside_loop.clear();
+        self.consumed_scrutinees.clear();
+    }
 }
 
 /// Collect every `Assign` (site, name, value) reachable from `stmts`,
@@ -204,6 +222,7 @@ impl<'a> LoopExitCtx<'a> {
     fn new(
         tir: &'a Tir,
         doms: &'a OnceCell<Vec<HashSet<BlockId>>>,
+        own: &Ownership,
         sidecar: &FunctionSidecar,
         loop_inst: TirRef,
     ) -> Option<Self> {
@@ -234,6 +253,8 @@ impl<'a> LoopExitCtx<'a> {
             .filter(|site| sidecar.free_on_reassign[site.index()].is_some())
             .filter_map(|site| sidecar.assign_binding[site.index()])
             .collect();
+        let mut sorted_owners: Vec<Owner> = own.states.keys().copied().collect();
+        sorted_owners.sort_by_key(owner_sort_key);
         Some(Self {
             body,
             inside_loop,
@@ -241,6 +262,7 @@ impl<'a> LoopExitCtx<'a> {
             top_level,
             loop_carried_owners,
             reassigned_after_loop_bindings,
+            sorted_owners,
             doms,
         })
     }
@@ -260,18 +282,45 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
     enclosing: Option<&LoopExitCtx<'_>>,
     doms: &OnceCell<Vec<HashSet<BlockId>>>,
 ) {
+    let mut scratch = LoopExitScratch::default();
+    schedule_loop_exit_frees_in_inner(
+        tir,
+        flow,
+        pool,
+        own,
+        sidecar,
+        stmts,
+        enclosing,
+        doms,
+        &mut scratch,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn schedule_loop_exit_frees_in_inner<S: TirStmtList + ?Sized>(
+    tir: &Tir,
+    flow: &ryo_core::flow::Flow,
+    pool: &InternPool,
+    own: &Ownership,
+    sidecar: &mut FunctionSidecar,
+    stmts: &S,
+    enclosing: Option<&LoopExitCtx<'_>>,
+    doms: &OnceCell<Vec<HashSet<BlockId>>>,
+    scratch: &mut LoopExitScratch,
+) {
     for r in stmts.iter_refs() {
         let r = stmt_match(tir, r).unwrap_or(r);
         let inst = *tir.inst(r);
         match inst.tag {
             TirTag::Break | TirTag::Continue => {
                 if let Some(ctx) = enclosing {
-                    schedule_break_continue_frees(tir, flow, pool, own, sidecar, r, ctx);
+                    schedule_break_continue_frees(tir, flow, pool, own, sidecar, r, ctx, scratch);
                 }
             }
             TirTag::WhileLoop | TirTag::ForRange => {
-                if let Some(ctx) = LoopExitCtx::new(tir, doms, sidecar, r) {
-                    schedule_loop_exit_frees_in(
+                if let Some(ctx) = LoopExitCtx::new(tir, doms, own, sidecar, r) {
+                    let mut nested_scratch = LoopExitScratch::default();
+                    schedule_loop_exit_frees_in_inner(
                         tir,
                         flow,
                         pool,
@@ -280,12 +329,13 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
                         &ctx.body,
                         Some(&ctx),
                         doms,
+                        &mut nested_scratch,
                     );
                 }
             }
             TirTag::IfStmt => {
                 let view = tir.if_stmt_view(r);
-                schedule_loop_exit_frees_in(
+                schedule_loop_exit_frees_in_inner(
                     tir,
                     flow,
                     pool,
@@ -294,22 +344,23 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
                     &view.then_stmts,
                     enclosing,
                     doms,
+                    scratch,
                 );
                 for elif in &view.elif_branches {
-                    schedule_loop_exit_frees_in(
-                        tir, flow, pool, own, sidecar, &elif.body, enclosing, doms,
+                    schedule_loop_exit_frees_in_inner(
+                        tir, flow, pool, own, sidecar, &elif.body, enclosing, doms, scratch,
                     );
                 }
                 if let Some(else_stmts) = &view.else_stmts {
-                    schedule_loop_exit_frees_in(
-                        tir, flow, pool, own, sidecar, else_stmts, enclosing, doms,
+                    schedule_loop_exit_frees_in_inner(
+                        tir, flow, pool, own, sidecar, else_stmts, enclosing, doms, scratch,
                     );
                 }
             }
             TirTag::Match => {
                 for body in match_arm_bodies(tir, r) {
-                    schedule_loop_exit_frees_in(
-                        tir, flow, pool, own, sidecar, &body, enclosing, doms,
+                    schedule_loop_exit_frees_in_inner(
+                        tir, flow, pool, own, sidecar, &body, enclosing, doms, scratch,
                     );
                 }
             }
@@ -318,8 +369,8 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
         if !matches!(inst.tag, TirTag::WhileLoop | TirTag::ForRange) {
             visit_operand_matches(tir, r, &mut |m| {
                 for body in match_arm_bodies(tir, m) {
-                    schedule_loop_exit_frees_in(
-                        tir, flow, pool, own, sidecar, &body, enclosing, doms,
+                    schedule_loop_exit_frees_in_inner(
+                        tir, flow, pool, own, sidecar, &body, enclosing, doms, scratch,
                     );
                 }
             });
@@ -370,7 +421,8 @@ fn prune_match_arms(tir: &Tir, m: TirRef, jump: TirRef, on_path: &mut HashSet<Ti
 
 /// Schedule one Free per `Valid` owner not already covered by a Free
 /// that fires on the jump's path. Kept for `schedule_loop_exit_frees_in`.
-pub(crate) fn schedule_break_continue_frees(
+#[allow(clippy::too_many_arguments)]
+fn schedule_break_continue_frees(
     tir: &Tir,
     flow: &ryo_core::flow::Flow,
     pool: &InternPool,
@@ -378,32 +430,34 @@ pub(crate) fn schedule_break_continue_frees(
     sidecar: &mut FunctionSidecar,
     jump_inst: TirRef,
     ctx: &LoopExitCtx<'_>,
+    scratch: &mut LoopExitScratch,
 ) {
     let inside_loop = &ctx.inside_loop;
 
-    let mut on_path: HashSet<TirRef> = HashSet::new();
+    scratch.clear();
+    let LoopExitScratch {
+        on_path,
+        covers_this_jump,
+        free_inside_loop,
+        consumed_scrutinees,
+    } = scratch;
     match ctx.top_level.get(&jump_inst) {
         Some(&enclosing_stmt) => {
             for stmt in ctx.body.iter().take_while(|&s| s != enclosing_stmt) {
-                tir.collect_reachable(stmt, &mut on_path);
+                tir.collect_reachable(stmt, on_path);
             }
-            let _ = tir.collect_jump_path(
-                std::slice::from_ref(&enclosing_stmt),
-                jump_inst,
-                &mut on_path,
-            );
-            prune_sibling_match_arms(tir, enclosing_stmt, jump_inst, &mut on_path);
+            let _ =
+                tir.collect_jump_path(std::slice::from_ref(&enclosing_stmt), jump_inst, on_path);
+            prune_sibling_match_arms(tir, enclosing_stmt, jump_inst, on_path);
         }
         None => {
-            let _ = tir.collect_jump_path_iter(ctx.body, jump_inst, &mut on_path);
+            let _ = tir.collect_jump_path_iter(ctx.body, jump_inst, on_path);
             for stmt in ctx.body.iter() {
-                prune_sibling_match_arms(tir, stmt, jump_inst, &mut on_path);
+                prune_sibling_match_arms(tir, stmt, jump_inst, on_path);
             }
         }
     }
 
-    let mut covers_this_jump: HashSet<TirRef> = HashSet::new();
-    let mut free_inside_loop: HashSet<TirRef> = HashSet::new();
     for fp in anchored_drops(sidecar) {
         if on_path.contains(&drop_anchor(fp)) {
             covers_this_jump.insert(fp.target);
@@ -414,8 +468,7 @@ pub(crate) fn schedule_break_continue_frees(
     }
 
     let is_break = matches!(tir.inst(jump_inst).tag, TirTag::Break);
-    let mut consumed_scrutinees = HashSet::new();
-    for &candidate in &on_path {
+    for &candidate in on_path.iter() {
         if tir.inst(candidate).tag != TirTag::Match {
             continue;
         }
@@ -435,15 +488,12 @@ pub(crate) fn schedule_break_continue_frees(
             consumed_scrutinees.insert(owner);
         }
     }
-    let mut sorted_states: Vec<(Owner, OwnerState)> =
-        own.states.iter().map(|(o, s)| (*o, s.clone())).collect();
-    sorted_states.sort_by_key(|(o, _)| owner_sort_key(o));
-    for (owner, state) in &sorted_states {
+    for &owner in &ctx.sorted_owners {
         let r = match owner.inst_tirref(flow) {
             Some(r) => r,
             None => continue,
         };
-        if !matches!(state, OwnerState::Valid) {
+        if !matches!(own.states.get(&owner), Some(OwnerState::Valid)) {
             continue;
         }
 

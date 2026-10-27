@@ -254,17 +254,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-145 — Ownership materializes the full states map per break/continue
-
-**Severity:** Cleanup
-**Area:** ownership
-
-**Files:** `ryo-frontend/src/ownership/loops/jumps.rs` (`schedule_break_continue_frees` :297, per-jump snapshot :362-364)
-**Summary:** Every break/continue jump clones the entire `own.states` map into a sorted `Vec`, then builds `on_path`/`covers_this_jump`/`free_inside_loop` sets and scans the whole `free_schedule` — all per jump, though the snapshot is constant within a loop body walk. The per-loop invariants are precomputed once per loop (`LoopExitCtx`); this per-jump residue remains.
-**Resolution:** Hoist the sorted snapshot to once per loop body walk (or iterate the map with an index); reuse scratch sets across jumps.
-
----
-
 ### I-147 — `emit_builtin_call` allocates mode Vecs per builtin call
 
 **Severity:** Cleanup
@@ -758,4 +747,4 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
 
-<!-- issue-id high-water: 248 -->
+<!-- issue-id high-water: 249 -->
