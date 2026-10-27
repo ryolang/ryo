@@ -884,8 +884,7 @@ impl<'a> Walk<'a> {
             }
         }
         if !needs_tracking(value_ty, self.pool) && !inout_param {
-            own.pending_dead_store
-                .retain(|_, (_, _, _, entry_home)| *entry_home != home);
+            own.clear_pending_dead_store(home);
             register_pending_dead_store(own, Owner(home), home, view.name, self.tir.span(r), r);
         }
     }
@@ -1406,8 +1405,7 @@ impl<'a> Walk<'a> {
         // Any read counts as "used" for dead-store purposes, even one
         // that ultimately fires E0020. Clear by lexical home so shadowed
         // bindings and branch-local owner reseats stay independent.
-        own.pending_dead_store
-            .retain(|_, (_, _, _, entry_home)| *entry_home != read);
+        own.clear_pending_dead_store(read);
         if needs_tracking(inst.ty, self.pool) {
             // Snapshot owner-at-read so the post-walk passes anchor to
             // the owner live *at this read*.

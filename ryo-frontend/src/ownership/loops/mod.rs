@@ -321,6 +321,7 @@ pub(crate) fn analyze_loop(
         // match-arm intersection can alternate between keeping and
         // dropping them.
         own.pending_dead_store.clone_from(&snap.pending_dead_store);
+        own.rebuild_pending_dead_store_index();
         w.walk_phase(own, &mut scratch, &mut staging, &region, pass_epoch);
         // Move the post-body state out, installing an empty placeholder
         // — the merge overwrites all five fields below.

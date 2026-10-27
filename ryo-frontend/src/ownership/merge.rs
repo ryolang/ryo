@@ -42,7 +42,7 @@ impl Ownership {
     /// in their place, without cloning it) so a finished arm / loop
     /// pass can hand its end state to the merge.
     pub(crate) fn take_branch(&mut self, restore: BranchState) -> BranchState {
-        BranchState {
+        let branch = BranchState {
             states: std::mem::replace(&mut self.states, restore.states),
             current_owner: std::mem::replace(&mut self.current_owner, restore.current_owner),
             binding_of_name: std::mem::replace(&mut self.binding_of_name, restore.binding_of_name),
@@ -54,7 +54,9 @@ impl Ownership {
                 &mut self.live_projections,
                 restore.live_projections,
             ),
-        }
+        };
+        self.rebuild_pending_dead_store_index();
+        branch
     }
 }
 
@@ -142,6 +144,7 @@ impl Ownership {
         // branch-local keys union (see merge_pending_dead_store).
         let branch_stores: Vec<_> = branches.iter().map(|b| &b.pending_dead_store).collect();
         merge_pending_dead_store(&mut self.pending_dead_store, &branch_stores);
+        self.rebuild_pending_dead_store_index();
     }
 }
 
@@ -521,6 +524,7 @@ pub(crate) fn merge_loop_plain(
     own.current_owner = merged_current_owner;
     own.binding_of_name = merged_binding_of_name;
     own.pending_dead_store = merged_pending_dead_store;
+    own.rebuild_pending_dead_store_index();
     own.live_projections = merged_live_projections;
     writes
 }

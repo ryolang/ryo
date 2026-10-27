@@ -440,6 +440,10 @@ pub(crate) fn register_pending_dead_store(
 ) {
     own.pending_dead_store
         .insert(owner, (name, span, decl_inst, home));
+    let owners = own.pending_dead_store_by_home.entry(home).or_default();
+    if !owners.contains(&owner) {
+        owners.push(owner);
+    }
 }
 
 /// True if `owner` is the value currently seated in an `inout str`

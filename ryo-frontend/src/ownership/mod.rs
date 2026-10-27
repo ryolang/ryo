@@ -249,6 +249,10 @@ pub(crate) struct Ownership {
     /// own `TirRef`, used as the Free anchor; the fourth is the lexical
     /// binding home, which keeps same-named shadows independent.
     pub pending_dead_store: HashMap<Owner, DeadStoreEntry>,
+    /// Lexical binding home → its pending owner keys. Reads and
+    /// assignments clear through this index instead of scanning every
+    /// pending entry. Rebuilt whenever branch state is restored or merged.
+    pub pending_dead_store_by_home: HashMap<PlaceId, Vec<Owner>>,
 
     /// SSA values that allocated heap-owned strings during the
     /// forward walk: `StrConst`, `StrConcat`, and Move-typed `Call`
@@ -423,6 +427,24 @@ impl Ownership {
     pub(crate) fn dense_set<V: Copy>(table: &mut [Option<V>], r: TirRef, v: V) {
         debug_assert!(!r.is_param());
         table[r.index()] = Some(v);
+    }
+
+    pub(crate) fn clear_pending_dead_store(&mut self, home: PlaceId) {
+        if let Some(owners) = self.pending_dead_store_by_home.remove(&home) {
+            for owner in owners {
+                self.pending_dead_store.remove(&owner);
+            }
+        }
+    }
+
+    pub(crate) fn rebuild_pending_dead_store_index(&mut self) {
+        self.pending_dead_store_by_home.clear();
+        for (&owner, (_, _, _, home)) in &self.pending_dead_store {
+            self.pending_dead_store_by_home
+                .entry(*home)
+                .or_default()
+                .push(owner);
+        }
     }
 
     /// The owner whose storage an instruction's value IS (G2): the
