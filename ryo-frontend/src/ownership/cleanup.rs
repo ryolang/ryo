@@ -32,6 +32,156 @@ pub(crate) struct CleanupContext<'a> {
     pub(super) assign_value_of: &'a HashMap<TirRef, TirRef>,
 }
 
+fn instruction_last_use_drop(
+    ctx: &CleanupContext<'_>,
+    own: &Ownership,
+    sidecar: &FunctionSidecar,
+    owner: Owner,
+    r: TirRef,
+) -> Option<DropOp> {
+    let stale_reassign_target =
+        ctx.reassign_targets.contains(&owner) && !ctx.live_binding_owners.contains(&owner);
+    if stale_reassign_target || ctx.inout_escape_owners.contains(&owner) {
+        return None;
+    }
+    let &after = ctx.last_use.get(&r)?;
+    // P5 (final spec §3.2): defer the destruction to
+    // the last use of any projection of this owner.
+    let after = defer_anchor(
+        after,
+        &owner,
+        ctx.projections_of,
+        ctx.last_use,
+        &own.view_last_use,
+        ctx.order,
+    );
+    // Conditional last use: a named binding whose LAST
+    // READ is inside a branch/loop is re-anchored by
+    // `last_use_anchor` (see loops.rs) — normally to
+    // the branch exit, the earliest point where the
+    // value is dead on ALL paths, EXCEPT a loop-carried
+    // owner whose binding is read again after the loop.
+    let anchor = last_use_anchor(
+        ctx.tir,
+        ctx.flow,
+        ctx.pool,
+        r,
+        after,
+        sidecar,
+        ctx.order,
+        ctx.last_read_by_name,
+        ctx.loop_carried_owners,
+        own.owner_hazards.iter().any(|&(o, site, kind)| {
+            o == owner
+                && matches!(kind, HazardKind::Move)
+                && matches!(ctx.tir.inst(site).tag, TirTag::Return | TirTag::ReturnVoid)
+        }),
+    )?;
+    if covered_by_later_reassign(ctx, owner, r, anchor) {
+        return None;
+    }
+    Some(DropOp {
+        position: DropPosition::AfterStep { inst: anchor },
+        target: r,
+        span: ctx.tir.span(r),
+    })
+}
+
+fn covered_by_later_reassign(
+    ctx: &CleanupContext<'_>,
+    owner: Owner,
+    r: TirRef,
+    anchor: TirRef,
+) -> bool {
+    // Anchor-order suppression: the owner is its
+    // binding's current owner (the stale-target check
+    // above did not fire — a loop merge's first-wins
+    // reseat leaves the PRE-reassign owner seated), but
+    // the binding is reassigned AFTER this anchor. The
+    // reassign-Free then releases this exact buffer at
+    // the first store that displaces it, and codegen's
+    // binding-path redirect frees the slot's CURRENT
+    // content wherever a later Free targets this owner —
+    // so scheduling a last-use Free here double-frees.
+    // Whatever the binding holds after its last
+    // reassign is released by that value's own final
+    // Free (last-use / dead-store / loop-exit), which
+    // redirects to the same home slot. The reassign set
+    // is the owner's OWN binding (its declaring
+    // VarDecl): a same-named shadow's reassigns target
+    // a different binding and home slot, so they must
+    // not suppress this owner — when they did, the
+    // outer buffer leaked on every path where the
+    // outer reassign never ran.
+    // A value belongs to exactly one binding's
+    // home-slot lineage — either a declaring VarDecl's
+    // init or a single reseating Assign's value, never
+    // both — so the `.or()` below is unambiguous.
+    debug_assert!(
+        !(ctx.decl_of_init.contains_key(&r) && ctx.assign_value_of.contains_key(&r)),
+        "owner {r:?} is both a VarDecl init and an Assign value"
+    );
+    if ctx.reassign_targets.contains(&owner)
+        && let Some(&binding) = ctx.decl_of_init.get(&r).or(ctx.assign_value_of.get(&r))
+        && ctx.reassign_orders.get(&binding).is_some_and(|v| {
+            v.iter()
+                .any(|&rr| anchored_after(ctx.tir, ctx.order, rr, anchor))
+        })
+    {
+        return true;
+    }
+    false
+}
+
+fn param_last_use_drop(ctx: &CleanupContext<'_>, own: &Ownership, owner: Owner) -> Option<DropOp> {
+    // A param owner: an `inout str` param's value escapes
+    // through the write-back pointer — never freed by the
+    // callee, even if a branch merge left its owner stamped
+    // Valid.
+    let name = ctx.flow.place(owner.0).name();
+    if own.inout_str_params.contains(&name) {
+        return None;
+    }
+    let idx = param_idx(&own.param_index, name);
+    // Anchor the Free after the param's last read — the
+    // same policy locals get — so later statements that
+    // never touch the param don't keep its buffer alive.
+    // A never-read param keeps the old anchor (after the
+    // last body statement): it must still be freed exactly
+    // once.
+    let after = match ctx.last_use.get(&TirRef::param(idx)) {
+        Some(&after) => {
+            // P5 (final spec §3.2): defer the destruction to
+            // the last use of any projection of this param
+            // (a slice of it keeps the buffer alive).
+            let after = defer_anchor(
+                after,
+                &owner,
+                ctx.projections_of,
+                ctx.last_use,
+                &own.view_last_use,
+                ctx.order,
+            );
+            // Conditional last use: same re-anchor as `Inst`
+            // owners — a last read inside a branch frees at
+            // the branch's exit. Anchoring after the read
+            // itself fires per-iteration in loops (UAF on
+            // later reads) and never fires on not-taken
+            // arms (leak); arms that `return` are covered
+            // by the return epilogue. The declared-before
+            // check locals need is trivially true here:
+            // params precede the body.
+            Some(outermost_branch_of(ctx.tir, after).unwrap_or(after))
+        }
+        None => ctx.body_stmts.iter().next_back(),
+    }?;
+    Some(DropOp {
+        position: DropPosition::AfterStep { inst: after },
+        target: TirRef::param(idx),
+        span: ctx.tir.params[idx].span,
+    })
+}
+
 pub(crate) fn schedule_last_use_frees(
     ctx: &CleanupContext<'_>,
     own: &Ownership,
@@ -46,147 +196,12 @@ pub(crate) fn schedule_last_use_frees(
         if !matches!(state, OwnerState::Valid) {
             continue;
         }
-        match owner.inst_tirref(ctx.flow) {
-            Some(r) => {
-                let stale_reassign_target = ctx.reassign_targets.contains(owner)
-                    && !ctx.live_binding_owners.contains(owner);
-                if stale_reassign_target || ctx.inout_escape_owners.contains(owner) {
-                    continue;
-                }
-                if let Some(&after) = ctx.last_use.get(&r) {
-                    // P5 (final spec §3.2): defer the destruction to
-                    // the last use of any projection of this owner.
-                    let after = defer_anchor(
-                        after,
-                        owner,
-                        ctx.projections_of,
-                        ctx.last_use,
-                        &own.view_last_use,
-                        ctx.order,
-                    );
-                    // Conditional last use: a named binding whose LAST
-                    // READ is inside a branch/loop is re-anchored by
-                    // `last_use_anchor` (see loops.rs) — normally to
-                    // the branch exit, the earliest point where the
-                    // value is dead on ALL paths, EXCEPT a loop-carried
-                    // owner whose binding is read again after the loop.
-                    let Some(anchor) = last_use_anchor(
-                        ctx.tir,
-                        ctx.flow,
-                        ctx.pool,
-                        r,
-                        after,
-                        sidecar,
-                        ctx.order,
-                        ctx.last_read_by_name,
-                        ctx.loop_carried_owners,
-                        own.owner_hazards.iter().any(|&(o, site, kind)| {
-                            o == *owner
-                                && matches!(kind, HazardKind::Move)
-                                && matches!(
-                                    ctx.tir.inst(site).tag,
-                                    TirTag::Return | TirTag::ReturnVoid
-                                )
-                        }),
-                    ) else {
-                        continue;
-                    };
-                    // Anchor-order suppression: the owner is its
-                    // binding's current owner (the stale-target check
-                    // above did not fire — a loop merge's first-wins
-                    // reseat leaves the PRE-reassign owner seated), but
-                    // the binding is reassigned AFTER this anchor. The
-                    // reassign-Free then releases this exact buffer at
-                    // the first store that displaces it, and codegen's
-                    // binding-path redirect frees the slot's CURRENT
-                    // content wherever a later Free targets this owner —
-                    // so scheduling a last-use Free here double-frees.
-                    // Whatever the binding holds after its last
-                    // reassign is released by that value's own final
-                    // Free (last-use / dead-store / loop-exit), which
-                    // redirects to the same home slot. The reassign set
-                    // is the owner's OWN binding (its declaring
-                    // VarDecl): a same-named shadow's reassigns target
-                    // a different binding and home slot, so they must
-                    // not suppress this owner — when they did, the
-                    // outer buffer leaked on every path where the
-                    // outer reassign never ran.
-                    // A value belongs to exactly one binding's
-                    // home-slot lineage — either a declaring VarDecl's
-                    // init or a single reseating Assign's value, never
-                    // both — so the `.or()` below is unambiguous.
-                    debug_assert!(
-                        !(ctx.decl_of_init.contains_key(&r)
-                            && ctx.assign_value_of.contains_key(&r)),
-                        "owner {r:?} is both a VarDecl init and an Assign value"
-                    );
-                    if ctx.reassign_targets.contains(owner)
-                        && let Some(&binding) =
-                            ctx.decl_of_init.get(&r).or(ctx.assign_value_of.get(&r))
-                        && ctx.reassign_orders.get(&binding).is_some_and(|v| {
-                            v.iter()
-                                .any(|&rr| anchored_after(ctx.tir, ctx.order, rr, anchor))
-                        })
-                    {
-                        continue;
-                    }
-                    sidecar.drops.push(DropOp {
-                        position: DropPosition::AfterStep { inst: anchor },
-                        target: r,
-                        span: ctx.tir.span(r),
-                    });
-                }
-            }
-            None => {
-                // A param owner: an `inout str` param's value escapes
-                // through the write-back pointer — never freed by the
-                // callee, even if a branch merge left its owner stamped
-                // Valid.
-                let name = ctx.flow.place(owner.0).name();
-                if own.inout_str_params.contains(&name) {
-                    continue;
-                }
-                let idx = param_idx(&own.param_index, name);
-                // Anchor the Free after the param's last read — the
-                // same policy locals get — so later statements that
-                // never touch the param don't keep its buffer alive.
-                // A never-read param keeps the old anchor (after the
-                // last body statement): it must still be freed exactly
-                // once.
-                let Some(after) = (match ctx.last_use.get(&TirRef::param(idx)) {
-                    Some(&after) => {
-                        // P5 (final spec §3.2): defer the destruction to
-                        // the last use of any projection of this param
-                        // (a slice of it keeps the buffer alive).
-                        let after = defer_anchor(
-                            after,
-                            owner,
-                            ctx.projections_of,
-                            ctx.last_use,
-                            &own.view_last_use,
-                            ctx.order,
-                        );
-                        // Conditional last use: same re-anchor as `Inst`
-                        // owners — a last read inside a branch frees at
-                        // the branch's exit. Anchoring after the read
-                        // itself fires per-iteration in loops (UAF on
-                        // later reads) and never fires on not-taken
-                        // arms (leak); arms that `return` are covered
-                        // by the return epilogue. The declared-before
-                        // check locals need is trivially true here:
-                        // params precede the body.
-                        Some(outermost_branch_of(ctx.tir, after).unwrap_or(after))
-                    }
-                    None => ctx.body_stmts.iter().next_back(),
-                }) else {
-                    continue;
-                };
-                sidecar.drops.push(DropOp {
-                    position: DropPosition::AfterStep { inst: after },
-                    target: TirRef::param(idx),
-                    span: ctx.tir.params[idx].span,
-                });
-            }
+        let drop = match owner.inst_tirref(ctx.flow) {
+            Some(r) => instruction_last_use_drop(ctx, own, sidecar, *owner, r),
+            None => param_last_use_drop(ctx, own, *owner),
+        };
+        if let Some(drop) = drop {
+            sidecar.drops.push(drop);
         }
     }
 }
