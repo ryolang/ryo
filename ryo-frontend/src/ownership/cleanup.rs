@@ -487,7 +487,7 @@ pub(crate) fn drain_dead_stores(
             format!("value `{}` is declared but never used", ctx.pool.str(*name)),
         ));
         if ctx.reassign_targets.contains(owner) {
-            // Task 6's reassignment-Free already covers this owner;
+            // The reassignment Free already covers this owner;
             // emitting another dead-store Free would double-free.
             continue;
         }
@@ -549,7 +549,7 @@ pub(crate) fn finalize_cleanup(
     own: &Ownership,
     sidecar: &mut FunctionSidecar,
     optional_optimizations: bool,
-    sink: &mut DiagSink,
+    _sink: &mut DiagSink,
 ) {
     // Convert honored reseat records into block-start DropOps (see the
     // helper for the honoring rules).
@@ -635,7 +635,7 @@ pub(crate) fn finalize_cleanup(
             ctx.pool,
             own,
             sidecar,
-            !sink.has_errors(),
+            !_sink.has_errors(),
         );
         sidecar.validation = Some(summary);
     }
