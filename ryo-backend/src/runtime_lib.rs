@@ -61,7 +61,7 @@ fn sweep_stale_temp_files(dir: &Path) -> Result<(), io::Error> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name();
-        if name.to_str().is_some_and(is_runtime_temp_file) {
+        if entry.file_type()?.is_file() && name.to_str().is_some_and(is_runtime_temp_file) {
             match fs::remove_file(entry.path()) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -77,7 +77,7 @@ fn evict_old_archives(dir: &Path, current: &Path) -> Result<(), io::Error> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name();
-        if name.to_str().is_some_and(is_cached_archive) {
+        if entry.file_type()?.is_file() && name.to_str().is_some_and(is_cached_archive) {
             let modified = entry.metadata()?.modified()?;
             archives.push((modified, entry.path()));
         }
@@ -101,7 +101,7 @@ fn evict_old_archives(dir: &Path, current: &Path) -> Result<(), io::Error> {
     Ok(())
 }
 
-pub fn extract_runtime_to_cache() -> Result<PathBuf, io::Error> {
+pub fn extract_runtime_to_cache() -> Result<(PathBuf, fs::File), io::Error> {
     extract_runtime_to_cache_at(&cache_dir()?, &content_hash(), RYO_RUNTIME_LIB)
 }
 
@@ -109,9 +109,9 @@ fn extract_runtime_to_cache_at(
     dir: &Path,
     hash: &str,
     runtime_lib: &[u8],
-) -> Result<PathBuf, io::Error> {
-    // The lock keeps cleanup from removing a temp file being written by another process.
-    let _lock = cache_lock(dir)?;
+) -> Result<(PathBuf, fs::File), io::Error> {
+    // The returned lock keeps cleanup and eviction excluded until the caller finishes using the archive.
+    let lock = cache_lock(dir)?;
     sweep_stale_temp_files(dir)?;
     let path = dir.join(extracted_name(hash));
 
@@ -126,7 +126,7 @@ fn extract_runtime_to_cache_at(
         fs::rename(&tmp_path, &path)?;
     }
     evict_old_archives(dir, &path)?;
-    Ok(path)
+    Ok((path, lock))
 }
 
 #[cfg(test)]
@@ -185,7 +185,8 @@ mod tests {
         let cached = dir.path().join(extracted_name("current"));
         fs::write(&cached, b"cached").unwrap();
 
-        let extracted = extract_runtime_to_cache_at(dir.path(), "current", b"replacement").unwrap();
+        let (extracted, _lock) =
+            extract_runtime_to_cache_at(dir.path(), "current", b"replacement").unwrap();
 
         assert_eq!(extracted, cached);
         assert_eq!(fs::read(extracted).unwrap(), b"cached");
@@ -198,13 +199,18 @@ mod tests {
             .path()
             .join(format!("{}.tmp.12345", extracted_name("stale")));
         let unrelated = dir.path().join("notes.tmp.12345");
+        let directory = dir
+            .path()
+            .join(format!("{}.tmp.12345", extracted_name("directory")));
         fs::write(&stale, b"partial").unwrap();
         fs::write(&unrelated, b"keep").unwrap();
+        fs::create_dir(&directory).unwrap();
 
         extract_runtime_to_cache_at(dir.path(), "current", b"runtime").unwrap();
 
         assert!(!stale.exists());
         assert_eq!(fs::read(unrelated).unwrap(), b"keep");
+        assert!(directory.exists());
     }
 
     #[test]
@@ -235,5 +241,29 @@ mod tests {
         drop(lock);
         extraction.join().unwrap();
         assert!(!active.exists());
+    }
+
+    #[test]
+    fn returned_lock_excludes_concurrent_maintenance() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (_path, lock) = extract_runtime_to_cache_at(dir.path(), "current", b"runtime").unwrap();
+        let thread_dir = dir.path().to_path_buf();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let extraction = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            extract_runtime_to_cache_at(&thread_dir, "other", b"other").unwrap();
+            done_tx.send(()).unwrap();
+        });
+        started_rx.recv().unwrap();
+
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+
+        drop(lock);
+        extraction.join().unwrap();
     }
 }

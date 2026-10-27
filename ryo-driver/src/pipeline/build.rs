@@ -81,12 +81,13 @@ pub fn build_file(file: &Path, emit: &[EmitKind], link: LinkMode) -> Result<(), 
 
     fs::write(&obj_filename, obj_bytes).map_err(CompilerError::from)?;
 
-    // Extract embedded runtime archive and link
-    let runtime_path = runtime_lib::extract_runtime_to_cache()
+    // Extract embedded runtime archive and keep its cache lock until zig finishes reading it.
+    let (runtime_path, _runtime_lock) = runtime_lib::extract_runtime_to_cache()
         .map_err(|e| CompilerError::LinkError(format!("Failed to extract runtime: {e}")))?;
 
     let link_result =
         linker::link_executable(&obj_filename, &exe_filename, &runtime_path, link.into());
+    drop(_runtime_lock);
 
     // Default: clean up the intermediate object file. Set
     // `RYO_KEEP_OBJ=1` to retain it — used by tooling that needs to
