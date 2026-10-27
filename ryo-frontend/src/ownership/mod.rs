@@ -22,8 +22,12 @@
 //!
 //! See `docs/dev/pl_references/mojo.md`.
 
-use ryo_core::diag::{Diag, DiagCode, DiagSink};
-use ryo_core::flow::{Analysis, BlockId, DropOp, DropPosition, Flow, PlaceId};
+use ryo_core::diag::DiagSink;
+#[cfg(test)]
+use ryo_core::diag::{Diag, DiagCode};
+#[cfg(test)]
+use ryo_core::flow::DropPosition;
+use ryo_core::flow::{Analysis, BlockId, DropOp, Flow, PlaceId};
 
 mod diag_fmt;
 pub(crate) use diag_fmt::*;
@@ -687,7 +691,7 @@ fn initialize_function_ownership(tir: &Tir, flow: &Flow, pool: &InternPool) -> O
     own
 }
 
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn analyze_function(
     tir: &Tir,
     flow: &Flow,
@@ -829,100 +833,7 @@ fn analyze_function(
 
     schedule_promotion_frees(&cleanup, &mut own, sidecar, &w.block_order);
 
-    // Warnings (W0001 below, W0003/W0004 in frees.rs) go to the
-    // `warnings` buffer, never `sink`: `check` flushes the buffer only
-    // when the whole unit is error-free, so an error from any function
-    // — analyzed before or after this one — silences them all.
-
-    // Dead-store survivors: emit W0001 and schedule a Free anchored
-    // after the declaring instruction. Skip owners already covered by
-    // `free_on_reassign` to avoid double-freeing the same allocation.
-    // (`reassign_targets` was computed above for the last-use pass.)
-    let mut sorted_dead: Vec<(Owner, (StringId, Span, TirRef))> = own
-        .pending_dead_store
-        .iter()
-        .map(|(o, v)| (*o, *v))
-        // The shared untracked sentinel (error-shaped TIR seats) owns
-        // nothing schedulable; the unit's own diagnostic carries it.
-        .filter(|(o, _)| o.0 != UNTRACKED_PLACE)
-        .collect();
-
-    sorted_dead.sort_by_key(|(o, _)| owner_sort_key(o));
-    for (owner, (name, span, decl_inst)) in &sorted_dead {
-        // Bound to an `inout str` param: the value escapes through the
-        // write-back — it IS used, just not by any TIR instruction the
-        // pass can see. Checked by NAME (not by current owner): a rebind
-        // inside a branch is discarded by the merge, leaving the entry
-        // keyed by a branch-local owner the exit-time escape set can't
-        // see. No W0001, no Free.
-        if own.inout_str_params.contains(name) {
-            continue;
-        }
-        if inout_escape_owners.contains(owner) {
-            continue;
-        }
-        // Never pile a warning onto an already-failing unit — `check`
-        // drops this buffer if any error fired anywhere in the unit.
-        warnings.emit(Diag::warning(
-            *span,
-            DiagCode::DeadStore,
-            format!("value `{}` is declared but never used", pool.str(*name)),
-        ));
-        if reassign_targets.contains(owner) {
-            // Task 6's reassignment-Free already covers this owner;
-            // emitting another dead-store Free would double-free.
-            continue;
-        }
-        // A dead reassign INSIDE A LOOP for a binding declared
-        // before that loop: anchor the Free after the outermost loop
-        // rather than after the in-loop assign. The in-loop anchor
-        // fires only when the body executes — the zero-iteration path
-        // leaks the pre-loop buffer. The after-loop anchor emits the
-        // binding's CURRENT FatLocals (the init→name map): the final iteration's
-        // value on taken paths, the pre-loop value on zero iterations.
-        // When the body may `return`, keep the in-loop Free too — the
-        // after-loop anchor is unreachable on the return path.
-        let (anchor, also_in_body) = match outermost_loop_of(tir, *decl_inst) {
-            Some(loop_stmt) if declared_before_stmt(tir, *name, loop_stmt) => {
-                let body = tir
-                    .loop_body_view(loop_stmt)
-                    .expect("outermost_loop_of returns loops");
-                let may_return = body_may_return(tir, &body);
-                (loop_stmt, may_return)
-            }
-            _ => (*decl_inst, false),
-        };
-        sidecar.drops.push(DropOp {
-            position: DropPosition::AfterStep { inst: anchor },
-            target: owner.tirref(flow),
-            span: *span,
-        });
-        if also_in_body {
-            sidecar.drops.push(DropOp {
-                position: DropPosition::AfterStep { inst: *decl_inst },
-                target: owner.tirref(flow),
-                span: *span,
-            });
-        }
-    }
-
-    // Match-arm bindings never read inside their arm (M12): the walk
-    // already scheduled their arm-gated Frees at the arm ends; only the
-    // W0001 belongs here. Dedup — loop convergence re-walks can record
-    // the same binding twice. Unlike the drain above, no inout /
-    // escape checks: an arm-local bind is a fresh value that dies with
-    // the arm regardless of any same-named outer binding.
-    let mut seen_arm_dead: HashSet<(u32, usize, usize)> = HashSet::new();
-    for (name, span) in &own.arm_dead_stores {
-        if !seen_arm_dead.insert((name.raw(), span.start, span.end)) {
-            continue;
-        }
-        warnings.emit(Diag::warning(
-            *span,
-            DiagCode::DeadStore,
-            format!("value `{}` is declared but never used", pool.str(*name)),
-        ));
-    }
+    drain_dead_stores(&cleanup, &own, sidecar, warnings);
 
     // W0003 case B (M8.4.1.2): redundant bound materializations. Runs
     // after the walk so the escape classification it reuses — final
