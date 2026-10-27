@@ -198,17 +198,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-096 — `~/.ryo/cache` grows unbounded
-
-**Severity:** Cleanup
-**Area:** linker-toolchain
-
-**Files:** `ryo-backend/src/runtime_lib.rs` (:17-40)
-**Summary:** Runtime archives are cached by content hash and never evicted (42 archives / 556 MB observed on a dev machine). `extract_runtime_to_temp` is a misnomer (persistent cache, not temp) and `cleanup_runtime_temp` is a no-op; stale `.tmp.{pid}` files linger after a kill.
-**Resolution:** Keep-last-N eviction by mtime (or a `ryo toolchain clean` command); rename the functions to reflect cache semantics; sweep stale `.tmp.*` on extract.
-
----
-
 ### I-097 — Embedded runtime archive is ~6 MB
 
 **Severity:** Cleanup
