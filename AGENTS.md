@@ -40,7 +40,7 @@ migration phase, or issue that caused it.
 - Avoid historical or catch-all names such as `gaps.rs`, `fixes.rs`,
   `phase2.rs`, `misc.rs`, or `helpers.rs`.
 - Put related modules under their owning component. For example,
-  cleanup validation belongs under `ownership/validate/`.
+  cleanup validation belongs under `ownership/cleanup_validation/`.
 - Keep shared machinery in the parent module or a module with a specific
   responsibility. Use the narrowest visibility necessary.
 - Extend an existing module when it already owns the responsibility.

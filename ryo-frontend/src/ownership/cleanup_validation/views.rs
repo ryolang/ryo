@@ -6,7 +6,7 @@
 //! release, and a release of the base group from which the view's
 //! final-use point is reachable (no intervening generation boundary)
 //! may fire BEFORE the view's read — a use-after-free. See the
-//! `ownership::validate` module header for the event model.
+//! `ownership::cleanup_validation` module header for the event model.
 
 use super::{
     Ctx, Event, EventKind, Point, StepIndex, ValidationSummary, in_ordinal_table, place_roots,

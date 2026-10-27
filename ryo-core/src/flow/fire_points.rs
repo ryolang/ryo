@@ -1,7 +1,7 @@
 //! Drop firing-point resolution: the ONE deterministic mapping from a
 //! cleanup [`DropPosition`] to its exact executable point(s), shared by
 //! the backend's fire-map build (codegen) and the frontend's cleanup
-//! validator (ownership/validate.rs). Neither side may re-interpret a
+//! validator (ownership/cleanup_validation.rs). Neither side may re-interpret a
 //! position privately; this module is the behavioral contract both
 //! consume.
 //!

@@ -47,7 +47,7 @@ use exit_frees::{
     schedule_return_epilogue_frees, suppress_redundant_exit_frees,
 };
 #[cfg(debug_assertions)]
-mod validate;
+mod cleanup_validation;
 mod views;
 pub(crate) use views::*;
 mod walk;
@@ -563,7 +563,7 @@ fn try_check_with_optimizations(
     }
     debug_assert_eq!(tirs.len(), flows.len(), "one Flow IR per TIR body");
     #[cfg(all(test, debug_assertions))]
-    validate::clear_test_ownerships();
+    cleanup_validation::clear_test_ownerships();
     let mut sidecar = OwnershipSidecar::default();
     let synth = materialization::SynthCalleeIds::resolve(pool);
     let mut warnings = DiagSink::new();
@@ -1347,14 +1347,20 @@ fn analyze_function(
     sidecar.transfers.dedup();
 
     // backend validators: debug-only cleanup-schedule completeness validator (see
-    // `validate`). Runs after every scheduling pass so the sidecar is
+    // `cleanup_validation`). Runs after every scheduling pass so the sidecar is
     // final; any broken invariant is a compiler bug, so panic. The path
     // checks run only on bodies the analysis itself found clean (an
     // errored body's best-effort schedule never reaches codegen).
     #[cfg(debug_assertions)]
     {
-        let summary =
-            validate::validate_cleanup(tir, flow, pool, &own, sidecar, !sink.has_errors());
+        let summary = cleanup_validation::validate_cleanup(
+            tir,
+            flow,
+            pool,
+            &own,
+            sidecar,
+            !sink.has_errors(),
+        );
         sidecar.validation = Some(summary);
     }
     sidecar.seal();

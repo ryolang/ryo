@@ -5,7 +5,7 @@
 //! identity from the borrowed original: its alloc establishes the
 //! obligation, the base's releases (`promotion_frees` — the normal
 //! anchor plus the return-epilogue copies) discharge it, and this
-//! check pairs them. See the `ownership::validate` module header for
+//! check pairs them. See the `ownership::cleanup_validation` module header for
 //! the event model.
 
 use super::{

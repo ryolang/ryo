@@ -114,7 +114,7 @@ resolved release storage, transfers, promotion allocations, and validation avail
 The dump uses stage artifacts and the shared resolver. It does not reconstruct execution.
 
 Shared backend literal storage lives in `literals.rs`; scoped lookup lives in `binding_storage.rs`.
-Backend preconditions live in `validate.rs`. Frontend ownership transfers live in `transfers.rs`,
+Backend preconditions live in `codegen/input.rs`. Frontend ownership transfers live in `transfers.rs`,
 aggregate analysis in `aggregates.rs`, cleanup scheduling in `cleanup.rs`,
 and materialization diagnostics in `materialization.rs`.
 
@@ -249,7 +249,7 @@ and loop convergence. Do not assume one forward scan computes dataflow facts.
 
 Construction validators check Flow structure in debug builds.
 Ownership validators check per-path destruction, view protection, displacement,
-and promotion pairing in `ownership/validate.rs` and its responsibility-named children.
+and promotion pairing in `ownership/cleanup_validation.rs` and its responsibility-named children.
 Their event model uses the same resolved storage that backend emission consumes.
 Each promotion allocation has its own discharge group, independent of its borrowed source.
 A reseat starts a new generation even when the previous value moved out.

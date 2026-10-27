@@ -1,6 +1,6 @@
 //! Debug-only cleanup-completeness validation (backend validators, frontend half) —
 //! the phase after ownership analysis, before the sidecar is handed to
-//! codegen. Construction-time structural validation (flow/validate.rs)
+//! codegen. Construction-time structural validation (flow/invariants.rs)
 //! checks the Flow IR itself; this validator checks the CLEANUP
 //! CONTRACT between the ownership pass and the backend, as ONE unified
 //! event model:
@@ -95,7 +95,7 @@
 //!   (the `promo_pairings_not_proved` count).
 //!
 //! All checks are debug-only, failing loudly (panic) on a PROVEN INVALID
-//! verdict — mirroring the existing validate.rs style.
+//! verdict.
 
 use super::{Ownership, flow_owner_place};
 pub(crate) use ryo_core::flow::fire_points::FirePoint as Point;

@@ -1,11 +1,11 @@
 //! Debug-only cleanup-validator pins: the debug-only cleanup-completeness validator
-//! (`ownership::validate`) accepts every legitimate schedule shape and
+//! (`ownership::cleanup_validation`) accepts every legitimate schedule shape and
 //! panics on hand-corrupted ones. Every fixture also exercises the
 //! validator implicitly: `check` runs it at the end of
 //! `analyze_function` for every body in debug builds, so a fixture that
 //! trips an invariant fails here regardless of the explicit calls.
 
-use super::super::validate as cv;
+use super::super::cleanup_validation as cv;
 use super::super::*;
 use super::common::*;
 

@@ -8,7 +8,7 @@
 //! consumed concat, which moves the old buffer into the result
 //! instead) means the old generation's release was removed while the
 //! write stays — a leak the schedule must not contain. See the
-//! `ownership::validate` module header for the event model.
+//! `ownership::cleanup_validation` module header for the event model.
 
 use super::super::HazardKind;
 use super::{Ctx, ValidationSummary};

@@ -52,6 +52,7 @@ mod enums;
 mod expr;
 mod frees;
 mod function_context;
+mod input;
 mod jit;
 mod literals;
 mod match_;
@@ -60,7 +61,6 @@ mod recursion;
 mod str_ops;
 mod structs;
 mod tail;
-mod validate;
 mod views;
 
 pub(crate) use structs::{is_fat_type, is_struct_type};
@@ -673,7 +673,7 @@ impl<M: Module> Codegen<M> {
         sidecar: &ryo_core::ownership::OwnershipSidecar,
         dump_ir: bool,
     ) -> Result<(DeclaredFunctions, String), String> {
-        let checked = validate::require_backend_input(tirs, flows, sidecar, pool)?;
+        let checked = input::require_backend_input(tirs, flows, sidecar, pool)?;
         if !self.optional_optimizations
             && sidecar
                 .functions
@@ -889,7 +889,7 @@ impl<M: Module> Codegen<M> {
 
     fn compile_function(
         &mut self,
-        ready: validate::BackendReadyBody<'_>,
+        ready: input::BackendReadyBody<'_>,
         func_ids: &DeclaredFunctions,
         pool: &InternPool,
         dump_ir: bool,
