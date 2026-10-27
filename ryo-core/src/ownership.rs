@@ -143,7 +143,7 @@ pub enum ValidationOutcome {
 }
 
 /// Debug tally of the whole cleanup validator (see the
-/// `ryo-frontend` `ownership::validate` module): what each check
+/// `ryo-frontend` `ownership::cleanup_validation` module): what each check
 /// examined and what it could NOT prove. Every check's verdict is
 /// PROVEN VALID / PROVEN INVALID / NOT PROVED; the not-proved counts
 /// are the conservative corners made visible — a body that skipped

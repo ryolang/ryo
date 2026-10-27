@@ -639,7 +639,7 @@ impl Flow {
     /// once at the end of [`Flow::build`].
     #[cfg(debug_assertions)]
     fn validate(&self, tir: &Tir, pool: &InternPool) {
-        validate::validate_flow(self, tir, pool);
+        invariants::validate_flow(self, tir, pool);
     }
 
     #[cfg(not(debug_assertions))]
@@ -648,7 +648,7 @@ impl Flow {
 
 pub mod build;
 pub mod fire_points;
+#[cfg(debug_assertions)]
+mod invariants;
 #[cfg(test)]
 mod tests;
-#[cfg(debug_assertions)]
-mod validate;

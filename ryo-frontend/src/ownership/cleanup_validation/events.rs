@@ -1,6 +1,6 @@
 //! The cleanup-event model: [`Event`] / [`EventKind`] (one executable
 //! fact that discharges or releases a generation — see the
-//! `ownership::validate` module header for the taxonomy) and
+//! `ownership::cleanup_validation` module header for the taxonomy) and
 //! [`collect_events`], the single collector that turns the sidecar's
 //! scheduled destructions, displacement releases, and walk-recorded
 //! transfers into per-place event lists at resolved firing points.

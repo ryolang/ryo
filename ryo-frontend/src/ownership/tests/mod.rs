@@ -1,3 +1,5 @@
+#[cfg(debug_assertions)]
+mod cleanup_validation;
 mod common;
 mod concat;
 mod enums;
@@ -14,8 +16,6 @@ mod match_;
 mod merge;
 mod shadow_bindings;
 mod structs;
-#[cfg(debug_assertions)]
-mod validate;
 mod views_basics;
 mod views_branches;
 mod views_bytes;
