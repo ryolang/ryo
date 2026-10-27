@@ -115,15 +115,28 @@ fn extract_runtime_to_cache_at(
     sweep_stale_temp_files(dir)?;
     let path = dir.join(extracted_name(hash));
 
-    if !path.exists() {
-        // Write to a temp name and rename for atomicity.
-        let tmp_path = dir.join(format!(
-            "{}.tmp.{}",
-            extracted_name(hash),
-            std::process::id()
-        ));
-        fs::write(&tmp_path, runtime_lib)?;
-        fs::rename(&tmp_path, &path)?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "cached runtime archive is not a regular file: {}",
+                    path.display()
+                ),
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // Write to a temp name and rename for atomicity.
+            let tmp_path = dir.join(format!(
+                "{}.tmp.{}",
+                extracted_name(hash),
+                std::process::id()
+            ));
+            fs::write(&tmp_path, runtime_lib)?;
+            fs::rename(&tmp_path, &path)?;
+        }
+        Err(error) => return Err(error),
     }
     evict_old_archives(dir, &path)?;
     Ok((path, lock))
@@ -190,6 +203,31 @@ mod tests {
 
         assert_eq!(extracted, cached);
         assert_eq!(fs::read(extracted).unwrap(), b"cached");
+    }
+
+    #[test]
+    fn extraction_rejects_cached_archive_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cached = dir.path().join(extracted_name("current"));
+        fs::create_dir(&cached).unwrap();
+
+        let error = extract_runtime_to_cache_at(dir.path(), "current", b"replacement").unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_rejects_cached_archive_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("target");
+        let cached = dir.path().join(extracted_name("current"));
+        fs::write(&target, b"cached").unwrap();
+        std::os::unix::fs::symlink(&target, &cached).unwrap();
+
+        let error = extract_runtime_to_cache_at(dir.path(), "current", b"replacement").unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
