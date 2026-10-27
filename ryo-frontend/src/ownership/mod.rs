@@ -806,152 +806,24 @@ fn analyze_function(
                 .copied()
         })
         .collect();
-    // Iterate owners in a sorted order so `drops` push
-    // order does not depend on HashMap iteration order.
-    let mut sorted_states: Vec<(Owner, OwnerState)> =
-        own.states.iter().map(|(o, s)| (*o, s.clone())).collect();
-    sorted_states.sort_by_key(|(o, _)| owner_sort_key(o));
-    for (owner, state) in &sorted_states {
-        if !matches!(state, OwnerState::Valid) {
-            continue;
-        }
-        match owner.inst_tirref(flow) {
-            Some(r) => {
-                let stale_reassign_target =
-                    reassign_targets.contains(owner) && !live_binding_owners.contains(owner);
-                if stale_reassign_target || inout_escape_owners.contains(owner) {
-                    continue;
-                }
-                if let Some(&after) = last_use.get(&r) {
-                    // P5 (final spec §3.2): defer the destruction to
-                    // the last use of any projection of this owner.
-                    let after = defer_anchor(
-                        after,
-                        owner,
-                        &projections_of,
-                        &last_use,
-                        &own.view_last_use,
-                        &order,
-                    );
-                    // Conditional last use: a named binding whose LAST
-                    // READ is inside a branch/loop is re-anchored by
-                    // `last_use_anchor` (see loops.rs) — normally to
-                    // the branch exit, the earliest point where the
-                    // value is dead on ALL paths, EXCEPT a loop-carried
-                    // owner whose binding is read again after the loop.
-                    let Some(anchor) = last_use_anchor(
-                        tir,
-                        flow,
-                        pool,
-                        r,
-                        after,
-                        sidecar,
-                        &order,
-                        &last_read_by_name,
-                        &loop_carried_owners,
-                        own.owner_hazards.iter().any(|&(o, site, kind)| {
-                            o == *owner
-                                && matches!(kind, HazardKind::Move)
-                                && matches!(tir.inst(site).tag, TirTag::Return | TirTag::ReturnVoid)
-                        }),
-                    ) else {
-                        continue;
-                    };
-                    // Anchor-order suppression: the owner is its
-                    // binding's current owner (the stale-target check
-                    // above did not fire — a loop merge's first-wins
-                    // reseat leaves the PRE-reassign owner seated), but
-                    // the binding is reassigned AFTER this anchor. The
-                    // reassign-Free then releases this exact buffer at
-                    // the first store that displaces it, and codegen's
-                    // binding-path redirect frees the slot's CURRENT
-                    // content wherever a later Free targets this owner —
-                    // so scheduling a last-use Free here double-frees.
-                    // Whatever the binding holds after its last
-                    // reassign is released by that value's own final
-                    // Free (last-use / dead-store / loop-exit), which
-                    // redirects to the same home slot. The reassign set
-                    // is the owner's OWN binding (its declaring
-                    // VarDecl): a same-named shadow's reassigns target
-                    // a different binding and home slot, so they must
-                    // not suppress this owner — when they did, the
-                    // outer buffer leaked on every path where the
-                    // outer reassign never ran.
-                    // A value belongs to exactly one binding's
-                    // home-slot lineage — either a declaring VarDecl's
-                    // init or a single reseating Assign's value, never
-                    // both — so the `.or()` below is unambiguous.
-                    debug_assert!(
-                        !(decl_of_init.contains_key(&r) && assign_value_of.contains_key(&r)),
-                        "owner {r:?} is both a VarDecl init and an Assign value"
-                    );
-                    if reassign_targets.contains(owner)
-                        && let Some(&binding) = decl_of_init.get(&r).or(assign_value_of.get(&r))
-                        && reassign_orders.get(&binding).is_some_and(|v| {
-                            v.iter().any(|&rr| anchored_after(tir, &order, rr, anchor))
-                        })
-                    {
-                        continue;
-                    }
-                    sidecar.drops.push(DropOp {
-                        position: DropPosition::AfterStep { inst: anchor },
-                        target: r,
-                        span: tir.span(r),
-                    });
-                }
-            }
-            None => {
-                // A param owner: an `inout str` param's value escapes
-                // through the write-back pointer — never freed by the
-                // callee, even if a branch merge left its owner stamped
-                // Valid.
-                let name = flow.place(owner.0).name();
-                if own.inout_str_params.contains(&name) {
-                    continue;
-                }
-                let idx = param_idx(&own.param_index, name);
-                // Anchor the Free after the param's last read — the
-                // same policy locals get — so later statements that
-                // never touch the param don't keep its buffer alive.
-                // A never-read param keeps the old anchor (after the
-                // last body statement): it must still be freed exactly
-                // once.
-                let Some(after) = (match last_use.get(&TirRef::param(idx)) {
-                    Some(&after) => {
-                        // P5 (final spec §3.2): defer the destruction to
-                        // the last use of any projection of this param
-                        // (a slice of it keeps the buffer alive).
-                        let after = defer_anchor(
-                            after,
-                            owner,
-                            &projections_of,
-                            &last_use,
-                            &own.view_last_use,
-                            &order,
-                        );
-                        // Conditional last use: same re-anchor as `Inst`
-                        // owners — a last read inside a branch frees at
-                        // the branch's exit. Anchoring after the read
-                        // itself fires per-iteration in loops (UAF on
-                        // later reads) and never fires on not-taken
-                        // arms (leak); arms that `return` are covered
-                        // by the return epilogue. The declared-before
-                        // check locals need is trivially true here:
-                        // params precede the body.
-                        Some(outermost_branch_of(tir, after).unwrap_or(after))
-                    }
-                    None => body_stmts.iter().next_back(),
-                }) else {
-                    continue;
-                };
-                sidecar.drops.push(DropOp {
-                    position: DropPosition::AfterStep { inst: after },
-                    target: TirRef::param(idx),
-                    span: tir.params[idx].span,
-                });
-            }
-        }
-    }
+    let cleanup = CleanupContext {
+        tir,
+        flow,
+        pool,
+        body_stmts,
+        order: &order,
+        projections_of: &projections_of,
+        last_use: &last_use,
+        last_read_by_name: &last_read_by_name,
+        loop_carried_owners: &loop_carried_owners,
+        reassign_targets: &reassign_targets,
+        live_binding_owners: &live_binding_owners,
+        inout_escape_owners: &inout_escape_owners,
+        reassign_orders: &reassign_orders,
+        decl_of_init: &decl_of_init,
+        assign_value_of: &assign_value_of,
+    };
+    schedule_last_use_frees(&cleanup, &own, sidecar);
 
     // Anonymous-temporary frees: temp_owners still Valid at function
     // exit need their own Free anchored after their single consumer —
@@ -1162,7 +1034,7 @@ fn analyze_function(
     // free after the final body statement; flag-conditional emission
     // keeps it a harmless no-op on paths that already freed (or never
     // promoted) the buffer.
-    if let Some(last) = body_stmts.iter().next_back() {
+    if let Some(last) = cleanup.body_stmts.iter().next_back() {
         let may_fall_through = match tir.inst(last).tag {
             TirTag::Return | TirTag::ReturnVoid => false,
             TirTag::IfStmt => if_may_fall_through(tir, last),
@@ -1313,14 +1185,23 @@ fn analyze_function(
     // Dominators are built on demand (break defensive emit only) and
     // shared across every loop in this function.
     let doms = std::cell::OnceCell::new();
-    schedule_loop_exit_frees_in(tir, flow, pool, &own, sidecar, &body_stmts, None, &doms);
+    schedule_loop_exit_frees_in(
+        tir,
+        flow,
+        pool,
+        &own,
+        sidecar,
+        &cleanup.body_stmts,
+        None,
+        &doms,
+    );
 
     schedule_return_epilogue_frees(
         tir,
         flow,
         &own,
         sidecar,
-        &body_stmts,
+        &cleanup.body_stmts,
         &order,
         &decl_of_init,
         &assign_value_of,
