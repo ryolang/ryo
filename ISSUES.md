@@ -721,6 +721,19 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-250 — W0001 Copy tracking regresses nested-control ownership analysis
+
+**Severity:** Correctness / Hygiene
+**Area:** ownership
+
+**Files:** ryo-frontend/src/ownership/mod.rs, ryo-frontend/src/ownership/merge.rs, ryo-frontend/src/ownership/walk.rs, ryo-frontend/src/ownership/walk/cascades.rs
+
+**Summary:** PR #209 extends pending dead-store tracking to Copy bindings, adding map and index work to branch restores and loop fixed-point merges. CodSpeed reports a 10.98% CPU-simulation regression for ownership_nested_control[(4, 4)] (1.6 ms to 1.8 ms). A same-machine walltime A/B measured 128.1 us on main versus 140.0 us on the PR. The regression is deliberately accepted for the W0001 correctness fix, but the ownership hot path needs a follow-up optimization.
+
+**Resolution:** Optimize the ownership-local dead-store representation while preserving path-sensitive, assignment-level W0001 behavior. Snapshotting the secondary index increased walltime to 171.9 us, omitting home-keyed entries did not help, and moving ordinary Copy warnings wholesale into sema broke existing warning semantics. Re-benchmark ownership_nested_control[(4, 4)] against main and require CodSpeed simulation to return to the accepted baseline range.
+
+---
+
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
