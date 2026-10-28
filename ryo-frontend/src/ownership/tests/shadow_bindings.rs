@@ -190,3 +190,33 @@ fn conditional_dead_reassign_still_minted_for_same_binding() {
         sc.drops
     );
 }
+
+#[test]
+fn copy_shadow_reassign_preserves_outer_owned_dead_store() {
+    let src =
+        "fn main():\n\tmut s = \"outer\"\n\tif true:\n\t\tmut s = 1\n\t\ts = 2\n\tprint(\"end\")\n";
+    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
+    assert_eq!(
+        diags
+            .iter()
+            .filter(|d| d.code == DiagCode::DeadStore)
+            .count(),
+        2,
+        "outer and inner bindings must both warn: {diags:?}"
+    );
+
+    let s_name = pool.intern_str("s");
+    let outer_init = (1..tirs[0].instructions.len())
+        .map(|i| TirRef::from_raw(i as u32))
+        .find(|&r| {
+            tirs[0].inst(r).tag == TirTag::VarDecl && tirs[0].var_decl_view(r).name == s_name
+        })
+        .map(|r| tirs[0].var_decl_view(r).initializer)
+        .expect("outer declaration");
+    let sc = take_function_sidecar(&mut sidecar, 0);
+    assert!(
+        sc.drops.iter().any(|d| d.target == outer_init),
+        "outer owned value must still be freed: {:?}",
+        sc.drops
+    );
+}

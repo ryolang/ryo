@@ -144,7 +144,7 @@ pub(crate) fn analyze_match_switch(
             // of the moved payload field.
             let owner = Owner(token_place);
             own.states.insert(owner, OwnerState::Valid);
-            register_pending_dead_store(own, owner, b.name, span, match_inst);
+            register_pending_dead_store(own, owner, token_place, b.name, span, match_inst);
             arm_binds.push((token, token_place, b.name));
         }
         // (b) Consumption: an arm binding a non-`Copy` field by move
@@ -256,7 +256,7 @@ pub(crate) fn analyze_match_switch(
             },
         };
         for (token_ref, token_place, name) in &arm_binds {
-            if let Some((_, span, _)) = own.pending_dead_store.remove(&Owner(*token_place)) {
+            if let Some((_, span, _, _)) = own.pending_dead_store.remove(&Owner(*token_place)) {
                 own.arm_dead_stores.push((*name, span));
                 if anchor_fires {
                     let position = if let Some(after) = arm_last {

@@ -586,3 +586,153 @@ fn two_immutable_borrows_ok() {
         "two immutable borrows of one owner are fine (Rule 7 many readers); got {diags:?}"
     );
 }
+
+#[test]
+fn dead_store_warns_for_every_local_type() {
+    let src = concat!(
+        "struct Point:\n\tx: float\n\ty: float\n\n",
+        "enum Option:\n\tSome(value: int)\n\tNone\n\n",
+        "fn main():\n",
+        "\tunused_str = \"hello\"\n",
+        "\tunused_int = 42\n",
+        "\tunused_float = 1.5\n",
+        "\tunused_bool = true\n",
+        "\tunused_enum = Option.Some{value=42}\n",
+        "\tunused_tuple = (42,)\n",
+        "\tunused_struct = Point{x=1.1, y=2.0}\n",
+        "\tprint(\"done\\n\")\n",
+    );
+    let diags = check_src(src);
+    let mut names: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == DiagCode::DeadStore)
+        .map(|d| d.message.as_str())
+        .collect();
+    names.sort_unstable();
+    let mut expected = vec![
+        "value `unused_bool` is declared but never used",
+        "value `unused_enum` is declared but never used",
+        "value `unused_float` is declared but never used",
+        "value `unused_int` is declared but never used",
+        "value `unused_str` is declared but never used",
+        "value `unused_struct` is declared but never used",
+        "value `unused_tuple` is declared but never used",
+    ];
+    expected.sort_unstable();
+    assert_eq!(names, expected, "diagnostics: {diags:?}");
+}
+
+#[test]
+fn dead_store_warns_for_params_and_views_without_freeing_borrows() {
+    let src = "fn consume(unused_int: int, unused_str: str, unused_view: strview):\n\traw = \"abc\"\n\tunused_local_view = raw[0:1]\n";
+    let (diags, mut sidecar, tirs, _pool) = check_src_full(src);
+    let mut names: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == DiagCode::DeadStore)
+        .map(|d| d.message.as_str())
+        .collect();
+    names.sort_unstable();
+    let mut expected = vec![
+        "value `unused_int` is declared but never used",
+        "value `unused_local_view` is declared but never used",
+        "value `unused_str` is declared but never used",
+        "value `unused_view` is declared but never used",
+    ];
+    expected.sort_unstable();
+    assert_eq!(names, expected, "diagnostics: {diags:?}");
+
+    let view = (1..tirs[0].instructions.len())
+        .map(|i| TirRef::from_raw(i as u32))
+        .find(|&r| tirs[0].inst(r).tag == TirTag::Slice)
+        .expect("view-producing slice");
+    let sidecar = take_function_sidecar(&mut sidecar, 0);
+    assert!(
+        sidecar.drops.iter().all(|d| {
+            d.target != TirRef::param(1) && d.target != TirRef::param(2) && d.target != view
+        }),
+        "borrowed parameters and views must not be freed: {:?}",
+        sidecar.drops
+    );
+}
+
+#[test]
+fn dead_store_tracks_copy_and_view_reassignment() {
+    let src = "fn main():\n\tmut x = 1\n\tx = 2\n\traw = \"abc\"\n\tmut view = raw[0:1]\n\tview = raw[1:2]\n";
+    let diags = check_src(src);
+    let mut names: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == DiagCode::DeadStore)
+        .map(|d| d.message.as_str())
+        .collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec![
+            "value `view` is declared but never used",
+            "value `x` is declared but never used",
+        ],
+        "diagnostics: {diags:?}"
+    );
+}
+
+#[test]
+fn dead_store_distinguishes_shadowed_bindings() {
+    let outer = "fn main():\n\tmut x = 1\n\tif true:\n\t\tmut x = 2\n\t\tprint(x)\n";
+    let diags = check_src(outer);
+    let dead: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == DiagCode::DeadStore)
+        .collect();
+    assert_eq!(dead.len(), 1, "outer binding must warn: {diags:?}");
+    assert_eq!(dead[0].span.start, outer.find("mut x = 1").unwrap());
+
+    let inner = "fn main():\n\tmut x = 1\n\tif true:\n\t\tmut x = 2\n\tprint(x)\n";
+    let diags = check_src(inner);
+    let dead: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == DiagCode::DeadStore)
+        .collect();
+    assert_eq!(dead.len(), 1, "inner binding must warn: {diags:?}");
+    assert_eq!(dead[0].span.start, inner.find("mut x = 2").unwrap());
+}
+
+#[test]
+fn inout_copy_reassignment_does_not_warn() {
+    let diags = check_src(
+        "fn set_int(inout x: int):\n\tx = 2\n\nfn set_float(inout x: float):\n\tx = 2.0\n",
+    );
+    assert!(
+        !diags.iter().any(|d| d.code == DiagCode::DeadStore),
+        "inout writes are caller-visible: {diags:?}"
+    );
+}
+
+#[test]
+fn dead_store_warns_for_copy_match_and_destructure_bindings() {
+    let src = "enum Option:\n\tSome(int)\n\tNone\n\nfn main():\n\t(unused, used) = (1, 2)\n\tprint(used)\n\tvalue = Option.Some(1)\n\tmatch value:\n\t\tSome(unused):\n\t\t\tprint(\"some\")\n\t\tNone:\n\t\t\tprint(\"none\")\n";
+    let diags = check_src(src);
+    let dead: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == DiagCode::DeadStore)
+        .collect();
+    assert_eq!(
+        dead.len(),
+        2,
+        "both unread Copy bindings must warn: {diags:?}"
+    );
+    assert!(
+        dead.iter()
+            .all(|d| d.message == "value `unused` is declared but never used"),
+        "diagnostics: {diags:?}"
+    );
+}
+
+#[test]
+fn dead_store_warns_for_unused_loop_variable() {
+    let diags = check_src("fn main():\n\tfor i in range(0, 3):\n\t\tprint(\"x\")\n");
+    assert!(
+        diags.iter().any(|d| d.code == DiagCode::DeadStore
+            && d.message == "value `i` is declared but never used"),
+        "unused loop variable must warn: {diags:?}"
+    );
+}

@@ -289,7 +289,7 @@ pub(crate) fn analyze_stmt(
                     if is_reserved {
                         child_scope.insert_binding(var_name, error_ty, false, false);
                     } else {
-                        child_scope.insert_binding(var_name, int_ty, false, false);
+                        child_scope.insert_dead_store_binding(var_name, int_ty, false, false, span);
                     }
                 });
             fcx.loop_depth -= 1;
@@ -986,6 +986,8 @@ fn analyze_destructure(
         }
         if is_temp {
             fcx.destructure_temps.insert(name, ty);
+        } else if sema.pool.is_copy(ty) {
+            scope.insert_dead_store_binding(name, ty, false, false, span);
         } else {
             scope.insert_binding(name, ty, false, false);
         }
@@ -1071,6 +1073,7 @@ fn analyze_block_seeded_iter(
     for stmt_ref in stmts {
         tirs.push(analyze_stmt(sema, fcx, &mut child_scope, stmt_ref));
     }
+    child_scope.drain_dead_stores(sema);
     tirs
 }
 

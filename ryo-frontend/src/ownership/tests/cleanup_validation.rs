@@ -97,7 +97,9 @@ fn validator_accepts_loop_body_frees() {
     let src =
         "fn main():\n\tmut i = 0\n\twhile i < 3:\n\t\ts = \"x\"\n\t\tprint(s)\n\t\ti = i + 1\n";
     let (diags, mut sidecar, tirs, pool) = check_src_full(src);
-    assert!(diags.is_empty(), "clean program; got {diags:?}");
+    assert_eq!(diags.len(), 1, "got {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::DeadStore);
+    assert_eq!(diags[0].message, "value `i` is declared but never used");
     let sc = take_function_sidecar(&mut sidecar, 0);
     let flow = build_flow(&tirs[0], &pool);
     let places = cv::TargetPlaces::build(&tirs[0], &flow, &pool);
@@ -265,7 +267,10 @@ fn validator_accepts_same_target_double_anchor_by_design() {
         &pool,
         &mut sink,
     );
-    assert!(sink.is_empty(), "clean body; got {:?}", sink.into_diags());
+    let diags = sink.into_diags();
+    assert_eq!(diags.len(), 1, "got {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::DeadStore);
+    assert_eq!(diags[0].message, "value `s` is declared but never used");
     let sc = take_function_sidecar(&mut sidecar, 0);
     // The fixture's whole point: the schedule really does contain the
     // same-target same-position pair.
@@ -662,7 +667,10 @@ fn path_checks_accept_by_design_double_anchor() {
     let mut sink = DiagSink::new();
     let flow = build_flow(&tir, &pool);
     let mut sidecar = check(std::slice::from_ref(&tir), &[flow], &pool, &mut sink);
-    assert!(sink.is_empty(), "clean body; got {:?}", sink.into_diags());
+    let diags = sink.into_diags();
+    assert_eq!(diags.len(), 1, "got {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::DeadStore);
+    assert_eq!(diags[0].message, "value `s` is declared but never used");
     let own = cv::take_test_ownership(tir.name).expect("captured ownership");
     let sc = take_function_sidecar(&mut sidecar, 0);
     let flow = build_flow(&tir, &pool);

@@ -323,7 +323,7 @@ pub(crate) fn analyze_destructure(
         // allocation dies with the statement — the drain anchors the
         // Free right after it, where codegen has just populated the
         // binding's slot.
-        register_pending_dead_store(own, owner, bind, span, stmt);
+        register_pending_dead_store(own, owner, owner_place, bind, span, stmt);
     }
     let _ = sidecar;
 }

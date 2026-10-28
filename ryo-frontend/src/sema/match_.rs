@@ -20,7 +20,7 @@
 //! E0129, listing the missing variants in declaration order (or the
 //! kind name); every arm after a wildcard, and every duplicate
 //! discriminant before it, is W0005 (warning severity, buffered like
-//! W0002/W0003 so it never piles onto an error).
+//! W0001/W0002/W0003 so it never piles onto an error).
 //!
 //! The third pass adds ARM TYPING and the typed emission: each cleanly
 //! resolved arm is typed in its own child `Scope` seeded with the
@@ -422,6 +422,7 @@ fn type_and_emit_match(
                 (TypedArmBody::Stmts(tirs), class)
             }
         };
+        child_scope.drain_dead_stores(sema);
 
         arms_out.push(TypedArm {
             discriminant: match arm.discriminant {
@@ -625,8 +626,10 @@ fn seed_arm_bindings(
             had_error = true;
             continue;
         }
-        child_scope.insert_binding(name, binding.ty, false, false);
-        if !sema.pool.is_copy(binding.ty) {
+        if sema.pool.is_copy(binding.ty) {
+            child_scope.insert_dead_store_binding(name, binding.ty, false, false, span);
+        } else {
+            child_scope.insert_binding(name, binding.ty, false, false);
             owners.push((binding.field_index, binding.ty));
         }
     }
@@ -798,7 +801,7 @@ impl Coverage {
 /// discriminants before the wildcard are W0005 on the later arm. When
 /// coverage is incomplete and no wildcard exists, emit E0129 listing
 /// the missing variants in declaration order (or the scrutinee kind).
-/// Warnings buffer through `sema.warnings` like W0002/W0003 — they
+/// Warnings buffer through `sema.warnings` like W0001/W0002/W0003 — they
 /// flush only when the whole unit is error-free.
 fn check_exhaustiveness(
     sema: &mut Sema<'_>,

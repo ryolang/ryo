@@ -191,6 +191,8 @@ pub(crate) fn anchored_drops(sidecar: &FunctionSidecar) -> impl Iterator<Item = 
 /// `current_owner[facts.read].unwrap_or(facts.read)`, so
 /// reassignment reseats ownership without disturbing the producing
 /// value's state.
+pub(crate) type DeadStoreEntry = (StringId, Span, TirRef, PlaceId);
+
 #[derive(Default, Clone)]
 pub(crate) struct Ownership {
     pub states: HashMap<Owner, OwnerState>,
@@ -239,14 +241,18 @@ pub(crate) struct Ownership {
     /// construction, so a missing key is an internal invariant
     /// violation (`expect` at the lookup sites), not a diagnostic.
     pub param_index: HashMap<StringId, usize>,
-    /// VarDecls of Move-typed values, keyed by the underlying owner
-    /// `TirRef`. Cleared when the binding is read (`Var`) or consumed
+    /// Declared or assigned bindings, keyed by owner or binding home.
+    /// Cleared when the binding is read (`Var`) or consumed
     /// (move/return). Whatever remains at function end is a dead
-    /// store — surfaced as W0001 + a Free anchored after the
-    /// declaring/assigning instruction. The third tuple element is
-    /// the `VarDecl`/`Assign` instruction's own `TirRef`, used as
-    /// the anchor for the dead-store Free.
-    pub pending_dead_store: HashMap<Owner, (StringId, Span, TirRef /* decl_inst */)>,
+    /// store — surfaced as W0001, plus a Free for live owned values.
+    /// The third tuple element is the declaring/assigning instruction's
+    /// own `TirRef`, used as the Free anchor; the fourth is the lexical
+    /// binding home, which keeps same-named shadows independent.
+    pub pending_dead_store: HashMap<Owner, DeadStoreEntry>,
+    /// Lexical binding home → its pending owner keys. Reads and
+    /// assignments clear through this index instead of scanning every
+    /// pending entry. Rebuilt whenever branch state is restored or merged.
+    pub pending_dead_store_by_home: HashMap<PlaceId, Vec<Owner>>,
 
     /// SSA values that allocated heap-owned strings during the
     /// forward walk: `StrConst`, `StrConcat`, and Move-typed `Call`
@@ -421,6 +427,24 @@ impl Ownership {
     pub(crate) fn dense_set<V: Copy>(table: &mut [Option<V>], r: TirRef, v: V) {
         debug_assert!(!r.is_param());
         table[r.index()] = Some(v);
+    }
+
+    pub(crate) fn clear_pending_dead_store(&mut self, home: PlaceId) {
+        if let Some(owners) = self.pending_dead_store_by_home.remove(&home) {
+            for owner in owners {
+                self.pending_dead_store.remove(&owner);
+            }
+        }
+    }
+
+    pub(crate) fn rebuild_pending_dead_store_index(&mut self) {
+        self.pending_dead_store_by_home.clear();
+        for (&owner, (_, _, _, home)) in &self.pending_dead_store {
+            self.pending_dead_store_by_home
+                .entry(*home)
+                .or_default()
+                .push(owner);
+        }
     }
 
     /// The owner whose storage an instruction's value IS (G2): the
@@ -668,23 +692,34 @@ fn initialize_function_ownership(tir: &Tir, flow: &Flow, pool: &InternPool) -> O
     // `Valid` (the callee owns them); borrowed and inout params start
     // at `Borrowed` (the callee does not own the buffer — inout adds
     // mutability, not ownership). Copy-typed params skip the lattice
-    // entirely. Owner identity is the param's place; names are labels.
+    // entirely. Non-inout parameters participate in dead-store analysis;
+    // inout write-back is caller-visible even without an explicit read.
     for (idx, param) in tir.params.iter().enumerate() {
-        if !needs_tracking(param.ty, pool) {
-            continue;
+        let home = own.param_places[idx];
+        let owner = Owner(home);
+        if needs_tracking(param.ty, pool) {
+            let state = match param.mode {
+                ParamMode::Move => OwnerState::Valid,
+                ParamMode::Borrow | ParamMode::Inout => OwnerState::Borrowed,
+            };
+            own.states.insert(owner, state);
+            if param.mode == ParamMode::Inout {
+                own.inout_str_params.insert(param.name);
+            }
         }
-        let owner = Owner(own.param_places[idx]);
-        let state = match param.mode {
-            ParamMode::Move => OwnerState::Valid,
-            ParamMode::Borrow | ParamMode::Inout => OwnerState::Borrowed,
-        };
-        own.states.insert(owner, state);
         own.current_owner.insert(own.param_places[idx], owner);
         // The param is the current binding for its name until a
         // shadowing `VarDecl` installs a different one.
         own.binding_of_name.insert(param.name, TirRef::param(idx));
-        if param.mode == ParamMode::Inout {
-            own.inout_str_params.insert(param.name);
+        if param.mode != ParamMode::Inout {
+            register_pending_dead_store(
+                &mut own,
+                owner,
+                home,
+                param.name,
+                param.span,
+                TirRef::param(idx),
+            );
         }
     }
 

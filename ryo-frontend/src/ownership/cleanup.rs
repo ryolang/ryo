@@ -10,7 +10,7 @@ use super::{
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow, Terminator};
 use ryo_core::ownership::{FunctionSidecar, PromoFree};
-use ryo_core::tir::{ExtraList, Span, Tir, TirRef, TirTag};
+use ryo_core::tir::{ExtraList, Tir, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
 use std::collections::{HashMap, HashSet};
 
@@ -452,11 +452,11 @@ pub(crate) fn drain_dead_stores(
     // when the whole unit is error-free, so an error from any function
     // — analyzed before or after this one — silences them all.
 
-    // Dead-store survivors: emit W0001 and schedule a Free anchored
-    // after the declaring instruction. Skip owners already covered by
-    // `free_on_reassign` to avoid double-freeing the same allocation.
+    // Dead-store survivors: emit W0001 and, for live owned values,
+    // schedule a Free anchored after the declaring instruction. Skip
+    // owners already covered by `free_on_reassign` to avoid double-frees.
     // (`reassign_targets` was computed above for the last-use pass.)
-    let mut sorted_dead: Vec<(Owner, (StringId, Span, TirRef))> = own
+    let mut sorted_dead: Vec<(Owner, super::DeadStoreEntry)> = own
         .pending_dead_store
         .iter()
         .map(|(o, v)| (*o, *v))
@@ -466,14 +466,14 @@ pub(crate) fn drain_dead_stores(
         .collect();
 
     sorted_dead.sort_by_key(|(o, _)| owner_sort_key(o));
-    for (owner, (name, span, decl_inst)) in &sorted_dead {
+    for (owner, (name, span, decl_inst, home)) in &sorted_dead {
         // Bound to an `inout str` param: the value escapes through the
         // write-back — it IS used, just not by any TIR instruction the
-        // pass can see. Checked by NAME (not by current owner): a rebind
-        // inside a branch is discarded by the merge, leaving the entry
-        // keyed by a branch-local owner the exit-time escape set can't
-        // see. No W0001, no Free.
-        if own.inout_str_params.contains(name) {
+        // pass can see. Checked by binding home (not by current owner): a
+        // rebind inside a branch is discarded by the merge, leaving the
+        // entry keyed by a branch-local owner the exit-time escape set
+        // can't see. Same-named shadow bindings still warn. No W0001, no Free.
+        if own.inout_str_params.contains(name) && own.param_places[own.param_index[name]] == *home {
             continue;
         }
         if ctx.inout_escape_owners.contains(owner) {
@@ -486,6 +486,9 @@ pub(crate) fn drain_dead_stores(
             DiagCode::DeadStore,
             format!("value `{}` is declared but never used", ctx.pool.str(*name)),
         ));
+        if decl_inst.is_param() || !matches!(own.states.get(owner), Some(OwnerState::Valid)) {
+            continue;
+        }
         if ctx.reassign_targets.contains(owner) {
             // The reassignment Free already covers this owner;
             // emitting another dead-store Free would double-free.

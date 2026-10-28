@@ -435,17 +435,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-191 — W0001 unused-value warning only fires for Move-typed bindings
-
-**Severity:** Correctness / Hygiene
-**Area:** ownership
-
-**Files:** `ryo-frontend/src/ownership/walk.rs` (`analyze_var_decl` :670 / `analyze_assign` :738 — the VarDecl/Assign arms), `ryo-frontend/src/ownership/mod.rs:76` (`needs_tracking` gate)
-**Summary:** The "declared but never used" warning (W0001, `DiagCode::DeadStore`) registers a binding into `pending_dead_store` only when `needs_tracking(ty)` (i.e. `is_move_type(ty)`) holds, so Copy-typed locals (`int`/`float`/`bool`) are walked as `OwnerState::NotTracked` and never checked. Function parameters are never checked at all (any type), and view-typed locals register a projection but no dead-store entry. Reproduced from `bug_reports/bug_w0001_unused_var_only_move_types.ryo` (2026-09-24 build, still present at `87ea62b`). Result: the user gets a warning for `unused_str` but silence for `unused_int` in the same function.
-**Resolution:** Add a Copy-type path — sema-level usage counting is the natural fit since the ownership pass intentionally skips Copy types — plus parameter and view handling. Decide whether params and views warn by default or sit behind a stricter lint tier, and keep the warning text uniform across type kinds.
-
----
-
 ### I-192 — Evaluate linking the `ryo` compiler binary itself against musl
 
 **Severity:** Correctness / Hygiene
@@ -485,6 +474,8 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **References:** [Hylo introduction](https://hylo-lang.org/introduction/) (temporary projections without first-class references); Racordon et al., [“Implementation Strategies for Mutable Value Semantics”](https://www.jot.fm/issues/issue_2022_02/article2.pdf), §2 and §3 (independent value paths and static inout path uniqueness).
 
 **Resolution:** Compare full field-access paths (or a path-prefix disjointness test) in the Rule-7 partition instead of root owners; keep the root-owner fallback for non-struct bases. When it lands, differentiate the E0032 message so the aliasing case (`&p.a, &p.a`) can name the field. Until then the workaround is splitting the call per field.
+
+**Priority recommendation:** High-priority ownership correction after M13, M13.8, and M16. Schedule around M21 and before M22; M21 can retain conservative indexed-element rejection. This is not alpha-blocking because current behavior is conservative and has documented workarounds, but it should not slip to v0.2. Methods will not fix free functions that borrow multiple fields, and collections increase the value of place-based tracking.
 
 ---
 
@@ -727,6 +718,19 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** RedundantMaterialize (W0003) fires when a str(...) copy 'never escapes and its source is never mutated' and recommends using the view directly. When the copy's purpose is TYPE CONVERSION (slice view -> owned str, e.g. int_str = str(s[start:dot]) into an str binding), following the advice is a compile error (E0012: a slice yields strview) — the recommendation is unreachable, a false positive for the materialize-where-owned-is-required pattern. The warning-free spellings today: keep str(...), or declare the binding strview end-to-end, which currently needs the noisy full-slice 'mut v = ""[:]' as the empty view. The empty-initializer syntax should be decided BEFORE slice[T]/list[T]/map[K,V] land so all view/collection types stay consistent. Options: (a) annotation-driven literal coercion 'mut v: strview = ""' (Rust/Swift style; minimal, literal-backed only), (b) context-typed builtin empty() (none-style precedent; uniform across collections; needs return-type-driven builtin resolution), (c) typed empty literals for collections (Pythonic, DX-consistent). Note M22's draft already uses constructor-style 'list[int]()'. The W0003 escape heuristic should also learn the conversion-purpose shape regardless of the syntax decision.
 
 **Resolution:** Pending language-owner decision. The W0003 heuristic fix (recognize materialize-for-conversion) is independent of the syntax choice and can land first.
+
+---
+
+### I-250 — W0001 Copy tracking regresses nested-control ownership analysis
+
+**Severity:** Correctness / Hygiene
+**Area:** ownership
+
+**Files:** ryo-frontend/src/ownership/mod.rs, ryo-frontend/src/ownership/merge.rs, ryo-frontend/src/ownership/walk.rs, ryo-frontend/src/ownership/walk/cascades.rs
+
+**Summary:** PR #209 extends pending dead-store tracking to Copy bindings, adding map and index work to branch restores and loop fixed-point merges. CodSpeed reports a 10.98% CPU-simulation regression for ownership_nested_control[(4, 4)] (1.6 ms to 1.8 ms). A same-machine walltime A/B measured 128.1 us on main versus 140.0 us on the PR. The regression is deliberately accepted for the W0001 correctness fix, but the ownership hot path needs a follow-up optimization.
+
+**Resolution:** Split dead-store analysis from ownership cleanup instead of adding more diagnostic state to `Ownership`. After sema, run a dedicated TIR/Flow dead-store pass keyed by lexical binding home (`PlaceId`), with a per-function binding/store table and dense bitsets for pending store generations. Compute block transfer sets once, then perform that pass's own CFG joins and loop fixed point; preserve the existing read-before-overwrite, branch intersection/local-union, shadowing, reassignment, and inout behavior. Return both buffered W0001 diagnostics and a queryable dead-store result for ownership cleanup and the W0003/W0004 consumers. `Ownership` should retain only owner-keyed Move-allocation state and consume that result when a dead store requires a Free; Copy/view diagnostics must not enter ownership snapshots or repeated loop walks. This separates binding-liveness analysis from memory-safety analysis and removes diagnostic-only HashMap cloning from the ownership hot path rather than tuning the current maps. Keep the existing diagnostic matrix and cleanup tests, add differential coverage between the old and new semantics, and require `ownership_nested_control[(4, 4)]` to return to the main baseline range in CodSpeed simulation.
 
 ---
 

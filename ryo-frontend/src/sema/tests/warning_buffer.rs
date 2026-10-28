@@ -1,4 +1,4 @@
-//! Warning-buffer gating for sema. Warnings (W0002/W0003 case A) are
+//! Warning-buffer gating for sema. Warnings (W0001/W0002/W0003 case A) are
 //! buffered per unit and flushed only when no error fired — a warning
 //! from an early decl must never pile onto an error discovered while
 //! analyzing a later one.

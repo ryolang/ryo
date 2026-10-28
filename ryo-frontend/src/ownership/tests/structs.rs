@@ -94,12 +94,14 @@ fn str_field_reassign_frees_old_value() {
 }
 
 #[test]
-fn field_inout_borrow_accepted_no_diags() {
+fn field_inout_borrow_accepted() {
     // `inc(&p.x)` on a `mut` root is a valid inout pass (M9): the
     // field borrow is call-scoped, the root stays usable afterwards.
     let src = "struct Point:\n\tx: int\n\ty: int\n\nfn inc(inout v: int):\n\tv += 1\n\nfn main():\n\tmut p = Point{x=1, y=2}\n\tinc(&p.x)\n\tq = p.y\n";
     let diags = check_src(src);
-    assert!(diags.is_empty(), "got {diags:?}");
+    assert_eq!(diags.len(), 1, "got {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::DeadStore);
+    assert_eq!(diags[0].message, "value `q` is declared but never used");
 }
 
 #[test]

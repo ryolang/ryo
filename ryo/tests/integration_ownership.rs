@@ -1008,8 +1008,8 @@ fn slice_then_reassign_while_view_live_rejected() {
 #[test]
 fn heap_str_last_use_in_inline_assert() {
     // `assert(s.len() == ...)` as the last use of a concat-built string:
-    // the desugared if's condition read must count as a use (no W0001,
-    // no Free before the assert).
+    // the desugared if's condition read must count as a use (no W0001
+    // for s, no Free before the assert).
     let temp_dir = TempDir::new().expect("temp");
     let code = "fn main():\n\tmut s: str = \"\"\n\tfor i in range(0, 25):\n\t\ts = s + \"fox \"\n\tassert(s.len() == 100, \"len must be 100\")\n\tprint(\"ok\\n\")\n";
     let test_file = create_test_file(temp_dir.path(), "inline_assert.ryo", code);
@@ -1021,8 +1021,8 @@ fn heap_str_last_use_in_inline_assert() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !stderr.contains("W0001"),
-        "assert condition read must count as a use (no W0001), got: {}",
+        !stderr.contains("value `s` is declared but never used"),
+        "assert condition read must count as a use (no W0001 for s), got: {}",
         stderr
     );
 }
