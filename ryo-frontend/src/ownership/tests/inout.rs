@@ -231,6 +231,19 @@ fn inout_distinct_owners_ok() {
 }
 
 #[test]
+fn copy_shadow_of_inout_param_warns_dead_store() {
+    let diags = check_src("fn f(inout s: str):\n\tif true:\n\t\tmut s = 1\n");
+    assert_eq!(
+        diags
+            .iter()
+            .filter(|d| d.code == DiagCode::DeadStore)
+            .count(),
+        1,
+        "the inner Copy binding must warn even though it shadows an inout parameter: {diags:?}"
+    );
+}
+
+#[test]
 fn inout_str_param_reassign_escapes_no_dead_store_no_free() {
     // Callee side: `fn set(inout s: str): s = "new"`. The
     // replacement value escapes through the write-back pointer, so the

@@ -589,9 +589,20 @@ fn two_immutable_borrows_ok() {
 
 #[test]
 fn dead_store_warns_for_every_local_type() {
-    let diags = check_src(include_str!(
-        "../../../../bug_reports/bug_w0001_unused_var_only_move_types.ryo"
-    ));
+    let src = concat!(
+        "struct Point:\n\tx: float\n\ty: float\n\n",
+        "enum Option:\n\tSome(value: int)\n\tNone\n\n",
+        "fn main():\n",
+        "\tunused_str = \"hello\"\n",
+        "\tunused_int = 42\n",
+        "\tunused_float = 1.5\n",
+        "\tunused_bool = true\n",
+        "\tunused_enum = Option.Some{value=42}\n",
+        "\tunused_tuple = (42,)\n",
+        "\tunused_struct = Point{x=1.1, y=2.0}\n",
+        "\tprint(\"done\\n\")\n",
+    );
+    let diags = check_src(src);
     let mut names: Vec<_> = diags
         .iter()
         .filter(|d| d.code == DiagCode::DeadStore)

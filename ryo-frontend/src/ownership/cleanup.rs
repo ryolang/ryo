@@ -466,14 +466,14 @@ pub(crate) fn drain_dead_stores(
         .collect();
 
     sorted_dead.sort_by_key(|(o, _)| owner_sort_key(o));
-    for (owner, (name, span, decl_inst, _)) in &sorted_dead {
+    for (owner, (name, span, decl_inst, home)) in &sorted_dead {
         // Bound to an `inout str` param: the value escapes through the
         // write-back — it IS used, just not by any TIR instruction the
-        // pass can see. Checked by NAME (not by current owner): a rebind
-        // inside a branch is discarded by the merge, leaving the entry
-        // keyed by a branch-local owner the exit-time escape set can't
-        // see. No W0001, no Free.
-        if own.inout_str_params.contains(name) {
+        // pass can see. Checked by binding home (not by current owner): a
+        // rebind inside a branch is discarded by the merge, leaving the
+        // entry keyed by a branch-local owner the exit-time escape set
+        // can't see. Same-named shadow bindings still warn. No W0001, no Free.
+        if own.inout_str_params.contains(name) && own.param_places[own.param_index[name]] == *home {
             continue;
         }
         if ctx.inout_escape_owners.contains(owner) {
