@@ -221,7 +221,13 @@ pub(super) fn emit_equality_operator(
                 fcx.builder.unreachable(sema.pool.error_type(), span)
             }
         }
-        TypeKind::Void | TypeKind::Never | TypeKind::View(_) => {
+        TypeKind::Void
+        | TypeKind::Never
+        | TypeKind::View(_)
+        | TypeKind::DeclaredError
+        | TypeKind::ErrorSet
+        | TypeKind::ErrorUnion
+        | TypeKind::InferredErrorUnion => {
             sema.sink.emit(Diag::error(
                 span,
                 DiagCode::UnsupportedOperator,
@@ -287,6 +293,10 @@ pub(super) fn emit_ordering_operator(
         | TypeKind::Struct
         | TypeKind::Bytes
         | TypeKind::Enum
+        | TypeKind::DeclaredError
+        | TypeKind::ErrorSet
+        | TypeKind::ErrorUnion
+        | TypeKind::InferredErrorUnion
         | TypeKind::View(_) => {
             sema.sink.emit(Diag::error(
                 span,

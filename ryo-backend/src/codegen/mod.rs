@@ -221,9 +221,14 @@ fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) ->
         }
         // Struct codegen (aggregate layout) lands in a later M9 task.
         TypeKind::Struct => unreachable!("cranelift_type_for: struct TypeId reached codegen"),
-        // Enums (M11) are slot-allocated aggregates exactly like
+        // Enum-shaped values use slot-allocated aggregates exactly like
         // structs; the memory-first paths gate before scalar mapping.
-        TypeKind::Enum => unreachable!("cranelift_type_for: enum TypeId reached codegen"),
+        TypeKind::Enum | TypeKind::DeclaredError | TypeKind::ErrorSet | TypeKind::ErrorUnion => {
+            unreachable!("cranelift_type_for: enum-shaped TypeId reached codegen")
+        }
+        TypeKind::InferredErrorUnion => {
+            unreachable!("cranelift_type_for: unresolved error union reached codegen")
+        }
     }
 }
 
