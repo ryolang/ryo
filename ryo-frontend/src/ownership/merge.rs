@@ -6,7 +6,7 @@ use ryo_core::tir::TirRef;
 use ryo_core::types::StringId;
 use std::collections::{HashMap, HashSet};
 
-/// The five non-monotone `Ownership` fields, extracted as a unit for
+/// The four non-monotone `Ownership` fields, extracted as a unit for
 /// per-arm / per-loop-pass snapshot and restore. Everything else in
 /// `Ownership` is monotone (arms accumulate it in place and never
 /// restore it) or walk-constant — see the field docs in `mod.rs`.
@@ -21,48 +21,40 @@ pub(crate) struct BranchState {
     /// declaring `VarDecl` inst, or a param's virtual ref) — the
     /// scope-resolution record, seeded from write facts only.
     pub binding_of_name: HashMap<StringId, TirRef>,
-    pub pending_dead_store: HashMap<Owner, super::DeadStoreEntry>,
     pub live_projections: HashMap<Owner, Vec<Owner>>,
 }
 
 impl Ownership {
-    /// Clone the five non-monotone fields — the single snapshot taken
+    /// Clone the four non-monotone fields — the single snapshot taken
     /// per branch point / loop.
     pub(crate) fn snapshot_branch(&self) -> BranchState {
         BranchState {
             states: self.states.clone(),
             current_owner: self.current_owner.clone(),
             binding_of_name: self.binding_of_name.clone(),
-            pending_dead_store: self.pending_dead_store.clone(),
             live_projections: self.live_projections.clone(),
         }
     }
 
-    /// Move the five non-monotone fields out (installing `restore`
+    /// Move the four non-monotone fields out (installing `restore`
     /// in their place, without cloning it) so a finished arm / loop
     /// pass can hand its end state to the merge.
     pub(crate) fn take_branch(&mut self, restore: BranchState) -> BranchState {
-        let branch = BranchState {
+        BranchState {
             states: std::mem::replace(&mut self.states, restore.states),
             current_owner: std::mem::replace(&mut self.current_owner, restore.current_owner),
             binding_of_name: std::mem::replace(&mut self.binding_of_name, restore.binding_of_name),
-            pending_dead_store: std::mem::replace(
-                &mut self.pending_dead_store,
-                restore.pending_dead_store,
-            ),
             live_projections: std::mem::replace(
                 &mut self.live_projections,
                 restore.live_projections,
             ),
-        };
-        self.rebuild_pending_dead_store_index();
-        branch
+        }
     }
 }
 
 impl Ownership {
     /// Conservatively merge per-branch lattices into `self`. On entry,
-    /// `self`'s five non-monotone fields hold the pre-branch state (the
+    /// `self`'s four non-monotone fields hold the pre-branch state (the
     /// caller's snapshot); each arm's end state merges into them in arm
     /// order. Per-field rules:
     /// - `states`: any branch `Moved` → `Moved`; otherwise first observed
@@ -75,9 +67,6 @@ impl Ownership {
     ///   uses with E0020.
     /// - `current_owner`: first-write-wins across branches; reseats
     ///   inside a branch survive the join.
-    /// - `pending_dead_store`: pre-branch keys intersect (any branch that
-    ///   read the binding clears the dead-store warning); branch-local keys
-    ///   union.
     /// - `live_projections`: union per root — a view live on any branch is
     ///   live at the join (P2). `analyze_if_stmt` prunes views whose last
     ///   use is inside the branch afterwards (they are dead on every path
@@ -139,12 +128,6 @@ impl Ownership {
             .map(|(b, _)| (&b.current_owner, &b.states))
             .collect();
         merge_binding_states(&mut self.states, &pre_branch_owners, &sides);
-
-        // Pending dead-store entries: pre-branch keys intersect,
-        // branch-local keys union (see merge_pending_dead_store).
-        let branch_stores: Vec<_> = branches.iter().map(|b| &b.pending_dead_store).collect();
-        merge_pending_dead_store(&mut self.pending_dead_store, &branch_stores);
-        self.rebuild_pending_dead_store_index();
     }
 }
 
@@ -269,39 +252,6 @@ pub(crate) fn binding_state_writes(
     writes
 }
 
-/// Pending dead-store merge. A key falls into one of two buckets
-/// relative to the pre-merge snapshot in `dst`:
-///
-/// (1) Pre-existing entries (already in `dst` before the branches /
-///     loop body walked): every side started with the entry. If any
-///     side cleared it, the value was used somewhere — drop it.
-///     Rule: intersect across sides.
-///
-/// (2) Local entries (introduced inside a side by a VarDecl): only
-///     the introducing side has the key. If that side ended with the
-///     entry still pending, W0001 should still fire after the join.
-///     Rule: union across sides (skipping pre-existing keys — those
-///     are governed by rule (1)).
-///
-/// Snapshots the pre-merge key set so the union step can distinguish
-/// local keys from pre-existing keys that (1) may have just dropped.
-/// Shared by `Ownership::merge_branches` (N sides) and
-/// `merge_non_monotone` (one side: the post-body snapshot).
-pub(crate) fn merge_pending_dead_store(
-    dst: &mut HashMap<Owner, super::DeadStoreEntry>,
-    branches: &[&HashMap<Owner, super::DeadStoreEntry>],
-) {
-    let pre_branch_keys: HashSet<Owner> = dst.keys().copied().collect();
-    dst.retain(|k, _| branches.iter().all(|b| b.contains_key(k)));
-    for b in branches {
-        for (k, v) in *b {
-            if !pre_branch_keys.contains(k) {
-                dst.insert(*k, *v);
-            }
-        }
-    }
-}
-
 /// P2 freeze ranges: union per root — a view live on any side is
 /// live at the join (final spec §3.2). Monotone over membership, so
 /// the loop fixed point's two walks still suffice. Callers prune
@@ -398,8 +348,6 @@ fn same_live_views(a: &[Owner], b: &[Owner]) -> bool {
 /// 3. `current_owner` — the binding homes (full key/value comparison);
 ///    a body-local home inserted by the merge requires a re-walk.
 /// 4. `binding_of_name` — the scope-resolution record, same rule.
-/// 5. `pending_dead_store` — full key/value comparison; the intersect/
-///    union merge can both drop and add keys.
 pub(crate) fn branch_states_differ(prev: &BranchState, own: &Ownership) -> bool {
     if states_differ_snapshot(
         &prev.states,
@@ -411,7 +359,6 @@ pub(crate) fn branch_states_differ(prev: &BranchState, own: &Ownership) -> bool 
     }
     map_differs(&prev.current_owner, &own.current_owner)
         || map_differs(&prev.binding_of_name, &own.binding_of_name)
-        || map_differs(&prev.pending_dead_store, &own.pending_dead_store)
 }
 
 /// Key/value equality of two maps (differ = key-set or value mismatch).
@@ -458,7 +405,7 @@ pub(crate) fn merge_non_monotone(
 /// The plain loop-entry join — MONOTONE (G3): per-owner any-Moved-wins
 /// (Moved is absorbing; first-observed otherwise), home/binding maps
 /// first-wins (the entry side is fixed, so these never change after the
-/// first merge), dead-store intersect/union, projection union. Returns
+/// first merge), projection union. Returns
 /// the binding-aware override writes UNAPPLIED so the caller decides
 /// (iteration: discard; final polish/merge: apply once, no feedback).
 ///
@@ -510,11 +457,7 @@ pub(crate) fn merge_loop_plain(
     let mut merged_binding_of_name = entry.binding_of_name;
     merge_name_map_first_wins(&mut merged_binding_of_name, &after.binding_of_name);
 
-    // 3. Merge pending_dead_store: pre-existing keys intersect; local keys union.
-    let mut merged_pending_dead_store = entry.pending_dead_store;
-    merge_pending_dead_store(&mut merged_pending_dead_store, &[&after.pending_dead_store]);
-
-    // 4. Merge live_projections: union per root (P2 freeze ranges,
+    // 3. Merge live_projections: union per root (P2 freeze ranges,
     //    final spec §3.2) — a view live on either side of the back-edge
     //    stays live. Monotone (membership grows in one direction only).
     let mut merged_live_projections = entry.live_projections;
@@ -523,8 +466,6 @@ pub(crate) fn merge_loop_plain(
     own.states = merged_states;
     own.current_owner = merged_current_owner;
     own.binding_of_name = merged_binding_of_name;
-    own.pending_dead_store = merged_pending_dead_store;
-    own.rebuild_pending_dead_store_index();
     own.live_projections = merged_live_projections;
     writes
 }

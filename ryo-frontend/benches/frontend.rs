@@ -250,7 +250,7 @@ fn sema_program(src: &str) -> (Vec<ryo_core::tir::Tir>, InternPool) {
     (tirs, pool)
 }
 
-#[divan::bench(args = [(4, 4), (64, 8)])]
+#[divan::bench(args = [(4, 4), (64, 8), (64, 16)])]
 fn ownership_nested_control(bencher: divan::Bencher, case: (usize, usize)) {
     let src = nested_control_source(case.0, case.1);
     bencher

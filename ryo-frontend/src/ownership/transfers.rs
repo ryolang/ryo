@@ -71,8 +71,8 @@ pub(crate) fn consume_for_assignment(
 
 /// Shared transition for every consume site: a needs-drop `FieldAccess`
 /// operand is rejected outright (`MoveOutOfField`, M9); `Valid` → stamp
-/// `Moved`, clear the pending dead-store entry, log the W0003 move
-/// hazard; `Borrowed` → E0021/E0022; `Moved` → E0020; `NotTracked` →
+/// `Moved` and log the W0003 move hazard; `Borrowed` → E0021/E0022;
+/// `Moved` → E0020; `NotTracked` →
 /// no-op.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn consume_underlying(
@@ -105,7 +105,6 @@ pub(crate) fn consume_underlying(
     }
     match state {
         OwnerState::Valid => {
-            own.pending_dead_store.remove(&underlying);
             own.states
                 .insert(underlying, OwnerState::Moved { moved_at: span });
             own.owner_hazards.push((underlying, site, HazardKind::Move));

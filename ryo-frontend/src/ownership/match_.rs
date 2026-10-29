@@ -33,14 +33,13 @@ use super::{
     BranchState, HazardKind, Owner, OwnerState, Ownership, RegionStop, Walk,
     check_source_projected, check_use_moved, consume_for_assignment, consumed_binding_name,
     drain_dying_views, inout_escape_owner, needs_tracking, owner_sort_key,
-    prune_branch_dead_projections, refine_view_liveness_for_arm, register_pending_dead_store,
-    restore_view_last_use,
+    prune_branch_dead_projections, refine_view_liveness_for_arm, restore_view_last_use,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::flow::{BlockId, DropOp, DropPosition, Place, PlaceId, Terminator, WriteKind};
 use ryo_core::ownership::FunctionSidecar;
 use ryo_core::tir::{ChildKind, MatchArmView, MatchBodyView, Tir, TirData, TirRef, TirTag};
-use ryo_core::types::{InternPool, StringId, StructField, TypeId};
+use ryo_core::types::{InternPool, StructField, TypeId};
 use std::collections::HashSet;
 
 /// `visit_block`'s `Switch` dispatch (M12). The scrutinee's steps ran
@@ -128,7 +127,7 @@ pub(crate) fn analyze_match_switch(
     for (arm_index, arm) in view.arms().enumerate() {
         // (a) Seed the arm's payload bindings as fresh owners keyed on
         // their owner tokens — arm-local. Copy binds need no owner.
-        let mut arm_binds: Vec<(TirRef, PlaceId, StringId)> = Vec::new();
+        let mut arm_binds: Vec<(TirRef, PlaceId)> = Vec::new();
         for b in arm.bindings() {
             own.binding_of_name.insert(b.name, match_inst);
             if w.pool.is_copy(b.ty) {
@@ -137,15 +136,13 @@ pub(crate) fn analyze_match_switch(
             let token = tokens[token_cursor];
             let token_place = token_places[token_cursor];
             token_cursor += 1;
-            let span = w.tir.span(match_inst);
             // The token's place is both the binding's identity (Flow
             // binds the payload name directly to the token place, so
             // reads of it resolve without a name lookup) and the owner
             // of the moved payload field.
             let owner = Owner(token_place);
             own.states.insert(owner, OwnerState::Valid);
-            register_pending_dead_store(own, owner, token_place, b.name, span, match_inst);
-            arm_binds.push((token, token_place, b.name));
+            arm_binds.push((token, token_place));
         }
         // (b) Consumption: an arm binding a non-`Copy` field by move
         // consumes the scrutinee on this arm's path.
@@ -223,9 +220,9 @@ pub(crate) fn analyze_match_switch(
         // value arm's body is consumed into the match inst, so the
         // result slot's buffer is owned by exactly one identity — the
         // match inst the result's consumers (VarDecl/Assign/Return/
-        // call arg) then move on. Runs after the body steps (the body
-        // owner must be evaluated) and before the dead-bind sweep (the
-        // consume already removed a transferred bind's pending entry).
+        // call arg) then move on. Runs after the body steps (so the
+        // standalone dead-store pass sees the transferred bind's read)
+        // and before the dead-bind sweep.
         if let MatchBodyView::Expr(e) = arm.body {
             // E0138's borrowed family was already rejected at (d) —
             // skip the consume there or the same arm would double-report
@@ -238,10 +235,9 @@ pub(crate) fn analyze_match_switch(
             }
         }
         let falls = arm_reaches_stop(w, &arm_regions[arm_index], join);
-        // (f) Dead arm-local binds: a tracked bind never read nor
-        // consumed inside the arm dies with the arm. Always remove the
-        // pending entry and buffer the W0001; the arm-gated Free is
-        // scheduled only where the anchor actually executes:
+        // (f) Dead arm-local binds: the standalone dead-store pass
+        // identifies them; ownership schedules the arm-gated Free only
+        // where the anchor actually executes:
         // * a Return end — the return epilogue owns the exit;
         // * a Break/Continue end — codegen fires due Frees before the
         //   jump, and the loop-exit pass dedups against it;
@@ -255,22 +251,21 @@ pub(crate) fn analyze_match_switch(
                 _ => falls,
             },
         };
-        for (token_ref, token_place, name) in &arm_binds {
-            if let Some((_, span, _, _)) = own.pending_dead_store.remove(&Owner(*token_place)) {
-                own.arm_dead_stores.push((*name, span));
-                if anchor_fires {
-                    let position = if let Some(after) = arm_last {
-                        Some(DropPosition::AfterStep { inst: after })
-                    } else {
-                        arm_exit.map(|block| DropPosition::PreTerminator { block })
-                    };
-                    if let Some(position) = position {
-                        sidecar.drops.push(DropOp {
-                            position,
-                            target: *token_ref,
-                            span,
-                        });
-                    }
+        for (token_ref, token_place) in &arm_binds {
+            if let Some((_, span, _, _)) = w.dead_stores.arm_dead_store(*token_place)
+                && anchor_fires
+            {
+                let position = if let Some(after) = arm_last {
+                    Some(DropPosition::AfterStep { inst: after })
+                } else {
+                    arm_exit.map(|block| DropPosition::PreTerminator { block })
+                };
+                if let Some(position) = position {
+                    sidecar.drops.push(DropOp {
+                        position,
+                        target: *token_ref,
+                        span,
+                    });
                 }
             }
         }
@@ -465,7 +460,6 @@ fn transfer_arm_result(
     }
     match state {
         OwnerState::Valid => {
-            own.pending_dead_store.remove(&owner);
             own.states
                 .insert(owner, OwnerState::Moved { moved_at: span });
             // W0003 case-B support: the arm-result transfer is a

@@ -7,7 +7,10 @@
 //! Free pass has populated the `drops` schedule and these passes can
 //! dedup against it.
 
-use super::{Owner, Ownership, TirStmtList, ancestor_branches_of, anchored_drops, drop_anchor};
+use super::{
+    DeadStoreAnalysis, Owner, Ownership, TirStmtList, ancestor_branches_of, anchored_drops,
+    drop_anchor,
+};
 use ryo_core::flow::fire_points::{FirePoints, FireVerdict};
 use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow};
 use ryo_core::ownership::FunctionSidecar;
@@ -25,6 +28,7 @@ pub(crate) fn schedule_return_epilogue_frees<S: TirStmtList + ?Sized>(
     tir: &Tir,
     flow: &Flow,
     own: &Ownership,
+    dead_stores: &DeadStoreAnalysis,
     sidecar: &mut FunctionSidecar,
     body_stmts: &S,
     order: &[u32],
@@ -52,7 +56,7 @@ pub(crate) fn schedule_return_epilogue_frees<S: TirStmtList + ?Sized>(
         let mut staged: Vec<DropOp> = Vec::new();
         for owner in owners {
             let r = owner.tirref(flow);
-            if !r.is_param() && own.pending_dead_store.contains_key(owner) {
+            if !r.is_param() && dead_stores.is_pending(owner) {
                 continue;
             }
             // A return that moves a binding's value hands the home
@@ -422,6 +426,7 @@ pub(crate) fn binding_value_maps(
 pub(crate) fn convert_honored_reseat_drops(
     tir: &Tir,
     own: &Ownership,
+    dead_stores: &DeadStoreAnalysis,
     flow: &Flow,
     sidecar: &mut FunctionSidecar,
     decl_of_init: &HashMap<TirRef, TirRef>,
@@ -434,7 +439,7 @@ pub(crate) fn convert_honored_reseat_drops(
         }
     };
     let mut honored: HashSet<usize> = HashSet::new();
-    for (owner, (name, _, _, _)) in &own.pending_dead_store {
+    for (owner, (name, _, _, _)) in dead_stores.pending() {
         for (idx, drop) in own.reseat_drops.iter().enumerate() {
             if drop.name == *name && drop.reseat_owners.contains(owner) {
                 match (binding_of_owner(&drop.pre_owner), binding_of_owner(owner)) {

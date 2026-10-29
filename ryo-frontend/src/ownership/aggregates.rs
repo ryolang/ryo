@@ -23,7 +23,7 @@
 
 use super::{
     Owner, OwnerState, Ownership, Walk, check_source_projected, consume_for_assignment,
-    consumed_binding_name, needs_tracking, register_pending_dead_store,
+    consumed_binding_name, needs_tracking,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::ownership::FunctionSidecar;
@@ -313,17 +313,11 @@ pub(crate) fn analyze_destructure(
         if !needs_tracking(field.ty, w.pool) {
             continue;
         }
-        let span = w.tir.span(stmt);
         // The token's place is both the binding identity (Flow binds
         // the name directly to it) and the owner of the moved-out
         // field.
         let owner = Owner(owner_place);
         own.states.insert(owner, OwnerState::Valid);
-        // A never-read bound field is a dead store (W0001) and its
-        // allocation dies with the statement — the drain anchors the
-        // Free right after it, where codegen has just populated the
-        // binding's slot.
-        register_pending_dead_store(own, owner, owner_place, bind, span, stmt);
     }
     let _ = sidecar;
 }

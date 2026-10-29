@@ -1,11 +1,11 @@
 //! Cleanup scheduling and destruction anchors.
 
 use super::{
-    HazardKind, Owner, OwnerState, Ownership, PromoCandidate, UNTRACKED_PLACE, anchored_after,
-    body_may_return, branch_may_not_return, convert_honored_reseat_drops, declared_before_stmt,
-    enclosing_if_main_cond, if_may_fall_through, inout_escape_owner, last_use_anchor,
-    outermost_branch_of, outermost_loop_of, owner_sort_key, param_idx, schedule_loop_exit_frees_in,
-    schedule_return_epilogue_frees, suppress_redundant_exit_frees,
+    DeadStoreAnalysis, HazardKind, Owner, OwnerState, Ownership, PromoCandidate, UNTRACKED_PLACE,
+    anchored_after, body_may_return, branch_may_not_return, convert_honored_reseat_drops,
+    declared_before_stmt, enclosing_if_main_cond, if_may_fall_through, inout_escape_owner,
+    last_use_anchor, outermost_branch_of, outermost_loop_of, owner_sort_key, param_idx,
+    schedule_loop_exit_frees_in, schedule_return_epilogue_frees, suppress_redundant_exit_frees,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow, Terminator};
@@ -30,6 +30,7 @@ pub(crate) struct CleanupContext<'a> {
     pub(super) reassign_orders: &'a HashMap<TirRef, Vec<TirRef>>,
     pub(super) decl_of_init: &'a HashMap<TirRef, TirRef>,
     pub(super) assign_value_of: &'a HashMap<TirRef, TirRef>,
+    pub(super) dead_stores: &'a DeadStoreAnalysis,
 }
 
 fn instruction_last_use_drop(
@@ -456,9 +457,9 @@ pub(crate) fn drain_dead_stores(
     // schedule a Free anchored after the declaring instruction. Skip
     // owners already covered by `free_on_reassign` to avoid double-frees.
     // (`reassign_targets` was computed above for the last-use pass.)
-    let mut sorted_dead: Vec<(Owner, super::DeadStoreEntry)> = own
-        .pending_dead_store
-        .iter()
+    let mut sorted_dead: Vec<(Owner, super::DeadStoreEntry)> = ctx
+        .dead_stores
+        .pending()
         .map(|(o, v)| (*o, *v))
         // The shared untracked sentinel (error-shaped TIR seats) owns
         // nothing schedulable; the unit's own diagnostic carries it.
@@ -528,21 +529,13 @@ pub(crate) fn drain_dead_stores(
         }
     }
 
-    // Match-arm bindings never read inside their arm (M12): the walk
-    // already scheduled their arm-gated Frees at the arm ends; only the
-    // W0001 belongs here. Dedup — loop convergence re-walks can record
-    // the same binding twice. Unlike the drain above, no inout /
-    // escape checks: an arm-local bind is a fresh value that dies with
-    // the arm regardless of any same-named outer binding.
-    let mut seen_arm_dead: HashSet<(u32, usize, usize)> = HashSet::new();
-    for (name, span) in &own.arm_dead_stores {
-        if !seen_arm_dead.insert((name.raw(), span.start, span.end)) {
-            continue;
-        }
+    // Match-arm bindings never read inside their arm (M12): ownership
+    // already scheduled their arm-gated Frees; only W0001 belongs here.
+    for (name, span, _, _) in ctx.dead_stores.arm_dead_stores() {
         warnings.emit(Diag::warning(
-            *span,
+            span,
             DiagCode::DeadStore,
-            format!("value `{}` is declared but never used", ctx.pool.str(*name)),
+            format!("value `{}` is declared but never used", ctx.pool.str(name)),
         ));
     }
 }
@@ -559,6 +552,7 @@ pub(crate) fn finalize_cleanup(
     convert_honored_reseat_drops(
         ctx.tir,
         own,
+        ctx.dead_stores,
         ctx.flow,
         sidecar,
         ctx.decl_of_init,
@@ -598,6 +592,7 @@ pub(crate) fn finalize_cleanup(
         ctx.tir,
         ctx.flow,
         own,
+        ctx.dead_stores,
         sidecar,
         &ctx.body_stmts,
         ctx.order,

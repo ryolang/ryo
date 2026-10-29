@@ -2,6 +2,7 @@
 mod cleanup_validation;
 mod common;
 mod concat;
+mod dead_stores;
 mod enums;
 mod error_path;
 mod frees;
