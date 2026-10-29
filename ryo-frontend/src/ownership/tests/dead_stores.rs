@@ -128,3 +128,37 @@ fn match_arm_read_on_return_path_counts_on_fallthrough_path() {
         "the returning branch's read must suppress W0001: {diags:?}"
     );
 }
+
+#[test]
+fn dead_predecessor_does_not_hide_live_dead_store() {
+    let src = concat!(
+        "fn f(c: bool, d: bool) -> int:\n",
+        "\ts = \"unused\"\n",
+        "\tif c:\n",
+        "\t\treturn 1\n",
+        "\t\tif d:\n",
+        "\t\t\tprint(\"dead\")\n",
+        "\treturn 0\n",
+    );
+    let (diags, mut sidecar, _, _) = check_src_full(src);
+    assert_eq!(
+        diags
+            .iter()
+            .filter(|d| {
+                d.code == DiagCode::DeadStore && d.message == "value `s` is declared but never used"
+            })
+            .count(),
+        1,
+        "diagnostics: {diags:?}"
+    );
+    let dead_span = diags
+        .iter()
+        .find(|d| d.code == DiagCode::DeadStore)
+        .expect("dead-store diagnostic")
+        .span;
+    let sidecar = take_function_sidecar(&mut sidecar, 0);
+    assert!(
+        sidecar.drops.iter().any(|drop| drop.span == dead_span),
+        "sidecar: {sidecar:?}"
+    );
+}

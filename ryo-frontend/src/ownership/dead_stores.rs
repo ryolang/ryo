@@ -559,7 +559,14 @@ fn join_predecessors(
     dominators: &[Option<BlockId>],
     output: &mut BitSet,
 ) {
-    let preds = flow.predecessors(block);
+    let preds: Vec<_> = flow
+        .predecessors(block)
+        .iter()
+        .copied()
+        .filter(|pred| {
+            !flow.blocks[pred.0 as usize].unreachable && dominators[pred.0 as usize].is_some()
+        })
+        .collect();
     if preds.is_empty() {
         output.words.fill(0);
         return;
