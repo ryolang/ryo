@@ -182,7 +182,6 @@ pub(crate) fn analyze_loop(
                 .unwrap_or(OwnerState::NotTracked);
             own.states.insert(dynamic_owner, state);
             if !own.current_owner.values().any(|owner| *owner == old_owner) {
-                own.pending_dead_store.remove(&old_owner);
                 own.states.remove(&old_owner);
             }
         }
@@ -218,9 +217,8 @@ pub(crate) fn analyze_loop(
     // Borrowed once merged — entry first-observed wins — so the two
     // form one class below Moved), product-ordered over the owner set;
     // plus live-projection sets under union (membership grows in one
-    // direction only); plus the first-wins home/binding maps and the
-    // dead-store map (see `BranchState` — the five merge-mutated
-    // fields).
+    // direction only); plus the first-wins home/binding maps (see
+    // `BranchState` — the four merge-mutated fields).
     //
     // Operator monotonicity. Each pass merges `entry ⊔ post-body` with
     // `merge_loop_plain`: any-Moved-wins adds Moved-ness and inserts
@@ -228,12 +226,7 @@ pub(crate) fn analyze_loop(
     // The four maps (states, current_owner, binding_of_name,
     // live_projections) therefore ASCEND the product order (never
     // removes a Moved, never shrinks a projection set, never changes a
-    // seated home). The fifth, pending_dead_store, is rebuilt from the
-    // pre-loop snapshot on each pass. The merge retains pre-loop
-    // entries only when they remain pending and unions body-local
-    // entries. If the next walk uses merged body-local entries, it
-    // treats them as pre-existing. Match-arm intersection can then
-    // clear and restore them on alternating passes.
+    // seated home).
     //
     // Convergence test. `differ` compares the PREVIOUS entry against
     // the MERGED state now in `own` — the state the iteration actually
@@ -243,7 +236,7 @@ pub(crate) fn analyze_loop(
     // see merge_loop_plain), the merged entry equals the previous entry
     // (a genuine fixed point), while the raw post-body state keeps
     // differing on every pass. The merged-vs-entry comparison covers
-    // all five merge-mutated components (see branch_states_differ) —
+    // all four merge-mutated components (see branch_states_differ) —
     // for live_projections by set MEMBERSHIP, not emptiness: the merged
     // set is the state the next pass consumes, and `{v1}` vs `{v1, v2}`
     // are different states even though both are non-empty — so
@@ -255,17 +248,13 @@ pub(crate) fn analyze_loop(
     // toward Moved (≤ 2 per owner), a home or binding-map key inserted
     // (≤ 1 per binding), a projection view inserted (≤ 1 per view) —
     // owners, bindings, and views are all bounded by the instruction
-    // arena A — plus at most ONE dead-store alignment pass (the fifth
-    // map is rebuilt from the pre-loop snapshot each pass, so it adds
-    // no ascension unit of its own: once the four monotone maps hold,
-    // the merged state repeats and the next compare converges — see
-    // above). Projection-set insertion was already counted at ≤ 1 unit
+    // arena A. Projection-set insertion was already counted at ≤ 1 unit
     // per view, and the membership witness adds no
     // new ascension kind: the join is monotone (pointwise ≥ the
     // previous entry), so a membership difference between previous and
     // merged entry IS a strict set growth — at least one view inserted
     // — never a lateral move that the stricter compare would chase
-    // forever. Chain height ≤ 2A + A + A + A + 1, so the cap below
+    // forever. Chain height ≤ 2A + A + A + A, so the cap below
     // bounds every real pass sequence. (For real bodies the walk is
     // state-independent, so the fixed point is reached in exactly 2
     // passes; the bound is the guarantee, not the expectation.)
@@ -315,16 +304,9 @@ pub(crate) fn analyze_loop(
         // sidecar).
         let mut staging = FunctionSidecar::new(w.tir.name, w.tir.instructions.len());
         let pass_epoch = w.next_epoch();
-        // Recompute dead stores from the loop-entry state on every
-        // speculative pass. The merged entry can contain stores from
-        // the loop body. If a later pass treats them as pre-existing,
-        // match-arm intersection can alternate between keeping and
-        // dropping them.
-        own.pending_dead_store.clone_from(&snap.pending_dead_store);
-        own.rebuild_pending_dead_store_index();
         w.walk_phase(own, &mut scratch, &mut staging, &region, pass_epoch);
         // Move the post-body state out, installing an empty placeholder
-        // — the merge overwrites all five fields below.
+        // — the merge overwrites all four fields below.
         let after = own.take_branch(BranchState::default());
         // Compute the binding-aware override writes while `after` is
         // intact; applied only on the converging pass (below) — never

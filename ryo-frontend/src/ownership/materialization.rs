@@ -1,6 +1,6 @@
 //! Materialization classification and redundant-copy diagnostics.
 
-use super::{Owner, OwnerState, Ownership, projection_root};
+use super::{DeadStoreAnalysis, Owner, OwnerState, Ownership, projection_root};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
@@ -149,12 +149,14 @@ pub(crate) fn collect_materialize_sites(
 /// `order` is the per-function document-rank table (the Flow builder's
 /// emission stamp — see [`document_rank`]), built once in
 /// `analyze_function` and shared with the P5 deferral.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn warn_redundant_materialize(
     tir: &Tir,
     flow: &ryo_core::flow::Flow,
     pool: &InternPool,
     ids: &SynthCalleeIds,
     own: &Ownership,
+    dead_stores: &DeadStoreAnalysis,
     order: &[u32],
     sink: &mut DiagSink,
 ) {
@@ -182,7 +184,7 @@ pub(crate) fn warn_redundant_materialize(
             continue;
         }
         // Never read at all: W0001 dead-store's jurisdiction, not W0003's.
-        if own.pending_dead_store.contains_key(&copy) {
+        if dead_stores.is_pending(&copy) {
             continue;
         }
         // The view's root must be local and resolvable; a `strview`
@@ -234,7 +236,7 @@ pub(crate) fn warn_redundant_materialize(
 /// Same post-walk shape as W0003 case B: the classification REUSES the
 /// walk's results. Escape/mutation evidence comes from `owner_hazards`
 /// (every consume, reassign-drop, and `inout` pass the walk observed,
-/// path-insensitive) and the surviving `pending_dead_store` set.
+/// path-insensitive) and the standalone dead-store result.
 /// Deliberate non-goals, all resolved toward NO warning (conservative):
 ///
 ///  - interprocedural flow: a copy borrow-passed to a function that
@@ -254,6 +256,7 @@ pub(crate) fn warn_redundant_to_bytes(
     pool: &InternPool,
     ids: &SynthCalleeIds,
     own: &Ownership,
+    dead_stores: &DeadStoreAnalysis,
     order: &[u32],
     last_use: &HashMap<TirRef, TirRef>,
     sink: &mut DiagSink,
@@ -268,7 +271,9 @@ pub(crate) fn warn_redundant_to_bytes(
     );
     let rank = |r: TirRef| order.get(r.index()).copied().unwrap_or(0);
     for (decl, call) in sites {
-        let Some(chain) = copy_chain_clean(own, tir, flow, own.owner_of_inst(call), decl) else {
+        let Some(chain) =
+            copy_chain_clean(own, dead_stores, tir, flow, own.owner_of_inst(call), decl)
+        else {
             continue;
         };
         // Receiver-root hazard check: `to_bytes()` SNAPSHOTS the
@@ -438,6 +443,7 @@ fn loop_encloses_chain_read_not_copy(
 /// owned copy and yields `None`.
 fn copy_chain_clean(
     own: &Ownership,
+    dead_stores: &DeadStoreAnalysis,
     tir: &Tir,
     _flow: &ryo_core::flow::Flow,
     start: Owner,
@@ -450,7 +456,7 @@ fn copy_chain_clean(
             continue;
         }
         // Never read at all: W0001 dead-store's jurisdiction, not W0004's.
-        if own.pending_dead_store.contains_key(&owner) {
+        if dead_stores.is_pending(&owner) {
             return None;
         }
         for &(o, site, _) in &own.owner_hazards {

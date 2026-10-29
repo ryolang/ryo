@@ -5,7 +5,7 @@
 //! arm-reseat collector, the operand use-safety checks
 //! (`check_operands_moved`), and the small binding helpers the VarDecl
 //! /Assign steps seat values through (`rebind_to_init`,
-//! `register_pending_dead_store`, `inout_escape_owner`).
+//! `inout_escape_owner`).
 
 use super::super::{
     BranchState, Owner, OwnerState, Ownership, RegionStop, ReseatDrop, UNTRACKED_PLACE,
@@ -16,8 +16,8 @@ use super::Walk;
 use ryo_core::diag::DiagSink;
 use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow, PlaceId, Terminator};
 use ryo_core::ownership::FunctionSidecar;
-use ryo_core::tir::{Span, Tir, TirData, TirRef, TirTag};
-use ryo_core::types::{InternPool, StringId};
+use ryo_core::tir::{Tir, TirData, TirRef, TirTag};
+use ryo_core::types::InternPool;
 use std::collections::HashSet;
 /// The `check_use_moved` half of the old `recurse_operands`: operand
 /// steps already ran (block iteration order), so only the parent's
@@ -424,26 +424,6 @@ pub(crate) fn rebind_to_init(own: &mut Ownership, home: PlaceId, init: TirRef) -
     }
     own.current_owner.insert(home, owner);
     owner
-}
-
-/// Register a binding into `pending_dead_store`. Owned values key by
-/// their current owner; non-owning values key by binding home. `home`
-/// identifies the lexical binding for later reads and assignments;
-/// `decl_inst` serves as the Free anchor when a dead store owns memory.
-pub(crate) fn register_pending_dead_store(
-    own: &mut Ownership,
-    owner: Owner,
-    home: PlaceId,
-    name: StringId,
-    span: Span,
-    decl_inst: TirRef,
-) {
-    own.pending_dead_store
-        .insert(owner, (name, span, decl_inst, home));
-    let owners = own.pending_dead_store_by_home.entry(home).or_default();
-    if !owners.contains(&owner) {
-        owners.push(owner);
-    }
 }
 
 /// True if `owner` is the value currently seated in an `inout str`

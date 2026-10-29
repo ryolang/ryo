@@ -697,19 +697,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-250 — W0001 Copy tracking regresses nested-control ownership analysis
-
-**Severity:** Correctness / Hygiene
-**Area:** ownership
-
-**Files:** ryo-frontend/src/ownership/mod.rs, ryo-frontend/src/ownership/merge.rs, ryo-frontend/src/ownership/walk.rs, ryo-frontend/src/ownership/walk/cascades.rs
-
-**Summary:** PR #209 extends pending dead-store tracking to Copy bindings, adding map and index work to branch restores and loop fixed-point merges. CodSpeed reports a 10.98% CPU-simulation regression for ownership_nested_control[(4, 4)] (1.6 ms to 1.8 ms). A same-machine walltime A/B measured 128.1 us on main versus 140.0 us on the PR. The regression is deliberately accepted for the W0001 correctness fix, but the ownership hot path needs a follow-up optimization.
-
-**Resolution:** Split dead-store analysis from ownership cleanup instead of adding more diagnostic state to `Ownership`. After sema, run a dedicated TIR/Flow dead-store pass keyed by lexical binding home (`PlaceId`), with a per-function binding/store table and dense bitsets for pending store generations. Compute block transfer sets once, then perform that pass's own CFG joins and loop fixed point; preserve the existing read-before-overwrite, branch intersection/local-union, shadowing, reassignment, and inout behavior. Return both buffered W0001 diagnostics and a queryable dead-store result for ownership cleanup and the W0003/W0004 consumers. `Ownership` should retain only owner-keyed Move-allocation state and consume that result when a dead store requires a Free; Copy/view diagnostics must not enter ownership snapshots or repeated loop walks. This separates binding-liveness analysis from memory-safety analysis and removes diagnostic-only HashMap cloning from the ownership hot path rather than tuning the current maps. Keep the existing diagnostic matrix and cleanup tests, add differential coverage between the old and new semantics, and require `ownership_nested_control[(4, 4)]` to return to the main baseline range in CodSpeed simulation.
-
----
-
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)

@@ -33,7 +33,7 @@ use std::collections::{HashMap, HashSet};
 mod cascades;
 
 use cascades::{analyze_if_cascade, check_operands_moved};
-pub(crate) use cascades::{inout_escape_owner, rebind_to_init, register_pending_dead_store};
+pub(crate) use cascades::{inout_escape_owner, rebind_to_init};
 
 /// How a region walk treats its boundary block.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -155,6 +155,7 @@ pub(crate) struct Walk<'a> {
     pub(crate) tir: &'a Tir,
     pub(crate) flow: &'a Flow,
     pub(crate) pool: &'a InternPool,
+    pub(crate) dead_stores: &'a super::DeadStoreAnalysis,
     /// Outer-driver skip marks: set once per block (first visit); the
     /// id-ordered driver uses them to process dead continuations the
     /// region walks never reach, and never to re-process a block.
@@ -198,7 +199,12 @@ pub(crate) struct Walk<'a> {
 }
 
 impl<'a> Walk<'a> {
-    pub(crate) fn new(tir: &'a Tir, flow: &'a Flow, pool: &'a InternPool) -> Self {
+    pub(crate) fn new(
+        tir: &'a Tir,
+        flow: &'a Flow,
+        pool: &'a InternPool,
+        dead_stores: &'a super::DeadStoreAnalysis,
+    ) -> Self {
         let len = tir.instructions.len();
         // Statement roots (drain gates) and `stmt_of` (promo anchors)
         // matter only when the body can create views or promotion
@@ -253,6 +259,7 @@ impl<'a> Walk<'a> {
             tir,
             flow,
             pool,
+            dead_stores,
             processed: vec![false; flow.blocks.len()],
             epoch: vec![0; flow.blocks.len()],
             epoch_next: 0,
@@ -664,8 +671,7 @@ impl<'a> Walk<'a> {
     // ---------- statement-step handlers (operand visits removed) ----------
 
     /// A Move-typed `VarDecl` consumes its initializer; view and Copy
-    /// declarations only establish their binding state. Every declaration
-    /// registers for dead-store analysis.
+    /// declarations only establish their binding state.
     fn analyze_var_decl(
         &mut self,
         own: &mut Ownership,
@@ -680,7 +686,7 @@ impl<'a> Walk<'a> {
         // The declaration's write fact names the binding's home place.
         let home = self.step_facts(r).write.expect("VarDecl writes").place;
         own.binding_of_name.insert(view.name, r);
-        let dead_store_owner = if needs_tracking(init_ty, self.pool) {
+        if needs_tracking(init_ty, self.pool) {
             let span = self.tir.span(r);
             let consumed_name = consumed_binding_name(self.tir, init);
             // P2 freeze (final spec §3.2): the consume moves the owner.
@@ -696,7 +702,7 @@ impl<'a> Walk<'a> {
                 consumed_name,
             );
             consume_for_assignment(self.tir, self.pool, own, sink, init, span, consumed_name, r);
-            rebind_to_init(own, home, init)
+            rebind_to_init(own, home, init);
         } else if self.pool.is_view(init_ty) {
             // P3 (final spec §3.2): binding a slice registers a
             // projection against the root owner (re-slices resolve
@@ -705,15 +711,9 @@ impl<'a> Walk<'a> {
             let view_owner = own.underlying_owner(init);
             own.current_owner.insert(home, view_owner);
             register_projection(own, self.tir, self.flow, self.pool, init, view_owner);
-            Owner(home)
         } else {
             own.current_owner.insert(home, Owner(home));
-            Owner(home)
-        };
-        // The walk clears this entry on any later read or consumption; a
-        // surviving entry at function end fires W0001. Non-owning bindings
-        // key by home so they never collide with their initializer's owner.
-        register_pending_dead_store(own, dead_store_owner, home, view.name, self.tir.span(r), r);
+        }
         // First-declared rank for the loop-carried scan. Live blocks
         // walk in document order, so the first visit wins; a dead-code
         // declaration walks late but was emitted in place, so its rank
@@ -733,7 +733,7 @@ impl<'a> Walk<'a> {
     }
 
     /// Reassignment consumes Move-typed values and reseats their owner;
-    /// view and Copy assignments update only binding and dead-store state.
+    /// view and Copy assignments update only binding state.
     fn analyze_assign(
         &mut self,
         own: &mut Ownership,
@@ -756,12 +756,6 @@ impl<'a> Walk<'a> {
             _ => None,
         };
         let value_ty = self.tir.inst(view.value).ty;
-        let inout_param = match self.flow.place(home) {
-            ryo_core::flow::Place::Param { index, .. } => {
-                self.tir.params[*index as usize].mode == ParamMode::Inout
-            }
-            _ => false,
-        };
         if needs_tracking(value_ty, self.pool) {
             // Capture the old owner before consume_for_assignment /
             // rebind overwrite current_owner[name]. Only emit the Free
@@ -824,9 +818,6 @@ impl<'a> Walk<'a> {
                     // W0003 case-B support: reassignment mutates the
                     // binding's owner — a defensive-copy hazard on it.
                     own.owner_hazards.push((old_owner, r, HazardKind::Mutate));
-                    // Reassignment runs the old value's destructor — an
-                    // observable use, so drop the pending dead-store.
-                    own.pending_dead_store.remove(&old_owner);
                 }
             }
             let span = self.tir.span(r);
@@ -853,19 +844,15 @@ impl<'a> Walk<'a> {
                 consumed_name,
                 r,
             );
-            let seat = rebind_to_init(own, home, view.value);
+            rebind_to_init(own, home, view.value);
             let loop_carried = self
                 .active_loop_carried_homes
                 .iter()
                 .any(|homes| homes.contains(&home));
             if loop_carried {
                 let home_owner = Owner(home);
-                own.pending_dead_store.remove(&seat);
                 own.current_owner.insert(home, home_owner);
                 own.states.insert(home_owner, OwnerState::Valid);
-                register_pending_dead_store(own, home_owner, home, view.name, span, r);
-            } else {
-                register_pending_dead_store(own, seat, home, view.name, span, r);
             }
         } else if self.pool.is_view(value_ty) {
             // P3/P4 (final spec §3.2): rebinding a view registers the
@@ -882,10 +869,6 @@ impl<'a> Walk<'a> {
             {
                 own.pending_dying.push(old);
             }
-        }
-        if !needs_tracking(value_ty, self.pool) && !inout_param {
-            own.clear_pending_dead_store(home);
-            register_pending_dead_store(own, Owner(home), home, view.name, self.tir.span(r), r);
         }
     }
 
@@ -1385,9 +1368,8 @@ impl<'a> Walk<'a> {
 
     /// Aliasing read: the step's `read` fact names the binding home
     /// place; the owner live in that home is recorded for the
-    /// post-walk last-use passes (replacing `collect_last_uses`), the
-    /// dead-store entry for the binding's name is cleared, and a view
-    /// read at its projection's last use queues the projection's
+    /// post-walk last-use passes (replacing `collect_last_uses`), and a
+    /// view read at its projection's last use queues the projection's
     /// death.
     fn analyze_var_read(&mut self, own: &mut Ownership, r: TirRef, dead: bool) {
         let inst = *self.tir.inst(r);
@@ -1402,10 +1384,6 @@ impl<'a> Walk<'a> {
             return;
         };
         let owner = own.current_owner.get(&read).copied().unwrap_or(Owner(read));
-        // Any read counts as "used" for dead-store purposes, even one
-        // that ultimately fires E0020. Clear by lexical home so shadowed
-        // bindings and branch-local owner reseats stay independent.
-        own.clear_pending_dead_store(read);
         if needs_tracking(inst.ty, self.pool) {
             // Snapshot owner-at-read so the post-walk passes anchor to
             // the owner live *at this read*.

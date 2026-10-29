@@ -1,7 +1,8 @@
 #[cfg(debug_assertions)]
 mod cleanup_validation;
-mod common;
+pub(in crate::ownership) mod common;
 mod concat;
+mod dead_stores;
 mod enums;
 mod error_path;
 mod frees;

@@ -31,6 +31,8 @@ use ryo_core::flow::{Analysis, BlockId, DropOp, Flow, PlaceId};
 
 mod diag_fmt;
 pub(crate) use diag_fmt::*;
+mod dead_stores;
+pub(crate) use dead_stores::*;
 mod cleanup;
 pub(crate) use cleanup::*;
 mod materialization;
@@ -241,18 +243,6 @@ pub(crate) struct Ownership {
     /// construction, so a missing key is an internal invariant
     /// violation (`expect` at the lookup sites), not a diagnostic.
     pub param_index: HashMap<StringId, usize>,
-    /// Declared or assigned bindings, keyed by owner or binding home.
-    /// Cleared when the binding is read (`Var`) or consumed
-    /// (move/return). Whatever remains at function end is a dead
-    /// store — surfaced as W0001, plus a Free for live owned values.
-    /// The third tuple element is the declaring/assigning instruction's
-    /// own `TirRef`, used as the Free anchor; the fourth is the lexical
-    /// binding home, which keeps same-named shadows independent.
-    pub pending_dead_store: HashMap<Owner, DeadStoreEntry>,
-    /// Lexical binding home → its pending owner keys. Reads and
-    /// assignments clear through this index instead of scanning every
-    /// pending entry. Rebuilt whenever branch state is restored or merged.
-    pub pending_dead_store_by_home: HashMap<PlaceId, Vec<Owner>>,
 
     /// SSA values that allocated heap-owned strings during the
     /// forward walk: `StrConst`, `StrConcat`, and Move-typed `Call`
@@ -402,15 +392,6 @@ pub(crate) struct Ownership {
     /// statement via the walk's `stmt_of` table). Consumed by the
     /// post-walk promotion-free scheduling pass in `analyze_function`.
     pub(crate) promo_candidates: Vec<PromoCandidate>,
-
-    /// Match-arm bindings (M12) never read nor consumed inside their
-    /// arm, swept by the match analysis at arm end: the name/span pairs
-    /// for the W0001 drain in `analyze_function` (the pass cannot emit
-    /// warnings — only `analyze_function` holds the warnings sink).
-    /// The matching Frees are already scheduled arm-gated at the arm's
-    /// end. Monotone-accumulating: loop convergence re-walks can record
-    /// a binding twice — the drain dedups.
-    pub arm_dead_stores: Vec<(StringId, Span)>,
 }
 
 impl Ownership {
@@ -427,24 +408,6 @@ impl Ownership {
     pub(crate) fn dense_set<V: Copy>(table: &mut [Option<V>], r: TirRef, v: V) {
         debug_assert!(!r.is_param());
         table[r.index()] = Some(v);
-    }
-
-    pub(crate) fn clear_pending_dead_store(&mut self, home: PlaceId) {
-        if let Some(owners) = self.pending_dead_store_by_home.remove(&home) {
-            for owner in owners {
-                self.pending_dead_store.remove(&owner);
-            }
-        }
-    }
-
-    pub(crate) fn rebuild_pending_dead_store_index(&mut self) {
-        self.pending_dead_store_by_home.clear();
-        for (&owner, (_, _, _, home)) in &self.pending_dead_store {
-            self.pending_dead_store_by_home
-                .entry(*home)
-                .or_default()
-                .push(owner);
-        }
     }
 
     /// The owner whose storage an instruction's value IS (G2): the
@@ -711,16 +674,6 @@ fn initialize_function_ownership(tir: &Tir, flow: &Flow, pool: &InternPool) -> O
         // The param is the current binding for its name until a
         // shadowing `VarDecl` installs a different one.
         own.binding_of_name.insert(param.name, TirRef::param(idx));
-        if param.mode != ParamMode::Inout {
-            register_pending_dead_store(
-                &mut own,
-                owner,
-                home,
-                param.name,
-                param.span,
-                TirRef::param(idx),
-            );
-        }
     }
 
     own
@@ -738,6 +691,7 @@ fn analyze_function(
     optional_optimizations: bool,
 ) {
     let mut own = initialize_function_ownership(tir, flow, pool);
+    let dead_stores = DeadStoreAnalysis::analyze_with_nesting(tir, flow, pool, &own.loop_nesting);
 
     // The forward walk, driven by Flow IR: the driver iterates blocks
     // in construction order; each block's steps run in evaluation
@@ -748,7 +702,7 @@ fn analyze_function(
     // processed later with the merged state. Dead continuations the
     // regions never reach (statements after a return/break) are
     // processed inline by the driver in block order.
-    let mut w = Walk::new(tir, flow, pool);
+    let mut w = Walk::new(tir, flow, pool, &dead_stores);
     let epoch = w.next_epoch();
     for b in flow.forward_order() {
         if w.is_processed(b) {
@@ -815,10 +769,18 @@ fn analyze_function(
     // join), so on the not-taken path the binding still owns the
     // pre-reassign allocation. Codegen emits the Free from the binding's
     // current `FatLocals`, which is the path-correct buffer.
+    // Unreachable reseats cannot cover a live value's cleanup.
     let reassign_targets: HashSet<Owner> = sidecar
         .free_on_reassign
         .iter()
-        .flatten()
+        .enumerate()
+        .filter(|(index, target)| {
+            target.is_some()
+                && flow
+                    .step_block_of(TirRef::from_raw(*index as u32))
+                    .is_some_and(|block| !flow.blocks[block.0 as usize].unreachable)
+        })
+        .flat_map(|(_, target)| target)
         .map(|t| {
             // Inout-param reseats store the param's virtual ref.
             if let Some(idx) = t.as_param_index() {
@@ -861,6 +823,7 @@ fn analyze_function(
         reassign_orders: &reassign_orders,
         decl_of_init: &decl_of_init,
         assign_value_of: &assign_value_of,
+        dead_stores: &dead_stores,
     };
     schedule_last_use_frees(&cleanup, &own, sidecar);
 
@@ -873,13 +836,23 @@ fn analyze_function(
     // W0003 case B (M8.4.1.2): redundant bound materializations. Runs
     // after the walk so the escape classification it reuses — final
     // lattice states plus the hazard log — is complete.
-    warn_redundant_materialize(tir, flow, pool, synth, &own, &order, warnings);
+    warn_redundant_materialize(tir, flow, pool, synth, &own, &dead_stores, &order, warnings);
 
     // W0004: bound `to_bytes()` copies that never mutate nor escape.
     // Same post-walk shape as W0003 case B, plus the last-use map to
     // bound the window where a receiver hazard collides with the
     // suggested view.
-    warn_redundant_to_bytes(tir, flow, pool, synth, &own, &order, &last_use, warnings);
+    warn_redundant_to_bytes(
+        tir,
+        flow,
+        pool,
+        synth,
+        &own,
+        &dead_stores,
+        &order,
+        &last_use,
+        warnings,
+    );
 
     finalize_cleanup(&cleanup, &own, sidecar, optional_optimizations, sink);
 }
