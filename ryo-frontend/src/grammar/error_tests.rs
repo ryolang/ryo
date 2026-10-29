@@ -326,7 +326,7 @@ fn try_and_catch_have_narrow_operands() {
 #[test]
 fn malformed_catch_recovers_at_next_declaration_without_orphans() {
     // A broken handler followed by `fn next(): ...` leaves a parseable next
-    // declaration, one recovered Error statement, and no reachable orphan nodes.
+    // declaration, one recovered Error statement, and no allocated orphan nodes.
     let (ok, ast, errs, _pool) = lex_and_parse_recovering(
         "broken = f() catch as err:\n\tNotFound:\nfn next():\n\treturn 0\n",
     );
@@ -347,4 +347,6 @@ fn malformed_catch_recovers_at_next_declaration_without_orphans() {
         reachable_stmts, 3,
         "only the Error, FunctionDef, and Return statements are reachable"
     );
+    assert_eq!(reachable_exprs + 1, ast.expr_count(), "orphan expressions");
+    assert_eq!(reachable_stmts + 1, ast.stmt_count(), "orphan statements");
 }

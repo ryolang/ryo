@@ -66,6 +66,9 @@ pub struct ParseState {
     /// followed by the next fold refresh), so the value is never
     /// stale at a read.
     postfix_head_enum: Option<StringId>,
+    /// Statement-entry arena lengths. Nested statement lists push and
+    /// pop in LIFO order when each line either succeeds or recovers.
+    recovery_checkpoints: Vec<AstCheckpoint>,
 }
 
 impl ParseState {
@@ -76,11 +79,24 @@ impl ParseState {
             ast: Ast::new(),
             pool,
             postfix_head_enum: None,
+            recovery_checkpoints: Vec::new(),
         }
     }
 
     pub fn into_parts(self) -> (Ast, InternPool) {
         (self.ast, self.pool)
+    }
+
+    fn begin_statement(&mut self) {
+        self.recovery_checkpoints.push(self.ast.checkpoint());
+    }
+
+    fn finish_statement(&mut self, rollback: bool) {
+        if let Some(checkpoint) = self.recovery_checkpoints.pop()
+            && rollback
+        {
+            self.ast.rollback(checkpoint);
+        }
     }
 }
 

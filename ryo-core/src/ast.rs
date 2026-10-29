@@ -588,6 +588,30 @@ impl fmt::Display for CompoundOp {
 
 // ---------- Top-level AST ----------
 
+/// Lengths needed to reclaim every arena allocated after a parser
+/// statement checkpoint. Kept in source order with [`Ast`].
+#[derive(Debug, Clone, Copy)]
+pub struct AstCheckpoint {
+    exprs: usize,
+    stmts: usize,
+    expr_lists: usize,
+    stmt_lists: usize,
+    elifs: usize,
+    struct_field_decls: usize,
+    struct_field_inits: usize,
+    type_field_lists: usize,
+    type_expr_lists: usize,
+    type_exprs: usize,
+    patterns: usize,
+    pattern_lists: usize,
+    pattern_field_lists: usize,
+    variant_arg_lists: usize,
+    match_arms: usize,
+    enum_variants: usize,
+    top_level: usize,
+    span: Span,
+}
+
 /// A complete Ryo program: the typed expression/statement arenas,
 /// their list side arenas, and the top-level statement ids in
 /// source order.
@@ -660,6 +684,58 @@ impl Ast {
             top_level: Vec::new(),
             span: Span::EMPTY,
         }
+    }
+
+    /// Capture the arena lengths before parsing one statement.
+    pub fn checkpoint(&self) -> AstCheckpoint {
+        AstCheckpoint {
+            exprs: self.exprs.len(),
+            stmts: self.stmts.len(),
+            expr_lists: self.expr_lists.len(),
+            stmt_lists: self.stmt_lists.len(),
+            elifs: self.elifs.len(),
+            struct_field_decls: self.struct_field_decls.len(),
+            struct_field_inits: self.struct_field_inits.len(),
+            type_field_lists: self.type_field_lists.len(),
+            type_expr_lists: self.type_expr_lists.len(),
+            type_exprs: self.type_exprs.len(),
+            patterns: self.patterns.len(),
+            pattern_lists: self.pattern_lists.len(),
+            pattern_field_lists: self.pattern_field_lists.len(),
+            variant_arg_lists: self.variant_arg_lists.len(),
+            match_arms: self.match_arms.len(),
+            enum_variants: self.enum_variants.len(),
+            top_level: self.top_level.len(),
+            span: self.span,
+        }
+    }
+
+    /// Reclaim every node and side-arena entry allocated after a
+    /// statement checkpoint. Earlier nodes cannot reference later ids,
+    /// so truncating cannot invalidate a surviving AST reference.
+    pub fn rollback(&mut self, checkpoint: AstCheckpoint) {
+        self.exprs.truncate(checkpoint.exprs);
+        self.stmts.truncate(checkpoint.stmts);
+        self.expr_lists.truncate(checkpoint.expr_lists);
+        self.stmt_lists.truncate(checkpoint.stmt_lists);
+        self.elifs.truncate(checkpoint.elifs);
+        self.struct_field_decls
+            .truncate(checkpoint.struct_field_decls);
+        self.struct_field_inits
+            .truncate(checkpoint.struct_field_inits);
+        self.type_field_lists.truncate(checkpoint.type_field_lists);
+        self.type_expr_lists.truncate(checkpoint.type_expr_lists);
+        self.type_exprs.truncate(checkpoint.type_exprs);
+        self.patterns.truncate(checkpoint.patterns);
+        self.pattern_lists.truncate(checkpoint.pattern_lists);
+        self.pattern_field_lists
+            .truncate(checkpoint.pattern_field_lists);
+        self.variant_arg_lists
+            .truncate(checkpoint.variant_arg_lists);
+        self.match_arms.truncate(checkpoint.match_arms);
+        self.enum_variants.truncate(checkpoint.enum_variants);
+        self.top_level.truncate(checkpoint.top_level);
+        self.span = checkpoint.span;
     }
 
     /// Lookup an expression by id.
