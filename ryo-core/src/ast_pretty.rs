@@ -14,7 +14,7 @@
 //! last child of its parent.
 
 use crate::ast::{
-    Ast, ExprId, ExprKind, FunctionDef, IfStmt, LitPattern, Literal, MatchArmBody,
+    Ast, CatchBody, ExprId, ExprKind, FunctionDef, IfStmt, LitPattern, Literal, MatchArmBody,
     PatternFieldKind, PatternId, PatternKind, PatternVariantArgTarget, StmtId, StmtKind, TypeExpr,
     TypeExprKind, VarDecl, VariantArgs,
 };
@@ -61,6 +61,28 @@ fn fmt_type_expr<'p>(texpr: &TypeExpr, ast: &Ast, pool: &'p InternPool) -> Cow<'
                 Cow::Owned(format!("({rendered},)"))
             } else {
                 Cow::Owned(format!("({rendered})"))
+            }
+        }
+        TypeExprKind::ErrorUnion {
+            error_set,
+            success,
+            inferred,
+        } => {
+            let success = fmt_type_expr(&ast.type_expr(*success), ast, pool);
+            if *inferred {
+                Cow::Owned(format!("!{success}"))
+            } else {
+                let errors = ast
+                    .type_expr_list(*error_set)
+                    .iter()
+                    .map(|ty| fmt_type_expr(ty, ast, pool).into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                if ast.type_expr_list(*error_set).len() == 1 {
+                    Cow::Owned(format!("{errors}!{success}"))
+                } else {
+                    Cow::Owned(format!("({errors})!{success}"))
+                }
             }
         }
     }
@@ -114,6 +136,7 @@ fn write_stmt_inline(out: &mut String, ast: &Ast, stmt: StmtId) -> fmt::Result {
         StmtKind::FunctionDef(_) => "FunctionDef",
         StmtKind::StructDef(_) => "StructDef",
         StmtKind::EnumDef(_) => "EnumDef",
+        StmtKind::ErrorDef(_) => "ErrorDef",
         StmtKind::Return(_) => "Return",
         StmtKind::ExprStmt(_) => "ExprStmt",
         StmtKind::IfStmt(_) => "IfStmt",
@@ -206,6 +229,28 @@ fn write_stmt_children(
                 writeln!(out)?;
             }
             Ok(())
+        }
+        StmtKind::ErrorDef(def) => {
+            let shape = match def.payload.kind {
+                VariantKind::Unit => "unit",
+                VariantKind::Tuple => "tuple",
+                VariantKind::Named => "named",
+            };
+            write!(
+                out,
+                "{}ErrorDef: {} ({shape})",
+                prefix,
+                pool.str(def.name.name)
+            )?;
+            for (field_name, field_ty) in ast.struct_field_decls(def.payload.fields) {
+                write!(
+                    out,
+                    " {}: {}",
+                    pool.str(*field_name),
+                    fmt_type_expr(field_ty, ast, pool)
+                )?;
+            }
+            writeln!(out)
         }
         StmtKind::Return(value) => {
             if let Some(e) = value {
@@ -455,6 +500,14 @@ fn write_expr(
             pool.str(c.variant.name)
         )),
         ExprKind::Match { .. } => Cow::Borrowed("Match"),
+        ExprKind::ErrorConstruct(c) => {
+            Cow::Owned(format!("ErrorConstruct({})", pool.str(c.name.name)))
+        }
+        ExprKind::Try(_) => Cow::Borrowed("Try"),
+        ExprKind::Catch(c) => Cow::Owned(match c.binding {
+            Some(binding) => format!("Catch(as {})", pool.str(binding.name)),
+            None => "Catch".to_string(),
+        }),
     };
 
     writeln!(
@@ -557,33 +610,95 @@ fn write_expr(
                 "scrut: ",
                 pool,
             )?;
-            for (i, arm) in arms.iter().enumerate() {
-                let is_last = i == arms.len() - 1;
-                writeln!(out, "{}{}arm[{}]:", new_prefix, connector(is_last), i)?;
-                let arm_prefix = format!("{}{}", new_prefix, continuation(is_last));
-                write_pattern(out, ast, arm.pattern, &arm_prefix, false, "pat: ", pool)?;
-                match arm.body {
-                    MatchArmBody::Expr(body) => {
-                        write_expr(out, ast, body, &arm_prefix, true, "body: ", pool)?;
-                    }
-                    MatchArmBody::Stmts(list) => {
-                        let stmts = ast.stmt_list(list);
-                        for (j, &stmt) in stmts.iter().enumerate() {
-                            write_stmt_tree(
-                                out,
-                                ast,
-                                stmt,
-                                &arm_prefix,
-                                j == stmts.len() - 1,
-                                pool,
-                            )?;
-                        }
-                    }
+            write_match_arms(out, ast, arms, &new_prefix, pool)
+        }
+        ExprKind::ErrorConstruct(c) => match &c.args {
+            Some(VariantArgs {
+                positional: Some(list),
+                ..
+            }) => write_expr_args(out, ast, ast.expr_list(*list), &new_prefix, pool),
+            Some(VariantArgs {
+                named: Some(inits), ..
+            }) => {
+                let inits = ast.struct_field_inits(*inits);
+                for (i, (name, value)) in inits.iter().enumerate() {
+                    let label = format!("{}: ", pool.str(*name));
+                    write_expr(
+                        out,
+                        ast,
+                        *value,
+                        &new_prefix,
+                        i == inits.len() - 1,
+                        &label,
+                        pool,
+                    )?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        },
+        ExprKind::Try(operand) => {
+            write_expr(out, ast, operand, &new_prefix, true, "operand: ", pool)
+        }
+        ExprKind::Catch(c) => match c.body {
+            CatchBody::Handler(MatchArmBody::Expr(handler)) => {
+                write_expr(out, ast, c.operand, &new_prefix, false, "operand: ", pool)?;
+                write_expr(out, ast, handler, &new_prefix, true, "handler: ", pool)
+            }
+            CatchBody::Handler(MatchArmBody::Stmts(list)) => {
+                write_expr(out, ast, c.operand, &new_prefix, false, "operand: ", pool)?;
+                write_block(
+                    out,
+                    "handler:",
+                    ast.stmt_list(list),
+                    &new_prefix,
+                    true,
+                    ast,
+                    pool,
+                )
+            }
+            CatchBody::Arms(list) => {
+                let arms = ast.match_arms(list);
+                write_expr(
+                    out,
+                    ast,
+                    c.operand,
+                    &new_prefix,
+                    arms.is_empty(),
+                    "operand: ",
+                    pool,
+                )?;
+                write_match_arms(out, ast, arms, &new_prefix, pool)
+            }
+        },
+    }
+}
+
+fn write_match_arms(
+    out: &mut String,
+    ast: &Ast,
+    arms: &[crate::ast::MatchArm],
+    prefix: &str,
+    pool: &InternPool,
+) -> fmt::Result {
+    for (i, arm) in arms.iter().enumerate() {
+        let is_last = i == arms.len() - 1;
+        writeln!(out, "{}{}arm[{}]:", prefix, connector(is_last), i)?;
+        let arm_prefix = format!("{}{}", prefix, continuation(is_last));
+        write_pattern(out, ast, arm.pattern, &arm_prefix, false, "pat: ", pool)?;
+        match arm.body {
+            MatchArmBody::Expr(body) => {
+                write_expr(out, ast, body, &arm_prefix, true, "body: ", pool)?;
+            }
+            MatchArmBody::Stmts(list) => {
+                let stmts = ast.stmt_list(list);
+                for (j, &stmt) in stmts.iter().enumerate() {
+                    write_stmt_tree(out, ast, stmt, &arm_prefix, j == stmts.len() - 1, pool)?;
                 }
             }
-            Ok(())
         }
     }
+    Ok(())
 }
 
 fn write_expr_args(

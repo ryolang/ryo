@@ -748,6 +748,7 @@ where
         enums::attributed_type_decl_parser(enum_tail.clone()),
         struct_decl_parser(),
         enums::enum_decl_parser(enum_tail),
+        errors::error_decl_parser(),
         function_def_parser(expr.clone()),
         destructure::destructure_stmt_parser(expr.clone()),
         var_decl_parser(expr.clone()),
@@ -852,7 +853,34 @@ where
                 elems.extend(rest);
                 e.state().type_expr_positional(&elems, span)
             });
-        named_type_expr_parser().or(anon).or(positional).boxed()
+        let inferred =
+            just(Token::Bang)
+                .ignore_then(ty.clone())
+                .map_with(|success, e: &mut Mx<'a, '_, I>| {
+                    let span = crate::spans::cspan(e.span());
+                    e.state().error_union_type(&[], success, true, span)
+                });
+        let grouped_errors = named_type_expr_parser()
+            .separated_by(just(Token::Pipe))
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LParen), just(Token::RParen));
+        let error_set = grouped_errors.or(named_type_expr_parser().map(|ty| vec![ty]));
+        let explicit = error_set
+            .then_ignore(just(Token::Bang))
+            .then(ty.clone())
+            .map_with(|(error_set, success), e: &mut Mx<'a, '_, I>| {
+                let span = crate::spans::cspan(e.span());
+                e.state().error_union_type(&error_set, success, false, span)
+            });
+        choice((
+            inferred,
+            explicit,
+            named_type_expr_parser(),
+            anon,
+            positional,
+        ))
+        .boxed()
     })
 }
 

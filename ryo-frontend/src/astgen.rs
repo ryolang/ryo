@@ -126,6 +126,14 @@ impl TypeResolver {
                 }
                 self.resolve_anon_fields(&fields, ast, pool, sink, defined_enums)
             }
+            ast::TypeExprKind::ErrorUnion { .. } => {
+                sink.emit(Diag::error(
+                    texpr.span,
+                    DiagCode::ParseError,
+                    "error union types are parsed but semantic lowering is not implemented yet",
+                ));
+                pool.error_type()
+            }
         }
     }
 
@@ -339,6 +347,13 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
                 enum_entries.insert(name, (ty, *def, program.stmt_span(stmt)));
                 enum_order.push(name);
             }
+            ast::StmtKind::ErrorDef(def) => {
+                sink.emit(Diag::error(
+                    def.name.span,
+                    DiagCode::ParseError,
+                    "error declarations are parsed but semantic lowering is not implemented yet",
+                ));
+            }
             _ => top_level.push(stmt),
         }
     }
@@ -528,6 +543,15 @@ fn named_refs_in(texpr: &ast::TypeExpr, ast: &ast::Ast, out: &mut Vec<(StringId,
             for ft in ast.type_expr_list(*elems) {
                 named_refs_in(ft, ast, out);
             }
+        }
+        ast::TypeExprKind::ErrorUnion {
+            error_set, success, ..
+        } => {
+            for ft in ast.type_expr_list(*error_set) {
+                named_refs_in(ft, ast, out);
+            }
+            let success = ast.type_expr(*success);
+            named_refs_in(&success, ast, out);
         }
     }
 }
@@ -1169,6 +1193,13 @@ fn gen_stmt(
         // Struct/enum declarations are filtered out before lowering (see `generate`).
         ast::StmtKind::StructDef(_) => {}
         ast::StmtKind::EnumDef(_) => {}
+        ast::StmtKind::ErrorDef(_) => {
+            sink.emit(Diag::error(
+                span,
+                DiagCode::ParseError,
+                "error declarations are parsed but semantic lowering is not implemented yet",
+            ));
+        }
     }
 }
 
@@ -1299,6 +1330,38 @@ fn gen_expr(
             sink,
             span,
         ),
+        ast::ExprKind::ErrorConstruct(c) => match c.args {
+            None => b.var_ref(c.name.name, span),
+            Some(args) => {
+                let mut arg_refs = Vec::new();
+                if let Some(list) = args.positional {
+                    for &arg in ast.expr_list(list) {
+                        arg_refs.push(gen_expr(b, ast, arg, types, defined_enums, pool, sink));
+                    }
+                } else if let Some(inits) = args.named {
+                    for &(_, arg) in ast.struct_field_inits(inits) {
+                        arg_refs.push(gen_expr(b, ast, arg, types, defined_enums, pool, sink));
+                    }
+                }
+                b.call(c.name.name, &arg_refs, span)
+            }
+        },
+        ast::ExprKind::Try(_) => {
+            sink.emit(Diag::error(
+                span,
+                DiagCode::ParseError,
+                "try expressions are parsed but semantic lowering is not implemented yet",
+            ));
+            b.int_literal(0, span)
+        }
+        ast::ExprKind::Catch(_) => {
+            sink.emit(Diag::error(
+                span,
+                DiagCode::ParseError,
+                "catch expressions are parsed but semantic lowering is not implemented yet",
+            ));
+            b.int_literal(0, span)
+        }
     }
 }
 
