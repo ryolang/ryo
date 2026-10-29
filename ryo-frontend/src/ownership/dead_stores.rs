@@ -443,7 +443,9 @@ fn compute_dominators(flow: &Flow) -> Vec<Option<BlockId>> {
     let count = flow.blocks.len();
     let mut idom = vec![None; count];
     for block in flow.forward_order() {
-        if block == flow.entry || flow.predecessors(block).is_empty() {
+        if block == flow.entry
+            || (!flow.blocks[block.0 as usize].unreachable && flow.predecessors(block).is_empty())
+        {
             idom[block.0 as usize] = Some(block);
         }
     }
@@ -459,7 +461,7 @@ fn compute_dominators(flow: &Flow) -> Vec<Option<BlockId>> {
             }
             let mut new = None;
             for pred in flow.predecessors(block) {
-                if idom[pred.0 as usize].is_none() {
+                if flow.blocks[pred.0 as usize].unreachable || idom[pred.0 as usize].is_none() {
                     continue;
                 }
                 new = Some(match new {
@@ -703,4 +705,30 @@ fn collect_arm_dead(
         }
     }
     (dead, order)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ownership::tests::common::check_src_full;
+
+    #[test]
+    fn unreachable_blocks_have_no_dominators() {
+        let src = concat!(
+            "fn f() -> int:\n",
+            "\treturn 0\n",
+            "\tif true:\n",
+            "\t\tdead = \"then\"\n",
+            "\telse:\n",
+            "\t\tdead = \"else\"\n",
+        );
+        let (_, _, tirs, pool) = check_src_full(src);
+        let flow = Flow::build(&tirs[0], &pool);
+        let idom = compute_dominators(&flow);
+        for block in flow.forward_order() {
+            if flow.blocks[block.0 as usize].unreachable {
+                assert_eq!(idom[block.0 as usize], None, "dead block {block:?}");
+            }
+        }
+    }
 }

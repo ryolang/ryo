@@ -48,7 +48,7 @@ pub(super) fn check_src(input: &str) -> Vec<Diag> {
 /// `check_src` variant that also returns the ownership sidecar, the
 /// TIRs, and the pool — for tests that pin Free anchors to specific
 /// instructions.
-pub(super) fn check_src_full(
+pub(in crate::ownership) fn check_src_full(
     input: &str,
 ) -> (
     Vec<Diag>,
