@@ -1400,6 +1400,38 @@ mod tests {
     }
 
     #[test]
+    fn enum_lit_dump_lists_variant_and_fields() {
+        let mut pool = InternPool::new();
+        let shape = pool.intern_str("Shape");
+        let pair = pool.intern_str("Pair");
+        let float_ty = pool.float();
+        let enum_ty = pool.declare_enum(shape);
+        pool.define_enum(
+            enum_ty,
+            shape,
+            &[crate::types::EnumVariantDef {
+                name: pair,
+                kind: crate::types::VariantKind::Tuple,
+                fields: vec![(pair, float_ty), (pair, float_ty)],
+            }],
+            crate::types::StructFlags::default(),
+        );
+
+        let mut b = UirBuilder::new();
+        let w = b.float_literal(3.0, sp());
+        let h = b.float_literal(4.0, sp());
+        b.enum_lit(enum_ty, 0, false, &[(0, w), (1, h)], sp());
+        let uir = b.finish();
+
+        let out = format!("{}", uir.dump(&pool));
+        assert!(
+            out.contains("= enum_lit Shape variant=0 {0: %1, 1: %2}"),
+            "got:\n{out}"
+        );
+        assert!(!out.contains("<malformed"), "got:\n{out}");
+    }
+
+    #[test]
     fn enum_lit_positional_flag_round_trips() {
         let mut pool = InternPool::new();
         let shape = pool.intern_str("Shape");

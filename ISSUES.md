@@ -332,17 +332,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-166 — Sema does not reject constant `INT_MIN / -1` at compile time
-
-**Severity:** Cleanup
-**Area:** sema
-
-**Files:** `ryo-frontend/src/sema/expr/mod.rs` (the literal-zero division check in `check_binary_op` :183-195), `ryo-backend/src/codegen/arith.rs` (`emit_div_guard` :166)
-**Summary:** The codegen division guard panics at runtime on `x / 0` and `x % 0`, with `INT_MIN / -1` and `INT_MIN % -1` covered by the signed-overflow guard fix; but sema only rejects the literal-zero-divisor form at compile time. The constant case `INT_MIN / -1` (dividend a known `i64::MIN` constant, divisor the literal expression `-1` — a unary minus, not a literal) still compiles and only fails when executed. Deferred from the runtime-guard fix as likely not worth it: the shape is rare and the runtime guard covers correctness.
-**Resolution:** In sema's division checks, when the divisor expression is a unary-minus of literal `1` and the dividend's constant value (or range) is exactly `i64::MIN`, emit a compile-time diagnostic pointing at the division. Skip if constant/range info is not already in scope at that site — do not plumb new machinery for this edge case.
-
----
-
 ### I-167 — Systematic audit of the runtime FFI boundary beyond the known gaps
 
 **Severity:** Cleanup
@@ -669,19 +658,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-244 — Dump writers render Extra-carrying tags as <malformed>
-
-**Severity:** Correctness / Hygiene
-**Area:** core-ir
-
-**Files:** ryo-core/src/uir/dump.rs, ryo-core/src/tir/dump.rs
-
-**Summary:** The hand-written dump writers lack arms for some Extra-carrying instruction tags. Verified 2026-10-20 on examples/enums.ryo: the UIR dump renders every EnumLit as `<malformed: EnumLit / Extra(...)>`. The Match rendering gap is documented (pattern_matching.md known-limitations), but EnumLit is not. The wires themselves are healthy — decode, views, and round-trip fixtures all exist; this is a display gap only.
-
-**Resolution:** Add dump arms for the remaining Extra-carrying tags (EnumLit first; audit both dump writers for any other Extra tag without an arm, UIR and TIR). Dump output is a debugging surface; keep arms aligned with the wires.rs layout modules.
-
----
-
 ### I-246 — Generate CodSpeed suite registration from suite manifests
 
 **Severity:** Cleanup
@@ -740,4 +716,4 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
 
-<!-- issue-id high-water: 249 -->
+<!-- issue-id high-water: 250 -->
