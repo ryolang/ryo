@@ -153,7 +153,9 @@ fn dead_predecessor_does_not_hide_live_dead_store() {
     );
     let dead_span = diags
         .iter()
-        .find(|d| d.code == DiagCode::DeadStore)
+        .find(|d| {
+            d.code == DiagCode::DeadStore && d.message == "value `s` is declared but never used"
+        })
         .expect("dead-store diagnostic")
         .span;
     let sidecar = take_function_sidecar(&mut sidecar, 0);
@@ -161,4 +163,149 @@ fn dead_predecessor_does_not_hide_live_dead_store() {
         sidecar.drops.iter().any(|drop| drop.span == dead_span),
         "sidecar: {sidecar:?}"
     );
+}
+
+#[test]
+fn dead_read_does_not_hide_match_binding_dead_store() {
+    let src = concat!(
+        "enum Opt:\n",
+        "\tSome(str)\n",
+        "\tNone\n",
+        "fn f() -> int:\n",
+        "\to = Opt.Some(\"value\")\n",
+        "\tmatch o:\n",
+        "\t\tSome(v):\n",
+        "\t\t\treturn 1\n",
+        "\t\t\tprint(v)\n",
+        "\t\tNone:\n",
+        "\t\t\treturn 0\n",
+    );
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        diags.iter().any(|d| {
+            d.code == DiagCode::DeadStore && d.message == "value `v` is declared but never used"
+        }),
+        "dead read must not count as a use: {diags:?}"
+    );
+    let m = (1..tirs[0].instructions.len() as u32)
+        .map(TirRef::from_raw)
+        .find(|&r| tirs[0].inst(r).tag == TirTag::Match)
+        .expect("match instruction");
+    let token = tirs[0]
+        .match_by_move_owner_refs(m, &pool)
+        .into_iter()
+        .next()
+        .expect("binding token");
+    let sidecar = take_function_sidecar(&mut sidecar, 0);
+    assert_eq!(
+        sidecar
+            .drops
+            .iter()
+            .filter(|drop| drop.target == token)
+            .count(),
+        1,
+        "sidecar: {sidecar:?}"
+    );
+}
+
+#[test]
+fn dead_move_does_not_suppress_live_dead_store_cleanup() {
+    let src = concat!(
+        "fn consume(move s: str):\n",
+        "\tprint(s)\n",
+        "fn main():\n",
+        "\ts = \"abcdefghijklmnopqrstuvwxyz\"\n",
+        "\treturn\n",
+        "\tconsume(s)\n",
+    );
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        diags.iter().any(|d| {
+            d.code == DiagCode::DeadStore && d.message == "value `s` is declared but never used"
+        }),
+        "diagnostics: {diags:?}"
+    );
+    let main = tirs
+        .iter()
+        .position(|tir| pool.str(tir.name) == "main")
+        .expect("main TIR");
+    let init = (1..tirs[main].instructions.len() as u32)
+        .map(TirRef::from_raw)
+        .find_map(|r| {
+            if tirs[main].inst(r).tag == TirTag::VarDecl {
+                Some(tirs[main].var_decl_view(r).initializer)
+            } else {
+                None
+            }
+        })
+        .expect("s initializer");
+    let sidecar = take_function_sidecar(&mut sidecar, main);
+    assert_eq!(
+        sidecar
+            .drops
+            .iter()
+            .filter(|drop| drop.target == init)
+            .count(),
+        1,
+        "sidecar: {sidecar:?}"
+    );
+}
+
+#[test]
+fn dead_reassignment_does_not_suppress_live_dead_store_cleanup() {
+    let src = concat!(
+        "fn main():\n",
+        "\tmut s = \"abcdefghijklmnopqrstuvwxyz\"\n",
+        "\treturn\n",
+        "\ts = \"zyxwvutsrqponmlkjihgfedcba\"\n",
+    );
+    let (diags, mut sidecar, tirs, _) = check_src_full(src);
+    assert!(
+        diags.iter().any(|d| {
+            d.code == DiagCode::DeadStore && d.message == "value `s` is declared but never used"
+        }),
+        "diagnostics: {diags:?}"
+    );
+    let init = (1..tirs[0].instructions.len() as u32)
+        .map(TirRef::from_raw)
+        .find_map(|r| {
+            if tirs[0].inst(r).tag == TirTag::VarDecl {
+                Some(tirs[0].var_decl_view(r).initializer)
+            } else {
+                None
+            }
+        })
+        .expect("s initializer");
+    let sidecar = take_function_sidecar(&mut sidecar, 0);
+    assert_eq!(
+        sidecar
+            .drops
+            .iter()
+            .filter(|drop| drop.target == init)
+            .count(),
+        1,
+        "sidecar: {sidecar:?}"
+    );
+}
+
+#[test]
+fn dead_terminal_does_not_replace_live_dead_store_diagnostic() {
+    let src = concat!(
+        "fn f() -> int:\n",
+        "\tmut x = 0\n",
+        "\treturn 0\n",
+        "\tx = 1\n",
+    );
+    let (diags, _, tirs, _) = check_src_full(src);
+    let decl = (1..tirs[0].instructions.len() as u32)
+        .map(TirRef::from_raw)
+        .find(|&r| tirs[0].inst(r).tag == TirTag::VarDecl)
+        .expect("x declaration");
+    let dead = diags
+        .iter()
+        .find(|d| {
+            d.code == DiagCode::DeadStore && d.message == "value `x` is declared but never used"
+        })
+        .expect("dead-store diagnostic");
+    assert_eq!(dead.span, tirs[0].span(decl), "diagnostics: {diags:?}");
 }

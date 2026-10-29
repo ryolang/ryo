@@ -601,7 +601,7 @@ fn collect_pending(
         .filter(|block| !flow.blocks[block.0 as usize].unreachable)
         .collect();
     let mut union = BitSet::new(stores.len());
-    for &block in &terminals {
+    for &block in &live_terminals {
         union.union_with(&outs[block.0 as usize]);
     }
     let mut pending = HashMap::new();
@@ -627,11 +627,16 @@ fn collect_pending(
 
 fn last_read_orders(flow: &Flow) -> Vec<u32> {
     let mut orders = vec![0; flow.places.len()];
-    for step in &flow.steps {
-        if let Some(home) = step.facts.read {
-            let order = flow.order_of(step.inst).unwrap_or(0);
-            let slot = &mut orders[home.0 as usize];
-            *slot = (*slot).max(order);
+    for block in flow
+        .forward_order()
+        .filter(|block| !flow.blocks[block.0 as usize].unreachable)
+    {
+        for step in flow.block_steps(block) {
+            if let Some(home) = step.facts.read {
+                let order = flow.order_of(step.inst).unwrap_or(0);
+                let slot = &mut orders[home.0 as usize];
+                *slot = (*slot).max(order);
+            }
         }
     }
     orders

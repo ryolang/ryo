@@ -769,10 +769,18 @@ fn analyze_function(
     // join), so on the not-taken path the binding still owns the
     // pre-reassign allocation. Codegen emits the Free from the binding's
     // current `FatLocals`, which is the path-correct buffer.
+    // Unreachable reseats cannot cover a live value's cleanup.
     let reassign_targets: HashSet<Owner> = sidecar
         .free_on_reassign
         .iter()
-        .flatten()
+        .enumerate()
+        .filter(|(index, target)| {
+            target.is_some()
+                && flow
+                    .step_block_of(TirRef::from_raw(*index as u32))
+                    .is_some_and(|block| !flow.blocks[block.0 as usize].unreachable)
+        })
+        .flat_map(|(_, target)| target)
         .map(|t| {
             // Inout-param reseats store the param's virtual ref.
             if let Some(idx) = t.as_param_index() {

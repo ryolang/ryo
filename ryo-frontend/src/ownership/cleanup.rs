@@ -487,7 +487,12 @@ pub(crate) fn drain_dead_stores(
             DiagCode::DeadStore,
             format!("value `{}` is declared but never used", ctx.pool.str(*name)),
         ));
-        if decl_inst.is_param() || !matches!(own.states.get(owner), Some(OwnerState::Valid)) {
+        if decl_inst.is_param()
+            || !matches!(
+                own.states.get(owner),
+                Some(OwnerState::Valid | OwnerState::Moved { .. })
+            )
+        {
             continue;
         }
         if ctx.reassign_targets.contains(owner) {
