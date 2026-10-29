@@ -929,6 +929,55 @@ mod tests {
     }
 
     #[test]
+    fn match_dump_lists_arms_bindings_guards_and_bodies() {
+        let mut pool = InternPool::new();
+        let int_ty = pool.int();
+        let str_ty = pool.str_();
+        let main = pool.intern_str("main");
+        let v = pool.intern_str("v");
+
+        let mut b = TirBuilder::new(main, vec![], int_ty, sp());
+        let scrut = b.int_const(0, int_ty, sp());
+        let body = b.int_const(1, int_ty, sp());
+        let stmt = b.return_void(pool.void(), sp());
+        let bindings = [MatchBinding {
+            field_index: 0,
+            name: v,
+            ty: str_ty,
+        }];
+        let guards = [(0, LitPattern::Int(-7))];
+        let m = b.match_expr(
+            scrut,
+            int_ty,
+            &[
+                TypedMatchArm {
+                    span: sp(),
+                    discriminant: Discriminant::Variant(1),
+                    bindings: &bindings,
+                    guards: &guards,
+                    body: TypedMatchBody::Expr(body),
+                },
+                TypedMatchArm {
+                    span: sp(),
+                    discriminant: Discriminant::Wildcard,
+                    bindings: &[],
+                    guards: &[],
+                    body: TypedMatchBody::Stmts(&[stmt]),
+                },
+            ],
+            sp(),
+        );
+        let tir = b.finish(&[m]);
+
+        let out = format!("{}", crate::tir::dump(std::slice::from_ref(&tir), &pool));
+        assert!(
+            out.contains("match %1 [variant 1 {0: v: str} guards {0: -7}: expr %2; _: stmts [%3]]"),
+            "got:\n{out}"
+        );
+        assert!(!out.contains("<malformed"), "got:\n{out}");
+    }
+
+    #[test]
     fn anon_arm_guards_round_trip_variable_width_literals() {
         let mut pool = InternPool::new();
         let int_ty = pool.int();

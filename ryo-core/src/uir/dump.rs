@@ -238,6 +238,22 @@ fn write_inst(
             }
             writeln!(f, "}}")
         }
+        (InstTag::EnumLit, InstData::Extra(_)) => {
+            let view = uir.enum_lit_view(r);
+            write!(
+                f,
+                "enum_lit {} variant={} {{",
+                pool.display(view.ty),
+                view.variant_index
+            )?;
+            for (i, (field_index, value)) in view.fields().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{field_index}: %{}", value.index())?;
+            }
+            writeln!(f, "}}")
+        }
         (InstTag::FieldAccess, InstData::FieldAccess { object, field }) => {
             writeln!(f, "field_access %{}.{}", object.index(), pool.str(field))
         }

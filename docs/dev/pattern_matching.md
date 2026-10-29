@@ -279,8 +279,6 @@ for both.
 - **View-typed match results** are rejected with E0137 (above) — no
   merge shape exists for a projection result until the M12.6 carry-over
   lifts it with the aggregate-result consume.
-- The UIR `ir --emit` dump renders `Match` as `<malformed>` until a dump
-  arm lands.
 
 ## References
 

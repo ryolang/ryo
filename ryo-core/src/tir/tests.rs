@@ -1,4 +1,5 @@
 use super::*;
+use crate::types::{EnumVariantDef, StructFlags, VariantKind};
 
 fn sp() -> Span {
     Span::EMPTY
@@ -1376,4 +1377,37 @@ fn destructure_dump_lists_fields() {
         "got:\n{}",
         out
     );
+}
+
+#[test]
+fn enum_lit_dump_lists_variant_and_fields() {
+    let mut pool = InternPool::new();
+    let int_ty = pool.int();
+    let shape = pool.intern_str("Shape");
+    let pair = pool.intern_str("Pair");
+    let enum_ty = pool.declare_enum(shape);
+    pool.define_enum(
+        enum_ty,
+        shape,
+        &[EnumVariantDef {
+            name: pair,
+            kind: VariantKind::Tuple,
+            fields: vec![(pair, int_ty), (pair, int_ty)],
+        }],
+        StructFlags::default(),
+    );
+    let main = pool.intern_str("main");
+
+    let mut b = TirBuilder::new(main, vec![], pool.void(), sp());
+    let w = b.int_const(3, int_ty, sp());
+    let h = b.int_const(4, int_ty, sp());
+    let lit = b.enum_lit(enum_ty, 0, false, &[(0, w), (1, h)], sp());
+    let tir = b.finish(&[lit]);
+
+    let out = format!("{}", dump(std::slice::from_ref(&tir), &pool));
+    assert!(
+        out.contains("= enum_lit Shape variant=0 {0: %1, 1: %2}"),
+        "got:\n{out}"
+    );
+    assert!(!out.contains("<malformed"), "got:\n{out}");
 }

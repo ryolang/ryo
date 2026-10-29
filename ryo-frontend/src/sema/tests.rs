@@ -993,6 +993,18 @@ fn const_mul_overflow_rejected() {
 }
 
 #[test]
+fn const_min_div_neg_one_overflow_rejected() {
+    let diags = run("fn main():\n\tx = -9223372036854775808 / -1\n").unwrap_err();
+    assert!(any_code(&diags, DiagCode::ConstEvalFailure));
+}
+
+#[test]
+fn const_min_mod_neg_one_overflow_rejected() {
+    let diags = run("fn main():\n\tx = -9223372036854775808 % -1\n").unwrap_err();
+    assert!(any_code(&diags, DiagCode::ConstEvalFailure));
+}
+
+#[test]
 fn const_neg_min_overflow_rejected() {
     // `(0 - MAX) - 1` const-evals to i64::MIN; negating it overflows.
     let diags = run("fn main():\n\tx = -((0 - 9223372036854775807) - 1)\n").unwrap_err();

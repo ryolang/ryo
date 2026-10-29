@@ -2,7 +2,8 @@
 //! the 2000-line CI gate (`scripts/check_file_length.sh`); the listing
 //! format is documented there.
 
-use super::{InternPool, ParamMode, Tir, TirData, TirRef, TirTag};
+use super::{Discriminant, InternPool, MatchBodyView, ParamMode, Tir, TirData, TirRef, TirTag};
+use crate::ast::LitPattern;
 use std::fmt;
 /// Renderable wrapper for `Tir::dump`, modelled on Zig's
 /// `Air.dumpAir` listing format. One section per function.
@@ -192,6 +193,22 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
             }
             writeln!(f, "}}")
         }
+        (TirTag::EnumLit, TirData::Extra(_)) => {
+            let view = tir.enum_lit_view(r);
+            write!(
+                f,
+                "enum_lit {} variant={} {{",
+                pool.display(view.ty),
+                view.variant_index
+            )?;
+            for (i, (field_index, value)) in view.fields().enumerate() {
+                if i > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{field_index}: %{}", value.index())?;
+            }
+            writeln!(f, "}}")
+        }
         (
             TirTag::FieldAccess,
             TirData::FieldAccess {
@@ -219,7 +236,71 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
             }
             writeln!(f, "}}")
         }
+        (TirTag::Match, TirData::Extra(_)) => {
+            let view = tir.match_view(r);
+            write!(f, "match %{} [", view.scrutinee.index())?;
+            for (i, arm) in view.arms().enumerate() {
+                if i > 0 {
+                    write!(f, "; ")?;
+                }
+                match arm.discriminant {
+                    Discriminant::Variant(index) => write!(f, "variant {index}")?,
+                    Discriminant::Int(value) => write!(f, "{value}")?,
+                    Discriminant::Str(value) => write!(f, "{:?}", pool.str(value))?,
+                    Discriminant::Bool(value) => write!(f, "{value}")?,
+                    Discriminant::Wildcard => write!(f, "_")?,
+                }
+                if arm.binding_count() > 0 {
+                    write!(f, " {{")?;
+                    for (j, binding) in arm.bindings().enumerate() {
+                        if j > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(
+                            f,
+                            "{}: {}: {}",
+                            binding.field_index,
+                            pool.str(binding.name),
+                            pool.display(binding.ty)
+                        )?;
+                    }
+                    write!(f, "}}")?;
+                }
+                if arm.guard_count() > 0 {
+                    write!(f, " guards {{")?;
+                    for (j, (field_index, literal)) in arm.guards().enumerate() {
+                        if j > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{field_index}: ")?;
+                        write_match_lit(f, pool, &literal)?;
+                    }
+                    write!(f, "}}")?;
+                }
+                write!(f, ": ")?;
+                match arm.body {
+                    MatchBodyView::Expr(body) => write!(f, "expr %{}", body.index())?,
+                    MatchBodyView::Stmts(_) => {
+                        let refs: Vec<_> = arm
+                            .body
+                            .stmts()
+                            .map(|stmt| format!("%{}", stmt.index()))
+                            .collect();
+                        write!(f, "stmts [{}]", refs.join(", "))?;
+                    }
+                }
+            }
+            writeln!(f, "]")
+        }
         (tag, data) => writeln!(f, "<malformed: {:?} / {:?}>", tag, data),
+    }
+}
+
+fn write_match_lit(f: &mut fmt::Formatter<'_>, pool: &InternPool, lit: &LitPattern) -> fmt::Result {
+    match lit {
+        LitPattern::Int(value) => write!(f, "{value}"),
+        LitPattern::Str(value) => write!(f, "{:?}", pool.str(*value)),
+        LitPattern::Bool(value) => write!(f, "{value}"),
     }
 }
 
