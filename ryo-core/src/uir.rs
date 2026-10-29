@@ -443,6 +443,15 @@ pub struct UirEnumField {
     pub span: Span,
 }
 
+/// A nominal error declaration with its single variant payload.
+#[derive(Debug, Clone)]
+pub struct UirErrorDecl {
+    pub name: StringId,
+    pub ty: TypeId,
+    pub payload: UirEnumVariant,
+    pub span: Span,
+}
+
 // ---------- Top-level UIR ----------
 
 #[derive(Debug, Clone)]
@@ -457,6 +466,8 @@ pub struct Uir {
     /// Enum declarations in source order (M11). Side table — enum
     /// decls lower to no instructions.
     pub enum_decls: Vec<UirEnumDecl>,
+    /// Nominal error declarations in source order.
+    pub error_decls: Vec<UirErrorDecl>,
 }
 
 impl Default for Uir {
@@ -481,6 +492,7 @@ impl Uir {
             func_bodies: Vec::new(),
             struct_decls: Vec::new(),
             enum_decls: Vec::new(),
+            error_decls: Vec::new(),
         }
     }
 
@@ -851,6 +863,10 @@ impl UirBuilder {
     /// to check enum-literal construction.
     pub fn add_enum_decl(&mut self, decl: UirEnumDecl) {
         self.uir.enum_decls.push(decl);
+    }
+
+    pub fn add_error_decl(&mut self, decl: UirErrorDecl) {
+        self.uir.error_decls.push(decl);
     }
 }
 

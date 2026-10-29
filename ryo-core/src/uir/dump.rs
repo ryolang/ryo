@@ -27,11 +27,28 @@ impl<'a> fmt::Display for UirDump<'a> {
         let uir = self.uir;
         let pool = self.pool;
 
-        // Section 0: struct declarations (M9 side table).
+        // Section 0: type declaration side tables.
         for decl in &uir.struct_decls {
             write!(f, "struct {}:", pool.str(decl.name))?;
             for field in &decl.fields {
                 write!(f, " {}: {}", pool.str(field.name), pool.display(field.ty))?;
+            }
+            writeln!(f)?;
+        }
+        for decl in &uir.error_decls {
+            write!(f, "error {}", pool.str(decl.name))?;
+            if decl.payload.kind != crate::types::VariantKind::Unit {
+                write!(f, "(")?;
+                for (index, field) in decl.payload.fields.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    if decl.payload.kind == crate::types::VariantKind::Named {
+                        write!(f, "{}: ", pool.str(field.name))?;
+                    }
+                    write!(f, "{}", pool.display(field.ty))?;
+                }
+                write!(f, ")")?;
             }
             writeln!(f)?;
         }

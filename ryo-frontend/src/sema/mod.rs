@@ -63,6 +63,7 @@ mod call;
 pub(crate) use call::*;
 mod diff;
 pub(crate) use diff::*;
+mod errors;
 mod expr;
 pub(crate) use expr::*;
 mod match_;
@@ -310,6 +311,9 @@ pub struct Sema<'a> {
     /// constructions and bare `EnumName.Variant` unit accesses resolve
     /// against this table.
     enum_types: HashMap<StringId, TypeId>,
+    /// Nominal error name → declared error type, used by constructor
+    /// and match resolution.
+    pub(crate) error_types: HashMap<StringId, TypeId>,
     /// Interned ids for the names compared on hot paths (builtin
     /// dispatch, materialize intercepts, reserved names). Built once
     /// in `Sema::new`.
@@ -371,6 +375,7 @@ impl<'a> Sema<'a> {
         let mut sema = Sema::new(uir, pool, sink, source, file_path);
         sema.register_structs();
         sema.register_enums();
+        errors::register_errors(&mut sema);
         sema.resolve_signatures();
         sema.seed_worklist();
         sema.drive();
@@ -434,6 +439,7 @@ impl<'a> Sema<'a> {
             results,
             struct_types: HashMap::new(),
             enum_types: HashMap::new(),
+            error_types: HashMap::new(),
             names,
             builtin_by_id,
             call_arg_refs: collect_call_arg_refs(uir),
@@ -766,6 +772,8 @@ mod tests_bytes;
 mod tests_destructure;
 #[cfg(test)]
 mod tests_enums;
+#[cfg(test)]
+mod tests_errors;
 #[cfg(test)]
 mod tests_match;
 #[cfg(test)]
