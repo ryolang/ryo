@@ -156,7 +156,195 @@ Include in every report:
 
 Zero defects in one track is useful evidence only when its valid inputs reached backend and runtime. Keep that evidence separate from tracks that found defects.
 
-## 10. When to Use `cargo-fuzz`
+## 10. Build the Python Harness
+
+Use Python 3's standard library; no third-party packages are needed. Keep the script and its output outside the repository. The components have these responsibilities:
+
+- `argparse` parses the base seed, case count, AOT frequency, compiler path, output directory, and timeout.
+- `random.Random` gives each case an independent, reproducible generator. Use it to choose valid types and control-flow shapes, or to mutate an AST-like program description before rendering source. Do not use it to corrupt arbitrary bytes.
+- `subprocess.run(..., shell=False, capture_output=True, timeout=...)` isolates every compiler invocation. An argument list avoids shell interpretation. Captured binary stdout preserves exact output, including newlines. A timeout contains a hung compiler or executable; the harness must record it as a failure, not retry indefinitely.
+- `pathlib.Path` gives each case a separate source, log, and AOT-binary directory. Separate paths prevent parallel cases from overwriting one another.
+- `json` writes the seed, source hash, commands, exit statuses, classification, and outputs to a machine-readable manifest. Human-readable summaries can lose information needed for triage.
+- `concurrent.futures.ThreadPoolExecutor` runs independent generation tracks or compiler processes concurrently. Give each worker its own seed and directory; do not share a generator or result file between workers.
+- `hashlib.sha256` identifies the exact source bytes. Include the compiler commit as well: a seed alone is not a sufficient repro identity after generator changes.
+- `tempfile.TemporaryDirectory` and `shutil.copy2` manage scratch binaries and preserved repros. Keep the manifest and minimized failures in a chosen output directory; let temporary build products disappear when the campaign ends.
+
+The following skeleton is runnable as written. Its generator is a deliberately small valid-program control. Replace `generate(seed)` with the feature's type-directed generator and structure-aware mutations, and supply each case's expected stdout or expected diagnostic. Keep expected-invalid cases separate from valid cases rather than treating any compiler error as a successful mutation.
+
+```python
+import argparse
+import concurrent.futures
+import hashlib
+import json
+import random
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+
+def generate(seed):
+    rng = random.Random(seed)
+    value = rng.randrange(100)
+    return {
+        "seed": seed,
+        "family": "valid-print",
+        "source": f'print("{value}")\n',
+        "expected_valid": True,
+        "expected_stdout": f"{value}",
+    }
+
+
+def execute(command, case_dir, name, timeout):
+    try:
+        result = subprocess.run(
+            command,
+            shell=False,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+        stdout, stderr = result.stdout, result.stderr
+        status = result.returncode
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout or b""
+        stderr = error.stderr or b""
+        status = "timeout"
+    (case_dir / f"{name}.stdout").write_bytes(stdout)
+    (case_dir / f"{name}.stderr").write_bytes(stderr)
+    return {"command": command, "status": status, "stdout": stdout}
+
+
+def run_case(case, args, track_dir):
+    case_dir = track_dir / str(case["seed"])
+    case_dir.mkdir()
+    source = case_dir / "case.ryo"
+    source.write_text(case["source"], encoding="utf-8")
+    ryo = str(args.ryo.resolve())
+    jit = execute([ryo, "run", str(source)], case_dir, "jit", args.timeout)
+    stderr = (case_dir / "jit.stderr").read_text(encoding="utf-8")
+    jit_exact = (
+        case["expected_valid"]
+        and jit["status"] == 0
+        and jit["stdout"] == case["expected_stdout"].encode()
+    )
+
+    if jit["status"] == "timeout":
+        outcome = "timeout"
+    elif case["expected_valid"]:
+        if jit["status"] != 0:
+            outcome = "unexpected_diagnostic"
+            if "panicked at" in stderr:
+                outcome = "compiler_panic"
+        elif not jit_exact:
+            outcome = "output_mismatch"
+        else:
+            outcome = "ok"
+    else:
+        diagnostic = case.get("expected_diagnostic")
+        valid_diagnostic = (
+            jit["status"] == 1
+            and diagnostic is not None
+            and f"[{diagnostic}]" in stderr
+            and "panicked at" not in stderr
+            and "internal error" not in stderr
+        )
+        outcome = "expected_diagnostic" if valid_diagnostic else "invalid_oracle_failure"
+
+    aot = None
+    if case["expected_valid"] and case["seed"] % args.aot_every == 0:
+        with tempfile.TemporaryDirectory(dir=case_dir) as scratch:
+            scratch_source = Path(scratch) / "case.ryo"
+            shutil.copy2(source, scratch_source)
+            binary = scratch_source.with_suffix("")
+            build = execute(
+                [ryo, "build", str(scratch_source)],
+                case_dir, "aot-build", args.timeout,
+            )
+            aot = {"build_command": build["command"], "build_status": build["status"]}
+            if build["status"] == 0:
+                run = execute([str(binary)], case_dir, "aot-run", args.timeout)
+                aot["run_command"] = run["command"]
+                aot["run_status"] = run["status"]
+                aot["exact_output"] = run["stdout"] == case["expected_stdout"].encode()
+                if outcome == "ok" and (run["status"] != 0 or not aot["exact_output"]):
+                    outcome = "aot_failure"
+            elif outcome == "ok":
+                outcome = "aot_build_failure"
+
+    return {
+        **{key: value for key, value in case.items() if key != "source"},
+        "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "source": str(source),
+        "jit_command": jit["command"],
+        "jit_status": jit["status"],
+        "aot": aot,
+        "outcome": outcome,
+        "backend_completed": case["expected_valid"] and jit["status"] == 0,
+        "jit_exact": jit_exact,
+    }
+
+
+def run_track(name, seeds, args):
+    track_dir = args.out / name
+    track_dir.mkdir(parents=True)
+    results = [run_case(generate(seed), args, track_dir) for seed in seeds]
+    summary = {
+        "track": name,
+        "generated": len(results),
+        "valid_generated": sum(r["expected_valid"] for r in results),
+        "backend_completed": sum(r["backend_completed"] for r in results),
+        "jit_exact": sum(r["jit_exact"] for r in results),
+        "expected_diagnostics": sum(r["outcome"] == "expected_diagnostic" for r in results),
+        "aot_executed": sum(r["aot"] is not None and "run_status" in r["aot"] for r in results),
+        "aot_exact": sum(bool(r["aot"] and r["aot"].get("exact_output")) for r in results),
+    }
+    (track_dir / "results.json").write_text(
+        json.dumps({"summary": summary, "cases": results}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return summary
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ryo", type=Path, required=True)
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--count", type=int, default=20)
+    parser.add_argument("--aot-every", type=int, default=5)
+    parser.add_argument("--timeout", type=float, default=10.0)
+    args = parser.parse_args()
+    if args.count < 1 or args.aot_every < 1:
+        parser.error("--count and --aot-every must be positive")
+    args.out.mkdir(parents=True, exist_ok=False)
+    shutil.copy2(__file__, args.out / "harness.py")
+    seeds = list(range(args.seed, args.seed + args.count))
+    tracks = {"control": seeds[::2], "mutation": seeds[1::2]}
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = [executor.submit(run_track, name, values, args) for name, values in tracks.items()]
+        summaries = [future.result() for future in futures]
+    manifest = {"compiler": str(args.ryo.resolve()), "tracks": summaries}
+    (args.out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    print(json.dumps(manifest, indent=2))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+Run it against a freshly built compiler, for example:
+
+```bash
+python3 /tmp/ryo-error-fuzz/harness.py \
+  --ryo target/debug/ryo \
+  --out /tmp/ryo-error-fuzz/run-001 \
+  --seed 1000 --count 100 --aot-every 10 --timeout 15
+```
+
+`backend_completed` counts only valid programs that completed JIT compilation and execution. It does not pretend that an exit code identifies the parser or semantic-analysis stage. For stage-specific coverage, use documented diagnostic categories or explicit compiler instrumentation, and count internal/backend failures separately. Compare `backend_completed` with the number of valid generated programs: a shrinking ratio is a reason to inspect the generator and oracles before reporting compiler defects. Preserve failing cases and their logs; the temporary AOT directory is only for build artifacts.
+
+## 11. When to Use `cargo-fuzz`
 
 [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz) is not limited to Rust source input. A Rust fuzz target can generate any structured data, including Ryo source programs. It is useful when you want a persistent, high-throughput, in-process harness that calls compiler crates directly and uses libFuzzer coverage guidance.
 
