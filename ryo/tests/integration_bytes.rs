@@ -88,7 +88,7 @@ fn test_bridging_round_trip() {
     // (E0102); é is \xc3\xa9 in UTF-8.
     assert_ryo_runs(
         "bytes_bridge.ryo",
-        "fn main():\n\traw = b\"h\\xc3\\xa9llo\"\n\ttext = raw.to_str()\n\traw2 = text.to_bytes()\n\tassert(raw == raw2, \"round trip\")\n\tv = raw[0:1]\n\tt2 = v.to_str()\n\tprint(t2)\n",
+        "fn main():\n\traw = b\"h\\xc3\\xa9llo\"\n\ttext = raw.to_str() catch as e:\n\t\te.message()\n\traw2 = text.to_bytes()\n\tassert(raw == raw2, \"round trip\")\n\tv = raw[0:1]\n\tt2 = v.to_str() catch as e:\n\t\te.message()\n\tprint(t2)\n",
     );
 }
 
@@ -118,19 +118,93 @@ fn test_bytes_push_range_panics() {
 }
 
 #[test]
-fn test_bytes_to_str_invalid_utf8_panics() {
-    let temp_dir = TempDir::new().expect("temp dir");
-    let test_file = create_test_file(
-        temp_dir.path(),
-        "bytes_to_str_bad.ryo",
-        "fn main():\n\tb = b\"\\xff\"\n\tprint(b.to_str())\n",
+fn test_bytes_to_str_valid_utf8_returns_error_union() {
+    let src = r#"fn main():
+	ascii = b"hello".to_str() catch as e:
+		e.message()
+	non_ascii = b"h\xc3\xa9llo".to_str() catch as e:
+		e.message()
+	empty = b"".to_str() catch as e:
+		e.message()
+	view_ascii_source = b"world"
+	view_ascii = view_ascii_source[0:5].to_str() catch as e:
+		e.message()
+	view_non_ascii_source = b"h\xc3\xa9llo"
+	view_non_ascii = view_non_ascii_source[0:6].to_str() catch as e:
+		e.message()
+	view_empty_source = b""
+	view_empty = view_empty_source[0:0].to_str() catch as e:
+		e.message()
+	print(ascii + "\n")
+	print(non_ascii + "\n")
+	print(empty + "\n")
+	print(view_ascii + "\n")
+	print(view_non_ascii + "\n")
+	print(view_empty + "\n")
+"#;
+    assert_ryo_prints(
+        "bytes_to_str_valid.ryo",
+        src,
+        "hello\nhéllo\n\nworld\nhéllo\n\n",
     );
-    let output = run_ryo_command(&["run", "bytes_to_str_bad.ryo"], &test_file).expect("run ryo");
-    assert_eq!(output.status.code(), Some(101));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("bytes are not valid UTF-8"),
-        "missing panic message: {stderr}"
+}
+
+#[test]
+fn test_bytes_to_str_invalid_utf8_recovers() {
+    let src = r#"fn main():
+	owned = b"\xff".to_str() catch as e:
+		e.message()
+	view_source = b"\xffA"
+	view = view_source[0:1].to_str() catch as e:
+		e.message()
+	print(owned + "\n")
+	print(view + "\n")
+"#;
+    assert_ryo_prints(
+        "bytes_to_str_bad.ryo",
+        src,
+        "bytes are not valid UTF-8\nbytes are not valid UTF-8\n",
+    );
+}
+
+#[test]
+fn test_bytes_to_str_compiler_known_error_type_annotation() {
+    let src = r#"fn convert(raw: bytes) -> Utf8Error!str:
+	return raw.to_str()
+
+fn main():
+	text = convert(b"\xff") catch as e:
+		e.message()
+	print(text + "\n")
+"#;
+    assert_ryo_prints(
+        "bytes_to_str_annotation.ryo",
+        src,
+        "bytes are not valid UTF-8\n",
+    );
+}
+
+#[test]
+fn test_bytes_to_str_alternates_results_through_one_slot() {
+    let src = r#"fn main():
+	mut result = b"".to_str()
+	for i in range(0, 4):
+		if i % 2 == 0:
+			result = b"valid_012345678901234567890123456789".to_str()
+		else:
+			result = b"\xff".to_str()
+		text = result catch as e:
+			e.message()
+		if i % 2 == 0:
+			assert(text == "valid_012345678901234567890123456789", "valid result")
+		else:
+			assert(text == "bytes are not valid UTF-8", "invalid result")
+		print(text + "\n")
+"#;
+    assert_ryo_prints(
+        "bytes_to_str_alternating.ryo",
+        src,
+        "valid_012345678901234567890123456789\nbytes are not valid UTF-8\nvalid_012345678901234567890123456789\nbytes are not valid UTF-8\n",
     );
 }
 
@@ -200,7 +274,7 @@ fn test_bytes_aot_build_and_run() {
     let test_file = create_test_file(
         temp_dir.path(),
         "bytes_aot.ryo",
-        "fn main():\n\tmut b = b\"\\x41\"\n\tbytes_push(&b, 66)\n\tprint(b.to_str())\n",
+        "fn main():\n\tmut b = b\"\\x41\"\n\tbytes_push(&b, 66)\n\ttext = b.to_str() catch as e:\n\t\te.message()\n\tprint(text)\n",
     );
     let build = run_ryo_command(&["build", "bytes_aot.ryo"], &test_file).expect("ryo build");
     assert!(

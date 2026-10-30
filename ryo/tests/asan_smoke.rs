@@ -637,3 +637,24 @@ fn main():
 fn asan_try_nested_heap_propagation() {
     run_asan_smoke(TRY_NESTED_HEAP_PROPAGATION, "try_nested_heap_propagation");
 }
+
+const UTF8_ERROR_UNION_LOOP: &str = r#"fn main():
+	mut result = b"".to_str()
+	for i in range(0, 4):
+		if i % 2 == 0:
+			result = b"valid_012345678901234567890123456789".to_str()
+		else:
+			result = b"\xff".to_str()
+		text = result catch as e:
+			e.message()
+		if i % 2 == 0:
+			assert(text == "valid_012345678901234567890123456789", "valid result")
+		else:
+			assert(text == "bytes are not valid UTF-8", "invalid result")
+		print(text + "\n")
+"#;
+
+#[test]
+fn asan_utf8_error_union_reinitialization() {
+    run_asan_smoke(UTF8_ERROR_UNION_LOOP, "utf8_error_union_reinitialization");
+}

@@ -718,13 +718,13 @@ fn check_access(is_admin: bool, is_owner: bool) -&gt; bool:
                 <line x1="12" y1="17" x2="12.01" y2="17"></line>
               </svg>
               <div>
-                <p class="callout-title">Two interim simplifications</p>
+                <p class="callout-title">Indexing width is interim</p>
                 <p>
                   <code>b[i]</code> currently yields <code>int</code>
                   (0–255) — it becomes <code>u8</code> when explicit
-                  sizes land — and <code>to_str()</code> panics on invalid
-                  UTF-8 until error unions land (final signature:
-                  <code>Utf8Error!str</code>).
+                  sizes land. <code>to_str()</code> returns
+                  <code>Utf8Error!str</code>, so invalid UTF-8 is
+                  recoverable with <code>catch</code> or <code>try</code>.
                 </p>
               </div>
             </div>
@@ -2280,13 +2280,6 @@ fn main():
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td>
-                      Errors as values (<code>!T</code>) &amp;
-                      <code>catch</code>
-                    </td>
-                    <td><span class="pill">Milestone 13</span></td>
-                  </tr>
                   <tr>
                     <td>
                       Optionals (<code>?T</code>) &amp; <code>orelse</code>

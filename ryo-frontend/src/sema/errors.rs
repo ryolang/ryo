@@ -22,6 +22,7 @@ pub(super) fn register_errors(sema: &mut Sema<'_>) {
         }
         sema.error_types.entry(decl.name).or_insert(decl.ty);
     }
+    super::builtins::register_utf8_error(sema);
 }
 
 pub(super) fn is_error_union(sema: &Sema<'_>, ty: TypeId) -> bool {

@@ -227,6 +227,83 @@ fn union_variant_fields<M: Module>(
     (ok, err)
 }
 
+pub(crate) fn emit_utf8_error_union<M: Module>(
+    builder: &mut FunctionBuilder,
+    ctx: &mut FunctionContext<'_, M>,
+    r: TirRef,
+    success: Value,
+    valid: Value,
+) -> Result<Value, String> {
+    const MESSAGE: &str = "bytes are not valid UTF-8";
+
+    let target = ctx.tir.inst(r).ty;
+    let (ok, err) = union_variant_fields(ctx, target);
+    let slot = Codegen::enum_slot(builder, ctx, target);
+    let dst = builder.ins().stack_addr(ctx.int_type, slot, 0);
+    let ok_block = builder.create_block();
+    let err_block = builder.create_block();
+    let merge = builder.create_block();
+    builder.ins().brif(valid, ok_block, &[], err_block, &[]);
+
+    builder.seal_block(ok_block);
+    builder.switch_to_block(ok_block);
+    store_union_tag(builder, dst, 0);
+    let ptr = builder
+        .ins()
+        .load(ctx.int_type, MemFlagsData::trusted(), success, 0);
+    let len = builder
+        .ins()
+        .load(types::I64, MemFlagsData::trusted(), success, 8);
+    let cap = builder
+        .ins()
+        .load(types::I64, MemFlagsData::trusted(), success, 16);
+    let ok_addr = offset_addr(builder, dst, ok.offset);
+    builder
+        .ins()
+        .store(MemFlagsData::trusted(), ptr, ok_addr, 0);
+    builder
+        .ins()
+        .store(MemFlagsData::trusted(), len, ok_addr, 8);
+    builder
+        .ins()
+        .store(MemFlagsData::trusted(), cap, ok_addr, 16);
+    builder.ins().jump(merge, &[]);
+
+    builder.seal_block(err_block);
+    builder.switch_to_block(err_block);
+    store_union_tag(builder, dst, 1);
+    let err_addr = offset_addr(builder, dst, err.offset);
+    store_union_tag(builder, err_addr, 0);
+    let variant = ctx
+        .pool
+        .enum_view(err.ty)
+        .variants()
+        .next()
+        .expect("Utf8Error variant");
+    debug_assert_eq!(variant.fields.len(), 1);
+    debug_assert_eq!(variant.fields[0].ty, ctx.pool.str_());
+    let message_addr = offset_addr(builder, err_addr, variant.fields[0].offset);
+    let data_id = Codegen::store_guard_msg(ctx.module, ctx.data_ctx, ctx.guard_msg_data, MESSAGE)?;
+    let data_ref = ctx.module.declare_data_in_func(data_id, builder.func);
+    let message_ptr = builder.ins().symbol_value(ctx.int_type, data_ref);
+    let message_len = builder.ins().iconst(types::I64, MESSAGE.len() as i64);
+    let static_cap = builder.ins().iconst(types::I64, 0);
+    builder
+        .ins()
+        .store(MemFlagsData::trusted(), message_ptr, message_addr, 0);
+    builder
+        .ins()
+        .store(MemFlagsData::trusted(), message_len, message_addr, 8);
+    builder
+        .ins()
+        .store(MemFlagsData::trusted(), static_cap, message_addr, 16);
+    builder.ins().jump(merge, &[]);
+
+    builder.seal_block(merge);
+    builder.switch_to_block(merge);
+    Ok(dst)
+}
+
 fn store_union_tag(builder: &mut FunctionBuilder, dst: Value, tag: i64) {
     let tag = builder.ins().iconst(types::I32, tag);
     builder.ins().store(MemFlagsData::trusted(), tag, dst, 0);

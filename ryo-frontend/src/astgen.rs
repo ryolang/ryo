@@ -35,6 +35,21 @@ fn synthetic_span() -> Span {
     Span::EMPTY
 }
 
+fn define_utf8_error(pool: &mut InternPool) -> (StringId, TypeId) {
+    let name = pool.intern_str("Utf8Error");
+    let error = pool.declare_error(name);
+    let field = pool.intern_str("0");
+    pool.define_error(
+        error,
+        EnumVariantDef {
+            name,
+            kind: VariantKind::Tuple,
+            fields: vec![(field, pool.str_())],
+        },
+    );
+    (name, error)
+}
+
 /// Pre-interned `StringId`s for the primitive type names.
 ///
 /// Phase 2 made identifiers `StringId` handles, so `resolve_type`
@@ -412,6 +427,7 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
 
     let main_id = pool.intern_str("main");
     let range_id = pool.intern_str("range");
+    let (utf8_error_name, utf8_error) = define_utf8_error(pool);
 
     // Declare every nominal type before resolving fields, payloads, or
     // signatures so later declarations and cross-kind cycles resolve
@@ -427,6 +443,22 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
     let mut error_order: Vec<StringId> = Vec::new();
 
     for &stmt in program.top_level_stmts() {
+        let nominal_declaration = match &program.stmt(stmt).kind {
+            ast::StmtKind::StructDef(def) => Some((def.name.name, def.name.span)),
+            ast::StmtKind::EnumDef(def) => Some((def.name.name, def.name.span)),
+            ast::StmtKind::ErrorDef(def) => Some((def.name.name, def.name.span)),
+            _ => None,
+        };
+        if let Some((name, span)) = nominal_declaration
+            && name == utf8_error_name
+        {
+            sink.emit(Diag::error(
+                span,
+                DiagCode::DuplicateDeclaration,
+                "duplicate declaration of compiler-known type 'Utf8Error'",
+            ));
+            continue;
+        }
         match &program.stmt(stmt).kind {
             ast::StmtKind::FunctionDef(def) => func_defs.push(def),
             // Parser-recovery placeholder: already diagnosed at the
@@ -535,6 +567,7 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
                 (ety, variants)
             })
             .collect();
+    error_types.insert(utf8_error_name, utf8_error);
 
     let types = TypeResolver {
         prims: Primitives::new(pool),
@@ -560,7 +593,7 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
             .chain(&error_order)
             .map(|&name| (name, DefState::Pending))
             .collect(),
-        defined_layouts: HashSet::new(),
+        defined_layouts: HashSet::from([utf8_error]),
         resolved_structs: HashMap::new(),
         resolved_enums: HashMap::new(),
         resolved_errors: HashMap::new(),
