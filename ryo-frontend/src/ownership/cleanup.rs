@@ -46,6 +46,18 @@ fn instruction_last_use_drop(
         return None;
     }
     let &after = ctx.last_use.get(&r)?;
+    // Arm prologues deep-copy shared catch payloads after the scrutinee
+    // step, so the original error cannot be released at that earlier read.
+    let after = ctx
+        .tir
+        .direct_catch_matches
+        .iter()
+        .copied()
+        .find(|&match_inst| {
+            let scrutinee = ctx.tir.match_view(match_inst).scrutinee;
+            scrutinee == after && own.underlying_owner(scrutinee) == owner
+        })
+        .unwrap_or(after);
     // P5 (final spec §3.2): defer the destruction to
     // the last use of any projection of this owner.
     let after = defer_anchor(

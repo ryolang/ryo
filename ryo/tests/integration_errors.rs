@@ -283,6 +283,144 @@ fn main():
     );
 }
 
+const DIRECT_CATCH_CONSUME_THEN_MESSAGE: &str = r#"error A(str)
+fn consume(move message: str):
+	print(message + "\n")
+fn describe(err: A, move message: str) -> str:
+	consume(message)
+	return err.message()
+fn find() -> A!str:
+	return A(int_to_str(7) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+fn main():
+	value = find() catch as err:
+		A(message): describe(err, message)
+	print(value + "\n")
+"#;
+const DIRECT_CATCH_CONSUME_THEN_MESSAGE_OUTPUT: &str =
+    "7aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n7aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+
+#[test]
+fn direct_catch_payload_consume_then_shared_message_jit() {
+    assert_ryo_output(
+        "catch_payload_consume_then_message_jit.ryo",
+        DIRECT_CATCH_CONSUME_THEN_MESSAGE,
+        DIRECT_CATCH_CONSUME_THEN_MESSAGE_OUTPUT,
+    );
+}
+
+#[test]
+fn direct_catch_payload_consume_then_shared_message_aot() {
+    assert_aot_output(
+        "catch_payload_consume_then_message_aot",
+        DIRECT_CATCH_CONSUME_THEN_MESSAGE,
+        DIRECT_CATCH_CONSUME_THEN_MESSAGE_OUTPUT,
+    );
+}
+
+const DIRECT_CATCH_AGGREGATE_CONSUME_THEN_MESSAGE: &str = r#"struct Payload:
+	text: str
+error A(Payload)
+fn consume(move payload: Payload):
+	assert(payload.text.len() == 41, "payload")
+fn describe(err: A, move payload: Payload) -> int:
+	consume(payload)
+	return err.message().len()
+fn find() -> A!int:
+	return A(Payload{text=int_to_str(7) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+fn main():
+	value = find() catch as err:
+		A(payload): describe(err, payload)
+	print(int_to_str(value) + "\n")
+"#;
+
+#[test]
+fn direct_catch_aggregate_payload_consume_then_shared_message_jit() {
+    assert_ryo_output(
+        "catch_aggregate_payload_consume_then_message_jit.ryo",
+        DIRECT_CATCH_AGGREGATE_CONSUME_THEN_MESSAGE,
+        "60\n",
+    );
+}
+
+#[test]
+fn direct_catch_aggregate_payload_consume_then_shared_message_aot() {
+    assert_aot_output(
+        "catch_aggregate_payload_consume_then_message_aot",
+        DIRECT_CATCH_AGGREGATE_CONSUME_THEN_MESSAGE,
+        "60\n",
+    );
+}
+
+const ERROR_UNION_BOUNDARIES: &str = r#"error A
+error B
+struct Holder:
+	value: (A | B)!int
+fn narrow(value: int) -> A!int:
+	if value < 0:
+		return A
+	return value
+fn wide(value: int) -> (A | B)!int:
+	if value < 0:
+		return B
+	return value
+fn take(value: (A | B)!int) -> int:
+	return value catch:
+		A: 100
+		B: 200
+fn error_set_boundaries() -> int:
+	mut x: (A | B)!int = 0
+	mut h = Holder{value=wide(0)}
+	ignored = wide(-1) catch as err:
+		if true:
+			x = err
+			h.value = err
+			return take(err) + take(x) + take(h.value)
+		else:
+			return 0
+	return ignored
+fn main():
+	mut x: A!int = 1
+	x = 2
+	print(int_to_str(take(x)) + "\n")
+	x = A
+	print(int_to_str(take(x)) + "\n")
+	mut y: (A | B)!int = 0
+	y = x
+	print(int_to_str(take(y)) + "\n")
+	y = B
+	print(int_to_str(take(y)) + "\n")
+	mut h = Holder{value=wide(0)}
+	h.value = 5
+	print(int_to_str(take(h.value)) + "\n")
+	h.value = A
+	print(int_to_str(take(h.value)) + "\n")
+	h.value = narrow(8)
+	print(int_to_str(take(h.value)) + "\n")
+	print(int_to_str(take(6)) + "\n")
+	print(int_to_str(take(B)) + "\n")
+	print(int_to_str(take(narrow(7))) + "\n")
+	print(int_to_str(error_set_boundaries()) + "\n")
+"#;
+const ERROR_UNION_BOUNDARIES_OUTPUT: &str = "2\n100\n100\n200\n5\n100\n8\n6\n200\n7\n600\n";
+
+#[test]
+fn error_union_assignment_field_and_call_boundaries_run_jit() {
+    assert_ryo_output(
+        "error_union_boundaries_jit.ryo",
+        ERROR_UNION_BOUNDARIES,
+        ERROR_UNION_BOUNDARIES_OUTPUT,
+    );
+}
+
+#[test]
+fn error_union_assignment_field_and_call_boundaries_run_aot() {
+    assert_aot_output(
+        "error_union_boundaries_aot",
+        ERROR_UNION_BOUNDARIES,
+        ERROR_UNION_BOUNDARIES_OUTPUT,
+    );
+}
+
 #[test]
 fn nested_match_non_copy_payload_move_rejects_later_shared_read() {
     let src = r#"error A(str)

@@ -201,6 +201,27 @@ impl<M: Module> Codegen<M> {
         src: Value,
         ty: TypeId,
     ) -> Result<(), String> {
+        Self::emit_enum_copy_impl(builder, ctx, dst, src, ty, false)
+    }
+
+    pub(crate) fn emit_enum_deep_copy(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        dst: Value,
+        src: Value,
+        ty: TypeId,
+    ) -> Result<(), String> {
+        Self::emit_enum_copy_impl(builder, ctx, dst, src, ty, true)
+    }
+
+    fn emit_enum_copy_impl(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        dst: Value,
+        src: Value,
+        ty: TypeId,
+        deep: bool,
+    ) -> Result<(), String> {
         let tag = builder
             .ins()
             .load(types::I32, MemFlagsData::trusted(), src, 0);
@@ -212,7 +233,11 @@ impl<M: Module> Codegen<M> {
             builder.seal_block(*block);
             builder.switch_to_block(*block);
             for field in variant.fields {
-                Self::emit_field_copy(builder, ctx, dst, src, field)?;
+                if deep {
+                    Self::emit_field_deep_copy(builder, ctx, dst, src, field)?;
+                } else {
+                    Self::emit_field_copy(builder, ctx, dst, src, field)?;
+                }
             }
             builder.ins().jump(merge, &[]);
         }

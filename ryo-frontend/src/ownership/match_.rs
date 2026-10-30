@@ -16,7 +16,9 @@
 //!   tokens (`Tir::match_by_move_owner_refs`, the M10 destructure
 //!   convention) — arm-local, seeded before the arm body walks;
 //! * an arm binding at least one non-`Copy` field by move consumes the
-//!   SCRUTINEE on that arm's path (the whole-value model);
+//!   SCRUTINEE on that arm's path (the whole-value model), except that
+//!   shared direct-catch arms own independent payload copies and leave
+//!   the original error alive;
 //! * on an OWNED scrutinee, the consuming arm's unbound needs-drop
 //!   payload fields (`Some(_)` positions) register as arm-start drops
 //!   (one `DropOp` per consuming arm, target = the scrutinee, keyed by
@@ -84,12 +86,9 @@ pub(crate) fn analyze_match_switch(
     // Borrow-ness is sourced from OWNERSHIP's own lattice (unchanged).
     let scrutinee_owner = own.underlying_owner(scrutinee);
     let borrowed = matches!(own.states.get(&scrutinee_owner), Some(OwnerState::Borrowed));
-    // Direct catch dispatch transfers payload ownership to arm bindings
-    // but keeps the shared binding readable as a non-owning alias.
+    // Shared direct-catch arms receive independent payload copies, so
+    // the original error stays owned and readable until its last use.
     let shared_catch = any_consumes && w.tir.is_direct_catch_match(match_inst);
-    if shared_catch {
-        own.states.insert(scrutinee_owner, OwnerState::Borrowed);
-    }
     // The borrowed-source family keeps its unchanged guards.
     let aggregate_result = w.pool.needs_drop(w.tir.inst(match_inst).ty);
 
@@ -158,7 +157,8 @@ pub(crate) fn analyze_match_switch(
             arm_binds.push((token, token_place));
         }
         // (b) Consumption: an arm binding a non-`Copy` field by move
-        // consumes the scrutinee on this arm's path.
+        // consumes the scrutinee unless this is a shared direct catch,
+        // whose binding owns a deep copy instead.
         let consumes = !arm_binds.is_empty();
         if consumes && tracked {
             let span = w.tir.span(match_inst);
@@ -195,7 +195,11 @@ pub(crate) fn analyze_match_switch(
         // same `unbound_payload_fields` derivation) and drops each —
         // keeping the target a TirRef the free path can resolve while
         // the field list stays derivable from the typed match wire.
-        if consumes && !borrowed && !unbound_payload_fields(w.pool, scrutinee_ty, &arm).is_empty() {
+        if consumes
+            && !shared_catch
+            && !borrowed
+            && !unbound_payload_fields(w.pool, scrutinee_ty, &arm).is_empty()
+        {
             sidecar.drops.push(DropOp {
                 position: DropPosition::BlockStart {
                     block: arm_blocks[arm_index],

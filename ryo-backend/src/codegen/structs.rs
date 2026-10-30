@@ -289,6 +289,31 @@ impl<M: Module> Codegen<M> {
         })
     }
 
+    fn emit_fat_deep_copy(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        field_addr: Value,
+        ptr: Value,
+        len: Value,
+        cap: Value,
+        field_ty: TypeId,
+    ) -> Result<(Value, Value, Value), String> {
+        let (ptr, len) =
+            Self::emit_fat_bytes_ptr_len(builder, ctx, ptr, len, cap, Some(field_addr))?;
+        let fn_name = if ctx.pool.kind(field_ty) == TypeKind::Bytes {
+            "ryo_bytes_from_view"
+        } else {
+            "ryo_str_from_view"
+        };
+        Self::emit_slot_out_call(
+            builder,
+            ctx,
+            fn_name,
+            &[(ctx.int_type, ptr), (types::I64, len)],
+            None,
+        )
+    }
+
     /// Field-wise struct copy (M9): NEVER a byte-wise block copy —
     /// reading uninitialized padding fails the ASan/Valgrind suites.
     /// Sizes and offsets are compile-time constants, so this unrolls
@@ -302,9 +327,30 @@ impl<M: Module> Codegen<M> {
         src: Value,
         ty: TypeId,
     ) -> Result<(), String> {
+        Self::emit_struct_copy_impl(builder, ctx, dst, src, ty, false)
+    }
+
+    pub(crate) fn emit_struct_deep_copy(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        dst: Value,
+        src: Value,
+        ty: TypeId,
+    ) -> Result<(), String> {
+        Self::emit_struct_copy_impl(builder, ctx, dst, src, ty, true)
+    }
+
+    fn emit_struct_copy_impl(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        dst: Value,
+        src: Value,
+        ty: TypeId,
+        deep: bool,
+    ) -> Result<(), String> {
         let view = ctx.pool.struct_view(ty);
         for field in &view.fields {
-            Self::emit_field_copy(builder, ctx, dst, src, field)?;
+            Self::emit_field_copy_impl(builder, ctx, dst, src, field, deep)?;
         }
         Ok(())
     }
@@ -321,6 +367,27 @@ impl<M: Module> Codegen<M> {
         src: Value,
         field: &StructField,
     ) -> Result<(), String> {
+        Self::emit_field_copy_impl(builder, ctx, dst, src, field, false)
+    }
+
+    pub(crate) fn emit_field_deep_copy(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        dst: Value,
+        src: Value,
+        field: &StructField,
+    ) -> Result<(), String> {
+        Self::emit_field_copy_impl(builder, ctx, dst, src, field, true)
+    }
+
+    fn emit_field_copy_impl(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        dst: Value,
+        src: Value,
+        field: &StructField,
+        deep: bool,
+    ) -> Result<(), String> {
         let off = i32::try_from(field.offset).expect("struct field offset exceeds i32");
         match ctx.pool.kind(field.ty) {
             TypeKind::Void => Ok(()),
@@ -334,6 +401,16 @@ impl<M: Module> Codegen<M> {
                 let cap = builder
                     .ins()
                     .load(types::I64, MemFlagsData::trusted(), src, off + 16);
+                let (ptr, len, cap) = if deep {
+                    let field_addr = if field.offset == 0 {
+                        src
+                    } else {
+                        builder.ins().iadd_imm_s(src, i64::from(field.offset))
+                    };
+                    Self::emit_fat_deep_copy(builder, ctx, field_addr, ptr, len, cap, field.ty)?
+                } else {
+                    (ptr, len, cap)
+                };
                 builder.ins().store(MemFlagsData::trusted(), ptr, dst, off);
                 builder
                     .ins()
@@ -357,7 +434,7 @@ impl<M: Module> Codegen<M> {
                 } else {
                     builder.ins().iadd_imm_s(dst, i64::from(field.offset))
                 };
-                Self::emit_struct_copy(builder, ctx, d, s, field.ty)
+                Self::emit_struct_copy_impl(builder, ctx, d, s, field.ty, deep)
             }
             TypeKind::Enum
             | TypeKind::DeclaredError
@@ -373,7 +450,11 @@ impl<M: Module> Codegen<M> {
                 } else {
                     builder.ins().iadd_imm_s(dst, i64::from(field.offset))
                 };
-                Self::emit_enum_copy(builder, ctx, d, s, field.ty)
+                if deep {
+                    Self::emit_enum_deep_copy(builder, ctx, d, s, field.ty)
+                } else {
+                    Self::emit_enum_copy(builder, ctx, d, s, field.ty)
+                }
             }
             _ => {
                 let cl_ty = cranelift_type_for(field.ty, ctx.pool, ctx.int_type);
@@ -1168,9 +1249,9 @@ impl<M: Module> Codegen<M> {
         Ok(Terminator::None)
     }
 
-    /// Register one field binding moved (or copied) out of an aggregate
-    /// slot: the field's value leaves `field_addr` into storage the
-    /// binding owns, in the same shape `VarDecl` produces (fat SSA
+    /// Register one field binding moved (or deep-copied) out of an
+    /// aggregate slot into storage the binding owns, in the same shape
+    /// `VarDecl` produces (fat SSA
     /// triples for `str`/`bytes`, a slot address for structs and enums, a
     /// scalar `Variable` for Copy fields) so every later read / scheduled
     /// free finds the binding where it expects it. Shared by M10
@@ -1192,6 +1273,29 @@ impl<M: Module> Codegen<M> {
         field_ty: TypeId,
         token: Option<TirRef>,
     ) -> Result<(), String> {
+        Self::bind_field(builder, ctx, name, field_addr, field_ty, token, false)
+    }
+
+    pub(crate) fn bind_field_deep_copy(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        name: StringId,
+        field_addr: Value,
+        field_ty: TypeId,
+        token: Option<TirRef>,
+    ) -> Result<(), String> {
+        Self::bind_field(builder, ctx, name, field_addr, field_ty, token, true)
+    }
+
+    fn bind_field(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        name: StringId,
+        field_addr: Value,
+        field_ty: TypeId,
+        token: Option<TirRef>,
+        deep: bool,
+    ) -> Result<(), String> {
         match ctx.pool.kind(field_ty) {
             TypeKind::Str | TypeKind::Bytes => {
                 let ptr = builder
@@ -1203,6 +1307,11 @@ impl<M: Module> Codegen<M> {
                 let cap = builder
                     .ins()
                     .load(types::I64, MemFlagsData::trusted(), field_addr, 16);
+                let (ptr, len, cap) = if deep {
+                    Self::emit_fat_deep_copy(builder, ctx, field_addr, ptr, len, cap, field_ty)?
+                } else {
+                    (ptr, len, cap)
+                };
                 let var_ptr = builder.declare_var(ctx.int_type);
                 let var_len = builder.declare_var(types::I64);
                 let var_cap = builder.declare_var(types::I64);
@@ -1244,7 +1353,11 @@ impl<M: Module> Codegen<M> {
             TypeKind::Struct | TypeKind::AnonStruct => {
                 let slot = Self::struct_slot(builder, ctx, field_ty);
                 let dst = builder.ins().stack_addr(ctx.int_type, slot, 0);
-                Self::emit_struct_copy(builder, ctx, dst, field_addr, field_ty)?;
+                if deep {
+                    Self::emit_struct_deep_copy(builder, ctx, dst, field_addr, field_ty)?;
+                } else {
+                    Self::emit_struct_copy(builder, ctx, dst, field_addr, field_ty)?;
+                }
                 let var = builder.declare_var(ctx.int_type);
                 builder.def_var(var, dst);
                 Self::write_slot(
@@ -1265,7 +1378,11 @@ impl<M: Module> Codegen<M> {
             | TypeKind::ErrorUnion => {
                 let slot = Self::enum_slot(builder, ctx, field_ty);
                 let dst = builder.ins().stack_addr(ctx.int_type, slot, 0);
-                Self::emit_enum_copy(builder, ctx, dst, field_addr, field_ty)?;
+                if deep {
+                    Self::emit_enum_deep_copy(builder, ctx, dst, field_addr, field_ty)?;
+                } else {
+                    Self::emit_enum_copy(builder, ctx, dst, field_addr, field_ty)?;
+                }
                 let var = builder.declare_var(ctx.int_type);
                 builder.def_var(var, dst);
                 Self::write_slot(

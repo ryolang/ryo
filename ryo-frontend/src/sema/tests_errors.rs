@@ -288,6 +288,62 @@ fn returns_and_typed_bindings_wrap_success_and_error_values() {
 }
 
 #[test]
+fn reassignment_coerces_success_error_and_narrower_union() {
+    let src = "error A\nerror B\n\
+               fn main():\n\tmut x: (A | B)!int = 1\n\tx = 2\n\tx = A\n\tmut narrow: A!int = 3\n\tx = narrow\n";
+    let (tirs, pool) = run(src).expect("union reassignment should coerce");
+    let main = tir_named(&tirs, &pool, "main");
+    for index in [1, 2, 4] {
+        let value = main.assign_view(stmt_at(main, index)).value;
+        assert_eq!(main.inst(value).tag, TirTag::ErrorUnionCoerce);
+        assert_eq!(main.inst(value).ty, main.inst(stmt_at(main, index)).ty);
+    }
+}
+
+#[test]
+fn field_assignment_coerces_success_error_and_narrower_union() {
+    let src = "error A\nerror B\nstruct Holder:\n\tvalue: (A | B)!int\n\
+               fn wide() -> (A | B)!int:\n\treturn 0\n\
+               fn narrow() -> A!int:\n\treturn 3\n\
+               fn main():\n\tmut h = Holder{value=wide()}\n\th.value = 2\n\th.value = A\n\th.value = narrow()\n";
+    let (tirs, pool) = run(src).expect("union field assignment should coerce");
+    let main = tir_named(&tirs, &pool, "main");
+    for index in 1..=3 {
+        let value = main.field_assign_view(stmt_at(main, index)).value;
+        assert_eq!(main.inst(value).tag, TirTag::ErrorUnionCoerce);
+        assert_eq!(main.inst(value).ty, main.inst(stmt_at(main, index)).ty);
+    }
+}
+
+#[test]
+fn call_arguments_coerce_success_error_set_and_narrower_union() {
+    let src = "error A\nerror B\n\
+               fn take(value: (A | B)!int) -> int:\n\treturn 0\n\
+               fn narrow() -> A!int:\n\treturn 3\n\
+               fn wide() -> (A | B)!int:\n\treturn B\n\
+               fn from_set() -> int:\n\treturn wide() catch as err:\n\t\t_: take(err)\n\
+               fn main():\n\ttake(1)\n\ttake(A)\n\ttake(narrow())\n";
+    let (tirs, pool) = run(src).expect("union call arguments should coerce");
+    let take = pool.find_str("take").expect("take is interned");
+    let calls: Vec<_> = tirs
+        .iter()
+        .flat_map(|tir| {
+            (1..tir.instructions.len() as u32)
+                .map(TirRef::from_raw)
+                .filter(|&r| tir.inst(r).tag == TirTag::Call && tir.call_view(r).name == take)
+                .map(move |r| (tir, r))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(calls.len(), 4);
+    for (tir, call) in calls {
+        let arg = tir.call_view(call).args.at(0);
+        assert_eq!(tir.inst(arg).tag, TirTag::ErrorUnionCoerce);
+        assert_eq!(pool.kind(tir.inst(arg).ty), TypeKind::ErrorUnion);
+    }
+}
+
+#[test]
 fn narrower_unions_widen_but_narrowing_is_rejected() {
     let src = "error A\nerror B\n\
                fn narrow() -> A!int:\n\treturn 1\n\

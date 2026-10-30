@@ -658,3 +658,49 @@ const UTF8_ERROR_UNION_LOOP: &str = r#"fn main():
 fn asan_utf8_error_union_reinitialization() {
     run_asan_smoke(UTF8_ERROR_UNION_LOOP, "utf8_error_union_reinitialization");
 }
+
+const DIRECT_CATCH_CONSUME_THEN_MESSAGE: &str = r#"error A(str)
+fn consume(move message: str):
+	print(message + "\n")
+fn describe(err: A, move message: str) -> str:
+	consume(message)
+	return err.message()
+fn find() -> A!str:
+	return A(int_to_str(7) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+fn main():
+	value = find() catch as err:
+		A(message): describe(err, message)
+	print(value + "\n")
+"#;
+
+#[test]
+fn asan_direct_catch_payload_consume_then_shared_message() {
+    run_asan_smoke(
+        DIRECT_CATCH_CONSUME_THEN_MESSAGE,
+        "direct_catch_payload_consume_then_shared_message",
+    );
+}
+
+const DIRECT_CATCH_AGGREGATE_CONSUME_THEN_MESSAGE: &str = r#"struct Payload:
+	text: str
+error A(Payload)
+fn consume(move payload: Payload):
+	assert(payload.text.len() == 41, "payload")
+fn describe(err: A, move payload: Payload) -> int:
+	consume(payload)
+	return err.message().len()
+fn find() -> A!int:
+	return A(Payload{text=int_to_str(7) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+fn main():
+	value = find() catch as err:
+		A(payload): describe(err, payload)
+	print(int_to_str(value) + "\n")
+"#;
+
+#[test]
+fn asan_direct_catch_aggregate_payload_consume_then_shared_message() {
+    run_asan_smoke(
+        DIRECT_CATCH_AGGREGATE_CONSUME_THEN_MESSAGE,
+        "direct_catch_aggregate_payload_consume_then_shared_message",
+    );
+}

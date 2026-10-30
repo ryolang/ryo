@@ -1,6 +1,6 @@
 //! `match` expression codegen (M12) — enum tag dispatch with wildcard
 //! routing, anonymous-struct guard chains (int/bool literal guards),
-//! per-arm payload binding moves, and scalar/void/aggregate merges.
+//! per-arm payload binding moves/copies, and scalar/void/aggregate merges.
 //!
 //! The lowering is split across the Flow-block driver:
 //!
@@ -10,8 +10,8 @@
 //!   memory, never a block param), and the per-scrutinee-kind routing
 //!   into the pre-mapped Flow arm blocks (`route_*` below).
 //! * Each Flow arm block's prologue (`match_arm_prologue`) fires the
-//!   arm-start payload drops and moves the payload bindings out of the
-//!   scrutinee slot through the shared `bind_field_move`.
+//!   arm-start payload drops and binds payloads from the scrutinee slot.
+//!   Shared direct-catch bindings deep-copy; all others move.
 //! * A falling arm's `Goto` terminator (`match_arm_fallthrough`) writes
 //!   the arm result into the match result slot (scalar values store;
 //!   aggregates go through the canonical per-type aggregate writes) and
@@ -358,11 +358,10 @@ impl<M: Module> Codegen<M> {
     }
 
     /// The Flow arm block's prologue: arm-start payload drops (the
-    /// consuming arm's unbound needs-drop fields) and the binding
-    /// prologue through the shared `bind_field_move` (fat triples,
-    /// struct/enum slot copies, scalar loads — the destructure logic).
-    /// Only slot-homed scrutinees (enum/anon-struct) carry payload
-    /// drops; literal scrutinees bind nothing.
+    /// consuming arm's unbound needs-drop fields) and payload binding.
+    /// Ordinary matches move; shared direct catches deep-copy so their
+    /// original error remains valid. Only slot-homed scrutinees carry
+    /// payload drops; literal scrutinees bind nothing.
     pub(crate) fn match_arm_prologue(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -410,7 +409,11 @@ impl<M: Module> Codegen<M> {
                 cursor += 1;
                 Some(token)
             };
-            Self::bind_field_move(builder, ctx, b.name, field_addr, b.ty, token)?;
+            if token.is_some() && ctx.tir.is_direct_catch_match(r) {
+                Self::bind_field_deep_copy(builder, ctx, b.name, field_addr, b.ty, token)?;
+            } else {
+                Self::bind_field_move(builder, ctx, b.name, field_addr, b.ty, token)?;
+            }
         }
         Ok(())
     }

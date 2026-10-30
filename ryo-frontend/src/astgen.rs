@@ -592,6 +592,7 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
             .chain(&enum_order)
             .chain(&error_order)
             .map(|&name| (name, DefState::Pending))
+            .chain(std::iter::once((utf8_error_name, DefState::Defined)))
             .collect(),
         defined_layouts: HashSet::from([utf8_error]),
         resolved_structs: HashMap::new(),

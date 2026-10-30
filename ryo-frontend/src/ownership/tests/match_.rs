@@ -1212,3 +1212,53 @@ fn discarded_aggregate_match_result_freed_once() {
         sc.drops
     );
 }
+
+#[test]
+fn direct_catch_shared_error_keeps_ownership_after_payload_move() {
+    let src = r#"error A(str)
+fn consume(move message: str):
+	print(message)
+fn describe(err: A, move message: str) -> str:
+	consume(message)
+	return err.message()
+fn find() -> A!str:
+	return A(int_to_str(7) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+fn main():
+	value = find() catch as err:
+		A(message): describe(err, message)
+	print(value)
+"#;
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "{diags:?}"
+    );
+    let main = tirs
+        .iter()
+        .position(|tir| pool.str(tir.name) == "main")
+        .expect("main exists");
+    let tir = &tirs[main];
+    let describe = pool.find_str("describe").expect("describe is interned");
+    let call = (1..tir.instructions.len() as u32)
+        .map(ryo_core::tir::TirRef::from_raw)
+        .find(|&r| tir.inst(r).tag == TirTag::Call && tir.call_view(r).name == describe)
+        .expect("call borrowing the shared error");
+    let receiver = tir.call_view(call).args.at(0);
+    let own = crate::ownership::cleanup_validation::take_test_ownership(tir.name)
+        .expect("ownership recorded");
+    let owner = own.underlying_owner(receiver);
+    assert_eq!(
+        own.states.get(&owner),
+        Some(&OwnerState::Valid),
+        "the shared error must retain its original allocation"
+    );
+    let flow = build_flow(tir, &pool);
+    let target = owner.tirref(&flow);
+    let sc = take_function_sidecar(&mut sidecar, main);
+    assert!(
+        sc.drops.iter().any(|drop| drop.target == target),
+        "the original shared error allocation must be destroyed after its reads"
+    );
+}

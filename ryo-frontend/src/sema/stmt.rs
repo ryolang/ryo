@@ -181,7 +181,7 @@ pub(crate) fn analyze_stmt(
         }
         InstTag::AssignOrDecl => {
             let view = sema.uir.assign_or_decl_view(r);
-            let value_tir = analyze_expr_allow_never(sema, fcx, scope, view.value);
+            let mut value_tir = analyze_expr_allow_never(sema, fcx, scope, view.value);
             let value_ty = fcx.builder.ty_of(value_tir);
 
             match scope.lookup_full(view.name) {
@@ -189,7 +189,15 @@ pub(crate) fn analyze_stmt(
                     if check_bindable_value(sema, view.name, value_ty, sema.uir.span(view.value)) {
                         return fcx.builder.unreachable(sema.pool.error_type(), span);
                     }
-                    if !sema.pool.is_error(value_ty)
+                    if super::errors::is_error_union(sema, existing_ty) {
+                        value_tir = super::errors::coerce_to_error_union(
+                            sema,
+                            fcx,
+                            value_tir,
+                            existing_ty,
+                            sema.uir.span(view.value),
+                        );
+                    } else if !sema.pool.is_error(value_ty)
                         && !sema.pool.is_error(existing_ty)
                         && !sema.pool.compatible(existing_ty, value_ty)
                     {
@@ -508,12 +516,20 @@ fn analyze_field_assign(
     let Some((target_tir, field_ty)) = check_field_chain(sema, fcx, scope, view.target) else {
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     };
-    let value_tir = analyze_expr_allow_never(sema, fcx, scope, view.value);
+    let mut value_tir = analyze_expr_allow_never(sema, fcx, scope, view.value);
     let value_ty = fcx.builder.ty_of(value_tir);
     if check_bindable_value(sema, field_name, value_ty, sema.uir.span(view.value)) {
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
-    if !sema.pool.is_error(value_ty)
+    if super::errors::is_error_union(sema, field_ty) {
+        value_tir = super::errors::coerce_to_error_union(
+            sema,
+            fcx,
+            value_tir,
+            field_ty,
+            sema.uir.span(view.value),
+        );
+    } else if !sema.pool.is_error(value_ty)
         && !sema.pool.is_error(field_ty)
         && !sema.pool.compatible(field_ty, value_ty)
     {

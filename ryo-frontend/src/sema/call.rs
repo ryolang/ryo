@@ -184,7 +184,17 @@ pub(crate) fn check_call(
                 }
             }
             let actual = fcx.builder.ty_of(*arg_tir);
-            let arg_tir = if sema.pool.is_view(actual)
+            let arg_tir = if super::errors::is_error_union(sema, exp_ty) {
+                let v = super::errors::coerce_to_error_union(
+                    sema,
+                    fcx,
+                    *arg_tir,
+                    exp_ty,
+                    sema.uir.span(arg_uir),
+                );
+                converted[idx] = v;
+                v
+            } else if sema.pool.is_view(actual)
                 && sema.pool.view_owner(actual) == Some(exp_ty)
                 && modes[idx] == ParamMode::Borrow
             {
