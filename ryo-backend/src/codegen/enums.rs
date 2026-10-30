@@ -19,14 +19,17 @@ use ryo_core::types::{EnumVariantView, InternPool, TypeId, TypeKind, VariantKind
 
 use super::{Codegen, FunctionContext, STR_SLOT_SIZE, Terminator, ValueRepr};
 
-/// True for enum types (M11) — memory-first aggregates exactly like
-/// structs: values live in stack slots, `ValueRepr::Enum` carries the
-/// slot address, and params/returns ride the slot-address / hidden-sret
+/// True for runtime enum-shaped types — memory-first aggregates exactly
+/// like structs: values live in stack slots, `ValueRepr::Enum` carries
+/// the slot address, and params/returns ride the slot-address / hidden-sret
 /// ABI. Callers gate aggregate paths with this before
-/// `cranelift_type_for`, where an enum TypeId is a caller bug (same
+/// `cranelift_type_for`, where an enum-shaped TypeId is a caller bug (same
 /// contract as `is_struct_type`).
 pub(crate) fn is_enum_type(ty: TypeId, pool: &InternPool) -> bool {
-    matches!(pool.kind(ty), TypeKind::Enum)
+    matches!(
+        pool.kind(ty),
+        TypeKind::Enum | TypeKind::DeclaredError | TypeKind::ErrorSet | TypeKind::ErrorUnion
+    )
 }
 
 /// Trap code for the invalid-discriminant arm of every tag dispatch:
@@ -80,6 +83,7 @@ impl<M: Module> Codegen<M> {
         let inst = ctx.tir.inst(r);
         let addr = match inst.tag {
             TirTag::EnumLit => Self::emit_enum_lit(builder, ctx, r)?,
+            TirTag::ErrorUnionCoerce => super::errors::emit_error_union_coerce(builder, ctx, r)?,
             TirTag::Var => {
                 let name = match inst.data {
                     TirData::Var(name) => name,
@@ -463,7 +467,9 @@ impl<M: Module> Codegen<M> {
         let view = ctx.tir.var_decl_view(r);
         let init_tag = ctx.tir.inst(view.initializer).tag;
         let addr = match init_tag {
-            TirTag::EnumLit | TirTag::Call => Self::eval_inst_enum(builder, ctx, view.initializer)?,
+            TirTag::EnumLit | TirTag::ErrorUnionCoerce | TirTag::Call => {
+                Self::eval_inst_enum(builder, ctx, view.initializer)?
+            }
             _ => {
                 let src = Self::eval_inst_enum(builder, ctx, view.initializer)?;
                 let slot = Self::enum_slot(builder, ctx, inst.ty);
@@ -571,7 +577,7 @@ impl<M: Module> Codegen<M> {
         } else {
             ctx.tir.inst(target).ty
         };
-        if !matches!(ctx.pool.kind(ty), TypeKind::Enum) {
+        if !is_enum_type(ty, ctx.pool) {
             return Ok(false);
         }
         let addr = if let Some(binding) = binding {

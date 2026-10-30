@@ -221,7 +221,10 @@ impl<M: Module> Codegen<M> {
                 };
                 Self::emit_struct_copy(builder, ctx, dst, src, field_ty)
             }
-            TypeKind::Enum => {
+            TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion => {
                 let src = Self::eval_inst_enum(builder, ctx, v)?;
                 let dst = if offset == 0 {
                     base
@@ -320,6 +323,7 @@ impl<M: Module> Codegen<M> {
     ) -> Result<(), String> {
         let off = i32::try_from(field.offset).expect("struct field offset exceeds i32");
         match ctx.pool.kind(field.ty) {
+            TypeKind::Void => Ok(()),
             TypeKind::Str | TypeKind::Bytes => {
                 let ptr = builder
                     .ins()
@@ -355,7 +359,10 @@ impl<M: Module> Codegen<M> {
                 };
                 Self::emit_struct_copy(builder, ctx, d, s, field.ty)
             }
-            TypeKind::Enum => {
+            TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion => {
                 let s = if field.offset == 0 {
                     src
                 } else {
@@ -432,7 +439,10 @@ impl<M: Module> Codegen<M> {
                 };
                 Self::emit_struct_drop(builder, ctx, addr, field_ty)
             }
-            TypeKind::Enum => {
+            TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion => {
                 let addr = if offset == 0 {
                     base
                 } else {
@@ -597,7 +607,10 @@ impl<M: Module> Codegen<M> {
                 }
                 Self::emit_struct_copy(builder, ctx, field_addr, src, field_ty)?;
             }
-            TypeKind::Enum => {
+            TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion => {
                 let src = Self::eval_inst_enum(builder, ctx, view.value)?;
                 if drop_old {
                     Self::emit_field_drop(builder, ctx, field_addr, 0, field_ty)?;
@@ -803,7 +816,10 @@ impl<M: Module> Codegen<M> {
             TypeKind::Struct | TypeKind::AnonStruct => {
                 Self::emit_struct_eq(builder, ctx, lhs_field, rhs_field, field.ty, false)
             }
-            TypeKind::Enum => {
+            TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion => {
                 Self::emit_enum_eq(builder, ctx, lhs_field, rhs_field, field.ty, false)
             }
             TypeKind::View(_) => {
@@ -967,7 +983,10 @@ impl<M: Module> Codegen<M> {
                 builder.ins().call(free_ref, &[p, c]);
                 Ok(())
             }
-            TypeKind::Enum => {
+            TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion => {
                 let nested = Self::eval_enum_debug_repr(builder, ctx, field_addr, field_ty)?;
                 let (p, l, c) = Self::emit_debug_field_triple(builder, ctx, nested);
                 let (vp, vl) = Self::emit_fat_bytes_ptr_len(builder, ctx, p, l, c, Some(nested))?;
@@ -1240,7 +1259,10 @@ impl<M: Module> Codegen<M> {
                 }
                 Ok(())
             }
-            TypeKind::Enum => {
+            TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion => {
                 let slot = Self::enum_slot(builder, ctx, field_ty);
                 let dst = builder.ins().stack_addr(ctx.int_type, slot, 0);
                 Self::emit_enum_copy(builder, ctx, dst, field_addr, field_ty)?;

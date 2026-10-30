@@ -362,14 +362,17 @@ impl EventCollector<'_> {
                     EventKind::TransferCall,
                     position_points(fire_points, DropPosition::AfterStep { inst: site }),
                 ),
-                // Aggregate seating: a struct/enum literal field's buffer
-                // moves into the aggregate — a different place, not a
-                // unioned home — so the field generation is discharged by
-                // the move itself (the aggregate's release frees it
-                // recursively). Binding seating (VarDecl/Assign/
+                // Aggregate seating and union coercion move a field or
+                // operand buffer into a different place, not a unioned home,
+                // so the source generation is discharged by the move itself
+                // (the destination's release frees it recursively). Binding
+                // seating (VarDecl/Assign/
                 // destructure) continues the identity in the SAME union and
                 // needs no event.
-                TirTag::FieldAssign | TirTag::StructLit | TirTag::EnumLit => (
+                TirTag::FieldAssign
+                | TirTag::StructLit
+                | TirTag::EnumLit
+                | TirTag::ErrorUnionCoerce => (
                     EventKind::Consume,
                     position_points(fire_points, DropPosition::AfterStep { inst: site }),
                 ),

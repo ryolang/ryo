@@ -177,7 +177,15 @@ pub(crate) fn analyze_match(
     // sentinel so later arms still get shape-checked where possible.
     let mut had_error = false;
     if !is_matchable(sema, scrutinee_ty) {
-        if !sema.pool.is_error(scrutinee_ty) {
+        if super::errors::is_error_union(sema, scrutinee_ty) {
+            sema.sink.emit(super::errors::direct_use_diag(
+                sema,
+                scrutinee_span,
+                DiagCode::InvalidMatchScrutinee,
+                scrutinee_ty,
+                "match on",
+            ));
+        } else if !sema.pool.is_error(scrutinee_ty) {
             let mut diag = Diag::error(
                 scrutinee_span,
                 DiagCode::InvalidMatchScrutinee,

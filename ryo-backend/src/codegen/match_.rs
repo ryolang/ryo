@@ -178,7 +178,10 @@ impl<M: Module> Codegen<M> {
         // place matters only for the scheduled post-merge drop (the
         // end-of-statement sweep fires the ownership pass's Free).
         let scrut = match ctx.pool.kind(scrut_ty) {
-            TypeKind::Enum => {
+            TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion => {
                 ScrutineeHome::Slot(Self::eval_inst_enum(builder, ctx, view.scrutinee)?)
             }
             TypeKind::AnonStruct => {
@@ -227,7 +230,10 @@ impl<M: Module> Codegen<M> {
                         StackSlotData::new(StackSlotKind::ExplicitSlot, STR_SLOT_SIZE, 3),
                     ),
                     TypeKind::Struct | TypeKind::AnonStruct => Self::struct_slot(builder, ctx, ty),
-                    TypeKind::Enum => Self::enum_slot(builder, ctx, ty),
+                    TypeKind::Enum
+                    | TypeKind::DeclaredError
+                    | TypeKind::ErrorSet
+                    | TypeKind::ErrorUnion => Self::enum_slot(builder, ctx, ty),
                     other => unreachable!("match_shape rejected {other:?} as an aggregate result"),
                 };
                 Some(builder.ins().stack_addr(ctx.int_type, slot, 0))
@@ -603,7 +609,10 @@ impl<M: Module> Codegen<M> {
                 let src = Self::eval_inst_struct(builder, ctx, body)?;
                 Self::emit_struct_copy(builder, ctx, slot_addr, src, ty)
             }
-            TypeKind::Enum => {
+            TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion => {
                 let src = Self::eval_inst_enum(builder, ctx, body)?;
                 Self::emit_enum_copy(builder, ctx, slot_addr, src, ty)
             }
@@ -641,7 +650,10 @@ impl<M: Module> Codegen<M> {
                 })
             }
             TypeKind::Struct | TypeKind::AnonStruct => Ok(ValueRepr::Struct { addr: slot_addr }),
-            TypeKind::Enum => Ok(ValueRepr::Enum { addr: slot_addr }),
+            TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion => Ok(ValueRepr::Enum { addr: slot_addr }),
             other => Err(format!(
                 "eval_inst_match: {other:?} is not a lowered aggregate match result"
             )),
@@ -664,7 +676,10 @@ impl<M: Module> Codegen<M> {
             | TypeKind::Bytes
             | TypeKind::Struct
             | TypeKind::AnonStruct
-            | TypeKind::Enum => Ok(MatchShape::Aggregate(ty)),
+            | TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion => Ok(MatchShape::Aggregate(ty)),
             other => Err(format!(
                 "eval_inst_match: match result type kind {other:?} is not lowerable (sema gates match result types)"
             )),

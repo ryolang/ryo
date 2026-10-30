@@ -1583,22 +1583,38 @@ fn gen_expr(
             sink,
             span,
         ),
-        ast::ExprKind::ErrorConstruct(c) => match c.args {
-            None => b.var_ref(c.name.name, span),
-            Some(args) => {
-                let mut arg_refs = Vec::new();
-                if let Some(list) = args.positional {
-                    for &arg in ast.expr_list(list) {
-                        arg_refs.push(gen_expr(b, ast, arg, types, defined_layouts, pool, sink));
+        ast::ExprKind::ErrorConstruct(c) => {
+            let ty = types
+                .error_types
+                .get(&c.name.name)
+                .copied()
+                .unwrap_or_else(|| pool.error_type());
+            match c.args {
+                None if pool.is_error(ty) => b.var_ref(c.name.name, span),
+                None => b.error_construct(c.name.name, ty, false, &[], span),
+                Some(args) => {
+                    let positional = args.positional.is_some();
+                    let mut arg_refs = Vec::new();
+                    if let Some(list) = args.positional {
+                        for (index, &arg) in ast.expr_list(list).iter().enumerate() {
+                            let value = gen_expr(b, ast, arg, types, defined_layouts, pool, sink);
+                            arg_refs.push((index as u32, value));
+                        }
+                    } else if let Some(inits) = args.named {
+                        for &(name, arg) in ast.struct_field_inits(inits) {
+                            let value = gen_expr(b, ast, arg, types, defined_layouts, pool, sink);
+                            arg_refs.push((name.raw(), value));
+                        }
                     }
-                } else if let Some(inits) = args.named {
-                    for &(_, arg) in ast.struct_field_inits(inits) {
-                        arg_refs.push(gen_expr(b, ast, arg, types, defined_layouts, pool, sink));
+                    if positional && pool.is_error(ty) {
+                        let values: Vec<_> = arg_refs.iter().map(|(_, value)| *value).collect();
+                        b.call(c.name.name, &values, span)
+                    } else {
+                        b.error_construct(c.name.name, ty, positional, &arg_refs, span)
                     }
                 }
-                b.call(c.name.name, &arg_refs, span)
             }
-        },
+        }
         ast::ExprKind::Try(_) => {
             sink.emit(Diag::error(
                 span,

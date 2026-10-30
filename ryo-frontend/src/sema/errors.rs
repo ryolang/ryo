@@ -1,5 +1,8 @@
-use super::Sema;
+use super::{FuncCtx, Scope, Sema, analyze_expr};
 use ryo_core::diag::{Diag, DiagCode};
+use ryo_core::tir::TirRef;
+use ryo_core::types::{StringId, TypeId, TypeKind, VariantKind};
+use ryo_core::uir::{InstRef, Span};
 
 pub(super) fn register_errors(sema: &mut Sema<'_>) {
     for decl in &sema.uir.error_decls {
@@ -17,4 +20,246 @@ pub(super) fn register_errors(sema: &mut Sema<'_>) {
         }
         sema.error_types.entry(decl.name).or_insert(decl.ty);
     }
+}
+
+pub(super) fn is_error_union(sema: &Sema<'_>, ty: TypeId) -> bool {
+    matches!(
+        sema.pool.kind(ty),
+        TypeKind::ErrorUnion | TypeKind::InferredErrorUnion
+    )
+}
+
+pub(super) fn direct_use_diag(
+    sema: &Sema<'_>,
+    span: Span,
+    code: DiagCode,
+    ty: TypeId,
+    action: &str,
+) -> Diag {
+    Diag::error(
+        span,
+        code,
+        format!(
+            "cannot {action} error union '{}' directly; use `try` or `catch` to unwrap it",
+            sema.pool.display(ty)
+        ),
+    )
+}
+
+pub(super) fn reject_direct_use(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    ty: TypeId,
+    span: Span,
+    code: DiagCode,
+    action: &str,
+) -> Option<TirRef> {
+    if !is_error_union(sema, ty) {
+        return None;
+    }
+    sema.sink
+        .emit(direct_use_diag(sema, span, code, ty, action));
+    Some(fcx.builder.unreachable(sema.pool.error_type(), span))
+}
+
+pub(super) fn analyze_error_construct(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    span: Span,
+) -> TirRef {
+    let (name, view) = sema.uir.error_construct_view(r);
+    if let Some(bound) = scope.lookup(name) {
+        if !view.positional && view.fields().count() == 0 {
+            return fcx.builder.var(name, bound, span);
+        }
+        for (_, value) in view.fields() {
+            analyze_expr(sema, fcx, scope, value);
+        }
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::TypeMismatch,
+            format!(
+                "'{}' is a bound value, not an error constructor or callable value",
+                sema.pool.str(name)
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    if sema.pool.is_error(view.ty) {
+        for (_, value) in view.fields() {
+            analyze_expr(sema, fcx, scope, value);
+        }
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::NamedArgInParens,
+            "named arguments are not supported in ordinary function calls",
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    let (error_name, kind, fields) = {
+        let errors = sema.pool.enum_view(view.ty);
+        let variant = errors
+            .variants()
+            .next()
+            .expect("declared errors have one variant");
+        (errors.name(), variant.kind, variant.fields.to_vec())
+    };
+    if kind == VariantKind::Unit {
+        if view.positional || view.fields().count() != 0 {
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::UnitVariantConstructed,
+                format!(
+                    "'{}' is a unit error — construct it as {}",
+                    sema.pool.str(error_name),
+                    sema.pool.str(error_name)
+                ),
+            ));
+            return fcx.builder.unreachable(sema.pool.error_type(), span);
+        }
+        return fcx.builder.enum_lit(view.ty, 0, false, &[], span);
+    }
+
+    let mut by_index: Vec<Option<TirRef>> = vec![None; fields.len()];
+    let mut field_errored = false;
+    for (selector, value_ref) in view.fields() {
+        let value = analyze_expr(sema, fcx, scope, value_ref);
+        let field = if view.positional {
+            fields.get(selector as usize)
+        } else {
+            let field_name = StringId::from_raw(selector);
+            fields.iter().find(|field| field.name == field_name)
+        };
+        let Some(field) = field else {
+            field_errored = true;
+            let message = if view.positional {
+                format!(
+                    "'{}' takes {} positional argument{}; found an extra argument",
+                    sema.pool.str(error_name),
+                    fields.len(),
+                    if fields.len() == 1 { "" } else { "s" }
+                )
+            } else {
+                format!(
+                    "error '{}' has no field '{}'",
+                    sema.pool.str(error_name),
+                    sema.pool.str(StringId::from_raw(selector))
+                )
+            };
+            sema.sink
+                .emit(Diag::error(span, DiagCode::UnknownVariantField, message));
+            continue;
+        };
+        let index = field.idx as usize;
+        if by_index[index].is_some() {
+            field_errored = true;
+            sema.sink.emit(Diag::error(
+                sema.uir.span(value_ref),
+                DiagCode::DuplicateVariantField,
+                format!(
+                    "field '{}' is specified more than once in error '{}'",
+                    sema.pool.str(field.name),
+                    sema.pool.str(error_name)
+                ),
+            ));
+            continue;
+        }
+        let actual = fcx.builder.ty_of(value);
+        if !sema.pool.compatible(actual, field.ty) {
+            sema.sink.emit(Diag::error(
+                sema.uir.span(value_ref),
+                DiagCode::TypeMismatch,
+                format!(
+                    "field '{}' of error '{}': expected '{}', found '{}'",
+                    sema.pool.str(field.name),
+                    sema.pool.str(error_name),
+                    sema.pool.display(field.ty),
+                    sema.pool.display(actual)
+                ),
+            ));
+        }
+        by_index[index] = Some(value);
+    }
+
+    let missing: Vec<_> = fields
+        .iter()
+        .zip(&by_index)
+        .filter(|(_, value)| value.is_none())
+        .map(|(field, _)| format!("'{}'", sema.pool.str(field.name)))
+        .collect();
+    if !missing.is_empty() && !field_errored {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::MissingVariantFields,
+            format!(
+                "missing field(s) {} in error '{}' construction",
+                missing.join(", "),
+                sema.pool.str(error_name)
+            ),
+        ));
+    }
+
+    let error_ty = sema.pool.error_type();
+    let args: Vec<_> = by_index
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            (
+                index as u32,
+                value.unwrap_or_else(|| fcx.builder.unreachable(error_ty, span)),
+            )
+        })
+        .collect();
+    fcx.builder
+        .enum_lit(view.ty, 0, view.positional, &args, span)
+}
+
+pub(super) fn coerce_to_error_union(
+    sema: &mut Sema,
+    fcx: &mut FuncCtx,
+    operand: TirRef,
+    target: TypeId,
+    span: Span,
+) -> TirRef {
+    let actual = fcx.builder.ty_of(operand);
+    if actual == target || sema.pool.is_error(actual) || sema.pool.is_never(actual) {
+        return operand;
+    }
+    debug_assert!(is_error_union(sema, target));
+    let target_view = sema.pool.error_union_view(target);
+    let target_members = sema.pool.error_set_view(target_view.error_set).members;
+    let target_inferred = sema.pool.kind(target) == TypeKind::InferredErrorUnion;
+    let subset = |members: &[TypeId]| {
+        target_inferred || members.iter().all(|member| target_members.contains(member))
+    };
+
+    let allowed = match sema.pool.kind(actual) {
+        TypeKind::DeclaredError | TypeKind::ErrorSet => {
+            subset(&sema.pool.error_set_view(actual).members)
+        }
+        TypeKind::ErrorUnion | TypeKind::InferredErrorUnion => {
+            let source = sema.pool.error_union_view(actual);
+            sema.pool.compatible(source.success, target_view.success)
+                && subset(&sema.pool.error_set_view(source.error_set).members)
+        }
+        _ => sema.pool.compatible(actual, target_view.success),
+    };
+    if allowed {
+        return fcx.builder.error_union_coerce(operand, target, span);
+    }
+
+    sema.sink.emit(Diag::error(
+        span,
+        DiagCode::TypeMismatch,
+        format!(
+            "cannot coerce '{}' to '{}': success types must match and the source error set must be a subset of the destination",
+            sema.pool.display(actual),
+            sema.pool.display(target)
+        ),
+    ));
+    operand
 }

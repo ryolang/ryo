@@ -1,15 +1,86 @@
-//! Binary-operator emission: the per-operator-kind `emit_*` fns called
-//! from [`check_binary_op`] once the operand join type is known. Each
-//! validates the operand kind for its operator family (bool logicals,
-//! equality, ordering, modulo, arithmetic), emits the typed TIR
-//! instruction or the E-operators diagnostic, and returns the TirRef.
-//! Split out of `expr/mod.rs` to stay under the file-length limit.
+//! Unary analysis and binary-operator emission. Each path validates the
+//! operand kind for its operator family, emits the typed TIR instruction
+//! or diagnostic, and returns the TirRef. Split out of `expr/mod.rs` to
+//! stay under the file-length limit.
 
-use super::{FuncCtx, Sema};
+use super::{ConstInt, FuncCtx, Scope, Sema, analyze_expr, const_eval_int};
+use crate::sema::errors;
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::tir::{TirRef, TirTag};
 use ryo_core::types::{TypeId, TypeKind, ViewKind};
-use ryo_core::uir::{InstTag, Span};
+use ryo_core::uir::{InstRef, InstTag, Span};
+
+pub(super) fn analyze_unary_operator(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    tag: InstTag,
+    r: InstRef,
+    operand: InstRef,
+    span: Span,
+) -> TirRef {
+    let sub = analyze_expr(sema, fcx, scope, operand);
+    let sub_ty = fcx.builder.ty_of(sub);
+    if let Some(recovery) = errors::reject_direct_use(
+        sema,
+        fcx,
+        sub_ty,
+        span,
+        DiagCode::UnsupportedOperator,
+        "use an operator on",
+    ) {
+        return recovery;
+    }
+    match tag {
+        InstTag::Neg => match sema.pool.kind(sub_ty) {
+            TypeKind::Int => {
+                if matches!(const_eval_int(sema.uir, r), ConstInt::Overflow) {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::ConstEvalFailure,
+                        "integer overflow in constant expression".to_string(),
+                    ));
+                    fcx.builder.unreachable(sema.pool.error_type(), span)
+                } else {
+                    fcx.builder.unary(TirTag::INeg, sema.pool.int(), sub, span)
+                }
+            }
+            TypeKind::Float => fcx
+                .builder
+                .unary(TirTag::FNeg, sema.pool.float(), sub, span),
+            TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
+            _ => {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::UnsupportedOperator,
+                    format!(
+                        "unary operator '-' not supported for type '{}'",
+                        sema.pool.display(sub_ty),
+                    ),
+                ));
+                fcx.builder.unreachable(sema.pool.error_type(), span)
+            }
+        },
+        InstTag::Not => match sema.pool.kind(sub_ty) {
+            TypeKind::Bool => fcx
+                .builder
+                .unary(TirTag::BoolNot, sema.pool.bool_(), sub, span),
+            TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
+            _ => {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::UnsupportedOperator,
+                    format!(
+                        "logical operator 'not' requires 'bool' operand, got '{}'",
+                        sema.pool.display(sub_ty),
+                    ),
+                ));
+                fcx.builder.unreachable(sema.pool.error_type(), span)
+            }
+        },
+        _ => unreachable!("analyze_unary_operator received {tag:?}"),
+    }
+}
 
 pub(super) fn emit_logical_operator(
     sema: &mut Sema<'_>,

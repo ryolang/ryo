@@ -617,6 +617,36 @@ impl<'a> Walk<'a> {
                 consume_struct_lit_fields(self.tir, self.flow, self.pool, own, sink, r);
             }
             TirTag::EnumLit => analyze_enum_lit(self, own, sink, r),
+            TirTag::ErrorUnionCoerce => {
+                self.seed_temp(own, r);
+                if let TirData::UnOp(operand) = inst.data
+                    && needs_tracking(self.tir.inst(operand).ty, self.pool)
+                {
+                    let span = self.tir.span(operand);
+                    let consumed_name = consumed_binding_name(self.tir, operand);
+                    check_source_projected(
+                        self.tir,
+                        self.flow,
+                        self.pool,
+                        own,
+                        sink,
+                        own.underlying_owner(operand),
+                        span,
+                        "move",
+                        consumed_name,
+                    );
+                    consume_for_assignment(
+                        self.tir,
+                        self.pool,
+                        own,
+                        sink,
+                        operand,
+                        span,
+                        consumed_name,
+                        r,
+                    );
+                }
+            }
             TirTag::Call => self.analyze_call(own, sink, r),
             TirTag::Var => self.analyze_var_read(own, r, dead),
             TirTag::Slice => {

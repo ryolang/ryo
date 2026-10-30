@@ -204,69 +204,12 @@ pub(crate) fn analyze_expr_allow_never(
             }
             check_binary_op(sema, fcx, inst.tag, lhs_ty, rhs_ty, l, r2, span)
         }
-        InstTag::Neg => {
+        InstTag::Neg | InstTag::Not => {
             let operand = match inst.data {
                 InstData::UnOp(o) => o,
-                _ => unreachable!("Neg must carry InstData::UnOp"),
+                _ => unreachable!("unary operator must carry InstData::UnOp"),
             };
-            let sub = analyze_expr(sema, fcx, scope, operand);
-            let sub_ty = fcx.builder.ty_of(sub);
-            match sema.pool.kind(sub_ty) {
-                TypeKind::Int => {
-                    // `-(i64::MIN)` is the only Neg that can overflow,
-                    // reachable through constant sub-expressions.
-                    if matches!(const_eval_int(sema.uir, r), ConstInt::Overflow) {
-                        sema.sink.emit(Diag::error(
-                            span,
-                            DiagCode::ConstEvalFailure,
-                            "integer overflow in constant expression".to_string(),
-                        ));
-                        fcx.builder.unreachable(sema.pool.error_type(), span)
-                    } else {
-                        fcx.builder.unary(TirTag::INeg, sema.pool.int(), sub, span)
-                    }
-                }
-                TypeKind::Float => fcx
-                    .builder
-                    .unary(TirTag::FNeg, sema.pool.float(), sub, span),
-                TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
-                _ => {
-                    sema.sink.emit(Diag::error(
-                        span,
-                        DiagCode::UnsupportedOperator,
-                        format!(
-                            "unary operator '-' not supported for type '{}'",
-                            sema.pool.display(sub_ty),
-                        ),
-                    ));
-                    fcx.builder.unreachable(sema.pool.error_type(), span)
-                }
-            }
-        }
-        InstTag::Not => {
-            let operand = match inst.data {
-                InstData::UnOp(o) => o,
-                _ => unreachable!("Not must carry InstData::UnOp"),
-            };
-            let sub = analyze_expr(sema, fcx, scope, operand);
-            let sub_ty = fcx.builder.ty_of(sub);
-            match sema.pool.kind(sub_ty) {
-                TypeKind::Bool => fcx
-                    .builder
-                    .unary(TirTag::BoolNot, sema.pool.bool_(), sub, span),
-                TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
-                _ => {
-                    sema.sink.emit(Diag::error(
-                        span,
-                        DiagCode::UnsupportedOperator,
-                        format!(
-                            "logical operator 'not' requires 'bool' operand, got '{}'",
-                            sema.pool.display(sub_ty),
-                        ),
-                    ));
-                    fcx.builder.unreachable(sema.pool.error_type(), span)
-                }
-            }
+            operators::analyze_unary_operator(sema, fcx, scope, inst.tag, r, operand, span)
         }
         InstTag::Call => {
             let view = sema.uir.call_view(r);
@@ -299,6 +242,16 @@ pub(crate) fn analyze_expr_allow_never(
 
             for arg in &view.args {
                 analyze_expr(sema, fcx, scope, arg);
+            }
+            if super::errors::is_error_union(sema, receiver_ty) {
+                sema.sink.emit(super::errors::direct_use_diag(
+                    sema,
+                    span,
+                    DiagCode::TypeMismatch,
+                    receiver_ty,
+                    "call a method on",
+                ));
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
 
             // `str`/`strview` (M8.4) and `bytes`/`bytesview` (M8.4.2)
@@ -479,6 +432,9 @@ pub(crate) fn analyze_expr_allow_never(
         InstTag::Borrow => analyze_borrow(sema, fcx, scope, r, inst.data, span),
         InstTag::StructLit => analyze_struct_lit(sema, fcx, scope, r, span),
         InstTag::EnumLit => analyze_variant_construct(sema, fcx, scope, r, span),
+        InstTag::ErrorConstruct => {
+            super::errors::analyze_error_construct(sema, fcx, scope, r, span)
+        }
         InstTag::Match => analyze_match(sema, fcx, scope, r, span),
         InstTag::FieldAccess => analyze_field_access(sema, fcx, scope, r, span),
         // UIR trusted-producer contract (see the `uir.rs` module
@@ -999,6 +955,16 @@ fn analyze_field_access(
     if sema.pool.is_error(oty) {
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
+    if super::errors::is_error_union(sema, oty) {
+        sema.sink.emit(super::errors::direct_use_diag(
+            sema,
+            span,
+            DiagCode::NotAStruct,
+            oty,
+            "access a field on",
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
     let is_struct = matches!(sema.pool.kind(oty), TypeKind::Struct | TypeKind::AnonStruct);
     if !is_struct {
         // A numeric key on a non-struct is never legitimate — and it
@@ -1317,6 +1283,23 @@ pub(crate) fn check_binary_op(
     rhs: TirRef,
     span: Span,
 ) -> TirRef {
+    let union_ty = if super::errors::is_error_union(sema, lhs_ty) {
+        Some(lhs_ty)
+    } else if super::errors::is_error_union(sema, rhs_ty) {
+        Some(rhs_ty)
+    } else {
+        None
+    };
+    if let Some(ty) = union_ty {
+        sema.sink.emit(super::errors::direct_use_diag(
+            sema,
+            span,
+            DiagCode::UnsupportedOperator,
+            ty,
+            "use an operator on",
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
     // M8.4 §3.3/§3.4, generalized M8.4.2: mixed owner/view equality —
     // wrap the owned side in an explicit `ToView` conversion so the
     // comparison runs view-vs-view. This must happen before the

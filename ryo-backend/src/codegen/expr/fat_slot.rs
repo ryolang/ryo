@@ -206,7 +206,10 @@ impl<M: Module> Codegen<M> {
                                 .load(types::I64, MemFlagsData::trusted(), repr_addr, 16);
                         ValueRepr::Str { ptr, len, cap }
                     }
-                    TypeKind::Enum => {
+                    TypeKind::Enum
+                    | TypeKind::DeclaredError
+                    | TypeKind::ErrorSet
+                    | TypeKind::ErrorUnion => {
                         // M11: enum operands render through the
                         // tag-dispatched enum Debug repr (unit
                         // `Color.Red`, tuple `Result.Success(5)`,

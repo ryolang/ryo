@@ -10,9 +10,10 @@ pub use super::wires::struct_lit_extra::StructLitView;
 pub use super::wires::var_decl_extra::VarDeclView;
 pub use super::wires::while_loop_extra::WhileLoopView;
 use super::{
-    InstData, InstRef, InstTag, Uir, assign_or_decl_extra, call_extra, compound_assign_extra,
-    compound_field_assign_extra, enum_lit_extra, field_assign_extra, for_range_extra,
-    if_stmt_extra, method_call_extra, struct_lit_extra, var_decl_extra, while_loop_extra,
+    InstData, InstRef, InstTag, StringId, Uir, assign_or_decl_extra, call_extra,
+    compound_assign_extra, compound_field_assign_extra, enum_lit_extra, field_assign_extra,
+    for_range_extra, if_stmt_extra, method_call_extra, struct_lit_extra, var_decl_extra,
+    while_loop_extra,
 };
 
 // ---------- Read-side helpers ----------
@@ -130,6 +131,15 @@ impl Uir {
             _ => unreachable!("EnumLit must carry InstData::Extra"),
         };
         enum_lit_extra::decode(&self.extra[range.as_range()])
+    }
+
+    pub fn error_construct_view(&self, r: InstRef) -> (StringId, EnumLitView<'_>) {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, InstTag::ErrorConstruct));
+        let InstData::ErrorConstruct { name, args } = inst.data else {
+            unreachable!("ErrorConstruct must carry its name and argument range")
+        };
+        (name, enum_lit_extra::decode(&self.extra[args.as_range()]))
     }
 
     pub fn if_stmt_view(&self, r: InstRef) -> IfStmtView<'_> {

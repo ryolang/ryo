@@ -2,6 +2,7 @@ use super::tests::*;
 use super::*;
 use crate::astgen;
 use ryo_core::ast;
+use ryo_core::tir::{TirData, TirTag};
 use ryo_core::types::TypeKind;
 
 #[test]
@@ -174,4 +175,222 @@ fn error_union_member_must_be_a_declared_error() {
     let src = "struct S:\n\tvalue: int\nfn f() -> S!int:\n\tpanic(\"x\")\n";
     let (_tirs, diags, _pool) = run_with_errors(src);
     assert!(any_code(&diags, DiagCode::TypeMismatch));
+}
+
+#[test]
+fn unit_positional_and_named_errors_construct_enum_literals() {
+    let src = "error Unit\nerror Positional(int, str)\nerror Named(status: int, message: str)\n\
+               fn main():\n\tu = Unit\n\tp = Positional(7, \"seven\")\n\tn = Named(message=\"seven\", status=7)\n";
+    let (tirs, pool) = run(src).expect("declared errors should construct");
+    let main = tir_named(&tirs, &pool, "main");
+    let literals: Vec<_> = main
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, inst)| inst.tag == TirTag::EnumLit)
+        .map(|(index, inst)| (TirRef::from_raw(index as u32), inst))
+        .collect();
+    assert_eq!(literals.len(), 3, "unexpected TIR: {main:?}");
+    assert!(literals.iter().all(|(_, inst)| {
+        pool.kind(inst.ty) == TypeKind::DeclaredError
+            && pool.enum_view(inst.ty).variants().count() == 1
+    }));
+    let fields: Vec<_> = main
+        .enum_lit_view(literals[2].0)
+        .fields()
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(fields, vec![0, 1], "named fields use declaration order");
+}
+
+#[test]
+fn error_constructor_shape_and_payload_errors_are_diagnosed() {
+    let cases = [
+        (
+            "error E(int)\nfn main():\n\tx = E()\n",
+            DiagCode::MissingVariantFields,
+        ),
+        (
+            "error E(int)\nfn main():\n\tx = E(1, 2)\n",
+            DiagCode::UnknownVariantField,
+        ),
+        (
+            "error E(value: int)\nfn main():\n\tx = E(other=1)\n",
+            DiagCode::UnknownVariantField,
+        ),
+        (
+            "error E(value: int)\nfn main():\n\tx = E(value=1, value=2)\n",
+            DiagCode::DuplicateVariantField,
+        ),
+        (
+            "error E(a: int, b: str)\nfn main():\n\tx = E(a=1)\n",
+            DiagCode::MissingVariantFields,
+        ),
+        (
+            "error E(int)\nfn main():\n\tx = E(\"bad\")\n",
+            DiagCode::TypeMismatch,
+        ),
+        (
+            "error E(value: int)\nfn main():\n\tx = E(value=\"bad\")\n",
+            DiagCode::TypeMismatch,
+        ),
+    ];
+    for (src, code) in cases {
+        let (_tirs, diags, _pool) = run_with_errors(src);
+        assert!(any_code(&diags, code), "{src:?}: {diags:?}");
+        assert!(
+            !any_code(&diags, DiagCode::UndefinedFunction),
+            "{src:?}: {diags:?}"
+        );
+        assert!(
+            !any_code(&diags, DiagCode::UndefinedVariable),
+            "{src:?}: {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn ordinary_calls_reject_named_arguments() {
+    let src = "fn Work(value: int) -> int:\n\treturn value\n\
+               fn main():\n\tresult = Work(value=1)\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert!(
+        diags.iter().any(|diag| {
+            diag.code == DiagCode::NamedArgInParens || diag.message.contains("named arguments")
+        }),
+        "unexpected diagnostics: {diags:?}"
+    );
+}
+
+#[test]
+fn returns_and_typed_bindings_wrap_success_and_error_values() {
+    let src = "error A\nerror B\n\
+               fn success() -> (A | B)!int:\n\treturn 7\n\
+               fn failure() -> (A | B)!int:\n\treturn A\n\
+               fn locals() -> A!int:\n\tvalue: A!int = 1\n\terr: A!int = A\n\treturn value\n";
+    let (tirs, pool) = run(src).expect("union coercions should succeed");
+    for name in ["success", "failure"] {
+        let tir = tir_named(&tirs, &pool, name);
+        let ret = stmt_at(tir, 0);
+        let TirData::UnOp(operand) = tir.inst(ret).data else {
+            panic!("return must have an operand")
+        };
+        assert_eq!(tir.inst(operand).tag, TirTag::ErrorUnionCoerce, "{name}");
+        assert_eq!(tir.inst(operand).ty, tir.return_type);
+    }
+    let locals = tir_named(&tirs, &pool, "locals");
+    for index in 0..2 {
+        let decl = locals.var_decl_view(stmt_at(locals, index));
+        assert_eq!(locals.inst(decl.initializer).tag, TirTag::ErrorUnionCoerce);
+        assert_eq!(locals.inst(decl.initializer).ty, locals.return_type);
+    }
+}
+
+#[test]
+fn narrower_unions_widen_but_narrowing_is_rejected() {
+    let src = "error A\nerror B\n\
+               fn narrow() -> A!int:\n\treturn 1\n\
+               fn wide() -> (A | B)!int:\n\tvalue = narrow()\n\treturn value\n";
+    let (tirs, pool) = run(src).expect("subset union should widen");
+    let wide = tir_named(&tirs, &pool, "wide");
+    let ret = stmt_at(wide, 1);
+    let TirData::UnOp(operand) = wide.inst(ret).data else {
+        panic!("return must have an operand")
+    };
+    assert_eq!(wide.inst(operand).tag, TirTag::ErrorUnionCoerce);
+    assert_eq!(wide.inst(operand).ty, wide.return_type);
+
+    let bad = "error A\nerror B\n\
+               fn wide() -> (A | B)!int:\n\treturn 1\n\
+               fn narrow() -> A!int:\n\tvalue = wide()\n\treturn value\n";
+    let (_tirs, diags, _pool) = run_with_errors(bad);
+    assert!(any_code(&diags, DiagCode::TypeMismatch), "{diags:?}");
+}
+
+#[test]
+fn incompatible_success_and_nonmember_errors_are_rejected() {
+    let cases = [
+        "error A\nfn f() -> A!int:\n\treturn \"bad\"\n",
+        "error A\nerror B\nfn f() -> A!int:\n\treturn B\n",
+        "error A\nerror B\nfn f() -> A!int:\n\tvalue: B!int = 1\n\treturn value\n",
+    ];
+    for src in cases {
+        let (_tirs, diags, _pool) = run_with_errors(src);
+        assert!(
+            any_code(&diags, DiagCode::TypeMismatch),
+            "{src:?}: {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn unannotated_raw_union_bindings_remain_unions() {
+    let src = "error A\nfn fail() -> A!int:\n\treturn A\nfn main():\n\tresult = fail()\n";
+    let (tirs, pool) = run(src).expect("raw inferred union binding should succeed");
+    let main = tir_named(&tirs, &pool, "main");
+    let decl = stmt_at(main, 0);
+    assert_eq!(pool.kind(main.inst(decl).ty), TypeKind::ErrorUnion);
+    let init = main.var_decl_view(decl).initializer;
+    assert_eq!(main.inst(init).ty, main.inst(decl).ty);
+}
+
+#[test]
+fn value_bindings_shadow_error_constructors() {
+    let src = "error E\n\
+               fn param(E: int) -> int:\n\treturn E\n\
+               fn main():\n\tE = 7\n\tvalue = E\n\tother = param(E)\n";
+    let (tirs, pool) = run(src).expect("bound values should win over error names");
+    let param = tir_named(&tirs, &pool, "param");
+    let ret = stmt_at(param, 0);
+    let TirData::UnOp(operand) = param.inst(ret).data else {
+        panic!("return must have an operand")
+    };
+    assert_eq!(param.inst(operand).tag, TirTag::Var);
+    assert_eq!(param.inst(operand).ty, pool.int());
+    let main = tir_named(&tirs, &pool, "main");
+    let value_init = main.var_decl_view(stmt_at(main, 1)).initializer;
+    assert_eq!(main.inst(value_init).tag, TirTag::Var);
+    assert_eq!(main.inst(value_init).ty, pool.int());
+}
+
+#[test]
+fn direct_error_union_use_is_rejected_with_unwrap_guidance() {
+    let bodies = [
+        "result = fail()\n\tprint(result.0)\n",
+        "result = fail()\n\tprint(result + 1)\n",
+        "result = fail()\n\tif result:\n\t\tprint(1)\n",
+        "result = fail()\n\tprint(result)\n",
+        "result = fail()\n\tresult.len()\n",
+        "result = fail()\n\tmatch result:\n\t\t_: 0\n",
+    ];
+    for body in bodies {
+        let src = format!("error A\nfn fail() -> A!int:\n\treturn A\nfn main():\n\t{body}");
+        let (_tirs, diags, _pool) = run_with_errors(&src);
+        assert!(
+            diags.iter().any(|diag| {
+                diag.message.contains("try")
+                    || diag.message.contains("catch")
+                    || diag
+                        .notes
+                        .iter()
+                        .any(|note| note.message.contains("try") || note.message.contains("catch"))
+            }),
+            "{src:?}: {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn void_success_return_wraps_ok() {
+    let src = "error A\nfn succeed() -> A!void:\n\treturn\n";
+    let (tirs, pool) = run(src).expect("void success should wrap in Ok");
+    let tir = tir_named(&tirs, &pool, "succeed");
+    let ret = stmt_at(tir, 0);
+    assert_eq!(tir.inst(ret).tag, TirTag::Return);
+    let TirData::UnOp(operand) = tir.inst(ret).data else {
+        panic!("return must have an operand")
+    };
+    assert_eq!(tir.inst(operand).tag, TirTag::ErrorUnionCoerce);
+    assert_eq!(tir.inst(operand).ty, tir.return_type);
 }

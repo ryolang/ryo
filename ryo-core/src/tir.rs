@@ -327,6 +327,11 @@ pub enum TirTag {
     /// `argc = 0`; `TypedInst.ty` is the enum type.
     EnumLit,
 
+    /// Explicit success/error wrapping or active-alternative widening
+    /// into an error union. Operand in `TirData::UnOp`; `TypedInst.ty`
+    /// is the destination union type.
+    ErrorUnionCoerce,
+
     /// Field access `object.field` (M9). Payload in
     /// `TirData::FieldAccess` (object + canonical field index);
     /// `TypedInst.ty` is the field type.
@@ -884,6 +889,15 @@ impl TirBuilder {
     ) -> TirRef {
         let range = enum_lit_extra::encode(&mut self.extra, ty, variant, args, positional);
         self.push(TirTag::EnumLit, ty, TirData::Extra(range), span)
+    }
+
+    pub fn error_union_coerce(&mut self, operand: TirRef, target: TypeId, span: Span) -> TirRef {
+        self.push(
+            TirTag::ErrorUnionCoerce,
+            target,
+            TirData::UnOp(operand),
+            span,
+        )
     }
 
     /// Emit a `FieldAccess` (M9). `field_index` is the canonical

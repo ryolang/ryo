@@ -257,6 +257,11 @@ pub enum InstTag {
     /// `argc = 0`.
     EnumLit,
 
+    /// Declared-error construction candidate. The inline data preserves
+    /// the source name for shadowing; the shared enum-literal wire holds
+    /// positional field indices or named-field `StringId`s.
+    ErrorConstruct,
+
     /// Field access `object.field` (M9); see [`InstData::FieldAccess`].
     FieldAccess,
 
@@ -332,6 +337,12 @@ pub enum InstData {
     FieldAccess {
         object: InstRef,
         field: StringId,
+    },
+    /// Error-construction candidate name and its shared enum-literal
+    /// argument wire. Sema resolves the name after value bindings.
+    ErrorConstruct {
+        name: StringId,
+        args: ExtraRange,
     },
     /// Destructuring assignment `pattern = value` (M10): the value
     /// expression plus a plan of `(selector, bind)` pairs in
@@ -821,6 +832,22 @@ impl UirBuilder {
     ) -> InstRef {
         let range = enum_lit_extra::encode(&mut self.uir.extra, ty, variant, args, positional);
         self.push(InstTag::EnumLit, InstData::Extra(range), span)
+    }
+
+    pub fn error_construct(
+        &mut self,
+        name: StringId,
+        ty: TypeId,
+        positional: bool,
+        args: &[(u32, InstRef)],
+        span: Span,
+    ) -> InstRef {
+        let range = enum_lit_extra::encode(&mut self.uir.extra, ty, 0, args, positional);
+        self.push(
+            InstTag::ErrorConstruct,
+            InstData::ErrorConstruct { name, args: range },
+            span,
+        )
     }
 
     /// Emits a `FieldAccess` `object.field` (M9).

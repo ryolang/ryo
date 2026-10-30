@@ -22,17 +22,29 @@ pub(crate) fn analyze_stmt(
     match inst.tag {
         InstTag::VarDecl => {
             let view = sema.uir.var_decl_view(r);
-            let init_tir = analyze_expr_allow_never(sema, fcx, scope, view.initializer);
-            let inferred = fcx.builder.ty_of(init_tir);
+            let mut init_tir = analyze_expr_allow_never(sema, fcx, scope, view.initializer);
+            let mut inferred = fcx.builder.ty_of(init_tir);
             // Reject void/never RHS and recover with the error
             // sentinel so downstream uses don't cascade.
-            let inferred =
+            inferred =
                 if check_bindable_value(sema, view.name, inferred, sema.uir.span(view.initializer))
                 {
                     sema.pool.error_type()
                 } else {
                     inferred
                 };
+            if let Some(target) = view.ty
+                && super::errors::is_error_union(sema, target)
+            {
+                init_tir = super::errors::coerce_to_error_union(
+                    sema,
+                    fcx,
+                    init_tir,
+                    target,
+                    sema.uir.span(view.initializer),
+                );
+                inferred = fcx.builder.ty_of(init_tir);
+            }
             let resolved = resolve_var_decl_type(&view, inferred, sema);
 
             if scope.contains_in_current(view.name) {
@@ -62,9 +74,12 @@ pub(crate) fn analyze_stmt(
                 InstData::UnOp(o) => o,
                 _ => unreachable!("Return must carry InstData::UnOp"),
             };
-            let val_tir = analyze_expr(sema, fcx, scope, operand);
+            let mut val_tir = analyze_expr(sema, fcx, scope, operand);
             let actual = fcx.builder.ty_of(val_tir);
-            if fcx.return_type == sema.pool.void() {
+            if super::errors::is_error_union(sema, fcx.return_type) {
+                val_tir =
+                    super::errors::coerce_to_error_union(sema, fcx, val_tir, fcx.return_type, span);
+            } else if fcx.return_type == sema.pool.void() {
                 if !sema.pool.is_error(actual) {
                     sema.sink.emit(Diag::error(
                         span,
@@ -95,6 +110,16 @@ pub(crate) fn analyze_stmt(
                 .unary(TirTag::Return, sema.pool.void(), val_tir, span)
         }
         InstTag::ReturnVoid => {
+            if super::errors::is_error_union(sema, fcx.return_type)
+                && sema.pool.error_union_view(fcx.return_type).success == sema.pool.void()
+            {
+                let value = fcx.builder.int_const(0, sema.pool.void(), span);
+                let wrapped =
+                    super::errors::coerce_to_error_union(sema, fcx, value, fcx.return_type, span);
+                return fcx
+                    .builder
+                    .unary(TirTag::Return, sema.pool.void(), wrapped, span);
+            }
             if fcx.return_type != sema.pool.void() && !sema.pool.is_error(fcx.return_type) {
                 sema.sink.emit(Diag::error(
                     span,
@@ -1085,7 +1110,15 @@ pub(crate) fn check_condition_bool(
 ) {
     // conditions must be bool (spec §3, Control Flow)
     let cond_ty = fcx.builder.ty_of(cond_tir);
-    if !sema.pool.is_error(cond_ty) && cond_ty != sema.pool.bool_() {
+    if super::errors::is_error_union(sema, cond_ty) {
+        sema.sink.emit(super::errors::direct_use_diag(
+            sema,
+            sema.uir.span(cond_uir),
+            DiagCode::ConditionNotBool,
+            cond_ty,
+            "test",
+        ));
+    } else if !sema.pool.is_error(cond_ty) && cond_ty != sema.pool.bool_() {
         sema.sink.emit(Diag::error(
             sema.uir.span(cond_uir),
             DiagCode::ConditionNotBool,
@@ -1103,6 +1136,7 @@ pub(crate) fn resolve_var_decl_type(
     sema: &mut Sema<'_>,
 ) -> TypeId {
     match view.ty {
+        Some(annotated) if super::errors::is_error_union(sema, annotated) => annotated,
         Some(annotated) if !sema.pool.compatible(annotated, inferred) => {
             // Anchor the squiggle on the offending value (the
             // initializer) rather than on the whole `[mut] name [:

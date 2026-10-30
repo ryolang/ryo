@@ -271,6 +271,19 @@ fn write_inst(
             }
             writeln!(f, "}}")
         }
+        (InstTag::ErrorConstruct, InstData::ErrorConstruct { .. }) => {
+            let (name, view) = uir.error_construct_view(r);
+            write!(f, "error_construct {}", pool.str(name))?;
+            for (field, value) in view.fields() {
+                if view.positional {
+                    write!(f, " {field}:")?;
+                } else {
+                    write!(f, " {}:", pool.str(StringId::from_raw(field)))?;
+                }
+                write!(f, "%{}", value.index())?;
+            }
+            writeln!(f)
+        }
         (InstTag::FieldAccess, InstData::FieldAccess { object, field }) => {
             writeln!(f, "field_access %{}.{}", object.index(), pool.str(field))
         }

@@ -574,6 +574,7 @@ impl FlowBuilder<'_> {
             | TirTag::Call
             | TirTag::StructLit
             | TirTag::EnumLit
+            | TirTag::ErrorUnionCoerce
                 if self.pool.needs_drop(inst.ty) =>
             {
                 self.mint_temp(r, inst.ty);

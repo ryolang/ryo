@@ -788,6 +788,16 @@ pub(crate) fn check_print_args(
         return false;
     }
     let arg_ty = fcx.builder.ty_of(arg_tirs[0]);
+    if super::errors::is_error_union(sema, arg_ty) {
+        sema.sink.emit(super::errors::direct_use_diag(
+            sema,
+            sema.uir.span(view.args.at(0)),
+            DiagCode::TypeMismatch,
+            arg_ty,
+            "print",
+        ));
+        return false;
+    }
     if sema.pool.is_error(arg_ty) {
         return false;
     }

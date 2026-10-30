@@ -353,6 +353,7 @@ fn un_op_name(t: TirTag) -> &'static str {
         TirTag::ToView => "to_view",
         TirTag::ViewAsOwner => "view_as_owner",
         TirTag::DebugRepr => "debug_repr",
+        TirTag::ErrorUnionCoerce => "error_union_coerce",
         _ => "?un",
     }
 }
