@@ -30,11 +30,12 @@
 //!    (A str scrutinee extracts its transient `(ptr, len)`.)
 //! 2. A result slot is allocated BEFORE the dispatch so the slot
 //!    address is a constant dominating every arm and the merge.
-//! 3. Dispatch per scrutinee kind: enums load the i32 tag and switch
-//!    (`emit_tag_dispatch`), routing each variant's case to the FIRST
+//! 3. Dispatch per scrutinee kind: nonempty enums load the i32 tag and
+//!    switch (`emit_tag_dispatch`), routing each variant's case to the FIRST
 //!    arm covering it (written order wins; W0005-dead duplicates stay
 //!    unrouted) and the wildcard arm's entry to the switch's
-//!    `otherwise`. Anon-struct scrutinees lower to a linear chain of
+//!    `otherwise`. An empty error set routes directly to its wildcard arm
+//!    without a tag load. Anon-struct scrutinees lower to a linear chain of
 //!    guard conjunctions: each failed compare short-circuits to the
 //!    next arm's test block, and the final wildcard arm is the
 //!    fallthrough. Literal scrutinees (int/bool/str) lower to the same
@@ -428,7 +429,17 @@ impl<M: Module> Codegen<M> {
                 }
                 continue;
             }
-            if token.is_some() && ctx.tir.is_direct_catch_match(r) {
+            if ctx.pool.kind(b.ty) == TypeKind::ErrorSet && ctx.pool.enum_view(b.ty).is_empty() {
+                debug_assert!(token.is_none());
+                let var = builder.declare_var(ctx.int_type);
+                builder.def_var(var, field_addr);
+                Self::write_slot(
+                    &mut ctx.struct_locals,
+                    &mut ctx.struct_locals_undo,
+                    b.name,
+                    Some(var),
+                );
+            } else if token.is_some() && ctx.tir.is_direct_catch_match(r) {
                 Self::bind_field_deep_copy(builder, ctx, b.name, field_addr, b.ty, token)?;
             } else {
                 Self::bind_field_move(builder, ctx, b.name, field_addr, b.ty, token)?;
@@ -708,11 +719,12 @@ impl<M: Module> Codegen<M> {
         }
     }
 
-    /// Enum scrutinee: i32 tag load plus `emit_tag_dispatch`. Each
-    /// variant's case block jumps to the FIRST arm covering it (written
-    /// order wins; duplicate arms past the first are W0005-dead and get
-    /// no case edge), and the wildcard arm's entry takes the switch's
-    /// `otherwise` — full coverage without a wildcard keeps the
+    /// Enum scrutinee: nonempty enums use an i32 tag load plus
+    /// `emit_tag_dispatch`; an empty error set jumps directly to its
+    /// wildcard arm. Each variant's case block jumps to the FIRST arm
+    /// covering it (written order wins; duplicate arms past the first are
+    /// W0005-dead and get no case edge), and the wildcard arm's entry takes
+    /// the switch's `otherwise` — full coverage without a wildcard keeps the
     /// invalid-tag trap, exactly the M11 invariant semantics. The case
     /// blocks are pure dispatch: the arm bodies are the pre-mapped Flow
     /// arm blocks, filled by the driver.
@@ -725,11 +737,6 @@ impl<M: Module> Codegen<M> {
         arm_entry: &[Option<Block>],
     ) -> Result<(), String> {
         let variant_count = ctx.pool.enum_view(scrut_ty).variants().count();
-        let tag = builder
-            .ins()
-            .load(types::I32, MemFlagsData::trusted(), scrutinee_addr, 0);
-        let (cases, otherwise) = Self::emit_tag_dispatch(builder, variant_count, tag);
-
         let mut case_arm: Vec<Option<usize>> = vec![None; variant_count];
         let mut wildcard: Option<usize> = None;
         for (i, arm) in view.arms().enumerate() {
@@ -778,6 +785,19 @@ impl<M: Module> Codegen<M> {
             }
         }
 
+        if variant_count == 0 {
+            let i = wildcard.ok_or_else(|| {
+                "eval_inst_match: empty enum scrutinee has no wildcard arm".to_string()
+            })?;
+            let entry = arm_entry[i].expect("an empty enum's wildcard arm has an entry block");
+            builder.ins().jump(entry, &[]);
+            return Ok(());
+        }
+
+        let tag = builder
+            .ins()
+            .load(types::I32, MemFlagsData::trusted(), scrutinee_addr, 0);
+        let (cases, otherwise) = Self::emit_tag_dispatch(builder, variant_count, tag);
         for (v, case) in cases.iter().enumerate() {
             // Pure dispatch: jump to the routed arm's pre-mapped Flow
             // block (the driver fills it), or trap on a violated-

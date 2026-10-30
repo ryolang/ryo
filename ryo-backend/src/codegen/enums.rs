@@ -1,14 +1,16 @@
 //! Enum codegen (M11) — all enum/variant emission: enum construction,
 //! tag/union slot layout, tag-dispatched copies and drops, Eq, and
 //! Debug. Like structs (see `structs.rs`), enum values are
-//! memory-first aggregates: every value lives in a stack slot sized by
-//! the pool's enum layout (`i32` discriminant at offset 0, each
+//! memory-first aggregates: every inhabited value lives in a stack slot
+//! sized by the pool's enum layout (`i32` discriminant at offset 0, each
 //! variant's payload at its pool-computed absolute offset), and
 //! `ValueRepr::Enum` carries the slot address. Copies and drops NEVER
 //! copy bytes — a block copy would read the inactive variants'
 //! uninitialized padding, which the ASan/Valgrind suites flag — so
 //! both dispatch on the loaded discriminant (`Switch`) and touch only
 //! the active variant's fields, reusing the struct per-field helpers.
+//! The empty inferred error set has no tag or payload storage, so copying
+//! it is a no-op.
 
 use cranelift::codegen::ir::{BlockArg, MemFlagsData, StackSlot, StackSlotData, StackSlotKind};
 use cranelift::frontend::Switch;
@@ -222,6 +224,9 @@ impl<M: Module> Codegen<M> {
         ty: TypeId,
         deep: bool,
     ) -> Result<(), String> {
+        if ctx.pool.enum_view(ty).is_empty() {
+            return Ok(());
+        }
         let tag = builder
             .ins()
             .load(types::I32, MemFlagsData::trusted(), src, 0);
