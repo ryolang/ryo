@@ -9,12 +9,33 @@ use ryo_core::tir::{ParamMode, TirRef};
 use ryo_core::types::{StringId, TypeId, VariantKind};
 use ryo_core::uir::{CallView, InstData, InstRef, InstTag, Span};
 
+fn analyze_call_args(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    view: &CallView<'_>,
+    expected: Option<&[TypeId]>,
+) -> Vec<TirRef> {
+    view.args
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            if let Some(target) = expected.and_then(|types| types.get(index))
+                && sema.uir.inst(arg).tag == InstTag::StructLit
+            {
+                super::analyze_struct_lit_with_target(sema, fcx, scope, arg, *target)
+            } else {
+                super::analyze_expr(sema, fcx, scope, arg)
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn check_call(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     view: &CallView<'_>,
-    arg_tirs: &[TirRef],
     span: Span,
 ) -> TirRef {
     let name_id = view.name;
@@ -25,20 +46,23 @@ pub(crate) fn check_call(
     // so a user-defined `fn str` must win over the intercept (least
     // surprise): it fires only when no user declaration carries the name.
     if name_id == names.str_ && !sema.name_to_decl.contains_key(&name_id) {
-        return emit_str_materialize(sema, fcx, view, arg_tirs, span);
+        let arg_tirs = analyze_call_args(sema, fcx, scope, view, None);
+        return emit_str_materialize(sema, fcx, view, &arg_tirs, span);
     }
 
     // M8.4.2: `bytes(bview)` materialization — same call-form
     // intercept rule as `str(view)`: a user-defined `fn bytes` wins.
     if name_id == names.bytes && !sema.name_to_decl.contains_key(&name_id) {
-        return emit_bytes_materialize(sema, fcx, view, arg_tirs, span);
+        let arg_tirs = analyze_call_args(sema, fcx, scope, view, None);
+        return emit_bytes_materialize(sema, fcx, view, &arg_tirs, span);
     }
 
     // Builtins short-circuit: they're not in `signatures` /
     // `name_to_decl`, so signature resolution and the worklist
     // never see them.
     if let Some(&(_, builtin)) = sema.builtin_by_id.iter().find(|&&(id, _)| id == name_id) {
-        return emit_builtin_call(sema, fcx, scope, view, arg_tirs, span, builtin);
+        let arg_tirs = analyze_call_args(sema, fcx, scope, view, None);
+        return emit_builtin_call(sema, fcx, scope, view, &arg_tirs, span, builtin);
     }
 
     if check_reserved_name(
@@ -47,12 +71,14 @@ pub(crate) fn check_call(
         span,
         "is a syntactic construct, not a callable function; use `for i in range(start, end):`",
     ) {
+        let _arg_tirs = analyze_call_args(sema, fcx, scope, view, None);
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
 
     let callee = match sema.name_to_decl.get(&name_id).copied() {
         Some(d) => d,
         None => {
+            let _arg_tirs = analyze_call_args(sema, fcx, scope, view, None);
             // `Some(1)` — the callee name may be an enum variant
             // written without its enum. Name every enum declaring it
             // (sorted for a stable message) and show the construct
@@ -103,6 +129,7 @@ pub(crate) fn check_call(
     if super::error_inference::is_inferred(sema, callee)
         && !super::error_inference::resolve_inferred_callee(sema, callee, span)
     {
+        let _arg_tirs = analyze_call_args(sema, fcx, scope, view, None);
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
 
@@ -133,6 +160,7 @@ pub(crate) fn check_call(
     } else {
         vec![ParamMode::Borrow; view.args.len()]
     };
+    let arg_tirs = analyze_call_args(sema, fcx, scope, view, Some(&expected));
 
     // Per-argument validation may replace an arg's TirRef with a
     // conversion inst (M8.4 §3.4), so the call is built from this

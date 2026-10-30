@@ -80,7 +80,11 @@ pub(crate) fn analyze_stmt(
                 InstData::UnOp(o) => o,
                 _ => unreachable!("Return must carry InstData::UnOp"),
             };
-            let mut val_tir = analyze_expr(sema, fcx, scope, operand);
+            let mut val_tir = if sema.uir.inst(operand).tag == InstTag::StructLit {
+                analyze_struct_lit_with_target(sema, fcx, scope, operand, fcx.return_type)
+            } else {
+                analyze_expr(sema, fcx, scope, operand)
+            };
             let actual = fcx.builder.ty_of(val_tir);
             if super::errors::is_error_union(sema, fcx.return_type) {
                 val_tir =
@@ -187,7 +191,13 @@ pub(crate) fn analyze_stmt(
         }
         InstTag::AssignOrDecl => {
             let view = sema.uir.assign_or_decl_view(r);
-            let mut value_tir = analyze_expr_allow_never(sema, fcx, scope, view.value);
+            let mut value_tir = if let Some((existing_ty, true)) = scope.lookup_full(view.name)
+                && sema.uir.inst(view.value).tag == InstTag::StructLit
+            {
+                analyze_struct_lit_with_target(sema, fcx, scope, view.value, existing_ty)
+            } else {
+                analyze_expr_allow_never(sema, fcx, scope, view.value)
+            };
             let value_ty = fcx.builder.ty_of(value_tir);
 
             match scope.lookup_full(view.name) {
@@ -522,7 +532,11 @@ fn analyze_field_assign(
     let Some((target_tir, field_ty)) = check_field_chain(sema, fcx, scope, view.target) else {
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     };
-    let mut value_tir = analyze_expr_allow_never(sema, fcx, scope, view.value);
+    let mut value_tir = if sema.uir.inst(view.value).tag == InstTag::StructLit {
+        analyze_struct_lit_with_target(sema, fcx, scope, view.value, field_ty)
+    } else {
+        analyze_expr_allow_never(sema, fcx, scope, view.value)
+    };
     let value_ty = fcx.builder.ty_of(value_tir);
     if check_bindable_value(sema, field_name, value_ty, sema.uir.span(view.value)) {
         return fcx.builder.unreachable(sema.pool.error_type(), span);

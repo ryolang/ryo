@@ -371,6 +371,9 @@ fn emit_error_set_convert<M: Module>(
     }
 
     let source_members = ctx.pool.error_set_view(source).members;
+    if source_members.is_empty() {
+        return Ok(());
+    }
     let target_members = ctx.pool.error_set_view(target).members;
     let source_variants: Vec<_> = ctx.pool.enum_view(source).variants().collect();
     let target_variants: Vec<_> = ctx.pool.enum_view(target).variants().collect();

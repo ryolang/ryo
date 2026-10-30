@@ -103,3 +103,29 @@ fn main():
         "empty error dispatch must not load a nonexistent payload tag:\n{clif}"
     );
 }
+
+#[test]
+fn empty_to_explicit_try_has_no_error_payload_tag_load() {
+    let (clif, _tirs, _pool) = clif_of(
+        r#"error A
+fn inner() -> !int:
+	return 7
+fn outer() -> A!int:
+	return try inner()
+fn main():
+	value = outer()
+"#,
+    );
+    let instructions: Vec<_> = clif
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let unused_payload_tag_load = instructions
+        .windows(2)
+        .any(|pair| pair[0].contains("load.i32") && pair[1].starts_with("jump "));
+    assert!(
+        !unused_payload_tag_load,
+        "empty-to-explicit conversion must not load an empty error-set tag:\n{clif}"
+    );
+}

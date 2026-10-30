@@ -214,15 +214,7 @@ pub(crate) fn analyze_expr_allow_never(
         }
         InstTag::Call => {
             let view = sema.uir.call_view(r);
-            // Translate args first (in source order) to fix their
-            // TIR refs and types, *then* validate against the
-            // signature so per-argument diagnostics carry the right
-            // span and the call still emits a well-formed TIR Call.
-            let mut arg_tirs = Vec::with_capacity(view.args.len());
-            for a in &view.args {
-                arg_tirs.push(analyze_expr(sema, fcx, scope, a));
-            }
-            check_call(sema, fcx, scope, &view, &arg_tirs, span)
+            check_call(sema, fcx, scope, &view, span)
         }
         InstTag::MethodCall => {
             let view = sema.uir.method_call_view(r);

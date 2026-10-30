@@ -114,3 +114,24 @@ fn main():
         assert_eq!(diags[0].code, DiagCode::TypeMismatch);
     }
 }
+
+#[test]
+fn anonymous_struct_fields_use_expected_type_positions() {
+    let src = r#"error A
+error B
+fn narrow() -> A!int:
+	return 3
+fn take(holder: {value: (A | B)!int}):
+	return
+fn make() -> {value: (A | B)!int}:
+	return {value=narrow()}
+fn main():
+	take({value=1})
+	take({value=A})
+	mut assigned: {value: (A | B)!int} = {value=0}
+	assigned = {value=narrow()}
+	mut nested: {inner: {value: (A | B)!int}} = {inner={value=0}}
+	nested.inner = {value=A}
+"#;
+    run(src).expect("anonymous literals should use call, return, and assignment targets");
+}

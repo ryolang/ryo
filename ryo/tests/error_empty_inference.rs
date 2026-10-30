@@ -189,3 +189,24 @@ fn empty_inferred_error_inspection_runs_aot() {
     );
     assert!(run.stdout.is_empty());
 }
+
+const EMPTY_TO_EXPLICIT: &str = r#"error A
+fn inner() -> !int:
+	return 7
+fn outer() -> A!int:
+	return try inner()
+fn main():
+	value = outer() catch:
+		A: 0
+	print(int_to_str(value) + "\n")
+"#;
+
+#[test]
+fn empty_inferred_try_to_explicit_union_runs_jit() {
+    assert_ryo_output("empty_to_explicit_try_jit.ryo", EMPTY_TO_EXPLICIT, "7\n");
+}
+
+#[test]
+fn empty_inferred_try_to_explicit_union_runs_aot() {
+    assert_aot_output("empty_to_explicit_try_aot.ryo", EMPTY_TO_EXPLICIT, "7\n");
+}
