@@ -409,6 +409,25 @@ impl<M: Module> Codegen<M> {
                 cursor += 1;
                 Some(token)
             };
+            if b.ty == ctx.pool.void() {
+                // Void uses a dummy zero scalar; its payload has no bytes
+                // to load, copy, or store.
+                let val = builder.ins().iconst(ctx.int_type, 0);
+                let var = builder.declare_var(ctx.int_type);
+                builder.def_var(var, val);
+                Self::write_slot(
+                    &mut ctx.range_facts,
+                    &mut ctx.range_facts_undo,
+                    b.name,
+                    None,
+                );
+                Self::write_slot(&mut ctx.locals, &mut ctx.locals_undo, b.name, Some(var));
+                if let Some(token) = token {
+                    ctx.aggregate_binding_storage.insert(token, var);
+                    Self::cache_repr(ctx, token, ValueRepr::Scalar(val));
+                }
+                continue;
+            }
             if token.is_some() && ctx.tir.is_direct_catch_match(r) {
                 Self::bind_field_deep_copy(builder, ctx, b.name, field_addr, b.ty, token)?;
             } else {
