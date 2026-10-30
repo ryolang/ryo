@@ -11,7 +11,7 @@ use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow, Terminator};
 use ryo_core::ownership::{FunctionSidecar, PromoFree};
 use ryo_core::tir::{ExtraList, Tir, TirRef, TirTag};
-use ryo_core::types::{InternPool, StringId};
+use ryo_core::types::{InternPool, StringId, TypeKind};
 use std::collections::{HashMap, HashSet};
 
 pub(crate) struct CleanupContext<'a> {
@@ -536,7 +536,21 @@ pub(crate) fn drain_dead_stores(
 
     // Match-arm bindings never read inside their arm (M12): ownership
     // already scheduled their arm-gated Frees; only W0001 belongs here.
-    for (name, span, _, _) in ctx.dead_stores.arm_dead_stores() {
+    for (name, span, _, home) in ctx.dead_stores.arm_dead_stores() {
+        let hidden_union_binding = ctx.flow.token_places_iter().any(|(owner, places)| {
+            if !places.contains(&home) || ctx.tir.inst(owner).tag != TirTag::Match {
+                return false;
+            }
+            let scrutinee = ctx.tir.match_view(owner).scrutinee;
+            matches!(
+                ctx.pool.kind(ctx.tir.inst(scrutinee).ty),
+                TypeKind::ErrorUnion | TypeKind::InferredErrorUnion
+            )
+        });
+        // Sema owns unused-binding warnings for hidden catch bindings.
+        if hidden_union_binding {
+            continue;
+        }
         warnings.emit(Diag::warning(
             span,
             DiagCode::DeadStore,

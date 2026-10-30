@@ -231,3 +231,54 @@ fn main():
 "#;
     assert_ryo_output("diverging_catch_jit.ryo", src, "user_42\n");
 }
+
+#[test]
+fn ordinary_handler_unused_non_copy_binding_warns_once_at_catch_binding() {
+    let src = r#"error A(str)
+fn find() -> A!int:
+	return A(int_to_str(1) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+fn main():
+	value = find() catch as err:
+		0
+	print(value)
+"#;
+    let temp_dir = TempDir::new().expect("temp");
+    let test_file = create_test_file(temp_dir.path(), "catch_handler_warning.ryo", src);
+    let output = run_ryo_command(&["run", "catch_handler_warning.ryo"], &test_file)
+        .expect("run ordinary catch handler");
+    assert!(
+        output.status.success(),
+        "ordinary handler failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "0");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("W0001").count(),
+        1,
+        "expected exactly one unused-binding warning: {stderr}"
+    );
+    assert!(
+        stderr.contains(":5:26"),
+        "warning must point at the `as err` identifier: {stderr}"
+    );
+}
+
+#[test]
+fn direct_payload_arm_can_read_shared_non_copy_error_jit() {
+    let src = r#"error A(str)
+fn describe(err: A, move message: str) -> str:
+	return message
+fn find() -> A!str:
+	return A(int_to_str(7) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+fn main():
+	value = find() catch as err:
+		A(message): describe(err, message)
+	print(value + "\n")
+"#;
+    assert_ryo_output(
+        "catch_payload_shared_read_jit.ryo",
+        src,
+        "7aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+    );
+}

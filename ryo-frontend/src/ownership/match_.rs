@@ -84,6 +84,26 @@ pub(crate) fn analyze_match_switch(
     // Borrow-ness is sourced from OWNERSHIP's own lattice (unchanged).
     let scrutinee_owner = own.underlying_owner(scrutinee);
     let borrowed = matches!(own.states.get(&scrutinee_owner), Some(OwnerState::Borrowed));
+    // Direct catch dispatch transfers payload ownership to arm bindings
+    // but keeps the shared binding readable as a non-owning alias.
+    let shared_catch = any_consumes
+        && consumed_binding_name(w.tir, scrutinee)
+            .filter(|name| !w.pool.str(*name).starts_with("__ryo_catch_"))
+            .and_then(|name| own.binding_of_name.get(&name).copied())
+            .is_some_and(|outer| {
+                if outer == match_inst || w.tir.inst(outer).tag != TirTag::Match {
+                    return false;
+                }
+                let union = w.tir.match_view(outer).scrutinee;
+                matches!(
+                    w.pool.kind(w.tir.inst(union).ty),
+                    ryo_core::types::TypeKind::ErrorUnion
+                        | ryo_core::types::TypeKind::InferredErrorUnion
+                )
+            });
+    if shared_catch {
+        own.states.insert(scrutinee_owner, OwnerState::Borrowed);
+    }
     // The borrowed-source family keeps its unchanged guards.
     let aggregate_result = w.pool.needs_drop(w.tir.inst(match_inst).ty);
 
@@ -168,16 +188,18 @@ pub(crate) fn analyze_match_switch(
                 "move",
                 consumed_name,
             );
-            consume_for_assignment(
-                w.tir,
-                w.pool,
-                own,
-                sink,
-                scrutinee,
-                span,
-                consumed_name,
-                match_inst,
-            );
+            if !shared_catch {
+                consume_for_assignment(
+                    w.tir,
+                    w.pool,
+                    own,
+                    sink,
+                    scrutinee,
+                    span,
+                    consumed_name,
+                    match_inst,
+                );
+            }
         }
         // (c) Arm-start drops: on an OWNED scrutinee, the consuming
         // arm's unbound needs-drop payload fields are destroyed when

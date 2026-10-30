@@ -462,10 +462,10 @@ fn catch_requires_an_error_union_operand() {
 	print(value)
 "#;
     let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "unexpected diagnostic cascade: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::TypeMismatch, "{diags:?}");
     assert!(
-        diags.iter().any(|diag| diag.code == DiagCode::TypeMismatch
-            && diag.message.contains("catch")
-            && diag.message.contains("error union")),
+        diags[0].message.contains("catch") && diags[0].message.contains("error union"),
         "{diags:?}"
     );
 }
