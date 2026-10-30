@@ -1,0 +1,30 @@
+error NotFound
+error InvalidInput(str)
+
+fn find_user(id: int) -> (NotFound | InvalidInput)!str:
+	if id < 0:
+		return InvalidInput("id must be non-negative")
+	if id == 0:
+		return NotFound
+	return "user_" + int_to_str(id)
+
+fn load_user(id: int) -> !str:
+	user = try find_user(id)
+	return user
+
+fn main():
+	user = load_user(42) catch as err:
+		NotFound: "unknown"
+		_: err.message()
+	print(user + "\n")
+
+	missing = load_user(0) catch as err:
+		NotFound: err.message()
+		InvalidInput(message): message
+	print(missing + "\n")
+
+	invalid = load_user(-1) catch as err:
+		match err:
+			NotFound: "unknown"
+			InvalidInput(message): message
+	print(invalid + "\n")

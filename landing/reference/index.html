@@ -181,6 +181,7 @@
                 <a href="#enums">Enums</a>
                 <a href="#tuples">Anonymous Structs &amp; Tuples</a>
                 <a href="#pattern-matching">Pattern Matching</a>
+                <a href="#errors">Errors &amp; Unions</a>
               </nav>
             </div>
 
@@ -1521,6 +1522,82 @@ fn main():
                 </tbody>
               </table>
             </div>
+          </section>
+
+          <!-- =================================================== -->
+          <section id="errors">
+            <h2>
+              Errors &amp; Unions
+              <a class="anchor" href="#errors" aria-label="Permalink">#</a>
+            </h2>
+            <p>
+              An <code>error</code> declaration creates a nominal,
+              single-variant error with an optional payload. A function
+              returns either success or a member of its error set:
+              <code>NotFound!str</code> has one error member,
+              <code>(NotFound | InvalidInput)!str</code> has two, and
+              <code>!str</code> infers a finite set from direct returns and
+              <code>try</code>. Inference never means an open
+              <code>anyerror</code> type.
+            </p>
+
+            <div class="code-block">
+              <div class="code-block-head">
+                <span class="filename">error_handling.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">error NotFound
+error InvalidInput(str)
+
+fn find_user(id: int) -&gt; (NotFound | InvalidInput)!str:
+	if id &lt; 0:
+		return InvalidInput("id must be non-negative")
+	if id == 0:
+		return NotFound
+	return "user_" + int_to_str(id)
+
+fn load_user(id: int) -&gt; !str:
+	user = try find_user(id)
+	return user
+
+fn main():
+	user = load_user(42) catch as err:
+		NotFound: "unknown"
+		_: err.message()
+	print(user + "\n")
+
+	missing = load_user(0) catch as err:
+		NotFound: err.message()
+		InvalidInput(message): message
+	print(missing + "\n")
+
+	invalid = load_user(-1) catch as err:
+		match err:
+			NotFound: "unknown"
+			InvalidInput(message): message
+	print(invalid + "\n")</code></pre>
+            </div>
+
+            <p>
+              <code>try</code> yields the success value or returns the error
+              from the enclosing function with normal cleanup.
+              <code>catch</code> evaluates its operand once: success becomes
+              the expression's value, while error runs the handler. Direct
+              arms are exhaustive over the error set; bare
+              <code>catch:</code> accepts the same arms without a shared
+              binding. The nested <code>catch as err: match err:</code> form
+              remains available, and <code>err.message()</code> returns a
+              fresh owned string for a declared error or error set.
+            </p>
+            <p>
+              Raw unions can be bound and passed without being unwrapped,
+              but direct field access, operators, printing, and source
+              <code>match</code> are rejected. <code>Ok</code> and
+              <code>Err</code> are compiler-only alternatives, never source
+              constructors or patterns. Error-return traces and
+              <code>.location()</code> / <code>.stack_trace()</code> are not
+              part of the implemented language.
+            </p>
           </section>
 
           <!-- =================================================== -->
