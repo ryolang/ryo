@@ -1543,6 +1543,25 @@ fn main():
 
             <div class="code-block">
               <div class="code-block-head">
+                <span class="filename">error_messages.ryo</span>
+                <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+              </div>
+              <pre><code class="language-ryo">error HttpError(status: int, message: str)
+
+fn main():
+	err = HttpError(status=404, message="not found")
+	print(err.message())  # not found</code></pre>
+            </div>
+            <p><code>message()</code> uses these automatic rules:</p>
+            <ul>
+              <li>Unit errors use the error name.</li>
+              <li>Exactly one string field uses its value.</li>
+              <li>A string field named <code>message</code> takes precedence.</li>
+              <li>Other payloads use debug formatting, including multi-field payloads without a string <code>message</code> field.</li>
+            </ul>
+
+            <div class="code-block">
+              <div class="code-block-head">
                 <span class="filename">error_handling.ryo</span>
                 <button class="icon-btn copy-btn" type="button" aria-label="Copy code"><svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg><svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
               </div>
@@ -1572,9 +1591,7 @@ fn main():
 	print(missing + "\n")
 
 	invalid = load_user(-1) catch as err:
-		match err:
-			NotFound: "unknown"
-			InvalidInput(message): message
+		err.message()
 	print(invalid + "\n")</code></pre>
             </div>
 
@@ -1585,10 +1602,15 @@ fn main():
               the expression's value, while error runs the handler. Direct
               arms are exhaustive over the error set; bare
               <code>catch:</code> accepts the same arms without a shared
-              binding. The nested <code>catch as err: match err:</code> form
-              remains available, and <code>err.message()</code> returns a
-              fresh owned string for a declared error or error set.
+              binding. <code>err.message()</code> returns a fresh owned string
+              for a declared error or error set.
             </p>
+            <ul>
+              <li>Use <code>try</code> to propagate the error.</li>
+              <li>Use bare <code>catch:</code> when no shared binding is needed.</li>
+              <li>Use <code>catch as err:</code> for shared message or log access.</li>
+              <li>Use nested match only for compatibility or specialized handling.</li>
+            </ul>
             <p>
               Raw unions can be bound and passed without being unwrapped,
               but direct field access, operators, printing, and source

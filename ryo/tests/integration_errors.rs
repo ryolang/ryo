@@ -33,6 +33,82 @@ fn error_return_constructs_and_runs_aot() {
 }
 
 #[test]
+fn lowercase_error_declaration_has_only_the_targeted_diagnostic() {
+    let src = "error timeout\nfn main():\n\tvalue = timeout\n\tother = timeout()\n\tprint(value)\n\tprint(other)\n";
+    let temp_dir = TempDir::new().expect("temp");
+    let test_file = create_test_file(temp_dir.path(), "lowercase_error.ryo", src);
+    let output = run_ryo_command(&["run", "lowercase_error.ryo"], &test_file)
+        .expect("run lowercase error declaration");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr
+            .matches("error declaration names must use PascalCase")
+            .count(),
+        1,
+        "unexpected diagnostics: {stderr}"
+    );
+    assert!(stderr.contains(":1:7"), "wrong diagnostic span: {stderr}");
+    assert!(!stderr.contains("undefined"), "cascading error: {stderr}");
+}
+
+const ERROR_HANDLING_EXAMPLE: &str = include_str!("../../examples/error_handling.ryo");
+const ERROR_REFERENCE: &str = include_str!("../../landing/reference/index.html");
+
+#[test]
+fn flagship_error_example_uses_the_shared_handler_and_preserves_output() {
+    assert!(ERROR_HANDLING_EXAMPLE.contains("user = load_user(42) catch as err:"));
+    assert!(ERROR_HANDLING_EXAMPLE.contains("missing = load_user(0) catch:"));
+    assert!(
+        ERROR_HANDLING_EXAMPLE.contains("invalid = load_user(-1) catch as err:\n\t\terr.message()"),
+        "the third example must use the ordinary shared-error handler"
+    );
+    assert!(
+        ERROR_REFERENCE.contains("invalid = load_user(-1) catch as err:\n\t\terr.message()"),
+        "the landing example must match the source example"
+    );
+    for guidance in [
+        "<code>try</code> to propagate",
+        "<code>catch:</code> when no shared binding is needed",
+        "<code>catch as err:</code> for shared message or log access",
+        "nested match only for compatibility or specialized handling",
+    ] {
+        assert!(
+            ERROR_REFERENCE.contains(guidance),
+            "missing decision guidance {guidance:?}"
+        );
+    }
+    assert_ryo_output(
+        "error_handling_example_jit.ryo",
+        ERROR_HANDLING_EXAMPLE,
+        "user_42\nNotFound\nid must be non-negative\n",
+    );
+}
+
+#[test]
+fn error_reference_covers_named_construction_and_message_rules() {
+    for required in [
+        "error HttpError(status: int, message: str)",
+        "HttpError(status=404, message=\"not found\")",
+        "Unit errors use the error name",
+        "Exactly one string field uses its value",
+        "A string field named <code>message</code> takes precedence",
+        "Other payloads use debug formatting, including multi-field payloads without a string <code>message</code> field",
+    ] {
+        assert!(
+            ERROR_REFERENCE.contains(required),
+            "missing error reference content {required:?}"
+        );
+    }
+    let src = r#"error HttpError(status: int, message: str)
+fn main():
+	err = HttpError(status=404, message="not found")
+	print(err.message() + "\n")
+"#;
+    assert_ryo_output("named_error_reference_jit.ryo", src, "not found\n");
+}
+
+#[test]
 fn active_union_alternatives_widen_with_heap_payload_jit() {
     let pad = "a".repeat(40);
     let src = format!(

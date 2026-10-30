@@ -39,11 +39,13 @@ fn resolve_var_read(
     match scope.lookup(name) {
         Some(t) => fcx.builder.var(name, t, span),
         None => {
-            sema.sink.emit(Diag::error(
-                span,
-                DiagCode::UndefinedVariable,
-                format!("undefined variable: '{}'", sema.pool.str(name)),
-            ));
+            if !sema.error_types.contains_key(&name) {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::UndefinedVariable,
+                    format!("undefined variable: '{}'", sema.pool.str(name)),
+                ));
+            }
             fcx.builder.unreachable(sema.pool.error_type(), span)
         }
     }
@@ -243,13 +245,18 @@ pub(crate) fn analyze_expr_allow_never(
                 analyze_expr(sema, fcx, scope, arg);
             }
             if super::errors::is_error_union(sema, receiver_ty) {
-                sema.sink.emit(super::errors::direct_use_diag(
-                    sema,
-                    span,
-                    DiagCode::TypeMismatch,
-                    receiver_ty,
-                    "call a method on",
-                ));
+                let diag = if view.name == ids.message {
+                    super::errors::direct_error_message_diag(sema, span, receiver_ty)
+                } else {
+                    super::errors::direct_use_diag(
+                        sema,
+                        span,
+                        DiagCode::TypeMismatch,
+                        receiver_ty,
+                        "call a method on",
+                    )
+                };
+                sema.sink.emit(diag);
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
 

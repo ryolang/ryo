@@ -8,9 +8,23 @@ where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     just(Token::ErrorDecl)
-        .ignore_then(select! { Token::Ident(name) => name }.map_with(
-            |name, e: &mut Mx<'a, '_, I>| Ident::new(name, crate::spans::cspan(e.span())),
-        ))
+        .ignore_then(
+            select! { Token::Ident(name) => name }
+                .map_with(|name, e: &mut Mx<'a, '_, I>| {
+                    Ident::new(name, crate::spans::cspan(e.span()))
+                })
+                .validate(|name, e: &mut Mx<'a, '_, I>, emitter| {
+                    if !is_uppercase_name(name.name, &e.state().pool) {
+                        emitter.emit(Rich::custom(
+                            e.span(),
+                            ParseDiag::Message(
+                                "error declaration names must use PascalCase".into(),
+                            ),
+                        ));
+                    }
+                    name
+                }),
+        )
         .then(enums::payload_parser())
         .map_with(|(name, payload), e: &mut Mx<'a, '_, I>| {
             let span = crate::spans::cspan(e.span());
@@ -171,7 +185,10 @@ where
             if e.state().pool.str(name) == "as" {
                 Ok(())
             } else {
-                Err(Rich::custom(e.span(), ParseDiag::ExpectedEnumTypeName))
+                Err(Rich::custom(
+                    e.span(),
+                    ParseDiag::Message("expected 'as <name>:' or ':' after 'catch'".into()),
+                ))
             }
         });
     let binding = as_keyword
@@ -197,7 +214,7 @@ where
                 emitter.emit(Rich::custom(
                     e.span(),
                     ParseDiag::Message(
-                        "bare catch requires direct error arms; use `catch as err:` for a handler"
+                        "bare catch requires direct error arms. Use a wildcard direct arm (`_: 0`) for binding-free handling, or `catch as err:` when shared error access is needed"
                             .into(),
                     ),
                 ));

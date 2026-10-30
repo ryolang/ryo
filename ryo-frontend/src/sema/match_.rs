@@ -78,6 +78,7 @@ use std::collections::HashMap;
 enum MatchMode {
     Source,
     Catch(Option<StringId>),
+    CatchDirect(StringId),
 }
 
 /// Resolution + exhaustiveness results for one `match` expression.
@@ -404,6 +405,7 @@ fn type_and_emit_match(
     let (catch, catch_binding) = match mode {
         MatchMode::Source => (false, None),
         MatchMode::Catch(binding) => (true, binding),
+        MatchMode::CatchDirect(name) => (true, Some(name)),
     };
     let void = sema.pool.void();
     let mut arms_out: Vec<TypedArm> = Vec::with_capacity(analysis.arms.len());
@@ -438,6 +440,13 @@ fn type_and_emit_match(
             || (arm.discriminant == Some(Discriminant::Variant(1)) && catch_binding.is_none())
         {
             MatchMode::Catch(None)
+        } else if arm.discriminant == Some(Discriminant::Variant(1))
+            && matches!(
+                uir_arm.body,
+                UirArmBodyView::Expr(body_ref) if sema.uir.is_direct_catch_match(body_ref)
+            )
+        {
+            MatchMode::CatchDirect(catch_binding.expect("direct catch has a shared binding"))
         } else {
             MatchMode::Catch(catch_binding)
         };
@@ -709,10 +718,11 @@ fn seed_arm_bindings(
     span: Span,
     mode: MatchMode,
 ) -> (Vec<(u32, TypeId)>, bool) {
-    let (warn_binding, temp_binding) = match mode {
-        MatchMode::Source => (None, false),
-        MatchMode::Catch(None) => (None, true),
-        MatchMode::Catch(Some(name)) => (Some(name), false),
+    let (warn_binding, temp_binding, direct_catch) = match mode {
+        MatchMode::Source => (None, false, false),
+        MatchMode::Catch(None) => (None, true, false),
+        MatchMode::Catch(Some(name)) => (Some(name), false, false),
+        MatchMode::CatchDirect(name) => (Some(name), false, true),
     };
     let mut owners = Vec::new();
     let mut had_error = false;
@@ -772,7 +782,20 @@ fn seed_arm_bindings(
         if warn_binding == Some(name) {
             fcx.destructure_temps.insert(name, binding.ty);
         }
-        if sema.pool.is_copy(binding.ty) || warn_binding == Some(name) {
+        if direct_catch && warn_binding == Some(name) {
+            let as_start = span.start.saturating_sub(3);
+            let span = if sema
+                .source
+                .as_bytes()
+                .get(as_start..span.start)
+                .is_some_and(|prefix| prefix == b"as ")
+            {
+                Span::new(as_start, span.end)
+            } else {
+                span
+            };
+            child_scope.insert_direct_catch_binding(name, binding.ty, span);
+        } else if sema.pool.is_copy(binding.ty) || warn_binding == Some(name) {
             child_scope.insert_dead_store_binding(name, binding.ty, false, false, span);
         } else {
             child_scope.insert_binding(name, binding.ty, false, false);

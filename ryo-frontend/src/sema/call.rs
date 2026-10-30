@@ -59,11 +59,13 @@ pub(crate) fn check_call(
             // spelling; still E0011 — the name is no function.
             let carriers = enum_variant_carriers(sema, name_id);
             if carriers.is_empty() {
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::UndefinedFunction,
-                    format!("undefined function: '{}'", sema.pool.str(name_id)),
-                ));
+                if !sema.error_types.contains_key(&name_id) {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::UndefinedFunction,
+                        format!("undefined function: '{}'", sema.pool.str(name_id)),
+                    ));
+                }
             } else {
                 let name = sema.pool.str(name_id).to_string();
                 let mut list = carriers

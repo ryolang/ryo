@@ -102,3 +102,24 @@ fn build_show_inferred_errors_prints_source_order_and_continues() {
     assert!(run.status.success());
     assert!(run.stdout.is_empty());
 }
+
+#[test]
+fn show_inferred_errors_marks_a_finalized_empty_error_set() {
+    let src = "fn succeed() -> !int:\n\treturn 1\nfn main():\n\treturn\n";
+    let temp_dir = TempDir::new().expect("temp");
+    let test_file = create_test_file(temp_dir.path(), "inspect_empty.ryo", src);
+    let output = run_ryo_command(
+        &["run", "--show-inferred-errors", "inspect_empty.ryo"],
+        &test_file,
+    )
+    .expect("run empty inferred-signature inspection");
+    assert!(
+        output.status.success(),
+        "empty inspection failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "succeed() -> !int (no errors)\n"
+    );
+}

@@ -74,6 +74,20 @@ fn error_declarations_parse_all_payload_forms() {
 }
 
 #[test]
+fn lowercase_error_declaration_is_rejected_at_its_name() {
+    let src = "error timeout\n";
+    let (_ok, _ast, errs, _pool) = lex_and_parse_recovering(src);
+    assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
+    assert_eq!(errs[0].span().start, 6);
+    assert_eq!(errs[0].span().end, 13);
+    assert!(matches!(
+        errs[0].reason(),
+        RichReason::Custom(ParseDiag::Message(message))
+            if message == "error declaration names must use PascalCase"
+    ));
+}
+
+#[test]
 fn error_declaration_duplicate_payload_fields_survive_for_sema() {
     let (ast, pool) = lex_and_parse("error Duplicate(field: int, field: str)\n").unwrap();
     let def = error_def(&ast, only_stmt(&ast));
@@ -286,6 +300,32 @@ fn bare_catch_parses_only_direct_arms() {
     assert_eq!(ast.match_arms(arms).len(), 1);
 
     assert!(lex_and_parse("value = f() catch:\n\t0\n").is_err());
+}
+
+#[test]
+fn bare_catch_handler_offers_wildcard_and_shared_binding_choices() {
+    let (_ok, _ast, errs, _pool) = lex_and_parse_recovering("value = f() catch:\n\t0\n");
+    assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
+    assert!(matches!(
+        errs[0].reason(),
+        RichReason::Custom(ParseDiag::Message(message))
+            if message == "bare catch requires direct error arms. Use a wildcard direct arm (`_: 0`) for binding-free handling, or `catch as err:` when shared error access is needed"
+    ));
+}
+
+#[test]
+fn malformed_catch_binding_has_a_catch_specific_diagnostic() {
+    let src = "value = f() catch err:\n\t_: 0\n";
+    let (_ok, _ast, errs, _pool) = lex_and_parse_recovering(src);
+    assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
+    let binding_start = src.find("err").expect("catch binding");
+    assert_eq!(errs[0].span().start, binding_start);
+    assert_eq!(errs[0].span().end, binding_start + 3);
+    assert!(matches!(
+        errs[0].reason(),
+        RichReason::Custom(ParseDiag::Message(message))
+            if message == "expected 'as <name>:' or ':' after 'catch'"
+    ));
 }
 
 #[test]

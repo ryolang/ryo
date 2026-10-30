@@ -438,6 +438,26 @@ fn direct_error_union_use_is_rejected_with_unwrap_guidance() {
 }
 
 #[test]
+fn direct_union_message_suggests_catching_and_binding_the_error() {
+    let src = "error Timeout\nfn fail() -> Timeout!int:\n\treturn Timeout\n\
+               fn main():\n\tresult = fail()\n\tprint(result.message())\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|diag| diag.message.contains("cannot call a method"))
+        .expect("direct union message must be rejected");
+    assert_eq!(
+        diag.message,
+        "cannot call a method on error union 'Timeout!int' directly"
+    );
+    assert_eq!(diag.notes.len(), 1, "{diag:?}");
+    assert_eq!(
+        diag.notes[0].message,
+        "help: catch and bind the error with `result catch as err: err.message()`"
+    );
+}
+
+#[test]
 fn void_success_return_wraps_ok() {
     let src = "error A\nfn succeed() -> A!void:\n\treturn\n";
     let (tirs, pool) = run(src).expect("void success should wrap in Ok");
@@ -703,15 +723,51 @@ fn main():
 	print(value)
 "#;
     let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "{diags:?}");
     let warnings: Vec<_> = diags
         .iter()
         .filter(|diag| diag.code == DiagCode::DeadStore)
         .collect();
     assert_eq!(warnings.len(), 1, "{diags:?}");
     assert!(warnings[0].message.contains("err"), "{warnings:?}");
-    let binding_start = src.find("as err").expect("catch binding") + "as ".len();
+    let binding_start = src.find("as err").expect("catch binding");
     assert_eq!(warnings[0].span.start, binding_start, "{warnings:?}");
-    assert_eq!(warnings[0].span.end, binding_start + "err".len());
+    assert_eq!(warnings[0].span.end, binding_start + "as err".len());
+    assert_eq!(warnings[0].notes.len(), 1, "{warnings:?}");
+    assert_eq!(
+        warnings[0].notes[0].message,
+        "help: if no arm needs the shared error, write bare `catch:`"
+    );
+}
+
+#[test]
+fn ordinary_catch_handler_keeps_the_generic_unused_binding_warning() {
+    let src = r#"error A(str)
+fn find() -> A!int:
+	return A("failure")
+fn main():
+	value = find() catch as err:
+		0
+	print(value)
+"#;
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    let warning = &diags[0];
+    let binding_start = src.find("as err").expect("catch binding") + "as ".len();
+    assert_eq!(warning.span.start, binding_start, "{warning:?}");
+    assert_eq!(warning.span.end, binding_start + "err".len());
+    assert!(warning.notes.is_empty(), "{warning:?}");
+}
+
+#[test]
+fn unrelated_unused_binding_has_no_catch_help() {
+    let src = "fn main():\n\tfor i in range(0, 1):\n\t\tprint(\"x\")\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, DiagCode::DeadStore);
+    assert_eq!(diags[0].span.start, src.find("for i").unwrap());
+    assert_eq!(diags[0].span.end, src.len());
+    assert!(diags[0].notes.is_empty(), "{diags:?}");
 }
 
 #[test]

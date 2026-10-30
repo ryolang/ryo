@@ -24,7 +24,5 @@ fn main():
 	print(missing + "\n")
 
 	invalid = load_user(-1) catch as err:
-		match err:
-			NotFound: "unknown"
-			InvalidInput(message): message
+		err.message()
 	print(invalid + "\n")

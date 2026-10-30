@@ -65,10 +65,17 @@ pub(super) fn lower_and_analyze(
     let report = sema::analyze_buffered_report(&uir, pool, &mut sink, input, file_path);
     if show_inferred_errors && !sink.has_errors() {
         for signature in &report.inferred {
+            let error_set = pool.error_union_view(signature.return_type).error_set;
+            let suffix = if pool.error_set_view(error_set).members.is_empty() {
+                " (no errors)"
+            } else {
+                ""
+            };
             println!(
-                "{}() -> {}",
+                "{}() -> {}{}",
                 pool.str(signature.name),
-                pool.display(signature.return_type)
+                pool.display(signature.return_type),
+                suffix
             );
         }
     }

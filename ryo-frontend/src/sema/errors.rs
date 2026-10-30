@@ -214,6 +214,18 @@ pub(super) fn direct_use_diag(
     )
 }
 
+pub(super) fn direct_error_message_diag(sema: &Sema<'_>, span: Span, ty: TypeId) -> Diag {
+    Diag::error(
+        span,
+        DiagCode::TypeMismatch,
+        format!(
+            "cannot call a method on error union '{}' directly",
+            sema.pool.display(ty)
+        ),
+    )
+    .with_help("catch and bind the error with `result catch as err: err.message()`")
+}
+
 pub(super) fn reject_direct_use(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,

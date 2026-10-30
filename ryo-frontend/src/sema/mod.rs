@@ -121,6 +121,7 @@ struct Binding {
     borrowed: bool,
     used: std::cell::Cell<bool>,
     dead_store_span: Option<Span>,
+    dead_store_help: Option<&'static str>,
 }
 
 pub(crate) struct Scope<'a> {
@@ -145,6 +146,7 @@ impl<'a> Scope<'a> {
                 borrowed,
                 used: std::cell::Cell::new(false),
                 dead_store_span: None,
+                dead_store_help: None,
             },
         );
     }
@@ -163,24 +165,35 @@ impl<'a> Scope<'a> {
         }
     }
 
+    fn insert_direct_catch_binding(&mut self, name: StringId, ty: TypeId, span: Span) {
+        self.insert_dead_store_binding(name, ty, false, false, span);
+        if let Some(binding) = self.bindings.get_mut(&name) {
+            binding.dead_store_help = Some("if no arm needs the shared error, write bare `catch:`");
+        }
+    }
+
     fn drain_dead_stores(&self, sema: &mut Sema<'_>) {
-        let mut dead: Vec<(StringId, Span)> = self
+        let mut dead: Vec<(StringId, Span, Option<&'static str>)> = self
             .bindings
             .iter()
             .filter_map(|(&name, binding)| {
                 (!binding.used.get())
                     .then_some(binding.dead_store_span)
                     .flatten()
-                    .map(|span| (name, span))
+                    .map(|span| (name, span, binding.dead_store_help))
             })
             .collect();
-        dead.sort_by_key(|(name, span)| (span.start, span.end, name.raw()));
-        for (name, span) in dead {
-            sema.warnings.push(Diag::warning(
+        dead.sort_by_key(|(name, span, _)| (span.start, span.end, name.raw()));
+        for (name, span, help) in dead {
+            let diag = Diag::warning(
                 span,
                 DiagCode::DeadStore,
                 format!("value `{}` is declared but never used", sema.pool.str(name)),
-            ));
+            );
+            sema.warnings.push(match help {
+                Some(help) => diag.with_help(help),
+                None => diag,
+            });
         }
     }
 

@@ -90,7 +90,10 @@ fn main():
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("cannot call a method on error union 'Timeout!int' directly")
-            && stderr.contains("use `try` or `catch` to unwrap it"),
+            && stderr.contains(
+                "help: catch and bind the error with `result catch as err: err.message()`"
+            )
+            && !stderr.contains("use `try` or `catch` to unwrap it"),
         "unexpected diagnostics: {stderr}"
     );
 }
