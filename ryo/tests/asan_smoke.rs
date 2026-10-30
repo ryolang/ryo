@@ -607,3 +607,33 @@ fn asan_error_match_active_narrow_union_storage() {
         "error_match_active_narrow_union",
     );
 }
+
+const TRY_NESTED_HEAP_PROPAGATION: &str = r#"struct Envelope:
+	message: str
+struct Payload:
+	envelope: Envelope
+	suffix: str
+error Narrow(Payload)
+error Other(int)
+error Largest(str, str, str, str)
+fn make(label: str) -> Payload:
+	return Payload{envelope=Envelope{message=label + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, suffix="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+fn inner(fail: bool) -> Narrow!Payload:
+	if fail:
+		return Narrow(make("error"))
+	return make("success")
+fn outer(fail: bool) -> (Narrow | Other | Largest)!Payload:
+	value = try inner(fail)
+	return value
+fn main():
+	for i in range(0, 4):
+		value = outer(i % 2 == 0) catch:
+			Narrow(payload): payload
+			_: make("other")
+		print(value.envelope.message + "\n")
+"#;
+
+#[test]
+fn asan_try_nested_heap_propagation() {
+    run_asan_smoke(TRY_NESTED_HEAP_PROPAGATION, "try_nested_heap_propagation");
+}

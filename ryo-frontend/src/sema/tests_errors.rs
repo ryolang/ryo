@@ -396,6 +396,155 @@ fn void_success_return_wraps_ok() {
 }
 
 #[test]
+fn try_unwraps_success_and_early_returns_through_destination_coercion() {
+    let src = r#"error A
+error B
+fn inner() -> A!str:
+	return "ok"
+fn outer() -> (A | B)!str:
+	value = try inner()
+	return value
+"#;
+    let (tirs, pool) = run(src).expect("subset propagation should succeed");
+    let outer = tir_named(&tirs, &pool, "outer");
+    assert_eq!(
+        outer
+            .instructions
+            .iter()
+            .filter(|inst| inst.tag == TirTag::Call)
+            .count(),
+        1,
+        "the try operand must be evaluated once"
+    );
+    let init = outer.var_decl_view(stmt_at(outer, 0)).initializer;
+    assert_eq!(outer.inst(init).tag, TirTag::Match);
+    assert_eq!(outer.inst(init).ty, pool.str_());
+    let view = outer.match_view(init);
+    let arms: Vec<_> = view.arms().collect();
+    assert_eq!(arms.len(), 2);
+    let ryo_core::tir::MatchBodyView::Expr(_) = arms[0].body else {
+        panic!("Ok must yield the extracted success value")
+    };
+    let err_stmts: Vec<_> = arms[1].body.stmts().collect();
+    assert_eq!(err_stmts.len(), 1);
+    assert_eq!(outer.inst(err_stmts[0]).tag, TirTag::Return);
+    let TirData::UnOp(coercion) = outer.inst(err_stmts[0]).data else {
+        panic!("the error arm must return the coerced error")
+    };
+    assert_eq!(outer.inst(coercion).tag, TirTag::ErrorUnionCoerce);
+    assert_eq!(outer.inst(coercion).ty, outer.return_type);
+    let TirData::UnOp(error) = outer.inst(coercion).data else {
+        panic!("union coercion must consume the active error")
+    };
+    assert_eq!(pool.kind(outer.inst(error).ty), TypeKind::DeclaredError);
+}
+
+#[test]
+fn try_rejects_a_non_union_operand() {
+    let src = r#"error A
+fn f() -> A!int:
+	value = try 1
+	return value
+"#;
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "unexpected diagnostic cascade: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::TypeMismatch);
+    assert!(
+        diags[0].message.contains("try") && diags[0].message.contains("error union operand"),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn try_rejects_void_and_non_union_enclosing_returns() {
+    let cases = [
+        r#"error A
+fn inner() -> A!int:
+	return 1
+fn main():
+	value = try inner()
+"#,
+        r#"error A
+fn inner() -> A!int:
+	return 1
+fn f() -> int:
+	value = try inner()
+	return value
+"#,
+    ];
+    for src in cases {
+        let (_tirs, diags, _pool) = run_with_errors(src);
+        assert_eq!(diags.len(), 1, "{src:?}: {diags:?}");
+        assert_eq!(diags[0].code, DiagCode::TypeMismatch);
+        assert!(
+            diags[0].message.contains("try")
+                && diags[0].message.contains("enclosing function")
+                && diags[0].message.contains("error union"),
+            "{src:?}: {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn try_lists_every_missing_destination_error_in_order() {
+    let src = r#"error A
+error B
+error C
+fn inner() -> (A | B | C)!int:
+	return 1
+fn outer() -> A!int:
+	value = try inner()
+	return value
+"#;
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "unexpected diagnostic cascade: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::TypeMismatch);
+    assert!(
+        diags[0].message.contains("missing error members 'B', 'C'"),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn try_rejects_nominal_error_conversion() {
+    let src = r#"error A
+error B
+fn inner() -> B!int:
+	return 1
+fn outer() -> A!int:
+	value = try inner()
+	return value
+"#;
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "unexpected diagnostic cascade: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::TypeMismatch);
+    assert!(
+        diags[0].message.contains("missing error member 'B'"),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn bare_try_statement_accepts_void_success() {
+    let src = r#"error A
+fn inner() -> A!void:
+	return
+fn outer() -> A!void:
+	try inner()
+	return
+"#;
+    let (tirs, pool) = run(src).expect("a bare try statement should allow void success");
+    let outer = tir_named(&tirs, &pool, "outer");
+    let stmt = stmt_at(outer, 0);
+    assert_eq!(outer.inst(stmt).tag, TirTag::ExprStmt);
+    let TirData::UnOp(init) = outer.inst(stmt).data else {
+        panic!("expression statement must wrap try")
+    };
+    assert_eq!(outer.inst(init).tag, TirTag::Match);
+    assert_eq!(outer.inst(init).ty, pool.void());
+}
+
+#[test]
 fn catch_forms_return_the_operand_success_type() {
     let direct = r#"error NotFound
 fn find() -> NotFound!str:

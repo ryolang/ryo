@@ -1,8 +1,8 @@
 use super::{FuncCtx, Scope, Sema, analyze_expr};
 use ryo_core::diag::{Diag, DiagCode};
-use ryo_core::tir::TirRef;
+use ryo_core::tir::{Discriminant, MatchBinding, TirRef, TirTag, TypedMatchArm, TypedMatchBody};
 use ryo_core::types::{StringId, TypeId, TypeKind, VariantKind};
-use ryo_core::uir::{InstRef, Span};
+use ryo_core::uir::{InstData, InstRef, Span};
 
 pub(super) fn register_errors(sema: &mut Sema<'_>) {
     for decl in &sema.uir.error_decls {
@@ -37,6 +37,135 @@ pub(super) fn analyze_catch(
     span: Span,
 ) -> TirRef {
     super::match_::analyze_catch(sema, fcx, scope, r, span)
+}
+
+pub(super) fn analyze_try(
+    sema: &mut Sema,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    span: Span,
+) -> TirRef {
+    let operand_ref = match sema.uir.inst(r).data {
+        InstData::UnOp(operand) => operand,
+        _ => unreachable!("Try must carry InstData::UnOp"),
+    };
+    let operand = analyze_expr(sema, fcx, scope, operand_ref);
+    let operand_ty = fcx.builder.ty_of(operand);
+    if sema.pool.is_error(operand_ty) {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    if !is_error_union(sema, operand_ty) {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::TypeMismatch,
+            format!(
+                "try requires an error union operand, found '{}'",
+                sema.pool.display(operand_ty)
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    if !is_error_union(sema, fcx.return_type) {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::TypeMismatch,
+            format!(
+                "try requires an error union return type on the enclosing function, found '{}'",
+                sema.pool.display(fcx.return_type)
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    let source = sema.pool.error_union_view(operand_ty);
+    let target = sema.pool.error_union_view(fcx.return_type);
+    let source_members = sema.pool.error_set_view(source.error_set).members;
+    let target_members = sema.pool.error_set_view(target.error_set).members;
+    let target_inferred = sema.pool.kind(fcx.return_type) == TypeKind::InferredErrorUnion;
+    let missing: Vec<TypeId> = source_members
+        .iter()
+        .copied()
+        .filter(|member| !target_inferred && !target_members.contains(member))
+        .collect();
+    if !missing.is_empty() {
+        let members = missing
+            .iter()
+            .map(|member| format!("'{}'", sema.pool.display(*member)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::TypeMismatch,
+            format!(
+                "cannot propagate '{}' through '{}': missing error {} {}",
+                sema.pool.display(operand_ty),
+                sema.pool.display(fcx.return_type),
+                if missing.len() == 1 {
+                    "member"
+                } else {
+                    "members"
+                },
+                members
+            ),
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    let success_name = sema
+        .pool
+        .intern_str(&format!("__ryo_try_success_{}", r.index()));
+    let error_name = sema
+        .pool
+        .intern_str(&format!("__ryo_try_error_{}", r.index()));
+    let success_bindings = if source.success == sema.pool.void() {
+        Vec::new()
+    } else {
+        vec![MatchBinding {
+            field_index: 0,
+            name: success_name,
+            ty: source.success,
+        }]
+    };
+    let error_bindings = [MatchBinding {
+        field_index: 0,
+        name: error_name,
+        ty: source.error_set,
+    }];
+    let success = if source.success == sema.pool.void() {
+        fcx.builder.int_const(0, source.success, span)
+    } else {
+        fcx.builder.var(success_name, source.success, span)
+    };
+    let error = fcx.builder.var(error_name, source.error_set, span);
+    let returned = coerce_to_error_union(sema, fcx, error, fcx.return_type, span);
+    let early_return = fcx
+        .builder
+        .unary(TirTag::Return, sema.pool.void(), returned, span);
+    let error_body = [early_return];
+    let ok_arm = TypedMatchArm {
+        span,
+        discriminant: Discriminant::Variant(0),
+        bindings: &success_bindings,
+        guards: &[],
+        body: TypedMatchBody::Expr(success),
+    };
+    let err_arm = TypedMatchArm {
+        span,
+        discriminant: Discriminant::Variant(1),
+        bindings: &error_bindings,
+        guards: &[],
+        body: TypedMatchBody::Stmts(&error_body),
+    };
+    super::match_::emit_error_union_dispatch(
+        fcx,
+        sema.pool,
+        operand,
+        source.success,
+        ok_arm,
+        err_arm,
+        span,
+    )
 }
 
 pub(super) fn direct_use_diag(

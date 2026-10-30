@@ -289,6 +289,10 @@ pub enum InstTag {
     /// the match wire; `binding` is the optional shared `catch as` name.
     Catch,
 
+    /// Error propagation over one operand. Sema lowers this to hidden
+    /// union dispatch with an ordinary early return on the error arm.
+    Try,
+
     /// Placeholder for a statement the parser recovered from (R10:
     /// `StmtKind::Error`). No operands. Sema lowers it to a TIR
     /// `Unreachable` with the error type, so downstream flow analysis
@@ -316,8 +320,8 @@ pub enum InstData {
     Bool(bool),
     /// Identifier name for [`InstTag::Var`] and [`InstTag::TempVar`].
     Var(StringId),
-    /// Single operand, used by unary ops, [`InstTag::Return`], and
-    /// [`InstTag::ExprStmt`].
+    /// Single operand, used by unary ops, [`InstTag::Return`],
+    /// [`InstTag::ExprStmt`], and [`InstTag::Try`].
     UnOp(InstRef),
     /// Call-site mutable-borrow marker `&expr`; operand is the inner
     /// ref. See [`InstTag::Borrow`].
@@ -607,7 +611,7 @@ impl UirBuilder {
     pub fn unary(&mut self, tag: InstTag, operand: InstRef, span: Span) -> InstRef {
         debug_assert!(matches!(
             tag,
-            InstTag::Neg | InstTag::Not | InstTag::Return | InstTag::ExprStmt
+            InstTag::Neg | InstTag::Not | InstTag::Return | InstTag::ExprStmt | InstTag::Try
         ));
         self.push(tag, InstData::UnOp(operand), span)
     }

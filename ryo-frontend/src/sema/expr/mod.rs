@@ -442,6 +442,7 @@ pub(crate) fn analyze_expr_allow_never(
             emitted
         }
         InstTag::Catch => super::errors::analyze_catch(sema, fcx, scope, r, span),
+        InstTag::Try => super::errors::analyze_try(sema, fcx, scope, r, span),
         InstTag::FieldAccess => analyze_field_access(sema, fcx, scope, r, span),
         // UIR trusted-producer contract (see the `uir.rs` module
         // header): astgen is the only producer, so a non-expression tag

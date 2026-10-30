@@ -1615,13 +1615,9 @@ fn gen_expr(
                 }
             }
         }
-        ast::ExprKind::Try(_) => {
-            sink.emit(Diag::error(
-                span,
-                DiagCode::ParseError,
-                "try expressions are parsed but semantic lowering is not implemented yet",
-            ));
-            b.int_literal(0, span)
+        ast::ExprKind::Try(operand) => {
+            let operand = gen_expr(b, ast, operand, types, defined_layouts, pool, sink);
+            b.unary(InstTag::Try, operand, span)
         }
         ast::ExprKind::Catch(catch) => {
             match_::gen_catch(b, ast, catch, types, defined_layouts, pool, sink, span)

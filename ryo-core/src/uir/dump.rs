@@ -477,6 +477,7 @@ fn un_op_name(t: InstTag) -> &'static str {
         InstTag::Not => "bool_not",
         InstTag::Return => "ret",
         InstTag::ExprStmt => "expr_stmt",
+        InstTag::Try => "try",
         _ => "?un",
     }
 }

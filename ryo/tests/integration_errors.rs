@@ -328,3 +328,102 @@ fn main():
         "7aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
     );
 }
+
+const TRY_PROPAGATION: &str = r#"error A
+error B
+fn inner(fail: bool) -> A!str:
+	print("inner\n")
+	if fail:
+		return A
+	return "ok"
+fn outer(fail: bool) -> (A | B)!str:
+	value = try inner(fail)
+	return value
+fn main():
+	ok = outer(false) catch:
+		A: "caught A"
+		B: "caught B"
+	print(ok + "\n")
+	err = outer(true) catch:
+		A: "caught A"
+		B: "caught B"
+	print(err + "\n")
+"#;
+const TRY_PROPAGATION_OUTPUT: &str = "inner\nok\ninner\ncaught A\n";
+
+#[test]
+fn try_success_and_subset_error_propagation_run_jit() {
+    assert_ryo_output(
+        "try_propagation_jit.ryo",
+        TRY_PROPAGATION,
+        TRY_PROPAGATION_OUTPUT,
+    );
+}
+
+#[test]
+fn try_success_and_subset_error_propagation_run_aot() {
+    assert_aot_output(
+        "try_propagation_aot",
+        TRY_PROPAGATION,
+        TRY_PROPAGATION_OUTPUT,
+    );
+}
+
+#[test]
+fn bare_try_void_success_runs_jit() {
+    let src = r#"error A
+fn inner() -> A!void:
+	return
+fn outer() -> A!void:
+	try inner()
+	return
+fn main():
+	outer()
+	print("ok\n")
+"#;
+    assert_ryo_output("try_void_success_jit.ryo", src, "ok\n");
+}
+
+const TRY_NESTED_HEAP: &str = r#"struct Envelope:
+	message: str
+struct Payload:
+	envelope: Envelope
+	suffix: str
+error Narrow(Payload)
+error Other(int)
+error Largest(str, str, str, str)
+fn make(label: str) -> Payload:
+	return Payload{envelope=Envelope{message=label + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, suffix="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+fn inner(fail: bool) -> Narrow!Payload:
+	if fail:
+		return Narrow(make("error"))
+	return make("success")
+fn outer(fail: bool) -> (Narrow | Other | Largest)!Payload:
+	value = try inner(fail)
+	return value
+fn main():
+	for i in range(0, 4):
+		value = outer(i % 2 == 0) catch:
+			Narrow(payload): payload
+			_: make("other")
+		print(value.envelope.message + "\n")
+"#;
+const TRY_NESTED_HEAP_OUTPUT: &str = "erroraaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nsuccessaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nerroraaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nsuccessaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+
+#[test]
+fn try_nested_heap_widening_and_early_return_run_jit() {
+    assert_ryo_output(
+        "try_nested_heap_jit.ryo",
+        TRY_NESTED_HEAP,
+        TRY_NESTED_HEAP_OUTPUT,
+    );
+}
+
+#[test]
+fn try_nested_heap_widening_and_early_return_run_aot() {
+    assert_aot_output(
+        "try_nested_heap_aot",
+        TRY_NESTED_HEAP,
+        TRY_NESTED_HEAP_OUTPUT,
+    );
+}
