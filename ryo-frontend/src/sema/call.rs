@@ -50,15 +50,6 @@ pub(crate) fn check_call(
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
 
-    // Demand the callee. With eagerly-resolved signatures this is
-    // a check that the decl exists *and* is not currently
-    // `InProgress` (cycle). Today the latter is unreachable —
-    // bodies don't depend on bodies — but the call sits here so
-    // future inferred-return-type / comptime work picks up cycle
-    // detection for free.
-    // UPDATE: We must NOT call `require_decl` here for normal function
-    // calls because it breaks recursive functions. A recursive function
-    // is `InProgress`, but its signature is already known!
     let callee = match sema.name_to_decl.get(&name_id).copied() {
         Some(d) => d,
         None => {
@@ -107,6 +98,12 @@ pub(crate) fn check_call(
             return fcx.builder.unreachable(sema.pool.error_type(), span);
         }
     };
+    if super::error_inference::is_inferred(sema, callee)
+        && !super::error_inference::resolve_inferred_callee(sema, callee, span)
+    {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
     // Snapshot the callee's per-parameter modes from its UIR
     // body so we can stamp `ParamMode`s without holding a borrow on
     // `sema` through the per-argument diagnostics below.
@@ -278,8 +275,13 @@ pub(crate) fn check_call(
             }
         }
     }
-    fcx.builder
-        .call(name_id, &converted, &modes, return_type, span)
+    let call = fcx
+        .builder
+        .call(name_id, &converted, &modes, return_type, span);
+    if super::error_inference::is_inferred(sema, callee) {
+        fcx.inferred_call_dependencies.insert(call, callee);
+    }
+    call
 }
 
 /// Returns `None` if `inner` is an assignable lvalue (a `mut` local or

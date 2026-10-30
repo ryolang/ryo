@@ -689,11 +689,13 @@ fn compiler_error_union_dispatch_synthesizes_hidden_alternatives() {
     let int = pool.int();
     let function_name = pool.intern_str("lowered");
     let mut fcx = FuncCtx {
+        decl: DeclId::from_index(0),
         builder: ryo_core::tir::TirBuilder::new(function_name, vec![], int, sp()),
         inst_map: vec![],
         return_type: int,
         loop_depth: 0,
         destructure_temps: Default::default(),
+        inferred_call_dependencies: Default::default(),
     };
     let error_value = fcx.builder.enum_lit(error, 0, false, &[], sp());
     let union_value = fcx.builder.error_union_coerce(error_value, union, sp());

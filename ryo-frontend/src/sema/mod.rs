@@ -6,12 +6,10 @@
 //!
 //! ## Phase 5 — worklist driver
 //!
-//! Earlier phases ran sema as a top-down recursion: collect every
-//! signature, then walk every body in source order. That worked
-//! because today's language has no construct (inferred return
-//! types, comptime, generics) that makes one body's analysis
-//! depend on another body's analysis. Phase 5 keeps the same
-//! observable behaviour but reframes the driver as a worklist:
+//! Explicit signatures are registered before body analysis. Inferred error
+//! unions use the same declaration worklist: named calls resolve their
+//! inferred callee on demand, while a call-graph pre-pass rejects recursive
+//! components that would require fixed-point inference.
 //!
 //! - [`Sema`] owns a [`DeclState`] table indexed by [`DeclId`] (one
 //!   id per function body in `uir.func_bodies`).
@@ -20,14 +18,9 @@
 //!   `Resolved` (TIR landed in the corresponding slot of
 //!   `Sema::results`, which is parallel to `uir.func_bodies`) or
 //!   `Failed`.
-//! - Cycle detection is dormant for today's feature set — bodies
-//!   only depend on callee *signatures*, which are resolved eagerly
-//!   in a separate first pass — but [`Sema::require_decl`] hits
-//!   `DeclState::InProgress` and emits a [`DiagCode::CycleInResolution`]
-//!   diagnostic the moment future work (inferred return types,
-//!   comptime evaluation) makes a body depend on another body
-//!   mid-analysis. That's the prerequisite the worklist driver
-//!   was built for; the features ride on top.
+//! - An inferred body records its concrete error members and deferred
+//!   coercions. Finalization patches the concrete union into that body's
+//!   signature and TIR before the result is published.
 //!
 //! Tests at the bottom of this file include a
 //! `cfg(any())`-gated block of comptime / generics smoke tests
@@ -63,6 +56,7 @@ mod call;
 pub(crate) use call::*;
 mod diff;
 pub(crate) use diff::*;
+mod error_inference;
 mod errors;
 mod expr;
 pub(crate) use expr::*;
@@ -105,13 +99,8 @@ enum DeclState {
     Unresolved,
     InProgress,
     Resolved,
-    /// Reserved: a decl whose resolution gave up. Today every
-    /// body still emits a well-formed TIR (with `Unreachable` slots
-    /// in place of failed expressions) so `Failed` is unreachable
-    /// from sources — §4.5 exit criterion. Comptime / inferred
-    /// returns are the first features that can transition a decl
-    /// into this state.
-    #[allow(dead_code)]
+    /// Recursive inferred signatures are rejected before body analysis;
+    /// callers recover through the error sentinel without cascading.
     Failed,
 }
 
@@ -229,6 +218,17 @@ impl<'a> Scope<'a> {
 
 // ---------- Public entrypoint ----------
 
+pub struct SemaReport {
+    pub tirs: Vec<Tir>,
+    pub warnings: Vec<Diag>,
+    pub inferred: Vec<InferredSignature>,
+}
+
+pub struct InferredSignature {
+    pub name: StringId,
+    pub return_type: TypeId,
+}
+
 /// Analyze `uir` and emit one [`Tir`] per function body.
 ///
 /// Thin wrapper around [`Sema::run`] kept as the stable façade
@@ -262,6 +262,17 @@ pub fn analyze_buffered(
     source: &str,
     file_path: &Path,
 ) -> (Vec<Tir>, Vec<Diag>) {
+    let report = analyze_buffered_report(uir, pool, sink, source, file_path);
+    (report.tirs, report.warnings)
+}
+
+pub fn analyze_buffered_report(
+    uir: &Uir,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+    source: &str,
+    file_path: &Path,
+) -> SemaReport {
     Sema::run(uir, pool, sink, source, file_path)
 }
 
@@ -298,6 +309,7 @@ pub struct Sema<'a> {
     /// Per-decl emitted TIR slot. Filled as decls transition to
     /// `Resolved`. Result extraction drains this in source order.
     results: Vec<Option<Tir>>,
+    inference: Vec<error_inference::InferenceState>,
     /// Struct name → interned struct type (M9), populated from
     /// `uir.struct_decls` (which carries only fully-defined structs;
     /// astgen already diagnosed duplicates / cycles / unknown field
@@ -361,7 +373,7 @@ fn collect_call_arg_refs(uir: &Uir) -> Vec<bool> {
 }
 
 impl<'a> Sema<'a> {
-    /// Drive sema to fixpoint and return one [`Tir`] per UIR
+    /// Drive the declaration worklist and return one [`Tir`] per UIR
     /// function body (source order) alongside the buffered warnings.
     /// The caller decides when to flush the warnings — see
     /// [`analyze`] (immediate) and [`analyze_buffered`] (deferred).
@@ -371,18 +383,24 @@ impl<'a> Sema<'a> {
         sink: &'a mut DiagSink,
         source: &'a str,
         file_path: &'a Path,
-    ) -> (Vec<Tir>, Vec<Diag>) {
+    ) -> SemaReport {
         let mut sema = Sema::new(uir, pool, sink, source, file_path);
         sema.register_structs();
         sema.register_enums();
         errors::register_errors(&mut sema);
         sema.resolve_signatures();
+        error_inference::reject_recursive_inferred_components(&mut sema);
         sema.seed_worklist();
         sema.drive();
+        let inferred = sema.inferred_signatures();
         // Take the warnings before `collect_results`, which consumes
         // `sema`.
         let warnings = std::mem::take(&mut sema.warnings);
-        (sema.collect_results(), warnings)
+        SemaReport {
+            tirs: sema.collect_results(),
+            warnings,
+            inferred,
+        }
     }
 
     fn new(
@@ -437,6 +455,9 @@ impl<'a> Sema<'a> {
             name_to_decl,
             signatures: HashMap::with_capacity(n),
             results,
+            inference: (0..n)
+                .map(|_| error_inference::InferenceState::default())
+                .collect(),
             struct_types: HashMap::new(),
             enum_types: HashMap::new(),
             error_types: HashMap::new(),
@@ -504,13 +525,9 @@ impl<'a> Sema<'a> {
         }
     }
 
-    /// Eagerly populate the signatures table.
-    ///
-    /// Today every signature is fully spelled in source — there is
-    /// no inferred-return-type form — so this is a single linear
-    /// scan. When inferred returns / generics arrive this becomes
-    /// a per-decl "ensure signature resolved" call driven by the
-    /// worklist; the rest of the driver doesn't need to know.
+    /// Populate parameter metadata and explicit return types up front.
+    /// Inferred returns start as placeholders and are replaced when their
+    /// declaration finalizes; calls never clone the unresolved placeholder.
     fn resolve_signatures(&mut self) {
         for body in &self.uir.func_bodies {
             // check_reserved_name rejects the '__ryo_' prefix alongside
@@ -550,6 +567,22 @@ impl<'a> Sema<'a> {
         while let Some(decl) = self.queue.pop_front() {
             self.resolve_decl(decl);
         }
+    }
+
+    fn inferred_signatures(&self) -> Vec<InferredSignature> {
+        self.uir
+            .func_bodies
+            .iter()
+            .enumerate()
+            .filter_map(|(index, body)| {
+                self.inference[index]
+                    .final_union
+                    .map(|return_type| InferredSignature {
+                        name: body.name,
+                        return_type,
+                    })
+            })
+            .collect()
     }
 
     /// Pull every resolved TIR out of the per-decl slots, in source
@@ -602,16 +635,19 @@ impl<'a> Sema<'a> {
         self.decl_state[decl.index()] = DeclState::InProgress;
 
         let body = &self.uir.func_bodies[decl.index()];
-        let tir = analyze_function(self, body);
+        let tir = analyze_function(self, decl, body);
 
         self.results[decl.index()] = Some(tir);
+        if error_inference::is_inferred(self, decl) {
+            error_inference::finalize_inferred_function(self, decl);
+        }
         self.decl_state[decl.index()] = DeclState::Resolved;
     }
 }
 
 // ---------- Per-function analysis ----------
 
-fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
+fn analyze_function(sema: &mut Sema<'_>, decl: DeclId, body: &FuncBody) -> Tir {
     let mut scope = Scope::new();
     for param in &body.params {
         // An `inout` parameter is mutable inside the callee body (like a
@@ -707,11 +743,13 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
         .collect();
 
     let mut fcx = FuncCtx {
+        decl,
         builder: TirBuilder::new(body.name, params, body.return_type, body.span),
         inst_map: vec![None; sema.uir.instructions.len()],
         return_type: body.return_type,
         loop_depth: 0,
         destructure_temps: HashMap::new(),
+        inferred_call_dependencies: HashMap::new(),
     };
 
     let uir = sema.uir;
@@ -750,6 +788,7 @@ fn analyze_function(sema: &mut Sema<'_>, body: &FuncBody) -> Tir {
 /// `analyze_function` call; the `inst_map` and `TirBuilder` arenas
 /// are scoped to a single body.
 pub(crate) struct FuncCtx {
+    decl: DeclId,
     builder: TirBuilder,
     inst_map: Vec<Option<TirRef>>,
     return_type: TypeId,
@@ -759,6 +798,7 @@ pub(crate) struct FuncCtx {
     /// user code can never collide with or observe them, and `TempVar`
     /// reads resolve them before any scope lookup.
     destructure_temps: HashMap<StringId, TypeId>,
+    inferred_call_dependencies: HashMap<TirRef, DeclId>,
 }
 
 #[cfg(test)]
@@ -772,6 +812,8 @@ mod tests_bytes;
 mod tests_destructure;
 #[cfg(test)]
 mod tests_enums;
+#[cfg(test)]
+mod tests_error_inference;
 #[cfg(test)]
 mod tests_errors;
 #[cfg(test)]

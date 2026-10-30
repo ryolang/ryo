@@ -24,7 +24,7 @@ fn explicit_and_inferred_error_union_signatures_resolve() {
     assert_eq!(pool.display(void_success).to_string(), "A!void");
     assert_eq!(pool.kind(one), TypeKind::ErrorUnion);
     assert_eq!(pool.kind(many), TypeKind::ErrorUnion);
-    assert_eq!(pool.kind(inferred), TypeKind::InferredErrorUnion);
+    assert_eq!(pool.kind(inferred), TypeKind::ErrorUnion);
     assert_eq!(pool.error_union_view(void_success).success, pool.void());
 }
 

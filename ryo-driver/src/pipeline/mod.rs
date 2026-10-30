@@ -48,6 +48,7 @@ pub(super) fn lower_and_analyze(
     source_name: &str,
     file_path: &Path,
     parse_diags: Vec<Diag>,
+    show_inferred_errors: bool,
 ) -> Result<(Uir, ryo_frontend::pipeline::CleanupProgram), CompilerError> {
     let mut sink = DiagSink::new();
     // Lex/parse diagnostics come first so the final render preserves
@@ -61,12 +62,21 @@ pub(super) fn lower_and_analyze(
     // run is the whole point of the structured-diagnostics phase.
     // Sema warnings are buffered and flushed after ownership so an
     // ownership error suppresses them exactly like a sema error.
-    let (tirs, sema_warnings) = sema::analyze_buffered(&uir, pool, &mut sink, input, file_path);
-    let analyzed = ryo_frontend::pipeline::BuiltProgram::build(tirs, pool)
+    let report = sema::analyze_buffered_report(&uir, pool, &mut sink, input, file_path);
+    if show_inferred_errors && !sink.has_errors() {
+        for signature in &report.inferred {
+            println!(
+                "{}() -> {}",
+                pool.str(signature.name),
+                pool.display(signature.return_type)
+            );
+        }
+    }
+    let analyzed = ryo_frontend::pipeline::BuiltProgram::build(report.tirs, pool)
         .analyze(pool, &mut sink)
         .map_err(CompilerError::CodegenError)?;
     if !sink.has_errors() {
-        for d in sema_warnings {
+        for d in report.warnings {
             sink.emit(d);
         }
     }

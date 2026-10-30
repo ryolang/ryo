@@ -83,6 +83,9 @@ pub(super) fn analyze_try(
     let source_members = sema.pool.error_set_view(source.error_set).members;
     let target_members = sema.pool.error_set_view(target.error_set).members;
     let target_inferred = sema.pool.kind(fcx.return_type) == TypeKind::InferredErrorUnion;
+    if target_inferred {
+        super::error_inference::note_dependency(sema, fcx, operand);
+    }
     let missing: Vec<TypeId> = source_members
         .iter()
         .copied()
@@ -376,19 +379,33 @@ pub(super) fn coerce_to_error_union(
         target_inferred || members.iter().all(|member| target_members.contains(member))
     };
 
-    let allowed = match sema.pool.kind(actual) {
+    let (source_members, allowed) = match sema.pool.kind(actual) {
         TypeKind::DeclaredError | TypeKind::ErrorSet => {
-            subset(&sema.pool.error_set_view(actual).members)
+            let members = sema.pool.error_set_view(actual).members;
+            let allowed = subset(&members);
+            (Some(members), allowed)
         }
         TypeKind::ErrorUnion | TypeKind::InferredErrorUnion => {
             let source = sema.pool.error_union_view(actual);
-            sema.pool.compatible(source.success, target_view.success)
-                && subset(&sema.pool.error_set_view(source.error_set).members)
+            let success_matches = sema.pool.compatible(source.success, target_view.success);
+            let members = sema.pool.error_set_view(source.error_set).members;
+            let allowed = success_matches && subset(&members);
+            (Some(members), allowed)
         }
-        _ => sema.pool.compatible(actual, target_view.success),
+        _ => (None, sema.pool.compatible(actual, target_view.success)),
     };
     if allowed {
-        return fcx.builder.error_union_coerce(operand, target, span);
+        if target_inferred {
+            if let Some(members) = &source_members {
+                super::error_inference::record_members(sema, fcx.decl, members);
+            }
+            super::error_inference::note_dependency(sema, fcx, operand);
+        }
+        let coercion = fcx.builder.error_union_coerce(operand, target, span);
+        if target_inferred {
+            super::error_inference::defer_coercion(sema, fcx.decl, coercion);
+        }
+        return coercion;
     }
 
     sema.sink.emit(Diag::error(
