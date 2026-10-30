@@ -451,7 +451,7 @@ pub(crate) fn analyze_expr_allow_never(
             )
         }
         InstTag::Borrow => analyze_borrow(sema, fcx, scope, r, inst.data, span),
-        InstTag::StructLit => analyze_struct_lit(sema, fcx, scope, r, span),
+        InstTag::StructLit => analyze_struct_lit(sema, fcx, scope, r, span, None),
         InstTag::EnumLit => analyze_variant_construct(sema, fcx, scope, r, span),
         InstTag::ErrorConstruct => {
             super::errors::analyze_error_construct(sema, fcx, scope, r, span)
@@ -517,16 +517,33 @@ fn analyze_borrow(
 /// recover with an error-typed `Unreachable`. The anonymous path
 /// infers the structural type from the field values — see
 /// [`analyze_anon_struct_lit`].
+pub(crate) fn analyze_struct_lit_with_target(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    target: TypeId,
+) -> TirRef {
+    if let Some(t) = fcx.inst_map[r.index()] {
+        return t;
+    }
+    let span = sema.uir.span(r);
+    let emitted = analyze_struct_lit(sema, fcx, scope, r, span, Some(target));
+    fcx.inst_map[r.index()] = Some(emitted);
+    emitted
+}
+
 fn analyze_struct_lit(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     r: InstRef,
     span: Span,
+    expected: Option<TypeId>,
 ) -> TirRef {
     let view = sema.uir.struct_lit_view(r);
     let Some(name) = view.name else {
-        return analyze_anon_struct_lit(sema, fcx, scope, &view, span);
+        return analyze_anon_struct_lit(sema, fcx, scope, &view, span, expected);
     };
     let Some(&sty) = sema.struct_types.get(&name) else {
         // Never declared — this one is on the user.
@@ -583,9 +600,9 @@ fn analyze_struct_lit(
             analyze_expr(sema, fcx, scope, value_ref);
             continue;
         }
-        let value = analyze_expr(sema, fcx, scope, value_ref);
+        let value = analyze_struct_field_value(sema, fcx, scope, value_ref, field.ty);
         let vty = fcx.builder.ty_of(value);
-        if !sema.pool.compatible(vty, field.ty) {
+        if !super::errors::is_error_union(sema, field.ty) && !sema.pool.compatible(vty, field.ty) {
             sema.sink.emit(Diag::error(
                 fspan,
                 DiagCode::TypeMismatch,
@@ -629,6 +646,30 @@ fn analyze_struct_lit(
         })
         .collect();
     fcx.builder.struct_lit(sty, &fields, span)
+}
+
+fn analyze_struct_field_value(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    value_ref: InstRef,
+    target: TypeId,
+) -> TirRef {
+    let mut value = if sema.uir.inst(value_ref).tag == InstTag::StructLit {
+        analyze_struct_lit_with_target(sema, fcx, scope, value_ref, target)
+    } else {
+        analyze_expr(sema, fcx, scope, value_ref)
+    };
+    if super::errors::is_error_union(sema, target) {
+        value = super::errors::coerce_to_error_union(
+            sema,
+            fcx,
+            value,
+            target,
+            sema.uir.span(value_ref),
+        );
+    }
+    value
 }
 
 /// Variant construction `EnumName.Variant(args...)` (M11). The UIR
@@ -866,27 +907,38 @@ fn analyze_variant_construct(
         .enum_lit(ety, variant_index, view.positional, &args, span)
 }
 
-/// Anonymous struct literal `{field = value, ...}` (M10). There is no
-/// declaration to validate against — the type is structural, inferred
-/// from the initializers: each field's type is its value's type, and
-/// the ordered (name, type) pairs intern via [`InternPool::anon_struct`].
-/// The TIR emission then matches the named path: canonical (here:
-/// written) order, duplicates diagnosed with `DuplicateStructField`,
-/// and a view-typed initializer rejected with `ViewFieldType` (Rule 6
-/// — views cannot live in struct fields). A field whose initializer
-/// failed to type-check poisons the whole literal: an error-typed
-/// field has no layout, so no anon type can be interned for it.
+/// Anonymous struct literal `{field = value, ...}` (M10). Without an
+/// expected shape, the ordered (name, type) pairs are inferred from the
+/// initializers and interned via [`InternPool::anon_struct`]. A matching
+/// expected anonymous shape instead supplies field targets so error-union
+/// fields coerce recursively. Shape and non-union mismatches still infer
+/// the source type for the enclosing compatibility check.
 fn analyze_anon_struct_lit(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     view: &StructLitView<'_>,
     span: Span,
+    expected: Option<TypeId>,
 ) -> TirRef {
+    let expected = expected.and_then(|ty| {
+        if sema.pool.kind(ty) != TypeKind::AnonStruct {
+            return None;
+        }
+        let expected_view = sema.pool.struct_view(ty);
+        let shape_matches = expected_view.fields.len() == view.fields().len()
+            && expected_view
+                .fields
+                .iter()
+                .zip(view.fields())
+                .all(|(field, (name, _))| field.name == name);
+        shape_matches.then_some((ty, expected_view.fields))
+    });
     let error_ty = sema.pool.error_type();
     let mut fields: Vec<(StringId, TypeId, TirRef)> = Vec::with_capacity(view.fields().len());
     let mut poisoned = false;
-    for (fname, value_ref) in view.fields() {
+    let mut expected_compatible = true;
+    for (index, (fname, value_ref)) in view.fields().enumerate() {
         let fspan = sema.uir.span(value_ref);
         if fields.iter().any(|(n, _, _)| *n == fname) {
             sema.sink.emit(Diag::error(
@@ -902,8 +954,19 @@ fn analyze_anon_struct_lit(
             analyze_expr(sema, fcx, scope, value_ref);
             continue;
         }
-        let value = analyze_expr(sema, fcx, scope, value_ref);
+        let expected_field = expected.as_ref().map(|(_, fields)| fields[index]);
+        let value = if let Some(field) = expected_field {
+            analyze_struct_field_value(sema, fcx, scope, value_ref, field.ty)
+        } else {
+            analyze_expr(sema, fcx, scope, value_ref)
+        };
         let vty = fcx.builder.ty_of(value);
+        if let Some(field) = expected_field
+            && !super::errors::is_error_union(sema, field.ty)
+            && !sema.pool.compatible(vty, field.ty)
+        {
+            expected_compatible = false;
+        }
         if sema.pool.is_error(vty) {
             poisoned = true;
         }
@@ -923,7 +986,10 @@ fn analyze_anon_struct_lit(
         return fcx.builder.unreachable(error_ty, span);
     }
     let pairs: Vec<(StringId, TypeId)> = fields.iter().map(|&(n, t, _)| (n, t)).collect();
-    let sty = sema.pool.anon_struct(&pairs);
+    let sty = match (expected, expected_compatible) {
+        (Some((ty, _)), true) => ty,
+        _ => sema.pool.anon_struct(&pairs),
+    };
     // The anon type's canonical order is the written order.
     let values: Vec<(u32, TirRef)> = fields
         .into_iter()

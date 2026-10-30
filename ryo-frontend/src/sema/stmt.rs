@@ -1,8 +1,8 @@
 //! Statement analysis — split from `mod.rs`; see module docs there.
 
 use super::{
-    ConstInt, FuncCtx, Scope, Sema, analyze_expr, analyze_expr_allow_never, check_reserved_name,
-    const_eval_int, with_struct_shape_notes,
+    ConstInt, FuncCtx, Scope, Sema, analyze_expr, analyze_expr_allow_never,
+    analyze_struct_lit_with_target, check_reserved_name, const_eval_int, with_struct_shape_notes,
 };
 use ryo_core::ast::CompoundOp;
 use ryo_core::diag::{Diag, DiagCode};
@@ -22,7 +22,13 @@ pub(crate) fn analyze_stmt(
     match inst.tag {
         InstTag::VarDecl => {
             let view = sema.uir.var_decl_view(r);
-            let mut init_tir = analyze_expr_allow_never(sema, fcx, scope, view.initializer);
+            let mut init_tir = if let Some(target) = view.ty
+                && sema.uir.inst(view.initializer).tag == InstTag::StructLit
+            {
+                analyze_struct_lit_with_target(sema, fcx, scope, view.initializer, target)
+            } else {
+                analyze_expr_allow_never(sema, fcx, scope, view.initializer)
+            };
             let mut inferred = fcx.builder.ty_of(init_tir);
             // Reject void/never RHS and recover with the error
             // sentinel so downstream uses don't cascade.

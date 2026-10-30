@@ -830,6 +830,8 @@ mod tests_error_duplicate_fields;
 #[cfg(test)]
 mod tests_error_inference;
 #[cfg(test)]
+mod tests_error_union_coercion;
+#[cfg(test)]
 mod tests_errors;
 #[cfg(test)]
 mod tests_match;
