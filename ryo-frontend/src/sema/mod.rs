@@ -826,6 +826,8 @@ mod tests_destructure;
 #[cfg(test)]
 mod tests_enums;
 #[cfg(test)]
+mod tests_error_duplicate_fields;
+#[cfg(test)]
 mod tests_error_inference;
 #[cfg(test)]
 mod tests_errors;

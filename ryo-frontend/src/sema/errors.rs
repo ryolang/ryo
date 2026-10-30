@@ -33,13 +33,15 @@ pub(super) fn is_error_union(sema: &Sema<'_>, ty: TypeId) -> bool {
 }
 
 pub(super) fn is_rejected_error_declaration(sema: &Sema<'_>, name: StringId) -> bool {
-    sema.error_types.contains_key(&name)
-        && !sema
-            .pool
-            .str(name)
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_uppercase)
+    sema.error_types.get(&name).is_some_and(|&ty| {
+        sema.pool.is_error(ty)
+            || !sema
+                .pool
+                .str(name)
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_uppercase)
+    })
 }
 
 pub(super) fn analyze_error_message(
@@ -287,6 +289,12 @@ pub(super) fn analyze_error_construct(
             DiagCode::NamedArgInParens,
             "named arguments are not supported in ordinary function calls",
         ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+
+    if is_rejected_error_declaration(sema, name)
+        || sema.pool.kind(view.ty) != TypeKind::DeclaredError
+    {
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
 
