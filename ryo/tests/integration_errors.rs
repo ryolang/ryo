@@ -49,3 +49,44 @@ fn void_success_return_runs_jit() {
     let src = "error A\nfn succeed() -> A!void:\n\treturn\nfn main():\n\tresult = succeed()\n\tprint(\"ok\\n\")\n";
     assert_ryo_output("error_void_success_jit.ryo", src, "ok\n");
 }
+
+const DECLARED_ERROR_MATCH: &str = "error NotFound(str)\n\
+     fn main():\n\terr = NotFound(int_to_str(7) + \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\")\n\tmatch err:\n\t\tNotFound(message): print(message)\n";
+const DECLARED_ERROR_MATCH_OUTPUT: &str = "7aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+#[test]
+fn declared_error_match_moves_heap_payload_jit() {
+    assert_ryo_output(
+        "declared_error_match_jit.ryo",
+        DECLARED_ERROR_MATCH,
+        DECLARED_ERROR_MATCH_OUTPUT,
+    );
+}
+
+#[test]
+fn declared_error_match_moves_heap_payload_aot() {
+    let temp_dir = TempDir::new().expect("temp");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "declared_error_match_aot.ryo",
+        DECLARED_ERROR_MATCH,
+    );
+    let build = run_ryo_build(&test_file, temp_dir.path());
+    assert!(
+        build.status.success(),
+        "ryo build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = Command::new(exe_path(temp_dir.path(), "declared_error_match_aot"))
+        .output()
+        .expect("run AOT declared-error match binary");
+    assert!(
+        run.status.success(),
+        "AOT binary failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        DECLARED_ERROR_MATCH_OUTPUT
+    );
+}

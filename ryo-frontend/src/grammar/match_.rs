@@ -317,15 +317,12 @@ where
     let arm_pattern = pat.validate(|pat_id, e: &mut Mx<'a, '_, I>, emitter| {
         let pattern = e.state().pattern(pat_id).kind;
         match pattern {
-            PatternKind::Variant {
-                enum_name: None,
-                variant,
-                ..
-            } if matches!(e.state().pool.str(variant), "Ok" | "Err") => {
+            PatternKind::Variant { variant, .. }
+                if matches!(e.state().pool.str(variant), "Ok" | "Err") => {
                 emitter.emit(Rich::custom(
                     e.span(),
                     ParseDiag::Message(
-                        "Ok and Err are compiler-internal alternatives, not source patterns".into(),
+                        "Ok and Err are compiler-internal alternatives, not source patterns; use `catch` to handle error unions".into(),
                     ),
                 ));
             }

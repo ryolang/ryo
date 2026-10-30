@@ -424,3 +424,37 @@ fn e0129_still_fires_alongside_redundant_arms() {
         .expect("E0129");
     assert!(e.message.contains("'Green'"), "got {:?}", e.message);
 }
+
+#[test]
+fn error_set_wildcard_is_exhaustive() {
+    let src = "error A\nerror B\n\
+               fn inspect(err: int):\n\tmatch err:\n\t\tA: 0\n\t\t_: 1\n";
+    let (_tirs, diags, _pool) = super::tests_match::run_with_error_set_param(src);
+    assert!(diags.is_empty(), "wildcard should cover the set: {diags:?}");
+}
+
+#[test]
+fn error_set_missing_nominal_members_are_listed() {
+    let src = "error A\nerror B\nerror C\n\
+               fn inspect(err: int):\n\tmatch err:\n\t\tA: 0\n";
+    let (_tirs, diags, _pool) = super::tests_match::run_with_error_set_param(src);
+    let diag = diags
+        .iter()
+        .find(|diag| diag.code == DiagCode::NonExhaustiveMatch)
+        .expect("missing nominal members must be diagnosed");
+    assert!(diag.message.contains("'B'"), "{diag:?}");
+    assert!(diag.message.contains("'C'"), "{diag:?}");
+}
+
+#[test]
+fn error_set_redundant_arms_use_m12_warnings() {
+    let src = "error A\nerror B\n\
+               fn inspect(err: int):\n\tmatch err:\n\t\tA: 0\n\t\tA: 1\n\t\t_: 2\n\t\tB: 3\n";
+    let (_tirs, diags, _pool) = super::tests_match::run_with_error_set_param(src);
+    assert_eq!(
+        count_code(&diags, DiagCode::UnreachableArm),
+        2,
+        "duplicate and post-wildcard arms must warn: {diags:?}"
+    );
+    assert!(!any_code(&diags, DiagCode::NonExhaustiveMatch));
+}

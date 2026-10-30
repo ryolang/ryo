@@ -544,3 +544,195 @@ fn positional_pattern_arity_mismatch_is_e0113() {
     }
     assert_eq!(diags.len(), 1, "exactly one error: {diags:?}");
 }
+
+pub(super) fn run_with_error_set_param(input: &str) -> (Vec<Tir>, Vec<Diag>, InternPool) {
+    use chumsky::{Parser, input::Input};
+
+    let mut pool = InternPool::new();
+    let mut lex_sink = DiagSink::new();
+    let tokens = crate::lexer::lex(input, &mut pool, &mut lex_sink);
+    assert!(!lex_sink.has_errors());
+    let token_stream = tokens[..].split_token_span((0..input.len()).into());
+    let mut state = crate::grammar::ParseState::new(pool);
+    crate::grammar::program_parser()
+        .parse_with_state(token_stream, &mut state)
+        .into_result()
+        .expect("parse ok");
+    let (ast, mut pool) = state.into_parts();
+    let mut sink = DiagSink::new();
+    let mut uir = crate::astgen::generate(&ast, &mut pool, &mut sink);
+    assert!(!sink.has_errors(), "astgen errors: {:?}", sink.into_diags());
+
+    // Model the error-set binding that compiler-generated catch lowering
+    // will expose to a nested source match; standalone set syntax is not
+    // part of the language.
+    let members: Vec<_> = uir.error_decls.iter().map(|decl| decl.ty).collect();
+    let error_set = pool.error_set(&members);
+    let body = uir
+        .func_bodies
+        .iter_mut()
+        .find(|body| pool.str(body.name) == "inspect")
+        .expect("inspect function");
+    assert_eq!(body.params.len(), 1);
+    body.params[0].ty = error_set;
+
+    let tirs = analyze(
+        &uir,
+        &mut pool,
+        &mut sink,
+        input,
+        std::path::Path::new("<test>"),
+    );
+    (tirs, sink.into_diags(), pool)
+}
+
+#[test]
+fn declared_error_match_resolves_nominal_member_and_payload() {
+    let src = "error NotFound(str)\n\
+               fn main():\n\terr = NotFound(\"missing\")\n\tmatch err:\n\t\tNotFound(message): message.len()\n";
+    let (tirs, pool) = run(src).expect("declared error should be matchable");
+    let main = tir_named(&tirs, &pool, "main");
+    let m = match_stmt_operand(main, 1);
+    let view = main.match_view(m);
+    assert_eq!(
+        pool.kind(main.inst(view.scrutinee).ty),
+        ryo_core::types::TypeKind::DeclaredError
+    );
+    assert_eq!(view.arm(0).discriminant, Discriminant::Variant(0));
+    let binding = view.arm(0).bindings().next().expect("payload binding");
+    assert_eq!(binding.field_index, 0);
+    assert_eq!(binding.ty, pool.str_());
+}
+
+#[test]
+fn multi_member_error_set_match_resolves_every_nominal_member() {
+    let src = "error A\nerror B(str)\n\
+               fn inspect(move err: int):\n\tmatch err:\n\t\tA: 0\n\t\tB(message): message.len()\n";
+    let (tirs, diags, pool) = run_with_error_set_param(src);
+    assert!(diags.is_empty(), "error-set match failed: {diags:?}");
+    let main = tir_named(&tirs, &pool, "inspect");
+    let m = match_stmt_operand(main, 0);
+    let view = main.match_view(m);
+    assert_eq!(
+        pool.kind(main.inst(view.scrutinee).ty),
+        ryo_core::types::TypeKind::ErrorSet
+    );
+    assert_eq!(view.arm(0).discriminant, Discriminant::Variant(0));
+    assert_eq!(view.arm(1).discriminant, Discriminant::Variant(1));
+    assert_eq!(view.arm(1).bindings().next().unwrap().ty, pool.str_());
+}
+
+#[test]
+fn error_match_reuses_payload_shape_diagnostics() {
+    let src = "error Unit\nerror Tuple(str)\n\
+               fn main():\n\tu = Unit\n\tt = Tuple(\"x\")\n\tmatch u:\n\t\tUnit(x): 0\n\t\t_: 0\n\tmatch t:\n\t\tTuple: 0\n\t\t_: 0\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert!(any_code(&diags, DiagCode::UnitVariantConstructed));
+    assert!(any_code(&diags, DiagCode::MissingVariantFields));
+}
+
+#[test]
+fn borrowed_error_payload_move_is_rejected() {
+    let src = "error NotFound(str)\n\
+               fn inspect(err: NotFound):\n\tmatch err:\n\t\tNotFound(message): 0\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert!(
+        any_code(&diags, DiagCode::MoveOutOfBorrowedScrutinee),
+        "borrowed payload move must reuse E0133: {diags:?}"
+    );
+}
+
+#[test]
+fn direct_error_union_match_points_to_catch() {
+    let src = "error A\nfn fail() -> A!int:\n\treturn A\n\
+               fn main():\n\tresult = fail()\n\tmatch result:\n\t\t_: 0\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|diag| diag.code == DiagCode::InvalidMatchScrutinee)
+        .expect("direct union match must be rejected");
+    assert!(diag.message.contains("`catch`"), "{diag:?}");
+}
+
+#[test]
+fn source_ok_and_err_patterns_point_to_catch() {
+    for pattern in ["Ok", "Err", "Result.Ok", "Result.Err"] {
+        let src = format!("fn main():\n\tmatch 0:\n\t\t{pattern}(_): 0\n");
+        let mut pool = InternPool::new();
+        let diags = match crate::parse::parse_source(&src, &mut pool) {
+            Ok((_ast, diags)) => diags,
+            Err(diags) => diags,
+        };
+        assert!(
+            diags.iter().any(|diag| diag.message.contains("`catch`")),
+            "{pattern} must reject source syntax with catch guidance: {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn compiler_error_union_dispatch_synthesizes_hidden_alternatives() {
+    let mut pool = InternPool::new();
+    let error_name = pool.intern_str("A");
+    let error = pool.declare_error(error_name);
+    pool.define_error(
+        error,
+        ryo_core::types::EnumVariantDef {
+            name: error_name,
+            kind: ryo_core::types::VariantKind::Unit,
+            fields: vec![],
+        },
+    );
+    let void = pool.void();
+    let union = pool.error_union(error, void);
+    assert_eq!(pool.error_union_view(union).success, void);
+    let int = pool.int();
+    let function_name = pool.intern_str("lowered");
+    let mut fcx = FuncCtx {
+        builder: ryo_core::tir::TirBuilder::new(function_name, vec![], int, sp()),
+        inst_map: vec![],
+        return_type: int,
+        loop_depth: 0,
+        destructure_temps: Default::default(),
+    };
+    let error_value = fcx.builder.enum_lit(error, 0, false, &[], sp());
+    let union_value = fcx.builder.error_union_coerce(error_value, union, sp());
+    let ok_body = fcx.builder.int_const(0, int, sp());
+    let err_body = fcx.builder.int_const(1, int, sp());
+    let err_name = pool.intern_str("err");
+    let err_bindings = [ryo_core::tir::MatchBinding {
+        field_index: 0,
+        name: err_name,
+        ty: error,
+    }];
+    let ok_arm = ryo_core::tir::TypedMatchArm {
+        span: sp(),
+        discriminant: Discriminant::Wildcard,
+        bindings: &[],
+        guards: &[],
+        body: ryo_core::tir::TypedMatchBody::Expr(ok_body),
+    };
+    let err_arm = ryo_core::tir::TypedMatchArm {
+        span: sp(),
+        discriminant: Discriminant::Wildcard,
+        bindings: &err_bindings,
+        guards: &[],
+        body: ryo_core::tir::TypedMatchBody::Expr(err_body),
+    };
+
+    let m = super::match_::emit_error_union_dispatch(
+        &mut fcx,
+        &pool,
+        union_value,
+        int,
+        ok_arm,
+        err_arm,
+        sp(),
+    );
+    let tir = fcx.builder.finish(&[m]);
+    let view = tir.match_view(m);
+    assert_eq!(view.len(), 2);
+    assert_eq!(view.arm(0).discriminant, Discriminant::Variant(0));
+    assert_eq!(view.arm(1).discriminant, Discriminant::Variant(1));
+    assert_eq!(view.arm(1).bindings().next().unwrap().ty, error);
+}

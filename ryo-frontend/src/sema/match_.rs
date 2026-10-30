@@ -12,8 +12,8 @@
 //! for the follow-on passes.
 //!
 //! The second pass adds EXHAUSTIVENESS + REDUNDANCY over the resolved arms:
-//! enum scrutinees cover variant indices (a `u128` bitset up to 128
-//! variants, a `Vec<bool>` fallback above), bool covers its two
+//! enum and error-set scrutinees cover variant indices (a `u128` bitset up
+//! to 128 variants, a `Vec<bool>` fallback above), bool covers its two
 //! literals, int/str/anon-struct scrutinees are uncoverable without a
 //! wildcard arm (anon patterns carry no M12 discriminant — structural
 //! lowering is M12.5). Incomplete coverage without a `_:` arm is
@@ -137,15 +137,19 @@ struct MatchArmAnalysis {
     had_error: bool,
 }
 
-/// The matchable scrutinee kinds (spec §4.6): enums by variant, exact
-/// literals over `int` / `bool` / `str`, and anonymous structs by
-/// shape. Named structs (nominal patterns), floats (literal patterns
-/// deferred with NaN/IEEE), views, `bytes`, and `void` / `never` (no
-/// value to match) are rejected with E0136.
+/// The matchable scrutinee kinds: enums and error sets by nominal
+/// variant, exact literals over `int` / `bool` / `str`, and anonymous
+/// structs by shape. Error unions remain compiler-dispatched only.
 fn is_matchable(sema: &Sema<'_>, ty: ryo_core::types::TypeId) -> bool {
     matches!(
         sema.pool.kind(ty),
-        TypeKind::Enum | TypeKind::Int | TypeKind::Bool | TypeKind::Str | TypeKind::AnonStruct
+        TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::Int
+            | TypeKind::Bool
+            | TypeKind::Str
+            | TypeKind::AnonStruct
     )
 }
 
@@ -191,7 +195,7 @@ pub(crate) fn analyze_match(
                 DiagCode::InvalidMatchScrutinee,
                 format!(
                     "cannot match on a value of type '{}' — match works on \
-                     enums, int, bool, str, and anonymous structs",
+                     enums, declared errors, error sets, int, bool, str, and anonymous structs",
                     sema.pool.display(scrutinee_ty),
                 ),
             );
@@ -567,8 +571,61 @@ fn type_and_emit_match(
             },
         })
         .collect();
-    fcx.builder
-        .match_expr(analysis.scrutinee, match_ty, &typed_arms, span)
+    emit_match_with_owner_tokens(
+        fcx,
+        analysis.scrutinee,
+        match_ty,
+        &typed_arms,
+        &owner_tokens,
+        span,
+    )
+}
+
+#[allow(dead_code)]
+pub(super) fn emit_error_union_dispatch(
+    fcx: &mut FuncCtx,
+    pool: &ryo_core::types::InternPool,
+    scrutinee: TirRef,
+    ty: TypeId,
+    ok_arm: TypedMatchArm<'_>,
+    err_arm: TypedMatchArm<'_>,
+    span: Span,
+) -> TirRef {
+    debug_assert!(matches!(
+        pool.kind(fcx.builder.ty_of(scrutinee)),
+        TypeKind::ErrorUnion | TypeKind::InferredErrorUnion
+    ));
+    let arms = [
+        TypedMatchArm {
+            discriminant: Discriminant::Variant(0),
+            ..ok_arm
+        },
+        TypedMatchArm {
+            discriminant: Discriminant::Variant(1),
+            ..err_arm
+        },
+    ];
+    let owner_tokens: Vec<_> = arms
+        .iter()
+        .flat_map(|arm| arm.bindings)
+        .filter(|binding| !pool.is_copy(binding.ty))
+        .map(|binding| (binding.field_index, binding.ty))
+        .collect();
+    emit_match_with_owner_tokens(fcx, scrutinee, ty, &arms, &owner_tokens, span)
+}
+
+fn emit_match_with_owner_tokens(
+    fcx: &mut FuncCtx,
+    scrutinee: TirRef,
+    ty: TypeId,
+    arms: &[TypedMatchArm<'_>],
+    owner_tokens: &[(u32, TypeId)],
+    span: Span,
+) -> TirRef {
+    for &(field_index, ty) in owner_tokens {
+        fcx.builder.field_access(scrutinee, field_index, ty, span);
+    }
+    fcx.builder.match_expr(scrutinee, ty, arms, span)
 }
 
 /// Insert one arm's payload bindings into its child scope, mirroring
@@ -736,7 +793,7 @@ enum Coverage {
 impl Coverage {
     fn new(sema: &Sema<'_>, ty: ryo_core::types::TypeId) -> Coverage {
         match sema.pool.kind(ty) {
-            TypeKind::Enum => {
+            TypeKind::Enum | TypeKind::DeclaredError | TypeKind::ErrorSet => {
                 let total = sema.pool.enum_view(ty).variants().count();
                 Coverage::Enum {
                     bits: VariantBits::new(total),
@@ -880,20 +937,43 @@ fn emit_non_exhaustive(
 ) {
     let mut diag = match coverage {
         Coverage::Enum { bits, total } => {
-            let names: Vec<String> = {
-                let view = sema.pool.enum_view(scrutinee_ty);
-                let names: Vec<StringId> = view.variants().map(|v| v.name).collect();
-                bits.missing(*total)
+            let error_pattern = matches!(
+                sema.pool.kind(scrutinee_ty),
+                TypeKind::DeclaredError | TypeKind::ErrorSet
+            );
+            let variant_names: Vec<StringId> = if error_pattern {
+                sema.pool
+                    .error_set_view(scrutinee_ty)
+                    .members
                     .into_iter()
-                    .map(|i| format!("'{}'", sema.pool.str(names[i])))
+                    .map(|member| sema.pool.enum_view(member).name())
+                    .collect()
+            } else {
+                sema.pool
+                    .enum_view(scrutinee_ty)
+                    .variants()
+                    .map(|variant| variant.name)
                     .collect()
             };
+            let names: Vec<String> = bits
+                .missing(*total)
+                .into_iter()
+                .map(|i| format!("'{}'", sema.pool.str(variant_names[i])))
+                .collect();
             let (noun, verb) = if names.len() == 1 {
                 ("variant", "is")
             } else {
                 ("variants", "are")
             };
-            let ename = sema.pool.str(sema.pool.enum_view(scrutinee_ty).name());
+            let note = if error_pattern {
+                format!(
+                    "the scrutinee is error set '{}' here",
+                    sema.pool.display(scrutinee_ty)
+                )
+            } else {
+                let ename = sema.pool.str(sema.pool.enum_view(scrutinee_ty).name());
+                format!("the scrutinee is enum '{ename}' here")
+            };
             Diag::error(
                 match_span,
                 DiagCode::NonExhaustiveMatch,
@@ -902,10 +982,7 @@ fn emit_non_exhaustive(
                     names.join(", "),
                 ),
             )
-            .with_note(
-                Some(scrutinee_span),
-                format!("the scrutinee is enum '{ename}' here"),
-            )
+            .with_note(Some(scrutinee_span), note)
         }
         Coverage::Bool(seen) => {
             let mut names = Vec::new();
@@ -1129,13 +1206,8 @@ fn resolve_literal(
     });
 }
 
-/// A variant arm `Red` / `Color.Red` / `Circle(radius)` /
-/// `Coords{x=px}`: resolve the enum (unqualified names against the
-/// SCRUTINEE enum only — never the scope), the variant, and the
-/// payload shape. Payload checks mirror [`super::analyze_variant_construct`]
-/// (M11): full coverage of the payload, `_` to skip a slot, the Brace
-/// Law's one-way-per-shape relaxed on the pattern side — positional
-/// binds over named payloads bind in declaration order (spec §4.6).
+/// Resolve an enum variant or a nominal error member against the
+/// scrutinee, then reuse the M12 payload-shape checks.
 fn resolve_variant(
     sema: &mut Sema<'_>,
     scrutinee_ty: ryo_core::types::TypeId,
@@ -1144,13 +1216,15 @@ fn resolve_variant(
     args: Option<UirVariantArgsView<'_>>,
     analysis: &mut MatchArmAnalysis,
 ) {
-    if sema.pool.kind(scrutinee_ty) != TypeKind::Enum {
+    let scrutinee_kind = sema.pool.kind(scrutinee_ty);
+    let error_pattern = matches!(scrutinee_kind, TypeKind::DeclaredError | TypeKind::ErrorSet);
+    if scrutinee_kind != TypeKind::Enum && !error_pattern {
         sema.sink.emit(Diag::error(
             analysis.span,
             DiagCode::PatternTypeMismatch,
             format!(
                 "variant pattern cannot match a scrutinee of type '{}' — \
-                 variant patterns match enum values",
+                 variant patterns match enum and error-set values",
                 sema.pool.display(scrutinee_ty),
             ),
         ));
@@ -1158,88 +1232,142 @@ fn resolve_variant(
         return;
     }
     if let Some(name) = enum_name {
-        match sema.enum_types.get(&name) {
-            Some(&ety) if ety == scrutinee_ty => {}
-            Some(&ety) => {
-                // Qualified path names a real enum that isn't the
-                // scrutinee's — name both enums (E0132).
-                let pattern_en = sema.pool.str(sema.pool.enum_view(ety).name()).to_string();
-                let scrutinee_en = sema
-                    .pool
-                    .str(sema.pool.enum_view(scrutinee_ty).name())
-                    .to_string();
-                sema.sink.emit(Diag::error(
-                    analysis.span,
-                    DiagCode::UnknownMatchVariant,
-                    format!(
-                        "variant pattern '{pattern_en}.{v}' names enum '{pattern_en}', \
-                         but the scrutinee is enum '{scrutinee_en}'",
-                        v = sema.pool.str(variant),
-                    ),
-                ));
-                analysis.had_error = true;
-                return;
-            }
-            None => {
-                // Never-declared (UnknownType, mirroring M11
-                // construction's undeclared-enum handling) or a struct
-                // name (UnknownEnum) — not E0132, which is reserved
-                // for declared-but-different enums.
-                if sema.struct_types.contains_key(&name) {
+        if error_pattern {
+            match sema.error_types.get(&name).copied() {
+                Some(error_ty)
+                    if sema
+                        .pool
+                        .error_set_view(scrutinee_ty)
+                        .members
+                        .contains(&error_ty)
+                        && sema.pool.enum_view(error_ty).name() == variant => {}
+                Some(_) => {
                     sema.sink.emit(Diag::error(
                         analysis.span,
-                        DiagCode::UnknownEnum,
-                        format!("'{}' is a struct, not an enum", sema.pool.str(name),),
+                        DiagCode::UnknownMatchVariant,
+                        format!(
+                            "error pattern '{}.{}' does not name a member of error set '{}'",
+                            sema.pool.str(name),
+                            sema.pool.str(variant),
+                            sema.pool.display(scrutinee_ty),
+                        ),
                     ));
-                } else {
+                    analysis.had_error = true;
+                    return;
+                }
+                None => {
                     sema.sink.emit(Diag::error(
                         analysis.span,
                         DiagCode::UnknownType,
-                        format!("unknown type: '{}' in match pattern", sema.pool.str(name)),
+                        format!("unknown error: '{}' in match pattern", sema.pool.str(name)),
                     ));
+                    analysis.had_error = true;
+                    return;
                 }
-                analysis.had_error = true;
-                return;
+            }
+        } else {
+            match sema.enum_types.get(&name) {
+                Some(&ety) if ety == scrutinee_ty => {}
+                Some(&ety) => {
+                    let pattern_en = sema.pool.str(sema.pool.enum_view(ety).name()).to_string();
+                    let scrutinee_en = sema
+                        .pool
+                        .str(sema.pool.enum_view(scrutinee_ty).name())
+                        .to_string();
+                    sema.sink.emit(Diag::error(
+                        analysis.span,
+                        DiagCode::UnknownMatchVariant,
+                        format!(
+                            "variant pattern '{pattern_en}.{v}' names enum '{pattern_en}', \
+                             but the scrutinee is enum '{scrutinee_en}'",
+                            v = sema.pool.str(variant),
+                        ),
+                    ));
+                    analysis.had_error = true;
+                    return;
+                }
+                None => {
+                    if sema.struct_types.contains_key(&name) {
+                        sema.sink.emit(Diag::error(
+                            analysis.span,
+                            DiagCode::UnknownEnum,
+                            format!("'{}' is a struct, not an enum", sema.pool.str(name)),
+                        ));
+                    } else {
+                        sema.sink.emit(Diag::error(
+                            analysis.span,
+                            DiagCode::UnknownType,
+                            format!("unknown type: '{}' in match pattern", sema.pool.str(name)),
+                        ));
+                    }
+                    analysis.had_error = true;
+                    return;
+                }
             }
         }
     }
 
-    // Decode the variant directory up front: the view borrows the pool
-    // and the checks below need `&mut Sema` (the construction-site
-    // precedent in analyze_variant_construct).
-    let (ename, variants) = {
-        let eview = sema.pool.enum_view(scrutinee_ty);
+    let (ename, variants) = if error_pattern {
+        let variants = sema
+            .pool
+            .error_set_view(scrutinee_ty)
+            .members
+            .into_iter()
+            .map(|member| {
+                let view = sema.pool.enum_view(member);
+                let variant = view
+                    .variants()
+                    .next()
+                    .expect("declared errors have one variant");
+                (view.name(), variant.kind, variant.fields.to_vec())
+            })
+            .collect::<Vec<_>>();
+        (None, variants)
+    } else {
+        let view = sema.pool.enum_view(scrutinee_ty);
         (
-            eview.name(),
-            eview
-                .variants()
+            Some(view.name()),
+            view.variants()
                 .map(|v| (v.name, v.kind, v.fields.to_vec()))
                 .collect::<Vec<_>>(),
         )
     };
     let Some(vidx) = variants.iter().position(|&(n, _, _)| n == variant) else {
-        emit_unknown_variant(sema, ename, variant, &variants, analysis);
+        emit_unknown_variant(sema, scrutinee_ty, variant, &variants, analysis);
         return;
     };
     let (vname, kind, fields) = &variants[vidx];
     let vname = sema.pool.str(*vname).to_string();
-    let ename = sema.pool.str(ename).to_string();
+    let (pattern, description) = if error_pattern {
+        (vname.clone(), format!("error '{vname}'"))
+    } else {
+        let ename = sema.pool.str(ename.expect("enum name")).to_string();
+        (
+            format!("{ename}.{vname}"),
+            format!("variant '{vname}' of enum '{ename}'"),
+        )
+    };
 
     let payload_ok = match kind {
         VariantKind::Unit => {
             if args.is_some() {
+                let nominal_kind = if error_pattern { "error" } else { "variant" };
                 sema.sink.emit(Diag::error(
                     analysis.span,
                     DiagCode::UnitVariantConstructed,
-                    format!("'{vname}' is a unit variant — match it as {ename}.{vname}"),
+                    format!("'{vname}' is a unit {nominal_kind} — match it as {pattern}"),
                 ));
                 false
             } else {
                 true
             }
         }
-        VariantKind::Tuple => resolve_tuple_payload(sema, &ename, &vname, fields, args, analysis),
-        VariantKind::Named => resolve_named_payload(sema, &ename, &vname, fields, args, analysis),
+        VariantKind::Tuple => {
+            resolve_tuple_payload(sema, &vname, &pattern, &description, fields, args, analysis)
+        }
+        VariantKind::Named => {
+            resolve_named_payload(sema, &vname, &pattern, &description, fields, args, analysis)
+        }
     };
     if payload_ok {
         analysis.discriminant = Some(Discriminant::Variant(vidx as u32));
@@ -1248,23 +1376,29 @@ fn resolve_variant(
     }
 }
 
-/// E0132 for an unresolved variant name: names the scrutinee enum and
-/// the identifier, with a did-you-mean help note over the enum's
-/// variant list when a close name exists and a plain variant-list note
-/// otherwise.
 fn emit_unknown_variant(
     sema: &mut Sema<'_>,
-    ename: StringId,
+    scrutinee_ty: ryo_core::types::TypeId,
     variant: StringId,
     variants: &[(StringId, VariantKind, Vec<StructField>)],
     analysis: &mut MatchArmAnalysis,
 ) {
-    let ename = sema.pool.str(ename).to_string();
+    let error_pattern = matches!(
+        sema.pool.kind(scrutinee_ty),
+        TypeKind::DeclaredError | TypeKind::ErrorSet
+    );
+    let parent = if error_pattern {
+        format!("error set '{}'", sema.pool.display(scrutinee_ty))
+    } else {
+        let ename = sema.pool.enum_view(scrutinee_ty).name();
+        format!("enum '{}'", sema.pool.str(ename))
+    };
+    let member_kind = if error_pattern { "member" } else { "variant" };
     let vname = sema.pool.str(variant).to_string();
     let mut diag = Diag::error(
         analysis.span,
         DiagCode::UnknownMatchVariant,
-        format!("enum '{ename}' has no variant '{vname}'"),
+        format!("{parent} has no {member_kind} '{vname}'"),
     );
     let names: Vec<&str> = variants.iter().map(|&(n, _, _)| sema.pool.str(n)).collect();
     if let Some(suggestion) = did_you_mean(&vname, &names) {
@@ -1275,7 +1409,7 @@ fn emit_unknown_variant(
             .map(|n| format!("'{n}'"))
             .collect::<Vec<_>>()
             .join(", ");
-        diag = diag.with_note(None, format!("enum '{ename}' declares: {listed}"));
+        diag = diag.with_note(None, format!("{parent} declares: {listed}"));
     }
     sema.sink.emit(diag);
     analysis.had_error = true;
@@ -1288,8 +1422,9 @@ fn emit_unknown_variant(
 /// (E0122) — tuple payloads have no user-spellable field names.
 fn resolve_tuple_payload(
     sema: &mut Sema<'_>,
-    ename: &str,
     vname: &str,
+    pattern: &str,
+    description: &str,
     fields: &[StructField],
     args: Option<UirVariantArgsView<'_>>,
     analysis: &mut MatchArmAnalysis,
@@ -1307,7 +1442,7 @@ fn resolve_tuple_payload(
                 ),
             )
             .with_help(format!(
-                "write {ename}.{vname}({}) to skip fields you don't need",
+                "write {pattern}({}) to skip fields you don't need",
                 vec!["_"; total].join(", "),
             )),
         );
@@ -1315,9 +1450,6 @@ fn resolve_tuple_payload(
     };
     if args.by_position {
         if args.len() > total {
-            // Extra positional argument: name its position, not the
-            // synthesized "0"/"1" field name (E0122, the construction
-            // wording verbatim).
             for (i, _) in args.args().enumerate().skip(total) {
                 sema.sink.emit(Diag::error(
                     analysis.span,
@@ -1343,7 +1475,7 @@ fn resolve_tuple_payload(
                     ),
                 )
                 .with_help(format!(
-                    "write {ename}.{vname}({}) to skip fields you don't need",
+                    "write {pattern}({}) to skip fields you don't need",
                     vec!["_"; total].join(", "),
                 )),
             );
@@ -1360,7 +1492,6 @@ fn resolve_tuple_payload(
         }
         return true;
     }
-    // Brace form on a tuple variant: no user-spellable field exists.
     let mut ok = true;
     if args.is_empty() {
         sema.sink.emit(
@@ -1374,7 +1505,7 @@ fn resolve_tuple_payload(
                 ),
             )
             .with_help(format!(
-                "write {ename}.{vname}({}) to skip fields you don't need",
+                "write {pattern}({}) to skip fields you don't need",
                 vec!["_"; total].join(", "),
             )),
         );
@@ -1388,10 +1519,10 @@ fn resolve_tuple_payload(
             Diag::error(
                 analysis.span,
                 DiagCode::UnknownVariantField,
-                format!("variant '{vname}' of enum '{ename}' has no field '{fname}'"),
+                format!("{description} has no field '{fname}'"),
             )
             .with_help(format!(
-                "'{vname}' is a tuple variant — use the paren form: {ename}.{vname}(...)"
+                "'{vname}' is a tuple variant — use the paren form: {pattern}(...)"
             )),
         );
         ok = false;
@@ -1405,8 +1536,9 @@ fn resolve_tuple_payload(
 /// (E0120, `_`-skippable) mirror the construction checks.
 fn resolve_named_payload(
     sema: &mut Sema<'_>,
-    ename: &str,
     vname: &str,
+    pattern: &str,
+    description: &str,
     fields: &[StructField],
     args: Option<UirVariantArgsView<'_>>,
     analysis: &mut MatchArmAnalysis,
@@ -1418,13 +1550,10 @@ fn resolve_named_payload(
             Diag::error(
                 analysis.span,
                 DiagCode::MissingVariantFields,
-                format!(
-                    "missing field(s) {missing} in match pattern for variant \
-                     '{vname}' of enum '{ename}'",
-                ),
+                format!("missing field(s) {missing} in match pattern for {description}"),
             )
             .with_help(format!(
-                "write {ename}.{vname}{{{}}} to skip fields you don't need",
+                "write {pattern}{{{}}} to skip fields you don't need",
                 fields
                     .iter()
                     .map(|f| format!("{}=_", sema.pool.str(f.name)))
@@ -1456,7 +1585,7 @@ fn resolve_named_payload(
                     format!("'{vname}' takes {total} fields; got {}", args.len()),
                 )
                 .with_help(format!(
-                    "write {ename}.{vname}({}) to skip fields you don't need",
+                    "write {pattern}({}) to skip fields you don't need",
                     vec!["_"; total].join(", "),
                 )),
             );
@@ -1473,15 +1602,10 @@ fn resolve_named_payload(
         }
         return true;
     }
-    // Brace form: per-arg resolution against the declared fields.
     let mut covered: Vec<bool> = vec![false; total];
-    // Once any field errored the coverage set is untrustworthy — the
-    // derived missing-fields error is suppressed (the field_errored
-    // precedent in analyze_variant_construct).
     let mut field_errored = false;
     for (name, target) in args.args() {
         let Some(fname) = name else {
-            // Producer invariant: brace args carry their field name.
             debug_assert!(false, "brace payload arg without a field name");
             field_errored = true;
             continue;
@@ -1491,7 +1615,7 @@ fn resolve_named_payload(
                 analysis.span,
                 DiagCode::UnknownVariantField,
                 format!(
-                    "variant '{vname}' of enum '{ename}' has no field '{}' (fields: {})",
+                    "{description} has no field '{}' (fields: {})",
                     sema.pool.str(fname),
                     field_list(sema.pool, fields),
                 ),
@@ -1504,10 +1628,8 @@ fn resolve_named_payload(
                 analysis.span,
                 DiagCode::DuplicateVariantField,
                 format!(
-                    "field '{}' is specified more than once in variant '{}' of enum '{}'",
+                    "field '{}' is specified more than once in {description}",
                     sema.pool.str(fname),
-                    vname,
-                    ename,
                 ),
             ));
             field_errored = true;
@@ -1542,10 +1664,7 @@ fn resolve_named_payload(
             Diag::error(
                 analysis.span,
                 DiagCode::MissingVariantFields,
-                format!(
-                    "missing field(s) {missing} in match pattern for variant '{}' of enum '{}'",
-                    vname, ename,
-                ),
+                format!("missing field(s) {missing} in match pattern for {description}"),
             )
             .with_help(format!("add '{first} = _' to skip fields you don't need")),
         );

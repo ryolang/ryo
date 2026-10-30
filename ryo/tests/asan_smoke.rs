@@ -580,3 +580,30 @@ fn asan_inout_parameter_shadow() {
         "inout_parameter_shadow",
     );
 }
+
+const ERROR_MATCH_ACTIVE_NARROW_UNION: &str = r#"error Narrow(str)
+error Other(int)
+error Largest(str, str, str, str)
+
+fn narrow() -> Narrow!int:
+	return Narrow(int_to_str(7) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+fn widen() -> (Narrow | Other | Largest)!int:
+	result: Narrow!int = narrow()
+	return result
+
+fn main():
+	err = Narrow(int_to_str(8) + "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	match err:
+		Narrow(message): print(message)
+	result = widen()
+	print("ok\n")
+"#;
+
+#[test]
+fn asan_error_match_active_narrow_union_storage() {
+    run_asan_smoke(
+        ERROR_MATCH_ACTIVE_NARROW_UNION,
+        "error_match_active_narrow_union",
+    );
+}
