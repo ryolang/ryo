@@ -494,6 +494,8 @@ pub struct Tir {
     /// value-position-match scan and unwrap without decoding a single
     /// instruction.
     pub contains_match: bool,
+    /// Compiler-generated direct-arm dispatch inside `catch as`.
+    pub direct_catch_matches: std::collections::HashSet<TirRef>,
 }
 
 impl Tir {
@@ -560,6 +562,7 @@ pub struct TirBuilder {
     /// Set by `match_expr` — the only `Match` producer — and copied
     /// into the built [`Tir`]'s `contains_match`.
     saw_match: bool,
+    direct_catch_matches: std::collections::HashSet<TirRef>,
 }
 
 impl TirBuilder {
@@ -586,6 +589,7 @@ impl TirBuilder {
             extra: Vec::new(),
             spans: vec![placeholder_span],
             saw_match: false,
+            direct_catch_matches: std::collections::HashSet::new(),
         }
     }
 
@@ -975,6 +979,7 @@ impl TirBuilder {
             span: self.span,
             operand_match_memo: std::cell::OnceCell::new(),
             contains_match: self.saw_match,
+            direct_catch_matches: self.direct_catch_matches,
         };
         #[cfg(debug_assertions)]
         tir.validate_tree_shape();

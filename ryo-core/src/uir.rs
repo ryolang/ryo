@@ -486,6 +486,8 @@ pub struct Uir {
     pub enum_decls: Vec<UirEnumDecl>,
     /// Nominal error declarations in source order.
     pub error_decls: Vec<UirErrorDecl>,
+    /// Compiler-generated direct-arm dispatch inside `catch as`.
+    pub direct_catch_matches: std::collections::HashSet<InstRef>,
 }
 
 impl Default for Uir {
@@ -511,7 +513,12 @@ impl Uir {
             struct_decls: Vec::new(),
             enum_decls: Vec::new(),
             error_decls: Vec::new(),
+            direct_catch_matches: std::collections::HashSet::new(),
         }
+    }
+
+    pub fn is_direct_catch_match(&self, r: InstRef) -> bool {
+        self.direct_catch_matches.contains(&r)
     }
 
     /// Lookup an instruction by reference.
@@ -901,6 +908,10 @@ impl UirBuilder {
 
     pub fn add_error_decl(&mut self, decl: UirErrorDecl) {
         self.uir.error_decls.push(decl);
+    }
+
+    pub fn mark_direct_catch_match(&mut self, r: InstRef) {
+        self.uir.direct_catch_matches.insert(r);
     }
 }
 

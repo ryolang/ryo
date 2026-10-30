@@ -434,7 +434,13 @@ pub(crate) fn analyze_expr_allow_never(
         InstTag::ErrorConstruct => {
             super::errors::analyze_error_construct(sema, fcx, scope, r, span)
         }
-        InstTag::Match => analyze_match(sema, fcx, scope, r, span),
+        InstTag::Match => {
+            let emitted = analyze_match(sema, fcx, scope, r, span);
+            if sema.uir.is_direct_catch_match(r) {
+                fcx.builder.mark_direct_catch_match(emitted);
+            }
+            emitted
+        }
         InstTag::Catch => super::errors::analyze_catch(sema, fcx, scope, r, span),
         InstTag::FieldAccess => analyze_field_access(sema, fcx, scope, r, span),
         // UIR trusted-producer contract (see the `uir.rs` module

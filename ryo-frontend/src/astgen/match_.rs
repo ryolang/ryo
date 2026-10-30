@@ -166,7 +166,7 @@ pub(super) fn gen_catch(
         ast::CatchBody::Handler(body) => lower_body(b, ast, body, types, defined_enums, pool, sink),
         ast::CatchBody::Arms(arms) => {
             let error_ref = b.temp_var_ref(error, error_span);
-            OwnedBody::Expr(gen_match_from_ref(
+            let direct = gen_match_from_ref(
                 b,
                 ast,
                 error_ref,
@@ -176,7 +176,11 @@ pub(super) fn gen_catch(
                 pool,
                 sink,
                 span,
-            ))
+            );
+            if binding.is_some() {
+                b.mark_direct_catch_match(direct);
+            }
+            OwnedBody::Expr(direct)
         }
     };
     let owned = [

@@ -282,3 +282,49 @@ fn main():
         "7aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
     );
 }
+
+#[test]
+fn nested_match_non_copy_payload_move_rejects_later_shared_read() {
+    let src = r#"error A(str)
+fn describe(err: A, move message: str) -> str:
+	return message
+fn find() -> A!str:
+	return A(int_to_str(7) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+fn main():
+	value = find() catch as err:
+		match err:
+			A(message): describe(err, message)
+	print(value + "\n")
+"#;
+    let temp_dir = TempDir::new().expect("temp");
+    let test_file = create_test_file(temp_dir.path(), "nested_catch_move_rejected.ryo", src);
+    let output = run_ryo_command(&["run", "nested_catch_move_rejected.ryo"], &test_file)
+        .expect("run nested catch match");
+    assert!(
+        !output.status.success(),
+        "a read after the nested match's move must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("use of moved value `err`"),
+        "unexpected diagnostics: {stderr}"
+    );
+}
+
+#[test]
+fn nested_match_non_copy_payload_move_without_shared_read_runs_jit() {
+    let src = r#"error A(str)
+fn find() -> A!str:
+	return A(int_to_str(7) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+fn main():
+	value = find() catch as err:
+		match err:
+			A(message): message
+	print(value + "\n")
+"#;
+    assert_ryo_output(
+        "nested_catch_move_cleanup_jit.ryo",
+        src,
+        "7aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+    );
+}
