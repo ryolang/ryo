@@ -1,6 +1,8 @@
 use super::{FuncCtx, Scope, Sema, analyze_expr};
 use ryo_core::diag::{Diag, DiagCode};
-use ryo_core::tir::{Discriminant, MatchBinding, TirRef, TirTag, TypedMatchArm, TypedMatchBody};
+use ryo_core::tir::{
+    Discriminant, MatchBinding, TirData, TirRef, TirTag, TypedMatchArm, TypedMatchBody,
+};
 use ryo_core::types::{StringId, TypeId, TypeKind, VariantKind};
 use ryo_core::uir::{InstData, InstRef, Span};
 
@@ -26,6 +28,29 @@ pub(super) fn is_error_union(sema: &Sema<'_>, ty: TypeId) -> bool {
     matches!(
         sema.pool.kind(ty),
         TypeKind::ErrorUnion | TypeKind::InferredErrorUnion
+    )
+}
+
+pub(super) fn analyze_error_message(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    args_empty: bool,
+    receiver: TirRef,
+    span: Span,
+) -> TirRef {
+    if !args_empty {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::ArityMismatch,
+            "message() takes no arguments",
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    fcx.builder.push_typed(
+        TirTag::ErrorMessage,
+        TirData::UnOp(receiver),
+        sema.pool.str_(),
+        span,
     )
 }
 

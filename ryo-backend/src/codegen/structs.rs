@@ -1067,7 +1067,7 @@ impl<M: Module> Codegen<M> {
 
     /// One `__ryo_str_push(result, suffix_ptr, suffix_len)` step of
     /// the repr chain.
-    fn emit_debug_push(
+    pub(crate) fn emit_debug_push(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         result: Value,

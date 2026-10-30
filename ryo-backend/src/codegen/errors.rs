@@ -1,13 +1,177 @@
-//! Error-union construction and active-alternative widening.
+//! Error-union construction, active-alternative widening, and error messages.
 
-use cranelift::codegen::ir::MemFlagsData;
+use cranelift::codegen::ir::{MemFlagsData, StackSlot, StackSlotData, StackSlotKind};
 use cranelift::prelude::*;
 use cranelift_module::Module;
 use ryo_core::tir::{TirData, TirRef};
-use ryo_core::types::{StructField, TypeId, TypeKind};
+use ryo_core::types::{EnumVariantView, StructField, TypeId, TypeKind, VariantKind};
 
 use super::enums::invalid_tag_trap;
-use super::{Codegen, FunctionContext, cranelift_type_for};
+use super::{Codegen, FunctionContext, STR_SLOT_SIZE, ValueRepr, cranelift_type_for};
+
+pub(crate) fn emit_error_message<M: Module>(
+    builder: &mut FunctionBuilder,
+    ctx: &mut FunctionContext<'_, M>,
+    r: TirRef,
+) -> Result<ValueRepr, String> {
+    let inst = ctx.tir.inst(r);
+    let TirData::UnOp(operand) = inst.data else {
+        unreachable!("ErrorMessage must carry an operand")
+    };
+    let operand_ty = ctx.tir.inst(operand).ty;
+    debug_assert!(matches!(
+        ctx.pool.kind(operand_ty),
+        TypeKind::DeclaredError | TypeKind::ErrorSet
+    ));
+    let addr = Codegen::eval_inst_enum(builder, ctx, operand)?;
+    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        STR_SLOT_SIZE,
+        3,
+    ));
+    let result = builder.ins().stack_addr(ctx.int_type, slot, 0);
+    let zero = builder.ins().iconst(ctx.int_type, 0);
+    let zero64 = builder.ins().iconst(types::I64, 0);
+    builder
+        .ins()
+        .store(MemFlagsData::trusted(), zero, result, 0);
+    builder
+        .ins()
+        .store(MemFlagsData::trusted(), zero64, result, 8);
+    builder
+        .ins()
+        .store(MemFlagsData::trusted(), zero64, result, 16);
+
+    let variants: Vec<_> = ctx.pool.enum_view(operand_ty).variants().collect();
+    let tag = builder
+        .ins()
+        .load(types::I32, MemFlagsData::trusted(), addr, 0);
+    let merge = builder.create_block();
+    let (cases, otherwise) = Codegen::<M>::emit_tag_dispatch(builder, variants.len(), tag);
+    for (block, variant) in cases.iter().zip(&variants) {
+        builder.seal_block(*block);
+        builder.switch_to_block(*block);
+        emit_active_error_message(builder, ctx, slot, result, addr, variant)?;
+        builder.ins().jump(merge, &[]);
+    }
+    builder.seal_block(otherwise);
+    builder.switch_to_block(otherwise);
+    invalid_tag_trap(builder);
+    builder.seal_block(merge);
+    builder.switch_to_block(merge);
+
+    let ptr = builder
+        .ins()
+        .load(ctx.int_type, MemFlagsData::trusted(), result, 0);
+    let len = builder
+        .ins()
+        .load(types::I64, MemFlagsData::trusted(), result, 8);
+    let cap = builder
+        .ins()
+        .load(types::I64, MemFlagsData::trusted(), result, 16);
+    Ok(ValueRepr::Str { ptr, len, cap })
+}
+
+fn emit_active_error_message<M: Module>(
+    builder: &mut FunctionBuilder,
+    ctx: &mut FunctionContext<'_, M>,
+    slot: StackSlot,
+    result: Value,
+    addr: Value,
+    variant: &EnumVariantView<'_>,
+) -> Result<(), String> {
+    if variant.fields.is_empty() {
+        return Codegen::push_debug_name(builder, ctx, result, variant.name);
+    }
+
+    let string_field =
+        if variant.fields.len() == 1 && ctx.pool.kind(variant.fields[0].ty) == TypeKind::Str {
+            Some(variant.fields[0])
+        } else {
+            let message_name = ctx.pool.find_str("message");
+            variant
+                .fields
+                .iter()
+                .find(|field| {
+                    Some(field.name) == message_name && ctx.pool.kind(field.ty) == TypeKind::Str
+                })
+                .copied()
+        };
+    if let Some(field) = string_field {
+        return emit_error_string_copy(builder, ctx, slot, addr, field);
+    }
+
+    Codegen::push_debug_name(builder, ctx, result, variant.name)?;
+    Codegen::push_debug_static(builder, ctx, result, "(")?;
+    let named = variant.kind == VariantKind::Named;
+    for (index, field) in variant.fields.iter().enumerate() {
+        if index > 0 {
+            Codegen::push_debug_static(builder, ctx, result, ", ")?;
+        }
+        if named {
+            Codegen::push_debug_name(builder, ctx, result, field.name)?;
+            Codegen::push_debug_static(builder, ctx, result, "=")?;
+        }
+        emit_error_field_value(builder, ctx, result, addr, *field)?;
+    }
+    Codegen::push_debug_static(builder, ctx, result, ")")
+}
+
+fn emit_error_string_copy<M: Module>(
+    builder: &mut FunctionBuilder,
+    ctx: &mut FunctionContext<'_, M>,
+    slot: StackSlot,
+    addr: Value,
+    field: StructField,
+) -> Result<(), String> {
+    let field_addr = offset_addr(builder, addr, field.offset);
+    let ptr = builder
+        .ins()
+        .load(ctx.int_type, MemFlagsData::trusted(), field_addr, 0);
+    let len = builder
+        .ins()
+        .load(types::I64, MemFlagsData::trusted(), field_addr, 8);
+    let cap = builder
+        .ins()
+        .load(types::I64, MemFlagsData::trusted(), field_addr, 16);
+    let (ptr, len) =
+        Codegen::emit_fat_bytes_ptr_len(builder, ctx, ptr, len, cap, Some(field_addr))?;
+    Codegen::emit_slot_out_call(
+        builder,
+        ctx,
+        "ryo_str_from_view",
+        &[(ctx.int_type, ptr), (types::I64, len)],
+        Some(slot),
+    )?;
+    Ok(())
+}
+
+fn emit_error_field_value<M: Module>(
+    builder: &mut FunctionBuilder,
+    ctx: &mut FunctionContext<'_, M>,
+    result: Value,
+    addr: Value,
+    field: StructField,
+) -> Result<(), String> {
+    if ctx.pool.kind(field.ty) != TypeKind::Str {
+        let field_addr = offset_addr(builder, addr, field.offset);
+        return Codegen::emit_debug_field_value(builder, ctx, result, field_addr, field.ty);
+    }
+
+    let field_addr = offset_addr(builder, addr, field.offset);
+    let ptr = builder
+        .ins()
+        .load(ctx.int_type, MemFlagsData::trusted(), field_addr, 0);
+    let len = builder
+        .ins()
+        .load(types::I64, MemFlagsData::trusted(), field_addr, 8);
+    let cap = builder
+        .ins()
+        .load(types::I64, MemFlagsData::trusted(), field_addr, 16);
+    let (ptr, len) =
+        Codegen::emit_fat_bytes_ptr_len(builder, ctx, ptr, len, cap, Some(field_addr))?;
+    Codegen::emit_debug_push(builder, ctx, result, ptr, len)
+}
 
 pub(crate) fn emit_error_union_coerce<M: Module>(
     builder: &mut FunctionBuilder,

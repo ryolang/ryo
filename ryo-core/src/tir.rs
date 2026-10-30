@@ -277,6 +277,10 @@ pub enum TirTag {
     /// Borrows operand; owned `str` out.
     DebugRepr,
 
+    /// Compiler-known declared-error/error-set `.message()`. Operand in
+    /// `TirData::UnOp`; borrows the active error and returns an owned `str`.
+    ErrorMessage,
+
     /// `return <expr>`. Operand in `TirData::UnOp`.
     Return,
 

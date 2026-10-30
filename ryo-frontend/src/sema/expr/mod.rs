@@ -253,6 +253,21 @@ pub(crate) fn analyze_expr_allow_never(
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
 
+            if view.name == ids.message
+                && matches!(
+                    sema.pool.kind(receiver_ty),
+                    TypeKind::DeclaredError | TypeKind::ErrorSet
+                )
+            {
+                return super::errors::analyze_error_message(
+                    sema,
+                    fcx,
+                    view.args.is_empty(),
+                    receiver_tir,
+                    span,
+                );
+            }
+
             // `str`/`strview` (M8.4) and `bytes`/`bytesview` (M8.4.2)
             // have methods.
             if !matches!(

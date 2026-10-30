@@ -597,7 +597,7 @@ impl<'a> Walk<'a> {
                     }
                 }
             }
-            TirTag::DebugRepr => {
+            TirTag::DebugRepr | TirTag::ErrorMessage => {
                 self.seed_temp(own, r);
                 if let TirData::UnOp(operand) = inst.data
                     && needs_tracking(self.tir.inst(operand).ty, self.pool)

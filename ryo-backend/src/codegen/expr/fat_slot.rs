@@ -151,6 +151,13 @@ impl<M: Module> Codegen<M> {
                     ValueRepr::Str { ptr, len, cap }
                 }
             }
+            TirTag::ErrorMessage => {
+                debug_assert!(
+                    out_slot.is_none(),
+                    "ErrorMessage manages its own result slot"
+                );
+                super::super::errors::emit_error_message(builder, ctx, r)?
+            }
             TirTag::DebugRepr => {
                 // M9.1/M11 print() gate: render the operand's Debug
                 // representation into a fresh owned str. Primitive
