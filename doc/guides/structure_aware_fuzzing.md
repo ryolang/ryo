@@ -261,11 +261,18 @@ def run_case(case, args, track_dir):
                 [ryo, "build", str(scratch_source)],
                 case_dir, "aot-build", args.timeout,
             )
-            aot = {"build_command": build["command"], "build_status": build["status"]}
+            aot = {
+                "build_command": build["command"],
+                "build_status": build["status"],
+                "build_stdout": str(case_dir / "aot-build.stdout"),
+                "build_stderr": str(case_dir / "aot-build.stderr"),
+            }
             if build["status"] == 0:
                 run = execute([str(binary)], case_dir, "aot-run", args.timeout)
                 aot["run_command"] = run["command"]
                 aot["run_status"] = run["status"]
+                aot["run_stdout"] = str(case_dir / "aot-run.stdout")
+                aot["run_stderr"] = str(case_dir / "aot-run.stderr")
                 aot["exact_output"] = run["stdout"] == case["expected_stdout"].encode()
                 if outcome == "ok" and (run["status"] != 0 or not aot["exact_output"]):
                     outcome = "aot_failure"
@@ -278,6 +285,8 @@ def run_case(case, args, track_dir):
         "source": str(source),
         "jit_command": jit["command"],
         "jit_status": jit["status"],
+        "jit_stdout": str(case_dir / "jit.stdout"),
+        "jit_stderr": str(case_dir / "jit.stderr"),
         "aot": aot,
         "outcome": outcome,
         "backend_completed": case["expected_valid"] and jit["status"] == 0,
@@ -309,6 +318,7 @@ def run_track(name, seeds, args):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ryo", type=Path, required=True)
+    parser.add_argument("--compiler-commit", required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--count", type=int, default=20)
@@ -317,6 +327,7 @@ def main():
     args = parser.parse_args()
     if args.count < 1 or args.aot_every < 1:
         parser.error("--count and --aot-every must be positive")
+    args.out = args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=False)
     shutil.copy2(__file__, args.out / "harness.py")
     seeds = list(range(args.seed, args.seed + args.count))
@@ -324,7 +335,11 @@ def main():
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = [executor.submit(run_track, name, values, args) for name, values in tracks.items()]
         summaries = [future.result() for future in futures]
-    manifest = {"compiler": str(args.ryo.resolve()), "tracks": summaries}
+    manifest = {
+        "compiler": str(args.ryo.resolve()),
+        "compiler_commit": args.compiler_commit,
+        "tracks": summaries,
+    }
     (args.out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps(manifest, indent=2))
 
@@ -338,6 +353,7 @@ Run it against a freshly built compiler, for example:
 ```bash
 python3 /tmp/ryo-error-fuzz/harness.py \
   --ryo target/debug/ryo \
+  --compiler-commit "$(git rev-parse HEAD)" \
   --out /tmp/ryo-error-fuzz/run-001 \
   --seed 1000 --count 100 --aot-every 10 --timeout 15
 ```
