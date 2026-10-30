@@ -152,12 +152,11 @@ pub enum InstTag {
     /// a local/param read or a diagnostic.
     Var,
 
-    /// Compiler-generated temporary read. Only astgen's nested-
-    /// destructuring lowering emits this (see [`InstTag::Destructure`]);
-    /// the payload is [`InstData::Var`] like [`InstTag::Var`], but sema
-    /// resolves it exclusively through the destructuring-temp side
-    /// table — never the user scope — so source-level `Var` references
-    /// can neither observe nor collide with compiler temporaries.
+    /// Compiler-generated temporary read, used by nested destructuring
+    /// and catch lowering. The payload is [`InstData::Var`] like
+    /// [`InstTag::Var`], but sema resolves it exclusively through the
+    /// compiler-temp side table — never the user scope — so source-level
+    /// `Var` references can neither observe nor collide with temporaries.
     TempVar,
 
     // Binary arithmetic / comparison. Both operands in `data.bin_op`.
@@ -286,6 +285,10 @@ pub enum InstTag {
     /// `extra` — see the `uir::match_` module for the wire layout.
     Match,
 
+    /// Compiler-generated error-union dispatch. The two hidden arms use
+    /// the match wire; `binding` is the optional shared `catch as` name.
+    Catch,
+
     /// Placeholder for a statement the parser recovered from (R10:
     /// `StmtKind::Error`). No operands. Sema lowers it to a TIR
     /// `Unreachable` with the error type, so downstream flow analysis
@@ -358,6 +361,10 @@ pub enum InstData {
     /// range into `extra` of the length-prefixed arm list; see the
     /// `uir::match_` module for the wire layout.
     Match {
+        scrutinee: InstRef,
+        arms: ExtraRange,
+    },
+    Catch {
         scrutinee: InstRef,
         arms: ExtraRange,
     },
@@ -584,8 +591,8 @@ impl UirBuilder {
         self.push(InstTag::Var, InstData::Var(name), span)
     }
 
-    /// Emits a read of a compiler-generated temporary (nested-
-    /// destructuring lowering only); see [`InstTag::TempVar`].
+    /// Emits a read of a compiler-generated temporary; see
+    /// [`InstTag::TempVar`].
     pub fn temp_var_ref(&mut self, name: StringId, span: Span) -> InstRef {
         self.push(InstTag::TempVar, InstData::Var(name), span)
     }
@@ -904,9 +911,9 @@ pub use destructure::UirDestructureView;
 pub(crate) use destructure::destructure_extra;
 mod match_;
 pub use match_::{
-    UirAnonField, UirAnonFieldsView, UirArgTarget, UirArmBody, UirArmBodyView, UirFieldTarget,
-    UirMatchArm, UirMatchArmView, UirMatchView, UirPattern, UirPatternView, UirVariantArgs,
-    UirVariantArgsView, match_extra,
+    UirAnonField, UirAnonFieldsView, UirArgTarget, UirArmBody, UirArmBodyView, UirCatchView,
+    UirFieldTarget, UirMatchArm, UirMatchArmView, UirMatchView, UirPattern, UirPatternView,
+    UirVariantArgs, UirVariantArgsView, match_extra,
 };
 mod wires;
 pub(crate) use wires::{

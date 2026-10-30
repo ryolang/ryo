@@ -119,6 +119,13 @@ pub(crate) fn analyze_match_switch(
     }
     let match_set: HashSet<BlockId> = match_blocks.iter().copied().collect();
 
+    if aggregate_result {
+        let result = w
+            .flow
+            .match_result(match_inst)
+            .expect("aggregate match result place");
+        own.states.remove(&Owner(result));
+    }
     let snap = own.snapshot_branch();
     let mut arm_results: Vec<BranchState> = Vec::with_capacity(view.len());
     let mut falls_through: Vec<bool> = Vec::with_capacity(view.len());

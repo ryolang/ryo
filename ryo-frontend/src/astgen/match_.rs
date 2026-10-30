@@ -100,7 +100,31 @@ pub(super) fn gen_match(
     span: Span,
 ) -> InstRef {
     let scrutinee_ref = gen_expr(b, ast, scrutinee, types, defined_enums, pool, sink);
+    gen_match_from_ref(
+        b,
+        ast,
+        scrutinee_ref,
+        arms,
+        types,
+        defined_enums,
+        pool,
+        sink,
+        span,
+    )
+}
 
+#[allow(clippy::too_many_arguments)]
+fn gen_match_from_ref(
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+    scrutinee_ref: InstRef,
+    arms: ast::MatchArmList,
+    types: &TypeResolver,
+    defined_enums: &HashSet<TypeId>,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+    span: Span,
+) -> InstRef {
     let source_arms = ast.match_arms(arms);
     let owned: Vec<(OwnedPattern, OwnedBody)> = source_arms
         .iter()
@@ -118,8 +142,80 @@ pub(super) fn gen_match(
     b.match_expr(scrutinee_ref, &uir_arms, span)
 }
 
-/// Lower one arm: the pattern to its builder input shape, the body per
-/// the parser's normalization (`Expr` arm vs statement list).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn gen_catch(
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+    catch: ast::CatchExpr,
+    types: &TypeResolver,
+    defined_enums: &HashSet<TypeId>,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+    span: Span,
+) -> InstRef {
+    let operand = gen_expr(b, ast, catch.operand, types, defined_enums, pool, sink);
+    let binding = catch.binding.map(|ident| ident.name);
+    let success = pool.intern_str(&format!("__ryo_catch_success_{}", span.start));
+    let error =
+        binding.unwrap_or_else(|| pool.intern_str(&format!("__ryo_catch_error_{}", span.start)));
+    let ok = pool.intern_str("Ok");
+    let err = pool.intern_str("Err");
+    let success_ref = b.temp_var_ref(success, span);
+    let error_span = catch.binding.map(|ident| ident.span).unwrap_or(span);
+    let error_body = match catch.body {
+        ast::CatchBody::Handler(body) => lower_body(b, ast, body, types, defined_enums, pool, sink),
+        ast::CatchBody::Arms(arms) => {
+            let error_ref = b.temp_var_ref(error, error_span);
+            OwnedBody::Expr(gen_match_from_ref(
+                b,
+                ast,
+                error_ref,
+                arms,
+                types,
+                defined_enums,
+                pool,
+                sink,
+                span,
+            ))
+        }
+    };
+    let owned = [
+        (
+            OwnedPattern::Variant {
+                enum_name: None,
+                variant: ok,
+                args: Some(OwnedVariantArgs {
+                    by_position: true,
+                    args: vec![(None, UirArgTarget::Bind(success))],
+                }),
+            },
+            OwnedBody::Expr(success_ref),
+            span,
+        ),
+        (
+            OwnedPattern::Variant {
+                enum_name: None,
+                variant: err,
+                args: Some(OwnedVariantArgs {
+                    by_position: true,
+                    args: vec![(None, UirArgTarget::Bind(error))],
+                }),
+            },
+            error_body,
+            error_span,
+        ),
+    ];
+    let arms: Vec<UirMatchArm<'_>> = owned
+        .iter()
+        .map(|(pattern, body, arm_span)| UirMatchArm {
+            span: *arm_span,
+            pattern: pattern.view(),
+            body: body.view(),
+        })
+        .collect();
+    b.catch(operand, binding, &arms, span)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_arm(
     b: &mut UirBuilder,
@@ -131,7 +227,21 @@ fn lower_arm(
     sink: &mut DiagSink,
 ) -> (OwnedPattern, OwnedBody) {
     let pattern = lower_match_pattern(ast, arm.pattern, sink);
-    let body = match arm.body {
+    let body = lower_body(b, ast, arm.body, types, defined_enums, pool, sink);
+    (pattern, body)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_body(
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+    body: ast::MatchArmBody,
+    types: &TypeResolver,
+    defined_enums: &HashSet<TypeId>,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+) -> OwnedBody {
+    match body {
         ast::MatchArmBody::Expr(expr) => {
             OwnedBody::Expr(gen_expr(b, ast, expr, types, defined_enums, pool, sink))
         }
@@ -142,8 +252,7 @@ fn lower_arm(
             }
             OwnedBody::Stmts(refs)
         }
-    };
-    (pattern, body)
+    }
 }
 
 /// Lower one arm pattern to its [`UirPattern`] builder-input shape.

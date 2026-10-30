@@ -29,6 +29,16 @@ pub(super) fn is_error_union(sema: &Sema<'_>, ty: TypeId) -> bool {
     )
 }
 
+pub(super) fn analyze_catch(
+    sema: &mut Sema,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    span: Span,
+) -> TirRef {
+    super::match_::analyze_catch(sema, fcx, scope, r, span)
+}
+
 pub(super) fn direct_use_diag(
     sema: &Sema<'_>,
     span: Span,

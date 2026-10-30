@@ -1623,13 +1623,8 @@ fn gen_expr(
             ));
             b.int_literal(0, span)
         }
-        ast::ExprKind::Catch(_) => {
-            sink.emit(Diag::error(
-                span,
-                DiagCode::ParseError,
-                "catch expressions are parsed but semantic lowering is not implemented yet",
-            ));
-            b.int_literal(0, span)
+        ast::ExprKind::Catch(catch) => {
+            match_::gen_catch(b, ast, catch, types, defined_layouts, pool, sink, span)
         }
     }
 }

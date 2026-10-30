@@ -50,10 +50,9 @@ fn resolve_var_read(
 }
 
 /// Resolve a compiler-generated temporary read (see [`InstTag::TempVar`]).
-/// Only astgen's nested-destructuring lowering emits that tag, always
-/// as the statement immediately after the one that bound the temp, so
-/// the table must contain it — a miss is a compiler bug, reported
-/// rather than panicked.
+/// Nested destructuring and catch lowering register every temp before
+/// emitting its read — a miss is a compiler bug, reported rather than
+/// panicked.
 fn resolve_temp_read(sema: &mut Sema<'_>, fcx: &mut FuncCtx, name: StringId, span: Span) -> TirRef {
     match fcx.destructure_temps.get(&name).copied() {
         Some(t) => fcx.builder.var(name, t, span),
@@ -436,6 +435,7 @@ pub(crate) fn analyze_expr_allow_never(
             super::errors::analyze_error_construct(sema, fcx, scope, r, span)
         }
         InstTag::Match => analyze_match(sema, fcx, scope, r, span),
+        InstTag::Catch => super::errors::analyze_catch(sema, fcx, scope, r, span),
         InstTag::FieldAccess => analyze_field_access(sema, fcx, scope, r, span),
         // UIR trusted-producer contract (see the `uir.rs` module
         // header): astgen is the only producer, so a non-expression tag

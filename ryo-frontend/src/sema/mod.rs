@@ -754,10 +754,10 @@ pub(crate) struct FuncCtx {
     inst_map: Vec<Option<TirRef>>,
     return_type: TypeId,
     loop_depth: u32,
-    /// M10: compiler-temp bindings synthesized by astgen for nested
-    /// destructuring patterns (`__ryo_destructure_N`). Kept OUT of the
-    /// user scope: user code can never collide with or observe them,
-    /// and the `Var` arm resolves them before any scope lookup.
+    /// Compiler-temp bindings synthesized by astgen for nested
+    /// destructuring and catch lowering. Kept OUT of the user scope:
+    /// user code can never collide with or observe them, and `TempVar`
+    /// reads resolve them before any scope lookup.
     destructure_temps: HashMap<StringId, TypeId>,
 }
 

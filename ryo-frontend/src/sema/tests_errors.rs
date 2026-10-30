@@ -394,3 +394,167 @@ fn void_success_return_wraps_ok() {
     assert_eq!(tir.inst(operand).tag, TirTag::ErrorUnionCoerce);
     assert_eq!(tir.inst(operand).ty, tir.return_type);
 }
+
+#[test]
+fn catch_forms_return_the_operand_success_type() {
+    let direct = r#"error NotFound
+fn find() -> NotFound!str:
+	return NotFound
+fn main():
+	value = find() catch as err:
+		NotFound: "unknown"
+	print(value)
+"#;
+    let bare = direct.replace("catch as err", "catch");
+    let nested = r#"error NotFound
+fn find() -> NotFound!str:
+	return NotFound
+fn main():
+	value = find() catch as err:
+		match err:
+			NotFound: "unknown"
+	print(value)
+"#;
+
+    for src in [direct, &bare, nested] {
+        let (tirs, pool) = run(src).expect("catch should return its success type");
+        let main = tir_named(&tirs, &pool, "main");
+        let init = main.var_decl_view(stmt_at(main, 0)).initializer;
+        assert_eq!(main.inst(init).tag, TirTag::Match, "{src}");
+        assert_eq!(main.inst(init).ty, pool.str_(), "{src}");
+    }
+}
+
+#[test]
+fn catch_rejects_non_exhaustive_direct_arms() {
+    let src = r#"error A
+error B
+fn find() -> (A | B)!int:
+	return A
+fn main():
+	value = find() catch:
+		A: 1
+	print(value)
+"#;
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert!(any_code(&diags, DiagCode::NonExhaustiveMatch), "{diags:?}");
+}
+
+#[test]
+fn catch_rejects_handler_type_mismatch() {
+    let src = r#"error A
+fn find() -> A!int:
+	return A
+fn main():
+	value = find() catch as err:
+		"bad"
+	print(value)
+"#;
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert!(any_code(&diags, DiagCode::ArmTypeMismatch), "{diags:?}");
+}
+
+#[test]
+fn catch_requires_an_error_union_operand() {
+    let src = r#"fn main():
+	value = 1 catch as err:
+		_: 0
+	print(value)
+"#;
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert!(
+        diags.iter().any(|diag| diag.code == DiagCode::TypeMismatch
+            && diag.message.contains("catch")
+            && diag.message.contains("error union")),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn catch_allows_a_diverging_handler() {
+    let src = r#"error A
+fn find() -> A!int:
+	return 7
+fn main():
+	value = find() catch as err:
+		panic("failure")
+	print(value)
+"#;
+    let (tirs, pool) = run(src).expect("a diverging handler should join with Ok(int)");
+    let main = tir_named(&tirs, &pool, "main");
+    let init = main.var_decl_view(stmt_at(main, 0)).initializer;
+    assert_eq!(main.inst(init).tag, TirTag::Match);
+    assert_eq!(main.inst(init).ty, pool.int());
+}
+
+#[test]
+fn catch_warns_once_at_an_unused_shared_binding() {
+    let src = r#"error A(str)
+fn find() -> A!int:
+	return A("failure")
+fn main():
+	value = find() catch as err:
+		A(_): 0
+	print(value)
+"#;
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    let warnings: Vec<_> = diags
+        .iter()
+        .filter(|diag| diag.code == DiagCode::DeadStore)
+        .collect();
+    assert_eq!(warnings.len(), 1, "{diags:?}");
+    assert!(warnings[0].message.contains("err"), "{warnings:?}");
+    let binding_start = src.find("as err").expect("catch binding") + "as ".len();
+    assert_eq!(warnings[0].span.start, binding_start, "{warnings:?}");
+    assert_eq!(warnings[0].span.end, binding_start + "err".len());
+}
+
+#[test]
+fn catch_binding_use_in_any_arm_suppresses_the_warning() {
+    let src = r#"error A
+error B
+fn find() -> (A | B)!int:
+	return A
+fn main():
+	value = find() catch as err:
+		A: match err:
+			A: 1
+			_: 2
+		_: 3
+	print(value)
+"#;
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
+fn catch_shared_binding_is_visible_in_a_wildcard_arm() {
+    let src = r#"error A
+error B
+fn find() -> (A | B)!int:
+	return B
+fn main():
+	value = find() catch as err:
+		A: 1
+		_: match err:
+			A: 2
+			B: 3
+	print(value)
+"#;
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
+fn bare_catch_has_no_binding_warning() {
+    let src = r#"error A(str)
+fn find() -> A!int:
+	return A("failure")
+fn main():
+	value = find() catch:
+		A(_): 0
+	print(value)
+"#;
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert!(diags.is_empty(), "{diags:?}");
+}

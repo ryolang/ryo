@@ -74,6 +74,12 @@ use ryo_core::uir::{
 };
 use std::collections::HashMap;
 
+#[derive(Clone, Copy)]
+enum MatchMode {
+    Source,
+    Catch(Option<StringId>),
+}
+
 /// Resolution + exhaustiveness results for one `match` expression.
 /// Computed by the resolution pass and the [`check_exhaustiveness`]
 /// walk; consumed by [`type_and_emit_match`], which seeds the
@@ -163,24 +169,54 @@ pub(crate) fn analyze_match(
     r: InstRef,
     span: Span,
 ) -> TirRef {
-    // Copy the shared UIR reference out of `sema` so the decoded view
-    // survives the `&mut Sema` calls below (the UIR arena is immutable
-    // for the whole analysis).
-    let uir = sema.uir;
-    let view = uir.match_view(r);
-    let (scrutinee, scrutinee_borrowed) = analyze_scrutinee(sema, fcx, scope, view.scrutinee);
-    // E0129's secondary underline when the scrutinee names an enum.
-    let scrutinee_span = uir.span(view.scrutinee);
-    let mut scrutinee_ty = fcx.builder.ty_of(scrutinee);
+    analyze_match_impl(sema, fcx, scope, r, span, false)
+}
 
-    // E0136: the scrutinee must be a matchable type. An error-typed
-    // scrutinee (its own diagnostic already emitted — e.g. an undefined
-    // name) recovers quietly, matching the struct-literal / enum-lit
-    // failed-type precedent; everything else names the type and lists
-    // what IS matchable, then resolution continues against the error
-    // sentinel so later arms still get shape-checked where possible.
+pub(super) fn analyze_catch(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    span: Span,
+) -> TirRef {
+    analyze_match_impl(sema, fcx, scope, r, span, true)
+}
+
+fn analyze_match_impl(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    span: Span,
+    catch: bool,
+) -> TirRef {
+    let uir = sema.uir;
+    let (scrutinee_ref, uir_arms, catch_binding) = if catch {
+        let view = uir.catch_view(r);
+        (view.scrutinee, view.arms, view.binding)
+    } else {
+        let view = uir.match_view(r);
+        (view.scrutinee, view.arms, None)
+    };
+    let (scrutinee, scrutinee_borrowed) = analyze_scrutinee(sema, fcx, scope, scrutinee_ref);
+    let scrutinee_span = uir.span(scrutinee_ref);
+    let mut scrutinee_ty = fcx.builder.ty_of(scrutinee);
     let mut had_error = false;
-    if !is_matchable(sema, scrutinee_ty) {
+
+    if catch && !super::errors::is_error_union(sema, scrutinee_ty) {
+        if !sema.pool.is_error(scrutinee_ty) {
+            sema.sink.emit(Diag::error(
+                scrutinee_span,
+                DiagCode::TypeMismatch,
+                format!(
+                    "catch requires an error union operand, found '{}'",
+                    sema.pool.display(scrutinee_ty)
+                ),
+            ));
+        }
+        had_error = true;
+        scrutinee_ty = sema.pool.error_type();
+    } else if !catch && !is_matchable(sema, scrutinee_ty) {
         if super::errors::is_error_union(sema, scrutinee_ty) {
             sema.sink.emit(super::errors::direct_use_diag(
                 sema,
@@ -208,8 +244,8 @@ pub(crate) fn analyze_match(
         scrutinee_ty = sema.pool.error_type();
     }
 
-    let mut arms = Vec::with_capacity(view.arms.len());
-    for arm in &view.arms {
+    let mut arms = Vec::with_capacity(uir_arms.len());
+    for arm in &uir_arms {
         let arm_span = arm.span;
         let body_span = match arm.body {
             UirArmBodyView::Expr(body) => uir.span(body),
@@ -218,15 +254,11 @@ pub(crate) fn analyze_match(
                 .map(|stmt| uir.span(InstRef::from_raw(*stmt)))
                 .unwrap_or(arm_span),
         };
-        let analysis = resolve_arm(sema, scrutinee_ty, arm, arm_span, body_span);
+        let analysis = resolve_arm(sema, scrutinee_ty, arm, arm_span, body_span, catch);
         had_error |= analysis.had_error;
         arms.push(analysis);
     }
 
-    // Exhaustiveness + redundancy over the resolved arms. An
-    // error-typed scrutinee (E0136 recovery or an already-errored
-    // expression) skips the walk: E0129 on top of the original
-    // diagnostic would double-report.
     let exhaustiveness = if sema.pool.is_error(scrutinee_ty) {
         Exhaustiveness::default()
     } else {
@@ -237,7 +269,7 @@ pub(crate) fn analyze_match(
         sema,
         fcx,
         scope,
-        &view.arms,
+        &uir_arms,
         MatchAnalysis {
             had_error,
             scrutinee,
@@ -248,6 +280,11 @@ pub(crate) fn analyze_match(
             has_wildcard: exhaustiveness.has_wildcard,
         },
         span,
+        if catch {
+            MatchMode::Catch(catch_binding)
+        } else {
+            MatchMode::Source
+        },
     )
 }
 
@@ -362,7 +399,12 @@ fn type_and_emit_match(
     uir_arms: &[UirMatchArmView<'_>],
     mut analysis: MatchAnalysis,
     span: Span,
+    mode: MatchMode,
 ) -> TirRef {
+    let (catch, catch_binding) = match mode {
+        MatchMode::Source => (false, None),
+        MatchMode::Catch(binding) => (true, binding),
+    };
     let void = sema.pool.void();
     let mut arms_out: Vec<TypedArm> = Vec::with_capacity(analysis.arms.len());
     let mut owner_tokens: Vec<(u32, TypeId)> = Vec::new();
@@ -390,12 +432,23 @@ fn type_and_emit_match(
             parent: Some(scope),
             bindings: HashMap::new(),
         };
+        let arm_mode = if !catch {
+            MatchMode::Source
+        } else if arm.discriminant == Some(Discriminant::Variant(0))
+            || (arm.discriminant == Some(Discriminant::Variant(1)) && catch_binding.is_none())
+        {
+            MatchMode::Catch(None)
+        } else {
+            MatchMode::Catch(catch_binding)
+        };
         let (owners, binding_error) = seed_arm_bindings(
             sema,
+            fcx,
             &mut child_scope,
             &arm.bindings,
             analysis.scrutinee_borrowed,
             arm.span,
+            arm_mode,
         );
         analysis.had_error |= binding_error;
         owner_tokens.extend(owners);
@@ -571,17 +624,28 @@ fn type_and_emit_match(
             },
         })
         .collect();
-    emit_match_with_owner_tokens(
-        fcx,
-        analysis.scrutinee,
-        match_ty,
-        &typed_arms,
-        &owner_tokens,
-        span,
-    )
+    if catch {
+        emit_error_union_dispatch(
+            fcx,
+            sema.pool,
+            analysis.scrutinee,
+            match_ty,
+            typed_arms[0],
+            typed_arms[1],
+            span,
+        )
+    } else {
+        emit_match_with_owner_tokens(
+            fcx,
+            analysis.scrutinee,
+            match_ty,
+            &typed_arms,
+            &owner_tokens,
+            span,
+        )
+    }
 }
 
-#[allow(dead_code)]
 pub(super) fn emit_error_union_dispatch(
     fcx: &mut FuncCtx,
     pool: &ryo_core::types::InternPool,
@@ -638,15 +702,29 @@ fn emit_match_with_owner_tokens(
 /// the scrutinee and need no token.
 fn seed_arm_bindings(
     sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
     child_scope: &mut Scope,
     bindings: &[MatchBinding],
     borrowed: bool,
     span: Span,
+    mode: MatchMode,
 ) -> (Vec<(u32, TypeId)>, bool) {
+    let (warn_binding, temp_binding) = match mode {
+        MatchMode::Source => (None, false),
+        MatchMode::Catch(None) => (None, true),
+        MatchMode::Catch(Some(name)) => (Some(name), false),
+    };
     let mut owners = Vec::new();
     let mut had_error = false;
     for binding in bindings {
         let name = binding.name;
+        if temp_binding {
+            fcx.destructure_temps.insert(name, binding.ty);
+            if !sema.pool.is_copy(binding.ty) {
+                owners.push((binding.field_index, binding.ty));
+            }
+            continue;
+        }
         if child_scope.contains_in_current(name) {
             sema.sink.emit(Diag::error(
                 span,
@@ -691,10 +769,15 @@ fn seed_arm_bindings(
             had_error = true;
             continue;
         }
-        if sema.pool.is_copy(binding.ty) {
+        if warn_binding == Some(name) {
+            fcx.destructure_temps.insert(name, binding.ty);
+        }
+        if sema.pool.is_copy(binding.ty) || warn_binding == Some(name) {
             child_scope.insert_dead_store_binding(name, binding.ty, false, false, span);
         } else {
             child_scope.insert_binding(name, binding.ty, false, false);
+        }
+        if !sema.pool.is_copy(binding.ty) {
             owners.push((binding.field_index, binding.ty));
         }
     }
@@ -793,7 +876,11 @@ enum Coverage {
 impl Coverage {
     fn new(sema: &Sema<'_>, ty: ryo_core::types::TypeId) -> Coverage {
         match sema.pool.kind(ty) {
-            TypeKind::Enum | TypeKind::DeclaredError | TypeKind::ErrorSet => {
+            TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion
+            | TypeKind::InferredErrorUnion => {
                 let total = sema.pool.enum_view(ty).variants().count();
                 Coverage::Enum {
                     bits: VariantBits::new(total),
@@ -1114,6 +1201,7 @@ fn resolve_arm(
     arm: &UirMatchArmView<'_>,
     span: Span,
     body_span: Span,
+    catch: bool,
 ) -> MatchArmAnalysis {
     let mut analysis = MatchArmAnalysis {
         span,
@@ -1150,6 +1238,7 @@ fn resolve_arm(
                 *variant,
                 *args,
                 &mut analysis,
+                catch,
             );
         }
         UirPatternView::Anon { fields } => {
@@ -1215,10 +1304,16 @@ fn resolve_variant(
     variant: StringId,
     args: Option<UirVariantArgsView<'_>>,
     analysis: &mut MatchArmAnalysis,
+    catch: bool,
 ) {
     let scrutinee_kind = sema.pool.kind(scrutinee_ty);
     let error_pattern = matches!(scrutinee_kind, TypeKind::DeclaredError | TypeKind::ErrorSet);
-    if scrutinee_kind != TypeKind::Enum && !error_pattern {
+    let union_pattern = catch
+        && matches!(
+            scrutinee_kind,
+            TypeKind::ErrorUnion | TypeKind::InferredErrorUnion
+        );
+    if scrutinee_kind != TypeKind::Enum && !error_pattern && !union_pattern {
         sema.sink.emit(Diag::error(
             analysis.span,
             DiagCode::PatternTypeMismatch,

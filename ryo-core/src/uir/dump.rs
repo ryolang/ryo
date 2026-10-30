@@ -318,23 +318,17 @@ fn write_inst(
         (InstTag::Match, InstData::Match { .. }) => {
             let view = uir.match_view(r);
             write!(f, "match %{} [", view.scrutinee.index())?;
-            for (i, arm) in view.arms.iter().enumerate() {
-                if i > 0 {
-                    write!(f, "; ")?;
-                }
-                write_match_pattern(f, pool, &arm.pattern)?;
-                write!(f, ": ")?;
-                match arm.body {
-                    UirArmBodyView::Expr(body) => write!(f, "expr %{}", body.index())?,
-                    UirArmBodyView::Stmts(words) => {
-                        let refs: Vec<_> = words
-                            .iter()
-                            .map(|w| format!("%{}", InstRef::from_raw(*w).index()))
-                            .collect();
-                        write!(f, "stmts [{}]", refs.join(", "))?;
-                    }
-                }
+            write_match_arms(f, pool, &view.arms)?;
+            writeln!(f, "]")
+        }
+        (InstTag::Catch, InstData::Catch { .. }) => {
+            let view = uir.catch_view(r);
+            write!(f, "catch %{}", view.scrutinee.index())?;
+            if let Some(binding) = view.binding {
+                write!(f, " as {}", pool.str(binding))?;
             }
+            write!(f, " [")?;
+            write_match_arms(f, pool, &view.arms)?;
             writeln!(f, "]")
         }
         (InstTag::Borrow, InstData::Borrow(inner)) => {
@@ -355,6 +349,31 @@ fn write_inst(
         }
         (tag, data) => writeln!(f, "<malformed: {:?} / {:?}>", tag, data),
     }
+}
+
+fn write_match_arms(
+    f: &mut fmt::Formatter<'_>,
+    pool: &InternPool,
+    arms: &[super::UirMatchArmView<'_>],
+) -> fmt::Result {
+    for (i, arm) in arms.iter().enumerate() {
+        if i > 0 {
+            write!(f, "; ")?;
+        }
+        write_match_pattern(f, pool, &arm.pattern)?;
+        write!(f, ": ")?;
+        match arm.body {
+            UirArmBodyView::Expr(body) => write!(f, "expr %{}", body.index())?,
+            UirArmBodyView::Stmts(words) => {
+                let refs: Vec<_> = words
+                    .iter()
+                    .map(|w| format!("%{}", InstRef::from_raw(*w).index()))
+                    .collect();
+                write!(f, "stmts [{}]", refs.join(", "))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn write_match_pattern(
