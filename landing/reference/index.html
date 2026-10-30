@@ -1566,8 +1566,8 @@ fn main():
 		_: err.message()
 	print(user + "\n")
 
-	missing = load_user(0) catch as err:
-		NotFound: err.message()
+	missing = load_user(0) catch:
+		NotFound: "NotFound"
 		InvalidInput(message): message
 	print(missing + "\n")
 
