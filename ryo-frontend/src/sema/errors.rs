@@ -32,6 +32,16 @@ pub(super) fn is_error_union(sema: &Sema<'_>, ty: TypeId) -> bool {
     )
 }
 
+pub(super) fn is_rejected_error_declaration(sema: &Sema<'_>, name: StringId) -> bool {
+    sema.error_types.contains_key(&name)
+        && !sema
+            .pool
+            .str(name)
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_uppercase)
+}
+
 pub(super) fn analyze_error_message(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -223,7 +233,7 @@ pub(super) fn direct_error_message_diag(sema: &Sema<'_>, span: Span, ty: TypeId)
             sema.pool.display(ty)
         ),
     )
-    .with_help("catch and bind the error with `result catch as err: err.message()`")
+    .with_help("use an indented `catch as err:` handler that calls `err.message()` to catch and bind the error")
 }
 
 pub(super) fn reject_direct_use(

@@ -1555,7 +1555,7 @@ fn main():
             <p><code>message()</code> uses these automatic rules:</p>
             <ul>
               <li>Unit errors use the error name.</li>
-              <li>Exactly one string field uses its value.</li>
+              <li>A payload whose only field is a string uses that field’s value.</li>
               <li>A string field named <code>message</code> takes precedence.</li>
               <li>Other payloads use debug formatting, including multi-field payloads without a string <code>message</code> field.</li>
             </ul>

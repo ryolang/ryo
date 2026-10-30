@@ -453,7 +453,7 @@ fn direct_union_message_suggests_catching_and_binding_the_error() {
     assert_eq!(diag.notes.len(), 1, "{diag:?}");
     assert_eq!(
         diag.notes[0].message,
-        "help: catch and bind the error with `result catch as err: err.message()`"
+        "help: use an indented `catch as err:` handler that calls `err.message()` to catch and bind the error"
     );
 }
 

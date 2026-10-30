@@ -12,6 +12,10 @@ fn load_user(id: int) -> !str:
 	user = try find_user(id)
 	return user
 
+# Use try to propagate the error.
+# Use bare catch: when no shared binding is needed.
+# Use catch as err: for shared message or log access.
+# Use nested match only for compatibility or specialized handling.
 fn main():
 	user = load_user(42) catch as err:
 		NotFound: "unknown"

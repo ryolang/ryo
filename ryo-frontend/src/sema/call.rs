@@ -59,7 +59,7 @@ pub(crate) fn check_call(
             // spelling; still E0011 — the name is no function.
             let carriers = enum_variant_carriers(sema, name_id);
             if carriers.is_empty() {
-                if !sema.error_types.contains_key(&name_id) {
+                if !super::errors::is_rejected_error_declaration(sema, name_id) {
                     sema.sink.emit(Diag::error(
                         span,
                         DiagCode::UndefinedFunction,

@@ -52,6 +52,27 @@ fn lowercase_error_declaration_has_only_the_targeted_diagnostic() {
     assert!(!stderr.contains("undefined"), "cascading error: {stderr}");
 }
 
+#[test]
+fn valid_error_name_field_access_keeps_undefined_variable_diagnostic() {
+    let src = "error Timeout\nfn main():\n\tvalue = Timeout.unknown\n\tprint(value)\n";
+    let temp_dir = TempDir::new().expect("temp");
+    let test_file = create_test_file(temp_dir.path(), "error_field_access.ryo", src);
+    let output = run_ryo_command(&["run", "error_field_access.ryo"], &test_file)
+        .expect("run valid error field access");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr.matches("undefined variable: 'Timeout'").count(),
+        1,
+        "missing UndefinedVariable diagnostic: {stderr}"
+    );
+    assert!(stderr.contains("E0010"), "wrong diagnostic code: {stderr}");
+    assert!(
+        !stderr.contains("PascalCase"),
+        "valid declaration must not be rejected: {stderr}"
+    );
+}
+
 const ERROR_HANDLING_EXAMPLE: &str = include_str!("../../examples/error_handling.ryo");
 const ERROR_REFERENCE: &str = include_str!("../../landing/reference/index.html");
 
@@ -59,6 +80,17 @@ const ERROR_REFERENCE: &str = include_str!("../../landing/reference/index.html")
 fn flagship_error_example_uses_the_shared_handler_and_preserves_output() {
     assert!(ERROR_HANDLING_EXAMPLE.contains("user = load_user(42) catch as err:"));
     assert!(ERROR_HANDLING_EXAMPLE.contains("missing = load_user(0) catch:"));
+    for guidance in [
+        "# Use try to propagate the error.",
+        "# Use bare catch: when no shared binding is needed.",
+        "# Use catch as err: for shared message or log access.",
+        "# Use nested match only for compatibility or specialized handling.",
+    ] {
+        assert!(
+            ERROR_HANDLING_EXAMPLE.contains(guidance),
+            "missing source decision guidance {guidance:?}"
+        );
+    }
     assert!(
         ERROR_HANDLING_EXAMPLE.contains("invalid = load_user(-1) catch as err:\n\t\terr.message()"),
         "the third example must use the ordinary shared-error handler"
@@ -91,7 +123,7 @@ fn error_reference_covers_named_construction_and_message_rules() {
         "error HttpError(status: int, message: str)",
         "HttpError(status=404, message=\"not found\")",
         "Unit errors use the error name",
-        "Exactly one string field uses its value",
+        "A payload whose only field is a string uses that field’s value.",
         "A string field named <code>message</code> takes precedence",
         "Other payloads use debug formatting, including multi-field payloads without a string <code>message</code> field",
     ] {

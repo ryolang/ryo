@@ -91,7 +91,7 @@ fn main():
     assert!(
         stderr.contains("cannot call a method on error union 'Timeout!int' directly")
             && stderr.contains(
-                "help: catch and bind the error with `result catch as err: err.message()`"
+                "help: use an indented `catch as err:` handler that calls `err.message()` to catch and bind the error"
             )
             && !stderr.contains("use `try` or `catch` to unwrap it"),
         "unexpected diagnostics: {stderr}"

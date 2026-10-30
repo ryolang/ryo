@@ -39,7 +39,7 @@ fn resolve_var_read(
     match scope.lookup(name) {
         Some(t) => fcx.builder.var(name, t, span),
         None => {
-            if !sema.error_types.contains_key(&name) {
+            if !super::errors::is_rejected_error_declaration(sema, name) {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::UndefinedVariable,
