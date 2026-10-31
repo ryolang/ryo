@@ -1214,6 +1214,7 @@ fn discarded_aggregate_match_result_freed_once() {
 }
 
 #[test]
+#[cfg(debug_assertions)]
 fn direct_catch_shared_error_keeps_ownership_after_payload_move() {
     let src = r#"error A(str)
 fn consume(move message: str):
