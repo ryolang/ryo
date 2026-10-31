@@ -894,7 +894,9 @@ impl InternPool {
         let mut is_copy = true;
         for &(_, fty) in fields {
             let (fsize, falign) = self.size_align(fty);
-            offset = offset.next_multiple_of(falign);
+            if falign != 0 {
+                offset = offset.next_multiple_of(falign);
+            }
             offsets.push(offset);
             offset = offset
                 .checked_add(fsize)
@@ -1007,7 +1009,9 @@ impl InternPool {
         let mut is_copy = true;
         for &(_, fty) in fields {
             let (fsize, falign) = self.size_align(fty);
-            offset = offset.next_multiple_of(falign);
+            if falign != 0 {
+                offset = offset.next_multiple_of(falign);
+            }
             offsets.push(offset);
             offset = offset
                 .checked_add(fsize)

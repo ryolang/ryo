@@ -1783,9 +1783,13 @@ fn fetch_and_parse() -> (ConnectionFailed | RequestTimeout | InvalidJson)!Data:
 
 fn main():
 	result = fetch_and_parse() catch as err:
-		ConnectionFailed(message): message
-		RequestTimeout: "request timed out"
-		InvalidJson(message): message
+		ConnectionFailed(message):
+			print(message)
+			process_exit(1)
+		RequestTimeout: panic("request timed out")
+		InvalidJson(message):
+			print(message)
+			process_exit(1)
 ```
 
 **Implementation Notes:**

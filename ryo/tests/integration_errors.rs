@@ -78,8 +78,10 @@ const ERROR_REFERENCE: &str = include_str!("../../landing/reference/index.html")
 
 #[test]
 fn flagship_error_example_uses_the_shared_handler_and_preserves_output() {
-    assert!(ERROR_HANDLING_EXAMPLE.contains("user = load_user(42) catch as err:"));
-    assert!(ERROR_HANDLING_EXAMPLE.contains("missing = load_user(0) catch:"));
+    let error_example = ERROR_HANDLING_EXAMPLE.replace("\r\n", "\n");
+    let error_reference = ERROR_REFERENCE.replace("\r\n", "\n");
+    assert!(error_example.contains("user = load_user(42) catch as err:"));
+    assert!(error_example.contains("missing = load_user(0) catch:"));
     for guidance in [
         "# Use try to propagate the error.",
         "# Use bare catch: when no shared binding is needed.",
@@ -87,16 +89,16 @@ fn flagship_error_example_uses_the_shared_handler_and_preserves_output() {
         "# Use nested match only for compatibility or specialized handling.",
     ] {
         assert!(
-            ERROR_HANDLING_EXAMPLE.contains(guidance),
+            error_example.contains(guidance),
             "missing source decision guidance {guidance:?}"
         );
     }
     assert!(
-        ERROR_HANDLING_EXAMPLE.contains("invalid = load_user(-1) catch as err:\n\t\terr.message()"),
+        error_example.contains("invalid = load_user(-1) catch as err:\n\t\terr.message()"),
         "the third example must use the ordinary shared-error handler"
     );
     assert!(
-        ERROR_REFERENCE.contains("invalid = load_user(-1) catch as err:\n\t\terr.message()"),
+        error_reference.contains("invalid = load_user(-1) catch as err:\n\t\terr.message()"),
         "the landing example must match the source example"
     );
     for guidance in [
@@ -106,19 +108,20 @@ fn flagship_error_example_uses_the_shared_handler_and_preserves_output() {
         "nested match only for compatibility or specialized handling",
     ] {
         assert!(
-            ERROR_REFERENCE.contains(guidance),
+            error_reference.contains(guidance),
             "missing decision guidance {guidance:?}"
         );
     }
     assert_ryo_output(
         "error_handling_example_jit.ryo",
-        ERROR_HANDLING_EXAMPLE,
+        &error_example,
         "user_42\nNotFound\nid must be non-negative\n",
     );
 }
 
 #[test]
 fn error_reference_covers_named_construction_and_message_rules() {
+    let error_reference = ERROR_REFERENCE.replace("\r\n", "\n");
     for required in [
         "error HttpError(status: int, message: str)",
         "HttpError(status=404, message=\"not found\")",
@@ -128,7 +131,7 @@ fn error_reference_covers_named_construction_and_message_rules() {
         "Other payloads use debug formatting, including multi-field payloads without a string <code>message</code> field",
     ] {
         assert!(
-            ERROR_REFERENCE.contains(required),
+            error_reference.contains(required),
             "missing error reference content {required:?}"
         );
     }

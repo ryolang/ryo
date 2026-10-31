@@ -440,6 +440,30 @@ fn struct_layout_mixed_alignment_and_copy_inference() {
 }
 
 #[test]
+fn anon_struct_zero_alignment_field_does_not_panic() {
+    let mut pool = InternPool::new();
+    let field = pool.intern_str("errors");
+    let empty_errors = pool.error_set(&[]);
+    let id = pool.anon_struct(&[(field, empty_errors)]);
+    let view = pool.struct_view(id);
+    assert_eq!(view.fields[0].offset, 0);
+    assert_eq!((view.size, view.align), (0, 1));
+}
+
+#[test]
+fn named_struct_zero_alignment_field_does_not_panic() {
+    let mut pool = InternPool::new();
+    let name = pool.intern_str("Holder");
+    let field = pool.intern_str("errors");
+    let empty_errors = pool.error_set(&[]);
+    let id = pool.declare_struct(name);
+    pool.define_struct(id, name, &[(field, empty_errors)], StructFlags::default());
+    let view = pool.struct_view(id);
+    assert_eq!(view.fields[0].offset, 0);
+    assert_eq!((view.size, view.align), (0, 1));
+}
+
+#[test]
 fn struct_flags_round_trip() {
     // M9.1: `#[repr(C)]` / `#[derive(Eq)]` ride in the payload's
     // flags word — layout is identical, the bits read back clean.

@@ -160,59 +160,99 @@ Zero defects in one track is useful evidence only when its valid inputs reached 
 
 Use Python 3's standard library; no third-party packages are needed. Keep the script and its output outside the repository. The components have these responsibilities:
 
-- `argparse` parses the base seed, case count, AOT frequency, compiler path, output directory, and timeout.
+- `argparse` parses the base seed, case count, AOT frequency, compiler identity, output directory, timeout, and per-stream byte limit.
 - `random.Random` gives each case an independent, reproducible generator. Use it to choose valid types and control-flow shapes, or to mutate an AST-like program description before rendering source. Do not use it to corrupt arbitrary bytes.
-- `subprocess.run(..., shell=False, capture_output=True, timeout=...)` isolates every compiler invocation. An argument list avoids shell interpretation. Captured binary stdout preserves exact output, including newlines. A timeout contains a hung compiler or executable; the harness must record it as a failure, not retry indefinitely.
-- `pathlib.Path` gives each case a separate source, log, and AOT-binary directory. Separate paths prevent parallel cases from overwriting one another.
-- `json` writes the seed, source hash, commands, exit statuses, classification, and outputs to a machine-readable manifest. Human-readable summaries can lose information needed for triage.
+- `subprocess.Popen` isolates each compiler invocation with an argument list and `shell=False`. Two `threading.Thread` readers stream stdout and stderr to per-case files, preserving at most the configured number of bytes per stream and discarding the rest. `wait(timeout=...)` contains hangs; record a timeout instead of retrying indefinitely.
+- `pathlib.Path` gives each case a separate source, log, and AOT-binary directory. Separate paths prevent parallel cases from overwriting one another. `os.name` selects the platform's executable suffix.
+- `json` writes the seed, source hash, commands, exit statuses, classification, and log paths to a machine-readable manifest. `platform` and `sys` record host details and the exact harness command so the report identifies the complete campaign.
 - `concurrent.futures.ThreadPoolExecutor` runs independent generation tracks or compiler processes concurrently. Give each worker its own seed and directory; do not share a generator or result file between workers.
 - `hashlib.sha256` identifies the exact source bytes. Include the compiler commit as well: a seed alone is not a sufficient repro identity after generator changes.
 - `tempfile.TemporaryDirectory` and `shutil.copy2` manage scratch binaries and preserved repros. Keep the manifest and minimized failures in a chosen output directory; let temporary build products disappear when the campaign ends.
 
-The following skeleton is runnable as written. Its generator is a deliberately small valid-program control. Replace `generate(seed)` with the feature's type-directed generator and structure-aware mutations, and supply each case's expected stdout or expected diagnostic. Keep expected-invalid cases separate from valid cases rather than treating any compiler error as a successful mutation.
+The following skeleton is runnable as written. It includes a valid-print control and a valid nonzero-exit mutation to exercise the exit-status oracle. Replace `generate(seed, track)` with the feature's type-directed generators and structure-aware mutations. Supply each valid case's expected exit and stdout, or each invalid case's expected diagnostic. Keep expected-invalid cases separate from valid cases rather than treating any compiler error as a successful mutation.
 
 ```python
 import argparse
 import concurrent.futures
 import hashlib
 import json
+import os
+import platform
 import random
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
 from pathlib import Path
 
 
-def generate(seed):
+def generate(seed, track):
     rng = random.Random(seed)
     value = rng.randrange(100)
+    if track == "control":
+        return {
+            "seed": seed,
+            "family": "valid-print",
+            "source": f'print("{value}")\n',
+            "expected_valid": True,
+            "expected_exit": 0,
+            "expected_stdout": f"{value}",
+        }
     return {
         "seed": seed,
-        "family": "valid-print",
-        "source": f'print("{value}")\n',
+        "family": "nonzero-exit",
+        "source": f'fn main():\n\tprint("{value}")\n\tprocess_exit(3)\n',
         "expected_valid": True,
+        "expected_exit": 3,
         "expected_stdout": f"{value}",
     }
 
 
-def execute(command, case_dir, name, timeout):
-    try:
-        result = subprocess.run(
-            command,
-            shell=False,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
+def execute(command, case_dir, name, timeout, max_output_bytes):
+    process = subprocess.Popen(
+        command,
+        shell=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    truncated = {"stdout": False, "stderr": False}
+
+    def copy_stream(source, destination_path, stream_name):
+        with destination_path.open("wb") as destination:
+            remaining = max_output_bytes
+            while chunk := source.read(65536):
+                kept = chunk[:remaining]
+                destination.write(kept)
+                remaining -= len(kept)
+                if len(kept) < len(chunk):
+                    truncated[stream_name] = True
+        source.close()
+
+    streams = (("stdout", process.stdout), ("stderr", process.stderr))
+    threads = [
+        threading.Thread(
+            target=copy_stream,
+            args=(source, case_dir / f"{name}.{stream_name}", stream_name),
         )
-        stdout, stderr = result.stdout, result.stderr
-        status = result.returncode
-    except subprocess.TimeoutExpired as error:
-        stdout = error.stdout or b""
-        stderr = error.stderr or b""
+        for stream_name, source in streams
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        status = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
         status = "timeout"
-    (case_dir / f"{name}.stdout").write_bytes(stdout)
-    (case_dir / f"{name}.stderr").write_bytes(stderr)
-    return {"command": command, "status": status, "stdout": stdout}
+    for thread in threads:
+        thread.join()
+    return {
+        "command": command,
+        "status": status,
+        "stdout": (case_dir / f"{name}.stdout").read_bytes(),
+        "truncated": any(truncated.values()),
+    }
 
 
 def run_case(case, args, track_dir):
@@ -221,21 +261,26 @@ def run_case(case, args, track_dir):
     source = case_dir / "case.ryo"
     source.write_text(case["source"], encoding="utf-8")
     ryo = str(args.ryo.resolve())
-    jit = execute([ryo, "run", str(source)], case_dir, "jit", args.timeout)
-    stderr = (case_dir / "jit.stderr").read_text(encoding="utf-8")
+    jit = execute(
+        [ryo, "run", str(source)], case_dir, "jit", args.timeout, args.max_output_bytes
+    )
+    stderr = (case_dir / "jit.stderr").read_text(encoding="utf-8", errors="replace")
     jit_exact = (
         case["expected_valid"]
-        and jit["status"] == 0
+        and jit["status"] == case["expected_exit"]
+        and not jit["truncated"]
         and jit["stdout"] == case["expected_stdout"].encode()
     )
 
     if jit["status"] == "timeout":
         outcome = "timeout"
+    elif jit["truncated"]:
+        outcome = "output_truncated"
+    elif "panicked at" in stderr:
+        outcome = "compiler_panic"
     elif case["expected_valid"]:
-        if jit["status"] != 0:
-            outcome = "unexpected_diagnostic"
-            if "panicked at" in stderr:
-                outcome = "compiler_panic"
+        if jit["status"] != case["expected_exit"]:
+            outcome = "unexpected_exit"
         elif not jit_exact:
             outcome = "output_mismatch"
         else:
@@ -246,7 +291,6 @@ def run_case(case, args, track_dir):
             jit["status"] == 1
             and diagnostic is not None
             and f"[{diagnostic}]" in stderr
-            and "panicked at" not in stderr
             and "internal error" not in stderr
         )
         outcome = "expected_diagnostic" if valid_diagnostic else "invalid_oracle_failure"
@@ -256,25 +300,33 @@ def run_case(case, args, track_dir):
         with tempfile.TemporaryDirectory(dir=case_dir) as scratch:
             scratch_source = Path(scratch) / "case.ryo"
             shutil.copy2(source, scratch_source)
-            binary = scratch_source.with_suffix("")
+            binary = scratch_source.with_suffix(".exe" if os.name == "nt" else "")
             build = execute(
                 [ryo, "build", str(scratch_source)],
-                case_dir, "aot-build", args.timeout,
+                case_dir, "aot-build", args.timeout, args.max_output_bytes,
             )
             aot = {
                 "build_command": build["command"],
                 "build_status": build["status"],
                 "build_stdout": str(case_dir / "aot-build.stdout"),
                 "build_stderr": str(case_dir / "aot-build.stderr"),
+                "build_truncated": build["truncated"],
             }
-            if build["status"] == 0:
-                run = execute([str(binary)], case_dir, "aot-run", args.timeout)
+            if build["status"] == 0 and not build["truncated"]:
+                run = execute(
+                    [str(binary)], case_dir, "aot-run", args.timeout, args.max_output_bytes
+                )
                 aot["run_command"] = run["command"]
                 aot["run_status"] = run["status"]
                 aot["run_stdout"] = str(case_dir / "aot-run.stdout")
                 aot["run_stderr"] = str(case_dir / "aot-run.stderr")
-                aot["exact_output"] = run["stdout"] == case["expected_stdout"].encode()
-                if outcome == "ok" and (run["status"] != 0 or not aot["exact_output"]):
+                aot["expected_exit"] = run["status"] == case["expected_exit"]
+                aot["exact_output"] = (
+                    not run["truncated"]
+                    and run["stdout"] == case["expected_stdout"].encode()
+                )
+                aot["output_truncated"] = run["truncated"]
+                if outcome == "ok" and not (aot["expected_exit"] and aot["exact_output"]):
                     outcome = "aot_failure"
             elif outcome == "ok":
                 outcome = "aot_build_failure"
@@ -287,9 +339,14 @@ def run_case(case, args, track_dir):
         "jit_status": jit["status"],
         "jit_stdout": str(case_dir / "jit.stdout"),
         "jit_stderr": str(case_dir / "jit.stderr"),
+        "jit_truncated": jit["truncated"],
         "aot": aot,
         "outcome": outcome,
-        "backend_completed": case["expected_valid"] and jit["status"] == 0,
+        "backend_completed": (
+            case["expected_valid"]
+            and jit["status"] == case["expected_exit"]
+            and not jit["truncated"]
+        ),
         "jit_exact": jit_exact,
     }
 
@@ -297,16 +354,24 @@ def run_case(case, args, track_dir):
 def run_track(name, seeds, args):
     track_dir = args.out / name
     track_dir.mkdir(parents=True)
-    results = [run_case(generate(seed), args, track_dir) for seed in seeds]
+    results = [run_case(generate(seed, name), args, track_dir) for seed in seeds]
     summary = {
         "track": name,
+        "families": sorted({r["family"] for r in results}),
         "generated": len(results),
         "valid_generated": sum(r["expected_valid"] for r in results),
         "backend_completed": sum(r["backend_completed"] for r in results),
         "jit_exact": sum(r["jit_exact"] for r in results),
         "expected_diagnostics": sum(r["outcome"] == "expected_diagnostic" for r in results),
         "aot_executed": sum(r["aot"] is not None and "run_status" in r["aot"] for r in results),
-        "aot_exact": sum(bool(r["aot"] and r["aot"].get("exact_output")) for r in results),
+        "aot_exact": sum(
+            bool(
+                r["aot"]
+                and r["aot"].get("exact_output")
+                and r["aot"].get("expected_exit")
+            )
+            for r in results
+        ),
     }
     (track_dir / "results.json").write_text(
         json.dumps({"summary": summary, "cases": results}, indent=2) + "\n",
@@ -324,9 +389,12 @@ def main():
     parser.add_argument("--count", type=int, default=20)
     parser.add_argument("--aot-every", type=int, default=5)
     parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument("--max-output-bytes", type=int, default=1_048_576)
     args = parser.parse_args()
-    if args.count < 1 or args.aot_every < 1:
-        parser.error("--count and --aot-every must be positive")
+    if args.count < 1 or args.aot_every < 1 or args.max_output_bytes < 1:
+        parser.error("--count, --aot-every, and --max-output-bytes must be positive")
+    if args.timeout <= 0:
+        parser.error("--timeout must be positive")
     args.out = args.out.resolve()
     args.out.mkdir(parents=True, exist_ok=False)
     shutil.copy2(__file__, args.out / "harness.py")
@@ -338,6 +406,28 @@ def main():
     manifest = {
         "compiler": str(args.ryo.resolve()),
         "compiler_commit": args.compiler_commit,
+        "host": {
+            "platform": platform.platform(),
+            "machine": platform.machine(),
+            "python": platform.python_version(),
+        },
+        "harness_command": [sys.executable, *sys.argv],
+        "parameters": {
+            "seed": args.seed,
+            "count": args.count,
+            "aot_every": args.aot_every,
+            "timeout": args.timeout,
+            "max_output_bytes": args.max_output_bytes,
+        },
+        "seed_range": [seeds[0], seeds[-1]],
+        "mutation_families": {
+            summary["track"]: summary["families"] for summary in summaries
+        },
+        "aot_selection": {
+            "strategy": "seed_modulo",
+            "modulus": args.aot_every,
+            "remainder": 0,
+        },
         "tracks": summaries,
     }
     (args.out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
@@ -358,7 +448,7 @@ python3 /tmp/ryo-error-fuzz/harness.py \
   --seed 1000 --count 100 --aot-every 10 --timeout 15
 ```
 
-`backend_completed` counts only valid programs that completed JIT compilation and execution. It does not pretend that an exit code identifies the parser or semantic-analysis stage. For stage-specific coverage, use documented diagnostic categories or explicit compiler instrumentation, and count internal/backend failures separately. Compare `backend_completed` with the number of valid generated programs: a shrinking ratio is a reason to inspect the generator and oracles before reporting compiler defects. Preserve failing cases and their logs; the temporary AOT directory is only for build artifacts.
+`backend_completed` counts only valid programs that completed JIT compilation and execution with the expected exit status and untruncated output. It does not pretend that an exit code identifies the parser or semantic-analysis stage. For stage-specific coverage, use documented diagnostic categories or explicit compiler instrumentation, and count internal/backend failures separately. Compare `backend_completed` with the number of valid generated programs: a shrinking ratio is a reason to inspect the generator and oracles before reporting compiler defects. Preserve failing cases and their logs; the temporary AOT directory is only for build artifacts.
 
 ## 11. When to Use `cargo-fuzz`
 

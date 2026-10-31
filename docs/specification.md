@@ -2162,8 +2162,8 @@ The `catch` operator evaluates an error-union operand exactly once. Success beco
 
 ```ryo
 config = load_and_parse("app.toml") catch as e:
-	FileError.NotFound(path): create_default(path)
-	ParseError.InvalidSyntax(line, col): process.exit(1)
+	FileError(path): create_default(path)
+	ParseError(line, col): process.exit(1)
 ```
 
 - **Syntax:** `expr catch as e: handler` binds the error set to `e`. Both `catch as e:` and bare `catch:` accept direct error arms; bare `catch:` accepts only direct arms and is the warning-free form when no shared binding is needed. `as` is Ryo's binding keyword — the same gesture as `with EXPR as NAME:` — and is *not* used for type conversion (which uses `TargetType(value)`).
