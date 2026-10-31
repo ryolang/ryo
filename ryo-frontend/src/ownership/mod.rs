@@ -25,7 +25,7 @@
 use ryo_core::diag::DiagSink;
 #[cfg(test)]
 use ryo_core::diag::{Diag, DiagCode};
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 use ryo_core::flow::DropPosition;
 use ryo_core::flow::{Analysis, BlockId, DropOp, Flow, PlaceId};
 

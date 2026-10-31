@@ -32,11 +32,20 @@ wire format downstream, never a re-parse of source:
 | TIR | `ryo-core/src/tir/match_.rs` | typed wire (discriminant + bindings + guards per arm), owner-token convention, decoded views |
 | Codegen | `ryo-backend/src/codegen/match_.rs` | tag dispatch / guard chains / literal chains, binding prologues, merge block; cleanup consumed as flow-positioned `DropOp`s (arm-start payload drops fire at the flow arm block's start) |
 
-The matchable scrutinee kinds (E0136 gates the rest): enums by variant,
-exact literals over `int` / `bool` / `str`, and anonymous structs by
-shape. Named structs (nominal patterns), floats (NaN/IEEE literal story
+The matchable scrutinee kinds (E0136 gates the rest): enums and declared
+errors by variant, multi-member error sets by nominal error member, exact
+literals over `int` / `bool` / `str`, and anonymous structs by shape.
+Named structs (nominal patterns), floats (NaN/IEEE literal story
 undefined), views, `bytes`, and `void` / `never` (no value to match) are
-rejected.
+rejected. An error union is also rejected with guidance to use `try` or
+`catch`: its `Ok`/`Err` alternatives exist only in compiler-generated
+control flow, never as source patterns.
+
+Both bare `catch:` and `catch as err:` accept direct exhaustive error arms.
+Sema lowers them through the same hidden success/error dispatch as `try`,
+then reuses error-set matching for the arms. The nested
+`catch as err: match err:` form remains valid; the shared `err` binding is
+visible in every direct arm, including `_`.
 
 ## Exhaustiveness and redundancy
 
@@ -46,6 +55,10 @@ Coverage is tracked as *discriminant sets* during arm resolution:
   128 variants, a `Vec<bool>` fallback above. Every `Enum.Variant:` arm
   sets its bit. If the union of all arms is not full and no `_:` arm
   exists → **E0129**, listing the missing variants in declaration order.
+- **Declared-error / error-set scrutinee** — the same discriminant coverage
+  over nominal error members. Direct `catch` arms use this coverage after
+  the hidden union dispatch; missing members produce E0129 and duplicate or
+  post-wildcard arms produce W0005.
 - **`bool` scrutinee** — two bits (`true`, `false`); same rule.
 - **`int` / `str` scrutinees** — uncoverable: infinitely (or
   content-wise) many values, so only a `_:` arm makes them exhaustive;
@@ -193,11 +206,12 @@ never silently miscompiled.
 
 ## Dispatch lowering
 
-- **Enum scrutinee** — load the i32 tag, `switch` (`emit_tag_dispatch`):
-  each variant's case routes to the *first* arm covering it (written
-  order wins; W0005-dead duplicates stay unrouted), the wildcard arm's
-  entry is the switch's `otherwise`, and a fully-covered match without a
-  wildcard keeps the invalid-tag trap.
+- **Enum / declared-error / error-set scrutinee** — load the i32 tag,
+  `switch` (`emit_tag_dispatch`): each variant's case routes to the *first*
+  arm covering it (written order wins; W0005-dead duplicates stay
+  unrouted), the wildcard arm's entry is the switch's `otherwise`, and a
+  fully-covered match without a wildcard keeps the invalid-tag trap. The
+  hidden `try`/`catch` union dispatch uses the same active-tag discipline.
 - **Anonymous-struct scrutinee** — a linear chain of per-arm guard
   conjunctions: each literal-field guard is one field-equality compare
   (`icmp_imm eq` for `int`/`bool`, the runtime's bytewise `ryo_str_eq`
@@ -256,11 +270,12 @@ merge (E0137's deferral — a match whose value arms all yield one view
 type is rejected at compile time until the merge shape exists) is also
 queued there.
 
-### Deferred to M13 / M16
+### Error matching and deferred M16 patterns
 
-Matching over error unions (the `catch` arms of §7.4) ships inside M13;
-`?T` / `none` patterns ship inside M16. M12's machinery is the substrate
-for both.
+M13 reuses M12's machinery for declared errors, error sets, and the direct
+`catch` arms of §7.4. Error-union success/error dispatch remains
+compiler-generated; source `Ok`/`Err` patterns are not accepted. `?T` /
+`none` patterns remain deferred to M16.
 
 ### Known limitations shipped with M12
 

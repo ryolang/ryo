@@ -24,7 +24,7 @@ where
     args.into_iter()
         .map(|arg| match arg {
             ParenArg::Expr(id) => id,
-            ParenArg::NamedSyntax { span, value } => {
+            ParenArg::NamedSyntax { span, value, .. } => {
                 e.emit(Rich::custom(
                     span,
                     ParseDiag::NamedArgInParens {
@@ -140,39 +140,19 @@ where
         })
 }
 
-/// The tail of an `enum` declaration after the `enum` keyword:
-/// `Name:` plus an indented block of variant lines (M11). Yields the
-/// name and the sealed variant list.
-///
-/// One payload rule covers both parenthesized kinds: the first element
-/// decides — `Name: type` lines are named payloads, bare types are
-/// tuple payloads — and mixing them inside one payload is a syntax
-/// error. Payload decls push straight into the `struct_field_decls`
-/// arena (tuple fields minted `"0"`, `"1"`, …) and variants into
-/// `enum_variants` as they parse, so no intermediate `Vec` is
-/// collected (I-152). An empty body parses; the empty-enum diagnostic
-/// is astgen's, not the parser's.
-///
-/// The tail embeds `type_expr_parser()` subtrees, so the grammar
-/// construction rule applies: the caller builds it once and threads
-/// it into both enum-declaration rules (plain and attributed).
-pub(super) fn enum_tail_parser<'a, I>()
--> impl Parser<'a, I, (Ident, EnumVariantDeclList), PExtra<'a>> + Clone + 'a
+/// A unit, positional, or named payload. The first parenthesized element
+/// decides the payload kind; fields are pushed directly into the shared
+/// declaration arena and sealed after the list finishes.
+pub(super) fn payload_parser<'a, I>() -> impl Parser<'a, I, EnumPayload, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
-    // Named payload: `(` `name: type` list `)`. Pushed as parsed.
     let named_elem = select! { Token::Ident(name) => name }
         .then_ignore(just(Token::Colon))
         .then(type_expr_parser())
         .map_with(|(name, ty), e: &mut Mx<'a, '_, I>| {
             e.state().push_struct_field_decl(name, ty);
         });
-    // `collect` (not `to(())`): an IterParser collection runs its
-    // items in Emit mode — a bare `repeated()`-as-parser validates in
-    // Check mode, which never runs the push closures above. Same for
-    // every `.map(|_| …)` below versus `.to(…)`: `to` validates its
-    // inner in Check mode.
     let named_payload = named_elem
         .clone()
         .then(
@@ -185,9 +165,6 @@ where
         .then_ignore(just(Token::RParen))
         .map(|_| VariantKind::Named);
 
-    // Tuple payload: `(` bare-type list `)`. The first element is
-    // `"0"`; the running count rides the fold accumulator so each
-    // subsequent element mints its own positional name.
     let tuple_first = type_expr_parser()
         .map_with(|ty, e: &mut Mx<'a, '_, I>| {
             let name = positional_field_name(0, &mut e.state().pool);
@@ -210,20 +187,31 @@ where
         .then_ignore(just(Token::RParen))
         .map(|_| VariantKind::Tuple);
 
-    // Variant line: `Name` (unit) or `Name(...)`; the payload decls
-    // land between the recorded start offset and the seal.
     let payload = just(Token::LParen)
         .ignore_then(choice((named_payload, tuple_payload)))
         .or_not();
+    empty()
+        .map_with(|_, e: &mut Mx<'a, '_, I>| e.state().struct_field_decls_len())
+        .then(payload)
+        .map_with(|(start, kind), e: &mut Mx<'a, '_, I>| EnumPayload {
+            kind: kind.unwrap_or(VariantKind::Unit),
+            fields: e.state().struct_field_decl_list_from(start),
+        })
+}
+
+/// The tail of an `enum` declaration after the `enum` keyword:
+/// `Name:` plus an indented block of variant lines (M11). Yields the
+/// name and the sealed variant list. An empty body parses; the
+/// empty-enum diagnostic is astgen's, not the parser's.
+pub(super) fn enum_tail_parser<'a, I>()
+-> impl Parser<'a, I, (Ident, EnumVariantDeclList), PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
     let variant = select! { Token::Ident(name) => name }
         .map_with(|name, e: &mut Mx<'a, '_, I>| Ident::new(name, crate::spans::cspan(e.span())))
-        .then(empty().map_with(|_, e: &mut Mx<'a, '_, I>| e.state().struct_field_decls_len()))
-        .then(payload)
-        .map_with(|((name, start), kind), e: &mut Mx<'a, '_, I>| {
-            let payload = EnumPayload {
-                kind: kind.unwrap_or(VariantKind::Unit),
-                fields: e.state().struct_field_decl_list_from(start),
-            };
+        .then(payload_parser())
+        .map_with(|(name, payload), e: &mut Mx<'a, '_, I>| {
             let span = crate::spans::cspan(e.span());
             e.state().push_enum_variant(name, payload, span);
         });
@@ -304,7 +292,11 @@ where
 /// errors still surface) and the no-orphan invariant holds.
 pub(super) enum ParenArg {
     Expr(ExprId),
-    NamedSyntax { span: SimpleSpan, value: ExprId },
+    NamedSyntax {
+        name: StringId,
+        span: SimpleSpan,
+        value: ExprId,
+    },
 }
 
 /// One argument of a parenthesized list. The `name = value` recovery
@@ -324,7 +316,8 @@ where
         .then_ignore(just(Token::Assign))
         .then(expr.clone())
         .map_with(
-            |(_name, value), e: &mut Mx<'a, '_, I>| ParenArg::NamedSyntax {
+            |(name, value), e: &mut Mx<'a, '_, I>| ParenArg::NamedSyntax {
+                name,
                 span: e.span(),
                 value,
             },

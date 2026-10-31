@@ -1,3 +1,8 @@
+fn show(raw: bytesview):
+	text = raw.to_str() catch as e:
+		e.message()
+	print(text)
+
 fn check(flag: bool):
 	mut s = b"outer_0123456789012345678901234567890123456789" + b"!"
 	for i in range(0, 2):
@@ -8,11 +13,11 @@ fn check(flag: bool):
 				mut s = b"deep_0123456789012345678901234567890123456789" + b"!"
 				s = b"deep_replacement_0123456789012345678901234567890123456789" + b"!"
 				v = s[0:4]
-				print(v.to_str())
+				show(v)
 			v = s[0:11]
-			print(v.to_str())
-		print(s[0:5].to_str())
-	print(s.to_str())
+			show(v)
+		show(s[0:5])
+	show(s)
 
 fn main():
 	check(true)

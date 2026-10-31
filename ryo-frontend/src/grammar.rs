@@ -66,6 +66,9 @@ pub struct ParseState {
     /// followed by the next fold refresh), so the value is never
     /// stale at a read.
     postfix_head_enum: Option<StringId>,
+    /// Statement-entry arena lengths. Nested statement lists push and
+    /// pop in LIFO order when each line either succeeds or recovers.
+    recovery_checkpoints: Vec<AstCheckpoint>,
 }
 
 impl ParseState {
@@ -76,11 +79,24 @@ impl ParseState {
             ast: Ast::new(),
             pool,
             postfix_head_enum: None,
+            recovery_checkpoints: Vec::new(),
         }
     }
 
     pub fn into_parts(self) -> (Ast, InternPool) {
         (self.ast, self.pool)
+    }
+
+    fn begin_statement(&mut self) {
+        self.recovery_checkpoints.push(self.ast.checkpoint());
+    }
+
+    fn finish_statement(&mut self, rollback: bool) {
+        if let Some(checkpoint) = self.recovery_checkpoints.pop()
+            && rollback
+        {
+            self.ast.rollback(checkpoint);
+        }
     }
 }
 
@@ -391,7 +407,9 @@ where
                     for arg in &args {
                         match arg {
                             enums::ParenArg::Expr(id) => positional.push(*id),
-                            enums::ParenArg::NamedSyntax { span: nspan, value } => {
+                            enums::ParenArg::NamedSyntax {
+                                span: nspan, value, ..
+                            } => {
                                 let diag = match &receiver_type {
                                     Some(enum_id) => ParseDiag::NamedArgInParens {
                                         enum_name: Some(enum_id.name),
@@ -542,6 +560,7 @@ where
             result
         },
     )
+    .map_with(|expr, e: &mut Mx<'a, '_, I>| errors::finish_error_candidate(expr, e))
 }
 
 fn expression_parser<'a, I>() -> impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a
@@ -575,22 +594,7 @@ where
                 e.state().literal(lit, span)
             });
 
-            let call = select! { Token::Ident(name) => name }
-                .then(
-                    enums::paren_arg(expr.clone())
-                        .separated_by(just(Token::Comma))
-                        .allow_trailing()
-                        .collect::<Vec<_>>()
-                        .delimited_by(just(Token::LParen), just(Token::RParen)),
-                )
-                .map_with(|(name, args), e: &mut Mx<'a, '_, I>| {
-                    let span = crate::spans::cspan(e.span());
-                    // `name = value` in a plain call's parens: named
-                    // arguments are unsupported (method flavor — an
-                    // atom call has no variant to name).
-                    let args = enums::unwrap_paren_args(args, e);
-                    e.state().call(name, &args, span)
-                });
+            let call = errors::call_or_error_construct_parser(expr.clone());
 
             // Struct literal `Name{field=value, ...}` (M9). Both this
             // and `call` open with `Ident`; the `{` vs `(` delimiter
@@ -772,7 +776,21 @@ where
         // (term contains unary, additive contains term, ...) and the
         // demangled symbol names grow to hundreds of kilobytes, which
         // breaks some profiling tooling (and compile times).
-        let unary = neg_min
+        let catch_tail = errors::catch_tail_parser(expr.clone());
+        let fold_catch = |operand, tail: errors::CatchTail, e: &mut Mx<'a, '_, I>| {
+            let start = e.state().expr_span(operand).start;
+            e.state().catch_expr(
+                operand,
+                tail.binding,
+                tail.body,
+                crate::spans::cspan(SimpleSpan::new((), start..tail.span.end)),
+            )
+        };
+        let caught_postfix = postfix
+            .clone()
+            .foldl_with(catch_tail.clone().repeated(), fold_catch)
+            .boxed();
+        let narrow_unary = neg_min
             .or(unary_op
                 .repeated()
                 .collect::<Vec<_>>()
@@ -786,6 +804,24 @@ where
                     result
                 }))
             .boxed();
+        let try_expr = errors::try_parser(narrow_unary)
+            .foldl_with(catch_tail.repeated(), fold_catch)
+            .boxed();
+        let ordinary_unary = neg_min
+            .or(unary_op
+                .repeated()
+                .collect::<Vec<_>>()
+                .then(caught_postfix)
+                .map_with(|(ops, expr), e: &mut Mx<'a, '_, I>| {
+                    let span = crate::spans::cspan(e.span());
+                    let mut result = expr;
+                    for op in ops.into_iter().rev() {
+                        result = e.state().unary(op, result, span);
+                    }
+                    result
+                }))
+            .boxed();
+        let unary = try_expr.or(ordinary_unary).boxed();
 
         // Fold `left op right` into a BinaryOp node spanning both
         // operands — the same span rule at every precedence level.
@@ -926,6 +962,8 @@ where
 
 mod enums;
 
+mod errors;
+
 mod destructure;
 
 mod match_;
@@ -940,6 +978,9 @@ mod destructure_tests;
 
 #[cfg(test)]
 mod enum_tests;
+
+#[cfg(test)]
+mod error_tests;
 
 #[cfg(test)]
 mod match_tests;

@@ -49,6 +49,7 @@ mod bytes;
 mod control;
 mod decls;
 mod enums;
+mod errors;
 mod expr;
 mod frees;
 mod function_context;
@@ -221,9 +222,14 @@ fn cranelift_type_for(ty: TypeId, pool: &InternPool, pointer_ty: types::Type) ->
         }
         // Struct codegen (aggregate layout) lands in a later M9 task.
         TypeKind::Struct => unreachable!("cranelift_type_for: struct TypeId reached codegen"),
-        // Enums (M11) are slot-allocated aggregates exactly like
+        // Enum-shaped values use slot-allocated aggregates exactly like
         // structs; the memory-first paths gate before scalar mapping.
-        TypeKind::Enum => unreachable!("cranelift_type_for: enum TypeId reached codegen"),
+        TypeKind::Enum | TypeKind::DeclaredError | TypeKind::ErrorSet | TypeKind::ErrorUnion => {
+            unreachable!("cranelift_type_for: enum-shaped TypeId reached codegen")
+        }
+        TypeKind::InferredErrorUnion => {
+            unreachable!("cranelift_type_for: unresolved error union reached codegen")
+        }
     }
 }
 
@@ -1503,7 +1509,7 @@ impl<M: Module> Codegen<M> {
                     let _ = Self::eval_inst_view(builder, ctx, r)?;
                 } else if matches!(ctx.pool.kind(ty), TypeKind::Struct | TypeKind::AnonStruct) {
                     let _ = Self::eval_inst_struct(builder, ctx, r)?;
-                } else if matches!(ctx.pool.kind(ty), TypeKind::Enum) {
+                } else if is_enum_type(ty, ctx.pool) {
                     let _ = Self::eval_inst_enum(builder, ctx, r)?;
                 } else {
                     let _ = Self::eval_inst(builder, ctx, r)?;
@@ -1567,7 +1573,7 @@ impl<M: Module> Codegen<M> {
             // struct-returning call): materialize so the call is
             // emitted; scheduled temp Frees handle the drop.
             let _ = Self::eval_inst_struct(builder, ctx, operand)?;
-        } else if matches!(ctx.pool.kind(operand_ty), TypeKind::Enum) {
+        } else if is_enum_type(operand_ty, ctx.pool) {
             // Bare enum-valued statement (e.g. a discarded
             // enum-returning call): materialize so the call is
             // emitted; scheduled temp Frees handle the drop.

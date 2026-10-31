@@ -144,10 +144,10 @@ where
 /// clean boundary would emit a spurious error. Errors emitted by a
 /// recovery whose surrounding line later fails are rolled back by
 /// chumsky's rewind, so each broken line reports exactly once.
-/// (Arena nodes pushed inside a failed region are *not* rolled back
-/// — they stay as unreachable orphans, which is safe because no kept
-/// node references them; see the `Inspector` impl on `ParseState` in
-/// `grammar.rs`.)
+/// The no-op `Inspector` does not rewind individual speculative
+/// alternatives. Once a whole line collapses to `Error`, its statement
+/// checkpoint reclaims every node and side-arena entry allocated since
+/// the line began, so recovery leaves no allocated orphans.
 ///
 /// `not_at_boundary` decides where the loop stops without running the
 /// statement grammar: the grammar is deep and a failed alternative
@@ -179,26 +179,38 @@ where
     // The recoveries attach to the whole line, not to `stmt`: the
     // block-swallowing variant consumes the block's closing `Dedent`,
     // which doubles as the line end, so no tail follows it.
+    let statement_start = empty()
+        .map_with(|_, e: &mut Mx<'a, '_, I>| {
+            e.state().begin_statement();
+        })
+        .then(stmt)
+        .map(|(_, stmt)| stmt);
     let line = not_at_boundary
-        .ignore_then(stmt)
+        .ignore_then(statement_start)
         .then(tail)
-        .map_with(|(s, tail), e: &mut Mx<'a, '_, I>| match tail {
-            LineTail::Clean => s,
-            LineTail::Garbage => {
-                let span = crate::spans::cspan(e.span());
-                e.state().error_stmt(span)
+        .map_with(|(s, tail), e: &mut Mx<'a, '_, I>| {
+            let rollback = matches!(&tail, LineTail::Garbage);
+            e.state().finish_statement(rollback);
+            match tail {
+                LineTail::Clean => s,
+                LineTail::Garbage => {
+                    let span = crate::spans::cspan(e.span());
+                    e.state().error_stmt(span)
+                }
             }
         })
         .recover_with(via_parser(
             skip_garbage()
                 .then_ignore(swallow_block())
                 .map_with(|_, e: &mut Mx<'a, '_, I>| {
+                    e.state().finish_statement(true);
                     let span = crate::spans::cspan(e.span());
                     e.state().error_stmt(span)
                 }),
         ))
         .recover_with(via_parser(skip_garbage().then_ignore(line_end).map_with(
             |_, e: &mut Mx<'a, '_, I>| {
+                e.state().finish_statement(true);
                 let span = crate::spans::cspan(e.span());
                 e.state().error_stmt(span)
             },
@@ -748,6 +760,7 @@ where
         enums::attributed_type_decl_parser(enum_tail.clone()),
         struct_decl_parser(),
         enums::enum_decl_parser(enum_tail),
+        errors::error_decl_parser(),
         function_def_parser(expr.clone()),
         destructure::destructure_stmt_parser(expr.clone()),
         var_decl_parser(expr.clone()),
@@ -852,7 +865,34 @@ where
                 elems.extend(rest);
                 e.state().type_expr_positional(&elems, span)
             });
-        named_type_expr_parser().or(anon).or(positional).boxed()
+        let inferred =
+            just(Token::Bang)
+                .ignore_then(ty.clone())
+                .map_with(|success, e: &mut Mx<'a, '_, I>| {
+                    let span = crate::spans::cspan(e.span());
+                    e.state().error_union_type(&[], success, true, span)
+                });
+        let grouped_errors = named_type_expr_parser()
+            .separated_by(just(Token::Pipe))
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LParen), just(Token::RParen));
+        let error_set = grouped_errors.or(named_type_expr_parser().map(|ty| vec![ty]));
+        let explicit = error_set
+            .then_ignore(just(Token::Bang))
+            .then(ty.clone())
+            .map_with(|(error_set, success), e: &mut Mx<'a, '_, I>| {
+                let span = crate::spans::cspan(e.span());
+                e.state().error_union_type(&error_set, success, false, span)
+            });
+        choice((
+            inferred,
+            explicit,
+            named_type_expr_parser(),
+            anon,
+            positional,
+        ))
+        .boxed()
     })
 }
 

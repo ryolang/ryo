@@ -27,11 +27,28 @@ impl<'a> fmt::Display for UirDump<'a> {
         let uir = self.uir;
         let pool = self.pool;
 
-        // Section 0: struct declarations (M9 side table).
+        // Section 0: type declaration side tables.
         for decl in &uir.struct_decls {
             write!(f, "struct {}:", pool.str(decl.name))?;
             for field in &decl.fields {
                 write!(f, " {}: {}", pool.str(field.name), pool.display(field.ty))?;
+            }
+            writeln!(f)?;
+        }
+        for decl in &uir.error_decls {
+            write!(f, "error {}", pool.str(decl.name))?;
+            if decl.payload.kind != crate::types::VariantKind::Unit {
+                write!(f, "(")?;
+                for (index, field) in decl.payload.fields.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    if decl.payload.kind == crate::types::VariantKind::Named {
+                        write!(f, "{}: ", pool.str(field.name))?;
+                    }
+                    write!(f, "{}", pool.display(field.ty))?;
+                }
+                write!(f, ")")?;
             }
             writeln!(f)?;
         }
@@ -254,6 +271,19 @@ fn write_inst(
             }
             writeln!(f, "}}")
         }
+        (InstTag::ErrorConstruct, InstData::ErrorConstruct { .. }) => {
+            let (name, view) = uir.error_construct_view(r);
+            write!(f, "error_construct {}", pool.str(name))?;
+            for (field, value) in view.fields() {
+                if view.positional {
+                    write!(f, " {field}:")?;
+                } else {
+                    write!(f, " {}:", pool.str(StringId::from_raw(field)))?;
+                }
+                write!(f, "%{}", value.index())?;
+            }
+            writeln!(f)
+        }
         (InstTag::FieldAccess, InstData::FieldAccess { object, field }) => {
             writeln!(f, "field_access %{}.{}", object.index(), pool.str(field))
         }
@@ -288,23 +318,17 @@ fn write_inst(
         (InstTag::Match, InstData::Match { .. }) => {
             let view = uir.match_view(r);
             write!(f, "match %{} [", view.scrutinee.index())?;
-            for (i, arm) in view.arms.iter().enumerate() {
-                if i > 0 {
-                    write!(f, "; ")?;
-                }
-                write_match_pattern(f, pool, &arm.pattern)?;
-                write!(f, ": ")?;
-                match arm.body {
-                    UirArmBodyView::Expr(body) => write!(f, "expr %{}", body.index())?,
-                    UirArmBodyView::Stmts(words) => {
-                        let refs: Vec<_> = words
-                            .iter()
-                            .map(|w| format!("%{}", InstRef::from_raw(*w).index()))
-                            .collect();
-                        write!(f, "stmts [{}]", refs.join(", "))?;
-                    }
-                }
+            write_match_arms(f, pool, &view.arms)?;
+            writeln!(f, "]")
+        }
+        (InstTag::Catch, InstData::Catch { .. }) => {
+            let view = uir.catch_view(r);
+            write!(f, "catch %{}", view.scrutinee.index())?;
+            if let Some(binding) = view.binding {
+                write!(f, " as {}", pool.str(binding))?;
             }
+            write!(f, " [")?;
+            write_match_arms(f, pool, &view.arms)?;
             writeln!(f, "]")
         }
         (InstTag::Borrow, InstData::Borrow(inner)) => {
@@ -325,6 +349,31 @@ fn write_inst(
         }
         (tag, data) => writeln!(f, "<malformed: {:?} / {:?}>", tag, data),
     }
+}
+
+fn write_match_arms(
+    f: &mut fmt::Formatter<'_>,
+    pool: &InternPool,
+    arms: &[super::UirMatchArmView<'_>],
+) -> fmt::Result {
+    for (i, arm) in arms.iter().enumerate() {
+        if i > 0 {
+            write!(f, "; ")?;
+        }
+        write_match_pattern(f, pool, &arm.pattern)?;
+        write!(f, ": ")?;
+        match arm.body {
+            UirArmBodyView::Expr(body) => write!(f, "expr %{}", body.index())?,
+            UirArmBodyView::Stmts(words) => {
+                let refs: Vec<_> = words
+                    .iter()
+                    .map(|w| format!("%{}", InstRef::from_raw(*w).index()))
+                    .collect();
+                write!(f, "stmts [{}]", refs.join(", "))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn write_match_pattern(
@@ -428,6 +477,7 @@ fn un_op_name(t: InstTag) -> &'static str {
         InstTag::Not => "bool_not",
         InstTag::Return => "ret",
         InstTag::ExprStmt => "expr_stmt",
+        InstTag::Try => "try",
         _ => "?un",
     }
 }

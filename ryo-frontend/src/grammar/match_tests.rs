@@ -246,7 +246,7 @@ fn match_statement_arms_parse() {
     // Single-line statement arm: `return e` fails the expression
     // alternative and wraps into a one-element StmtList.
     let (ast, _pool) =
-        lex_and_parse("fn f():\n\tmatch r:\n\t\tErr(e): return e\n\t\tOk(v): v\n").unwrap();
+        lex_and_parse("fn f():\n\tmatch r:\n\t\tFailed(e): return e\n\t\tSome(v): v\n").unwrap();
     let def = fn_def(&ast, only_stmt(&ast));
     let m = match_expr(&ast, expr_stmt(&ast, fn_body(&ast, def)[0]));
     let arms = ast.match_arms(m.1);

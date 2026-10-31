@@ -1,0 +1,32 @@
+error NotFound
+error InvalidInput(str)
+
+fn find_user(id: int) -> (NotFound | InvalidInput)!str:
+	if id < 0:
+		return InvalidInput("id must be non-negative")
+	if id == 0:
+		return NotFound
+	return "user_" + int_to_str(id)
+
+fn load_user(id: int) -> !str:
+	user = try find_user(id)
+	return user
+
+# Use try to propagate the error.
+# Use bare catch: when no shared binding is needed.
+# Use catch as err: for shared message or log access.
+# Use nested match only for compatibility or specialized handling.
+fn main():
+	user = load_user(42) catch as err:
+		NotFound: "unknown"
+		_: err.message()
+	print(user + "\n")
+
+	missing = load_user(0) catch:
+		NotFound: "NotFound"
+		InvalidInput(message): message
+	print(missing + "\n")
+
+	invalid = load_user(-1) catch as err:
+		err.message()
+	print(invalid + "\n")

@@ -1,6 +1,6 @@
 # bytes/bytesview (M8.4.2) — owned byte buffers and read-only views.
-# Interims: b[i] yields int (0-255) until M17.1; to_str() panics on
-# invalid UTF-8 until M13; hex int literals (0xFF) land at M13.7.
+# Interims: b[i] yields int (0-255) until M17.1; hex int literals
+# (0xFF) land at M13.7.
 fn main():
 	raw = b"\x01\x02\x03"
 	header = raw[0:2]             # bytesview — projection, no copy
@@ -12,5 +12,6 @@ fn main():
 	print(buf)                    # b"\0\xff\x01\x02\x03"
 
 	text = "héllo".to_bytes()    # owned bytes from a str
-	back = text.to_str()          # panics on invalid UTF-8 (interim)
+	back = text.to_str() catch as e:
+		e.message()
 	print(back)

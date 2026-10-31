@@ -43,7 +43,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 12 — Pattern Matching [alpha] ✅ COMPLETE](#milestone-12-pattern-matching-alpha--complete)
 - [ ] [Milestone 12.5 — Advanced Pattern Matching](#milestone-125-advanced-pattern-matching) *(deferred to v0.2 — post-alpha; holds everything M12 defers)*
 - [ ] [Milestone 12.6 — Match Ownership Completion](#milestone-126-match-ownership-completion) *(deferred to v0.2 — post-alpha; undefined enum/match ownership semantics)*
-- [ ] [Milestone 13 — Error Types & Unions [alpha]](#milestone-13-error-types--unions-alpha)
+- [x] [Milestone 13 — Error Types & Unions [alpha] ✅ COMPLETE](#milestone-13-error-types--unions-alpha--complete)
 - [ ] [Milestone 13.5 — Default Parameters & Named Arguments](#milestone-135-default-parameters--named-arguments) *(deferred — see sequencing note below)*
 - [ ] [Milestone 13.6 — `io_read_line` Gains Error Unions](#milestone-136-io_read_line-gains-error-unions) *(lands directly after M13)*
 - [x] [Milestone 13.7 — Literal Completeness ✅ COMPLETE](#milestone-137-literal-completeness) *(landed ad hoc 2026-10-22 — scientific notation, underscores, base prefixes, full escape set)*
@@ -72,7 +72,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 
 ### Phase 5: Post-v0.1.0 Extensions (v0.2+)
 
-Deferred features tracked separately — see Phase 5 section for the full list (REPL/JIT, Concurrency Runtime, Closures, FFI, Traits & Generics, Try/Catch, F-strings, Stack Traces polish, Benchmarking & Doc Generation, Constrained/Distinct Types, Contracts, Copy Elision, Stdlib Allocation Optimizations, Cancellation Model, Named Parameters, LSP/Editor Tooling, etc.).
+Deferred features tracked separately — see Phase 5 section for the full list (REPL/JIT, Concurrency Runtime, Closures, FFI, Traits & Generics, Error Return Traces, F-strings, Stack Traces polish, Benchmarking & Doc Generation, Constrained/Distinct Types, Contracts, Copy Elision, Stdlib Allocation Optimizations, Cancellation Model, Named Parameters, LSP/Editor Tooling, etc.).
 
 **From the final slicing & memory-model spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md` §14), the gap register (`docs/dev/ryo-missing-features-and-gaps.md`), and the view-materialization record (`docs/dev/ryo-view-materialization.md`):**
 
@@ -1294,13 +1294,13 @@ fn main():
 - Slicing `raw[start:end]` yields `bytesview` — a projection governed by the D1 rules (P1–P6, E1–E4) with **no** UTF-8 boundary check (bytes are not text); bounds check at creation, panics
 - `bytesview` activates `TypeKind::View(ViewKind::Bytes)` (slot reserved since M8.4's Task 10.1); generalize `TirTag::ToView` → owner→view conversion per the `owner_view` table
 - Scalar indexing `b[i]` on `bytes` and `bytesview`, bounds-checked, panics — **interim: yields `int`** (0–255); becomes `u8` with Milestone 17.1 (`u8` without coercion rules is unusable — no implicit numeric conversions means `b[i] == 0x02` would not compile). Read-only: no `b[i] = v`
-- Bridging: `text.to_bytes() -> bytes` (owned copy, never fails) and `raw.to_str() -> str` — **interim: panics on invalid UTF-8**; becomes `Utf8Error!str` with Milestone 13 (error unions), call sites switch to `catch`/match handling
+- Bridging: `text.to_bytes() -> bytes` (owned copy, never fails) and `raw.to_str() -> Utf8Error!str`; invalid UTF-8 is recoverable with `try` or `catch` (finalized by Milestone 13)
 - `bytes(bview)` mirrors M8.4.1.2's `str(view)` (owned copy from a `bytesview`); W0003 extends to both shapes
 - Buffer building (the builder idiom is deferred — it needs M17 methods): `a + b` owned concatenation (mirrors `StrConcat`; view operands rejected as with `str`) and `bytes_push(&b, x)` single-byte append (`inout` first arg mirroring `str_push`; `x: int` range-checked 0–255, panics)
 - `print` accepts `bytes`/`bytesview` with an escaped repr (`b"\x01\x02A"`: printable ASCII literal, short escapes where they exist, else `\xNN`); `==`/`!=` on both types incl. cross-comparison via the implicit owner→view conversion; `.len()`/`.is_empty()`
 - Runtime: `__ryo_bytes_*` alloc/free/realloc/concat/slice/from_view/push/eq/repr/to_bytes/to_str mirroring the `str` ABI — **ABI history:** string producers originally used the slot-out pattern (caller-provided 24-byte slot written via `write_str_slot`); commit `7d0a047` then moved `{ptr, len}` producers to a packed-`u128` register return (`pack_pair`, no out-pointer stack slots); the 2026-09 string fast-path work inlined those small ops as Cranelift IR at the call site and removed `pack_pair` from the runtime entirely (recorded in `docs/dev/cranelift_lessons.md`). Producers that still exist as runtime calls (`ryo_int_to_str`, `ryo_float_to_str`, the `__ryo_*_from_view` materialize calls) use slot-out — the template M9.2's str-producing intrinsics follow; memory fixtures for both JIT and AOT (ASan/Valgrind)
 
-**Visible Progress:** Protocol/binary code reads and slices raw buffers zero-copy; text bridging is explicit and checked (panic interim).
+**Visible Progress:** Protocol/binary code reads and slices raw buffers zero-copy; text bridging is explicit and UTF-8 failures are recoverable.
 
 **Example:**
 
@@ -1310,7 +1310,8 @@ fn main():
 	header = raw[0:2]             # bytesview — projection, no copy
 	print(int_to_str(header[0]))  # 1 — b[i] yields int (interim)
 
-	text = raw.to_str()           # panics on invalid UTF-8 (interim)
+	text = raw.to_str() catch as e:
+		e.message()
 	raw2 = text.to_bytes()        # owned copy
 
 	mut buf = b"\x00"
@@ -1322,7 +1323,7 @@ fn main():
 **Implementation Notes:**
 
 - The projection machinery is shared with `strview` (M8.4): same root-owner side tables, P2 freeze, P5 deferral; only the UTF-8 boundary check is `strview`-specific
-- Deferred out of this milestone (dependencies missing at this point in the sequence): `u8` element type and indexed stores → Milestone 17.1; `Utf8Error!str` spelling → Milestone 13; `bytes.builder()` → after Milestone 17; `bytes.from_list([...])` → Milestone 22 era (no list type exists to pass)
+- Deferred out of this milestone (dependencies missing at this point in the sequence): `u8` element type and indexed stores → Milestone 17.1; `bytes.builder()` → after Milestone 17; `bytes.from_list([...])` → Milestone 22 era (no list type exists to pass). The `Utf8Error!str` conversion later shipped in M13.
 - `sbytes` (shared-backed, escaping) is **not** part of this milestone — it ships with `shared[T]` machinery (v0.2–v0.3, final spec §5)
 - `str` indexing remains forbidden (spec §4.7); `b[i]` applies to `bytes` only
 - Mutable view types remain rejected (final spec §12); mutable sub-ranges use `inout` + range parameters (Q4)
@@ -1747,77 +1748,61 @@ fn describe_color(color: Color) -> str:
 
 **Effort:** ~2 weeks (medium)
 
-### Milestone 13: Error Types & Unions [alpha]
+### Milestone 13: Error Types & Unions [alpha] ✅ COMPLETE
 
-**Goal:** Implement error types, error unions, and the error trait
+**Status:** ✅ COMPLETE (2026-10-30)
+
+**Goal:** Implement nominal errors, explicit and inferred error unions, propagation, exhaustive handling, and automatic messages
 
 **Tasks:**
 
-- Add `error` keyword to lexer/parser
-- Extend AST: `StmtKind::ErrorDef`
-- Parse error definitions:
+- Add `error` declarations with unit, positional, and named payloads to the lexer, parser, AST, and semantic declaration pipeline
+- Parse explicit error unions `(ErrorA | ErrorB)!SuccessType`, single-error unions `ErrorA!SuccessType`, and finite inferred unions `!SuccessType`
+- Construct declared errors and coerce compatible success values, error sets, and narrower unions while preserving active-variant ownership
+- Implement `try` as success unwrapping or early error return with ordinary cleanup and union widening
+- Infer finite error sets from direct returns, returned sets/unions, and `try`; reject recursive components containing inferred signatures and support `--show-inferred-errors`
+- Implement direct-arm `expr catch:` and `expr catch as e:`, ordinary handlers, and nested `catch as e: match e:` with exhaustive error-set matching
+- Implement `.message() -> str` for declared errors and error sets as a compiler-known interface, not a user trait
+- Reuse enum-shaped tagged layouts and hidden structure returns for JIT and AOT codegen
+- Convert `bytes.to_str()` and `bytesview.to_str()` to `Utf8Error!str`, returning recoverable errors for invalid UTF-8
+- Cover parsing, semantics, ownership, messages, inference, UTF-8, JIT/AOT execution, ASan, Valgrind, and runtime Miri
 
-  ```ryo
-  # File: file/errors.ryo
-  error NotFound(path: str)
-  error PermissionDenied(path: str)
-
-  # File: main.ryo
-  import file
-  ```
-
-- Parse error union syntax: `(ErrorA | ErrorB)!SuccessType`
-- Parse function signatures with error returns: `fn foo() -> FileError!Data`
-- Implement explicit error propagation via pattern matching on the union (the `try` sugar lands in v0.2)
-- Implement `expr catch as e:` error handling with exhaustive pattern matching on the bound error (spec §7.4; required by the alpha litmus test)
-- Implement `.message() -> str` method for all errors (compiler-known interface, not a user trait yet)
-- Extend Codegen: Generate IR for:
-  - Error variant construction
-  - Error unions (tagged union of errors + success value)
-- Write tests for error definitions and error unions
-
-**Visible Progress:** Can define domain-specific errors and compose them in error unions
+**Visible Progress:** Can define domain-specific errors, compose and infer finite error unions, propagate with `try`, and handle errors exhaustively with direct `catch` arms
 
 **Example:**
 
 ```ryo
-# File: http/errors.ryo
 error ConnectionFailed(reason: str)
 error RequestTimeout
-
-# File: parse/errors.ryo
 error InvalidJson(message: str)
 
-# File: main.ryo
-import http
-import parse
-
-# v0.1 propagates errors explicitly via match. The `try`/`catch` sugar
-# (originally Milestone 14) is deferred to v0.2 — see Phase 5.
-fn fetch_and_parse() -> (http.ConnectionFailed | http.RequestTimeout | parse.InvalidJson)!Data:
- response = match http_get("https://api.example.com"):
-  Ok(r): r
-  Err(e): return e          # propagate http errors
- data = match parse_json(response.body()):
-  Ok(d): d
-  Err(e): return e          # propagate parse errors
- return data
+fn fetch_and_parse() -> (ConnectionFailed | RequestTimeout | InvalidJson)!Data:
+	response = try http_get("https://api.example.com")
+	data = try parse_json(response.body())
+	return data
 
 fn main():
+	result = fetch_and_parse() catch as err:
+		ConnectionFailed(message):
+			print(message)
+			process_exit(1)
+		RequestTimeout: panic("request timed out")
+		InvalidJson(message):
+			print(message)
+			process_exit(1)
 ```
 
 **Implementation Notes:**
 
-- Errors are **single-variant only** (no multi-variant enums for errors)
-- Error unions use `|` syntax for composition
-- `.message() -> str` is exposed via a compiler-known interface (the user-facing `trait` keyword is v0.2/v0.3 — see Phase 5: Traits & Generics)
-- The `try` *propagation* operator and the bare `catch:` shortcut are deferred to v0.2 (see Phase 5: Try/Catch Operators); v0.1 handles errors with `expr catch as e:` (spec §7.4) and propagates with explicit `match`/`return`
-- Dependencies: Milestone 11 (enums), Milestone 12 (pattern matching for handling)
-- `match` on an error-union scrutinee extends M12's arm resolution: unqualified variant names resolve against *every* error type in the union (spec §7.4 shows `io.FileNotFound(p):` and `parse.InvalidFormat(reason):` in one `match`), and exhaustiveness covers the union's full variant set. The rest of M12's deferral register (guards, or-patterns, nested patterns) stays in M12.5 — none of it is needed for error handling
-- Converts the M8.4.2 interim: `bytes.to_str()` / `bytesview.to_str()` gain their final `Utf8Error!str` signature (the panicking stopgap is replaced; call sites switch to `catch`/match handling)
-- **Error return traces** (Zig-inspired): instrument every error-return site to record the return address into a per-error trace buffer, giving users the full propagation path from creation to handler. Compiler inserts instrumentation at `match` error-forwarding sites (`Err(e): return e`); the trace buffer is a fixed-size array carried alongside the error union value. Zero cost when errors don't fire. Unlike panic stack traces (I-039, which walk frame pointers at crash time), error traces capture the *propagation chain* at each return site — showing every function that forwarded the error, not just where it was created. Requires DWARF `.debug_line` for source mapping (shared prerequisite with I-039).
-
-> **Note:** The `try` *propagation* operator (originally Milestone 14) is **deferred to v0.2** — see Phase 5: Try/Catch Operators. Error-union *types*, the `.message()` accessor, and `expr catch as e:` *handling* all ship in v0.1 (spec §7.4); v0.1 propagates errors with explicit `match`/`return`, which is verbose but fully expressive.
+- Errors are nominal and **single-variant only**. Error-set composition is unordered and deduplicated; nominal errors never convert implicitly.
+- `Ok` and `Err` are compiler-only alternatives, never source constructors or patterns. Direct `match` on an error union is rejected; declared errors and error sets remain matchable.
+- Raw unions may be bound without unwrapping. `try` takes the immediate unary/postfix expression, and `catch` applies to the immediately preceding postfix expression.
+- Empty inferred sets are valid; explicit empty-set syntax is not. Recursive call-graph components containing `!T` are rejected, including mixed explicit/inferred cycles.
+- `.message() -> str` returns a fresh owned string. The user-facing `trait` keyword remains v0.2/v0.3 work (see Phase 5: Traits & Generics).
+- Dependencies: Milestone 11 (enums), Milestone 12 (pattern matching for handling). M12.5/M12.6 deferrals remain unchanged.
+- The M8.4.2 interim is replaced: invalid UTF-8 produces `Utf8Error` rather than panicking, and call sites use `try` or `catch`.
+- **Error return traces remain deferred.** They require a separately designed trace representation, source mapping, and public inspection API; M13 does not capture creation or propagation frames and does not add `.location()` or `.stack_trace()`.
+- Milestone 13.6 (`io_read_line`) remains separately planned and is not part of this completion.
 
 ### Milestone 13.5: Default Parameters & Named Arguments
 
@@ -2465,12 +2450,9 @@ fn main():
   process.exit(1)
 
  filename = args[1]
- # v0.1: explicit error propagation via match (try/catch is v0.2)
- content = match io.read_file(filename):
-  Ok(c): c
-  Err(e):
-   io.println("Error reading file: " + e.message())
-   process.exit(1)
+	content = io.read_file(filename) catch as e:
+		io.println("Error reading file: " + e.message())
+		process.exit(1)
 
  words = string.split(content, " ")
  io.println("Word count: " + int_to_str(words.len()))  # v0.1: concat (f-strings v0.2)
@@ -3320,55 +3302,35 @@ impl[T] Stack[T]:
 
 ### Try/Catch Operators
 
-**Goal:** Ergonomic error propagation and handling sugar over error unions
+**Status:** ✅ COMPLETE — shipped with Milestone 13
 
-> **Syntax decision (locked):** `catch` binds the error via the `as` keyword — `expr catch as e:` — mirroring `with EXPR as NAME:`. `as` is a binding keyword (type conversions use `TargetType(value)`, not `as`). Use bare `expr catch:` to handle without binding. The earlier `catch |e|:` form is superseded.
+**Goal:** Ergonomic error propagation and handling over error unions
 
-**Why Post-v0.1.0:**
-
-- v0.1 ships error *handling* via `expr catch as e:` (Milestone 13, spec §7.4) — required by the alpha litmus test
-- What v0.1 *lacks* is the `try` *propagation* operator: v0.1 code propagates errors with explicit `match`/`return`, which is verbose but fully expressive
-- Also deferred: the bare `expr catch:` shortcut (a future improvement, spec §7.4) and automatic error-union composition at propagation sites
-- Deferring `try` lets v0.2 design it alongside the trait system and `?` shorthand as a coherent ergonomics package
+> **Syntax decision (locked):** `catch` binds the error via the `as` keyword — `expr catch as e:` — mirroring `with EXPR as NAME:`. `as` is a binding keyword (type conversions use `TargetType(value)`, not `as`). Use bare `expr catch:` for direct arms without a shared binding. The earlier `catch |e|:` form is superseded.
 
 **Features:**
 
-- `try expr` — propagates errors to the caller, unwraps the success value *(deferred to v0.2)*
-- `expr catch as e: handler` — expression-based error handling with pattern matching on `e` *(ships in v0.1, Milestone 13)*
-- Bare `expr catch:` shortcut — elides the redundant `match err:` *(future improvement, spec §7.4)*
-- Automatic error-union composition (no manual enum construction at propagation sites) *(deferred to v0.2)*
+- `try expr` — propagates errors to the caller with ordinary cleanup and unwraps the success value
+- `expr catch as e: handler` — handles an error with an ordinary handler or nested `match e:`
+- `expr catch:` and `expr catch as e:` with direct exhaustive error arms — elide the redundant nested `match`
+- Finite inferred error-union composition from direct returns, returned sets/unions, and `try`
+- Hidden compiler-only `Ok`/`Err` alternatives; source code uses `try` and `catch`, never explicit result patterns
 
 **Example:**
 
 ```ryo
-# v0.2 `try` propagation sugar (`catch as e:` handling below is already v0.1 — see M13)
 fn load_config(path: strview) -> (file.NotFound | parse.InvalidFormat)!Config:
- content = try read_file(path)
- config = try parse_config(content)
- return config
+	content = try read_file(path)
+	config = try parse_config(content)
+	return config
 
-result = load_config("config.toml") catch as e:
- match e:
-  file.NotFound(p): print("missing: " + p)
-  parse.InvalidFormat(m): print("bad format: " + m)
- return 1
+config = load_config("config.toml") catch as e:
+	file.NotFound(p): default_config()
+	parse.InvalidFormat(m): default_config()
 ```
 
-```ryo
-# v0.1 equivalent (verbose but expressive)
-fn load_config(path: strview) -> (file.NotFound | parse.InvalidFormat)!Config:
- content = match read_file(path):
-  Ok(c): c
-  Err(e): return e
- config = match parse_config(content):
-  Ok(c): c
-  Err(e): return e
- return config
-```
-
-**Effort:** ~2-3 weeks
-**Dependencies:** v0.1 error unions (M13), pattern matching (M12)
-**Timeline:** v0.2 (early post-v0.1.0)
+**Dependencies:** Milestone 11 (enums), Milestone 12 (pattern matching)
+**Timeline:** Milestone 13 (v0.1)
 
 ### F-strings & String Interpolation
 
@@ -3882,7 +3844,7 @@ The 26 milestones in Phases 1-4 represent the **core language** needed for Ryo v
 
 - ❌ Closures & lambda expressions (v0.2 — incl. capture analysis)
 - ❌ User-facing `trait` keyword & trait bounds (v0.2 — v0.1 has compiler-known interfaces for `drop`/`Copy`/`.message()`)
-- ❌ `try`/`catch` operators (v0.2 — v0.1 uses `match` for error propagation)
+- ❌ Error-return traces and `.location()` / `.stack_trace()` (deferred; M13 has `try`/`catch` and messages without trace capture)
 - ❌ F-strings / string interpolation (v0.2 — v0.1 uses `+` concatenation with `*_to_str` helpers)
 - ❌ Multi-frame stack traces & "did you mean?" suggestions (v0.2 — v0.1 has single-frame panic)
 - ❌ `#[bench]` benchmark harness & `ryo doc` HTML generator (v0.2 — doc comments are still parsed)
@@ -3903,7 +3865,7 @@ This foundation enables building **synchronous applications** including CLI tool
 ### Realistic Estimates (2-4 weeks per milestone)
 
 **Phase 1 (M1-M3.5):** ✅ COMPLETE (~2 months)
-**Phase 2 (M4-M13):** 15 milestones — incl. M8.1 (str+heap), M8.2 (&T), M8.3 (inout), M8.4 (strview), M13.7 (literal forms); excl. closures and try/catch (v0.2) and M6 (now early-Phase-4) × 3 weeks avg = ~45 weeks (~11 months)
+**Phase 2 (M4-M13):** 15 milestones — incl. M8.1 (str+heap), M8.2 (&T), M8.3 (inout), M8.4 (strview), M13 (try/catch and inferred error unions), M13.7 (literal forms); excl. closures (v0.2) and M6 (now early-Phase-4) × 3 weeks avg = ~45 weeks (~11 months)
 **Phase 3 (M16, M17, M17.1, M17.2, M21, M22, M23):** 7 milestones — strings/borrows pulled forward to Phase 2; traits and closure capture deferred to v0.2 × 3 weeks avg = ~21 weeks (~5 months)
 **Phase 4 (M24-M27):** 6 milestones (includes M26.5 Distribution & Installer and M26.6 Cross-Compilation) × 4 weeks avg = ~24 weeks (~6 months)
 

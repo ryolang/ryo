@@ -85,6 +85,9 @@ enum Commands {
         /// program writes.
         #[arg(long, value_delimiter = ',', value_enum)]
         emit: Vec<EmitKind>,
+        /// Print each inferred error-union signature in source order.
+        #[arg(long)]
+        show_inferred_errors: bool,
         /// Arguments forwarded to the program: everything after the
         /// source file is captured verbatim, `--flag`-shaped values
         /// included, and handed to the program's argv intrinsics.
@@ -100,6 +103,9 @@ enum Commands {
         /// command is silent on success.
         #[arg(long, value_delimiter = ',', value_enum)]
         emit: Vec<EmitKind>,
+        /// Print each inferred error-union signature in source order.
+        #[arg(long)]
+        show_inferred_errors: bool,
         /// Libc to link the produced binary against (Linux only; no
         /// effect on other hosts). Default: musl (static, portable).
         /// Note: static musl binaries are opaque to Valgrind's leak
@@ -167,9 +173,14 @@ fn run_command(cli: Cli) -> Result<std::process::ExitCode, CompilerError> {
             let emit = emit.into_iter().map(Into::into).collect::<Vec<_>>();
             pipeline::ir_command(&file, &emit)?;
         }
-        Commands::Run { file, emit, args } => {
+        Commands::Run {
+            file,
+            emit,
+            show_inferred_errors,
+            args,
+        } => {
             let emit = emit.into_iter().map(Into::into).collect::<Vec<_>>();
-            let program_exit = pipeline::run_file(&file, &emit, &args)?;
+            let program_exit = pipeline::run_file(&file, &emit, &args, show_inferred_errors)?;
             // Propagate the JIT program's own exit code. Ryo's
             // `main` is void today (the C-ABI shim returns 0), so
             // this is always SUCCESS in practice; clamping into the
@@ -179,9 +190,14 @@ fn run_command(cli: Cli) -> Result<std::process::ExitCode, CompilerError> {
                 program_exit.clamp(0, 255) as u8
             ));
         }
-        Commands::Build { file, emit, link } => {
+        Commands::Build {
+            file,
+            emit,
+            show_inferred_errors,
+            link,
+        } => {
             let emit = emit.into_iter().map(Into::into).collect::<Vec<_>>();
-            pipeline::build_file(&file, &emit, link.into())?;
+            pipeline::build_file(&file, &emit, link.into(), show_inferred_errors)?;
         }
         Commands::Toolchain { action } => match action {
             ToolchainAction::Install => {

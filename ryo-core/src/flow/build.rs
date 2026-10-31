@@ -561,19 +561,21 @@ impl FlowBuilder<'_> {
                     unreachable!("ViewAsOwner carries UnOp")
                 }
             }
-            // `StrConst`/`BytesConst`/`DebugRepr` join the producer
-            // set (G2): the ownership pass keys owner state by place,
+            // `StrConst`/`BytesConst`/`DebugRepr`/`ErrorMessage` join the
+            // producer set (G2): the ownership pass keys owner state by place,
             // so every tracked producer needs a temp place — a
             // literal's place is its storage identity even though
             // codegen materializes it inline.
             TirTag::StrConst
             | TirTag::BytesConst
             | TirTag::DebugRepr
+            | TirTag::ErrorMessage
             | TirTag::StrConcat
             | TirTag::BytesConcat
             | TirTag::Call
             | TirTag::StructLit
             | TirTag::EnumLit
+            | TirTag::ErrorUnionCoerce
                 if self.pool.needs_drop(inst.ty) =>
             {
                 self.mint_temp(r, inst.ty);

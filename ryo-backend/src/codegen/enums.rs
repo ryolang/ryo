@@ -1,14 +1,16 @@
 //! Enum codegen (M11) — all enum/variant emission: enum construction,
 //! tag/union slot layout, tag-dispatched copies and drops, Eq, and
 //! Debug. Like structs (see `structs.rs`), enum values are
-//! memory-first aggregates: every value lives in a stack slot sized by
-//! the pool's enum layout (`i32` discriminant at offset 0, each
+//! memory-first aggregates: every inhabited value lives in a stack slot
+//! sized by the pool's enum layout (`i32` discriminant at offset 0, each
 //! variant's payload at its pool-computed absolute offset), and
 //! `ValueRepr::Enum` carries the slot address. Copies and drops NEVER
 //! copy bytes — a block copy would read the inactive variants'
 //! uninitialized padding, which the ASan/Valgrind suites flag — so
 //! both dispatch on the loaded discriminant (`Switch`) and touch only
 //! the active variant's fields, reusing the struct per-field helpers.
+//! The empty inferred error set has no tag or payload storage, so copying
+//! it is a no-op.
 
 use cranelift::codegen::ir::{BlockArg, MemFlagsData, StackSlot, StackSlotData, StackSlotKind};
 use cranelift::frontend::Switch;
@@ -19,14 +21,17 @@ use ryo_core::types::{EnumVariantView, InternPool, TypeId, TypeKind, VariantKind
 
 use super::{Codegen, FunctionContext, STR_SLOT_SIZE, Terminator, ValueRepr};
 
-/// True for enum types (M11) — memory-first aggregates exactly like
-/// structs: values live in stack slots, `ValueRepr::Enum` carries the
-/// slot address, and params/returns ride the slot-address / hidden-sret
+/// True for runtime enum-shaped types — memory-first aggregates exactly
+/// like structs: values live in stack slots, `ValueRepr::Enum` carries
+/// the slot address, and params/returns ride the slot-address / hidden-sret
 /// ABI. Callers gate aggregate paths with this before
-/// `cranelift_type_for`, where an enum TypeId is a caller bug (same
+/// `cranelift_type_for`, where an enum-shaped TypeId is a caller bug (same
 /// contract as `is_struct_type`).
 pub(crate) fn is_enum_type(ty: TypeId, pool: &InternPool) -> bool {
-    matches!(pool.kind(ty), TypeKind::Enum)
+    matches!(
+        pool.kind(ty),
+        TypeKind::Enum | TypeKind::DeclaredError | TypeKind::ErrorSet | TypeKind::ErrorUnion
+    )
 }
 
 /// Trap code for the invalid-discriminant arm of every tag dispatch:
@@ -80,6 +85,7 @@ impl<M: Module> Codegen<M> {
         let inst = ctx.tir.inst(r);
         let addr = match inst.tag {
             TirTag::EnumLit => Self::emit_enum_lit(builder, ctx, r)?,
+            TirTag::ErrorUnionCoerce => super::errors::emit_error_union_coerce(builder, ctx, r)?,
             TirTag::Var => {
                 let name = match inst.data {
                     TirData::Var(name) => name,
@@ -197,6 +203,30 @@ impl<M: Module> Codegen<M> {
         src: Value,
         ty: TypeId,
     ) -> Result<(), String> {
+        Self::emit_enum_copy_impl(builder, ctx, dst, src, ty, false)
+    }
+
+    pub(crate) fn emit_enum_deep_copy(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        dst: Value,
+        src: Value,
+        ty: TypeId,
+    ) -> Result<(), String> {
+        Self::emit_enum_copy_impl(builder, ctx, dst, src, ty, true)
+    }
+
+    fn emit_enum_copy_impl(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        dst: Value,
+        src: Value,
+        ty: TypeId,
+        deep: bool,
+    ) -> Result<(), String> {
+        if ctx.pool.enum_view(ty).is_empty() {
+            return Ok(());
+        }
         let tag = builder
             .ins()
             .load(types::I32, MemFlagsData::trusted(), src, 0);
@@ -208,7 +238,11 @@ impl<M: Module> Codegen<M> {
             builder.seal_block(*block);
             builder.switch_to_block(*block);
             for field in variant.fields {
-                Self::emit_field_copy(builder, ctx, dst, src, field)?;
+                if deep {
+                    Self::emit_field_deep_copy(builder, ctx, dst, src, field)?;
+                } else {
+                    Self::emit_field_copy(builder, ctx, dst, src, field)?;
+                }
             }
             builder.ins().jump(merge, &[]);
         }
@@ -463,7 +497,9 @@ impl<M: Module> Codegen<M> {
         let view = ctx.tir.var_decl_view(r);
         let init_tag = ctx.tir.inst(view.initializer).tag;
         let addr = match init_tag {
-            TirTag::EnumLit | TirTag::Call => Self::eval_inst_enum(builder, ctx, view.initializer)?,
+            TirTag::EnumLit | TirTag::ErrorUnionCoerce | TirTag::Call => {
+                Self::eval_inst_enum(builder, ctx, view.initializer)?
+            }
             _ => {
                 let src = Self::eval_inst_enum(builder, ctx, view.initializer)?;
                 let slot = Self::enum_slot(builder, ctx, inst.ty);
@@ -571,7 +607,7 @@ impl<M: Module> Codegen<M> {
         } else {
             ctx.tir.inst(target).ty
         };
-        if !matches!(ctx.pool.kind(ty), TypeKind::Enum) {
+        if !is_enum_type(ty, ctx.pool) {
             return Ok(false);
         }
         let addr = if let Some(binding) = binding {

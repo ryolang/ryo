@@ -152,12 +152,11 @@ pub enum InstTag {
     /// a local/param read or a diagnostic.
     Var,
 
-    /// Compiler-generated temporary read. Only astgen's nested-
-    /// destructuring lowering emits this (see [`InstTag::Destructure`]);
-    /// the payload is [`InstData::Var`] like [`InstTag::Var`], but sema
-    /// resolves it exclusively through the destructuring-temp side
-    /// table — never the user scope — so source-level `Var` references
-    /// can neither observe nor collide with compiler temporaries.
+    /// Compiler-generated temporary read, used by nested destructuring
+    /// and catch lowering. The payload is [`InstData::Var`] like
+    /// [`InstTag::Var`], but sema resolves it exclusively through the
+    /// compiler-temp side table — never the user scope — so source-level
+    /// `Var` references can neither observe nor collide with temporaries.
     TempVar,
 
     // Binary arithmetic / comparison. Both operands in `data.bin_op`.
@@ -257,6 +256,11 @@ pub enum InstTag {
     /// `argc = 0`.
     EnumLit,
 
+    /// Declared-error construction candidate. The inline data preserves
+    /// the source name for shadowing; the shared enum-literal wire holds
+    /// positional field indices or named-field `StringId`s.
+    ErrorConstruct,
+
     /// Field access `object.field` (M9); see [`InstData::FieldAccess`].
     FieldAccess,
 
@@ -280,6 +284,14 @@ pub enum InstTag {
     /// in [`InstData::Match`]; the arm list is a variable payload in
     /// `extra` — see the `uir::match_` module for the wire layout.
     Match,
+
+    /// Compiler-generated error-union dispatch. The two hidden arms use
+    /// the match wire; `binding` is the optional shared `catch as` name.
+    Catch,
+
+    /// Error propagation over one operand. Sema lowers this to hidden
+    /// union dispatch with an ordinary early return on the error arm.
+    Try,
 
     /// Placeholder for a statement the parser recovered from (R10:
     /// `StmtKind::Error`). No operands. Sema lowers it to a TIR
@@ -308,8 +320,8 @@ pub enum InstData {
     Bool(bool),
     /// Identifier name for [`InstTag::Var`] and [`InstTag::TempVar`].
     Var(StringId),
-    /// Single operand, used by unary ops, [`InstTag::Return`], and
-    /// [`InstTag::ExprStmt`].
+    /// Single operand, used by unary ops, [`InstTag::Return`],
+    /// [`InstTag::ExprStmt`], and [`InstTag::Try`].
     UnOp(InstRef),
     /// Call-site mutable-borrow marker `&expr`; operand is the inner
     /// ref. See [`InstTag::Borrow`].
@@ -333,6 +345,12 @@ pub enum InstData {
         object: InstRef,
         field: StringId,
     },
+    /// Error-construction candidate name and its shared enum-literal
+    /// argument wire. Sema resolves the name after value bindings.
+    ErrorConstruct {
+        name: StringId,
+        args: ExtraRange,
+    },
     /// Destructuring assignment `pattern = value` (M10): the value
     /// expression plus a plan of `(selector, bind)` pairs in
     /// `destructure_extra`. `by_position` selects the selector
@@ -347,6 +365,10 @@ pub enum InstData {
     /// range into `extra` of the length-prefixed arm list; see the
     /// `uir::match_` module for the wire layout.
     Match {
+        scrutinee: InstRef,
+        arms: ExtraRange,
+    },
+    Catch {
         scrutinee: InstRef,
         arms: ExtraRange,
     },
@@ -443,6 +465,15 @@ pub struct UirEnumField {
     pub span: Span,
 }
 
+/// A nominal error declaration with its single variant payload.
+#[derive(Debug, Clone)]
+pub struct UirErrorDecl {
+    pub name: StringId,
+    pub ty: TypeId,
+    pub payload: UirEnumVariant,
+    pub span: Span,
+}
+
 // ---------- Top-level UIR ----------
 
 #[derive(Debug, Clone)]
@@ -457,6 +488,10 @@ pub struct Uir {
     /// Enum declarations in source order (M11). Side table — enum
     /// decls lower to no instructions.
     pub enum_decls: Vec<UirEnumDecl>,
+    /// Nominal error declarations in source order.
+    pub error_decls: Vec<UirErrorDecl>,
+    /// Compiler-generated direct-arm dispatch inside `catch as`.
+    pub direct_catch_matches: std::collections::HashSet<InstRef>,
 }
 
 impl Default for Uir {
@@ -481,7 +516,13 @@ impl Uir {
             func_bodies: Vec::new(),
             struct_decls: Vec::new(),
             enum_decls: Vec::new(),
+            error_decls: Vec::new(),
+            direct_catch_matches: std::collections::HashSet::new(),
         }
+    }
+
+    pub fn is_direct_catch_match(&self, r: InstRef) -> bool {
+        self.direct_catch_matches.contains(&r)
     }
 
     /// Lookup an instruction by reference.
@@ -561,8 +602,8 @@ impl UirBuilder {
         self.push(InstTag::Var, InstData::Var(name), span)
     }
 
-    /// Emits a read of a compiler-generated temporary (nested-
-    /// destructuring lowering only); see [`InstTag::TempVar`].
+    /// Emits a read of a compiler-generated temporary; see
+    /// [`InstTag::TempVar`].
     pub fn temp_var_ref(&mut self, name: StringId, span: Span) -> InstRef {
         self.push(InstTag::TempVar, InstData::Var(name), span)
     }
@@ -570,7 +611,7 @@ impl UirBuilder {
     pub fn unary(&mut self, tag: InstTag, operand: InstRef, span: Span) -> InstRef {
         debug_assert!(matches!(
             tag,
-            InstTag::Neg | InstTag::Not | InstTag::Return | InstTag::ExprStmt
+            InstTag::Neg | InstTag::Not | InstTag::Return | InstTag::ExprStmt | InstTag::Try
         ));
         self.push(tag, InstData::UnOp(operand), span)
     }
@@ -811,6 +852,22 @@ impl UirBuilder {
         self.push(InstTag::EnumLit, InstData::Extra(range), span)
     }
 
+    pub fn error_construct(
+        &mut self,
+        name: StringId,
+        ty: TypeId,
+        positional: bool,
+        args: &[(u32, InstRef)],
+        span: Span,
+    ) -> InstRef {
+        let range = enum_lit_extra::encode(&mut self.uir.extra, ty, 0, args, positional);
+        self.push(
+            InstTag::ErrorConstruct,
+            InstData::ErrorConstruct { name, args: range },
+            span,
+        )
+    }
+
     /// Emits a `FieldAccess` `object.field` (M9).
     pub fn field_access(&mut self, object: InstRef, field: StringId, span: Span) -> InstRef {
         self.push(
@@ -852,6 +909,14 @@ impl UirBuilder {
     pub fn add_enum_decl(&mut self, decl: UirEnumDecl) {
         self.uir.enum_decls.push(decl);
     }
+
+    pub fn add_error_decl(&mut self, decl: UirErrorDecl) {
+        self.uir.error_decls.push(decl);
+    }
+
+    pub fn mark_direct_catch_match(&mut self, r: InstRef) {
+        self.uir.direct_catch_matches.insert(r);
+    }
 }
 
 mod dump;
@@ -861,9 +926,9 @@ pub use destructure::UirDestructureView;
 pub(crate) use destructure::destructure_extra;
 mod match_;
 pub use match_::{
-    UirAnonField, UirAnonFieldsView, UirArgTarget, UirArmBody, UirArmBodyView, UirFieldTarget,
-    UirMatchArm, UirMatchArmView, UirMatchView, UirPattern, UirPatternView, UirVariantArgs,
-    UirVariantArgsView, match_extra,
+    UirAnonField, UirAnonFieldsView, UirArgTarget, UirArmBody, UirArmBodyView, UirCatchView,
+    UirFieldTarget, UirMatchArm, UirMatchArmView, UirMatchView, UirPattern, UirPatternView,
+    UirVariantArgs, UirVariantArgsView, match_extra,
 };
 mod wires;
 pub(crate) use wires::{

@@ -391,6 +391,10 @@ impl MatchBodyView<'_> {
 // ---------- Builder ----------
 
 impl TirBuilder {
+    pub fn mark_direct_catch_match(&mut self, r: TirRef) {
+        self.direct_catch_matches.insert(r);
+    }
+
     /// Emit a typed `match scrutinee:` expression (M12). `ty` is the
     /// match expression's result type (the join of the arm bodies);
     /// `arms` is copied verbatim into `extra` — see the module header
@@ -507,6 +511,10 @@ impl TirBuilder {
 // ---------- Decoder ----------
 
 impl Tir {
+    pub fn is_direct_catch_match(&self, r: TirRef) -> bool {
+        self.direct_catch_matches.contains(&r)
+    }
+
     /// Decode a [`TirTag::Match`] payload (M12). Borrows `extra`;
     /// allocates nothing — arms decode on demand by index (see
     /// [`MatchView`]).

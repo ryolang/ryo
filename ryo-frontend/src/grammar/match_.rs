@@ -39,21 +39,63 @@
 use super::*;
 use chumsky::input::ValueInput;
 
-/// `match scrutinee:` + indented arm block (M12). Yields the
-/// expression id. Built once inside `expression_parser`'s atom choice
-/// and handed the shared `expr` handle — no new
-/// `expression_parser()` call site. The arm statement grammar is
-/// `body_statement_parser` over the same handle, so statement arms
-/// (return/break/assignments, if/while/for, nested matches) parse
-/// exactly as they do in a function body.
+/// `match scrutinee:` + indented arm block (M12).
 pub(super) fn match_expression_parser<'a, I>(
     expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
 ) -> impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
-    let stmt = body_statement_parser(expr.clone());
+    just(Token::Match)
+        .ignore_then(expr.clone())
+        .then_ignore(just(Token::Colon))
+        .then(match_arms_parser(expr))
+        .map_with(|(scrutinee, arms), e: &mut Mx<'a, '_, I>| {
+            let span = crate::spans::cspan(e.span());
+            e.state().match_expr_with_arms(scrutinee, arms, span)
+        })
+        .boxed()
+}
 
+/// Expression, single-statement, and indented-block arm bodies.
+pub(super) fn match_arm_body_parser<'a, I>(
+    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, MatchArmBody, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    let stmt = body_statement_parser(expr.clone());
+    let tail = require_newlines().or(peek_terminator(Token::Dedent));
+    choice((
+        expr.clone()
+            .then_ignore(tail.clone())
+            .map(MatchArmBody::Expr),
+        stmt.clone()
+            .then_ignore(tail)
+            .map_with(|s, e: &mut Mx<'a, '_, I>| {
+                MatchArmBody::Stmts(e.state().push_stmt_list(&[s]))
+            }),
+        skip_newlines()
+            .ignore_then(statement_list(stmt, peek_terminator(Token::Dedent)))
+            .delimited_by(
+                skip_newlines().ignore_then(just(Token::Indent)),
+                just(Token::Dedent),
+            )
+            .then_ignore(skip_newlines())
+            .map_with(|stmts, e: &mut Mx<'a, '_, I>| {
+                MatchArmBody::Stmts(e.state().push_stmt_list(&stmts))
+            }),
+    ))
+}
+
+/// Parse and seal one or more match arms. Direct-arm catch expressions
+/// use the same patterns and body forms as ordinary match expressions.
+pub(super) fn match_arms_parser<'a, I>(
+    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, MatchArmList, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
     // ---- Patterns ----
     //
     // `Recursive` because positional elements are full patterns
@@ -273,49 +315,33 @@ where
     // binding so the rest of the arm still parses (the diagnostic
     // fails the build).
     let arm_pattern = pat.validate(|pat_id, e: &mut Mx<'a, '_, I>, emitter| {
-        if let PatternKind::Bind(ident) = e.state().pattern(pat_id).kind {
-            let name = e.state().pool.str(ident.name).to_string();
-            emitter.emit(Rich::custom(
-                e.span(),
-                ParseDiag::Message(format!(
-                    "`{name}` is not a pattern — did you mean a variant pattern like \
-                     `Some({name})`? (use `_` to match any value)"
-                )),
-            ));
+        let pattern = e.state().pattern(pat_id).kind;
+        match pattern {
+            PatternKind::Variant { variant, .. }
+                if matches!(e.state().pool.str(variant), "Ok" | "Err") => {
+                emitter.emit(Rich::custom(
+                    e.span(),
+                    ParseDiag::Message(
+                        "Ok and Err are compiler-internal alternatives, not source patterns; use `catch` to handle error unions".into(),
+                    ),
+                ));
+            }
+            PatternKind::Bind(ident) => {
+                let name = e.state().pool.str(ident.name).to_string();
+                emitter.emit(Rich::custom(
+                    e.span(),
+                    ParseDiag::Message(format!(
+                        "`{name}` is not a pattern — did you mean a variant pattern like \
+                         `Some({name})`? (use `_` to match any value)"
+                    )),
+                ));
+            }
+            _ => {}
         }
         pat_id
     });
 
-    let tail = require_newlines().or(peek_terminator(Token::Dedent));
-    let arm_body = choice((
-        // Expression arm — a call like `io.print(...)` lands here.
-        expr.clone()
-            .then_ignore(tail.clone())
-            .map(MatchArmBody::Expr),
-        // Single-line statement arm (`return e`, assignments) — wraps
-        // into a one-element StmtList.
-        stmt.clone()
-            .then_ignore(tail.clone())
-            .map_with(|s, e: &mut Mx<'a, '_, I>| {
-                MatchArmBody::Stmts(e.state().push_stmt_list(&[s]))
-            }),
-        // Block arm — the indented statement list. The newline run
-        // after the inner block's `Dedent` always separates this arm
-        // from the next arm (or the arm block's own `Dedent`), so it
-        // is absorbed here: the single-line arms' `tail` handles it
-        // via `require_newlines`, but this arm has no line tail of
-        // its own.
-        skip_newlines()
-            .ignore_then(statement_list(stmt.clone(), peek_terminator(Token::Dedent)))
-            .delimited_by(
-                skip_newlines().ignore_then(just(Token::Indent)),
-                just(Token::Dedent),
-            )
-            .then_ignore(skip_newlines())
-            .map_with(|stmts, e: &mut Mx<'a, '_, I>| {
-                MatchArmBody::Stmts(e.state().push_stmt_list(&stmts))
-            }),
-    ));
+    let arm_body = match_arm_body_parser(expr.clone());
     let arm_line = arm_pattern
         .then_ignore(just(Token::Colon))
         .then(arm_body)
@@ -346,14 +372,7 @@ where
         empty(),
     ));
 
-    just(Token::Match)
-        .ignore_then(expr.clone())
-        .then_ignore(just(Token::Colon))
-        .then(arms)
-        .then_ignore(absorb_close_paren_newline)
-        .map_with(|(scrutinee, arms), e: &mut Mx<'a, '_, I>| {
-            let span = crate::spans::cspan(e.span());
-            e.state().match_expr(scrutinee, &arms, span)
-        })
+    arms.then_ignore(absorb_close_paren_newline)
+        .map_with(|arms, e: &mut Mx<'a, '_, I>| e.state().push_match_arm_list(&arms))
         .boxed()
 }

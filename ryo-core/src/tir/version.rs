@@ -12,6 +12,9 @@ impl Tir {
         self.body.offset.hash(&mut hash);
         self.body.len.hash(&mut hash);
         self.contains_match.hash(&mut hash);
+        let mut direct_catch: Vec<_> = self.direct_catch_matches.iter().map(|r| r.raw()).collect();
+        direct_catch.sort_unstable();
+        direct_catch.hash(&mut hash);
         self.extra.hash(&mut hash);
         for param in &self.params {
             param.name.hash(&mut hash);

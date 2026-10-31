@@ -690,12 +690,11 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 		return os.read(path)
 	```
 
-- **Generic Error Type** (`!T`): Accept any error:
+- **Inferred Error Union** (`!T`): Infer a finite error set, never an open `anyerror` set. See Section 7.2 for inference, recursion, and empty-set rules.
 
     ```ryo
 	fn flexible_operation() -> !Data:
-		# Can return any error type
-		...
+		return try operation()
 	```
 
 - **Combined Error and Optional** (`!?T`):
@@ -711,52 +710,34 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 
 #### **Pattern Matching on Errors**
 
-- **Single Error Type** (Exhaustive matching required):
+- **Single Error Type** (direct exhaustive arm):
 
     ```ryo
 	result = read_file(path) catch as e:
-		match e:
-			io.FileNotFound(p):
-				print(f"File not found: {p}")
-			io.PermissionDenied(p):
-				print(f"Permission denied: {p}")
-			io.DiskFull:
-				print("Disk full")
-			# MUST handle all variants - compiler error if missing
+		io.FileNotFound(p): recover_file(p)
 	```
 
-- **Error Union** (Exhaustive matching required):
+- **Error Union** (nested exhaustive matching remains valid):
 
     ```ryo
 	result = process(path) catch as e:
 		match e:
-			io.FileNotFound(p):
-				return create_default(p)
-			io.PermissionDenied(p):
-				return request_permissions()
-			parse.InvalidSyntax(line, col):
-				log_error(f"Syntax error at {line}:{col}")
-				return default_config()
-			parse.UnexpectedToken(exp, got):
-				log_error(f"Expected {exp}, got {got}")
-				return default_config()
-			parse.UnexpectedEof:
-				log_error("Unexpected end of file")
-				return default_config()
-			# MUST handle all variants in union - compiler enforces this
+			io.FileNotFound(p): create_default(p)
+			io.PermissionDenied(p): request_permissions()
+			parse.InvalidSyntax(line, col): default_config()
+			parse.UnexpectedToken(exp, got): default_config()
+			parse.UnexpectedEof: default_config()
 	```
 
     **Using catch-all when needed:**
 
     ```ryo
 	result = process(path) catch as e:
-		match e:
-			io.FileNotFound(p):
-				return create_default(p)
-			_:  # Explicit catch-all: "handle everything else the same way"
-				log_error(e.message())
-				return default_config()
+		io.FileNotFound(p): create_default(p)
+		_: fallback(e.message())
 	```
+
+Bare `catch:` accepts the same direct arms without a shared binding. `Ok` and `Err` are compiler-only and cannot appear as source patterns; match a declared error or error set directly, but consume an error union with `try` or `catch`.
 
 - *(Rationale: Single-variant errors provide simplicity (one syntax). Error unions enable automatic composition without wrapper types (Zig-inspired). Exhaustive matching by default ensures all error cases are explicitly handled. The `_` catch-all provides an escape hatch for truly generic handling.)*
 
@@ -821,15 +802,15 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 				print(f"  {frame.function} at {frame.file}:{frame.line}")
 	```
 
-- **Automatic Message Generation:**
-  - **Single string field:** The string is used as the message.
+- **Automatic Message Generation:** `.message() -> str` is available on every declared error and error set, including the value bound by `catch as e`. It returns a fresh owned string and never moves a field out of a borrowed error. Calling it directly on an error union is rejected; catch the union first.
+  - **Single string field:** The string is used as the message, whether the field is positional or named.
 
         ```ryo
 		error NotFound(str)
 		# .message() returns the string directly
 		```
 
-  - **Named message field:** The `message` field is used.
+  - **Named message field:** A `message: str` field is used even when other fields exist, taking precedence over debug formatting.
 
         ```ryo
 		error HttpError(status: int, message: str)
@@ -843,7 +824,7 @@ fn parse_json(text: str) -> parse.InvalidSyntax!Data:
 		# .message() returns "Timeout"
 		```
 
-  - **Multiple fields (no message field):** Generated from Debug representation.
+  - **Other shapes:** A deterministic debug representation contains the error name and all fields. Named fields use `name=value`; string contents appear without debug quotes.
 
         ```ryo
 		error FileNotFound(path: str, permission_level: int)
@@ -2029,6 +2010,10 @@ error PermissionDenied(path: str)
 error ReadFailed(reason: str)
 ```
 
+Each declaration creates one nominal single-variant error. Payload fields must be owned and have finite layouts; views are forbidden. Unit errors construct by name, positional payloads use `Error(value, ...)`, and named payloads use `Error(field=value, ...)` without mixing positional and named fields. Named-parenthesized error construction does not enable named arguments on ordinary functions.
+
+A bound local or parameter shadows a same-named error constructor. An unbound name that identifies a declared error constructs that error.
+
 - *(Rationale: `error` keyword signals error-handling intent. Single-variant errors with module organization provide clear composition without wrapper types. Associated data enables rich error information.)*
 
 ### 7.2 Error Union Types
@@ -2041,22 +2026,22 @@ Function return types specify both the error type and success type. Ryo provides
 | -------- | ---------- | --------- |
 | `ErrorType!T` | Single, specific error type | `fn read(path) -> FileNotFound!str` |
 | `(E1\|E2\|E3)!T` | Multiple known error types | `fn load() -> (FileNotFound\|ParseError)!Data` |
-| `!T` | Any/inferred error types | `fn process() -> !Result` (compiler infers all errors from `try`) |
+| `!T` | Finite inferred error set | `fn process() -> !Result` |
 
 **Decision Guide:**
 
 - **Use `ErrorType!T`** when your function can only fail in one specific way
 - **Use `(E1|E2)!T`** when you know exactly which errors can occur and want to document them
-- **Use `!T`** when composing multiple functions with different errors - the compiler automatically infers the error union from `try` expressions
+- **Use `!T`** when composing functions whose direct returns and `try` expressions determine a finite error set
 
 #### **Single Error Type**
 
 The `ErrorType!SuccessType` syntax indicates a function can return one specific error or a value:
 
 ```ryo
-fn read_file(path: str) -> FileError!str:
+fn read_file(path: str) -> FileNotFound!str:
 	if not exists(path):
-		return FileError.NotFound(path)
+		return FileNotFound(path)
 	return os.read(path)
 ```
 
@@ -2072,7 +2057,7 @@ fn process(path: str) -> (FileError | ParseError)!Data:
 	return data
 ```
 
-**Inferred error union** - Compiler infers from `try` expressions:
+**Inferred error union** - Infer a finite set from direct error returns, returned error sets or unions, and `try` expressions:
 
 ```ryo
 # Compiler infers: (FileError | ParseError)!Data
@@ -2082,21 +2067,22 @@ fn process(path: str) -> !Data:
 	return data
 ```
 
-**Generic error type** - Accept any error:
+An inferred union is never an open or global `anyerror` type. Inference has these rules:
 
-```ryo
-fn flexible_operation() -> !Data:
-	# Can return any error type
-	...
-```
+- `!T` is available only in function-return position, not in parameters, fields, or local annotations.
+- Returning a declared error adds that error; returning a concrete error set or union adds all its members; `try` adds the operand's members. Successful returns add nothing.
+- An empty inferred set is valid. It has no explicit source syntax, its error alternative is uninhabited, and only its success alternative can be constructed.
+- Every recursive call-graph component containing an inferred function is rejected, including a cycle that passes through explicitly typed functions. Recursion using only explicit unions remains valid; the diagnostic requests explicit unions for the inferred members.
+- `--show-inferred-errors` prints each finalized inferred return union in source order.
 
 - **Error Union Semantics:**
-  - Error types are composed with `|` operator (unordered, not a sequence)
-  - Inferred unions automatically track all possible errors from `try` expressions
-  - Use `--show-inferred-errors` compiler flag to see inferred error set
-  - Single error type is a special case of error union with one member
+  - Error members are nominal. Composition with `|` is unordered and deduplicated; a single-member set is that declared error type. Explicit sets must contain at least one member.
+  - `void` success is supported. `never`, views, declared errors, error sets, and error unions cannot be success types; optional success types use the separate `!?T` composition.
+  - A success value, declared error, error set, or narrower union coerces to a compatible union. Union widening preserves the active alternative; narrowing and conversion between nominal errors are rejected.
+  - Raw unions may be held in explicitly typed or inferred local bindings and parameters, returned, assigned, or consumed by `try` or `catch`. Binding one does not unwrap it: direct field access, arithmetic, truthiness, printing, arbitrary methods, and source-level `match` remain forbidden.
+  - Use `--show-inferred-errors` to inspect inferred error sets. A single error type is the one-member case of an error union.
 
-- *(Rationale: Zig-style `E!T` syntax is concise. Error unions eliminate wrapper types through automatic composition. Explicit unions document API contracts. Inferred unions reduce boilerplate.)*
+- *(Rationale: Zig-style `E!T` syntax is concise. Error unions eliminate wrapper types through automatic composition. Explicit unions document API contracts. Finite inferred unions reduce boilerplate without hiding the possible failures.)*
 
 ### 7.3 Error Propagation (`try`)
 
@@ -2112,9 +2098,11 @@ fn load_and_parse(path: str) -> !Config:
 	return config
 ```
 
-- **Semantic:** `try expr` evaluates `expr`:
-  - If success: returns the value
-  - If error: propagates error to caller
+- **Semantic:** `try expr` requires an error-union operand and an error-union return type on the enclosing function. It evaluates the operand exactly once:
+  - If success: yields the success value.
+  - If error: returns the error to the caller using the ordinary union-coercion rules and the same cleanup as any other early return.
+
+- **Precedence:** `try` takes only the immediate unary/postfix expression, excluding a following binary operator, `orelse`, or `catch`. Thus `try f() + g()` means `(try f()) + g()`, and `try f() catch as e:` means `(try f()) catch as e:` (normally a type error because `try` has already unwrapped the union).
 
 - **Error Composition with `try`:**
   - **Inferred unions (`!T`):** `try` automatically collects all error types from `try` expressions into the inferred union. No manual bookkeeping needed.
@@ -2170,67 +2158,36 @@ fn load_and_parse(path: str) -> !Config:
 
 ### 7.4 Error Handling (`catch`)
 
-**IMPORTANT:** Error handling with `catch` requires **exhaustive pattern matching**. All error types and variants must be explicitly handled. If you don't want to handle specific error cases explicitly, use the `_` wildcard pattern to match remaining cases.
-
-The `catch` operator handles errors with pattern matching:
+The `catch` operator evaluates an error-union operand exactly once. Success becomes the catch expression's value; error executes the handler or the exhaustive error arms:
 
 ```ryo
 config = load_and_parse("app.toml") catch as e:
-	match e:
-		FileError.NotFound(path):
-			print(f"Creating default config at {path}")
-			return default_config()
-
-		ParseError.InvalidSyntax(line, col):
-			print(f"Syntax error at {line}:{col}")
-			process.exit(1)
+	FileError(path): create_default(path)
+	ParseError(line, col): process.exit(1)
 ```
 
-- **Syntax:** `expr catch as e: handle_error(e)` binds the error to `e`; use `expr catch:` (no `as` clause) to handle without binding. `as` is Ryo's binding keyword — the same gesture as `with EXPR as NAME:` — and is *not* used for type conversion (which uses `TargetType(value)`).
-- **Pattern Matching:** Full ADT pattern matching enables type-safe error handling.
-- **Note (future improvement, not yet in the language):** The dominant idiom is `catch as err:` immediately followed by `match err:` — the value is bound only to be matched on the next line, so the explicit `match err:` is superfluous boilerplate. A later language improvement may let `catch:` introduce match arms directly (e.g. `expr catch: Pattern: body`), eliding the redundant `match`. Until then, the explicit `match` is required.
+- **Syntax:** `expr catch as e: handler` binds the error set to `e`. Both `catch as e:` and bare `catch:` accept direct error arms; bare `catch:` accepts only direct arms and is the warning-free form when no shared binding is needed. `as` is Ryo's binding keyword — the same gesture as `with EXPR as NAME:` — and is *not* used for type conversion (which uses `TargetType(value)`).
+- **Direct arms:** Arms match the declared members of the error set and must be exhaustive, either by covering every member or with `_`. A shared `e` binding is visible in every arm, including the wildcard arm. Every falling arm or ordinary-handler path must produce the operand's success type or diverge.
+- **Nested matching:** The explicit `catch as e: match e:` form remains valid when a full match handler is more convenient:
 
-- **Pattern Matching Differences:**
-  - **Single Error Type** (exhaustive): Must handle all variants
+    ```ryo
+	result = process(path) catch as e:
+		match e:
+			io.FileNotFound(p): create_default(p)
+			parse.InvalidFormat(reason): default_config()
+			network.ConnectionFailed(reason): retry_later()
+	```
 
-        ```ryo
-		result = read_file(path) catch as e:
-			match e:
-				FileError.NotFound(p):
-					# ...
-				FileError.PermissionDenied(p):
-					# ...
-				FileError.ReadError(r):
-					# ...
-				# MUST handle all variants
-		```
+- **Bare direct arms:** Omit the binding when only the patterns and payload bindings are needed:
 
-  - **Error Union** (Exhaustive matching required): Must handle all error types in union:
+    ```ryo
+	result = process(path) catch:
+		io.FileNotFound(p): create_default(p)
+		_: default_config()
+	```
 
-        ```ryo
-		result = process(path) catch as e:
-			match e:
-				io.FileNotFound(p):
-					return create_default(p)
-				parse.InvalidFormat(reason):
-					log_error(f"Parse error: {reason}")
-					return default_config()
-				network.ConnectionFailed(reason):
-					return retry_later()
-				# MUST handle all variants in union
-		```
-
-  - **With Catch-All**: When you want generic handling for some errors:
-
-        ```ryo
-		result = process(path) catch as e:
-			match e:
-				io.FileNotFound(p):
-					return create_default(p)
-				_:  # Explicit catch-all for all other error types
-					log_error(e.message())
-					return default_config()
-		```
+- **Precedence:** `catch` applies to the immediately preceding postfix expression and binds more tightly than binary operators. Thus `f() + g() catch as e:` means `f() + (g() catch as e:)`; parenthesize a wider expression when the whole expression produces the union.
+- **Hidden alternatives:** `Ok` and `Err` are compiler-only alternatives, never source constructors or patterns. An error union is not a valid source-level `match` scrutinee; use `try` or `catch`. Declared errors and error sets do support exhaustive `match`, with the usual payload-shape, move, redundancy, and missing-arm rules.
 
 - *(Rationale: `catch` follows familiar error-handling conventions. Exhaustive matching for all error types (single or union) ensures all error cases are explicitly handled, improving code reliability and preventing silent failures.)*
 
@@ -2412,17 +2369,17 @@ fn main():
 **Direct unwrap is NOT allowed.** Attempting to access error or optional values without using `try`, `catch`, or `orelse` is a **compile-time error**:
 
 ```ryo
-# ❌ COMPILE ERROR: Cannot access error union value directly
+# ❌ COMPILE ERROR: Cannot use an error union as its success type
 result: ParseError!int = parse_int("42")
-value = result  # ERROR: Cannot use value of type ParseError!int directly
+value = result + 1  # ERROR: use `try` or `catch` first
+raw = result         # OK: binds the raw union without unwrapping it
 
 # ❌ COMPILE ERROR: Cannot access optional value directly
 maybe_user: ?User = get_user(id)
 name = maybe_user.name  # ERROR: Cannot access fields on optional type
 
-# ✅ CORRECT: Use try to unwrap errors
-result: ParseError!int = parse_int("42")
-value = try result catch as e:
+# ✅ CORRECT: Use catch to unwrap or handle errors
+value = parse_int("42") catch as e:
 	handle_error(e)
 	return
 

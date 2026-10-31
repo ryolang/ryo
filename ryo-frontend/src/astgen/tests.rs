@@ -527,6 +527,40 @@ fn forward_struct_reference_resolves() {
 }
 
 #[test]
+fn utf8_error_struct_field_uses_compiler_known_layout() {
+    let (uir, pool) = parse_and_lower("struct Holder:\n\tvalue: Utf8Error\n")
+        .expect("compiler-known Utf8Error should be a valid struct field");
+    assert_eq!(
+        pool.display(uir.struct_decls[0].fields[0].ty).to_string(),
+        "Utf8Error"
+    );
+}
+
+#[test]
+fn utf8_error_enum_payload_uses_compiler_known_layout() {
+    let (uir, pool) = parse_and_lower("enum Wrapper:\n\tCase(Utf8Error)\n")
+        .expect("compiler-known Utf8Error should be a valid enum payload");
+    let variant = pool
+        .enum_view(uir.enum_decls[0].ty)
+        .variants()
+        .next()
+        .unwrap();
+    assert_eq!(pool.display(variant.fields[0].ty).to_string(), "Utf8Error");
+}
+
+#[test]
+fn utf8_error_error_payload_uses_compiler_known_layout() {
+    let (uir, pool) = parse_and_lower("error Wrapper(Utf8Error)\n")
+        .expect("compiler-known Utf8Error should be a valid error payload");
+    let variant = pool
+        .enum_view(uir.error_decls[0].ty)
+        .variants()
+        .next()
+        .unwrap();
+    assert_eq!(pool.display(variant.fields[0].ty).to_string(), "Utf8Error");
+}
+
+#[test]
 fn duplicate_struct_declaration_is_diagnosed() {
     let err = parse_and_lower("struct P:\n\tx: int\n\nstruct P:\n\ty: int\n").unwrap_err();
     assert!(err.iter().any(|d| d.code == DiagCode::DuplicateDeclaration));

@@ -795,3 +795,127 @@ fn valgrind_inout_parameter_shadow() {
         "inout_parameter_shadow",
     );
 }
+
+const ERROR_MATCH_ACTIVE_NARROW_UNION: &str = r#"error Narrow(str)
+error Other(int)
+error Largest(str, str, str, str)
+
+fn narrow() -> Narrow!int:
+	return Narrow(int_to_str(7) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+fn widen() -> (Narrow | Other | Largest)!int:
+	result: Narrow!int = narrow()
+	return result
+
+fn main():
+	err = Narrow(int_to_str(8) + "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	match err:
+		Narrow(message): print(message)
+	result = widen()
+	print("ok\n")
+"#;
+
+#[test]
+fn valgrind_error_match_active_narrow_union_storage() {
+    run_valgrind_smoke_allocating(
+        ERROR_MATCH_ACTIVE_NARROW_UNION,
+        "error_match_active_narrow_union",
+    );
+}
+
+const TRY_NESTED_HEAP_PROPAGATION: &str = r#"struct Envelope:
+	message: str
+struct Payload:
+	envelope: Envelope
+	suffix: str
+error Narrow(Payload)
+error Other(int)
+error Largest(str, str, str, str)
+fn make(label: str) -> Payload:
+	return Payload{envelope=Envelope{message=label + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, suffix="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+fn inner(fail: bool) -> Narrow!Payload:
+	if fail:
+		return Narrow(make("error"))
+	return make("success")
+fn outer(fail: bool) -> (Narrow | Other | Largest)!Payload:
+	value = try inner(fail)
+	return value
+fn main():
+	for i in range(0, 4):
+		value = outer(i % 2 == 0) catch:
+			Narrow(payload): payload
+			_: make("other")
+		print(value.envelope.message + "\n")
+"#;
+
+#[test]
+fn valgrind_try_nested_heap_propagation() {
+    run_valgrind_smoke_allocating(TRY_NESTED_HEAP_PROPAGATION, "try_nested_heap_propagation");
+}
+
+const UTF8_ERROR_UNION_LOOP: &str = r#"fn main():
+	mut result = b"".to_str()
+	for i in range(0, 4):
+		if i % 2 == 0:
+			result = b"valid_012345678901234567890123456789".to_str()
+		else:
+			result = b"\xff".to_str()
+		text = result catch as e:
+			e.message()
+		if i % 2 == 0:
+			assert(text == "valid_012345678901234567890123456789", "valid result")
+		else:
+			assert(text == "bytes are not valid UTF-8", "invalid result")
+		print(text + "\n")
+"#;
+
+#[test]
+fn valgrind_utf8_error_union_reinitialization() {
+    run_valgrind_smoke_allocating(UTF8_ERROR_UNION_LOOP, "utf8_error_union_reinitialization");
+}
+
+const DIRECT_CATCH_CONSUME_THEN_MESSAGE: &str = r#"error A(str)
+fn consume(move message: str):
+	print(message + "\n")
+fn describe(err: A, move message: str) -> str:
+	consume(message)
+	return err.message()
+fn find() -> A!str:
+	return A(int_to_str(7) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+fn main():
+	value = find() catch as err:
+		A(message): describe(err, message)
+	print(value + "\n")
+"#;
+
+#[test]
+fn valgrind_direct_catch_payload_consume_then_shared_message() {
+    run_valgrind_smoke_allocating(
+        DIRECT_CATCH_CONSUME_THEN_MESSAGE,
+        "direct_catch_payload_consume_then_shared_message",
+    );
+}
+
+const DIRECT_CATCH_AGGREGATE_CONSUME_THEN_MESSAGE: &str = r#"struct Payload:
+	text: str
+error A(Payload)
+fn consume(move payload: Payload):
+	assert(payload.text.len() == 41, "payload")
+fn describe(err: A, move payload: Payload) -> int:
+	consume(payload)
+	return err.message().len()
+fn find() -> A!int:
+	return A(Payload{text=int_to_str(7) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+fn main():
+	value = find() catch as err:
+		A(payload): describe(err, payload)
+	print(int_to_str(value) + "\n")
+"#;
+
+#[test]
+fn valgrind_direct_catch_aggregate_payload_consume_then_shared_message() {
+    run_valgrind_smoke_allocating(
+        DIRECT_CATCH_AGGREGATE_CONSUME_THEN_MESSAGE,
+        "direct_catch_aggregate_payload_consume_then_shared_message",
+    );
+}

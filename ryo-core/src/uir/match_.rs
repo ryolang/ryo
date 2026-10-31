@@ -245,6 +245,13 @@ pub struct UirMatchView<'a> {
     pub arms: Vec<UirMatchArmView<'a>>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct UirCatchView<'a> {
+    pub scrutinee: InstRef,
+    pub arms: Vec<UirMatchArmView<'a>>,
+    pub binding: Option<StringId>,
+}
+
 /// Decoded view of one match arm; see [`UirMatchArm`].
 #[derive(Debug, PartialEq, Eq)]
 pub struct UirMatchArmView<'a> {
@@ -385,6 +392,29 @@ impl UirBuilder {
         arms: &[UirMatchArm<'_>],
         span: Span,
     ) -> InstRef {
+        let arms = self.encode_match_arms(arms);
+        self.push(InstTag::Match, InstData::Match { scrutinee, arms }, span)
+    }
+
+    pub fn catch(
+        &mut self,
+        scrutinee: InstRef,
+        binding: Option<StringId>,
+        arms: &[UirMatchArm<'_>],
+        span: Span,
+    ) -> InstRef {
+        let offset = self.extra_offset();
+        self.uir.extra.push(destructure_extra::encode_bind(binding));
+        let match_arms = self.encode_match_arms(arms);
+        debug_assert_eq!(match_arms.offset, offset + 1);
+        let arms = ExtraRange {
+            offset,
+            len: match_arms.len + 1,
+        };
+        self.push(InstTag::Catch, InstData::Catch { scrutinee, arms }, span)
+    }
+
+    fn encode_match_arms(&mut self, arms: &[UirMatchArm<'_>]) -> ExtraRange {
         let offset = self.extra_offset();
         self.uir.extra.push(Self::len_u32(arms.len()));
         for arm in arms {
@@ -402,14 +432,7 @@ impl UirBuilder {
             self.uir.extra[arm_len_slot] = arm_len;
         }
         let len = Self::len_u32(self.uir.extra.len() - offset as usize);
-        self.push(
-            InstTag::Match,
-            InstData::Match {
-                scrutinee,
-                arms: ExtraRange { offset, len },
-            },
-            span,
-        )
+        ExtraRange { offset, len }
     }
 
     fn encode_match_pattern(&mut self, pattern: &UirPattern<'_>) {
@@ -526,24 +549,46 @@ impl Uir {
     pub fn match_view(&self, r: InstRef) -> UirMatchView<'_> {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, InstTag::Match));
-        let (scrutinee, range) = match inst.data {
-            InstData::Match { scrutinee, arms } => (scrutinee, arms),
-            _ => unreachable!("Match must carry InstData::Match"),
+        let InstData::Match { scrutinee, arms } = inst.data else {
+            unreachable!("Match must carry InstData::Match")
         };
+        UirMatchView {
+            scrutinee,
+            arms: self.decode_match_arms(arms),
+        }
+    }
+
+    pub fn catch_view(&self, r: InstRef) -> UirCatchView<'_> {
+        let inst = self.inst(r);
+        debug_assert!(matches!(inst.tag, InstTag::Catch));
+        let InstData::Catch { scrutinee, arms } = inst.data else {
+            unreachable!("Catch must carry InstData::Catch")
+        };
+        let binding = destructure_extra::decode_bind(self.extra[arms.offset as usize]);
+        let match_arms = ExtraRange {
+            offset: arms.offset + 1,
+            len: arms.len - 1,
+        };
+        UirCatchView {
+            scrutinee,
+            arms: self.decode_match_arms(match_arms),
+            binding,
+        }
+    }
+
+    fn decode_match_arms(&self, range: ExtraRange) -> Vec<UirMatchArmView<'_>> {
         let slice = &self.extra[range.as_range()];
         let arm_count = slice[match_extra::ARM_COUNT] as usize;
         let mut arms = Vec::with_capacity(arm_count);
         let mut pos = match_extra::ARMS_START;
         for _ in 0..arm_count {
             let arm_len = slice[pos] as usize;
-            // Includes the arm_len word itself: the arm decoder works
-            // in arm-relative offsets (see `match_extra`).
             let arm = &slice[pos..pos + 1 + arm_len];
             arms.push(decode_match_arm(arm));
             pos += 1 + arm_len;
         }
         debug_assert_eq!(pos, slice.len(), "match payload length mismatch");
-        UirMatchView { scrutinee, arms }
+        arms
     }
 }
 
