@@ -174,8 +174,11 @@ pub(super) struct CatchTail {
     pub span: SimpleSpan,
 }
 
+/// `catch [as name]:` plus direct arms or a handler body. `arms` and
+/// `arm_body` are the expression grammar's shared match-arm parsers.
 pub(super) fn catch_tail_parser<'a, I>(
-    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+    arms: impl Parser<'a, I, MatchArmList, PExtra<'a>> + Clone + 'a,
+    arm_body: impl Parser<'a, I, MatchArmBody, PExtra<'a>> + Clone + 'a,
 ) -> impl Parser<'a, I, CatchTail, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
@@ -196,9 +199,9 @@ where
             |name, e: &mut Mx<'a, '_, I>| Ident::new(name, crate::spans::cspan(e.span())),
         ))
         .or_not();
-    let arms = match_::match_arms_parser(expr.clone()).map(CatchBody::Arms);
+    let arms = arms.map(CatchBody::Arms);
     let handler = skip_newlines()
-        .ignore_then(match_::match_arm_body_parser(expr))
+        .ignore_then(arm_body)
         .delimited_by(
             skip_newlines().ignore_then(just(Token::Indent)),
             just(Token::Dedent),

@@ -760,8 +760,10 @@ where
         enums::attributed_type_decl_parser(enum_tail.clone()),
         struct_decl_parser(),
         enums::enum_decl_parser(enum_tail),
-        errors::error_decl_parser(),
         function_def_parser(expr.clone()),
+        // After `fn`: function definitions dominate top-level code, so
+        // they should not pay for a failed `error` keyword check.
+        errors::error_decl_parser(),
         destructure::destructure_stmt_parser(expr.clone()),
         var_decl_parser(expr.clone()),
         assignment_guard,
@@ -872,13 +874,25 @@ where
                     let span = crate::spans::cspan(e.span());
                     e.state().error_union_type(&[], success, true, span)
                 });
-        let grouped_errors = named_type_expr_parser()
+        // `E!T`: parse the leading name once and let an optional `!`
+        // decide between a plain named type and an explicit union, so
+        // ordinary annotations never re-parse their name.
+        let named_or_explicit = named_type_expr_parser()
+            .then(just(Token::Bang).ignore_then(ty.clone()).or_not())
+            .map_with(|(name, success), e: &mut Mx<'a, '_, I>| match success {
+                Some(success) => {
+                    let span = crate::spans::cspan(e.span());
+                    e.state().error_union_type(&[name], success, false, span)
+                }
+                None => name,
+            });
+        // `(E1 | E2)!T`: tried before the positional `(int, str)` sugar;
+        // a `,` after the first element rejects it and falls through.
+        let grouped_explicit = named_type_expr_parser()
             .separated_by(just(Token::Pipe))
             .at_least(1)
             .collect::<Vec<_>>()
-            .delimited_by(just(Token::LParen), just(Token::RParen));
-        let error_set = grouped_errors.or(named_type_expr_parser().map(|ty| vec![ty]));
-        let explicit = error_set
+            .delimited_by(just(Token::LParen), just(Token::RParen))
             .then_ignore(just(Token::Bang))
             .then(ty.clone())
             .map_with(|(error_set, success), e: &mut Mx<'a, '_, I>| {
@@ -886,11 +900,11 @@ where
                 e.state().error_union_type(&error_set, success, false, span)
             });
         choice((
-            inferred,
-            explicit,
-            named_type_expr_parser(),
+            named_or_explicit,
             anon,
+            grouped_explicit,
             positional,
+            inferred,
         ))
         .boxed()
     })

@@ -39,17 +39,20 @@
 use super::*;
 use chumsky::input::ValueInput;
 
-/// `match scrutinee:` + indented arm block (M12).
+/// `match scrutinee:` + indented arm block (M12). `arms` is the
+/// shared [`match_arms_parser`] instance, built once per expression
+/// grammar and also used by direct-arm `catch`.
 pub(super) fn match_expression_parser<'a, I>(
     expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+    arms: impl Parser<'a, I, MatchArmList, PExtra<'a>> + Clone + 'a,
 ) -> impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     just(Token::Match)
-        .ignore_then(expr.clone())
+        .ignore_then(expr)
         .then_ignore(just(Token::Colon))
-        .then(match_arms_parser(expr))
+        .then(arms)
         .map_with(|(scrutinee, arms), e: &mut Mx<'a, '_, I>| {
             let span = crate::spans::cspan(e.span());
             e.state().match_expr_with_arms(scrutinee, arms, span)
@@ -90,8 +93,11 @@ where
 
 /// Parse and seal one or more match arms. Direct-arm catch expressions
 /// use the same patterns and body forms as ordinary match expressions.
+/// `arm_body` is the shared [`match_arm_body_parser`] instance: the
+/// body grammar embeds a full statement grammar, so building it once
+/// keeps parser construction cheap.
 pub(super) fn match_arms_parser<'a, I>(
-    expr: impl Parser<'a, I, ExprId, PExtra<'a>> + Clone + 'a,
+    arm_body: impl Parser<'a, I, MatchArmBody, PExtra<'a>> + Clone + 'a,
 ) -> impl Parser<'a, I, MatchArmList, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
@@ -341,7 +347,6 @@ where
         pat_id
     });
 
-    let arm_body = match_arm_body_parser(expr.clone());
     let arm_line = arm_pattern
         .then_ignore(just(Token::Colon))
         .then(arm_body)

@@ -568,6 +568,10 @@ where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
     recursive(|expr| {
+        // The match-arm grammar embeds a full body-statement grammar;
+        // build it once and share it between `match` and `catch`.
+        let match_arm_body = match_::match_arm_body_parser(expr.clone()).boxed();
+        let match_arms = match_::match_arms_parser(match_arm_body.clone());
         // One `key = value` field initializer, shared by the struct
         // literal atoms and the M11 named-variant-construct postfix
         // op. Field keys are identifiers or integer literals: a
@@ -749,7 +753,10 @@ where
                 .or(ident_expr)
                 .or(literal)
                 .or(paren_or_tuple)
-                .or(match_::match_expression_parser(expr.clone()))
+                .or(match_::match_expression_parser(
+                    expr.clone(),
+                    match_arms.clone(),
+                ))
         };
 
         let postfix = postfix_parser(expr.clone(), field_init.clone(), atom);
@@ -776,7 +783,7 @@ where
         // (term contains unary, additive contains term, ...) and the
         // demangled symbol names grow to hundreds of kilobytes, which
         // breaks some profiling tooling (and compile times).
-        let catch_tail = errors::catch_tail_parser(expr.clone());
+        let catch_tail = errors::catch_tail_parser(match_arms, match_arm_body);
         let fold_catch = |operand, tail: errors::CatchTail, e: &mut Mx<'a, '_, I>| {
             let start = e.state().expr_span(operand).start;
             e.state().catch_expr(
@@ -786,9 +793,28 @@ where
                 crate::spans::cspan(SimpleSpan::new((), start..tail.span.end)),
             )
         };
+        // Every postfix operand may be followed by `catch`, so a miss
+        // must stay cheap: peek for the keyword instead of attempting
+        // the tail, which would record a failed alternative (and merge
+        // it into the pending expected-token error) after each operand.
+        // When `catch` is present, `repeated` keeps the usual rewind
+        // semantics, so a malformed tail reports exactly as before.
+        let catch_tails = catch_tail.clone().repeated().collect::<Vec<_>>();
+        let maybe_catch_tails = custom(move |inp| {
+            if inp.peek() == Some(Token::Catch) {
+                inp.parse(&catch_tails)
+            } else {
+                Ok(Vec::new())
+            }
+        });
         let caught_postfix = postfix
             .clone()
-            .foldl_with(catch_tail.clone().repeated(), fold_catch)
+            .then(maybe_catch_tails)
+            .map_with(move |(operand, tails), e: &mut Mx<'a, '_, I>| {
+                tails
+                    .into_iter()
+                    .fold(operand, |operand, tail| fold_catch(operand, tail, e))
+            })
             .boxed();
         let narrow_unary = neg_min
             .or(unary_op
@@ -821,7 +847,10 @@ where
                     result
                 }))
             .boxed();
-        let unary = try_expr.or(ordinary_unary).boxed();
+        // Ordinary operands first: `try` is a keyword no ordinary unary
+        // can start with, so the order is unobservable, and the common
+        // case no longer pays for a failed `try` attempt per operand.
+        let unary = ordinary_unary.or(try_expr).boxed();
 
         // Fold `left op right` into a BinaryOp node spanning both
         // operands — the same span rule at every precedence level.
