@@ -615,11 +615,7 @@ fn type_and_emit_match(
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
 
-    // ---- Emission: owner tokens, then the Match itself ----
-    for (field_index, ty) in &owner_tokens {
-        fcx.builder
-            .field_access(analysis.scrutinee, *field_index, *ty, span);
-    }
+    // ---- Emission: owner tokens + Match (emit_match_with_owner_tokens) ----
     let typed_arms: Vec<TypedMatchArm<'_>> = arms_out
         .iter()
         .map(|arm| TypedMatchArm {

@@ -2444,18 +2444,18 @@ import collections
 import process
 
 fn main():
- args = process.args()
- if args.len() < 2:
-  io.println("Usage: program <file>")
-  process.exit(1)
+	args = process.args()
+	if args.len() < 2:
+		io.println("Usage: program <file>")
+		process.exit(1)
 
- filename = args[1]
+	filename = args[1]
 	content = io.read_file(filename) catch as e:
 		io.println("Error reading file: " + e.message())
 		process.exit(1)
 
- words = string.split(content, " ")
- io.println("Word count: " + int_to_str(words.len()))  # v0.1: concat (f-strings v0.2)
+	words = string.split(content, " ")
+	io.println("Word count: " + int_to_str(words.len()))  # v0.1: concat (f-strings v0.2)
 
 ```
 
