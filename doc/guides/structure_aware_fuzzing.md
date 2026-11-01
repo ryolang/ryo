@@ -162,7 +162,7 @@ Use Python 3's standard library; no third-party packages are needed. Keep the sc
 
 - `argparse` parses the base seed, case count, AOT frequency, compiler identity, output directory, timeout, and per-stream byte limit.
 - `random.Random` gives each case an independent, reproducible generator. Use it to choose valid types and control-flow shapes, or to mutate an AST-like program description before rendering source. Do not use it to corrupt arbitrary bytes.
-- `subprocess.Popen` isolates each compiler invocation with an argument list and `shell=False`. Two `threading.Thread` readers stream stdout and stderr to per-case files, preserving at most the configured number of bytes per stream and discarding the rest. `wait(timeout=...)` contains hangs; record a timeout instead of retrying indefinitely.
+- `subprocess.Popen` isolates each compiler invocation with an argument list and `shell=False`. Two `threading.Thread` readers use available-chunk reads to stream stdout and stderr to per-case files, preserving at most the configured number of bytes per stream and discarding the rest. `wait(timeout=...)` contains hangs. Start a new process group on POSIX and terminate it with `os.killpg`; on Windows, use a new process group and `taskkill /T /F` so linker children cannot outlive a timed-out build. Record a timeout instead of retrying indefinitely.
 - `pathlib.Path` gives each case a separate source, log, and AOT-binary directory. Separate paths prevent parallel cases from overwriting one another. `os.name` selects the platform's executable suffix.
 - `json` writes the seed, source hash, commands, exit statuses, classification, and log paths to a machine-readable manifest. `platform` and `sys` record host details and the exact harness command so the report identifies the complete campaign.
 - `concurrent.futures.ThreadPoolExecutor` runs independent generation tracks or compiler processes concurrently. Give each worker its own seed and directory; do not share a generator or result file between workers.
@@ -180,6 +180,7 @@ import os
 import platform
 import random
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -210,18 +211,24 @@ def generate(seed, track):
 
 
 def execute(command, case_dir, name, timeout, max_output_bytes):
+    process_options = {}
+    if os.name == "nt":
+        process_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        process_options["start_new_session"] = True
     process = subprocess.Popen(
         command,
         shell=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        **process_options,
     )
     truncated = {"stdout": False, "stderr": False}
 
     def copy_stream(source, destination_path, stream_name):
-        with destination_path.open("wb") as destination:
+        with destination_path.open("wb", buffering=0) as destination:
             remaining = max_output_bytes
-            while chunk := source.read(65536):
+            while chunk := source.read1(65536):
                 kept = chunk[:remaining]
                 destination.write(kept)
                 remaining -= len(kept)
@@ -242,7 +249,24 @@ def execute(command, case_dir, name, timeout, max_output_bytes):
     try:
         status = process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        process.kill()
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        else:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if process.poll() is None:
+            process.kill()
         process.wait()
         status = "timeout"
     for thread in threads:
