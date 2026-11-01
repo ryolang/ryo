@@ -105,6 +105,8 @@ GitHub Actions runs on pushes to `main` and PRs targeting `main` (see `.github/w
 
 **Performance is a CI gate.** CodSpeed comments on PRs report both walltime and simulation (compile-time) regressions. A double-digit regression on a tracked benchmark is a defect: fix it in the PR or record a deliberate decision, never merge silently. Before merging codegen changes, run the affected benchmarks via `uv run benchmarks/run.py run --benchmarks <name>` and compare against the README's latest checkpoint. Local walltime A/B can miss compile-time regressions that the simulation metric isolates — trust the CodSpeed gate for compile-time claims.
 
+**Feature performance.** Keep existing code paths cheap when adding syntax or built-ins. For optional grammar, check a distinguishing token before running the full alternative, and build shared subparsers once. Avoid eager setup for features a program does not use. Compare tiny and large inputs on the same runner type to catch fixed setup and scaling costs.
+
 ---
 
 ## Development Workflow
