@@ -697,6 +697,71 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-251 — Measure and remove fixed frontend setup overhead
+
+**Severity:** Correctness / Hygiene
+**Area:** sema
+
+**Files:** ryo-frontend/src/astgen.rs, ryo-frontend/src/sema/mod.rs, ryo-frontend/benches/frontend.rs
+
+**Summary:** Small semantic benchmarks show a fixed per-compile cost after error-union support, while larger semantic benchmarks are mostly unchanged. Eager Utf8Error layout registration and per-function inference state are candidates, but hardware differences make the exact regression uncertain.
+
+**Resolution:** Compare base and head on the same runner type, then measure lazy Utf8Error registration/layout and inference-state allocation independently. Preserve compiler-known type behavior and add small and large benchmarks so the fixed-cost fix does not penalize error-using programs.
+
+---
+
+### I-252 — Extract the structural fuzzing harness into scripts
+
+**Severity:** Cleanup
+**Area:** tooling
+
+**Files:** doc/guides/structure_aware_fuzzing.md, scripts/
+
+**Summary:** The reusable standard-library harness is embedded as a large executable example in the guide. A script would be easier to run and test directly, while generated Ryo programs and campaign artifacts should remain outside the repository.
+
+**Resolution:** Move the harness into a named scripts/ entry point, add standard-library unittest coverage for generation, process-tree timeouts, bounded streams, oracles, and manifests, and replace the long guide listing with usage instructions and a link.
+
+---
+
+### I-253 — Remove the nested catch-match compatibility form
+
+**Severity:** Cleanup
+**Area:** frontend-parser
+
+**Files:** ryo-frontend/src/grammar/errors.rs, ryo-frontend/src/sema/match_.rs, docs/specification.md, ryo/tests/integration_errors.rs
+
+**Summary:** The compatibility form 'expr catch as e: match e:' repeats the dispatch already provided by direct catch arms, adding syntax and ownership paths that make the preferred error-handling style less clear.
+
+**Resolution:** As an explicitly approved language change, reject nested catch-as-match with guidance to use direct catch arms or an ordinary handler as appropriate. Migrate tests, examples, the specification, and the reference while retaining direct arms and module-qualified nominal error patterns.
+
+---
+
+### I-254 — Add a frontend-only ryo check command
+
+**Severity:** Correctness / Hygiene
+**Area:** driver-cli
+
+**Files:** ryo/src/main.rs, ryo-driver/src/pipeline/mod.rs, ryo-driver/src/pipeline/build.rs, ryo/tests/integration_driver.rs
+
+**Summary:** Users need a fast way to show errors and warnings without code generation, linking, or execution. Current run and build commands always proceed into backend work after frontend analysis.
+
+**Resolution:** Add 'ryo check <file>' with parsing, astgen, sema, and ownership diagnostics but no CLIF, Zig, binary, or execution. Return zero with warnings and nonzero with errors, support inferred-signature inspection, test operation without Zig, and introduce shared frontend options if that removes repeated argument plumbing.
+
+---
+
+### I-255 — Warn when an inferred error set is empty
+
+**Severity:** Correctness / Hygiene
+**Area:** sema
+
+**Files:** ryo-frontend/src/sema/error_inference.rs, ryo-frontend/src/sema/mod.rs, docs/specification.md, ryo/tests/error_empty_inference.rs
+
+**Summary:** A finalized inferred '!T' signature with no errors can hide an unnecessarily broad API. The current contract accepts empty sets without a warning and exposes them only through --show-inferred-errors.
+
+**Resolution:** As an explicitly approved diagnostics change, add a warning for finalized empty inferred sets with help to use the plain success return type instead. Update the specification, reference, and tests, while preserving successful compilation and exact inferred-signature inspection output.
+
+---
+
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
