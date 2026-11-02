@@ -78,6 +78,7 @@ jobs:
       - uses: ./.github/actions/zig-toolchain
       - run: |
           if [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
+            export CARGO_BUILD_JOBS=2
             (
               while true; do
                 date -u '+%Y-%m-%dT%H:%M:%SZ'
