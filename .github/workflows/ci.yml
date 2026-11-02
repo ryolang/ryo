@@ -76,7 +76,22 @@ jobs:
         with:
           prefix-key: test
       - uses: ./.github/actions/zig-toolchain
-      - run: cargo test --workspace
+      - run: |
+          if [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
+            (
+              while true; do
+                date -u '+%Y-%m-%dT%H:%M:%SZ'
+                df -h /
+                free -h
+                du -sh target 2>/dev/null || true
+                ps -eo pid,ppid,%cpu,%mem,rss,stat,comm --sort=-rss | head -12
+                sleep 10
+              done
+            ) &
+            monitor_pid=$!
+            trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
+          fi
+          cargo test --workspace
       # The param-sentinel guards in Tir::inst/span are hard assert!s so a
       # contract violation fails clearly in release too — run their
       # should_panic tests under the release profile to keep it that way.
