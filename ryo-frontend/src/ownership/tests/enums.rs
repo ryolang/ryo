@@ -184,3 +184,66 @@ fn moving_viewed_payload_into_enum_on_one_branch_is_rejected() {
         "expected a branch-local move diagnostic naming the projected owner; got {diags:?}"
     );
 }
+
+#[test]
+fn try_early_return_cleans_locals_once_without_freeing_propagated_payload() {
+    let src = r#"error A(str)
+error B
+fn inner() -> A!str:
+	return A(int_to_str(7) + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+fn outer() -> (A | B)!str:
+	local = int_to_str(8) + "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	value = try inner()
+	print(local)
+	return value
+"#;
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.severity == ryo_core::diag::Severity::Error),
+        "try propagation must be ownership-clean; got {diags:?}"
+    );
+    let outer_index = tirs
+        .iter()
+        .position(|tir| pool.str(tir.name) == "outer")
+        .expect("outer TIR");
+    let outer = &tirs[outer_index];
+    let sidecar = take_function_sidecar(&mut sidecar, outer_index);
+    let refs =
+        || (1..outer.instructions.len()).map(|index| ryo_core::tir::TirRef::from_raw(index as u32));
+    let local_init = refs()
+        .find(|&r| {
+            outer.inst(r).tag == ryo_core::tir::TirTag::VarDecl
+                && pool.str(outer.var_decl_view(r).name) == "local"
+        })
+        .map(|r| outer.var_decl_view(r).initializer)
+        .expect("local initializer");
+    let try_match = refs()
+        .find(|&r| outer.inst(r).tag == ryo_core::tir::TirTag::Match)
+        .expect("try dispatch");
+    let view = outer.match_view(try_match);
+    let early_return = view.arm(1).body.stmts().next().expect("error arm return");
+    assert_eq!(outer.inst(early_return).tag, ryo_core::tir::TirTag::Return);
+    let local_cleanup: Vec<_> = sidecar
+        .drops
+        .iter()
+        .filter(|drop| {
+            drop.target == local_init && drop.position.anchor_inst() == Some(early_return)
+        })
+        .collect();
+    assert_eq!(
+        local_cleanup.len(),
+        1,
+        "the ordinary return epilogue must clean the live local exactly once; got {:?}",
+        sidecar.drops
+    );
+    let tokens = outer.match_by_move_owner_refs(try_match, &pool);
+    assert_eq!(tokens.len(), 2, "success and error payloads each move once");
+    let error_token = tokens[1];
+    assert!(
+        !sidecar.drops.iter().any(|drop| drop.target == error_token),
+        "the propagated payload must move into the return, not also be freed: {:?}",
+        sidecar.drops
+    );
+}

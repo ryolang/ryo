@@ -31,7 +31,12 @@ fn get_output_filenames(input_file: &Path) -> (PathBuf, PathBuf) {
 /// rendering and pipeline order as `ryo ir`; CLIF prints after
 /// codegen, before linking). `link` selects the libc zig cc links
 /// against on Linux (musl default); it is a no-op on other hosts.
-pub fn build_file(file: &Path, emit: &[EmitKind], link: LinkMode) -> Result<(), CompilerError> {
+pub fn build_file(
+    file: &Path,
+    emit: &[EmitKind],
+    link: LinkMode,
+    show_inferred_errors: bool,
+) -> Result<(), CompilerError> {
     let input = read_source_file(file)?;
     let mut pool = InternPool::new();
     let name = source_name(file);
@@ -46,7 +51,15 @@ pub fn build_file(file: &Path, emit: &[EmitKind], link: LinkMode) -> Result<(), 
         println!();
     }
 
-    let (uir, analyzed) = lower_and_analyze(&program, &mut pool, &input, &name, file, parse_diags)?;
+    let (uir, analyzed) = lower_and_analyze(
+        &program,
+        &mut pool,
+        &input,
+        &name,
+        file,
+        parse_diags,
+        show_inferred_errors,
+    )?;
     analyzed
         .require_backend_transition()
         .map_err(CompilerError::CodegenError)?;

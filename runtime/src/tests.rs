@@ -698,17 +698,37 @@ fn bytes_eq_compares_contents() {
 }
 
 #[test]
-fn bytes_to_str_copies_valid_utf8() {
-    let src = "héllo".as_bytes();
+fn bytes_to_str_valid_utf8_returns_true_and_copies() {
+    let cases: &[&[u8]] = &[b"hello", "héllo".as_bytes(), b""];
+    for &src in cases {
+        let mut slot = RyoStrFat {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        // SAFETY: valid out-slot; src is readable for its byte length.
+        let valid = unsafe { __ryo_bytes_to_str(&mut slot, src.as_ptr(), src.len() as u64) };
+        assert!(valid);
+        assert_eq!(slot_content(&slot), src);
+        // SAFETY: every successful result is an owned tagged string slot.
+        unsafe { ryo_str_free(slot.ptr, slot.cap) };
+    }
+}
+
+#[test]
+fn bytes_to_str_invalid_utf8_returns_false_without_writing() {
+    let src = [0xffu8, 0xc3, 0x28];
     let mut slot = RyoStrFat {
-        ptr: core::ptr::null_mut(),
-        len: 0,
-        cap: 0,
+        ptr: core::ptr::dangling_mut::<u8>(),
+        len: 41,
+        cap: 63,
     };
     // SAFETY: valid out-slot; src is readable for its byte length.
-    unsafe { __ryo_bytes_to_str(&mut slot, src.as_ptr(), src.len() as u64) };
-    assert!(is_inline(slot.cap));
-    assert_eq!(slot_content(&slot), "héllo".as_bytes());
+    let valid = unsafe { __ryo_bytes_to_str(&mut slot, src.as_ptr(), src.len() as u64) };
+    assert!(!valid);
+    assert_eq!(slot.ptr, core::ptr::dangling_mut::<u8>());
+    assert_eq!(slot.len, 41);
+    assert_eq!(slot.cap, 63);
 }
 
 #[test]

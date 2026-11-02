@@ -7,7 +7,7 @@
 use super::tests::*;
 use super::tests_match::{match_in_var_init, match_stmt_operand};
 use super::*;
-use ryo_core::tir::{Discriminant, MatchBinding, MatchBodyView, TirRef, TirTag};
+use ryo_core::tir::{Discriminant, MatchBinding, MatchBodyView, TirData, TirRef, TirTag};
 
 // ---------- Arm typing (E0133-E0135) + typed TIR Match ----------
 
@@ -367,6 +367,15 @@ fn owned_scrutinee_binds_non_copy_field_and_emits_owner_token() {
         pool.str_(),
         "token carries the field type"
     );
+    let scrutinee = main.match_view(m).scrutinee;
+    let token_count = main
+        .instructions
+        .iter()
+        .filter(
+            |inst| matches!(inst.data, TirData::FieldAccess { object, .. } if object == scrutinee),
+        )
+        .count();
+    assert_eq!(token_count, 1, "owner token must be emitted only once");
 }
 
 #[test]

@@ -39,21 +39,22 @@ fn resolve_var_read(
     match scope.lookup(name) {
         Some(t) => fcx.builder.var(name, t, span),
         None => {
-            sema.sink.emit(Diag::error(
-                span,
-                DiagCode::UndefinedVariable,
-                format!("undefined variable: '{}'", sema.pool.str(name)),
-            ));
+            if !super::errors::is_rejected_error_declaration(sema, name) {
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::UndefinedVariable,
+                    format!("undefined variable: '{}'", sema.pool.str(name)),
+                ));
+            }
             fcx.builder.unreachable(sema.pool.error_type(), span)
         }
     }
 }
 
 /// Resolve a compiler-generated temporary read (see [`InstTag::TempVar`]).
-/// Only astgen's nested-destructuring lowering emits that tag, always
-/// as the statement immediately after the one that bound the temp, so
-/// the table must contain it — a miss is a compiler bug, reported
-/// rather than panicked.
+/// Nested destructuring and catch lowering register every temp before
+/// emitting its read — a miss is a compiler bug, reported rather than
+/// panicked.
 fn resolve_temp_read(sema: &mut Sema<'_>, fcx: &mut FuncCtx, name: StringId, span: Span) -> TirRef {
     match fcx.destructure_temps.get(&name).copied() {
         Some(t) => fcx.builder.var(name, t, span),
@@ -204,81 +205,16 @@ pub(crate) fn analyze_expr_allow_never(
             }
             check_binary_op(sema, fcx, inst.tag, lhs_ty, rhs_ty, l, r2, span)
         }
-        InstTag::Neg => {
+        InstTag::Neg | InstTag::Not => {
             let operand = match inst.data {
                 InstData::UnOp(o) => o,
-                _ => unreachable!("Neg must carry InstData::UnOp"),
+                _ => unreachable!("unary operator must carry InstData::UnOp"),
             };
-            let sub = analyze_expr(sema, fcx, scope, operand);
-            let sub_ty = fcx.builder.ty_of(sub);
-            match sema.pool.kind(sub_ty) {
-                TypeKind::Int => {
-                    // `-(i64::MIN)` is the only Neg that can overflow,
-                    // reachable through constant sub-expressions.
-                    if matches!(const_eval_int(sema.uir, r), ConstInt::Overflow) {
-                        sema.sink.emit(Diag::error(
-                            span,
-                            DiagCode::ConstEvalFailure,
-                            "integer overflow in constant expression".to_string(),
-                        ));
-                        fcx.builder.unreachable(sema.pool.error_type(), span)
-                    } else {
-                        fcx.builder.unary(TirTag::INeg, sema.pool.int(), sub, span)
-                    }
-                }
-                TypeKind::Float => fcx
-                    .builder
-                    .unary(TirTag::FNeg, sema.pool.float(), sub, span),
-                TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
-                _ => {
-                    sema.sink.emit(Diag::error(
-                        span,
-                        DiagCode::UnsupportedOperator,
-                        format!(
-                            "unary operator '-' not supported for type '{}'",
-                            sema.pool.display(sub_ty),
-                        ),
-                    ));
-                    fcx.builder.unreachable(sema.pool.error_type(), span)
-                }
-            }
-        }
-        InstTag::Not => {
-            let operand = match inst.data {
-                InstData::UnOp(o) => o,
-                _ => unreachable!("Not must carry InstData::UnOp"),
-            };
-            let sub = analyze_expr(sema, fcx, scope, operand);
-            let sub_ty = fcx.builder.ty_of(sub);
-            match sema.pool.kind(sub_ty) {
-                TypeKind::Bool => fcx
-                    .builder
-                    .unary(TirTag::BoolNot, sema.pool.bool_(), sub, span),
-                TypeKind::Error => fcx.builder.unreachable(sema.pool.error_type(), span),
-                _ => {
-                    sema.sink.emit(Diag::error(
-                        span,
-                        DiagCode::UnsupportedOperator,
-                        format!(
-                            "logical operator 'not' requires 'bool' operand, got '{}'",
-                            sema.pool.display(sub_ty),
-                        ),
-                    ));
-                    fcx.builder.unreachable(sema.pool.error_type(), span)
-                }
-            }
+            operators::analyze_unary_operator(sema, fcx, scope, inst.tag, r, operand, span)
         }
         InstTag::Call => {
             let view = sema.uir.call_view(r);
-            // Translate args first (in source order) to fix their
-            // TIR refs and types, *then* validate against the
-            // signature so per-argument diagnostics carry the right
-            // span and the call still emits a well-formed TIR Call.
-            let mut arg_tirs = Vec::with_capacity(view.args.len());
-            for a in &view.args {
-                arg_tirs.push(analyze_expr(sema, fcx, scope, a));
-            }
-            check_call(sema, fcx, scope, &view, &arg_tirs, span)
+            check_call(sema, fcx, scope, &view, span)
         }
         InstTag::MethodCall => {
             let view = sema.uir.method_call_view(r);
@@ -299,6 +235,36 @@ pub(crate) fn analyze_expr_allow_never(
 
             for arg in &view.args {
                 analyze_expr(sema, fcx, scope, arg);
+            }
+            if super::errors::is_error_union(sema, receiver_ty) {
+                let diag = if view.name == ids.message {
+                    super::errors::direct_error_message_diag(sema, span, receiver_ty)
+                } else {
+                    super::errors::direct_use_diag(
+                        sema,
+                        span,
+                        DiagCode::TypeMismatch,
+                        receiver_ty,
+                        "call a method on",
+                    )
+                };
+                sema.sink.emit(diag);
+                return fcx.builder.unreachable(sema.pool.error_type(), span);
+            }
+
+            if view.name == ids.message
+                && matches!(
+                    sema.pool.kind(receiver_ty),
+                    TypeKind::DeclaredError | TypeKind::ErrorSet
+                )
+            {
+                return super::errors::analyze_error_message(
+                    sema,
+                    fcx,
+                    view.args.is_empty(),
+                    receiver_tir,
+                    span,
+                );
             }
 
             // `str`/`strview` (M8.4) and `bytes`/`bytesview` (M8.4.2)
@@ -477,9 +443,20 @@ pub(crate) fn analyze_expr_allow_never(
             )
         }
         InstTag::Borrow => analyze_borrow(sema, fcx, scope, r, inst.data, span),
-        InstTag::StructLit => analyze_struct_lit(sema, fcx, scope, r, span),
+        InstTag::StructLit => analyze_struct_lit(sema, fcx, scope, r, span, None),
         InstTag::EnumLit => analyze_variant_construct(sema, fcx, scope, r, span),
-        InstTag::Match => analyze_match(sema, fcx, scope, r, span),
+        InstTag::ErrorConstruct => {
+            super::errors::analyze_error_construct(sema, fcx, scope, r, span)
+        }
+        InstTag::Match => {
+            let emitted = analyze_match(sema, fcx, scope, r, span);
+            if sema.uir.is_direct_catch_match(r) {
+                fcx.builder.mark_direct_catch_match(emitted);
+            }
+            emitted
+        }
+        InstTag::Catch => super::errors::analyze_catch(sema, fcx, scope, r, span),
+        InstTag::Try => super::errors::analyze_try(sema, fcx, scope, r, span),
         InstTag::FieldAccess => analyze_field_access(sema, fcx, scope, r, span),
         // UIR trusted-producer contract (see the `uir.rs` module
         // header): astgen is the only producer, so a non-expression tag
@@ -532,16 +509,33 @@ fn analyze_borrow(
 /// recover with an error-typed `Unreachable`. The anonymous path
 /// infers the structural type from the field values — see
 /// [`analyze_anon_struct_lit`].
+pub(crate) fn analyze_struct_lit_with_target(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    target: TypeId,
+) -> TirRef {
+    if let Some(t) = fcx.inst_map[r.index()] {
+        return t;
+    }
+    let span = sema.uir.span(r);
+    let emitted = analyze_struct_lit(sema, fcx, scope, r, span, Some(target));
+    fcx.inst_map[r.index()] = Some(emitted);
+    emitted
+}
+
 fn analyze_struct_lit(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     r: InstRef,
     span: Span,
+    expected: Option<TypeId>,
 ) -> TirRef {
     let view = sema.uir.struct_lit_view(r);
     let Some(name) = view.name else {
-        return analyze_anon_struct_lit(sema, fcx, scope, &view, span);
+        return analyze_anon_struct_lit(sema, fcx, scope, &view, span, expected);
     };
     let Some(&sty) = sema.struct_types.get(&name) else {
         // Never declared — this one is on the user.
@@ -598,9 +592,9 @@ fn analyze_struct_lit(
             analyze_expr(sema, fcx, scope, value_ref);
             continue;
         }
-        let value = analyze_expr(sema, fcx, scope, value_ref);
+        let value = analyze_struct_field_value(sema, fcx, scope, value_ref, field.ty);
         let vty = fcx.builder.ty_of(value);
-        if !sema.pool.compatible(vty, field.ty) {
+        if !super::errors::is_error_union(sema, field.ty) && !sema.pool.compatible(vty, field.ty) {
             sema.sink.emit(Diag::error(
                 fspan,
                 DiagCode::TypeMismatch,
@@ -644,6 +638,30 @@ fn analyze_struct_lit(
         })
         .collect();
     fcx.builder.struct_lit(sty, &fields, span)
+}
+
+fn analyze_struct_field_value(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    value_ref: InstRef,
+    target: TypeId,
+) -> TirRef {
+    let mut value = if sema.uir.inst(value_ref).tag == InstTag::StructLit {
+        analyze_struct_lit_with_target(sema, fcx, scope, value_ref, target)
+    } else {
+        analyze_expr(sema, fcx, scope, value_ref)
+    };
+    if super::errors::is_error_union(sema, target) {
+        value = super::errors::coerce_to_error_union(
+            sema,
+            fcx,
+            value,
+            target,
+            sema.uir.span(value_ref),
+        );
+    }
+    value
 }
 
 /// Variant construction `EnumName.Variant(args...)` (M11). The UIR
@@ -881,27 +899,38 @@ fn analyze_variant_construct(
         .enum_lit(ety, variant_index, view.positional, &args, span)
 }
 
-/// Anonymous struct literal `{field = value, ...}` (M10). There is no
-/// declaration to validate against — the type is structural, inferred
-/// from the initializers: each field's type is its value's type, and
-/// the ordered (name, type) pairs intern via [`InternPool::anon_struct`].
-/// The TIR emission then matches the named path: canonical (here:
-/// written) order, duplicates diagnosed with `DuplicateStructField`,
-/// and a view-typed initializer rejected with `ViewFieldType` (Rule 6
-/// — views cannot live in struct fields). A field whose initializer
-/// failed to type-check poisons the whole literal: an error-typed
-/// field has no layout, so no anon type can be interned for it.
+/// Anonymous struct literal `{field = value, ...}` (M10). Without an
+/// expected shape, the ordered (name, type) pairs are inferred from the
+/// initializers and interned via [`InternPool::anon_struct`]. A matching
+/// expected anonymous shape instead supplies field targets so error-union
+/// fields coerce recursively. Shape and non-union mismatches still infer
+/// the source type for the enclosing compatibility check.
 fn analyze_anon_struct_lit(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     view: &StructLitView<'_>,
     span: Span,
+    expected: Option<TypeId>,
 ) -> TirRef {
+    let expected = expected.and_then(|ty| {
+        if sema.pool.kind(ty) != TypeKind::AnonStruct {
+            return None;
+        }
+        let expected_view = sema.pool.struct_view(ty);
+        let shape_matches = expected_view.fields.len() == view.fields().len()
+            && expected_view
+                .fields
+                .iter()
+                .zip(view.fields())
+                .all(|(field, (name, _))| field.name == name);
+        shape_matches.then_some((ty, expected_view.fields))
+    });
     let error_ty = sema.pool.error_type();
     let mut fields: Vec<(StringId, TypeId, TirRef)> = Vec::with_capacity(view.fields().len());
     let mut poisoned = false;
-    for (fname, value_ref) in view.fields() {
+    let mut expected_compatible = true;
+    for (index, (fname, value_ref)) in view.fields().enumerate() {
         let fspan = sema.uir.span(value_ref);
         if fields.iter().any(|(n, _, _)| *n == fname) {
             sema.sink.emit(Diag::error(
@@ -917,8 +946,19 @@ fn analyze_anon_struct_lit(
             analyze_expr(sema, fcx, scope, value_ref);
             continue;
         }
-        let value = analyze_expr(sema, fcx, scope, value_ref);
+        let expected_field = expected.as_ref().map(|(_, fields)| fields[index]);
+        let value = if let Some(field) = expected_field {
+            analyze_struct_field_value(sema, fcx, scope, value_ref, field.ty)
+        } else {
+            analyze_expr(sema, fcx, scope, value_ref)
+        };
         let vty = fcx.builder.ty_of(value);
+        if let Some(field) = expected_field
+            && !super::errors::is_error_union(sema, field.ty)
+            && !sema.pool.compatible(vty, field.ty)
+        {
+            expected_compatible = false;
+        }
         if sema.pool.is_error(vty) {
             poisoned = true;
         }
@@ -938,7 +978,10 @@ fn analyze_anon_struct_lit(
         return fcx.builder.unreachable(error_ty, span);
     }
     let pairs: Vec<(StringId, TypeId)> = fields.iter().map(|&(n, t, _)| (n, t)).collect();
-    let sty = sema.pool.anon_struct(&pairs);
+    let sty = match (expected, expected_compatible) {
+        (Some((ty, _)), true) => ty,
+        _ => sema.pool.anon_struct(&pairs),
+    };
     // The anon type's canonical order is the written order.
     let values: Vec<(u32, TirRef)> = fields
         .into_iter()
@@ -997,6 +1040,16 @@ fn analyze_field_access(
     let obj = analyze_expr(sema, fcx, scope, object);
     let oty = fcx.builder.ty_of(obj);
     if sema.pool.is_error(oty) {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    if super::errors::is_error_union(sema, oty) {
+        sema.sink.emit(super::errors::direct_use_diag(
+            sema,
+            span,
+            DiagCode::NotAStruct,
+            oty,
+            "access a field on",
+        ));
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
     let is_struct = matches!(sema.pool.kind(oty), TypeKind::Struct | TypeKind::AnonStruct);
@@ -1317,6 +1370,23 @@ pub(crate) fn check_binary_op(
     rhs: TirRef,
     span: Span,
 ) -> TirRef {
+    let union_ty = if super::errors::is_error_union(sema, lhs_ty) {
+        Some(lhs_ty)
+    } else if super::errors::is_error_union(sema, rhs_ty) {
+        Some(rhs_ty)
+    } else {
+        None
+    };
+    if let Some(ty) = union_ty {
+        sema.sink.emit(super::errors::direct_use_diag(
+            sema,
+            span,
+            DiagCode::UnsupportedOperator,
+            ty,
+            "use an operator on",
+        ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
     // M8.4 §3.3/§3.4, generalized M8.4.2: mixed owner/view equality —
     // wrap the owned side in an explicit `ToView` conversion so the
     // comparison runs view-vs-view. This must happen before the

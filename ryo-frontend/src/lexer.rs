@@ -65,7 +65,10 @@ pub enum Token {
     Move,
     Struct,
     Enum,
+    ErrorDecl,
     Match,
+    Try,
+    Catch,
     True,
     False,
     And,
@@ -92,6 +95,8 @@ pub enum Token {
     Percent,
     EqEq,
     NotEq,
+    Bang,
+    Pipe,
     Lt,
     Gt,
     LtEq,
@@ -147,7 +152,10 @@ impl fmt::Display for Token {
             Self::Move => write!(f, "move"),
             Self::Struct => write!(f, "struct"),
             Self::Enum => write!(f, "enum"),
+            Self::ErrorDecl => write!(f, "error"),
             Self::Match => write!(f, "match"),
+            Self::Try => write!(f, "try"),
+            Self::Catch => write!(f, "catch"),
             Self::True => write!(f, "true"),
             Self::False => write!(f, "false"),
             Self::And => write!(f, "and"),
@@ -169,6 +177,8 @@ impl fmt::Display for Token {
             Self::Percent => write!(f, "%"),
             Self::EqEq => write!(f, "=="),
             Self::NotEq => write!(f, "!="),
+            Self::Bang => write!(f, "!"),
+            Self::Pipe => write!(f, "|"),
             Self::Lt => write!(f, "<"),
             Self::Gt => write!(f, ">"),
             Self::LtEq => write!(f, "<="),
@@ -249,8 +259,14 @@ pub(crate) enum RawToken<'a> {
     Struct,
     #[token("enum")]
     Enum,
+    #[token("error")]
+    ErrorDecl,
     #[token("match")]
     Match,
+    #[token("try")]
+    Try,
+    #[token("catch")]
+    Catch,
     #[token("true")]
     True,
     #[token("false")]
@@ -291,6 +307,10 @@ pub(crate) enum RawToken<'a> {
     EqEq,
     #[token("!=")]
     NotEq,
+    #[token("!")]
+    Bang,
+    #[token("|")]
+    Pipe,
     #[token("<=")]
     LtEq,
     #[token(">=")]
@@ -785,7 +805,10 @@ fn intern_token(
         RawToken::Inout => Token::Inout,
         RawToken::Struct => Token::Struct,
         RawToken::Enum => Token::Enum,
+        RawToken::ErrorDecl => Token::ErrorDecl,
         RawToken::Match => Token::Match,
+        RawToken::Try => Token::Try,
+        RawToken::Catch => Token::Catch,
         RawToken::True => Token::True,
         RawToken::False => Token::False,
         RawToken::And => Token::And,
@@ -805,6 +828,8 @@ fn intern_token(
         RawToken::Percent => Token::Percent,
         RawToken::EqEq => Token::EqEq,
         RawToken::NotEq => Token::NotEq,
+        RawToken::Bang => Token::Bang,
+        RawToken::Pipe => Token::Pipe,
         RawToken::Lt => Token::Lt,
         RawToken::Gt => Token::Gt,
         RawToken::LtEq => Token::LtEq,

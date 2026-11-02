@@ -1494,29 +1494,30 @@ pub unsafe extern "C" fn __ryo_bytes_index(ptr: *const u8, len: u64, idx: u64) -
     unsafe { *ptr.add(idx as usize) as u64 }
 }
 
-/// `bytes.to_str()` backing (M8.4.2 stopgap): validates UTF-8 and
-/// writes an owned `str` copy as a tagged slot; panics (exit 101) on
-/// invalid input until M13 turns the signature into `Utf8Error!str`.
+/// `bytes.to_str()` backing: validates UTF-8 and returns whether the
+/// input was valid. On success, writes an owned `str` copy as a tagged
+/// slot. On failure, returns false without writing to `out`.
 ///
 /// # Safety
 /// `out` points to a valid, uninitialized `RyoStrFat`. `ptr` must point
 /// to `len` readable bytes (or be null/dangling when `len == 0`).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn __ryo_bytes_to_str(out: *mut RyoStrFat, ptr: *const u8, len: u64) {
+pub unsafe extern "C" fn __ryo_bytes_to_str(out: *mut RyoStrFat, ptr: *const u8, len: u64) -> bool {
     if len == 0 {
         // SAFETY: out is a valid out-slot.
         unsafe { write_str_slot(out, b"") };
-        return;
+        return true;
     }
     debug_assert!(!ptr.is_null());
     let n: usize = len.try_into().unwrap_or_else(|_| overflow_abort());
     // SAFETY: caller contract — ptr/len describe a readable byte range.
     let bytes = unsafe { core::slice::from_raw_parts(ptr, n) };
     if core::str::from_utf8(bytes).is_err() {
-        slice_fail("bytes are not valid UTF-8");
+        return false;
     }
     // SAFETY: out is a valid out-slot; `bytes` holds `len` initialized bytes.
     unsafe { write_str_slot(out, bytes) };
+    true
 }
 
 /// `str.to_bytes()` backing (M8.4.2): owned copy of the UTF-8 bytes,

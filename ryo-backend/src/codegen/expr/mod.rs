@@ -640,16 +640,6 @@ impl<M: Module> Codegen<M> {
                 out_slot,
             )?;
             ValueRepr::Bytes { ptr, len, cap }
-        } else if ids.bytes_to_str == Some(name_id) {
-            let (ptr_arg, len_arg) = Self::eval_str_or_view_parts(builder, ctx, args.at(0))?;
-            let (ptr, len, cap) = Self::emit_slot_out_call(
-                builder,
-                ctx,
-                "__ryo_bytes_to_str",
-                &[(ctx.int_type, ptr_arg), (types::I64, len_arg)],
-                out_slot,
-            )?;
-            ValueRepr::Str { ptr, len, cap }
         } else if ids.bytes_repr == Some(name_id) {
             let (ptr_arg, len_arg) = Self::eval_str_or_view_parts(builder, ctx, args.at(0))?;
             let (ptr, len, cap) = Self::emit_slot_out_call(
@@ -1176,6 +1166,12 @@ impl<M: Module> Codegen<M> {
                 }
             }
             return Ok(builder.ins().iconst(ctx.int_type, 0));
+        }
+
+        if ids.bytes_to_str == Some(name_id) {
+            let addr = Self::emit_bytes_to_str(builder, ctx, r)?;
+            Self::cache_repr(ctx, r, ValueRepr::Enum { addr });
+            return Ok(addr);
         }
 
         let (callee_id, return_abi) = ctx

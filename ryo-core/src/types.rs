@@ -135,10 +135,17 @@ enum Tag {
     /// `define_enum` fills `data` with the index into `extra` of the
     /// layout block.
     Enum,
-    // Reserved for later phases — not constructed today:
-    //   Func, Option, ErrorUnion.
-    // Adding any of those is a new `Tag` variant and a new arm in
-    // `kind`/`Display`; storage shape is already in place.
+    /// Nominal single-variant error, backed by the enum layout block.
+    DeclaredError,
+    /// Canonical error members backed by the enum layout block. The
+    /// member TypeIds follow the variant directory in `extra`.
+    ErrorSet,
+    /// Concrete `Ok(success)` / `Err(error_set)` enum layout.
+    ErrorUnion,
+    /// Inference placeholder. `data` indexes `[error_set, success]` in
+    /// `extra`; it deliberately has no enum layout block.
+    InferredErrorUnion,
+    // Reserved for later phases — not constructed today: Func, Option.
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -209,6 +216,14 @@ pub enum TypeKind {
     /// Nominal enum (M11). Identity is the declared name; variants and
     /// layout are read back via [`InternPool::enum_view`].
     Enum,
+    /// Nominal single-variant error with an enum-shaped runtime layout.
+    DeclaredError,
+    /// Canonical, deduplicated nominal error members.
+    ErrorSet,
+    /// Concrete enum-shaped `Ok(success)` / `Err(error_set)` union.
+    ErrorUnion,
+    /// Inference-only union placeholder; never has a runtime layout.
+    InferredErrorUnion,
 }
 
 /// The CLOSED set of projection kinds (final spec §3.1, D1).
@@ -485,7 +500,14 @@ pub struct InternPool {
     /// `struct_names`. Cross-kind collisions are rejected upstream.
     enum_names: std::collections::HashMap<StringId, TypeId>,
 
-    /// Decoded enum payload fields (M11), appended per variant in
+    /// Declared errors are nominal; structural sets and unions have
+    /// independent canonical dedup domains.
+    error_names: std::collections::HashMap<StringId, TypeId>,
+    error_sets: std::collections::HashMap<Vec<TypeId>, TypeId>,
+    error_unions: std::collections::HashMap<(TypeId, TypeId), TypeId>,
+    inferred_error_unions: std::collections::HashMap<TypeId, TypeId>,
+
+    /// Decoded enum-shaped payload fields, appended per variant in
     /// declaration order; `enum_view` borrows slices of this arena.
     enum_fields: Vec<StructField>,
 
@@ -591,6 +613,10 @@ impl InternPool {
             string_dedup: HashTable::new(),
             struct_names: std::collections::HashMap::new(),
             enum_names: std::collections::HashMap::new(),
+            error_names: std::collections::HashMap::new(),
+            error_sets: std::collections::HashMap::new(),
+            error_unions: std::collections::HashMap::new(),
+            inferred_error_unions: std::collections::HashMap::new(),
             enum_fields: Vec::new(),
             hasher: DefaultHashBuilder::default(),
         };
@@ -677,6 +703,10 @@ impl InternPool {
             Tag::AnonStruct => TypeKind::AnonStruct,
             Tag::Struct => TypeKind::Struct,
             Tag::Enum => TypeKind::Enum,
+            Tag::DeclaredError => TypeKind::DeclaredError,
+            Tag::ErrorSet => TypeKind::ErrorSet,
+            Tag::ErrorUnion => TypeKind::ErrorUnion,
+            Tag::InferredErrorUnion => TypeKind::InferredErrorUnion,
         }
     }
 
@@ -738,7 +768,10 @@ impl InternPool {
             // panics in `struct_view` (trusted-producer contract:
             // define before querying).
             TypeKind::Struct | TypeKind::AnonStruct => self.struct_view(ty).is_copy,
-            TypeKind::Enum => self.enum_view(ty).is_copy(),
+            TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion => self.enum_view(ty).is_copy(),
             _ => false,
         }
     }
@@ -861,7 +894,9 @@ impl InternPool {
         let mut is_copy = true;
         for &(_, fty) in fields {
             let (fsize, falign) = self.size_align(fty);
-            offset = offset.next_multiple_of(falign);
+            if falign != 0 {
+                offset = offset.next_multiple_of(falign);
+            }
             offsets.push(offset);
             offset = offset
                 .checked_add(fsize)
@@ -974,7 +1009,9 @@ impl InternPool {
         let mut is_copy = true;
         for &(_, fty) in fields {
             let (fsize, falign) = self.size_align(fty);
-            offset = offset.next_multiple_of(falign);
+            if falign != 0 {
+                offset = offset.next_multiple_of(falign);
+            }
             offsets.push(offset);
             offset = offset
                 .checked_add(fsize)
@@ -1095,9 +1132,19 @@ impl InternPool {
         variants: &[EnumVariantDef],
         flags: StructFlags,
     ) {
+        debug_assert!(matches!(self.items[id.0 as usize].tag, Tag::Enum));
+        self.define_enum_layout(id, name, variants, flags);
+    }
+
+    fn define_enum_layout(
+        &mut self,
+        id: TypeId,
+        name: StringId,
+        variants: &[EnumVariantDef],
+        flags: StructFlags,
+    ) {
         let item = self.items[id.0 as usize];
-        debug_assert!(matches!(item.tag, Tag::Enum));
-        assert!(item.data == u32::MAX, "define_enum: enum already defined");
+        assert!(item.data == u32::MAX, "enum layout already defined");
         assert!(!variants.is_empty(), "enum needs at least one variant");
         let mut seen = std::collections::HashSet::with_capacity(variants.len());
         for v in variants {
@@ -1116,7 +1163,9 @@ impl InternPool {
             let mut rel_offsets = Vec::with_capacity(v.fields.len());
             for &(_, fty) in &v.fields {
                 let (fsize, falign) = self.size_align(fty);
-                payload_end = payload_end.next_multiple_of(falign);
+                if falign != 0 {
+                    payload_end = payload_end.next_multiple_of(falign);
+                }
                 rel_offsets.push(payload_end);
                 payload_end = payload_end
                     .checked_add(fsize)
@@ -1167,12 +1216,16 @@ impl InternPool {
         self.items[id.0 as usize].data = data;
     }
 
-    /// Read back a defined enum's payload. Same trusted-producer
-    /// contract as `struct_view`: define before querying.
+    /// Read back a defined enum-shaped payload. Same trusted-producer
+    /// contract as `struct_view`: define before querying. Inference-only
+    /// error unions deliberately have no enum view.
     pub fn enum_view(&self, id: TypeId) -> EnumView<'_> {
         let item = self.items[id.0 as usize];
-        debug_assert!(matches!(item.tag, Tag::Enum));
-        debug_assert!(item.data != u32::MAX, "enum_view on undefined enum");
+        debug_assert!(matches!(
+            item.tag,
+            Tag::Enum | Tag::DeclaredError | Tag::ErrorSet | Tag::ErrorUnion
+        ));
+        debug_assert!(item.data != u32::MAX, "enum_view on undefined type");
         EnumView {
             pool: self,
             start: item.data as usize,
@@ -1180,12 +1233,12 @@ impl InternPool {
     }
 
     /// `(size, align)` in bytes for types with a fixed layout:
-    /// bool (1,1); int/float (8,8); str/bytes (24,8); view (16,8);
-    /// struct (M9 nominal / M10 anon) → the layout stored at
-    /// define/intern time; enum (M11) → the layout computed by
-    /// `define_enum`.
+    /// void (0,1); bool (1,1); int/float (8,8); str/bytes (24,8);
+    /// view (16,8); structs and all runtime enum-shaped types use their
+    /// stored layout. The empty error set is uniquely (0,0).
     pub fn size_align(&self, ty: TypeId) -> (u32, u32) {
         match self.kind(ty) {
+            TypeKind::Void => (0, 1),
             TypeKind::Bool => (1, 1),
             TypeKind::Int | TypeKind::Float => (8, 8),
             TypeKind::Str | TypeKind::Bytes => (24, 8),
@@ -1194,19 +1247,25 @@ impl InternPool {
                 let v = self.struct_view(ty);
                 (v.size, v.align)
             }
-            TypeKind::Enum => self.enum_view(ty).size_align(),
+            TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion => self.enum_view(ty).size_align(),
             other => unreachable!("size_align: no layout for {other:?}"),
         }
     }
 
     /// True for types that own heap state and must be dropped:
-    /// `str`/`bytes`, a struct that is not Copy, or an enum with any
-    /// needs-drop field in any variant (M11).
+    /// `str`/`bytes`, a struct that is not Copy, or an enum-shaped type
+    /// with any needs-drop field in any variant.
     pub fn needs_drop(&self, ty: TypeId) -> bool {
         match self.kind(ty) {
             TypeKind::Str | TypeKind::Bytes => true,
             TypeKind::Struct | TypeKind::AnonStruct => !self.struct_view(ty).is_copy,
-            TypeKind::Enum => self
+            TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion => self
                 .enum_view(ty)
                 .variants()
                 .any(|v| v.fields.iter().any(|f| self.needs_drop(f.ty))),
@@ -1390,13 +1449,49 @@ impl fmt::Display for DisplayType<'_> {
                 let view = self.pool.struct_view(self.id);
                 write!(f, "{}", self.pool.str(view.name))
             }
-            TypeKind::Enum => {
+            TypeKind::Enum | TypeKind::DeclaredError => {
                 let view = self.pool.enum_view(self.id);
                 write!(f, "{}", self.pool.str(view.name()))
+            }
+            TypeKind::ErrorSet => {
+                let members = self.pool.error_set_view(self.id).members;
+                if members.is_empty() {
+                    write!(f, "<empty error set>")
+                } else {
+                    for (index, member) in members.iter().enumerate() {
+                        if index != 0 {
+                            write!(f, " | ")?;
+                        }
+                        write!(f, "{}", self.pool.display(*member))?;
+                    }
+                    Ok(())
+                }
+            }
+            TypeKind::ErrorUnion | TypeKind::InferredErrorUnion => {
+                let view = self.pool.error_union_view(self.id);
+                let member_count = self.pool.error_set_view(view.error_set).members.len();
+                match member_count {
+                    0 => write!(f, "!{}", self.pool.display(view.success)),
+                    1 => write!(
+                        f,
+                        "{}!{}",
+                        self.pool.display(view.error_set),
+                        self.pool.display(view.success)
+                    ),
+                    _ => write!(
+                        f,
+                        "({})!{}",
+                        self.pool.display(view.error_set),
+                        self.pool.display(view.success)
+                    ),
+                }
             }
         }
     }
 }
+
+mod errors;
+pub use errors::{ErrorSetView, ErrorUnionView};
 
 #[cfg(test)]
 mod tests;

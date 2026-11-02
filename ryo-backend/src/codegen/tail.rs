@@ -13,10 +13,11 @@ use std::collections::HashSet;
 
 /// Syntactic pre-pass for tail-call emission, run over every TIR body before
 /// declaration: collect the names of functions whose bodies contain a
-/// tail-position self-call, so `build_signature` compiles them with
-/// `CallConv::Tail` — the only convention from which Cranelift allows
-/// `return_call`. Deliberately cheap and conservative: over-marking is
-/// harmless (a marked function that turns out ineligible at emission
+/// tail-position self-call, so `lower_abi` compiles scalar-returning
+/// candidates with `CallConv::Tail` — the only convention from which
+/// Cranelift allows `return_call`. Deliberately cheap and conservative:
+/// over-marking is harmless (indirect returns keep the ordinary calling
+/// convention, and a marked function that turns out ineligible at emission
 /// still compiles correctly as a plain Tail-conv function), only
 /// under-marking would forgo a tail call. `main` is never marked (the
 /// C runtime enters it with the C ABI) and neither is any function

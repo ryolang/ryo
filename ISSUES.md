@@ -516,7 +516,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Summary:** I-186 and I-188 record call overhead, but their proposed TIR/backend placement predates the Flow pipeline. Record the implementation sequence from docs/dev/pipeline_migration.md. Small JSON validator helpers are candidates for bounded inlining. The expected speedup is unmeasured. Cranelift 0.136.1 also provides `Context::inline` and the `Inline` trait. Evaluate these as optional backend machinery, not as a replacement for language-level Flow inlining. Ryo must supply verified, legalized callee bodies with matching signatures and bounded selection rules. A backend experiment must preserve cleanup, source provenance, and stack-guard behavior. Reference: [Cranelift inlining infrastructure](https://docs.rs/cranelift-codegen/latest/cranelift_codegen/inline/index.html).
 
-**Resolution:** (1) Complete the required Flow storage, cleanup, phase-validation, and analysis-invalidation contracts, including explicit storage lineage, cleanup firing points, and promotion lifetimes. (2) Define body cloning and mutation contracts. Remap TIR instructions, side arenas, Flow blocks, places, joins, cleanup references, and source provenance. Keep cached source bodies unchanged. (3) Add bounded inlining over concrete language-level Flow bodies before ABI lowering. Start with small direct callees returning scalar values, including borrowed bytesview parameters. Exclude unsupported ownership and effect cases. This first version does not require generics, comptime, ARC, or concurrency. (4) Split the caller block at the call. Evaluate arguments exactly once in original order. Bind parameters, clone the callee, and route returns to a continuation and result. Preserve borrow/move semantics, cleanup order, and exceptional exits. (5) Preserve or recompute affected analyses. Validate transformed bodies and cleanup obligations. Keep the unoptimized path valid. (6) Bound callee size, expansion depth, and caller growth. Detect recursive cycles and prevent unbounded expansion. (7) Test multiple returns, side effects, short-circuit evaluation, borrowed views, shadowing, and recursion limits. Add owned-value, replacement, destruction, and sanitizer coverage as those shapes become eligible. Compare execution with the pass enabled and disabled. (8) Measure JSON validation, collatz, and compiler benchmarks against the same base. Start with is_hex_digit, skip_ws, and match_lit candidates. Inspect generated code for removed calls. Record execution time, compile time, code size, toolchain versions, and remaining hot paths. Do not promise Rust parity or attribute the entire gap to call overhead.
+**Resolution:** (1) Complete the required Flow storage, cleanup, phase-validation, and analysis-invalidation contracts, including explicit storage lineage, cleanup firing points, and promotion lifetimes. (2) Define body cloning and mutation contracts. Remap TIR instructions, side arenas, Flow blocks, places, joins, cleanup references, and source provenance. Keep cached source bodies unchanged. (3) Add bounded inlining over concrete language-level Flow bodies before ABI lowering. Start with small direct callees returning scalar values, including borrowed bytesview parameters. Exclude unsupported ownership and effect cases. This first version does not require generics, comptime, ARC, or concurrency. (4) Split the caller block at the call. Evaluate arguments exactly once in original order. Bind parameters, clone the callee, and route returns to a continuation and result. Preserve borrow/move semantics, cleanup order, and exceptional exits. (5) Preserve or recompute affected analyses. Validate transformed bodies and cleanup obligations. Keep the unoptimized path valid. (6) Bound callee size, expansion depth, and caller growth. Detect recursive cycles and prevent unbounded expansion. (7) Test multiple returns, side effects, short-circuit evaluation, borrowed views, shadowing, and recursion limits. Add owned-value, replacement, destruction, and sanitizer coverage as those shapes become eligible. Compare execution with the pass enabled and disabled. (8) Measure JSON validation, collatz, and compiler benchmarks against the same base. Start with is_hex_digit, skip_ws, and match_lit candidates. Inspect generated code for removed calls. Record execution time, compile time, code size, toolchain versions, and remaining hot paths. Do not promise Rust parity or attribute the entire gap to call overhead. Reference: https://fitzgen.com/2025/11/19/inliner.html
 
 ---
 
@@ -694,6 +694,71 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** RedundantMaterialize (W0003) fires when a str(...) copy 'never escapes and its source is never mutated' and recommends using the view directly. When the copy's purpose is TYPE CONVERSION (slice view -> owned str, e.g. int_str = str(s[start:dot]) into an str binding), following the advice is a compile error (E0012: a slice yields strview) — the recommendation is unreachable, a false positive for the materialize-where-owned-is-required pattern. The warning-free spellings today: keep str(...), or declare the binding strview end-to-end, which currently needs the noisy full-slice 'mut v = ""[:]' as the empty view. The empty-initializer syntax should be decided BEFORE slice[T]/list[T]/map[K,V] land so all view/collection types stay consistent. Options: (a) annotation-driven literal coercion 'mut v: strview = ""' (Rust/Swift style; minimal, literal-backed only), (b) context-typed builtin empty() (none-style precedent; uniform across collections; needs return-type-driven builtin resolution), (c) typed empty literals for collections (Pythonic, DX-consistent). Note M22's draft already uses constructor-style 'list[int]()'. The W0003 escape heuristic should also learn the conversion-purpose shape regardless of the syntax decision.
 
 **Resolution:** Pending language-owner decision. The W0003 heuristic fix (recognize materialize-for-conversion) is independent of the syntax choice and can land first.
+
+---
+
+### I-251 — Measure and remove fixed frontend setup overhead
+
+**Severity:** Correctness / Hygiene
+**Area:** sema
+
+**Files:** ryo-frontend/src/astgen.rs, ryo-frontend/src/sema/mod.rs, ryo-frontend/benches/frontend.rs
+
+**Summary:** Small semantic benchmarks show a fixed per-compile cost after error-union support, while larger semantic benchmarks are mostly unchanged. Eager Utf8Error layout registration and per-function inference state are candidates, but hardware differences make the exact regression uncertain.
+
+**Resolution:** Compare base and head on the same runner type, then measure lazy Utf8Error registration/layout and inference-state allocation independently. Preserve compiler-known type behavior and add small and large benchmarks so the fixed-cost fix does not penalize error-using programs.
+
+---
+
+### I-252 — Extract the structural fuzzing harness into scripts
+
+**Severity:** Cleanup
+**Area:** tooling
+
+**Files:** doc/guides/structure_aware_fuzzing.md, scripts/
+
+**Summary:** The reusable standard-library harness is embedded as a large executable example in the guide. A script would be easier to run and test directly, while generated Ryo programs and campaign artifacts should remain outside the repository.
+
+**Resolution:** Move the harness into a named scripts/ entry point, add standard-library unittest coverage for generation, process-tree timeouts, bounded streams, oracles, and manifests, and replace the long guide listing with usage instructions and a link.
+
+---
+
+### I-253 — Remove the nested catch-match compatibility form
+
+**Severity:** Cleanup
+**Area:** frontend-parser
+
+**Files:** ryo-frontend/src/grammar/errors.rs, ryo-frontend/src/sema/match_.rs, docs/specification.md, ryo/tests/integration_errors.rs
+
+**Summary:** The compatibility form 'expr catch as e: match e:' repeats the dispatch already provided by direct catch arms, adding syntax and ownership paths that make the preferred error-handling style less clear.
+
+**Resolution:** As an explicitly approved language change, reject nested catch-as-match with guidance to use direct catch arms or an ordinary handler as appropriate. Migrate tests, examples, the specification, and the reference while retaining direct arms and module-qualified nominal error patterns.
+
+---
+
+### I-254 — Add a frontend-only ryo check command
+
+**Severity:** Correctness / Hygiene
+**Area:** driver-cli
+
+**Files:** ryo/src/main.rs, ryo-driver/src/pipeline/mod.rs, ryo-driver/src/pipeline/build.rs, ryo/tests/integration_driver.rs
+
+**Summary:** Users need a fast way to show errors and warnings without code generation, linking, or execution. Current run and build commands always proceed into backend work after frontend analysis.
+
+**Resolution:** Add 'ryo check <file>' with parsing, astgen, sema, and ownership diagnostics but no CLIF, Zig, binary, or execution. Return zero with warnings and nonzero with errors, support inferred-signature inspection, test operation without Zig, and introduce shared frontend options if that removes repeated argument plumbing.
+
+---
+
+### I-255 — Warn when an inferred error set is empty
+
+**Severity:** Correctness / Hygiene
+**Area:** sema
+
+**Files:** ryo-frontend/src/sema/error_inference.rs, ryo-frontend/src/sema/mod.rs, docs/specification.md, ryo/tests/error_empty_inference.rs
+
+**Summary:** A finalized inferred '!T' signature with no errors can hide an unnecessarily broad API. The current contract accepts empty sets without a warning and exposes them only through --show-inferred-errors.
+
+**Resolution:** As an explicitly approved diagnostics change, add a warning for finalized empty inferred sets with help to use the plain success return type instead. Update the specification, reference, and tests, while preserving successful compilation and exact inferred-signature inspection output.
 
 ---
 

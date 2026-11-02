@@ -88,6 +88,7 @@ fn parse_and_sema_diagnostics_co_surface() {
         "<test>",
         Path::new("<test>"),
         parse_diags,
+        false,
     )
     .expect_err("both a parse error and a type error must fail the compile");
     let CompilerError::Diagnostics(diags) = err else {

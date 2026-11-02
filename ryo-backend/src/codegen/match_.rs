@@ -1,6 +1,6 @@
 //! `match` expression codegen (M12) — enum tag dispatch with wildcard
 //! routing, anonymous-struct guard chains (int/bool literal guards),
-//! per-arm payload binding moves, and scalar/void/aggregate merges.
+//! per-arm payload binding moves/copies, and scalar/void/aggregate merges.
 //!
 //! The lowering is split across the Flow-block driver:
 //!
@@ -10,8 +10,8 @@
 //!   memory, never a block param), and the per-scrutinee-kind routing
 //!   into the pre-mapped Flow arm blocks (`route_*` below).
 //! * Each Flow arm block's prologue (`match_arm_prologue`) fires the
-//!   arm-start payload drops and moves the payload bindings out of the
-//!   scrutinee slot through the shared `bind_field_move`.
+//!   arm-start payload drops and binds payloads from the scrutinee slot.
+//!   Shared direct-catch bindings deep-copy; all others move.
 //! * A falling arm's `Goto` terminator (`match_arm_fallthrough`) writes
 //!   the arm result into the match result slot (scalar values store;
 //!   aggregates go through the canonical per-type aggregate writes) and
@@ -30,11 +30,12 @@
 //!    (A str scrutinee extracts its transient `(ptr, len)`.)
 //! 2. A result slot is allocated BEFORE the dispatch so the slot
 //!    address is a constant dominating every arm and the merge.
-//! 3. Dispatch per scrutinee kind: enums load the i32 tag and switch
-//!    (`emit_tag_dispatch`), routing each variant's case to the FIRST
+//! 3. Dispatch per scrutinee kind: nonempty enums load the i32 tag and
+//!    switch (`emit_tag_dispatch`), routing each variant's case to the FIRST
 //!    arm covering it (written order wins; W0005-dead duplicates stay
 //!    unrouted) and the wildcard arm's entry to the switch's
-//!    `otherwise`. Anon-struct scrutinees lower to a linear chain of
+//!    `otherwise`. An empty error set routes directly to its wildcard arm
+//!    without a tag load. Anon-struct scrutinees lower to a linear chain of
 //!    guard conjunctions: each failed compare short-circuits to the
 //!    next arm's test block, and the final wildcard arm is the
 //!    fallthrough. Literal scrutinees (int/bool/str) lower to the same
@@ -178,7 +179,10 @@ impl<M: Module> Codegen<M> {
         // place matters only for the scheduled post-merge drop (the
         // end-of-statement sweep fires the ownership pass's Free).
         let scrut = match ctx.pool.kind(scrut_ty) {
-            TypeKind::Enum => {
+            TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion => {
                 ScrutineeHome::Slot(Self::eval_inst_enum(builder, ctx, view.scrutinee)?)
             }
             TypeKind::AnonStruct => {
@@ -227,7 +231,10 @@ impl<M: Module> Codegen<M> {
                         StackSlotData::new(StackSlotKind::ExplicitSlot, STR_SLOT_SIZE, 3),
                     ),
                     TypeKind::Struct | TypeKind::AnonStruct => Self::struct_slot(builder, ctx, ty),
-                    TypeKind::Enum => Self::enum_slot(builder, ctx, ty),
+                    TypeKind::Enum
+                    | TypeKind::DeclaredError
+                    | TypeKind::ErrorSet
+                    | TypeKind::ErrorUnion => Self::enum_slot(builder, ctx, ty),
                     other => unreachable!("match_shape rejected {other:?} as an aggregate result"),
                 };
                 Some(builder.ins().stack_addr(ctx.int_type, slot, 0))
@@ -352,11 +359,10 @@ impl<M: Module> Codegen<M> {
     }
 
     /// The Flow arm block's prologue: arm-start payload drops (the
-    /// consuming arm's unbound needs-drop fields) and the binding
-    /// prologue through the shared `bind_field_move` (fat triples,
-    /// struct/enum slot copies, scalar loads — the destructure logic).
-    /// Only slot-homed scrutinees (enum/anon-struct) carry payload
-    /// drops; literal scrutinees bind nothing.
+    /// consuming arm's unbound needs-drop fields) and payload binding.
+    /// Ordinary matches move; shared direct catches deep-copy so their
+    /// original error remains valid. Only slot-homed scrutinees carry
+    /// payload drops; literal scrutinees bind nothing.
     pub(crate) fn match_arm_prologue(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -404,7 +410,40 @@ impl<M: Module> Codegen<M> {
                 cursor += 1;
                 Some(token)
             };
-            Self::bind_field_move(builder, ctx, b.name, field_addr, b.ty, token)?;
+            if b.ty == ctx.pool.void() {
+                // Void uses a dummy zero scalar; its payload has no bytes
+                // to load, copy, or store.
+                let val = builder.ins().iconst(ctx.int_type, 0);
+                let var = builder.declare_var(ctx.int_type);
+                builder.def_var(var, val);
+                Self::write_slot(
+                    &mut ctx.range_facts,
+                    &mut ctx.range_facts_undo,
+                    b.name,
+                    None,
+                );
+                Self::write_slot(&mut ctx.locals, &mut ctx.locals_undo, b.name, Some(var));
+                if let Some(token) = token {
+                    ctx.aggregate_binding_storage.insert(token, var);
+                    Self::cache_repr(ctx, token, ValueRepr::Scalar(val));
+                }
+                continue;
+            }
+            if ctx.pool.kind(b.ty) == TypeKind::ErrorSet && ctx.pool.enum_view(b.ty).is_empty() {
+                debug_assert!(token.is_none());
+                let var = builder.declare_var(ctx.int_type);
+                builder.def_var(var, field_addr);
+                Self::write_slot(
+                    &mut ctx.struct_locals,
+                    &mut ctx.struct_locals_undo,
+                    b.name,
+                    Some(var),
+                );
+            } else if token.is_some() && ctx.tir.is_direct_catch_match(r) {
+                Self::bind_field_deep_copy(builder, ctx, b.name, field_addr, b.ty, token)?;
+            } else {
+                Self::bind_field_move(builder, ctx, b.name, field_addr, b.ty, token)?;
+            }
         }
         Ok(())
     }
@@ -603,7 +642,10 @@ impl<M: Module> Codegen<M> {
                 let src = Self::eval_inst_struct(builder, ctx, body)?;
                 Self::emit_struct_copy(builder, ctx, slot_addr, src, ty)
             }
-            TypeKind::Enum => {
+            TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion => {
                 let src = Self::eval_inst_enum(builder, ctx, body)?;
                 Self::emit_enum_copy(builder, ctx, slot_addr, src, ty)
             }
@@ -641,7 +683,10 @@ impl<M: Module> Codegen<M> {
                 })
             }
             TypeKind::Struct | TypeKind::AnonStruct => Ok(ValueRepr::Struct { addr: slot_addr }),
-            TypeKind::Enum => Ok(ValueRepr::Enum { addr: slot_addr }),
+            TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion => Ok(ValueRepr::Enum { addr: slot_addr }),
             other => Err(format!(
                 "eval_inst_match: {other:?} is not a lowered aggregate match result"
             )),
@@ -664,18 +709,22 @@ impl<M: Module> Codegen<M> {
             | TypeKind::Bytes
             | TypeKind::Struct
             | TypeKind::AnonStruct
-            | TypeKind::Enum => Ok(MatchShape::Aggregate(ty)),
+            | TypeKind::Enum
+            | TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion => Ok(MatchShape::Aggregate(ty)),
             other => Err(format!(
                 "eval_inst_match: match result type kind {other:?} is not lowerable (sema gates match result types)"
             )),
         }
     }
 
-    /// Enum scrutinee: i32 tag load plus `emit_tag_dispatch`. Each
-    /// variant's case block jumps to the FIRST arm covering it (written
-    /// order wins; duplicate arms past the first are W0005-dead and get
-    /// no case edge), and the wildcard arm's entry takes the switch's
-    /// `otherwise` — full coverage without a wildcard keeps the
+    /// Enum scrutinee: nonempty enums use an i32 tag load plus
+    /// `emit_tag_dispatch`; an empty error set jumps directly to its
+    /// wildcard arm. Each variant's case block jumps to the FIRST arm
+    /// covering it (written order wins; duplicate arms past the first are
+    /// W0005-dead and get no case edge), and the wildcard arm's entry takes
+    /// the switch's `otherwise` — full coverage without a wildcard keeps the
     /// invalid-tag trap, exactly the M11 invariant semantics. The case
     /// blocks are pure dispatch: the arm bodies are the pre-mapped Flow
     /// arm blocks, filled by the driver.
@@ -688,11 +737,6 @@ impl<M: Module> Codegen<M> {
         arm_entry: &[Option<Block>],
     ) -> Result<(), String> {
         let variant_count = ctx.pool.enum_view(scrut_ty).variants().count();
-        let tag = builder
-            .ins()
-            .load(types::I32, MemFlagsData::trusted(), scrutinee_addr, 0);
-        let (cases, otherwise) = Self::emit_tag_dispatch(builder, variant_count, tag);
-
         let mut case_arm: Vec<Option<usize>> = vec![None; variant_count];
         let mut wildcard: Option<usize> = None;
         for (i, arm) in view.arms().enumerate() {
@@ -741,6 +785,19 @@ impl<M: Module> Codegen<M> {
             }
         }
 
+        if variant_count == 0 {
+            let i = wildcard.ok_or_else(|| {
+                "eval_inst_match: empty enum scrutinee has no wildcard arm".to_string()
+            })?;
+            let entry = arm_entry[i].expect("an empty enum's wildcard arm has an entry block");
+            builder.ins().jump(entry, &[]);
+            return Ok(());
+        }
+
+        let tag = builder
+            .ins()
+            .load(types::I32, MemFlagsData::trusted(), scrutinee_addr, 0);
+        let (cases, otherwise) = Self::emit_tag_dispatch(builder, variant_count, tag);
         for (v, case) in cases.iter().enumerate() {
             // Pure dispatch: jump to the routed arm's pre-mapped Flow
             // block (the driver fills it), or trap on a violated-

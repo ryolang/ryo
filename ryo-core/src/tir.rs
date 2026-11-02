@@ -277,6 +277,10 @@ pub enum TirTag {
     /// Borrows operand; owned `str` out.
     DebugRepr,
 
+    /// Compiler-known declared-error/error-set `.message()`. Operand in
+    /// `TirData::UnOp`; borrows the active error and returns an owned `str`.
+    ErrorMessage,
+
     /// `return <expr>`. Operand in `TirData::UnOp`.
     Return,
 
@@ -326,6 +330,11 @@ pub enum TirTag {
     /// synthesized `"0"`, `"1"`, … names). Unit variants encode
     /// `argc = 0`; `TypedInst.ty` is the enum type.
     EnumLit,
+
+    /// Explicit success/error wrapping or active-alternative widening
+    /// into an error union. Operand in `TirData::UnOp`; `TypedInst.ty`
+    /// is the destination union type.
+    ErrorUnionCoerce,
 
     /// Field access `object.field` (M9). Payload in
     /// `TirData::FieldAccess` (object + canonical field index);
@@ -489,6 +498,8 @@ pub struct Tir {
     /// value-position-match scan and unwrap without decoding a single
     /// instruction.
     pub contains_match: bool,
+    /// Compiler-generated direct-arm dispatch inside `catch as`.
+    pub direct_catch_matches: std::collections::HashSet<TirRef>,
 }
 
 impl Tir {
@@ -555,6 +566,7 @@ pub struct TirBuilder {
     /// Set by `match_expr` — the only `Match` producer — and copied
     /// into the built [`Tir`]'s `contains_match`.
     saw_match: bool,
+    direct_catch_matches: std::collections::HashSet<TirRef>,
 }
 
 impl TirBuilder {
@@ -581,6 +593,7 @@ impl TirBuilder {
             extra: Vec::new(),
             spans: vec![placeholder_span],
             saw_match: false,
+            direct_catch_matches: std::collections::HashSet::new(),
         }
     }
 
@@ -886,6 +899,15 @@ impl TirBuilder {
         self.push(TirTag::EnumLit, ty, TirData::Extra(range), span)
     }
 
+    pub fn error_union_coerce(&mut self, operand: TirRef, target: TypeId, span: Span) -> TirRef {
+        self.push(
+            TirTag::ErrorUnionCoerce,
+            target,
+            TirData::UnOp(operand),
+            span,
+        )
+    }
+
     /// Emit a `FieldAccess` (M9). `field_index` is the canonical
     /// declaration-order index; `ty` is the field type.
     pub fn field_access(
@@ -961,6 +983,7 @@ impl TirBuilder {
             span: self.span,
             operand_match_memo: std::cell::OnceCell::new(),
             contains_match: self.saw_match,
+            direct_catch_matches: self.direct_catch_matches,
         };
         #[cfg(debug_assertions)]
         tir.validate_tree_shape();

@@ -4,15 +4,40 @@
 //! ABI, `ryo_bytes_*` symbols.
 
 use super::literals::store_bytes;
-use cranelift::codegen::ir::{FuncRef, types};
+use cranelift::codegen::ir::{FuncRef, StackSlotData, StackSlotKind, types};
 use cranelift::prelude::*;
 use cranelift_module::Module;
 use ryo_core::tir::TirRef;
 use ryo_core::types::{StringId, TypeKind};
 
-use super::{Codegen, FunctionContext, ValueRepr};
+use super::{Codegen, FunctionContext, STR_SLOT_SIZE, ValueRepr};
 
 impl<M: Module> Codegen<M> {
+    pub(crate) fn emit_bytes_to_str(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+    ) -> Result<Value, String> {
+        let view = ctx.tir.call_view(r);
+        let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, view.args.at(0))?;
+        let slot = builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            STR_SLOT_SIZE,
+            3,
+        ));
+        let out = builder.ins().stack_addr(ctx.int_type, slot, 0);
+        let func = Self::declare_runtime_fn(
+            ctx,
+            builder,
+            "__ryo_bytes_to_str",
+            &[ctx.int_type, ctx.int_type, types::I64],
+            &[types::I8],
+        )?;
+        let call = builder.ins().call(func, &[out, ptr, len]);
+        let valid = builder.inst_results(call)[0];
+        super::errors::emit_utf8_error_union(builder, ctx, r, out, valid)
+    }
+
     /// Emit a bytes literal as a fat pointer triple (ptr, len, cap=0):
     /// the `.rodata` data pointer, the compile-time length, and the
     /// static cap-0 sentinel — pure constants, no runtime call. Mirrors

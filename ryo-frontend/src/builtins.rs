@@ -34,6 +34,7 @@ pub struct BuiltinNameIds {
     pub(crate) to_str: StringId,
     pub(crate) to_bytes: StringId,
     pub(crate) as_bytes: StringId,
+    pub(crate) message: StringId,
 }
 
 impl BuiltinNameIds {
@@ -61,6 +62,7 @@ impl BuiltinNameIds {
             to_str: pool.intern_str("to_str"),
             to_bytes: pool.intern_str("to_bytes"),
             as_bytes: pool.intern_str("as_bytes"),
+            message: pool.intern_str("message"),
         }
     }
 }

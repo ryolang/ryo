@@ -290,6 +290,7 @@ pub(crate) fn analyze_loop(
     // is the fallback's documented conservative direction: tolerable
     // only because the state is unreachable-by-proof, never a silently
     // accepted analysis result.
+    let hazard_count = own.owner_hazards.len();
     let mut entry_state = snap.clone();
     let mut converged = false;
     let height_cap = 5 * w.tir.instructions.len() + 2;
@@ -362,7 +363,10 @@ pub(crate) fn analyze_loop(
 
     // Phase 2 — single check pass against the real sink and sidecar:
     // a binding moved inside the body without rebinding before the
-    // back-edge surfaces as E0020 on this pass.
+    // back-edge surfaces as E0020 on this pass. Speculative hazards are
+    // discarded with their staging sidecars; only this pass drives
+    // displacement validation.
+    own.owner_hazards.truncate(hazard_count);
     let pass_epoch = w.next_epoch();
     w.walk_phase(own, sink, sidecar, &region, pass_epoch);
     // Final merge with the loop-entry snapshot: the loop may execute

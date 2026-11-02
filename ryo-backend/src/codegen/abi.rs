@@ -109,7 +109,7 @@ impl<M: Module> Codegen<M> {
         } else if let ValueAbi::Scalar(ty) = result {
             signature.returns.push(AbiParam::new(ty));
         }
-        if !is_main && self.tail_candidates.contains(&tir.name) {
+        if !is_main && !result.indirect_return() && self.tail_candidates.contains(&tir.name) {
             signature.call_conv = CallConv::Tail;
         }
         LoweredAbi {

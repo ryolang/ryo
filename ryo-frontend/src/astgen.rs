@@ -24,8 +24,8 @@ use ryo_core::types::{
     EnumVariantDef, InternPool, StringId, StructFlags, TypeId, TypeKind, VariantKind,
 };
 use ryo_core::uir::{
-    InstRef, InstTag, Uir, UirBuilder, UirEnumDecl, UirEnumField, UirEnumVariant, UirParam,
-    UirStructDecl, UirStructField,
+    InstRef, InstTag, Uir, UirBuilder, UirEnumDecl, UirEnumField, UirEnumVariant, UirErrorDecl,
+    UirParam, UirStructDecl, UirStructField,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -33,6 +33,21 @@ type Span = ryo_core::span::Span;
 
 fn synthetic_span() -> Span {
     Span::EMPTY
+}
+
+fn define_utf8_error(pool: &mut InternPool) -> (StringId, TypeId) {
+    let name = pool.intern_str("Utf8Error");
+    let error = pool.declare_error(name);
+    let field = pool.intern_str("0");
+    pool.define_error(
+        error,
+        EnumVariantDef {
+            name,
+            kind: VariantKind::Tuple,
+            fields: vec![(field, pool.str_())],
+        },
+    );
+    (name, error)
 }
 
 /// Pre-interned `StringId`s for the primitive type names.
@@ -51,6 +66,8 @@ struct Primitives {
     bytesview: StringId,
     bool_: StringId,
     float: StringId,
+    void: StringId,
+    never: StringId,
 }
 
 impl Primitives {
@@ -63,12 +80,13 @@ impl Primitives {
             bytesview: pool.intern_str("bytesview"),
             bool_: pool.intern_str("bool"),
             float: pool.intern_str("float"),
+            void: pool.intern_str("void"),
+            never: pool.intern_str("never"),
         }
     }
 }
 
-/// Type-annotation resolution: primitive names plus the struct and enum
-/// declarations from `generate`'s pre-scan (M9, M11); primitives win.
+/// Type-annotation resolution over primitives and nominal declarations.
 ///
 /// `enum_variant_fields` is the variant directory `EnumLit` lowering
 /// consults — variants in declaration order with each payload's field
@@ -78,6 +96,7 @@ struct TypeResolver {
     prims: Primitives,
     struct_types: HashMap<StringId, TypeId>,
     enum_types: HashMap<StringId, TypeId>,
+    error_types: HashMap<StringId, TypeId>,
     enum_variant_fields: HashMap<TypeId, Vec<(StringId, VariantKind, Vec<StringId>)>>,
     main: StringId,
     range: StringId,
@@ -95,16 +114,36 @@ impl TypeResolver {
             || name == p.float
     }
 
-    /// Resolve any type expression: a plain (or legacy `&name`) name,
-    /// an anonymous struct type literal `{q: int, r: int}` (M10), or
-    /// the positional form `(int, str)` (M10, ≡ `{0: int, 1: str}`).
     fn resolve_type(
         &self,
         texpr: &ast::TypeExpr,
         ast: &ast::Ast,
         pool: &mut InternPool,
         sink: &mut DiagSink,
-        defined_enums: &HashSet<TypeId>,
+        defined_layouts: &HashSet<TypeId>,
+    ) -> TypeId {
+        self.resolve_type_inner(texpr, ast, pool, sink, defined_layouts, false)
+    }
+
+    fn resolve_return_type(
+        &self,
+        texpr: &ast::TypeExpr,
+        ast: &ast::Ast,
+        pool: &mut InternPool,
+        sink: &mut DiagSink,
+        defined_layouts: &HashSet<TypeId>,
+    ) -> TypeId {
+        self.resolve_type_inner(texpr, ast, pool, sink, defined_layouts, true)
+    }
+
+    fn resolve_type_inner(
+        &self,
+        texpr: &ast::TypeExpr,
+        ast: &ast::Ast,
+        pool: &mut InternPool,
+        sink: &mut DiagSink,
+        defined_layouts: &HashSet<TypeId>,
+        allow_inferred: bool,
     ) -> TypeId {
         match &texpr.kind {
             ast::TypeExprKind::Name { name, is_view } => {
@@ -112,7 +151,7 @@ impl TypeResolver {
             }
             ast::TypeExprKind::Anon { fields } => {
                 let fields = ast.type_field_list(*fields);
-                self.resolve_anon_fields(fields, ast, pool, sink, defined_enums)
+                self.resolve_anon_fields(fields, ast, pool, sink, defined_layouts)
             }
             ast::TypeExprKind::Positional(elems) => {
                 // (int, str) is sugar over {0: int, 1: str}: intern
@@ -124,9 +163,129 @@ impl TypeResolver {
                     let name = pool.intern_str(&i.to_string());
                     fields.push((name, *elem));
                 }
-                self.resolve_anon_fields(&fields, ast, pool, sink, defined_enums)
+                self.resolve_anon_fields(&fields, ast, pool, sink, defined_layouts)
+            }
+            ast::TypeExprKind::ErrorUnion { .. } => {
+                self.resolve_error_union(texpr, ast, pool, sink, defined_layouts, allow_inferred)
             }
         }
+    }
+
+    fn resolve_error_union(
+        &self,
+        texpr: &ast::TypeExpr,
+        ast: &ast::Ast,
+        pool: &mut InternPool,
+        sink: &mut DiagSink,
+        defined_layouts: &HashSet<TypeId>,
+        allow_inferred: bool,
+    ) -> TypeId {
+        let ast::TypeExprKind::ErrorUnion {
+            error_set,
+            success,
+            inferred,
+        } = texpr.kind
+        else {
+            unreachable!()
+        };
+        let members = ast.type_expr_list(error_set);
+        if inferred && !allow_inferred {
+            sink.emit(Diag::error(
+                texpr.span,
+                DiagCode::TypeMismatch,
+                "inferred error unions are only valid in function-return position",
+            ));
+            return pool.error_type();
+        }
+        if !inferred && members.is_empty() {
+            sink.emit(Diag::error(
+                texpr.span,
+                DiagCode::TypeMismatch,
+                "an explicit error union must contain at least one error",
+            ));
+            return pool.error_type();
+        }
+
+        if inferred {
+            let success = ast.type_expr(success);
+            let success =
+                self.resolve_error_union_success(&success, ast, pool, sink, defined_layouts);
+            if pool.is_error(success) {
+                return pool.error_type();
+            }
+            return pool.inferred_error_union(success);
+        }
+
+        let mut member_types = Vec::with_capacity(members.len());
+        let mut failed = false;
+        for member in members {
+            let ty = self.resolve_type(member, ast, pool, sink, defined_layouts);
+            if pool.is_error(ty) {
+                failed = true;
+                continue;
+            }
+            if pool.kind(ty) != TypeKind::DeclaredError {
+                sink.emit(Diag::error(
+                    member.span,
+                    DiagCode::TypeMismatch,
+                    "error union members must be declared errors",
+                ));
+                failed = true;
+            } else if !defined_layouts.contains(&ty) {
+                failed = true;
+            }
+            member_types.push(ty);
+        }
+        let success = ast.type_expr(success);
+        let success = self.resolve_error_union_success(&success, ast, pool, sink, defined_layouts);
+        if failed || pool.is_error(success) {
+            return pool.error_type();
+        }
+        let error_set = pool.error_set(&member_types);
+        pool.error_union(error_set, success)
+    }
+
+    fn resolve_error_union_success(
+        &self,
+        texpr: &ast::TypeExpr,
+        ast: &ast::Ast,
+        pool: &mut InternPool,
+        sink: &mut DiagSink,
+        defined_layouts: &HashSet<TypeId>,
+    ) -> TypeId {
+        let success = match texpr.kind {
+            ast::TypeExprKind::Name {
+                name,
+                is_view: false,
+            } if name == self.prims.void => pool.void(),
+            ast::TypeExprKind::Name {
+                name,
+                is_view: false,
+            } if name == self.prims.never => pool.never(),
+            _ => self.resolve_type(texpr, ast, pool, sink, defined_layouts),
+        };
+        if pool.is_error(success) {
+            return success;
+        }
+        let invalid = match pool.kind(success) {
+            TypeKind::Never => Some("error union success type cannot be 'never'"),
+            TypeKind::View(_) => Some("error union success type must be owned, not a view"),
+            TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion
+            | TypeKind::InferredErrorUnion => {
+                Some("error types, error sets, and error unions cannot be success types")
+            }
+            _ => None,
+        };
+        if let Some(message) = invalid {
+            sink.emit(Diag::error(texpr.span, DiagCode::TypeMismatch, message));
+            return pool.error_type();
+        }
+        if !type_has_layout(pool, success, defined_layouts) {
+            return pool.error_type();
+        }
+        success
     }
 
     /// `{q: int, r: int}` (and its positional equivalent): resolve
@@ -139,11 +298,11 @@ impl TypeResolver {
         ast: &ast::Ast,
         pool: &mut InternPool,
         sink: &mut DiagSink,
-        defined_enums: &HashSet<TypeId>,
+        defined_layouts: &HashSet<TypeId>,
     ) -> TypeId {
         let mut pairs: Vec<(StringId, TypeId)> = Vec::with_capacity(fields.len());
         for &(fname, ref ftexpr) in fields {
-            let fty = self.resolve_type(ftexpr, ast, pool, sink, defined_enums);
+            let fty = self.resolve_type(ftexpr, ast, pool, sink, defined_layouts);
             if pool.is_view(fty) {
                 sink.emit(Diag::error(
                     ftexpr.span,
@@ -182,13 +341,10 @@ impl TypeResolver {
         // computes layout eagerly: interning would panic in
         // `size_align`. Absorb instead (the original diagnostic is in
         // the sink; `compatible` matches the error sentinel downstream).
-        // Enum definedness comes from `defined_enums` — the pool has no
-        // `is_defined_enum` (types.rs is at its line cap).
-        if pairs.iter().any(|&(_, fty)| {
-            pool.is_error(fty)
-                || (matches!(pool.kind(fty), TypeKind::Struct) && !pool.is_defined_struct(fty))
-                || (matches!(pool.kind(fty), TypeKind::Enum) && !defined_enums.contains(&fty))
-        }) {
+        if pairs
+            .iter()
+            .any(|&(_, fty)| !type_has_layout(pool, fty, defined_layouts))
+        {
             return pool.error_type();
         }
         pool.anon_struct(&pairs)
@@ -235,6 +391,8 @@ impl TypeResolver {
             ty
         } else if let Some(&ty) = self.enum_types.get(&name) {
             ty
+        } else if let Some(&ty) = self.error_types.get(&name) {
+            ty
         } else {
             // Only resolve the &str on the unhappy path; the common
             // primitive path stays a pure `StringId` compare.
@@ -245,6 +403,15 @@ impl TypeResolver {
             ));
             pool.error_type()
         }
+    }
+}
+
+fn type_has_layout(pool: &InternPool, ty: TypeId, defined_layouts: &HashSet<TypeId>) -> bool {
+    match pool.kind(ty) {
+        TypeKind::Error | TypeKind::Never | TypeKind::InferredErrorUnion => false,
+        TypeKind::Struct => pool.is_defined_struct(ty),
+        TypeKind::Enum | TypeKind::DeclaredError => defined_layouts.contains(&ty),
+        _ => true,
     }
 }
 
@@ -260,29 +427,44 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
 
     let main_id = pool.intern_str("main");
     let range_id = pool.intern_str("range");
+    let (utf8_error_name, utf8_error) = define_utf8_error(pool);
 
-    // Pre-scan (M9, M11): declare every top-level struct and enum
-    // before any field or payload type is resolved (annotations may
-    // name later-declared types); both kinds before either is defined.
+    // Declare every nominal type before resolving fields, payloads, or
+    // signatures so later declarations and cross-kind cycles resolve
+    // through one namespace.
     let mut struct_types: HashMap<StringId, TypeId> = HashMap::new();
     let mut struct_entries: HashMap<StringId, (TypeId, ast::StructDef, Span)> = HashMap::new();
     let mut struct_order: Vec<StringId> = Vec::new();
     let mut enum_types: HashMap<StringId, TypeId> = HashMap::new();
     let mut enum_entries: HashMap<StringId, (TypeId, ast::EnumDef, Span)> = HashMap::new();
     let mut enum_order: Vec<StringId> = Vec::new();
+    let mut error_types: HashMap<StringId, TypeId> = HashMap::new();
+    let mut error_entries: HashMap<StringId, (TypeId, ast::ErrorDef, Span)> = HashMap::new();
+    let mut error_order: Vec<StringId> = Vec::new();
 
     for &stmt in program.top_level_stmts() {
+        let nominal_declaration = match &program.stmt(stmt).kind {
+            ast::StmtKind::StructDef(def) => Some((def.name.name, def.name.span)),
+            ast::StmtKind::EnumDef(def) => Some((def.name.name, def.name.span)),
+            ast::StmtKind::ErrorDef(def) => Some((def.name.name, def.name.span)),
+            _ => None,
+        };
+        if let Some((name, span)) = nominal_declaration
+            && name == utf8_error_name
+        {
+            sink.emit(Diag::error(
+                span,
+                DiagCode::DuplicateDeclaration,
+                "duplicate declaration of compiler-known type 'Utf8Error'",
+            ));
+            continue;
+        }
         match &program.stmt(stmt).kind {
             ast::StmtKind::FunctionDef(def) => func_defs.push(def),
             // Parser-recovery placeholder: already diagnosed at the
             // parse stage, and not a "top-level statement" for the
             // explicit-main check.
             ast::StmtKind::Error => {}
-            // Struct declarations (M9) are declarations, not
-            // executable top-level statements — they must not trip
-            // the explicit-main check and must not reach
-            // `gen_implicit_main`. They lower to `uir.struct_decls`
-            // entries below, not to instructions.
             ast::StmtKind::StructDef(def) => {
                 let name = def.name.name;
                 if struct_entries.contains_key(&name) {
@@ -293,13 +475,12 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
                     ));
                     continue;
                 }
-                if enum_entries.contains_key(&name) {
-                    // Type names share one namespace across kinds (types.rs relies on this check).
+                if enum_entries.contains_key(&name) || error_entries.contains_key(&name) {
                     sink.emit(Diag::error(
                         def.name.span,
                         DiagCode::DuplicateDeclaration,
                         format!(
-                            "type '{}' is declared as both a struct and an enum",
+                            "type '{}' is declared with more than one kind",
                             pool.str(name),
                         ),
                     ));
@@ -310,9 +491,6 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
                 struct_entries.insert(name, (ty, *def, program.stmt_span(stmt)));
                 struct_order.push(name);
             }
-            // Enum declarations (M11) are declarations like structs:
-            // filtered out here, defined by the DFS, registered in
-            // `uir.enum_decls`.
             ast::StmtKind::EnumDef(def) => {
                 let name = def.name.name;
                 if enum_entries.contains_key(&name) {
@@ -323,12 +501,12 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
                     ));
                     continue;
                 }
-                if struct_entries.contains_key(&name) {
+                if struct_entries.contains_key(&name) || error_entries.contains_key(&name) {
                     sink.emit(Diag::error(
                         def.name.span,
                         DiagCode::DuplicateDeclaration,
                         format!(
-                            "type '{}' is declared as both a struct and an enum",
+                            "type '{}' is declared with more than one kind",
                             pool.str(name),
                         ),
                     ));
@@ -338,6 +516,32 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
                 enum_types.insert(name, ty);
                 enum_entries.insert(name, (ty, *def, program.stmt_span(stmt)));
                 enum_order.push(name);
+            }
+            ast::StmtKind::ErrorDef(def) => {
+                let name = def.name.name;
+                if error_entries.contains_key(&name) {
+                    sink.emit(Diag::error(
+                        def.name.span,
+                        DiagCode::DuplicateDeclaration,
+                        format!("duplicate error declaration: '{}'", pool.str(name)),
+                    ));
+                    continue;
+                }
+                if struct_entries.contains_key(&name) || enum_entries.contains_key(&name) {
+                    sink.emit(Diag::error(
+                        def.name.span,
+                        DiagCode::DuplicateDeclaration,
+                        format!(
+                            "type '{}' is declared with more than one kind",
+                            pool.str(name),
+                        ),
+                    ));
+                    continue;
+                }
+                let ty = pool.declare_error(name);
+                error_types.insert(name, ty);
+                error_entries.insert(name, (ty, *def, program.stmt_span(stmt)));
+                error_order.push(name);
             }
             _ => top_level.push(stmt),
         }
@@ -363,35 +567,39 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
                 (ety, variants)
             })
             .collect();
+    error_types.insert(utf8_error_name, utf8_error);
 
     let types = TypeResolver {
         prims: Primitives::new(pool),
         struct_types,
         enum_types,
+        error_types,
         enum_variant_fields,
         main: main_id,
         range: range_id,
     };
 
-    // Define DFS with cycle detection (M9 structs, M11 enums): one
-    // dependency-ordered DFS covers both kinds (cross-kind cycles
-    // caught); a by-value self-reference has no finite layout
-    // (`InfiniteSize`).
+    // One dependency-ordered DFS covers all nominal kinds, including
+    // cross-kind by-value cycles.
     let mut definer = TypeDefiner {
         structs: &struct_entries,
         enums: &enum_entries,
+        errors: &error_entries,
         types: &types,
         ast: program,
         states: struct_order
             .iter()
             .chain(&enum_order)
+            .chain(&error_order)
             .map(|&name| (name, DefState::Pending))
+            .chain(std::iter::once((utf8_error_name, DefState::Defined)))
             .collect(),
-        defined_enums: HashSet::new(),
+        defined_layouts: HashSet::from([utf8_error]),
         resolved_structs: HashMap::new(),
         resolved_enums: HashMap::new(),
+        resolved_errors: HashMap::new(),
     };
-    for &name in struct_order.iter().chain(&enum_order) {
+    for &name in struct_order.iter().chain(&enum_order).chain(&error_order) {
         definer.define(name, pool, sink);
     }
 
@@ -454,13 +662,48 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
         });
     }
 
+    for &name in &error_order {
+        let (_, def, span) = error_entries[&name];
+        let (ty, payload) = if definer.states[&name] != DefState::Defined {
+            (
+                pool.error_type(),
+                UirEnumVariant {
+                    name,
+                    kind: VariantKind::Unit,
+                    fields: Vec::new(),
+                    span: def.name.span,
+                },
+            )
+        } else {
+            let (ty, _, _) = error_entries[&name];
+            (
+                ty,
+                definer
+                    .resolved_errors
+                    .remove(&name)
+                    .unwrap_or_else(|| UirEnumVariant {
+                        name,
+                        kind: VariantKind::Unit,
+                        fields: Vec::new(),
+                        span: def.name.span,
+                    }),
+            )
+        };
+        b.add_error_decl(UirErrorDecl {
+            name,
+            ty,
+            payload,
+            span,
+        });
+    }
+
     for func in &func_defs {
         gen_function_def(
             &mut b,
             program,
             func,
             &types,
-            &definer.defined_enums,
+            &definer.defined_layouts,
             pool,
             sink,
         );
@@ -475,7 +718,7 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
             program,
             &top_level,
             &types,
-            &definer.defined_enums,
+            &definer.defined_layouts,
             pool,
             sink,
         );
@@ -491,27 +734,27 @@ enum DefState {
     Pending,
     /// On the current DFS stack — a field pointing here is a cycle.
     InProgress,
-    /// `define_struct` / `define_enum` has run; layout is in the pool.
+    /// The declaration's layout is in the pool.
     Defined,
     /// Abandoned after a diagnostic (cycle, empty enum, duplicate
     /// variant, unresolvable type); dependents must fail too.
     Failed,
 }
 
-/// Working state for the type define DFS (M9 structs, M11 enums):
-/// one DFS covers both kinds, so cross-kind references order together.
+/// Working state for the shared nominal-type define DFS.
 struct TypeDefiner<'a> {
     structs: &'a HashMap<StringId, (TypeId, ast::StructDef, Span)>,
     enums: &'a HashMap<StringId, (TypeId, ast::EnumDef, Span)>,
+    errors: &'a HashMap<StringId, (TypeId, ast::ErrorDef, Span)>,
     types: &'a TypeResolver,
     ast: &'a ast::Ast,
     states: HashMap<StringId, DefState>,
-    /// Enum types the DFS has defined so far — the pool has no
-    /// `is_defined_enum` probe (types.rs is at its line cap), and
-    /// `enum_view` on an undefined enum is an out-of-bounds read.
-    defined_enums: HashSet<TypeId>,
+    /// Defined enum-shaped types. The pool has no definedness probe for
+    /// these, and viewing an undefined one is an out-of-bounds read.
+    defined_layouts: HashSet<TypeId>,
     resolved_structs: HashMap<StringId, Vec<UirStructField>>,
     resolved_enums: HashMap<StringId, Vec<UirEnumVariant>>,
+    resolved_errors: HashMap<StringId, UirEnumVariant>,
 }
 
 /// Collect the named type references in a struct field's or enum
@@ -529,13 +772,21 @@ fn named_refs_in(texpr: &ast::TypeExpr, ast: &ast::Ast, out: &mut Vec<(StringId,
                 named_refs_in(ft, ast, out);
             }
         }
+        ast::TypeExprKind::ErrorUnion {
+            error_set, success, ..
+        } => {
+            for ft in ast.type_expr_list(*error_set) {
+                named_refs_in(ft, ast, out);
+            }
+            let success = ast.type_expr(*success);
+            named_refs_in(&success, ast, out);
+        }
     }
 }
 
 impl TypeDefiner<'_> {
-    /// Define one type's fields (struct) or variants (enum) in
-    /// dependency order; diagnostics use names in hand (`pool.display(id)`
-    /// panics on undefined types).
+    /// Define one nominal type in dependency order; diagnostics use
+    /// names in hand (`pool.display(id)` panics on undefined types).
     fn define(&mut self, name: StringId, pool: &mut InternPool, sink: &mut DiagSink) {
         if self.states[&name] != DefState::Pending {
             return;
@@ -543,8 +794,10 @@ impl TypeDefiner<'_> {
         self.states.insert(name, DefState::InProgress);
         if self.structs.contains_key(&name) {
             self.define_struct(name, pool, sink);
-        } else {
+        } else if self.enums.contains_key(&name) {
             self.define_enum(name, pool, sink);
+        } else {
+            self.define_error(name, pool, sink);
         }
     }
 
@@ -559,11 +812,15 @@ impl TypeDefiner<'_> {
         pool: &mut InternPool,
         sink: &mut DiagSink,
     ) -> bool {
-        let is_struct = self.types.struct_types.contains_key(&rname);
-        if !is_struct && !self.types.enum_types.contains_key(&rname) {
+        let noun = if self.types.struct_types.contains_key(&rname) {
+            "struct"
+        } else if self.types.enum_types.contains_key(&rname) {
+            "enum"
+        } else if self.types.error_types.contains_key(&rname) {
+            "error"
+        } else {
             return false;
-        }
-        let noun = if is_struct { "struct" } else { "enum" };
+        };
         match self.states[&rname] {
             DefState::InProgress => {
                 sink.emit(Diag::error(
@@ -615,7 +872,7 @@ impl TypeDefiner<'_> {
             }
             let fty = self
                 .types
-                .resolve_type(&texpr, self.ast, pool, sink, &self.defined_enums);
+                .resolve_type(&texpr, self.ast, pool, sink, &self.defined_layouts);
             if pool.is_error(fty) {
                 failed = true;
             }
@@ -768,8 +1025,62 @@ impl TypeDefiner<'_> {
             },
         );
         self.states.insert(name, DefState::Defined);
-        self.defined_enums.insert(ty);
+        self.defined_layouts.insert(ty);
         self.resolved_enums.insert(name, variants);
+    }
+
+    fn define_error(&mut self, name: StringId, pool: &mut InternPool, sink: &mut DiagSink) {
+        let (ty, def, _) = self.errors[&name];
+        let decl_fields = self.ast.struct_field_decls(def.payload.fields);
+        let mut failed = false;
+        let mut seen: Vec<StringId> = Vec::with_capacity(decl_fields.len());
+        for &(field_name, field_type) in decl_fields {
+            if seen.contains(&field_name) {
+                sink.emit(Diag::error(
+                    field_type.span,
+                    DiagCode::DuplicateStructField,
+                    format!(
+                        "field '{}' is specified more than once in error '{}'",
+                        pool.str(field_name),
+                        pool.str(name),
+                    ),
+                ));
+                failed = true;
+            } else {
+                seen.push(field_name);
+            }
+        }
+        let (fields, payload_failed) = self.resolve_field_list(decl_fields, pool, sink);
+        failed |= payload_failed;
+        if failed {
+            self.states.insert(name, DefState::Failed);
+            return;
+        }
+
+        let payload = UirEnumVariant {
+            name,
+            kind: def.payload.kind,
+            fields: fields
+                .into_iter()
+                .map(|(field_name, field_type, field_span)| UirEnumField {
+                    name: field_name,
+                    ty: field_type,
+                    span: field_span,
+                })
+                .collect(),
+            span: def.name.span,
+        };
+        pool.define_error(
+            ty,
+            EnumVariantDef {
+                name,
+                kind: payload.kind,
+                fields: payload.fields.iter().map(|f| (f.name, f.ty)).collect(),
+            },
+        );
+        self.states.insert(name, DefState::Defined);
+        self.defined_layouts.insert(ty);
+        self.resolved_errors.insert(name, payload);
     }
 }
 
@@ -778,13 +1089,13 @@ fn lower_block(
     ast: &ast::Ast,
     stmts: &[ast::StmtId],
     types: &TypeResolver,
-    defined_enums: &HashSet<TypeId>,
+    defined_layouts: &HashSet<TypeId>,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) -> Vec<InstRef> {
     let mut out = Vec::new();
     for &s in stmts {
-        gen_stmt(b, ast, s, types, defined_enums, pool, sink, &mut out);
+        gen_stmt(b, ast, s, types, defined_layouts, pool, sink, &mut out);
     }
     out
 }
@@ -794,7 +1105,7 @@ fn gen_implicit_main(
     ast: &ast::Ast,
     stmts: &[ast::StmtId],
     types: &TypeResolver,
-    defined_enums: &HashSet<TypeId>,
+    defined_layouts: &HashSet<TypeId>,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) {
@@ -810,7 +1121,7 @@ fn gen_implicit_main(
             ast,
             stmt,
             types,
-            defined_enums,
+            defined_layouts,
             pool,
             sink,
             &mut body_stmts,
@@ -826,7 +1137,7 @@ fn gen_function_def(
     ast: &ast::Ast,
     func: &ast::FunctionDef,
     types: &TypeResolver,
-    defined_enums: &HashSet<TypeId>,
+    defined_layouts: &HashSet<TypeId>,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) {
@@ -835,14 +1146,14 @@ fn gen_function_def(
         .iter()
         .map(|p| UirParam {
             name: p.name.name,
-            ty: types.resolve_type(&p.type_annotation, ast, pool, sink, defined_enums),
+            ty: types.resolve_type(&p.type_annotation, ast, pool, sink, defined_layouts),
             mode: p.mode,
             span: p.span,
         })
         .collect();
 
     let return_type = match &func.return_type {
-        Some(ty) => types.resolve_type(ty, ast, pool, sink, defined_enums),
+        Some(ty) => types.resolve_return_type(ty, ast, pool, sink, defined_layouts),
         None => pool.void(),
     };
 
@@ -873,7 +1184,7 @@ fn gen_function_def(
         ast,
         ast.stmt_list(func.body),
         types,
-        defined_enums,
+        defined_layouts,
         pool,
         sink,
     );
@@ -987,7 +1298,7 @@ fn gen_stmt(
     ast: &ast::Ast,
     stmt: ast::StmtId,
     types: &TypeResolver,
-    defined_enums: &HashSet<TypeId>,
+    defined_layouts: &HashSet<TypeId>,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     out: &mut Vec<InstRef>,
@@ -995,17 +1306,18 @@ fn gen_stmt(
     let span = ast.stmt_span(stmt);
     match &ast.stmt(stmt).kind {
         ast::StmtKind::VarDecl(decl) => {
-            let initializer = gen_expr(b, ast, decl.initializer, types, defined_enums, pool, sink);
+            let initializer =
+                gen_expr(b, ast, decl.initializer, types, defined_layouts, pool, sink);
             let ty = decl
                 .type_annotation
                 .as_ref()
-                .map(|ann| types.resolve_type(ann, ast, pool, sink, defined_enums));
+                .map(|ann| types.resolve_type(ann, ast, pool, sink, defined_layouts));
             let r = b.var_decl(decl.name.name, decl.mutable, ty, initializer, span);
             out.push(r);
         }
         ast::StmtKind::Return(value) => match value {
             Some(expr) => {
-                let value = gen_expr(b, ast, *expr, types, defined_enums, pool, sink);
+                let value = gen_expr(b, ast, *expr, types, defined_layouts, pool, sink);
                 out.push(b.unary(InstTag::Return, value, span));
             }
             None => {
@@ -1013,7 +1325,7 @@ fn gen_stmt(
             }
         },
         ast::StmtKind::ExprStmt(value) => {
-            let value = gen_expr(b, ast, *value, types, defined_enums, pool, sink);
+            let value = gen_expr(b, ast, *value, types, defined_layouts, pool, sink);
             out.push(b.unary(InstTag::ExprStmt, value, span));
         }
         ast::StmtKind::FunctionDef(_) => {
@@ -1024,39 +1336,39 @@ fn gen_stmt(
             ));
         }
         ast::StmtKind::AssignOrDecl { target, value } => {
-            let value_ref = gen_expr(b, ast, *value, types, defined_enums, pool, sink);
+            let value_ref = gen_expr(b, ast, *value, types, defined_layouts, pool, sink);
             let r = b.assign_or_decl(target.name, value_ref, span);
             out.push(r);
         }
         ast::StmtKind::CompoundAssign { target, op, value } => {
-            let value_ref = gen_expr(b, ast, *value, types, defined_enums, pool, sink);
+            let value_ref = gen_expr(b, ast, *value, types, defined_layouts, pool, sink);
             let r = b.compound_assign(target.name, *op, value_ref, span);
             out.push(r);
         }
         ast::StmtKind::FieldAssign { target, value } => {
-            let target_ref = gen_expr(b, ast, *target, types, defined_enums, pool, sink);
-            let value_ref = gen_expr(b, ast, *value, types, defined_enums, pool, sink);
+            let target_ref = gen_expr(b, ast, *target, types, defined_layouts, pool, sink);
+            let value_ref = gen_expr(b, ast, *value, types, defined_layouts, pool, sink);
             let r = b.field_assign(target_ref, value_ref, span);
             out.push(r);
         }
         ast::StmtKind::CompoundFieldAssign { target, op, value } => {
-            let target_ref = gen_expr(b, ast, *target, types, defined_enums, pool, sink);
-            let value_ref = gen_expr(b, ast, *value, types, defined_enums, pool, sink);
+            let target_ref = gen_expr(b, ast, *target, types, defined_layouts, pool, sink);
+            let value_ref = gen_expr(b, ast, *value, types, defined_layouts, pool, sink);
             let r = b.compound_field_assign(target_ref, *op, value_ref, span);
             out.push(r);
         }
         ast::StmtKind::Destructure { target, value } => {
-            let value_ref = gen_expr(b, ast, *value, types, defined_enums, pool, sink);
+            let value_ref = gen_expr(b, ast, *value, types, defined_layouts, pool, sink);
             lower_destructure_pattern(b, ast, pool, *target, value_ref, span, sink, out);
         }
         ast::StmtKind::IfStmt(if_stmt) => {
-            let cond = gen_expr(b, ast, if_stmt.cond, types, defined_enums, pool, sink);
+            let cond = gen_expr(b, ast, if_stmt.cond, types, defined_layouts, pool, sink);
             let then_stmts = lower_block(
                 b,
                 ast,
                 ast.stmt_list(if_stmt.then_block),
                 types,
-                defined_enums,
+                defined_layouts,
                 pool,
                 sink,
             );
@@ -1065,13 +1377,13 @@ fn gen_stmt(
                 .elif_list(if_stmt.elif_branches)
                 .iter()
                 .map(|elif| {
-                    let elif_cond = gen_expr(b, ast, elif.cond, types, defined_enums, pool, sink);
+                    let elif_cond = gen_expr(b, ast, elif.cond, types, defined_layouts, pool, sink);
                     let elif_body = lower_block(
                         b,
                         ast,
                         ast.stmt_list(elif.block),
                         types,
-                        defined_enums,
+                        defined_layouts,
                         pool,
                         sink,
                     );
@@ -1085,7 +1397,7 @@ fn gen_stmt(
                     ast,
                     ast.stmt_list(stmts),
                     types,
-                    defined_enums,
+                    defined_layouts,
                     pool,
                     sink,
                 )
@@ -1101,13 +1413,13 @@ fn gen_stmt(
             out.push(r);
         }
         ast::StmtKind::WhileLoop { cond, body } => {
-            let cond_ref = gen_expr(b, ast, *cond, types, defined_enums, pool, sink);
+            let cond_ref = gen_expr(b, ast, *cond, types, defined_layouts, pool, sink);
             let body_refs = lower_block(
                 b,
                 ast,
                 ast.stmt_list(*body),
                 types,
-                defined_enums,
+                defined_layouts,
                 pool,
                 sink,
             );
@@ -1134,14 +1446,14 @@ fn gen_stmt(
                     ),
                 ));
             }
-            let start_ref = gen_expr(b, ast, *start, types, defined_enums, pool, sink);
-            let end_ref = gen_expr(b, ast, *end, types, defined_enums, pool, sink);
+            let start_ref = gen_expr(b, ast, *start, types, defined_layouts, pool, sink);
+            let end_ref = gen_expr(b, ast, *end, types, defined_layouts, pool, sink);
             let body_refs = lower_block(
                 b,
                 ast,
                 ast.stmt_list(*body),
                 types,
-                defined_enums,
+                defined_layouts,
                 pool,
                 sink,
             );
@@ -1166,9 +1478,10 @@ fn gen_stmt(
             let r = b.unreachable(span);
             out.push(r);
         }
-        // Struct/enum declarations are filtered out before lowering (see `generate`).
+        // Nominal type declarations are filtered out before lowering.
         ast::StmtKind::StructDef(_) => {}
         ast::StmtKind::EnumDef(_) => {}
+        ast::StmtKind::ErrorDef(_) => {}
     }
 }
 
@@ -1177,7 +1490,7 @@ fn gen_expr(
     ast: &ast::Ast,
     expr: ast::ExprId,
     types: &TypeResolver,
-    defined_enums: &HashSet<TypeId>,
+    defined_layouts: &HashSet<TypeId>,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) -> InstRef {
@@ -1192,8 +1505,8 @@ fn gen_expr(
         },
         ast::ExprKind::Ident(name) => b.var_ref(name, span),
         ast::ExprKind::BinaryOp(lhs, op, rhs) => {
-            let l = gen_expr(b, ast, lhs, types, defined_enums, pool, sink);
-            let r = gen_expr(b, ast, rhs, types, defined_enums, pool, sink);
+            let l = gen_expr(b, ast, lhs, types, defined_layouts, pool, sink);
+            let r = gen_expr(b, ast, rhs, types, defined_layouts, pool, sink);
             let tag = match op {
                 ast::BinaryOperator::Add => InstTag::Add,
                 ast::BinaryOperator::Sub => InstTag::Sub,
@@ -1212,7 +1525,7 @@ fn gen_expr(
             b.binary(tag, l, r, span)
         }
         ast::ExprKind::UnaryOp(op, operand) => {
-            let s = gen_expr(b, ast, operand, types, defined_enums, pool, sink);
+            let s = gen_expr(b, ast, operand, types, defined_layouts, pool, sink);
             let tag = match op {
                 ast::UnaryOperator::Neg => InstTag::Neg,
                 ast::UnaryOperator::Not => InstTag::Not,
@@ -1223,7 +1536,7 @@ fn gen_expr(
             let arg_refs: Vec<InstRef> = ast
                 .expr_list(args)
                 .iter()
-                .map(|&a| gen_expr(b, ast, a, types, defined_enums, pool, sink))
+                .map(|&a| gen_expr(b, ast, a, types, defined_layouts, pool, sink))
                 .collect();
             b.call(name, &arg_refs, span)
         }
@@ -1232,32 +1545,32 @@ fn gen_expr(
             method,
             args,
         } => {
-            let receiver_ref = gen_expr(b, ast, receiver, types, defined_enums, pool, sink);
+            let receiver_ref = gen_expr(b, ast, receiver, types, defined_layouts, pool, sink);
             let arg_refs: Vec<InstRef> = ast
                 .expr_list(args)
                 .iter()
-                .map(|&a| gen_expr(b, ast, a, types, defined_enums, pool, sink))
+                .map(|&a| gen_expr(b, ast, a, types, defined_layouts, pool, sink))
                 .collect();
             b.method_call(receiver_ref, method, &arg_refs, span)
         }
         ast::ExprKind::Borrow(inner) => {
-            let inner_ref = gen_expr(b, ast, inner, types, defined_enums, pool, sink);
+            let inner_ref = gen_expr(b, ast, inner, types, defined_layouts, pool, sink);
             b.borrow(inner_ref, span)
         }
         ast::ExprKind::Slice { base, start, end } => {
             // Slice projection `base[start:end]` (final spec §3);
             // bounds are optional shorthands. Sema type-checks the
             // base and yields `strview`.
-            let base_ref = gen_expr(b, ast, base, types, defined_enums, pool, sink);
-            let start_ref = start.map(|e| gen_expr(b, ast, e, types, defined_enums, pool, sink));
-            let end_ref = end.map(|e| gen_expr(b, ast, e, types, defined_enums, pool, sink));
+            let base_ref = gen_expr(b, ast, base, types, defined_layouts, pool, sink);
+            let start_ref = start.map(|e| gen_expr(b, ast, e, types, defined_layouts, pool, sink));
+            let end_ref = end.map(|e| gen_expr(b, ast, e, types, defined_layouts, pool, sink));
             b.slice(base_ref, start_ref, end_ref, span)
         }
         ast::ExprKind::Index { base, index } => {
             // Scalar indexing `base[index]` (M8.4.2). Sema gates the
             // base to bytes/bytesview.
-            let base_ref = gen_expr(b, ast, base, types, defined_enums, pool, sink);
-            let index_ref = gen_expr(b, ast, index, types, defined_enums, pool, sink);
+            let base_ref = gen_expr(b, ast, base, types, defined_layouts, pool, sink);
+            let index_ref = gen_expr(b, ast, index, types, defined_layouts, pool, sink);
             b.index(base_ref, index_ref, span)
         }
         // Struct literal `Name{field=value, ...}` (M9) or the
@@ -1271,7 +1584,12 @@ fn gen_expr(
             let fields: Vec<(StringId, InstRef)> = ast
                 .struct_field_inits(lit.fields)
                 .iter()
-                .map(|&(fname, e)| (fname, gen_expr(b, ast, e, types, defined_enums, pool, sink)))
+                .map(|&(fname, e)| {
+                    (
+                        fname,
+                        gen_expr(b, ast, e, types, defined_layouts, pool, sink),
+                    )
+                })
                 .collect();
             let name = lit.name.map(|ident| ident.name);
             b.struct_lit(name, &fields, span)
@@ -1279,12 +1597,12 @@ fn gen_expr(
         // Field access `object.field` (M9); chains fold left in the
         // AST, so each access lowers against its own object.
         ast::ExprKind::FieldAccess { object, field } => {
-            let obj = gen_expr(b, ast, object, types, defined_enums, pool, sink);
+            let obj = gen_expr(b, ast, object, types, defined_layouts, pool, sink);
             b.field_access(obj, field.name, span)
         }
         // Variant construction (M11) lowers to `EnumLit`.
         ast::ExprKind::VariantConstruct(c) => {
-            variants::lower_variant_construct(b, ast, c, types, defined_enums, pool, sink, span)
+            variants::lower_variant_construct(b, ast, c, types, defined_layouts, pool, sink, span)
         }
         // Match expressions (M12) lower to the UIR `Match` wire; see
         // `astgen/match_.rs` for the pattern/body mapping.
@@ -1294,11 +1612,50 @@ fn gen_expr(
             scrutinee,
             arms,
             types,
-            defined_enums,
+            defined_layouts,
             pool,
             sink,
             span,
         ),
+        ast::ExprKind::ErrorConstruct(c) => {
+            let ty = types
+                .error_types
+                .get(&c.name.name)
+                .copied()
+                .unwrap_or_else(|| pool.error_type());
+            match c.args {
+                None if pool.is_error(ty) => b.var_ref(c.name.name, span),
+                None => b.error_construct(c.name.name, ty, false, &[], span),
+                Some(args) => {
+                    let positional = args.positional.is_some();
+                    let mut arg_refs = Vec::new();
+                    if let Some(list) = args.positional {
+                        for (index, &arg) in ast.expr_list(list).iter().enumerate() {
+                            let value = gen_expr(b, ast, arg, types, defined_layouts, pool, sink);
+                            arg_refs.push((index as u32, value));
+                        }
+                    } else if let Some(inits) = args.named {
+                        for &(name, arg) in ast.struct_field_inits(inits) {
+                            let value = gen_expr(b, ast, arg, types, defined_layouts, pool, sink);
+                            arg_refs.push((name.raw(), value));
+                        }
+                    }
+                    if positional && pool.is_error(ty) {
+                        let values: Vec<_> = arg_refs.iter().map(|(_, value)| *value).collect();
+                        b.call(c.name.name, &values, span)
+                    } else {
+                        b.error_construct(c.name.name, ty, positional, &arg_refs, span)
+                    }
+                }
+            }
+        }
+        ast::ExprKind::Try(operand) => {
+            let operand = gen_expr(b, ast, operand, types, defined_layouts, pool, sink);
+            b.unary(InstTag::Try, operand, span)
+        }
+        ast::ExprKind::Catch(catch) => {
+            match_::gen_catch(b, ast, catch, types, defined_layouts, pool, sink, span)
+        }
     }
 }
 

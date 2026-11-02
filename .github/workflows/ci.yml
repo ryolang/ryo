@@ -76,7 +76,11 @@ jobs:
         with:
           prefix-key: test
       - uses: ./.github/actions/zig-toolchain
-      - run: cargo test --workspace
+      - run: |
+          if [ "${{ matrix.os }}" = "ubuntu-24.04-arm" ]; then
+            export CARGO_BUILD_JOBS=2
+          fi
+          cargo test --workspace
       # The param-sentinel guards in Tir::inst/span are hard assert!s so a
       # contract violation fails clearly in release too — run their
       # should_panic tests under the release profile to keep it that way.

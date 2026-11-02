@@ -5,6 +5,7 @@
 use super::tests::*;
 use super::*;
 use ryo_core::tir::{Tir, TirRef, TirTag};
+use ryo_core::types::TypeKind;
 
 // (`tests.rs`'s own `use ryo_core::tir::...` is private to that module,
 // so this file needs its own import; `DiagCode`, `TypeId`, `InternPool`
@@ -356,18 +357,26 @@ fn to_str_types_on_bytes_and_bytesview() {
     let callee = pool
         .find_str("__ryo_bytes_to_str")
         .expect("callee interned");
-    let calls = (1..main.instructions.len())
-        .filter(|&idx| {
+    let calls: Vec<_> = (1..main.instructions.len())
+        .filter_map(|idx| {
             let r = TirRef::from_raw(u32::try_from(idx).expect("idx fits u32"));
-            main.inst(r).tag == TirTag::Call
-                && main.inst(r).ty == pool.str_()
-                && main.call_view(r).name == callee
+            (main.inst(r).tag == TirTag::Call && main.call_view(r).name == callee)
+                .then_some(main.inst(r).ty)
         })
-        .count();
+        .collect();
     assert_eq!(
-        calls, 2,
+        calls.len(),
+        2,
         "both to_str() calls must lower to __ryo_bytes_to_str"
     );
+    for ty in calls {
+        assert_eq!(pool.kind(ty), TypeKind::ErrorUnion);
+        assert_eq!(pool.display(ty).to_string(), "Utf8Error!str");
+        let error = pool.error_union_view(ty).error_set;
+        let variant = pool.enum_view(error).variants().next().expect("Utf8Error");
+        assert_eq!(variant.fields.len(), 1);
+        assert_eq!(variant.fields[0].ty, pool.str_());
+    }
 }
 
 #[test]

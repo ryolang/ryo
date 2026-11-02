@@ -24,6 +24,7 @@ pub fn run_file(
     file: &Path,
     emit: &[EmitKind],
     program_args: &[String],
+    show_inferred_errors: bool,
 ) -> Result<i32, CompilerError> {
     let input = read_source_file(file)?;
     let mut pool = InternPool::new();
@@ -39,7 +40,15 @@ pub fn run_file(
         println!();
     }
 
-    let (uir, analyzed) = lower_and_analyze(&program, &mut pool, &input, &name, file, parse_diags)?;
+    let (uir, analyzed) = lower_and_analyze(
+        &program,
+        &mut pool,
+        &input,
+        &name,
+        file,
+        parse_diags,
+        show_inferred_errors,
+    )?;
     analyzed
         .require_backend_transition()
         .map_err(CompilerError::CodegenError)?;

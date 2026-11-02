@@ -39,6 +39,8 @@ pub enum StmtKind {
     /// `enum Name:` declaration (M11). The variant list lives in the
     /// `enum_variants` side arena, in declaration order.
     EnumDef(EnumDef),
+    /// A single-line nominal error declaration.
+    ErrorDef(ErrorDef),
     Return(Option<ExprId>),
     ExprStmt(ExprId),
     IfStmt(IfStmt),
@@ -182,6 +184,13 @@ pub struct EnumPayload {
     pub fields: StructFieldDeclList,
 }
 
+/// A nominal single-variant error declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ErrorDef {
+    pub name: Ident,
+    pub payload: EnumPayload,
+}
+
 /// A struct literal `Name{field=value, ...}` (M9) or the anonymous
 /// `{field=value, ...}` (M10). `name` is `None` for the anonymous
 /// form — its type identity is the field shape, not a declared name.
@@ -214,6 +223,14 @@ pub struct VariantConstruct {
 pub struct VariantArgs {
     pub positional: Option<ExprList>,
     pub named: Option<StructFieldInitList>,
+}
+
+/// A nominal error construction candidate. `None` is the bare unit
+/// spelling; parenthesized forms reuse the enum argument list storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ErrorConstruct {
+    pub name: Ident,
+    pub args: Option<VariantArgs>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

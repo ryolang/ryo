@@ -226,6 +226,21 @@ pub enum MatchArmBody {
     Stmts(StmtList),
 }
 
+/// An error-union catch expression. Bare `catch:` has no binding and
+/// accepts only direct arms; `catch as name:` also accepts one handler.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CatchExpr {
+    pub operand: ExprId,
+    pub binding: Option<Ident>,
+    pub body: CatchBody,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CatchBody {
+    Handler(MatchArmBody),
+    Arms(MatchArmList),
+}
+
 impl Ast {
     /// Lookup a destructuring pattern by id.
     pub fn pattern(&self, id: PatternId) -> &Pattern {
@@ -314,7 +329,7 @@ impl Ast {
 
     /// Copy a match arm list into the `match_arms` side arena; see
     /// [`Ast::push_expr_list`] for the checked-conversion rationale.
-    fn push_match_arm_list(&mut self, items: &[MatchArm]) -> MatchArmList {
+    pub fn push_match_arm_list(&mut self, items: &[MatchArm]) -> MatchArmList {
         let offset =
             u32::try_from(self.match_arms.len()).expect("AST match_arms arena exceeded u32::MAX");
         self.match_arms.extend_from_slice(items);
@@ -403,6 +418,16 @@ impl Ast {
     /// into the `match_arms` side arena in written order.
     pub fn match_expr(&mut self, scrutinee: ExprId, arms: &[MatchArm], span: Span) -> ExprId {
         let arms = self.push_match_arm_list(arms);
+        self.match_expr_with_arms(scrutinee, arms, span)
+    }
+
+    /// Build a match from an arm list already sealed by the parser.
+    pub fn match_expr_with_arms(
+        &mut self,
+        scrutinee: ExprId,
+        arms: MatchArmList,
+        span: Span,
+    ) -> ExprId {
         self.push_expr(super::ExprKind::Match { scrutinee, arms }, span)
     }
 }

@@ -117,9 +117,9 @@ pub(super) fn unknown_method_error(
 }
 
 /// M8.4.2 bridging methods: `bytes`/`bytesview`.to_str() lowers to
-/// `__ryo_bytes_to_str` (a stopgap that panics at runtime on invalid
-/// UTF-8; becomes `Utf8Error!str` at M13), `str`/`strview`.to_bytes()
-/// lowers to `__ryo_str_to_bytes`. Wrong-family receivers keep the
+/// `__ryo_bytes_to_str` and returns `Utf8Error!str`;
+/// `str`/`strview`.to_bytes() lowers to `__ryo_str_to_bytes`.
+/// Wrong-family receivers keep the
 /// generalized "X has no method 'Y'" diagnostic. Only called for the
 /// `to_str` / `to_bytes` names.
 pub(super) fn bridge_method_call(
@@ -157,7 +157,10 @@ pub(super) fn bridge_method_call(
                 ));
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
-            ("__ryo_bytes_to_str", sema.pool.str_())
+            (
+                "__ryo_bytes_to_str",
+                super::super::builtins::utf8_error_union(sema),
+            )
         }
         _ => {
             if !matches!(

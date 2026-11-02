@@ -9,7 +9,7 @@ use super::tests::*;
 use super::*;
 
 /// Count nodes reachable from `top_level` by following child ids.
-fn reachable_node_counts(ast: &Ast) -> (usize, usize) {
+pub(super) fn reachable_node_counts(ast: &Ast) -> (usize, usize) {
     let mut expr_seen = vec![false; ast.expr_count()];
     let mut stmt_seen = vec![false; ast.stmt_count()];
     let mut expr_work: Vec<ExprId> = Vec::new();
@@ -68,7 +68,7 @@ fn reachable_node_counts(ast: &Ast) -> (usize, usize) {
             StmtKind::Break | StmtKind::Continue | StmtKind::Error => {}
             // Field declarations are scalar metadata in a side
             // arena, not node children — nothing reachable to follow.
-            StmtKind::StructDef(_) | StmtKind::EnumDef(_) => {}
+            StmtKind::StructDef(_) | StmtKind::EnumDef(_) | StmtKind::ErrorDef(_) => {}
         }
         while let Some(expr) = expr_work.pop() {
             if expr_seen[expr.index()] {
@@ -126,6 +126,40 @@ fn reachable_node_counts(ast: &Ast) -> (usize, usize) {
                     }
                     _ => {}
                 },
+                ExprKind::ErrorConstruct(c) => match &c.args {
+                    Some(VariantArgs {
+                        positional: Some(list),
+                        ..
+                    }) => expr_work.extend_from_slice(ast.expr_list(*list)),
+                    Some(VariantArgs {
+                        named: Some(inits), ..
+                    }) => {
+                        for &(_, value) in ast.struct_field_inits(*inits) {
+                            expr_work.push(value);
+                        }
+                    }
+                    _ => {}
+                },
+                ExprKind::Try(operand) => expr_work.push(operand),
+                ExprKind::Catch(c) => {
+                    expr_work.push(c.operand);
+                    match c.body {
+                        CatchBody::Handler(MatchArmBody::Expr(body)) => expr_work.push(body),
+                        CatchBody::Handler(MatchArmBody::Stmts(list)) => {
+                            stmt_work.extend_from_slice(ast.stmt_list(list));
+                        }
+                        CatchBody::Arms(list) => {
+                            for arm in ast.match_arms(list) {
+                                match arm.body {
+                                    MatchArmBody::Expr(body) => expr_work.push(body),
+                                    MatchArmBody::Stmts(list) => {
+                                        stmt_work.extend_from_slice(ast.stmt_list(list));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 // Match arms hold expressions (scrutinee, Expr bodies)
                 // and statement lists; patterns hold no expressions.
                 ExprKind::Match { scrutinee, arms } => {

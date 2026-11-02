@@ -199,16 +199,14 @@ pub(crate) fn check_field_move_out(
         unreachable!("FieldAccess must carry TirData::FieldAccess");
     };
     let obj_ty = tir.inst(object).ty;
-    // Sema guarantees the object is a struct (named or anonymous) or an
-    // enum (M12 payload access); a poisoned (error-typed) chain already
-    // has a sema diagnostic, so don't add noise — the normal consume
-    // path no-ops on it. M12's by-move match bindings make the enum arm
-    // reachable: the owner tokens sema emits are `FieldAccess`es on the
-    // enum-typed scrutinee, and any consume path that meets one must be
-    // rejected exactly like a struct field read (payload fields move
-    // only together with the whole enum).
+    // Sema guarantees the object is a struct or enum-shaped aggregate;
+    // match owner tokens use the same field-access convention for enums,
+    // declared errors, error sets, and compiler-dispatched error unions.
     let obj_kind = pool.kind(obj_ty);
-    if matches!(obj_kind, TypeKind::Enum) {
+    if matches!(
+        obj_kind,
+        TypeKind::Enum | TypeKind::DeclaredError | TypeKind::ErrorSet | TypeKind::ErrorUnion
+    ) {
         // The wire's field_index is variant-relative and the access
         // site carries no variant — the payload shape cannot be named
         // the way the struct arm names `field_name`.

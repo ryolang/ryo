@@ -162,6 +162,23 @@ impl PatternId {
     }
 }
 
+/// Index into [`Ast::type_exprs`]. Same layout and sentinel convention
+/// as [`ExprId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypeExprId(NonZeroU32);
+
+impl TypeExprId {
+    fn from_index(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("TypeExprId index out of range (>= 2^32)");
+        TypeExprId(NonZeroU32::new(raw).expect("TypeExprId index must be >= 1"))
+    }
+
+    /// Array index into `type_exprs`.
+    pub fn index(self) -> usize {
+        self.0.get() as usize
+    }
+}
+
 // ---------- List ranges ----------
 
 /// A `[offset, offset+len)` slice of the `expr_lists` side arena —
@@ -352,6 +369,9 @@ pub enum ExprKind {
     /// `EnumName.Variant` stays [`ExprKind::FieldAccess`] (sema
     /// reinterprets it as a unit-variant value).
     VariantConstruct(VariantConstruct),
+    /// A nominal error construction candidate. Name resolution decides
+    /// whether the candidate denotes a declared error or another value.
+    ErrorConstruct(ErrorConstruct),
     /// `match scrutinee:` with one or more `pattern: body` arms
     /// (M12). The arms live in the `match_arms` side arena, in
     /// written order, behind a [`MatchArmList`]; each arm's pattern is
@@ -361,6 +381,10 @@ pub enum ExprKind {
         scrutinee: ExprId,
         arms: MatchArmList,
     },
+    /// Prefix error propagation over a narrow unary/postfix operand.
+    Try(ExprId),
+    /// Error-union handling with either one handler or direct error arms.
+    Catch(CatchExpr),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -409,12 +433,10 @@ impl Ident {
     }
 }
 
-/// A type expression: a plain (or legacy `&name`) name, an anonymous
-/// struct type literal `{q: int, r: int}` (M10), or the positional
-/// sugar form `(int, str)` (M10, ≡ `{0: int, 1: str}`).
+/// A surface type expression. Compound child lists live in side arenas;
+/// an error union's success type has its own [`TypeExprId`] node.
 ///
-/// 32 bytes: `span` (16 B, align 8) plus `kind` (12 B — an 8-byte
-/// list-range payload plus the discriminant, 4-byte aligned).
+/// 32 bytes: `span` (16 B, align 8) plus `kind` and padding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypeExpr {
     pub span: Span,
@@ -441,6 +463,13 @@ pub enum TypeExprKind {
     /// `type_expr_lists` side arena; resolution interns the `"0"`,
     /// `"1"`, … names before pool dedup.
     Positional(TypeExprList),
+    /// `E!T`, `(A | B)!T`, or inferred `!T`. Only inferred unions have
+    /// an empty error set; the success node lives in `type_exprs`.
+    ErrorUnion {
+        error_set: TypeExprList,
+        success: TypeExprId,
+        inferred: bool,
+    },
 }
 
 impl TypeExpr {
@@ -559,6 +588,30 @@ impl fmt::Display for CompoundOp {
 
 // ---------- Top-level AST ----------
 
+/// Lengths needed to reclaim every arena allocated after a parser
+/// statement checkpoint. Kept in source order with [`Ast`].
+#[derive(Debug, Clone, Copy)]
+pub struct AstCheckpoint {
+    exprs: usize,
+    stmts: usize,
+    expr_lists: usize,
+    stmt_lists: usize,
+    elifs: usize,
+    struct_field_decls: usize,
+    struct_field_inits: usize,
+    type_field_lists: usize,
+    type_expr_lists: usize,
+    type_exprs: usize,
+    patterns: usize,
+    pattern_lists: usize,
+    pattern_field_lists: usize,
+    variant_arg_lists: usize,
+    match_arms: usize,
+    enum_variants: usize,
+    top_level: usize,
+    span: Span,
+}
+
 /// A complete Ryo program: the typed expression/statement arenas,
 /// their list side arenas, and the top-level statement ids in
 /// source order.
@@ -573,6 +626,7 @@ pub struct Ast {
     struct_field_inits: Vec<(StringId, ExprId)>,
     type_field_lists: Vec<(StringId, TypeExpr)>,
     type_expr_lists: Vec<TypeExpr>,
+    type_exprs: Vec<TypeExpr>,
     patterns: Vec<Pattern>,
     pattern_lists: Vec<PatternId>,
     pattern_field_lists: Vec<PatternField>,
@@ -614,6 +668,10 @@ impl Ast {
             struct_field_inits: Vec::new(),
             type_field_lists: Vec::new(),
             type_expr_lists: Vec::new(),
+            type_exprs: vec![TypeExpr {
+                kind: TypeExprKind::Positional(TypeExprList { offset: 0, len: 0 }),
+                span: Span::EMPTY,
+            }],
             patterns: vec![Pattern {
                 kind: PatternKind::Wildcard,
                 span: Span::EMPTY,
@@ -626,6 +684,58 @@ impl Ast {
             top_level: Vec::new(),
             span: Span::EMPTY,
         }
+    }
+
+    /// Capture the arena lengths before parsing one statement.
+    pub fn checkpoint(&self) -> AstCheckpoint {
+        AstCheckpoint {
+            exprs: self.exprs.len(),
+            stmts: self.stmts.len(),
+            expr_lists: self.expr_lists.len(),
+            stmt_lists: self.stmt_lists.len(),
+            elifs: self.elifs.len(),
+            struct_field_decls: self.struct_field_decls.len(),
+            struct_field_inits: self.struct_field_inits.len(),
+            type_field_lists: self.type_field_lists.len(),
+            type_expr_lists: self.type_expr_lists.len(),
+            type_exprs: self.type_exprs.len(),
+            patterns: self.patterns.len(),
+            pattern_lists: self.pattern_lists.len(),
+            pattern_field_lists: self.pattern_field_lists.len(),
+            variant_arg_lists: self.variant_arg_lists.len(),
+            match_arms: self.match_arms.len(),
+            enum_variants: self.enum_variants.len(),
+            top_level: self.top_level.len(),
+            span: self.span,
+        }
+    }
+
+    /// Reclaim every node and side-arena entry allocated after a
+    /// statement checkpoint. Earlier nodes cannot reference later ids,
+    /// so truncating cannot invalidate a surviving AST reference.
+    pub fn rollback(&mut self, checkpoint: AstCheckpoint) {
+        self.exprs.truncate(checkpoint.exprs);
+        self.stmts.truncate(checkpoint.stmts);
+        self.expr_lists.truncate(checkpoint.expr_lists);
+        self.stmt_lists.truncate(checkpoint.stmt_lists);
+        self.elifs.truncate(checkpoint.elifs);
+        self.struct_field_decls
+            .truncate(checkpoint.struct_field_decls);
+        self.struct_field_inits
+            .truncate(checkpoint.struct_field_inits);
+        self.type_field_lists.truncate(checkpoint.type_field_lists);
+        self.type_expr_lists.truncate(checkpoint.type_expr_lists);
+        self.type_exprs.truncate(checkpoint.type_exprs);
+        self.patterns.truncate(checkpoint.patterns);
+        self.pattern_lists.truncate(checkpoint.pattern_lists);
+        self.pattern_field_lists
+            .truncate(checkpoint.pattern_field_lists);
+        self.variant_arg_lists
+            .truncate(checkpoint.variant_arg_lists);
+        self.match_arms.truncate(checkpoint.match_arms);
+        self.enum_variants.truncate(checkpoint.enum_variants);
+        self.top_level.truncate(checkpoint.top_level);
+        self.span = checkpoint.span;
     }
 
     /// Lookup an expression by id.
@@ -686,6 +796,12 @@ impl Ast {
     /// written order.
     pub fn type_expr_list(&self, list: TypeExprList) -> &[TypeExpr] {
         &self.type_expr_lists[list.as_range()]
+    }
+
+    /// Read an arena-allocated type expression, such as an error
+    /// union's success node.
+    pub fn type_expr(&self, id: TypeExprId) -> TypeExpr {
+        self.type_exprs[id.index()]
     }
 
     // Lookup a destructuring pattern by id.
@@ -1158,6 +1274,12 @@ impl Ast {
         )
     }
 
+    /// A single-variant nominal error declaration. Its payload uses the
+    /// same field arena and shape metadata as an enum variant.
+    pub fn error_def(&mut self, name: Ident, payload: EnumPayload, span: Span) -> StmtId {
+        self.push_stmt(StmtKind::ErrorDef(ErrorDef { name, payload }), span)
+    }
+
     /// Struct literal `Name{field=value, ...}` (M9) or the anonymous
     /// `{field=value, ...}` (M10); pass `None` for the anonymous
     /// form. The field initializers are copied into the
@@ -1226,6 +1348,55 @@ impl Ast {
         id
     }
 
+    /// A nominal error construction candidate with unit, positional,
+    /// or named-paren arguments.
+    pub fn error_construct(
+        &mut self,
+        name: Ident,
+        args: Option<VariantArgs>,
+        span: Span,
+    ) -> ExprId {
+        self.push_expr(
+            ExprKind::ErrorConstruct(ErrorConstruct { name, args }),
+            span,
+        )
+    }
+
+    /// Promote a bare uppercase-led identifier to a unit error
+    /// candidate without discarding its existing arena node.
+    pub fn promote_ident_to_error_construct(&mut self, id: ExprId) -> ExprId {
+        let node = &mut self.exprs[id.index()];
+        let ExprKind::Ident(name) = node.kind else {
+            unreachable!("error construct candidate must be a bare ident node");
+        };
+        node.kind = ExprKind::ErrorConstruct(ErrorConstruct {
+            name: Ident::new(name, node.span),
+            args: None,
+        });
+        id
+    }
+
+    pub fn try_expr(&mut self, operand: ExprId, span: Span) -> ExprId {
+        self.push_expr(ExprKind::Try(operand), span)
+    }
+
+    pub fn catch_expr(
+        &mut self,
+        operand: ExprId,
+        binding: Option<Ident>,
+        body: CatchBody,
+        span: Span,
+    ) -> ExprId {
+        self.push_expr(
+            ExprKind::Catch(CatchExpr {
+                operand,
+                binding,
+                body,
+            }),
+            span,
+        )
+    }
+
     /// Anonymous struct type literal `{q: int, r: int}` (M10); the
     /// field list is copied into the `type_field_lists` side arena in
     /// written order. Yields the inline [`TypeExpr`] value — type
@@ -1247,6 +1418,29 @@ impl Ast {
         TypeExpr {
             span,
             kind: TypeExprKind::Positional(elems),
+        }
+    }
+
+    /// Construct an explicit or inferred error union, allocating its
+    /// success type in the type-expression arena.
+    pub fn error_union_type(
+        &mut self,
+        error_set: &[TypeExpr],
+        success: TypeExpr,
+        inferred: bool,
+        span: Span,
+    ) -> TypeExpr {
+        let success_index = self.type_exprs.len();
+        self.type_exprs.push(success);
+        let success = TypeExprId::from_index(success_index);
+        let error_set = self.push_type_expr_list(error_set);
+        TypeExpr {
+            span,
+            kind: TypeExprKind::ErrorUnion {
+                error_set,
+                success,
+                inferred,
+            },
         }
     }
 
@@ -1411,11 +1605,11 @@ mod tests {
 
     #[test]
     fn type_expr_stays_small() {
-        // `span` (16 B) + `kind` (12 B: an 8-byte list-range payload
-        // plus the discriminant, 4-byte aligned) must pack into 32 B —
-        // see the field-order note on `TypeExpr`.
+        // The error-union variant grows `kind` to 16 B; `span` plus
+        // `kind` must still pack into 32 B — see the field-order note
+        // on `TypeExpr`.
         assert_eq!(std::mem::size_of::<TypeExpr>(), 32);
-        assert_eq!(std::mem::size_of::<TypeExprKind>(), 12);
+        assert_eq!(std::mem::size_of::<TypeExprKind>(), 16);
     }
 
     #[test]
