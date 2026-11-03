@@ -262,7 +262,7 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), CompilerError> {
             // "Zig binary not found after download".
             eprintln!(
                 "warning: skipping non-enclosed zip entry '{}'",
-                entry.name()
+                String::from_utf8_lossy(entry.name_raw())
             );
             continue;
         };
