@@ -2045,7 +2045,7 @@ Function return types specify both the error type and success type. Ryo provides
 - **Use `(E1|E2)!T`** when you know exactly which errors or family sets can occur and want to document them
 - **Use `!T`** when composing functions whose direct returns and `try` expressions determine a finite error set
 
-Family aliases flatten to their members before set canonicalization. Thus `IoError!str` admits every `IoError` member, while `IoError.Eof!str` admits only `Eof`; aliases and equivalent explicitly written sets have the same behavior.
+A family alias is equivalent to the union of all its members. Thus `IoError!str` admits every `IoError` member, while `IoError.Eof!str` admits only `Eof`; aliases and equivalent explicitly written sets have the same behavior.
 
 #### **Single Error Type**
 
