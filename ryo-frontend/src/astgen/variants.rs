@@ -48,8 +48,8 @@ pub(super) fn lower_variant_construct(
                 c.variant.span,
                 DiagCode::NamedArgInParens,
                 ParseDiag::NamedArgInParens {
-                    enum_name: Some(enum_name),
-                    variant: Some(c.variant.name),
+                    enum_name: None,
+                    variant: None,
                 }
                 .message(pool),
             ));

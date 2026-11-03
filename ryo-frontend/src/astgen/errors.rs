@@ -61,7 +61,6 @@ impl ErrorRegistry {
 
         let mut seen = HashSet::new();
         let mut qualified_members = Vec::with_capacity(members.len());
-        let mut failed = false;
         for member in members {
             if !seen.insert(member.name.name) {
                 sink.emit(Diag::error(
@@ -73,7 +72,7 @@ impl ErrorRegistry {
                         pool.str(family)
                     ),
                 ));
-                failed = true;
+                continue;
             }
             let qualified = qualified_error_name(pool, family, member.name.name);
             if occupied_names.contains(&qualified) {
@@ -85,12 +84,9 @@ impl ErrorRegistry {
                         pool.str(qualified)
                     ),
                 ));
-                failed = true;
+                continue;
             }
             qualified_members.push((qualified, *member));
-        }
-        if failed {
-            return;
         }
 
         occupied_names.insert(family);
@@ -278,7 +274,11 @@ fn lower_resolved_error_construct(
         return b.error_construct(name, family_root, family_member, ty, false, &[], span);
     };
 
-    if family_root.is_some() && args.named.is_some() && !args.named_parens {
+    if family_root.is_some()
+        && types.error_types.contains_key(&name)
+        && args.named.is_some()
+        && !args.named_parens
+    {
         sink.emit(Diag::error(
             span,
             DiagCode::TypeMismatch,
@@ -305,10 +305,12 @@ fn lower_resolved_error_construct(
     }
 
     if args.mixed_fields {
-        let root = family_root.or(Some(name));
+        if family_root.is_none() {
+            return b.enum_lit(pool.error_type(), 0, positional, &arg_refs, span);
+        }
         return b.error_construct(
             name,
-            root,
+            family_root,
             family_member,
             pool.error_type(),
             positional,

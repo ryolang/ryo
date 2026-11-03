@@ -417,6 +417,30 @@ impl TypeResolver {
                 pool.error_type()
             }
         } else {
+            let qualified = pool.str(name);
+            let family_member = qualified
+                .split_once('.')
+                .map(|(root, member)| (root.to_string(), member.to_string()));
+            if let Some((root, member)) = family_member {
+                let root = pool.intern_str(&root);
+                if let Some(members) = self.error_family_members.get(&root) {
+                    let available = members
+                        .iter()
+                        .map(|member| format!("'{}'", pool.str(*member)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    sink.emit(Diag::error(
+                        span,
+                        DiagCode::UnknownVariant,
+                        format!(
+                            "error family '{}' has no member '{}' (members: {available})",
+                            pool.str(root),
+                            member,
+                        ),
+                    ));
+                    return pool.error_type();
+                }
+            }
             // Only resolve the &str on the unhappy path; the common
             // primitive path stays a pure `StringId` compare.
             sink.emit(Diag::error(

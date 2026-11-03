@@ -885,6 +885,27 @@ fn qualified_error_payload_diagnostics_match_unqualified_errors() {
 }
 
 #[test]
+fn standalone_error_mixed_fields_emit_only_parser_diagnostic() {
+    let src = "error E(a: int)\nfn main():\n\tvalue = E(1, a=2)\n";
+    let mut pool = InternPool::new();
+    let (ast, parse_diags) = crate::parse::parse_source(src, &mut pool).expect("parse recovers");
+    let mut sink = DiagSink::new();
+    for diag in parse_diags {
+        sink.emit(diag);
+    }
+    let uir = astgen::generate(&ast, &mut pool, &mut sink);
+    let _ = analyze(&uir, &mut pool, &mut sink, src, Path::new("<test>"));
+    let diags = sink.into_diags();
+    assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::ParseError);
+    assert!(
+        diags[0]
+            .message
+            .contains("positional and named error payload fields cannot be mixed")
+    );
+}
+
+#[test]
 fn qualified_error_named_payload_rejects_braced_construction() {
     let src = "errors IoError:\n\tInvalidUtf8(code: int, message: str)\nfn main():\n\tvalue = IoError.InvalidUtf8{code=1, message=\"bad\"}\n";
     let (_tirs, diags, _pool) = run_with_errors(src);
@@ -1078,4 +1099,54 @@ fn invalid_error_family_members_do_not_crash_match_diagnostics() {
             "{pattern}: {diags:?}"
         );
     }
+}
+
+#[test]
+fn unknown_uppercase_root_named_args_use_plain_call_diagnostic() {
+    let src = "fn main():\n\tvalue = Missing.Create(value=1)\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 2, "unexpected diagnostics: {diags:?}");
+    assert!(diags.iter().any(|diag| {
+        diag.code == DiagCode::UndefinedVariable
+            && diag.message.contains("undefined variable: 'Missing'")
+    }));
+    let named_arg = diags
+        .iter()
+        .find(|diag| diag.code == DiagCode::NamedArgInParens)
+        .expect("plain named-argument diagnostic");
+    assert_eq!(
+        named_arg.message,
+        "named arguments are not supported — pass arguments positionally"
+    );
+    assert!(!named_arg.message.contains("braces"));
+    assert!(!named_arg.message.contains("named variants"));
+}
+
+#[test]
+fn duplicate_error_family_member_emits_only_declaration_diagnostic() {
+    let src = "errors IoError:\n\tEof\n\tEof\nfn read() -> IoError!str:\n\treturn IoError.Eof\nfn main():\n\tvalue = read()\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::DuplicateVariant);
+}
+
+#[test]
+fn unknown_error_member_type_lists_available_members() {
+    let src = "errors IoError:\n\tEof\n\tReadFailed(str)\nfn take(value: IoError.Missing):\n\treturn\nfn main():\n\tvalue = 1\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::UnknownVariant);
+    assert!(diags[0].message.contains("'Eof'"), "{diags:?}");
+    assert!(diags[0].message.contains("'ReadFailed'"), "{diags:?}");
+}
+
+#[test]
+fn unknown_error_member_braces_report_member_before_delimiter() {
+    let src = "errors IoError:\n\tEof\n\tReadFailed(str)\nfn main():\n\tvalue = IoError.Missing{code=1}\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::UnknownVariant);
+    assert!(diags[0].message.contains("'Eof'"), "{diags:?}");
+    assert!(diags[0].message.contains("'ReadFailed'"), "{diags:?}");
+    assert!(!diags[0].message.contains("braced construction"));
 }
