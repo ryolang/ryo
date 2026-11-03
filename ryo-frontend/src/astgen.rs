@@ -1489,7 +1489,13 @@ fn gen_stmt(
         ast::StmtKind::StructDef(_) => {}
         ast::StmtKind::EnumDef(_) => {}
         ast::StmtKind::ErrorDef(_) => {}
-        ast::StmtKind::ErrorFamilyDef(_) => {}
+        ast::StmtKind::ErrorFamilyDef(def) => {
+            sink.emit(Diag::error(
+                def.name.span,
+                DiagCode::ParseError,
+                "error families are not yet lowered",
+            ));
+        }
     }
 }
 

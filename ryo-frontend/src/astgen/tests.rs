@@ -616,3 +616,44 @@ fn bytes_index_lowers_to_uir() {
     }
     assert_eq!(slices, 1, "b[0:1] must stay a Slice");
 }
+
+#[test]
+fn nested_error_family_lowering_is_explicitly_deferred() {
+    // Body parsing rejects family declarations, so drive gen_stmt with a nested AST.
+    let mut ast = ast::Ast::new();
+    let mut pool = InternPool::new();
+    let field_start = ast.struct_field_decls_len();
+    let fields = ast.struct_field_decl_list_from(field_start);
+    let member_start = ast.enum_variants_len();
+    ast.push_enum_variant(
+        ast::Ident::new(pool.intern_str("Eof"), Span::new(22, 25)),
+        ast::EnumPayload {
+            kind: VariantKind::Unit,
+            fields,
+        },
+        Span::new(22, 25),
+    );
+    let members = ast.enum_variant_list_from(member_start);
+    let name_span = Span::new(12, 19);
+    let family = ast.error_family_def(
+        ast::Ident::new(pool.intern_str("IoError"), name_span),
+        members,
+        ast::DeclVisibility::Module,
+        Span::new(0, 25),
+    );
+    let main = ast.function_def(
+        ast::Ident::new(pool.intern_str("main"), Span::new(0, 4)),
+        &[],
+        None,
+        &[family],
+        Span::new(0, 25),
+    );
+    ast.set_top_level(vec![main]);
+
+    let mut sink = DiagSink::new();
+    let _ = generate(&ast, &mut pool, &mut sink);
+    let diags = sink.into_diags();
+    assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+    assert_eq!(diags[0].message, "error families are not yet lowered");
+    assert_eq!(diags[0].span, name_span);
+}
