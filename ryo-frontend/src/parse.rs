@@ -443,14 +443,16 @@ mod tests {
 
     #[test]
     fn named_arg_in_parens_enum_flavor_message_is_targeted() {
-        // `Shape.Circle(radius=5.0)` (Circle is a tuple variant) used
-        // to render the generic E0100 expected-token dump; the
-        // targeted E0124 names the variant and shows both correct
-        // spellings, as the single error.
+        // AstGen emits E0124 once name resolution proves this is an
+        // enum rather than an error-family member.
         let mut pool = InternPool::new();
         let input = "enum Shape:\n\tCircle(float)\n\tRectangle(width: float, height: float)\n\nfn main():\n\tprint(Shape.Circle(radius=5.0))\n";
-        let (_program, diags) =
+        let (program, parse_diags) =
             parse_source(input, &mut pool).expect("recovery should yield a partial program");
+        assert!(parse_diags.is_empty(), "{parse_diags:?}");
+        let mut sink = ryo_core::diag::DiagSink::new();
+        let _uir = crate::astgen::generate(&program, &mut pool, &mut sink);
+        let diags = sink.into_diags();
         let errors = diags
             .iter()
             .filter(|d| d.severity == Severity::Error)

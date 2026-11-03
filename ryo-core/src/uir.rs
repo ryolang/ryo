@@ -345,8 +345,9 @@ pub enum InstData {
         object: InstRef,
         field: StringId,
     },
-    /// Error-construction candidate name and its shared enum-literal
-    /// argument wire. Sema resolves the name after value bindings.
+    /// Error-construction candidate name and its side-arena argument
+    /// wire. The wire prefixes the shared enum-literal payload with the
+    /// optional family root and member IDs for value-shadowing checks.
     ErrorConstruct {
         name: StringId,
         args: ExtraRange,
@@ -864,15 +865,29 @@ impl UirBuilder {
         self.push(InstTag::EnumLit, InstData::Extra(range), span)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn error_construct(
         &mut self,
         name: StringId,
+        family_root: Option<StringId>,
+        family_member: Option<StringId>,
         ty: TypeId,
         positional: bool,
         args: &[(u32, InstRef)],
         span: Span,
     ) -> InstRef {
-        let range = enum_lit_extra::encode(&mut self.uir.extra, ty, 0, args, positional);
+        let root = family_root.map_or(u32::MAX, StringId::raw);
+        let member = family_member.map_or(u32::MAX, StringId::raw);
+        let offset = u32::try_from(self.uir.extra.len()).expect("UIR extra arena exceeds u32");
+        self.uir.extra.extend([root, member]);
+        let payload = enum_lit_extra::encode(&mut self.uir.extra, ty, 0, args, positional);
+        let range = ExtraRange {
+            offset,
+            len: payload
+                .len
+                .checked_add(2)
+                .expect("UIR wire length overflow"),
+        };
         self.push(
             InstTag::ErrorConstruct,
             InstData::ErrorConstruct { name, args: range },

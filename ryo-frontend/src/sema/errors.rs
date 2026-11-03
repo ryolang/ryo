@@ -261,10 +261,21 @@ pub(super) fn analyze_error_construct(
     r: InstRef,
     span: Span,
 ) -> TirRef {
-    let (name, view) = sema.uir.error_construct_view(r);
-    if let Some(bound) = scope.lookup(name) {
+    let (name, family_root, family_member, view) = sema.uir.error_construct_view(r);
+    if family_root.is_some() && family_member.is_none() && sema.pool.is_error(view.ty) {
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    let shadowed = match (family_root, family_member) {
+        (Some(root), Some(_)) => scope.lookup(root).map(|bound| (root, bound)),
+        _ => scope.lookup(name).map(|bound| (name, bound)),
+    };
+    if let Some((bound_name, bound)) = shadowed {
         if !view.positional && view.fields().count() == 0 {
-            return fcx.builder.var(name, bound, span);
+            if let Some(member) = family_member {
+                let object = fcx.builder.var(bound_name, bound, span);
+                return super::expr::analyze_value_field_access(sema, fcx, object, member, span);
+            }
+            return fcx.builder.var(bound_name, bound, span);
         }
         for (_, value) in view.fields() {
             analyze_expr(sema, fcx, scope, value);
@@ -274,9 +285,37 @@ pub(super) fn analyze_error_construct(
             DiagCode::TypeMismatch,
             format!(
                 "'{}' is a bound value, not an error constructor or callable value",
-                sema.pool.str(name)
+                sema.pool.str(bound_name)
             ),
         ));
+        return fcx.builder.unreachable(sema.pool.error_type(), span);
+    }
+    if family_root.is_some() && sema.pool.is_error(view.ty) {
+        if let (Some(root), Some(member)) = (family_root, family_member)
+            && !sema.error_types.contains_key(&name)
+        {
+            let prefix = format!("{}.", sema.pool.str(root));
+            let available = sema
+                .uir
+                .error_decls
+                .iter()
+                .filter(|decl| sema.pool.str(decl.name).starts_with(&prefix))
+                .map(|decl| {
+                    let qualified = sema.pool.str(decl.name);
+                    format!("'{}'", &qualified[prefix.len()..])
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::UnknownVariant,
+                format!(
+                    "error family '{}' has no member '{}' (members: {available})",
+                    sema.pool.str(root),
+                    sema.pool.str(member),
+                ),
+            ));
+        }
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
 

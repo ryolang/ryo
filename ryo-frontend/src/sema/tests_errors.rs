@@ -819,3 +819,137 @@ fn main():
     let (_tirs, diags, _pool) = run_with_errors(src);
     assert!(diags.is_empty(), "{diags:?}");
 }
+
+#[test]
+fn qualified_error_members_construct_declared_errors() {
+    let src = "errors IoError:\n\tEof\n\tReadFailed(str)\n\tInvalidUtf8(code: int, message: str)\nfn main():\n\tunit = IoError.Eof\n\tpositional = IoError.ReadFailed(\"bad\")\n\tnamed = IoError.InvalidUtf8(message=\"bad\", code=1)\n";
+    let (tirs, pool) = run(src).expect("qualified members should construct");
+    let main = tir_named(&tirs, &pool, "main");
+
+    for (index, expected) in ["IoError.Eof", "IoError.ReadFailed", "IoError.InvalidUtf8"]
+        .into_iter()
+        .enumerate()
+    {
+        let decl = main.var_decl_view(stmt_at(main, index));
+        let inst = main.inst(decl.initializer);
+        assert_eq!(inst.tag, TirTag::EnumLit);
+        assert_eq!(pool.kind(inst.ty), TypeKind::DeclaredError);
+        assert_eq!(pool.display(inst.ty).to_string(), expected);
+    }
+    let named = main.var_decl_view(stmt_at(main, 2)).initializer;
+    let fields: Vec<_> = main
+        .enum_lit_view(named)
+        .fields()
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(fields, [0, 1]);
+}
+
+#[test]
+fn qualified_error_payload_diagnostics_match_unqualified_errors() {
+    let declarations =
+        "errors IoError:\n\tEof\n\tReadFailed(str)\n\tInvalidUtf8(code: int, message: str)\n";
+    let cases = [
+        (
+            "fn main():\n\tvalue = IoError.ReadFailed(\"bad\", \"extra\")\n",
+            DiagCode::UnknownVariantField,
+        ),
+        (
+            "fn main():\n\tvalue = IoError.InvalidUtf8(code=1)\n",
+            DiagCode::MissingVariantFields,
+        ),
+        (
+            "fn main():\n\tvalue = IoError.ReadFailed(1)\n",
+            DiagCode::TypeMismatch,
+        ),
+        (
+            "fn main():\n\tvalue = IoError.InvalidUtf8(code=1, message=\"bad\", other=2)\n",
+            DiagCode::UnknownVariantField,
+        ),
+        (
+            "fn main():\n\tvalue = IoError.InvalidUtf8(code=1, code=2, message=\"bad\")\n",
+            DiagCode::DuplicateVariantField,
+        ),
+        (
+            "fn main():\n\tvalue = IoError.Eof()\n",
+            DiagCode::UnitVariantConstructed,
+        ),
+    ];
+
+    for (body, expected) in cases {
+        let src = format!("{declarations}{body}");
+        let (_tirs, diags, _pool) = run_with_errors(&src);
+        assert_eq!(diags.len(), 1, "{src:?}: {diags:?}");
+        assert_eq!(diags[0].code, expected, "{src:?}: {diags:?}");
+    }
+}
+
+#[test]
+fn qualified_error_bare_member_requires_family_qualification() {
+    let src = "errors IoError:\n\tEof\n\tReadFailed(str)\nfn main():\n\tvalue = Eof\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::UndefinedVariable);
+    assert!(diags[0].message.contains("IoError.Eof"));
+    assert!(!diags[0].message.contains("undefined variable"));
+}
+
+#[test]
+fn qualified_error_family_alias_is_not_a_value_or_constructor() {
+    for expression in ["IoError", "IoError()", "IoError(\"bad\")"] {
+        let src = format!(
+            "errors IoError:\n\tEof\n\tReadFailed(str)\nfn main():\n\tvalue = {expression}\n"
+        );
+        let (_tirs, diags, _pool) = run_with_errors(&src);
+        assert_eq!(diags.len(), 1, "{expression}: {diags:?}");
+        assert_eq!(diags[0].code, DiagCode::TypeMismatch);
+        assert!(diags[0].message.contains("error-set alias"));
+        assert!(diags[0].message.contains("IoError.Eof"));
+    }
+}
+
+#[test]
+fn qualified_error_unknown_member_lists_available_members() {
+    for expression in ["IoError.Unknown", "IoError.Unknown()"] {
+        let src = format!(
+            "errors IoError:\n\tEof\n\tReadFailed(str)\n\tInvalidUtf8(code: int, message: str)\nfn main():\n\tvalue = {expression}\n"
+        );
+        let (_tirs, diags, _pool) = run_with_errors(&src);
+        assert_eq!(diags.len(), 1, "{expression}: {diags:?}");
+        assert_eq!(diags[0].code, DiagCode::UnknownVariant);
+        for member in ["Eof", "ReadFailed", "InvalidUtf8"] {
+            assert!(diags[0].message.contains(member), "{diags:?}");
+        }
+    }
+}
+
+#[test]
+fn qualified_error_bound_family_root_preserves_field_access() {
+    let src = "errors IoError:\n\tEof\nstruct Holder:\n\tfield: int\nfn main():\n\tIoError = Holder{field=7}\n\tvalue = IoError.field\n";
+    let (tirs, pool) = run(src).expect("a bound family root should remain a value");
+    let main = tir_named(&tirs, &pool, "main");
+    let value = main.var_decl_view(stmt_at(main, 1)).initializer;
+    assert_eq!(main.inst(value).tag, TirTag::FieldAccess);
+    assert_eq!(main.inst(value).ty, pool.int());
+}
+
+#[test]
+fn qualified_error_bound_family_root_payload_call_is_not_family_construction() {
+    let src = "errors IoError:\n\tEof\n\tReadFailed(str)\nfn main():\n\tIoError = 7\n\tvalue = IoError.ReadFailed(\"bad\")\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::TypeMismatch);
+    assert!(diags[0].message.contains("'IoError' is a bound value"));
+    assert!(!diags[0].message.contains("IoError.ReadFailed"));
+}
+
+#[test]
+fn qualified_error_unknown_uppercase_receiver_keeps_value_fallback() {
+    for expression in ["Missing.Member", "Missing.Member()"] {
+        let src = format!("fn main():\n\tvalue = {expression}\n");
+        let (_tirs, diags, _pool) = run_with_errors(&src);
+        assert_eq!(diags.len(), 1, "{expression}: {diags:?}");
+        assert_eq!(diags[0].code, DiagCode::UndefinedVariable);
+        assert!(diags[0].message.contains("undefined variable: 'Missing'"));
+    }
+}

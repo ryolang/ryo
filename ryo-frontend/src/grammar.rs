@@ -232,8 +232,9 @@ enum PostfixOp {
     /// uppercase-led receiver folds this into a
     /// `VariantConstruct` whose variant span must be the name
     /// token's, exactly like the standalone form. Args carry
-    /// the `name = value` recovery markers; the fold emits the
-    /// targeted diagnostic and unwraps them.
+    /// the `name = value` recovery markers; ordinary calls diagnose
+    /// them here, while uppercase-led receivers preserve named fields
+    /// for AstGen's enum-versus-error-family resolution.
     Method(Ident, Vec<enums::ParenArg>, SimpleSpan),
     /// `.name{inits}` (M11 named variant construction); emitted
     /// only when the receiver gate passes.
@@ -395,47 +396,58 @@ where
             let result = match op {
                 PostfixOp::Method(method, args, span) => {
                     let receiver_type = type_name_ident(receiver, e);
-                    // Recover each `name = value` arg with one
-                    // targeted diagnostic (E0124): the enum flavor
-                    // names the enum and variant and shows both
-                    // correct spellings; the method flavor says
-                    // named arguments are unsupported. The value
-                    // passes through as a positional argument so its
-                    // own type errors still surface.
                     let mut positional = Vec::with_capacity(args.len());
-                    for arg in &args {
+                    let mut named = Vec::new();
+                    for arg in args {
                         match arg {
-                            enums::ParenArg::Expr(id) => positional.push(*id),
+                            enums::ParenArg::Expr(id) => positional.push(id),
                             enums::ParenArg::NamedSyntax {
-                                span: nspan, value, ..
+                                name,
+                                span: nspan,
+                                value,
                             } => {
-                                let diag = match &receiver_type {
-                                    Some(enum_id) => ParseDiag::NamedArgInParens {
-                                        enum_name: Some(enum_id.name),
-                                        variant: Some(method.name),
-                                    },
-                                    None => ParseDiag::NamedArgInParens {
-                                        enum_name: None,
-                                        variant: None,
-                                    },
-                                };
-                                e.emit(Rich::custom(*nspan, diag));
-                                positional.push(*value);
+                                if receiver_type.is_none() {
+                                    e.emit(Rich::custom(
+                                        nspan,
+                                        ParseDiag::NamedArgInParens {
+                                            enum_name: None,
+                                            variant: None,
+                                        },
+                                    ));
+                                }
+                                positional.push(value);
+                                named.push((name, value));
                             }
                         }
                     }
                     match receiver_type {
-                        Some(_enum_id) => {
-                            // R4: a paren call on a bare uppercase-led
-                            // receiver can only be variant construction
-                            // (`Url.parse(x)`); the lowercase mirror
-                            // (`obj.field()`) keeps its method-call
-                            // meaning. The receiver `Ident` node is
-                            // promoted in place (no orphan); args are
-                            // collected, then pushed contiguously and
-                            // sealed (I-205: a start→seal window cannot
-                            // span the arg parses — nested construction
-                            // writes the same arena).
+                        Some(_) if !named.is_empty() && named.len() == positional.len() => {
+                            let list_start = e.state().struct_field_inits_len();
+                            for &(name, value) in &named {
+                                e.state().push_struct_field_init_item(name, value);
+                            }
+                            let list = e.state().struct_field_init_list_from(list_start);
+                            e.state().promote_ident_to_variant_construct(
+                                receiver,
+                                method,
+                                Some(VariantArgs {
+                                    positional: None,
+                                    named: Some(list),
+                                    named_parens: true,
+                                }),
+                                crate::spans::cspan(SimpleSpan::new((), start..span.end)),
+                            )
+                        }
+                        Some(_) => {
+                            if !named.is_empty() {
+                                e.emit(Rich::custom(
+                                    span,
+                                    ParseDiag::Message(
+                                        "positional and named payload fields cannot be mixed"
+                                            .into(),
+                                    ),
+                                ));
+                            }
                             let list_start = e.state().expr_lists_len();
                             for &arg in &positional {
                                 e.state().push_expr_list_item(arg);
@@ -447,6 +459,7 @@ where
                                 Some(VariantArgs {
                                     positional: Some(list),
                                     named: None,
+                                    named_parens: false,
                                 }),
                                 crate::spans::cspan(SimpleSpan::new((), start..span.end)),
                             )
@@ -480,6 +493,7 @@ where
                         Some(VariantArgs {
                             positional: None,
                             named: Some(list),
+                            named_parens: false,
                         }),
                         crate::spans::cspan(SimpleSpan::new((), start..span.end)),
                     )
@@ -505,6 +519,7 @@ where
                         Some(VariantArgs {
                             positional: Some(list),
                             named: None,
+                            named_parens: false,
                         }),
                         crate::spans::cspan(SimpleSpan::new((), start..span.end)),
                     )
@@ -533,6 +548,7 @@ where
                         Some(VariantArgs {
                             positional: Some(list),
                             named: None,
+                            named_parens: false,
                         }),
                         crate::spans::cspan(SimpleSpan::new((), start..span.end)),
                     )

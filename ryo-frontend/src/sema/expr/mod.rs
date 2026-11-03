@@ -1038,6 +1038,16 @@ fn analyze_field_access(
         }
     }
     let obj = analyze_expr(sema, fcx, scope, object);
+    analyze_value_field_access(sema, fcx, obj, field, span)
+}
+
+pub(super) fn analyze_value_field_access(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    obj: TirRef,
+    field: StringId,
+    span: Span,
+) -> TirRef {
     let oty = fcx.builder.ty_of(obj);
     if sema.pool.is_error(oty) {
         return fcx.builder.unreachable(sema.pool.error_type(), span);

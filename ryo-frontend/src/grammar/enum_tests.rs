@@ -411,32 +411,20 @@ fn named_arg_in_parens_method_flavor() {
 
 #[test]
 fn named_arg_in_parens_enum_flavor() {
-    // `Shape.Circle(radius=5.0)`: Circle is a tuple variant, so the
-    // paren list is positional — the enum flavor names the variant
-    // (and the enum), exactly once.
-    let (ok, _ast, errs, pool) = lex_and_parse_recovering(
-        "enum Shape:\n\tCircle(float)\nfn main():\n\tprint(Shape.Circle(radius=5.0))\n",
-    );
+    // Parsing preserves named fields until AstGen can distinguish an
+    // enum from an error family. Enums recover this shape positionally.
+    let (ok, ast, errs, pool) =
+        lex_and_parse_recovering("enum Shape:\n\tCircle(float)\nShape.Circle(radius=5.0)\n");
     assert!(ok, "recovery should still produce a partial program");
-    assert_eq!(
-        errs.len(),
-        1,
-        "expected exactly the named-arg diagnostic: {errs:?}"
-    );
-    match errs[0].reason() {
-        RichReason::Custom(ParseDiag::NamedArgInParens { enum_name, variant }) => {
-            let (en, v) = (
-                enum_name.expect("enum name"),
-                variant.expect("variant name"),
-            );
-            assert_eq!(pool.str(en), "Shape");
-            assert_eq!(pool.str(v), "Circle");
-        }
-        other => panic!("expected NamedArgInParens, got {other:?}"),
-    }
-    // The value survives as a positional argument: the recovered
-    // construct is `Shape.Circle(5.0)`, a well-formed construct —
-    // the positional spelling must of course still parse.
+    assert!(errs.is_empty(), "diagnostics are deferred: {errs:?}");
+    let stmt = ast.top_level_stmts()[1];
+    let construct = variant_construct(&ast, expr_stmt(&ast, stmt));
+    let args = construct.args.expect("constructor arguments");
+    assert!(args.named_parens);
+    let fields = ast.struct_field_inits(args.named.expect("named fields"));
+    assert_eq!(fields.len(), 1);
+    assert_eq!(pool.str(fields[0].0), "radius");
+
     lex_and_parse("enum Shape:\n\tCircle(float)\nfn main():\n\tx = Shape.Circle(5.0)\n")
         .expect("positional spelling must still parse");
 }

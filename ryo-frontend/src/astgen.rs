@@ -100,6 +100,7 @@ struct TypeResolver {
     enum_types: HashMap<StringId, TypeId>,
     error_types: HashMap<StringId, TypeId>,
     error_families: HashMap<StringId, Vec<TypeId>>,
+    error_family_members: HashMap<StringId, Vec<StringId>>,
     enum_variant_fields: HashMap<TypeId, Vec<(StringId, VariantKind, Vec<StringId>)>>,
     main: StringId,
     range: StringId,
@@ -607,6 +608,7 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
         entries: error_entries,
         order: error_order,
         families: error_families,
+        family_members: error_family_members,
         family_decls,
     } = errors;
     error_types.insert(utf8_error_name, utf8_error);
@@ -617,6 +619,7 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
         enum_types,
         error_types,
         error_families,
+        error_family_members,
         enum_variant_fields,
         main: main_id,
         range: range_id,
@@ -1689,12 +1692,53 @@ fn gen_expr(
         // Field access `object.field` (M9); chains fold left in the
         // AST, so each access lowers against its own object.
         ast::ExprKind::FieldAccess { object, field } => {
-            let obj = gen_expr(b, ast, object, types, defined_layouts, pool, sink);
-            b.field_access(obj, field.name, span)
+            if let ast::ExprKind::Ident(root) = ast.expr(object).kind
+                && types.error_family_members.contains_key(&root)
+            {
+                errors::lower_qualified_error_construct(
+                    b,
+                    ast,
+                    ast::Ident::new(root, ast.expr_span(object)),
+                    field,
+                    None,
+                    types,
+                    defined_layouts,
+                    pool,
+                    sink,
+                    span,
+                )
+            } else {
+                let obj = gen_expr(b, ast, object, types, defined_layouts, pool, sink);
+                b.field_access(obj, field.name, span)
+            }
         }
         // Variant construction (M11) lowers to `EnumLit`.
         ast::ExprKind::VariantConstruct(c) => {
-            variants::lower_variant_construct(b, ast, c, types, defined_layouts, pool, sink, span)
+            if types.error_family_members.contains_key(&c.enum_name.name) {
+                errors::lower_qualified_error_construct(
+                    b,
+                    ast,
+                    c.enum_name,
+                    c.variant,
+                    c.args,
+                    types,
+                    defined_layouts,
+                    pool,
+                    sink,
+                    span,
+                )
+            } else {
+                variants::lower_variant_construct(
+                    b,
+                    ast,
+                    c,
+                    types,
+                    defined_layouts,
+                    pool,
+                    sink,
+                    span,
+                )
+            }
         }
         // Match expressions (M12) lower to the UIR `Match` wire; see
         // `astgen/match_.rs` for the pattern/body mapping.
@@ -1710,36 +1754,7 @@ fn gen_expr(
             span,
         ),
         ast::ExprKind::ErrorConstruct(c) => {
-            let ty = types
-                .error_types
-                .get(&c.name.name)
-                .copied()
-                .unwrap_or_else(|| pool.error_type());
-            match c.args {
-                None if pool.is_error(ty) => b.var_ref(c.name.name, span),
-                None => b.error_construct(c.name.name, ty, false, &[], span),
-                Some(args) => {
-                    let positional = args.positional.is_some();
-                    let mut arg_refs = Vec::new();
-                    if let Some(list) = args.positional {
-                        for (index, &arg) in ast.expr_list(list).iter().enumerate() {
-                            let value = gen_expr(b, ast, arg, types, defined_layouts, pool, sink);
-                            arg_refs.push((index as u32, value));
-                        }
-                    } else if let Some(inits) = args.named {
-                        for &(name, arg) in ast.struct_field_inits(inits) {
-                            let value = gen_expr(b, ast, arg, types, defined_layouts, pool, sink);
-                            arg_refs.push((name.raw(), value));
-                        }
-                    }
-                    if positional && pool.is_error(ty) {
-                        let values: Vec<_> = arg_refs.iter().map(|(_, value)| *value).collect();
-                        b.call(c.name.name, &values, span)
-                    } else {
-                        b.error_construct(c.name.name, ty, positional, &arg_refs, span)
-                    }
-                }
-            }
+            errors::lower_error_construct(b, ast, c, types, defined_layouts, pool, sink, span)
         }
         ast::ExprKind::Try(operand) => {
             let operand = gen_expr(b, ast, operand, types, defined_layouts, pool, sink);

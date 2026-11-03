@@ -272,8 +272,11 @@ fn write_inst(
             writeln!(f, "}}")
         }
         (InstTag::ErrorConstruct, InstData::ErrorConstruct { .. }) => {
-            let (name, view) = uir.error_construct_view(r);
+            let (name, family_root, _, view) = uir.error_construct_view(r);
             write!(f, "error_construct {}", pool.str(name))?;
+            if let Some(root) = family_root {
+                write!(f, " family_root={}", pool.str(root))?;
+            }
             for (field, value) in view.fields() {
                 if view.positional {
                     write!(f, " {field}:")?;

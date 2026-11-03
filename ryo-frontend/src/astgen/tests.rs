@@ -850,3 +850,52 @@ fn nested_error_family_lowering_is_rejected() {
     );
     assert_eq!(diags[0].span, name_span);
 }
+
+#[test]
+fn qualified_error_construction_lowers_to_error_construct() {
+    let src = "errors IoError:\n\tEof\n\tReadFailed(str)\n\tInvalidUtf8(code: int, message: str)\nfn main():\n\tunit = IoError.Eof\n\tpositional = IoError.ReadFailed(\"bad\")\n\tnamed = IoError.InvalidUtf8(code=1, message=\"bad\")\n";
+    let (uir, pool) = parse_and_lower(src).expect("qualified members should lower");
+    let main = body_named(&uir, &pool, "main");
+
+    for (index, expected) in ["IoError.Eof", "IoError.ReadFailed", "IoError.InvalidUtf8"]
+        .into_iter()
+        .enumerate()
+    {
+        let statement = uir.body_stmts(main).at(index);
+        let initializer = match uir.inst(statement).tag {
+            InstTag::VarDecl => uir.var_decl_view(statement).initializer,
+            InstTag::AssignOrDecl => uir.assign_or_decl_view(statement).value,
+            other => panic!("expected a binding statement, got {other:?}"),
+        };
+        let inst = uir.inst(initializer);
+        assert_eq!(inst.tag, InstTag::ErrorConstruct);
+        let InstData::ErrorConstruct { name, .. } = inst.data else {
+            unreachable!()
+        };
+        assert_eq!(pool.str(name), expected);
+    }
+}
+
+#[test]
+fn qualified_error_mixed_payload_fields_emit_one_targeted_diagnostic() {
+    let src = "errors IoError:\n\tEof\n\tInvalidUtf8(code: int, message: str)\nfn main():\n\tvalue = IoError.InvalidUtf8(1, message=\"bad\")\n";
+    let mut pool = InternPool::new();
+    let (ast, parse_diags) = crate::parse::parse_source(src, &mut pool).expect("parse recovers");
+    let mut sink = DiagSink::new();
+    for diag in parse_diags {
+        sink.emit(diag);
+    }
+    let uir = generate(&ast, &mut pool, &mut sink);
+    let _ = crate::sema::analyze(
+        &uir,
+        &mut pool,
+        &mut sink,
+        src,
+        std::path::Path::new("<test>"),
+    );
+
+    let diags = sink.into_diags();
+    assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::ParseError);
+    assert!(diags[0].message.contains("cannot be mixed"));
+}

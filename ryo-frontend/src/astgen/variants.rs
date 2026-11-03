@@ -3,6 +3,7 @@
 //! stays under the file-length gate.
 
 use super::*;
+use ryo_core::diag::ParseDiag;
 use ryo_core::extra::enum_lit_extra;
 
 /// Lower `EnumName.Variant(args)` (M11) to [`InstTag::EnumLit`]: variant and
@@ -19,7 +20,9 @@ use ryo_core::extra::enum_lit_extra;
 ///
 /// The source form rides the wire via `enum_lit_extra::FLAG_POSITIONAL`:
 /// the parenthesized positional form sets it, the braced named form
-/// clears it. Sema needs the distinction to enforce the Brace Law on
+/// clears it. Named parens are diagnosed here and recovered as positional
+/// now that the parser preserves them for error-family construction.
+/// Sema needs the distinction to enforce the Brace Law on
 /// named payloads (D11): `Rectangle(1.0, 2.0)` on `Rectangle(width: float,
 /// height: float)` is rejected with the brace spelling, while the
 /// field-identical `Rectangle{width=1.0, height=2.0}` stays legal — in
@@ -40,6 +43,25 @@ pub(super) fn lower_variant_construct(
     let enum_name = c.enum_name.name;
     let Some(&declared) = types.enum_types.get(&enum_name) else {
         let args = c.args.expect("parser always passes Some");
+        if args.named_parens {
+            sink.emit(Diag::error(
+                c.variant.span,
+                DiagCode::NamedArgInParens,
+                ParseDiag::NamedArgInParens {
+                    enum_name: Some(enum_name),
+                    variant: Some(c.variant.name),
+                }
+                .message(pool),
+            ));
+            let recv = b.var_ref(enum_name, c.enum_name.span);
+            let inits = args.named.expect("named parens carry named fields");
+            let arg_refs: Vec<InstRef> = ast
+                .struct_field_inits(inits)
+                .iter()
+                .map(|&(_, arg)| gen_expr(b, ast, arg, types, defined_enums, pool, sink))
+                .collect();
+            return b.method_call(recv, c.variant.name, &arg_refs, span);
+        }
         if let Some(list) = args.positional {
             // The parser promotes every `Uppercase.name(args)` to
             // VariantConstruct; when the receiver names no enum, the
@@ -72,6 +94,17 @@ pub(super) fn lower_variant_construct(
         pool.error_type()
     };
     let args = c.args.expect("parser always passes Some");
+    if args.named_parens {
+        sink.emit(Diag::error(
+            c.variant.span,
+            DiagCode::NamedArgInParens,
+            ParseDiag::NamedArgInParens {
+                enum_name: Some(enum_name),
+                variant: Some(c.variant.name),
+            }
+            .message(pool),
+        ));
+    }
     let variants = &types.enum_variant_fields[&declared];
     let Some(vidx) = variants
         .iter()
@@ -97,6 +130,15 @@ pub(super) fn lower_variant_construct(
     let positional = match (args.positional, args.named) {
         (Some(list), None) => {
             for (i, &arg) in ast.expr_list(list).iter().enumerate() {
+                pairs.push((
+                    i as u32,
+                    gen_expr(b, ast, arg, types, defined_enums, pool, sink),
+                ));
+            }
+            true
+        }
+        (None, Some(inits)) if args.named_parens => {
+            for (i, &(_, arg)) in ast.struct_field_inits(inits).iter().enumerate() {
                 pairs.push((
                     i as u32,
                     gen_expr(b, ast, arg, types, defined_enums, pool, sink),

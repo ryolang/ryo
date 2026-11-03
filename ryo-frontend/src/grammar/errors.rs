@@ -190,6 +190,7 @@ where
                     Some(VariantArgs {
                         positional: None,
                         named: Some(fields),
+                        named_parens: true,
                     }),
                     span,
                 )
@@ -209,6 +210,7 @@ where
                     Some(VariantArgs {
                         positional: Some(list),
                         named: None,
+                        named_parens: false,
                     }),
                     span,
                 )
