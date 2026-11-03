@@ -618,7 +618,197 @@ fn bytes_index_lowers_to_uir() {
 }
 
 #[test]
-fn nested_error_family_lowering_is_explicitly_deferred() {
+fn error_family_members_have_independent_layouts() {
+    let src =
+        "pub errors IoError:\n\tEof\n\tReadFailed(str)\n\tInvalidUtf8(code: int, message: str)\n";
+    let (uir, pool) = parse_and_lower(src).expect("error family should lower");
+
+    assert_eq!(uir.error_decls.len(), 3);
+    assert_eq!(uir.error_families.len(), 1);
+    let family = &uir.error_families[0];
+    assert_eq!(pool.str(family.name), "IoError");
+    assert_eq!(family.visibility, ast::DeclVisibility::Public);
+    let member_types: Vec<_> = uir.error_decls.iter().map(|decl| decl.ty).collect();
+    assert_eq!(family.members, member_types);
+
+    let names: Vec<_> = uir
+        .error_decls
+        .iter()
+        .map(|decl| pool.str(decl.name))
+        .collect();
+    assert_eq!(
+        names,
+        ["IoError.Eof", "IoError.ReadFailed", "IoError.InvalidUtf8"]
+    );
+    let distinct: std::collections::HashSet<_> =
+        uir.error_decls.iter().map(|decl| decl.ty).collect();
+    assert_eq!(distinct.len(), 3);
+    for decl in &uir.error_decls {
+        assert_eq!(pool.kind(decl.ty), TypeKind::DeclaredError);
+        assert_eq!(pool.enum_view(decl.ty).len(), 1);
+    }
+
+    let eof = pool.enum_view(uir.error_decls[0].ty);
+    let eof_variant = eof.variants().next().unwrap();
+    assert_eq!(pool.str(eof_variant.name), "IoError.Eof");
+    assert_eq!(eof_variant.kind, VariantKind::Unit);
+    assert!(eof_variant.fields.is_empty());
+
+    let read_failed = pool.enum_view(uir.error_decls[1].ty);
+    let read_variant = read_failed.variants().next().unwrap();
+    assert_eq!(pool.str(read_variant.name), "IoError.ReadFailed");
+    assert_eq!(read_variant.kind, VariantKind::Tuple);
+    assert_eq!(read_variant.fields.len(), 1);
+    assert_eq!(pool.str(read_variant.fields[0].name), "0");
+    assert_eq!(read_variant.fields[0].ty, pool.str_());
+
+    let invalid_utf8 = pool.enum_view(uir.error_decls[2].ty);
+    let invalid_variant = invalid_utf8.variants().next().unwrap();
+    assert_eq!(pool.str(invalid_variant.name), "IoError.InvalidUtf8");
+    assert_eq!(invalid_variant.kind, VariantKind::Named);
+    assert_eq!(invalid_variant.fields.len(), 2);
+    assert_eq!(pool.str(invalid_variant.fields[0].name), "code");
+    assert_eq!(invalid_variant.fields[0].ty, pool.int());
+    assert_eq!(pool.str(invalid_variant.fields[1].name), "message");
+    assert_eq!(invalid_variant.fields[1].ty, pool.str_());
+}
+
+#[test]
+fn error_family_alias_expands_in_error_union() {
+    let declarations =
+        "errors IoError:\n\tEof\n\tReadFailed(str)\n\tInvalidUtf8(code: int, message: str)\n";
+    let alias = "fn alias_order() -> IoError!str:\n\treturn \"ok\"\n";
+    let explicit = "fn explicit_order() -> (IoError.Eof | IoError.ReadFailed | IoError.InvalidUtf8)!str:\n\treturn \"ok\"\n";
+
+    for (src, first, second) in [
+        (
+            format!("{declarations}{alias}{explicit}"),
+            "alias_order",
+            "explicit_order",
+        ),
+        (
+            format!("{declarations}{explicit}{alias}"),
+            "explicit_order",
+            "alias_order",
+        ),
+    ] {
+        let (uir, pool) = parse_and_lower(&src).expect("alias and explicit set should lower");
+        let first = body_named(&uir, &pool, first).return_type;
+        let second = body_named(&uir, &pool, second).return_type;
+        assert_eq!(pool.kind(first), TypeKind::ErrorUnion);
+        assert_eq!(first, second);
+
+        let union = pool.error_union_view(first);
+        assert_eq!(union.success, pool.str_());
+        let members = pool.error_set_view(union.error_set).members;
+        let names: Vec<_> = members
+            .iter()
+            .map(|&member| pool.display(member).to_string())
+            .collect();
+        assert_eq!(
+            names,
+            ["IoError.Eof", "IoError.ReadFailed", "IoError.InvalidUtf8"]
+        );
+    }
+}
+
+#[test]
+fn error_family_alias_is_error_set_type() {
+    let src = "errors IoError:\n\tEof\n\tReadFailed(str)\n\tInvalidUtf8(code: int, message: str)\nfn report(err: IoError):\n\treturn\n";
+    let (uir, pool) = parse_and_lower(src).expect("error-set parameter should lower");
+    let report = body_named(&uir, &pool, "report");
+    let ty = report.params[0].ty;
+
+    assert_eq!(pool.kind(ty), TypeKind::ErrorSet);
+    assert_eq!(
+        pool.display(ty).to_string(),
+        "IoError.Eof | IoError.ReadFailed | IoError.InvalidUtf8"
+    );
+    let members = pool.error_set_view(ty).members;
+    let decl_types: Vec<_> = uir.error_decls.iter().map(|decl| decl.ty).collect();
+    assert_eq!(members, decl_types);
+}
+
+#[test]
+fn error_family_empty_declaration_is_rejected() {
+    let mut ast = ast::Ast::new();
+    let mut pool = InternPool::new();
+    let member_start = ast.enum_variants_len();
+    let members = ast.enum_variant_list_from(member_start);
+    let name_span = Span::new(7, 14);
+    let family = ast.error_family_def(
+        ast::Ident::new(pool.intern_str("IoError"), name_span),
+        members,
+        ast::DeclVisibility::Module,
+        Span::new(0, 15),
+    );
+    ast.set_top_level(vec![family]);
+
+    let mut sink = DiagSink::new();
+    let _ = generate(&ast, &mut pool, &mut sink);
+    let diags = sink.into_diags();
+    assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+    assert_eq!(diags[0].span, name_span);
+    assert!(diags[0].message.contains("at least one member"));
+}
+
+#[test]
+fn error_family_duplicate_member_is_rejected() {
+    let err = parse_and_lower("errors IoError:\n\tEof\n\tEof\n").unwrap_err();
+    assert!(
+        err.iter()
+            .any(|diag| diag.code == DiagCode::DuplicateVariant),
+        "unexpected diagnostics: {err:?}"
+    );
+}
+
+#[test]
+fn error_family_alias_value_cycle_is_diagnosed() {
+    let err = parse_and_lower("errors IoError:\n\tEof\n\tBad(IoError)\n").unwrap_err();
+    assert!(
+        err.iter().any(|diag| diag.code == DiagCode::InfiniteSize),
+        "unexpected diagnostics: {err:?}"
+    );
+}
+
+#[test]
+fn error_family_nominal_type_collision_is_rejected() {
+    for src in [
+        "errors IoError:\n\tEof\nstruct IoError:\n\tvalue: int\n",
+        "error IoError\nerrors IoError:\n\tEof\n",
+    ] {
+        let err = parse_and_lower(src).unwrap_err();
+        assert!(
+            err.iter()
+                .any(|diag| diag.code == DiagCode::DuplicateDeclaration),
+            "unexpected diagnostics: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn error_family_redeclaration_does_not_extend_family() {
+    let err = parse_and_lower("errors IoError:\n\tEof\nerrors IoError:\n\tReadFailed(str)\n")
+        .unwrap_err();
+    assert!(
+        err.iter()
+            .any(|diag| diag.code == DiagCode::DuplicateDeclaration),
+        "unexpected diagnostics: {err:?}"
+    );
+}
+
+#[test]
+fn error_family_member_short_name_is_not_a_type() {
+    let src = "errors IoError:\n\tEof\nfn report(err: Eof):\n\treturn\n";
+    let err = parse_and_lower(src).unwrap_err();
+    assert!(
+        err.iter().any(|diag| diag.code == DiagCode::UnknownType),
+        "unexpected diagnostics: {err:?}"
+    );
+}
+
+#[test]
+fn nested_error_family_lowering_is_rejected() {
     // Body parsing rejects family declarations, so drive gen_stmt with a nested AST.
     let mut ast = ast::Ast::new();
     let mut pool = InternPool::new();
@@ -654,6 +844,9 @@ fn nested_error_family_lowering_is_explicitly_deferred() {
     let _ = generate(&ast, &mut pool, &mut sink);
     let diags = sink.into_diags();
     assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
-    assert_eq!(diags[0].message, "error families are not yet lowered");
+    assert_eq!(
+        diags[0].message,
+        "nested error family declarations are not supported"
+    );
     assert_eq!(diags[0].span, name_span);
 }

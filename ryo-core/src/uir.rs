@@ -58,7 +58,7 @@
 //! must first be converted to report an internal-error `Diag` — see
 //! the `unreachable!` sites in this file.
 
-use crate::ast::CompoundOp;
+use crate::ast::{CompoundOp, DeclVisibility};
 use crate::tir::ParamMode;
 use crate::types::{InternPool, StringId, TypeId, VariantKind};
 use std::num::NonZeroU32;
@@ -474,6 +474,15 @@ pub struct UirErrorDecl {
     pub span: Span,
 }
 
+/// A closed error family and its ordered independent member types.
+#[derive(Debug, Clone)]
+pub struct UirErrorFamilyDecl {
+    pub name: StringId,
+    pub members: Vec<TypeId>,
+    pub visibility: DeclVisibility,
+    pub span: Span,
+}
+
 // ---------- Top-level UIR ----------
 
 #[derive(Debug, Clone)]
@@ -490,6 +499,8 @@ pub struct Uir {
     pub enum_decls: Vec<UirEnumDecl>,
     /// Nominal error declarations in source order.
     pub error_decls: Vec<UirErrorDecl>,
+    /// Error family metadata in source order.
+    pub error_families: Vec<UirErrorFamilyDecl>,
     /// Compiler-generated direct-arm dispatch inside `catch as`.
     pub direct_catch_matches: std::collections::HashSet<InstRef>,
 }
@@ -517,6 +528,7 @@ impl Uir {
             struct_decls: Vec::new(),
             enum_decls: Vec::new(),
             error_decls: Vec::new(),
+            error_families: Vec::new(),
             direct_catch_matches: std::collections::HashSet::new(),
         }
     }
@@ -912,6 +924,10 @@ impl UirBuilder {
 
     pub fn add_error_decl(&mut self, decl: UirErrorDecl) {
         self.uir.error_decls.push(decl);
+    }
+
+    pub fn add_error_family_decl(&mut self, decl: UirErrorFamilyDecl) {
+        self.uir.error_families.push(decl);
     }
 
     pub fn mark_direct_catch_match(&mut self, r: InstRef) {

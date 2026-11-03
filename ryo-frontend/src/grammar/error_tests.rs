@@ -157,17 +157,12 @@ fn error_family_members_reject_visibility_modifiers() {
 }
 
 #[test]
-fn error_family_lowering_is_explicitly_deferred() {
+fn error_family_declaration_lowers_cleanly() {
     let (ast, mut pool) = lex_and_parse("errors IoError:\n\tEof\n").unwrap();
     let mut sink = ryo_core::diag::DiagSink::new();
     let _ = crate::astgen::generate(&ast, &mut pool, &mut sink);
     let diags = sink.into_diags();
-    assert!(
-        diags
-            .iter()
-            .any(|diag| diag.message == "error families are not yet lowered"),
-        "unexpected diagnostics: {diags:?}"
-    );
+    assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
 }
 
 #[test]

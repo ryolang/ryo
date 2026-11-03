@@ -18,6 +18,8 @@
 //! threads it directly into `sema::analyze` and from there into
 //! `codegen::compile`; there is no intermediate tree-shaped IR.
 
+mod errors;
+use errors::ErrorRegistry;
 use ryo_core::ast;
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::types::{
@@ -97,6 +99,7 @@ struct TypeResolver {
     struct_types: HashMap<StringId, TypeId>,
     enum_types: HashMap<StringId, TypeId>,
     error_types: HashMap<StringId, TypeId>,
+    error_families: HashMap<StringId, Vec<TypeId>>,
     enum_variant_fields: HashMap<TypeId, Vec<(StringId, VariantKind, Vec<StringId>)>>,
     main: StringId,
     range: StringId,
@@ -147,7 +150,7 @@ impl TypeResolver {
     ) -> TypeId {
         match &texpr.kind {
             ast::TypeExprKind::Name { name, is_view } => {
-                self.resolve_name(*name, *is_view, texpr.span, pool, sink)
+                self.resolve_name(*name, *is_view, texpr.span, defined_layouts, pool, sink)
             }
             ast::TypeExprKind::Anon { fields } => {
                 let fields = ast.type_field_list(*fields);
@@ -224,17 +227,26 @@ impl TypeResolver {
                 failed = true;
                 continue;
             }
-            if pool.kind(ty) != TypeKind::DeclaredError {
-                sink.emit(Diag::error(
-                    member.span,
-                    DiagCode::TypeMismatch,
-                    "error union members must be declared errors",
-                ));
-                failed = true;
-            } else if !defined_layouts.contains(&ty) {
-                failed = true;
+            match pool.kind(ty) {
+                TypeKind::DeclaredError | TypeKind::ErrorSet => {
+                    let expanded = pool.error_set_view(ty).members;
+                    if expanded
+                        .iter()
+                        .any(|member| !defined_layouts.contains(member))
+                    {
+                        failed = true;
+                    }
+                    member_types.extend(expanded);
+                }
+                _ => {
+                    sink.emit(Diag::error(
+                        member.span,
+                        DiagCode::TypeMismatch,
+                        "error union members must be declared errors or error sets",
+                    ));
+                    failed = true;
+                }
             }
-            member_types.push(ty);
         }
         let success = ast.type_expr(success);
         let success = self.resolve_error_union_success(&success, ast, pool, sink, defined_layouts);
@@ -355,7 +367,8 @@ impl TypeResolver {
         name: StringId,
         is_view: bool,
         span: Span,
-        pool: &InternPool,
+        defined_layouts: &HashSet<TypeId>,
+        pool: &mut InternPool,
         sink: &mut DiagSink,
     ) -> TypeId {
         if is_view {
@@ -393,6 +406,15 @@ impl TypeResolver {
             ty
         } else if let Some(&ty) = self.error_types.get(&name) {
             ty
+        } else if let Some(members) = self.error_families.get(&name) {
+            if members
+                .iter()
+                .all(|member| defined_layouts.contains(member))
+            {
+                pool.error_set(members)
+            } else {
+                pool.error_type()
+            }
         } else {
             // Only resolve the &str on the unhappy path; the common
             // primitive path stays a pure `StringId` compare.
@@ -438,14 +460,14 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
     let mut enum_types: HashMap<StringId, TypeId> = HashMap::new();
     let mut enum_entries: HashMap<StringId, (TypeId, ast::EnumDef, Span)> = HashMap::new();
     let mut enum_order: Vec<StringId> = Vec::new();
-    let mut error_types: HashMap<StringId, TypeId> = HashMap::new();
-    let mut error_entries: HashMap<StringId, (TypeId, ast::ErrorDef, Span)> = HashMap::new();
-    let mut error_order: Vec<StringId> = Vec::new();
+    let mut errors = ErrorRegistry::new();
+    let mut occupied_names = HashSet::from([utf8_error_name]);
 
     for &stmt in program.top_level_stmts() {
         let nominal_declaration = match &program.stmt(stmt).kind {
             ast::StmtKind::StructDef(def) => Some((def.name.name, def.name.span)),
             ast::StmtKind::EnumDef(def) => Some((def.name.name, def.name.span)),
+            ast::StmtKind::ErrorFamilyDef(def) => Some((def.name.name, def.name.span)),
             ast::StmtKind::ErrorDef(def) => Some((def.name.name, def.name.span)),
             _ => None,
         };
@@ -475,7 +497,7 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
                     ));
                     continue;
                 }
-                if enum_entries.contains_key(&name) || error_entries.contains_key(&name) {
+                if occupied_names.contains(&name) {
                     sink.emit(Diag::error(
                         def.name.span,
                         DiagCode::DuplicateDeclaration,
@@ -490,6 +512,7 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
                 struct_types.insert(name, ty);
                 struct_entries.insert(name, (ty, *def, program.stmt_span(stmt)));
                 struct_order.push(name);
+                occupied_names.insert(name);
             }
             ast::StmtKind::EnumDef(def) => {
                 let name = def.name.name;
@@ -501,7 +524,7 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
                     ));
                     continue;
                 }
-                if struct_entries.contains_key(&name) || error_entries.contains_key(&name) {
+                if occupied_names.contains(&name) {
                     sink.emit(Diag::error(
                         def.name.span,
                         DiagCode::DuplicateDeclaration,
@@ -516,17 +539,19 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
                 enum_types.insert(name, ty);
                 enum_entries.insert(name, (ty, *def, program.stmt_span(stmt)));
                 enum_order.push(name);
+                occupied_names.insert(name);
             }
-            ast::StmtKind::ErrorFamilyDef(def) => {
-                sink.emit(Diag::error(
-                    def.name.span,
-                    DiagCode::ParseError,
-                    "error families are not yet lowered",
-                ));
-            }
+            ast::StmtKind::ErrorFamilyDef(def) => errors.declare_family(
+                program,
+                def,
+                program.stmt_span(stmt),
+                &mut occupied_names,
+                pool,
+                sink,
+            ),
             ast::StmtKind::ErrorDef(def) => {
                 let name = def.name.name;
-                if error_entries.contains_key(&name) {
+                if errors.entries.contains_key(&name) {
                     sink.emit(Diag::error(
                         def.name.span,
                         DiagCode::DuplicateDeclaration,
@@ -534,7 +559,7 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
                     ));
                     continue;
                 }
-                if struct_entries.contains_key(&name) || enum_entries.contains_key(&name) {
+                if occupied_names.contains(&name) {
                     sink.emit(Diag::error(
                         def.name.span,
                         DiagCode::DuplicateDeclaration,
@@ -546,9 +571,12 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
                     continue;
                 }
                 let ty = pool.declare_error(name);
-                error_types.insert(name, ty);
-                error_entries.insert(name, (ty, *def, program.stmt_span(stmt)));
-                error_order.push(name);
+                errors.types.insert(name, ty);
+                errors
+                    .entries
+                    .insert(name, (ty, *def, program.stmt_span(stmt)));
+                errors.order.push(name);
+                occupied_names.insert(name);
             }
             _ => top_level.push(stmt),
         }
@@ -574,6 +602,13 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
                 (ety, variants)
             })
             .collect();
+    let ErrorRegistry {
+        types: mut error_types,
+        entries: error_entries,
+        order: error_order,
+        families: error_families,
+        family_decls,
+    } = errors;
     error_types.insert(utf8_error_name, utf8_error);
 
     let types = TypeResolver {
@@ -581,6 +616,7 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
         struct_types,
         enum_types,
         error_types,
+        error_families,
         enum_variant_fields,
         main: main_id,
         range: range_id,
@@ -599,6 +635,11 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
             .chain(&enum_order)
             .chain(&error_order)
             .map(|&name| (name, DefState::Pending))
+            .chain(
+                family_decls
+                    .iter()
+                    .map(|family| (family.name, DefState::Pending)),
+            )
             .chain(std::iter::once((utf8_error_name, DefState::Defined)))
             .collect(),
         defined_layouts: HashSet::from([utf8_error]),
@@ -606,7 +647,12 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
         resolved_enums: HashMap::new(),
         resolved_errors: HashMap::new(),
     };
-    for &name in struct_order.iter().chain(&enum_order).chain(&error_order) {
+    for &name in struct_order
+        .iter()
+        .chain(&enum_order)
+        .chain(family_decls.iter().map(|family| &family.name))
+        .chain(&error_order)
+    {
         definer.define(name, pool, sink);
     }
 
@@ -702,6 +748,9 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
             payload,
             span,
         });
+    }
+    for family in family_decls {
+        b.add_error_family_decl(family);
     }
 
     for func in &func_defs {
@@ -803,6 +852,8 @@ impl TypeDefiner<'_> {
             self.define_struct(name, pool, sink);
         } else if self.enums.contains_key(&name) {
             self.define_enum(name, pool, sink);
+        } else if self.types.error_families.contains_key(&name) {
+            self.define_error_family(name, pool, sink);
         } else {
             self.define_error(name, pool, sink);
         }
@@ -825,6 +876,8 @@ impl TypeDefiner<'_> {
             "enum"
         } else if self.types.error_types.contains_key(&rname) {
             "error"
+        } else if self.types.error_families.contains_key(&rname) {
+            "error set"
         } else {
             return false;
         };
@@ -850,6 +903,31 @@ impl TypeDefiner<'_> {
             DefState::Defined => false,
             DefState::Failed => true,
         }
+    }
+
+    fn define_error_family(&mut self, name: StringId, pool: &mut InternPool, sink: &mut DiagSink) {
+        let member_names: Vec<_> = self.types.error_families[&name]
+            .iter()
+            .map(|member| {
+                self.errors
+                    .iter()
+                    .find_map(|(&member_name, (ty, _, _))| (ty == member).then_some(member_name))
+                    .expect("family member must have an error declaration")
+            })
+            .collect();
+        let mut defined = true;
+        for member_name in member_names {
+            self.define(member_name, pool, sink);
+            defined &= self.states[&member_name] == DefState::Defined;
+        }
+        self.states.insert(
+            name,
+            if defined {
+                DefState::Defined
+            } else {
+                DefState::Failed
+            },
+        );
     }
 
     /// Resolve one declaration field list (struct fields or an enum
@@ -1493,7 +1571,7 @@ fn gen_stmt(
             sink.emit(Diag::error(
                 def.name.span,
                 DiagCode::ParseError,
-                "error families are not yet lowered",
+                "nested error family declarations are not supported",
             ));
         }
     }
