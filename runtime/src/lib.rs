@@ -734,8 +734,8 @@ pub(crate) unsafe fn read_line_from(state: &mut ReadLineState, fd: c_int, out: *
 /// trailing `\n` is stripped; EOF before any byte yields "". The fd is
 /// parameterized on the crate-visible `read_line_from` so runtime tests
 /// can drive it with temp files.
-/// TODO(M13.6): interim call form — replaced by
-/// `io.read_line() -> IoError!str`.
+/// TODO(M16): interim call form — replaced by
+/// `io.read_line() -> IoError!?str`.
 ///
 /// # Safety
 /// `out` points to a valid, uninitialized `RyoStrFat`.

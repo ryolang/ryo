@@ -45,11 +45,10 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [ ] [Milestone 12.6 — Match Ownership Completion](#milestone-126-match-ownership-completion) *(deferred to v0.2 — post-alpha; undefined enum/match ownership semantics)*
 - [x] [Milestone 13 — Error Types & Unions [alpha] ✅ COMPLETE](#milestone-13-error-types--unions-alpha--complete)
 - [ ] [Milestone 13.5 — Default Parameters & Named Arguments](#milestone-135-default-parameters--named-arguments) *(deferred — see sequencing note below)*
-- [ ] [Milestone 13.6 — `io_read_line` Gains Error Unions](#milestone-136-io_read_line-gains-error-unions) *(resumes after M13.8, before M16)*
 - [x] [Milestone 13.7 — Literal Completeness ✅ COMPLETE](#milestone-137-literal-completeness) *(landed ad hoc 2026-10-22 — scientific notation, underscores, base prefixes, full escape set)*
-- [x] [Milestone 13.8 — Error Namespaces ✅ COMPLETE](#milestone-138-error-namespaces) *(landed after the namespace design; M13.6/M16 may resume)*
+- [x] [Milestone 13.8 — Error Namespaces ✅ COMPLETE](#milestone-138-error-namespaces) *(landed after the namespace design; M16 may resume)*
 
-> **Sequencing note (2026-09):** Next-up order is the alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M13.8 → M13.6 → M16** — followed by the rest of Phase 3. M10 is no longer a standalone milestone in effort terms: anonymous structs are the single grouping type, with its grouping machinery folded into M9, so what ships between M9.1 and M11 is only the positional-sugar layer (parser forms + destructuring, depends on M9). **M12.5, M12.6, and M13.5 are deferred past the core cluster.** M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"), and M9's former dependency on its named-argument parsing is stale — the same decision moved struct literals to brace construction with its own grammar. M13.7 is complete and landed ad hoc as filler. M13.5 remains v0.1-scope but may slip to v0.2 if the core cluster absorbs the schedule. **M9.2 (throwaway CLI intrinsics)** has no dependencies and slots in alongside the core cluster any time after M9.1; **M13.8** follows its approved error-namespace design, then **M13.6** resumes before M16 to migrate the M9.2 `io_read_line` placeholder to real error unions. **M12.5** (advanced pattern matching — nested patterns, guards, or-patterns, and the rest of M12's deferral register) is v0.2 work, not alpha-gating; the only pattern features alpha needs beyond M12 ship inside M13 (error-union match) and M16 (`?T`/`none` patterns) themselves.
+> **Sequencing note (2026-09; `io_read_line` folded into M16 in 2026-11):** Next-up order is the alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M13.8 → M16** — followed by the rest of Phase 3. M10 is no longer a standalone milestone in effort terms: anonymous structs are the single grouping type, with its grouping machinery folded into M9, so what ships between M9.1 and M11 is only the positional-sugar layer (parser forms + destructuring, depends on M9). **M12.5, M12.6, and M13.5 are deferred past the core cluster.** M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"), and M9's former dependency on its named-argument parsing is stale — the same decision moved struct literals to brace construction with its own grammar. M13.7 is complete and landed ad hoc as filler. M13.5 remains v0.1-scope but may slip to v0.2 if the core cluster absorbs the schedule. **M9.2 (throwaway CLI intrinsics)** has no dependencies and slots in alongside the core cluster any time after M9.1; **M13.8** follows its approved error-namespace design, then **M16** supplies optionals and migrates the M9.2 `io_read_line` placeholder directly to `IoError!?str` without a temporary EOF error variant. **M12.5** (advanced pattern matching — nested patterns, guards, or-patterns, and the rest of M12's deferral register) is v0.2 work, not alpha-gating; the only pattern features alpha needs beyond M12 ship inside M13 (error-union match) and M16 (`?T`/`none` patterns) themselves.
 
 ### Phase 3: Type System & Memory Safety
 
@@ -1447,7 +1446,7 @@ fn main():
 | `io_eprint(s: str) -> void` | `io.eprint(s: str) -> void` | M24 |
 | `process_argc() -> int`, `process_argv(i: int) -> str` | `process.args() -> list[str]` | M22 |
 | `process_env(key: str) -> str` (empty = unset) | `process.env(key: str) -> ?str` (none = unset) | M16 |
-| `io_read_line() -> str` (empty = EOF) | `io.read_line() -> IoError!str` | M13.6 → `IoError!?str` at M16 |
+| `io_read_line() -> str` (empty = EOF) | `io.read_line() -> IoError!?str` (none = EOF) | M16; name at M24 |
 
 **Deprecation plan (documented, not built here):** when modules + `std.io` land, the intrinsics move into `std` as `process.*` / `io.*` with the final signatures; the `process_*` / `io_*` intrinsics remain as deprecated aliases that emit a warning for exactly one release, then are removed.
 
@@ -1478,7 +1477,7 @@ fn main():
   - JIT: `Codegen::execute` calls main as `fn() -> isize` with no argv, and `ryo run` has no trailing-arg capture — add a clap `trailing_var_arg = true, allow_hyphen_values = true` to `run`, thread it through `pipeline::run_file` → `execute`, build a `CString` argv there, and change the trampoline to `extern "C" fn(i64, *const *const c_char) -> i64` (pointer-sized argc matching the emitted `main`; `c_int` was the original sketch and would be a width mismatch)
   - `process_argv(i)` is bounds-checked and panics (exit 101) on out-of-range; returns an owned `str` copy via the slot-out ABI (below)
 - `process_env(key: str) -> str` — empty string = unset (placeholder for `?str` at M16); needs a new libc `getenv` extern in the runtime (which is `#![no_std]` under the staticlib feature, so `std::env` is unavailable). **Decided 2026-10-01: narrow `getenv` on all platforms**, mirroring the existing narrow `_write` split — non-ASCII values on Windows come back in the ANSI codepage (documented placeholder limitation, revisited with `?str` at M16). The key is copied to a 4 KiB stack buffer + NUL-terminated; longer keys panic (interim)
-- `io_read_line() -> str` — read fd 0 up to `\n`, strip it; empty string on EOF (placeholder for `IoError!str` at M13.6); needs a new `read`/`_read` extern under the existing `cfg(windows)` split; growable heap buffer via the linked malloc/realloc; EINTR retried, other read errors panic (exit 101, interim). The runtime is factored as `ryo_read_line(out)` + `read_line_from(fd, out)` inner so unit tests can parameterize the fd
+- `io_read_line() -> str` — read fd 0 up to `\n`, strip it; empty string on EOF (placeholder for `IoError!?str` at M16); needs a new `read`/`_read` extern under the existing `cfg(windows)` split; growable heap buffer via the linked malloc/realloc; EINTR retried, other read errors panic (exit 101, interim). The runtime is factored as `ryo_read_line(out)` + `read_line_from(fd, out)` inner so unit tests can parameterize the fd
 - Str-producing builtins (`process_argv`, `process_env`, `io_read_line`) use the slot-out ABI: sema arm returning `str`, codegen arm calling `emit_slot_out_call` (the `int_to_str` pattern), runtime export writing through `write_str_slot` (SSO ≤23B inline, else heap). No ownership-pass changes needed — the pass seeds any str-returning `Call` as a fresh owner generically. Unbounded outputs → no `max_output_len` entries
 - Mark every interim call form in code with `TODO(M13/M16/M22)` noting what replaces it
 
@@ -1803,7 +1802,7 @@ fn main():
 - Dependencies: Milestone 11 (enums), Milestone 12 (pattern matching for handling). M12.5/M12.6 deferrals remain unchanged.
 - The M8.4.2 interim is replaced: invalid UTF-8 produces `Utf8Error` rather than panicking, and call sites use `try` or `catch`.
 - **Error return traces remain deferred.** They require a separately designed trace representation, source mapping, and public inspection API; M13 does not capture creation or propagation frames and does not add `.location()` or `.stack_trace()`.
-- Milestone 13.6 (`io_read_line`) remains separately planned and is not part of this completion.
+- The `io_read_line` migration remains M16 integration work and is not part of this completion.
 
 ### Milestone 13.5: Default Parameters & Named Arguments
 
@@ -1901,54 +1900,6 @@ print("hello", "")          # compile error — end is keyword-only
 
 > **Note:** Closures and lambda expressions were originally planned as Milestone 8.6 but have been **deferred to v0.2** (see Phase 5: Closures & Lambda Expressions). Closures are not strictly required for the v0.1.0 core language; named functions plus the standard library cover every v0.1 use case, and deferring capture analysis (originally M15.5) lets the v0.1 borrow checker stay focused on let/struct/method bindings.
 
-### Milestone 13.6: `io_read_line` Gains Error Unions
-
-**Goal:** Migrate the M9.2 placeholder `io_read_line() -> str` (empty = EOF) to `io_read_line() -> IoError!str` — errors as values. The name swap to `io.read_line` itself waits for M24 (modules); this milestone changes only the return type.
-
-**Status:** ⏳ Planned — resumes after M13.8, before M16.
-
-> **Why this milestone exists:** M9.2 ships stdin early with a placeholder return type (plain `str`, empty-on-EOF) so CLIs work before error unions exist. That placeholder is deliberately temporary — this milestone replaces it after M13.8 supplies the error-family surface, mirroring how M13 converts the `bytes.to_str()` panicking stopgap to `Utf8Error!str`.
-
-**Error type (decided):** use a compiler-known `IoError` family with `Eof`, `ReadFailed(str)`, and `InvalidUtf8(code: int, message: str)` members. The family can later be re-exported by the `io` module; M13.8 does not implement that module or import behavior.
-
-**EOF (decided 2026-09):** at this milestone, EOF is a dedicated `IoError` variant — the only option available before `?T` exists. M16 migrates the signature to the final form `io_read_line() -> IoError!?str` (clean EOF → `none`, errors reserved for real failures: read errors, invalid UTF-8, unexpected truncation). That migration is a deliberate breaking change, acceptable pre-alpha. The final form follows the cross-language consensus that EOF is graceful termination, not a failure: Swift's `readLine() -> String?`, Rust's `Ok(0)`/iterator `None`, Go's Scanner ("first non-EOF error"; `io.EOF` documents "functions should return EOF only to signal a graceful end of input"), and Kotlin adding `readlnOrNull()` because the throwing `readln()` forced boilerplate on the canonical read-until-EOF loop.
-
-**Tasks:**
-
-- Sema: change the `io_read_line` arm to return the error-union `TypeId` (M13 machinery); the runtime `read` path and slot-out ABI already exist from M9.2 — only the signature and error construction change
-- UTF-8 validation failures become `IoError` values (reuses the M8.4.2 `__ryo_bytes_to_str` machinery and its M13 `Utf8Error!str` conversion)
-- Update M9.2-era call sites and examples: empty-string checks become `catch`/`match` handling
-- Write tests:
-  - Unit: result usable only through `catch`/`match` like any error union
-  - Integration: piped stdin — line read round-trip, EOF yields the `IoError` EOF variant (not `""`), invalid UTF-8 yields an `IoError` (not a panic)
-
-**Visible Progress:** stdin failures are values, not sentinels:
-
-```ryo
-name = io_read_line() catch as e:
-	io_eprint("read failed: " + e.message() + "\n")
-	process_exit(1)
-```
-
-**Example:**
-
-```ryo
-fn main():
-	io_eprint("name? ")
-	line = io_read_line() catch as e:
-		io_eprint("read failed: " + e.message() + "\n")
-		process_exit(1)
-	if line == "":
-		io_eprint("empty input\n")
-		process_exit(2)
-	print("hello, " + line)
-```
-
-**Implementation Notes:**
-
-- The returned `str` is owned by the caller under the normal rules; the runtime buffer is scratch
-- Dependencies: Milestone 13 (error types & unions), Milestone 13.8 (the `IoError` family), Milestone 9.2 (the placeholder being replaced)
-
 ### Milestone 13.7: Literal Completeness
 
 **Status:** ✅ COMPLETE — landed ad hoc (2026-10-22), outside the milestone sequence.
@@ -1976,7 +1927,7 @@ fn main():
 - Parser snippet and large-source benchmarks against the pre-change implementation
 - Standard formatting, lint, workspace test, and file-length gates
 
-Module paths, imports, cross-file extension, and optional-type integration are not part of this milestone. M13.6 and M16 resume after M13.8.
+Module paths, imports, cross-file extension, and optional-type integration are not part of this milestone. M16 resumes after M13.8.
 
 ## Phase 3: Type System & Memory Safety
 
@@ -1993,7 +1944,7 @@ Module paths, imports, cross-file extension, and optional-type integration are n
 
 ### Milestone 16: Optional Types (`?T`) [alpha]
 
-**Goal:** Implement null-safe optional types with `?T`, `none`, and `orelse`
+**Goal:** Implement null-safe optional types with `?T`, `none`, and `orelse`, then use them to give `io_read_line` its final result type
 
 **Tasks:**
 
@@ -2013,7 +1964,16 @@ Module paths, imports, cross-file extension, and optional-type integration are n
   - Optional chaining short-circuiting
 - Write tests for optional types and null safety
 
-**Visible Progress:** No more null pointer exceptions! Type-safe optional handling.
+**Required `io_read_line` integration (after the optional core):**
+
+- Migrate the M9.2 placeholder `io_read_line() -> str` directly to `io_read_line() -> IoError!?str`; the name swap to `io.read_line` waits for M24
+- Add a compiler-known `IoError` family with `ReadFailed(str)` and `InvalidUtf8(str)` members, with no temporary `IoError.Eof` member and no numeric UTF-8 code without defined semantics
+- Keep clean EOF before any byte as `none`; keep empty lines and unterminated final lines as present strings; reserve errors for read failures and invalid UTF-8
+- Extend the runtime slot-out ABI with internal success/EOF/read-failure/invalid-UTF-8 statuses, and construct the standard optional/error-union result in codegen
+- Update M9.2-era call sites and examples to handle real failures with `catch`, then consume the optional line
+- Add AST/sema, runtime, JIT, and AOT coverage for present lines, `none`, present empty lines, unterminated final lines, read failures, invalid UTF-8, ownership, and cleanup
+
+**Visible Progress:** No more null pointer exceptions! Type-safe optional handling, plus stdin with explicit EOF and typed failures.
 
 **Example:**
 
@@ -2039,16 +1999,26 @@ fn main():
 
 ```
 
+**stdin integration:**
+
+```ryo
+name = io_read_line() catch as e:
+	io_eprint("read failed: " + e.message() + "\n")
+	process_exit(1)
+name = name orelse "anonymous"
+```
+
 **Implementation Notes:**
 
 - Optional types use **tagged union** (tag + value)
 - `none` is **not null** (different representation, type-safe)
 - Smart casting narrows types in control flow
 - Chaining returns `?T` (must handle with `orelse` or check)
-- Migrate `io_read_line` to its final signature `io_read_line() -> IoError!?str`: clean EOF becomes `none`, replacing the interim `IoError` EOF variant from M13.6 (deliberate breaking change — pre-alpha; matches the Swift `readLine() -> String?` / Rust `None` / Go Scanner consensus that EOF is graceful termination, not a failure)
+- The `io_read_line` integration is required for M16 completion but should be a separate PR after the optional core; it reuses the standard optional and error-family representations rather than adding a builtin-specific layout
+- A present returned `str` is owned by the caller under the normal rules; the runtime buffer is scratch
 - Migrate `process_env(key: str) -> str` (M9.2 placeholder, empty = unset) to `process_env(key: str) -> ?str` (`none` = unset); the final `process.env` name swap waits for M24
 - M12's match machinery extends to `?T`: `none` is a literal pattern, the payload-binding form follows whatever unwrap idiom M16 establishes (decided at implementation time), and exhaustiveness covers `{none, value}` — no wildcard needed for a fully handled optional
-- Dependencies: Milestone 11 (enums provide foundation for tagged unions)
+- Dependencies: Milestone 11 (enums provide foundation for tagged unions), Milestone 13.8 (the `IoError` family), Milestone 9.2 (the stdin placeholder being replaced)
 
 ### Milestone 17: Method Implementations
 
@@ -2433,7 +2403,7 @@ fn main():
   - `print(str) -> void`: Print to stdout (already in M3.5 as builtin)
   - `println(str) -> void`: Print with newline
   - `eprint(str) -> void`, `eprintln(str) -> void`: Print to stderr. **Update (2026-09):** `io_eprint` lands as a throwaway intrinsic in M9.2; `io.eprint` is its final form (mechanical `io_eprint` → `io.eprint` swap)
-  - `read_line() -> IoError!?str`: Read from stdin (`none` on clean EOF). **Update (2026-09):** `io_read_line` lands as a placeholder intrinsic in M9.2 and gains error unions in M13.6; `io.read_line` is the final name (M16 takes the signature to `IoError!?str`)
+  - `read_line() -> IoError!?str`: Read from stdin (`none` on clean EOF). **Update (2026-11):** `io_read_line` lands as a placeholder intrinsic in M9.2 and gains its final signature in M16; `io.read_line` is the final name at M24
   - `read_file(path: strview) -> io.Error!str`: Read file contents
   - `write_file(path: strview, content: strview) -> io.Error!void`: Write to file
   - `append_file(path: strview, content: strview) -> io.Error!void`: Append to file

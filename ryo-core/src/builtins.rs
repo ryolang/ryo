@@ -110,8 +110,8 @@ pub const BUILTINS: &[BuiltinFunction] = &[
         max_output_len: None,
     },
     BuiltinFunction {
-        // TODO(M13.6): interim call form — replaced by
-        // `io.read_line() -> IoError!str`.
+        // TODO(M16): interim call form — replaced by
+        // `io.read_line() -> IoError!?str`.
         name: "io_read_line",
         return_ty: BuiltinReturn::Str,
         borrowed_scalar_params: &[],

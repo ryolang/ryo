@@ -7,7 +7,7 @@ fn read_line(mode: int) -> IoError!str:
 	if mode == 0:
 		return IoError.Eof
 	if mode == 1:
-		return IoError.ReadFailed("read failed:" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+		return IoError.ReadFailed("read failed:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	if mode == 2:
 		return IoError.InvalidUtf8(code=mode, message="input is not valid UTF-8")
 	return "line"

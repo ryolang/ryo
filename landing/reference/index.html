@@ -1567,8 +1567,10 @@ fn main():
             </div>
             <p>
               Construct and match members as <code>Family.Member</code>.
-              Bare member names are not added to the surrounding scope, and
-              equal short names in different families stay distinct. A broad
+              Bare member names are not added to the surrounding scope. A
+              local value binding shadows the family name in value position;
+              type-position family resolution is unchanged. Equal short names
+              in different families stay distinct. A broad
               <code>IoError!T</code> return permits every family member;
               <code>IoError.Eof!T</code> permits only that member, and direct
               member inference stays narrow. Family visibility applies to the
@@ -1649,9 +1651,7 @@ fn main():
             <p>
               Raw unions can be bound and passed without being unwrapped,
               but direct field access, operators, printing, and source
-              <code>match</code> are rejected. <code>Ok</code> and
-              <code>Err</code> are compiler-only alternatives, never source
-              constructors or patterns. Error-return traces and
+              <code>match</code> are rejected. Error-return traces and
               <code>.location()</code> / <code>.stack_trace()</code> are not
               part of the implemented language.
             </p>

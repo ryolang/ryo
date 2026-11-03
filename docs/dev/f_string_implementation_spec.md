@@ -69,7 +69,7 @@ A compiled template definition stores reusable structure and accepts its context
 
 ### 2.4 Milestone placement
 
-Basic f-string interpolation ships as **M16.1 — F-Strings & String Interpolation** in v0.1/alpha, after M16 Optional Types and before M17 Method Implementations. The execution order is **M13 → M13.8 → M13.6 → M16 → M16.1 → M17**. M16.1 requires no traits, t-strings, or template machinery.
+Basic f-string interpolation ships as **M16.1 — F-Strings & String Interpolation** in v0.1/alpha, after M16 Optional Types and before M17 Method Implementations. The execution order is **M13 → M13.8 → M16 → M16.1 → M17**. M16.1 requires no traits, t-strings, or template machinery.
 
 **M17.3 — Static Format Specifications** follows M17.1 Explicit Sizes and M17.2 `char`. M17.1 and M17.2 extend plain interpolation and the existing default conversion paths to their new types. M17.3 adds static precision, width, alignment, fill, alternate-form, and numeric-base specifications across the complete numeric and character type system. It must not duplicate or redesign the plain conversion paths. Text width counts Unicode scalar values, not UTF-8 bytes, grapheme clusters, or terminal display columns.
 
