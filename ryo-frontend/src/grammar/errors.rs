@@ -33,6 +33,85 @@ where
         .boxed()
 }
 
+pub(super) fn error_family_decl_parser<'a, I>(
+    enum_tail: impl Parser<'a, I, (Ident, EnumVariantDeclList), PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, StmtId, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    let visibility = choice((
+        just(Token::Pub).to(DeclVisibility::Public),
+        just(Token::Package).to(DeclVisibility::Package),
+    ))
+    .or_not()
+    .map(|visibility| visibility.unwrap_or(DeclVisibility::Module));
+
+    let family = visibility
+        .then_ignore(just(Token::Errors))
+        .then(enum_tail)
+        .validate(
+            |(visibility, (name, members)), e: &mut Mx<'a, '_, I>, emitter| {
+                let name_span = SimpleSpan::new((), name.span.start..name.span.end);
+                if !is_uppercase_name(name.name, &e.state().pool) {
+                    emitter.emit(Rich::custom(
+                        name_span,
+                        ParseDiag::Message(
+                            "error family declaration names must use PascalCase".into(),
+                        ),
+                    ));
+                }
+                if e.state().enum_variants(members).is_empty() {
+                    emitter.emit(Rich::custom(
+                        name_span,
+                        ParseDiag::Message(format!(
+                            "error family '{}' must declare at least one member",
+                            e.state().pool.str(name.name)
+                        )),
+                    ));
+                }
+                (visibility, name, members)
+            },
+        )
+        .map_with(|(visibility, name, members), e: &mut Mx<'a, '_, I>| {
+            let span = crate::spans::cspan(e.span());
+            e.state().error_family_def(name, members, visibility, span)
+        });
+
+    let member_modifier = choice((just(Token::Pub), just(Token::Package)))
+        .map_with(|_, e: &mut Mx<'a, '_, I>| e.span());
+    let invalid_body = skip_newlines()
+        .ignore_then(just(Token::Indent))
+        .ignore_then(
+            none_of([Token::Pub, Token::Package, Token::Dedent])
+                .repeated()
+                .ignore_then(member_modifier)
+                .then(none_of(Token::Dedent).repeated()),
+        )
+        .then_ignore(just(Token::Dedent));
+    let invalid_member_visibility = visibility
+        .then_ignore(just(Token::Errors))
+        .then(
+            select! { Token::Ident(name) => name }.map_with(|name, e: &mut Mx<'a, '_, I>| {
+                Ident::new(name, crate::spans::cspan(e.span()))
+            }),
+        )
+        .then_ignore(just(Token::Colon))
+        .then(invalid_body)
+        .validate(|parsed, _e: &mut Mx<'a, '_, I>, emitter| {
+            emitter.emit(Rich::custom(
+                parsed.1.0,
+                ParseDiag::Message("error family members cannot have visibility modifiers".into()),
+            ));
+            parsed
+        })
+        .map_with(|_, e: &mut Mx<'a, '_, I>| {
+            let span = crate::spans::cspan(e.span());
+            e.state().error_stmt(span)
+        });
+
+    family.or(invalid_member_visibility).boxed()
+}
+
 fn is_uppercase_name(name: StringId, pool: &InternPool) -> bool {
     pool.str(name)
         .as_bytes()
@@ -111,6 +190,8 @@ where
                     Some(VariantArgs {
                         positional: None,
                         named: Some(fields),
+                        named_parens: true,
+                        mixed_fields: false,
                     }),
                     span,
                 )
@@ -130,6 +211,8 @@ where
                     Some(VariantArgs {
                         positional: Some(list),
                         named: None,
+                        named_parens: false,
+                        mixed_fields: !positional && !named,
                     }),
                     span,
                 )

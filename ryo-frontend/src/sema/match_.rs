@@ -1,64 +1,22 @@
-//! `match` expression analysis (M12) — pattern resolution, the
-//! E0129-E0137 diagnostic family, exhaustiveness checking, and typed
-//! TIR `Match` emission. Split from `expr.rs` so the parent file stays
-//! under the 2000-line CI gate.
+//! `match` expression analysis: pattern resolution, E0129-E0137 diagnostics,
+//! exhaustiveness, and typed TIR `Match` emission.
 //!
-//! Analysis runs in three passes. RESOLUTION validates the scrutinee
-//! type (E0136) and resolves each arm's pattern against it — literal
-//! kinds (E0131), variant names and payload shapes (E0132, reusing the
-//! M11 construction checks E0120/E0121/E0122/E0125), anonymous-struct
-//! shapes (reusing the M10 destructure checks E0113/E0114/E0040) — and
-//! collects the per-arm results in a [`MatchAnalysis`] scratch struct
-//! for the follow-on passes.
+//! Resolution validates the scrutinee and each arm's literal, variant, payload,
+//! or anonymous-struct shape, collecting the results in [`MatchAnalysis`].
 //!
-//! The second pass adds EXHAUSTIVENESS + REDUNDANCY over the resolved arms:
-//! enum and error-set scrutinees cover variant indices (a `u128` bitset up
-//! to 128 variants, a `Vec<bool>` fallback above), bool covers its two
-//! literals, int/str/anon-struct scrutinees are uncoverable without a
-//! wildcard arm (anon patterns carry no M12 discriminant — structural
-//! lowering is M12.5). Incomplete coverage without a `_:` arm is
-//! E0129, listing the missing variants in declaration order (or the
-//! kind name); every arm after a wildcard, and every duplicate
-//! discriminant before it, is W0005 (warning severity, buffered like
-//! W0001/W0002/W0003 so it never piles onto an error).
+//! Exhaustiveness tracks enum and error-set variant indices with a `u128`
+//! bitset or `Vec<bool>` fallback. Bool tracks both literals; int, str, and
+//! anonymous structs require a wildcard. Missing coverage emits E0129, while
+//! duplicate discriminants and arms after a wildcard emit buffered W0005.
 //!
-//! The third pass adds ARM TYPING and the typed emission: each cleanly
-//! resolved arm is typed in its own child `Scope` seeded with the
-//! payload bindings (E0133 gates by-move binds out of borrowed
-//! scrutinees; the duplicate/reserved binding checks mirror M10
-//! destructure insertion), the arm types are joined — every value arm
-//! must agree on one `TypeId` (E0134), `never`/error arms join freely
-//! (an expression arm analyzed through the never-tolerant entry point,
-//! so a `panic(...)` arm is DIVERGING rather than E0017), a falling
-//! statement arm is legal only when no arm produces a value
-//! (else E0135), and a view-typed candidate is rejected outright
-//! (E0137 — no merge shape exists for a view result) — and a clean
-//! match emits `TirTag::Match` typed as the joined result, preceded by
-//! one `FieldAccess` owner token per by-move binding (the convention
-//! documented on `TirBuilder::match_expr`).
-//! Anon-pattern arms encode `Discriminant::Wildcard` as a coverage
-//! placeholder (structural lowering is M12.5) and carry their literal
-//! field constraints on the wire as a per-arm GUARD list so codegen
-//! can evaluate them. An errored match recovers with the error-typed
-//! `Unreachable` sentinel (§4.5; codegen never runs on a unit with
-//! errors).
+//! Arm typing seeds child scopes with payload bindings, joins arm types, and
+//! rejects invalid moves, mismatches, falling statement arms, and view results.
+//! Anon arms retain literal guards; errored matches recover as `Unreachable`.
 //!
-//! ## Span anchoring
-//!
-//! UIR and TIR match arms carry the source span of each pattern.
-//! Pattern diagnostics and redundancy warnings use that span;
-//! scrutinee diagnostics use the scrutinee expression span.
-//!
-//! ## Continuity
-//!
-//! One broken arm never suppresses another: every arm is resolved
-//! independently, and an arm that errored records `had_error` so
-//! exhaustiveness excludes it instead of piling derived diagnostics on
-//! top (E0129 still fires when the remaining, clean arms leave gaps).
-//! W0005 likewise never suppresses E0129 or any other diagnostic. The
-//! same holds into arm typing: a resolution-broken arm is skipped for
-//! typing (its own diagnostic already fired), while its siblings still
-//! type-check, and one E0133 bind never blocks the next arm's binds.
+//! Pattern diagnostics use pattern spans; scrutinee diagnostics use its span.
+//! Qualified error-family patterns carry full canonical member names.
+//! Broken arms are excluded from coverage and typing while their siblings
+//! continue through both passes.
 
 use super::{
     FuncCtx, Scope, Sema, analyze_block, analyze_expr, analyze_expr_allow_never,
@@ -967,13 +925,9 @@ impl Coverage {
     }
 }
 
-/// Walk the resolved arms in order: a wildcard arm sets `has_wildcard`
-/// and makes every later arm redundant (W0005); duplicate
-/// discriminants before the wildcard are W0005 on the later arm. When
-/// coverage is incomplete and no wildcard exists, emit E0129 listing
-/// the missing variants in declaration order (or the scrutinee kind).
-/// Warnings buffer through `sema.warnings` like W0001/W0002/W0003 — they
-/// flush only when the whole unit is error-free.
+/// Track coverage and redundant arms, suppressing E0129 when a pattern
+/// already failed. Otherwise, incomplete coverage lists missing variants.
+/// Warnings buffer through `sema.warnings` and flush only for clean units.
 fn check_exhaustiveness(
     sema: &mut Sema<'_>,
     scrutinee_ty: ryo_core::types::TypeId,
@@ -1007,7 +961,7 @@ fn check_exhaustiveness(
         }
     }
     let exhaustive = has_wildcard || coverage.is_full();
-    if !exhaustive {
+    if !exhaustive && arms.iter().all(|arm| !arm.had_error) {
         emit_non_exhaustive(sema, scrutinee_ty, &coverage, match_span, scrutinee_span);
     }
     Exhaustiveness {
@@ -1501,6 +1455,65 @@ fn emit_unknown_variant(
         sema.pool.kind(scrutinee_ty),
         TypeKind::DeclaredError | TypeKind::ErrorSet
     );
+    if error_pattern {
+        if sema
+            .uir
+            .error_families
+            .iter()
+            .any(|family| family.name == variant)
+        {
+            let example = sema
+                .uir
+                .error_decls
+                .iter()
+                .map(|decl| sema.pool.str(decl.name))
+                .find(|name| name.starts_with(&format!("{}.", sema.pool.str(variant))))
+                .unwrap_or("Family.Member")
+                .to_string();
+            sema.sink.emit(Diag::error(
+                analysis.span,
+                DiagCode::TypeMismatch,
+                format!(
+                    "error family '{}' is an error-set alias, not a pattern; match a member as {example}",
+                    sema.pool.str(variant),
+                ),
+            ));
+            analysis.had_error = true;
+            return;
+        }
+        let suffix = format!(".{}", sema.pool.str(variant));
+        let mut owners: Vec<_> = sema
+            .uir
+            .error_families
+            .iter()
+            .filter(|family| {
+                let qualified = format!("{}{suffix}", sema.pool.str(family.name));
+                sema.uir
+                    .error_decls
+                    .iter()
+                    .any(|decl| sema.pool.str(decl.name) == qualified)
+            })
+            .map(|family| family.name)
+            .collect();
+        owners.sort_by(|&a, &b| sema.pool.str(a).cmp(sema.pool.str(b)));
+        if !owners.is_empty() {
+            let qualifications = owners
+                .iter()
+                .map(|family| format!("{}{suffix}", sema.pool.str(*family)))
+                .collect::<Vec<_>>()
+                .join(" or ");
+            sema.sink.emit(Diag::error(
+                analysis.span,
+                DiagCode::UnknownMatchVariant,
+                format!(
+                    "error family member '{}' must be qualified; match it as {qualifications}",
+                    sema.pool.str(variant)
+                ),
+            ));
+            analysis.had_error = true;
+            return;
+        }
+    }
     let parent = if error_pattern {
         format!("error set '{}'", sema.pool.display(scrutinee_ty))
     } else {

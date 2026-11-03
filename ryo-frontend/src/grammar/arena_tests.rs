@@ -68,7 +68,10 @@ pub(super) fn reachable_node_counts(ast: &Ast) -> (usize, usize) {
             StmtKind::Break | StmtKind::Continue | StmtKind::Error => {}
             // Field declarations are scalar metadata in a side
             // arena, not node children — nothing reachable to follow.
-            StmtKind::StructDef(_) | StmtKind::EnumDef(_) | StmtKind::ErrorDef(_) => {}
+            StmtKind::StructDef(_)
+            | StmtKind::EnumDef(_)
+            | StmtKind::ErrorDef(_)
+            | StmtKind::ErrorFamilyDef(_) => {}
         }
         while let Some(expr) = expr_work.pop() {
             if expr_seen[expr.index()] {

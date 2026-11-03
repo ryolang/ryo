@@ -133,13 +133,25 @@ impl Uir {
         enum_lit_extra::decode(&self.extra[range.as_range()])
     }
 
-    pub fn error_construct_view(&self, r: InstRef) -> (StringId, EnumLitView<'_>) {
+    pub fn error_construct_view(
+        &self,
+        r: InstRef,
+    ) -> (
+        StringId,
+        Option<StringId>,
+        Option<StringId>,
+        EnumLitView<'_>,
+    ) {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, InstTag::ErrorConstruct));
         let InstData::ErrorConstruct { name, args } = inst.data else {
             unreachable!("ErrorConstruct must carry its name and argument range")
         };
-        (name, enum_lit_extra::decode(&self.extra[args.as_range()]))
+        let words = &self.extra[args.as_range()];
+        let family_root = (words[0] != u32::MAX).then(|| StringId::from_raw(words[0]));
+        let family_member = (words[1] != u32::MAX).then(|| StringId::from_raw(words[1]));
+        let view = enum_lit_extra::decode(&words[2..]);
+        (name, family_root, family_member, view)
     }
 
     pub fn if_stmt_view(&self, r: InstRef) -> IfStmtView<'_> {

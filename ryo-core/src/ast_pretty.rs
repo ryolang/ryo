@@ -137,6 +137,7 @@ fn write_stmt_inline(out: &mut String, ast: &Ast, stmt: StmtId) -> fmt::Result {
         StmtKind::StructDef(_) => "StructDef",
         StmtKind::EnumDef(_) => "EnumDef",
         StmtKind::ErrorDef(_) => "ErrorDef",
+        StmtKind::ErrorFamilyDef(_) => "ErrorFamilyDef",
         StmtKind::Return(_) => "Return",
         StmtKind::ExprStmt(_) => "ExprStmt",
         StmtKind::IfStmt(_) => "IfStmt",
@@ -251,6 +252,40 @@ fn write_stmt_children(
                 )?;
             }
             writeln!(out)
+        }
+        StmtKind::ErrorFamilyDef(def) => {
+            writeln!(
+                out,
+                "{}ErrorFamilyDef: {} ({:?})",
+                prefix,
+                pool.str(def.name.name),
+                def.visibility
+            )?;
+            let inner = format!("{}  ", prefix);
+            for member in ast.enum_variants(def.members) {
+                let shape = match member.payload.kind {
+                    VariantKind::Unit => "unit",
+                    VariantKind::Tuple => "tuple",
+                    VariantKind::Named => "named",
+                };
+                write!(
+                    out,
+                    "{}├── member: {} ({})",
+                    inner,
+                    pool.str(member.name.name),
+                    shape
+                )?;
+                for (field_name, field_ty) in ast.struct_field_decls(member.payload.fields) {
+                    write!(
+                        out,
+                        " {}: {}",
+                        pool.str(*field_name),
+                        fmt_type_expr(field_ty, ast, pool)
+                    )?;
+                }
+                writeln!(out)?;
+            }
+            Ok(())
         }
         StmtKind::Return(value) => {
             if let Some(e) = value {

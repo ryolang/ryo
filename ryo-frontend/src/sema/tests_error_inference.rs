@@ -211,3 +211,36 @@ fn empty_inferred_set_has_only_a_constructible_success_alternative() {
     assert!(pool.enum_view(variants[1].fields[0].ty).is_empty());
     assert_coercions_patched(&tirs, &pool, "succeed");
 }
+
+#[test]
+fn qualified_error_inference_from_one_member_stays_narrow() {
+    let src = r#"errors IoError:
+	Eof
+	ReadFailed(str)
+	InvalidUtf8(code: int, message: str)
+fn read() -> !str:
+	return IoError.Eof
+"#;
+    let (tirs, pool) = run(src).expect("one returned member should infer");
+    assert_final_type(&tirs, &pool, "read", "IoError.Eof!str");
+    assert_no_placeholders(&tirs, &pool);
+}
+
+#[test]
+fn qualified_error_inference_from_alias_contributes_every_member() {
+    let src = r#"errors IoError:
+	Eof
+	ReadFailed(str)
+	InvalidUtf8(code: int, message: str)
+fn forward(value: IoError) -> !str:
+	return value
+"#;
+    let (tirs, pool) = run(src).expect("a broad alias value should infer all members");
+    assert_final_type(
+        &tirs,
+        &pool,
+        "forward",
+        "(IoError.Eof | IoError.ReadFailed | IoError.InvalidUtf8)!str",
+    );
+    assert_no_placeholders(&tirs, &pool);
+}

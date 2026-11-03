@@ -409,8 +409,9 @@ pub enum Literal {
 
 // Statement node types (Stmt, StmtKind, and their structured payload
 // structs: IfStmt, ElifBranch, VarDecl, StructAttrs, StructDef,
-// EnumAttrs, EnumDef, EnumVariantDecl, EnumPayload, StructLiteral,
-// VariantConstruct, VariantArgs, FunctionDef, Param) live in
+// EnumAttrs, EnumDef, EnumVariantDecl, EnumPayload, ErrorDef,
+// ErrorFamilyDef, DeclVisibility, StructLiteral, VariantConstruct,
+// VariantArgs, FunctionDef, Param) live in
 // `ast/stmts.rs`, split out to stay under the file-length limit (R2);
 // they re-export below through `pub use stmts::*`.
 
@@ -1278,6 +1279,24 @@ impl Ast {
     /// same field arena and shape metadata as an enum variant.
     pub fn error_def(&mut self, name: Ident, payload: EnumPayload, span: Span) -> StmtId {
         self.push_stmt(StmtKind::ErrorDef(ErrorDef { name, payload }), span)
+    }
+
+    /// An error family declaration. Members reuse the enum variant arena.
+    pub fn error_family_def(
+        &mut self,
+        name: Ident,
+        members: EnumVariantDeclList,
+        visibility: DeclVisibility,
+        span: Span,
+    ) -> StmtId {
+        self.push_stmt(
+            StmtKind::ErrorFamilyDef(ErrorFamilyDef {
+                name,
+                members,
+                visibility,
+            }),
+            span,
+        )
     }
 
     /// Struct literal `Name{field=value, ...}` (M9) or the anonymous

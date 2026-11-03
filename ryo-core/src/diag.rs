@@ -376,10 +376,11 @@ pub enum DiagCode {
     /// `#[derive(Eq)]`. The message names the allowed attribute.
     ReprCOnEnum,
     /// A `name = value` pair inside a parenthesized argument list
-    /// (M11). Paren lists are positional; named fields belong in the
-    /// brace form on named variants. The variant-construction flavor
-    /// names the enum and variant and shows both correct spellings;
-    /// the plain-call flavor says named arguments are unsupported.
+    /// (M11). Enum paren lists are positional; named fields belong in
+    /// the brace form on named variants. The variant-construction
+    /// flavor names the enum and variant and shows both correct
+    /// spellings; the plain-call flavor says named arguments are
+    /// unsupported. Error constructors accept named parens.
     NamedArgInParens,
     /// A unit variant constructed with an argument list (M11):
     /// `Color.Red()`. Unit variants construct bare (`Color.Red`).
@@ -589,9 +590,10 @@ pub enum ParseDiag {
     /// lists are positional. Two flavors: variant construction
     /// (receiver is a bare type-name identifier) carries the enum and
     /// variant names and shows both correct spellings; a plain call
-    /// carries neither and says named arguments are unsupported. The
-    /// parser recovers by treating the value as a positional
-    /// argument, so a type error in the value still surfaces.
+    /// carries neither and says named arguments are unsupported.
+    /// Ordinary calls recover in the parser; uppercase-led receivers
+    /// recover in AstGen after enum-versus-error-family resolution.
+    /// The value becomes positional in either recovery.
     NamedArgInParens {
         enum_name: Option<crate::types::StringId>,
         variant: Option<crate::types::StringId>,

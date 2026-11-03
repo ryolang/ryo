@@ -45,17 +45,20 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [ ] [Milestone 12.6 — Match Ownership Completion](#milestone-126-match-ownership-completion) *(deferred to v0.2 — post-alpha; undefined enum/match ownership semantics)*
 - [x] [Milestone 13 — Error Types & Unions [alpha] ✅ COMPLETE](#milestone-13-error-types--unions-alpha--complete)
 - [ ] [Milestone 13.5 — Default Parameters & Named Arguments](#milestone-135-default-parameters--named-arguments) *(deferred — see sequencing note below)*
-- [ ] [Milestone 13.6 — `io_read_line` Gains Error Unions](#milestone-136-io_read_line-gains-error-unions) *(lands directly after M13)*
 - [x] [Milestone 13.7 — Literal Completeness ✅ COMPLETE](#milestone-137-literal-completeness) *(landed ad hoc 2026-10-22 — scientific notation, underscores, base prefixes, full escape set)*
+- [x] [Milestone 13.8 — Error Namespaces ✅ COMPLETE](#milestone-138-error-namespaces) *(landed after the namespace design; M16 may resume)*
 
-> **Sequencing note (2026-09):** Next-up order is the alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M16** — followed by the rest of Phase 3. M10 is no longer a standalone milestone in effort terms: per D11 its grouping machinery folds into M9, so what ships between M9.1 and M11 is only the positional-sugar layer (parser forms + destructuring, depends on M9). **M12.5, M12.6, M13.5, and M13.7 are deferred past the core cluster.** M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"), and M9's former dependency on its named-argument parsing is stale — D11 moved struct literals to brace construction with its own grammar. M13.7 has no dependencies and slots in as filler. M13.5 remains v0.1-scope but may slip to v0.2 if the core cluster absorbs the schedule. **M9.2 (throwaway CLI intrinsics)** has no dependencies and slots in alongside the core cluster any time after M9.1; **M13.6** lands directly after M13, before M16, migrating the M9.2 `io_read_line` placeholder to real error unions. **M12.5** (advanced pattern matching — nested patterns, guards, or-patterns, and the rest of M12's deferral register) is v0.2 work, not alpha-gating; the only pattern features alpha needs beyond M12 ship inside M13 (error-union match) and M16 (`?T`/`none` patterns) themselves.
+> **Sequencing note (2026-09; `io_read_line` folded into M16 in 2026-11):** Next-up order is the alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M13.8 → M16** — followed by the rest of Phase 3. M10 is no longer a standalone milestone in effort terms: anonymous structs are the single grouping type, with its grouping machinery folded into M9, so what ships between M9.1 and M11 is only the positional-sugar layer (parser forms + destructuring, depends on M9). **M12.5, M12.6, and M13.5 are deferred past the core cluster.** M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"), and M9's former dependency on its named-argument parsing is stale — the same decision moved struct literals to brace construction with its own grammar. M13.7 is complete and landed ad hoc as filler. M13.5 remains v0.1-scope but may slip to v0.2 if the core cluster absorbs the schedule. **M9.2 (throwaway CLI intrinsics)** has no dependencies and slots in alongside the core cluster any time after M9.1; **M13.8** follows its approved error-namespace design, then **M16** supplies optionals and migrates the M9.2 `io_read_line` placeholder directly to `IoError!?str` without a temporary EOF error variant. **M12.5** (advanced pattern matching — nested patterns, guards, or-patterns, and the rest of M12's deferral register) is v0.2 work, not alpha-gating; the only pattern features alpha needs beyond M12 ship inside M13 (error-union match) and M16 (`?T`/`none` patterns) themselves.
 
 ### Phase 3: Type System & Memory Safety
 
 - [ ] [Milestone 16 — Optional Types (`?T`) [alpha]](#milestone-16-optional-types-t-alpha)
+- [ ] [Milestone 16.1 — F-Strings & String Interpolation](#milestone-161-f-strings--string-interpolation)
 - [ ] [Milestone 17 — Method Implementations](#milestone-17-method-implementations)
 - [ ] [Milestone 17.1 — Explicit Sizes (`i8`–`i64`, `u8`–`u64`, `usize`, `float32`)](#milestone-171-explicit-sizes-i8i64-u8u64-usize-float32)
 - [ ] [Milestone 17.2 — `char` Type](#milestone-172-char-type)
+- [ ] [Milestone 17.3 — Static Format Specifications](#milestone-173-static-format-specifications)
+- [ ] [Milestone 17.4 — Interpolation Conversions & Debug Capture](#milestone-174-interpolation-conversions--debug-capture)
 - [ ] [Milestone 21 — Array Slices (`slice[T]`)](#milestone-21-array-slices-slicet)
 - [ ] [Milestone 22 — Collections (List, Map)](#milestone-22-collections-list-map)
 - [ ] [Milestone 23 — RAII & Drop (Compiler Intrinsic)](#milestone-23-raii--drop-compiler-intrinsic)
@@ -72,7 +75,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 
 ### Phase 5: Post-v0.1.0 Extensions (v0.2+)
 
-Deferred features tracked separately — see Phase 5 section for the full list (REPL/JIT, Concurrency Runtime, Closures, FFI, Traits & Generics, Error Return Traces, F-strings, Stack Traces polish, Benchmarking & Doc Generation, Constrained/Distinct Types, Contracts, Copy Elision, Stdlib Allocation Optimizations, Cancellation Model, Named Parameters, LSP/Editor Tooling, etc.).
+Deferred features tracked separately — see Phase 5 section for the full list (REPL/JIT, Concurrency Runtime, Closures, FFI, Traits & Generics, Error Return Traces, Advanced F-String Formatting, Stack Traces polish, Benchmarking & Doc Generation, Constrained/Distinct Types, Contracts, Copy Elision, Stdlib Allocation Optimizations, Cancellation Model, Named Parameters, LSP/Editor Tooling, etc.).
 
 **From the final slicing & memory-model spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md` §14), the gap register (`docs/dev/ryo-missing-features-and-gaps.md`), and the view-materialization record (`docs/dev/ryo-view-materialization.md`):**
 
@@ -1006,7 +1009,7 @@ Every downstream milestone in Phase 2 (structs, tuples, enums, pattern matching,
 - Add string concatenation: `s1 + s2` (move left, borrow right)
 - Add string methods: `.len()`, `.is_empty()`, `.substring(start, end)` (`.chars()` is deferred — needs iterators)
 - Add stdlib helpers for non-string formatting: `int_to_str(x)`, `float_to_str(x)`, `bool_to_str(b)`
-- **F-strings (`f"Value: {x}"`) are deferred to v0.2** — see Phase 5: F-strings & String Interpolation. v0.1 uses `+` concatenation with the `*_to_str` helpers above.
+- **Basic f-strings (`f"Value: {x}"`) are scheduled for M16.1** — see the milestone entry and [f-string implementation specification](f_string_implementation_spec.md). Only dynamic width or precision and custom `Display` formatting remain Phase 5 work.
 - Parser/AST: accept the **`move` keyword** as a prefix on parameter declarations (`fn consume(move s: str)`). Without `move`, parameters borrow. Sema records the convention on the function signature (type-only; ownership lives elsewhere).
 - Add a **new pipeline stage `ryo-frontend/src/ownership.rs`** between Sema and Codegen — modeled on Mojo's MLIR-based lifetime/ASAP-destruction passes (Zig stops being a useful compiler reference for the borrow checker; see [pl_references/mojo.md](pl_references/mojo.md)). The pass mutates each `Tir` in place: inserts `TirTag::Free`, tracks per-`TirRef` ownership state, and reports diagnostics.
   - Per-`TirRef` (SSA value) state lattice: `NotTracked` / `Valid` / `Borrowed` / `Moved { moved_at, kind }`
@@ -1446,7 +1449,7 @@ fn main():
 | `io_eprint(s: str) -> void` | `io.eprint(s: str) -> void` | M24 |
 | `process_argc() -> int`, `process_argv(i: int) -> str` | `process.args() -> list[str]` | M22 |
 | `process_env(key: str) -> str` (empty = unset) | `process.env(key: str) -> ?str` (none = unset) | M16 |
-| `io_read_line() -> str` (empty = EOF) | `io.read_line() -> IoError!str` | M13.6 → `IoError!?str` at M16 |
+| `io_read_line() -> str` (empty = EOF) | `io.read_line() -> IoError!?str` (none = EOF) | M16; name at M24 |
 
 **Deprecation plan (documented, not built here):** when modules + `std.io` land, the intrinsics move into `std` as `process.*` / `io.*` with the final signatures; the `process_*` / `io_*` intrinsics remain as deprecated aliases that emit a warning for exactly one release, then are removed.
 
@@ -1477,7 +1480,7 @@ fn main():
   - JIT: `Codegen::execute` calls main as `fn() -> isize` with no argv, and `ryo run` has no trailing-arg capture — add a clap `trailing_var_arg = true, allow_hyphen_values = true` to `run`, thread it through `pipeline::run_file` → `execute`, build a `CString` argv there, and change the trampoline to `extern "C" fn(i64, *const *const c_char) -> i64` (pointer-sized argc matching the emitted `main`; `c_int` was the original sketch and would be a width mismatch)
   - `process_argv(i)` is bounds-checked and panics (exit 101) on out-of-range; returns an owned `str` copy via the slot-out ABI (below)
 - `process_env(key: str) -> str` — empty string = unset (placeholder for `?str` at M16); needs a new libc `getenv` extern in the runtime (which is `#![no_std]` under the staticlib feature, so `std::env` is unavailable). **Decided 2026-10-01: narrow `getenv` on all platforms**, mirroring the existing narrow `_write` split — non-ASCII values on Windows come back in the ANSI codepage (documented placeholder limitation, revisited with `?str` at M16). The key is copied to a 4 KiB stack buffer + NUL-terminated; longer keys panic (interim)
-- `io_read_line() -> str` — read fd 0 up to `\n`, strip it; empty string on EOF (placeholder for `IoError!str` at M13.6); needs a new `read`/`_read` extern under the existing `cfg(windows)` split; growable heap buffer via the linked malloc/realloc; EINTR retried, other read errors panic (exit 101, interim). The runtime is factored as `ryo_read_line(out)` + `read_line_from(fd, out)` inner so unit tests can parameterize the fd
+- `io_read_line() -> str` — read fd 0 up to `\n`, strip it; empty string on EOF (placeholder for `IoError!?str` at M16); needs a new `read`/`_read` extern under the existing `cfg(windows)` split; growable heap buffer via the linked malloc/realloc; EINTR retried, other read errors panic (exit 101, interim). The runtime is factored as `ryo_read_line(out)` + `read_line_from(fd, out)` inner so unit tests can parameterize the fd
 - Str-producing builtins (`process_argv`, `process_env`, `io_read_line`) use the slot-out ABI: sema arm returning `str`, codegen arm calling `emit_slot_out_call` (the `int_to_str` pattern), runtime export writing through `write_str_slot` (SSO ≤23B inline, else heap). No ownership-pass changes needed — the pass seeds any str-returning `Call` as a fresh owner generically. Unbounded outputs → no `max_output_len` entries
 - Mark every interim call form in code with `TODO(M13/M16/M22)` noting what replaces it
 
@@ -1802,7 +1805,7 @@ fn main():
 - Dependencies: Milestone 11 (enums), Milestone 12 (pattern matching for handling). M12.5/M12.6 deferrals remain unchanged.
 - The M8.4.2 interim is replaced: invalid UTF-8 produces `Utf8Error` rather than panicking, and call sites use `try` or `catch`.
 - **Error return traces remain deferred.** They require a separately designed trace representation, source mapping, and public inspection API; M13 does not capture creation or propagation frames and does not add `.location()` or `.stack_trace()`.
-- Milestone 13.6 (`io_read_line`) remains separately planned and is not part of this completion.
+- The `io_read_line` migration remains M16 integration work and is not part of this completion.
 
 ### Milestone 13.5: Default Parameters & Named Arguments
 
@@ -1900,59 +1903,34 @@ print("hello", "")          # compile error — end is keyword-only
 
 > **Note:** Closures and lambda expressions were originally planned as Milestone 8.6 but have been **deferred to v0.2** (see Phase 5: Closures & Lambda Expressions). Closures are not strictly required for the v0.1.0 core language; named functions plus the standard library cover every v0.1 use case, and deferring capture analysis (originally M15.5) lets the v0.1 borrow checker stay focused on let/struct/method bindings.
 
-### Milestone 13.6: `io_read_line` Gains Error Unions
-
-**Goal:** Migrate the M9.2 placeholder `io_read_line() -> str` (empty = EOF) to `io_read_line() -> IoError!str` — errors as values. The name swap to `io.read_line` itself waits for M24 (modules); this milestone changes only the return type.
-
-**Status:** ⏳ Planned — lands directly after M13, before M16.
-
-> **Why this milestone exists:** M9.2 ships stdin early with a placeholder return type (plain `str`, empty-on-EOF) so CLIs work before error unions exist. That placeholder is deliberately temporary — this milestone replaces it as soon as M13's error unions land, mirroring how M13 converts the `bytes.to_str()` panicking stopgap to `Utf8Error!str`.
-
-**Open design decision (resolve at implementation time):** the error type must be compiler-known, because the `io` module needs M6 (Phase 4 — later than this milestone). Options: a compiler-intrinsic `IoError` error definition (mirroring the `.message()` compiler-known interface from M13), later re-exported by the `io` module; or reuse a generic compiler-known error.
-
-**EOF (decided 2026-09):** at this milestone, EOF is a dedicated `IoError` variant — the only option available before `?T` exists. M16 migrates the signature to the final form `io_read_line() -> IoError!?str` (clean EOF → `none`, errors reserved for real failures: read errors, invalid UTF-8, unexpected truncation). That migration is a deliberate breaking change, acceptable pre-alpha. The final form follows the cross-language consensus that EOF is graceful termination, not a failure: Swift's `readLine() -> String?`, Rust's `Ok(0)`/iterator `None`, Go's Scanner ("first non-EOF error"; `io.EOF` documents "functions should return EOF only to signal a graceful end of input"), and Kotlin adding `readlnOrNull()` because the throwing `readln()` forced boilerplate on the canonical read-until-EOF loop.
-
-**Tasks:**
-
-- Sema: change the `io_read_line` arm to return the error-union `TypeId` (M13 machinery); the runtime `read` path and slot-out ABI already exist from M9.2 — only the signature and error construction change
-- UTF-8 validation failures become `IoError` values (reuses the M8.4.2 `__ryo_bytes_to_str` machinery and its M13 `Utf8Error!str` conversion)
-- Update M9.2-era call sites and examples: empty-string checks become `catch`/`match` handling
-- Write tests:
-  - Unit: result usable only through `catch`/`match` like any error union
-  - Integration: piped stdin — line read round-trip, EOF yields the `IoError` EOF variant (not `""`), invalid UTF-8 yields an `IoError` (not a panic)
-
-**Visible Progress:** stdin failures are values, not sentinels:
-
-```ryo
-name = io_read_line() catch as e:
-	io_eprint("read failed: " + e.message() + "\n")
-	process_exit(1)
-```
-
-**Example:**
-
-```ryo
-fn main():
-	io_eprint("name? ")
-	line = io_read_line() catch as e:
-		io_eprint("read failed: " + e.message() + "\n")
-		process_exit(1)
-	if line == "":
-		io_eprint("empty input\n")
-		process_exit(2)
-	print("hello, " + line)
-```
-
-**Implementation Notes:**
-
-- The returned `str` is owned by the caller under the normal rules; the runtime buffer is scratch
-- Dependencies: Milestone 13 (error types & unions), Milestone 9.2 (the placeholder being replaced)
-
 ### Milestone 13.7: Literal Completeness
 
 **Status:** ✅ COMPLETE — landed ad hoc (2026-10-22), outside the milestone sequence.
 
 **Landed ad hoc (2026-10-22):** the full spec §2 literal surface — scientific notation (`1.23e-10`, signed/uppercase/dotless exponents), underscore separators (`1_000`, `1_000.0`), base-prefixed integers (`0xFF` / `0o77` / `0b11`, the `IntLitMin` magnitude spellable in any base, malformed prefixes get a dedicated diagnostic), and the string escape set (`\xHH` as U+00HH UTF-8 encoded, Python semantics; `\u{...}` Unicode scalars with surrogate/range/malformed rejections; bytes literals keep raw-byte `\xNN`, and `\u{...}` stays an unknown escape there). All lexer-scoped; the decoded value is materialized at lex time, so parser/AST/sema/codegen are untouched.
+
+### Milestone 13.8: Error Namespaces
+
+**Goal:** Add closed single-file error families with qualified members, complete-set aliases, and precise member-level inference.
+
+**Status:** ✅ COMPLETE — verified with workspace tests, JIT/AOT heap-payload runs, parser comparisons, and the source file-length gate.
+
+**Scope:**
+
+- `errors Family:` declarations with unit, message-only, and structured members; one family-wide visibility for the alias and every member
+- Qualified construction, patterns, and narrow member types; independent nominal identity and duplicate short names across families
+- Family aliases in explicit error sets and error-value positions, canonical alias expansion, exhaustive catches, and qualified unit messages
+- Existing error-set layout, ownership, cleanup, and backend instructions; no new runtime wrapper or ABI
+- Public `examples/error_namespaces.ryo`, [specification §§4.9/7](../specification.md), and landing reference coverage
+
+**Verification:**
+
+- Parser, lowering, sema, ownership, inference, and diagnostic coverage for valid and invalid families
+- JIT and AOT integration for broad and narrow returns, exhaustive catches, duplicate member names, and repeated reads of owned heap payloads
+- Parser snippet and large-source benchmarks against the pre-change implementation
+- Standard formatting, lint, workspace test, and file-length gates
+
+Module paths, imports, cross-file extension, and optional-type integration are not part of this milestone. M16 resumes after M13.8.
 
 ## Phase 3: Type System & Memory Safety
 
@@ -1969,7 +1947,7 @@ fn main():
 
 ### Milestone 16: Optional Types (`?T`) [alpha]
 
-**Goal:** Implement null-safe optional types with `?T`, `none`, and `orelse`
+**Goal:** Implement null-safe optional types with `?T`, `none`, and `orelse`, then use them to give `io_read_line` its final result type
 
 **Tasks:**
 
@@ -1989,7 +1967,16 @@ fn main():
   - Optional chaining short-circuiting
 - Write tests for optional types and null safety
 
-**Visible Progress:** No more null pointer exceptions! Type-safe optional handling.
+**Required `io_read_line` integration (after the optional core):**
+
+- Migrate the M9.2 placeholder `io_read_line() -> str` directly to `io_read_line() -> IoError!?str`; the name swap to `io.read_line` waits for M24
+- Add a compiler-known `IoError` family with `ReadFailed(str)` and `InvalidUtf8(str)` members, with no temporary `IoError.Eof` member and no numeric UTF-8 code without defined semantics
+- Keep clean EOF before any byte as `none`; keep empty lines and unterminated final lines as present strings; reserve errors for read failures and invalid UTF-8
+- Extend the runtime slot-out ABI with internal success/EOF/read-failure/invalid-UTF-8 statuses, and construct the standard optional/error-union result in codegen
+- Update M9.2-era call sites and examples to handle real failures with `catch`, then consume the optional line
+- Add AST/sema, runtime, JIT, and AOT coverage for present lines, `none`, present empty lines, unterminated final lines, read failures, invalid UTF-8, ownership, and cleanup
+
+**Visible Progress:** No more null pointer exceptions! Type-safe optional handling, plus stdin with explicit EOF and typed failures.
 
 **Example:**
 
@@ -2015,16 +2002,57 @@ fn main():
 
 ```
 
+**stdin integration:**
+
+```ryo
+name = io_read_line() catch as e:
+	io_eprint("read failed: " + e.message() + "\n")
+	process_exit(1)
+name = name orelse "anonymous"
+```
+
 **Implementation Notes:**
 
 - Optional types use **tagged union** (tag + value)
 - `none` is **not null** (different representation, type-safe)
 - Smart casting narrows types in control flow
 - Chaining returns `?T` (must handle with `orelse` or check)
-- Migrate `io_read_line` to its final signature `io_read_line() -> IoError!?str`: clean EOF becomes `none`, replacing the interim `IoError` EOF variant from M13.6 (deliberate breaking change — pre-alpha; matches the Swift `readLine() -> String?` / Rust `None` / Go Scanner consensus that EOF is graceful termination, not a failure)
+- The `io_read_line` integration is required for M16 completion but should be a separate PR after the optional core; it reuses the standard optional and error-family representations rather than adding a builtin-specific layout
+- A present returned `str` is owned by the caller under the normal rules; the runtime buffer is scratch
 - Migrate `process_env(key: str) -> str` (M9.2 placeholder, empty = unset) to `process_env(key: str) -> ?str` (`none` = unset); the final `process.env` name swap waits for M24
 - M12's match machinery extends to `?T`: `none` is a literal pattern, the payload-binding form follows whatever unwrap idiom M16 establishes (decided at implementation time), and exhaustiveness covers `{none, value}` — no wildcard needed for a fully handled optional
-- Dependencies: Milestone 11 (enums provide foundation for tagged unions)
+- Dependencies: Milestone 11 (enums provide foundation for tagged unions), Milestone 13.8 (the `IoError` family), Milestone 9.2 (the stdin placeholder being replaced)
+
+### Milestone 16.1: F-Strings & String Interpolation
+
+**Status:** ⏳ Planned — v0.1/alpha, after M16 and before M17.
+
+**Goal:** Compile basic `f"..."` literals with eagerly evaluated expression interpolation into ordinary owned `str` values, without requiring traits, t-strings, or template machinery.
+
+**Design:** [F-String Implementation Specification](f_string_implementation_spec.md).
+
+**Tasks:**
+
+- Add the shared interpolation scanner and segmented token, AST, and UIR representations; parse holes with the normal expression parser
+- Emit type-directed default conversions through the existing `DebugRepr` and byte-representation paths rather than a v0.2 `Display` trait
+- Preserve left-to-right, exactly-once evaluation, non-move behavior for interpolated lvalues, and valid view/owner lifetimes
+- Support nested delimiters and nested f-strings with accurate malformed-literal diagnostics
+- Add scanner, grammar, semantic, ownership, JIT, AOT, and documentation coverage
+
+**Example:**
+
+```ryo
+name = "Alice"
+score = 95.5
+msg = f"Hello, {name}! Score: {score}"
+```
+
+**Implementation Notes:**
+
+- Static format specifications are M17.3; conversions and `{value=}` are M17.4
+- Dynamic width or precision and custom `Display` formatting remain v0.2 work
+- T-strings and compiled templates remain deferred and are not dependencies
+- Dependencies: Milestone 16 and the existing string/ownership pipeline
 
 ### Milestone 17: Method Implementations
 
@@ -2138,6 +2166,41 @@ fn main():
 
 - `.chars()` / `.char_count()` themselves land with M22 (iterator machinery); this milestone ships only the type
 - Dependencies: Milestone 13.7 recommended (shares the `\u{HHHH}` escape decoder)
+
+### Milestone 17.3: Static Format Specifications
+
+**Status:** ⏳ Planned — after M17.1 and M17.2.
+
+**Goal:** Extend M16.1 interpolation with static precision, width, alignment, fill, alternate-form, and numeric-base specifications across the complete numeric and character type system.
+
+**Tasks:**
+
+- Reuse and extend the M16.1 default conversion paths; do not introduce a parallel formatting pipeline
+- Apply M17.1 sized numeric types and M17.2 `char` to plain and formatted interpolation
+- Count text width in Unicode scalar values, not UTF-8 bytes, grapheme clusters, or terminal columns
+- Test each specification across supported numeric and character types in JIT and AOT
+
+**Implementation Notes:**
+
+- Dependencies: Milestones 16.1, 17.1, and 17.2
+- Dynamic width or precision and custom `Display` formatting remain v0.2 work
+
+### Milestone 17.4: Interpolation Conversions & Debug Capture
+
+**Status:** ⏳ Planned — after M17.3.
+
+**Goal:** Add the interpolation conversion forms and `{value=}` debug-text capture defined by the f-string implementation specification.
+
+**Tasks:**
+
+- Implement conversions on top of the shared interpolation and static-formatting machinery
+- Preserve expression source text for `{value=}` while retaining exactly-once, left-to-right evaluation
+- Add parsing, semantic, ownership, JIT, and AOT coverage
+
+**Implementation Notes:**
+
+- Dependencies: Milestone 17.3
+- Dynamic width or precision and custom `Display` formatting remain v0.2 work
 
 ### Milestone 21: Array Slices (`slice[T]`)
 
@@ -2409,7 +2472,7 @@ fn main():
   - `print(str) -> void`: Print to stdout (already in M3.5 as builtin)
   - `println(str) -> void`: Print with newline
   - `eprint(str) -> void`, `eprintln(str) -> void`: Print to stderr. **Update (2026-09):** `io_eprint` lands as a throwaway intrinsic in M9.2; `io.eprint` is its final form (mechanical `io_eprint` → `io.eprint` swap)
-  - `read_line() -> IoError!?str`: Read from stdin (`none` on clean EOF). **Update (2026-09):** `io_read_line` lands as a placeholder intrinsic in M9.2 and gains error unions in M13.6; `io.read_line` is the final name (M16 takes the signature to `IoError!?str`)
+  - `read_line() -> IoError!?str`: Read from stdin (`none` on clean EOF). **Update (2026-11):** `io_read_line` lands as a placeholder intrinsic in M9.2 and gains its final signature in M16; `io.read_line` is the final name at M24
   - `read_file(path: strview) -> io.Error!str`: Read file contents
   - `write_file(path: strview, content: strview) -> io.Error!void`: Write to file
   - `append_file(path: strview, content: strview) -> io.Error!void`: Append to file
@@ -2455,7 +2518,7 @@ fn main():
 		process.exit(1)
 
 	words = string.split(content, " ")
-	io.println("Word count: " + int_to_str(words.len()))  # v0.1: concat (f-strings v0.2)
+	io.println("Word count: " + int_to_str(words.len()))  # v0.1: concat before M16.1 f-strings
 
 ```
 
@@ -3294,7 +3357,7 @@ impl[T] Stack[T]:
 
 **Phasing:**
 
-- **v0.2:** `trait` keyword, trait definitions, `impl Trait for T`, basic trait bounds. Standalone traits without generics enable user-defined `Drop`, `Copy` derivations, and `Display` for f-strings (below). Promoted from v0.1 compiler intrinsics.
+- **v0.2:** `trait` keyword, trait definitions, `impl Trait for T`, basic trait bounds. Standalone traits without generics enable user-defined `Drop`, `Copy` derivations, and custom `Display` formatting for interpolated values (below). Promoted from v0.1 compiler intrinsics.
 - **v0.3:** Generic functions and types with trait bounds (`fn max[T: Comparable](...)`, `struct Stack[T]`), generic standard library replacing hardcoded `list[int]` / `map[str, int]`.
 - **v0.4+:** Associated types, default trait methods, dynamic dispatch (`dyn Trait`).
 
@@ -3332,37 +3395,19 @@ config = load_config("config.toml") catch as e:
 **Dependencies:** Milestone 11 (enums), Milestone 12 (pattern matching)
 **Timeline:** Milestone 13 (v0.1)
 
-### F-strings & String Interpolation
+### Advanced F-String Formatting
 
-**Goal:** Inline expression interpolation in string literals: `f"Hello, {name}! Score: {score}"`
+**Goal:** Add dynamic width or precision and custom `Display` formatting for interpolated values.
 
-**Why Post-v0.1.0:**
+**Sequencing:**
 
-- v0.1 ships string concatenation (`+`) and stdlib `int_to_str` / `float_to_str` / `bool_to_str` helpers — every f-string is mechanically rewritable to concat form
-- F-strings need an interpolation parser, type-directed `to_string()` resolution (cleanest with the `Display` trait from v0.2 traits), and codegen for arbitrary expression splicing — better designed alongside the trait system
-- Curly braces are already reserved by the lexer, so the v0.2 addition is non-breaking
+- Basic interpolation ships in M16.1 without traits
+- Static format specifications ship in M17.3
+- Conversions and `{value=}` ship in M17.4
+- Only dynamic formatting and user-defined `Display` behavior wait for the v0.2 trait system
 
-**Features:**
+**Dependencies:** Milestone 17.4 and v0.2 traits for custom `Display` implementations
 
-- `f"..."` literal prefix triggers interpolation
-- `{expr}` splices any expression whose type implements `Display` (from v0.2 trait system)
-- Format specifiers: `{x:.2}` for floats, `{n:04}` for zero-padded ints (Python/Rust-inspired)
-- Compile-time parsed: invalid expressions or missing `Display` impls produce errors at the interpolation site
-
-**Example:**
-
-```ryo
-# v0.2
-name = "Alice"
-score = 95.5
-msg = f"Hello, {name}! Score: {score:.1}"
-
-# v0.1 equivalent
-msg = "Hello, " + name + "! Score: " + float_to_str(score)
-```
-
-**Effort:** ~1-2 weeks (after v0.2 trait system lands)
-**Dependencies:** v0.2 traits (for `Display`), v0.1 strings (M15)
 **Timeline:** v0.2
 
 ### T-strings & Template Literals
@@ -3845,7 +3890,7 @@ The 26 milestones in Phases 1-4 represent the **core language** needed for Ryo v
 - ❌ Closures & lambda expressions (v0.2 — incl. capture analysis)
 - ❌ User-facing `trait` keyword & trait bounds (v0.2 — v0.1 has compiler-known interfaces for `drop`/`Copy`/`.message()`)
 - ❌ Error-return traces and `.location()` / `.stack_trace()` (deferred; M13 has `try`/`catch` and messages without trace capture)
-- ❌ F-strings / string interpolation (v0.2 — v0.1 uses `+` concatenation with `*_to_str` helpers)
+- ❌ Dynamic width/precision and custom `Display` interpolation (v0.2 — basic f-strings ship in M16.1, static format specifications in M17.3, and conversions/`{value=}` in M17.4)
 - ❌ Multi-frame stack traces & "did you mean?" suggestions (v0.2 — v0.1 has single-frame panic)
 - ❌ `#[bench]` benchmark harness & `ryo doc` HTML generator (v0.2 — doc comments are still parsed)
 - ❌ Constrained types / range types (v0.2)

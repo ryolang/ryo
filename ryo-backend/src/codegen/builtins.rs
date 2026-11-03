@@ -111,10 +111,10 @@ impl<M: Module> Codegen<M> {
     /// runtime strips the trailing `\n` and maps EOF (before any byte)
     /// to "". The out-slot is the call's only parameter, passed last —
     /// the arg-less case of the `process_env` slot pattern. Runtime
-    /// read errors panic there (stderr + exit 101) until M13.6's
-    /// `IoError!str` shape gives them a channel.
-    /// TODO(M13.6): interim call form — replaced by
-    /// `io.read_line() -> IoError!str`.
+    /// read errors panic there (stderr + exit 101) until M16's
+    /// `IoError!?str` shape gives them a channel.
+    /// TODO(M16): interim call form — replaced by
+    /// `io.read_line() -> IoError!?str`.
     pub(crate) fn emit_io_read_line(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,

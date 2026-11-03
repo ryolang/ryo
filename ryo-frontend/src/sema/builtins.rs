@@ -189,10 +189,10 @@ fn emit_process_builtin(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
-        // TODO(M13.6): interim call form — replaced by
-        // `io.read_line() -> IoError!str`. `io_read_line()` takes no
+        // TODO(M16): interim call form — replaced by
+        // `io.read_line() -> IoError!?str`. `io_read_line()` takes no
         // arguments; the runtime maps EOF to the empty string (the
-        // M13.6 `IoError!str` shape will distinguish real errors).
+        // M16 `IoError!?str` shape will distinguish EOF from real errors).
         n if n == ids.io_read_line => {
             if !view.args.is_empty() {
                 sema.sink.emit(Diag::error(

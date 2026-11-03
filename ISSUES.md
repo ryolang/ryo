@@ -490,7 +490,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Summary:** The M9.2 argv state is process-wide: two atomics (`ARGC: AtomicIsize`, `ARGV: AtomicPtr<c_char>`) written by `ryo_rt_init` at hosted-`main` entry and read by the `process_argc`/`process_argv` intrinsics. The single-writer contract ("init exactly once, before any read") is enforced only by documentation. A second `ryo_rt_init` overlapping an active reader can interleave — `ARGC` from the newer call, `ARGV` from the older — and because the table is borrowed rather than copied, a count/table generation mix indexes past the older table's bounds and hands the out-of-bounds slot to `strlen`, which then scans arbitrary host memory. The Release/Acquire publication pair (data-then-flag) is verified by a threaded Miri test but only covers a single publication; it says nothing about re-init or cross-execution lifetime. Today's execution shapes never overlap hosted runs in one process (the `ryo run` CLI runs one program per process; AOT is one per process), so the exposure is conditional — but it gates the planned core/embedding flavour, where a host running multiple scripted executions per process is the entire point. Raised by the M9.2 PR's security-architecture review; no supported entry point can trigger it today. Same host-policy bucket, for the same future flavour: `process_env` reads the host environment with no allowlist (intentional capability in the CLI model), and the interim `io_read_line` accumulates stdin with no line-length cap — both need an explicit host-data/resource policy for untrusted embedding.
 
-**Resolution:** Before the embedding flavour ships, give hosted execution an explicit isolation contract. Cheapest sound option: whole-execution serialization — an execution-scoped init/exit handshake around the hosted run, with init aborting or blocking while a run is active (for the CLI, exit clears it, keeping sequential runs cheap). The per-execution-context alternative (thread a handle through the trampoline and store argv per execution) is a larger ABI change to the intrinsics' zero-arg signatures. Release/Acquire publication stays as the intra-run init contract either way. Decide the env and stdin policy in the same design: a curated environ/allowlist for `process_env`, and a line cap for `io_read_line` (the cap also belongs to M13.6's buffering work).
+**Resolution:** Before the embedding flavour ships, give hosted execution an explicit isolation contract. Cheapest sound option: whole-execution serialization — an execution-scoped init/exit handshake around the hosted run, with init aborting or blocking while a run is active (for the CLI, exit clears it, keeping sequential runs cheap). The per-execution-context alternative (thread a handle through the trampoline and store argv per execution) is a larger ABI change to the intrinsics' zero-arg signatures. Release/Acquire publication stays as the intra-run init contract either way. Decide the env and stdin policy in the same design: a curated environ/allowlist for `process_env`, and a line cap for `io_read_line` (the cap is separate hardening work, not part of M16's result-type integration).
 
 ---
 
@@ -715,7 +715,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Severity:** Cleanup
 **Area:** tooling
 
-**Files:** doc/guides/structure_aware_fuzzing.md, scripts/
+**Files:** docs/guides/structure_aware_fuzzing.md, scripts/
 
 **Summary:** The reusable standard-library harness is embedded as a large executable example in the guide. A script would be easier to run and test directly, while generated Ryo programs and campaign artifacts should remain outside the repository.
 
@@ -759,6 +759,58 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** A finalized inferred '!T' signature with no errors can hide an unnecessarily broad API. The current contract accepts empty sets without a warning and exposes them only through --show-inferred-errors.
 
 **Resolution:** As an explicitly approved diagnostics change, add a warning for finalized empty inferred sets with help to use the plain success return type instead. Update the specification, reference, and tests, while preserving successful compilation and exact inferred-signature inspection output.
+
+---
+
+### I-256 — Error-family definition rescans error entries per member
+
+**Severity:** Cleanup
+**Area:** sema
+
+**Files:** ryo-frontend/src/astgen.rs, ryo-frontend/src/astgen/errors.rs
+
+**Summary:** Family definition recovers each qualified member name by scanning the complete error-entry map once per member. This makes lowering quadratic in the number of family/error declarations and adds an avoidable expect on data already known during registration. The final namespace review deferred this because typical families are small, but pathological large families pay unnecessary compile-time cost.
+
+**Resolution:** Retain ordered qualified member names alongside member TypeIds in the family registry, or maintain a TypeId-to-name index, and use that direct mapping during definition. Add a focused regression for declaration order and a large-family compile-time benchmark before and after the change.
+
+---
+
+### I-257 — File-length check scans nested worktree build artifacts
+
+**Severity:** Correctness / Hygiene
+**Area:** tooling
+
+**Files:** scripts/check_file_length.sh
+
+**Summary:** The standard file-length check fails on generated Cranelift Rust files under pre-existing nested .worktrees target directories. Those artifacts are not checkout sources and prevent the required CI-equivalent local check from giving a useful result on the maintainer machine. Branch sources were verified separately, but the standard command remains red without modifying user artifacts.
+
+**Resolution:** Restrict the scan to tracked source files or explicitly exclude nested worktrees and all target/build-output directories while retaining the no-allowlist 2000-line rule for real Rust sources. Add a fixture with a nested worktree/target file and a tracked over-length source to prove generated files are ignored and real violations still fail.
+
+---
+
+### I-258 — Tree-sitter highlight lacks repository scope configuration
+
+**Severity:** Cleanup
+**Area:** tooling
+
+**Files:** tree-sitter-ryo (sibling checkout): queries/highlights.scm, repository tree-sitter configuration
+
+**Summary:** The high-level tree-sitter highlight command cannot select the Ryo grammar from the sibling checkout because no parser directories or language scope metadata are configured. Error-family captures were verified through direct query execution instead, but the normal high-level highlighting path remains unverified without adding user-global configuration.
+
+**Resolution:** Add repository-local parser/scope configuration or document a supported self-contained highlight invocation, then verify the standard tree-sitter highlight command against examples/error_namespaces.ryo without changing user-global settings. Keep direct query checks as focused capture coverage.
+
+---
+
+### I-259 — Warn when error-union functions never return success
+
+**Severity:** Correctness / Hygiene
+**Area:** sema
+
+**Files:** ryo-frontend/src/sema/, ryo-core/src/diag.rs, ryo-driver/src/pipeline/diagnostics.rs, ryo-frontend/src/sema/tests_errors.rs
+
+**Summary:** A function with an explicit error-union return type can return only error values and never produce its declared success type. For example, fn read_line(mode: int) -> IoError!str returns IoError.Eof on one path and IoError.ReadFailed("read failed") on the other, so its str success type is unreachable. The compiler currently accepts this without a warning, even though it may indicate a missing success return.
+
+**Resolution:** Add a conservative post-sema warning for locally provable failure-only functions. Require an explicit error-union return type, at least one value-producing return, every such return to be an error, and no successful fallthrough. Stay silent when returned calls, try expressions, or other control flow could produce success. Do not make this an error: failure-only APIs can be intentional. Document the diagnostic and add focused tests for all-error, successful, mixed, fallthrough, call, and try cases.
 
 ---
 

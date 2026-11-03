@@ -58,7 +58,7 @@
 //! must first be converted to report an internal-error `Diag` — see
 //! the `unreachable!` sites in this file.
 
-use crate::ast::CompoundOp;
+use crate::ast::{CompoundOp, DeclVisibility};
 use crate::tir::ParamMode;
 use crate::types::{InternPool, StringId, TypeId, VariantKind};
 use std::num::NonZeroU32;
@@ -345,8 +345,9 @@ pub enum InstData {
         object: InstRef,
         field: StringId,
     },
-    /// Error-construction candidate name and its shared enum-literal
-    /// argument wire. Sema resolves the name after value bindings.
+    /// Error-construction candidate name and its side-arena argument
+    /// wire. The wire prefixes the shared enum-literal payload with the
+    /// optional family root and member IDs for value-shadowing checks.
     ErrorConstruct {
         name: StringId,
         args: ExtraRange,
@@ -474,6 +475,15 @@ pub struct UirErrorDecl {
     pub span: Span,
 }
 
+/// A closed error family and its ordered independent member types.
+#[derive(Debug, Clone)]
+pub struct UirErrorFamilyDecl {
+    pub name: StringId,
+    pub members: Vec<TypeId>,
+    pub visibility: DeclVisibility,
+    pub span: Span,
+}
+
 // ---------- Top-level UIR ----------
 
 #[derive(Debug, Clone)]
@@ -490,6 +500,8 @@ pub struct Uir {
     pub enum_decls: Vec<UirEnumDecl>,
     /// Nominal error declarations in source order.
     pub error_decls: Vec<UirErrorDecl>,
+    /// Error family metadata in source order.
+    pub error_families: Vec<UirErrorFamilyDecl>,
     /// Compiler-generated direct-arm dispatch inside `catch as`.
     pub direct_catch_matches: std::collections::HashSet<InstRef>,
 }
@@ -517,6 +529,7 @@ impl Uir {
             struct_decls: Vec::new(),
             enum_decls: Vec::new(),
             error_decls: Vec::new(),
+            error_families: Vec::new(),
             direct_catch_matches: std::collections::HashSet::new(),
         }
     }
@@ -852,15 +865,29 @@ impl UirBuilder {
         self.push(InstTag::EnumLit, InstData::Extra(range), span)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn error_construct(
         &mut self,
         name: StringId,
+        family_root: Option<StringId>,
+        family_member: Option<StringId>,
         ty: TypeId,
         positional: bool,
         args: &[(u32, InstRef)],
         span: Span,
     ) -> InstRef {
-        let range = enum_lit_extra::encode(&mut self.uir.extra, ty, 0, args, positional);
+        let root = family_root.map_or(u32::MAX, StringId::raw);
+        let member = family_member.map_or(u32::MAX, StringId::raw);
+        let offset = u32::try_from(self.uir.extra.len()).expect("UIR extra arena exceeds u32");
+        self.uir.extra.extend([root, member]);
+        let payload = enum_lit_extra::encode(&mut self.uir.extra, ty, 0, args, positional);
+        let range = ExtraRange {
+            offset,
+            len: payload
+                .len
+                .checked_add(2)
+                .expect("UIR wire length overflow"),
+        };
         self.push(
             InstTag::ErrorConstruct,
             InstData::ErrorConstruct { name, args: range },
@@ -912,6 +939,10 @@ impl UirBuilder {
 
     pub fn add_error_decl(&mut self, decl: UirErrorDecl) {
         self.uir.error_decls.push(decl);
+    }
+
+    pub fn add_error_family_decl(&mut self, decl: UirErrorFamilyDecl) {
+        self.uir.error_families.push(decl);
     }
 
     pub fn mark_direct_catch_match(&mut self, r: InstRef) {

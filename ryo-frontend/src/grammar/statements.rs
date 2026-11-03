@@ -695,8 +695,8 @@ where
     // every parse.
     let expr = expression_parser();
     // The enum-decl tail embeds `type_expr_parser()` subtrees; build it
-    // once here and share it between the plain and attributed
-    // enum-declaration rules (same build-once discipline as `expr`).
+    // once here and share it between enum and error-family declarations
+    // (same build-once discipline as `expr`).
     let enum_tail = enums::enum_tail_parser();
     let expr_stmt = expr.clone().map_with(|expr, e: &mut Mx<'a, '_, I>| {
         let span = crate::spans::cspan(e.span());
@@ -759,10 +759,11 @@ where
     choice((
         enums::attributed_type_decl_parser(enum_tail.clone()),
         struct_decl_parser(),
-        enums::enum_decl_parser(enum_tail),
+        enums::enum_decl_parser(enum_tail.clone()),
         function_def_parser(expr.clone()),
         // After `fn`: function definitions dominate top-level code, so
-        // they should not pay for a failed `error` keyword check.
+        // they should not pay for failed error-declaration keyword checks.
+        errors::error_family_decl_parser(enum_tail),
         errors::error_decl_parser(),
         destructure::destructure_stmt_parser(expr.clone()),
         var_decl_parser(expr.clone()),
@@ -779,29 +780,46 @@ where
     top_level_statement_parser().boxed()
 }
 
-/// A plain-name type expression: `str`, `int`, `Point`, or the legacy
-/// `&name` view form (M8.4 pre-Q5). Struct declaration fields use
-/// this rule — they stay name-only — while the compound anonymous
-/// form is added on top in [`type_expr_parser`] for the function
-/// signature / variable annotation positions.
+/// A named type expression: `str`, `int`, `Point`, a dotted path such as
+/// `IoError.Eof`, or the legacy `&name` view form (M8.4 pre-Q5). Dotted
+/// paths are interned as one canonical name. The compound anonymous form
+/// is added on top in [`type_expr_parser`].
 fn named_type_expr_parser<'a, I>() -> impl Parser<'a, I, TypeExpr, PExtra<'a>> + Clone + 'a
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
+    let dotted_name = select! { Token::Ident(name) => name }
+        .then(
+            just(Token::Dot)
+                .ignore_then(select! { Token::Ident(name) => name })
+                .repeated()
+                .collect::<Vec<_>>(),
+        )
+        .map_with(|(first, rest), e: &mut Mx<'a, '_, I>| {
+            if rest.is_empty() {
+                return first;
+            }
+            let mut canonical = e.state().pool.str(first).to_owned();
+            for segment in rest {
+                canonical.push('.');
+                canonical.push_str(e.state().pool.str(segment));
+            }
+            e.state().pool.intern_str(&canonical)
+        });
     let view = just(Token::Amp)
-        .ignore_then(select! { Token::Ident(name) => name })
+        .ignore_then(dotted_name)
         .map_with(|name, e: &mut Mx<'a, '_, I>| {
             TypeExpr::view(name, crate::spans::cspan(e.span()))
         });
-    let plain = select! { Token::Ident(name) => name }
+    let plain = dotted_name
         .map_with(|name, e: &mut Mx<'a, '_, I>| TypeExpr::new(name, crate::spans::cspan(e.span())));
     // The view alternative comes first so the `&` is consumed before
     // the plain form can reject it.
     view.or(plain).boxed()
 }
 
-/// Type annotation: a plain name (`str`, `int`, ...), the legacy
-/// `&name` view form (M8.4 pre-Q5), a compound anonymous struct
+/// Type annotation: a plain or dotted name (`str`, `IoError.Eof`, ...), the
+/// legacy `&name` view form (M8.4 pre-Q5), a compound anonymous struct
 /// type literal `{q: int, r: int}` (M10), or the positional sugar
 /// `(int, str)` (M10, ≡ `{0: int, 1: str}`). Post-M8.4.1 the `&`
 /// form is retired syntax — it survives here only so astgen can

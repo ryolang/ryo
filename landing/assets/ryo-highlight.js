@@ -20,6 +20,7 @@ const ryo = (hljs) => {
 			"else",
 			"enum",
 			"error",
+			"errors",
 			"fn",
 			"for",
 			"if",

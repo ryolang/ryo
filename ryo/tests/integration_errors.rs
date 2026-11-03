@@ -676,3 +676,83 @@ fn try_nested_heap_widening_and_early_return_run_aot() {
         TRY_NESTED_HEAP_OUTPUT,
     );
 }
+
+const ERROR_FAMILY_END_TO_END: &str = r#"errors IoError:
+	Eof
+	ReadFailed(str)
+	InvalidUtf8(code: int, message: str)
+
+errors NetworkError:
+	Eof
+	Timeout
+
+fn read_line(mode: int) -> IoError!str:
+	if mode == 0:
+		return IoError.Eof
+	if mode == 1:
+		return IoError.ReadFailed(int_to_str(mode) + ":read failed:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if mode == 2:
+		return IoError.InvalidUtf8(code=mode, message="invalid utf8:" + int_to_str(mode))
+	return "line"
+
+fn eof_only() -> IoError.Eof!str:
+	return IoError.Eof
+
+fn inferred_eof() -> !str:
+	return IoError.Eof
+
+fn consume_narrow(move value: IoError.Eof!str) -> str:
+	return value catch:
+		IoError.Eof: "narrow eof"
+
+fn describe(mode: int) -> str:
+	return read_line(mode) catch:
+		IoError.Eof: "caught eof"
+		IoError.ReadFailed(message): message
+		IoError.InvalidUtf8(code, message): message + ":" + int_to_str(code)
+
+fn fail_with_heap_payload() -> IoError!str:
+	return IoError.ReadFailed("direct heap payload:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+
+fn print_twice(err: IoError) -> str:
+	print(err.message() + "\n")
+	print(err.message() + "\n")
+	return "reported"
+
+fn main():
+	io_eof = IoError.Eof
+	network_eof = NetworkError.Eof
+	assert(io_eof.message() == "IoError.Eof", "qualified IO message")
+	assert(network_eof.message() == "NetworkError.Eof", "qualified network message")
+	print(io_eof.message() + "\n")
+	print(network_eof.message() + "\n")
+	print(consume_narrow(eof_only()) + "\n")
+	print(consume_narrow(inferred_eof()) + "\n")
+	for mode in range(0, 3):
+		message = describe(mode)
+		print(message + "\n")
+		print(message + "\n")
+	reported = fail_with_heap_payload() catch as err:
+		_: print_twice(err)
+	print(reported + "\n")
+"#;
+
+const ERROR_FAMILY_END_TO_END_OUTPUT: &str = "IoError.Eof\nNetworkError.Eof\nnarrow eof\nnarrow eof\ncaught eof\ncaught eof\n1:read failed:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n1:read failed:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ninvalid utf8:2:2\ninvalid utf8:2:2\ndirect heap payload:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\ndirect heap payload:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nreported\n";
+
+#[test]
+fn error_family_end_to_end_runs_jit() {
+    assert_ryo_output(
+        "error_family_end_to_end_jit.ryo",
+        ERROR_FAMILY_END_TO_END,
+        ERROR_FAMILY_END_TO_END_OUTPUT,
+    );
+}
+
+#[test]
+fn error_family_end_to_end_runs_aot() {
+    assert_aot_output(
+        "error_family_end_to_end_aot",
+        ERROR_FAMILY_END_TO_END,
+        ERROR_FAMILY_END_TO_END_OUTPUT,
+    );
+}
