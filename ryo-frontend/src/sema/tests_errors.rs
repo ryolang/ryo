@@ -1150,3 +1150,16 @@ fn unknown_error_member_braces_report_member_before_delimiter() {
     assert!(diags[0].message.contains("'ReadFailed'"), "{diags:?}");
     assert!(!diags[0].message.contains("braced construction"));
 }
+
+#[test]
+fn duplicate_short_member_constructions_list_all_qualifications() {
+    let src = "errors IoError:\n\tNotFound\nerrors ParseError:\n\tNotFound\nfn main():\n\tvalue = NotFound\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::UndefinedVariable);
+    assert!(diags[0].message.contains("IoError.NotFound"), "{diags:?}");
+    assert!(
+        diags[0].message.contains("ParseError.NotFound"),
+        "{diags:?}"
+    );
+}

@@ -522,3 +522,25 @@ fn qualified_error_match_duplicate_short_names_stay_distinct() {
         );
     }
 }
+
+#[test]
+fn bare_error_family_pattern_does_not_emit_non_exhaustive_match() {
+    let src = "errors IoError:\n\tEof\n\tReadFailed(str)\nfn read() -> IoError!str:\n\treturn IoError.Eof\nfn main():\n\tvalue = read() catch:\n\t\tEof: \"eof\"\n\tprint(value)\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::UnknownMatchVariant);
+    assert!(diags[0].message.contains("must be qualified"));
+}
+
+#[test]
+fn duplicate_short_member_patterns_list_all_qualifications() {
+    let src = "errors IoError:\n\tNotFound\nerrors ParseError:\n\tNotFound\nfn find() -> (IoError.NotFound | ParseError.NotFound)!str:\n\treturn IoError.NotFound\nfn main():\n\tvalue = find() catch:\n\t\tNotFound: \"found\"\n\tprint(value)\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::UnknownMatchVariant);
+    assert!(diags[0].message.contains("IoError.NotFound"), "{diags:?}");
+    assert!(
+        diags[0].message.contains("ParseError.NotFound"),
+        "{diags:?}"
+    );
+}

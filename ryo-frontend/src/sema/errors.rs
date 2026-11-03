@@ -335,6 +335,26 @@ pub(super) fn analyze_error_construct(
                     ),
                 ));
             } else {
+                let suffix = format!(".{}", sema.pool.str(name));
+                let mut owners: Vec<_> = sema
+                    .uir
+                    .error_families
+                    .iter()
+                    .filter(|family| {
+                        let qualified = format!("{}{suffix}", sema.pool.str(family.name));
+                        sema.uir
+                            .error_decls
+                            .iter()
+                            .any(|decl| sema.pool.str(decl.name) == qualified)
+                    })
+                    .map(|family| family.name)
+                    .collect();
+                owners.sort_by(|&a, &b| sema.pool.str(a).cmp(sema.pool.str(b)));
+                let qualifications = owners
+                    .iter()
+                    .map(|family| format!("{}.{}", sema.pool.str(*family), sema.pool.str(name)))
+                    .collect::<Vec<_>>()
+                    .join(" or ");
                 let code = if !view.positional && view.fields().count() == 0 {
                     DiagCode::UndefinedVariable
                 } else {
@@ -344,9 +364,7 @@ pub(super) fn analyze_error_construct(
                     span,
                     code,
                     format!(
-                        "error family member '{}' must be qualified; construct it as {}.{}",
-                        sema.pool.str(name),
-                        sema.pool.str(root),
+                        "error family member '{}' must be qualified; construct it as {qualifications}",
                         sema.pool.str(name),
                     ),
                 ));

@@ -925,13 +925,9 @@ impl Coverage {
     }
 }
 
-/// Walk the resolved arms in order: a wildcard arm sets `has_wildcard`
-/// and makes every later arm redundant (W0005); duplicate
-/// discriminants before the wildcard are W0005 on the later arm. When
-/// coverage is incomplete and no wildcard exists, emit E0129 listing
-/// the missing variants in declaration order (or the scrutinee kind).
-/// Warnings buffer through `sema.warnings` like W0001/W0002/W0003 — they
-/// flush only when the whole unit is error-free.
+/// Track coverage and redundant arms, suppressing E0129 when a pattern
+/// already failed. Otherwise, incomplete coverage lists missing variants.
+/// Warnings buffer through `sema.warnings` and flush only for clean units.
 fn check_exhaustiveness(
     sema: &mut Sema<'_>,
     scrutinee_ty: ryo_core::types::TypeId,
@@ -965,7 +961,7 @@ fn check_exhaustiveness(
         }
     }
     let exhaustive = has_wildcard || coverage.is_full();
-    if !exhaustive {
+    if !exhaustive && arms.iter().all(|arm| !arm.had_error) {
         emit_non_exhaustive(sema, scrutinee_ty, &coverage, match_span, scrutinee_span);
     }
     Exhaustiveness {
@@ -1500,15 +1496,18 @@ fn emit_unknown_variant(
             .map(|family| family.name)
             .collect();
         owners.sort_by(|&a, &b| sema.pool.str(a).cmp(sema.pool.str(b)));
-        if let Some(&family) = owners.first() {
+        if !owners.is_empty() {
+            let qualifications = owners
+                .iter()
+                .map(|family| format!("{}{suffix}", sema.pool.str(*family)))
+                .collect::<Vec<_>>()
+                .join(" or ");
             sema.sink.emit(Diag::error(
                 analysis.span,
                 DiagCode::UnknownMatchVariant,
                 format!(
-                    "error family member '{}' must be qualified; match it as {}.{}",
-                    sema.pool.str(variant),
-                    sema.pool.str(family),
-                    sema.pool.str(variant),
+                    "error family member '{}' must be qualified; match it as {qualifications}",
+                    sema.pool.str(variant)
                 ),
             ));
             analysis.had_error = true;
