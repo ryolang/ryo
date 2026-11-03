@@ -1460,13 +1460,20 @@ fn emit_unknown_variant(
         TypeKind::DeclaredError | TypeKind::ErrorSet
     );
     if error_pattern {
-        if let Some(family) = sema
+        if sema
             .uir
             .error_families
             .iter()
-            .find(|family| family.name == variant)
+            .any(|family| family.name == variant)
         {
-            let example = sema.pool.display(family.members[0]);
+            let example = sema
+                .uir
+                .error_decls
+                .iter()
+                .map(|decl| sema.pool.str(decl.name))
+                .find(|name| name.starts_with(&format!("{}.", sema.pool.str(variant))))
+                .unwrap_or("Family.Member")
+                .to_string();
             sema.sink.emit(Diag::error(
                 analysis.span,
                 DiagCode::TypeMismatch,
@@ -1484,11 +1491,11 @@ fn emit_unknown_variant(
             .error_families
             .iter()
             .filter(|family| {
-                family.members.iter().any(|&member| {
-                    sema.pool
-                        .str(sema.pool.enum_view(member).name())
-                        .ends_with(&suffix)
-                })
+                let qualified = format!("{}{suffix}", sema.pool.str(family.name));
+                sema.uir
+                    .error_decls
+                    .iter()
+                    .any(|decl| sema.pool.str(decl.name) == qualified)
             })
             .map(|family| family.name)
             .collect();

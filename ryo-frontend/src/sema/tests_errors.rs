@@ -885,6 +885,41 @@ fn qualified_error_payload_diagnostics_match_unqualified_errors() {
 }
 
 #[test]
+fn value_bindings_shadow_error_family_aliases_and_members() {
+    let src = "errors IoError:\n\tEof\nfn param(IoError: int, Eof: int) -> int:\n\treturn IoError + Eof\nfn main():\n\tIoError = 7\n\tEof = 8\n\talias = IoError\n\tmember = Eof\n\ttotal = param(IoError, Eof)\n";
+    let (tirs, pool) = run(src).expect("bound values should win over error family names");
+    let param = tir_named(&tirs, &pool, "param");
+    let ret = stmt_at(param, 0);
+    let TirData::UnOp(operand) = param.inst(ret).data else {
+        panic!("return must have an operand")
+    };
+    assert_eq!(param.inst(operand).ty, pool.int());
+
+    let main = tir_named(&tirs, &pool, "main");
+    for statement in [2, 3] {
+        let value = main.var_decl_view(stmt_at(main, statement)).initializer;
+        assert_eq!(main.inst(value).tag, TirTag::Var);
+        assert_eq!(main.inst(value).ty, pool.int());
+    }
+}
+
+#[test]
+fn unbound_error_family_candidates_analyze_arguments() {
+    for expression in ["IoError(missing)", "Eof(missing)"] {
+        let src = format!("errors IoError:\n\tEof\nfn main():\n\tvalue = {expression}\n");
+        let (_tirs, diags, _pool) = run_with_errors(&src);
+        assert_eq!(diags.len(), 2, "{expression}: {diags:?}");
+        assert!(
+            diags.iter().any(|diag| {
+                diag.code == DiagCode::UndefinedVariable
+                    && diag.message.contains("undefined variable: 'missing'")
+            }),
+            "{expression}: {diags:?}"
+        );
+    }
+}
+
+#[test]
 fn qualified_error_bare_member_requires_family_qualification() {
     let src = "errors IoError:\n\tEof\n\tReadFailed(str)\nfn main():\n\tvalue = Eof\n";
     let (_tirs, diags, _pool) = run_with_errors(src);
@@ -990,6 +1025,26 @@ fn qualified_error_match_rejects_bare_members_aliases_and_unknown_members() {
         assert_eq!(diags[0].code, expected_code, "{pattern}: {diags:?}");
         assert!(
             diags[0].message.contains(expected_message),
+            "{pattern}: {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn invalid_error_family_members_do_not_crash_match_diagnostics() {
+    let cases = [
+        ("IoError", DiagCode::TypeMismatch, "error-set alias"),
+        ("Eof", DiagCode::UnknownMatchVariant, "must be qualified"),
+    ];
+    for (pattern, expected_code, expected_message) in cases {
+        let src = format!(
+            "errors IoError:\n\tBad(Missing)\n\tEof\nerror A\nfn read() -> A!int:\n\treturn A\nfn main():\n\tvalue = read() catch:\n\t\t{pattern}: 0\n\t\t_: 1\n\tprint(value)\n"
+        );
+        let (_tirs, diags, _pool) = run_with_errors(&src);
+        assert!(
+            diags.iter().any(|diag| {
+                diag.code == expected_code && diag.message.contains(expected_message)
+            }),
             "{pattern}: {diags:?}"
         );
     }

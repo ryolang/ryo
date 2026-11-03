@@ -34,14 +34,6 @@ impl ErrorRegistry {
         let family = def.name.name;
         let members = program.enum_variants(def.members);
         if members.is_empty() {
-            sink.emit(Diag::error(
-                def.name.span,
-                DiagCode::EmptyEnum,
-                format!(
-                    "error family '{}' must declare at least one member",
-                    pool.str(family)
-                ),
-            ));
             return;
         }
         if self.families.contains_key(&family) {
@@ -150,17 +142,21 @@ pub(super) fn lower_error_construct(
     span: Span,
 ) -> InstRef {
     let name = c.name.name;
-    if let Some(members) = types.error_family_members.get(&name) {
-        let example = format!("{}.{}", pool.str(name), pool.str(members[0]));
-        sink.emit(Diag::error(
-            c.name.span,
-            DiagCode::TypeMismatch,
-            format!(
-                "error family '{}' is an error-set alias, not a value or constructor; construct a member as {example}",
-                pool.str(name),
-            ),
-        ));
-        return b.error_construct(name, Some(name), None, pool.error_type(), false, &[], span);
+    if types.error_family_members.contains_key(&name) {
+        return lower_resolved_error_construct(
+            b,
+            ast,
+            name,
+            Some(name),
+            None,
+            pool.error_type(),
+            c.args,
+            types,
+            defined_layouts,
+            pool,
+            sink,
+            span,
+        );
     }
 
     if !types.error_types.contains_key(&name) {
@@ -172,28 +168,18 @@ pub(super) fn lower_error_construct(
             .collect();
         owners.sort_by(|&a, &b| pool.str(a).cmp(pool.str(b)));
         if let Some(&family) = owners.first() {
-            let example = format!("{}.{}", pool.str(family), pool.str(name));
-            let code = if c.args.is_none() {
-                DiagCode::UndefinedVariable
-            } else {
-                DiagCode::UndefinedFunction
-            };
-            sink.emit(Diag::error(
-                c.name.span,
-                code,
-                format!(
-                    "error family member '{}' must be qualified; construct it as {example}",
-                    pool.str(name),
-                ),
-            ));
-            let qualified = qualified_error_name(pool, family, name);
-            return b.error_construct(
-                qualified,
+            return lower_resolved_error_construct(
+                b,
+                ast,
+                name,
                 Some(family),
                 None,
                 pool.error_type(),
-                false,
-                &[],
+                c.args,
+                types,
+                defined_layouts,
+                pool,
+                sink,
                 span,
             );
         }
@@ -307,10 +293,11 @@ fn lower_resolved_error_construct(
     }
 
     if args.mixed_fields {
+        let root = family_root.or(Some(name));
         return b.error_construct(
             name,
-            Some(family_root.unwrap_or(name)),
-            None,
+            root,
+            family_member,
             pool.error_type(),
             positional,
             &arg_refs,

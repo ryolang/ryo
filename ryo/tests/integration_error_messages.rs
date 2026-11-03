@@ -178,3 +178,24 @@ fn error_family_messages_and_owned_payloads_run_aot() {
         ERROR_FAMILY_MESSAGE_OUTPUT
     );
 }
+
+#[test]
+fn empty_error_family_reports_one_diagnostic() {
+    let temp_dir = TempDir::new().expect("temp");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "empty_error_family.ryo",
+        "errors IoError:\n",
+    );
+    let output = run_ryo_command(&["run", "empty_error_family.ryo"], &test_file)
+        .expect("run empty error family rejection");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr
+            .matches("error family 'IoError' must declare at least one member")
+            .count(),
+        1,
+        "unexpected diagnostics: {stderr}"
+    );
+}

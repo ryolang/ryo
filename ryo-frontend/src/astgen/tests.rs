@@ -730,29 +730,6 @@ fn error_family_alias_is_error_set_type() {
 }
 
 #[test]
-fn error_family_empty_declaration_is_rejected() {
-    let mut ast = ast::Ast::new();
-    let mut pool = InternPool::new();
-    let member_start = ast.enum_variants_len();
-    let members = ast.enum_variant_list_from(member_start);
-    let name_span = Span::new(7, 14);
-    let family = ast.error_family_def(
-        ast::Ident::new(pool.intern_str("IoError"), name_span),
-        members,
-        ast::DeclVisibility::Module,
-        Span::new(0, 15),
-    );
-    ast.set_top_level(vec![family]);
-
-    let mut sink = DiagSink::new();
-    let _ = generate(&ast, &mut pool, &mut sink);
-    let diags = sink.into_diags();
-    assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
-    assert_eq!(diags[0].span, name_span);
-    assert!(diags[0].message.contains("at least one member"));
-}
-
-#[test]
 fn error_family_duplicate_member_is_rejected() {
     let err = parse_and_lower("errors IoError:\n\tEof\n\tEof\n").unwrap_err();
     assert!(

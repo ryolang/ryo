@@ -262,9 +262,6 @@ pub(super) fn analyze_error_construct(
     span: Span,
 ) -> TirRef {
     let (name, family_root, family_member, view) = sema.uir.error_construct_view(r);
-    if family_root.is_some() && family_member.is_none() && sema.pool.is_error(view.ty) {
-        return fcx.builder.unreachable(sema.pool.error_type(), span);
-    }
     let shadowed = match (family_root, family_member) {
         (Some(root), Some(_)) => scope.lookup(root).map(|bound| (root, bound)),
         _ => scope.lookup(name).map(|bound| (name, bound)),
@@ -315,6 +312,45 @@ pub(super) fn analyze_error_construct(
                     sema.pool.str(member),
                 ),
             ));
+        } else if let (Some(root), None) = (family_root, family_member) {
+            for (_, value) in view.fields() {
+                analyze_expr(sema, fcx, scope, value);
+            }
+            if root == name {
+                let prefix = format!("{}.", sema.pool.str(root));
+                let example = sema
+                    .uir
+                    .error_decls
+                    .iter()
+                    .map(|decl| sema.pool.str(decl.name))
+                    .find(|qualified| qualified.starts_with(&prefix))
+                    .unwrap_or("Family.Member")
+                    .to_string();
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::TypeMismatch,
+                    format!(
+                        "error family '{}' is an error-set alias, not a value or constructor; construct a member as {example}",
+                        sema.pool.str(root),
+                    ),
+                ));
+            } else {
+                let code = if !view.positional && view.fields().count() == 0 {
+                    DiagCode::UndefinedVariable
+                } else {
+                    DiagCode::UndefinedFunction
+                };
+                sema.sink.emit(Diag::error(
+                    span,
+                    code,
+                    format!(
+                        "error family member '{}' must be qualified; construct it as {}.{}",
+                        sema.pool.str(name),
+                        sema.pool.str(root),
+                        sema.pool.str(name),
+                    ),
+                ));
+            }
         }
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
