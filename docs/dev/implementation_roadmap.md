@@ -53,9 +53,12 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 ### Phase 3: Type System & Memory Safety
 
 - [ ] [Milestone 16 — Optional Types (`?T`) [alpha]](#milestone-16-optional-types-t-alpha)
+- [ ] [Milestone 16.1 — F-Strings & String Interpolation](#milestone-161-f-strings--string-interpolation)
 - [ ] [Milestone 17 — Method Implementations](#milestone-17-method-implementations)
 - [ ] [Milestone 17.1 — Explicit Sizes (`i8`–`i64`, `u8`–`u64`, `usize`, `float32`)](#milestone-171-explicit-sizes-i8i64-u8u64-usize-float32)
 - [ ] [Milestone 17.2 — `char` Type](#milestone-172-char-type)
+- [ ] [Milestone 17.3 — Static Format Specifications](#milestone-173-static-format-specifications)
+- [ ] [Milestone 17.4 — Interpolation Conversions & Debug Capture](#milestone-174-interpolation-conversions--debug-capture)
 - [ ] [Milestone 21 — Array Slices (`slice[T]`)](#milestone-21-array-slices-slicet)
 - [ ] [Milestone 22 — Collections (List, Map)](#milestone-22-collections-list-map)
 - [ ] [Milestone 23 — RAII & Drop (Compiler Intrinsic)](#milestone-23-raii--drop-compiler-intrinsic)
@@ -72,7 +75,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 
 ### Phase 5: Post-v0.1.0 Extensions (v0.2+)
 
-Deferred features tracked separately — see Phase 5 section for the full list (REPL/JIT, Concurrency Runtime, Closures, FFI, Traits & Generics, Error Return Traces, F-strings, Stack Traces polish, Benchmarking & Doc Generation, Constrained/Distinct Types, Contracts, Copy Elision, Stdlib Allocation Optimizations, Cancellation Model, Named Parameters, LSP/Editor Tooling, etc.).
+Deferred features tracked separately — see Phase 5 section for the full list (REPL/JIT, Concurrency Runtime, Closures, FFI, Traits & Generics, Error Return Traces, Advanced F-String Formatting, Stack Traces polish, Benchmarking & Doc Generation, Constrained/Distinct Types, Contracts, Copy Elision, Stdlib Allocation Optimizations, Cancellation Model, Named Parameters, LSP/Editor Tooling, etc.).
 
 **From the final slicing & memory-model spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md` §14), the gap register (`docs/dev/ryo-missing-features-and-gaps.md`), and the view-materialization record (`docs/dev/ryo-view-materialization.md`):**
 
@@ -1006,7 +1009,7 @@ Every downstream milestone in Phase 2 (structs, tuples, enums, pattern matching,
 - Add string concatenation: `s1 + s2` (move left, borrow right)
 - Add string methods: `.len()`, `.is_empty()`, `.substring(start, end)` (`.chars()` is deferred — needs iterators)
 - Add stdlib helpers for non-string formatting: `int_to_str(x)`, `float_to_str(x)`, `bool_to_str(b)`
-- **F-strings (`f"Value: {x}"`) are deferred to v0.2** — see Phase 5: F-strings & String Interpolation. v0.1 uses `+` concatenation with the `*_to_str` helpers above.
+- **Basic f-strings (`f"Value: {x}"`) are scheduled for M16.1** — see the milestone entry and [f-string implementation specification](f_string_implementation_spec.md). Only dynamic width or precision and custom `Display` formatting remain Phase 5 work.
 - Parser/AST: accept the **`move` keyword** as a prefix on parameter declarations (`fn consume(move s: str)`). Without `move`, parameters borrow. Sema records the convention on the function signature (type-only; ownership lives elsewhere).
 - Add a **new pipeline stage `ryo-frontend/src/ownership.rs`** between Sema and Codegen — modeled on Mojo's MLIR-based lifetime/ASAP-destruction passes (Zig stops being a useful compiler reference for the borrow checker; see [pl_references/mojo.md](pl_references/mojo.md)). The pass mutates each `Tir` in place: inserts `TirTag::Free`, tracks per-`TirRef` ownership state, and reports diagnostics.
   - Per-`TirRef` (SSA value) state lattice: `NotTracked` / `Valid` / `Borrowed` / `Moved { moved_at, kind }`
@@ -2020,6 +2023,37 @@ name = name orelse "anonymous"
 - M12's match machinery extends to `?T`: `none` is a literal pattern, the payload-binding form follows whatever unwrap idiom M16 establishes (decided at implementation time), and exhaustiveness covers `{none, value}` — no wildcard needed for a fully handled optional
 - Dependencies: Milestone 11 (enums provide foundation for tagged unions), Milestone 13.8 (the `IoError` family), Milestone 9.2 (the stdin placeholder being replaced)
 
+### Milestone 16.1: F-Strings & String Interpolation
+
+**Status:** ⏳ Planned — v0.1/alpha, after M16 and before M17.
+
+**Goal:** Compile basic `f"..."` literals with eagerly evaluated expression interpolation into ordinary owned `str` values, without requiring traits, t-strings, or template machinery.
+
+**Design:** [F-String Implementation Specification](f_string_implementation_spec.md).
+
+**Tasks:**
+
+- Add the shared interpolation scanner and segmented token, AST, and UIR representations; parse holes with the normal expression parser
+- Emit type-directed default conversions through the existing `DebugRepr` and byte-representation paths rather than a v0.2 `Display` trait
+- Preserve left-to-right, exactly-once evaluation, non-move behavior for interpolated lvalues, and valid view/owner lifetimes
+- Support nested delimiters and nested f-strings with accurate malformed-literal diagnostics
+- Add scanner, grammar, semantic, ownership, JIT, AOT, and documentation coverage
+
+**Example:**
+
+```ryo
+name = "Alice"
+score = 95.5
+msg = f"Hello, {name}! Score: {score}"
+```
+
+**Implementation Notes:**
+
+- Static format specifications are M17.3; conversions and `{value=}` are M17.4
+- Dynamic width or precision and custom `Display` formatting remain v0.2 work
+- T-strings and compiled templates remain deferred and are not dependencies
+- Dependencies: Milestone 16 and the existing string/ownership pipeline
+
 ### Milestone 17: Method Implementations
 
 **Goal:** Implement methods on types via `impl` blocks
@@ -2132,6 +2166,41 @@ fn main():
 
 - `.chars()` / `.char_count()` themselves land with M22 (iterator machinery); this milestone ships only the type
 - Dependencies: Milestone 13.7 recommended (shares the `\u{HHHH}` escape decoder)
+
+### Milestone 17.3: Static Format Specifications
+
+**Status:** ⏳ Planned — after M17.1 and M17.2.
+
+**Goal:** Extend M16.1 interpolation with static precision, width, alignment, fill, alternate-form, and numeric-base specifications across the complete numeric and character type system.
+
+**Tasks:**
+
+- Reuse and extend the M16.1 default conversion paths; do not introduce a parallel formatting pipeline
+- Apply M17.1 sized numeric types and M17.2 `char` to plain and formatted interpolation
+- Count text width in Unicode scalar values, not UTF-8 bytes, grapheme clusters, or terminal columns
+- Test each specification across supported numeric and character types in JIT and AOT
+
+**Implementation Notes:**
+
+- Dependencies: Milestones 16.1, 17.1, and 17.2
+- Dynamic width or precision and custom `Display` formatting remain v0.2 work
+
+### Milestone 17.4: Interpolation Conversions & Debug Capture
+
+**Status:** ⏳ Planned — after M17.3.
+
+**Goal:** Add the interpolation conversion forms and `{value=}` debug-text capture defined by the f-string implementation specification.
+
+**Tasks:**
+
+- Implement conversions on top of the shared interpolation and static-formatting machinery
+- Preserve expression source text for `{value=}` while retaining exactly-once, left-to-right evaluation
+- Add parsing, semantic, ownership, JIT, and AOT coverage
+
+**Implementation Notes:**
+
+- Dependencies: Milestone 17.3
+- Dynamic width or precision and custom `Display` formatting remain v0.2 work
 
 ### Milestone 21: Array Slices (`slice[T]`)
 
@@ -2449,7 +2518,7 @@ fn main():
 		process.exit(1)
 
 	words = string.split(content, " ")
-	io.println("Word count: " + int_to_str(words.len()))  # v0.1: concat (f-strings v0.2)
+	io.println("Word count: " + int_to_str(words.len()))  # v0.1: concat before M16.1 f-strings
 
 ```
 
@@ -3288,7 +3357,7 @@ impl[T] Stack[T]:
 
 **Phasing:**
 
-- **v0.2:** `trait` keyword, trait definitions, `impl Trait for T`, basic trait bounds. Standalone traits without generics enable user-defined `Drop`, `Copy` derivations, and `Display` for f-strings (below). Promoted from v0.1 compiler intrinsics.
+- **v0.2:** `trait` keyword, trait definitions, `impl Trait for T`, basic trait bounds. Standalone traits without generics enable user-defined `Drop`, `Copy` derivations, and custom `Display` formatting for interpolated values (below). Promoted from v0.1 compiler intrinsics.
 - **v0.3:** Generic functions and types with trait bounds (`fn max[T: Comparable](...)`, `struct Stack[T]`), generic standard library replacing hardcoded `list[int]` / `map[str, int]`.
 - **v0.4+:** Associated types, default trait methods, dynamic dispatch (`dyn Trait`).
 
@@ -3326,37 +3395,19 @@ config = load_config("config.toml") catch as e:
 **Dependencies:** Milestone 11 (enums), Milestone 12 (pattern matching)
 **Timeline:** Milestone 13 (v0.1)
 
-### F-strings & String Interpolation
+### Advanced F-String Formatting
 
-**Goal:** Inline expression interpolation in string literals: `f"Hello, {name}! Score: {score}"`
+**Goal:** Add dynamic width or precision and custom `Display` formatting for interpolated values.
 
-**Why Post-v0.1.0:**
+**Sequencing:**
 
-- v0.1 ships string concatenation (`+`) and stdlib `int_to_str` / `float_to_str` / `bool_to_str` helpers — every f-string is mechanically rewritable to concat form
-- F-strings need an interpolation parser, type-directed `to_string()` resolution (cleanest with the `Display` trait from v0.2 traits), and codegen for arbitrary expression splicing — better designed alongside the trait system
-- Curly braces are already reserved by the lexer, so the v0.2 addition is non-breaking
+- Basic interpolation ships in M16.1 without traits
+- Static format specifications ship in M17.3
+- Conversions and `{value=}` ship in M17.4
+- Only dynamic formatting and user-defined `Display` behavior wait for the v0.2 trait system
 
-**Features:**
+**Dependencies:** Milestone 17.4 and v0.2 traits for custom `Display` implementations
 
-- `f"..."` literal prefix triggers interpolation
-- `{expr}` splices any expression whose type implements `Display` (from v0.2 trait system)
-- Format specifiers: `{x:.2}` for floats, `{n:04}` for zero-padded ints (Python/Rust-inspired)
-- Compile-time parsed: invalid expressions or missing `Display` impls produce errors at the interpolation site
-
-**Example:**
-
-```ryo
-# v0.2
-name = "Alice"
-score = 95.5
-msg = f"Hello, {name}! Score: {score:.1}"
-
-# v0.1 equivalent
-msg = "Hello, " + name + "! Score: " + float_to_str(score)
-```
-
-**Effort:** ~1-2 weeks (after v0.2 trait system lands)
-**Dependencies:** v0.2 traits (for `Display`), v0.1 strings (M15)
 **Timeline:** v0.2
 
 ### T-strings & Template Literals
@@ -3839,7 +3890,7 @@ The 26 milestones in Phases 1-4 represent the **core language** needed for Ryo v
 - ❌ Closures & lambda expressions (v0.2 — incl. capture analysis)
 - ❌ User-facing `trait` keyword & trait bounds (v0.2 — v0.1 has compiler-known interfaces for `drop`/`Copy`/`.message()`)
 - ❌ Error-return traces and `.location()` / `.stack_trace()` (deferred; M13 has `try`/`catch` and messages without trace capture)
-- ❌ F-strings / string interpolation (v0.2 — v0.1 uses `+` concatenation with `*_to_str` helpers)
+- ❌ Dynamic width/precision and custom `Display` interpolation (v0.2 — basic f-strings ship in M16.1, static format specifications in M17.3, and conversions/`{value=}` in M17.4)
 - ❌ Multi-frame stack traces & "did you mean?" suggestions (v0.2 — v0.1 has single-frame panic)
 - ❌ `#[bench]` benchmark harness & `ryo doc` HTML generator (v0.2 — doc comments are still parsed)
 - ❌ Constrained types / range types (v0.2)

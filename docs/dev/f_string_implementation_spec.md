@@ -637,3 +637,9 @@ cargo test --workspace
 ./scripts/check_file_length.sh
 ./scripts/run_linux_tests.sh
 ```
+
+## References
+
+- Spec: [Section 2](../specification.md) (string and f-string literals), [Section 6.1.2](../specification.md) (interpolation as the non-variadic printing idiom)
+- Dev: [implementation_roadmap.md](implementation_roadmap.md) (M16.1, M17.3, and M17.4)
+- Dev: [compiler_guide.md](compiler_guide.md) (pipeline, AST/UIR, semantic-analysis, backend, and testing conventions)
