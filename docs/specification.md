@@ -637,7 +637,7 @@ fn eof_only() -> IoError.Eof!str:
 
 Each member is an independent nominal single-variant error with the same payload and construction rules as a standalone `error` declaration. Construction, patterns, and narrow type references use `Family.Member`; bare member names are not introduced into the surrounding scope. The family is closed at the end of its block and cannot be extended by another declaration. Same-named members in different families remain distinct.
 
-The family name is also an alias for the set of all its members. It can name an error value or appear anywhere an explicit error set is valid. Returning one member infers only that member; returning a value typed as the family alias contributes the complete set. The alias is not a constructor.
+The family name is also an alias for the set of all its members. It can be used as the type of an error value or appear anywhere an explicit error set is valid; it is not a value. Returning one member infers only that member; returning a value typed as the family alias contributes the complete set. The alias is not a constructor.
 
 A family has one visibility for its alias and every member:
 
