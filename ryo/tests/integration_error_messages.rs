@@ -112,3 +112,69 @@ fn message_rejects_arguments() {
         "unexpected diagnostics: {stderr}"
     );
 }
+
+const ERROR_FAMILY_MESSAGE_PROGRAM: &str = r#"errors IoError:
+	Eof
+	ReadFailed(str)
+
+errors ParseError:
+	Eof
+
+fn fail() -> IoError!str:
+	return IoError.ReadFailed(int_to_str(7) + ":heap payload:cccccccccccccccccccccccccccccccccccccccc")
+
+fn print_twice(err: IoError) -> str:
+	print(err.message() + "\n")
+	print(err.message() + "\n")
+	return err.message()
+
+fn main():
+	io_eof = IoError.Eof
+	parse_eof = ParseError.Eof
+	assert(io_eof.message() == "IoError.Eof", "IO unit message")
+	assert(parse_eof.message() == "ParseError.Eof", "parse unit message")
+	print(io_eof.message() + "\n")
+	print(parse_eof.message() + "\n")
+	message = fail() catch as err:
+		_: print_twice(err)
+	print(message + "\n")
+"#;
+
+const ERROR_FAMILY_MESSAGE_OUTPUT: &str = "IoError.Eof\nParseError.Eof\n7:heap payload:cccccccccccccccccccccccccccccccccccccccc\n7:heap payload:cccccccccccccccccccccccccccccccccccccccc\n7:heap payload:cccccccccccccccccccccccccccccccccccccccc\n";
+
+#[test]
+fn error_family_messages_and_owned_payloads_run_jit() {
+    assert_ryo_output(
+        "error_family_messages_jit.ryo",
+        ERROR_FAMILY_MESSAGE_PROGRAM,
+        ERROR_FAMILY_MESSAGE_OUTPUT,
+    );
+}
+
+#[test]
+fn error_family_messages_and_owned_payloads_run_aot() {
+    let temp_dir = TempDir::new().expect("temp");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "error_family_messages_aot.ryo",
+        ERROR_FAMILY_MESSAGE_PROGRAM,
+    );
+    let build = run_ryo_build(&test_file, temp_dir.path());
+    assert!(
+        build.status.success(),
+        "ryo build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = Command::new(exe_path(temp_dir.path(), "error_family_messages_aot"))
+        .output()
+        .expect("run AOT error-family message binary");
+    assert!(
+        run.status.success(),
+        "AOT binary failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        ERROR_FAMILY_MESSAGE_OUTPUT
+    );
+}

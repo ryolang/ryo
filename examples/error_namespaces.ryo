@@ -1,0 +1,28 @@
+errors IoError:
+	Eof
+	ReadFailed(str)
+	InvalidUtf8(code: int, message: str)
+
+fn read_line(mode: int) -> IoError!str:
+	if mode == 0:
+		return IoError.Eof
+	if mode == 1:
+		return IoError.ReadFailed("read failed:" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if mode == 2:
+		return IoError.InvalidUtf8(code=mode, message="input is not valid UTF-8")
+	return "line"
+
+fn eof_only() -> IoError.Eof!str:
+	return IoError.Eof
+
+fn main():
+	narrow = eof_only() catch:
+		IoError.Eof: "end of input"
+	print(narrow + "\n")
+
+	for mode in range(0, 4):
+		line = read_line(mode) catch:
+			IoError.Eof: "end of input"
+			IoError.ReadFailed(message): message
+			IoError.InvalidUtf8(code, message): message + " (code " + int_to_str(code) + ")"
+		print(line + "\n")

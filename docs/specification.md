@@ -618,41 +618,38 @@ To prevent "Iterator Invalidation" bugs (modifying a collection while iterating)
 		return parse(response.body)
 	```
 
-#### **Grouping Related Errors with Modules**
+#### **Error Families**
 
-For organizing related errors, use directory-based module organization:
-
-> **Note:** Ryo does NOT have a `module` keyword for inline definitions. Modules are defined by directory structure, and all `.ryo` files in a directory automatically form one module. Use `import` statements to reference errors from other modules. See Section 11 (Module System) for complete details.
+Use an `errors` block to group related errors under a qualified name:
 
 ```ryo
-# File: io/errors.ryo
-error FileNotFound(path: str)
-error PermissionDenied(path: str)
-error DiskFull
+errors IoError:
+	Eof
+	ReadFailed(str)
+	InvalidUtf8(code: int, message: str)
 
-# File: parse/errors.ryo
-error InvalidSyntax(line: int, column: int)
-error UnexpectedToken(expected: str, got: str)
-error UnexpectedEof
+fn read_line() -> IoError!str:
+	return IoError.ReadFailed("read failed")
+
+fn eof_only() -> IoError.Eof!str:
+	return IoError.Eof
 ```
 
-Usage:
+Each member is an independent nominal single-variant error with the same payload and construction rules as a standalone `error` declaration. Construction, patterns, and narrow type references use `Family.Member`; bare member names are not introduced into the surrounding scope. The family is closed at the end of its block and cannot be extended by another declaration. Same-named members in different families remain distinct.
+
+The family name is also an alias for the set of all its members. It can name an error value or appear anywhere an explicit error set is valid. Returning one member infers only that member; returning a value typed as the family alias contributes the complete set. The alias is not a constructor.
+
+A family has one visibility for its alias and every member:
 
 ```ryo
-# File: main.ryo
-import io
-import parse
-
-fn read_file(path: str) -> io.FileNotFound!str:
-	if not exists(path):
-		return io.FileNotFound(path)
-	return os.read(path)
-
-fn parse_json(text: str) -> parse.InvalidSyntax!Data:
-	if invalid_json(text):
-		return parse.InvalidSyntax(line=0, column=0)
-	return Data(...)
+pub errors IoError:
+	Eof
+	ReadFailed(str)
 ```
+
+`pub`, `package`, and private visibility follow the ordinary declaration rules. Per-member visibility and nested family declarations are forbidden, so every caller that can name a public family can also name every member for exhaustive matching.
+
+> **Future module and import integration:** Module paths, direct family imports, and cross-module visibility enforcement are module-system behavior. They do not reopen a family or change canonical member identity. See Section 11 for the module system.
 
 #### **Error Union Types** (Composition)
 
@@ -817,11 +814,15 @@ Bare `catch:` accepts the same direct arms without a shared binding. `Ok` and `E
 		# .message() returns the message field
 		```
 
-  - **Unit variant:** Variant name is used.
+  - **Unit variant:** The declared name is used. A family member uses its qualified name.
 
         ```ryo
 		error Timeout
 		# .message() returns "Timeout"
+
+		errors IoError:
+			Eof
+		# IoError.Eof.message() returns "IoError.Eof"
 		```
 
   - **Other shapes:** A deterministic debug representation contains the error name and all fields. Named fields use `name=value`; string contents appear without debug quotes.
@@ -1992,29 +1993,39 @@ results = [validator(10), validator(-5), validator(42), validator(105)]
 
 ## 7. Error Handling
 
-Error handling in Ryo uses algebraic error types (defined with the `error` keyword) combined with the `try` and `catch` operators for type-safe, explicit error management.
+Error handling in Ryo uses algebraic error types (defined with `error` or grouped in an `errors` family) combined with the `try` and `catch` operators for type-safe, explicit error management.
 
 ### 7.1 Error Types and Definitions
 
-Error types are defined with the `error` keyword, using directory-based modules to organize related errors:
+A standalone `error` declaration creates one nominal single-variant error:
 
 ```ryo
-# File: network/errors.ryo
 error ConnectionTimeout
 error DnsResolutionFailed(domain: str)
 error HttpError(status: int, message: str)
-
-# File: io/errors.ryo
-error NotFound(path: str)
-error PermissionDenied(path: str)
-error ReadFailed(reason: str)
 ```
 
-Each declaration creates one nominal single-variant error. Payload fields must be owned and have finite layouts; views are forbidden. Unit errors construct by name, positional payloads use `Error(value, ...)`, and named payloads use `Error(field=value, ...)` without mixing positional and named fields. Named-parenthesized error construction does not enable named arguments on ordinary functions.
+An `errors` block creates a closed family of independent nominal errors and an alias for their complete set:
 
-A bound local or parameter shadows a same-named error constructor. An unbound name that identifies a declared error constructs that error.
+```ryo
+errors IoError:
+	Eof
+	ReadFailed(str)
+	InvalidUtf8(code: int, message: str)
 
-- *(Rationale: `error` keyword signals error-handling intent. Single-variant errors with module organization provide clear composition without wrapper types. Associated data enables rich error information.)*
+fn read_line() -> IoError!str:
+	return IoError.Eof
+```
+
+Payload fields must be owned and have finite layouts; views are forbidden. Unit errors construct by name, positional payloads use `Error(value, ...)`, and named payloads use `Error(field=value, ...)` without mixing positional and named fields. Named-parenthesized error construction does not enable named arguments on ordinary functions. Family members use the same forms after `Family.`.
+
+A bound local or parameter shadows a same-named error constructor. An unbound name that identifies a declared error constructs that error. Family members require qualified construction and patterns; their short names do not enter the surrounding scope. Members cannot be added after the block, and equal short names in separate families denote different errors.
+
+The family alias can be used as an error-set type or as the type of an error value, but it is not a value or constructor. A family-wide visibility modifier applies equally to the alias and all members. Member-level visibility and nested families are invalid. Module paths, family imports, and cross-module visibility are future module-system composition rules; they do not make families open or change member identity.
+
+For unit members, `.message()` returns the qualified `Family.Member` name. String payload and named `message` field behavior is identical to standalone errors.
+
+- *(Rationale: Single-variant errors and closed families provide clear composition without wrapper types. Qualified members avoid collisions while aliases preserve concise broad error sets and precise narrow inference.)*
 
 ### 7.2 Error Union Types
 
@@ -2024,15 +2035,17 @@ Function return types specify both the error type and success type. Ryo provides
 
 | Syntax | Use Case | Example |
 | -------- | ---------- | --------- |
-| `ErrorType!T` | Single, specific error type | `fn read(path) -> FileNotFound!str` |
-| `(E1\|E2\|E3)!T` | Multiple known error types | `fn load() -> (FileNotFound\|ParseError)!Data` |
+| `ErrorType!T` | One declared member or a named family set | `fn read(path) -> FileNotFound!str` |
+| `(E1\|E2\|E3)!T` | Multiple known error types or family sets | `fn load() -> (FileNotFound\|ParseError)!Data` |
 | `!T` | Finite inferred error set | `fn process() -> !Result` |
 
 **Decision Guide:**
 
-- **Use `ErrorType!T`** when your function can only fail in one specific way
-- **Use `(E1|E2)!T`** when you know exactly which errors can occur and want to document them
+- **Use `ErrorType!T`** for one declared member, one qualified family member, or a family alias that names its complete set
+- **Use `(E1|E2)!T`** when you know exactly which errors or family sets can occur and want to document them
 - **Use `!T`** when composing functions whose direct returns and `try` expressions determine a finite error set
+
+Family aliases flatten to their members before set canonicalization. Thus `IoError!str` admits every `IoError` member, while `IoError.Eof!str` admits only `Eof`; aliases and equivalent explicitly written sets have the same behavior.
 
 #### **Single Error Type**
 
@@ -2070,7 +2083,7 @@ fn process(path: str) -> !Data:
 An inferred union is never an open or global `anyerror` type. Inference has these rules:
 
 - `!T` is available only in function-return position, not in parameters, fields, or local annotations.
-- Returning a declared error adds that error; returning a concrete error set or union adds all its members; `try` adds the operand's members. Successful returns add nothing.
+- Returning a declared error or qualified family member adds exactly that member; returning a concrete error set, family-alias value, or union adds all its members; `try` adds the operand's members. Successful returns add nothing.
 - An empty inferred set is valid. It has no explicit source syntax, its error alternative is uninhabited, and only its success alternative can be constructed.
 - Every recursive call-graph component containing an inferred function is rejected, including a cycle that passes through explicitly typed functions. Recursion using only explicit unions remains valid; the diagnostic requests explicit unions for the inferred members.
 - `--show-inferred-errors` prints each finalized inferred return union in source order.

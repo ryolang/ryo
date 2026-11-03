@@ -45,10 +45,11 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [ ] [Milestone 12.6 — Match Ownership Completion](#milestone-126-match-ownership-completion) *(deferred to v0.2 — post-alpha; undefined enum/match ownership semantics)*
 - [x] [Milestone 13 — Error Types & Unions [alpha] ✅ COMPLETE](#milestone-13-error-types--unions-alpha--complete)
 - [ ] [Milestone 13.5 — Default Parameters & Named Arguments](#milestone-135-default-parameters--named-arguments) *(deferred — see sequencing note below)*
-- [ ] [Milestone 13.6 — `io_read_line` Gains Error Unions](#milestone-136-io_read_line-gains-error-unions) *(lands directly after M13)*
+- [ ] [Milestone 13.6 — `io_read_line` Gains Error Unions](#milestone-136-io_read_line-gains-error-unions) *(resumes after M13.8, before M16)*
 - [x] [Milestone 13.7 — Literal Completeness ✅ COMPLETE](#milestone-137-literal-completeness) *(landed ad hoc 2026-10-22 — scientific notation, underscores, base prefixes, full escape set)*
+- [x] [Milestone 13.8 — Error Namespaces ✅ COMPLETE](#milestone-138-error-namespaces) *(landed after the namespace design; M13.6/M16 may resume)*
 
-> **Sequencing note (2026-09):** Next-up order is the alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M16** — followed by the rest of Phase 3. M10 is no longer a standalone milestone in effort terms: per D11 its grouping machinery folds into M9, so what ships between M9.1 and M11 is only the positional-sugar layer (parser forms + destructuring, depends on M9). **M12.5, M12.6, M13.5, and M13.7 are deferred past the core cluster.** M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"), and M9's former dependency on its named-argument parsing is stale — D11 moved struct literals to brace construction with its own grammar. M13.7 has no dependencies and slots in as filler. M13.5 remains v0.1-scope but may slip to v0.2 if the core cluster absorbs the schedule. **M9.2 (throwaway CLI intrinsics)** has no dependencies and slots in alongside the core cluster any time after M9.1; **M13.6** lands directly after M13, before M16, migrating the M9.2 `io_read_line` placeholder to real error unions. **M12.5** (advanced pattern matching — nested patterns, guards, or-patterns, and the rest of M12's deferral register) is v0.2 work, not alpha-gating; the only pattern features alpha needs beyond M12 ship inside M13 (error-union match) and M16 (`?T`/`none` patterns) themselves.
+> **Sequencing note (2026-09):** Next-up order is the alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M13.8 → M13.6 → M16** — followed by the rest of Phase 3. M10 is no longer a standalone milestone in effort terms: per D11 its grouping machinery folds into M9, so what ships between M9.1 and M11 is only the positional-sugar layer (parser forms + destructuring, depends on M9). **M12.5, M12.6, M13.5, and M13.7 are deferred past the core cluster.** M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"), and M9's former dependency on its named-argument parsing is stale — D11 moved struct literals to brace construction with its own grammar. M13.7 has no dependencies and slots in as filler. M13.5 remains v0.1-scope but may slip to v0.2 if the core cluster absorbs the schedule. **M9.2 (throwaway CLI intrinsics)** has no dependencies and slots in alongside the core cluster any time after M9.1; **M13.8** follows its approved error-namespace design, then **M13.6** resumes before M16 to migrate the M9.2 `io_read_line` placeholder to real error unions. **M12.5** (advanced pattern matching — nested patterns, guards, or-patterns, and the rest of M12's deferral register) is v0.2 work, not alpha-gating; the only pattern features alpha needs beyond M12 ship inside M13 (error-union match) and M16 (`?T`/`none` patterns) themselves.
 
 ### Phase 3: Type System & Memory Safety
 
@@ -1904,11 +1905,11 @@ print("hello", "")          # compile error — end is keyword-only
 
 **Goal:** Migrate the M9.2 placeholder `io_read_line() -> str` (empty = EOF) to `io_read_line() -> IoError!str` — errors as values. The name swap to `io.read_line` itself waits for M24 (modules); this milestone changes only the return type.
 
-**Status:** ⏳ Planned — lands directly after M13, before M16.
+**Status:** ⏳ Planned — resumes after M13.8, before M16.
 
-> **Why this milestone exists:** M9.2 ships stdin early with a placeholder return type (plain `str`, empty-on-EOF) so CLIs work before error unions exist. That placeholder is deliberately temporary — this milestone replaces it as soon as M13's error unions land, mirroring how M13 converts the `bytes.to_str()` panicking stopgap to `Utf8Error!str`.
+> **Why this milestone exists:** M9.2 ships stdin early with a placeholder return type (plain `str`, empty-on-EOF) so CLIs work before error unions exist. That placeholder is deliberately temporary — this milestone replaces it after M13.8 supplies the error-family surface, mirroring how M13 converts the `bytes.to_str()` panicking stopgap to `Utf8Error!str`.
 
-**Open design decision (resolve at implementation time):** the error type must be compiler-known, because the `io` module needs M6 (Phase 4 — later than this milestone). Options: a compiler-intrinsic `IoError` error definition (mirroring the `.message()` compiler-known interface from M13), later re-exported by the `io` module; or reuse a generic compiler-known error.
+**Error type (decided):** use a compiler-known `IoError` family with `Eof`, `ReadFailed(str)`, and `InvalidUtf8(str)` members. The family can later be re-exported by the `io` module; M13.8 does not implement that module or import behavior.
 
 **EOF (decided 2026-09):** at this milestone, EOF is a dedicated `IoError` variant — the only option available before `?T` exists. M16 migrates the signature to the final form `io_read_line() -> IoError!?str` (clean EOF → `none`, errors reserved for real failures: read errors, invalid UTF-8, unexpected truncation). That migration is a deliberate breaking change, acceptable pre-alpha. The final form follows the cross-language consensus that EOF is graceful termination, not a failure: Swift's `readLine() -> String?`, Rust's `Ok(0)`/iterator `None`, Go's Scanner ("first non-EOF error"; `io.EOF` documents "functions should return EOF only to signal a graceful end of input"), and Kotlin adding `readlnOrNull()` because the throwing `readln()` forced boilerplate on the canonical read-until-EOF loop.
 
@@ -1953,6 +1954,29 @@ fn main():
 **Status:** ✅ COMPLETE — landed ad hoc (2026-10-22), outside the milestone sequence.
 
 **Landed ad hoc (2026-10-22):** the full spec §2 literal surface — scientific notation (`1.23e-10`, signed/uppercase/dotless exponents), underscore separators (`1_000`, `1_000.0`), base-prefixed integers (`0xFF` / `0o77` / `0b11`, the `IntLitMin` magnitude spellable in any base, malformed prefixes get a dedicated diagnostic), and the string escape set (`\xHH` as U+00HH UTF-8 encoded, Python semantics; `\u{...}` Unicode scalars with surrogate/range/malformed rejections; bytes literals keep raw-byte `\xNN`, and `\u{...}` stays an unknown escape there). All lexer-scoped; the decoded value is materialized at lex time, so parser/AST/sema/codegen are untouched.
+
+### Milestone 13.8: Error Namespaces
+
+**Goal:** Add closed single-file error families with qualified members, complete-set aliases, and precise member-level inference.
+
+**Status:** ✅ COMPLETE — verified with workspace tests, JIT/AOT heap-payload runs, parser comparisons, and the source file-length gate.
+
+**Scope:**
+
+- `errors Family:` declarations with unit, message-only, and structured members; one family-wide visibility for the alias and every member
+- Qualified construction, patterns, and narrow member types; independent nominal identity and duplicate short names across families
+- Family aliases in explicit error sets and error-value positions, canonical alias expansion, exhaustive catches, and qualified unit messages
+- Existing error-set layout, ownership, cleanup, and backend instructions; no new runtime wrapper or ABI
+- Public `examples/error_namespaces.ryo`, specification §§4.9/7, and landing reference coverage
+
+**Verification:**
+
+- Parser, lowering, sema, ownership, inference, and diagnostic coverage for valid and invalid families
+- JIT and AOT integration for broad and narrow returns, exhaustive catches, duplicate member names, and repeated reads of owned heap payloads
+- Parser snippet and large-source benchmarks against the pre-change implementation
+- Standard formatting, lint, workspace test, and file-length gates
+
+Module paths, imports, cross-file extension, and optional-type integration are not part of this milestone. M13.6 and M16 resume after M13.8.
 
 ## Phase 3: Type System & Memory Safety
 
