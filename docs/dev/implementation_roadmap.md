@@ -1967,7 +1967,7 @@ fn main():
 - Qualified construction, patterns, and narrow member types; independent nominal identity and duplicate short names across families
 - Family aliases in explicit error sets and error-value positions, canonical alias expansion, exhaustive catches, and qualified unit messages
 - Existing error-set layout, ownership, cleanup, and backend instructions; no new runtime wrapper or ABI
-- Public `examples/error_namespaces.ryo`, specification §§4.9/7, and landing reference coverage
+- Public `examples/error_namespaces.ryo`, [specification §§4.9/7](../specification.md), and landing reference coverage
 
 **Verification:**
 
