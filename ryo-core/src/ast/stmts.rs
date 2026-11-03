@@ -238,11 +238,14 @@ pub struct VariantConstruct {
 /// `Some`. `named_parens` distinguishes error-style `Member(field=value)`
 /// from enum-style `Variant{field=value}`; AstGen rejects the former for
 /// enums after name resolution distinguishes them from error families.
+/// `mixed_fields` marks an already-diagnosed positional recovery whose
+/// payload must not be validated again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VariantArgs {
     pub positional: Option<ExprList>,
     pub named: Option<StructFieldInitList>,
     pub named_parens: bool,
+    pub mixed_fields: bool,
 }
 
 /// A nominal error construction candidate. `None` is the bare unit

@@ -236,13 +236,18 @@ pub(super) fn lower_qualified_error_construct(
     let members = &types.error_family_members[&family.name];
     if !members.contains(&member.name) {
         let name = qualified_error_name(pool, family.name, member.name);
-        return b.error_construct(
+        return lower_resolved_error_construct(
+            b,
+            ast,
             name,
             Some(family.name),
             Some(member.name),
             pool.error_type(),
-            false,
-            &[],
+            args,
+            types,
+            defined_layouts,
+            pool,
+            sink,
             span,
         );
     }
@@ -280,11 +285,8 @@ fn lower_resolved_error_construct(
     sink: &mut DiagSink,
     span: Span,
 ) -> InstRef {
-    if family_root.is_some() && pool.is_error(ty) {
-        return b.error_construct(name, family_root, family_member, ty, false, &[], span);
-    }
     let Some(args) = args else {
-        if pool.is_error(ty) {
+        if pool.is_error(ty) && family_root.is_none() {
             return b.var_ref(name, span);
         }
         return b.error_construct(name, family_root, family_member, ty, false, &[], span);
@@ -304,7 +306,19 @@ fn lower_resolved_error_construct(
         }
     }
 
-    if positional && pool.is_error(ty) {
+    if args.mixed_fields {
+        return b.error_construct(
+            name,
+            Some(family_root.unwrap_or(name)),
+            None,
+            pool.error_type(),
+            positional,
+            &arg_refs,
+            span,
+        );
+    }
+
+    if family_root.is_none() && positional && pool.is_error(ty) {
         let values: Vec<_> = arg_refs.iter().map(|(_, value)| *value).collect();
         b.call(name, &values, span)
     } else {

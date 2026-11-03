@@ -944,6 +944,21 @@ fn qualified_error_bound_family_root_payload_call_is_not_family_construction() {
 }
 
 #[test]
+fn qualified_error_bound_root_unknown_payload_calls_are_not_callable() {
+    for expression in ["IoError.Unknown()", "IoError.Unknown(\"bad\")"] {
+        let src =
+            format!("errors IoError:\n\tEof\nfn main():\n\tIoError = 7\n\tvalue = {expression}\n");
+        let (_tirs, diags, _pool) = run_with_errors(&src);
+        assert_eq!(diags.len(), 1, "{expression}: {diags:?}");
+        assert_eq!(diags[0].code, DiagCode::TypeMismatch);
+        assert!(
+            diags[0].message.contains("'IoError' is a bound value"),
+            "{expression}: {diags:?}"
+        );
+    }
+}
+
+#[test]
 fn qualified_error_unknown_uppercase_receiver_keeps_value_fallback() {
     for expression in ["Missing.Member", "Missing.Member()"] {
         let src = format!("fn main():\n\tvalue = {expression}\n");

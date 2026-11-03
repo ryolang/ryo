@@ -191,5 +191,10 @@ pub(super) fn lower_variant_construct(
         }
         _ => unreachable!("parser guarantees exactly one variant-arg form"),
     };
+    let ty = if args.mixed_fields {
+        pool.error_type()
+    } else {
+        ty
+    };
     b.enum_lit(ty, vidx as u32, positional, &pairs, span)
 }

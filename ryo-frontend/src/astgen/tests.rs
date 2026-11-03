@@ -878,7 +878,7 @@ fn qualified_error_construction_lowers_to_error_construct() {
 
 #[test]
 fn qualified_error_mixed_payload_fields_emit_one_targeted_diagnostic() {
-    let src = "errors IoError:\n\tEof\n\tInvalidUtf8(code: int, message: str)\nfn main():\n\tvalue = IoError.InvalidUtf8(1, message=\"bad\")\n";
+    let src = "errors IoError:\n\tEof\n\tInvalidUtf8(code: int, message: str)\nfn main():\n\tvalue = IoError.InvalidUtf8(1, message=2)\n";
     let mut pool = InternPool::new();
     let (ast, parse_diags) = crate::parse::parse_source(src, &mut pool).expect("parse recovers");
     let mut sink = DiagSink::new();

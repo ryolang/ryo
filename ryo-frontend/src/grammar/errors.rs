@@ -191,6 +191,7 @@ where
                         positional: None,
                         named: Some(fields),
                         named_parens: true,
+                        mixed_fields: false,
                     }),
                     span,
                 )
@@ -211,6 +212,7 @@ where
                         positional: Some(list),
                         named: None,
                         named_parens: false,
+                        mixed_fields: !positional && !named,
                     }),
                     span,
                 )

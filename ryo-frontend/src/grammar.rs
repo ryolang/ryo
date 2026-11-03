@@ -434,6 +434,7 @@ where
                                     positional: None,
                                     named: Some(list),
                                     named_parens: true,
+                                    mixed_fields: false,
                                 }),
                                 crate::spans::cspan(SimpleSpan::new((), start..span.end)),
                             )
@@ -460,6 +461,7 @@ where
                                     positional: Some(list),
                                     named: None,
                                     named_parens: false,
+                                    mixed_fields: !named.is_empty(),
                                 }),
                                 crate::spans::cspan(SimpleSpan::new((), start..span.end)),
                             )
@@ -494,6 +496,7 @@ where
                             positional: None,
                             named: Some(list),
                             named_parens: false,
+                            mixed_fields: false,
                         }),
                         crate::spans::cspan(SimpleSpan::new((), start..span.end)),
                     )
@@ -520,6 +523,7 @@ where
                             positional: Some(list),
                             named: None,
                             named_parens: false,
+                            mixed_fields: false,
                         }),
                         crate::spans::cspan(SimpleSpan::new((), start..span.end)),
                     )
@@ -549,6 +553,7 @@ where
                             positional: Some(list),
                             named: None,
                             named_parens: false,
+                            mixed_fields: false,
                         }),
                         crate::spans::cspan(SimpleSpan::new((), start..span.end)),
                     )
