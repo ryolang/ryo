@@ -1,5 +1,6 @@
 # TODO
 
+- https://github.com/ryancbuckley/clif-to-wasm and https://github.com/bytecodealliance/waffle from https://github.com/bytecodealliance/wasmtime/issues/2566#issuecomment-6563915721
 - cache Valgrind Docker image for CI; it takes 9 minutes 29 seconds just to install it
 - https://github.com/rust-lang/compiler-builtins/blob/main/libm/README.md
 - FFI: https://verdagon.dev/blog/fearless-ffi
