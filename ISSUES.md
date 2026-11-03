@@ -715,7 +715,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Severity:** Cleanup
 **Area:** tooling
 
-**Files:** doc/guides/structure_aware_fuzzing.md, scripts/
+**Files:** docs/guides/structure_aware_fuzzing.md, scripts/
 
 **Summary:** The reusable standard-library harness is embedded as a large executable example in the guide. A script would be easier to run and test directly, while generated Ryo programs and campaign artifacts should remain outside the repository.
 
@@ -759,6 +759,45 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** A finalized inferred '!T' signature with no errors can hide an unnecessarily broad API. The current contract accepts empty sets without a warning and exposes them only through --show-inferred-errors.
 
 **Resolution:** As an explicitly approved diagnostics change, add a warning for finalized empty inferred sets with help to use the plain success return type instead. Update the specification, reference, and tests, while preserving successful compilation and exact inferred-signature inspection output.
+
+---
+
+### I-256 — Error-family definition rescans error entries per member
+
+**Severity:** Cleanup
+**Area:** sema
+
+**Files:** ryo-frontend/src/astgen.rs, ryo-frontend/src/astgen/errors.rs
+
+**Summary:** Family definition recovers each qualified member name by scanning the complete error-entry map once per member. This makes lowering quadratic in the number of family/error declarations and adds an avoidable expect on data already known during registration. The final namespace review deferred this because typical families are small, but pathological large families pay unnecessary compile-time cost.
+
+**Resolution:** Retain ordered qualified member names alongside member TypeIds in the family registry, or maintain a TypeId-to-name index, and use that direct mapping during definition. Add a focused regression for declaration order and a large-family compile-time benchmark before and after the change.
+
+---
+
+### I-257 — File-length check scans nested worktree build artifacts
+
+**Severity:** Correctness / Hygiene
+**Area:** tooling
+
+**Files:** scripts/check_file_length.sh
+
+**Summary:** The standard file-length check fails on generated Cranelift Rust files under pre-existing nested .worktrees target directories. Those artifacts are not checkout sources and prevent the required CI-equivalent local check from giving a useful result on the maintainer machine. Branch sources were verified separately, but the standard command remains red without modifying user artifacts.
+
+**Resolution:** Restrict the scan to tracked source files or explicitly exclude nested worktrees and all target/build-output directories while retaining the no-allowlist 2000-line rule for real Rust sources. Add a fixture with a nested worktree/target file and a tracked over-length source to prove generated files are ignored and real violations still fail.
+
+---
+
+### I-258 — Tree-sitter highlight lacks repository scope configuration
+
+**Severity:** Cleanup
+**Area:** tooling
+
+**Files:** tree-sitter-ryo (sibling checkout): queries/highlights.scm, repository tree-sitter configuration
+
+**Summary:** The high-level tree-sitter highlight command cannot select the Ryo grammar from the sibling checkout because no parser directories or language scope metadata are configured. Error-family captures were verified through direct query execution instead, but the normal high-level highlighting path remains unverified without adding user-global configuration.
+
+**Resolution:** Add repository-local parser/scope configuration or document a supported self-contained highlight invocation, then verify the standard tree-sitter highlight command against examples/error_namespaces.ryo without changing user-global settings. Keep direct query checks as focused capture coverage.
 
 ---
 
