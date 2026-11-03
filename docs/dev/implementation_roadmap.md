@@ -1947,7 +1947,7 @@ fn main():
 **Implementation Notes:**
 
 - The returned `str` is owned by the caller under the normal rules; the runtime buffer is scratch
-- Dependencies: Milestone 13 (error types & unions), Milestone 9.2 (the placeholder being replaced)
+- Dependencies: Milestone 13 (error types & unions), Milestone 13.8 (the `IoError` family), Milestone 9.2 (the placeholder being replaced)
 
 ### Milestone 13.7: Literal Completeness
 
