@@ -649,7 +649,7 @@ pub errors IoError:
 
 `pub`, `package`, and private visibility follow the ordinary declaration rules. Per-member visibility and nested family declarations are forbidden, so every caller that can name a public family can also name every member for exhaustive matching.
 
-> **Future module and import integration:** Module paths, direct family imports, and cross-module visibility enforcement are module-system behavior. They do not reopen a family or change canonical member identity. See Section 11 for the module system.
+> **Module and import integration:** Module paths, direct family imports, and cross-module visibility enforcement are module-system behavior. They do not reopen a family or change canonical member identity. See Section 11 for the module system.
 
 #### **Error Union Types** (Composition)
 
@@ -816,14 +816,14 @@ Bare `catch:` accepts the same direct arms without a shared binding. `Ok` and `E
 
   - **Unit variant:** The declared name is used. A family member uses its qualified name.
 
-        ```ryo
-		error Timeout
-		# .message() returns "Timeout"
+    ```ryo
+	error Timeout
+	# .message() returns "Timeout"
 
-		errors IoError:
-			Eof
-		# IoError.Eof.message() returns "IoError.Eof"
-		```
+	errors IoError:
+		Eof
+	# IoError.Eof.message() returns "IoError.Eof"
+	```
 
   - **Other shapes:** A deterministic debug representation contains the error name and all fields. Named fields use `name=value`; string contents appear without debug quotes.
 
@@ -2021,7 +2021,7 @@ Payload fields must be owned and have finite layouts; views are forbidden. Unit 
 
 A bound local or parameter shadows a same-named error constructor. An unbound name that identifies a declared error constructs that error. Family members require qualified construction and patterns; their short names do not enter the surrounding scope. Members cannot be added after the block, and equal short names in separate families denote different errors.
 
-The family alias can be used as an error-set type or as the type of an error value, but it is not a value or constructor. A family-wide visibility modifier applies equally to the alias and all members. Member-level visibility and nested families are invalid. Module paths, family imports, and cross-module visibility are future module-system composition rules; they do not make families open or change member identity.
+The family alias can be used as an error-set type or as the type of an error value, but it is not a value or constructor. A family-wide visibility modifier applies equally to the alias and all members. Member-level visibility and nested families are invalid. Module paths, family imports, and cross-module visibility follow module-system composition rules; they do not make families open or change member identity.
 
 For unit members, `.message()` returns the qualified `Family.Member` name. String payload and named `message` field behavior is identical to standalone errors.
 

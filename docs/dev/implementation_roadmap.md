@@ -1909,7 +1909,7 @@ print("hello", "")          # compile error — end is keyword-only
 
 > **Why this milestone exists:** M9.2 ships stdin early with a placeholder return type (plain `str`, empty-on-EOF) so CLIs work before error unions exist. That placeholder is deliberately temporary — this milestone replaces it after M13.8 supplies the error-family surface, mirroring how M13 converts the `bytes.to_str()` panicking stopgap to `Utf8Error!str`.
 
-**Error type (decided):** use a compiler-known `IoError` family with `Eof`, `ReadFailed(str)`, and `InvalidUtf8(str)` members. The family can later be re-exported by the `io` module; M13.8 does not implement that module or import behavior.
+**Error type (decided):** use a compiler-known `IoError` family with `Eof`, `ReadFailed(str)`, and `InvalidUtf8(code: int, message: str)` members. The family can later be re-exported by the `io` module; M13.8 does not implement that module or import behavior.
 
 **EOF (decided 2026-09):** at this milestone, EOF is a dedicated `IoError` variant — the only option available before `?T` exists. M16 migrates the signature to the final form `io_read_line() -> IoError!?str` (clean EOF → `none`, errors reserved for real failures: read errors, invalid UTF-8, unexpected truncation). That migration is a deliberate breaking change, acceptable pre-alpha. The final form follows the cross-language consensus that EOF is graceful termination, not a failure: Swift's `readLine() -> String?`, Rust's `Ok(0)`/iterator `None`, Go's Scanner ("first non-EOF error"; `io.EOF` documents "functions should return EOF only to signal a graceful end of input"), and Kotlin adding `readlnOrNull()` because the throwing `readln()` forced boilerplate on the canonical read-until-EOF loop.
 
