@@ -801,6 +801,19 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-259 — Warn when error-union functions never return success
+
+**Severity:** Correctness / Hygiene
+**Area:** sema
+
+**Files:** ryo-frontend/src/sema/, ryo-core/src/diag.rs, ryo-driver/src/pipeline/diagnostics.rs, ryo-frontend/src/sema/tests_errors.rs
+
+**Summary:** A function with an explicit error-union return type can return only error values and never produce its declared success type. For example, fn read_line(mode: int) -> IoError!str returns IoError.Eof on one path and IoError.ReadFailed("read failed") on the other, so its str success type is unreachable. The compiler currently accepts this without a warning, even though it may indicate a missing success return.
+
+**Resolution:** Add a conservative post-sema warning for locally provable failure-only functions. Require an explicit error-union return type, at least one value-producing return, every such return to be an error, and no successful fallthrough. Stay silent when returned calls, try expressions, or other control flow could produce success. Do not make this an error: failure-only APIs can be intentional. Document the diagnostic and add focused tests for all-error, successful, mixed, fallthrough, call, and try cases.
+
+---
+
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
