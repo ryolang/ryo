@@ -69,7 +69,7 @@ A compiled template definition stores reusable structure and accepts its context
 
 ### 2.4 Milestone placement
 
-Basic f-string interpolation ships as **M13.8 — F-Strings & String Interpolation** in v0.1/alpha. Its numeric position follows M13.7 Literal Completeness. Because M13.7 landed ad hoc, the execution order is **M13 → M13.6 → M13.8 → M16**. M13.8 requires no traits, t-strings, or template machinery.
+Basic f-string interpolation ships as **M16.1 — F-Strings & String Interpolation** in v0.1/alpha, after M16 Optional Types and before M17 Method Implementations. The execution order is **M13 → M13.8 → M13.6 → M16 → M16.1 → M17**. M16.1 requires no traits, t-strings, or template machinery.
 
 **M17.3 — Static Format Specifications** follows M17.1 Explicit Sizes and M17.2 `char`. M17.1 and M17.2 extend plain interpolation and the existing default conversion paths to their new types. M17.3 adds static precision, width, alignment, fill, alternate-form, and numeric-base specifications across the complete numeric and character type system. It must not duplicate or redesign the plain conversion paths. Text width counts Unicode scalar values, not UTF-8 bytes, grapheme clusters, or terminal display columns.
 
@@ -198,7 +198,7 @@ These restrictions should produce targeted diagnostics where practical rather th
 
 ### 5.1 Result and conversion rules
 
-The result type is always `str` after successful semantic analysis. M13.8 uses a compiler-provided default conversion and performs no trait lookup.
+The result type is always `str` after successful semantic analysis. M16.1 uses a compiler-provided default conversion and performs no trait lookup.
 
 | Interpolated type | Required behavior |
 |---|---|
@@ -586,7 +586,7 @@ The intended properties are:
 
 The processing library owns any SQL, HTML, logging, or other domain-safety guarantee. The literal syntax alone provides no such guarantee.
 
-F-string work may reuse the interpolation scanner with this future feature, but must not expose `TemplateView`, reserve a public runtime ABI, or implement an owning captured `Template`. M13.8 does not expose processor metadata or change its runtime lowering to support t-strings.
+F-string work may reuse the interpolation scanner with this future feature, but must not expose `TemplateView`, reserve a public runtime ABI, or implement an owning captured `Template`. M16.1 does not expose processor metadata or change its runtime lowering to support t-strings.
 
 ## 12. Deferred compiled-template direction
 
