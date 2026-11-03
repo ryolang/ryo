@@ -23,7 +23,7 @@ jobs:
     # decision. Publication authority stays in the release job below.
     permissions:
       contents: read
-      checks: read
+      actions: read
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
     steps:
@@ -62,25 +62,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HEAD_SHA: ${{ github.sha }}
         run: |
-          # Never publish a commit whose CI is red — the playground
-          # auto-deploys whatever release it sees. Fail closed: pending
-          # check runs also skip (CI on a fresh merge may still be running
-          # when the nightly fires), and so does an empty result — a commit
-          # with no check runs at all has no CI evidence to stand on. This
-          # job's own check run is excluded (it is in_progress while this
-          # step runs).
-          gh api "repos/${{ github.repository }}/commits/${HEAD_SHA}/check-runs?per_page=100" \
-            --jq '[.check_runs[] | select(.name != "Check for code changes") | {name, status, conclusion}]' \
-            > check_runs.json
-          cat check_runs.json
-          if jq -e 'any(.[]; .conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled" or .conclusion == "action_required")' check_runs.json > /dev/null; then
-            echo "CI is failing on ${HEAD_SHA} — skipping release"
+          # Never publish a commit whose main-branch CI is not green — the
+          # playground auto-deploys whatever release it sees. Other workflows,
+          # such as CodSpeed, do not gate releases. Fail closed when CI is
+          # missing, pending, or unsuccessful.
+          gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=${HEAD_SHA}&branch=main&event=push&per_page=1" \
+            --jq '.workflow_runs[0] | if . == null then null else {status, conclusion} end' \
+            > ci_run.json
+          cat ci_run.json
+          if jq -e '. == null' ci_run.json > /dev/null; then
+            echo "No main-branch CI run on ${HEAD_SHA} — skipping release"
             echo "ci_ok=false" >> "$GITHUB_OUTPUT"
-          elif jq -e 'any(.[]; .status != "completed")' check_runs.json > /dev/null; then
+          elif jq -e '.status != "completed"' ci_run.json > /dev/null; then
             echo "CI still in progress on ${HEAD_SHA} — skipping release"
             echo "ci_ok=false" >> "$GITHUB_OUTPUT"
-          elif [[ "$(jq 'length' check_runs.json)" -eq 0 ]]; then
-            echo "No check runs on ${HEAD_SHA} — skipping release"
+          elif jq -e '.conclusion != "success"' ci_run.json > /dev/null; then
+            echo "CI is not green on ${HEAD_SHA} — skipping release"
             echo "ci_ok=false" >> "$GITHUB_OUTPUT"
           else
             echo "CI green on ${HEAD_SHA}"
