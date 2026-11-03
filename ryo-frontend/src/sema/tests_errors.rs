@@ -968,3 +968,29 @@ fn qualified_error_unknown_uppercase_receiver_keeps_value_fallback() {
         assert!(diags[0].message.contains("undefined variable: 'Missing'"));
     }
 }
+
+#[test]
+fn qualified_error_match_rejects_bare_members_aliases_and_unknown_members() {
+    let declarations = "errors IoError:\n\tEof\n\tReadFailed(str)\n";
+    let cases = [
+        ("Eof", DiagCode::UnknownMatchVariant, "must be qualified"),
+        ("IoError", DiagCode::TypeMismatch, "error-set alias"),
+        (
+            "IoError.Unknown",
+            DiagCode::UnknownMatchVariant,
+            "members: 'Eof', 'ReadFailed'",
+        ),
+    ];
+    for (pattern, expected_code, expected_message) in cases {
+        let src = format!(
+            "{declarations}fn read() -> IoError!str:\n\treturn IoError.Eof\nfn main():\n\tvalue = read() catch:\n\t\t{pattern}: \"bad\"\n\t\t_: \"other\"\n\tprint(value)\n"
+        );
+        let (_tirs, diags, _pool) = run_with_errors(&src);
+        assert_eq!(diags.len(), 1, "{pattern}: {diags:?}");
+        assert_eq!(diags[0].code, expected_code, "{pattern}: {diags:?}");
+        assert!(
+            diags[0].message.contains(expected_message),
+            "{pattern}: {diags:?}"
+        );
+    }
+}

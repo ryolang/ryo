@@ -458,3 +458,67 @@ fn error_set_redundant_arms_use_m12_warnings() {
     );
     assert!(!any_code(&diags, DiagCode::NonExhaustiveMatch));
 }
+
+const QUALIFIED_IO_DECLARATIONS: &str =
+    "errors IoError:\n\tEof\n\tReadFailed(str)\n\tInvalidUtf8(code: int, message: str)\n";
+
+#[test]
+fn qualified_error_match_catch_covers_every_family_member() {
+    let src = format!(
+        "{QUALIFIED_IO_DECLARATIONS}fn read() -> IoError!str:\n\treturn IoError.Eof\nfn main():\n\tvalue = read() catch:\n\t\tIoError.Eof: \"eof\"\n\t\tIoError.ReadFailed(_): \"read\"\n\t\tIoError.InvalidUtf8{{code=_, message=_}}: \"utf8\"\n\tprint(value)\n"
+    );
+    run(&src).expect("all qualified family arms should be exhaustive");
+}
+
+#[test]
+fn qualified_error_match_missing_member_uses_its_canonical_name() {
+    let src = format!(
+        "{QUALIFIED_IO_DECLARATIONS}fn read() -> IoError!str:\n\treturn IoError.Eof\nfn main():\n\tvalue = read() catch:\n\t\tIoError.Eof: \"eof\"\n\t\tIoError.ReadFailed(_): \"read\"\n\tprint(value)\n"
+    );
+    let (_tirs, diags, _pool) = run_with_errors(&src);
+    assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::NonExhaustiveMatch);
+    assert!(
+        diags[0].message.contains("'IoError.InvalidUtf8'"),
+        "missing member must use its full name: {diags:?}"
+    );
+}
+
+#[test]
+fn qualified_error_match_single_member_set_needs_only_that_arm() {
+    let src = format!(
+        "{QUALIFIED_IO_DECLARATIONS}fn read() -> IoError.Eof!str:\n\treturn IoError.Eof\nfn main():\n\tvalue = read() catch:\n\t\tIoError.Eof: \"eof\"\n\tprint(value)\n"
+    );
+    run(&src).expect("one qualified arm should cover a one-member set");
+}
+
+#[test]
+fn qualified_error_match_duplicate_short_names_stay_distinct() {
+    let declarations = "errors IoError:\n\tNotFound\nerrors ParseError:\n\tNotFound\n";
+    let function =
+        "fn find() -> (IoError.NotFound | ParseError.NotFound)!str:\n\treturn IoError.NotFound\n";
+    let both_arms = format!(
+        "{declarations}{function}fn main():\n\tvalue = find() catch:\n\t\tIoError.NotFound: \"io\"\n\t\tParseError.NotFound: \"parse\"\n\tprint(value)\n"
+    );
+    let (_tirs, diags, _pool) = run_with_errors(&both_arms);
+    assert!(
+        diags.is_empty(),
+        "distinct qualified members must not be redundant: {diags:?}"
+    );
+
+    for (only_arm, missing) in [
+        ("IoError.NotFound", "ParseError.NotFound"),
+        ("ParseError.NotFound", "IoError.NotFound"),
+    ] {
+        let src = format!(
+            "{declarations}{function}fn main():\n\tvalue = find() catch:\n\t\t{only_arm}: \"found\"\n\tprint(value)\n"
+        );
+        let (_tirs, diags, _pool) = run_with_errors(&src);
+        assert_eq!(diags.len(), 1, "{only_arm}: {diags:?}");
+        assert_eq!(diags[0].code, DiagCode::NonExhaustiveMatch);
+        assert!(
+            diags[0].message.contains(&format!("'{missing}'")),
+            "{only_arm} must leave {missing} uncovered: {diags:?}"
+        );
+    }
+}
