@@ -67,7 +67,7 @@ jobs:
           # such as CodSpeed, do not gate releases. Fail closed when CI is
           # missing, pending, or unsuccessful.
           gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=${HEAD_SHA}&branch=main&event=push&per_page=1" \
-            --jq '.workflow_runs[0] | {status, conclusion}' \
+            --jq '.workflow_runs[0] | if . == null then null else {status, conclusion} end' \
             > ci_run.json
           cat ci_run.json
           if jq -e '. == null' ci_run.json > /dev/null; then
