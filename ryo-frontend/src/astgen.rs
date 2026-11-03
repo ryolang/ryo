@@ -517,6 +517,13 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
                 enum_entries.insert(name, (ty, *def, program.stmt_span(stmt)));
                 enum_order.push(name);
             }
+            ast::StmtKind::ErrorFamilyDef(def) => {
+                sink.emit(Diag::error(
+                    def.name.span,
+                    DiagCode::ParseError,
+                    "error families are not yet lowered",
+                ));
+            }
             ast::StmtKind::ErrorDef(def) => {
                 let name = def.name.name;
                 if error_entries.contains_key(&name) {
@@ -1478,10 +1485,11 @@ fn gen_stmt(
             let r = b.unreachable(span);
             out.push(r);
         }
-        // Nominal type declarations are filtered out before lowering.
+        // Type declarations are filtered out before lowering.
         ast::StmtKind::StructDef(_) => {}
         ast::StmtKind::EnumDef(_) => {}
         ast::StmtKind::ErrorDef(_) => {}
+        ast::StmtKind::ErrorFamilyDef(_) => {}
     }
 }
 

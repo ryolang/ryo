@@ -66,6 +66,9 @@ pub enum Token {
     Struct,
     Enum,
     ErrorDecl,
+    Errors,
+    Pub,
+    Package,
     Match,
     Try,
     Catch,
@@ -153,6 +156,9 @@ impl fmt::Display for Token {
             Self::Struct => write!(f, "struct"),
             Self::Enum => write!(f, "enum"),
             Self::ErrorDecl => write!(f, "error"),
+            Self::Errors => write!(f, "errors"),
+            Self::Pub => write!(f, "pub"),
+            Self::Package => write!(f, "package"),
             Self::Match => write!(f, "match"),
             Self::Try => write!(f, "try"),
             Self::Catch => write!(f, "catch"),
@@ -261,6 +267,12 @@ pub(crate) enum RawToken<'a> {
     Enum,
     #[token("error")]
     ErrorDecl,
+    #[token("errors")]
+    Errors,
+    #[token("pub")]
+    Pub,
+    #[token("package")]
+    Package,
     #[token("match")]
     Match,
     #[token("try")]
@@ -806,6 +818,9 @@ fn intern_token(
         RawToken::Struct => Token::Struct,
         RawToken::Enum => Token::Enum,
         RawToken::ErrorDecl => Token::ErrorDecl,
+        RawToken::Errors => Token::Errors,
+        RawToken::Pub => Token::Pub,
+        RawToken::Package => Token::Package,
         RawToken::Match => Token::Match,
         RawToken::Try => Token::Try,
         RawToken::Catch => Token::Catch,

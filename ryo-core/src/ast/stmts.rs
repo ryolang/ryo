@@ -5,8 +5,9 @@
 //! module holds the statement node types (`Stmt`, `StmtKind`) and
 //! their structured payload structs (`IfStmt`, `ElifBranch`,
 //! `VarDecl`, `StructAttrs`, `StructDef`, `EnumAttrs`, `EnumDef`,
-//! `EnumVariantDecl`, `EnumPayload`, `StructLiteral`,
-//! `VariantConstruct`, `VariantArgs`, `FunctionDef`, `Param`).
+//! `EnumVariantDecl`, `EnumPayload`, `ErrorDef`, `ErrorFamilyDef`,
+//! `DeclVisibility`, `StructLiteral`, `VariantConstruct`, `VariantArgs`,
+//! `FunctionDef`, `Param`).
 //! Expression children are [`ExprId`] indices; statement children
 //! live in the `stmt_lists` side arena behind [`StmtList`] ranges.
 
@@ -41,6 +42,8 @@ pub enum StmtKind {
     EnumDef(EnumDef),
     /// A single-line nominal error declaration.
     ErrorDef(ErrorDef),
+    /// An `errors Name:` declaration and its member list.
+    ErrorFamilyDef(ErrorFamilyDef),
     Return(Option<ExprId>),
     ExprStmt(ExprId),
     IfStmt(IfStmt),
@@ -189,6 +192,21 @@ pub struct EnumPayload {
 pub struct ErrorDef {
     pub name: Ident,
     pub payload: EnumPayload,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclVisibility {
+    Module,
+    Public,
+    Package,
+}
+
+/// An error family declaration. Members reuse the enum variant and payload arenas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ErrorFamilyDef {
+    pub name: Ident,
+    pub members: EnumVariantDeclList,
+    pub visibility: DeclVisibility,
 }
 
 /// A struct literal `Name{field=value, ...}` (M9) or the anonymous

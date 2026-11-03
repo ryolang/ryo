@@ -12,6 +12,13 @@ fn error_def(ast: &Ast, stmt: StmtId) -> ErrorDef {
     }
 }
 
+fn error_family_def(ast: &Ast, stmt: StmtId) -> ErrorFamilyDef {
+    match &ast.stmt(stmt).kind {
+        StmtKind::ErrorFamilyDef(def) => *def,
+        other => panic!("expected ErrorFamilyDef, got {other:?}"),
+    }
+}
+
 fn expr_stmt(ast: &Ast, stmt: StmtId) -> ExprId {
     match &ast.stmt(stmt).kind {
         StmtKind::ExprStmt(expr) => *expr,
@@ -38,6 +45,129 @@ fn assert_call(ast: &Ast, pool: &InternPool, expr: ExprId, expected: &str) {
         ExprKind::Call(name, _) => assert_eq!(pool.str(name), expected),
         other => panic!("expected Call({expected}), got {other:?}"),
     }
+}
+
+#[test]
+fn error_family_declaration_parses_members_and_visibility() {
+    let (ast, pool) = lex_and_parse(
+        "pub errors IoError:\n\tEof\n\tReadFailed(str)\n\tInvalidUtf8(code: int, message: str)\n",
+    )
+    .unwrap();
+    let def = error_family_def(&ast, only_stmt(&ast));
+    assert_eq!(pool.str(def.name.name), "IoError");
+    assert_eq!(def.visibility, DeclVisibility::Public);
+
+    let members = ast.enum_variants(def.members);
+    assert_eq!(members.len(), 3);
+    assert_eq!(pool.str(members[0].name.name), "Eof");
+    assert_eq!(members[0].payload.kind, VariantKind::Unit);
+    assert!(ast.struct_field_decls(members[0].payload.fields).is_empty());
+
+    assert_eq!(pool.str(members[1].name.name), "ReadFailed");
+    assert_eq!(members[1].payload.kind, VariantKind::Tuple);
+    let tuple_fields = ast.struct_field_decls(members[1].payload.fields);
+    assert_eq!(tuple_fields.len(), 1);
+    assert_eq!(pool.str(tuple_fields[0].0), "0");
+    assert_eq!(pool.str(type_name(&tuple_fields[0].1).0), "str");
+
+    assert_eq!(pool.str(members[2].name.name), "InvalidUtf8");
+    assert_eq!(members[2].payload.kind, VariantKind::Named);
+    let named_fields = ast.struct_field_decls(members[2].payload.fields);
+    assert_eq!(named_fields.len(), 2);
+    assert_eq!(pool.str(named_fields[0].0), "code");
+    assert_eq!(pool.str(type_name(&named_fields[0].1).0), "int");
+    assert_eq!(pool.str(named_fields[1].0), "message");
+    assert_eq!(pool.str(type_name(&named_fields[1].1).0), "str");
+}
+
+#[test]
+fn error_family_declaration_parses_package_and_module_visibility() {
+    for (src, expected) in [
+        ("package errors IoError:\n\tEof\n", DeclVisibility::Package),
+        ("errors IoError:\n\tEof\n", DeclVisibility::Module),
+    ] {
+        let (ast, _pool) = lex_and_parse(src).unwrap();
+        assert_eq!(error_family_def(&ast, only_stmt(&ast)).visibility, expected);
+    }
+}
+
+#[test]
+fn qualified_error_type_paths_parse_as_canonical_names() {
+    let src = "fn f() -> IoError.Eof!str:\n\treturn \"x\"\nfn g(err: IoError):\n\treturn\n";
+    let (ast, pool) = lex_and_parse(src).unwrap();
+    let stmts = ast.top_level_stmts();
+    assert_eq!(stmts.len(), 2);
+
+    let f = fn_def(&ast, stmts[0]);
+    let TypeExprKind::ErrorUnion {
+        error_set,
+        success,
+        inferred: false,
+    } = f.return_type.expect("return type").kind
+    else {
+        panic!("expected an explicit error union");
+    };
+    let errors = ast.type_expr_list(error_set);
+    assert_eq!(errors.len(), 1);
+    assert_eq!(pool.str(type_name(&errors[0]).0), "IoError.Eof");
+    assert_eq!(pool.str(type_name(&ast.type_expr(success)).0), "str");
+    let path_start = src.find("IoError.Eof").unwrap();
+    assert_eq!(errors[0].span.start, path_start);
+    assert_eq!(errors[0].span.end, path_start + "IoError.Eof".len());
+
+    let g = fn_def(&ast, stmts[1]);
+    assert_eq!(g.params.len(), 1);
+    assert_eq!(
+        pool.str(type_name(&g.params[0].type_annotation).0),
+        "IoError"
+    );
+}
+
+#[test]
+fn error_family_empty_body_has_dedicated_diagnostic() {
+    let (_ok, _ast, errs, _pool) = lex_and_parse_recovering("errors IoError:\n");
+    assert_eq!(errs.len(), 1, "unexpected diagnostics: {errs:?}");
+    assert!(matches!(
+        errs[0].reason(),
+        RichReason::Custom(ParseDiag::Message(message))
+            if message == "error family 'IoError' must declare at least one member"
+    ));
+}
+
+#[test]
+fn error_family_members_reject_visibility_modifiers() {
+    for keyword in ["pub", "package"] {
+        let src = format!("errors IoError:\n\t{keyword} Eof\n");
+        let (_ok, ast, errs, _pool) = lex_and_parse_recovering(&src);
+        let diagnostic = errs
+            .iter()
+            .find(|err| {
+                matches!(
+                    err.reason(),
+                    RichReason::Custom(ParseDiag::Message(message))
+                        if message == "error family members cannot have visibility modifiers"
+                )
+            })
+            .unwrap_or_else(|| panic!("missing diagnostic for {keyword}: {errs:?}"));
+        let modifier_start = src.find(keyword).unwrap();
+        assert_eq!(diagnostic.span().start, modifier_start);
+        assert_eq!(diagnostic.span().end, modifier_start + keyword.len());
+        assert!(matches!(ast.stmt(only_stmt(&ast)).kind, StmtKind::Error));
+    }
+}
+
+#[test]
+fn error_family_lowering_is_explicitly_deferred() {
+    let (ast, mut pool) = lex_and_parse("errors IoError:\n\tEof\n").unwrap();
+    let mut sink = ryo_core::diag::DiagSink::new();
+    let _ = crate::astgen::generate(&ast, &mut pool, &mut sink);
+    let diags = sink.into_diags();
+    assert!(
+        diags
+            .iter()
+            .any(|diag| diag.message == "error families are not yet lowered"),
+        "unexpected diagnostics: {diags:?}"
+    );
 }
 
 #[test]

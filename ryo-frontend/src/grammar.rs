@@ -3,10 +3,9 @@
 //! Built on chumsky over the lexer's `Token` type. Identifiers,
 //! type names, and string literals come pre-interned as `StringId`
 //! handles — the parser only copies handles out of those tokens.
-//! The one exception is positional field keys (`{0=17}`, `pair.0`):
-//! the canonical field name is the numeric VALUE in decimal (`007`
-//! → `"7"`), a string the lexer never sees, so the parse state
-//! carries the intern pool to mint it (see [`ParseState`]).
+//! Positional field keys (`{0=17}`, `pair.0`) and dotted type paths are
+//! canonicalized during parsing, so the parse state carries the intern
+//! pool to mint their canonical names (see [`ParseState`]).
 //!
 //! The parser builds directly into the [`Ast`] arenas: the state
 //! threaded through `parse_with_state` is [`ParseState`], which
