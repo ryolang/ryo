@@ -278,6 +278,18 @@ fn lower_resolved_error_construct(
         return b.error_construct(name, family_root, family_member, ty, false, &[], span);
     };
 
+    if family_root.is_some() && args.named.is_some() && !args.named_parens {
+        sink.emit(Diag::error(
+            span,
+            DiagCode::TypeMismatch,
+            format!(
+                "error family member '{}' cannot use braced construction; use the bare member or parenthesized payload syntax",
+                pool.str(name)
+            ),
+        ));
+        return b.enum_lit(pool.error_type(), 0, false, &[], span);
+    }
+
     let positional = args.positional.is_some();
     let mut arg_refs = Vec::new();
     if let Some(list) = args.positional {

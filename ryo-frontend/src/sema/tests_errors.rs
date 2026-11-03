@@ -885,6 +885,36 @@ fn qualified_error_payload_diagnostics_match_unqualified_errors() {
 }
 
 #[test]
+fn qualified_error_named_payload_rejects_braced_construction() {
+    let src = "errors IoError:\n\tInvalidUtf8(code: int, message: str)\nfn main():\n\tvalue = IoError.InvalidUtf8{code=1, message=\"bad\"}\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::TypeMismatch);
+    assert!(diags[0].message.contains("IoError.InvalidUtf8"));
+    assert!(diags[0].message.contains("cannot use braced construction"));
+}
+
+#[test]
+fn qualified_error_unit_member_rejects_empty_braces() {
+    let src = "errors IoError:\n\tEof\nfn main():\n\tvalue = IoError.Eof{}\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::TypeMismatch);
+    assert!(diags[0].message.contains("IoError.Eof"));
+    assert!(diags[0].message.contains("cannot use braced construction"));
+}
+
+#[test]
+fn qualified_error_braces_are_rejected_before_bound_root_recovery() {
+    let src = "errors IoError:\n\tInvalidUtf8(code: int, message: str)\nfn main():\n\tIoError = 7\n\tvalue = IoError.InvalidUtf8{code=1, message=\"bad\"}\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+    assert_eq!(diags[0].code, DiagCode::TypeMismatch);
+    assert!(diags[0].message.contains("IoError.InvalidUtf8"));
+    assert!(diags[0].message.contains("cannot use braced construction"));
+}
+
+#[test]
 fn value_bindings_shadow_error_family_aliases_and_members() {
     let src = "errors IoError:\n\tEof\nfn param(IoError: int, Eof: int) -> int:\n\treturn IoError + Eof\nfn main():\n\tIoError = 7\n\tEof = 8\n\talias = IoError\n\tmember = Eof\n\ttotal = param(IoError, Eof)\n";
     let (tirs, pool) = run(src).expect("bound values should win over error family names");
