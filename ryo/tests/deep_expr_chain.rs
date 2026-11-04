@@ -57,17 +57,21 @@ fn parse_deep_addition_chain_succeeds() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), "deep_chain.ryo", &add_chain(terms));
 
-    let status = Command::new(env!("CARGO_BIN_EXE_ryo"))
+    // `.output()` (not `.status()`): the child must be able to finish
+    // writing stderr even when a diagnostic regression floods it past
+    // the pipe buffer, and the failure message needs the cause.
+    let output = Command::new(env!("CARGO_BIN_EXE_ryo"))
         .arg("parse")
         .arg(&test_file)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .status()
+        .output()
         .expect("Failed to run ryo parse command");
 
     assert!(
-        status.success(),
-        "deep chain parse failed (overflow or diagnostics)"
+        output.status.success(),
+        "deep chain parse failed (overflow or diagnostics): {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }

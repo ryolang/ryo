@@ -468,10 +468,11 @@ pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Toke
 const DFA_STACK_PER_BYTE: usize = 512;
 
 /// Run the raw-token collection inline while its worst-case DFA depth
-/// fits the 8 MiB default stack of a spawned thread (the test harness
-/// and the CLI worker included), so typical sources pay no spawn cost.
-/// Only fuzz-scale inputs beyond ~16 KiB take the thread path.
-const DFA_INLINE_BUDGET: usize = 8 * 1024 * 1024;
+/// fits the 2 MiB default stack of a spawned thread (the CLI worker
+/// sets 32 MiB explicitly; test threads get the 2 MiB std default), so
+/// typical sources pay no spawn cost. Inputs beyond ~4 KiB take the
+/// input-sized-thread path.
+const DFA_INLINE_BUDGET: usize = 2 * 1024 * 1024;
 
 /// Upper bound on the lexing-thread stack reserve. The reserve is
 /// lazily committed, but hosts without overcommit can refuse absurd
