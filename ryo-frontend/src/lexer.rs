@@ -485,44 +485,35 @@ const DFA_STACK_MAX: usize = 1024 * 1024 * 1024;
 /// Length of the longest string/bytes literal body in the input. The
 /// DFA recursion depth a token can accumulate is driven by its escape
 /// count, and escapes live only inside literal bodies, so the longest
-/// body — not the file size — sets the stack the lexer can need. The
-/// scan overestimates on purpose: a quote inside a comment extends the
-/// "literal" (the oversized stack is harmless), and it never
-/// underestimates a real literal. Quotes are rare in typical code, so
+/// body — not the file size — sets the stack the lexer can need.
+///
+/// A real literal body never contains an unescaped quote, so it is
+/// exactly the gap between one unescaped quote and the next. Taking
+/// the maximum gap between consecutive unescaped quotes therefore
+/// never underestimates a real body, whatever stray quotes in comments
+/// do to the pairing — and stray quotes can only overestimate (the
+/// oversized stack is harmless). Quotes are rare in typical code, so
 /// the `find('"')` calls (memchr-accelerated) keep the pre-pass cheap
 /// next to the lex itself.
 fn longest_literal_body(input: &str) -> usize {
     let mut longest = 0;
-    let mut from = 0;
-    while let Some(open_rel) = input[from..].find('"') {
-        let open = from + open_rel;
-        let body_start = open + 1;
-        // Locate the closing quote, skipping escaped characters. A quote
-        // is real only when preceded by an even run of backslashes.
-        let mut close = None;
-        let mut at = body_start;
-        while let Some(rel) = input[at..].find('"') {
-            let candidate = at + rel;
-            let mut bs = candidate;
-            while bs > body_start && input.as_bytes()[bs - 1] == b'\\' {
-                bs -= 1;
-            }
-            if (candidate - bs) % 2 == 0 {
-                close = Some(candidate);
-                break;
-            }
-            at = candidate + 1;
+    let mut prev_quote: Option<usize> = None;
+    let mut at = 0;
+    while let Some(rel) = input[at..].find('"') {
+        let quote = at + rel;
+        // A quote preceded by an odd run of backslashes is escaped, not
+        // a boundary.
+        let mut bs = quote;
+        while bs > 0 && input.as_bytes()[bs - 1] == b'\\' {
+            bs -= 1;
         }
-        match close {
-            Some(c) => {
-                longest = longest.max(c - body_start);
-                from = c + 1;
+        if (quote - bs) % 2 == 0 {
+            if let Some(prev) = prev_quote {
+                longest = longest.max(quote - prev - 1);
             }
-            None => {
-                longest = longest.max(input.len() - body_start);
-                break;
-            }
+            prev_quote = Some(quote);
         }
+        at = quote + 1;
     }
     longest
 }
@@ -1636,9 +1627,19 @@ mod tests {
         assert_eq!(longest_literal_body(r#"b = b"a\x00b""#), 6);
         // An escaped quote does not end the body early.
         assert_eq!(longest_literal_body(r#"s = "a\"b" + "xy""#), 4);
-        // Ordinary code around and between literals is not counted.
+        // Ordinary code around and between literals is not counted... in
+        // fact the gap between two consecutive quotes spans it, so the
+        // scan overestimates to the largest inter-literal distance —
+        // harmless (an oversized lazily-committed reserve at worst).
         let code = "fn main():\n\ta = \"short\"\n\tprint(a)\n\tb = b\"\\x61\\x62\"\n\tprint(b)\n";
-        assert_eq!(longest_literal_body(code), 8);
+        assert_eq!(longest_literal_body(code), 17);
+        // A stray quote in a comment must not pair-shift the real literal
+        // away: its body still shows up as a gap between consecutive
+        // unescaped quotes (the scan may overestimate — here the stray
+        // quote pairs with the real opener for an 11-char gap — but it
+        // can never land below the true 4-byte body).
+        let adversarial = "# 12\" ruler\ns = \"aaaa\"\n";
+        assert_eq!(longest_literal_body(adversarial), 11);
     }
 
     #[test]

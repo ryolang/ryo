@@ -303,20 +303,6 @@ def cmd_file(_entries, issues_file, args):
         text = issues_file.read_text(encoding="utf-8")
         issue_id = f"I-{max_id_ever(parse_entries(text), issues_file) + 1:03d}"
         entry = f"### {issue_id} — {values['title']}\n" + entry_body
-        # Maintain the watermark BEFORE inserting the new entry. Only the
-        # file's own marker line is replaced — a title or body containing
-        # marker-shaped text must survive untouched (the real marker sits
-        # at the end of the file, so the last match is the file's own).
-        # A file that has no marker yet gets one behind an entry boundary,
-        # otherwise it would be swallowed into the previous entry's body
-        # and lost (along with the retired id) when that entry is deleted.
-        marker = f"<!-- issue-id high-water: {int(issue_id[2:])} -->"
-        matches = list(HIGH_WATER_RE.finditer(text))
-        if matches:
-            last = matches[-1]
-            text = text[: last.start()] + marker + text[last.end() :]
-        else:
-            text = text.rstrip("\n") + "\n\n---\n\n" + marker + "\n"
         anchor = "## Cross-References"
         idx = text.find(anchor)
         if idx != -1:
@@ -329,6 +315,20 @@ def cmd_file(_entries, issues_file, args):
             text = head + "\n\n" + entry + "\n---\n\n" + tail
         else:
             text = text.rstrip("\n") + "\n\n---\n\n" + entry
+        # Maintain the watermark AFTER inserting the new entry: drop any
+        # standalone marker lines (entry fields are single-line, so a
+        # full-line marker can only be a previously written watermark)
+        # and pin the fresh marker at the very end, behind an entry
+        # boundary, where deleting the last entry cannot swallow it.
+        # Marker-shaped text inside a title or body is never a full
+        # line, so it stays untouched.
+        marker = f"<!-- issue-id high-water: {int(issue_id[2:])} -->"
+        lines = [
+            l
+            for l in text.split("\n")
+            if not (l.strip() and HIGH_WATER_RE.fullmatch(l.strip()))
+        ]
+        text = "\n".join(lines).rstrip("\n") + "\n\n---\n\n" + marker + "\n"
         write_atomic(issues_file, text)
     line_no = text[:text.find(f"### {issue_id}")].count("\n") + 1
     print(f"filed {issue_id} at {issues_file}:{line_no}")

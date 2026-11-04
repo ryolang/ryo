@@ -866,10 +866,25 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-267 — Stack overflow on deeply right-nested operator chains (paren-nested RHS)
+
+**Severity:** Correctness / Hygiene
+**Area:** sema
+
+**Files:** ryo-frontend/src/sema/expr (general expression recursion), ryo-backend/src/codegen/expr (eval_inst); repro at bug_reports/bug_right_nested_chain_stack_overflow.ryo
+
+**Summary:** A right-nested chain 1+(1+(1+...)) 100k deep aborts ryo run with a stack overflow in debug builds. The I-261 depth budgets propagate through LHS chain links only; each parenthesized RHS restarts the depth at zero via the general expression entrypoint, so the budget never trips and the recursion grows one frame group per paren level. Pre-existing: main overflows at 50k already (not a PR regression; the PR fixed the left-nested shape). Repro: 100k nested parens, ryo run exits 134; ryo parse alone is fine to 300k.
+
+**Resolution:** Propagate the chain depth through parenthesized RHS operands (or bound the general expression recursion by depth with the existing iterative walkers as spill), keeping the hot path free of per-frame bookkeeping — see how c4c6c99 balances depth limits with the perf gate. Add a regression test with a 100k-deep right-nested chain.
+
+---
+
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
 
-<!-- issue-id high-water: 266 -->
+---
+
+<!-- issue-id high-water: 267 -->
