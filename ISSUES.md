@@ -866,23 +866,10 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-264 — Stack overflow (SIGABRT) on bytes literals with many escape sequences
-
-**Severity:** Correctness / Hygiene
-**Area:** frontend-lexer
-
-**Files:** ryo-frontend/src/lexer (bytes literal escape decoding); repro at bug_reports/bug_bytes_escape_stack_overflow.ryo
-
-**Summary:** A bytes literal containing ~30000 hex escape sequences (b"\x61\x61...") aborts the compiler with 'thread has overflowed its stack' in both 'ryo parse' and 'ryo run/build'; 20000 escapes parse fine, threshold between 20000 and 30000 on the dev machine. Raw ASCII bytes literals of 100KB are fine, and 10MB string literals are fine -- the recursion is per-escape in the bytes-literal decoding path. Sibling of I-261 (operator-chain parser overflow) but a different code path. Found by compiler-input size torture 2026-11-04 (commit e82f503).
-
-**Resolution:** Make escape decoding iterative (or chunked) instead of recursive per escape; add a regression test with a 100k-escape bytes literal. Repro: bug_reports/bug_bytes_escape_stack_overflow.ryo (30000 escapes).
-
----
-
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
 
-<!-- issue-id high-water: 250 -->
+<!-- issue-id high-water: 264 -->

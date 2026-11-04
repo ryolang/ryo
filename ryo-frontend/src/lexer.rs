@@ -423,36 +423,7 @@ fn estimated_token_count(input: &str) -> usize {
 /// without Indent/Dedent markers, so this returns an empty vector
 /// and the driver skips parsing.
 pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Token, Span)> {
-    // Pre-size the raw-token buffer instead of growing it from zero.
-    // logos' `SpannedIter` reports only a trivial `(0, None)` size
-    // hint, so `collect` would otherwise repeatedly reallocate and
-    // memcpy the whole buffer as it grows. The estimate avoids most
-    // of those reallocations on typical input — but it is NOT an
-    // upper bound (see estimated_token_count): punctuation-dense
-    // input may still grow the buffer, costing a reallocation,
-    // nothing more.
-    let mut raw_tokens: Vec<(RawToken<'_>, Span)> =
-        Vec::with_capacity(estimated_token_count(input));
-    raw_tokens.extend(
-        RawToken::lexer(input)
-            .spanned()
-            .map(|(tok, span)| match tok {
-                Ok(t) => (t, span.into()),
-                Err(()) => {
-                    // logos matched nothing at this span: the source
-                    // holds a character the grammar doesn't recognize.
-                    // The text is sliced from the input and escaped so
-                    // control bytes (e.g. a lone `\r`) render readably.
-                    let text = input[span.clone()].escape_debug().to_string();
-                    sink.emit(Diag::error(
-                        crate::spans::cspan(SimpleSpan::new((), span.clone())),
-                        DiagCode::InvalidCharacter,
-                        format!("invalid character '{}'", text),
-                    ));
-                    (RawToken::Error, span.into())
-                }
-            }),
-    );
+    let raw_tokens = collect_raw_tokens(input, sink);
 
     let processed = match crate::indent::process(raw_tokens) {
         Ok(processed) => processed,
@@ -479,6 +450,85 @@ pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Toke
         out.push((tok, span));
     }
     out
+}
+
+/// Worst-case Logos DFA stack growth per input byte.
+///
+/// Logos compiles the `\\.` alternative of the string/bytes literal
+/// regexes into DFA state functions that hand off with plain
+/// `return stateN(...)` calls. Rust guarantees no tail calls, so in
+/// debug builds every escape sequence in a literal body parks its
+/// state-function frames until the token's match completes — measured
+/// ~1.5 KB per escape, overflowing a 32 MiB stack between 20k and 25k
+/// `\xNN` escapes (I-264). An all-escape body is 4 source bytes per
+/// escape, so ~370 B of stack per input byte worst-case; 512 leaves
+/// headroom for fatter debug frames on other targets. Release builds
+/// do tail-call and stay flat, and the oversized reserve is lazily
+/// committed, so sizing for debug costs nothing there.
+const DFA_STACK_PER_BYTE: usize = 512;
+
+/// Run the raw-token collection inline while its worst-case DFA depth
+/// fits the 8 MiB default stack of a spawned thread (the test harness
+/// and the CLI worker included), so typical sources pay no spawn cost.
+/// Only fuzz-scale inputs beyond ~16 KiB take the thread path.
+const DFA_INLINE_BUDGET: usize = 8 * 1024 * 1024;
+
+/// Drive `RawToken::lexer` over the input, mapping logos misses to
+/// `RawToken::Error` plus an `InvalidCharacter` diagnostic. Split out
+/// of `lex` so the pass can run on a scoped thread with an input-sized
+/// stack: a single literal holding tens of thousands of escapes needs
+/// a stack proportional to its length, which no fixed caller stack
+/// guarantees (see `DFA_STACK_PER_BYTE`).
+fn collect_raw_tokens<'a>(input: &'a str, sink: &mut DiagSink) -> Vec<(RawToken<'a>, Span)> {
+    let collect = |sink: &mut DiagSink| {
+        // Pre-size the raw-token buffer instead of growing it from
+        // zero. logos' `SpannedIter` reports only a trivial
+        // `(0, None)` size hint, so `collect` would otherwise
+        // repeatedly reallocate and memcpy the whole buffer as it
+        // grows. The estimate avoids most of those reallocations on
+        // typical input — but it is NOT an upper bound (see
+        // estimated_token_count): punctuation-dense input may still
+        // grow the buffer, costing a reallocation, nothing more.
+        let mut raw_tokens: Vec<(RawToken<'_>, Span)> =
+            Vec::with_capacity(estimated_token_count(input));
+        raw_tokens.extend(
+            RawToken::lexer(input)
+                .spanned()
+                .map(|(tok, span)| match tok {
+                    Ok(t) => (t, span.into()),
+                    Err(()) => {
+                        // logos matched nothing at this span: the source
+                        // holds a character the grammar doesn't recognize.
+                        // The text is sliced from the input and escaped so
+                        // control bytes (e.g. a lone `\r`) render readably.
+                        let text = input[span.clone()].escape_debug().to_string();
+                        sink.emit(Diag::error(
+                            crate::spans::cspan(SimpleSpan::new((), span.clone())),
+                            DiagCode::InvalidCharacter,
+                            format!("invalid character '{}'", text),
+                        ));
+                        (RawToken::Error, span.into())
+                    }
+                }),
+        );
+        raw_tokens
+    };
+    if input.len().saturating_mul(DFA_STACK_PER_BYTE) <= DFA_INLINE_BUDGET {
+        return collect(sink);
+    }
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(
+                input
+                    .len()
+                    .saturating_mul(DFA_STACK_PER_BYTE)
+                    .max(DFA_INLINE_BUDGET),
+            )
+            .spawn_scoped(scope, || collect(sink))
+            .expect("failed to spawn raw-token lexing thread")
+            .join()
+            .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+    })
 }
 
 /// Decode standard escape sequences in a string/bytes-literal body.
@@ -1452,6 +1502,25 @@ mod tests {
         let (toks, pool) = lex_strings(r#"x = b"\n\t\r\\\"\0""#);
         match toks[2] {
             Token::BytesLit(id) => assert_eq!(pool.bytes_payload(id), b"\n\t\r\\\"\0"),
+            ref t => panic!("expected BytesLit at index 2, got {:?}", t),
+        }
+    }
+
+    #[test]
+    fn bytes_literal_with_many_escapes_does_not_overflow_stack() {
+        // I-264: the Logos DFA for literal bodies recurses per escape
+        // (~1.5 KB per escape in debug builds), so a bytes literal with
+        // tens of thousands of `\xNN` escapes blows through any fixed
+        // caller stack. 100k escapes must still decode.
+        let mut src = String::from("x = b\"");
+        src.push_str(&"\\x61".repeat(100_000));
+        src.push('"');
+        let (toks, pool) = lex_strings(&src);
+        match toks[2] {
+            Token::BytesLit(id) => {
+                assert_eq!(pool.bytes_payload(id).len(), 100_000);
+                assert!(pool.bytes_payload(id).iter().all(|&b| b == b'a'));
+            }
             ref t => panic!("expected BytesLit at index 2, got {:?}", t),
         }
     }
