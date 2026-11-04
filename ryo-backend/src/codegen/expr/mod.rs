@@ -33,10 +33,23 @@ impl<M: Module> Codegen<M> {
     /// Materialize an instruction's value, recursively materializing
     /// operand `TirRef`s as needed. Memoized: a second visit hands
     /// back the cached `Value`.
+    #[inline]
     pub(crate) fn eval_inst(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
+    ) -> Result<Value, String> {
+        Self::eval_inst_d(builder, ctx, r, 0)
+    }
+
+    /// Depth-carrying body of [`Self::eval_inst`]; `depth` is the
+    /// operator-chain recursion budget consumed so far (see
+    /// [`Self::eval_binop_chain`]).
+    fn eval_inst_d(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        depth: u32,
     ) -> Result<Value, String> {
         if let Some(repr) = Self::cached_repr(ctx, r) {
             return match repr {
@@ -104,7 +117,7 @@ impl<M: Module> Codegen<M> {
             // the demand recursion they replace overflowed the stack
             // around ~7k terms.
             TirTag::INeg | TirTag::FNeg | TirTag::BoolNot => {
-                Self::eval_unary_chain(builder, ctx, r)?
+                Self::eval_unary_chain(builder, ctx, r, depth)?
             }
             TirTag::IAdd
             | TirTag::ISub
@@ -126,7 +139,7 @@ impl<M: Module> Codegen<M> {
             | TirTag::FCmpLt
             | TirTag::FCmpLe
             | TirTag::FCmpGt
-            | TirTag::FCmpGe => Self::eval_binop_chain(builder, ctx, r)?,
+            | TirTag::FCmpGe => Self::eval_binop_chain(builder, ctx, r, depth)?,
             TirTag::BoolAnd | TirTag::BoolOr => {
                 // The short-circuit control flow is explicit in
                 // the Flow IR — the lhs block's Branch terminator
@@ -313,28 +326,63 @@ impl<M: Module> Codegen<M> {
         )
     }
 
-    /// Materialize a left-associative scalar binary-operator chain
-    /// iteratively.
-    ///
-    /// The old demand recursion (`eval_inst` → `emit_numeric_binary_op`
-    /// → `eval_inst(lhs)`) descended one stack frame per chain link and
-    /// overflowed the compiler's 32 MiB stack around ~7k terms. The
-    /// walk below keeps the spine on an explicit `Vec`: each link's
-    /// lhs is the accumulated value, its rhs is materialized through
-    /// the ordinary demand path, so nesting through parens or calls
-    /// stays recursive exactly as before. Emission order (innermost
-    /// link first) and the per-link memo are identical to the old
-    /// recursion.
+    /// Operator-chain recursion budget: how many chain links the
+    /// old-style recursion may consume before the remaining spine
+    /// lowers iteratively (`eval_binop_spill` / `eval_unary_spill`).
+    /// Far below the compiler thread's 32 MiB stack (a debug frame per
+    /// link is kilobytes), far above anything a hand-written chain.
+    const CHAIN_RECURSION_LIMIT: u32 = 64;
+
+    /// Materialize one link of a left-associative scalar binary-
+    /// operator chain, recursing like the old demand recursion
+    /// (`eval_inst` → `emit_numeric_binary_op` → `eval_inst(lhs)`).
+    /// Shallow chains (everything hand-written) pay nothing for the
+    /// deep-chain machinery; past [`Self::CHAIN_RECURSION_LIMIT`] links
+    /// the remaining spine hands off to the iterative walker so a
+    /// 100k-term `1+1+...` chain cannot overflow the stack. Emission
+    /// order (innermost link first) and the per-link memo are
+    /// identical to the old recursion.
     fn eval_binop_chain(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         root: TirRef,
+        depth: u32,
     ) -> Result<Value, String> {
-        // Spine links, outermost first. Stop descending at an
-        // already-materialized link: the Flow driver may have
-        // evaluated an inner step before the outer chain's root
-        // (every operator inst is a step), and re-emitting it would
-        // duplicate instructions the memo exists to prevent.
+        let inst = ctx.tir.inst(root);
+        let TirData::BinOp { lhs, rhs } = inst.data else {
+            unreachable!("chain tag must carry TirData::BinOp");
+        };
+        let lv = if Self::is_chain_binop_tag(ctx.tir.inst(lhs).tag)
+            && Self::cached_repr(ctx, lhs).is_none()
+        {
+            if depth < Self::CHAIN_RECURSION_LIMIT {
+                Self::eval_binop_chain(builder, ctx, lhs, depth + 1)?
+            } else {
+                Self::eval_binop_spill(builder, ctx, lhs)?
+            }
+        } else {
+            Self::eval_inst(builder, ctx, lhs)?
+        };
+        let rv = Self::eval_inst(builder, ctx, rhs)?;
+        let v = Self::emit_numeric_binop(builder, ctx, inst.tag, lhs, rhs, lv, rv)?;
+        if Self::cached_repr(ctx, root).is_none() {
+            Self::cache_repr(ctx, root, ValueRepr::Scalar(v));
+        }
+        Ok(v)
+    }
+
+    /// Iterative fallback for the deep tail of a scalar binary-
+    /// operator chain — see [`Self::eval_binop_chain`]. Spine links,
+    /// outermost first; stop descending at an already-materialized
+    /// link (the Flow driver may have evaluated an inner step before
+    /// the outer chain's root — every operator inst is a step — and
+    /// re-emitting it would duplicate instructions the memo exists to
+    /// prevent).
+    fn eval_binop_spill(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        root: TirRef,
+    ) -> Result<Value, String> {
         let mut spine = ChainSpine::new();
         let inner_lhs = {
             let mut cur = root;
@@ -383,9 +431,66 @@ impl<M: Module> Codegen<M> {
         result
     }
 
-    /// Materialize a unary-operator chain (`not not ...`, `- - ...`)
-    /// iteratively — same spine-walk rationale as [`Self::eval_binop_chain`].
+    /// Materialize one link of a unary-operator chain (`not not ...`,
+    /// `- - ...`), recursing like the old demand recursion — same
+    /// depth-bounded design as [`Self::eval_binop_chain`].
     fn eval_unary_chain(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        root: TirRef,
+        depth: u32,
+    ) -> Result<Value, String> {
+        let inst = ctx.tir.inst(root);
+        let TirData::UnOp(operand) = inst.data else {
+            unreachable!("unary chain tag must carry TirData::UnOp");
+        };
+        let acc = if matches!(
+            ctx.tir.inst(operand).tag,
+            TirTag::INeg | TirTag::FNeg | TirTag::BoolNot
+        ) && Self::cached_repr(ctx, operand).is_none()
+        {
+            if depth < Self::CHAIN_RECURSION_LIMIT {
+                Self::eval_unary_chain(builder, ctx, operand, depth + 1)?
+            } else {
+                Self::eval_unary_spill(builder, ctx, operand)?
+            }
+        } else {
+            Self::eval_inst(builder, ctx, operand)?
+        };
+        let value = match inst.tag {
+            TirTag::INeg => {
+                // Spec §18 checked negation: `-(x)` as `0 - x` so
+                // `-(i64::MIN)` sets the overflow flag and panics.
+                // Elide when the operand's bounds exclude i64::MIN —
+                // the only input whose negation overflows.
+                let zero = builder.ins().iconst(ctx.int_type, 0);
+                if ranges::int_range_of(ctx.tir, &ctx.range_facts, operand)
+                    .and_then(|r| r.checked_neg())
+                    .is_some()
+                {
+                    builder.ins().isub(zero, acc)
+                } else {
+                    let (r, of) = builder.ins().ssub_overflow(zero, acc);
+                    Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG)?;
+                    r
+                }
+            }
+            TirTag::FNeg => builder.ins().fneg(acc),
+            TirTag::BoolNot => {
+                let one = builder.ins().iconst(types::I8, 1);
+                builder.ins().bxor(acc, one)
+            }
+            _ => unreachable!("non-unary tag in eval_unary_chain: {:?}", inst.tag),
+        };
+        if Self::cached_repr(ctx, root).is_none() {
+            Self::cache_repr(ctx, root, ValueRepr::Scalar(value));
+        }
+        Ok(value)
+    }
+
+    /// Iterative fallback for the deep tail of a unary-operator chain —
+    /// see [`Self::eval_unary_chain`].
+    fn eval_unary_spill(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         root: TirRef,
@@ -419,10 +524,6 @@ impl<M: Module> Codegen<M> {
             };
             let next = match inst.tag {
                 TirTag::INeg => {
-                    // Spec §18 checked negation: `-(x)` as `0 - x` so
-                    // `-(i64::MIN)` sets the overflow flag and panics.
-                    // Elide when the operand's bounds exclude i64::MIN —
-                    // the only input whose negation overflows.
                     let zero = builder.ins().iconst(ctx.int_type, 0);
                     if ranges::int_range_of(ctx.tir, &ctx.range_facts, operand)
                         .and_then(|r| r.checked_neg())
@@ -442,7 +543,7 @@ impl<M: Module> Codegen<M> {
                     let one = builder.ins().iconst(types::I8, 1);
                     Ok(builder.ins().bxor(acc, one))
                 }
-                _ => unreachable!("non-unary tag in eval_unary_chain: {:?}", inst.tag),
+                _ => unreachable!("non-unary tag in eval_unary_spill: {:?}", inst.tag),
             };
             acc = match next {
                 Ok(v) => v,

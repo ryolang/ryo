@@ -37,6 +37,7 @@ impl<T> ChainSpine<T> {
         Self::default()
     }
 
+    #[inline]
     pub fn push(&mut self, item: T) {
         if self.spilled.is_empty() && self.len < SPINE_INLINE_CAP {
             self.inline[self.len] = Some(item);
@@ -56,6 +57,7 @@ impl<T> ChainSpine<T> {
     }
 
     /// Pop the most recently pushed item, if any.
+    #[inline]
     pub fn pop(&mut self) -> Option<T> {
         if let Some(item) = self.spilled.pop() {
             return Some(item);
@@ -65,6 +67,17 @@ impl<T> ChainSpine<T> {
         }
         self.len -= 1;
         self.inline[self.len].take()
+    }
+
+    /// Pop the `n` most-recent items into `out` (cleared first), in
+    /// original push order.
+    pub fn pop_n(&mut self, n: usize, out: &mut Vec<T>) {
+        out.clear();
+        out.reserve(n);
+        for _ in 0..n {
+            out.push(self.pop().expect("spine holds n items"));
+        }
+        out.reverse();
     }
 
     pub fn is_empty(&self) -> bool {

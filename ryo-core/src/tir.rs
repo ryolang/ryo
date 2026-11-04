@@ -1235,15 +1235,42 @@ impl Tir {
     /// and nested body statements — into `set`.
     /// [`Tir::walk_operands`] is shallow; this helper drives the
     /// recursion.
+    /// Operand depth the reachability probes may recurse before the
+    /// remaining subtree walks on an explicit stack — same
+    /// overflow-guard pattern as the operator-chain walkers. UIR/TIR
+    /// operand links can nest arbitrarily deep (a long operator
+    /// chain), which unbounded recursion cannot survive.
+    const REACHABILITY_DEPTH_LIMIT: u32 = 64;
+
     pub fn collect_reachable(&self, r: TirRef, set: &mut HashSet<TirRef>) {
-        // Iterative worklist walk — operand links can nest arbitrarily
-        // deep (a long operator chain), which the old recursion could
-        // not survive. The stack stays inline for shallow subtrees.
+        self.collect_reachable_d(r, set, 0)
+    }
+
+    fn collect_reachable_d(&self, r: TirRef, set: &mut HashSet<TirRef>, depth: u32) {
         if !set.insert(r) {
             return;
         }
+        if depth == Self::REACHABILITY_DEPTH_LIMIT {
+            self.collect_reachable_stack(r, set);
+            return;
+        }
+        self.walk_operands(r, &mut |_parent, child, _kind| {
+            self.collect_reachable_d(child, set, depth + 1);
+        });
+    }
+
+    /// Iterative continuation of [`Tir::collect_reachable_d`] past the
+    /// recursion budget; `r` is already in `set`. Cold: see
+    /// [`Tir::contains_reachable_stack`].
+    #[cold]
+    #[inline(never)]
+    fn collect_reachable_stack(&self, r: TirRef, set: &mut HashSet<TirRef>) {
         let mut stack = ChainSpine::new();
-        stack.push(r);
+        self.walk_operands(r, &mut |_parent, child, _kind| {
+            if set.insert(child) {
+                stack.push(child);
+            }
+        });
         while let Some(x) = stack.pop() {
             self.walk_operands(x, &mut |_parent, child, _kind| {
                 if set.insert(child) {
@@ -1261,15 +1288,44 @@ impl Tir {
     /// (e.g. `collect_jump_path`'s arm selection) where the set itself
     /// is never needed.
     pub fn contains_reachable(&self, root: TirRef, target: TirRef) -> bool {
-        // Iterative DFS with an explicit stack: the operand graph can
-        // nest arbitrarily deep (a long operator chain), which the old
-        // recursion could not survive. No visited set — like the old
-        // recursion, this trusts the tree-shape invariant (a debug
-        // build asserts it in `validate_tree_shape`); the short-circuit
-        // exit keeps this probe allocation-free for shallow subtrees.
-        if root == target {
+        self.contains_reachable_d(root, target, 0)
+    }
+
+    /// Recursive reachability probe with the old short-circuit
+    /// semantics; no visited set — like the old recursion, this trusts
+    /// the tree-shape invariant (a debug build asserts it in
+    /// `validate_tree_shape`). Past [`Tir::REACHABILITY_DEPTH_LIMIT`],
+    /// the remaining subtree probes on an explicit stack. Shaped
+    /// exactly like the old single-function recursion (one callee in
+    /// the operand loop, target check in the step) so the hot probe
+    /// optimizes the same way; the budget check lives in the step.
+    fn contains_reachable_d(&self, x: TirRef, target: TirRef, depth: u32) -> bool {
+        if x == target {
             return true;
         }
+        let budget_left = depth < Self::REACHABILITY_DEPTH_LIMIT;
+        let mut found = false;
+        self.walk_operands(x, &mut |_parent, child, _kind| {
+            if !found {
+                if child == target {
+                    found = true;
+                } else if budget_left {
+                    found = self.contains_reachable_d(child, target, depth + 1);
+                } else {
+                    found = self.contains_reachable_stack(child, target);
+                }
+            }
+        });
+        found
+    }
+
+    /// Iterative continuation of [`Tir::contains_reachable_d`] past the
+    /// recursion budget. Cold: only pathologically deep operand nesting
+    /// reaches here, and keeping it out of line keeps the hot recursive
+    /// probe small.
+    #[cold]
+    #[inline(never)]
+    fn contains_reachable_stack(&self, root: TirRef, target: TirRef) -> bool {
         let mut stack = ChainSpine::new();
         stack.push(root);
         while let Some(x) = stack.pop() {

@@ -445,20 +445,118 @@ impl FlowBuilder<'_> {
 
     // ---------- expressions ----------
 
+    /// Expression nesting the recursive emitter may consume before
+    /// handing the remaining subtree to the iterative machine. Far
+    /// below the compiler thread's 32 MiB stack, far above anything a
+    /// hand-written expression nests.
+    const EXPR_DEPTH_LIMIT: u32 = 64;
+
     /// Evaluate `r` and its operands into the current block. After a
     /// match or a diverging call, `self.cur` is the continuation block
     /// (join, or an unreachable block).
-    /// Emit one expression's steps into the current block,
-    /// iteratively. TIR operand links mirror the AST's nesting — a
-    /// 100k-term operator chain nests 100k `BinOp` lhs links — so the
-    /// old demand recursion overflowed the stack long before codegen.
-    /// `Enter` schedules a node's operands and an `Exit`; `Exit`
-    /// pushes the step after its operands, preserving the exact
-    /// post-order the recursion produced. Control constructs
-    /// (match/if/while/for, short-circuit `and`/`or`, never calls)
-    /// manage their own sub-emissions and stay recursive — chain
-    /// length never nests through them.
+    #[inline]
     fn emit_expr(&mut self, r: TirRef) {
+        self.emit_expr_d(r, 0);
+    }
+
+    /// Depth-carrying body of [`FlowBuilder::emit_expr`]: the old
+    /// demand recursion, verbatim, plus a budget check per level.
+    /// Past [`FlowBuilder::EXPR_DEPTH_LIMIT`] the remaining subtree
+    /// lowers via [`FlowBuilder::emit_expr_machine`].
+    fn emit_expr_d(&mut self, r: TirRef, depth: u32) {
+        if depth == Self::EXPR_DEPTH_LIMIT {
+            return self.emit_expr_machine(r);
+        }
+        // Stamp the single-parent consumer edge for every operand
+        // (the TIR is tree-shaped): consumers of Flow facts read
+        // `parent_of` instead of re-walking TIR operand trees. Only
+        // `Operand`-kind edges count — body statements are reachable,
+        // not consumed.
+        self.tir.walk_operands(r, &mut |_p, child, kind| {
+            if kind == crate::tir::ChildKind::Operand {
+                self.inst_meta[child.index()].parent = Some(r.raw());
+            }
+        });
+        let inst = *self.tir.inst(r);
+        match inst.tag {
+            // Control constructs are position-agnostic: sema lowers
+            // some calls (assert) to an IfStmt in expression position,
+            // and a match is equally at home in an initializer or a
+            // statement. The builders cut blocks wherever they stand.
+            TirTag::Match => self.build_match(r),
+            TirTag::IfStmt => self.build_if(r),
+            TirTag::WhileLoop => self.build_while(r),
+            TirTag::ForRange => self.build_for(r),
+            TirTag::BoolAnd | TirTag::BoolOr => {
+                // Short-circuit control flow made explicit: the RHS is
+                // reachable only through the taken edge. `lhs` is
+                // evaluated in the current block, which the Branch then
+                // terminates; the merged value is a step in the join
+                // block (its operands dominate it by emission order).
+                let is_and = inst.tag == TirTag::BoolAnd;
+                let (lhs, rhs) = match inst.data {
+                    crate::tir::TirData::BinOp { lhs, rhs } => (lhs, rhs),
+                    _ => unreachable!("BoolAnd/BoolOr must carry TirData::BinOp"),
+                };
+                self.emit_expr_d(lhs, depth + 1);
+                let rhs_block = self.new_block(false);
+                let join = self.new_block(false);
+                let (then_, else_) = if is_and {
+                    (rhs_block, join)
+                } else {
+                    (join, rhs_block)
+                };
+                self.set_term(
+                    self.cur,
+                    Terminator::Branch {
+                        cond: lhs,
+                        then_,
+                        else_,
+                    },
+                    None,
+                );
+                self.cur = rhs_block;
+                self.emit_expr_d(rhs, depth + 1);
+                self.close_region(self.cur, join);
+                self.cur = join;
+                self.push_step(r, StepFacts::default());
+            }
+            TirTag::Call if self.pool.is_never(inst.ty) => {
+                let view = self.tir.call_view(r);
+                for arg in &view.args {
+                    self.emit_expr_d(arg, depth + 1);
+                }
+                let next = self.new_block(true);
+                self.set_term(self.cur, Terminator::Call { call: r, next }, Some(r));
+                self.cur = next;
+            }
+            _ => {
+                let tir = self.tir;
+                tir.walk_operands(r, &mut |_p, child, kind| {
+                    debug_assert!(
+                        kind == crate::tir::ChildKind::Operand,
+                        "expression insts announce operands only"
+                    );
+                    self.emit_expr_d(child, depth + 1);
+                });
+                let facts = self.facts_for(r);
+                self.push_step(r, facts);
+            }
+        }
+    }
+
+    /// Iterative fallback for deeply nested expressions — see
+    /// [`FlowBuilder::emit_expr_d`]. TIR operand links mirror the
+    /// AST's nesting (a 100k-term operator chain nests 100k `BinOp`
+    /// lhs links), so past the recursion budget the remaining subtree
+    /// walks on an explicit task stack. `Enter` schedules a node's
+    /// operands and an `Exit`; `Exit` pushes the step after its
+    /// operands, preserving the exact post-order the recursion
+    /// produced. Control constructs (match/if/while/for,
+    /// short-circuit `and`/`or`, never calls) manage their own
+    /// sub-emissions and stay recursive — chain length never nests
+    /// through them.
+    fn emit_expr_machine(&mut self, r: TirRef) {
         enum Task {
             Enter(TirRef),
             Exit(TirRef),
