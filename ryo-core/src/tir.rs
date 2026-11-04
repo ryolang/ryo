@@ -1260,8 +1260,8 @@ impl Tir {
     }
 
     /// Iterative continuation of [`Tir::collect_reachable_d`] past the
-    /// recursion budget; `r` is already in `set`. Cold: see
-    /// [`Tir::contains_reachable_stack`].
+    /// recursion budget; `r` is already in `set`. Cold: only
+    /// pathologically deep operand nesting reaches here.
     #[cold]
     #[inline(never)]
     fn collect_reachable_stack(&self, r: TirRef, set: &mut HashSet<TirRef>) {
@@ -1287,47 +1287,57 @@ impl Tir {
     /// [`Tir::collect_reachable`] does. Used for containment probes
     /// (e.g. `collect_jump_path`'s arm selection) where the set itself
     /// is never needed.
+    ///
+    /// Runs on an explicit stack rather than recursing, so deep operand
+    /// links cannot overflow the thread stack; a single non-recursive
+    /// loop also keeps the hot probe free of per-frame depth
+    /// bookkeeping. No visited set — this trusts the tree-shape
+    /// invariant (a debug build asserts it in `validate_tree_shape`).
     pub fn contains_reachable(&self, root: TirRef, target: TirRef) -> bool {
-        self.contains_reachable_d(root, target, 0)
-    }
-
-    /// Recursive reachability probe with the old short-circuit
-    /// semantics; no visited set — like the old recursion, this trusts
-    /// the tree-shape invariant (a debug build asserts it in
-    /// `validate_tree_shape`). Past [`Tir::REACHABILITY_DEPTH_LIMIT`],
-    /// the remaining subtree probes on an explicit stack. Shaped
-    /// exactly like the old single-function recursion (one callee in
-    /// the operand loop, target check in the step) so the hot probe
-    /// optimizes the same way; the budget check lives in the step.
-    fn contains_reachable_d(&self, x: TirRef, target: TirRef, depth: u32) -> bool {
-        if x == target {
+        if root == target {
             return true;
         }
-        let budget_left = depth < Self::REACHABILITY_DEPTH_LIMIT;
-        let mut found = false;
-        self.walk_operands(x, &mut |_parent, child, _kind| {
-            if !found {
+        // Ordinary operand nesting fits a small fixed inline stack, so
+        // the hot probe never touches the heap. Should a pathologically
+        // deep subtree outgrow it, the probe restarts on the heap-backed
+        // cold path (the walk has no side effects, so restarting is
+        // sound).
+        const INLINE: usize = 32;
+        let mut stack = [root; INLINE];
+        let mut len = 1usize;
+        let mut overflow = false;
+        while len > 0 {
+            len -= 1;
+            let x = stack[len];
+            let mut found = false;
+            self.walk_operands(x, &mut |_parent, child, _kind| {
                 if child == target {
                     found = true;
-                } else if budget_left {
-                    found = self.contains_reachable_d(child, target, depth + 1);
+                } else if len < INLINE {
+                    stack[len] = child;
+                    len += 1;
                 } else {
-                    found = self.contains_reachable_stack(child, target);
+                    overflow = true;
                 }
+            });
+            if found {
+                return true;
             }
-        });
-        found
+            if overflow {
+                return self.contains_reachable_deep(root, target);
+            }
+        }
+        false
     }
 
-    /// Iterative continuation of [`Tir::contains_reachable_d`] past the
-    /// recursion budget. Cold: only pathologically deep operand nesting
-    /// reaches here, and keeping it out of line keeps the hot recursive
-    /// probe small.
+    /// Heap-backed continuation of [`Tir::contains_reachable`] for
+    /// subtrees deeper than its inline stack. Cold: only
+    /// pathologically deep operand nesting (a long operator chain)
+    /// reaches here.
     #[cold]
     #[inline(never)]
-    fn contains_reachable_stack(&self, root: TirRef, target: TirRef) -> bool {
-        let mut stack = ChainSpine::new();
-        stack.push(root);
+    fn contains_reachable_deep(&self, root: TirRef, target: TirRef) -> bool {
+        let mut stack = vec![root];
         while let Some(x) = stack.pop() {
             let mut found = false;
             self.walk_operands(x, &mut |_parent, child, _kind| {
