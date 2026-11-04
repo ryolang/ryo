@@ -827,19 +827,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-261 — Parser stack overflow (SIGABRT) on long left-associative operator chains
-
-**Severity:** Correctness / Hygiene
-**Area:** frontend-parser
-
-**Files:** ryo-frontend/src/parser (expression parsing); repro at bug_reports/bug_parser_stack_overflow_expr_chain.ryo
-
-**Summary:** A binary expression chain of ~7000 terms (e.g. print(1+1+1+... with 7000 ones) aborts the compiler with 'thread has overflowed its stack' (exit 134) in both `ryo run` and `ryo build`; `ryo parse` alone reproduces, so the recursion is in the parser. 6000 terms compile fine on the dev machine — threshold between 6000 and 7000. Parenthesized nesting to 10000 deep is fine; only left-assoc operator chains overflow. Found by the grammar/recovery fuzz campaign 2026-11-04 (commit e82f503).
-
-**Resolution:** Rewrite the binary-expression parser to loop on same-precedence operators (explicit left-fold) instead of recursing per operand, or run parsing on a growable stack; add a regression test with a 100k-term chain. Do not fix mid-campaign; campaign artifact: /tmp/ryo-gramrec-fuzz/repros/.
-
----
-
 ### I-262 — Compiler process leaks chumsky recursive parser allocations on every parse (found via Valgrind)
 
 **Severity:** Correctness / Hygiene
@@ -866,10 +853,23 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-265 — oracle.ryo panics in ownership cleanup validation (leak path-coverage assert)
+
+**Severity:** Correctness / Hygiene
+**Area:** ownership
+
+**Files:** examples/oracle.ryo; ryo-frontend/src/ownership/cleanup_validation.rs
+
+**Summary:** 'ryo run examples/oracle.ryo' (a committed example) aborts with SIGABRT: thread panicked at ryo-frontend/src/ownership/cleanup_validation.rs:1309 'path coverage: place union 21 (Temp producer TirRef(53) + Local decl TirRef(54)) established at FirePoint { block 9, ordinal 15 } has a path to an exit or a replacement write with no release or transfer of the generation — a leak'. Reproduces identically on eaf2f9b (pre-existing, unrelated to the deep-chain stack-overflow work fixed on this branch) with and without CLI args/stdin. Debug-build assert (cleanup validation); release behavior unverified.
+
+**Resolution:** Investigate the leak path for the io_read_line/env temp in oracle.ryo; the union is established at block 9 ordinal 15 and never released on some exit path. Not fixed — found while verifying the deep-chain stack-overflow fix on branch fix/fuzz-findings-i260-i264.
+
+---
+
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
 
-<!-- issue-id high-water: 264 -->
+<!-- issue-id high-water: 265 -->

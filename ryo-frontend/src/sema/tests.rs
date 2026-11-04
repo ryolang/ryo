@@ -1383,3 +1383,86 @@ fn reserved_name_no_cascade_undefined_variable() {
         "should not cascade into UndefinedVariable"
     );
 }
+
+// ---------- Deep operator chains ----------
+//
+// A left-associative chain nests one `BinOp`/`UnOp` link per term, so
+// a 100k-term `1+1+...` expression is a 100k-deep tree. Every pass
+// that walks expression nesting (astgen, sema's chain walkers, the
+// TIR tree-shape validation) is iterative; these tests pin that on
+// the small test-thread stack — the recursive formulations they
+// replaced overflowed the CLI's 32 MiB stack around ~7k terms.
+
+/// `print(1+1+... )` with `terms` ones.
+fn add_chain_src(terms: usize) -> String {
+    let mut src = String::from("fn main():\n\tprint(");
+    for i in 0..terms {
+        if i > 0 {
+            src.push('+');
+        }
+        src.push('1');
+    }
+    src.push_str(")\n");
+    src
+}
+
+#[test]
+fn hundred_k_term_addition_chain_analyzes_without_overflow() {
+    let (tirs, pool) = run(&add_chain_src(100_000)).expect("100k-term chain should analyze");
+    let main = tirs
+        .iter()
+        .find(|t| pool.str(t.name) == "main")
+        .expect("main TIR");
+    // N literals + (N-1) IAdd links + DebugRepr + print call + ExprStmt.
+    let iadds = main
+        .instructions
+        .iter()
+        .filter(|i| i.tag == TirTag::IAdd)
+        .count();
+    assert_eq!(iadds, 100_000 - 1, "chain must lower fully, not truncated");
+}
+
+#[test]
+fn hundred_k_term_unary_chain_analyzes_without_overflow() {
+    let mut src = String::from("fn main():\n\tprint(");
+    for _ in 0..100_000 {
+        src.push_str("not ");
+    }
+    src.push_str("true)\n");
+    run(&src).expect("100k-term unary chain should analyze");
+}
+
+#[test]
+fn deep_chain_const_eval_reports_overflow() {
+    // i64::MAX + 1 + ... overflows at the first link; the per-link
+    // incremental fold must still detect it (and the cascade matches
+    // the old recursion's per-link re-reporting — verified against the
+    // pre-fix compiler).
+    let mut src = String::from("fn main():\n\tprint(9223372036854775807");
+    for _ in 0..999 {
+        src.push_str("+1");
+    }
+    src.push_str(")\n");
+    let diags = run(&src).unwrap_err();
+    assert!(
+        any_code(&diags, DiagCode::ConstEvalFailure),
+        "expected const-eval overflow, got: {diags:?}"
+    );
+}
+
+#[test]
+fn deep_chain_const_eval_reports_division_by_zero() {
+    let mut src = String::from("fn main():\n\tprint(1/(");
+    for i in 0..10_000 {
+        if i > 0 {
+            src.push('+');
+        }
+        src.push('1');
+    }
+    src.push_str("-10000)+1)\n");
+    let diags = run(&src).unwrap_err();
+    assert!(
+        any_code(&diags, DiagCode::DivisionByZero),
+        "expected division-by-zero, got: {diags:?}"
+    );
+}

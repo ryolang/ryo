@@ -58,6 +58,7 @@
 //! internal-error `Diag` — see the `unreachable!` sites in this file.
 
 use crate::ast::CompoundOp;
+use crate::spine::ChainSpine;
 use crate::types::{InternPool, StringId, TypeId};
 use std::collections::HashSet;
 use std::num::NonZeroU32;
@@ -1187,24 +1188,21 @@ impl Tir {
     /// one O(N) walk per built body in debug builds only.
     #[cfg(debug_assertions)]
     fn validate_tree_shape(&self) {
-        fn walk(tir: &Tir, r: TirRef, seen: &mut HashSet<TirRef>) {
-            tir.walk_operands(r, &mut |_parent, child, _kind| {
-                debug_assert!(
-                    seen.insert(child),
-                    "TIR body is not tree-shaped: instruction raw={} has more than one parent",
-                    child.raw()
-                );
-                walk(tir, child, seen);
-            });
-        }
+        // Iterative DFS: a long operator chain nests one operand link
+        // per term, and this walk runs on every built body — recursion
+        // here overflows the stack on exactly the deep programs the
+        // rest of the pipeline now accepts.
         let mut seen: HashSet<TirRef> = HashSet::new();
-        for stmt in self.body_stmts() {
+        let mut stack: Vec<TirRef> = self.body_stmts().into_iter().collect();
+        while let Some(r) = stack.pop() {
             debug_assert!(
-                seen.insert(stmt),
-                "TIR body is not tree-shaped: statement raw={} is listed twice in the body roots",
-                stmt.raw()
+                seen.insert(r),
+                "TIR body is not tree-shaped: instruction raw={} has more than one parent",
+                r.raw()
             );
-            walk(self, stmt, &mut seen);
+            self.walk_operands(r, &mut |_parent, child, _kind| {
+                stack.push(child);
+            });
         }
     }
 
@@ -1238,12 +1236,21 @@ impl Tir {
     /// [`Tir::walk_operands`] is shallow; this helper drives the
     /// recursion.
     pub fn collect_reachable(&self, r: TirRef, set: &mut HashSet<TirRef>) {
+        // Iterative worklist walk — operand links can nest arbitrarily
+        // deep (a long operator chain), which the old recursion could
+        // not survive. The stack stays inline for shallow subtrees.
         if !set.insert(r) {
             return;
         }
-        self.walk_operands(r, &mut |_parent, child, _kind| {
-            self.collect_reachable(child, set);
-        });
+        let mut stack = ChainSpine::new();
+        stack.push(r);
+        while let Some(x) = stack.pop() {
+            self.walk_operands(x, &mut |_parent, child, _kind| {
+                if set.insert(child) {
+                    stack.push(child);
+                }
+            });
+        }
     }
 
     /// Return `true` iff `target` is reachable from `root` — `target`
@@ -1254,16 +1261,31 @@ impl Tir {
     /// (e.g. `collect_jump_path`'s arm selection) where the set itself
     /// is never needed.
     pub fn contains_reachable(&self, root: TirRef, target: TirRef) -> bool {
+        // Iterative DFS with an explicit stack: the operand graph can
+        // nest arbitrarily deep (a long operator chain), which the old
+        // recursion could not survive. No visited set — like the old
+        // recursion, this trusts the tree-shape invariant (a debug
+        // build asserts it in `validate_tree_shape`); the short-circuit
+        // exit keeps this probe allocation-free for shallow subtrees.
         if root == target {
             return true;
         }
-        let mut found = false;
-        self.walk_operands(root, &mut |_parent, child, _kind| {
-            if !found && self.contains_reachable(child, target) {
-                found = true;
+        let mut stack = ChainSpine::new();
+        stack.push(root);
+        while let Some(x) = stack.pop() {
+            let mut found = false;
+            self.walk_operands(x, &mut |_parent, child, _kind| {
+                if child == target {
+                    found = true;
+                } else {
+                    stack.push(child);
+                }
+            });
+            if found {
+                return true;
             }
-        });
-        found
+        }
+        false
     }
 
     /// Return `true` iff every execution path through `stmts` returns

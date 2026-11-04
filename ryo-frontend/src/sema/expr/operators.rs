@@ -3,7 +3,7 @@
 //! or diagnostic, and returns the TirRef. Split out of `expr/mod.rs` to
 //! stay under the file-length limit.
 
-use super::{ConstInt, FuncCtx, Scope, Sema, analyze_expr, const_eval_int};
+use super::{ConstInt, FuncCtx, Scope, Sema, analyze_expr};
 use crate::sema::errors;
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::tir::{TirRef, TirTag};
@@ -15,8 +15,8 @@ pub(super) fn analyze_unary_operator(
     fcx: &mut FuncCtx,
     scope: &Scope,
     tag: InstTag,
-    r: InstRef,
     operand: InstRef,
+    operand_const: ConstInt,
     span: Span,
 ) -> TirRef {
     let sub = analyze_expr(sema, fcx, scope, operand);
@@ -34,7 +34,16 @@ pub(super) fn analyze_unary_operator(
     match tag {
         InstTag::Neg => match sema.pool.kind(sub_ty) {
             TypeKind::Int => {
-                if matches!(const_eval_int(sema.uir, r), ConstInt::Overflow) {
+                // The caller passes the constant-folded operand (chain
+                // walkers fold incrementally); the node's own constant
+                // is its negation.
+                let node_const = match operand_const {
+                    ConstInt::Value(v) => {
+                        v.checked_neg().map_or(ConstInt::Overflow, ConstInt::Value)
+                    }
+                    other => other,
+                };
+                if matches!(node_const, ConstInt::Overflow) {
                     sema.sink.emit(Diag::error(
                         span,
                         DiagCode::ConstEvalFailure,
