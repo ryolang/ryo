@@ -312,6 +312,15 @@ def cmd_file(_entries, issues_file, args):
             text = head + "\n\n" + entry + "\n---\n\n" + tail
         else:
             text = text.rstrip("\n") + "\n\n---\n\n" + entry
+        # Keep the on-disk watermark in step with the filing: an entry that is
+        # filed and resolved before its first commit has no git history, so a
+        # stale marker could silently reuse its id. The watermark must always
+        # record the highest number ever used, not just the highest deleted.
+        marker = f"<!-- issue-id high-water: {int(issue_id[2:])} -->"
+        if HIGH_WATER_RE.search(text):
+            text = HIGH_WATER_RE.sub(marker, text)
+        else:
+            text = text.rstrip("\n") + "\n\n" + marker + "\n"
         write_atomic(issues_file, text)
     line_no = text[:text.find(f"### {issue_id}")].count("\n") + 1
     print(f"filed {issue_id} at {issues_file}:{line_no}")
