@@ -814,6 +814,71 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-260 — Compiler aborts (SIGABRT) when a multi-span diagnostic is piped to an early-closing reader
+
+**Severity:** Correctness / Hygiene
+**Area:** driver-cli
+
+**Files:** unknown (diagnostic rendering path)
+
+**Summary:** Repro: any program whose diagnostic renders with multiple spans plus a note (e.g. E0020 use-of-moved with 'value moved here' help) run as 'ryo run f.ryo | head -3' exits 134 (SIGABRT); the same input exits 1 cleanly when stdout/stderr are drained or a terminal. Single-span diagnostics (E0129) pipe fine. Likely a broken-pipe (EPIPE) write panicking in the diagnostic renderer instead of degrading. Found during structure-aware fuzzing (2026-11-04, commit e82f503). Fuzz harnesses must drain compiler output streams to avoid triggering it.
+
+**Resolution:** Decide the intended behavior for EPIPE on diagnostic output (ignore/SIGPIPE-default vs clean exit 1) and make the renderer tolerate closed pipes; add a regression test that pipes a multi-span diagnostic to a closing reader.
+
+---
+
+### I-261 — Parser stack overflow (SIGABRT) on long left-associative operator chains
+
+**Severity:** Correctness / Hygiene
+**Area:** frontend-parser
+
+**Files:** ryo-frontend/src/parser (expression parsing); repro at bug_reports/bug_parser_stack_overflow_expr_chain.ryo
+
+**Summary:** A binary expression chain of ~7000 terms (e.g. print(1+1+1+... with 7000 ones) aborts the compiler with 'thread has overflowed its stack' (exit 134) in both `ryo run` and `ryo build`; `ryo parse` alone reproduces, so the recursion is in the parser. 6000 terms compile fine on the dev machine — threshold between 6000 and 7000. Parenthesized nesting to 10000 deep is fine; only left-assoc operator chains overflow. Found by the grammar/recovery fuzz campaign 2026-11-04 (commit e82f503).
+
+**Resolution:** Rewrite the binary-expression parser to loop on same-precedence operators (explicit left-fold) instead of recursing per operand, or run parsing on a growable stack; add a regression test with a 100k-term chain. Do not fix mid-campaign; campaign artifact: /tmp/ryo-gramrec-fuzz/repros/.
+
+---
+
+### I-262 — Compiler process leaks chumsky recursive parser allocations on every parse (found via Valgrind)
+
+**Severity:** Correctness / Hygiene
+**Area:** frontend-parser
+
+**Files:** ryo-frontend/src/grammar/statements.rs, ryo-frontend/src/grammar/destructure.rs (chumsky Recursive::declare), ryo-frontend/src/parse.rs
+
+**Summary:** Running `valgrind --leak-check=full ryo run <any-file.ryo>` on Linux (arm64) reports ~2.4 KB definitely lost in 14 blocks per invocation. The leak records point at chumsky recursive::Indirect Rc allocations created by Recursive::declare in destructure_stmt_parser / body_statement_parser / program_parser — the per-parse parser combinator tree is never fully dropped (Rc cycle between recursive declarations). Deterministic, small, and unrelated to generated-code memory behavior, but it accumulates per parse in any long-lived process (future REPL/LSP/watch mode). Found by the 2026-11-04 CI-grade Valgrind fuzz pass (commit e82f503); the repo test suite only valgrinds compiled programs, never the compiler process, so CI does not see it.
+
+**Resolution:** Break the Rc cycle (chumsky docs suggest avoid cycles via once_cell/lazy or explicit teardown; e.g. build the recursive parsers once per thread instead of per parse, or switch recursive::Indirect to a Weak back-reference). Add a compiler-process valgrind check (valgrind on `ryo run examples/hello.ryo` asserting no definitely-lost blocks) to the Linux test script.
+
+---
+
+### I-263 — Compile time is quadratic in per-function statement count (~156s for 40k statements)
+
+**Severity:** Correctness / Hygiene
+**Area:** ownership
+
+**Files:** ryo-frontend/src/sema, ryo-frontend/src/ownership (per-statement passes suspect); probe files /tmp/ryo-size-fuzz/probe/chained_*.ryo
+
+**Summary:** A single function with N simple statements takes O(N^2) total compile time: chained bindings (x_i = x_{i-1} + i) measure 10k=10.7s, 20k=40.7s, 40k=156.7s (4x per doubling). Independent bindings are similar (100k statements = 391s). Parsing is NOT the bottleneck — 'ryo parse' on the 100k-statement file takes 1.2s, so the quadratic lives in post-parse stages (sema and/or ownership/dead-store dataflow rescanning per-statement state). Long literals (10MB string: 0.6s), many functions (10k: 4.2s), big structs (5000 fields: 0.9s) are all fine. The same quadratic shows with string-literal bindings: 5000 distinct str bindings in one function take ~29s, 20000 exceed 120s. Found by compiler-input size torture fuzzing 2026-11-04 (commit e82f503).
+
+**Resolution:** Profile a 40k-statement chained build to find the per-statement O(N) rescan (suspects: binding-state maps copied or linearly scanned per statement in ownership/dead-store; sema scope lookups). Make per-statement work O(1) amortized. Add a scaling regression test (compile-time budget for 20k statements) to CI.
+
+---
+
+### I-264 — Stack overflow (SIGABRT) on bytes literals with many escape sequences
+
+**Severity:** Correctness / Hygiene
+**Area:** frontend-lexer
+
+**Files:** ryo-frontend/src/lexer (bytes literal escape decoding); repro at bug_reports/bug_bytes_escape_stack_overflow.ryo
+
+**Summary:** A bytes literal containing ~30000 hex escape sequences (b"\x61\x61...") aborts the compiler with 'thread has overflowed its stack' in both 'ryo parse' and 'ryo run/build'; 20000 escapes parse fine, threshold between 20000 and 30000 on the dev machine. Raw ASCII bytes literals of 100KB are fine, and 10MB string literals are fine -- the recursion is per-escape in the bytes-literal decoding path. Sibling of I-261 (operator-chain parser overflow) but a different code path. Found by compiler-input size torture 2026-11-04 (commit e82f503).
+
+**Resolution:** Make escape decoding iterative (or chunked) instead of recursive per escape; add a regression test with a 100k-escape bytes literal. Repro: bug_reports/bug_bytes_escape_stack_overflow.ryo (30000 escapes).
+
+---
+
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
