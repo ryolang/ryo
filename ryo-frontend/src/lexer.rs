@@ -452,7 +452,8 @@ pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Toke
     out
 }
 
-/// Worst-case Logos DFA stack growth per input byte.
+/// Worst-case Logos DFA stack growth per literal-body byte, across all
+/// escape kinds.
 ///
 /// Logos compiles the `\\.` alternative of the string/bytes literal
 /// regexes into DFA state functions that hand off with plain
@@ -460,29 +461,76 @@ pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Toke
 /// debug builds every escape sequence in a literal body parks its
 /// state-function frames until the token's match completes — measured
 /// ~1.5 KB per escape, overflowing a 32 MiB stack between 20k and 25k
-/// `\xNN` escapes. An all-escape body is 4 source bytes per
-/// escape, so ~370 B of stack per input byte worst-case; 512 leaves
-/// headroom for fatter debug frames on other targets. Release builds
-/// do tail-call and stay flat, and the oversized reserve is lazily
-/// committed, so sizing for debug costs nothing there.
-const DFA_STACK_PER_BYTE: usize = 512;
+/// `\xNN` escapes. The two-byte escapes (`\n`, `\t`, `\r`, `\\`, `\"`,
+/// `\0`) park roughly twice the frames per source byte of `\xNN`
+/// (~740 B/byte); 1024 covers both with headroom for fatter debug
+/// frames on other targets. Release builds do tail-call and stay flat,
+/// and the oversized reserve is lazily committed, so sizing for debug
+/// costs nothing there.
+const DFA_STACK_PER_BYTE: usize = 1024;
 
-/// Run the raw-token collection inline while its worst-case DFA depth
-/// fits the 2 MiB default stack of a spawned thread (the CLI worker
-/// sets 32 MiB explicitly; test threads get the 2 MiB std default), so
-/// typical sources pay no spawn cost. Inputs beyond ~4 KiB take the
-/// input-sized-thread path.
+/// Run the raw-token collection inline while the worst-case DFA depth
+/// of the input's LONGEST literal fits the 2 MiB default stack of a
+/// spawned thread (the CLI worker sets 32 MiB explicitly; test threads
+/// get the 2 MiB std default), so typical sources pay no spawn cost.
+/// Only literals longer than ~2 KiB take the sized-thread path.
 const DFA_INLINE_BUDGET: usize = 2 * 1024 * 1024;
 
 /// Upper bound on the lexing-thread stack reserve. The reserve is
 /// lazily committed, but hosts without overcommit can refuse absurd
-/// reservations, and no single literal can outgrow the whole input's
-/// worth of frames — 1 GiB covers more than two million escapes.
+/// reservations, and no literal can outgrow the whole input's worth of
+/// frames — 1 GiB covers more than a million escapes of either kind.
 const DFA_STACK_MAX: usize = 1024 * 1024 * 1024;
 
-/// Worst-case DFA stack the input can need, clamped to a spawnable size.
-fn dfa_stack_size(input_len: usize) -> usize {
-    input_len
+/// Length of the longest string/bytes literal body in the input. The
+/// DFA recursion depth a token can accumulate is driven by its escape
+/// count, and escapes live only inside literal bodies, so the longest
+/// body — not the file size — sets the stack the lexer can need. The
+/// scan overestimates on purpose: a quote inside a comment extends the
+/// "literal" (the oversized stack is harmless), and it never
+/// underestimates a real literal. Quotes are rare in typical code, so
+/// the `find('"')` calls (memchr-accelerated) keep the pre-pass cheap
+/// next to the lex itself.
+fn longest_literal_body(input: &str) -> usize {
+    let mut longest = 0;
+    let mut from = 0;
+    while let Some(open_rel) = input[from..].find('"') {
+        let open = from + open_rel;
+        let body_start = open + 1;
+        // Locate the closing quote, skipping escaped characters. A quote
+        // is real only when preceded by an even run of backslashes.
+        let mut close = None;
+        let mut at = body_start;
+        while let Some(rel) = input[at..].find('"') {
+            let candidate = at + rel;
+            let mut bs = candidate;
+            while bs > body_start && input.as_bytes()[bs - 1] == b'\\' {
+                bs -= 1;
+            }
+            if (candidate - bs) % 2 == 0 {
+                close = Some(candidate);
+                break;
+            }
+            at = candidate + 1;
+        }
+        match close {
+            Some(c) => {
+                longest = longest.max(c - body_start);
+                from = c + 1;
+            }
+            None => {
+                longest = longest.max(input.len() - body_start);
+                break;
+            }
+        }
+    }
+    longest
+}
+
+/// Worst-case DFA stack the longest literal can need, clamped to a
+/// spawnable size.
+fn dfa_stack_size(longest_body: usize) -> usize {
+    longest_body
         .saturating_mul(DFA_STACK_PER_BYTE)
         .clamp(DFA_INLINE_BUDGET, DFA_STACK_MAX)
 }
@@ -544,7 +592,8 @@ fn collect_raw_tokens<'a>(input: &'a str, sink: &mut DiagSink) -> Vec<(RawToken<
         );
         raw_tokens
     };
-    if input.len().saturating_mul(DFA_STACK_PER_BYTE) <= DFA_INLINE_BUDGET {
+    let longest_body = longest_literal_body(input);
+    if longest_body.saturating_mul(DFA_STACK_PER_BYTE) <= DFA_INLINE_BUDGET {
         return collect(sink);
     }
     enum Outcome<'a> {
@@ -555,7 +604,7 @@ fn collect_raw_tokens<'a>(input: &'a str, sink: &mut DiagSink) -> Vec<(RawToken<
     // spawn is reported out and the fallback lexes on the caller's stack
     // after the scope ends.
     let outcome = std::thread::scope(|scope| {
-        match spawn_sized(scope, dfa_stack_size(input.len()), || collect(sink)) {
+        match spawn_sized(scope, dfa_stack_size(longest_body), || collect(sink)) {
             Ok(handle) => Outcome::Tokens(
                 handle
                     .join()
@@ -1571,12 +1620,39 @@ mod tests {
 
     #[test]
     fn dfa_stack_size_is_clamped() {
-        // Small inputs stay at the inline budget; absurd inputs clamp to
+        // Small bodies stay at the inline budget; absurd bodies clamp to
         // the spawnable maximum instead of requesting a stack proportional
-        // to the whole file (hosts without overcommit can refuse that).
+        // to the literal (hosts without overcommit can refuse that).
         assert_eq!(dfa_stack_size(0), DFA_INLINE_BUDGET);
         assert_eq!(dfa_stack_size(100), DFA_INLINE_BUDGET);
         assert_eq!(dfa_stack_size(usize::MAX), DFA_STACK_MAX);
+    }
+
+    #[test]
+    fn longest_literal_body_finds_the_widest_body() {
+        assert_eq!(longest_literal_body(""), 0);
+        assert_eq!(longest_literal_body("print(1)"), 0);
+        assert_eq!(longest_literal_body(r#"s = "abc""#), 3);
+        assert_eq!(longest_literal_body(r#"b = b"a\x00b""#), 6);
+        // An escaped quote does not end the body early.
+        assert_eq!(longest_literal_body(r#"s = "a\"b" + "xy""#), 4);
+        // Ordinary code around and between literals is not counted.
+        let code = "fn main():\n\ta = \"short\"\n\tprint(a)\n\tb = b\"\\x61\\x62\"\n\tprint(b)\n";
+        assert_eq!(longest_literal_body(code), 8);
+    }
+
+    #[test]
+    fn string_literal_with_many_short_escapes_does_not_overflow_stack() {
+        // The two-byte escapes (\n et al.) park ~2x the DFA frames per
+        // source byte of \xNN; 100k of them must still lex.
+        let mut src = String::from("s = \"");
+        src.push_str(&"\\n".repeat(100_000));
+        src.push('"');
+        let (toks, pool) = lex_strings(&src);
+        match toks[2] {
+            Token::StrLit(id) => assert_eq!(pool.str(id).len(), 100_000),
+            ref t => panic!("expected StrLit at index 2, got {:?}", t),
+        }
     }
 
     #[test]
