@@ -845,7 +845,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Severity:** Correctness / Hygiene
 **Area:** ownership
 
-**Files:** ryo-frontend/src/sema, ryo-frontend/src/ownership (per-statement passes suspect); probe files /tmp/ryo-size-fuzz/probe/chained_*.ryo
+**Files:** ryo-frontend/src/sema, ryo-frontend/src/ownership (per-statement passes suspect). Repro: one function with N chained bindings `x_i = x_{i-1} + i` (measured at 10k/20k/40k).
 
 **Summary:** A single function with N simple statements takes O(N^2) total compile time: chained bindings (x_i = x_{i-1} + i) measure 10k=10.7s, 20k=40.7s, 40k=156.7s (4x per doubling). Independent bindings are similar (100k statements = 391s). Parsing is NOT the bottleneck — 'ryo parse' on the 100k-statement file takes 1.2s, so the quadratic lives in post-parse stages (sema and/or ownership/dead-store dataflow rescanning per-statement state). Long literals (10MB string: 0.6s), many functions (10k: 4.2s), big structs (5000 fields: 0.9s) are all fine. The same quadratic shows with string-literal bindings: 5000 distinct str bindings in one function take ~29s, 20000 exceed 120s. Found by compiler-input size torture fuzzing 2026-11-04 (commit e82f503).
 
@@ -860,9 +860,9 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Files:** examples/oracle.ryo; ryo-frontend/src/ownership/cleanup_validation.rs
 
-**Summary:** 'ryo run examples/oracle.ryo' (a committed example) aborts with SIGABRT: thread panicked at ryo-frontend/src/ownership/cleanup_validation.rs:1309 'path coverage: place union 21 (Temp producer TirRef(53) + Local decl TirRef(54)) established at FirePoint { block 9, ordinal 15 } has a path to an exit or a replacement write with no release or transfer of the generation — a leak'. Reproduces identically on eaf2f9b (pre-existing, unrelated to the deep-chain stack-overflow work fixed on this branch) with and without CLI args/stdin. Debug-build assert (cleanup validation); release behavior unverified.
+**Summary:** 'ryo run examples/oracle.ryo' (a committed example) aborts with SIGABRT: thread panicked at ryo-frontend/src/ownership/cleanup_validation.rs:1309 'path coverage: place union 21 (Temp producer TirRef(53) + Local decl TirRef(54)) established at FirePoint { block 9, ordinal 15 } has a path to an exit or a replacement write with no release or transfer of the generation — a leak'. Reproduces identically on eaf2f9b (pre-existing, unrelated to the deep operator-chain stack-overflow fix) with and without CLI args/stdin. Debug-build assert (cleanup validation); release behavior unverified.
 
-**Resolution:** Investigate the leak path for the io_read_line/env temp in oracle.ryo; the union is established at block 9 ordinal 15 and never released on some exit path. Not fixed — found while verifying the deep-chain stack-overflow fix on branch fix/fuzz-findings-i260-i264.
+**Resolution:** Investigate the leak path for the io_read_line/env temp in oracle.ryo; the union is established at block 9 ordinal 15 and never released on some exit path. Found while verifying the deep operator-chain stack-overflow fix.
 
 ---
 

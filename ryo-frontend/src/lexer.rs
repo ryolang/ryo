@@ -460,7 +460,7 @@ pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Toke
 /// debug builds every escape sequence in a literal body parks its
 /// state-function frames until the token's match completes — measured
 /// ~1.5 KB per escape, overflowing a 32 MiB stack between 20k and 25k
-/// `\xNN` escapes (I-264). An all-escape body is 4 source bytes per
+/// `\xNN` escapes. An all-escape body is 4 source bytes per
 /// escape, so ~370 B of stack per input byte worst-case; 512 leaves
 /// headroom for fatter debug frames on other targets. Release builds
 /// do tail-call and stay flat, and the oversized reserve is lazily
@@ -472,6 +472,36 @@ const DFA_STACK_PER_BYTE: usize = 512;
 /// and the CLI worker included), so typical sources pay no spawn cost.
 /// Only fuzz-scale inputs beyond ~16 KiB take the thread path.
 const DFA_INLINE_BUDGET: usize = 8 * 1024 * 1024;
+
+/// Upper bound on the lexing-thread stack reserve. The reserve is
+/// lazily committed, but hosts without overcommit can refuse absurd
+/// reservations, and no single literal can outgrow the whole input's
+/// worth of frames — 1 GiB covers more than two million escapes.
+const DFA_STACK_MAX: usize = 1024 * 1024 * 1024;
+
+/// Worst-case DFA stack the input can need, clamped to a spawnable size.
+fn dfa_stack_size(input_len: usize) -> usize {
+    input_len
+        .saturating_mul(DFA_STACK_PER_BYTE)
+        .clamp(DFA_INLINE_BUDGET, DFA_STACK_MAX)
+}
+
+/// Spawn `f` on a scoped thread with the given stack. Extracted so the
+/// closure's borrow of its captures ends with the call — the caller's
+/// fallback path needs them back when the spawn is refused.
+fn spawn_sized<'scope, 'env, F, T>(
+    scope: &'scope std::thread::Scope<'scope, 'env>,
+    stack_size: usize,
+    f: F,
+) -> std::io::Result<std::thread::ScopedJoinHandle<'scope, T>>
+where
+    F: FnOnce() -> T + Send + 'env,
+    T: Send + 'env,
+{
+    std::thread::Builder::new()
+        .stack_size(stack_size)
+        .spawn_scoped(scope, f)
+}
 
 /// Drive `RawToken::lexer` over the input, mapping logos misses to
 /// `RawToken::Error` plus an `InvalidCharacter` diagnostic. Split out
@@ -516,19 +546,32 @@ fn collect_raw_tokens<'a>(input: &'a str, sink: &mut DiagSink) -> Vec<(RawToken<
     if input.len().saturating_mul(DFA_STACK_PER_BYTE) <= DFA_INLINE_BUDGET {
         return collect(sink);
     }
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .stack_size(
-                input
-                    .len()
-                    .saturating_mul(DFA_STACK_PER_BYTE)
-                    .max(DFA_INLINE_BUDGET),
-            )
-            .spawn_scoped(scope, || collect(sink))
-            .expect("failed to spawn raw-token lexing thread")
-            .join()
-            .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
-    })
+    enum Outcome<'a> {
+        Tokens(Vec<(RawToken<'a>, Span)>),
+        SpawnRefused,
+    }
+    // The scoped thread borrows `sink` for the whole scope, so a refused
+    // spawn is reported out and the fallback lexes on the caller's stack
+    // after the scope ends.
+    let outcome = std::thread::scope(|scope| {
+        match spawn_sized(scope, dfa_stack_size(input.len()), || collect(sink)) {
+            Ok(handle) => Outcome::Tokens(
+                handle
+                    .join()
+                    .unwrap_or_else(|payload| std::panic::resume_unwind(payload)),
+            ),
+            Err(_) => Outcome::SpawnRefused,
+        }
+    });
+    match outcome {
+        Outcome::Tokens(tokens) => tokens,
+        // A host without overcommit can refuse the reservation (the
+        // stack is lazily committed, so this is the only realistic
+        // spawn failure). Correct for ordinary inputs; a pathological
+        // escape-heavy literal would have overflowed before this pass
+        // existed.
+        Outcome::SpawnRefused => collect(sink),
+    }
 }
 
 /// Decode standard escape sequences in a string/bytes-literal body.
@@ -1508,7 +1551,7 @@ mod tests {
 
     #[test]
     fn bytes_literal_with_many_escapes_does_not_overflow_stack() {
-        // I-264: the Logos DFA for literal bodies recurses per escape
+        // The Logos DFA for literal bodies recurses per escape
         // (~1.5 KB per escape in debug builds), so a bytes literal with
         // tens of thousands of `\xNN` escapes blows through any fixed
         // caller stack. 100k escapes must still decode.
@@ -1523,6 +1566,16 @@ mod tests {
             }
             ref t => panic!("expected BytesLit at index 2, got {:?}", t),
         }
+    }
+
+    #[test]
+    fn dfa_stack_size_is_clamped() {
+        // Small inputs stay at the inline budget; absurd inputs clamp to
+        // the spawnable maximum instead of requesting a stack proportional
+        // to the whole file (hosts without overcommit can refuse that).
+        assert_eq!(dfa_stack_size(0), DFA_INLINE_BUDGET);
+        assert_eq!(dfa_stack_size(100), DFA_INLINE_BUDGET);
+        assert_eq!(dfa_stack_size(usize::MAX), DFA_STACK_MAX);
     }
 
     #[test]
