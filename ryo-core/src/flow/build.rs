@@ -552,9 +552,10 @@ impl FlowBuilder<'_> {
     /// walks on an explicit task stack. `Enter` schedules a node's
     /// operands and an `Exit`; `Exit` pushes the step after its
     /// operands, preserving the exact post-order the recursion
-    /// produced. Boolean operands use continuation tasks to preserve
-    /// short-circuit blocks without returning to the recursive entrypoint.
-    /// Other control constructs manage their own sub-emissions.
+    /// produced. Boolean operands and diverging-call arguments use
+    /// continuation tasks to preserve control flow without returning to
+    /// the recursive entrypoint. Other control constructs manage their
+    /// own sub-emissions.
     fn emit_expr_machine(&mut self, r: TirRef) {
         enum Task {
             Enter(TirRef),
@@ -569,6 +570,7 @@ impl FlowBuilder<'_> {
                 expr: TirRef,
                 join: BlockId,
             },
+            AfterNeverArgs(TirRef),
         }
         // Task stack stays inline for statement-sized expressions; deep
         // operator chains spill to the heap.
@@ -615,12 +617,10 @@ impl FlowBuilder<'_> {
                         }
                         TirTag::Call if self.pool.is_never(inst.ty) => {
                             let view = self.tir.call_view(x);
-                            for arg in &view.args {
-                                self.emit_expr(arg);
+                            tasks.push(Task::AfterNeverArgs(x));
+                            for arg in view.args.iter().rev() {
+                                tasks.push(Task::Enter(arg));
                             }
-                            let next = self.new_block(true);
-                            self.set_term(self.cur, Terminator::Call { call: x, next }, Some(x));
-                            self.cur = next;
                         }
                         _ => {
                             // Hot shapes push their operands directly;
@@ -694,6 +694,11 @@ impl FlowBuilder<'_> {
                     self.close_region(self.cur, join);
                     self.cur = join;
                     self.push_step(expr, StepFacts::default());
+                }
+                Task::AfterNeverArgs(expr) => {
+                    let next = self.new_block(true);
+                    self.set_term(self.cur, Terminator::Call { call: expr, next }, Some(expr));
+                    self.cur = next;
                 }
             }
         }
