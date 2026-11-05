@@ -48,7 +48,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 13.7 — Literal Completeness ✅ COMPLETE](#milestone-137-literal-completeness) *(landed ad hoc 2026-10-22 — scientific notation, underscores, base prefixes, full escape set)*
 - [x] [Milestone 13.8 — Error Namespaces ✅ COMPLETE](#milestone-138-error-namespaces) *(landed after the namespace design; M16 may resume)*
 
-> **Sequencing note (2026-11; renumbered — completed milestones keep their numbers, incomplete ones were renumbered into schedule order):** The alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M13.8** — is complete, plus the ad-hoc **M13.7** (literal completeness) and **M13.8** (error namespaces). Next-up order is **M16 → M16.1 → M16.2 → M16.3 (spelling approved 2026-11-05 — conventional symbols, see spec_bitwise_operators.md) → M17 → M17.1 → M17.2 → M17.3 → M17.4 → M18 → M19**, the renumbered forms of the former M16/M16.1/M21/M17.1/M17.2/M17.3/M17.4/M17/M22/M23 — the renumbering records the 2026-11 reorder decision (arrays ahead of explicit sizes for structural payoff; methods directly before collections, their first consumer; bit operations on `int` between them, gated only on the operator-spelling ruling). M16 supplies optionals and migrates the M9.2 `io_read_line` placeholder directly to `IoError!?str` without a temporary EOF error variant. **M12.5, M12.6, and M13.5 stay deferred past the core cluster** and keep their old numbers (they are v0.2 work). M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"). **M12.5** (advanced pattern matching — nested patterns, guards, or-patterns, and the rest of M12's deferral register) is v0.2 work, not alpha-gating; the only pattern features alpha needs beyond M12 ship inside M13 (error-union match) and M16 (`?T`/`none` patterns) themselves.
+> **Sequencing note (2026-11; renumbered — completed milestones keep their numbers, incomplete ones were renumbered into schedule order):** The alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M13.8** — is complete, plus the ad-hoc **M13.7** (literal completeness) and **M13.8** (error namespaces). Next-up order is **M16 → M16.1 → M16.2 → M16.3 (spelling approved 2026-11-05 — conventional symbols, see spec_bitwise_operators.md) → M17 → M17.1 → M17.2 → M17.3 → M17.4 → M18 → M18.1 → M19**, the renumbered forms of the former M16/M16.1/M21/M17.1/M17.2/M17.3/M17.4/M17/M22/M23 — the renumbering records the 2026-11 reorder decision (arrays ahead of explicit sizes for structural payoff; methods directly before collections, their first consumer; bit operations on `int` between them, gated only on the operator-spelling ruling). M16 supplies optionals and migrates the M9.2 `io_read_line` placeholder directly to `IoError!?str` without a temporary EOF error variant. **M12.5, M12.6, and M13.5 stay deferred past the core cluster** and keep their old numbers (they are v0.2 work). M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"). **M12.5** (advanced pattern matching — nested patterns, guards, or-patterns, and the rest of M12's deferral register) is v0.2 work, not alpha-gating; the only pattern features alpha needs beyond M12 ship inside M13 (error-union match) and M16 (`?T`/`none` patterns) themselves.
 
 ### Phase 3: Type System & Memory Safety
 
@@ -62,6 +62,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [ ] [Milestone 17.3 — Interpolation Conversions & Debug Capture](#milestone-173-interpolation-conversions--debug-capture)
 - [ ] [Milestone 17.4 — Method Implementations](#milestone-174-method-implementations)
 - [ ] [Milestone 18 — Collections (List, Map)](#milestone-18-collections-list-map)
+- [ ] [Milestone 18.1 — Collections of User Enums (Compiler-Generic Builtins)](#milestone-181-collections-of-user-enums-compiler-generic-builtins)
 - [ ] [Milestone 19 — RAII & Drop (Compiler Intrinsic)](#milestone-19-raii--drop-compiler-intrinsic)
 
 ### Phase 4: Module System & Core Ecosystem
@@ -2342,7 +2343,51 @@ fn main():
 - **String iteration (sequencing, with spec §4.7):** `char` (§4.2, Unicode scalar value — Milestone 17.1) lands first; `.chars()` is a decoding iterator over it; `.char_count()` is the explicit-O(n) convenience — `.len()` stays byte length, so no linear scan hides behind constant-looking syntax. `s.chars().collect() -> list[char]` is the decode-once-then-index escape hatch (explicit allocation).
 - **String `for` shape:** `for (offset, c) in text.chars():` — each step yields the byte offset (aligned with slice bounds, for `text[start:i]`-style scanning) and the decoded `char` (for classification). No silent U+FFFD: `str` is valid UTF-8 by construction, so decoding is total — the Go ergonomics without the Go error-swallowing.
 - **Key hashability is a predicate, not a protocol — open decision, needed before non-primitive map keys (Draft — v0.2+).** Equality already models the pattern: memberwise `==` gated by the compile-time Eq-capable predicate (spec §4.5), computed recursively from the fields with no user-written code, compile error when a field isn't Eq-capable. Hashing should mirror it exactly: a value is hashable iff every field type is hashable, enforced at the call site as a compile error naming the offending field — never Python's runtime `unhashable type`. What actually needs deciding: Ryo values can mutate through `mut` bindings, including struct/tuple fields (M10 positional writes), which changes their content — and therefore their hash — after insertion. Candidates: **(a) snapshot at insertion** — the map owns its key (copy for Copy shapes, move/clone for owning ones), so mutating the original afterwards cannot corrupt the table; composes with the copy-on-write note above and with the ownership pass. **(b) transitive immutability as a capability** — only deeply immutable types are hashable, and a `mut` binding of a hashable type cannot be used as a key; hashability becomes a type property, at the cost of refusing legitimate read-only uses. Python never faced the question (tuples are deeply immutable, which is exactly why they are the dict-key idiom); Rust's `Hash`+`Eq` split answers it for interior mutability only. Pick before `map[K, V]` accepts struct/tuple keys — the hardcoded `map[str, int]` doesn't hit the question, but the decision shapes the map's ownership contract.
-- **Heterogeneous + dynamically-sized data = enum + collection — the intended idiom, and an open `any` question for Phase 5 (Draft — v0.2+).** "A sequence of different-typed elements of unknown length" decomposes into two needs the type system answers separately: heterogeneity via a sum type, unknown size via a collection. The intended idiom is `list[EnumType]` / `map[str, EnumType]`: the union is a declared enum (§4.8 — named payloads keep braces, positional payloads keep parens), the dynamism is `list[T]`/`map[K, V]`. This covers the closed-set use cases — ASTs (`Expr = Literal | Binary(op, lhs, rhs) | Call(...)`), JSON (`Json = Null | Bool(bool) | … | Arr(list[Json])` — recursion through the generic collection), document/UI models, event and message streams (the Go-inspired concurrency story answers this better than Go: an exhaustive `match` on a message enum instead of `interface{}` type assertions). It also mirrors the D11 ruling: one structural product type (anonymous structs) paired with one nominal sum type (enums). Sequencing: the full recursive pattern (`list[Json]`) needs generic collections — Phase 5 (Traits & Generics), since M18 hardcodes instantiations. What this idiom cannot express is an OPEN set (variants added by third parties later — plugin systems; truly schema-less external data). The escape hatch is type erasure — an `any`/top type carrying runtime type tags with checked downcasts — at the cost of RTTI, mandatory boxing, and lost static guarantees. Whether Ryo wants an `any` at all is a deliberate Phase 5 decision, not a default; schema-less JSON is often better served by schema-driven codegen. Deliberately rejected: structural union types (`list[A | B]`, the TypeScript approach — breaks the D11 symmetry and adds implicit-coercion surface) and growing/dynamic tuples (contradicts the static-shape ruling at the root of M10).
+- **Heterogeneous + dynamically-sized data = enum + collection — the intended idiom, and an open `any` question for Phase 5 (Draft — v0.2+).** "A sequence of different-typed elements of unknown length" decomposes into two needs the type system answers separately: heterogeneity via a sum type, unknown size via a collection. The intended idiom is `list[EnumType]` / `map[str, EnumType]`: the union is a declared enum (§4.8 — named payloads keep braces, positional payloads keep parens), the dynamism is `list[T]`/`map[K, V]`. This covers the closed-set use cases — ASTs (`Expr = Literal | Binary(op, lhs, rhs) | Call(...)`), JSON (`Json = Null | Bool(bool) | … | Arr(list[Json])` — recursion through the generic collection), document/UI models, event and message streams (the Go-inspired concurrency story answers this better than Go: an exhaustive `match` on a message enum instead of `interface{}` type assertions). It also mirrors the D11 ruling: one structural product type (anonymous structs) paired with one nominal sum type (enums). Sequencing: enum instantiations (`list[Json]`, `map[str, Expr]`) land in M18.1, directly after this milestone; user-struct instantiations (`list[Particle]`) and user-defined generics remain Phase 5 (Traits & Generics). What this idiom cannot express is an OPEN set (variants added by third parties later — plugin systems; truly schema-less external data). The escape hatch is type erasure — an `any`/top type carrying runtime type tags with checked downcasts — at the cost of RTTI, mandatory boxing, and lost static guarantees. Whether Ryo wants an `any` at all is a deliberate Phase 5 decision, not a default; schema-less JSON is often better served by schema-driven codegen. Deliberately rejected: structural union types (`list[A | B]`, the TypeScript approach — breaks the D11 symmetry and adds implicit-coercion surface) and growing/dynamic tuples (contradicts the static-shape ruling at the root of M10).
+
+### Milestone 18.1: Collections of User Enums (Compiler-Generic Builtins)
+
+**Status:** ⏳ Planned — v0.1.0/beta, directly after M18.
+
+**Goal:** Extend M18's hardcoded `list[int]`/`list[str]`/`map[str, int]` to accept **user enum types** as the element/value type — `list[Json]`, `map[str, Expr]`, `list[MessageType]` — via compiler-internal monomorphization of the builtin method set. User-defined generics (user-written `Box[T]`, trait bounds, generic enums like `enum Option[T]`) remain Phase 5; this milestone makes the language's documented "heterogeneous data = enum + collection" idiom (ASTs, JSON DOM, event/message streams) usable in v0.1. Design decision recorded 2026-11-05: the "compiler-generic builtins" rung — between M18's hardcoded instantiations and Phase-5 user generics.
+
+**Tasks:**
+
+- Sema: accept `list[E]` / `map[str, E]` where `E` is a user enum, substituting `E` into the builtin signatures; reject other user types (structs) with a targeted diagnostic naming this milestone's scope
+- Layout: element stride from tag + max-variant payload (M11 machinery); buffer sizing/indexing reuses the M18 runtime unchanged
+- Element drop: per-element destruction for variants holding owning payloads (`str`, nested enums) — generalizes M18's `list[str]` element-drop path
+- Clone: Copy-classified enums get buffer memcpy; owning enums clone element-wise, per the eager-clone model from M18's COW decision (COW itself stays Phase 5)
+- Map keys and values: hashability mirrors the synthesized-Eq predicate (M9.1); resolves the M18 hashability open decision for enums via snapshot-at-insertion
+- Recursive types: support an enum whose variant holds `list[the enum itself]` (`Json = Null | … | Arr(list[Json])`) — the pool-based type representation already permits the cycle
+- Tests: JSON DOM construction/traversal, AST interpretation with exhaustive `match`, event-stream dispatch, enum-keyed map, recursive-enum acceptance/rejection cases
+
+**Visible Progress:** JSON DOM, AST-interpreter, and event-stream programs compile in v0.1.
+
+**Example:**
+
+```ryo
+enum Message:
+	Quit
+	Text(str)
+	Count(int)
+
+fn main():
+	mut inbox = list[Message]()
+	inbox.append(Message.Text("hello"))
+	inbox.append(Message.Quit)
+	for m in inbox:
+		match m:
+			Message.Quit: print("bye")
+			Message.Text(s): print(s)
+			Message.Count(n): print(int_to_str(n))
+```
+
+**Implementation Notes:**
+
+- Mechanism is compiler monomorphization — Rust-style per-instantiation codegen of the small buffer-method set. No comptime evaluator, no user-facing generic syntax is added
+- Dependencies: M18 (buffer runtime, methods, element-drop machinery). M19 is **not** required — eager destruction already covers element teardown; the milestone lands freely before or after M19
+- Explicitly out of scope, so the sema diagnostic can point at it: user **structs** as element types (`list[Particle]`) — covered in v0.1 by the parallel-array/arena pattern or a separately scheduled hardcoded instantiation; user-defined generics, trait bounds, generic enums — Phase 5 (Traits & Generics)
+- Codegen growth is bounded: one method-set instantiation per (container kind × user enum)
 
 ### Milestone 19: RAII & Drop (Compiler Intrinsic)
 
@@ -3946,10 +3991,10 @@ This foundation enables building **synchronous applications** including CLI tool
 
 **Phase 1 (M1-M3.5):** ✅ COMPLETE (~2 months)
 **Phase 2 (M4-M13):** 15 milestones — incl. M8.1 (str+heap), M8.2 (&T), M8.3 (inout), M8.4 (strview), M13 (try/catch and inferred error unions), M13.7 (literal forms); excl. closures (v0.2) and M6 (now early-Phase-4) × 3 weeks avg = ~45 weeks (~11 months)
-**Phase 3 (M16 → M16.1 → M16.2 → M16.3 → M17 → M17.1 → M17.2 → M17.3 → M17.4 → M18 → M19):** 11 milestones — strings/borrows pulled forward to Phase 2; traits and closure capture deferred to v0.2 × 3 weeks avg = ~33 weeks (~8 months)
+**Phase 3 (M16 → M16.1 → M16.2 → M16.3 → M17 → M17.1 → M17.2 → M17.3 → M17.4 → M18 → M18.1 → M19):** 12 milestones — strings/borrows pulled forward to Phase 2; traits and closure capture deferred to v0.2 × 3 weeks avg = ~36 weeks (~9 months)
 **Phase 4 (M24-M27):** 6 milestones (includes M26.5 Distribution & Installer and M26.6 Cross-Compilation) × 4 weeks avg = ~24 weeks (~6 months)
 
-**Total Estimated Time:** 102 weeks (~25 months) from Phase 2 start to v0.1.0
+**Total Estimated Time:** 105 weeks (~26 months) from Phase 2 start to v0.1.0
 
 ### Development Approach
 
