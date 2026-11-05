@@ -41,14 +41,10 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 10 — Tuples ✅ COMPLETE](#milestone-10-tuples-tuple-sugar-over-anonymous-structs--complete)
 - [x] [Milestone 11 — Enums (Algebraic Data Types) ✅ COMPLETE](#milestone-11-enums-algebraic-data-types--complete)
 - [x] [Milestone 12 — Pattern Matching [alpha] ✅ COMPLETE](#milestone-12-pattern-matching-alpha--complete)
-- [ ] [Milestone 12.5 — Advanced Pattern Matching](#milestone-125-advanced-pattern-matching) *(deferred to v0.2 — post-alpha; holds everything M12 defers)*
-- [ ] [Milestone 12.6 — Match Ownership Completion](#milestone-126-match-ownership-completion) *(deferred to v0.2 — post-alpha; undefined enum/match ownership semantics)*
 - [x] [Milestone 13 — Error Types & Unions [alpha] ✅ COMPLETE](#milestone-13-error-types--unions-alpha--complete)
-- [ ] [Milestone 13.5 — Default Parameters & Named Arguments](#milestone-135-default-parameters--named-arguments) *(deferred — see sequencing note below)*
 - [x] [Milestone 13.7 — Literal Completeness ✅ COMPLETE](#milestone-137-literal-completeness) *(landed ad hoc 2026-10-22 — scientific notation, underscores, base prefixes, full escape set)*
 - [x] [Milestone 13.8 — Error Namespaces ✅ COMPLETE](#milestone-138-error-namespaces) *(landed after the namespace design; M16 may resume)*
 
-> **Sequencing note (2026-11; renumbered — completed milestones keep their numbers, incomplete ones were renumbered into schedule order):** The alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M13.8** — is complete, plus the ad-hoc **M13.7** (literal completeness) and **M13.8** (error namespaces). Next-up order is **M16 → M16.1 → M16.2 → M16.3 (spelling approved 2026-11-05 — conventional symbols, see spec_bitwise_operators.md) → M17 → M17.1 → M17.2 → M17.3 → M17.4 → M18 → M18.1 → M19**, the renumbered forms of the former M16/M16.1/M21/M17.1/M17.2/M17.3/M17.4/M17/M22/M23 — the renumbering records the 2026-11 reorder decision (arrays ahead of explicit sizes for structural payoff; methods directly before collections, their first consumer; bit operations on `int` between them, gated only on the operator-spelling ruling). M16 supplies optionals and migrates the M9.2 `io_read_line` placeholder directly to `IoError!?str` without a temporary EOF error variant. **M12.5, M12.6, and M13.5 stay deferred past the core cluster** and keep their old numbers (they are v0.2 work). M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"). **M12.5** (advanced pattern matching — nested patterns, guards, or-patterns, and the rest of M12's deferral register) is v0.2 work, not alpha-gating; the only pattern features alpha needs beyond M12 ship inside M13 (error-union match) and M16 (`?T`/`none` patterns) themselves.
 
 ### Phase 3: Type System & Memory Safety
 
@@ -68,16 +64,16 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 ### Phase 4: Module System & Core Ecosystem
 
 - [ ] [Milestone 6 — Module System (Implementation)](#milestone-6-module-system-implementation)
-- [ ] [Milestone 24 — Standard Library Core [alpha: partial]](#milestone-24-standard-library-core-alpha-partial)
-- [ ] [Milestone 25 — Panic & Debugging Support [alpha: partial]](#milestone-25-panic--debugging-support-alpha-partial)
-- [ ] [Milestone 26 — Testing Framework & Documentation](#milestone-26-testing-framework--documentation)
-- [ ] [Milestone 26.5 — Distribution & Installer [alpha: partial]](#milestone-265-distribution--installer-alpha-partial)
-- [ ] [Milestone 26.6 — Cross-Compilation (64-bit)](#milestone-266-cross-compilation-64-bit)
-- [ ] [Milestone 27 — Core Language Complete & v0.1.0 Prep](#milestone-27-core-language-complete--v010-prep)
+- [ ] [Milestone 20 — Standard Library Core [alpha: partial]](#milestone-20-standard-library-core-alpha-partial)
+- [ ] [Milestone 21 — Panic & Debugging Support [alpha: partial]](#milestone-21-panic--debugging-support-alpha-partial)
+- [ ] [Milestone 22 — Testing Framework & Documentation](#milestone-22-testing-framework--documentation)
+- [ ] [Milestone 22.5 — Distribution & Installer [alpha: partial]](#milestone-225-distribution--installer-alpha-partial)
+- [ ] [Milestone 22.6 — Cross-Compilation (64-bit)](#milestone-226-cross-compilation-64-bit)
+- [ ] [Milestone 23 — Core Language Complete & v0.1.0 Prep](#milestone-23-core-language-complete--v010-prep)
 
 ### Phase 5: Post-v0.1.0 Extensions (v0.2+)
 
-Deferred features tracked separately — see Phase 5 section for the full list (REPL/JIT, Concurrency Runtime, Closures, FFI, Traits & Generics, Error Return Traces, Advanced F-String Formatting, Stack Traces polish, Benchmarking & Doc Generation, Constrained/Distinct Types, Contracts, Copy Elision, Stdlib Allocation Optimizations, Cancellation Model, Named Parameters, LSP/Editor Tooling, etc.).
+Deferred features tracked separately — see Phase 5 section for the full list (REPL/JIT, Concurrency Runtime, Closures, FFI, Traits & Generics, Error Return Traces, Advanced F-String Formatting, Stack Traces polish, Benchmarking & Doc Generation, Constrained/Distinct Types, Contracts, Copy Elision, Stdlib Allocation Optimizations, Cancellation Model, Default Parameters & Named Arguments, LSP/Editor Tooling, etc.). The v0.2-deferred pattern-matching items — advanced pattern matching and match ownership completion (formerly M12.5/M12.6) — are detailed in the Phase 5 section.
 
 **From the final slicing & memory-model spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md` §14), the gap register (`docs/dev/ryo-missing-features-and-gaps.md`), and the view-materialization record (`docs/dev/ryo-view-materialization.md`):**
 
@@ -107,7 +103,7 @@ Deferred features tracked separately — see Phase 5 section for the full list (
 
 This roadmap outlines the planned development of the Ryo programming language compiler and runtime. Each milestone focuses on delivering specific, tangible capabilities while building toward a complete language implementation.
 
-**Development Timeline:** Each milestone is designed for approximately 2-4 weeks of development (assuming ~8 hours/week), but timelines should remain flexible to ensure quality over speed.
+**Development Timeline:** Each milestone is designed as an incremental deliverable — timelines stay flexible to ensure quality over speed.
 
 ## Guiding Principles
 
@@ -313,7 +309,7 @@ Full alpha definition, litmus test, non-goals, release tagging, and gating test 
 - String literals as compile-time constants only (no runtime heap allocation)
 - print() accepts only string literals (not variables)
 - No ownership semantics (deferred to Milestone 8.1)
-- Simple 3-5 day implementation vs full ownership (2-3 weeks)
+- Deliberately simpler than the full-ownership design (which deferred to Milestone 8.1 anyway)
 
 **Example:**
 
@@ -693,14 +689,14 @@ remainder = a % b     # 1
 - Sema rejects binding a `void` value to a name (`msg = print(...)` → `VoidValueInExpression`). Existing rules already cover `return <expr>` in void functions, void in arithmetic/equality operands, and void as a non-void argument.
 - Codegen treats `main` as a C-ABI `int main()` shim regardless of Ryo's view: when Ryo's `main` is void, the emitted Cranelift function still returns `int 0` (matches `zig cc` crt0 expectations and the JIT `fn() -> isize` trampoline).
 - Bare `return` inside a void function (incl. `main`) now lowers cleanly: in `main`, codegen returns `iconst 0` to satisfy the C ABI; in other void functions, it returns no value.
-- Tests updated: integration tests dropped exit-code-via-`return N` assertions (those return with the `exit(code)` builtin — originally planned for M24, re-planned to M9.2); they now verify compilation + `[Result] => 0`. New tests cover `fn main() -> int` rejected, `fn main(x: int)` rejected, void-binding rejected, void return-value rejected, bare `return` accepted, void function without explicit return accepted.
+- Tests updated: integration tests dropped exit-code-via-`return N` assertions (those return with the `exit(code)` builtin — originally planned for M20, re-planned to M9.2); they now verify compilation + `[Result] => 0`. New tests cover `fn main() -> int` rejected, `fn main(x: int)` rejected, void-binding rejected, void return-value rejected, bare `return` accepted, void function without explicit return accepted.
 - 158 unit tests + 41 integration tests passing; `cargo fmt` clean; `cargo clippy --all-targets` clean.
 
 **Visible Progress:** `print("hello")` is a plain top-level statement. `fn main():` is the canonical entry point. Explicit `fn main() -> int` is a clear compile error.
 
 **Deferred to later milestones (as planned):**
 
-- `exit(code)` builtin for non-zero exit codes — lands with stdlib core (M24). **Update (2026-09):** re-planned to M9.2 (basic CLI builtins).
+- `exit(code)` builtin for non-zero exit codes — lands with stdlib core (M20). **Update (2026-09):** re-planned to M9.2 (basic CLI builtins).
 - Conditional-branch lowering and `if/else` (M8b) — needed before non-trivial void-function control flow patterns can be expressed.
 - Loop control (M8c).
 
@@ -737,7 +733,7 @@ fn main():                  # no args, no return type (Go-style)
 **Implementation Notes:**
 
 - This milestone introduces **no new control flow** — the goal is to land the type-system and ABI changes in isolation so 8b's block-emission work has a clean baseline.
-- A future `exit(code: int)` builtin (M24, stdlib core) replaces the old `return <code>` pattern from `main`. **Update (2026-09):** re-planned to M9.2.
+- A future `exit(code: int)` builtin (M20, stdlib core) replaces the old `return <code>` pattern from `main`. **Update (2026-09):** re-planned to M9.2.
 - Dependencies: Milestone 4 (function lowering, return statements), Milestone 6.5 (bool/equality already done).
 
 ---
@@ -1000,7 +996,7 @@ fn main():
 - ✅ [M8.1b: Ownership pass + move tracking](../superpowers/plans/2026-06-03-milestone-8.1b-ownership-pass.md) (June 2026)
 - ✅ [M8.1c: ASAP destruction (Free insertion)](../superpowers/plans/2026-06-05-milestone-8.1c-asap-destruction.md) (June 2026)
 
-**Why this comes before M13.5 (and the rest of Phase 2):**
+**Why this comes before the named-arguments work (now Phase 5, formerly M13.5):**
 Every downstream milestone in Phase 2 (structs, tuples, enums, pattern matching, error types) uses `str` in its examples and signatures — `error NotFound(path: str)`, `Result.Error("...")`, struct fields with string names. Landing strings and the borrow checker here makes those milestones implementable as written, instead of forward-referencing features. It also means the move-tracking pass exists before structs and tuples, so their move semantics are checked from day one.
 
 **Tasks:**
@@ -1388,8 +1384,8 @@ fn main():
 - Default layout is **unspecified** — the compiler may reorder fields to minimize padding (source-invisible; field access is by name). `#[repr(C)]` opts into declaration-order C layout (added in Milestone 9.1, consumed by FFI in v0.2)
 - No default values for fields (all must be initialized)
 - No methods yet (added in Milestone 17.4)
-- **D11 (final spec §10):** struct literals use brace construction — `Point{x=1, y=2}` — per the Brace Law (braces group by name; construction is visibly distinct from calls). The named-argument grammar for *calls* still comes from Milestone 13.5; braces are no longer reserved exclusively for f-string interpolation
-- Dependencies: Milestone 4 (functions for passing structs). Struct literals use brace construction (D11) with their own grammar — they do **not** depend on Milestone 13.5's named-argument parsing, so the M13.5 deferral does not block this milestone.
+- **D11 (final spec §10):** struct literals use brace construction — `Point{x=1, y=2}` — per the Brace Law (braces group by name; construction is visibly distinct from calls). The named-argument grammar for *calls* still comes from the named-arguments work (Phase 5, formerly Milestone 13.5); braces are no longer reserved exclusively for f-string interpolation
+- Dependencies: Milestone 4 (functions for passing structs). Struct literals use brace construction (D11) with their own grammar — they do **not** depend on the named-argument parsing (Phase 5), so that deferral does not block this milestone.
 
 ### Milestone 9.1: Synthesized Eq & Debug for Structs ✅ COMPLETE
 
@@ -1399,7 +1395,7 @@ fn main():
 
 **Tasks:**
 
-- Parse one-off attributes on struct definitions: `#[derive(Eq)]`, `#[repr(C)]` (the general attribute system formalizes at Milestone 26)
+- Parse one-off attributes on struct definitions: `#[derive(Eq)]`, `#[repr(C)]` (the general attribute system formalizes at Milestone 22)
 - **Debug (always-on):** synthesize a debug string for every struct
   - Format mirrors the literal syntax: `Point{x=1.0, y=2.0}`, fields in declaration order
   - Recursive: nested structs render through their own Debug
@@ -1448,11 +1444,11 @@ fn main():
 
 | Interim (M9.2) | Final | Lands |
 |---|---|---|
-| `process_exit(code: int) -> never` | `process.exit(code: int) -> never` | M24 (modules) |
-| `io_eprint(s: str) -> void` | `io.eprint(s: str) -> void` | M24 |
+| `process_exit(code: int) -> never` | `process.exit(code: int) -> never` | M20 (modules) |
+| `io_eprint(s: str) -> void` | `io.eprint(s: str) -> void` | M20 |
 | `process_argc() -> int`, `process_argv(i: int) -> str` | `process.args() -> list[str]` | M18 |
 | `process_env(key: str) -> str` (empty = unset) | `process.env(key: str) -> ?str` (none = unset) | M16 |
-| `io_read_line() -> str` (empty = EOF) | `io.read_line() -> IoError!?str` (none = EOF) | M16; name at M24 |
+| `io_read_line() -> str` (empty = EOF) | `io.read_line() -> IoError!?str` (none = EOF) | M16; name at M20 |
 
 **Deprecation plan (documented, not built here):** when modules + `std.io` land, the intrinsics move into `std` as `process.*` / `io.*` with the final signatures; the `process_*` / `io_*` intrinsics remain as deprecated aliases that emit a warning for exactly one release, then are removed.
 
@@ -1696,63 +1692,9 @@ fn describe_color(color: Color) -> str:
 - Match is an **expression** (returns a value)
 - All arms must have same return type
 - Exhaustiveness checking at compile time (prevents missing cases)
-- Nested patterns, guards, or-patterns, float-literal patterns, nominal-struct patterns, borrow-bindings, and full structural exhaustiveness for anonymous-struct patterns are **deferred to Milestone 12.5** (v0.2, post-alpha) — see its section for the full deferral register; undefined match-ownership semantics (mutable `inout` binds, scrutinee reassignment, conditional-move merges, nested-place scrutinees) are **deferred to Milestone 12.6**
+- Nested patterns, guards, or-patterns, float-literal patterns, nominal-struct patterns, borrow-bindings, and full structural exhaustiveness for anonymous-struct patterns are **deferred to the advanced-pattern-matching work** (Phase 5, v0.2+, formerly Milestone 12.5) — see its section for the full deferral register; undefined match-ownership semantics (mutable `inout` binds, scrutinee reassignment, conditional-move merges, nested-place scrutinees) are **deferred to match-ownership completion** (Phase 5, formerly Milestone 12.6)
 - Scope boundary: M12 lands match-only — I-208 (lowercase type names), I-032 (expression-level `if`), and I-195 (disjoint field borrows, needs design sign-off) are triaged as immediate post-M12 follow-ups, not bundled
 - Dependencies: Milestone 11 (enums to match on)
-
-### Milestone 12.5: Advanced Pattern Matching
-
-**Goal:** Everything M12 deliberately deferred — the pattern features that make `match` fully ergonomic but that alpha (and M13/M16, which carry their own pattern needs) does not require.
-
-**Status:** ⏳ Deferred — v0.2, post-alpha. Not alpha-gating: the alpha litmus and M13's error handling need only M12's surface; matching over error unions ships inside M13, and `?T` matching ships inside M16 (both noted in their sections).
-
-**Deferral register (from the M12 design):**
-
-- **Nested patterns** — patterns inside variant payloads (`Some(Coords{x, y})`), literals inside payloads (`Some(0)`), anon patterns nested in variants
-- **Guards** — `User(age) if age >= 18:` (spec Future Work: "Advanced Pattern Matching")
-- **OR patterns** — `1 | 2 | 3:` arm alternatives
-- **Float literal patterns** — excluded from M12 over NaN/IEEE equality semantics; needs a defined story (exact-bit compare? IEEE `==`?) before parsing
-- **Bare irrefutable bind as a whole-arm pattern** — `v:` binding the entire scrutinee (M12 rejects this with a did-you-mean note)
-- **Nominal struct patterns** — `Point{x, y}:` destructure-by-name on named structs (needs a decision on how nominal patterns interact with the Brace Law)
-- **Full structural exhaustiveness for anon/tuple patterns** — cross-arm literal-field coverage (M12 always requires a `_:` arm for anonymous-struct scrutinees)
-- **Borrow-bindings in arms** — bind payload by immutable borrow when the scrutinee is borrowed (M12 emits `E0133` for non-`Copy` fields on borrowed scrutinees); requires reference/view codegen in arm prologues. Binding-mode inference semantics are tracked in M12.6
-- Further ideas (slice patterns, `@` bindings, range patterns) live in [proposals.md](proposals.md) "Pattern Matching Extensions" and fold in here if accepted
-
-**Dependencies:** Milestone 12 (the entire surface builds on its Match IR, exhaustiveness checker, and arm-binding machinery)
-
-**Target:** v0.2
-
-**Effort:** ~2-3 weeks (medium)
-
-**Visible Progress:** `match` gains the expressiveness of Rust/Swift pattern matching — deep destructuring in a single arm, guarded arms, compact alternative arms.
-
-### Milestone 12.6: Match Ownership Completion
-
-**Goal:** The ownership semantics M12's move-only core deliberately left undefined: mutable payload bindings, scrutinee liveness rules, and conditional-move merge behavior. Alpha survives without them (each case has a workaround — extract/move/reconstruct, or restructure the match); together they make `match` a complete ownership citizen.
-
-**Status:** ⏳ Deferred — v0.2, post-alpha. Not alpha-gating.
-
-**Items:**
-
-- **Mutable payload bindings (`inout` binds)** — `match opt: Some(inout v): v = f(v)` mutates the payload in place; the scrutinee must be a mutable place (`mut` binding, `inout` param, mutable field path). No surface syntax or semantics defined today; requires mutable-borrow arm prologues (the M8.3 `inout` idiom applied to bindings) plus a conflict rule (while `inout v` is live, no other access to the scrutinee in that arm). Anon/tuple `inout` fields follow the same rule.
-- **Scrutinee liveness & reassignment** — define and enforce: may an arm assign to the scrutinee variable (`match x: _: x = new()`)? Adopt the Rust-shaped rule — legal when no arm borrows from or moves through the scrutinee, `E0033`-family error otherwise — and extend the ownership pass to model it.
-- **Conditional move + reinitialization across arms** — `match opt: Some(v): opt = None` with `opt` used after the match: moved in one arm, re-initialized on every path after the move → valid at the merge. M12's union merge conservatively reports "moved"; this pins the finer lattice (re-init resets per-arm state; merge joins states) with tests. Until then the conservative error is the specified behavior.
-- **Nested-place scrutinees & enum-in-aggregate moves** — `match wrapper.inner:` (partial moves out of a nested place's payload, interaction with the outer owner's remaining-field drops) and moving enums out of struct fields / containers. Requires place-expression scrutinee ownership beyond simple variables; today only variable (and simple owned-temporary) scrutinees are well-defined.
-- **M12 ownership-review carry-overs** — eight leaks/diagnostics residuals deferred from the M12 implementation review: (1) a never-read by-move bind in a `continue`-ending arm can leak (narrow trigger); (2) `collect_jump_path` sibling-arm over-approximation on returns-in-arms leaks (needs core-TIR headroom); (3) a non-`Var` moved scrutinee reports use-after-move twice; (4) copy-bind shadowing leaks (same convention as the M10 destructuring bind — one entry covers both); (5) `continue`-ending arms and match-inside-loop interplay lack committed tests (break-in-arm coverage landed in the M12 review fix wave: ownership unit tests + ASan/Valgrind sanitizer mirrors); (6) four ownership walkers have no `Match` arm at all — `outermost_branch_of` and `enclosing_if_main_cond` (loops.rs), `collect_bound_call_sites` (frees.rs), and the `is_exit_anchor` predicate (mod.rs) — so they miss bare matches, not just `ExprStmt`-wrapped ones; each needs its own design + tests; (7) a `break` inside a cond/bounds-position match arm (`while match ...:` / `for i in match ...`) gets no loop-exit Frees — the loop-exit walk's operand descent is skipped at loop statements, where it would run against the stale outer loop context (exotic shape; matches in body/statement positions are covered); (8) `branch_may_not_return` (loops.rs) has a `Match` arm but no operand descent (pre-existing; backstopped by the return epilogue).
-- **Aggregate match value arms** — shipped with M12: each non-`never` value arm's aggregate result is consumed into the match inst in `analyze_match` (mirror `analyze_var_decl`'s `consume_for_assignment` + `rebind_to_init`), so the ownership pass stops scheduling drops that alias the result slot; the match inst is the single owner the result's consumers move on. The compile-time rejections that preceded the lift — codegen's owned-producer guard (with its `free_would_emit` elision-predicate duplication of `emit_frees`) and the E0139 by-move-payload check — were deleted with it. The borrowed-result family stays rejected (E0138, no scheduled drop exists for a borrowed owner); the `match_discarded_value` sanitizer fixture remains structurally leak-insensitive (static-literal arms), with heap-carrying coverage in the arm-result transfer tests.
-- **View-typed match results** — every value arm agreeing on a view type passes the E0134 join, but no merge shape exists for a view result (ownership/liveness of a projection across arms needs design); sema rejects the shape at compile time (E0137) instead of miscompiling through `eval_inst_view`. Lift together with the (now shipped) aggregate arm-result consume: an arm result consumed into the match is an owned value like any other, and view results can then merge through the same slot machinery.
-
-**Cross-references (not claimed here):**
-
-- Immutable borrow-bindings / match ergonomics — pattern surface in M12.5; binding-mode inference semantics land together with or just before this milestone's items
-- `match self:` on `move self` / `inout self` — M17.4 (Method Implementations) defines the self parameter modes; match rides them
-- Copy elision through the match merge block — tracked in [copy_elision.md](copy_elision.md) (P1 specialization for pattern matching)
-
-**Dependencies:** Milestone 12 (match core), Milestone 8.3 (`inout`, shipped); pairs naturally with M12.5
-
-**Target:** v0.2
-
-**Effort:** ~2 weeks (medium)
 
 ### Milestone 13: Error Types & Unions [alpha] ✅ COMPLETE
 
@@ -1805,106 +1747,10 @@ fn main():
 - Raw unions may be bound without unwrapping. `try` takes the immediate unary/postfix expression, and `catch` applies to the immediately preceding postfix expression.
 - Empty inferred sets are valid; explicit empty-set syntax is not. Recursive call-graph components containing `!T` are rejected, including mixed explicit/inferred cycles.
 - `.message() -> str` returns a fresh owned string. The user-facing `trait` keyword remains v0.2/v0.3 work (see Phase 5: Traits & Generics).
-- Dependencies: Milestone 11 (enums), Milestone 12 (pattern matching for handling). M12.5/M12.6 deferrals remain unchanged.
+- Dependencies: Milestone 11 (enums), Milestone 12 (pattern matching for handling). The M12.5/M12.6 deferrals (now Phase 5) remain unchanged.
 - The M8.4.2 interim is replaced: invalid UTF-8 produces `Utf8Error` rather than panicking, and call sites use `try` or `catch`.
 - **Error return traces remain deferred.** They require a separately designed trace representation, source mapping, and public inspection API; M13 does not capture creation or propagation frames and does not add `.location()` or `.stack_trace()`.
 - The `io_read_line` migration remains M16 integration work and is not part of this completion.
-
-### Milestone 13.5: Default Parameters & Named Arguments
-
-**Goal:** Support default parameter values and named arguments for all functions (user-defined and builtins), with named-by-default calling convention
-
-**Status:** ⏳ Deferred — post-alpha core cluster (M9 → M9.1 → M11 → M12 → M13 → M16); not alpha-gating (see [alpha_scope.md](alpha_scope.md)). May slip to v0.2 if the core cluster absorbs the v0.1 schedule. Depends on Milestone 8.
-
-**Calling Convention (Swift-style):**
-
-- All parameters are **keyword-only by default** — callers must use `name=value`
-- `_` before a parameter name opts it into **positional** — callers can pass by position
-- Named arguments always work, even for `_` params — `_` adds positional as an option, it doesn't remove named
-- Positional args must come before named args at the call site
-- This replaces the spec's `#[named]` attribute (Section 6.1.1) with a simpler, safer default
-
-**Tasks:**
-
-1. **Parser Extensions:**
-   - Parse `name=expr` in call argument lists (inside `()` = named arg, at statement level = assignment)
-   - Parse default values in function parameter definitions: `param: Type = default_expr`
-   - Parse `_` prefix on parameter names: `_ param: Type`
-
-2. **AST Extensions:**
-   - Add `default: Option<Expression>` and `positional: bool` to function parameter nodes
-   - Add `name: Option<String>` to call argument nodes to represent `CallArg { name, value }`
-
-3. **Sema / Lowering:**
-   - Validate: defaults must be trailing (no `fn f(a: int = 1, b: int)` — compile error)
-   - Validate: named args match parameter names
-   - Validate: positional args can only target `_`-marked params
-   - Validate: no positional args after named args at call site
-   - Insert default values for omitted arguments during lowering
-   - All calls arrive at codegen fully resolved
-
-4. **Codegen:**
-   - No structural changes needed if lowering inserts defaults
-   - All calls arrive at codegen fully resolved with all arguments filled in
-
-5. **Builtin Updates:**
-   - Update `BuiltinFunction` struct to include parameter metadata (names, types, defaults, positional flag)
-   - Builtins like `print` participate in the named/positional system
-
-6. **Testing:**
-   - Default values, named args, `_` positional params
-   - Mixing positional + named args
-   - Error cases: wrong name, positional for non-`_` param, positional after named, missing required arg, duplicate arg
-
-**Design note — sentinels (from Python 3.15's `sentinel`, PEP 661):** default parameters reopen the "not provided vs explicitly `none`" question for optional params. Ryo's static types mostly cover sentinel needs (a dedicated enum variant *is* a sentinel, with exhaustiveness checking), but stdlib APIs with `?T` defaults need a uniform idiom. Decide at scoping: builtin `sentinel` type vs an enum-variant convention.
-
-**Visible Progress:** Functions with defaults and named arguments work. Clear compile errors for argument misuse.
-
-**Example:**
-
-```ryo
-# All params keyword-only by default
-fn create_user(name: str, age: int, role: str = "user"):
- ...
-
-create_user(name="Alice", age=30)              # ok
-create_user(name="Alice", age=30, role="admin") # ok
-create_user("Alice", 30)                        # compile error
-
-# _ opts into positional
-fn add(_ a: int, _ b: int) -> int:
- return a + b
-
-add(1, 2)          # ok
-add(a=1, b=2)      # also ok
-
-# Mix: first param positional, rest keyword-only
-fn print(_ text: str, end: str = "\n"):
- ...
-
-print("hello")              # ok — text positional, end defaults to "\n"
-print("hello", end="")      # ok — explicit end
-print("hello", "")          # compile error — end is keyword-only
-```
-
-**Design Decisions:**
-
-- **Named by default, `_` opts into positional** (Swift model) — replaces the spec's `#[named]` attribute with a simpler, safer default. Proven at scale by Swift for 10+ years
-- **Defaults evaluated at each call site** (Kotlin/Swift model), not at definition time — avoids Python's mutable default gotcha where `def f(x=[])` shares the list across calls
-- **Defaults must be compile-time evaluable expressions** (literals, constants, future `comptime` calls) — simplifies codegen, aligns with Zig philosophy
-- **Trailing position required** for params with defaults (like Python, Kotlin, C++)
-- **AI-era rationale:** Named arguments cost the AI nothing — it types for free. But the human reviewer sees exactly what each argument means without cross-referencing the function signature
-
-**Implementation Notes:**
-
-- Struct construction `Point{x=1, y=2}` (D11 braces) and function named args `f(x=1)` share the `name=value` grammar inside their delimiters — the parser distinguishes them by delimiter (`{}` vs `()`), resolution happens during lowering
-- No function overloading in Ryo, so defaults don't create ambiguity
-- Languages analyzed: Go (no defaults — too limiting), Rust (no defaults — relies on builders/traits Ryo lacks), Python (`*` separator — good but `_` is cleaner), Swift (named by default — best fit for Ryo)
-- Dependencies: Milestone 8 (control flow for conditional default handling), Milestone 7 (comparison operators)
-
-**Unlocks:** Future `print(_ text: str, end: str = "\n")` API. (Milestone 9 struct literals no longer depend on this milestone — D11 brace construction has its own grammar.)
-
-> **Note:** Closures and lambda expressions were originally planned as Milestone 8.6 but have been **deferred to v0.2** (see Phase 5: Closures & Lambda Expressions). Closures are not strictly required for the v0.1.0 core language; named functions plus the standard library cover every v0.1 use case, and deferring capture analysis (originally M15.5) lets the v0.1 borrow checker stay focused on let/struct/method bindings.
 
 ### Milestone 13.7: Literal Completeness
 
@@ -1972,7 +1818,7 @@ Module paths, imports, cross-file extension, and optional-type integration are n
 
 **Required `io_read_line` integration (after the optional core):**
 
-- Migrate the M9.2 placeholder `io_read_line() -> str` directly to `io_read_line() -> IoError!?str`; the name swap to `io.read_line` waits for M24
+- Migrate the M9.2 placeholder `io_read_line() -> str` directly to `io_read_line() -> IoError!?str`; the name swap to `io.read_line` waits for M20
 - Add a compiler-known `IoError` family with `ReadFailed(str)` and `InvalidUtf8(str)` members, with no temporary `IoError.Eof` member and no numeric UTF-8 code without defined semantics
 - Keep clean EOF before any byte as `none`; keep empty lines and unterminated final lines as present strings; reserve errors for read failures and invalid UTF-8
 - Extend the runtime slot-out ABI with internal success/EOF/read-failure/invalid-UTF-8 statuses, and construct the standard optional/error-union result in codegen
@@ -2022,7 +1868,7 @@ name = name orelse "anonymous"
 - Chaining returns `?T` (must handle with `orelse` or check)
 - The `io_read_line` integration is required for M16 completion but should be a separate PR after the optional core; it reuses the standard optional and error-family representations rather than adding a builtin-specific layout
 - A present returned `str` is owned by the caller under the normal rules; the runtime buffer is scratch
-- Migrate `process_env(key: str) -> str` (M9.2 placeholder, empty = unset) to `process_env(key: str) -> ?str` (`none` = unset); the final `process.env` name swap waits for M24
+- Migrate `process_env(key: str) -> str` (M9.2 placeholder, empty = unset) to `process_env(key: str) -> ?str` (`none` = unset); the final `process.env` name swap waits for M20
 - M12's match machinery extends to `?T`: `none` is a literal pattern, the payload-binding form follows whatever unwrap idiom M16 establishes (decided at implementation time), and exhaustiveness covers `{none, value}` — no wildcard needed for a fully handled optional
 - Dependencies: Milestone 11 (enums provide foundation for tagged unions), Milestone 13.8 (the `IoError` family), Milestone 9.2 (the stdin placeholder being replaced)
 
@@ -2490,7 +2336,7 @@ Directory-based modules, three access levels (`pub` / `package` / module-private
 
 7. **Testing:** imports, visibility, multi-file modules, nested modules, circular detection, real multi-module projects.
 
-**Visible Progress:** Real multi-file projects with proper encapsulation — the v0.1 standard library (M24) lives in modules from day one.
+**Visible Progress:** Real multi-file projects with proper encapsulation — the v0.1 standard library (M20) lives in modules from day one.
 
 **Example:**
 
@@ -2538,7 +2384,7 @@ fn main():
 
 **Future Enhancements** (see proposals.md): re-exports `pub use`, glob imports `import utils.*`, conditional compilation `#[cfg(...)]`, workspace support.
 
-### Milestone 24: Standard Library Core [alpha: partial]
+### Milestone 20: Standard Library Core [alpha: partial]
 
 **Goal:** Implement essential standard library modules
 
@@ -2551,7 +2397,7 @@ fn main():
   - `print(str) -> void`: Print to stdout (already in M3.5 as builtin)
   - `println(str) -> void`: Print with newline
   - `eprint(str) -> void`, `eprintln(str) -> void`: Print to stderr. **Update (2026-09):** `io_eprint` lands as a throwaway intrinsic in M9.2; `io.eprint` is its final form (mechanical `io_eprint` → `io.eprint` swap)
-  - `read_line() -> IoError!?str`: Read from stdin (`none` on clean EOF). **Update (2026-11):** `io_read_line` lands as a placeholder intrinsic in M9.2 and gains its final signature in M16; `io.read_line` is the final name at M24
+  - `read_line() -> IoError!?str`: Read from stdin (`none` on clean EOF). **Update (2026-11):** `io_read_line` lands as a placeholder intrinsic in M9.2 and gains its final signature in M16; `io.read_line` is the final name at M20
   - `read_file(path: strview) -> io.Error!str`: Read file contents
   - `write_file(path: strview, content: strview) -> io.Error!void`: Write to file
   - `append_file(path: strview, content: strview) -> io.Error!void`: Append to file
@@ -2616,7 +2462,7 @@ fn main():
 - Platform-specific code isolated to the `process` module
 - Dependencies: Milestone 6 (modules for stdlib organization)
 
-### Milestone 25: Panic & Debugging Support [alpha: partial]
+### Milestone 21: Panic & Debugging Support [alpha: partial]
 
 **Goal:** Implement panic mechanism and debugging features
 
@@ -2691,7 +2537,7 @@ note: run with `RYOLANG_BACKTRACE=1` for full backtrace
 - v0.1 panic is single-frame; full DWARF stack traces ship in v0.2
 - Dependencies: Milestone 19 (RAII for unwinding)
 
-### Milestone 26: Testing Framework & Documentation
+### Milestone 22: Testing Framework & Documentation
 
 **Goal:** Implement built-in testing and documentation generation
 
@@ -2772,9 +2618,9 @@ Test result: ok. 2 passed; 0 failed
 - Test discovery scans all files in project
 - Doc comments use **Markdown** (like Rust)
 - Generated docs include trait implementations, method signatures
-- Dependencies: Milestone 25 (assert functions)
+- Dependencies: Milestone 21 (assert functions)
 
-### Milestone 26.5: Distribution & Installer [alpha: partial]
+### Milestone 22.5: Distribution & Installer [alpha: partial]
 
 **Goal:** Zero-friction installation and distribution for v0.1.0 release
 
@@ -2864,11 +2710,11 @@ ryo upgrade
 - All files in `~/.ryo/` directory for clean uninstall
 - Windows is a first-class citizen (PowerShell script works seamlessly)
 - `x86_64-apple-darwin` (Intel Mac) is intentionally excluded; `release.yml` currently ships linux-x64 and linux-arm64 (both glibc) plus macos-arm64 (libSystem) — static musl artifacts stay gated on the musl evaluation in `ISSUES.md`, and the `x86_64-pc-windows-msvc` target is still open
-- Dependencies: Milestone 27 prep work (this enables distribution)
+- Dependencies: Milestone 23 prep work (this enables distribution)
 
-### Milestone 26.6: Cross-Compilation (64-bit) [alpha]
+### Milestone 22.6: Cross-Compilation (64-bit) [alpha]
 
-**Goal:** `ryo build --target <triple>` produces a working binary for any supported 64-bit POSIX target from any host — enabling M26.5's binary distributions without per-platform runners.
+**Goal:** `ryo build --target <triple>` produces a working binary for any supported 64-bit POSIX target from any host — enabling M22.5's binary distributions without per-platform runners.
 
 **Status:** ⏳ Planned
 
@@ -2901,9 +2747,8 @@ file ./hello
 
 **Dependencies:** Milestone 3 (AOT), Milestone 8.1 (str ABI), zig toolchain. 32-bit targets: blocked on I-076 (str ABI hardcoding).
 
-**Effort:** ~1-2 weeks
 
-### Milestone 27: Core Language Complete & v0.1.0 Prep
+### Milestone 23: Core Language Complete & v0.1.0 Prep
 
 **Goal:** Finalize core language, polish, and prepare for v0.1.0 release
 
@@ -3038,9 +2883,8 @@ Available commands:
 - Integration with readline/rustyline for input editing
 - If the REPL outgrows JIT-per-line into a real interpreter, [wasmi 2.0](https://wasmi-labs.github.io/blog/posts/wasmi-v2.0/) is the design reference: accumulator registers over pure stack slots (operands/results live in hardware registers, no decode-load-store per op), op-code fusion to eliminate the copy instructions accumulators introduce, and fixed-width 64-bit stack cells.
 
-**Timeline:** v1.4 (3-6 months after v0.1.0)
-**Effort:** 2-3 weeks
-**Dependencies:** Core language complete (M1-M26)
+**Timeline:** v1.4
+**Dependencies:** Core language complete (M1-M22)
 
 ### Task/Future/Channel Runtime (Green Threads & Ambient Runtime)
 
@@ -3255,13 +3099,13 @@ fn main():
 
 **Implementation Phases:**
 
-1. **Milestone 32:** Green threads runtime, ambient context, basic task spawning, `handle[T]` for `task.spawn_detached` (spec §9.2.1)
-2. **Milestone 33:** Cancellation model (`Canceled`/`Timeout` errors, cooperative cancellation, RAII cleanup on cancel)
-3. **Milestone 34:** Parallelism, sync primitives (Mutex/RwLock), spec updates, work-stealing
-4. **Milestone 35:** Data parallelism (par_iter, fork-join)
-5. **Milestone 36 (optional):** Select statement and advanced cancellation patterns
+1. **Step 1 — green threads runtime, ambient context, basic task spawning, `handle[T]` for `task.spawn_detached` (spec §9.2.1)
+2. **Step 2 — cancellation model (`Canceled`/`Timeout` errors, cooperative cancellation, RAII cleanup on cancel)
+3. **Step 3 — parallelism, sync primitives (Mutex/RwLock), spec updates, work-stealing
+4. **Step 4 — data parallelism (par_iter, fork-join)
+5. **Step 5 (optional) — select statement and advanced cancellation patterns
 
-**Timeline:** v1.5-1.6 (6-12 months after v0.1.0)
+**Timeline:** v1.5–v1.6
 
 ### Closures & Lambda Expressions
 
@@ -3333,7 +3177,6 @@ printer = fn(): print(int_to_str(data_len))  # data_len copied (int is Copy)
 - Milestone 8.2 (Immutable Borrows) and Milestone 8.3 (Mutable Borrows) — required for `task.scope` scoped-borrow captures
 - Milestone 8.1 (Heap-Allocated `str` & Move Semantics) — required for owning-type captures
 
-**Effort:** ~3 weeks (closure syntax: 1 week, capture analysis & environment layout: 2 weeks)
 **Timeline:** v0.2 (early post-v0.1.0)
 
 **Future Enhancements** (post-v0.2):
@@ -3383,7 +3226,7 @@ fn main():
 - **Generics across FFI via monomorphization with symbol-name interpolation** (`image_hash_{Algorithm}`) — the answer if Ryo ever exports generic functions to C, where each instantiation needs a distinct symbol.
 - **`rust-spec` type classification** (Layout / Size / Alignment / Trap / Niche axes) — a ready-made checklist for deciding which Ryo types are FFI-lowerable and what validation each crossing needs.
 
-**Timeline:** v1.6 (12-18 months after v0.1.0)
+**Timeline:** v1.6
 
 ### Traits & Generics System
 
@@ -3440,7 +3283,7 @@ impl[T] Stack[T]:
 - **v0.3:** Generic functions and types with trait bounds (`fn max[T: Comparable](...)`, `struct Stack[T]`), generic standard library replacing hardcoded `list[int]` / `map[str, int]`.
 - **v0.4+:** Associated types, default trait methods, dynamic dispatch (`dyn Trait`).
 
-**Timeline:** v0.2 (traits, ~3 weeks), v0.3 (generics, 18-24 months after v0.1.0)
+**Timeline:** v0.2 (traits), v0.3 (generics)
 
 ### Try/Catch Operators
 
@@ -3516,7 +3359,6 @@ print(tmpl.values[0])      # "Alice"
 render(tmpl)               # consumer renders/escapes as it sees fit
 ```
 
-**Effort:** ~1 week (reuses the f-string parser)
 **Dependencies:** F-strings & String Interpolation, M9 structs, M17.4 methods, v0.2 traits
 **Timeline:** v0.2, after F-strings
 
@@ -3527,7 +3369,7 @@ render(tmpl)               # consumer renders/escapes as it sees fit
 **Why Post-v0.1.0:**
 
 - v0.1 panic prints a single frame (`file:line:column`) which is sufficient to debug; multi-frame traces are polish, not correctness
-- DWARF integration is platform-sensitive (Linux/macOS/Windows differ) and benefits from settling after distribution lands (M26.5)
+- DWARF integration is platform-sensitive (Linux/macOS/Windows differ) and benefits from settling after distribution lands (M22.5)
 - Suggestion engine (`Levenshtein` over identifier scopes, structured fix-it hints) is independent of language semantics — pure tooling work
 
 **Features:**
@@ -3539,8 +3381,7 @@ render(tmpl)               # consumer renders/escapes as it sees fit
 - "did you mean?" suggestions for typos in identifiers, type names, method calls
 - Source context with caret highlighting in compiler errors (improvement over v0.1)
 
-**Effort:** ~1.5-2 weeks
-**Dependencies:** v0.1 panic (M25), Drop/RAII (M19) for unwinding
+**Dependencies:** v0.1 panic (M21), Drop/RAII (M19) for unwinding
 **Timeline:** v0.2
 
 ### Benchmarking & Doc Generation
@@ -3560,8 +3401,7 @@ render(tmpl)               # consumer renders/escapes as it sees fit
 - Markdown rendering in doc comments
 - Doctest extraction: examples in `///` comments runnable via `ryo test`
 
-**Effort:** ~2 weeks (bench: ~3 days, doc generator: ~7 days)
-**Dependencies:** v0.1 testing framework (M26), attribute system (M26)
+**Dependencies:** v0.1 testing framework (M22), attribute system (M22)
 **Timeline:** v0.2
 
 ### Constrained Types & Distinct Types (Ada-Inspired Type Safety)
@@ -3632,7 +3472,6 @@ v = speed(t, d)        # compile error: expected Meters, got Seconds
 5. **Composition:** Allow `type Port = distinct int(1..65535)` (distinct + constrained)
 6. **Codegen:** Zero overhead — same representation as base type, all checks are compile-time
 
-**Effort:** ~3-4 weeks total (constrained: 2-3 weeks, distinct: 1 week)
 **Dependencies:** Type checker (Phase 3), type conversion syntax (v0.1)
 **Timeline:** v0.2 (early post-v0.1.0)
 
@@ -3706,8 +3545,7 @@ ContractViolation: precondition failed: amount > 0
 
 **Design reference:** [Verus](https://www.amazon.science/blog/developing-provably-correct-rust-code-with-verus) — the most ergonomic existence proof for how contracts should feel: specs (`requires`/`ensures`/invariants) live in the same file as the code, violations render as source-level errors, feedback is fast enough for a red-squiggles loop. Ryo's `#[pre]`/`#[post]` semantics (what's enforceable, diagnostic shape, spec/code drift) should be designed against this model. Verus itself is also the fallback if the runtime's unsafe FFI invariants (string/bytes ABI tag bits, `len ≤ cap`, concat/realloc bounds) ever need machine-checked *all-inputs* guarantees — Miri (CI'd) covers the dynamic side, Verus the static one; adopt only if runtime UB actually ships.
 
-**Effort:** ~1-2 weeks (once attribute system exists from `#[test]` milestone)
-**Dependencies:** Attribute system (Milestone 26), functions (M4), boolean expressions (M8), panic (M25)
+**Dependencies:** Attribute system (Milestone 22), functions (M4), boolean expressions (M8), panic (M21)
 **Timeline:** v0.2 (ships alongside attribute system)
 
 **Hardest Part:** Handling `#[post]` with multiple return points — each `return` must be rewritten to check the postcondition before returning. This is a well-understood AST transformation but requires care.
@@ -3731,8 +3569,7 @@ ContractViolation: precondition failed: amount > 0
 
 **Implementation Details:** See [copy_elision.md](copy_elision.md) for the full G/P/F classification and algorithm sketch.
 
-**Effort:** ~2-3 weeks
-**Dependencies:** Ownership (M15), Borrows (M19-M20), RAII (M19)
+**Dependencies:** Ownership & borrows (M8.1–M8.3 machinery), RAII (M19)
 **Timeline:** v0.2 (early post-v0.1.0)
 
 ### Standard Library Allocation Optimizations (SSO, COW)
@@ -3757,8 +3594,7 @@ ContractViolation: precondition failed: amount > 0
 
 **Implementation Details:** See [stdlib_optimizations.md](stdlib_optimizations.md) for SSO threshold, COW semantics, and sink-parameter guidelines.
 
-**Effort:** ~3-4 weeks
-**Dependencies:** String type (M15), Copy elision (above), Concurrency runtime (for atomic refcounts)
+**Dependencies:** String type (M8.1, shipped), Copy elision (above), Concurrency runtime (for atomic refcounts)
 **Timeline:** v0.2-v0.3
 
 ### Cancellation Model (`Canceled`/`Timeout` Errors)
@@ -3767,7 +3603,7 @@ ContractViolation: precondition failed: amount > 0
 
 **Why Post-v0.1.0:**
 
-- Requires concurrency runtime (Milestone 32) to be functional
+- Requires the Phase 5 concurrency runtime (below) to be functional
 - Requires error unions and error types (v0.1 features)
 - Cancellation semantics must be designed alongside green threads, not after
 
@@ -3829,41 +3665,158 @@ result = try task.timeout(5s, worker).await catch as e:
 
 **Visible Progress:** Tasks cancel cooperatively with clear error types. Resources are always cleaned up. No leaked file handles, connections, or locks on cancellation.
 
-**Effort:** ~2-3 weeks (integrated with Milestone 32-33 runtime work)
-**Dependencies:** Concurrency runtime (Milestone 32), error unions (v0.1), Drop trait (Milestone 19)
-**Timeline:** v0.4+ (ships with concurrency runtime, Milestone 33)
+**Dependencies:** Phase 5 concurrency runtime, error unions (v0.1), Drop trait (Milestone 19)
+**Timeline:** v0.4+ (ships with the concurrency runtime)
 
-### Named Parameters (`#[named]`)
+### Advanced Pattern Matching (formerly Milestone 12.5)
 
-> **Superseded by Milestone 13.5's named-by-default calling convention** — keyword-only-by-default makes a per-function `#[named]` attribute redundant. This entry remains only as the fallback design if M13.5 slips past v0.1 entirely.
+**Goal:** Everything M12 deliberately deferred — the pattern features that make `match` fully ergonomic but that alpha (and M13/M16, which carry their own pattern needs) does not require.
 
-**Goal:** Allow functions to require callers to use named arguments
+**Status:** ⏳ Deferred to Phase 5 (v0.2+) — moved out of Phase 2 on 2026-11-05; post-alpha. Not alpha-gating: the alpha litmus and M13's error handling need only M12's surface; matching over error unions ships inside M13, and `?T` matching ships inside M16 (both noted in their sections).
 
-**Why Post-v0.1.0:**
+**Deferral register (from the M12 design):**
 
-- Requires attribute system (shared with `#[test]`, `#[pre]`, `#[post]`)
-- Low priority — optional call-site ergonomics, not a safety feature
+- **Nested patterns** — patterns inside variant payloads (`Some(Coords{x, y})`), literals inside payloads (`Some(0)`), anon patterns nested in variants
+- **Guards** — `User(age) if age >= 18:` (spec Future Work: "Advanced Pattern Matching")
+- **OR patterns** — `1 | 2 | 3:` arm alternatives
+- **Float literal patterns** — excluded from M12 over NaN/IEEE equality semantics; needs a defined story (exact-bit compare? IEEE `==`?) before parsing
+- **Bare irrefutable bind as a whole-arm pattern** — `v:` binding the entire scrutinee (M12 rejects this with a did-you-mean note)
+- **Nominal struct patterns** — `Point{x, y}:` destructure-by-name on named structs (needs a decision on how nominal patterns interact with the Brace Law)
+- **Full structural exhaustiveness for anon/tuple patterns** — cross-arm literal-field coverage (M12 always requires a `_:` arm for anonymous-struct scrutinees)
+- **Borrow-bindings in arms** — bind payload by immutable borrow when the scrutinee is borrowed (M12 emits `E0133` for non-`Copy` fields on borrowed scrutinees); requires reference/view codegen in arm prologues. Binding-mode inference semantics are tracked in M12.6
+- Further ideas (slice patterns, `@` bindings, range patterns) live in [proposals.md](proposals.md) "Pattern Matching Extensions" and fold in here if accepted
 
-**Features:**
+**Dependencies:** Milestone 12 (the entire surface builds on its Match IR, exhaustiveness checker, and arm-binding machinery)
+
+**Target:** v0.2
+
+
+**Visible Progress:** `match` gains the expressiveness of Rust/Swift pattern matching — deep destructuring in a single arm, guarded arms, compact alternative arms.
+
+### Match Ownership Completion (formerly Milestone 12.6)
+
+**Goal:** The ownership semantics M12's move-only core deliberately left undefined: mutable payload bindings, scrutinee liveness rules, and conditional-move merge behavior. Alpha survives without them (each case has a workaround — extract/move/reconstruct, or restructure the match); together they make `match` a complete ownership citizen.
+
+**Status:** ⏳ Deferred to Phase 5 (v0.2+) — moved out of Phase 2 on 2026-11-05; post-alpha. Not alpha-gating.
+
+**Items:**
+
+- **Mutable payload bindings (`inout` binds)** — `match opt: Some(inout v): v = f(v)` mutates the payload in place; the scrutinee must be a mutable place (`mut` binding, `inout` param, mutable field path). No surface syntax or semantics defined today; requires mutable-borrow arm prologues (the M8.3 `inout` idiom applied to bindings) plus a conflict rule (while `inout v` is live, no other access to the scrutinee in that arm). Anon/tuple `inout` fields follow the same rule.
+- **Scrutinee liveness & reassignment** — define and enforce: may an arm assign to the scrutinee variable (`match x: _: x = new()`)? Adopt the Rust-shaped rule — legal when no arm borrows from or moves through the scrutinee, `E0033`-family error otherwise — and extend the ownership pass to model it.
+- **Conditional move + reinitialization across arms** — `match opt: Some(v): opt = None` with `opt` used after the match: moved in one arm, re-initialized on every path after the move → valid at the merge. M12's union merge conservatively reports "moved"; this pins the finer lattice (re-init resets per-arm state; merge joins states) with tests. Until then the conservative error is the specified behavior.
+- **Nested-place scrutinees & enum-in-aggregate moves** — `match wrapper.inner:` (partial moves out of a nested place's payload, interaction with the outer owner's remaining-field drops) and moving enums out of struct fields / containers. Requires place-expression scrutinee ownership beyond simple variables; today only variable (and simple owned-temporary) scrutinees are well-defined.
+- **M12 ownership-review carry-overs** — eight leaks/diagnostics residuals deferred from the M12 implementation review: (1) a never-read by-move bind in a `continue`-ending arm can leak (narrow trigger); (2) `collect_jump_path` sibling-arm over-approximation on returns-in-arms leaks (needs core-TIR headroom); (3) a non-`Var` moved scrutinee reports use-after-move twice; (4) copy-bind shadowing leaks (same convention as the M10 destructuring bind — one entry covers both); (5) `continue`-ending arms and match-inside-loop interplay lack committed tests (break-in-arm coverage landed in the M12 review fix wave: ownership unit tests + ASan/Valgrind sanitizer mirrors); (6) four ownership walkers have no `Match` arm at all — `outermost_branch_of` and `enclosing_if_main_cond` (loops.rs), `collect_bound_call_sites` (frees.rs), and the `is_exit_anchor` predicate (mod.rs) — so they miss bare matches, not just `ExprStmt`-wrapped ones; each needs its own design + tests; (7) a `break` inside a cond/bounds-position match arm (`while match ...:` / `for i in match ...`) gets no loop-exit Frees — the loop-exit walk's operand descent is skipped at loop statements, where it would run against the stale outer loop context (exotic shape; matches in body/statement positions are covered); (8) `branch_may_not_return` (loops.rs) has a `Match` arm but no operand descent (pre-existing; backstopped by the return epilogue).
+- **Aggregate match value arms** — shipped with M12: each non-`never` value arm's aggregate result is consumed into the match inst in `analyze_match` (mirror `analyze_var_decl`'s `consume_for_assignment` + `rebind_to_init`), so the ownership pass stops scheduling drops that alias the result slot; the match inst is the single owner the result's consumers move on. The compile-time rejections that preceded the lift — codegen's owned-producer guard (with its `free_would_emit` elision-predicate duplication of `emit_frees`) and the E0139 by-move-payload check — were deleted with it. The borrowed-result family stays rejected (E0138, no scheduled drop exists for a borrowed owner); the `match_discarded_value` sanitizer fixture remains structurally leak-insensitive (static-literal arms), with heap-carrying coverage in the arm-result transfer tests.
+- **View-typed match results** — every value arm agreeing on a view type passes the E0134 join, but no merge shape exists for a view result (ownership/liveness of a projection across arms needs design); sema rejects the shape at compile time (E0137) instead of miscompiling through `eval_inst_view`. Lift together with the (now shipped) aggregate arm-result consume: an arm result consumed into the match is an owned value like any other, and view results can then merge through the same slot machinery.
+
+**Cross-references (not claimed here):**
+
+- Immutable borrow-bindings / match ergonomics — pattern surface in M12.5; binding-mode inference semantics land together with or just before this milestone's items
+- `match self:` on `move self` / `inout self` — M17.4 (Method Implementations) defines the self parameter modes; match rides them
+- Copy elision through the match merge block — tracked in [copy_elision.md](copy_elision.md) (P1 specialization for pattern matching)
+
+**Dependencies:** Milestone 12 (match core), Milestone 8.3 (`inout`, shipped); pairs naturally with M12.5
+
+**Target:** v0.2
+
+
+### Default Parameters & Named Arguments (formerly Milestone 13.5)
+
+**Goal:** Support default parameter values and named arguments for all functions (user-defined and builtins), with named-by-default calling convention
+
+**Status:** ⏳ Deferred to Phase 5 (v0.2+) — moved out of Phase 2 on 2026-11-05. Not alpha-gating (see [alpha_scope.md](alpha_scope.md)). Depends on Milestone 8 (shipped).
+
+**Calling Convention (Swift-style):**
+
+- All parameters are **keyword-only by default** — callers must use `name=value`
+- `_` before a parameter name opts it into **positional** — callers can pass by position
+- Named arguments always work, even for `_` params — `_` adds positional as an option, it doesn't remove named
+- Positional args must come before named args at the call site
+- This replaces the spec's `#[named]` attribute (Section 6.1.1) with a simpler, safer default
+
+**Tasks:**
+
+1. **Parser Extensions:**
+   - Parse `name=expr` in call argument lists (inside `()` = named arg, at statement level = assignment)
+   - Parse default values in function parameter definitions: `param: Type = default_expr`
+   - Parse `_` prefix on parameter names: `_ param: Type`
+
+2. **AST Extensions:**
+   - Add `default: Option<Expression>` and `positional: bool` to function parameter nodes
+   - Add `name: Option<String>` to call argument nodes to represent `CallArg { name, value }`
+
+3. **Sema / Lowering:**
+   - Validate: defaults must be trailing (no `fn f(a: int = 1, b: int)` — compile error)
+   - Validate: named args match parameter names
+   - Validate: positional args can only target `_`-marked params
+   - Validate: no positional args after named args at call site
+   - Insert default values for omitted arguments during lowering
+   - All calls arrive at codegen fully resolved
+
+4. **Codegen:**
+   - No structural changes needed if lowering inserts defaults
+   - All calls arrive at codegen fully resolved with all arguments filled in
+
+5. **Builtin Updates:**
+   - Update `BuiltinFunction` struct to include parameter metadata (names, types, defaults, positional flag)
+   - Builtins like `print` participate in the named/positional system
+
+6. **Testing:**
+   - Default values, named args, `_` positional params
+   - Mixing positional + named args
+   - Error cases: wrong name, positional for non-`_` param, positional after named, missing required arg, duplicate arg
+
+**Design note — sentinels (from Python 3.15's `sentinel`, PEP 661):** default parameters reopen the "not provided vs explicitly `none`" question for optional params. Ryo's static types mostly cover sentinel needs (a dedicated enum variant *is* a sentinel, with exhaustiveness checking), but stdlib APIs with `?T` defaults need a uniform idiom. Decide at scoping: builtin `sentinel` type vs an enum-variant convention.
+
+**Visible Progress:** Functions with defaults and named arguments work. Clear compile errors for argument misuse.
+
+**Example:**
 
 ```ryo
-#[named]
-fn create_user(name: str, age: int, role: str):
-    # ...
+# All params keyword-only by default
+fn create_user(name: str, age: int, role: str = "user"):
+ ...
 
-create_user(name="Alice", age=30, role="admin")   # ok
-create_user("Alice", 30, "admin")                   # compile error
+create_user(name="Alice", age=30)              # ok
+create_user(name="Alice", age=30, role="admin") # ok
+create_user("Alice", 30)                        # compile error
+
+# _ opts into positional
+fn add(_ a: int, _ b: int) -> int:
+ return a + b
+
+add(1, 2)          # ok
+add(a=1, b=2)      # also ok
+
+# Mix: first param positional, rest keyword-only
+fn print(_ text: str, end: str = "\n"):
+ ...
+
+print("hello")              # ok — text positional, end defaults to "\n"
+print("hello", end="")      # ok — explicit end
+print("hello", "")          # compile error — end is keyword-only
 ```
 
-**Implementation Tasks:**
+**Design Decisions:**
 
-1. Parse `#[named]` attribute (reuses attribute system)
-2. At call sites for `#[named]` functions, verify all arguments are named
-3. Clear error message: "function 'create_user' requires named arguments"
+- **Named by default, `_` opts into positional** (Swift model) — replaces the spec's `#[named]` attribute with a simpler, safer default. Proven at scale by Swift for 10+ years
+- **Defaults evaluated at each call site** (Kotlin/Swift model), not at definition time — avoids Python's mutable default gotcha where `def f(x=[])` shares the list across calls
+- **Defaults must be compile-time evaluable expressions** (literals, constants, future `comptime` calls) — simplifies codegen, aligns with Zig philosophy
+- **Trailing position required** for params with defaults (like Python, Kotlin, C++)
+- **AI-era rationale:** Named arguments cost the AI nothing — it types for free. But the human reviewer sees exactly what each argument means without cross-referencing the function signature
 
-**Effort:** ~2-3 days (trivial once attribute system exists)
-**Dependencies:** Attribute system (Milestone 26)
-**Timeline:** v0.3
+**Implementation Notes:**
+
+- Struct construction `Point{x=1, y=2}` (D11 braces) and function named args `f(x=1)` share the `name=value` grammar inside their delimiters — the parser distinguishes them by delimiter (`{}` vs `()`), resolution happens during lowering
+- No function overloading in Ryo, so defaults don't create ambiguity
+- Languages analyzed: Go (no defaults — too limiting), Rust (no defaults — relies on builders/traits Ryo lacks), Python (`*` separator — good but `_` is cleaner), Swift (named by default — best fit for Ryo)
+- Dependencies: Milestone 8 (control flow for conditional default handling), Milestone 7 (comparison operators)
+
+**Unlocks:** Future `print(_ text: str, end: str = "\n")` API. (Milestone 9 struct literals no longer depend on this milestone — D11 brace construction has its own grammar.)
+
+> **Note:** Closures and lambda expressions were originally planned as Milestone 8.6 but have been **deferred to v0.2** (see Phase 5: Closures & Lambda Expressions). Closures are not strictly required for the v0.1.0 core language; named functions plus the standard library cover every v0.1 use case, and deferring capture analysis (originally M15.5) lets the v0.1 borrow checker stay focused on let/struct/method bindings.
+
+> **Fallback — per-function `#[named]` attribute:** if the named-by-default convention above slips further, the lighter attribute design is the fallback: parse `#[named]` on function definitions and require named arguments at call sites ("function 'x' requires named arguments"). It depends only on the attribute system (Milestone 22) rather than the full calling-convention change — keyword-only-by-default makes the attribute redundant, so it is not planned unless this section slips.
 
 ### Additional Post-v0.1.0 Features
 
@@ -3979,7 +3932,7 @@ The 26 milestones in Phases 1-4 represent the **core language** needed for Ryo v
 - ❌ Task/Future runtime (v0.4+)
 - ❌ FFI/unsafe blocks (v0.2+)
 - ❌ Full generics system (v0.3+)
-- ⏳ Named parameters & default values (deferred — Milestone 13.5, post-alpha core cluster; may slip to v0.2)
+- ⏳ Named parameters & default values (Phase 5, v0.2+ — formerly Milestone 13.5)
 - ✅ Integer overflow semantics frozen (v0.1 — GAP-2: traps in all build modes; spec §18)
 - ❌ LSP/advanced tooling (v0.2+)
 
@@ -3987,14 +3940,14 @@ This foundation enables building **synchronous applications** including CLI tool
 
 ## Development Timeline
 
-### Realistic Estimates (2-4 weeks per milestone)
+### Phase Summary
 
-**Phase 1 (M1-M3.5):** ✅ COMPLETE (~2 months)
-**Phase 2 (M4-M13):** 15 milestones — incl. M8.1 (str+heap), M8.2 (&T), M8.3 (inout), M8.4 (strview), M13 (try/catch and inferred error unions), M13.7 (literal forms); excl. closures (v0.2) and M6 (now early-Phase-4) × 3 weeks avg = ~45 weeks (~11 months)
-**Phase 3 (M16 → M16.1 → M16.2 → M16.3 → M17 → M17.1 → M17.2 → M17.3 → M17.4 → M18 → M18.1 → M19):** 12 milestones — strings/borrows pulled forward to Phase 2; traits and closure capture deferred to v0.2 × 3 weeks avg = ~36 weeks (~9 months)
-**Phase 4 (M24-M27):** 6 milestones (includes M26.5 Distribution & Installer and M26.6 Cross-Compilation) × 4 weeks avg = ~24 weeks (~6 months)
+Time estimates were removed (2026-11-05): milestone counts drift and dated estimates read as commitments. Ordering and dependencies are the schedule now.
 
-**Total Estimated Time:** 105 weeks (~26 months) from Phase 2 start to v0.1.0
+**Phase 1 (M1–M3.5):** ✅ COMPLETE
+**Phase 2 (M4–M13.8):** ✅ COMPLETE — closures deferred to Phase 5; the M6 module-system *implementation* moved to lead Phase 4; the v0.2-deferred pattern-matching and named-arguments items moved to Phase 5 (2026-11-05)
+**Phase 3 (M16 → M16.1 → M16.2 → M16.3 → M17 → M17.1 → M17.2 → M17.3 → M17.4 → M18 → M18.1 → M19):** strings/borrows pulled forward to Phase 2; traits and closure capture deferred to v0.2
+**Phase 4 (M6 → M20 → M21 → M22 → M22.5 → M22.6 → M23):** module-system implementation leads; includes Distribution & Installer (M22.5) and Cross-Compilation (M22.6)
 
 ### Development Approach
 
@@ -4005,9 +3958,9 @@ This foundation enables building **synchronous applications** including CLI tool
 
 ### Milestones by Complexity
 
-**Simple (2 weeks):** M4, M5, M7, M10, M8.4, M13.7
-**Medium (3 weeks):** M6, M8, M8.1, M8.2, M8.3, M13.5, M9, M11, M12, M13, M16, M16.1, M16.2, M16.3, M17, M17.1, M17.2, M17.3, M24, M25, M26, M26.5
-**Complex (4-5 weeks):** M17.4, M18, M19, M27
+**Simple:** M4, M5, M7, M10, M8.4, M13.7
+**Medium:** M6, M8, M8.1, M8.2, M8.3, M9, M11, M12, M13, M16, M16.1, M16.2, M16.3, M17, M17.1, M17.2, M17.3, M20, M21, M22, M22.5
+**Complex:** M17.4, M18, M18.1, M19, M23
 
 This timeline is **realistic** based on compiler development best practices. Each milestone includes implementation, testing, documentation, and examples.
 
@@ -4119,7 +4072,7 @@ The goal is a **production-ready core language** that can evolve based on actual
 
 ## Conclusion
 
-This roadmap represents an **honest, achievable plan** for building Ryo v0.1.0 over approximately 18-26 months. By deferring advanced features (concurrency runtime, FFI, generics) to Phase 5, we can deliver a solid, usable language faster while maintaining room for future growth.
+This roadmap represents an **honest, achievable plan** for building Ryo v0.1.0. By deferring advanced features (concurrency runtime, FFI, generics) to Phase 5, we can deliver a solid, usable language faster while maintaining room for future growth.
 
 **Next steps:**
 

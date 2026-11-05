@@ -91,9 +91,9 @@ These are large milestones in the v0.1.0 roadmap; alpha ships only the slice req
 
 | Milestone | Alpha subset | Beta adds |
 |---|---|---|
-| **M24** — Standard Library Core | `print`, `arg(i: int) -> ?str`, `arg_count() -> int`, `read_line() -> ?str`, `int.parse(s: &str) -> ParseError!int` | Full stdlib (collections, file I/O, time, etc.) |
-| **M25** — Panic & Debugging Support | `panic(msg: &str)`, `assert(cond: bool, msg: &str)` | Pretty stack traces, debug formatting |
-| **M26.5** — Distribution & Installer | macOS + Linux only; `curl ... \| sh` works; `ryo build`, `ryo run` work | Windows installer, `ryo upgrade`, signed binaries |
+| **M20** — Standard Library Core | `print`, `arg(i: int) -> ?str`, `arg_count() -> int`, `read_line() -> ?str`, `int.parse(s: &str) -> ParseError!int` | Full stdlib (collections, file I/O, time, etc.) |
+| **M21** — Panic & Debugging Support | `panic(msg: &str)`, `assert(cond: bool, msg: &str)` | Pretty stack traces, debug formatting |
+| **M22.5** — Distribution & Installer | macOS + Linux only; `curl ... \| sh` works; `ryo build`, `ryo run` work | Windows installer, `ryo upgrade`, signed binaries |
 
 ---
 
@@ -103,12 +103,12 @@ The snippet alone doesn't make alpha useful — users need basic I/O to write sm
 
 | API | Purpose | Folds into |
 |---|---|---|
-| `arg(i: int) -> ?str` | Read CLI argument by index | M24 partial |
-| `arg_count() -> int` | Count of CLI arguments | M24 partial |
-| `read_line() -> ?str` | Read one line from stdin (`none` on EOF) | M24 partial |
-| `int.parse(s: &str) -> ParseError!int` | Parse integer from string | M24 partial |
-| `assert(cond: bool, msg: &str)` | Aborts with message on `false` | M25 partial |
-| `panic(msg: &str)` | Aborts with message | M25 partial |
+| `arg(i: int) -> ?str` | Read CLI argument by index | M20 partial |
+| `arg_count() -> int` | Count of CLI arguments | M20 partial |
+| `read_line() -> ?str` | Read one line from stdin (`none` on EOF) | M20 partial |
+| `int.parse(s: &str) -> ParseError!int` | Parse integer from string | M20 partial |
+| `assert(cond: bool, msg: &str)` | Aborts with message on `false` | M21 partial |
+| `panic(msg: &str)` | Aborts with message | M21 partial |
 
 **Note on collections:** Alpha intentionally has *no* user-facing list, map, or array types. The CLI argv API uses indexed access (`arg(i)`) instead of iteration over a list. This keeps M16.2/M18 entirely out of alpha scope and forces ownership ergonomics to be validated on simpler data first. Users who want to iterate can use recursion + integer indices.
 
@@ -121,17 +121,17 @@ These are documented in the roadmap as v0.1.0 milestones but are **not** part of
 | Feature | Roadmap | Why deferred from alpha |
 |---|---|---|
 | Module system | M5, M6 | Single-file programs are sufficient for alpha-scale evaluation |
-| Default parameters & named arguments | M13.5 | Pure ergonomics; positional args work |
+| Default parameters & named arguments | Phase 5 (formerly M13.5) | Pure ergonomics; positional args work |
 | Structs | M9 | Snippet uses no structs; tuples + enums cover early needs |
 | Tuples | M10 | Not in snippet |
 | Methods (`impl` blocks) | M17.4 | Free functions cover all alpha use cases |
 | Array slices `&[T]` | M16.2 | Depends on collections |
 | Collections (`list`, `map`) | M18 | Largest deferral; see "Note on collections" above |
 | RAII & `Drop` | M19 | No alpha types own non-memory resources |
-| Testing framework (`#[test]`) | M26 | Use `assert` + `if cond: panic("...")` for alpha self-tests |
-| Documentation generator (`ryo doc`) | M26 | Markdown + manual examples are sufficient |
-| Pretty error messages with snippets | M27 | Plain "error at line N: ..." is enough for alpha feedback |
-| Windows support | M26.5 | macOS + Linux only |
+| Testing framework (`#[test]`) | M22 | Use `assert` + `if cond: panic("...")` for alpha self-tests |
+| Documentation generator (`ryo doc`) | M22 | Markdown + manual examples are sufficient |
+| Pretty error messages with snippets | M23 | Plain "error at line N: ..." is enough for alpha feedback |
+| Windows support | M22.5 | macOS + Linux only |
 | Generics, traits, FFI, REPL, concurrency | Phase 5 | All v0.2+ in the existing roadmap |
 
 ---
@@ -156,7 +156,7 @@ Three rules for keeping alpha tractable:
 
 1. **No spec changes for alpha-included features once implementation begins.** Once M11 (enums) lands, alpha-blocking enum syntax is frozen until `0.0.1-alpha.1` ships. Design iteration during implementation is the #1 cause of compiler projects stalling.
 2. **Pre-announce the gaps.** The alpha announcement must list "Not yet: collections, modules, methods, concurrency, REPL, Windows" prominently. Setting expectations early is free; resetting them later costs trust.
-3. **Installer is alpha-blocking.** If users can't `curl ... | sh` and have `ryo run hello.ryo` work in 30 seconds, the alpha doesn't exist from their perspective. M26.5 (partial) is non-negotiable. Linux ARM too.
+3. **Installer is alpha-blocking.** If users can't `curl ... | sh` and have `ryo run hello.ryo` work in 30 seconds, the alpha doesn't exist from their perspective. M22.5 (partial) is non-negotiable. Linux ARM too.
 
 ---
 
@@ -182,7 +182,7 @@ Alpha is released when `ryo build && ./<program>` succeeds on macOS and Linux fo
 
 Based on the roadmap's stated cadence (2–3 weeks per medium milestone at ~8 hr/week):
 
-- **Remaining alpha milestones:** M7, M8, M8.1, M8.2, M8.3, M8.4, M11, M12, M13, M16 plus partial M24/M25/M26.5
+- **Remaining alpha milestones:** M7, M8, M8.1, M8.2, M8.3, M8.4, M11, M12, M13, M16 plus partial M20/M21/M22.5
 - **Effort:** ~10 milestones × 2.5 weeks ≈ **25 weeks** of evening work
 - **Calendar estimate:** **5–6 months** to alpha at current pace, assuming no design re-litigation
 
