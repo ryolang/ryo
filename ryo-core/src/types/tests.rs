@@ -65,7 +65,7 @@ fn str_view_is_copy_and_displays() {
     assert!(pool.is_view(v));
     // The pool has no char/u8 primitive at M8.4 — the UTF-8 code
     // unit is not interned as a type, so `view_elem` reports
-    // `None` for `strview` until D2/M16.2 gives elements a pool
+    // `None` for `strview` until D2/M18 gives elements a pool
     // representation.
     assert_eq!(pool.view_elem(v), None);
     assert_eq!(pool.display(v).to_string(), "strview");

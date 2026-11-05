@@ -342,7 +342,7 @@ pub enum ExprKind {
         end: Option<ExprId>,
     },
     /// Scalar indexing `base[index]` (M8.4.2: `bytes`/`bytesview` only,
-    /// yields `int` until M17 makes it `u8`). Grammatically distinct
+    /// yields `int` until M20 makes it `u8`). Grammatically distinct
     /// from `Slice` — the colon is what makes a bracket a slice.
     Index {
         base: ExprId,

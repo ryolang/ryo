@@ -207,4 +207,4 @@ The accepted tradeoff: **bare `|` becomes bitwise OR in expressions, and the bar
 
 - Spec: Section 4.2 (explicit sizes — the sized-type extension), Section 18 (traps in all build modes — the invalid-shift-count rule)
 - Spec: the operator-uniqueness rule ("each operator has exactly one meaning") — this proposal amends it to one-meaning-per-syntactic-role
-- Roadmap: [Milestone 19 — Bit Operations](implementation_roadmap.md#milestone-163-bit-operations)
+- Roadmap: [Milestone 19 — Bit Operations](implementation_roadmap.md#milestone-19-bit-operations)
