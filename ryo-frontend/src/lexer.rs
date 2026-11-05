@@ -495,6 +495,11 @@ const DFA_STACK_MAX: usize = 1024 * 1024 * 1024;
 /// oversized stack is harmless). Quotes are rare in typical code, so
 /// the `find('"')` calls (memchr-accelerated) keep the pre-pass cheap
 /// next to the lex itself.
+///
+/// The tail after the last unescaped quote is also measured: an
+/// unterminated literal (or one whose closing quote is escaped) is
+/// scanned to EOF by the DFA before it fails, so that run needs the
+/// sized stack even though it is never a "real" body.
 fn longest_literal_body(input: &str) -> usize {
     let mut longest = 0;
     let mut prev_quote: Option<usize> = None;
@@ -514,6 +519,12 @@ fn longest_literal_body(input: &str) -> usize {
             prev_quote = Some(quote);
         }
         at = quote + 1;
+    }
+    // Tail after the last unescaped quote: an unterminated literal (or a
+    // closing quote that is itself escaped) is scanned to EOF by the DFA
+    // before it errors, so that run needs the sized stack too.
+    if let Some(prev) = prev_quote {
+        longest = longest.max(input.len() - prev - 1);
     }
     longest
 }
@@ -1640,6 +1651,25 @@ mod tests {
         // can never land below the true 4-byte body).
         let adversarial = "# 12\" ruler\ns = \"aaaa\"\n";
         assert_eq!(longest_literal_body(adversarial), 11);
+        // An unterminated literal counts its tail: the DFA scans it to EOF
+        // before failing, so the sized stack must cover it.
+        assert_eq!(longest_literal_body(r#"s = "abc"#), 3);
+    }
+
+    #[test]
+    fn unterminated_literal_with_many_escapes_does_not_overflow_stack() {
+        // One unescaped quote, then a long run of escapes and no closer:
+        // the pre-pass must measure the tail so the sized thread is used
+        // instead of the inline-budget path. Must report an error, not crash.
+        let mut src = String::from("s = \"");
+        src.push_str(&"\\n".repeat(100_000));
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let _ = lex(&src, &mut pool, &mut sink);
+        assert!(
+            !sink.into_diags().is_empty(),
+            "expected an unterminated-literal error"
+        );
     }
 
     #[test]
