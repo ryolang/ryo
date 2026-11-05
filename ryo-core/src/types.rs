@@ -113,7 +113,7 @@ enum Tag {
     /// Read-only `{ptr, len}` projection (final spec §3.1, D1). `data`:
     /// 0 = Str, 1 = Bytes (M8.4.2), >= 2: index + 2 into
     /// `extra`, where `extra[idx]` is the element TypeId of a Slice view
-    /// (uninhabited until M21 — no parametric interning yet).
+    /// (uninhabited until M16.2 — no parametric interning yet).
     View,
     /// Anonymous struct (M10): a structural grouping of named
     /// fields with no declared identity. `data` is the index into
@@ -233,14 +233,14 @@ pub enum TypeKind {
 /// general borrow type Ownership Lite rejects (M8.3): `&int`,
 /// `&User` must stay unrepresentable. `Bytes` is inhabited since
 /// M8.4.2 (D2); `Slice` still has NO constructor (`Slice` lands with
-/// `[T]` arrays in M21).
+/// `[T]` arrays in M16.2).
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ViewKind {
     /// `strview` — owner: `str`; element: UTF-8 unit.
     Str,
-    /// `bytesview` — owner: `bytes` (`sbytes` is v0.2+); element: `u8` (M17.1; indexing yields `int` until then). (D2, M8.4.2.)
+    /// `bytesview` — owner: `bytes` (`sbytes` is v0.2+); element: `u8` (M17; indexing yields `int` until then). (D2, M8.4.2.)
     Bytes,
-    /// `slice[T]` — owners: `[T]` | `list[T]` | `[T; N]`; element: `T`. (M21.)
+    /// `slice[T]` — owners: `[T]` | `list[T]` | `[T; N]`; element: `T`. (M16.2.)
     Slice(TypeId),
 }
 
@@ -696,7 +696,7 @@ impl InternPool {
                 0 => TypeKind::View(ViewKind::Str),
                 1 => TypeKind::View(ViewKind::Bytes),
                 // Trusted-producer invariant: no Slice constructor
-                // exists until M21, so the pool can never hold a
+                // exists until M16.2, so the pool can never hold a
                 // `data >= 2` payload.
                 _ => unreachable!("no Slice constructor exists"),
             },
@@ -815,13 +815,13 @@ impl InternPool {
     /// At M8.4 the pool has no char/u8 primitive, so the `strview`
     /// element type is not representable and this returns `None` for
     /// `View(Str)`; `Some(elem)` only decodes for `View(Slice(elem))`
-    /// (uninhabited until M21). Callers needing UTF-8 semantics
+    /// (uninhabited until M16.2). Callers needing UTF-8 semantics
     /// sub-match `ViewKind::Str` directly instead.
     pub fn view_elem(&self, t: TypeId) -> Option<TypeId> {
         match self.kind(t) {
             TypeKind::View(ViewKind::Str) => None,
             // `bytesview`'s element type is `u8`, which does not exist
-            // until M17.1 — not representable until then.
+            // until M17 — not representable until then.
             TypeKind::View(ViewKind::Bytes) => None,
             TypeKind::View(ViewKind::Slice(elem)) => Some(elem),
             _ => None,

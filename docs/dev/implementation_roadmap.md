@@ -48,20 +48,21 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 13.7 — Literal Completeness ✅ COMPLETE](#milestone-137-literal-completeness) *(landed ad hoc 2026-10-22 — scientific notation, underscores, base prefixes, full escape set)*
 - [x] [Milestone 13.8 — Error Namespaces ✅ COMPLETE](#milestone-138-error-namespaces) *(landed after the namespace design; M16 may resume)*
 
-> **Sequencing note (2026-09; `io_read_line` folded into M16 in 2026-11):** Next-up order is the alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M13.8 → M16** — followed by the rest of Phase 3. M10 is no longer a standalone milestone in effort terms: anonymous structs are the single grouping type, with its grouping machinery folded into M9, so what ships between M9.1 and M11 is only the positional-sugar layer (parser forms + destructuring, depends on M9). **M12.5, M12.6, and M13.5 are deferred past the core cluster.** M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"), and M9's former dependency on its named-argument parsing is stale — the same decision moved struct literals to brace construction with its own grammar. M13.7 is complete and landed ad hoc as filler. M13.5 remains v0.1-scope but may slip to v0.2 if the core cluster absorbs the schedule. **M9.2 (throwaway CLI intrinsics)** has no dependencies and slots in alongside the core cluster any time after M9.1; **M13.8** follows its approved error-namespace design, then **M16** supplies optionals and migrates the M9.2 `io_read_line` placeholder directly to `IoError!?str` without a temporary EOF error variant. **M12.5** (advanced pattern matching — nested patterns, guards, or-patterns, and the rest of M12's deferral register) is v0.2 work, not alpha-gating; the only pattern features alpha needs beyond M12 ship inside M13 (error-union match) and M16 (`?T`/`none` patterns) themselves.
+> **Sequencing note (2026-11; renumbered — completed milestones keep their numbers, incomplete ones were renumbered into schedule order):** The alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M13.8** — is complete, plus the ad-hoc **M13.7** (literal completeness) and **M13.8** (error namespaces). Next-up order is **M16 → M16.1 → M16.2 → M16.3 (draft, spelling approval pending) → M17 → M17.1 → M17.2 → M17.3 → M17.4 → M18 → M19**, the renumbered forms of the former M16/M16.1/M21/M17.1/M17.2/M17.3/M17.4/M17/M22/M23 — the renumbering records the 2026-11 reorder decision (arrays ahead of explicit sizes for structural payoff; methods directly before collections, their first consumer; bit operations on `int` between them, gated only on the operator-spelling ruling). M16 supplies optionals and migrates the M9.2 `io_read_line` placeholder directly to `IoError!?str` without a temporary EOF error variant. **M12.5, M12.6, and M13.5 stay deferred past the core cluster** and keep their old numbers (they are v0.2 work). M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"). **M12.5** (advanced pattern matching — nested patterns, guards, or-patterns, and the rest of M12's deferral register) is v0.2 work, not alpha-gating; the only pattern features alpha needs beyond M12 ship inside M13 (error-union match) and M16 (`?T`/`none` patterns) themselves.
 
 ### Phase 3: Type System & Memory Safety
 
 - [ ] [Milestone 16 — Optional Types (`?T`) [alpha]](#milestone-16-optional-types-t-alpha)
 - [ ] [Milestone 16.1 — F-Strings & String Interpolation](#milestone-161-f-strings--string-interpolation)
-- [ ] [Milestone 17 — Method Implementations](#milestone-17-method-implementations)
-- [ ] [Milestone 17.1 — Explicit Sizes (`i8`–`i64`, `u8`–`u64`, `usize`, `float32`)](#milestone-171-explicit-sizes-i8i64-u8u64-usize-float32)
-- [ ] [Milestone 17.2 — `char` Type](#milestone-172-char-type)
-- [ ] [Milestone 17.3 — Static Format Specifications](#milestone-173-static-format-specifications)
-- [ ] [Milestone 17.4 — Interpolation Conversions & Debug Capture](#milestone-174-interpolation-conversions--debug-capture)
-- [ ] [Milestone 21 — Array Slices (`slice[T]`)](#milestone-21-array-slices-slicet)
-- [ ] [Milestone 22 — Collections (List, Map)](#milestone-22-collections-list-map)
-- [ ] [Milestone 23 — RAII & Drop (Compiler Intrinsic)](#milestone-23-raii--drop-compiler-intrinsic)
+- [ ] [Milestone 16.2 — Fixed Arrays, Mutable Indexing & Slices (`slice[T]`)](#milestone-162-fixed-arrays-mutable-indexing--slices-slicet)
+- [ ] [Milestone 16.3 — Bit Operations (Draft — grammar pending)](#milestone-163-bit-operations-draft--grammar-pending)
+- [ ] [Milestone 17 — Explicit Sizes (`i8`–`i64`, `u8`–`u64`, `usize`, `float32`)](#milestone-17-explicit-sizes-i8i64-u8u64-usize-float32)
+- [ ] [Milestone 17.1 — `char` Type](#milestone-171-char-type)
+- [ ] [Milestone 17.2 — Static Format Specifications](#milestone-172-static-format-specifications)
+- [ ] [Milestone 17.3 — Interpolation Conversions & Debug Capture](#milestone-173-interpolation-conversions--debug-capture)
+- [ ] [Milestone 17.4 — Method Implementations](#milestone-174-method-implementations)
+- [ ] [Milestone 18 — Collections (List, Map)](#milestone-18-collections-list-map)
+- [ ] [Milestone 19 — RAII & Drop (Compiler Intrinsic)](#milestone-19-raii--drop-compiler-intrinsic)
 
 ### Phase 4: Module System & Core Ecosystem
 
@@ -84,7 +85,7 @@ Deferred features tracked separately — see Phase 5 section for the full list (
 | `sbytes` (ARC buffer, slicing, COW warnings) | v0.2–v0.3 | D3; needs `shared[T]` atomic-refcount runtime |
 | Debug-mode `shared[T]` cycle detector (runtime tooling) | v0.2–v0.3 | reports reference cycles in debug builds instead of leaking silently; semantics unchanged — no cycle collection (spec §5.6) |
 | Runtime profile split (`core`/`hosted`, `--profile=core`) | v0.2 | D9; stdlib layering, no backend changes |
-| `bytes.copy_into(bview, &buf)` (no-alloc view materialization) | v0.2 | needed by the `core` no-alloc profile and the FFI buffer idiom (`cstr.from`) — land with/before FFI; destination is a fixed-capacity `[N]u8` (fixed arrays land with M21); design in `ryo-view-materialization.md` §3 |
+| `bytes.copy_into(bview, &buf)` (no-alloc view materialization) | v0.2 | needed by the `core` no-alloc profile and the FFI buffer idiom (`cstr.from`) — land with/before FFI; destination is a fixed-capacity `[N]u8` (fixed arrays land with M16.2); design in `ryo-view-materialization.md` §3 |
 | Machine-applicable diagnostic suggestions (E0034 ViewEscape → `str(view)` materialize fix) | v0.2 | needs Diag suggestion-payload machinery that doesn't exist yet; design in `docs/experimental/ryo-agent-interface-proposal.md` and `ryo-view-materialization.md` §4 |
 | LSP / editor tooling server | v0.2+ | rides both rows above: `Diag` is already LSP-shaped (severity, stable `DiagCode`, byte spans, notes), so squiggles + codes + related info need no new diagnostic machinery — only the structured emission channel (`ryo check --json=v1` / library API per `docs/experimental/ryo-agent-interface-proposal.md` §2), a line index over the `byte_to_char_offsets` table in `render_diags` (negotiate UTF-8 positions), in-memory virtual files (`didOpen`, unsaved buffers), and debounced recheck; quick-fix code actions come free once the suggestion payload lands; the R9/R10 continue-past-errors design already yields the full per-version diagnostic set an editor wants |
 | Bounded operator overloading (`Add`… traits) | v0.2–v0.3 | D10; concrete types first, generic traits with user generics |
@@ -98,7 +99,7 @@ Deferred features tracked separately — see Phase 5 section for the full list (
 | Binary pattern matching (if adopted) | post-v0.4 | deferred; stdlib parser facility first |
 | GUI Phase 1 (immediate-mode toolkit PoC) | post-v0.2 | ecosystem, not language; D4 + `ryo-bindgen` |
 | `yield` subroutines | separate RFC | measured re-entry condition only (final spec §11.4) |
-| `Scoped` marker trait (`with` enforcement) | with M23 + sync guards | generalizes spec §14.5.4's mandatory-`with` guard rule into a user-accessible core trait; rides the M23 `Drop` facet machinery and the concurrency guard types; design in `with_enforcement.md` (draft, pending approval) |
+| `Scoped` marker trait (`with` enforcement) | with M19 + sync guards | generalizes spec §14.5.4's mandatory-`with` guard rule into a user-accessible core trait; rides the M19 `Drop` facet machinery and the concurrency guard types; design in `with_enforcement.md` (draft, pending approval) |
 
 ---
 
@@ -929,7 +930,7 @@ done
   - `while <expr>:` block
   - `for <ident> in range(<start>, <end>):` — parser recognizes the `range(start, end)` arity specifically; calling `range` outside a `for` header is a compile error in v0.1 (it is a loop construct, not a first-class iterator)
   - `break` / `continue` parse as bare statements
-  - General `for <ident> in <iterable>:` over collections is **deferred** to M22 (Collections) — until lists exist there is nothing else to iterate over
+  - General `for <ident> in <iterable>:` over collections is **deferred** to M18 (Collections) — until lists exist there is nothing else to iterate over
 - **`range()` builtin (loop-header-only in v0.1):**
   - `range(start, end)` → `start..end` exclusive
   - Both args must be `int`; result is the loop-header's iteration domain (no first-class range value yet)
@@ -979,7 +980,7 @@ fn main():
 
 **Implementation Notes:**
 
-- `for item in iterable:` over collections is deferred to **M22** — the design is reserved but cannot be implemented until lists/maps exist.
+- `for item in iterable:` over collections is deferred to **M18** — the design is reserved but cannot be implemented until lists/maps exist.
 - `range()` is parser-recognized in the `for` header only; it is **not** a first-class value in v0.1 (no `r = range(10)` binding). This keeps the implementation simple and avoids committing to an iterator protocol before traits land in v0.2.
 - **Operator separation reminder:** `range()` is for iteration, `:` is for slicing (`s[1:4]`, M8.4), `..` is reserved for type bounds only (`int(1..65535)`).
 - `break`/`continue` affect the **innermost loop only**. No labeled breaks in v0.1.
@@ -1061,7 +1062,7 @@ fn main():
 
 - **Pipeline pivot.** Up through M8c the compiler followed Zig's pipeline. M8.1 introduces a new `Ownership` stage between Sema and Codegen, modeled on Mojo (see [pl_references/mojo.md](pl_references/mojo.md)). Sema becomes type-only; ownership is its own pass. Ryo's surface design, syntax, and types are unchanged.
 - Move tracking covers **named bindings and anonymous owned temporaries** in this milestone. Explicit `&T` / `inout T` borrow syntax arrives in M8.2 / M8.3; field-by-field move tracking (partial moves out of structs/tuples) follows naturally because the same dataflow analysis is reused.
-- `str` deallocation follows hybrid eager destruction (spec Section 5.4) — `Free` is inserted after the binding's last use, after the old buffer when a `mut` binding is reassigned over a `Valid` slot, and at the end of the enclosing statement for anonymous owned temporaries. Lexical scope-exit RAII would be too late and would leak intermediate buffers in concat chains. User-extensible cleanup via the `drop` method lands in M23.
+- `str` deallocation follows hybrid eager destruction (spec Section 5.4) — `Free` is inserted after the binding's last use, after the old buffer when a `mut` binding is reassigned over a `Valid` slot, and at the end of the enclosing statement for anonymous owned temporaries. Lexical scope-exit RAII would be too late and would leak intermediate buffers in concat chains. User-extensible cleanup via the `drop` method lands in M19.
 - Allocator failure surfaces as a panic in v0.1; allocation-fallible APIs ship alongside error unions (M13).
 - Detailed design: see [2026-05-20-milestone-8.1-heap-str-and-move-semantics-design.md](../superpowers/specs/2026-05-20-milestone-8.1-heap-str-and-move-semantics-design.md).
 - Dependencies: Milestone 8 (control flow blocks shape the dataflow regions the move tracker walks).
@@ -1136,9 +1137,9 @@ fn main():
   - **At most one mutable borrow** of a value at any point
   - **No immutable borrows while a mutable borrow is live**
   - Mutable borrows still cannot outlive the borrowed value
-- `inout` accepts scalars and `str` only; `inout` on aggregates (`[T]`, structs) is deferred to M22.
+- `inout` accepts scalars and `str` only; `inout` on aggregates (`[T]`, structs) is deferred to M18.
 
-**Visible Progress:** Mutation through references is safe and aliasing-free. Foundations for `inout self` methods (M17) and in-place collection updates (M22) are in place.
+**Visible Progress:** Mutation through references is safe and aliasing-free. Foundations for `inout self` methods (M17.4) and in-place collection updates (M18) are in place.
 
 **Example:**
 
@@ -1203,7 +1204,7 @@ fn main():
 - `strview` is a **borrowed view** (immutable, fixed-length); the owning `str` remains the source of truth and is frozen against moves/mutation while any view is live (P2), with the freeze lifting at the view's last use (P4).
 - Views are non-escaping (Rule 5): they cannot be returned, passed to `move` parameters, or stored past the current function — so `first_word`-style helpers print or otherwise consume the slice in place rather than returning it. See `examples/string_slices.ryo`.
 - UTF-8 validity is checked at slice creation, not on every read — so iteration is allocation-free.
-- Array slices `slice[T]` are **not** included here; they ship in M21 alongside list literal syntax. `TypeKind::View(ViewKind)` already reserves their representation.
+- Array slices `slice[T]` are **not** included here; they ship in M16.2 alongside list literal syntax. `TypeKind::View(ViewKind)` already reserves their representation.
 - Dependencies: Milestone 8.2 (immutable borrows provide the reference machinery), Milestone 8.3 (explicit borrow syntax)
 
 ### Milestone 8.4.1: `strview` Spelling & View→`str` Re-borrow [alpha] ✅ COMPLETE
@@ -1281,7 +1282,7 @@ fn main():
 **Implementation Notes:**
 
 - The e2e test proves the copy is deep: materialize, then mutate the original — the copy is unaffected.
-- Out of scope (deferred): `bytes(bview)` (ships with M8.4.2), `slice[T]` materialization (M21), the `Clone` trait and the trait-forward resolution hook (trait milestone — `str(view)` will resolve through a converting-initializer protocol, call sites unchanged), and a machine-applicable E0034 suggestion (needs Diag suggestion-payload machinery that doesn't exist — belongs with the agent-interface milestone).
+- Out of scope (deferred): `bytes(bview)` (ships with M8.4.2), `slice[T]` materialization (M16.2), the `Clone` trait and the trait-forward resolution hook (trait milestone — `str(view)` will resolve through a converting-initializer protocol, call sites unchanged), and a machine-applicable E0034 suggestion (needs Diag suggestion-payload machinery that doesn't exist — belongs with the agent-interface milestone).
 - Dependencies: Milestone 8.4.1 (re-borrow, view machinery)
 
 ### Milestone 8.4.2: `bytes` Type & `bytesview` [alpha] ✅ COMPLETE
@@ -1296,10 +1297,10 @@ fn main():
 - Bytes literal `b"\x00\x01"`: ASCII content plus the string-literal escape set and `\xNN` (exactly two hex digits, bytes-literal-only); raw non-ASCII source bytes are a lex diagnostic. Static data + `cap=0` header, no allocation (string-literal lowering)
 - Slicing `raw[start:end]` yields `bytesview` — a projection governed by the D1 rules (P1–P6, E1–E4) with **no** UTF-8 boundary check (bytes are not text); bounds check at creation, panics
 - `bytesview` activates `TypeKind::View(ViewKind::Bytes)` (slot reserved since M8.4's Task 10.1); generalize `TirTag::ToView` → owner→view conversion per the `owner_view` table
-- Scalar indexing `b[i]` on `bytes` and `bytesview`, bounds-checked, panics — **interim: yields `int`** (0–255); becomes `u8` with Milestone 17.1 (`u8` without coercion rules is unusable — no implicit numeric conversions means `b[i] == 0x02` would not compile). Read-only: no `b[i] = v`
+- Scalar indexing `b[i]` on `bytes` and `bytesview`, bounds-checked, panics — **interim: yields `int`** (0–255); becomes `u8` with Milestone 17 (`u8` without coercion rules is unusable — no implicit numeric conversions means `b[i] == 0x02` would not compile). Read-only: no `b[i] = v`
 - Bridging: `text.to_bytes() -> bytes` (owned copy, never fails) and `raw.to_str() -> Utf8Error!str`; invalid UTF-8 is recoverable with `try` or `catch` (finalized by Milestone 13)
 - `bytes(bview)` mirrors M8.4.1.2's `str(view)` (owned copy from a `bytesview`); W0003 extends to both shapes
-- Buffer building (the builder idiom is deferred — it needs M17 methods): `a + b` owned concatenation (mirrors `StrConcat`; view operands rejected as with `str`) and `bytes_push(&b, x)` single-byte append (`inout` first arg mirroring `str_push`; `x: int` range-checked 0–255, panics)
+- Buffer building (the builder idiom is deferred — it needs M17.4 methods): `a + b` owned concatenation (mirrors `StrConcat`; view operands rejected as with `str`) and `bytes_push(&b, x)` single-byte append (`inout` first arg mirroring `str_push`; `x: int` range-checked 0–255, panics)
 - `print` accepts `bytes`/`bytesview` with an escaped repr (`b"\x01\x02A"`: printable ASCII literal, short escapes where they exist, else `\xNN`); `==`/`!=` on both types incl. cross-comparison via the implicit owner→view conversion; `.len()`/`.is_empty()`
 - Runtime: `__ryo_bytes_*` alloc/free/realloc/concat/slice/from_view/push/eq/repr/to_bytes/to_str mirroring the `str` ABI — **ABI history:** string producers originally used the slot-out pattern (caller-provided 24-byte slot written via `write_str_slot`); commit `7d0a047` then moved `{ptr, len}` producers to a packed-`u128` register return (`pack_pair`, no out-pointer stack slots); the 2026-09 string fast-path work inlined those small ops as Cranelift IR at the call site and removed `pack_pair` from the runtime entirely (recorded in `docs/dev/cranelift_lessons.md`). Producers that still exist as runtime calls (`ryo_int_to_str`, `ryo_float_to_str`, the `__ryo_*_from_view` materialize calls) use slot-out — the template M9.2's str-producing intrinsics follow; memory fixtures for both JIT and AOT (ASan/Valgrind)
 
@@ -1326,7 +1327,7 @@ fn main():
 **Implementation Notes:**
 
 - The projection machinery is shared with `strview` (M8.4): same root-owner side tables, P2 freeze, P5 deferral; only the UTF-8 boundary check is `strview`-specific
-- Deferred out of this milestone (dependencies missing at this point in the sequence): `u8` element type and indexed stores → Milestone 17.1; `bytes.builder()` → after Milestone 17; `bytes.from_list([...])` → Milestone 22 era (no list type exists to pass). The `Utf8Error!str` conversion later shipped in M13.
+- Deferred out of this milestone (dependencies missing at this point in the sequence): `u8` element type and indexed stores → Milestone 17; `bytes.builder()` → after Milestone 17.4; `bytes.from_list([...])` → Milestone 18 era (no list type exists to pass). The `Utf8Error!str` conversion later shipped in M13.
 - `sbytes` (shared-backed, escaping) is **not** part of this milestone — it ships with `shared[T]` machinery (v0.2–v0.3, final spec §5)
 - `str` indexing remains forbidden (spec §4.7); `b[i]` applies to `bytes` only
 - Mutable view types remain rejected (final spec §12); mutable sub-ranges use `inout` + range parameters (Q4)
@@ -1384,7 +1385,7 @@ fn main():
 - Structs are **moved by default** (ownership semantics)
 - Default layout is **unspecified** — the compiler may reorder fields to minimize padding (source-invisible; field access is by name). `#[repr(C)]` opts into declaration-order C layout (added in Milestone 9.1, consumed by FFI in v0.2)
 - No default values for fields (all must be initialized)
-- No methods yet (added in Milestone 17)
+- No methods yet (added in Milestone 17.4)
 - **D11 (final spec §10):** struct literals use brace construction — `Point{x=1, y=2}` — per the Brace Law (braces group by name; construction is visibly distinct from calls). The named-argument grammar for *calls* still comes from Milestone 13.5; braces are no longer reserved exclusively for f-string interpolation
 - Dependencies: Milestone 4 (functions for passing structs). Struct literals use brace construction (D11) with their own grammar — they do **not** depend on Milestone 13.5's named-argument parsing, so the M13.5 deferral does not block this milestone.
 
@@ -1428,7 +1429,7 @@ fn main():
 
 **Implementation Notes:**
 
-- `Eq`/`Debug` are **compiler-known interfaces** — the fourth instance of the established v0.1 pattern (Copy marker M8.1, `.message()` M13, `Drop` M23). When traits land in v0.2/v0.3 they promote to real traits with identical surface syntax; when `impl` blocks land (M17) manual implementations become possible and derive degrades gracefully to an overridable default
+- `Eq`/`Debug` are **compiler-known interfaces** — the fourth instance of the established v0.1 pattern (Copy marker M8.1, `.message()` M13, `Drop` M19). When traits land in v0.2/v0.3 they promote to real traits with identical surface syntax; when `impl` blocks land (M17.4) manual implementations become possible and derive degrades gracefully to an overridable default
 - `print()` on a struct borrows it (Rule 2) — no ownership transfer for printing
 - Enums (M11) get the same derive/Debug treatment as a follow-up; out of scope here
 - Dependencies: Milestone 9 (structs)
@@ -1447,7 +1448,7 @@ fn main():
 |---|---|---|
 | `process_exit(code: int) -> never` | `process.exit(code: int) -> never` | M24 (modules) |
 | `io_eprint(s: str) -> void` | `io.eprint(s: str) -> void` | M24 |
-| `process_argc() -> int`, `process_argv(i: int) -> str` | `process.args() -> list[str]` | M22 |
+| `process_argc() -> int`, `process_argv(i: int) -> str` | `process.args() -> list[str]` | M18 |
 | `process_env(key: str) -> str` (empty = unset) | `process.env(key: str) -> ?str` (none = unset) | M16 |
 | `io_read_line() -> str` (empty = EOF) | `io.read_line() -> IoError!?str` (none = EOF) | M16; name at M24 |
 
@@ -1456,7 +1457,7 @@ fn main():
 **Design decisions (2026-10-01):**
 
 - **Runtime exports:** `runtime_symbols()` grows 21 → 28 — PR1 adds `ryo_exit`, `ryo_eprint`; PR2 adds `ryo_rt_init`, `ryo_process_argc`, `ryo_process_argv`, `ryo_getenv`, `ryo_read_line`.
-- **`process.args()` target shape at M22 (decided):** Python-style `list[str]` ergonomics — built lazily on first call, cached master copy in the runtime, deep copy per call until `shared[T]` (v0.2–v0.3) removes the copy. Args convert bytes→UTF-8 lossy (U+FFFD on invalid sequences — hostile argv must not panic); `argc == 0` → empty list; `args[0]` = invocation path, included. Zero-copy (Zig/Rust) shapes are excluded by Rule 5 (views cannot be stored in collections), not by preference; a tuple return is rejected on static arity vs. runtime length. The interim intrinsics keep today's unvalidated slot behavior; the lossy policy applies from the M22 API onward. In the v0.2 `core` embedding flavour these APIs do not exist at all — see the revisit note below.
+- **`process.args()` target shape at M18 (decided):** Python-style `list[str]` ergonomics — built lazily on first call, cached master copy in the runtime, deep copy per call until `shared[T]` (v0.2–v0.3) removes the copy. Args convert bytes→UTF-8 lossy (U+FFFD on invalid sequences — hostile argv must not panic); `argc == 0` → empty list; `args[0]` = invocation path, included. Zero-copy (Zig/Rust) shapes are excluded by Rule 5 (views cannot be stored in collections), not by preference; a tuple return is rejected on static arity vs. runtime length. The interim intrinsics keep today's unvalidated slot behavior; the lossy policy applies from the M18 API onward. In the v0.2 `core` embedding flavour these APIs do not exist at all — see the revisit note below.
 
 **Tasks — PR1 (exit + stderr):**
 
@@ -1482,7 +1483,7 @@ fn main():
 - `process_env(key: str) -> str` — empty string = unset (placeholder for `?str` at M16); needs a new libc `getenv` extern in the runtime (which is `#![no_std]` under the staticlib feature, so `std::env` is unavailable). **Decided 2026-10-01: narrow `getenv` on all platforms**, mirroring the existing narrow `_write` split — non-ASCII values on Windows come back in the ANSI codepage (documented placeholder limitation, revisited with `?str` at M16). The key is copied to a 4 KiB stack buffer + NUL-terminated; longer keys panic (interim)
 - `io_read_line() -> str` — read fd 0 up to `\n`, strip it; empty string on EOF (placeholder for `IoError!?str` at M16); needs a new `read`/`_read` extern under the existing `cfg(windows)` split; growable heap buffer via the linked malloc/realloc; EINTR retried, other read errors panic (exit 101, interim). The runtime is factored as `ryo_read_line(out)` + `read_line_from(fd, out)` inner so unit tests can parameterize the fd
 - Str-producing builtins (`process_argv`, `process_env`, `io_read_line`) use the slot-out ABI: sema arm returning `str`, codegen arm calling `emit_slot_out_call` (the `int_to_str` pattern), runtime export writing through `write_str_slot` (SSO ≤23B inline, else heap). No ownership-pass changes needed — the pass seeds any str-returning `Call` as a fresh owner generically. Unbounded outputs → no `max_output_len` entries
-- Mark every interim call form in code with `TODO(M13/M16/M22)` noting what replaces it
+- Mark every interim call form in code with `TODO(M13/M16/M18)` noting what replaces it
 
 **Tests** (`.ryo` files use TAB indentation; patterns from `integration_assert_panic.rs` — `run_ryo_command` captures status/stdout/stderr, `panic_exits_with_101_jit` asserts exit codes, the AOT pattern passes program args via `Command::args`):
 
@@ -1510,7 +1511,7 @@ fn main():
 - Constraints: compiler intrinsics only — no `extern "C"` in Ryo (`std.sys` is the v0.2 design), no allocator, no modules, no `fs.*` (file I/O waits for M13 error unions, per the std design)
 - Returned `str`s are proper owned heap strings (SSO slot via `write_str_slot`); verify no leaks/double-frees under the existing ASan/Valgrind integration tests
 - Out of scope: general stdin buffering/iteration, UTF-8/encoding error handling, process spawning, the FFI layer
-- **Revisit when the runtime consumes flags:** M9.2's entry shim passes argv through untouched — `process_argc`/`process_argv` see every argument. Once the runtime itself needs flags (the v0.2 runtime profile split `--profile=core`, the debug-mode `shared[T]` cycle detector, future scheduler settings), `ryo_rt_init` must partition argv into runtime-reserved flags and program args, and the intrinsics settle on the post-partition view. Design the reserved-flag scheme then — the natural landing point is the M22 migration to `process.args() -> list[str]`. Note the `core` embedding flavour has *no* argv at all (`process.*`/`io.*` are hosted-only; a core library has no `main`, the host calls exported functions) — M9.2's shim sits entirely inside the hosted `is_main` special-case, so nothing needs gating until the v0.2 profile split lands.
+- **Revisit when the runtime consumes flags:** M9.2's entry shim passes argv through untouched — `process_argc`/`process_argv` see every argument. Once the runtime itself needs flags (the v0.2 runtime profile split `--profile=core`, the debug-mode `shared[T]` cycle detector, future scheduler settings), `ryo_rt_init` must partition argv into runtime-reserved flags and program args, and the intrinsics settle on the post-partition view. Design the reserved-flag scheme then — the natural landing point is the M18 migration to `process.args() -> list[str]`. Note the `core` embedding flavour has *no* argv at all (`process.*`/`io.*` are hosted-only; a core library has no `main`, the host calls exported functions) — M9.2's shim sits entirely inside the hosted `is_main` special-case, so nothing needs gating until the v0.2 profile split lands.
 - Dependencies: none beyond what exists today (`never` type, `void`, and the extern runtime ABI all shipped)
 
 ### Milestone 10: Tuples (Tuple Sugar over Anonymous Structs) ✅ COMPLETE
@@ -1742,7 +1743,7 @@ fn describe_color(color: Color) -> str:
 **Cross-references (not claimed here):**
 
 - Immutable borrow-bindings / match ergonomics — pattern surface in M12.5; binding-mode inference semantics land together with or just before this milestone's items
-- `match self:` on `move self` / `inout self` — M17 (Method Implementations) defines the self parameter modes; match rides them
+- `match self:` on `move self` / `inout self` — M17.4 (Method Implementations) defines the self parameter modes; match rides them
 - Copy elision through the match merge block — tracked in [copy_elision.md](copy_elision.md) (P1 specialization for pattern matching)
 
 **Dependencies:** Milestone 12 (match core), Milestone 8.3 (`inout`, shipped); pairs naturally with M12.5
@@ -2049,12 +2050,170 @@ msg = f"Hello, {name}! Score: {score}"
 
 **Implementation Notes:**
 
-- Static format specifications are M17.3; conversions and `{value=}` are M17.4
+- Static format specifications are M17.2; conversions and `{value=}` are M17.3
 - Dynamic width or precision and custom `Display` formatting remain v0.2 work
 - T-strings and compiled templates remain deferred and are not dependencies
 - Dependencies: Milestone 16 and the existing string/ownership pipeline
 
-### Milestone 17: Method Implementations
+### Milestone 16.2: Fixed Arrays, Mutable Indexing & Slices (`slice[T]`)
+
+**Status:** ⏳ Planned — v0.1/alpha, after M16.1 and before M17. Highest structural payoff of the remaining milestones: arrays are the most common blocker across sorting, spectral norm, matrix multiplication, graph algorithms, compression, AST interpreters, neural networks, and natural versions of the existing benchmark ports; the design builds directly on the completed `strview`/`bytesview` machinery.
+
+**Goal:** Borrowed views into arrays — zero-copy iteration over sub-ranges — plus fixed-size arrays with mutable element indexing. (String slices `strview` shipped in M8.4; the interim `b[i]`-yields-`int` rule from M8.4.2 stays until M17.)
+
+**Tasks:**
+
+- Add `[T]` array literal syntax to lexer/parser: `[1, 2, 3]`
+- Extend type system: `Type::Slice(Box<Type>)` for array slices `slice[T]` and `inout [T]`
+- Generalize the `for` header beyond `range(...)`: M8c deferred `for <ident> in <iterable>:` to the collections milestone; fixed arrays/slices are the first non-range iterable, so this milestone extends the loop header to slices (or ships indexed loops plus `len()` as an interim spelling — decide during implementation)
+- Parse slice operations on arrays:
+  - `array[start:end]` — partial slice
+  - `array[:]` — full slice
+  - `array[1:4]` — slice value (view kind determined by the parameter type: `slice[T]` vs `inout [T]`)
+- Mutable element indexing on fixed arrays (`mut nums[i] = v`, bounds-checked, panics) — the fixed-array counterpart of the indexed stores M17 brings to `bytes`
+- Codegen:
+  - Slice representation (pointer + length, fat pointer)
+  - Bounds checking at runtime (panic on out-of-range)
+- `slice[T]` materialization into an owning container, with the bit-copy check in sema: `T` must be trivially copyable (uses the Copy-type classification from the ownership-pass side tables). Views of owning values (`slice[str]`, `slice[Node]`) are materialized by explicit iteration or, once traits land, user `Clone` impls — never by memcpy (`ryo-view-materialization.md` §1)
+- Write tests for array slices
+
+**Visible Progress:** Efficient array sub-range iteration without copying.
+
+**Example:**
+
+```ryo
+fn sum_slice(numbers: slice[int]) -> int:
+ mut total = 0
+ for n in numbers:
+  total += n
+ return total
+
+fn main():
+ nums = [1, 2, 3, 4, 5]
+ total = sum_slice(nums[1:4])    # pass slice [2, 3, 4]
+ print(int_to_str(total))         # 9
+```
+
+**Implementation Notes:**
+
+- Array slices are **fat pointers** (pointer + length); the same representation `strview` already uses
+- Bounds checking at runtime; out-of-range slicing panics
+- `[T]` array literals create stack-allocated fixed-size arrays in v0.1; growable `list[T]` lands in M18
+- Dependencies: Milestone 8.2 (immutable borrows), Milestone 8.3 (`inout [T]` slices)
+- **Open design decision — empty-view/empty-collection initializer syntax (I-249).** `strview` today has no literal: the empty view is the full-slice spell `""[:]` (see the W0003 discussion there — the redundant-materialize hint pushes users toward view-typed bindings, which needed the base-deferral fix in PR #198). `slice[T]` inherits the gap, and M18's draft already assumes constructor-style `list[int]()`. Decide one consistent story before shipping slice[T]/list[T] — annotated literal coercion (`mut v: strview = ""`), a context-typed `empty()` builtin, or typed empty literals — so views and collections do not grow two idioms.
+
+### Milestone 16.3: Bit Operations (Draft — grammar pending)
+
+**Status:** (Draft — v0.1) The operator set itself is approved for the roadmap order; the **spelling is not decided** and blocks implementation. The syntax decision — contextual symbols vs word operators — is a spec-level change and requires explicit approval per the design-change escalation rule; the spec has no bitwise operator section yet.
+
+**Goal:** Bitwise shifts, AND, OR, XOR, and NOT on the existing `int` type (64-bit two's-complement), unlocking SHA-256, CRC32, compression, binary protocols, and simpler Base64 code on top of M16.2's arrays and `bytes`. Sized-type (`u8`/`u32`/…) variants and rotations follow M17; nothing here depends on explicit sizes.
+
+**Design questions this milestone owns:**
+
+- Operator spelling — **open, needs approval**: symbol forms (`<<`, `>>`, `&`, `|`, `^`, `~`) are familiar but `&` collides with the M8.3 inout call-site marker and `|`/`^`/`~` are entirely new single-character tokens; word forms (`shl`, `shr`, `bit_and`, `bit_or`, `bit_xor`, `bit_not`) match the `and`/`or`/`not` precedent but read worse in expression-dense code. If symbols win, each needs a context rule that disambiguates from existing tokens (`&x` vs `a & b`).
+- Shift-count and NOT semantics — **decided**: shift counts ≥ 64 or negative trap in all build modes (spec §18 precedent); NOT is the 64-bit two's-complement complement (no separate bool-flip operator — `not` stays bool-only)
+- Precedence — open (symbol forms slot into the existing ladder; word forms need a new layer above `and`/`or`)
+
+**Tasks:**
+
+- Spec section for the bitwise operators with the approved spellings and precedence
+- Lexer tokens + parser precedence layer; disambiguation rule if `&` is reused
+- Sema: operands are `int` (sized types arrive with M17); result is `int`
+- Codegen: Cranelift `ishl`/`ushr`/`sshr`/`band`/`bor`/`bxor`/`bnot` on I64; trap paths for bad shift counts
+- Tests: operator matrix, precedence, shift-trap behavior in JIT and AOT
+
+**Visible Progress:** `hash = (hash << 5) - hash + byte` / `flags & MASK` style code compiles.
+
+**Implementation Notes:**
+
+- Dependencies: none beyond the current pipeline — schedulable freely once the spelling is approved
+- The M9.2/benchmark ports that need bit ops (SHA-256, CRC32) operate on `bytes` and `int` first; they do not wait for M17
+
+### Milestone 17: Explicit Sizes (`i8`–`i64`, `u8`–`u64`, `usize`, `float32`)
+
+**Goal:** Make the spec §4.2 "Explicit Sizes" line real — sized integer and float types with deliberate conversion rules.
+
+**Status:** ⏳ Planned
+
+**Design questions this milestone owns:**
+
+- Literal coercion — **decided (spec §4.2)**: an `int` literal takes the sized type in a typed context (annotation, parameter, arithmetic/comparison operand) when the value fits, checked at compile time; variables get no implicit conversions — mixed-type arithmetic on variables is a compile error with an explicit-conversion diagnostic. This answers the `b[i] == 0x02` case
+- Conversion spelling — **decided (spec §4.2/§18)**: `int` ↔ sized-type conversions preserve the value and trap on non-fitting values in all build modes; same-width signed↔unsigned traps too (no implicit bit reinterpretation)
+- Overflow semantics per sized type (GAP-2 froze traps-in-all-build-modes for `int`, spec §18; sized types follow)
+
+**Tasks:**
+
+- Pool tags + `TypeKind` entries for `i8`/`i16`/`i32`/`u8`/`u16`/`u32`/`u64`/`usize`/`float32`; annotation resolution; display
+- Integer escape-hatch spellings (`wrapping_*` conversions / same-width reinterpret) — spec §18 promises the family; trapping conversions must not ship without a legal spelling for intentional bit-level conversion
+- Cranelift lowering (`I8`–`I64`, `F32`) with explicit extend/reduce at conversions; checked narrowing (compare + trap per §18); no implicit widening
+- Resolves the M8.4.2 interim: `b[i]` yields `u8`, `bytes_push` takes `u8` (pre-alpha breaking change, pre-announced in the M8.4.2 notes)
+- Indexed stores `b[i] = v` on `mut bytes` bindings (bounds-checked, panics) — deferred from M8.4.2 alongside the element type
+- Benchmark: add `benchmarks/byte_sieve/` (Sieve of Eratosthenes over a `mut bytes` buffer) as the tracking measure for byte-index codegen — expressible only once indexed stores land here
+- Tests: per-type arithmetic/comparison/conversion, overflow traps, the `bytes` element-type transition and indexed stores
+
+**Visible Progress:** `if raw[0] == 0x02:` compiles and does the obvious thing.
+
+**Implementation Notes:**
+
+- Dependencies: none beyond the current pipeline — schedulable freely, but delay widens the body of `int`-typed byte code that must migrate
+
+### Milestone 17.1: `char` Type
+
+**Goal:** The spec §4.2 `char` primitive (Unicode Scalar Value, literal `'a'`) — M18's string-iteration story (`.chars()` yields `char`) already assumes it exists.
+
+**Status:** ⏳ Planned
+
+**Tasks:**
+
+- Pool tag + `TypeKind::Char`; annotation resolution; display
+- Char literals `'a'`, `'\u{1F600}'` — exactly one scalar value per literal; empty and multi-scalar literals are lex diagnostics
+- Representation: 32-bit scalar, validated at literal time (no surrogates, nothing above U+10FFFF); Cranelift `I32`
+- `==`/`!=`, `print` (renders the single char), checked `char` ↔ `int` conversion (code point)
+- Tests: literals, escapes, validation rejections
+
+**Visible Progress:** `c: char = 'a'` compiles; the type M18's `.chars()` iterator yields now exists.
+
+**Implementation Notes:**
+
+- `.chars()` / `.char_count()` themselves land with M18 (iterator machinery); this milestone ships only the type
+- Dependencies: Milestone 13.7 recommended (shares the `\u{HHHH}` escape decoder)
+
+### Milestone 17.2: Static Format Specifications
+
+**Status:** ⏳ Planned — after M17 and M17.1.
+
+**Goal:** Extend M16.1 interpolation with static precision, width, alignment, fill, alternate-form, and numeric-base specifications across the complete numeric and character type system.
+
+**Tasks:**
+
+- Reuse and extend the M16.1 default conversion paths; do not introduce a parallel formatting pipeline
+- Apply M17 sized numeric types and M17.1 `char` to plain and formatted interpolation
+- Count text width in Unicode scalar values, not UTF-8 bytes, grapheme clusters, or terminal columns
+- Test each specification across supported numeric and character types in JIT and AOT
+
+**Implementation Notes:**
+
+- Dependencies: Milestones 16.1, 17.1, and 17.2
+- Dynamic width or precision and custom `Display` formatting remain v0.2 work
+
+### Milestone 17.3: Interpolation Conversions & Debug Capture
+
+**Status:** ⏳ Planned — after M17.2.
+
+**Goal:** Add the interpolation conversion forms and `{value=}` debug-text capture defined by the f-string implementation specification.
+
+**Tasks:**
+
+- Implement conversions on top of the shared interpolation and static-formatting machinery
+- Preserve expression source text for `{value=}` while retaining exactly-once, left-to-right evaluation
+- Add parsing, semantic, ownership, JIT, and AOT coverage
+
+**Implementation Notes:**
+
+- Dependencies: Milestone 17.2
+- Dynamic width or precision and custom `Display` formatting remain v0.2 work
+
+### Milestone 17.4: Method Implementations
 
 **Goal:** Implement methods on types via `impl` blocks
 
@@ -2112,140 +2271,13 @@ fn main():
 - Dependencies: Milestone 8.1 (ownership/move tracking for `self`), Milestone 8.2/8.3 (borrows for `&self` / `inout self`)
 - Unblocks the `bytes.builder()` buffer-builder design (deferred from M8.4.2): chained `move self -> Self` methods (`u8(v).u16_be(n).bytes(b).build()`, spec §5.2.1) on an opaque builder type
 
-> **Note:** Milestone 18 (Traits) has been **deferred to v0.2/v0.3** and folded into the Phase 5 "Traits & Generics" track. Without generics, traits are largely cosmetic — you cannot write `fn max[T: Comparable](...)` — so shipping them together preserves design coherence. A handful of trait-shaped concepts the v0.1 language depends on (`.message()` on errors, `Copy` marker, `Drop` cleanup) are implemented as **compiler-known interfaces** rather than user-extensible traits in v0.1. Methods on user types still work via `impl` blocks (Milestone 17); only the `trait` keyword and trait bounds are deferred.
+> **Note:** The Traits milestone has been **deferred to v0.2/v0.3** and folded into the Phase 5 "Traits & Generics" track. Without generics, traits are largely cosmetic — you cannot write `fn max[T: Comparable](...)` — so shipping them together preserves design coherence. A handful of trait-shaped concepts the v0.1 language depends on (`.message()` on errors, `Copy` marker, `Drop` cleanup) are implemented as **compiler-known interfaces** rather than user-extensible traits in v0.1. Methods on user types still work via `impl` blocks (Milestone 17.4); only the `trait` keyword and trait bounds are deferred.
 
-> **Note:** Milestone 19 (Immutable Borrows) has been **moved to Milestone 8.2** — see Phase 2.
+> **Note:** The Immutable Borrows milestone has been **moved to Milestone 8.2** — see Phase 2.
 
-> **Note:** Milestone 20 (Mutable Borrows) has been **moved to Milestone 8.3** — see Phase 2.
+> **Note:** The Mutable Borrows milestone has been **moved to Milestone 8.3** — see Phase 2.
 
-### Milestone 17.1: Explicit Sizes (`i8`–`i64`, `u8`–`u64`, `usize`, `float32`)
-
-**Goal:** Make the spec §4.2 "Explicit Sizes" line real — sized integer and float types with deliberate conversion rules.
-
-**Status:** ⏳ Planned
-
-**Design questions this milestone owns:**
-
-- Literal coercion — **decided (spec §4.2)**: an `int` literal takes the sized type in a typed context (annotation, parameter, arithmetic/comparison operand) when the value fits, checked at compile time; variables get no implicit conversions — mixed-type arithmetic on variables is a compile error with an explicit-conversion diagnostic. This answers the `b[i] == 0x02` case
-- Conversion spelling — **decided (spec §4.2/§18)**: `int` ↔ sized-type conversions preserve the value and trap on non-fitting values in all build modes; same-width signed↔unsigned traps too (no implicit bit reinterpretation)
-- Overflow semantics per sized type (GAP-2 froze traps-in-all-build-modes for `int`, spec §18; sized types follow)
-
-**Tasks:**
-
-- Pool tags + `TypeKind` entries for `i8`/`i16`/`i32`/`u8`/`u16`/`u32`/`u64`/`usize`/`float32`; annotation resolution; display
-- Integer escape-hatch spellings (`wrapping_*` conversions / same-width reinterpret) — spec §18 promises the family; trapping conversions must not ship without a legal spelling for intentional bit-level conversion
-- Cranelift lowering (`I8`–`I64`, `F32`) with explicit extend/reduce at conversions; checked narrowing (compare + trap per §18); no implicit widening
-- Resolves the M8.4.2 interim: `b[i]` yields `u8`, `bytes_push` takes `u8` (pre-alpha breaking change, pre-announced in the M8.4.2 notes)
-- Indexed stores `b[i] = v` on `mut bytes` bindings (bounds-checked, panics) — deferred from M8.4.2 alongside the element type
-- Benchmark: add `benchmarks/byte_sieve/` (Sieve of Eratosthenes over a `mut bytes` buffer) as the tracking measure for byte-index codegen — expressible only once indexed stores land here
-- Tests: per-type arithmetic/comparison/conversion, overflow traps, the `bytes` element-type transition and indexed stores
-
-**Visible Progress:** `if raw[0] == 0x02:` compiles and does the obvious thing.
-
-**Implementation Notes:**
-
-- Dependencies: none beyond the current pipeline — schedulable freely, but delay widens the body of `int`-typed byte code that must migrate
-
-### Milestone 17.2: `char` Type
-
-**Goal:** The spec §4.2 `char` primitive (Unicode Scalar Value, literal `'a'`) — M22's string-iteration story (`.chars()` yields `char`) already assumes it exists.
-
-**Status:** ⏳ Planned
-
-**Tasks:**
-
-- Pool tag + `TypeKind::Char`; annotation resolution; display
-- Char literals `'a'`, `'\u{1F600}'` — exactly one scalar value per literal; empty and multi-scalar literals are lex diagnostics
-- Representation: 32-bit scalar, validated at literal time (no surrogates, nothing above U+10FFFF); Cranelift `I32`
-- `==`/`!=`, `print` (renders the single char), checked `char` ↔ `int` conversion (code point)
-- Tests: literals, escapes, validation rejections
-
-**Visible Progress:** `c: char = 'a'` compiles; the type M22's `.chars()` iterator yields now exists.
-
-**Implementation Notes:**
-
-- `.chars()` / `.char_count()` themselves land with M22 (iterator machinery); this milestone ships only the type
-- Dependencies: Milestone 13.7 recommended (shares the `\u{HHHH}` escape decoder)
-
-### Milestone 17.3: Static Format Specifications
-
-**Status:** ⏳ Planned — after M17.1 and M17.2.
-
-**Goal:** Extend M16.1 interpolation with static precision, width, alignment, fill, alternate-form, and numeric-base specifications across the complete numeric and character type system.
-
-**Tasks:**
-
-- Reuse and extend the M16.1 default conversion paths; do not introduce a parallel formatting pipeline
-- Apply M17.1 sized numeric types and M17.2 `char` to plain and formatted interpolation
-- Count text width in Unicode scalar values, not UTF-8 bytes, grapheme clusters, or terminal columns
-- Test each specification across supported numeric and character types in JIT and AOT
-
-**Implementation Notes:**
-
-- Dependencies: Milestones 16.1, 17.1, and 17.2
-- Dynamic width or precision and custom `Display` formatting remain v0.2 work
-
-### Milestone 17.4: Interpolation Conversions & Debug Capture
-
-**Status:** ⏳ Planned — after M17.3.
-
-**Goal:** Add the interpolation conversion forms and `{value=}` debug-text capture defined by the f-string implementation specification.
-
-**Tasks:**
-
-- Implement conversions on top of the shared interpolation and static-formatting machinery
-- Preserve expression source text for `{value=}` while retaining exactly-once, left-to-right evaluation
-- Add parsing, semantic, ownership, JIT, and AOT coverage
-
-**Implementation Notes:**
-
-- Dependencies: Milestone 17.3
-- Dynamic width or precision and custom `Display` formatting remain v0.2 work
-
-### Milestone 21: Array Slices (`slice[T]`)
-
-**Goal:** Borrowed views into arrays — zero-copy iteration over sub-ranges. (String slices `strview` are planned in M8.4.)
-
-**Tasks:**
-
-- Add `[T]` array literal syntax to lexer/parser: `[1, 2, 3]`
-- Extend type system: `Type::Slice(Box<Type>)` for array slices `slice[T]` and `inout [T]`
-- Parse slice operations on arrays:
-  - `array[start:end]` — partial slice
-  - `array[:]` — full slice
-  - `array[1:4]` — slice value (view kind determined by the parameter type: `slice[T]` vs `inout [T]`)
-- Codegen:
-  - Slice representation (pointer + length, fat pointer)
-  - Bounds checking at runtime (panic on out-of-range)
-- `slice[T]` materialization into an owning container, with the bit-copy check in sema: `T` must be trivially copyable (uses the Copy-type classification from the ownership-pass side tables). Views of owning values (`slice[str]`, `slice[Node]`) are materialized by explicit iteration or, once traits land, user `Clone` impls — never by memcpy (`ryo-view-materialization.md` §1)
-- Write tests for array slices
-
-**Visible Progress:** Efficient array sub-range iteration without copying.
-
-**Example:**
-
-```ryo
-fn sum_slice(numbers: slice[int]) -> int:
- mut total = 0
- for n in numbers:
-  total += n
- return total
-
-fn main():
- nums = [1, 2, 3, 4, 5]
- total = sum_slice(nums[1:4])    # pass slice [2, 3, 4]
- print(int_to_str(total))         # 9
-```
-
-**Implementation Notes:**
-
-- Array slices are **fat pointers** (pointer + length); the same representation `strview` already uses
-- Bounds checking at runtime; out-of-range slicing panics
-- `[T]` array literals create stack-allocated fixed-size arrays in v0.1; growable `list[T]` lands in M22
-- Dependencies: Milestone 8.2 (immutable borrows), Milestone 8.3 (`inout [T]` slices)
-- **Open design decision — empty-view/empty-collection initializer syntax (I-249).** `strview` today has no literal: the empty view is the full-slice spell `""[:]` (see the W0003 discussion there — the redundant-materialize hint pushes users toward view-typed bindings, which needed the base-deferral fix in PR #198). `slice[T]` inherits the gap, and M22's draft already assumes constructor-style `list[int]()`. Decide one consistent story before shipping slice[T]/list[T] — annotated literal coercion (`mut v: strview = ""`), a context-typed `empty()` builtin, or typed empty literals — so views and collections do not grow two idioms.
-
-### Milestone 22: Collections (List, Map)
+### Milestone 18: Collections (List, Map)
 
 **Goal:** Implement `list[T]` and `map[K, V]` with hardcoded types
 
@@ -2299,18 +2331,18 @@ fn main():
 
 - **Hardcoded types** initially: `list[int]`, `list[str]`, `map[str, int]`
 - Generics deferred to Phase 5 (post-v0.1.0)
-- Collections own their data (RAII cleanup in M23)
+- Collections own their data (RAII cleanup in M19)
 - Iteration uses immutable borrows
 - **Copy-on-write at the buffer level** — `list[T]`, `map[K, V]`, and `str` are class-backed but present value semantics to the user. A mutating method checks the backing buffer's refcount; if > 1, it clones the buffer first. This is the Swift collection model (`Array`, `Dictionary`, `String`) and is the prerequisite for `shared[T]`'s performance story (spec 5.6).
 - **ARC optimizer pass** ([arc_optimizer.md](arc_optimizer.md)) is a **hard gate** for user-visible `shared[T]`: the pass must be committed before `shared[T]` ships in the stdlib or appears in any published benchmark. Without retain/release elision, every collection access in shared-state code pays atomic refcount cost, and first impressions of the feature would be set by unoptimized microbenchmarks. Sequencing: design and prototype the pass during this milestone.
-- Dependencies: Milestone 8.3 (`inout` for append/remove), Milestone 21 (array slices for iteration)
+- Dependencies: Milestone 8.3 (`inout` for append/remove), Milestone 16.2 (array slices for iteration)
 - `bytes.from_list([...])` becomes expressible here (deferred from M8.4.2 — it needs list literals to exist)
-- **String iteration (sequencing, with spec §4.7):** `char` (§4.2, Unicode scalar value — Milestone 17.2) lands first; `.chars()` is a decoding iterator over it; `.char_count()` is the explicit-O(n) convenience — `.len()` stays byte length, so no linear scan hides behind constant-looking syntax. `s.chars().collect() -> list[char]` is the decode-once-then-index escape hatch (explicit allocation).
+- **String iteration (sequencing, with spec §4.7):** `char` (§4.2, Unicode scalar value — Milestone 17.1) lands first; `.chars()` is a decoding iterator over it; `.char_count()` is the explicit-O(n) convenience — `.len()` stays byte length, so no linear scan hides behind constant-looking syntax. `s.chars().collect() -> list[char]` is the decode-once-then-index escape hatch (explicit allocation).
 - **String `for` shape:** `for (offset, c) in text.chars():` — each step yields the byte offset (aligned with slice bounds, for `text[start:i]`-style scanning) and the decoded `char` (for classification). No silent U+FFFD: `str` is valid UTF-8 by construction, so decoding is total — the Go ergonomics without the Go error-swallowing.
 - **Key hashability is a predicate, not a protocol — open decision, needed before non-primitive map keys (Draft — v0.2+).** Equality already models the pattern: memberwise `==` gated by the compile-time Eq-capable predicate (spec §4.5), computed recursively from the fields with no user-written code, compile error when a field isn't Eq-capable. Hashing should mirror it exactly: a value is hashable iff every field type is hashable, enforced at the call site as a compile error naming the offending field — never Python's runtime `unhashable type`. What actually needs deciding: Ryo values can mutate through `mut` bindings, including struct/tuple fields (M10 positional writes), which changes their content — and therefore their hash — after insertion. Candidates: **(a) snapshot at insertion** — the map owns its key (copy for Copy shapes, move/clone for owning ones), so mutating the original afterwards cannot corrupt the table; composes with the copy-on-write note above and with the ownership pass. **(b) transitive immutability as a capability** — only deeply immutable types are hashable, and a `mut` binding of a hashable type cannot be used as a key; hashability becomes a type property, at the cost of refusing legitimate read-only uses. Python never faced the question (tuples are deeply immutable, which is exactly why they are the dict-key idiom); Rust's `Hash`+`Eq` split answers it for interior mutability only. Pick before `map[K, V]` accepts struct/tuple keys — the hardcoded `map[str, int]` doesn't hit the question, but the decision shapes the map's ownership contract.
-- **Heterogeneous + dynamically-sized data = enum + collection — the intended idiom, and an open `any` question for Phase 5 (Draft — v0.2+).** "A sequence of different-typed elements of unknown length" decomposes into two needs the type system answers separately: heterogeneity via a sum type, unknown size via a collection. The intended idiom is `list[EnumType]` / `map[str, EnumType]`: the union is a declared enum (§4.8 — named payloads keep braces, positional payloads keep parens), the dynamism is `list[T]`/`map[K, V]`. This covers the closed-set use cases — ASTs (`Expr = Literal | Binary(op, lhs, rhs) | Call(...)`), JSON (`Json = Null | Bool(bool) | … | Arr(list[Json])` — recursion through the generic collection), document/UI models, event and message streams (the Go-inspired concurrency story answers this better than Go: an exhaustive `match` on a message enum instead of `interface{}` type assertions). It also mirrors the D11 ruling: one structural product type (anonymous structs) paired with one nominal sum type (enums). Sequencing: the full recursive pattern (`list[Json]`) needs generic collections — Phase 5 (Traits & Generics), since M22 hardcodes instantiations. What this idiom cannot express is an OPEN set (variants added by third parties later — plugin systems; truly schema-less external data). The escape hatch is type erasure — an `any`/top type carrying runtime type tags with checked downcasts — at the cost of RTTI, mandatory boxing, and lost static guarantees. Whether Ryo wants an `any` at all is a deliberate Phase 5 decision, not a default; schema-less JSON is often better served by schema-driven codegen. Deliberately rejected: structural union types (`list[A | B]`, the TypeScript approach — breaks the D11 symmetry and adds implicit-coercion surface) and growing/dynamic tuples (contradicts the static-shape ruling at the root of M10).
+- **Heterogeneous + dynamically-sized data = enum + collection — the intended idiom, and an open `any` question for Phase 5 (Draft — v0.2+).** "A sequence of different-typed elements of unknown length" decomposes into two needs the type system answers separately: heterogeneity via a sum type, unknown size via a collection. The intended idiom is `list[EnumType]` / `map[str, EnumType]`: the union is a declared enum (§4.8 — named payloads keep braces, positional payloads keep parens), the dynamism is `list[T]`/`map[K, V]`. This covers the closed-set use cases — ASTs (`Expr = Literal | Binary(op, lhs, rhs) | Call(...)`), JSON (`Json = Null | Bool(bool) | … | Arr(list[Json])` — recursion through the generic collection), document/UI models, event and message streams (the Go-inspired concurrency story answers this better than Go: an exhaustive `match` on a message enum instead of `interface{}` type assertions). It also mirrors the D11 ruling: one structural product type (anonymous structs) paired with one nominal sum type (enums). Sequencing: the full recursive pattern (`list[Json]`) needs generic collections — Phase 5 (Traits & Generics), since M18 hardcodes instantiations. What this idiom cannot express is an OPEN set (variants added by third parties later — plugin systems; truly schema-less external data). The escape hatch is type erasure — an `any`/top type carrying runtime type tags with checked downcasts — at the cost of RTTI, mandatory boxing, and lost static guarantees. Whether Ryo wants an `any` at all is a deliberate Phase 5 decision, not a default; schema-less JSON is often better served by schema-driven codegen. Deliberately rejected: structural union types (`list[A | B]`, the TypeScript approach — breaks the D11 symmetry and adds implicit-coercion surface) and growing/dynamic tuples (contradicts the static-shape ruling at the root of M10).
 
-### Milestone 23: RAII & Drop (Compiler Intrinsic)
+### Milestone 19: RAII & Drop (Compiler Intrinsic)
 
 **Goal:** Implement automatic resource cleanup via a compiler-known `drop` method
 
@@ -2365,7 +2397,7 @@ fn early_return():
 - User-defined cleanup via the special `drop` method on `impl` blocks (no `trait Drop` keyword needed yet)
 - Prevents resource leaks (files, sockets, memory)
 - **Forward compatibility:** when the user-facing trait system ships in v0.2/v0.3, `Drop` becomes a real trait and existing `fn drop(inout self)` methods continue to work unchanged
-- Dependencies: Milestone 17 (methods — `impl` blocks), Milestone 8.3 (mutable borrows for `inout self`)
+- Dependencies: Milestone 17.4 (methods — `impl` blocks), Milestone 8.3 (mutable borrows for `inout self`)
 
 ## Phase 4: Module System & Core Ecosystem
 
@@ -2455,7 +2487,7 @@ fn main():
 **Dependencies:**
 
 - Milestone 5 (design)
-- Milestone 23 (everything else — modules wrap a complete language)
+- Milestone 19 (everything else — modules wrap a complete language)
 
 **Future Enhancements** (see proposals.md): re-exports `pub use`, glob imports `import utils.*`, conditional compilation `#[cfg(...)]`, workspace support.
 
@@ -2610,7 +2642,7 @@ note: run with `RYOLANG_BACKTRACE=1` for full backtrace
 - Panic **unwinds the stack** (calls `drop` on all values)
 - Panic is **not recoverable** (use error handling for that)
 - v0.1 panic is single-frame; full DWARF stack traces ship in v0.2
-- Dependencies: Milestone 23 (RAII for unwinding)
+- Dependencies: Milestone 19 (RAII for unwinding)
 
 ### Milestone 26: Testing Framework & Documentation
 
@@ -3081,10 +3113,10 @@ Adding M:N threading has **specification impacts** that require changes to earli
 
 **A. `Shared[T]` Must Be Atomic Reference Counted (ARC)**
 
-- **Change in Milestone 23 (RAII & Drop)**: `Shared[T]` uses atomic CPU instructions
+- **Change in Milestone 19 (RAII & Drop)**: `Shared[T]` uses atomic CPU instructions
 - **Performance cost:** ~5-10 CPU cycles per clone/drop for thread safety
 - **Rationale:** Prevents data races when multiple threads share ownership
-- **Gate:** `shared[T]` does not ship user-facing until the ARC optimizer pass ([arc_optimizer.md](arc_optimizer.md), gated in M22) is committed — unelided atomic retain/release on every assignment would otherwise dominate shared-state code and set the feature's benchmark reputation
+- **Gate:** `shared[T]` does not ship user-facing until the ARC optimizer pass ([arc_optimizer.md](arc_optimizer.md), gated in M18) is committed — unelided atomic retain/release on every assignment would otherwise dominate shared-state code and set the feature's benchmark reputation
 
 **B. Global Mutable State Rules**
 
@@ -3312,7 +3344,7 @@ fn main():
 
 **Why Post-v0.1.0:**
 
-- Hardcoded collections (Milestone 22) sufficient for v0.1.0
+- Hardcoded collections (Milestone 18) sufficient for v0.1.0
 - Generic implementation is complex (monomorphization, specialization)
 - **Traits without generics are cosmetic** — you cannot write `fn max[T: Comparable](...)`, so shipping the `trait` keyword separately from generics produces an awkward intermediate state. Folding them together preserves design coherence.
 - Community feedback will inform design (variance, associated types, etc.)
@@ -3402,11 +3434,11 @@ config = load_config("config.toml") catch as e:
 **Sequencing:**
 
 - Basic interpolation ships in M16.1 without traits
-- Static format specifications ship in M17.3
-- Conversions and `{value=}` ship in M17.4
+- Static format specifications ship in M17.2
+- Conversions and `{value=}` ship in M17.3
 - Only dynamic formatting and user-defined `Display` behavior wait for the v0.2 trait system
 
-**Dependencies:** Milestone 17.4 and v0.2 traits for custom `Display` implementations
+**Dependencies:** Milestone 17.3 and v0.2 traits for custom `Display` implementations
 
 **Timeline:** v0.2
 
@@ -3417,7 +3449,7 @@ config = load_config("config.toml") catch as e:
 **Why Post-v0.1.0:**
 
 - Builds directly on the f-string interpolation parser (shared machinery) — shipping it after f-strings keeps the parser single-sourced
-- The `Template` type needs user-defined types (M9) and methods (M17) for its API, and `Display` reification to `str` needs v0.2 traits
+- The `Template` type needs user-defined types (M9) and methods (M17.4) for its API, and `Display` reification to `str` needs v0.2 traits
 
 **Features:**
 
@@ -3438,7 +3470,7 @@ render(tmpl)               # consumer renders/escapes as it sees fit
 ```
 
 **Effort:** ~1 week (reuses the f-string parser)
-**Dependencies:** F-strings & String Interpolation, M9 structs, M17 methods, v0.2 traits
+**Dependencies:** F-strings & String Interpolation, M9 structs, M17.4 methods, v0.2 traits
 **Timeline:** v0.2, after F-strings
 
 ### Stack Traces & Compiler Diagnostics Polish
@@ -3461,7 +3493,7 @@ render(tmpl)               # consumer renders/escapes as it sees fit
 - Source context with caret highlighting in compiler errors (improvement over v0.1)
 
 **Effort:** ~1.5-2 weeks
-**Dependencies:** v0.1 panic (M25), Drop/RAII (M23) for unwinding
+**Dependencies:** v0.1 panic (M25), Drop/RAII (M19) for unwinding
 **Timeline:** v0.2
 
 ### Benchmarking & Doc Generation
@@ -3653,7 +3685,7 @@ ContractViolation: precondition failed: amount > 0
 **Implementation Details:** See [copy_elision.md](copy_elision.md) for the full G/P/F classification and algorithm sketch.
 
 **Effort:** ~2-3 weeks
-**Dependencies:** Ownership (M15), Borrows (M19-M20), RAII (M23)
+**Dependencies:** Ownership (M15), Borrows (M19-M20), RAII (M19)
 **Timeline:** v0.2 (early post-v0.1.0)
 
 ### Standard Library Allocation Optimizations (SSO, COW)
@@ -3750,7 +3782,7 @@ result = try task.timeout(5s, worker).await catch as e:
 **Visible Progress:** Tasks cancel cooperatively with clear error types. Resources are always cleaned up. No leaked file handles, connections, or locks on cancellation.
 
 **Effort:** ~2-3 weeks (integrated with Milestone 32-33 runtime work)
-**Dependencies:** Concurrency runtime (Milestone 32), error unions (v0.1), Drop trait (Milestone 23)
+**Dependencies:** Concurrency runtime (Milestone 32), error unions (v0.1), Drop trait (Milestone 19)
 **Timeline:** v0.4+ (ships with concurrency runtime, Milestone 33)
 
 ### Named Parameters (`#[named]`)
@@ -3890,7 +3922,7 @@ The 26 milestones in Phases 1-4 represent the **core language** needed for Ryo v
 - ❌ Closures & lambda expressions (v0.2 — incl. capture analysis)
 - ❌ User-facing `trait` keyword & trait bounds (v0.2 — v0.1 has compiler-known interfaces for `drop`/`Copy`/`.message()`)
 - ❌ Error-return traces and `.location()` / `.stack_trace()` (deferred; M13 has `try`/`catch` and messages without trace capture)
-- ❌ Dynamic width/precision and custom `Display` interpolation (v0.2 — basic f-strings ship in M16.1, static format specifications in M17.3, and conversions/`{value=}` in M17.4)
+- ❌ Dynamic width/precision and custom `Display` interpolation (v0.2 — basic f-strings ship in M16.1, static format specifications in M17.2, and conversions/`{value=}` in M17.3)
 - ❌ Multi-frame stack traces & "did you mean?" suggestions (v0.2 — v0.1 has single-frame panic)
 - ❌ `#[bench]` benchmark harness & `ryo doc` HTML generator (v0.2 — doc comments are still parsed)
 - ❌ Constrained types / range types (v0.2)
@@ -3911,10 +3943,10 @@ This foundation enables building **synchronous applications** including CLI tool
 
 **Phase 1 (M1-M3.5):** ✅ COMPLETE (~2 months)
 **Phase 2 (M4-M13):** 15 milestones — incl. M8.1 (str+heap), M8.2 (&T), M8.3 (inout), M8.4 (strview), M13 (try/catch and inferred error unions), M13.7 (literal forms); excl. closures (v0.2) and M6 (now early-Phase-4) × 3 weeks avg = ~45 weeks (~11 months)
-**Phase 3 (M16, M17, M17.1, M17.2, M21, M22, M23):** 7 milestones — strings/borrows pulled forward to Phase 2; traits and closure capture deferred to v0.2 × 3 weeks avg = ~21 weeks (~5 months)
+**Phase 3 (M16 → M16.1 → M16.2 → M16.3 → M17 → M17.1 → M17.2 → M17.3 → M17.4 → M18 → M19):** 11 milestones — strings/borrows pulled forward to Phase 2; traits and closure capture deferred to v0.2 × 3 weeks avg = ~33 weeks (~8 months)
 **Phase 4 (M24-M27):** 6 milestones (includes M26.5 Distribution & Installer and M26.6 Cross-Compilation) × 4 weeks avg = ~24 weeks (~6 months)
 
-**Total Estimated Time:** 98 weeks (~24 months) from Phase 2 start to v0.1.0
+**Total Estimated Time:** 110 weeks (~27 months) from Phase 2 start to v0.1.0
 
 ### Development Approach
 
@@ -3926,8 +3958,8 @@ This foundation enables building **synchronous applications** including CLI tool
 ### Milestones by Complexity
 
 **Simple (2 weeks):** M4, M5, M7, M10, M8.4, M13.7
-**Medium (3 weeks):** M6, M8, M8.1, M8.2, M8.3, M13.5, M9, M11, M12, M13, M16, M17, M17.2, M21, M22, M24, M25, M26, M26.5
-**Complex (4-5 weeks):** M17.1, M20, M23, M27
+**Medium (3 weeks):** M6, M8, M8.1, M8.2, M8.3, M13.5, M9, M11, M12, M13, M16, M16.1, M16.2, M16.3, M17, M17.1, M17.2, M17.3, M24, M25, M26, M26.5
+**Complex (4-5 weeks):** M17.4, M18, M19, M27
 
 This timeline is **realistic** based on compiler development best practices. Each milestone includes implementation, testing, documentation, and examples.
 

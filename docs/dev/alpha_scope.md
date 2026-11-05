@@ -110,7 +110,7 @@ The snippet alone doesn't make alpha useful — users need basic I/O to write sm
 | `assert(cond: bool, msg: &str)` | Aborts with message on `false` | M25 partial |
 | `panic(msg: &str)` | Aborts with message | M25 partial |
 
-**Note on collections:** Alpha intentionally has *no* user-facing list, map, or array types. The CLI argv API uses indexed access (`arg(i)`) instead of iteration over a list. This keeps M21/M22 entirely out of alpha scope and forces ownership ergonomics to be validated on simpler data first. Users who want to iterate can use recursion + integer indices.
+**Note on collections:** Alpha intentionally has *no* user-facing list, map, or array types. The CLI argv API uses indexed access (`arg(i)`) instead of iteration over a list. This keeps M16.2/M18 entirely out of alpha scope and forces ownership ergonomics to be validated on simpler data first. Users who want to iterate can use recursion + integer indices.
 
 ---
 
@@ -124,10 +124,10 @@ These are documented in the roadmap as v0.1.0 milestones but are **not** part of
 | Default parameters & named arguments | M13.5 | Pure ergonomics; positional args work |
 | Structs | M9 | Snippet uses no structs; tuples + enums cover early needs |
 | Tuples | M10 | Not in snippet |
-| Methods (`impl` blocks) | M17 | Free functions cover all alpha use cases |
-| Array slices `&[T]` | M21 | Depends on collections |
-| Collections (`list`, `map`) | M22 | Largest deferral; see "Note on collections" above |
-| RAII & `Drop` | M23 | No alpha types own non-memory resources |
+| Methods (`impl` blocks) | M17.4 | Free functions cover all alpha use cases |
+| Array slices `&[T]` | M16.2 | Depends on collections |
+| Collections (`list`, `map`) | M18 | Largest deferral; see "Note on collections" above |
+| RAII & `Drop` | M19 | No alpha types own non-memory resources |
 | Testing framework (`#[test]`) | M26 | Use `assert` + `if cond: panic("...")` for alpha self-tests |
 | Documentation generator (`ryo doc`) | M26 | Markdown + manual examples are sufficient |
 | Pretty error messages with snippets | M27 | Plain "error at line N: ..." is enough for alpha feedback |

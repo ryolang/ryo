@@ -8,7 +8,7 @@
 
 ## Evolution note: this benchmark must mutate to B
 
-This flat-loop record workload is the interim form. Once `list[T]` lands (M22, see `docs/dev/implementation_roadmap.md`), this benchmark **must** evolve into the AoS *particles* workload: a `list[Particle]` of structs with `x/y/z` float fields, integrated over N time steps — the array-of-structs layout comparison Ryo vs Rust vs Swift vs Python. That is the comparison that actually exercises contiguous aggregate storage, iteration over struct elements, and in-place field mutation at scale. When it does, this synthetic loop retires or survives as the flat-loop baseline leg.
+This flat-loop record workload is the interim form. Once `list[T]` lands (M18, see `docs/dev/implementation_roadmap.md`), this benchmark **must** evolve into the AoS *particles* workload: a `list[Particle]` of structs with `x/y/z` float fields, integrated over N time steps — the array-of-structs layout comparison Ryo vs Rust vs Swift vs Python. That is the comparison that actually exercises contiguous aggregate storage, iteration over struct elements, and in-place field mutation at scale. When it does, this synthetic loop retires or survives as the flat-loop baseline leg.
 
 ## Benchmarks & Performance Results
 

@@ -69,11 +69,11 @@ A compiled template definition stores reusable structure and accepts its context
 
 ### 2.4 Milestone placement
 
-Basic f-string interpolation ships as **M16.1 — F-Strings & String Interpolation** in v0.1/alpha, after M16 Optional Types and before M17 Method Implementations. The execution order is **M13 → M13.8 → M16 → M16.1 → M17**. M16.1 requires no traits, t-strings, or template machinery.
+Basic f-string interpolation ships as **M16.1 — F-Strings & String Interpolation** in v0.1/alpha, after M16 Optional Types and before M17.4 Method Implementations. The execution order is **M13 → M13.8 → M16 → M16.1 → M17.4**. M16.1 requires no traits, t-strings, or template machinery.
 
-**M17.3 — Static Format Specifications** follows M17.1 Explicit Sizes and M17.2 `char`. M17.1 and M17.2 extend plain interpolation and the existing default conversion paths to their new types. M17.3 adds static precision, width, alignment, fill, alternate-form, and numeric-base specifications across the complete numeric and character type system. It must not duplicate or redesign the plain conversion paths. Text width counts Unicode scalar values, not UTF-8 bytes, grapheme clusters, or terminal display columns.
+**M17.2 — Static Format Specifications** follows M17 Explicit Sizes and M17.1 `char`. M17 and M17.1 extend plain interpolation and the existing default conversion paths to their new types. M17.2 adds static precision, width, alignment, fill, alternate-form, and numeric-base specifications across the complete numeric and character type system. It must not duplicate or redesign the plain conversion paths. Text width counts Unicode scalar values, not UTF-8 bytes, grapheme clusters, or terminal display columns.
 
-Conversions and `{value=}` ship in **M17.4**, after the static format-specification work. Dynamic width or precision and custom `Display` formatting remain v0.2 work. T-strings and compiled templates remain deferred under Sections 11 and 12.
+Conversions and `{value=}` ship in **M17.3**, after the static format-specification work. Dynamic width or precision and custom `Display` formatting remain v0.2 work. T-strings and compiled templates remain deferred under Sections 11 and 12.
 
 ## 3. Non-goals
 
@@ -641,5 +641,5 @@ cargo test --workspace
 ## References
 
 - Spec: [Section 2](../specification.md) (string and f-string literals), [Section 6.1.2](../specification.md) (interpolation as the non-variadic printing idiom)
-- Dev: [implementation_roadmap.md](implementation_roadmap.md) (M16.1, M17.3, and M17.4)
+- Dev: [implementation_roadmap.md](implementation_roadmap.md) (M16.1, M17.2, and M17.3)
 - Dev: [compiler_guide.md](compiler_guide.md) (pipeline, AST/UIR, semantic-analysis, backend, and testing conventions)

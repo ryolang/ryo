@@ -65,7 +65,7 @@ fn str_view_is_copy_and_displays() {
     assert!(pool.is_view(v));
     // The pool has no char/u8 primitive at M8.4 — the UTF-8 code
     // unit is not interned as a type, so `view_elem` reports
-    // `None` for `strview` until D2/M21 gives elements a pool
+    // `None` for `strview` until D2/M16.2 gives elements a pool
     // representation.
     assert_eq!(pool.view_elem(v), None);
     assert_eq!(pool.display(v).to_string(), "strview");
@@ -364,7 +364,7 @@ fn bytes_display_and_copy_classification() {
     assert!(!pool.is_copy(pool.bytes()));
     assert!(pool.is_copy(pool.bytes_view()));
     assert!(pool.is_view(pool.bytes_view()));
-    assert_eq!(pool.view_elem(pool.bytes_view()), None); // u8 lands at M17.1
+    assert_eq!(pool.view_elem(pool.bytes_view()), None); // u8 lands at M17
 }
 
 #[test]

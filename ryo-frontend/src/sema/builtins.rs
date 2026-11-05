@@ -121,7 +121,7 @@ fn emit_process_builtin(
             let ret_ty = builtin.return_type(sema.pool);
             fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
         }
-        // TODO(M22): interim call form — replaced by `process.args`.
+        // TODO(M18): interim call form — replaced by `process.args`.
         n if n == ids.process_argv => {
             if view.args.len() != 1 {
                 sema.sink.emit(Diag::error(
@@ -399,7 +399,7 @@ fn emit_push_builtin(
         n if n == ids.bytes_push => {
             // bytes_push(b: inout bytes, x: int) -> void (M8.4.2
             // stopgap: the byte is an `int` range-checked 0-255 at
-            // runtime; becomes `u8` at M17.1). Mirrors the str_push
+            // runtime; becomes `u8` at M17). Mirrors the str_push
             // arm's inout/lvalue machinery; appends a SINGLE byte.
             if view.args.len() != 2 {
                 sema.sink.emit(Diag::error(
