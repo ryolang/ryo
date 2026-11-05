@@ -452,8 +452,7 @@ pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Toke
     out
 }
 
-/// Worst-case Logos DFA stack growth per literal-body byte, across all
-/// escape kinds.
+/// Worst-case Logos DFA stack growth per escape source byte.
 ///
 /// Logos compiles the `\\.` alternative of the string/bytes literal
 /// regexes into DFA state functions that hand off with plain
@@ -470,10 +469,10 @@ pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Toke
 const DFA_STACK_PER_BYTE: usize = 1024;
 
 /// Run the raw-token collection inline while the worst-case DFA depth
-/// of the input's LONGEST literal fits the 2 MiB default stack of a
+/// of the input's largest literal fits the 2 MiB default stack of a
 /// spawned thread (the CLI worker sets 32 MiB explicitly; test threads
 /// get the 2 MiB std default), so typical sources pay no spawn cost.
-/// Only literals longer than ~2 KiB take the sized-thread path.
+/// Only literals with more than ~2 KiB of escapes take the sized-thread path.
 const DFA_INLINE_BUDGET: usize = 2 * 1024 * 1024;
 
 /// Upper bound on the lexing-thread stack reserve. The reserve is
@@ -482,31 +481,32 @@ const DFA_INLINE_BUDGET: usize = 2 * 1024 * 1024;
 /// frames — 1 GiB covers more than a million escapes of either kind.
 const DFA_STACK_MAX: usize = 1024 * 1024 * 1024;
 
-/// Length of the longest string/bytes literal body in the input. The
-/// DFA recursion depth a token can accumulate is driven by its escape
-/// count, and escapes live only inside literal bodies, so the longest
-/// body — not the file size — sets the stack the lexer can need.
-/// Unterminated literals count through EOF; comments and code between
-/// literals do not count.
-fn longest_literal_body(input: &str) -> usize {
+/// Source bytes consumed by escape sequences in the largest literal.
+/// Ordinary literal bytes do not recurse through the DFA's `\\.`
+/// alternative and do not contribute to its stack requirement.
+fn longest_literal_escape_bytes(input: &str) -> usize {
     let bytes = input.as_bytes();
     let mut longest = 0;
-    let mut literal_start = None;
+    let mut literal_escapes = None;
     let mut at = 0;
     while at < bytes.len() {
-        if let Some(start) = literal_start {
+        if let Some(escapes) = literal_escapes.as_mut() {
             match bytes[at] {
                 b'"' => {
-                    longest = longest.max(at - start);
-                    literal_start = None;
+                    longest = longest.max(*escapes);
+                    literal_escapes = None;
                     at += 1;
                 }
                 b'\\' if bytes.get(at + 1) == Some(&b'\n') => {
-                    longest = longest.max(at - start);
-                    literal_start = None;
+                    longest = longest.max(*escapes);
+                    literal_escapes = None;
                     at += 1;
                 }
-                b'\\' => at = (at + 2).min(bytes.len()),
+                b'\\' => {
+                    let width = 1 + input[at + 1..].chars().next().map_or(0, char::len_utf8);
+                    *escapes += width;
+                    at += width;
+                }
                 _ => at += 1,
             }
             continue;
@@ -519,22 +519,22 @@ fn longest_literal_body(input: &str) -> usize {
                 }
             }
             b'"' => {
-                literal_start = Some(at + 1);
+                literal_escapes = Some(0);
                 at += 1;
             }
             _ => at += 1,
         }
     }
-    if let Some(start) = literal_start {
-        longest = longest.max(bytes.len() - start);
+    if let Some(escapes) = literal_escapes {
+        longest = longest.max(escapes);
     }
     longest
 }
 
 /// Worst-case DFA stack the longest literal can need, clamped to a
 /// spawnable size.
-fn dfa_stack_size(longest_body: usize) -> usize {
-    longest_body
+fn dfa_stack_size(escape_bytes: usize) -> usize {
+    escape_bytes
         .saturating_mul(DFA_STACK_PER_BYTE)
         .clamp(DFA_INLINE_BUDGET, DFA_STACK_MAX)
 }
@@ -569,8 +569,8 @@ thread_local! {
 /// `RawToken::Error` plus an `InvalidCharacter` diagnostic. Split out
 /// of `lex` so the pass can run on a scoped thread with an input-sized
 /// stack: a single literal holding tens of thousands of escapes needs
-/// a stack proportional to its length, which no fixed caller stack
-/// guarantees (see `DFA_STACK_PER_BYTE`).
+/// a stack proportional to its escape content, which no fixed caller
+/// stack guarantees (see `DFA_STACK_PER_BYTE`).
 fn collect_raw_tokens<'a>(input: &'a str, sink: &mut DiagSink) -> Vec<(RawToken<'a>, Span)> {
     let collect = |sink: &mut DiagSink| {
         // Pre-size the raw-token buffer instead of growing it from
@@ -605,26 +605,25 @@ fn collect_raw_tokens<'a>(input: &'a str, sink: &mut DiagSink) -> Vec<(RawToken<
         );
         raw_tokens
     };
-    let longest_body = longest_literal_body(input);
+    let escape_bytes = longest_literal_escape_bytes(input);
     let reject_too_large = |sink: &mut DiagSink| {
         sink.emit(Diag::error(
             crate::spans::cspan(SimpleSpan::new((), 0..input.len())),
             DiagCode::LexerInputTooLarge,
             format!(
                 "string literal is too large to lex ({} bytes of escapes in one literal; the limit is {})",
-                longest_body,
+                escape_bytes,
                 DFA_STACK_MAX / DFA_STACK_PER_BYTE,
             ),
         ));
         Vec::new()
     };
     // Above the cap even the sized thread would overflow: reject instead
-    // of scanning. Needs a >1 MiB single literal body — far past anything
-    // a human writes.
-    if longest_body.saturating_mul(DFA_STACK_PER_BYTE) > DFA_STACK_MAX {
+    // of scanning. Needs >1 MiB of escapes in one literal.
+    if escape_bytes.saturating_mul(DFA_STACK_PER_BYTE) > DFA_STACK_MAX {
         return reject_too_large(sink);
     }
-    if longest_body.saturating_mul(DFA_STACK_PER_BYTE) <= DFA_INLINE_BUDGET {
+    if escape_bytes.saturating_mul(DFA_STACK_PER_BYTE) <= DFA_INLINE_BUDGET {
         return collect(sink);
     }
     enum Outcome<'a> {
@@ -634,7 +633,7 @@ fn collect_raw_tokens<'a>(input: &'a str, sink: &mut DiagSink) -> Vec<(RawToken<
     // The scoped thread borrows `sink` for the whole scope, so a refused
     // spawn is reported out and handled after the scope ends.
     let outcome = std::thread::scope(|scope| {
-        match spawn_sized(scope, dfa_stack_size(longest_body), || collect(sink)) {
+        match spawn_sized(scope, dfa_stack_size(escape_bytes), || collect(sink)) {
             Ok(handle) => Outcome::Tokens(
                 handle
                     .join()
@@ -646,7 +645,7 @@ fn collect_raw_tokens<'a>(input: &'a str, sink: &mut DiagSink) -> Vec<(RawToken<
     match outcome {
         Outcome::Tokens(tokens) => tokens,
         Outcome::SpawnRefused
-            if longest_body.saturating_mul(DFA_STACK_PER_BYTE) <= DFA_INLINE_BUDGET =>
+            if escape_bytes.saturating_mul(DFA_STACK_PER_BYTE) <= DFA_INLINE_BUDGET =>
         {
             collect(sink)
         }
@@ -1659,30 +1658,25 @@ mod tests {
     }
 
     #[test]
-    fn longest_literal_body_finds_the_widest_body() {
-        assert_eq!(longest_literal_body(""), 0);
-        assert_eq!(longest_literal_body("print(1)"), 0);
-        assert_eq!(longest_literal_body(r#"s = "abc""#), 3);
-        assert_eq!(longest_literal_body(r#"b = b"a\x00b""#), 6);
+    fn longest_literal_escape_bytes_ignores_plain_bytes() {
+        assert_eq!(longest_literal_escape_bytes(""), 0);
+        assert_eq!(longest_literal_escape_bytes("print(1)"), 0);
+        assert_eq!(longest_literal_escape_bytes(r#"s = "abc""#), 0);
+        assert_eq!(longest_literal_escape_bytes(r#"b = b"a\x00b""#), 2);
         // An escaped quote does not end the body early.
-        assert_eq!(longest_literal_body(r#"s = "a\"b" + "xy""#), 4);
+        assert_eq!(longest_literal_escape_bytes(r#"s = "a\"b" + "xy""#), 2);
         // Ordinary code around and between literals is not counted.
         let code = "fn main():\n\ta = \"short\"\n\tprint(a)\n\tb = b\"\\x61\\x62\"\n\tprint(b)\n";
-        assert_eq!(longest_literal_body(code), 8);
+        assert_eq!(longest_literal_escape_bytes(code), 4);
         // Quotes in comments do not shift literal boundaries.
-        let adversarial = "# 12\" ruler\ns = \"aaaa\"\n";
-        assert_eq!(longest_literal_body(adversarial), 4);
-        assert_eq!(longest_literal_body("#\r\"aaaa\""), 4);
-        // An unterminated literal counts its tail: the DFA scans it to EOF
-        // before failing, so the sized stack must cover it.
-        assert_eq!(longest_literal_body(r#"s = "abc"#), 3);
-        // A backslash before a literal opener is invalid code, not an
-        // escape: the DFA still opens the literal there, so the body must
-        // be measured from the odd-run opener to the closing quote.
-        assert_eq!(longest_literal_body("\\\"aaaa\""), 4);
-        // With no even-run quote at all, an odd-run opener may start an
-        // unterminated literal scanned to EOF.
-        assert_eq!(longest_literal_body("\\\"aaaa"), 4);
+        let adversarial = "# 12\" ruler\ns = \"a\\naa\"\n";
+        assert_eq!(longest_literal_escape_bytes(adversarial), 2);
+        assert_eq!(longest_literal_escape_bytes("#\r\"a\\naa\""), 2);
+        // Unterminated literals count their escapes through EOF.
+        assert_eq!(longest_literal_escape_bytes(r#"s = "a\nbc"#), 2);
+        // A backslash outside a literal does not hide the next literal's escapes.
+        assert_eq!(longest_literal_escape_bytes("\\\"a\\naa\""), 2);
+        assert_eq!(longest_literal_escape_bytes("\\\"a\\naa"), 2);
     }
 
     #[test]
@@ -1711,11 +1705,12 @@ mod tests {
     }
 
     #[test]
-    fn non_literal_bytes_do_not_trigger_too_large_diagnostic() {
+    fn ordinary_bytes_do_not_trigger_too_large_diagnostic() {
         let oversized = "a".repeat(DFA_STACK_MAX / DFA_STACK_PER_BYTE + 1);
         let cases = [
             format!("s = \"ok\"\n#{oversized}"),
             format!("s = \"ok\"\n#{oversized}\nt = \"ok\""),
+            format!("s = \"{oversized}\""),
         ];
         for src in cases {
             let mut pool = InternPool::new();
