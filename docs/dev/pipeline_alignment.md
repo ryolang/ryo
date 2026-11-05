@@ -2,7 +2,7 @@
 
 # Pipeline Alignment with Zig: Remaining Work
 
-The multi-phase plan that moved Ryo's middle-end onto the Zig-style pipeline is **complete**: structured diagnostics (`ryo-core/src/diag.rs`), the deepened `InternPool` (`types.rs`), the UIR/TIR split (`uir.rs`, `tir.rs`, `astgen.rs`, `sema/`), and the lazy worklist Sema driver (`DeclState`: `Unresolved → InProgress → Resolved/Failed`, with cycle detection) have all shipped. The compiler today runs `Lexer → Indent → Parser → AstGen → UIR → Sema → TIR → Flow → Ownership → Codegen` — see [compiler_guide.md](compiler_guide.md) for the authoritative pipeline map. The original phase-by-phase plan text has been removed; git history preserves it.
+The multi-phase plan that moved Ryo's middle-end onto the Zig-style pipeline is **complete**: structured diagnostics (`ryo-core/src/diag.rs`), the deepened `InternPool` (`types.rs`), the UIR/TIR split (`uir.rs`, `tir.rs`, `astgen.rs`, `sema/`), and the lazy worklist Sema driver (`DeclState`: `Unresolved → InProgress → Resolved/Failed`, with cycle detection) have all shipped. The compiler today runs `Lexer → Indent → Parser → AstGen → UIR → Sema → TIR → Flow → Ownership → Codegen` — see [guide_compiler.md](guide_compiler.md) for the authoritative pipeline map. The original phase-by-phase plan text has been removed; git history preserves it.
 
 The [compiler pipeline design](pipeline_migration.md) records the Flow IR layer — Ryo's mid-level execution representation (rustc-MIR-shaped in architectural role, deliberately not named MIR).
 The current working tree uses Flow-driven ownership traversal and maps Flow blocks to Cranelift blocks during backend emission. Cleanup still includes sidecar schedules, instruction anchors, and TIR-based scheduling scans. The [refreshed source audit](pipeline_migration.md#current-pipeline-source-audit-on-2026-10-15) distinguishes these implemented paths from the full phase and cleanup contracts. This source audit does not establish completion of the migration's verification gates. Generic Flow IR analysis, monomorphization, inlining, comptime queries, and transformations remain target work.
@@ -26,7 +26,7 @@ Infrastructure-only test hooks for these already exist, `cfg(any())`-gated, in `
 The Zig alignment was a starting point, not a constraint. The pipeline is expected to diverge where Ryo's own features demand a different shape, and to grow stages Zig doesn't have:
 
 - **Already diverged: the Ownership pass** (post-sema, pre-codegen — `ryo-frontend/src/ownership/mod.rs`). Zig has no ownership or borrow analysis; Ryo's move semantics and eager-destruction guarantees require a dedicated analysis over Flow IR blocks. See `pl_references/mojo.md`.
-- **Optimization steps before codegen.** The target places transformations on Flow IR, with cleanup and reference-count operations explicit before their optimizers. Rebase the planned `shared[T]` ARC optimizer ([design](arc_optimizer.md)) onto that representation. Its destruction and aliasing proofs must remain valid.
+- **Optimization steps before codegen.** The target places transformations on Flow IR, with cleanup and reference-count operations explicit before their optimizers. Rebase the planned `shared[T]` ARC optimizer ([design](spec_arc_optimizer.md)) onto that representation. Its destruction and aliasing proofs must remain valid.
 - Future divergences should be recorded in their own dev docs rather than forced back into the Zig mould.
 
 ## Risk Register (still valid)
@@ -48,7 +48,7 @@ These remain roadmap or future considerations, not part of any shipped phase:
 
 ## References
 
-- Dev: [compiler_guide.md](compiler_guide.md) — authoritative map of the shipped pipeline. `pl_references/mojo.md` (ownership pass), `arc_optimizer.md` (planned pre-codegen optimization), `pl_references/zig.md` (upstream design borrowed from).
+- Dev: [guide_compiler.md](guide_compiler.md) — authoritative map of the shipped pipeline. `pl_references/mojo.md` (ownership pass), `spec_arc_optimizer.md` (planned pre-codegen optimization), `pl_references/zig.md` (upstream design borrowed from).
 - Milestone/Roadmap: *Compile-time Execution (comptime)* and *Full Generics System* — [implementation_roadmap.md](implementation_roadmap.md) (Phase 5, v0.2+).
 - Issues: [../../ISSUES.md](../../ISSUES.md) — I-018 (`TypeId` enum re-attempt).
 - Inspiration: Zig's `src/InternPool.zig` (sidecar `extra` array, single pool for types/strings/values), `src/AstGen.zig` → `src/Sema.zig` separation, `src/Zir.zig` / `src/Air.zig` shapes, `src/Module.zig`'s decl worklist.

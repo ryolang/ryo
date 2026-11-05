@@ -3,7 +3,7 @@
 > **Document Status:** Design Proposal (Pre-Implementation)
 > **Last Updated:** 2026-07-22
 > **Version:** 1.0.0-draft
-> **Resolves:** GAP-1 (`ryo-missing-features-and-gaps.md` §2)
+> **Resolves:** GAP-1 (`record_missing_features_and_gaps.md` §2)
 > **Interacts with:** D5 (scoped task borrows), D9 (runtime profiles), base spec §9.1 (ambient runtime), §9.2.1 (structured concurrency), §5.5 (`with` blocks), §4.10 (error capture)
 
 ---
@@ -91,11 +91,11 @@ Compare Go: `ctx, span := tracer.Start(ctx, ...); defer span.End()` — plus man
 
 1. **Task-tree spans.** Span context is a context field (§2.1); `task.scope`/`task.run` children are automatically child spans. `spawn_detached` creates a span **link** (rule 3 above) — honest topology in the trace backend.
 2. **Error capture → span events.** The §4.10 machinery already collects stack traces at error creation — the 5–10% DX tax. Wire it in: every propagated error becomes a span event with its stack trace; every panic sets span status to error. **The overhead that makes Ryo slower than Go becomes the instrumentation that makes Ryo services more observable than Go services, with zero user code.**
-3. **std.http auto-instrumentation.** Since std owns both HTTP (per `std_ext.md`) and OTel, W3C `traceparent` extraction on inbound requests and injection on outbound calls happen invisibly. Cross-service traces work out of the box.
+3. **std.http auto-instrumentation.** Since std owns both HTTP (per `spec_std_extensions.md`) and OTel, W3C `traceparent` extraction on inbound requests and injection on outbound calls happen invisibly. Cross-service traces work out of the box.
 
 ### 3.4 Cost discipline (D9-aligned)
 
-- **Pay-per-import:** no `import std.otel` → nothing linked, nothing checked (same rule as TLS in `std_ext.md`).
+- **Pay-per-import:** no `import std.otel` → nothing linked, nothing checked (same rule as TLS in `spec_std_extensions.md`).
 - **Noop by default:** with no exporter configured, span operations are no-ops (one branch per span); the SDK initializes on explicit `otel.init_otlp(endpoint)`.
 - **Hosted-only:** meaningless on `core`; a noop stub at most.
 - **Std surface is OTel-native and minimal** — tracer/span/meter vocabulary directly (the standard's own words; no translation layer to rot). Std ships the **OTLP exporter only**; vendor-specific exporters are external packages.

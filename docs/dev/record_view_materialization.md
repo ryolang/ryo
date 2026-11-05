@@ -123,6 +123,6 @@ suggestion-payload machinery, which does not exist yet.
 
 ## References
 
-- Spec: final slicing & memory spec §3.4.1 (materialization), view rules P1–P6, E0034 ViewEscape (`ryo-slicing-and-memory-model-final-spec.md`)
+- Spec: final slicing & memory spec §3.4.1 (materialization), view rules P1–P6, E0034 ViewEscape (`spec_slicing_and_memory_model.md`)
 - Dev: `docs/experimental/ryo-agent-interface-proposal.md` (machine-applicable suggestions)
 - Milestone: M8.4.1.2 and M8.4.2 (shipped); M16.2, Traits & Generics, and the Phase 5 deferred table (pending) — see `implementation_roadmap.md`

@@ -64,7 +64,7 @@ This inverts Rust's default. The rationale (spec 5.1 "Borrow-by-Default for Func
 
 This is where Ryo trades expressiveness for simplicity most aggressively. It's *less* powerful than Rust, deliberately. Rust patterns that need long-lived borrows (e.g., self-referential iterators, parent-child references in trees) become `shared[T]` or owned-with-an-ID in Ryo (spec 5.6).
 
-Ryo's `shared[T]` is modeled on **Swift's class reference semantics**, not Rust's manual `Arc<T>`: refcount ops are implicit on assignment (no `.clone()` in user code), the compiler elides redundant retain/release pairs aggressively, and stdlib collections implement copy-on-write. Reach-for-it cost is closer to Swift than to Rust-with-`Arc`. See [arc_optimizer.md](../arc_optimizer.md) for the elision-pass design that makes this performance model real.
+Ryo's `shared[T]` is modeled on **Swift's class reference semantics**, not Rust's manual `Arc<T>`: refcount ops are implicit on assignment (no `.clone()` in user code), the compiler elides redundant retain/release pairs aggressively, and stdlib collections implement copy-on-write. Reach-for-it cost is closer to Swift than to Rust-with-`Arc`. See [spec_arc_optimizer.md](../spec_arc_optimizer.md) for the elision-pass design that makes this performance model real.
 
 ### 5. Analysis algorithm
 
@@ -107,7 +107,7 @@ The M8.1 design explicitly chose Rust's diagnostic surface as the bar, even whil
 - **Polonius / Datalog** — overkill without regions
 - **Stacked Borrows / Tree Borrows** (memory model) — Ryo doesn't have `unsafe` for everyday code, so the operational-semantics complexity is mostly avoided
 - **`Pin` / self-referential structs** — not addressed; no plans
-- **Auto traits (`Send` / `Sync`)** — Ryo's concurrency model is different (see [concurrency.md](../concurrency.md))
+- **Auto traits (`Send` / `Sync`)** — Ryo's concurrency model is different (see [spec_concurrency.md](../spec_concurrency.md))
 
 ## What Ryo does take from Rust
 

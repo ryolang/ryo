@@ -4,7 +4,7 @@ three gate criteria.
 # Concurrency PoC — Results
 
 Results of the pre-Phase-1 proof-of-concept gate defined in
-[`concurrency.md`](concurrency.md) (*Gate: proof-of-concept spike before
+[`spec_concurrency.md`](spec_concurrency.md) (*Gate: proof-of-concept spike before
 Phase 1*). PoC code is throwaway and uncommitted (scratch crate under
 `local/concurrency-poc/`, gitignored); this file is the only committed
 artifact.
@@ -218,6 +218,6 @@ no borrow outliving a yield).
 
 ## References
 
-- Plan: [`concurrency.md`](concurrency.md) — gate criteria, §1.1 stack
+- Plan: [`spec_concurrency.md`](spec_concurrency.md) — gate criteria, §1.1 stack
   strategy, §3.3 affinity hooks, §3.5 FFI routing, §3.6 context machinery
 - Spec: [§9.2](../specification.md#92-core-primitives-and-safety) (concurrency semantics the runtime must deliver)

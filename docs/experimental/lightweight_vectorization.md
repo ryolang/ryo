@@ -75,7 +75,7 @@ ForRange(start=limit, end=len, step=1):
 
 ## 3. Integrating with Tensors (DLPack) and Operator Ergonomics
 
-This lightweight vectorization strategy works perfectly with Ryo's DLPack Tensor wrappers (see `docs/dev/tensor.md`). However, connecting safe, DLPack-backed Tensors to raw SIMD loops requires addressing two conflicts: **Safety Checks** and **Operator Ergonomics**.
+This lightweight vectorization strategy works perfectly with Ryo's DLPack Tensor wrappers (see `docs/dev/spec_tensor.md`). However, connecting safe, DLPack-backed Tensors to raw SIMD loops requires addressing two conflicts: **Safety Checks** and **Operator Ergonomics**.
 
 ### A. Bridging Safety and SIMD (Bounds Hoisting)
 The safe `Tensor.get(index)` method inherently contains a bounds-checking `if` branch, which violates the "Strictly Simple" rule of the vectorizer. To allow Tensor loops to vectorize, the compiler must perform optimizations before the vectorization pass:

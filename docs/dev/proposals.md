@@ -836,11 +836,11 @@ fn main():
 
 ### **Dynamic Dispatch (Trait Objects)**
 
-> Moved to its own design doc — see [`dyn_trait.md`](dyn_trait.md), which covers static-vs-dynamic dispatch, the enum-dispatch pattern recommended for v0.1, vtable roadmap placement, and the `&dyn Trait` surface (syntax, object-safety rules, performance).
+> Moved to its own design doc — see [`spec_dyn_trait.md`](spec_dyn_trait.md), which covers static-vs-dynamic dispatch, the enum-dispatch pattern recommended for v0.1, vtable roadmap placement, and the `&dyn Trait` surface (syntax, object-safety rules, performance).
 
 ### **Foreign Function Interface (FFI) & Unsafe Code**
 
-> Moved to its own design doc — see [`unsafe.md`](unsafe.md), which owns the capability-based (`kind = "system"`) gatekeeper model, the `unsafe`/`extern "C"` syntax, the C type mapping, and the set of operations that require `unsafe`. The full `extern`/bindgen workflow is specified in `docs/specification.md` §4.11 / §17.
+> Moved to its own design doc — see [`spec_unsafe.md`](spec_unsafe.md), which owns the capability-based (`kind = "system"`) gatekeeper model, the `unsafe`/`extern "C"` syntax, the C type mapping, and the set of operations that require `unsafe`. The full `extern`/bindgen workflow is specified in `docs/specification.md` §4.11 / §17.
 
 ### **Runtime Permissions (Sandboxing for AI-Generated Code)**
 
@@ -994,7 +994,7 @@ Adopting Deno's model rather than Zero's is the load-bearing decision: it preser
 
 ### **SIMD Support**
 
-> Moved to [`std_ext.md`](std_ext.md) (`std.simd` entry) — vector types are backed by Cranelift intrinsics, with the `simd.f32x4` operator surface documented there.
+> Moved to [`spec_std_extensions.md`](spec_std_extensions.md) (`std.simd` entry) — vector types are backed by Cranelift intrinsics, with the `simd.f32x4` operator surface documented there.
 
 ---
 
@@ -1348,4 +1348,4 @@ Attribute System → Compile-Time Reflection
 - Spec: [Specification](../specification.md) (approved proposals migrate into their relevant sections).
 - Spec flaws and pending decisions: [design_issues.md](design_issues.md).
 - Delivery: [Implementation roadmap](implementation_roadmap.md).
-- Sub-proposal: `docs/dev/proposals/wasm_target.md`
+- Sub-proposal: `docs/dev/proposal_wasm_target.md`

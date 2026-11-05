@@ -516,7 +516,7 @@ fn clif_bytes_ops_slot_out_producers() {
 
 #[test]
 fn clif_user_str_return_keeps_sret() {
-    // Copy-elision boundary (docs/dev/copy_elision.md G1/G2): user
+    // Copy-elision boundary (docs/dev/spec_copy_elision.md G1/G2): user
     // functions returning `str` keep the hidden sret destination-slot
     // convention — the Phase 0 ABI change touches the *runtime* ABI only.
     let temp_dir = TempDir::new().expect("Failed to create temp directory");

@@ -144,12 +144,12 @@ corosensei stack and calls into the PoC scheduler.
   will miss it. Above the bar → revisit `corosensei` / the stack-switching
   approach before Phase 1.
 
-Every measured result is recorded in `docs/dev/concurrency_poc.md` (created by the
+Every measured result is recorded in `docs/dev/record_concurrency_poc.md` (created by the
 PoC; one table row per criterion per OS, with the raw numbers). All three criteria
 must pass — or be explicitly waived with the reason recorded in that file — before
 Phase 1 implementation begins.
 
-> **Sibling reference docs:** [`memory_model_comparison.md`](pl_references/memory_model_comparison.md), [`rust.md`](pl_references/rust.md), [`mojo.md`](pl_references/mojo.md), [`arc_optimizer.md`](arc_optimizer.md), [`proposals/wasm_target.md`](proposals/wasm_target.md).
+> **Sibling reference docs:** [`memory_model_comparison.md`](pl_references/memory_model_comparison.md), [`rust.md`](pl_references/rust.md), [`mojo.md`](pl_references/mojo.md), [`spec_arc_optimizer.md`](spec_arc_optimizer.md), [`proposal_wasm_target.md`](proposal_wasm_target.md).
 
 ---
 
@@ -228,7 +228,7 @@ net for runaway Ryo recursion.
 - The `Task` control block carries a **context frame pointer** from Phase 1,
   captured from the spawning task at spawn time and immutable thereafter.
   Phase 1 stores an empty frame; the ambient-context proposal
-  (`ryo-context-and-otel-proposal.md`) populates it when it lands. Reserving
+  (`proposal_context_and_otel.md`) populates it when it lands. Reserving
   the field now is free; retrofitting it means auditing every spawn path.
 
 ```
@@ -489,7 +489,7 @@ Inherited by child tasks spawned within the same `task.scope` (§4.2)
 unless explicitly overridden.
 
 **The ambient context is a structured task-local.** The context/OTel proposal
-(`ryo-context-and-otel-proposal.md`) puts deadlines, cancellation, and trace
+(`proposal_context_and_otel.md`) puts deadlines, cancellation, and trace
 identity in a scope-bound context frame that propagates down the task tree.
 Mechanically it rides this section's machinery, with four refinements:
 
@@ -753,7 +753,7 @@ spikes, not uniform slowdown. Policy:
   preference) is a Phase 5 tuning candidate, gated on measurements — it is
   easy to make worse than the OS default if tuned wrong. The §3.3 affinity
   hooks and the migration-cost data (cold-reload ~17 ns/KB of live stack,
-  `concurrency_poc.md`) already compose with it.
+  `record_concurrency_poc.md`) already compose with it.
 
 See the appendix for a full workload example (bounded DB concurrency).
 
@@ -1261,7 +1261,7 @@ M:N migration, yielding cleanup, and static lock safety need separate evidence.
 
 ## Implementation concerns from Go, Pony, Erlang, and TinyGo
 
-Review basis: the primary sources below and [concurrency_poc.md](concurrency_poc.md).
+Review basis: the primary sources below and [record_concurrency_poc.md](record_concurrency_poc.md).
 These are implementation obligations and open decisions. They do not adopt
 new syntax, preemption, restart supervision, or a bundled `core` executor.
 
@@ -1367,7 +1367,7 @@ RSS or total reserved space. Static sizing needs conservative fallback for
 recursion, unknown callees, and native calls. Asyncify demonstrates that
 a compiler transform can preserve colorless source syntax.
 
-Sources: [PoC evidence](concurrency_poc.md),
+Sources: [PoC evidence](record_concurrency_poc.md),
 [TinyGo scheduler options](https://tinygo.org/docs/reference/usage/important-options/),
 [TinyGo stack configuration](https://pkg.go.dev/github.com/tinygo-org/tinygo/compileopts#Config.AutomaticStackSize).
 
@@ -1732,7 +1732,7 @@ browser target is a stated product priority.
 - Historical note: this document began as two drafts — an initial plan and
   the `concurrency_loom_kt.md` Loom/Kotlin alternative. The alternative was
   adopted and merged here.
-- Sibling design docs: [`memory_model_comparison.md`](pl_references/memory_model_comparison.md), [`rust.md`](pl_references/rust.md), [`mojo.md`](pl_references/mojo.md), [`arc_optimizer.md`](arc_optimizer.md), [`go.md`](pl_references/go.md) (inspiration), [`proposals/wasm_target.md`](proposals/wasm_target.md), [`ryo-context-and-otel-proposal.md`](ryo-context-and-otel-proposal.md) (ambient context rides §1.2/§1.5/§3.6 machinery)
+- Sibling design docs: [`memory_model_comparison.md`](pl_references/memory_model_comparison.md), [`rust.md`](pl_references/rust.md), [`mojo.md`](pl_references/mojo.md), [`spec_arc_optimizer.md`](spec_arc_optimizer.md), [`go.md`](pl_references/go.md) (inspiration), [`proposal_wasm_target.md`](proposal_wasm_target.md), [`proposal_context_and_otel.md`](proposal_context_and_otel.md) (ambient context rides §1.2/§1.5/§3.6 machinery)
 - Upstream prior art:
   - [JEP 444: Virtual Threads (Java 21 GA)](https://openjdk.org/jeps/444) — Loom (inspiration for the FFI ergonomics goal).
   - [Loom OpenJDK wiki](https://wiki.openjdk.org/display/loom/Main).

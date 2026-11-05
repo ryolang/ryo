@@ -44,7 +44,7 @@ panic = "abort"
 [profile.dev]
 panic = "abort"
 
-# Lint policy derived from docs/dev/ryo-compiler-llm-instructions.md.
+# Lint policy derived from docs/dev/guide_llm_instructions.md.
 # Compiler crates opt in with `[lints] workspace = true`; `runtime/` is the
 # curated FFI/unsafe boundary (R5) and deliberately does not.
 [workspace.lints.rust]

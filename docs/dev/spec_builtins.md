@@ -66,10 +66,10 @@ Use this checklist when implementing a feature:
 
 ### 4. The OS-Backed Module Recipe
 
-> Every stdlib package that touches the OS follows the same three tiers: (1) a compiler builtin *only* if it needs magic syntax or literals, (2) an `extern "C"` shim in the Rust runtime (`std.sys`), (3) a safe Ryo wrapper (`std.<package>`). `net.http`, `os`, `encoding.json`, and `time` all follow this shape — see the JSON instance in [`std_ext.md`](std_ext.md) §7.
+> Every stdlib package that touches the OS follows the same three tiers: (1) a compiler builtin *only* if it needs magic syntax or literals, (2) an `extern "C"` shim in the Rust runtime (`std.sys`), (3) a safe Ryo wrapper (`std.<package>`). `net.http`, `os`, `encoding.json`, and `time` all follow this shape — see the JSON instance in [`spec_std_extensions.md`](spec_std_extensions.md) §7.
 
 ## References
 - Spec: `docs/specification.md` §4.2 (primitive types), §4.7 (built-in collections), §14 (standard library: implicit `core`/`builtin` module, hybrid runtime split, package list)
 - Spec: `docs/specification.md` §19 (Runtime Profiles — the language-level counterpart of the `no_std` floor)
-- Dev: `std_ext.md` (the three-tier recipe applied to `encoding.json`)
+- Dev: `spec_std_extensions.md` (the three-tier recipe applied to `encoding.json`)
 - Roadmap: `docs/dev/implementation_roadmap.md`

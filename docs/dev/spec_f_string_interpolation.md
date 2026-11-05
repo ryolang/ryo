@@ -642,4 +642,4 @@ cargo test --workspace
 
 - Spec: [Section 2](../specification.md) (string and f-string literals), [Section 6.1.2](../specification.md) (interpolation as the non-variadic printing idiom)
 - Dev: [implementation_roadmap.md](implementation_roadmap.md) (M16.1, M17.2, and M17.3)
-- Dev: [compiler_guide.md](compiler_guide.md) (pipeline, AST/UIR, semantic-analysis, backend, and testing conventions)
+- Dev: [guide_compiler.md](guide_compiler.md) (pipeline, AST/UIR, semantic-analysis, backend, and testing conventions)

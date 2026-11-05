@@ -98,5 +98,5 @@ This order delivers "Hello World" first (high morale), then immediately forces r
 
 ## References
 - Spec: `docs/specification.md` §14 (Standard Library — hybrid runtime architecture, core packages), §17 (FFI & `unsafe` gatekeeping)
-- Dev: `docs/dev/built_in.md` (built-in vs stdlib boundary), `docs/dev/std_ext.md`
+- Dev: `docs/dev/spec_builtins.md` (built-in vs stdlib boundary), `docs/dev/spec_std_extensions.md`
 - Roadmap: `docs/dev/implementation_roadmap.md`

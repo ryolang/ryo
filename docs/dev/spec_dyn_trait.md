@@ -139,5 +139,5 @@ process_shapes(shapes)
 
 ## References
 - Spec: `docs/specification.md` §8 (Traits / interfaces)
-- Dev: `docs/dev/closure_representation.md` (shared fat-pointer dispatch)
+- Dev: `docs/dev/spec_closure_representation.md` (shared fat-pointer dispatch)
 - Roadmap: `docs/dev/implementation_roadmap.md` (dyn Trait, v0.3+)

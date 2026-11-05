@@ -4,7 +4,7 @@
 > **Last Updated:** 2026-09-01
 > **Version:** 1.0.0-draft
 > **Method:** Every declared target domain (base spec §1.1) reviewed against the base specification, the final slicing/memory-model spec (decisions D1–D11), the GUI strategy (§11), and the reviewed ecosystem proposals (`std_ext`, `tensor`, `unsafe`)
-> **Companion document:** `ryo-context-and-otel-proposal.md` (full design for GAP-1)
+> **Companion document:** `proposal_context_and_otel.md` (full design for GAP-1)
 
 ---
 
@@ -26,7 +26,7 @@ The slicing/ownership/memory-model work is **converged** — no remaining gaps a
 
 **Why Ryo can do better than all of them.** The ambient runtime already lives in TLS (§9.1), and `task.scope` already defines a lexical tree of work (§9.2.1, extended by D5). The context tree and the task tree are *the same tree*: propagation and cancellation can flow down the structure the scheduler already maintains — no parameter threading, no function coloring, with `with` blocks giving deadlines a lexical, reviewer-visible extent.
 
-**Disposition:** full design in the companion document `ryo-context-and-otel-proposal.md` (context propagation is the mechanism; OpenTelemetry is its flagship consumer). Must land **with the v0.4 concurrency runtime** — retrofitting after the scheduler freezes would repeat Go's mistake.
+**Disposition:** full design in the companion document `proposal_context_and_otel.md` (context propagation is the mechanism; OpenTelemetry is its flagship consumer). Must land **with the v0.4 concurrency runtime** — retrofitting after the scheduler freezes would repeat Go's mistake.
 
 ---
 
@@ -40,7 +40,7 @@ The slicing/ownership/memory-model work is **converged** — no remaining gaps a
 
 **Status:** absorbed — roadmapped for v0.2 (Phase 5, with the `unsafe` policy work) and listed as a spec §19 planned extension. This file remains the design-detail source.
 
-**The gap.** D9's `core` profile targets freestanding environments, but bare-metal code requires **volatile** reads/writes to memory-mapped registers (the compiler must not elide, coalesce, or reorder them). Neither the base spec nor the unsafe operation set (`unsafe.md` §7) includes volatile access. Without it, the LLVM backend (Q6) would arrive at a language that still cannot toggle a GPIO pin.
+**The gap.** D9's `core` profile targets freestanding environments, but bare-metal code requires **volatile** reads/writes to memory-mapped registers (the compiler must not elide, coalesce, or reorder them). Neither the base spec nor the unsafe operation set (`spec_unsafe.md` §7) includes volatile access. Without it, the LLVM backend (Q6) would arrive at a language that still cannot toggle a GPIO pin.
 
 **Proposed fix (minimal):** add volatile load/store to the unsafe operation set — e.g. `volatile_read(ptr: *const T) -> T` / `volatile_write(ptr: *mut T, value: T)` as `unsafe` intrinsics in the `core` profile's intrinsic package, subject to all D4 rules (SAFETY comments, gating, audit). No new syntax, no safe-code exposure. Target: **v0.2**, with the unsafe-policy implementation.
 
@@ -79,7 +79,7 @@ Macros, `eval`, runtime reflection, variadics, exceptions, GC — exclusions wit
 | Gap | Amends (when approved) |
 |-----|------------------------|
 | GAP-1 | New section with companion proposal; interacts with D5 (task tree), D9 (profiles), `with` statement |
-| GAP-3 | Final spec §6 (D4 operation set) or `unsafe.md` §7 — one bullet (already listed as a spec §19 planned extension) |
+| GAP-3 | Final spec §6 (D4 operation set) or `spec_unsafe.md` §7 — one bullet (already listed as a spec §19 planned extension) |
 | GAP-4 | Base spec §4.11 (representation attributes) — one attribute (already listed as a spec §19 planned extension) |
 
 GAP-2's amendment has already landed: spec §18. None of the remaining items touches decisions D1–D11; all are additive. Approvals are required before any text moves into the main specification documents.
@@ -89,7 +89,7 @@ GAP-2's amendment has already landed: spec §18. None of the remaining items tou
 ## References
 
 - Spec: Section 18 (integer overflow behavior — GAP-2, resolved); Section 19 (planned extensions — GAP-1 context propagation, GAP-3 volatile MMIO, GAP-4 `#[repr(packed)]`)
-- Dev: `ryo-context-and-otel-proposal.md` (full design for GAP-1)
+- Dev: `proposal_context_and_otel.md` (full design for GAP-1)
 - Milestone: Phase 5 rows for GAP-1 / GAP-3 / GAP-4 and the v0.1 GAP-2 freeze — see implementation_roadmap.md
 
 ---

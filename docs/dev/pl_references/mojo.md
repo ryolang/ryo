@@ -312,7 +312,7 @@ Ryo's spec Rules 5 and 6 (no returning borrows, no struct fields holding referen
 - **MLIR.** Ryo uses Cranelift. The ownership pass operates on TIR's flat-arena, per-function representation, not on an MLIR dialect.
 - **Comptime metaprogramming.** Mojo has rich metaprogramming for stdlib types; Ryo defers that to v0.2+.
 - **`__del__` user hooks.** Ryo's user-extensible drop is M19, not M8.1.
-- **Tensor/SIMD types.** Mojo's stdlib leans on tensor/SIMD primitives; that's a separate Ryo concern (see `tensor.md`).
+- **Tensor/SIMD types.** Mojo's stdlib leans on tensor/SIMD primitives; that's a separate Ryo concern (see `spec_tensor.md`).
 - **Reference syntax.** Mojo's `Reference[T, Origin]` is parametric; Ryo's `&T` (scope-locked view) / `inout T` (mutable parameter convention) (M8.2+) is convention-based and origins are inferred from Rules 5/6.
 - **Python interop.** Mojo's `python/` module is core to its positioning; Ryo has no equivalent.
 - **GPU as a first-class target.** Ryo targets Cranelift/native and (later) WASM; GPU is out of scope.

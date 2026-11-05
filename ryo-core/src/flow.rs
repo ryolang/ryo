@@ -8,7 +8,7 @@
 //! backend already uses (post-order operand evaluation, statements in
 //! source order), so lowering order is preserved by construction.
 //!
-//! Design rules (see `docs/dev/ryo-compiler-llm-instructions.md`):
+//! Design rules (see `docs/dev/guide_llm_instructions.md`):
 //! flat `Vec` arenas + `Copy` `u32` newtype indices (R1), no pointer
 //! trees, exhaustive `match`es on [`Terminator`] (no wildcard — a new
 //! control form is a compile error here and at every consumer).

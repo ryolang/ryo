@@ -5,7 +5,7 @@
 > **Document Status:** Design Note (Pre-Implementation)
 > **Last Updated:** 2026-10-14
 > **Version:** 1.1.0-draft
-> **Interacts with:** [Pipeline migration](pipeline_migration.md), [compiler instructions](ryo-compiler-llm-instructions.md), [concurrency design](concurrency.md), and [implementation roadmap](implementation_roadmap.md).
+> **Interacts with:** [Pipeline migration](pipeline_migration.md), [compiler instructions](guide_llm_instructions.md), [concurrency design](spec_concurrency.md), and [implementation roadmap](implementation_roadmap.md).
 > **Companion philosophy:** Zig compiler (lazy, demand-driven); rustc query model; Go package caching
 
 ---
@@ -169,7 +169,7 @@ Delivery versions remain in the implementation roadmap. The order below describe
 - **Base spec §16's "whole-program AOT" claims** need no retraction — whole-program *analysis results* are themselves cacheable queries with versioned inputs. Whole-program knowledge and incremental compilation coexist if dependencies are recorded; they conflict only if analyses read global state untracked (forbidden by H-1/H-2).
 - **Effect-analysis performance:** treat budgets as measured goals, not guaranteed worst-case costs. Correctness permits a full recomputation when dependency changes require it.
 - **Flow IR migration:** mandatory analysis and lowering remain correct with cache reuse and optional optimizations disabled. Instance collection expands until generated callees and helpers are resolved.
-- **LLM instructions:** H-1 tightens R4; H-2/H-4 extend R1/R18 (index-keyed side tables make invalidation surgical). An amendment to `ryo-compiler-llm-instructions.md` §1 folding in H-1…H-5 is the natural next step on approval.
+- **LLM instructions:** H-1 tightens R4; H-2/H-4 extend R1/R18 (index-keyed side tables make invalidation surgical). An amendment to `guide_llm_instructions.md` §1 folding in H-1…H-5 is the natural next step on approval.
 
 ## 8. Risks
 
@@ -213,7 +213,7 @@ These tests are acceptance gates for the corresponding stages, not optional foll
 ## References
 
 - Spec: [Section 5](../specification.md#5-memory-management-ownership-lite) (ownership and destruction), [Section 9](../specification.md#9-concurrency-model-taskfuturechannel) (tasks and effects), and [Section 16](../specification.md#16-tooling) (tooling).
-- Dev: [Pipeline migration](pipeline_migration.md), [concurrency](concurrency.md), [tensor integration](tensor.md), and [compiler instructions](ryo-compiler-llm-instructions.md).
+- Dev: [Pipeline migration](pipeline_migration.md), [concurrency](spec_concurrency.md), [tensor integration](spec_tensor.md), and [compiler instructions](guide_llm_instructions.md).
 - Delivery: [Implementation roadmap](implementation_roadmap.md).
 - rustc: [Incremental compilation](https://rustc-dev-guide.rust-lang.org/queries/incremental-compilation.html) for result fingerprints, dependency validation, and ordered reads.
 - Salsa: [Incremental algorithm](https://salsa-rs.github.io/salsa/reference/algorithm.html) for revisions, dependency checks, and unchanged-result reuse.
