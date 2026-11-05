@@ -48,14 +48,14 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 - [x] [Milestone 13.7 — Literal Completeness ✅ COMPLETE](#milestone-137-literal-completeness) *(landed ad hoc 2026-10-22 — scientific notation, underscores, base prefixes, full escape set)*
 - [x] [Milestone 13.8 — Error Namespaces ✅ COMPLETE](#milestone-138-error-namespaces) *(landed after the namespace design; M16 may resume)*
 
-> **Sequencing note (2026-11; renumbered — completed milestones keep their numbers, incomplete ones were renumbered into schedule order):** The alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M13.8** — is complete, plus the ad-hoc **M13.7** (literal completeness) and **M13.8** (error namespaces). Next-up order is **M16 → M16.1 → M16.2 → M16.3 (draft, spelling approval pending) → M17 → M17.1 → M17.2 → M17.3 → M17.4 → M18 → M19**, the renumbered forms of the former M16/M16.1/M21/M17.1/M17.2/M17.3/M17.4/M17/M22/M23 — the renumbering records the 2026-11 reorder decision (arrays ahead of explicit sizes for structural payoff; methods directly before collections, their first consumer; bit operations on `int` between them, gated only on the operator-spelling ruling). M16 supplies optionals and migrates the M9.2 `io_read_line` placeholder directly to `IoError!?str` without a temporary EOF error variant. **M12.5, M12.6, and M13.5 stay deferred past the core cluster** and keep their old numbers (they are v0.2 work). M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"). **M12.5** (advanced pattern matching — nested patterns, guards, or-patterns, and the rest of M12's deferral register) is v0.2 work, not alpha-gating; the only pattern features alpha needs beyond M12 ship inside M13 (error-union match) and M16 (`?T`/`none` patterns) themselves.
+> **Sequencing note (2026-11; renumbered — completed milestones keep their numbers, incomplete ones were renumbered into schedule order):** The alpha-gating core — **M9 → M9.1 → M10 → M11 → M12 → M13 → M13.8** — is complete, plus the ad-hoc **M13.7** (literal completeness) and **M13.8** (error namespaces). Next-up order is **M16 → M16.1 → M16.2 → M16.3 (spelling approved 2026-11-05 — conventional symbols, see spec_bitwise_operators.md) → M17 → M17.1 → M17.2 → M17.3 → M17.4 → M18 → M19**, the renumbered forms of the former M16/M16.1/M21/M17.1/M17.2/M17.3/M17.4/M17/M22/M23 — the renumbering records the 2026-11 reorder decision (arrays ahead of explicit sizes for structural payoff; methods directly before collections, their first consumer; bit operations on `int` between them, gated only on the operator-spelling ruling). M16 supplies optionals and migrates the M9.2 `io_read_line` placeholder directly to `IoError!?str` without a temporary EOF error variant. **M12.5, M12.6, and M13.5 stay deferred past the core cluster** and keep their old numbers (they are v0.2 work). M13.5 is not alpha-gating (see [alpha_scope.md](alpha_scope.md): "pure ergonomics; positional args work"). **M12.5** (advanced pattern matching — nested patterns, guards, or-patterns, and the rest of M12's deferral register) is v0.2 work, not alpha-gating; the only pattern features alpha needs beyond M12 ship inside M13 (error-union match) and M16 (`?T`/`none` patterns) themselves.
 
 ### Phase 3: Type System & Memory Safety
 
 - [ ] [Milestone 16 — Optional Types (`?T`) [alpha]](#milestone-16-optional-types-t-alpha)
 - [ ] [Milestone 16.1 — F-Strings & String Interpolation](#milestone-161-f-strings--string-interpolation)
 - [ ] [Milestone 16.2 — Fixed Arrays, Mutable Indexing & Slices (`slice[T]`)](#milestone-162-fixed-arrays-mutable-indexing--slices-slicet)
-- [ ] [Milestone 16.3 — Bit Operations (Draft — grammar pending)](#milestone-163-bit-operations-draft--grammar-pending)
+- [ ] [Milestone 16.3 — Bit Operations](#milestone-163-bit-operations)
 - [ ] [Milestone 17 — Explicit Sizes (`i8`–`i64`, `u8`–`u64`, `usize`, `float32`)](#milestone-17-explicit-sizes-i8i64-u8u64-usize-float32)
 - [ ] [Milestone 17.1 — `char` Type](#milestone-171-char-type)
 - [ ] [Milestone 17.2 — Static Format Specifications](#milestone-172-static-format-specifications)
@@ -2102,17 +2102,17 @@ fn main():
 - Dependencies: Milestone 8.2 (immutable borrows), Milestone 8.3 (`inout [T]` slices)
 - **Open design decision — empty-view/empty-collection initializer syntax (I-249).** `strview` today has no literal: the empty view is the full-slice spell `""[:]` (see the W0003 discussion there — the redundant-materialize hint pushes users toward view-typed bindings, which needed the base-deferral fix in PR #198). `slice[T]` inherits the gap, and M18's draft already assumes constructor-style `list[int]()`. Decide one consistent story before shipping slice[T]/list[T] — annotated literal coercion (`mut v: strview = ""`), a context-typed `empty()` builtin, or typed empty literals — so views and collections do not grow two idioms.
 
-### Milestone 16.3: Bit Operations (Draft — grammar pending)
+### Milestone 16.3: Bit Operations
 
-**Status:** (Draft — v0.1) The operator set itself is approved for the roadmap order; the **spelling is not decided** and blocks implementation. The syntax decision — contextual symbols vs word operators — is a spec-level change and requires explicit approval per the design-change escalation rule; the spec has no bitwise operator section yet.
+**Status:** ⏳ Planned — v0.1/alpha, after M16.2 and before M17. Spelling approved 2026-11-05: conventional symbols `& | ^ ~ << >>` with Rust/Python-shaped precedence, per the ratified design [Bitwise Operators](spec_bitwise_operators.md). The spec section remains to be written.
 
 **Goal:** Bitwise shifts, AND, OR, XOR, and NOT on the existing `int` type (64-bit two's-complement), unlocking SHA-256, CRC32, compression, binary protocols, and simpler Base64 code on top of M16.2's arrays and `bytes`. Sized-type (`u8`/`u32`/…) variants and rotations follow M17; nothing here depends on explicit sizes.
 
 **Design questions this milestone owns:**
 
-- Operator spelling — **open, needs approval**: symbol forms (`<<`, `>>`, `&`, `|`, `^`, `~`) are familiar but `&` collides with the M8.3 inout call-site marker and `|`/`^`/`~` are entirely new single-character tokens; word forms (`shl`, `shr`, `bit_and`, `bit_or`, `bit_xor`, `bit_not`) match the `and`/`or`/`not` precedent but read worse in expression-dense code. If symbols win, each needs a context rule that disambiguates from existing tokens (`&x` vs `a & b`).
+- Operator spelling — **decided (2026-11-05)**: conventional symbols (`<<`, `>>`, `&`, `|`, `^`, `~`); `&` keeps its M8.3 prefix meaning (mutable-borrow marker) and gains the infix bit-AND role, `|` gains the expression-position bit-OR role alongside its type-position error-union role — one meaning per syntactic role, as specified in `spec_bitwise_operators.md`
 - Shift-count and NOT semantics — **decided**: shift counts ≥ 64 or negative trap in all build modes (spec §18 precedent); NOT is the 64-bit two's-complement complement (no separate bool-flip operator — `not` stays bool-only)
-- Precedence — open (symbol forms slot into the existing ladder; word forms need a new layer above `and`/`or`)
+- Precedence — **decided (2026-11-05)**: Rust/Python-shaped ladder, bitwise operators tighter than comparisons, as specified in `spec_bitwise_operators.md`
 
 **Tasks:**
 
@@ -2126,7 +2126,7 @@ fn main():
 
 **Implementation Notes:**
 
-- Dependencies: none beyond the current pipeline — schedulable freely once the spelling is approved
+- Dependencies: none beyond the current pipeline — schedulable freely now that the spelling is approved
 - The M9.2/benchmark ports that need bit ops (SHA-256, CRC32) operate on `bytes` and `int` first; they do not wait for M17
 
 ### Milestone 17: Explicit Sizes (`i8`–`i64`, `u8`–`u64`, `usize`, `float32`)
