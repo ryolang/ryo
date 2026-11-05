@@ -486,74 +486,47 @@ const DFA_STACK_MAX: usize = 1024 * 1024 * 1024;
 /// DFA recursion depth a token can accumulate is driven by its escape
 /// count, and escapes live only inside literal bodies, so the longest
 /// body — not the file size — sets the stack the lexer can need.
-///
-/// A quote after an even backslash run is a DFA boundary in every
-/// context: inside a string it opens or closes one, and outside it
-/// opens one (the backslashes are reported as invalid characters, not
-/// treated as escapes). The gaps between consecutive even-run quotes
-/// therefore never underestimate a body. A quote after an odd run is
-/// ambiguous: escaped inside a string (no boundary — it must not split
-/// a body), but a boundary when the run is invalid code outside one.
-/// Both readings are covered: the escaped reading rides inside the
-/// even-run gaps, and the opener reading is covered by also measuring
-/// from the first quote in the file to the first even-run quote, the
-/// tail after the last even-run quote, and — when no even-run quote
-/// exists at all — from the first quote to EOF. Stray quotes can only
-/// overestimate (the oversized stack is harmless). Quotes are rare in
-/// typical code, so the `find('"')` calls (memchr-accelerated) keep
-/// the pre-pass cheap next to the lex itself.
+/// Unterminated literals count through EOF; comments and code between
+/// literals do not count.
 fn longest_literal_body(input: &str) -> usize {
+    let bytes = input.as_bytes();
     let mut longest = 0;
-    // First quote of any parity, and the first/last even-run (certain
-    // DFA boundary) quote.
-    let mut first_quote: Option<usize> = None;
-    let mut first_even: Option<usize> = None;
-    let mut prev_even: Option<usize> = None;
+    let mut literal_start = None;
     let mut at = 0;
-    while let Some(rel) = input[at..].find('"') {
-        let quote = at + rel;
-        // A quote preceded by an odd run of backslashes is escaped, not
-        // a boundary.
-        let mut bs = quote;
-        while bs > 0 && input.as_bytes()[bs - 1] == b'\\' {
-            bs -= 1;
-        }
-        if first_quote.is_none() {
-            first_quote = Some(quote);
-        }
-        if (quote - bs) % 2 == 0 {
-            if let Some(prev) = prev_even {
-                longest = longest.max(quote - prev - 1);
+    while at < bytes.len() {
+        if let Some(start) = literal_start {
+            match bytes[at] {
+                b'"' => {
+                    longest = longest.max(at - start);
+                    literal_start = None;
+                    at += 1;
+                }
+                b'\\' if bytes.get(at + 1) == Some(&b'\n') => {
+                    longest = longest.max(at - start);
+                    literal_start = None;
+                    at += 1;
+                }
+                b'\\' => at = (at + 2).min(bytes.len()),
+                _ => at += 1,
             }
-            if first_even.is_none() {
-                first_even = Some(quote);
-            }
-            prev_even = Some(quote);
+            continue;
         }
-        at = quote + 1;
+        match bytes[at] {
+            b'#' if bytes.get(at + 1) != Some(&b'[') => {
+                at += 1;
+                while at < bytes.len() && !matches!(bytes[at], b'\r' | b'\n') {
+                    at += 1;
+                }
+            }
+            b'"' => {
+                literal_start = Some(at + 1);
+                at += 1;
+            }
+            _ => at += 1,
+        }
     }
-    match prev_even {
-        Some(last_even) => {
-            // Tail after the last certain boundary: an unterminated
-            // literal (or one whose closing quote is escaped) is scanned
-            // to EOF by the DFA before it fails.
-            longest = longest.max(input.len() - last_even - 1);
-            // Odd-run quotes before the first certain boundary may each
-            // open a literal after invalid code; measuring from the
-            // first quote in the file covers every such run at once.
-            if let (Some(fq), Some(fe)) = (first_quote, first_even)
-                && fq != fe
-            {
-                longest = longest.max(fe - fq - 1);
-            }
-        }
-        None => {
-            // No certain boundary anywhere: any quote may open an
-            // unterminated literal scanned to EOF.
-            if let Some(fq) = first_quote {
-                longest = longest.max(input.len() - fq - 1);
-            }
-        }
+    if let Some(start) = literal_start {
+        longest = longest.max(bytes.len() - start);
     }
     longest
 }
@@ -578,9 +551,18 @@ where
     F: FnOnce() -> T + Send + 'env,
     T: Send + 'env,
 {
+    #[cfg(test)]
+    if REFUSE_SIZED_SPAWN.with(|refuse| refuse.get()) {
+        return Err(std::io::Error::other("refused by test"));
+    }
     std::thread::Builder::new()
         .stack_size(stack_size)
         .spawn_scoped(scope, f)
+}
+
+#[cfg(test)]
+thread_local! {
+    static REFUSE_SIZED_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Drive `RawToken::lexer` over the input, mapping logos misses to
@@ -624,10 +606,7 @@ fn collect_raw_tokens<'a>(input: &'a str, sink: &mut DiagSink) -> Vec<(RawToken<
         raw_tokens
     };
     let longest_body = longest_literal_body(input);
-    // Above the cap even the sized thread would overflow: reject instead
-    // of scanning. Needs a >1 MiB single literal body — far past anything
-    // a human writes.
-    if longest_body.saturating_mul(DFA_STACK_PER_BYTE) > DFA_STACK_MAX {
+    let reject_too_large = |sink: &mut DiagSink| {
         sink.emit(Diag::error(
             crate::spans::cspan(SimpleSpan::new((), 0..input.len())),
             DiagCode::LexerInputTooLarge,
@@ -637,7 +616,13 @@ fn collect_raw_tokens<'a>(input: &'a str, sink: &mut DiagSink) -> Vec<(RawToken<
                 DFA_STACK_MAX / DFA_STACK_PER_BYTE,
             ),
         ));
-        return Vec::new();
+        Vec::new()
+    };
+    // Above the cap even the sized thread would overflow: reject instead
+    // of scanning. Needs a >1 MiB single literal body — far past anything
+    // a human writes.
+    if longest_body.saturating_mul(DFA_STACK_PER_BYTE) > DFA_STACK_MAX {
+        return reject_too_large(sink);
     }
     if longest_body.saturating_mul(DFA_STACK_PER_BYTE) <= DFA_INLINE_BUDGET {
         return collect(sink);
@@ -647,8 +632,7 @@ fn collect_raw_tokens<'a>(input: &'a str, sink: &mut DiagSink) -> Vec<(RawToken<
         SpawnRefused,
     }
     // The scoped thread borrows `sink` for the whole scope, so a refused
-    // spawn is reported out and the fallback lexes on the caller's stack
-    // after the scope ends.
+    // spawn is reported out and handled after the scope ends.
     let outcome = std::thread::scope(|scope| {
         match spawn_sized(scope, dfa_stack_size(longest_body), || collect(sink)) {
             Ok(handle) => Outcome::Tokens(
@@ -661,12 +645,12 @@ fn collect_raw_tokens<'a>(input: &'a str, sink: &mut DiagSink) -> Vec<(RawToken<
     });
     match outcome {
         Outcome::Tokens(tokens) => tokens,
-        // A host without overcommit can refuse the reservation (the
-        // stack is lazily committed, so this is the only realistic
-        // spawn failure). Correct for ordinary inputs; a pathological
-        // escape-heavy literal would have overflowed before this pass
-        // existed.
-        Outcome::SpawnRefused => collect(sink),
+        Outcome::SpawnRefused
+            if longest_body.saturating_mul(DFA_STACK_PER_BYTE) <= DFA_INLINE_BUDGET =>
+        {
+            collect(sink)
+        }
+        Outcome::SpawnRefused => reject_too_large(sink),
     }
 }
 
@@ -1682,19 +1666,13 @@ mod tests {
         assert_eq!(longest_literal_body(r#"b = b"a\x00b""#), 6);
         // An escaped quote does not end the body early.
         assert_eq!(longest_literal_body(r#"s = "a\"b" + "xy""#), 4);
-        // Ordinary code around and between literals is not counted... in
-        // fact the gap between two consecutive quotes spans it, so the
-        // scan overestimates to the largest inter-literal distance —
-        // harmless (an oversized lazily-committed reserve at worst).
+        // Ordinary code around and between literals is not counted.
         let code = "fn main():\n\ta = \"short\"\n\tprint(a)\n\tb = b\"\\x61\\x62\"\n\tprint(b)\n";
-        assert_eq!(longest_literal_body(code), 17);
-        // A stray quote in a comment must not pair-shift the real literal
-        // away: its body still shows up as a gap between consecutive
-        // unescaped quotes (the scan may overestimate — here the stray
-        // quote pairs with the real opener for an 11-char gap — but it
-        // can never land below the true 4-byte body).
+        assert_eq!(longest_literal_body(code), 8);
+        // Quotes in comments do not shift literal boundaries.
         let adversarial = "# 12\" ruler\ns = \"aaaa\"\n";
-        assert_eq!(longest_literal_body(adversarial), 11);
+        assert_eq!(longest_literal_body(adversarial), 4);
+        assert_eq!(longest_literal_body("#\r\"aaaa\""), 4);
         // An unterminated literal counts its tail: the DFA scans it to EOF
         // before failing, so the sized stack must cover it.
         assert_eq!(longest_literal_body(r#"s = "abc"#), 3);
@@ -1730,6 +1708,46 @@ mod tests {
                 .any(|(t, _)| matches!(t, Token::StrLit(id) if pool.str(*id).len() == 100_000)),
             "expected the 100k-escape string to lex fully"
         );
+    }
+
+    #[test]
+    fn non_literal_bytes_do_not_trigger_too_large_diagnostic() {
+        let oversized = "a".repeat(DFA_STACK_MAX / DFA_STACK_PER_BYTE + 1);
+        let cases = [
+            format!("s = \"ok\"\n#{oversized}"),
+            format!("s = \"ok\"\n#{oversized}\nt = \"ok\""),
+        ];
+        for src in cases {
+            let mut pool = InternPool::new();
+            let mut sink = DiagSink::new();
+            let toks = lex(&src, &mut pool, &mut sink);
+            assert!(
+                !sink
+                    .into_diags()
+                    .iter()
+                    .any(|d| d.code == DiagCode::LexerInputTooLarge),
+                "ordinary source bytes must not be rejected as a literal"
+            );
+            assert!(toks.iter().any(|(t, _)| matches!(t, Token::StrLit(_))));
+        }
+    }
+
+    #[test]
+    fn refused_sized_spawn_rejects_over_budget_literal() {
+        let mut src = String::from("s = \"");
+        src.push_str(&"\\n".repeat(2_000));
+        src.push('"');
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        REFUSE_SIZED_SPAWN.with(|refuse| refuse.set(true));
+        let toks = lex(&src, &mut pool, &mut sink);
+        REFUSE_SIZED_SPAWN.with(|refuse| refuse.set(false));
+        assert!(
+            sink.into_diags()
+                .iter()
+                .any(|d| d.code == DiagCode::LexerInputTooLarge)
+        );
+        assert!(toks.is_empty());
     }
 
     #[test]
