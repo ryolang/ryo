@@ -552,14 +552,23 @@ impl FlowBuilder<'_> {
     /// walks on an explicit task stack. `Enter` schedules a node's
     /// operands and an `Exit`; `Exit` pushes the step after its
     /// operands, preserving the exact post-order the recursion
-    /// produced. Control constructs (match/if/while/for,
-    /// short-circuit `and`/`or`, never calls) manage their own
-    /// sub-emissions and stay recursive — chain length never nests
-    /// through them.
+    /// produced. Boolean operands use continuation tasks to preserve
+    /// short-circuit blocks without returning to the recursive entrypoint.
+    /// Other control constructs manage their own sub-emissions.
     fn emit_expr_machine(&mut self, r: TirRef) {
         enum Task {
             Enter(TirRef),
             Exit(TirRef),
+            AfterBoolLhs {
+                expr: TirRef,
+                lhs: TirRef,
+                rhs: TirRef,
+                is_and: bool,
+            },
+            AfterBoolRhs {
+                expr: TirRef,
+                join: BlockId,
+            },
         }
         // Task stack stays inline for statement-sized expressions; deep
         // operator chains spill to the heap.
@@ -591,38 +600,18 @@ impl FlowBuilder<'_> {
                         TirTag::WhileLoop => self.build_while(x),
                         TirTag::ForRange => self.build_for(x),
                         TirTag::BoolAnd | TirTag::BoolOr => {
-                            // Short-circuit control flow made explicit: the RHS is
-                            // reachable only through the taken edge. `lhs` is
-                            // evaluated in the current block, which the Branch then
-                            // terminates; the merged value is a step in the join
-                            // block (its operands dominate it by emission order).
                             let is_and = inst.tag == TirTag::BoolAnd;
                             let (lhs, rhs) = match inst.data {
                                 crate::tir::TirData::BinOp { lhs, rhs } => (lhs, rhs),
                                 _ => unreachable!("BoolAnd/BoolOr must carry TirData::BinOp"),
                             };
-                            self.emit_expr(lhs);
-                            let rhs_block = self.new_block(false);
-                            let join = self.new_block(false);
-                            let (then_, else_) = if is_and {
-                                (rhs_block, join)
-                            } else {
-                                (join, rhs_block)
-                            };
-                            self.set_term(
-                                self.cur,
-                                Terminator::Branch {
-                                    cond: lhs,
-                                    then_,
-                                    else_,
-                                },
-                                None,
-                            );
-                            self.cur = rhs_block;
-                            self.emit_expr(rhs);
-                            self.close_region(self.cur, join);
-                            self.cur = join;
-                            self.push_step(x, StepFacts::default());
+                            tasks.push(Task::AfterBoolLhs {
+                                expr: x,
+                                lhs,
+                                rhs,
+                                is_and,
+                            });
+                            tasks.push(Task::Enter(lhs));
                         }
                         TirTag::Call if self.pool.is_never(inst.ty) => {
                             let view = self.tir.call_view(x);
@@ -674,6 +663,37 @@ impl FlowBuilder<'_> {
                 Task::Exit(x) => {
                     let facts = self.facts_for(x);
                     self.push_step(x, facts);
+                }
+                Task::AfterBoolLhs {
+                    expr,
+                    lhs,
+                    rhs,
+                    is_and,
+                } => {
+                    let rhs_block = self.new_block(false);
+                    let join = self.new_block(false);
+                    let (then_, else_) = if is_and {
+                        (rhs_block, join)
+                    } else {
+                        (join, rhs_block)
+                    };
+                    self.set_term(
+                        self.cur,
+                        Terminator::Branch {
+                            cond: lhs,
+                            then_,
+                            else_,
+                        },
+                        None,
+                    );
+                    self.cur = rhs_block;
+                    tasks.push(Task::AfterBoolRhs { expr, join });
+                    tasks.push(Task::Enter(rhs));
+                }
+                Task::AfterBoolRhs { expr, join } => {
+                    self.close_region(self.cur, join);
+                    self.cur = join;
+                    self.push_step(expr, StepFacts::default());
                 }
             }
         }
