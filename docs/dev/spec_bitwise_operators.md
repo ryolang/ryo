@@ -74,9 +74,8 @@ Collection pipelines stay on the iterator-chain and free-function forms. This is
 
 Initial implementation supports the existing signed `int` type:
 
-- Binary operands must have the same type.
-- `&`, `|`, and `^` return that type.
-- Shift counts use `int`.
+- `&`, `|`, `^`: both operands must have the same type, and the result is that type.
+- `<<`, `>>`: the left operand is the shifted integer value; the shift count is `int`. The result has the value's type.
 - `~` returns the operand type.
 - No implicit conversions between numeric types.
 - `bool`, floats, strings, and aggregates are rejected.
@@ -137,7 +136,8 @@ unary -, not, ~
 &
 ^
 |
-ordering and equality
+ordering
+equality
 and
 or
 ```
@@ -185,7 +185,7 @@ fn main():
 1. Add operator tokens and precedence levels.
 2. Add AST, UIR, and TIR representations.
 3. Add semantic checks for integer operands and shift counts.
-4. Lower to Cranelift `band`, `bor`, `bxor`, `bnot`, `shl`, `sshr`, and later `ushr`.
+4. Lower to Cranelift `band`, `bor`, `bxor`, `bnot`, `ishl`, `sshr`, and later `ushr`.
 5. Add compound-assignment lowering.
 6. Test precedence, negative values, sign shifts, discarded bits, invalid counts, and `INT_MIN`.
 

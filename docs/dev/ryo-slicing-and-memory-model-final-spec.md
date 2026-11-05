@@ -546,8 +546,8 @@ Mobile note: iOS and Android are **`hosted` environments** under D9 — the full
 | `bytes` type, `bytesview` | 8.4.2 | D1 |
 | `bytes.builder()` buffer builder API | post-M17.4 | Method implementations (chained `move self -> Self`) |
 | Conformance edits to spec §4.4/§5.7 | 8.4 | — (ship with the feature) |
-| `slice[T]` over fixed arrays `[T]` | 21 | `[T]` array type |
-| `for x in slice` iteration | 22 | for-over-iterable |
+| `slice[T]` over fixed arrays `[T]` | M16.2 | `[T]` array type |
+| `for x in slice` iteration | M16.2 | for-over-iterable |
 | `unsafe` policy revision (manifest gating, `SAFETY:` enforcement, `ryo audit`) | v0.2 | Lands with FFI/unsafe work |
 | `sbytes` (ARC buffer, slicing, COW warnings) | v0.2–v0.3 | `shared[T]` atomic-refcount runtime (§5.6, already specified); slicing + COW machinery |
 | Scoped task borrows + stdlib `par_*` | v0.4 | Concurrency runtime |

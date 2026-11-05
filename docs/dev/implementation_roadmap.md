@@ -2057,20 +2057,20 @@ msg = f"Hello, {name}! Score: {score}"
 
 ### Milestone 16.2: Fixed Arrays, Mutable Indexing & Slices (`slice[T]`)
 
-**Status:** ⏳ Planned — v0.1/alpha, after M16.1 and before M17. Highest structural payoff of the remaining milestones: arrays are the most common blocker across sorting, spectral norm, matrix multiplication, graph algorithms, compression, AST interpreters, neural networks, and natural versions of the existing benchmark ports; the design builds directly on the completed `strview`/`bytesview` machinery.
+**Status:** ⏳ Planned — v0.1.0/beta, after M16.1 and before M17. Highest structural payoff of the remaining milestones: arrays are the most common blocker across sorting, spectral norm, matrix multiplication, graph algorithms, compression, AST interpreters, neural networks, and natural versions of the existing benchmark ports; the design builds directly on the completed `strview`/`bytesview` machinery.
 
 **Goal:** Borrowed views into arrays — zero-copy iteration over sub-ranges — plus fixed-size arrays with mutable element indexing. (String slices `strview` shipped in M8.4; the interim `b[i]`-yields-`int` rule from M8.4.2 stays until M17.)
 
 **Tasks:**
 
 - Add `[T]` array literal syntax to lexer/parser: `[1, 2, 3]`
-- Extend type system: `Type::Slice(Box<Type>)` for array slices `slice[T]` and `inout [T]`
+- Extend type system: `Type::Slice(Box<Type>)` for the immutable array-slice view `slice[T]`. Mutable view types stay rejected (slicing/memory-model spec D7 — mutable sub-ranges go through range-based `inout` APIs, not an `inout [T]` type)
 - Generalize the `for` header beyond `range(...)`: M8c deferred `for <ident> in <iterable>:` to the collections milestone; fixed arrays/slices are the first non-range iterable, so this milestone extends the loop header to slices (or ships indexed loops plus `len()` as an interim spelling — decide during implementation)
 - Parse slice operations on arrays:
   - `array[start:end]` — partial slice
   - `array[:]` — full slice
-  - `array[1:4]` — slice value (view kind determined by the parameter type: `slice[T]` vs `inout [T]`)
-- Mutable element indexing on fixed arrays (`mut nums[i] = v`, bounds-checked, panics) — the fixed-array counterpart of the indexed stores M17 brings to `bytes`
+  - `array[1:4]` — slice value (immutable `slice[T]` view; the owning array converts implicitly at call sites, as `str` → `strview` does today)
+- Mutable element indexing on fixed arrays (`nums[i] = v` on `mut` bindings — declare `mut nums = [...]`, then assign `nums[i] = v`; bounds-checked, panics) — the fixed-array counterpart of the indexed stores M17 brings to `bytes`
 - Codegen:
   - Slice representation (pointer + length, fat pointer)
   - Bounds checking at runtime (panic on out-of-range)
@@ -2104,7 +2104,7 @@ fn main():
 
 ### Milestone 16.3: Bit Operations
 
-**Status:** ⏳ Planned — v0.1/alpha, after M16.2 and before M17. Spelling approved 2026-11-05: conventional symbols `& | ^ ~ << >>` with Rust/Python-shaped precedence, per the ratified design [Bitwise Operators](spec_bitwise_operators.md). The spec section remains to be written.
+**Status:** ⏳ Planned — v0.1/alpha, after M16.2 and before M17. Spelling approved 2026-11-05: conventional symbols `& | ^ ~ << >>` with Rust/Python-shaped precedence, per the ratified design [Bitwise Operators](spec_bitwise_operators.md). The approved behavior is now documented in the spec (§3, Bitwise Operators).
 
 **Goal:** Bitwise shifts, AND, OR, XOR, and NOT on the existing `int` type (64-bit two's-complement), unlocking SHA-256, CRC32, compression, binary protocols, and simpler Base64 code on top of M16.2's arrays and `bytes`. Sized-type (`u8`/`u32`/…) variants and rotations follow M17; nothing here depends on explicit sizes.
 
@@ -2193,7 +2193,7 @@ fn main():
 
 **Implementation Notes:**
 
-- Dependencies: Milestones 16.1, 17.1, and 17.2
+- Dependencies: Milestones 16.1, 17, and 17.1
 - Dynamic width or precision and custom `Display` formatting remain v0.2 work
 
 ### Milestone 17.3: Interpolation Conversions & Debug Capture
@@ -3946,7 +3946,7 @@ This foundation enables building **synchronous applications** including CLI tool
 **Phase 3 (M16 → M16.1 → M16.2 → M16.3 → M17 → M17.1 → M17.2 → M17.3 → M17.4 → M18 → M19):** 11 milestones — strings/borrows pulled forward to Phase 2; traits and closure capture deferred to v0.2 × 3 weeks avg = ~33 weeks (~8 months)
 **Phase 4 (M24-M27):** 6 milestones (includes M26.5 Distribution & Installer and M26.6 Cross-Compilation) × 4 weeks avg = ~24 weeks (~6 months)
 
-**Total Estimated Time:** 110 weeks (~27 months) from Phase 2 start to v0.1.0
+**Total Estimated Time:** 102 weeks (~25 months) from Phase 2 start to v0.1.0
 
 ### Development Approach
 
