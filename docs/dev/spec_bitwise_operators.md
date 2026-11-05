@@ -80,7 +80,7 @@ Initial implementation supports the existing signed `int` type:
 - No implicit conversions between numeric types.
 - `bool`, floats, strings, and aggregates are rejected.
 
-Milestone 17 (explicit sizes) extends the operators to sized integers:
+Milestone 20 (explicit sizes) extends the operators to sized integers:
 
 - Signed and unsigned integers support all six operators.
 - Mixed sized types still require explicit conversion.
@@ -107,7 +107,7 @@ This is a bit operation, not checked multiplication. For example, shifting into 
 `>>` is:
 
 - **Arithmetic for signed integers**, preserving the sign bit.
-- **Logical for unsigned integers** after M17, inserting zero bits.
+- **Logical for unsigned integers** after M20, inserting zero bits.
 
 Thus, for signed `int`:
 
@@ -207,4 +207,4 @@ The accepted tradeoff: **bare `|` becomes bitwise OR in expressions, and the bar
 
 - Spec: Section 4.2 (explicit sizes — the sized-type extension), Section 18 (traps in all build modes — the invalid-shift-count rule)
 - Spec: the operator-uniqueness rule ("each operator has exactly one meaning") — this proposal amends it to one-meaning-per-syntactic-role
-- Roadmap: [Milestone 16.3 — Bit Operations](implementation_roadmap.md#milestone-163-bit-operations)
+- Roadmap: [Milestone 19 — Bit Operations](implementation_roadmap.md#milestone-163-bit-operations)

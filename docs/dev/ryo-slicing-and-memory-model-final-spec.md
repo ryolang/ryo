@@ -162,7 +162,7 @@ The re-borrow (P6') covers call sites for free; it cannot cover escapes, because
 - **W0003 RedundantMaterialize.** A heuristic, warnings-only lint flags the two bad shapes: (a) a materialize call in an argument position the re-borrow or a view-accepting builtin (e.g. `print`, the `str_push` suffix) already serves, and (b) a bound materialize result that never escapes while its source is never mutated afterward (mutating the source later is a legitimate defensive copy and is not flagged). Conservative by design: when unsure, no warning.
 - **Trait-forward hook.** When traits land, `str(view)` resolves through a converting-initializer protocol (Swift `init(_:)`-style, or a `From`/`Materialize` trait with call syntax — name TBD at the trait milestone). Call sites unchanged; recorded as an open hook, not built now.
 
-`bytes(bview)` mirrors this with M8.4.2; `slice[T]` materialization defers to M16.2 with its bit-copy restriction (decision record §2.4).
+`bytes(bview)` mirrors this with M8.4.2; `slice[T]` materialization defers to M18 with its bit-copy restriction (decision record §2.4).
 
 ### 3.5 Conformance edits to the base spec
 
@@ -544,10 +544,10 @@ Mobile note: iOS and Android are **`hosted` environments** under D9 — the full
 | `str(view)` materialization, W0003 RedundantMaterialize (§3.4.1) | 8.4.1.2 | M8.4.1 re-borrow |
 | Anonymous structs, tuple sugar, `Name{...}` construction (D11) | M9–M10 | Parser grammar (§10.2); base-spec edits (§10.5); zero implementation cost pre-alpha |
 | `bytes` type, `bytesview` | 8.4.2 | D1 |
-| `bytes.builder()` buffer builder API | post-M17.4 | Method implementations (chained `move self -> Self`) |
+| `bytes.builder()` buffer builder API | post-M24 | Method implementations (chained `move self -> Self`) |
 | Conformance edits to spec §4.4/§5.7 | 8.4 | — (ship with the feature) |
-| `slice[T]` over fixed arrays `[T]` | M16.2 | `[T]` array type |
-| `for x in slice` iteration | M16.2 | for-over-iterable |
+| `slice[T]` over fixed arrays `[T]` | M18 | `[T]` array type |
+| `for x in slice` iteration | M18 | for-over-iterable |
 | `unsafe` policy revision (manifest gating, `SAFETY:` enforcement, `ryo audit`) | v0.2 | Lands with FFI/unsafe work |
 | `sbytes` (ARC buffer, slicing, COW warnings) | v0.2–v0.3 | `shared[T]` atomic-refcount runtime (§5.6, already specified); slicing + COW machinery |
 | Scoped task borrows + stdlib `par_*` | v0.4 | Concurrency runtime |

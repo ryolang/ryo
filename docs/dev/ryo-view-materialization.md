@@ -13,7 +13,7 @@
 
 ---
 
-## 1. `slice[T]` materialization — Milestone 16.2
+## 1. `slice[T]` materialization — Milestone 18
 
 `slice[T]` materialization lands with the slice-view machinery. The bit-copy
 restriction is enforced in sema: `T` must be trivially copyable (needs the
@@ -125,4 +125,4 @@ suggestion-payload machinery, which does not exist yet.
 
 - Spec: final slicing & memory spec §3.4.1 (materialization), view rules P1–P6, E0034 ViewEscape (`ryo-slicing-and-memory-model-final-spec.md`)
 - Dev: `docs/experimental/ryo-agent-interface-proposal.md` (machine-applicable suggestions)
-- Milestone: M8.4.1.2 and M8.4.2 (shipped); M16.2, Traits & Generics, and the Phase 5 deferred table (pending) — see `implementation_roadmap.md`
+- Milestone: M8.4.1.2 and M8.4.2 (shipped); M18, Traits & Generics, and the Phase 5 deferred table (pending) — see `implementation_roadmap.md`
