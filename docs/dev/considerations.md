@@ -12,7 +12,7 @@ Software supply chain attacks (typosquatting, malicious build scripts) are a sig
 *   **The Risk:** A user adds `pkg:left-pad`. That package contains a build script that steals SSH keys during installation.
 *   **Ryo Design:**
     *   **No "Install Scripts":** By default, installing a package should **never** execute code. It should only download sources.
-    *   **Sandboxed Builds:** If a "System" package needs to compile C code (Milestone 21), it must happen in a restricted environment or explicitly request permission: *"Package 'sqlite-sys' wants to run a build script. Allow? [y/N]"*.
+    *   **Sandboxed Builds:** If a "System" package needs to compile C code (the FFI milestone, Phase 5), it must happen in a restricted environment or explicitly request permission: *"Package 'sqlite-sys' wants to run a build script. Allow? [y/N]"*.
     *   **Lockfile Hashing:** `ryo.lock` must store cryptographic hashes of tarballs, not just versions. The spec currently guarantees only reproducible builds via `ryo.lock` (§13); the hashing rule is not yet specified.
 
 ### 2. Observability Hooks (For the "Ambient Runtime")

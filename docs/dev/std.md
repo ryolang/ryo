@@ -76,8 +76,8 @@ pub fn println(s: &str) -> WriteError!void:
 Implementing just `write` and `println` proves that:
 
 1.  **Milestone 3 (CodeGen):** The compiler can link against `libc`.
-2.  **Milestone 10 (Strings):** The memory layout of `&str` (Fat Pointer) is correctly defined so that `s.ptr()` and `s.len()` work.
-3.  **Milestone 21 (FFI Gatekeeper):** The compiler correctly allows `extern "C"` in `std.sys` but forbids it in packages without `allow_unsafe = true` (spec §17).
+2.  **Milestone 8.1 (Strings):** The memory layout of `&str` (Fat Pointer) is correctly defined so that `s.ptr()` and `s.len()` work.
+3.  **FFI milestone (Phase 5):** The compiler correctly allows `extern "C"` in `std.sys` but forbids it in packages without `allow_unsafe = true` (spec §17).
 
 ### 4. The Next Step: `std.mem` (The Allocator)
 
