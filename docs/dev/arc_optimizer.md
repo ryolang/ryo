@@ -2,7 +2,7 @@
 
 # ARC Optimizer Pass (`ryo-driver/src/arc_optimizer.rs` or `ryo-frontend/src/arc_optimizer.rs`)
 
-> Draft. The pass does not exist yet; this doc is the design sketch that will be referenced when the pass lands. Sequencing: designed and prototyped during M25 (collections / COW buffers — the first refcounted infrastructure), and a **hard gate** before `shared[T]` ships user-facing with the concurrency runtime — see `implementation_roadmap.md`.
+> Draft. The pass does not exist yet; this doc is the design sketch that will be referenced when the pass lands. Sequencing: designed and prototyped during M25 (collections — the first allocation substrate), shipping with the Phase 5 `shared[T]` package, and a **hard gate** before `shared[T]` ships user-facing with the concurrency runtime — see `implementation_roadmap.md`.
 
 This pass is the compiler-engineering investment that makes `shared[T]`'s performance story (spec 5.6) credible. Without it, every implicit retain/release on assignment fires an atomic op, and `shared[T]` overhead dominates application code. With it, retain/release pairs that bracket regions where the value cannot be deallocated are elided before codegen, matching the Swift model the spec commits to.
 
@@ -186,7 +186,7 @@ The ARC optimizer interacts with COW like this: most reads of a `list[T]` never 
 
 The pass is not needed until refcounted values exist as language features. Sequencing (tracked in `implementation_roadmap.md`):
 
-1. **M25 (collections / COW buffers)** — the first refcounted infrastructure lands here (buffer-level refcounts for `list` / `map` / `str` COW). The pass is designed and prototyped during this milestone.
+1. **M25 (collections)** — `list[T]`/`map[K, V]` land here with Rust-style eager `clone()`; the buffer-level refcount/COW infrastructure is deferred to Phase 5 (decision 2026-11, see the roadmap's Phase 5 table). The pass is designed and prototyped during this milestone against the M25 runtime.
 2. **Concurrency runtime (Phase 5)** — `shared[T]` becomes user-facing when multiple tasks need access to the same value. Spec section 5.6 implicitly assumes this is available.
 3. **Hard gate:** the pass must be committed before `shared[T]` ships in the stdlib or appears in any published benchmark. Without it, unelided atomic retain/release pairs dominate shared-state microbenchmarks and the feature's performance reputation is set before it has a chance.
 

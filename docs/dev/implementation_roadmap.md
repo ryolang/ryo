@@ -1874,7 +1874,7 @@ name = name orelse "anonymous"
 
 ### Milestone 17: F-Strings & String Interpolation
 
-**Status:** ⏳ Planned — v0.1/alpha, after M16 and before M17.
+**Status:** ⏳ Planned — v0.1/alpha, after M16 and before M18.
 
 **Goal:** Compile basic `f"..."` literals with eagerly evaluated expression interpolation into ordinary owned `str` values, without requiring traits, t-strings, or template machinery.
 
@@ -1905,9 +1905,9 @@ msg = f"Hello, {name}! Score: {score}"
 
 ### Milestone 18: Fixed Arrays, Mutable Indexing & Slices (`slice[T]`)
 
-**Status:** ⏳ Planned — v0.1.0/beta, after M17 and before M17. Highest structural payoff of the remaining milestones: arrays are the most common blocker across sorting, spectral norm, matrix multiplication, graph algorithms, compression, AST interpreters, neural networks, and natural versions of the existing benchmark ports; the design builds directly on the completed `strview`/`bytesview` machinery.
+**Status:** ⏳ Planned — v0.1.0/beta, after M17 and before M19. Highest structural payoff of the remaining milestones: arrays are the most common blocker across sorting, spectral norm, matrix multiplication, graph algorithms, compression, AST interpreters, neural networks, and natural versions of the existing benchmark ports; the design builds directly on the completed `strview`/`bytesview` machinery.
 
-**Goal:** Borrowed views into arrays — zero-copy iteration over sub-ranges — plus fixed-size arrays with mutable element indexing. (String slices `strview` shipped in M8.4; the interim `b[i]`-yields-`int` rule from M8.4.2 stays until M17.)
+**Goal:** Borrowed views into arrays — zero-copy iteration over sub-ranges — plus fixed-size arrays with mutable element indexing. (String slices `strview` shipped in M8.4; the interim `b[i]`-yields-`int` rule from M8.4.2 stays until M20.)
 
 **Tasks:**
 
@@ -1952,7 +1952,7 @@ fn main():
 
 ### Milestone 19: Bit Operations
 
-**Status:** ⏳ Planned — v0.1/alpha, after M18 and before M17. Spelling approved 2026-11-05: conventional symbols `& | ^ ~ << >>` with Rust/Python-shaped precedence, per the ratified design [Bitwise Operators](spec_bitwise_operators.md). The approved behavior is now documented in the spec (§3, Bitwise Operators).
+**Status:** ⏳ Planned — v0.1/alpha, after M18 and before M20. Spelling approved 2026-11-05: conventional symbols `& | ^ ~ << >>` with Rust/Python-shaped precedence, per the ratified design [Bitwise Operators](spec_bitwise_operators.md). The approved behavior is now documented in the spec (§3, Bitwise Operators).
 
 **Goal:** Bitwise shifts, AND, OR, XOR, and NOT on the existing `int` type (64-bit two's-complement), unlocking SHA-256, CRC32, compression, binary protocols, and simpler Base64 code on top of M18's arrays and `bytes`. Sized-type (`u8`/`u32`/…) variants and rotations follow M20; nothing here depends on explicit sizes.
 
@@ -2193,7 +2193,7 @@ fn main():
 
 ### Milestone 25.1: Collections of User Enums (Compiler-Generic Builtins)
 
-**Status:** ⏳ Planned — v0.1.0/beta, directly after M18.
+**Status:** ⏳ Planned — v0.1.0/beta, directly after M25.
 
 **Goal:** Extend M25's hardcoded `list[int]`/`list[str]`/`map[str, int]` to accept **user enum types** as the element/value type — `list[Json]`, `map[str, Expr]`, `list[MessageType]` — via compiler-internal monomorphization of the builtin method set. User-defined generics (user-written `Box[T]`, trait bounds, generic enums like `enum Option[T]`) remain Phase 5; this milestone makes the language's documented "heterogeneous data = enum + collection" idiom (ASTs, JSON DOM, event/message streams) usable in v0.1. Design decision recorded 2026-11-05: the "compiler-generic builtins" rung — between M25's hardcoded instantiations and Phase-5 user generics.
 
@@ -3007,7 +3007,7 @@ Adding M:N threading has **specification impacts** that require changes to earli
 - **Change in Milestone 26 (RAII & Drop)**: `Shared[T]` uses atomic CPU instructions
 - **Performance cost:** ~5-10 CPU cycles per clone/drop for thread safety
 - **Rationale:** Prevents data races when multiple threads share ownership
-- **Gate:** `shared[T]` does not ship user-facing until the ARC optimizer pass ([arc_optimizer.md](arc_optimizer.md), gated in M25) is committed — unelided atomic retain/release on every assignment would otherwise dominate shared-state code and set the feature's benchmark reputation
+- **Gate:** `shared[T]` does not ship user-facing until the ARC optimizer pass ([arc_optimizer.md](arc_optimizer.md), designed/prototyped during M25, shipping with the Phase 5 `shared[T]` package) is committed — unelided atomic retain/release on every assignment would otherwise dominate shared-state code and set the feature's benchmark reputation
 
 **B. Global Mutable State Rules**
 
