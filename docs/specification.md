@@ -334,7 +334,7 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 
         **Note:** The `..` operator is reserved for type bounds (`int(1..65535)`). Slicing uses `:` inside `[]` (`s[1:4]`). Iteration uses `range()`. Each operator has one meaning per syntactic role.
   - **`break`/`continue`:** Affect the **innermost** enclosing loop. Using `break` or `continue` outside a loop is a compile error. Labeled breaks are not supported. Loops are statements, not expressions — `break` does not carry a value.
-  - *(Rationale: Block-scoped loop variables prevent accidental use of stale state. Immutable loop variables are consistent with Ryo's default and eliminate a class of bugs. `range()` is the single mechanism for counted iteration — no operator alternative, no ambiguity. It follows Python conventions because that's the target audience. Each operator has exactly one purpose: `range()` for iteration, `:` for slicing, `..` for type bounds. `for` handles iteration and counting; `while` handles conditions. Each keyword has one clear purpose. `while true:` replaces a dedicated `loop` keyword — one keyword per concept, no more.)*
+  - *(Rationale: Block-scoped loop variables prevent accidental use of stale state. Immutable loop variables are consistent with Ryo's default and eliminate a class of bugs. `range()` is the single mechanism for counted iteration — no operator alternative, no ambiguity. It follows Python conventions because that's the target audience. Each operator has one meaning per syntactic role: `range()` for iteration, `:` for slicing, `..` for type bounds. `for` handles iteration and counting; `while` handles conditions. Each keyword has one clear purpose. `while true:` replaces a dedicated `loop` keyword — one keyword per concept, no more.)*
 
 - **Pattern Matching:** `match expr: Pattern1: ... Pattern2(bind): ... Pattern3 { x, y }: ... _ : ...` (`_` for wildcard/default).
 
@@ -349,7 +349,7 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 - **Bitwise Operators:** `&` (AND), `|` (OR), `^` (XOR), `~` (NOT), `<<` / `>>` (left/right shift).
   - Each operator has one meaning per syntactic role: `&` in prefix position at a call site is the mutable-borrow marker (§5.3); in infix position it is bitwise AND. `|` in type position separates error-union members (§4.9); in expression position it is bitwise OR. `~` is only ever bitwise NOT.
   - `&`, `|`, `^` take two operands of the same type and return that type. `<<` / `>>` take an integer value on the left and an `int` shift count on the right, and return the value's type. `~` takes one integer operand and returns its type.
-  - Initially the operand type is the signed `int` type; sized integer types widen the operand set when explicit sizes land. Shift counts below 0 or ≥ the operand's bit width (64 for `int`) are a runtime trap. `>>` on signed integers is arithmetic (sign-propagating).
+  - These operators apply to every integer type (§4.2) — the signed `int` and the sized integer types. Shift counts below 0 or ≥ the operand's bit width (64 for `int`) are compile-time errors when the count is a constant, and runtime traps otherwise. `>>` on signed integers is arithmetic (sign-propagating).
   - `bool`, floats, `str`, and aggregates are rejected as operands; there are no implicit conversions between numeric types.
   - Precedence, tighter to looser: shifts above `&` above `^` above `|`, all above comparison. Compound assignments `&=`, `|=`, `^=`, `<<=`, `>>=` are supported.
 

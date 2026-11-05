@@ -1204,7 +1204,7 @@ fn main():
 - `strview` is a **borrowed view** (immutable, fixed-length); the owning `str` remains the source of truth and is frozen against moves/mutation while any view is live (P2), with the freeze lifting at the view's last use (P4).
 - Views are non-escaping (Rule 5): they cannot be returned, passed to `move` parameters, or stored past the current function — so `first_word`-style helpers print or otherwise consume the slice in place rather than returning it. See `examples/string_slices.ryo`.
 - UTF-8 validity is checked at slice creation, not on every read — so iteration is allocation-free.
-- Array slices `slice[T]` are **not** included here; they ship in M16.2 alongside list literal syntax. `TypeKind::View(ViewKind)` already reserves their representation.
+- Array slices `slice[T]` are **not** included here; they ship in M16.2 alongside fixed arrays. `TypeKind::View(ViewKind)` already reserves their representation.
 - Dependencies: Milestone 8.2 (immutable borrows provide the reference machinery), Milestone 8.3 (explicit borrow syntax)
 
 ### Milestone 8.4.1: `strview` Spelling & View→`str` Re-borrow [alpha] ✅ COMPLETE
@@ -2063,7 +2063,7 @@ msg = f"Hello, {name}! Score: {score}"
 
 **Tasks:**
 
-- Add `[T]` array literal syntax to lexer/parser: `[1, 2, 3]`
+- Fixed-array literal syntax — **open decision**: `[1, 2, 3]` is already specified as a `list[T]` literal (spec §4.7 and the §5.4 example), so fixed arrays need either a distinct literal form or an explicit type-context rule; decide during implementation (same family as the I-249 initializer-syntax ruling)
 - Extend type system: `Type::Slice(Box<Type>)` for the immutable array-slice view `slice[T]`. Mutable view types stay rejected (slicing/memory-model spec D7 — mutable sub-ranges go through range-based `inout` APIs, not an `inout [T]` type)
 - Generalize the `for` header beyond `range(...)`: M8c deferred `for <ident> in <iterable>:` to the collections milestone; fixed arrays/slices are the first non-range iterable, so this milestone extends the loop header to slices (or ships indexed loops plus `len()` as an interim spelling — decide during implementation)
 - Parse slice operations on arrays:
@@ -2089,7 +2089,7 @@ fn sum_slice(numbers: slice[int]) -> int:
  return total
 
 fn main():
- nums = [1, 2, 3, 4, 5]
+ nums = [1, 2, 3, 4, 5]    # fixed-array literal spelling pending the open decision above
  total = sum_slice(nums[1:4])    # pass slice [2, 3, 4]
  print(int_to_str(total))         # 9
 ```
@@ -2098,8 +2098,8 @@ fn main():
 
 - Array slices are **fat pointers** (pointer + length); the same representation `strview` already uses
 - Bounds checking at runtime; out-of-range slicing panics
-- `[T]` array literals create stack-allocated fixed-size arrays in v0.1; growable `list[T]` lands in M18
-- Dependencies: Milestone 8.2 (immutable borrows), Milestone 8.3 (`inout [T]` slices)
+- Fixed arrays are stack-allocated, fixed-size values in v0.1 (literal spelling per the open decision above); growable `list[T]` lands in M18
+- Dependencies: Milestone 8.2 (immutable borrows), Milestone 8.3 (explicit `inout` borrows)
 - **Open design decision — empty-view/empty-collection initializer syntax (I-249).** `strview` today has no literal: the empty view is the full-slice spell `""[:]` (see the W0003 discussion there — the redundant-materialize hint pushes users toward view-typed bindings, which needed the base-deferral fix in PR #198). `slice[T]` inherits the gap, and M18's draft already assumes constructor-style `list[int]()`. Decide one consistent story before shipping slice[T]/list[T] — annotated literal coercion (`mut v: strview = ""`), a context-typed `empty()` builtin, or typed empty literals — so views and collections do not grow two idioms.
 
 ### Milestone 16.3: Bit Operations
