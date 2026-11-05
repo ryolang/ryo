@@ -487,22 +487,28 @@ const DFA_STACK_MAX: usize = 1024 * 1024 * 1024;
 /// count, and escapes live only inside literal bodies, so the longest
 /// body — not the file size — sets the stack the lexer can need.
 ///
-/// A real literal body never contains an unescaped quote, so it is
-/// exactly the gap between one unescaped quote and the next. Taking
-/// the maximum gap between consecutive unescaped quotes therefore
-/// never underestimates a real body, whatever stray quotes in comments
-/// do to the pairing — and stray quotes can only overestimate (the
-/// oversized stack is harmless). Quotes are rare in typical code, so
-/// the `find('"')` calls (memchr-accelerated) keep the pre-pass cheap
-/// next to the lex itself.
-///
-/// The tail after the last unescaped quote is also measured: an
-/// unterminated literal (or one whose closing quote is escaped) is
-/// scanned to EOF by the DFA before it fails, so that run needs the
-/// sized stack even though it is never a "real" body.
+/// A quote after an even backslash run is a DFA boundary in every
+/// context: inside a string it opens or closes one, and outside it
+/// opens one (the backslashes are reported as invalid characters, not
+/// treated as escapes). The gaps between consecutive even-run quotes
+/// therefore never underestimate a body. A quote after an odd run is
+/// ambiguous: escaped inside a string (no boundary — it must not split
+/// a body), but a boundary when the run is invalid code outside one.
+/// Both readings are covered: the escaped reading rides inside the
+/// even-run gaps, and the opener reading is covered by also measuring
+/// from the first quote in the file to the first even-run quote, the
+/// tail after the last even-run quote, and — when no even-run quote
+/// exists at all — from the first quote to EOF. Stray quotes can only
+/// overestimate (the oversized stack is harmless). Quotes are rare in
+/// typical code, so the `find('"')` calls (memchr-accelerated) keep
+/// the pre-pass cheap next to the lex itself.
 fn longest_literal_body(input: &str) -> usize {
     let mut longest = 0;
-    let mut prev_quote: Option<usize> = None;
+    // First quote of any parity, and the first/last even-run (certain
+    // DFA boundary) quote.
+    let mut first_quote: Option<usize> = None;
+    let mut first_even: Option<usize> = None;
+    let mut prev_even: Option<usize> = None;
     let mut at = 0;
     while let Some(rel) = input[at..].find('"') {
         let quote = at + rel;
@@ -512,19 +518,42 @@ fn longest_literal_body(input: &str) -> usize {
         while bs > 0 && input.as_bytes()[bs - 1] == b'\\' {
             bs -= 1;
         }
+        if first_quote.is_none() {
+            first_quote = Some(quote);
+        }
         if (quote - bs) % 2 == 0 {
-            if let Some(prev) = prev_quote {
+            if let Some(prev) = prev_even {
                 longest = longest.max(quote - prev - 1);
             }
-            prev_quote = Some(quote);
+            if first_even.is_none() {
+                first_even = Some(quote);
+            }
+            prev_even = Some(quote);
         }
         at = quote + 1;
     }
-    // Tail after the last unescaped quote: an unterminated literal (or a
-    // closing quote that is itself escaped) is scanned to EOF by the DFA
-    // before it errors, so that run needs the sized stack too.
-    if let Some(prev) = prev_quote {
-        longest = longest.max(input.len() - prev - 1);
+    match prev_even {
+        Some(last_even) => {
+            // Tail after the last certain boundary: an unterminated
+            // literal (or one whose closing quote is escaped) is scanned
+            // to EOF by the DFA before it fails.
+            longest = longest.max(input.len() - last_even - 1);
+            // Odd-run quotes before the first certain boundary may each
+            // open a literal after invalid code; measuring from the
+            // first quote in the file covers every such run at once.
+            if let (Some(fq), Some(fe)) = (first_quote, first_even)
+                && fq != fe
+            {
+                longest = longest.max(fe - fq - 1);
+            }
+        }
+        None => {
+            // No certain boundary anywhere: any quote may open an
+            // unterminated literal scanned to EOF.
+            if let Some(fq) = first_quote {
+                longest = longest.max(input.len() - fq - 1);
+            }
+        }
     }
     longest
 }
@@ -595,6 +624,21 @@ fn collect_raw_tokens<'a>(input: &'a str, sink: &mut DiagSink) -> Vec<(RawToken<
         raw_tokens
     };
     let longest_body = longest_literal_body(input);
+    // Above the cap even the sized thread would overflow: reject instead
+    // of scanning. Needs a >1 MiB single literal body — far past anything
+    // a human writes.
+    if longest_body.saturating_mul(DFA_STACK_PER_BYTE) > DFA_STACK_MAX {
+        sink.emit(Diag::error(
+            crate::spans::cspan(SimpleSpan::new((), 0..input.len())),
+            DiagCode::LexerInputTooLarge,
+            format!(
+                "string literal is too large to lex ({} bytes of escapes in one literal; the limit is {})",
+                longest_body,
+                DFA_STACK_MAX / DFA_STACK_PER_BYTE,
+            ),
+        ));
+        return Vec::new();
+    }
     if longest_body.saturating_mul(DFA_STACK_PER_BYTE) <= DFA_INLINE_BUDGET {
         return collect(sink);
     }
@@ -1654,6 +1698,59 @@ mod tests {
         // An unterminated literal counts its tail: the DFA scans it to EOF
         // before failing, so the sized stack must cover it.
         assert_eq!(longest_literal_body(r#"s = "abc"#), 3);
+        // A backslash before a literal opener is invalid code, not an
+        // escape: the DFA still opens the literal there, so the body must
+        // be measured from the odd-run opener to the closing quote.
+        assert_eq!(longest_literal_body("\\\"aaaa\""), 4);
+        // With no even-run quote at all, an odd-run opener may start an
+        // unterminated literal scanned to EOF.
+        assert_eq!(longest_literal_body("\\\"aaaa"), 4);
+    }
+
+    #[test]
+    fn literal_after_invalid_backslash_uses_sized_stack() {
+        // The stray backslash is invalid code (not an escape), so the DFA
+        // opens the string at the quote the parity check marks odd. The
+        // pre-pass must still measure the 100k-escape body and pick the
+        // sized thread instead of overflowing inline.
+        let mut src = String::from("\\\"");
+        src.push_str(&"\\n".repeat(100_000));
+        src.push('"');
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let toks = lex(&src, &mut pool, &mut sink);
+        assert!(
+            sink.into_diags()
+                .iter()
+                .any(|d| d.code == DiagCode::InvalidCharacter),
+            "expected an invalid-character diagnostic for the stray backslash"
+        );
+        assert!(
+            toks.iter()
+                .any(|(t, _)| matches!(t, Token::StrLit(id) if pool.str(*id).len() == 100_000)),
+            "expected the 100k-escape string to lex fully"
+        );
+    }
+
+    #[test]
+    fn over_cap_literal_is_rejected_without_scanning() {
+        // 600k escapes = 1.2 MiB body, past the 1 GiB stack cap: the
+        // lexer must reject with a diagnostic instead of overflowing the
+        // sized thread. Scanning would take a long time; this test also
+        // proves the reject happens before the DFA runs.
+        let mut src = String::from("s = \"");
+        src.push_str(&"\\n".repeat(600_000));
+        src.push('"');
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let toks = lex(&src, &mut pool, &mut sink);
+        assert!(
+            sink.into_diags()
+                .iter()
+                .any(|d| d.code == DiagCode::LexerInputTooLarge),
+            "expected a too-large-literal diagnostic"
+        );
+        assert!(toks.is_empty(), "over-cap input must not be scanned");
     }
 
     #[test]

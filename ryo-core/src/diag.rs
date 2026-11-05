@@ -411,6 +411,11 @@ pub enum DiagCode {
     /// not recognize (e.g. `\q`). The backslash and character are
     /// preserved verbatim in the interned string.
     UnknownEscape,
+    /// A single string/bytes literal body exceeded the lexer's stack
+    /// budget (roughly a mebibyte of escapes in one literal). The
+    /// compiler cannot tokenize it without overflowing; split the
+    /// literal into smaller pieces.
+    LexerInputTooLarge,
 
     /// A constant integer expression overflowed `int` during
     /// compile-time evaluation (spec §18: overflow traps in all build
