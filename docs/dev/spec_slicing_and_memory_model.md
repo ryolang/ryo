@@ -153,7 +153,7 @@ For views that must escape: use `sbytes` (§5).
 
 ### 3.4.1 Materialization — `str(view)` (M8.4.1.2)
 
-The re-borrow (P6') covers call sites for free; it cannot cover escapes, because the manufactured `str` is call-scoped. The owned-copy operation P6 alludes to is spelled **`str(view)`** (decision record: `ryo-view-materialization.md`):
+The re-borrow (P6') covers call sites for free; it cannot cover escapes, because the manufactured `str` is call-scoped. The owned-copy operation P6 alludes to is spelled **`str(view)`** (decision record: `record_view_materialization.md`):
 
 - **Type rule.** The argument must be a `strview`; anything else — including an owned `str` — is E0012 TypeMismatch. There is no `str(owned)` clone form: same-type duplication is the future `Clone` trait's story (trait milestone).
 - **Result.** A fresh owned `str` (`{ptr, len, cap=len}`): allocates, copies the viewed bytes, and is independent of the source buffer.

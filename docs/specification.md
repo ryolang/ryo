@@ -349,9 +349,9 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
 - **Bitwise Operators:** `&` (AND), `|` (OR), `^` (XOR), `~` (NOT), `<<` / `>>` (left/right shift).
   - Each operator has one meaning per syntactic role: `&` in prefix position at a call site is the mutable-borrow marker (§5.3); in infix position it is bitwise AND. `|` in type position separates error-union members (§4.9); in expression position it is bitwise OR. `~` is only ever bitwise NOT.
   - `&`, `|`, `^` take two operands of the same type and return that type. `<<` / `>>` take an integer value on the left and an `int` shift count on the right, and return the value's type. `~` takes one integer operand and returns its type.
-  - These operators apply to every integer type (§4.2) — the signed `int` and the sized integer types. Shift counts below 0 or ≥ the operand's bit width (64 for `int`) are compile-time errors when the count is a constant, and runtime traps otherwise. `>>` on signed integers is arithmetic (sign-propagating).
+  - These operators apply to every integer type (§4.2) — the signed `int` and the sized integer types. Shift counts below 0 or ≥ the operand's bit width (64 for `int`) are compile-time errors when the count is a constant, and runtime traps otherwise. `<<` discards bits shifted beyond the operand's width: shifting into the sign bit yields the corresponding signed bit pattern — a bit operation, not a checked multiplication, with no overflow panic. `>>` on signed integers is arithmetic (sign-propagating); on unsigned sized types it is logical, inserting zero bits.
   - `bool`, floats, `str`, and aggregates are rejected as operands; there are no implicit conversions between numeric types.
-  - Precedence, tighter to looser: shifts above `&` above `^` above `|`, all above comparison. Compound assignments `&=`, `|=`, `^=`, `<<=`, `>>=` are supported.
+  - Precedence, tighter to looser: shifts sit below `*` `/` `%` and `+` `-`, above `&`, which sits above `^`, which sits above `|`; the whole group binds tighter than comparison. Shifts are left-associative. Compound assignments `&=`, `|=`, `^=`, `<<=`, `>>=` are supported.
 
 ## 4. Types
 

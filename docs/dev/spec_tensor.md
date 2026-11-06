@@ -219,7 +219,7 @@ Track backend version, kernel source/artifact identity, target device architectu
 features, options, ABI, and runtime requirements in native manifests and cache dependencies.
 For JIT execution, track loaded-module lifetime.
 For AOT builds, resolve required libraries and artifact packaging.
-Follow the [incremental compilation design](ryo-incremental-compilation.md).
+Follow the [incremental compilation design](proposal_incremental_compilation.md).
 Device dispatch does not require an additional Ryo IR for this host-orchestrator design.
 
 ---
@@ -249,7 +249,7 @@ Do not claim that host-only tests prove GPU lifetime or synchronization correctn
 ## References
 
 - Spec: [Section 4.11](../specification.md#411-ffi--c-interoperability) (C-header integration), [Section 5.4](../specification.md#54-hybrid-eager-destruction--raii-drop-trait) (resource destruction), and [Section 9](../specification.md#9-concurrency-model-taskfuturechannel) (tasks and cancellation).
-- Dev: [Pipeline migration](pipeline_migration.md), [incremental compilation](ryo-incremental-compilation.md), [Rust-backed std extensions](std_ext.md), and [closure representation](closure_representation.md).
+- Dev: [Pipeline migration](pipeline_migration.md), [incremental compilation](proposal_incremental_compilation.md), [Rust-backed std extensions](spec_std_extensions.md), and [closure representation](spec_closure_representation.md).
 - Experiments: [CPU vectorization](../experimental/lightweight_vectorization.md) and [Mojo tensor backend](../experimental/mojo_tensor_backend.md).
 - Delivery: [Implementation roadmap](implementation_roadmap.md).
 - DLPack: [C API](https://dmlc.github.io/dlpack/latest/c_api.html) and [exchange specification](https://dmlc.github.io/dlpack/latest/python_spec.html) for representation, release, and stream contracts.

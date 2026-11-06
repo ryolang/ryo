@@ -32,5 +32,5 @@ The programmer is responsible for upholding safety invariants inside an `unsafe`
 
 ## References
 - Spec: `docs/specification.md` §17 (FFI & unsafe — now owns the `unsafe` operation set, moved out of this document), §4.11 (FFI & C Interoperability)
-- Dev: `docs/dev/built_in.md` (std.sys hidden layer)
+- Dev: `docs/dev/spec_builtins.md` (std.sys hidden layer)
 - Roadmap: `docs/dev/implementation_roadmap.md` — unsafe policy implementation (manifest gating, `SAFETY:` enforcement, `ryo audit`) targeted at v0.2

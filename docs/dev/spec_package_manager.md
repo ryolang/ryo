@@ -239,5 +239,5 @@ This Cargo-style `ryo` package manager design, with a central registry, TOML man
 The addition of task runner functionality (similar to `make` or `just`) provides developers with a convenient way to define and execute common development tasks directly through the `ryo` CLI, reducing the need for external build tools and scripts.
 
 ## References
-- Dev: `docs/dev/official_pkg.md` (recommended packages)
+- Dev: `docs/dev/spec_official_packages.md` (recommended packages)
 - Roadmap: `docs/dev/implementation_roadmap.md` (package-manager milestone)

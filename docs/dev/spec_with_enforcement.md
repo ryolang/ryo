@@ -165,5 +165,5 @@ the roadmap Phase 5 table (same dependency as E0034's fix).
 - Spec: [Section 5.5](../specification.md) (`with` — Resource Lifetime Blocks)
 - Spec: [Section 14.5.4](../specification.md) (Synchronization Primitives — the guard rule this proposal generalizes)
 - Spec: [Section 6.1.3 / E0017](../specification.md) (`never` binding restriction — the enforcement precedent)
-- Dev: `concurrency.md` milestone summary ("`with` enforcement", Phase 6)
+- Dev: `spec_concurrency.md` milestone summary ("`with` enforcement", Phase 6)
 - Milestone: RAII & Drop (M26) — see implementation_roadmap.md

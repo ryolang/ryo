@@ -75,7 +75,7 @@ Quick status overview. `[x]` = complete, `[ ]` = incomplete. Jump to a milestone
 
 Deferred features tracked separately — see Phase 5 section for the full list (REPL/JIT, Concurrency Runtime, Closures, FFI, Traits & Generics, Error Return Traces, Advanced F-String Formatting, Stack Traces polish, Benchmarking & Doc Generation, Constrained/Distinct Types, Contracts, Copy Elision, Stdlib Allocation Optimizations, Cancellation Model, Default Parameters & Named Arguments, LSP/Editor Tooling, etc.). The v0.2-deferred pattern-matching items — advanced pattern matching and match ownership completion (formerly M12.5/M12.6) — are detailed in the Phase 5 section.
 
-**From the final slicing & memory-model spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md` §14), the gap register (`docs/dev/ryo-missing-features-and-gaps.md`), and the view-materialization record (`docs/dev/ryo-view-materialization.md`):**
+**From the final slicing & memory-model spec (`docs/dev/spec_slicing_and_memory_model.md` §14), the gap register (`docs/dev/record_missing_features_and_gaps.md`), and the view-materialization record (`docs/dev/record_view_materialization.md`):**
 
 | Item | Target | Notes |
 | ------ | -------- | ------- |
@@ -83,21 +83,21 @@ Deferred features tracked separately — see Phase 5 section for the full list (
 | Buffer-level COW for `list[T]`/`map[K, V]` (lazy copy on mutation of a shared buffer) | v0.2, with `shared[T]` | deferred from M25 (decision 2026-11): v0.1 ships eager `clone()` (Rust-style deep copy); COW installs on the refcounted-buffer substrate — same work package as `sbytes`/`shared[T]`, the ARC optimizer, and the static COW-check elision M25 designs for; retrofit is ABI-safe (a collection value is a pointer slot; eager clone is the refcount-never-exceeds-1 degenerate case) as long as M25's single-lowering-point constraint holds |
 | Debug-mode `shared[T]` cycle detector (runtime tooling) | v0.2–v0.3 | reports reference cycles in debug builds instead of leaking silently; semantics unchanged — no cycle collection (spec §5.6) |
 | Runtime profile split (`core`/`hosted`, `--profile=core`) | v0.2 | D9; stdlib layering, no backend changes |
-| `bytes.copy_into(bview, &buf)` (no-alloc view materialization) | v0.2 | needed by the `core` no-alloc profile and the FFI buffer idiom (`cstr.from`) — land with/before FFI; destination is a fixed-capacity `[N]u8` (fixed arrays land with M18); design in `ryo-view-materialization.md` §3 |
-| Machine-applicable diagnostic suggestions (E0034 ViewEscape → `str(view)` materialize fix) | v0.2 | needs Diag suggestion-payload machinery that doesn't exist yet; design in `docs/experimental/ryo-agent-interface-proposal.md` and `ryo-view-materialization.md` §4 |
+| `bytes.copy_into(bview, &buf)` (no-alloc view materialization) | v0.2 | needed by the `core` no-alloc profile and the FFI buffer idiom (`cstr.from`) — land with/before FFI; destination is a fixed-capacity `[N]u8` (fixed arrays land with M18); design in `record_view_materialization.md` §3 |
+| Machine-applicable diagnostic suggestions (E0034 ViewEscape → `str(view)` materialize fix) | v0.2 | needs Diag suggestion-payload machinery that doesn't exist yet; design in `docs/experimental/ryo-agent-interface-proposal.md` and `record_view_materialization.md` §4 |
 | LSP / editor tooling server | v0.2+ | rides both rows above: `Diag` is already LSP-shaped (severity, stable `DiagCode`, byte spans, notes), so squiggles + codes + related info need no new diagnostic machinery — only the structured emission channel (`ryo check --json=v1` / library API per `docs/experimental/ryo-agent-interface-proposal.md` §2), a line index over the `byte_to_char_offsets` table in `render_diags` (negotiate UTF-8 positions), in-memory virtual files (`didOpen`, unsaved buffers), and debounced recheck; quick-fix code actions come free once the suggestion payload lands; the R9/R10 continue-past-errors design already yields the full per-version diagnostic set an editor wants |
 | Bounded operator overloading (`Add`… traits) | v0.2–v0.3 | D10; concrete types first, generic traits with user generics |
-| `unsafe` policy implementation (manifest gating, `SAFETY:` enforcement, `ryo audit`) | v0.2 | D4; lands with FFI/unsafe work; binding-author reference detail in `unsafe.md` |
+| `unsafe` policy implementation (manifest gating, `SAFETY:` enforcement, `ryo audit`) | v0.2 | D4; lands with FFI/unsafe work; binding-author reference detail in `spec_unsafe.md` |
 | Volatile MMIO intrinsics | v0.2 | GAP-3; `core` profile intrinsic package |
 | `#[repr(packed)]` | v0.2 | GAP-4; rides with FFI |
 | Scoped task borrows + stdlib `par_*` | v0.4 | D5; concurrency runtime |
 | Retaining views (`shared[T]`-backed views that escape calls) | v0.2–v0.3 | spec §5.7 + Rule 5/6 exceptions; **blocked on the `shared[T]` refcount runtime** (same substrate as `sbytes` above); unlocks zero-copy parser libraries |
 | `std.slice.split_mut` (disjoint mutable chunks for `task.scope` children) | v0.4 | spec §9.2.1; **blocked on the concurrency runtime**; stdlib-internal `unsafe` is the disjointness proof; enables parallel in-place mutation — rides with the scoped-task-borrows row |
-| Context propagation & cancellation deadlines | v0.4 | GAP-1; must land **with** the scheduler (see `ryo-context-and-otel-proposal.md`) |
+| Context propagation & cancellation deadlines | v0.4 | GAP-1; must land **with** the scheduler (see `proposal_context_and_otel.md`) |
 | Binary pattern matching (if adopted) | post-v0.4 | deferred; stdlib parser facility first |
 | GUI Phase 1 (immediate-mode toolkit PoC) | post-v0.2 | ecosystem, not language; D4 + `ryo-bindgen` |
 | `yield` subroutines | separate RFC | measured re-entry condition only (final spec §11.4) |
-| `Scoped` marker trait (`with` enforcement) | with M26 + sync guards | generalizes spec §14.5.4's mandatory-`with` guard rule into a user-accessible core trait; rides the M26 `Drop` facet machinery and the concurrency guard types; design in `with_enforcement.md` (draft, pending approval) |
+| `Scoped` marker trait (`with` enforcement) | with M26 + sync guards | generalizes spec §14.5.4's mandatory-`with` guard rule into a user-accessible core trait; rides the M26 `Drop` facet machinery and the concurrency guard types; design in `spec_with_enforcement.md` (draft, pending approval) |
 
 ---
 
@@ -1008,7 +1008,7 @@ Every downstream milestone in Phase 2 (structs, tuples, enums, pattern matching,
 - Add string concatenation: `s1 + s2` (move left, borrow right)
 - Add string methods: `.len()`, `.is_empty()`, `.substring(start, end)` (`.chars()` is deferred — needs iterators)
 - Add stdlib helpers for non-string formatting: `int_to_str(x)`, `float_to_str(x)`, `bool_to_str(b)`
-- **Basic f-strings (`f"Value: {x}"`) are scheduled for M17** — see the milestone entry and [f-string implementation specification](f_string_implementation_spec.md). Only dynamic width or precision and custom `Display` formatting remain Phase 5 work.
+- **Basic f-strings (`f"Value: {x}"`) are scheduled for M17** — see the milestone entry and [f-string implementation specification](spec_f_string_interpolation.md). Only dynamic width or precision and custom `Display` formatting remain Phase 5 work.
 - Parser/AST: accept the **`move` keyword** as a prefix on parameter declarations (`fn consume(move s: str)`). Without `move`, parameters borrow. Sema records the convention on the function signature (type-only; ownership lives elsewhere).
 - Add a **new pipeline stage `ryo-frontend/src/ownership.rs`** between Sema and Codegen — modeled on Mojo's MLIR-based lifetime/ASAP-destruction passes (Zig stops being a useful compiler reference for the borrow checker; see [pl_references/mojo.md](pl_references/mojo.md)). The pass mutates each `Tir` in place: inserts `TirTag::Free`, tracks per-`TirRef` ownership state, and reports diagnostics.
   - Per-`TirRef` (SSA value) state lattice: `NotTracked` / `Valid` / `Borrowed` / `Moved { moved_at, kind }`
@@ -1170,7 +1170,7 @@ fn main():
 
 **What was implemented:**
 
-- `strview` as a first-class read-only view type (`{ptr, len}`, 16 bytes), per the final slicing spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md`, D1). Slice expressions `s[start:end]`, `s[start:]`, `s[:end]`, `s[:]` yield `strview`; bounds are `int`, checked at creation (out-of-range, reversed ranges `start > end`, and non-UTF-8-boundary all panic). Views are unified behind `TypeKind::View(ViewKind)` — `strview` today, `slice[T]`/`bytesview` reserved.
+- `strview` as a first-class read-only view type (`{ptr, len}`, 16 bytes), per the final slicing spec (`docs/dev/spec_slicing_and_memory_model.md`, D1). Slice expressions `s[start:end]`, `s[start:]`, `s[:end]`, `s[:]` yield `strview`; bounds are `int`, checked at creation (out-of-range, reversed ranges `start > end`, and non-UTF-8-boundary all panic). Views are unified behind `TypeKind::View(ViewKind)` — `strview` today, `slice[T]`/`bytesview` reserved.
 - `strview` parameters are the preferred read-only string convention (§3.4); passing an owned `str` to a `strview` parameter triggers the implicit view conversion (`str → strview` drops `cap`). `inout strview`, `move strview`, and `-> strview` are rejected (E1/E2).
 - Projection rules P1–P6 in the ownership pass: freeze of the owner while any slice is live (`SourceProjected`, E0035), transitive re-slicing, last-use projection lifetimes (P4 lift), and P5-deferred owner destruction. Escapes diagnose on two levels: `-> strview` signatures are rejected in sema as Rule-5 type errors (E0022 `ReturnBorrowedValue`); body-level ownership violations — returning a view value, passing a view to a `move` parameter — report `ViewEscape` (E0034) from the ownership pass.
 - Builtin read-only string consumers accept views: `print`, `.len()`, `.is_empty()`, `==`.
@@ -1247,7 +1247,7 @@ fn main():
 
 ### Milestone 8.4.1.2: View Materialization (`str(view)`) + W0003 [alpha] ✅ COMPLETE
 
-**Goal:** Close the escape story for views: `str(view)` produces an owned `str` copy of a `strview` (allocates + copies), and a new warning flags materializations that buy nothing. Per the decision record (`docs/dev/ryo-view-materialization.md`, spelling decided 2026-08-01) and final spec §3.4.1.
+**Goal:** Close the escape story for views: `str(view)` produces an owned `str` copy of a `strview` (allocates + copies), and a new warning flags materializations that buy nothing. Per the decision record (`docs/dev/record_view_materialization.md`, spelling decided 2026-08-01) and final spec §3.4.1.
 
 **Status:** ✅ COMPLETE (2026-08-02)
 
@@ -1285,7 +1285,7 @@ fn main():
 
 ### Milestone 8.4.2: `bytes` Type & `bytesview` [alpha] ✅ COMPLETE
 
-**Goal:** An owned, heap-allocated, contiguous byte buffer — the binary sibling of `str` — plus its read-only projection, filling the gap where `list[u8]` is the only (awkward) option. Per the final slicing spec (`docs/dev/ryo-slicing-and-memory-model-final-spec.md`, D2).
+**Goal:** An owned, heap-allocated, contiguous byte buffer — the binary sibling of `str` — plus its read-only projection, filling the gap where `list[u8]` is the only (awkward) option. Per the final slicing spec (`docs/dev/spec_slicing_and_memory_model.md`, D2).
 
 **Status:** ✅ COMPLETE (2026-09-01)
 
@@ -1300,7 +1300,7 @@ fn main():
 - `bytes(bview)` mirrors M8.4.1.2's `str(view)` (owned copy from a `bytesview`); W0003 extends to both shapes
 - Buffer building (the builder idiom is deferred — it needs M24 methods): `a + b` owned concatenation (mirrors `StrConcat`; view operands rejected as with `str`) and `bytes_push(&b, x)` single-byte append (`inout` first arg mirroring `str_push`; `x: int` range-checked 0–255, panics)
 - `print` accepts `bytes`/`bytesview` with an escaped repr (`b"\x01\x02A"`: printable ASCII literal, short escapes where they exist, else `\xNN`); `==`/`!=` on both types incl. cross-comparison via the implicit owner→view conversion; `.len()`/`.is_empty()`
-- Runtime: `__ryo_bytes_*` alloc/free/realloc/concat/slice/from_view/push/eq/repr/to_bytes/to_str mirroring the `str` ABI — **ABI history:** string producers originally used the slot-out pattern (caller-provided 24-byte slot written via `write_str_slot`); commit `7d0a047` then moved `{ptr, len}` producers to a packed-`u128` register return (`pack_pair`, no out-pointer stack slots); the 2026-09 string fast-path work inlined those small ops as Cranelift IR at the call site and removed `pack_pair` from the runtime entirely (recorded in `docs/dev/cranelift_lessons.md`). Producers that still exist as runtime calls (`ryo_int_to_str`, `ryo_float_to_str`, the `__ryo_*_from_view` materialize calls) use slot-out — the template M9.2's str-producing intrinsics follow; memory fixtures for both JIT and AOT (ASan/Valgrind)
+- Runtime: `__ryo_bytes_*` alloc/free/realloc/concat/slice/from_view/push/eq/repr/to_bytes/to_str mirroring the `str` ABI — **ABI history:** string producers originally used the slot-out pattern (caller-provided 24-byte slot written via `write_str_slot`); commit `7d0a047` then moved `{ptr, len}` producers to a packed-`u128` register return (`pack_pair`, no out-pointer stack slots); the 2026-09 string fast-path work inlined those small ops as Cranelift IR at the call site and removed `pack_pair` from the runtime entirely (recorded in `docs/dev/guide_cranelift_lessons.md`). Producers that still exist as runtime calls (`ryo_int_to_str`, `ryo_float_to_str`, the `__ryo_*_from_view` materialize calls) use slot-out — the template M9.2's str-producing intrinsics follow; memory fixtures for both JIT and AOT (ASan/Valgrind)
 
 **Visible Progress:** Protocol/binary code reads and slices raw buffers zero-copy; text bridging is explicit and UTF-8 failures are recoverable.
 
@@ -1434,11 +1434,11 @@ fn main():
 
 ### Milestone 9.2: Throwaway CLI Intrinsics (`process_*`, `io_*`) ✅ COMPLETE
 
-**Goal:** Make CLIs usable now — exit codes, stderr, args, env, stdin — via a **temporary** compiler-intrinsic layer named to mirror the future module paths (`process.*`, `io.*` per [docs/std.md](../std.md)), so the eventual migration is a mechanical `prefix_name` → `prefix.name` swap. Nothing is added to the prelude: `print` stays the only I/O prelude builtin.
+**Goal:** Make CLIs usable now — exit codes, stderr, args, env, stdin — via a **temporary** compiler-intrinsic layer named to mirror the future module paths (`process.*`, `io.*` per [docs/dev/spec_std.md](spec_std.md)), so the eventual migration is a mechanical `prefix_name` → `prefix.name` swap. Nothing is added to the prelude: `print` stays the only I/O prelude builtin.
 
 **Status:** ✅ COMPLETE (2026-10-01, PR #172 — the planned PR1/PR2 split shipped as one PR)
 
-> **Why throwaway (2026-09):** the real implementations are the module functions from [docs/std.md](../std.md) (`process.exit`, `io.eprint`, …), built on the `std.sys` → `std.io` → `std.mem` stack ([docs/dev/std.md](std.md)) — all gated behind the module system (M27), which is far away. This layer makes CLIs work today with placeholder return types that **will** change (documented breaking changes, acceptable pre-alpha). The intrinsics are deliberately **not spec surface** — the spec documents only the final `process.*` / `io.*` API. No major language routes basic I/O through its general FFI layer (Go/Rust/Swift/Python all give the runtime its own syscall channel), so these are compiler-known builtins backed by `ryo_*` runtime exports — the `print()` pattern — with no `extern "C"`, no allocator, and no module system.
+> **Why throwaway (2026-09):** the real implementations are the module functions from [docs/dev/spec_std.md](spec_std.md) (`process.exit`, `io.eprint`, …), built on the `std.sys` → `std.io` → `std.mem` stack ([docs/dev/spec_std.md](spec_std.md)) — all gated behind the module system (M27), which is far away. This layer makes CLIs work today with placeholder return types that **will** change (documented breaking changes, acceptable pre-alpha). The intrinsics are deliberately **not spec surface** — the spec documents only the final `process.*` / `io.*` API. No major language routes basic I/O through its general FFI layer (Go/Rust/Swift/Python all give the runtime its own syscall channel), so these are compiler-known builtins backed by `ryo_*` runtime exports — the `print()` pattern — with no `extern "C"`, no allocator, and no module system.
 
 **Placeholder semantics & migration map** (the return type changes, not just the name):
 
@@ -1878,7 +1878,7 @@ name = name orelse "anonymous"
 
 **Goal:** Compile basic `f"..."` literals with eagerly evaluated expression interpolation into ordinary owned `str` values, without requiring traits, t-strings, or template machinery.
 
-**Design:** [F-String Implementation Specification](f_string_implementation_spec.md).
+**Design:** [F-String Implementation Specification](spec_f_string_interpolation.md).
 
 **Tasks:**
 
@@ -1922,7 +1922,7 @@ msg = f"Hello, {name}! Score: {score}"
 - Codegen:
   - Slice representation (pointer + length, fat pointer)
   - Bounds checking at runtime (panic on out-of-range)
-- `slice[T]` materialization into an owning container, with the bit-copy check in sema: `T` must be trivially copyable (uses the Copy-type classification from the ownership-pass side tables). Views of owning values (`slice[str]`, `slice[Node]`) are materialized by explicit iteration or, once traits land, user `Clone` impls — never by memcpy (`ryo-view-materialization.md` §1)
+- `slice[T]` materialization into an owning container, with the bit-copy check in sema: `T` must be trivially copyable (uses the Copy-type classification from the ownership-pass side tables). Views of owning values (`slice[str]`, `slice[Node]`) are materialized by explicit iteration or, once traits land, user `Clone` impls — never by memcpy (`record_view_materialization.md` §1)
 - Write tests for array slices
 
 **Visible Progress:** Efficient array sub-range iteration without copying.
@@ -2182,8 +2182,8 @@ fn main():
 - Collections own their data (RAII cleanup in M26)
 - Iteration uses immutable borrows
 - **Buffer model and cloning** — `list[T]`, `map[K, V]`, and `str` are class-backed buffers presenting value semantics to the user. The **v0.1 contract is eager deep copy (Rust-style), not lazy COW** (decision 2026-11): `.clone()` copies the buffer, mutating methods mutate in place, and no refcount checks exist — v0.1 workloads are move/borrow-dominated and clones are explicit, so the lazy-copy payoff is small until `shared[T]` arrives and forces the refcounted-buffer substrate anyway. Therefore `.clone()` on collections must ship **in this milestone as a compiler builtin** — user-defined `Clone` is a v0.2/v0.3 trait, and without a builtin clone there is no way to obtain an independent copy of a list in v0.1; unify with the trait machinery when it lands. Buffer-level COW (the Swift `Array`/`Dictionary`/`String` model: a mutating method checks the backing buffer's refcount and clones first when > 1) is deferred to the Phase 5 *Stdlib Allocation Optimizations* package; it is the prerequisite for `shared[T]`'s performance story (spec 5.6). Note the Ryo variant of that model: **assignment moves** (`b = a` invalidates `a`, spec §5.1) — COW is exercised by the sharing paths (`.clone()`, views, `shared[T]`), never by plain assignment; auto-clone on assignment stays rejected (hidden-cost footgun, see the struct_records evidence in ISSUES.md). Eager clone is the refcount-never-exceeds-1 degenerate case of COW, so the retrofit is ABI-safe (a collection value is a pointer slot) **provided this milestone keeps buffer allocation, `clone()`, and every mutating-method buffer access each behind a single lowering point** — the design constraint noted above. Revisit earlier if a benchmark shows a clone-heavy hot path.
-- **ARC optimizer pass** ([arc_optimizer.md](arc_optimizer.md)) is a **hard gate** for user-visible `shared[T]`: the pass must be committed before `shared[T]` ships in the stdlib or appears in any published benchmark. Without retain/release elision, every collection access in shared-state code pays atomic refcount cost, and first impressions of the feature would be set by unoptimized microbenchmarks. Sequencing: design and prototype the pass during this milestone.
-- **Static COW-check elision via the ownership pass (defer implementation, design for it now):** when the ownership pass proves a `mut` collection is uniquely owned (the same sole-ownership analysis eager destruction already runs), mutating methods can skip the buffer refcount check entirely and mutate in place — no branch at all, versus SSO-style dynamic workarounds (small-vector inlining is a recorded non-goal in `stdlib_optimizations.md`; growth headroom + geometric growth ships here). Design the buffer ABI and mutating-method calls so elision is installable later: the uniqueness check must live in one lowering point, not be duplicated per method. This is the same machinery family as the ARC optimizer — one investment, payoff across `list[T]`, `map[K, V]`, and `str`.
+- **ARC optimizer pass** ([spec_arc_optimizer.md](spec_arc_optimizer.md)) is a **hard gate** for user-visible `shared[T]`: the pass must be committed before `shared[T]` ships in the stdlib or appears in any published benchmark. Without retain/release elision, every collection access in shared-state code pays atomic refcount cost, and first impressions of the feature would be set by unoptimized microbenchmarks. Sequencing: design and prototype the pass during this milestone.
+- **Static COW-check elision via the ownership pass (defer implementation, design for it now):** when the ownership pass proves a `mut` collection is uniquely owned (the same sole-ownership analysis eager destruction already runs), mutating methods can skip the buffer refcount check entirely and mutate in place — no branch at all, versus SSO-style dynamic workarounds (small-vector inlining is a recorded non-goal in `spec_stdlib_optimizations.md`; growth headroom + geometric growth ships here). Design the buffer ABI and mutating-method calls so elision is installable later: the uniqueness check must live in one lowering point, not be duplicated per method. This is the same machinery family as the ARC optimizer — one investment, payoff across `list[T]`, `map[K, V]`, and `str`.
 - Dependencies: Milestone 8.3 (`inout` for append/remove), Milestone 18 (array slices for iteration)
 - `bytes.from_list([...])` becomes expressible here (deferred from M8.4.2 — it needs list literals to exist)
 - **String iteration (sequencing, with spec §4.7):** `char` (§4.2, Unicode scalar value — Milestone 21) lands first; `.chars()` is a decoding iterator over it; `.char_count()` is the explicit-O(n) convenience — `.len()` stays byte length, so no linear scan hides behind constant-looking syntax. `s.chars().collect() -> list[char]` is the decode-once-then-index escape hatch (explicit allocation).
@@ -2421,7 +2421,7 @@ fn main():
   - `sqrt(x: float) -> float`
   - `pow(base: float, exp: float) -> float`
   - Constants: `PI`, `E`
-- Implement `process` module (per [docs/std.md](../std.md) §1 — the `os` naming was superseded):
+- Implement `process` module (per [docs/dev/spec_std.md](spec_std.md) §1 — the `os` naming was superseded):
   - `args() -> list[str]`: Command-line arguments. **Update (2026-09):** the `process_argc()`/`process_argv(i)` intrinsics land in M9.2; `process.args()` collects them into a `list[str]`
   - `env(key: strview) -> ?str`: Environment variables. **Update (2026-09):** `process_env` lands as a placeholder (`str`, empty = unset) in M9.2 and becomes `?str` at M16
   - `exit(code: int)`: Exit program. **Update (2026-09):** `process_exit` lands as an intrinsic in M9.2; `process.exit` is its final form
@@ -2903,7 +2903,7 @@ Available commands:
 - Not essential for initial adoption (synchronous code works fine)
 - Allows more design iteration based on community feedback
 
-**Implementation plan:** [concurrency.md](concurrency.md) — phased M:N green-thread runtime (`corosensei` + `mio` + `crossbeam-deque`). **Implementation is gated on a proof-of-concept spike** validating the core stack on all three OSes; Phase 1 of the plan starts only once the PoC is ready and validates feasibility (see the gate note in that document's Overview).
+**Implementation plan:** [spec_concurrency.md](spec_concurrency.md) — phased M:N green-thread runtime (`corosensei` + `mio` + `crossbeam-deque`). **Implementation is gated on a proof-of-concept spike** validating the core stack on all three OSes; Phase 1 of the plan starts only once the PoC is ready and validates feasibility (see the gate note in that document's Overview).
 
 **Design Decision: Green Threads (Stack Swapping) vs async/await**
 
@@ -3013,7 +3013,7 @@ Adding M:N threading has **specification impacts** that require changes to earli
 - **Change in Milestone 26 (RAII & Drop)**: `Shared[T]` uses atomic CPU instructions
 - **Performance cost:** ~5-10 CPU cycles per clone/drop for thread safety
 - **Rationale:** Prevents data races when multiple threads share ownership
-- **Gate:** `shared[T]` does not ship user-facing until the ARC optimizer pass ([arc_optimizer.md](arc_optimizer.md), designed/prototyped during M25, shipping with the Phase 5 `shared[T]` package) is committed — unelided atomic retain/release on every assignment would otherwise dominate shared-state code and set the feature's benchmark reputation
+- **Gate:** `shared[T]` does not ship user-facing until the ARC optimizer pass ([spec_arc_optimizer.md](spec_arc_optimizer.md), gated in M25) is committed — unelided atomic retain/release on every assignment would otherwise dominate shared-state code and set the feature's benchmark reputation
 
 **B. Global Mutable State Rules**
 
@@ -3175,7 +3175,7 @@ printer = fn(): print(int_to_str(data_len))  # data_len copied (int is Copy)
 - Capture semantics follow assignment: Copy types are copied, owning types are moved (§6.2.2); closures that mutate their captures require a `mut` binding
 - Capture rules enforced at closure creation time (no runtime overhead, no escape analysis)
 - Closure types (`Fn`, `FnMut`) start as compiler concepts; promoted to real traits once the trait system supports it
-- See [closure_representation.md](closure_representation.md) for memory layout and ABI details
+- See [spec_closure_representation.md](spec_closure_representation.md) for memory layout and ABI details
 
 **Dependencies:**
 
@@ -3238,6 +3238,8 @@ fn main():
 
 **Goal:** User-facing `trait` keyword, trait bounds, generic types and functions — shipped together
 
+> **Pending approval:** the substrate and sequencing for this section are decided by [proposal_comptime_substrate.md](proposal_comptime_substrate.md) — comptime is the generics substrate (no classic-generics syntax); the instance axis lands pre-v0.1 via M25.1, and the evaluator, `type_info`, and user surface debut here, co-designed with derives. Awaiting language-owner ruling; the section body below predates the proposal.
+
 **Why Post-v0.1.0:**
 
 - Hardcoded collections (Milestone 25) sufficient for v0.1.0
@@ -3251,7 +3253,7 @@ fn main():
 - `fn drop(inout self)` (compiler-known method) → `impl Drop for T` (no source change to method body)
 - `Copy` (compiler marker) → user-derivable `#[derive(Copy)]`
 - `.message()` (compiler-known error accessor) → `impl Error for T` with explicit `fn message(&self) -> str`
-- `str(view)` / `bytes(bview)` (sema-intercepted materialize builtins, M8.4.1.2/M8.4.2) → resolve through a converting-initializer protocol (Swift `init(_:)`-style, or a `From`/`Materialize` trait with call syntax — name TBD at this milestone), call sites unchanged; plus a user-facing `Clone` trait for same-type `T → T` duplication (Go `slices.Clone` vocabulary) — `ryo-view-materialization.md` §2
+- `str(view)` / `bytes(bview)` (sema-intercepted materialize builtins, M8.4.1.2/M8.4.2) → resolve through a converting-initializer protocol (Swift `init(_:)`-style, or a `From`/`Materialize` trait with call syntax — name TBD at this milestone), call sites unchanged; plus a user-facing `Clone` trait for same-type `T → T` duplication (Go `slices.Clone` vocabulary) — `record_view_materialization.md` §2
 
 **Features:**
 
@@ -3573,7 +3575,7 @@ ContractViolation: precondition failed: amount > 0
 - Hidden output pointer calling convention for eligible return sites
 - Integration with the TIR lowering pipeline
 
-**Implementation Details:** See [copy_elision.md](copy_elision.md) for the full G/P/F classification and algorithm sketch.
+**Implementation Details:** See [spec_copy_elision.md](spec_copy_elision.md) for the full G/P/F classification and algorithm sketch.
 
 **Dependencies:** Ownership & borrows (M8.1–M8.3 machinery), RAII (M26)
 **Timeline:** v0.2 (early post-v0.1.0)
@@ -3598,7 +3600,7 @@ ContractViolation: precondition failed: amount > 0
 - Sink-parameter convention: `move T -> T` pattern for buffer-building APIs
 - Atomic COW refcounts for thread safety
 
-**Implementation Details:** See [stdlib_optimizations.md](stdlib_optimizations.md) for SSO threshold, COW semantics, and sink-parameter guidelines.
+**Implementation Details:** See [spec_stdlib_optimizations.md](spec_stdlib_optimizations.md) for SSO threshold, COW semantics, and sink-parameter guidelines.
 
 **Dependencies:** String type (M8.1, shipped), Copy elision (above), Concurrency runtime (for atomic refcounts)
 **Timeline:** v0.2-v0.3
@@ -3719,7 +3721,7 @@ result = try task.timeout(5s, worker).await catch as e:
 
 - Immutable borrow-bindings / match ergonomics — pattern surface in M12.5; binding-mode inference semantics land together with or just before this milestone's items
 - `match self:` on `move self` / `inout self` — M24 (Method Implementations) defines the self parameter modes; match rides them
-- Copy elision through the match merge block — tracked in [copy_elision.md](copy_elision.md) (P1 specialization for pattern matching)
+- Copy elision through the match merge block — tracked in [spec_copy_elision.md](spec_copy_elision.md) (P1 specialization for pattern matching)
 
 **Dependencies:** Milestone 12 (match core), Milestone 8.3 (`inout`, shipped); pairs naturally with M12.5
 
@@ -4095,5 +4097,5 @@ This roadmap represents an **honest, achievable plan** for building Ryo v0.1.0. 
 ## References
 
 - Spec: [specification.md](../specification.md) — canonical language specification; this roadmap schedules its delivery
-- Dev: [alpha_scope.md](alpha_scope.md), [pipeline_alignment.md](pipeline_alignment.md), [cranelift_lessons.md](cranelift_lessons.md) — implementation plans linked from milestones; cranelift_lessons.md records the 2026-08 Cranelift/codegen findings (ABI limits, packed-`u128` runtime ABI, guard flag-fusion, measurement lessons) — read before optimization work in `ryo-backend`
+- Dev: [alpha_scope.md](alpha_scope.md), [pipeline_alignment.md](pipeline_alignment.md), [guide_cranelift_lessons.md](guide_cranelift_lessons.md) — implementation plans linked from milestones; guide_cranelift_lessons.md records the 2026-08 Cranelift/codegen findings (ABI limits, packed-`u128` runtime ABI, guard flag-fusion, measurement lessons) — read before optimization work in `ryo-backend`
 - Milestone: alpha milestones tagged `[alpha]` inline; see [alpha_scope.md](alpha_scope.md) for the alpha delivery slice

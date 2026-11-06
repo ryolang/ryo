@@ -4,7 +4,7 @@
 
 A dimension-by-dimension comparison of the four languages' memory models. Useful as a quick lookup when explaining Ryo's choices to someone familiar with one of the others, or when evaluating whether to adopt a particular pattern from a sibling language.
 
-Companion to [`rust.md`](rust.md), [`mojo.md`](mojo.md), [`swift.md`](swift.md), and [`arc_optimizer.md`](../arc_optimizer.md). Those go deeper on individual axes; this file is the cross-cutting summary.
+Companion to [`rust.md`](rust.md), [`mojo.md`](mojo.md), [`swift.md`](swift.md), and [`spec_arc_optimizer.md`](../spec_arc_optimizer.md). Those go deeper on individual axes; this file is the cross-cutting summary.
 
 ## 1. Default value semantics
 
@@ -81,19 +81,19 @@ Companion to [`rust.md`](rust.md), [`mojo.md`](mojo.md), [`swift.md`](swift.md),
 | **Use after move** | Compile error | Compile error | Compile error for `consuming` | Compile error (M8.1) |
 | **Use after free** | Compile error | Compile error | Impossible (ARC always holds) | Compile error for owned; impossible for shared |
 | **Iterator invalidation** | Compile-time (borrow conflict) | Compile-time | Runtime trap (COW copy) | Compile-time (view escape rule) |
-| **Data race freedom** | `Send`/`Sync` auto traits | Lifetime-based | `Sendable` protocol + actors | Channels + `shared[mutex[T]]` (concurrency.md) |
+| **Data race freedom** | `Send`/`Sync` auto traits | Lifetime-based | `Sendable` protocol + actors | Channels + `shared[mutex[T]]` (spec_concurrency.md) |
 | **Unsafe escape hatch** | `unsafe { }` (always available) | `__mlir_op[…]` for stdlib only | `withUnsafePointer`, `unowned(unsafe)` | `unsafe` (system packages only) |
 
 ## 8. Concurrency model
 
 | Aspect | Rust | Mojo | Swift | Ryo |
 |---|---|---|---|---|
-| **Primary primitive** | `std::thread`, `tokio::spawn` | Tasks, channels | Actors, structured concurrency | Tasks + channels (see concurrency.md) |
+| **Primary primitive** | `std::thread`, `tokio::spawn` | Tasks, channels | Actors, structured concurrency | Tasks + channels (see spec_concurrency.md) |
 | **Auto traits for safety** | `Send` + `Sync` | TBD | `Sendable` (compile-checked) | TBD |
 | **Cross-thread move** | Requires `Send` | TBD | `sending` parameters (5.9+) | Channel send |
 | **Cross-thread share** | `Arc<T>` (+ `Sync` for refs) | `ArcPointer[T]` | Class refs + `@unchecked Sendable` | `shared[T]` (always atomic) |
 | **Actor isolation** | Manual | Manual | First-class `actor` keyword | TBD (Erlang-style proposed) |
-| **Async runtime** | Pluggable (tokio, async-std) | First-party | First-party | Go-style (concurrency.md) |
+| **Async runtime** | Pluggable (tokio, async-std) | First-party | First-party | Go-style (spec_concurrency.md) |
 
 ## 9. String and collection representation
 
@@ -127,7 +127,7 @@ Companion to [`rust.md`](rust.md), [`mojo.md`](mojo.md), [`swift.md`](swift.md),
 | **Ownership / borrow check** | `rustc_borrowck` (NLL + Polonius) on MIR | `CheckLifetime` on MLIR | Exclusivity + ARC check on SIL | `OwnershipPass` on TIR |
 | **ARC elision** | LLVM `ObjCArcOpts` (limited) | (limited) | SIL `ARCOptimizer` (aggressive) | `arc_optimizer.rs` (planned) |
 | **Native backend** | LLVM | LLVM | LLVM | Cranelift |
-| **WASM backend** | LLVM (`wasm32-*`) | Not yet supported | LLVM (`swiftwasm` fork) | None today — Cranelift does not emit WASM. Future work would build a parallel `wasm-encoder` backend — see [proposals/wasm_target.md](../proposals/wasm_target.md). |
+| **WASM backend** | LLVM (`wasm32-*`) | Not yet supported | LLVM (`swiftwasm` fork) | None today — Cranelift does not emit WASM. Future work would build a parallel `wasm-encoder` backend — see [proposal_wasm_target.md](../proposal_wasm_target.md). |
 | **WASM runtime model** | Rust std on `wasm32-wasi` uses wasi-libc | N/A | Swift runtime ported (large) | TBD — earlier "Go-style bundled `dlmalloc-rs` + direct WASI imports" plan was tied to the dropped Cranelift-emits-WASM design; the runtime model will be revisited if/when the second backend is funded. |
 
 ## Philosophical positioning
@@ -164,9 +164,9 @@ Ryo deliberately picks: Mojo's argument conventions, Mojo's ASAP destruction, Sw
 - Spec: `docs/specification.md` Section 5 (Memory Management)
 - Dev: `docs/dev/pl_references/rust.md` (deeper Rust comparison)
 - Dev: `docs/dev/pl_references/mojo.md` (Mojo as ownership-pass inspiration)
-- Dev: `docs/dev/arc_optimizer.md` (Swift-style refcount elision design)
+- Dev: `docs/dev/spec_arc_optimizer.md` (Swift-style refcount elision design)
 - Dev: `ryo-frontend/src/ownership/mod.rs` (the shipped ownership pass); Spec: `docs/specification.md` §5 (Memory Management)
-- Dev: `docs/dev/concurrency.md` (Ryo's concurrency model)
-- Dev: `docs/dev/proposals/wasm_target.md` (WASM target — deferred proposal)
+- Dev: `docs/dev/spec_concurrency.md` (Ryo's concurrency model)
+- Dev: `docs/dev/proposal_wasm_target.md` (WASM target — deferred proposal)
 - Milestone: `docs/dev/implementation_roadmap.md`
 - Upstream: <https://github.com/rust-lang/rust>, <https://github.com/modular/modular/tree/main/mojo>, <https://github.com/swiftlang/swift>

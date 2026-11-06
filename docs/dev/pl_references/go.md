@@ -672,6 +672,6 @@ Use `go tool objdump` to disassemble binaries and `go tool addr2line` to map add
 * * *
 
 ## References
-- Dev: `docs/dev/concurrency.md` (Ryo's Go-inspired concurrency model)
+- Dev: `docs/dev/spec_concurrency.md` (Ryo's Go-inspired concurrency model)
 - Spec: [specification.md](../../specification.md) §9 (Concurrency)
 - Upstream: <https://github.com/golang/go>

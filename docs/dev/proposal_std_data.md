@@ -3,8 +3,8 @@
 > **Document Status:** Design Proposal (Pre-Implementation)
 > **Last Updated:** 2026-07-22
 > **Version:** 1.0.0-draft
-> **Fills:** the data-storage gap deliberately left by `std_ext.md` (which covered json/http/regex/time/rand/crypto/fs but no persistence)
-> **Interacts with:** D1 (projections), D2 (`bytes`), D4 (unsafe policy), D9 (runtime profiles), GAP-1 (ambient context), base spec §4.11 (FFI), §5.5 (`with`/Drop), t-strings (SQL/HTML safety), the validated MVC flow (`ryo-slicing-and-memory-model-final-spec.md` §2.3)
+> **Fills:** the data-storage gap deliberately left by `spec_std_extensions.md` (which covered json/http/regex/time/rand/crypto/fs but no persistence)
+> **Interacts with:** D1 (projections), D2 (`bytes`), D4 (unsafe policy), D9 (runtime profiles), GAP-1 (ambient context), base spec §4.11 (FFI), §5.5 (`with`/Drop), t-strings (SQL/HTML safety), the validated MVC flow (`spec_slicing_and_memory_model.md` §2.3)
 
 ---
 
@@ -19,7 +19,7 @@ std.cache         # in-process cache (LRU/TTL) — pure library type
 std.redis         # remote cache client (RESP protocol) — pure Ryo
 ```
 
-> **Open decision (deferred to the data-layer milestone, v0.2+):** whether the database drivers live in `std.db` / `std.db.sqlite` / `std.db.postgres` as proposed here, or ship as official `pkg:` registry packages per `official_pkg.md`. Both documents stay in tree until that milestone resolves the placement; the API designs below apply to either home.
+> **Open decision (deferred to the data-layer milestone, v0.2+):** whether the database drivers live in `std.db` / `std.db.sqlite` / `std.db.postgres` as proposed here, or ship as official `pkg:` registry packages per `spec_official_packages.md`. Both documents stay in tree until that milestone resolves the placement; the API designs below apply to either home.
 
 Profile mapping (D9):
 
@@ -56,12 +56,12 @@ Profile mapping (D9):
 
 1. **Audience parity.** Python ships `sqlite3` in its stdlib; Ryo's audience expects an embedded database with zero setup. For CLI tools — a stated target domain — SQLite is frequently the entire storage layer.
 2. **Zero-dependency bundling is nearly free.** The toolchain already ships a C compiler (the Zig linker bundles clang). Compiling the SQLite amalgamation at toolchain-build time means `import std.db.sqlite` works with no system package manager and no `libsqlite3` version lottery.
-3. **Reference implementation of the safe-wrapper pattern.** Opaque handle + `Drop` + D4 SAFETY comments + structured error mapping — the pattern `tensor.md` and `unsafe.md` fumbled in details (see `ryo-proposal-review-issues.md`, T-1/T-2/U-3/U-4). Shipping it in std sets the correct example by authority, including the review memo's G-1 requirement (field-level visibility for the private handle).
+3. **Reference implementation of the safe-wrapper pattern.** Opaque handle + `Drop` + D4 SAFETY comments + structured error mapping — the pattern `spec_tensor.md` and `spec_unsafe.md` fumbled in details (see `record_proposal_review_issues.md`, T-1/T-2/U-3/U-4). Shipping it in std sets the correct example by authority, including the review memo's G-1 requirement (field-level visibility for the private handle).
 4. **T-string SQL is the differentiator** (§3.3).
 
 ### 3.2 Explicitly not wrapping Rust crates
 
-The `std_ext` wrapping strategy does **not** apply here: `sqlx` drags in Tokio (correctly banned before v0.4 by `std_ext.md`'s own gating note), and `rusqlite` adds a Rust shim where direct amalgamation FFI is cleaner. Crate wrapping is reserved for *hard* problems (TLS, HTTP semantics); a stable C ABI is what `ryo-bindgen` exists for.
+The `std_ext` wrapping strategy does **not** apply here: `sqlx` drags in Tokio (correctly banned before v0.4 by `spec_std_extensions.md`'s own gating note), and `rusqlite` adds a Rust shim where direct amalgamation FFI is cleaner. Crate wrapping is reserved for *hard* problems (TLS, HTTP semantics); a stable C ABI is what `ryo-bindgen` exists for.
 
 ### 3.3 The canonical API
 

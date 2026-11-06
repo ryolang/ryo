@@ -104,5 +104,5 @@ Specific function signatures will be finalized during stdlib design.
 
 ## References
 - Spec: Section 5.9
-- Dev: std.md, std_ext.md, copy_elision.md
+- Dev: spec_std.md, spec_std_extensions.md, spec_copy_elision.md
 - Milestone: Stdlib Allocation Optimizations (Phase 5, v0.2+) — see implementation_roadmap.md

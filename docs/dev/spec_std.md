@@ -79,7 +79,7 @@ Implementing just `write` and `println` proves that:
 2.  **Milestone 8.1 (Strings):** The memory layout of `&str` (Fat Pointer) is correctly defined so that `s.ptr()` and `s.len()` work.
 3.  **FFI milestone (Phase 5):** The compiler correctly allows `extern "C"` in `std.sys` but forbids it in packages without `allow_unsafe = true` (spec §17).
 
-*Sequencing note (2026-11): this doc is the v0.2+ FFI architecture. In v0.1, the Phase 4 stdlib core (M28) ships the same `std.sys` → `std.io` → `std.mem` surface as compiler-known intrinsics backed by `ryo_*` runtime exports — the `print()` pattern from M9.2, with no `extern "C"` and no manifest `allow_unsafe` — and the `extern "C"` spellings below remain the post-Phase-5 target (see the roadmap's M9.2 "why throwaway" note and the M28 mechanical-rename tasks).*
+*Sequencing note (2026-11): this doc is the v0.2+ FFI architecture. In v0.1, the Phase 4 stdlib core (M28) ships the same `std.sys` → `std.io` → `std.mem` surface — including the file I/O entry points `io.read_file`, `io.write_file`, and `io.append_file` (M9.2 covers exit/stderr/args/env/stdin only) — as compiler-known intrinsics backed by `ryo_*` runtime exports — the `print()` pattern from M9.2, with no `extern "C"` and no manifest `allow_unsafe` — and the `extern "C"` spellings below remain the post-Phase-5 target (see the roadmap's M9.2 "why throwaway" note and the M28 mechanical-rename tasks).*
 
 ### 4. The Next Step: `std.mem` (The Allocator)
 
@@ -100,5 +100,5 @@ This order delivers "Hello World" first (high morale), then immediately forces r
 
 ## References
 - Spec: `docs/specification.md` §14 (Standard Library — hybrid runtime architecture, core packages), §17 (FFI & `unsafe` gatekeeping)
-- Dev: `docs/dev/built_in.md` (built-in vs stdlib boundary), `docs/dev/std_ext.md`
+- Dev: `docs/dev/spec_builtins.md` (built-in vs stdlib boundary), `docs/dev/spec_std_extensions.md`
 - Roadmap: `docs/dev/implementation_roadmap.md`

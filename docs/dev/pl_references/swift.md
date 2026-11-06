@@ -23,7 +23,7 @@ Relevant files
 - `SwiftCompilerSources/` — compiler passes written in Swift (bootstrapped)
 - `utils/` — build scripts (`build-script`, toolchain packaging)
 
-Swift is Apple's general-purpose language, open-sourced in 2015. It combines value semantics with automatic reference counting (ARC) for class types, targets LLVM, and has first-party concurrency (actors, `Sendable`, structured tasks). For Ryo it is the design reference for `shared[T]`'s implicit-refcount model and for the ARC elision pass (see `docs/dev/arc_optimizer.md`).
+Swift is Apple's general-purpose language, open-sourced in 2015. It combines value semantics with automatic reference counting (ARC) for class types, targets LLVM, and has first-party concurrency (actors, `Sendable`, structured tasks). For Ryo it is the design reference for `shared[T]`'s implicit-refcount model and for the ARC elision pass (see `docs/dev/spec_arc_optimizer.md`).
 
 ### Repository Structure
 
@@ -107,21 +107,21 @@ Per the [release announcement](https://swift.org/blog/swift-6.3-released/) (2026
 ## How Ryo Borrows from Swift
 
 - **`shared[T]` (spec 5.6)** — modeled on Swift's class reference semantics: refcount ops are implicit on assignment, no `.clone()` in user code. See `docs/dev/pl_references/rust.md` for the explicit Swift-vs-Rust comparison.
-- **ARC optimizer** — the pass design in `docs/dev/arc_optimizer.md` (retain/release elision, stack promotion, COW support) is a direct port of the SIL ARC optimizer's responsibilities onto Ryo's TIR. Swift proves the elision-pass investment is what makes implicit refcounting viable.
-- **Copy-on-write collections** — stdlib-level COW via uniqueness checking is the model for Ryo's `str`/collections (see `docs/dev/stdlib_optimizations.md`).
+- **ARC optimizer** — the pass design in `docs/dev/spec_arc_optimizer.md` (retain/release elision, stack promotion, COW support) is a direct port of the SIL ARC optimizer's responsibilities onto Ryo's TIR. Swift proves the elision-pass investment is what makes implicit refcounting viable.
+- **Copy-on-write collections** — stdlib-level COW via uniqueness checking is the model for Ryo's `str`/collections (see `docs/dev/spec_stdlib_optimizations.md`).
 - **No lifetime annotations, borrow-by-default conventions** — Swift's `borrowing`/`consuming`/`inout` triad maps to Ryo's default borrow / `move` / `inout` parameter modes (spec 5.2–5.3).
 
 ### What we DON'T take from Swift
 
 - **Classes and inheritance.** Ryo's `shared[T]` is a stdlib smart-pointer type over Ryo values, not a separate class hierarchy.
-- **Actors.** Ryo's concurrency model is Go-style tasks + channels (see `docs/dev/concurrency.md`), not actor isolation.
+- **Actors.** Ryo's concurrency model is Go-style tasks + channels (see `docs/dev/spec_concurrency.md`), not actor isolation.
 - **LLVM-scale pass pipeline.** Ryo's Cranelift backend has no SIL analog; the ARC optimizer runs as a TIR→TIR transform pre-codegen.
 - **Stable ABI / library evolution.** Swift pays heavy complexity for ABI stability (`@export`, resilience domains); Ryo is pre-alpha with no ABI commitments.
 
 ## References
 
 - Spec: [specification.md](../../specification.md) Section 5.6 (Shared Ownership)
-- Dev: `docs/dev/arc_optimizer.md` (the planned pass modeled on `lib/SILOptimizer/ARC/`)
+- Dev: `docs/dev/spec_arc_optimizer.md` (the planned pass modeled on `lib/SILOptimizer/ARC/`)
 - Dev: `docs/dev/pl_references/memory_model_comparison.md` (cross-language memory-model table)
 - Dev: `docs/dev/pl_references/rust.md` (comparison against Rust's manual `Arc<T>`)
 - Milestone: TBD (sequenced with `shared[T]`) — see `docs/dev/implementation_roadmap.md`

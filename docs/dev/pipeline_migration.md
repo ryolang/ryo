@@ -349,7 +349,7 @@ comptime is permitted to read, or reject them under the chosen evaluation contra
 
 Cache immutable artifacts or explicitly version their phase and analysis results.
 After a transformation, preserve proven facts or recompute invalidated analyses
-before consumption. Follow the [incremental compilation design](ryo-incremental-compilation.md)
+before consumption. Follow the [incremental compilation design](proposal_incremental_compilation.md)
 for persistence and scheduling; this migration does not imply that caching is implemented.
 
 ### Package metadata and separate compilation
@@ -405,7 +405,7 @@ flowchart LR
 The Ryo wrapper defines the public API, ownership behavior, and error translation.
 Users of that wrapper do not need foreign declarations at each call site.
 User-authored foreign declarations serve direct foreign-library integration.
-This structure extends the [std design](std.md) and [Rust wrapper plan](std_ext.md).
+This structure extends the [std design](spec_std.md) and [Rust wrapper plan](spec_std_extensions.md).
 Importable modules can use statically linked implementations. Import does not imply dynamic loading.
 
 #### Compiler and memory contracts
@@ -528,7 +528,7 @@ Preserve ownership and cleanup contracts, or rerun affected analyses.
 Apply growth budgets and measure compile time, allocations, and binary size.
 
 Automatic reference counting (ARC) optimization follows explicit retain/release
-insertion. Rebase the existing [ARC design](arc_optimizer.md) onto Flow IR when implemented.
+insertion. Rebase the existing [ARC design](spec_arc_optimizer.md) onto Flow IR when implemented.
 Its current TIR placement describes the earlier pipeline.
 
 ### Escape analysis and allocation placement
@@ -559,7 +559,7 @@ Closure lowering constructs explicit environments and capture operations.
 Ownership checks task transfers and scoped borrowed captures.
 A scoped child's borrowed capture protects its owner until the scope join.
 
-The [concurrency implementation plan](concurrency.md) proposes inferred yield effects.
+The [concurrency implementation plan](spec_concurrency.md) proposes inferred yield effects.
 Compute function summaries over the call graph, including recursive cycles.
 Keep generic summaries parametric and resolve concrete implementations when known.
 Include implicit destructor calls. Recheck effects after transformations that change calls.
@@ -650,12 +650,12 @@ Update architecture references after the relevant consumers migrate.
 - Spec: [Section 6](../specification.md#6-functions--closures) (functions and captures), [Section 8](../specification.md#8-traits-behavior) (traits).
 - Spec: [Section 9](../specification.md#9-concurrency-model-taskfuturechannel) (tasks, cancellation, and joins).
 - Spec: [Section 14](../specification.md#14-standard-library) (stdlib layering), [Section 4.11](../specification.md#411-ffi--c-interoperability) and [Section 17](../specification.md#17-ffi--unsafe) (foreign integration).
-- Dev: [Standard library foundation](std.md), [Rust-backed std extensions](std_ext.md), and [official native packages](official_pkg.md).
-- Spec amendments: [Memory model](ryo-slicing-and-memory-model-final-spec.md), especially scoped task borrows and runtime profiles.
-- Dev: [Pipeline alignment](pipeline_alignment.md), [pattern matching](pattern_matching.md), [concurrency](concurrency.md), [closure representation](closure_representation.md), [ARC optimizer](arc_optimizer.md).
-- Contributor rules: [Compiler instructions](ryo-compiler-llm-instructions.md).
+- Dev: [Standard library foundation](spec_std.md), [Rust-backed std extensions](spec_std_extensions.md), and [official native packages](spec_official_packages.md).
+- Spec amendments: [Memory model](spec_slicing_and_memory_model.md), especially scoped task borrows and runtime profiles.
+- Dev: [Pipeline alignment](pipeline_alignment.md), [pattern matching](pattern_matching.md), [concurrency](spec_concurrency.md), [closure representation](spec_closure_representation.md), [ARC optimizer](spec_arc_optimizer.md).
+- Contributor rules: [Compiler instructions](guide_llm_instructions.md).
 - Milestones and delivery: [Implementation roadmap](implementation_roadmap.md).
-- Dev: [Incremental compilation](ryo-incremental-compilation.md) for queries, dependency tracking, and cache validity.
+- Dev: [Incremental compilation](proposal_incremental_compilation.md) for queries, dependency tracking, and cache validity.
 - Zig: [AIR](https://github.com/ziglang/zig/blob/master/src/Air.zig) and [liveness](https://github.com/ziglang/zig/blob/master/src/Air/Liveness.zig) for arena-based representation and explicit branch analysis.
 - Zig: [Sema](https://github.com/ziglang/zig/blob/master/src/Sema.zig) for integrated comptime evaluation and specialization; [AIR legalization](https://github.com/ziglang/zig/blob/master/src/Air/Legalize.zig) for backend preparation.
 - rustc: [MIR](https://rustc-dev-guide.rust-lang.org/mir/index.html), [dataflow](https://rustc-dev-guide.rust-lang.org/mir/dataflow.html), [drop elaboration](https://rustc-dev-guide.rust-lang.org/mir/drop-elaboration.html), and [monomorphization](https://rustc-dev-guide.rust-lang.org/backend/monomorph.html) for analysis boundaries and explicit operations.

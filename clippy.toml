@@ -1,5 +1,5 @@
 # Clippy configuration for the Ryo compiler workspace.
-# Enforces rules from docs/dev/ryo-compiler-llm-instructions.md; lint levels
+# Enforces rules from docs/dev/guide_llm_instructions.md; lint levels
 # live in the root Cargo.toml `[workspace.lints]` table.
 
 # R1 — flat arrays and typed indices, never pointer trees.
