@@ -11,6 +11,8 @@ use std::collections::HashMap;
 
 mod methods;
 mod operators;
+#[cfg(test)]
+mod walker_tests;
 
 /// Resolve a user-spelled variable read. The `__ryo_` namespace belongs
 /// to compiler-generated temporaries (nested-destructuring temps,

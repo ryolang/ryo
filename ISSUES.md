@@ -847,11 +847,11 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Severity:** Correctness / Hygiene
 **Area:** sema
 
-**Files:** ryo-frontend/src/sema/expr/mod.rs; ryo-frontend/src/sema/call.rs; ryo-backend/src/codegen/expr/mod.rs
+**Files:** ryo-frontend/src/sema/expr/mod.rs; ryo-frontend/src/sema/expr/walker_tests.rs; ryo-frontend/src/sema/call.rs; ryo-backend/src/codegen/expr/mod.rs
 
-**Summary:** Depth is now carried through direct parenthesized binary RHS links, but unary operators and call arguments still enter analyze_expr/eval_inst at depth zero. Confirmed on debug builds: 50k levels of 1+(-(1+(-(...)))) and 50k levels of 1+id(1+id(...)) both abort ryo ir --emit=tir with a stack overflow (exit 134). Codegen has the same reset at unary operands and call-argument evaluation, currently masked by the earlier sema crash.
+**Summary:** Depth is now carried through direct parenthesized binary RHS links, but unary operators and call arguments still enter analyze_expr/eval_inst at depth zero. Confirmed on debug builds: 50k levels of 1+(-(1+(-(...)))), 1+id(1+id(...)), and id(id(...)) all abort with a stack overflow. Codegen has the same reset at unary operands and call-argument evaluation, currently masked by the earlier sema crash.
 
-**Resolution:** Propagate a general expression-depth budget across unary and call boundaries in sema and codegen, with iterative spill for the remaining subtree rather than adding per-frame allocation to the hot path. Add 50k-deep unary-mediated and call-mediated RHS regressions, then exercise end-to-end codegen as well as sema.
+**Resolution:** Propagate a general expression-depth budget across unary and call boundaries in sema and codegen, with iterative spill for the remaining subtree rather than adding per-frame allocation to the hot path. Add 50k-deep unary-mediated, call-mediated, and call-only regressions, then exercise end-to-end codegen as well as sema.
 
 ---
 
