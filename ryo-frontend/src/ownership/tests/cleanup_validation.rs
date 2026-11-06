@@ -46,6 +46,17 @@ fn validator_accepts_echo_example() {
     assert!(diags.is_empty(), "clean example; got {diags:?}");
 }
 
+#[test]
+fn validator_accepts_oracle_example() {
+    let (diags, _, _, _) = check_src_full(include_str!("../../../../examples/oracle.ryo"));
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != ryo_core::diag::Severity::Error),
+        "clean example; got {diags:?}"
+    );
+}
+
 /// Positive pin: if/else with borrows in both arms.
 #[test]
 fn validator_accepts_if_else_borrows() {

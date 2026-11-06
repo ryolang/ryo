@@ -1490,3 +1490,84 @@ fn fixed7_view_init_e2e() {
         "3.1415900\n",
     );
 }
+
+#[test]
+fn loop_if_arm_local_release_stays_in_binding_scope() {
+    assert_ryo_output(
+        "loop_if_arm_local.ryo",
+        "fn main():\n\tmut i = 0\n\twhile i < 2:\n\t\tif i == 0:\n\t\t\ts = \"0123456789012345678901234567890123456789\" + int_to_str(i) + \"\\n\"\n\t\t\tprint(s)\n\t\telse:\n\t\t\tprint(\"skip\\n\")\n\t\ti += 1\n",
+        "01234567890123456789012345678901234567890\nskip\n",
+    );
+}
+
+#[test]
+fn loop_nested_if_arm_local_uses_safe_inner_join() {
+    assert_ryo_output(
+        "loop_nested_if_arm_local.ryo",
+        "fn main():\n\tmut i = 0\n\twhile i < 2:\n\t\tif i == 0:\n\t\t\ts = \"0123456789012345678901234567890123456789\" + int_to_str(i) + \"\\n\"\n\t\t\tif i == 0:\n\t\t\t\tprint(s)\n\t\telse:\n\t\t\tprint(\"skip\\n\")\n\t\ti += 1\n",
+        "01234567890123456789012345678901234567890\nskip\n",
+    );
+}
+
+#[test]
+fn loop_match_arm_local_release_stays_in_binding_scope() {
+    assert_ryo_output(
+        "loop_match_arm_local.ryo",
+        "fn main():\n\tmut i = 0\n\twhile i < 2:\n\t\tmatch i:\n\t\t\t0:\n\t\t\t\ts = \"0123456789012345678901234567890123456789\" + int_to_str(i) + \"\\n\"\n\t\t\t\tprint(s)\n\t\t\t_:\n\t\t\t\tprint(\"skip\\n\")\n\t\ti += 1\n",
+        "01234567890123456789012345678901234567890\nskip\n",
+    );
+}
+
+#[test]
+fn for_if_arm_local_release_stays_in_binding_scope() {
+    assert_ryo_output(
+        "for_if_arm_local.ryo",
+        "fn main():\n\tfor i in range(0, 2):\n\t\tif i == 0:\n\t\t\ts = \"0123456789012345678901234567890123456789\" + int_to_str(i) + \"\\n\"\n\t\t\tprint(s)\n\t\telse:\n\t\t\tprint(\"skip\\n\")\n",
+        "01234567890123456789012345678901234567890\nskip\n",
+    );
+}
+
+const ERROR_LOOP_PRELUDE: &str = "errors IoError:\n\tEof\n\tReadFailed(str)\n\nfn read_line(mode: int) -> IoError!void:\n\tif mode == 0:\n\t\treturn IoError.Eof\n\tif mode == 1:\n\t\treturn IoError.ReadFailed(\"read failed:0123456789012345678901234567890123456789\\n\")\n\treturn\n\n";
+const ERROR_LOOP_EXPECTED: &str = "caught:01234567890123456789012345678901234567890\nnext\nread failed:0123456789012345678901234567890123456789\nnext\nnext\n";
+
+#[test]
+fn loop_nested_error_match_arm_local_release_stays_in_binding_scope() {
+    let source = format!(
+        "{ERROR_LOOP_PRELUDE}fn main():\n\tfor mode in range(0, 3):\n\t\tread_line(mode) catch as err:\n\t\t\tmatch err:\n\t\t\t\tIoError.Eof:\n\t\t\t\t\ts = \"caught:0123456789012345678901234567890123456789\" + int_to_str(mode) + \"\\n\"\n\t\t\t\t\tprint(s)\n\t\t\t\tIoError.ReadFailed(message):\n\t\t\t\t\tprint(message)\n\t\tprint(\"next\\n\")\n"
+    );
+    assert_ryo_output(
+        "loop_nested_error_match_arm_local.ryo",
+        &source,
+        ERROR_LOOP_EXPECTED,
+    );
+}
+
+#[test]
+fn loop_direct_error_catch_arm_local_release_stays_in_binding_scope() {
+    let source = format!(
+        "{ERROR_LOOP_PRELUDE}fn main():\n\tfor mode in range(0, 3):\n\t\tread_line(mode) catch:\n\t\t\tIoError.Eof:\n\t\t\t\ts = \"caught:0123456789012345678901234567890123456789\" + int_to_str(mode) + \"\\n\"\n\t\t\t\tprint(s)\n\t\t\tIoError.ReadFailed(message):\n\t\t\t\tprint(message)\n\t\tprint(\"next\\n\")\n"
+    );
+    assert_ryo_output(
+        "loop_direct_error_catch_arm_local.ryo",
+        &source,
+        ERROR_LOOP_EXPECTED,
+    );
+}
+
+#[test]
+fn dominance_handles_returning_sibling_before_break() {
+    assert_ryo_output(
+        "dominance_return_before_break.ryo",
+        "fn choose(flag: bool) -> str:\n\ts = \"0123456789012345678901234567890123456789\\n\"\n\twhile true:\n\t\tif flag:\n\t\t\treturn s\n\t\telse:\n\t\t\tbreak\n\treturn s\n\nfn main():\n\tprint(choose(true))\n\tprint(choose(false))\n",
+        "0123456789012345678901234567890123456789\n0123456789012345678901234567890123456789\n",
+    );
+}
+
+#[test]
+fn dominance_handles_diverging_match_arm() {
+    assert_ryo_output(
+        "dominance_diverging_match.ryo",
+        "fn choose(flag: bool) -> str:\n\ts = \"0123456789012345678901234567890123456789\\n\"\n\twhile true:\n\t\tmatch flag:\n\t\t\ttrue:\n\t\t\t\treturn s\n\t\t\tfalse:\n\t\t\t\tbreak\n\treturn s\n\nfn main():\n\tprint(choose(true))\n\tprint(choose(false))\n",
+        "0123456789012345678901234567890123456789\n0123456789012345678901234567890123456789\n",
+    );
+}

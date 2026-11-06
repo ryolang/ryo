@@ -1,23 +1,28 @@
 //! Cleanup scheduling and destruction anchors.
 
 use super::{
-    DeadStoreAnalysis, HazardKind, Owner, OwnerState, Ownership, PromoCandidate, UNTRACKED_PLACE,
-    anchored_after, body_may_return, branch_may_not_return, convert_honored_reseat_drops,
-    declared_before_stmt, enclosing_if_main_cond, if_may_fall_through, inout_escape_owner,
-    last_use_anchor, outermost_branch_of, outermost_loop_of, owner_sort_key, param_idx,
-    schedule_loop_exit_frees_in, schedule_return_epilogue_frees, suppress_redundant_exit_frees,
+    DeadStoreAnalysis, Dominators, HazardKind, Owner, OwnerState, Ownership, PromoCandidate,
+    UNTRACKED_PLACE, anchored_after, body_may_return, branch_may_not_return,
+    convert_honored_reseat_drops, declared_before_stmt, enclosing_if_main_cond,
+    if_may_fall_through, inout_escape_owner, last_use_anchor, outermost_branch_of,
+    outermost_loop_of, owner_sort_key, param_idx, schedule_loop_exit_frees_in,
+    schedule_return_epilogue_frees, suppress_redundant_exit_frees,
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
+use ryo_core::flow::fire_points::FirePoints;
 use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow, Terminator};
 use ryo_core::ownership::{FunctionSidecar, PromoFree};
 use ryo_core::tir::{ExtraList, Tir, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeKind};
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 
 pub(crate) struct CleanupContext<'a> {
     pub(super) tir: &'a Tir,
     pub(super) flow: &'a Flow,
     pub(super) pool: &'a InternPool,
+    pub(super) fire_points: FirePoints<'a>,
+    pub(super) dominators: OnceCell<Dominators>,
     pub(super) body_stmts: ExtraList<'a, TirRef>,
     pub(super) order: &'a [u32],
     pub(super) projections_of: &'a HashMap<Owner, Vec<TirRef>>,
@@ -84,6 +89,8 @@ fn instruction_last_use_drop(
         ctx.order,
         ctx.last_read_by_name,
         ctx.loop_carried_owners,
+        &ctx.fire_points,
+        &ctx.dominators,
         own.owner_hazards.iter().any(|&(o, site, kind)| {
             o == owner
                 && matches!(kind, HazardKind::Move)
@@ -605,9 +612,6 @@ pub(crate) fn finalize_cleanup(
     // Loop-exit Frees run LAST so they can inspect the now-complete
     // `drops` schedule and only add jump-anchored Frees for inside-loop
     // owners that no earlier pass already covered.
-    // Dominators are built on demand (break defensive emit only) and
-    // shared across every loop in this function.
-    let doms = std::cell::OnceCell::new();
     schedule_loop_exit_frees_in(
         ctx.tir,
         ctx.flow,
@@ -616,7 +620,7 @@ pub(crate) fn finalize_cleanup(
         sidecar,
         &ctx.body_stmts,
         None,
-        &doms,
+        &ctx.dominators,
     );
 
     schedule_return_epilogue_frees(

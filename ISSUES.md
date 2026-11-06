@@ -853,19 +853,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-265 — oracle.ryo panics in ownership cleanup validation (leak path-coverage assert)
-
-**Severity:** Correctness / Hygiene
-**Area:** ownership
-
-**Files:** examples/oracle.ryo; ryo-frontend/src/ownership/cleanup_validation.rs
-
-**Summary:** 'ryo run examples/oracle.ryo' (a committed example) aborts with SIGABRT: thread panicked at ryo-frontend/src/ownership/cleanup_validation.rs:1309 'path coverage: place union 21 (Temp producer TirRef(53) + Local decl TirRef(54)) established at FirePoint { block 9, ordinal 15 } has a path to an exit or a replacement write with no release or transfer of the generation — a leak'. Reproduces identically on eaf2f9b (pre-existing, unrelated to the deep operator-chain stack-overflow fix) with and without CLI args/stdin. Debug-build assert (cleanup validation); release behavior unverified.
-
-**Resolution:** Investigate the leak path for the io_read_line/env temp in oracle.ryo; the union is established at block 9 ordinal 15 and never released on some exit path. Found while verifying the deep operator-chain stack-overflow fix.
-
----
-
 ### I-267 — Stack overflow on deeply right-nested operator chains (paren-nested RHS)
 
 **Severity:** Correctness / Hygiene
