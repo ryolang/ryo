@@ -152,7 +152,7 @@ Include in every report:
 - root cause and working controls;
 - minimization and independent verification method;
 - coverage gaps, such as single-file programs, one architecture, or no external memory checker;
-- confirmation that no repository files were changed.
+- confirmation that no repository files were changed, except the campaign register entry.
 
 Zero defects in one track is useful evidence only when its valid inputs reached backend and runtime. Keep that evidence separate from tracks that found defects.
 

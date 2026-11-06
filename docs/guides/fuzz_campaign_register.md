@@ -11,10 +11,11 @@ against, and what it covered — so future campaigns don't rerun settled ground.
 ### 1. M13 error types & unions — pilot + full campaign
 
 - **Date:** 2026-10-30
-- **Compiler under test:** worktree `.worktrees/feat-error-types-unions` (branch
-  `feat/error-types-unions`, since squash-merged to main as `9366c5c` "feat: implement
-  error types and unions (M13) (#212)"; `git diff` of the compiler crates between the
-  branch and the squash merge is empty, so main's M13 content is what was fuzzed)
+- **Compiler under test:** `4375bf4d30b5769970db4e63343a8d7cd4750e51` in worktree
+  `.worktrees/feat-error-types-unions` (branch `feat/error-types-unions`, since
+  squash-merged to main as `9366c5c` "feat: implement error types and unions (M13)
+  (#212)"; `git diff` of the compiler crates between the branch and the squash merge is
+  empty, so main's M13 content is what was fuzzed)
 - **Tracks:** grammar, inference, ownership, backend (+ `verify-backend`,
   `verify-declarations` one-off checks)
 - **Result: defects found and fixed on-branch.** The repro set preserved under
@@ -125,16 +126,15 @@ against, and what it covered — so future campaigns don't rerun settled ground.
   static call chains to 1500 functions, elif chains to 1500, nested blocks to 300,
   `fib` to 28, accumulator recursion to 20k, concatenation chains to 3000, call
   fans to 100 — all exact output in JIT and AOT. **Finding: chains past ~6500
-  terms overflowed the compiler stack (SIGABRT) — filed as I-261** (the
-  recursion was in astgen/sema/codegen/flow, not the parser), minimized repro
-  preserved at `bug_reports/bug_parser_stack_overflow_expr_chain.ryo`; ten
-  oversize probes reproduced the abort deterministically. **Fixed in
-  `3747e17`** (iterative chain walks across astgen/sema/flow/codegen and
-  the AST dump printer; 100k terms now compiles and prints 100000).
-- **Result: one defect (I-261, parser stack depth), everything else clean** —
+  terms overflowed the compiler stack (SIGABRT)** (the recursion was in
+  astgen/sema/codegen/flow, not the parser); ten oversize probes reproduced the
+  abort deterministically. **Fixed in `3747e17`** (iterative chain walks across
+  astgen/sema/flow/codegen and the AST dump printer; 100k terms now compiles and
+  prints 100000).
+- **Result: one defect (expression-chain stack overflow), everything else clean** —
   no panics, timeouts, or output mismatches outside the known probe family.
 - **Artifacts:** `/tmp/ryo-gramrec-fuzz/run-001/` (manifest.json, harness.py,
-  per-case logs); repro in-repo at `bug_reports/`; harness at
+  per-case logs); committed regression at `ryo/tests/deep_expr_chain.rs`; harness at
   `/tmp/ryo-gramrec-fuzz/harness.py`
 
 ### 6. CI-grade memory checking on Linux (ASan/LSan + Valgrind)
@@ -173,19 +173,20 @@ against, and what it covered — so future campaigns don't rerun settled ground.
   wall times recorded; 11 families: many functions, long string/bytes literals,
   independent & chained statements, big structs, big matches, many string
   literals, mixed files, chain callers, and an oversize bytes-escape probe.
-- **Result: 109/120 clean; the 11 crashes are the intentional I-264 probes**
+- **Result: 109/120 clean; the 11 crashes are the intentional bytes-escape probes**
   (bytes literals with 30k–55k hex escapes, deterministic SIGABRT). No panics,
-  no timeouts, no output mismatches; AOT exact 18/18. I-264 is fixed in `6dede11` (raw-token lexing runs on an input-sized
-  stack; the probes now pass).
+  no timeouts, no output mismatches; AOT exact 18/18. The bytes-escape overflow was
+  fixed in `6dede11` (raw-token lexing runs on an input-sized stack; the probes now
+  pass).
 - **Scaling evidence** (JIT wall time, this host): linear families — 10MB
   string literal 0.57s, 5MB bytes 0.3s, 8k functions 2.9s, 5000-field struct
   0.85s, 1000-arm match 0.35s, 1000-deep chain 0.8s. Quadratic families
   (I-263): statements 5k→5.0s, 10k→18.6s, 20k→71.5s; chained statements
   10k→10.7s→15k 22.6s; string-literal bindings 1k→1.2s, 3k→10.2s, 5k→28s.
 - **Findings filed:** I-263 (quadratic per-statement compile cost; parse of the
-  same file is 1.2s so the bottleneck is sema/ownership) and I-264 (bytes
-  escape stack overflow past ~25k escapes — Logos DFA recursion per escape,
-  not the escape decoder; fixed in `6dede11`, repro in `bug_reports/`).
+  same file is 1.2s so the bottleneck is sema/ownership) and a bytes-escape
+  stack overflow past ~25k escapes (Logos DFA recursion per escape, not the
+  escape decoder; fixed in `6dede11`, repro in `bug_reports/`).
 - **Artifacts:** `/tmp/ryo-size-fuzz/run-001/` (manifest.json, harness.py,
   per-case logs and timings); harness at `/tmp/ryo-size-fuzz/harness.py`
 
@@ -199,10 +200,10 @@ against, and what it covered — so future campaigns don't rerun settled ground.
 | Match/enums (arm order, payload moves, exhaustiveness, int-literal dispatch, `%` guards) | `e82f503` | `e82f503` | 480-case campaign, clean |
 | UTF-8 slicing, bytes/bytesview, UTF-8 conversions | `e82f503` | `e82f503` | same campaign |
 | Numeric edges (overflow guards, float formatting, NaN/Inf, boundary comparisons) | `e82f503` | `e82f503` | same campaign |
-| General grammar recovery (malformed sources, multi-error files, bad tokens/indent) | `e82f503` | `e82f503` | 360-case campaign, clean except I-261 (fixed in 3747e17) |
-| Deep recursion / deep programs (to 20k depth, 1500-fns chains, 9000 parens) | `e82f503` | `e82f503` | same campaign; oversize expr chains → I-261 (fixed in 3747e17) |
+| General grammar recovery (malformed sources, multi-error files, bad tokens/indent) | `e82f503` | `e82f503` | 360-case campaign, clean except expression-chain stack overflow (fixed in `3747e17`) |
+| Deep recursion / deep programs (to 20k depth, 1500-fns chains, 9000 parens) | `e82f503` | `e82f503` | same campaign; oversize expression chains → compiler stack overflow (fixed in `3747e17`) |
 | Generated-code memory safety (Valgrind on AOT fuzz binaries, linux/arm64) | `e82f503` | `e82f503` | 48/49 clean; I-262 compiler-process leak; 1 valgrind ARM64 gap |
-| Input size scaling (to 10MB literals, 8k fns, 20k stmts, 5k-field structs) | `e82f503` | `e82f503` | clean except I-263 quadratic costs; I-264 escape overflow fixed in `6dede11` |
+| Input size scaling (to 10MB literals, 8k fns, 20k stmts, 5k-field structs) | `e82f503` | `e82f503` | clean except I-263 quadratic costs; bytes-escape overflow fixed in `6dede11` |
 
 ## Not Yet Fuzzed (candidates, in priority order)
 
@@ -212,8 +213,10 @@ against, and what it covered — so future campaigns don't rerun settled ground.
 ## Rerun Policy
 
 - A baseline above stays valid until **main advances with changes in that feature
-  area** — check `git log <baseline>..HEAD -- <area crates>` before rerunning; if the
-  diff is empty, the campaign still covers HEAD.
+  area** — check `git log <baseline>..HEAD -- <area crates and their Cargo.toml files>
+  Cargo.toml Cargo.lock rust-toolchain.toml` before rerunning; if the diff is empty,
+  the campaign still covers HEAD. Any relevant workspace manifest, lockfile, or
+  toolchain change invalidates the baseline.
 - Per the guide, fuzz after parser, type-system, ownership, control-flow, runtime, or
   backend changes; a PR-branch campaign (like #2) counts for main once merged if the
   squash content matches (verify with `git diff` as done above).
