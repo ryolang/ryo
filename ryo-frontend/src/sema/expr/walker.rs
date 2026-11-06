@@ -1,3 +1,4 @@
+use super::super::ScopeParent;
 use super::super::call::{finish_call, prepare_call};
 use super::{
     CHAIN_RECURSION_LIMIT, ConstInt, FuncCtx, Scope, Sema, analyze_binop_link,
@@ -49,10 +50,16 @@ std::thread_local! {
 
 #[cfg(test)]
 pub(crate) fn with_expr_limit<T>(limit: u32, f: impl FnOnce() -> T) -> T {
+    struct Reset(Option<u32>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_EXPR_LIMIT.with(|current| current.set(self.0));
+        }
+    }
+
     let previous = TEST_EXPR_LIMIT.with(|current| current.replace(Some(limit)));
-    let result = f();
-    TEST_EXPR_LIMIT.with(|current| current.set(previous));
-    result
+    let _reset = Reset(previous);
+    f()
 }
 
 pub(crate) fn is_generic_expr_tag(tag: InstTag) -> bool {
@@ -69,7 +76,90 @@ pub(crate) fn is_generic_expr_tag(tag: InstTag) -> bool {
             | InstTag::EnumLit
             | InstTag::ErrorConstruct
             | InstTag::FieldAccess
+            | InstTag::Match
+            | InstTag::Catch
+            | InstTag::Try
     ) || is_chain_binop_tag(tag)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct ScopeId(usize);
+
+struct ScopeArena<'a> {
+    root: &'a Scope<'a>,
+    owned: Vec<Option<Scope<'a>>>,
+}
+
+impl<'a> ScopeArena<'a> {
+    fn new(root: &'a Scope<'a>) -> Self {
+        Self {
+            root,
+            owned: Vec::new(),
+        }
+    }
+
+    fn root_id(&self) -> ScopeId {
+        ScopeId(0)
+    }
+
+    fn get(&self, id: ScopeId) -> &Scope<'a> {
+        if id.0 == 0 {
+            return self.root;
+        }
+        self.owned[id.0 - 1].as_ref().expect("active scope")
+    }
+
+    fn get_mut(&mut self, id: ScopeId) -> &mut Scope<'a> {
+        id.0.checked_sub(1)
+            .and_then(|index| self.owned.get_mut(index))
+            .and_then(Option::as_mut)
+            .expect("owned scope")
+    }
+
+    fn take_parent(&mut self, id: ScopeId) -> ScopeParent<'a> {
+        if id.0 == 0 {
+            return ScopeParent::Borrowed(self.root);
+        }
+        ScopeParent::Owned(Box::new(
+            self.owned[id.0 - 1].take().expect("active parent scope"),
+        ))
+    }
+
+    fn restore(&mut self, id: ScopeId, parent: ScopeParent<'a>) {
+        if let ScopeParent::Owned(scope) = parent {
+            self.owned[id.0 - 1] = Some(*scope);
+        }
+    }
+
+    fn push(&mut self, scope: Scope<'a>) -> ScopeId {
+        self.owned.push(Some(scope));
+        ScopeId(self.owned.len())
+    }
+
+    fn take(&mut self, id: ScopeId) -> Scope<'a> {
+        self.owned[id.0 - 1].take().expect("unfinished arm scope")
+    }
+}
+
+mod match_tasks;
+use match_tasks::{ArmStatement, MatchState, match_scrutinee};
+
+#[derive(Clone, Copy)]
+enum Task {
+    Enter(InstRef, ScopeId, NeverMode),
+    CallArg(InstRef, usize, ScopeId),
+    AfterBase(InstRef, ScopeId),
+    AfterLhs(InstRef, ScopeId),
+    AfterScrutinee(InstRef, ScopeId),
+    PrepareArm(InstRef, usize, ScopeId),
+    BlockStmt(InstRef, usize, usize, ScopeId),
+    FinishStmt(InstRef, usize, usize, ScopeId),
+    FinishArm(InstRef, usize, ScopeId),
+    Exit(InstRef, ScopeId, NeverMode),
+}
+
+fn is_chain(sema: &Sema<'_>, node: InstRef) -> bool {
+    is_generic_expr_tag(sema.uir.inst(node).tag)
 }
 
 #[cold]
@@ -81,37 +171,21 @@ pub(crate) fn analyze_expr_machine(
     root: InstRef,
     context: SemaExprContext,
 ) -> TirRef {
-    enum Task {
-        Enter(InstRef),
-        CallArg(InstRef, usize),
-        AfterBase(InstRef),
-        AfterLhs(InstRef),
-        Exit(InstRef),
-    }
-
-    fn is_chain(sema: &Sema<'_>, node: InstRef) -> bool {
-        is_generic_expr_tag(sema.uir.inst(node).tag)
-    }
-
+    let mut match_state = MatchState::new(scope);
+    let root_scope = match_state.scopes.root_id();
     let mut tasks = ChainSpine::new();
     let mut early_errors = Vec::new();
     let mut consts = HashMap::new();
     let mut analyzed = HashMap::new();
     let mut calls = HashMap::new();
     let mut method_recoveries = HashMap::new();
-    tasks.push(Task::Enter(root));
+    tasks.push(Task::Enter(root, root_scope, NeverMode::Reject));
     while let Some(task) = tasks.pop() {
         match task {
-            Task::Enter(node) => {
+            Task::Enter(node, scope_id, mode) => {
+                let scope = match_state.scopes.get(scope_id);
                 if fcx.inst_map[node.index()].is_some() {
-                    let value = analyze_expr_with(
-                        sema,
-                        fcx,
-                        scope,
-                        node,
-                        super::NeverMode::Reject,
-                        context.child(),
-                    );
+                    let value = analyze_expr_with(sema, fcx, scope, node, mode, context.child());
                     analyzed.insert(node, value);
                     consts.insert(node, const_eval_int(sema.uir, node));
                     continue;
@@ -120,9 +194,9 @@ pub(crate) fn analyze_expr_machine(
                 if inst.tag == InstTag::Call {
                     let view = sema.uir.call_view(node);
                     let plan = prepare_call(sema, &view, sema.uir.span(node));
-                    tasks.push(Task::Exit(node));
+                    tasks.push(Task::Exit(node, scope_id, mode));
                     for index in (0..view.args.len()).rev() {
-                        tasks.push(Task::CallArg(node, index));
+                        tasks.push(Task::CallArg(node, index, scope_id));
                     }
                     calls.insert(node, plan);
                     continue;
@@ -137,38 +211,48 @@ pub(crate) fn analyze_expr_machine(
                         view.name,
                         sema.uir.span(node),
                     ) {
-                        tasks.push(Task::Exit(node));
+                        tasks.push(Task::Exit(node, scope_id, mode));
                         for arg in view.args.iter().rev() {
-                            tasks.push(Task::Enter(arg));
+                            tasks.push(Task::Enter(arg, scope_id, NeverMode::Reject));
                         }
                         method_recoveries.insert(node, recovery);
                         continue;
                     }
+                }
+                if matches!(inst.tag, InstTag::Match | InstTag::Catch) {
+                    tasks.push(Task::Exit(node, scope_id, mode));
+                    tasks.push(Task::AfterScrutinee(node, scope_id));
+                    tasks.push(Task::Enter(
+                        match_scrutinee(sema, node),
+                        scope_id,
+                        NeverMode::Reject,
+                    ));
+                    continue;
                 }
                 if matches!(inst.tag, InstTag::Slice | InstTag::Index) {
                     let base = match inst.data {
                         InstData::Slice { base, .. } | InstData::BinOp { lhs: base, .. } => base,
                         _ => unreachable!(),
                     };
-                    tasks.push(Task::Exit(node));
-                    tasks.push(Task::AfterBase(node));
-                    tasks.push(Task::Enter(base));
+                    tasks.push(Task::Exit(node, scope_id, mode));
+                    tasks.push(Task::AfterBase(node, scope_id));
+                    tasks.push(Task::Enter(base, scope_id, NeverMode::Reject));
                     continue;
                 }
                 if is_composite_tag(inst.tag) && !composite_has_leaf_recovery(sema, scope, node) {
                     let children = composite_children(sema, node);
-                    tasks.push(Task::Exit(node));
+                    tasks.push(Task::Exit(node, scope_id, mode));
                     for child in children.into_iter().rev() {
-                        tasks.push(Task::Enter(child));
+                        tasks.push(Task::Enter(child, scope_id, NeverMode::Reject));
                     }
                     continue;
                 }
                 match inst.data {
                     InstData::BinOp { lhs, .. } if is_chain_binop_tag(inst.tag) => {
-                        tasks.push(Task::Exit(node));
-                        tasks.push(Task::AfterLhs(node));
+                        tasks.push(Task::Exit(node, scope_id, mode));
+                        tasks.push(Task::AfterLhs(node, scope_id));
                         if is_chain(sema, lhs) && fcx.inst_map[lhs.index()].is_none() {
-                            tasks.push(Task::Enter(lhs));
+                            tasks.push(Task::Enter(lhs, scope_id, NeverMode::Reject));
                         } else {
                             analyzed.insert(
                                 lhs,
@@ -177,7 +261,7 @@ pub(crate) fn analyze_expr_machine(
                                     fcx,
                                     scope,
                                     lhs,
-                                    super::NeverMode::Reject,
+                                    NeverMode::Reject,
                                     context.child(),
                                 ),
                             );
@@ -185,9 +269,9 @@ pub(crate) fn analyze_expr_machine(
                         }
                     }
                     InstData::UnOp(operand) if matches!(inst.tag, InstTag::Neg | InstTag::Not) => {
-                        tasks.push(Task::Exit(node));
+                        tasks.push(Task::Exit(node, scope_id, mode));
                         if is_chain(sema, operand) && fcx.inst_map[operand.index()].is_none() {
-                            tasks.push(Task::Enter(operand));
+                            tasks.push(Task::Enter(operand, scope_id, NeverMode::Reject));
                         } else {
                             analyzed.insert(
                                 operand,
@@ -196,7 +280,7 @@ pub(crate) fn analyze_expr_machine(
                                     fcx,
                                     scope,
                                     operand,
-                                    super::NeverMode::Reject,
+                                    NeverMode::Reject,
                                     context.child(),
                                 ),
                             );
@@ -218,20 +302,15 @@ pub(crate) fn analyze_expr_machine(
                         consts.insert(node, const_eval_int(sema.uir, node));
                     }
                     _ => {
-                        let value = analyze_expr_with(
-                            sema,
-                            fcx,
-                            scope,
-                            node,
-                            super::NeverMode::Reject,
-                            context.child(),
-                        );
+                        let value =
+                            analyze_expr_with(sema, fcx, scope, node, mode, context.child());
                         analyzed.insert(node, value);
                         consts.insert(node, const_eval_int(sema.uir, node));
                     }
                 }
             }
-            Task::CallArg(node, index) => {
+            Task::CallArg(node, index, scope_id) => {
+                let scope = match_state.scopes.get(scope_id);
                 let view = sema.uir.call_view(node);
                 let arg = view.args.at(index);
                 let target = calls[&node]
@@ -252,21 +331,21 @@ pub(crate) fn analyze_expr_machine(
                     analyzed.insert(arg, value);
                     consts.insert(arg, ConstInt::NotConst);
                 } else if is_chain(sema, arg) && fcx.inst_map[arg.index()].is_none() {
-                    tasks.push(Task::Enter(arg));
+                    tasks.push(Task::Enter(arg, scope_id, NeverMode::Reject));
                 } else {
                     let value = analyze_expr_with(
                         sema,
                         fcx,
                         scope,
                         arg,
-                        super::NeverMode::Reject,
+                        NeverMode::Reject,
                         context.child(),
                     );
                     analyzed.insert(arg, value);
                     consts.insert(arg, const_eval_int(sema.uir, arg));
                 }
             }
-            Task::AfterBase(node) => {
+            Task::AfterBase(node, scope_id) => {
                 let inst = sema.uir.inst(node);
                 let base = match inst.data {
                     InstData::Slice { base, .. } | InstData::BinOp { lhs: base, .. } => base,
@@ -284,7 +363,7 @@ pub(crate) fn analyze_expr_machine(
                         ) =>
                     {
                         for child in [end, start].into_iter().flatten() {
-                            tasks.push(Task::Enter(child));
+                            tasks.push(Task::Enter(child, scope_id, NeverMode::Reject));
                         }
                     }
                     InstData::BinOp { rhs, .. }
@@ -293,17 +372,18 @@ pub(crate) fn analyze_expr_machine(
                             TypeKind::Bytes | TypeKind::View(ViewKind::Bytes)
                         ) =>
                     {
-                        tasks.push(Task::Enter(rhs));
+                        tasks.push(Task::Enter(rhs, scope_id, NeverMode::Reject));
                     }
                     _ => {}
                 }
             }
-            Task::AfterLhs(node) => {
+            Task::AfterLhs(node, scope_id) => {
+                let scope = match_state.scopes.get(scope_id);
                 let InstData::BinOp { rhs, .. } = sema.uir.inst(node).data else {
                     unreachable!("chain tag must carry InstData::BinOp");
                 };
                 if is_chain(sema, rhs) && fcx.inst_map[rhs.index()].is_none() {
-                    tasks.push(Task::Enter(rhs));
+                    tasks.push(Task::Enter(rhs, scope_id, NeverMode::Reject));
                 } else {
                     analyzed.insert(
                         rhs,
@@ -312,19 +392,57 @@ pub(crate) fn analyze_expr_machine(
                             fcx,
                             scope,
                             rhs,
-                            super::NeverMode::Reject,
+                            NeverMode::Reject,
                             context.child(),
                         ),
                     );
                     consts.insert(rhs, const_eval_int(sema.uir, rhs));
                 }
             }
-            Task::Exit(node) => {
+            Task::AfterScrutinee(node, scope_id) => {
+                match_state.after_scrutinee(&mut tasks, sema, fcx, node, scope_id);
+            }
+            Task::PrepareArm(node, index, scope_id) => {
+                match_state.prepare_arm(&mut tasks, sema, fcx, node, index, scope_id);
+            }
+            Task::BlockStmt(node, arm_index, stmt_index, scope_id) => {
+                match_state.block_stmt(
+                    &mut tasks,
+                    sema,
+                    fcx,
+                    ArmStatement {
+                        node,
+                        arm_index,
+                        stmt_index,
+                    },
+                    scope_id,
+                );
+            }
+            Task::FinishStmt(node, arm_index, stmt_index, scope_id) => {
+                match_state.finish_stmt(sema, fcx, node, arm_index, stmt_index, scope_id);
+            }
+            Task::FinishArm(node, index, parent_scope_id) => {
+                match_state.finish_arm(sema, fcx, &analyzed, node, index, parent_scope_id);
+            }
+            Task::Exit(node, scope_id, mode) => {
+                let scope = match_state.scopes.get(scope_id);
                 let inst = sema.uir.inst(node);
                 if let Some(recovery) = method_recoveries.remove(&node) {
                     analyzed.insert(node, recovery);
                     consts.insert(node, ConstInt::NotConst);
                     fcx.inst_map[node.index()] = Some(recovery);
+                    continue;
+                }
+                if matches!(inst.tag, InstTag::Match | InstTag::Catch) {
+                    let next = match_state.finish_match(sema, fcx, node);
+                    fcx.inst_map[node.index()] = Some(next);
+                    let next = if node == root || mode == NeverMode::Allow {
+                        next
+                    } else {
+                        reject_never(sema, fcx, node, next)
+                    };
+                    analyzed.insert(node, next);
+                    consts.insert(node, ConstInt::NotConst);
                     continue;
                 }
                 if inst.tag == InstTag::Call {
@@ -338,7 +456,7 @@ pub(crate) fn analyze_expr_machine(
                     let next =
                         finish_call(sema, fcx, scope, &view, sema.uir.span(node), plan, arg_tirs);
                     fcx.inst_map[node.index()] = Some(next);
-                    let next = if node == root {
+                    let next = if node == root || mode == NeverMode::Allow {
                         next
                     } else {
                         reject_never(sema, fcx, node, next)
@@ -393,7 +511,7 @@ pub(crate) fn analyze_expr_machine(
                                 limit: u32::MAX,
                             },
                         );
-                        let next = if node == root {
+                        let next = if node == root || mode == NeverMode::Allow {
                             next
                         } else {
                             reject_never(sema, fcx, node, next)
@@ -424,6 +542,7 @@ fn is_composite_tag(tag: InstTag) -> bool {
             | InstTag::EnumLit
             | InstTag::ErrorConstruct
             | InstTag::FieldAccess
+            | InstTag::Try
     )
 }
 
@@ -478,6 +597,12 @@ fn composite_children(sema: &Sema<'_>, node: InstRef) -> Vec<InstRef> {
                 unreachable!()
             };
             vec![object]
+        }
+        InstTag::Try => {
+            let InstData::UnOp(operand) = inst.data else {
+                unreachable!()
+            };
+            vec![operand]
         }
         _ => unreachable!("not a composite expression"),
     }

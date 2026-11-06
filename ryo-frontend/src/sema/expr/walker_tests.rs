@@ -56,6 +56,41 @@ impl DeepExpr {
         Self::program(expr)
     }
 
+    fn nested_matches(depth: usize) -> String {
+        let mut src = String::from("fn main():\n");
+        for level in 0..=depth {
+            src.push_str(&"\t".repeat(2 * level + 1));
+            src.push_str("match 1:\n");
+            src.push_str(&"\t".repeat(2 * level + 2));
+            src.push_str("1:\n");
+        }
+        src.push_str(&"\t".repeat(2 * depth + 3));
+        src.push_str("print(0)\n");
+        for level in (0..=depth).rev() {
+            src.push_str(&"\t".repeat(2 * level + 2));
+            src.push_str("_:\n");
+            src.push_str(&"\t".repeat(2 * level + 3));
+            src.push_str("print(0)\n");
+        }
+        src
+    }
+
+    fn nested_catches(depth: usize) -> String {
+        let mut src = String::from("error E\nfn find() -> E!int:\n\treturn E\nfn main():\n");
+        for level in 0..=depth {
+            src.push_str(&"\t".repeat(level + 1));
+            if level == 0 {
+                src.push_str("value = find() catch as err:\n");
+            } else {
+                src.push_str("E: find() catch as err:\n");
+            }
+        }
+        src.push_str(&"\t".repeat(depth + 2));
+        src.push_str("E: 0\n");
+        src.push_str("\tprint(value)\n");
+        src
+    }
+
     fn scalar_shapes(depth: usize) -> Vec<String> {
         if depth == 0 {
             return vec!["1".to_string()];
@@ -195,6 +230,18 @@ impl DeepExpr {
                 "fn main():\n\tvalue = match 1:\n\t\t1: 10\n\t\t_: 20\n\tprint(value)\n".to_string(),
             ),
             (
+                "statement_match_scopes",
+                "enum Opt:\n\tSome(value: int)\n\tNone\nfn f(o: Opt) -> int:\n\tmatch o:\n\t\tOpt.Some(v):\n\t\t\tw = v + 1\n\t\t\treturn w\n\t\tOpt.None:\n\t\t\treturn 0\n".to_string(),
+            ),
+            (
+                "diverging_match",
+                "fn f(b: bool) -> int:\n\tmatch b:\n\t\ttrue: panic(\"a\")\n\t\tfalse: return 7\nfn main():\n\tprint(f(false))\n".to_string(),
+            ),
+            (
+                "invalid_match_join",
+                "enum Opt:\n\tSome(value: int)\n\tNone\nfn main():\n\to = Opt.Some{value=5}\n\tx = match o:\n\t\tOpt.Some(v): v\n\t\tOpt.None: \"s\"\n".to_string(),
+            ),
+            (
                 "catch",
                 "error E\nfn find() -> E!int:\n\treturn E\nfn main():\n\tvalue = find() catch as err:\n\t\tE: 0\n\tprint(value)\n".to_string(),
             ),
@@ -267,6 +314,22 @@ fn nested_call_chain_analyzes_without_overflow() {
     run_deep_repro(
         "sema::expr::walker_tests::nested_call_chain_analyzes_without_overflow",
         DeepExpr::nested_calls(50_000),
+    );
+}
+
+#[test]
+fn nested_match_expressions_analyze_without_overflow() {
+    run_deep_repro(
+        "sema::expr::walker_tests::nested_match_expressions_analyze_without_overflow",
+        DeepExpr::nested_matches(100),
+    );
+}
+
+#[test]
+fn nested_catch_expressions_analyze_without_overflow() {
+    run_deep_repro(
+        "sema::expr::walker_tests::nested_catch_expressions_analyze_without_overflow",
+        DeepExpr::nested_catches(100),
     );
 }
 

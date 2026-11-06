@@ -1126,7 +1126,7 @@ fn analyze_block_seeded_iter(
     seed: impl FnOnce(&mut Scope),
 ) -> Vec<TirRef> {
     let mut child_scope = Scope {
-        parent: Some(scope),
+        parent: Some(scope.into()),
         bindings: HashMap::new(),
     };
     seed(&mut child_scope);

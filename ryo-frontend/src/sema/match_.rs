@@ -19,7 +19,7 @@
 //! continue through both passes.
 
 use super::{
-    FuncCtx, Scope, Sema, analyze_block, analyze_expr, analyze_expr_allow_never,
+    FuncCtx, Scope, ScopeParent, Sema, analyze_block, analyze_expr, analyze_expr_allow_never,
     check_reserved_name, field_list, ordinal, with_struct_shape_notes,
 };
 use ryo_core::ast::LitPattern;
@@ -33,7 +33,7 @@ use ryo_core::uir::{
 use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
-enum MatchMode {
+pub(crate) enum MatchMode {
     Source,
     Catch(Option<StringId>),
     CatchDirect(StringId),
@@ -49,22 +49,22 @@ enum MatchMode {
 /// carry a targeted dead-code allow below. `had_error` is the shared
 /// error flag: set by resolution, grown by typing.
 #[allow(dead_code)]
-struct MatchAnalysis {
+pub(crate) struct MatchAnalysis {
     /// True when resolution already failed (the scrutinee's own
     /// diagnostic or any arm's pattern error) — the match recovers
     /// error-typed no matter how typing goes.
-    had_error: bool,
+    pub(crate) had_error: bool,
     /// The analyzed scrutinee operand.
     scrutinee: TirRef,
     /// Whether the scrutinee is borrowed — an explicit `&expr`
     /// or a read of a borrow-mode parameter. Gates E0133 at bind time;
     /// Copy binds and wildcard arms stay legal on borrows.
-    scrutinee_borrowed: bool,
+    pub(crate) scrutinee_borrowed: bool,
     /// The scrutinee type arms were resolved against: the real type, or
     /// the error sentinel when E0136 fired (arms then skip their checks
     /// quietly — the original diagnostic already explains).
     scrutinee_ty: TypeId,
-    arms: Vec<MatchArmAnalysis>,
+    pub(crate) arms: Vec<MatchArmAnalysis>,
     /// True when every scrutinee value is covered — all enum
     /// variants / both bool literals marked, or a `_:` arm exists.
     exhaustive: bool,
@@ -73,7 +73,7 @@ struct MatchAnalysis {
 }
 
 /// Resolution results for one arm.
-struct MatchArmAnalysis {
+pub(crate) struct MatchArmAnalysis {
     /// Source span of the arm pattern, carried through UIR.
     span: Span,
     /// Source span of the first body expression or statement.
@@ -141,6 +141,9 @@ pub(super) fn analyze_catch(
     analyze_match_impl(sema, fcx, scope, r, span, true)
 }
 
+mod plan;
+pub(crate) use plan::*;
+
 fn analyze_match_impl(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -150,101 +153,19 @@ fn analyze_match_impl(
     catch: bool,
 ) -> TirRef {
     let uir = sema.uir;
-    let (scrutinee_ref, uir_arms, catch_binding) = if catch {
-        let view = uir.catch_view(r);
-        (view.scrutinee, view.arms, view.binding)
+    let scrutinee_ref = if catch {
+        uir.catch_view(r).scrutinee
     } else {
-        let view = uir.match_view(r);
-        (view.scrutinee, view.arms, None)
+        uir.match_view(r).scrutinee
     };
-    let (scrutinee, scrutinee_borrowed) = analyze_scrutinee(sema, fcx, scope, scrutinee_ref);
-    let scrutinee_span = uir.span(scrutinee_ref);
-    let mut scrutinee_ty = fcx.builder.ty_of(scrutinee);
-    let mut had_error = false;
-
-    if catch && !super::errors::is_error_union(sema, scrutinee_ty) {
-        if !sema.pool.is_error(scrutinee_ty) {
-            sema.sink.emit(Diag::error(
-                scrutinee_span,
-                DiagCode::TypeMismatch,
-                format!(
-                    "catch requires an error union operand, found '{}'",
-                    sema.pool.display(scrutinee_ty)
-                ),
-            ));
-        }
-        had_error = true;
-        scrutinee_ty = sema.pool.error_type();
-    } else if !catch && !is_matchable(sema, scrutinee_ty) {
-        if super::errors::is_error_union(sema, scrutinee_ty) {
-            sema.sink.emit(super::errors::direct_use_diag(
-                sema,
-                scrutinee_span,
-                DiagCode::InvalidMatchScrutinee,
-                scrutinee_ty,
-                "match on",
-            ));
-        } else if !sema.pool.is_error(scrutinee_ty) {
-            let mut diag = Diag::error(
-                scrutinee_span,
-                DiagCode::InvalidMatchScrutinee,
-                format!(
-                    "cannot match on a value of type '{}' — match works on \
-                     enums, declared errors, error sets, int, bool, str, and anonymous structs",
-                    sema.pool.display(scrutinee_ty),
-                ),
-            );
-            if sema.pool.kind(scrutinee_ty) == TypeKind::Float {
-                diag = diag.with_help("float literal patterns are not yet supported");
-            }
-            sema.sink.emit(diag);
-        }
-        had_error = true;
-        scrutinee_ty = sema.pool.error_type();
-    }
-
-    let mut arms = Vec::with_capacity(uir_arms.len());
-    for arm in &uir_arms {
-        let arm_span = arm.span;
-        let body_span = match arm.body {
-            UirArmBodyView::Expr(body) => uir.span(body),
-            UirArmBodyView::Stmts(stmts) => stmts
-                .first()
-                .map(|stmt| uir.span(InstRef::from_raw(*stmt)))
-                .unwrap_or(arm_span),
-        };
-        let analysis = resolve_arm(sema, scrutinee_ty, arm, arm_span, body_span, catch);
-        had_error |= analysis.had_error;
-        arms.push(analysis);
-    }
-
-    let exhaustiveness = if sema.pool.is_error(scrutinee_ty) {
-        Exhaustiveness::default()
+    let (scrutinee, borrowed) = analyze_scrutinee(sema, fcx, scope, scrutinee_ref);
+    let plan = prepare_match(sema, fcx, r, catch, scrutinee, borrowed);
+    let uir_arms = if catch {
+        uir.catch_view(r).arms
     } else {
-        check_exhaustiveness(sema, scrutinee_ty, &arms, span, scrutinee_span)
+        uir.match_view(r).arms
     };
-
-    type_and_emit_match(
-        sema,
-        fcx,
-        scope,
-        &uir_arms,
-        MatchAnalysis {
-            had_error,
-            scrutinee,
-            scrutinee_borrowed,
-            scrutinee_ty,
-            arms,
-            exhaustive: exhaustiveness.exhaustive,
-            has_wildcard: exhaustiveness.has_wildcard,
-        },
-        span,
-        if catch {
-            MatchMode::Catch(catch_binding)
-        } else {
-            MatchMode::Source
-        },
-    )
+    type_and_emit_match(sema, fcx, scope, &uir_arms, plan.analysis, span, plan.mode)
 }
 
 // ---------- Arm typing + typed TIR emission ----------
@@ -257,7 +178,7 @@ fn analyze_match_impl(
 /// a parameter (`match w.inner:` — the projection borrows with its
 /// root). The `&` marker lowers away, exactly like `&` at an `inout`
 /// call argument: the TIR operand is the inner value.
-fn analyze_scrutinee(
+pub(crate) fn analyze_scrutinee(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
@@ -289,7 +210,7 @@ fn analyze_scrutinee(
 }
 
 /// One arm's typed body before it is handed to [`TirBuilder::match_expr`].
-enum TypedArmBody {
+pub(crate) enum TypedArmBody {
     Expr(TirRef),
     Stmts(Vec<TirRef>),
 }
@@ -310,7 +231,7 @@ enum ArmClass {
 }
 
 /// One fully typed arm: the emission payload plus its join class.
-struct TypedArm {
+pub(crate) struct TypedArm {
     discriminant: Discriminant,
     bindings: Vec<MatchBinding>,
     /// Anon-arm literal guards (`{x=0}` constraints), in written order —
@@ -321,6 +242,105 @@ struct TypedArm {
     /// Body span for diagnostics about the arm's result.
     span: Span,
     class: ArmClass,
+}
+
+pub(crate) struct MatchArmPreparation<'a> {
+    pub(crate) scope: Scope<'a>,
+    pub(crate) owners: Vec<(u32, TypeId)>,
+    pub(crate) binding_error: bool,
+}
+
+pub(crate) fn prepare_match_arm<'a>(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    parent: ScopeParent<'a>,
+    arm: &MatchArmAnalysis,
+    direct_catch_body: bool,
+    scrutinee_borrowed: bool,
+    mode: MatchMode,
+) -> Option<MatchArmPreparation<'a>> {
+    if arm.had_error {
+        return None;
+    }
+    let (catch, catch_binding) = match mode {
+        MatchMode::Source => (false, None),
+        MatchMode::Catch(binding) => (true, binding),
+        MatchMode::CatchDirect(name) => (true, Some(name)),
+    };
+    let mut scope = Scope {
+        parent: Some(parent),
+        bindings: HashMap::new(),
+    };
+    let arm_mode = if !catch {
+        MatchMode::Source
+    } else if arm.discriminant == Some(Discriminant::Variant(0))
+        || (arm.discriminant == Some(Discriminant::Variant(1)) && catch_binding.is_none())
+    {
+        MatchMode::Catch(None)
+    } else if arm.discriminant == Some(Discriminant::Variant(1)) && direct_catch_body {
+        MatchMode::CatchDirect(catch_binding.expect("direct catch has a shared binding"))
+    } else {
+        MatchMode::Catch(catch_binding)
+    };
+    let (owners, binding_error) = seed_arm_bindings(
+        sema,
+        fcx,
+        &mut scope,
+        &arm.bindings,
+        scrutinee_borrowed,
+        arm.span,
+        arm_mode,
+    );
+    Some(MatchArmPreparation {
+        scope,
+        owners,
+        binding_error,
+    })
+}
+
+pub(crate) fn finish_match_arm(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    preparation: MatchArmPreparation<'_>,
+    arm: &MatchArmAnalysis,
+    body: TypedArmBody,
+) -> (TypedArm, Vec<(u32, TypeId)>, bool) {
+    let void = sema.pool.void();
+    let class = match &body {
+        TypedArmBody::Expr(body_tir) => {
+            let ty = fcx.builder.ty_of(*body_tir);
+            if sema.pool.is_error(ty) || sema.pool.is_never(ty) {
+                ArmClass::Diverges
+            } else if ty == void {
+                ArmClass::VoidExpr
+            } else {
+                ArmClass::Value(ty)
+            }
+        }
+        TypedArmBody::Stmts(tirs) => {
+            if fcx.builder.block_definitely_terminates(tirs, sema.pool) {
+                ArmClass::Diverges
+            } else {
+                ArmClass::FallingStmt
+            }
+        }
+    };
+    preparation.scope.drain_dead_stores(sema);
+    (
+        TypedArm {
+            discriminant: match arm.discriminant {
+                Some(d) => d,
+                None => Discriminant::Wildcard,
+            },
+            bindings: arm.bindings.clone(),
+            guards: arm.anon_literals.clone(),
+            body,
+            span: arm.body_span,
+            class,
+        },
+        preparation.owners,
+        preparation.binding_error,
+    )
 }
 
 /// Type every cleanly-resolved arm in its own child `Scope`
@@ -360,115 +380,54 @@ fn type_and_emit_match(
     span: Span,
     mode: MatchMode,
 ) -> TirRef {
-    let (catch, catch_binding) = match mode {
-        MatchMode::Source => (false, None),
-        MatchMode::Catch(binding) => (true, binding),
-        MatchMode::CatchDirect(name) => (true, Some(name)),
-    };
-    let void = sema.pool.void();
     let mut arms_out: Vec<TypedArm> = Vec::with_capacity(analysis.arms.len());
     let mut owner_tokens: Vec<(u32, TypeId)> = Vec::new();
-
-    // The UIR arm bodies (borrowed from the immutable UIR arena, kept
-    // across the `&mut Sema` body analyses below) walk in lockstep with
-    // the resolution results — both derive from the same wire order.
-    debug_assert_eq!(
-        uir_arms.len(),
-        analysis.arms.len(),
-        "resolution and typing walk the same arms"
-    );
-
     for (arm, uir_arm) in analysis.arms.iter().zip(uir_arms) {
-        // A resolution-broken arm carries its own diagnostic and its
-        // shape is untrustworthy — skip its typing so nothing piles on
-        // (it never reaches the wire: the match is error-typed).
-        if arm.had_error {
-            continue;
-        }
-        // The arm's bindings live in a child scope and die with it:
-        // visible inside the arm, unresolvable after the match, free to
-        // collide with names in sibling arms.
-        let mut child_scope = Scope {
-            parent: Some(scope),
-            bindings: HashMap::new(),
-        };
-        let arm_mode = if !catch {
-            MatchMode::Source
-        } else if arm.discriminant == Some(Discriminant::Variant(0))
-            || (arm.discriminant == Some(Discriminant::Variant(1)) && catch_binding.is_none())
-        {
-            MatchMode::Catch(None)
-        } else if arm.discriminant == Some(Discriminant::Variant(1))
-            && matches!(
-                uir_arm.body,
-                UirArmBodyView::Expr(body_ref) if sema.uir.is_direct_catch_match(body_ref)
-            )
-        {
-            MatchMode::CatchDirect(catch_binding.expect("direct catch has a shared binding"))
-        } else {
-            MatchMode::Catch(catch_binding)
-        };
-        let (owners, binding_error) = seed_arm_bindings(
+        let Some(preparation) = prepare_match_arm(
             sema,
             fcx,
-            &mut child_scope,
-            &arm.bindings,
+            scope.into(),
+            arm,
+            matches!(
+                uir_arm.body,
+                UirArmBodyView::Expr(body_ref) if sema.uir.is_direct_catch_match(body_ref)
+            ),
             analysis.scrutinee_borrowed,
-            arm.span,
-            arm_mode,
-        );
-        analysis.had_error |= binding_error;
-        owner_tokens.extend(owners);
-
-        let (body, class) = match uir_arm.body {
-            UirArmBodyView::Expr(body_ref) => {
-                // The never-tolerant entry point: a diverging arm body
-                // (`panic(...)`, any noreturn call) is a DIVERGING arm
-                // at the join — like a `return`-ending statement arm —
-                // not an E0017 value-position error. The classifier
-                // below routes `never`/error bodies to Diverges.
-                let body_tir = analyze_expr_allow_never(sema, fcx, &child_scope, body_ref);
-                let ty = fcx.builder.ty_of(body_tir);
-                let class = if sema.pool.is_error(ty) || sema.pool.is_never(ty) {
-                    ArmClass::Diverges
-                } else if ty == void {
-                    ArmClass::VoidExpr
-                } else {
-                    ArmClass::Value(ty)
-                };
-                (TypedArmBody::Expr(body_tir), class)
-            }
+            mode,
+        ) else {
+            continue;
+        };
+        let body = match uir_arm.body {
+            UirArmBodyView::Expr(body_ref) => TypedArmBody::Expr(analyze_expr_allow_never(
+                sema,
+                fcx,
+                &preparation.scope,
+                body_ref,
+            )),
             UirArmBodyView::Stmts(_) => {
                 let stmt_refs: Vec<InstRef> = uir_arm.body.stmts().collect();
-                let tirs = analyze_block(sema, fcx, &child_scope, &stmt_refs);
-                // The arm-termination sense (R13): a statement arm ending
-                // in `return`/`break`/`continue` is `never` at the join;
-                // only a body that can really fall through is the E0135
-                // shape.
-                let terminates = fcx.builder.block_definitely_terminates(&tirs, sema.pool);
-                let class = if terminates {
-                    ArmClass::Diverges
-                } else {
-                    ArmClass::FallingStmt
-                };
-                (TypedArmBody::Stmts(tirs), class)
+                TypedArmBody::Stmts(analyze_block(sema, fcx, &preparation.scope, &stmt_refs))
             }
         };
-        child_scope.drain_dead_stores(sema);
-
-        arms_out.push(TypedArm {
-            discriminant: match arm.discriminant {
-                Some(d) => d,
-                None => Discriminant::Wildcard,
-            },
-            bindings: arm.bindings.clone(),
-            guards: arm.anon_literals.clone(),
-            body,
-            span: arm.body_span,
-            class,
-        });
+        let (typed, owners, binding_error) = finish_match_arm(sema, fcx, preparation, arm, body);
+        analysis.had_error |= binding_error;
+        owner_tokens.extend(owners);
+        arms_out.push(typed);
     }
+    finish_typed_match(sema, fcx, analysis, arms_out, owner_tokens, span, mode)
+}
 
+pub(crate) fn finish_typed_match(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    mut analysis: MatchAnalysis,
+    arms_out: Vec<TypedArm>,
+    owner_tokens: Vec<(u32, TypeId)>,
+    span: Span,
+    mode: MatchMode,
+) -> TirRef {
+    let catch = !matches!(mode, MatchMode::Source);
+    let void = sema.pool.void();
     // ---- Join ----
     let candidate = arms_out.iter().find_map(|arm| match arm.class {
         ArmClass::Value(ty) => Some(ty),

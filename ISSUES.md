@@ -855,6 +855,19 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-270 — Stack overflow lowering deeply nested match and catch blocks
+
+**Severity:** Correctness / Hygiene
+**Area:** frontend-parser
+
+**Files:** ryo-frontend/src/astgen/match_.rs; ryo-frontend/src/astgen/expr.rs; ryo-frontend/src/astgen.rs
+
+**Summary:** Nested statement-form match and catch expressions recurse through arm statement lowering. Confirmed on debug builds: 500 nested statement matches and 1,000 nested catches parse successfully but abort during astgen with a stack overflow, before sema starts. The generic sema expression walker cannot reach these inputs through source-driven tests.
+
+**Resolution:** Lower nested arm bodies and statement blocks with explicit tasks instead of recursive gen_stmt/gen_expr calls, preserving source order and UIR wire shape. Add deep nested match and catch regressions through parse and UIR generation so sema can be exercised end to end.
+
+---
+
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
@@ -865,4 +878,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-<!-- issue-id high-water: 269 -->
+---
+
+<!-- issue-id high-water: 270 -->
