@@ -92,7 +92,39 @@ impl DeepExpr {
             ("calls", Self::program("id(1+id(2))".to_string())),
             (
                 "invalid_call",
-                Self::program("missing(1)".to_string()),
+                Self::program("missing(1+true)".to_string()),
+            ),
+            (
+                "reserved_call_diagnostic_order",
+                Self::program("range(1+true)".to_string()),
+            ),
+            (
+                "call_arity_and_argument_diagnostic_order",
+                Self::program("id(1+true, 2)".to_string()),
+            ),
+            (
+                "expected_struct_argument",
+                "struct Point:\n\tx: int\n\ty: int\nfn norm(p: Point) -> int:\n\treturn p.x\nfn main():\n\tprint(norm(Point{x=1, y=2}))\n".to_string(),
+            ),
+            (
+                "materialization_call",
+                "fn main():\n\ts = \"abc\"\n\tprint(str(s[0:1]))\n".to_string(),
+            ),
+            (
+                "anonymous_struct",
+                "fn main():\n\tp = {x=1, y=2}\n\tprint(p.x)\n".to_string(),
+            ),
+            (
+                "invalid_enum_payload",
+                "enum Shape:\n\tCircle(int)\nfn main():\n\ts = Shape.Circle(\"bad\")\n".to_string(),
+            ),
+            (
+                "invalid_error_payload",
+                "error E(int)\nfn main():\n\te = E(\"bad\")\n".to_string(),
+            ),
+            (
+                "invalid_field",
+                "struct Point:\n\tx: int\nfn main():\n\tp = Point{x=1}\n\tprint(p.y)\n".to_string(),
             ),
             (
                 "methods",
@@ -108,7 +140,31 @@ impl DeepExpr {
             ),
             (
                 "invalid_index",
-                "fn main():\n\tprint(1[0])\n".to_string(),
+                "fn main():\n\tprint(1[1+true])\n".to_string(),
+            ),
+            (
+                "invalid_slice",
+                "fn main():\n\tprint(1[1+true:2])\n".to_string(),
+            ),
+            (
+                "lowercase_enum_method",
+                "enum color:\n\tRed\nfn main():\n\tprint(color.red(1+true))\n".to_string(),
+            ),
+            (
+                "struct_name_method",
+                "struct Point:\n\tx: int\nfn main():\n\tprint(Point.make(1+true))\n".to_string(),
+            ),
+            (
+                "unit_variant_field",
+                "enum Color:\n\tRed\nfn main():\n\tprint(Color.Red)\n".to_string(),
+            ),
+            (
+                "positional_named_enum",
+                "enum Shape:\n\tRectangle(width: int)\nfn main():\n\ts = Shape.Rectangle(1+true)\n".to_string(),
+            ),
+            (
+                "unit_error_with_payload",
+                "error E\nfn main():\n\te = E(1+true)\n".to_string(),
             ),
             (
                 "borrow",
@@ -199,7 +255,6 @@ fn unary_mediated_rhs_chain_analyzes_without_overflow() {
 }
 
 #[test]
-#[ignore = "I-269: call arguments still reset expression depth"]
 fn call_mediated_rhs_chain_analyzes_without_overflow() {
     run_deep_repro(
         "sema::expr::walker_tests::call_mediated_rhs_chain_analyzes_without_overflow",
@@ -208,7 +263,6 @@ fn call_mediated_rhs_chain_analyzes_without_overflow() {
 }
 
 #[test]
-#[ignore = "I-269: nested call arguments still reset expression depth"]
 fn nested_call_chain_analyzes_without_overflow() {
     run_deep_repro(
         "sema::expr::walker_tests::nested_call_chain_analyzes_without_overflow",

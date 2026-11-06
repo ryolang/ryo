@@ -22,13 +22,12 @@ use ryo_core::uir::{InstData, InstRef, InstTag, Span};
 /// the FieldAccess reinterpretation. Returns the error-typed
 /// recovery TIR when the check fired, `None` to continue ordinary
 /// method analysis.
-pub(super) fn lowercase_enum_method_receiver(
+pub(super) fn lowercase_enum_method_receiver_recovery(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     receiver: InstRef,
     method: StringId,
-    args: &ryo_core::uir::ExtraList<'_, InstRef>,
     span: Span,
 ) -> Option<TirRef> {
     if let InstTag::Var = sema.uir.inst(receiver).tag {
@@ -55,14 +54,8 @@ pub(super) fn lowercase_enum_method_receiver(
                     sema.pool.str(method),
                 )),
             );
-            for arg in args {
-                analyze_expr(sema, fcx, scope, arg);
-            }
             return Some(fcx.builder.unreachable(sema.pool.error_type(), span));
         }
-        // `Point.make(1.0)` — a struct name in enum-construct
-        // position. Structs construct with braces, not `Name(...)`
-        // parens; name the brace spelling with the declared fields.
         if scope.lookup(name).is_none()
             && let Some(&sty) = sema.struct_types.get(&name)
         {
@@ -84,13 +77,29 @@ pub(super) fn lowercase_enum_method_receiver(
                 DiagCode::NotAStruct,
                 format!("'{raw}' is a struct, not an enum — construct it as {raw}{example}"),
             ));
-            for arg in args {
-                analyze_expr(sema, fcx, scope, arg);
-            }
             return Some(fcx.builder.unreachable(sema.pool.error_type(), span));
         }
     }
     None
+}
+
+pub(super) fn lowercase_enum_method_receiver(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    receiver: InstRef,
+    method: StringId,
+    args: &ryo_core::uir::ExtraList<'_, InstRef>,
+    span: Span,
+) -> Option<TirRef> {
+    let recovery =
+        lowercase_enum_method_receiver_recovery(sema, fcx, scope, receiver, method, span);
+    if recovery.is_some() {
+        for arg in args {
+            analyze_expr(sema, fcx, scope, arg);
+        }
+    }
+    recovery
 }
 
 /// Unknown receiver method: the generalized "X has no method 'Y'"

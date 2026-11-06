@@ -1,20 +1,23 @@
+use super::super::call::{finish_call, prepare_call};
 use super::{
-    CHAIN_RECURSION_LIMIT, FuncCtx, Scope, Sema, analyze_binop_link, analyze_expr_with,
-    analyze_unary_link, const_eval_int, is_chain_binop_tag,
+    CHAIN_RECURSION_LIMIT, ConstInt, FuncCtx, Scope, Sema, analyze_binop_link,
+    analyze_expr_allow_never_with, analyze_expr_with, analyze_struct_lit_with_target_and_context,
+    analyze_unary_link, const_eval_int, is_chain_binop_tag, reject_never,
 };
 use ryo_core::spine::ChainSpine;
 use ryo_core::tir::TirRef;
+use ryo_core::types::{TypeKind, VariantKind, ViewKind};
 use ryo_core::uir::{InstData, InstRef, InstTag};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
-pub(super) struct SemaExprContext {
-    pub(super) depth: u32,
-    pub(super) limit: u32,
+pub(crate) struct SemaExprContext {
+    pub(crate) depth: u32,
+    pub(crate) limit: u32,
 }
 
 impl SemaExprContext {
-    pub(super) fn root() -> Self {
+    pub(crate) fn root() -> Self {
         #[cfg(test)]
         if let Some(limit) = TEST_EXPR_LIMIT.with(|limit| limit.get()) {
             return Self { depth: 0, limit };
@@ -25,7 +28,7 @@ impl SemaExprContext {
         }
     }
 
-    pub(super) fn child(self) -> Self {
+    pub(crate) fn child(self) -> Self {
         Self {
             depth: self.depth.saturating_add(1),
             limit: self.limit,
@@ -34,7 +37,7 @@ impl SemaExprContext {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum NeverMode {
+pub(crate) enum NeverMode {
     Reject,
     Allow,
 }
@@ -45,16 +48,33 @@ std::thread_local! {
 }
 
 #[cfg(test)]
-pub(super) fn with_expr_limit<T>(limit: u32, f: impl FnOnce() -> T) -> T {
+pub(crate) fn with_expr_limit<T>(limit: u32, f: impl FnOnce() -> T) -> T {
     let previous = TEST_EXPR_LIMIT.with(|current| current.replace(Some(limit)));
     let result = f();
     TEST_EXPR_LIMIT.with(|current| current.set(previous));
     result
 }
 
+pub(crate) fn is_generic_expr_tag(tag: InstTag) -> bool {
+    matches!(
+        tag,
+        InstTag::Neg
+            | InstTag::Not
+            | InstTag::Call
+            | InstTag::MethodCall
+            | InstTag::Slice
+            | InstTag::Index
+            | InstTag::Borrow
+            | InstTag::StructLit
+            | InstTag::EnumLit
+            | InstTag::ErrorConstruct
+            | InstTag::FieldAccess
+    ) || is_chain_binop_tag(tag)
+}
+
 #[cold]
 #[inline(never)]
-pub(super) fn analyze_expr_machine(
+pub(crate) fn analyze_expr_machine(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
@@ -63,19 +83,22 @@ pub(super) fn analyze_expr_machine(
 ) -> TirRef {
     enum Task {
         Enter(InstRef),
+        CallArg(InstRef, usize),
+        AfterBase(InstRef),
         AfterLhs(InstRef),
         Exit(InstRef),
     }
 
     fn is_chain(sema: &Sema<'_>, node: InstRef) -> bool {
-        matches!(sema.uir.inst(node).tag, InstTag::Neg | InstTag::Not)
-            || is_chain_binop_tag(sema.uir.inst(node).tag)
+        is_generic_expr_tag(sema.uir.inst(node).tag)
     }
 
     let mut tasks = ChainSpine::new();
     let mut early_errors = Vec::new();
     let mut consts = HashMap::new();
     let mut analyzed = HashMap::new();
+    let mut calls = HashMap::new();
+    let mut method_recoveries = HashMap::new();
     tasks.push(Task::Enter(root));
     while let Some(task) = tasks.pop() {
         match task {
@@ -94,6 +117,52 @@ pub(super) fn analyze_expr_machine(
                     continue;
                 }
                 let inst = sema.uir.inst(node);
+                if inst.tag == InstTag::Call {
+                    let view = sema.uir.call_view(node);
+                    let plan = prepare_call(sema, &view, sema.uir.span(node));
+                    tasks.push(Task::Exit(node));
+                    for index in (0..view.args.len()).rev() {
+                        tasks.push(Task::CallArg(node, index));
+                    }
+                    calls.insert(node, plan);
+                    continue;
+                }
+                if inst.tag == InstTag::MethodCall {
+                    let view = sema.uir.method_call_view(node);
+                    if let Some(recovery) = super::methods::lowercase_enum_method_receiver_recovery(
+                        sema,
+                        fcx,
+                        scope,
+                        view.receiver,
+                        view.name,
+                        sema.uir.span(node),
+                    ) {
+                        tasks.push(Task::Exit(node));
+                        for arg in view.args.iter().rev() {
+                            tasks.push(Task::Enter(arg));
+                        }
+                        method_recoveries.insert(node, recovery);
+                        continue;
+                    }
+                }
+                if matches!(inst.tag, InstTag::Slice | InstTag::Index) {
+                    let base = match inst.data {
+                        InstData::Slice { base, .. } | InstData::BinOp { lhs: base, .. } => base,
+                        _ => unreachable!(),
+                    };
+                    tasks.push(Task::Exit(node));
+                    tasks.push(Task::AfterBase(node));
+                    tasks.push(Task::Enter(base));
+                    continue;
+                }
+                if is_composite_tag(inst.tag) && !composite_has_leaf_recovery(sema, scope, node) {
+                    let children = composite_children(sema, node);
+                    tasks.push(Task::Exit(node));
+                    for child in children.into_iter().rev() {
+                        tasks.push(Task::Enter(child));
+                    }
+                    continue;
+                }
                 match inst.data {
                     InstData::BinOp { lhs, .. } if is_chain_binop_tag(inst.tag) => {
                         tasks.push(Task::Exit(node));
@@ -134,6 +203,20 @@ pub(super) fn analyze_expr_machine(
                             consts.insert(operand, const_eval_int(sema.uir, operand));
                         }
                     }
+                    _ if is_composite_tag(inst.tag) => {
+                        let value = analyze_expr_allow_never_with(
+                            sema,
+                            fcx,
+                            scope,
+                            node,
+                            SemaExprContext {
+                                depth: 0,
+                                limit: u32::MAX,
+                            },
+                        );
+                        analyzed.insert(node, value);
+                        consts.insert(node, const_eval_int(sema.uir, node));
+                    }
                     _ => {
                         let value = analyze_expr_with(
                             sema,
@@ -146,6 +229,73 @@ pub(super) fn analyze_expr_machine(
                         analyzed.insert(node, value);
                         consts.insert(node, const_eval_int(sema.uir, node));
                     }
+                }
+            }
+            Task::CallArg(node, index) => {
+                let view = sema.uir.call_view(node);
+                let arg = view.args.at(index);
+                let target = calls[&node]
+                    .expected()
+                    .and_then(|types| types.get(index))
+                    .copied();
+                if let Some(target) = target
+                    && sema.uir.inst(arg).tag == InstTag::StructLit
+                {
+                    let value = analyze_struct_lit_with_target_and_context(
+                        sema,
+                        fcx,
+                        scope,
+                        arg,
+                        target,
+                        context.child(),
+                    );
+                    analyzed.insert(arg, value);
+                    consts.insert(arg, ConstInt::NotConst);
+                } else if is_chain(sema, arg) && fcx.inst_map[arg.index()].is_none() {
+                    tasks.push(Task::Enter(arg));
+                } else {
+                    let value = analyze_expr_with(
+                        sema,
+                        fcx,
+                        scope,
+                        arg,
+                        super::NeverMode::Reject,
+                        context.child(),
+                    );
+                    analyzed.insert(arg, value);
+                    consts.insert(arg, const_eval_int(sema.uir, arg));
+                }
+            }
+            Task::AfterBase(node) => {
+                let inst = sema.uir.inst(node);
+                let base = match inst.data {
+                    InstData::Slice { base, .. } | InstData::BinOp { lhs: base, .. } => base,
+                    _ => unreachable!(),
+                };
+                let base_ty = fcx.builder.ty_of(analyzed[&base]);
+                let base_kind = sema.pool.kind(base_ty);
+                match inst.data {
+                    InstData::Slice { start, end, .. }
+                        if matches!(
+                            base_kind,
+                            TypeKind::Str
+                                | TypeKind::Bytes
+                                | TypeKind::View(ViewKind::Str | ViewKind::Bytes)
+                        ) =>
+                    {
+                        for child in [end, start].into_iter().flatten() {
+                            tasks.push(Task::Enter(child));
+                        }
+                    }
+                    InstData::BinOp { rhs, .. }
+                        if matches!(
+                            base_kind,
+                            TypeKind::Bytes | TypeKind::View(ViewKind::Bytes)
+                        ) =>
+                    {
+                        tasks.push(Task::Enter(rhs));
+                    }
+                    _ => {}
                 }
             }
             Task::AfterLhs(node) => {
@@ -171,6 +321,32 @@ pub(super) fn analyze_expr_machine(
             }
             Task::Exit(node) => {
                 let inst = sema.uir.inst(node);
+                if let Some(recovery) = method_recoveries.remove(&node) {
+                    analyzed.insert(node, recovery);
+                    consts.insert(node, ConstInt::NotConst);
+                    fcx.inst_map[node.index()] = Some(recovery);
+                    continue;
+                }
+                if inst.tag == InstTag::Call {
+                    let view = sema.uir.call_view(node);
+                    let arg_tirs = view
+                        .args
+                        .iter()
+                        .map(|arg| analyzed[&arg])
+                        .collect::<Vec<_>>();
+                    let plan = calls.remove(&node).expect("call prepared first");
+                    let next =
+                        finish_call(sema, fcx, scope, &view, sema.uir.span(node), plan, arg_tirs);
+                    fcx.inst_map[node.index()] = Some(next);
+                    let next = if node == root {
+                        next
+                    } else {
+                        reject_never(sema, fcx, node, next)
+                    };
+                    analyzed.insert(node, next);
+                    consts.insert(node, ConstInt::NotConst);
+                    continue;
+                }
                 match inst.data {
                     InstData::BinOp { lhs, rhs } if is_chain_binop_tag(inst.tag) => {
                         let acc = analyzed.get(&lhs).copied().expect("lhs analyzed first");
@@ -206,7 +382,26 @@ pub(super) fn analyze_expr_machine(
                         consts.insert(node, node_const);
                         fcx.inst_map[node.index()] = Some(next);
                     }
-                    _ => unreachable!("only unary and binary nodes have exit tasks"),
+                    _ if is_composite_tag(inst.tag) => {
+                        let next = analyze_expr_allow_never_with(
+                            sema,
+                            fcx,
+                            scope,
+                            node,
+                            SemaExprContext {
+                                depth: 0,
+                                limit: u32::MAX,
+                            },
+                        );
+                        let next = if node == root {
+                            next
+                        } else {
+                            reject_never(sema, fcx, node, next)
+                        };
+                        analyzed.insert(node, next);
+                        consts.insert(node, const_eval_int(sema.uir, node));
+                    }
+                    _ => unreachable!("only scheduled nodes have exit tasks"),
                 }
             }
         }
@@ -216,4 +411,122 @@ pub(super) fn analyze_expr_machine(
         fcx.inst_map[node.index()] = None;
     }
     result
+}
+
+fn is_composite_tag(tag: InstTag) -> bool {
+    matches!(
+        tag,
+        InstTag::MethodCall
+            | InstTag::Slice
+            | InstTag::Index
+            | InstTag::Borrow
+            | InstTag::StructLit
+            | InstTag::EnumLit
+            | InstTag::ErrorConstruct
+            | InstTag::FieldAccess
+    )
+}
+
+fn composite_children(sema: &Sema<'_>, node: InstRef) -> Vec<InstRef> {
+    let inst = sema.uir.inst(node);
+    match inst.tag {
+        InstTag::MethodCall => {
+            let view = sema.uir.method_call_view(node);
+            std::iter::once(view.receiver)
+                .chain(view.args.iter())
+                .collect()
+        }
+        InstTag::Slice => {
+            let InstData::Slice { base, start, end } = inst.data else {
+                unreachable!()
+            };
+            std::iter::once(base).chain(start).chain(end).collect()
+        }
+        InstTag::Index => {
+            let InstData::BinOp { lhs, rhs } = inst.data else {
+                unreachable!()
+            };
+            vec![lhs, rhs]
+        }
+        InstTag::Borrow => {
+            let InstData::Borrow(inner) = inst.data else {
+                unreachable!()
+            };
+            vec![inner]
+        }
+        InstTag::StructLit => sema
+            .uir
+            .struct_lit_view(node)
+            .fields()
+            .map(|(_, value)| value)
+            .collect(),
+        InstTag::EnumLit => sema
+            .uir
+            .enum_lit_view(node)
+            .fields()
+            .map(|(_, value)| value)
+            .collect(),
+        InstTag::ErrorConstruct => sema
+            .uir
+            .error_construct_view(node)
+            .3
+            .fields()
+            .map(|(_, value)| value)
+            .collect(),
+        InstTag::FieldAccess => {
+            let InstData::FieldAccess { object, .. } = inst.data else {
+                unreachable!()
+            };
+            vec![object]
+        }
+        _ => unreachable!("not a composite expression"),
+    }
+}
+
+fn field_access_has_type_recovery(sema: &Sema<'_>, scope: &Scope, node: InstRef) -> bool {
+    let InstData::FieldAccess { object, .. } = sema.uir.inst(node).data else {
+        return false;
+    };
+    let InstData::Var(name) = sema.uir.inst(object).data else {
+        return false;
+    };
+    scope.lookup(name).is_none()
+        && (sema.enum_types.contains_key(&name) || sema.struct_types.contains_key(&name))
+}
+
+fn composite_has_leaf_recovery(sema: &Sema<'_>, scope: &Scope, node: InstRef) -> bool {
+    let tag = sema.uir.inst(node).tag;
+    if tag == InstTag::FieldAccess && field_access_has_type_recovery(sema, scope, node) {
+        return true;
+    }
+    if tag == InstTag::ErrorConstruct {
+        let view = sema.uir.error_construct_view(node).3;
+        if sema.pool.kind(view.ty) == TypeKind::DeclaredError {
+            let kind = sema
+                .pool
+                .enum_view(view.ty)
+                .variants()
+                .next()
+                .expect("declared errors have one variant")
+                .kind;
+            return kind == VariantKind::Unit
+                && (view.positional || view.fields().next().is_some());
+        }
+    }
+    if tag != InstTag::EnumLit {
+        return false;
+    }
+    let view = sema.uir.enum_lit_view(node);
+    if sema.pool.is_error(view.ty) {
+        return true;
+    }
+    let Some(variant) = sema
+        .pool
+        .enum_view(view.ty)
+        .variants()
+        .nth(view.variant_index as usize)
+    else {
+        return true;
+    };
+    view.positional && matches!(variant.kind, VariantKind::Named | VariantKind::Unit)
 }

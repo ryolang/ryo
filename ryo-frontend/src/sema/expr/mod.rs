@@ -10,8 +10,9 @@ use ryo_core::uir::{InstData, InstRef, InstTag, Span, StructLitView, Uir};
 
 mod methods;
 mod operators;
-mod walker;
-use walker::{NeverMode, SemaExprContext, analyze_expr_machine};
+pub(crate) mod walker;
+pub(crate) use walker::{NeverMode, SemaExprContext};
+use walker::{analyze_expr_machine, is_generic_expr_tag};
 #[cfg(test)]
 mod walker_tests;
 
@@ -102,7 +103,7 @@ pub(crate) fn analyze_expr(
     )
 }
 
-fn analyze_expr_with(
+pub(crate) fn analyze_expr_with(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
@@ -111,7 +112,20 @@ fn analyze_expr_with(
     context: SemaExprContext,
 ) -> TirRef {
     let t = analyze_expr_allow_never_with(sema, fcx, scope, r, context);
-    if mode == NeverMode::Reject && sema.pool.is_never(fcx.builder.ty_of(t)) {
+    if mode == NeverMode::Reject {
+        reject_never(sema, fcx, r, t)
+    } else {
+        t
+    }
+}
+
+pub(crate) fn reject_never(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    r: InstRef,
+    value: TirRef,
+) -> TirRef {
+    if sema.pool.is_never(fcx.builder.ty_of(value)) {
         sema.sink.emit(Diag::error(
             sema.uir.span(r),
             DiagCode::VoidValueInExpression,
@@ -121,7 +135,7 @@ fn analyze_expr_with(
             .builder
             .unreachable(sema.pool.error_type(), sema.uir.span(r));
     }
-    t
+    value
 }
 
 #[inline]
@@ -153,6 +167,9 @@ fn analyze_expr_allow_never_with(
     }
 
     let inst = sema.uir.inst(r);
+    if context.depth >= context.limit && is_generic_expr_tag(inst.tag) {
+        return analyze_expr_machine(sema, fcx, scope, r, context);
+    }
     let span = sema.uir.span(r);
     let emitted = match inst.tag {
         InstTag::IntLiteral => match inst.data {
@@ -201,20 +218,11 @@ fn analyze_expr_allow_never_with(
         | InstTag::LtEq
         | InstTag::GtEq
         | InstTag::And
-        | InstTag::Or => {
-            if context.depth < context.limit {
-                analyze_binop_d(sema, fcx, scope, r, context)
-            } else {
-                analyze_expr_machine(sema, fcx, scope, r, context)
-            }
-        }
-        InstTag::Neg | InstTag::Not if context.depth >= context.limit => {
-            analyze_expr_machine(sema, fcx, scope, r, context)
-        }
+        | InstTag::Or => analyze_binop_d(sema, fcx, scope, r, context),
         InstTag::Neg | InstTag::Not => analyze_unary_chain(sema, fcx, scope, r, context),
         InstTag::Call => {
             let view = sema.uir.call_view(r);
-            check_call(sema, fcx, scope, &view, span)
+            check_call(sema, fcx, scope, &view, span, context)
         }
         InstTag::MethodCall => {
             let view = sema.uir.method_call_view(r);
@@ -443,7 +451,7 @@ fn analyze_expr_allow_never_with(
             )
         }
         InstTag::Borrow => analyze_borrow(sema, fcx, scope, r, inst.data, span),
-        InstTag::StructLit => analyze_struct_lit(sema, fcx, scope, r, span, None),
+        InstTag::StructLit => analyze_struct_lit(sema, fcx, scope, r, span, None, context),
         InstTag::EnumLit => analyze_variant_construct(sema, fcx, scope, r, span),
         InstTag::ErrorConstruct => {
             super::errors::analyze_error_construct(sema, fcx, scope, r, span)
@@ -741,11 +749,22 @@ pub(crate) fn analyze_struct_lit_with_target(
     r: InstRef,
     target: TypeId,
 ) -> TirRef {
+    analyze_struct_lit_with_target_and_context(sema, fcx, scope, r, target, SemaExprContext::root())
+}
+
+pub(crate) fn analyze_struct_lit_with_target_and_context(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    target: TypeId,
+    context: SemaExprContext,
+) -> TirRef {
     if let Some(t) = fcx.inst_map[r.index()] {
         return t;
     }
     let span = sema.uir.span(r);
-    let emitted = analyze_struct_lit(sema, fcx, scope, r, span, Some(target));
+    let emitted = analyze_struct_lit(sema, fcx, scope, r, span, Some(target), context);
     fcx.inst_map[r.index()] = Some(emitted);
     emitted
 }
@@ -757,10 +776,11 @@ fn analyze_struct_lit(
     r: InstRef,
     span: Span,
     expected: Option<TypeId>,
+    context: SemaExprContext,
 ) -> TirRef {
     let view = sema.uir.struct_lit_view(r);
     let Some(name) = view.name else {
-        return analyze_anon_struct_lit(sema, fcx, scope, &view, span, expected);
+        return analyze_anon_struct_lit(sema, fcx, scope, &view, span, expected, context);
     };
     let Some(&sty) = sema.struct_types.get(&name) else {
         // Never declared — this one is on the user.
@@ -800,7 +820,14 @@ fn analyze_struct_lit(
             ));
             // Still analyze the initializer so diagnostics inside it
             // (unknown names, type errors) are reported.
-            analyze_expr(sema, fcx, scope, value_ref);
+            analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                value_ref,
+                NeverMode::Reject,
+                context.child(),
+            );
             continue;
         };
         if by_index[field.idx as usize].is_some() {
@@ -814,10 +841,17 @@ fn analyze_struct_lit(
                 ),
             ));
             // Same recovery: analyze the duplicate's initializer too.
-            analyze_expr(sema, fcx, scope, value_ref);
+            analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                value_ref,
+                NeverMode::Reject,
+                context.child(),
+            );
             continue;
         }
-        let value = analyze_struct_field_value(sema, fcx, scope, value_ref, field.ty);
+        let value = analyze_struct_field_value(sema, fcx, scope, value_ref, field.ty, context);
         let vty = fcx.builder.ty_of(value);
         if !super::errors::is_error_union(sema, field.ty) && !sema.pool.compatible(vty, field.ty) {
             sema.sink.emit(Diag::error(
@@ -871,11 +905,26 @@ fn analyze_struct_field_value(
     scope: &Scope,
     value_ref: InstRef,
     target: TypeId,
+    context: SemaExprContext,
 ) -> TirRef {
     let mut value = if sema.uir.inst(value_ref).tag == InstTag::StructLit {
-        analyze_struct_lit_with_target(sema, fcx, scope, value_ref, target)
+        analyze_struct_lit_with_target_and_context(
+            sema,
+            fcx,
+            scope,
+            value_ref,
+            target,
+            context.child(),
+        )
     } else {
-        analyze_expr(sema, fcx, scope, value_ref)
+        analyze_expr_with(
+            sema,
+            fcx,
+            scope,
+            value_ref,
+            NeverMode::Reject,
+            context.child(),
+        )
     };
     if super::errors::is_error_union(sema, target) {
         value = super::errors::coerce_to_error_union(
@@ -1137,6 +1186,7 @@ fn analyze_anon_struct_lit(
     view: &StructLitView<'_>,
     span: Span,
     expected: Option<TypeId>,
+    context: SemaExprContext,
 ) -> TirRef {
     let expected = expected.and_then(|ty| {
         if sema.pool.kind(ty) != TypeKind::AnonStruct {
@@ -1168,14 +1218,28 @@ fn analyze_anon_struct_lit(
             ));
             // Same recovery as the named path: analyze the duplicate's
             // initializer so its own errors still surface.
-            analyze_expr(sema, fcx, scope, value_ref);
+            analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                value_ref,
+                NeverMode::Reject,
+                context.child(),
+            );
             continue;
         }
         let expected_field = expected.as_ref().map(|(_, fields)| fields[index]);
         let value = if let Some(field) = expected_field {
-            analyze_struct_field_value(sema, fcx, scope, value_ref, field.ty)
+            analyze_struct_field_value(sema, fcx, scope, value_ref, field.ty, context)
         } else {
-            analyze_expr(sema, fcx, scope, value_ref)
+            analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                value_ref,
+                NeverMode::Reject,
+                context.child(),
+            )
         };
         let vty = fcx.builder.ty_of(value);
         if let Some(field) = expected_field
