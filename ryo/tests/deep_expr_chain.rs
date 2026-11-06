@@ -1,4 +1,4 @@
-//! Regression tests for deep left-associative operator chains.
+//! Regression tests for deeply nested operator chains.
 //!
 //! A ~7k-term `1+1+...` chain used to abort the compiler with
 //! `thread has overflowed its stack` (SIGABRT): every pass that walks
@@ -24,6 +24,44 @@ fn add_chain(terms: usize) -> String {
     }
     src.push_str(")\n");
     src
+}
+
+fn right_nested_add_chain(terms: usize) -> String {
+    let mut src = String::from("fn main():\n\tprint(");
+    for _ in 1..terms {
+        src.push_str("1+(");
+    }
+    src.push('1');
+    for _ in 1..terms {
+        src.push(')');
+    }
+    src.push_str(")\n");
+    src
+}
+
+#[test]
+fn jit_run_right_nested_addition_chain_prints_sum() {
+    let terms = 20_000;
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "right_nested_chain.ryo",
+        &right_nested_add_chain(terms),
+    );
+
+    let output = run_ryo_command(&["run", "right_nested_chain.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "right-nested chain compile failed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        terms.to_string(),
+        "right-nested chain must evaluate to its term count"
+    );
 }
 
 #[test]

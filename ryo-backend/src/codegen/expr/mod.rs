@@ -139,7 +139,13 @@ impl<M: Module> Codegen<M> {
             | TirTag::FCmpLt
             | TirTag::FCmpLe
             | TirTag::FCmpGt
-            | TirTag::FCmpGe => Self::eval_binop_chain(builder, ctx, r, depth)?,
+            | TirTag::FCmpGe => {
+                if depth < Self::CHAIN_RECURSION_LIMIT {
+                    Self::eval_binop_chain(builder, ctx, r, depth)?
+                } else {
+                    Self::eval_binop_machine(builder, ctx, r)?
+                }
+            }
             TirTag::BoolAnd | TirTag::BoolOr => {
                 // The short-circuit control flow is explicit in
                 // the Flow IR — the lhs block's Branch terminator
@@ -327,21 +333,22 @@ impl<M: Module> Codegen<M> {
     }
 
     /// Operator-chain recursion budget: how many chain links the
-    /// old-style recursion may consume before the remaining spine
-    /// lowers iteratively (`eval_binop_spill` / `eval_unary_spill`).
-    /// Far below the compiler thread's 32 MiB stack (a debug frame per
-    /// link is kilobytes), far above anything a hand-written chain.
+    /// old-style recursion may consume before the remaining subtree
+    /// lowers iteratively (`eval_binop_spill` / `eval_binop_machine` /
+    /// `eval_unary_spill`). Far below the compiler thread's 32 MiB stack
+    /// (a debug frame per link is kilobytes), far above anything a
+    /// hand-written chain.
     const CHAIN_RECURSION_LIMIT: u32 = 64;
 
-    /// Materialize one link of a left-associative scalar binary-
-    /// operator chain, recursing like the old demand recursion
-    /// (`eval_inst` → `emit_numeric_binary_op` → `eval_inst(lhs)`).
-    /// Shallow chains (everything hand-written) pay nothing for the
-    /// deep-chain machinery; past [`Self::CHAIN_RECURSION_LIMIT`] links
-    /// the remaining spine hands off to the iterative walker so a
-    /// 100k-term `1+1+...` chain cannot overflow the stack. Emission
-    /// order (innermost link first) and the per-link memo are
-    /// identical to the old recursion.
+    /// Materialize one link of a scalar binary-operator chain, recursing
+    /// like the old demand recursion (`eval_inst` →
+    /// `emit_numeric_binary_op` → `eval_inst(lhs)`). Shallow chains
+    /// (everything hand-written) pay nothing for the deep-chain
+    /// machinery; past [`Self::CHAIN_RECURSION_LIMIT`] links the
+    /// remaining subtree hands off to an iterative walker so both left-
+    /// and right-nested 100k-term chains avoid stack overflow. Emission
+    /// order (innermost link first) and the per-link memo are identical
+    /// to the old recursion.
     fn eval_binop_chain(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -363,12 +370,67 @@ impl<M: Module> Codegen<M> {
         } else {
             Self::eval_inst(builder, ctx, lhs)?
         };
-        let rv = Self::eval_inst(builder, ctx, rhs)?;
+        let rv = Self::eval_inst_d(builder, ctx, rhs, depth + 1)?;
         let v = Self::emit_numeric_binop(builder, ctx, inst.tag, lhs, rhs, lv, rv)?;
         if Self::cached_repr(ctx, root).is_none() {
             Self::cache_repr(ctx, root, ValueRepr::Scalar(v));
         }
         Ok(v)
+    }
+
+    /// Iterative fallback when either operand nests past the chain
+    /// recursion budget. Enter tasks evaluate the lhs before descending
+    /// into a chain rhs; exit tasks emit links on the way back out,
+    /// preserving demand recursion's evaluation and memoization order.
+    #[cold]
+    #[inline(never)]
+    fn eval_binop_machine(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        root: TirRef,
+    ) -> Result<Value, String> {
+        enum Task {
+            Enter(TirRef),
+            Exit(TirRef),
+        }
+
+        let mut tasks = ChainSpine::new();
+        tasks.push(Task::Enter(root));
+        while let Some(task) = tasks.pop() {
+            match task {
+                Task::Enter(node) => {
+                    if Self::cached_repr(ctx, node).is_some() {
+                        continue;
+                    }
+                    let TirData::BinOp { lhs, rhs } = ctx.tir.inst(node).data else {
+                        unreachable!("chain tag must carry TirData::BinOp");
+                    };
+                    Self::eval_inst(builder, ctx, lhs)?;
+                    tasks.push(Task::Exit(node));
+                    if Self::is_chain_binop_tag(ctx.tir.inst(rhs).tag)
+                        && Self::cached_repr(ctx, rhs).is_none()
+                    {
+                        tasks.push(Task::Enter(rhs));
+                    } else {
+                        Self::eval_inst(builder, ctx, rhs)?;
+                    }
+                }
+                Task::Exit(node) => {
+                    if Self::cached_repr(ctx, node).is_some() {
+                        continue;
+                    }
+                    let inst = ctx.tir.inst(node);
+                    let TirData::BinOp { lhs, rhs } = inst.data else {
+                        unreachable!("chain tag must carry TirData::BinOp");
+                    };
+                    let lv = Self::eval_inst(builder, ctx, lhs)?;
+                    let rv = Self::eval_inst(builder, ctx, rhs)?;
+                    let value = Self::emit_numeric_binop(builder, ctx, inst.tag, lhs, rhs, lv, rv)?;
+                    Self::cache_repr(ctx, node, ValueRepr::Scalar(value));
+                }
+            }
+        }
+        Self::eval_inst(builder, ctx, root)
     }
 
     /// Iterative fallback for the deep tail of a scalar binary-

@@ -829,16 +829,29 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-267 — Stack overflow on deeply right-nested operator chains (paren-nested RHS)
+### I-268 — Define broken-pipe semantics for Ryo CLI programs
+
+**Severity:** Correctness / Hygiene
+**Area:** runtime
+
+**Files:** runtime/src/lib.rs; ryo-backend/src/codegen/jit.rs; ryo-driver/src/pipeline/run.rs; ryo/tests/integration_driver.rs; docs/specification.md
+
+**Summary:** Ryo targets first-class CLI applications, but broken-pipe handling currently covers only compiler-owned diagnostics and inspection output. Generated-program behavior is a separate contract: JIT execution inherits the Rust compiler process's SIGPIPE disposition, while AOT programs have an independent native runtime, so execution modes can diverge when a downstream reader closes stdout or stderr early.
+
+**Resolution:** Adopt conventional Unix-filter behavior for generated Ryo programs: default SIGPIPE termination on Unix, with explicit non-panicking EPIPE handling and documented exit behavior on Windows. Implement the policy at the runtime/JIT execution boundary so JIT and AOT agree without changing the existing compiler diagnostic broken-pipe behavior. Specify stdout/stderr and exit-status semantics, and add early-closing-reader tests for both execution modes plus Windows coverage.
+
+---
+
+### I-269 — Stack overflow when deep RHS chains cross unary or call boundaries
 
 **Severity:** Correctness / Hygiene
 **Area:** sema
 
-**Files:** ryo-frontend/src/sema/expr (general expression recursion), ryo-backend/src/codegen/expr (eval_inst); repro at bug_reports/bug_right_nested_chain_stack_overflow.ryo
+**Files:** ryo-frontend/src/sema/expr/mod.rs; ryo-frontend/src/sema/call.rs; ryo-backend/src/codegen/expr/mod.rs
 
-**Summary:** A right-nested chain 1+(1+(1+...)) 100k deep aborts ryo run with a stack overflow in debug builds. The I-261 depth budgets propagate through LHS chain links only; each parenthesized RHS restarts the depth at zero via the general expression entrypoint, so the budget never trips and the recursion grows one frame group per paren level. Pre-existing: main overflows at 50k already (not a PR regression; the PR fixed the left-nested shape). Repro: 100k nested parens, ryo run exits 134; ryo parse alone is fine to 300k.
+**Summary:** Depth is now carried through direct parenthesized binary RHS links, but unary operators and call arguments still enter analyze_expr/eval_inst at depth zero. Confirmed on debug builds: 50k levels of 1+(-(1+(-(...)))) and 50k levels of 1+id(1+id(...)) both abort ryo ir --emit=tir with a stack overflow (exit 134). Codegen has the same reset at unary operands and call-argument evaluation, currently masked by the earlier sema crash.
 
-**Resolution:** Propagate the chain depth through parenthesized RHS operands (or bound the general expression recursion by depth with the existing iterative walkers as spill), keeping the hot path free of per-frame bookkeeping — see how c4c6c99 balances depth limits with the perf gate. Add a regression test with a 100k-deep right-nested chain.
+**Resolution:** Propagate a general expression-depth budget across unary and call boundaries in sema and codegen, with iterative spill for the remaining subtree rather than adding per-frame allocation to the hot path. Add 50k-deep unary-mediated and call-mediated RHS regressions, then exercise end-to-end codegen as well as sema.
 
 ---
 
@@ -850,4 +863,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-<!-- issue-id high-water: 267 -->
+---
+
+<!-- issue-id high-water: 269 -->
