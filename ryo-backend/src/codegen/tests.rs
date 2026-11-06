@@ -12,7 +12,7 @@ use target_lexicon::Triple;
 /// `clif_of` helpers in the `tests/clif_*.rs` integration suites (kept
 /// inline here because the enum codegen tests are unit tests in this
 /// module, per the M11 plan).
-fn clif_of(src: &str) -> String {
+pub(super) fn clif_of(src: &str) -> String {
     let (tirs, flows, pool, sidecar) = analyze(src);
     let mut codegen = Codegen::new_jit().expect("JIT codegen should initialize");
     codegen

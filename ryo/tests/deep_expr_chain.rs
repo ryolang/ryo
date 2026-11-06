@@ -64,6 +64,77 @@ fn jit_run_right_nested_addition_chain_prints_sum() {
     );
 }
 
+fn unary_mediated_add_chain(links: usize) -> String {
+    let mut src = String::from("fn main():\n\tprint(");
+    for _ in 0..links {
+        src.push_str("1+(-(");
+    }
+    src.push('1');
+    for _ in 0..links {
+        src.push_str("))");
+    }
+    src.push_str(")\n");
+    src
+}
+
+fn call_mediated_add_chain(links: usize) -> String {
+    let mut src = String::from("fn id(x: int) -> int:\n\treturn x\n\nfn main():\n\tprint(");
+    for _ in 0..links {
+        src.push_str("1+id(");
+    }
+    src.push('1');
+    for _ in 0..links {
+        src.push(')');
+    }
+    src.push_str(")\n");
+    src
+}
+
+fn nested_call_chain(links: usize) -> String {
+    let mut src = String::from("fn id(x: int) -> int:\n\treturn x\n\nfn main():\n\tprint(");
+    for _ in 0..links {
+        src.push_str("id(");
+    }
+    src.push('1');
+    for _ in 0..links {
+        src.push(')');
+    }
+    src.push_str(")\n");
+    src
+}
+
+fn assert_jit_prints(file_name: &str, src: &str, expected: &str) {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(temp_dir.path(), file_name, src);
+    let output =
+        run_ryo_command(&["run", file_name], &test_file).expect("Failed to run ryo run command");
+    assert!(
+        output.status.success(),
+        "expression compile failed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+}
+
+#[test]
+fn jit_run_unary_mediated_rhs_chain() {
+    assert_jit_prints("unary_mediated.ryo", &unary_mediated_add_chain(10_000), "1");
+}
+
+#[test]
+fn jit_run_call_mediated_rhs_chain() {
+    assert_jit_prints(
+        "call_mediated.ryo",
+        &call_mediated_add_chain(10_000),
+        "10001",
+    );
+}
+
+#[test]
+fn jit_run_nested_call_chain() {
+    assert_jit_prints("nested_calls.ryo", &nested_call_chain(10_000), "1");
+}
+
 fn alternating_add_chain(terms: usize) -> String {
     let mut prefixes = Vec::with_capacity(terms - 1);
     let mut suffix = String::new();

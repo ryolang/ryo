@@ -1,6 +1,10 @@
 //! Expression evaluation and call emission — split from `mod.rs`; see module docs there.
 
 mod fat_slot;
+mod walker;
+use walker::{CodegenExprContext, EvalRequest};
+#[cfg(test)]
+mod walker_tests;
 
 use super::arith::{DIV_OVERFLOW_MSG, DIV_ZERO_MSG, MOD_OVERFLOW_MSG, MOD_ZERO_MSG};
 use super::literals::store_string;
@@ -11,7 +15,6 @@ use super::{
 use cranelift::codegen::ir::{FuncRef, MemFlagsData, StackSlot};
 use cranelift::prelude::*;
 use cranelift_module::{Linkage, Module};
-use ryo_core::spine::ChainSpine;
 use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, TypeKind, ViewKind};
 use std::collections::HashMap;
@@ -39,17 +42,25 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
     ) -> Result<Value, String> {
-        Self::eval_inst_d(builder, ctx, r, 0)
+        match Self::eval_inst_with(
+            builder,
+            ctx,
+            r,
+            EvalRequest::Scalar,
+            CodegenExprContext::root(),
+        )? {
+            ValueRepr::Scalar(value) => Ok(value),
+            _ => unreachable!("scalar request must produce a scalar value"),
+        }
     }
 
-    /// Depth-carrying body of [`Self::eval_inst`]; `depth` is the
-    /// operator-chain recursion budget consumed so far (see
-    /// [`Self::eval_binop_chain`]).
+    /// Depth-carrying body of [`Self::eval_inst`]; `context` tracks the
+    /// expression recursion budget (see [`Self::eval_binop_chain`]).
     fn eval_inst_d(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
-        depth: u32,
+        context: CodegenExprContext,
     ) -> Result<Value, String> {
         if let Some(repr) = Self::cached_repr(ctx, r) {
             return match repr {
@@ -81,6 +92,9 @@ impl<M: Module> Codegen<M> {
                 "eval_inst: fat/view-typed inst %{} reached the scalar entry point; use eval_inst_fat / eval_inst_view",
                 r.index()
             ));
+        }
+        if context.depth >= context.limit && Self::is_generic_scalar_tag(inst.tag) {
+            return Self::eval_expr_machine(builder, ctx, r);
         }
         let value = match inst.tag {
             TirTag::IntConst => match inst.data {
@@ -117,7 +131,7 @@ impl<M: Module> Codegen<M> {
             // the demand recursion they replace overflowed the stack
             // around ~7k terms.
             TirTag::INeg | TirTag::FNeg | TirTag::BoolNot => {
-                Self::eval_unary_chain(builder, ctx, r, depth)?
+                Self::eval_unary_chain(builder, ctx, r, context)?
             }
             TirTag::IAdd
             | TirTag::ISub
@@ -139,13 +153,7 @@ impl<M: Module> Codegen<M> {
             | TirTag::FCmpLt
             | TirTag::FCmpLe
             | TirTag::FCmpGt
-            | TirTag::FCmpGe => {
-                if depth < Self::CHAIN_RECURSION_LIMIT {
-                    Self::eval_binop_chain(builder, ctx, r, depth)?
-                } else {
-                    Self::eval_binop_machine(builder, ctx, r)?
-                }
-            }
+            | TirTag::FCmpGe => Self::eval_binop_chain(builder, ctx, r, context)?,
             TirTag::BoolAnd | TirTag::BoolOr => {
                 // The short-circuit control flow is explicit in
                 // the Flow IR — the lhs block's Branch terminator
@@ -171,7 +179,7 @@ impl<M: Module> Codegen<M> {
                         r.index()
                     ));
                 }
-                Self::emit_call(builder, ctx, r)?
+                Self::emit_call_d(builder, ctx, r, context)?
             }
             TirTag::IfStmt => {
                 // Sema's `assert` desugar puts an IfStmt in
@@ -332,11 +340,9 @@ impl<M: Module> Codegen<M> {
         )
     }
 
-    /// Operator-chain recursion budget: how many chain links the
-    /// old-style recursion may consume before the remaining subtree
-    /// lowers iteratively (`eval_binop_machine` / `eval_unary_spill`).
-    /// Far below the compiler thread's 32 MiB stack (a debug frame per
-    /// link is kilobytes), far above anything a hand-written chain.
+    /// Expression recursion budget before the generic iterative walker
+    /// takes over. Far below the compiler thread's stack, far above
+    /// ordinary hand-written nesting.
     const CHAIN_RECURSION_LIMIT: u32 = 64;
 
     /// Materialize one link of a scalar binary-operator chain, recursing
@@ -352,7 +358,7 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         root: TirRef,
-        depth: u32,
+        context: CodegenExprContext,
     ) -> Result<Value, String> {
         let inst = ctx.tir.inst(root);
         let TirData::BinOp { lhs, rhs } = inst.data else {
@@ -361,89 +367,20 @@ impl<M: Module> Codegen<M> {
         let lv = if Self::is_chain_binop_tag(ctx.tir.inst(lhs).tag)
             && Self::cached_repr(ctx, lhs).is_none()
         {
-            if depth < Self::CHAIN_RECURSION_LIMIT {
-                Self::eval_binop_chain(builder, ctx, lhs, depth + 1)?
+            if context.depth < context.limit {
+                Self::eval_binop_chain(builder, ctx, lhs, context.child())?
             } else {
-                Self::eval_binop_machine(builder, ctx, lhs)?
+                Self::eval_expr_machine(builder, ctx, lhs)?
             }
         } else {
-            Self::eval_inst(builder, ctx, lhs)?
+            Self::eval_inst_d(builder, ctx, lhs, context.child())?
         };
-        let rv = Self::eval_inst_d(builder, ctx, rhs, depth + 1)?;
+        let rv = Self::eval_inst_d(builder, ctx, rhs, context.child())?;
         let v = Self::emit_numeric_binop(builder, ctx, inst.tag, lhs, rhs, lv, rv)?;
         if Self::cached_repr(ctx, root).is_none() {
             Self::cache_repr(ctx, root, ValueRepr::Scalar(v));
         }
         Ok(v)
-    }
-
-    /// Iterative fallback when either operand nests past the chain
-    /// recursion budget. Enter tasks descend into a chain lhs, after-lhs
-    /// tasks descend into the rhs, and exit tasks emit links on the way
-    /// back out, preserving demand recursion's evaluation and
-    /// memoization order.
-    #[cold]
-    #[inline(never)]
-    fn eval_binop_machine(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        root: TirRef,
-    ) -> Result<Value, String> {
-        enum Task {
-            Enter(TirRef),
-            AfterLhs(TirRef),
-            Exit(TirRef),
-        }
-
-        let mut tasks = ChainSpine::new();
-        tasks.push(Task::Enter(root));
-        while let Some(task) = tasks.pop() {
-            match task {
-                Task::Enter(node) => {
-                    if Self::cached_repr(ctx, node).is_some() {
-                        continue;
-                    }
-                    let TirData::BinOp { lhs, rhs: _ } = ctx.tir.inst(node).data else {
-                        unreachable!("chain tag must carry TirData::BinOp");
-                    };
-                    tasks.push(Task::Exit(node));
-                    tasks.push(Task::AfterLhs(node));
-                    if Self::is_chain_binop_tag(ctx.tir.inst(lhs).tag)
-                        && Self::cached_repr(ctx, lhs).is_none()
-                    {
-                        tasks.push(Task::Enter(lhs));
-                    } else {
-                        Self::eval_inst(builder, ctx, lhs)?;
-                    }
-                }
-                Task::AfterLhs(node) => {
-                    let TirData::BinOp { rhs, .. } = ctx.tir.inst(node).data else {
-                        unreachable!("chain tag must carry TirData::BinOp");
-                    };
-                    if Self::is_chain_binop_tag(ctx.tir.inst(rhs).tag)
-                        && Self::cached_repr(ctx, rhs).is_none()
-                    {
-                        tasks.push(Task::Enter(rhs));
-                    } else {
-                        Self::eval_inst(builder, ctx, rhs)?;
-                    }
-                }
-                Task::Exit(node) => {
-                    if Self::cached_repr(ctx, node).is_some() {
-                        continue;
-                    }
-                    let inst = ctx.tir.inst(node);
-                    let TirData::BinOp { lhs, rhs } = inst.data else {
-                        unreachable!("chain tag must carry TirData::BinOp");
-                    };
-                    let lv = Self::eval_inst(builder, ctx, lhs)?;
-                    let rv = Self::eval_inst(builder, ctx, rhs)?;
-                    let value = Self::emit_numeric_binop(builder, ctx, inst.tag, lhs, rhs, lv, rv)?;
-                    Self::cache_repr(ctx, node, ValueRepr::Scalar(value));
-                }
-            }
-        }
-        Self::eval_inst(builder, ctx, root)
     }
 
     /// Materialize one link of a unary-operator chain (`not not ...`,
@@ -453,7 +390,7 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         root: TirRef,
-        depth: u32,
+        context: CodegenExprContext,
     ) -> Result<Value, String> {
         let inst = ctx.tir.inst(root);
         let TirData::UnOp(operand) = inst.data else {
@@ -464,15 +401,29 @@ impl<M: Module> Codegen<M> {
             TirTag::INeg | TirTag::FNeg | TirTag::BoolNot
         ) && Self::cached_repr(ctx, operand).is_none()
         {
-            if depth < Self::CHAIN_RECURSION_LIMIT {
-                Self::eval_unary_chain(builder, ctx, operand, depth + 1)?
+            if context.depth < context.limit {
+                Self::eval_unary_chain(builder, ctx, operand, context.child())?
             } else {
-                Self::eval_unary_spill(builder, ctx, operand)?
+                Self::eval_expr_machine(builder, ctx, operand)?
             }
         } else {
-            Self::eval_inst(builder, ctx, operand)?
+            Self::eval_inst_d(builder, ctx, operand, context.child())?
         };
-        let value = match inst.tag {
+        let value = Self::emit_unary_link(builder, ctx, inst.tag, operand, acc)?;
+        if Self::cached_repr(ctx, root).is_none() {
+            Self::cache_repr(ctx, root, ValueRepr::Scalar(value));
+        }
+        Ok(value)
+    }
+
+    fn emit_unary_link(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        tag: TirTag,
+        operand: TirRef,
+        acc: Value,
+    ) -> Result<Value, String> {
+        let value = match tag {
             TirTag::INeg => {
                 // Spec §18 checked negation: `-(x)` as `0 - x` so
                 // `-(i64::MIN)` sets the overflow flag and panics.
@@ -495,85 +446,9 @@ impl<M: Module> Codegen<M> {
                 let one = builder.ins().iconst(types::I8, 1);
                 builder.ins().bxor(acc, one)
             }
-            _ => unreachable!("non-unary tag in eval_unary_chain: {:?}", inst.tag),
+            _ => unreachable!("non-unary tag in emit_unary_link: {:?}", tag),
         };
-        if Self::cached_repr(ctx, root).is_none() {
-            Self::cache_repr(ctx, root, ValueRepr::Scalar(value));
-        }
         Ok(value)
-    }
-
-    /// Iterative fallback for the deep tail of a unary-operator chain —
-    /// see [`Self::eval_unary_chain`].
-    fn eval_unary_spill(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        root: TirRef,
-    ) -> Result<Value, String> {
-        let mut spine = ChainSpine::new();
-        let inner = {
-            let mut cur = root;
-            loop {
-                let inst = ctx.tir.inst(cur);
-                let TirData::UnOp(operand) = inst.data else {
-                    unreachable!("unary chain tag must carry TirData::UnOp");
-                };
-                spine.push(cur);
-                if matches!(
-                    ctx.tir.inst(operand).tag,
-                    TirTag::INeg | TirTag::FNeg | TirTag::BoolNot
-                ) && Self::cached_repr(ctx, operand).is_none()
-                {
-                    cur = operand;
-                } else {
-                    break operand;
-                }
-            }
-        };
-        let mut acc = Self::eval_inst(builder, ctx, inner)?;
-        let mut result: Result<Value, String> = Ok(acc);
-        spine.fold_rev_until(|node| {
-            let inst = ctx.tir.inst(node);
-            let TirData::UnOp(operand) = inst.data else {
-                unreachable!("unary chain tag must carry TirData::UnOp");
-            };
-            let next = match inst.tag {
-                TirTag::INeg => {
-                    let zero = builder.ins().iconst(ctx.int_type, 0);
-                    if ranges::int_range_of(ctx.tir, &ctx.range_facts, operand)
-                        .and_then(|r| r.checked_neg())
-                        .is_some()
-                    {
-                        Ok(builder.ins().isub(zero, acc))
-                    } else {
-                        let (r, of) = builder.ins().ssub_overflow(zero, acc);
-                        match Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG) {
-                            Ok(()) => Ok(r),
-                            Err(e) => Err(e),
-                        }
-                    }
-                }
-                TirTag::FNeg => Ok(builder.ins().fneg(acc)),
-                TirTag::BoolNot => {
-                    let one = builder.ins().iconst(types::I8, 1);
-                    Ok(builder.ins().bxor(acc, one))
-                }
-                _ => unreachable!("non-unary tag in eval_unary_spill: {:?}", inst.tag),
-            };
-            acc = match next {
-                Ok(v) => v,
-                Err(e) => {
-                    result = Err(e);
-                    return false;
-                }
-            };
-            if Self::cached_repr(ctx, node).is_none() {
-                Self::cache_repr(ctx, node, ValueRepr::Scalar(acc));
-            }
-            result = Ok(acc);
-            true
-        });
-        result
     }
 
     /// Lower a scalar numeric binary instruction from its two operand
@@ -1153,7 +1028,16 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
     ) -> Result<Value, String> {
-        Self::emit_call_slot(builder, ctx, r, None)
+        Self::emit_call_slot_d(builder, ctx, r, None, CodegenExprContext::root())
+    }
+
+    fn emit_call_d(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        context: CodegenExprContext,
+    ) -> Result<Value, String> {
+        Self::emit_call_slot_d(builder, ctx, r, None, context)
     }
 
     /// `emit_call` with a caller-provided sret destination: a
@@ -1164,6 +1048,16 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
         out_slot: Option<StackSlot>,
+    ) -> Result<Value, String> {
+        Self::emit_call_slot_d(builder, ctx, r, out_slot, CodegenExprContext::root())
+    }
+
+    fn emit_call_slot_d(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        out_slot: Option<StackSlot>,
+        context: CodegenExprContext,
     ) -> Result<Value, String> {
         let view = ctx.tir.call_view(r);
         let name_id = view.name;
@@ -1441,7 +1335,7 @@ impl<M: Module> Codegen<M> {
             .map(|(id, abi)| (*id, abi.result))
             .ok_or_else(|| format!("Undefined function: '{}'", name_str))?;
 
-        let marshalled = Self::marshal_user_call_args(builder, ctx, r, out_slot)?;
+        let marshalled = Self::marshal_user_call_args_d(builder, ctx, r, out_slot, context)?;
         // Guard recursive (call-graph cycle) calls with the
         // stack-limit check, right before the call instruction.
         Self::maybe_emit_stack_check(builder, ctx, name_id)?;
@@ -1549,6 +1443,16 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
         out_slot: Option<StackSlot>,
+    ) -> Result<MarshalledArgs, String> {
+        Self::marshal_user_call_args_d(builder, ctx, r, out_slot, CodegenExprContext::root())
+    }
+
+    fn marshal_user_call_args_d(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        out_slot: Option<StackSlot>,
+        context: CodegenExprContext,
     ) -> Result<MarshalledArgs, String> {
         let view = ctx.tir.call_view(r);
         let name_id = view.name;
@@ -1680,7 +1584,7 @@ impl<M: Module> Codegen<M> {
                 let addr = Self::emit_enum_call_arg(builder, ctx, arg, mode)?;
                 values.push(addr);
             } else {
-                values.push(Self::eval_inst(builder, ctx, arg)?);
+                values.push(Self::eval_inst_d(builder, ctx, arg, context.child())?);
             }
         }
 
