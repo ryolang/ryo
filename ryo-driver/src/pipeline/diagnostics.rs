@@ -23,7 +23,7 @@ pub(super) fn fail_with_diags(diags: Vec<Diag>, input: &str, source_name: &str) 
 /// span and would otherwise sort to the top; it's rendered
 /// out-of-band after the sorted sweep so the suppression marker
 /// always lands at the bottom of the report.
-fn render_diags(diags: &[Diag], input: &str, source_name: &str) {
+fn render_diags(diags: &[Diag], input: &str, source_name: &str) -> Result<(), CompilerError> {
     let source = Source::from(input);
     // Ariadne 0.6 indexes `Source` by CHARACTER offset, but every span
     // in the compiler is a BYTE offset (logos + `str` slicing). On pure
@@ -41,11 +41,12 @@ fn render_diags(diags: &[Diag], input: &str, source_name: &str) {
     let mut sorted = regular;
     sorted.sort_by_key(|d| (d.span.start, d.span.end));
     for d in sorted {
-        emit_one(d, source_name, &source, &byte_to_char);
+        emit_one(d, source_name, &source, &byte_to_char)?;
     }
     for d in truncation {
-        emit_one(d, source_name, &source, &byte_to_char);
+        emit_one(d, source_name, &source, &byte_to_char)?;
     }
+    Ok(())
 }
 
 /// Prefix table mapping byte offsets to character offsets: entry `i`
@@ -74,7 +75,28 @@ fn to_char_span(offsets: &[usize], span: std::ops::Range<usize>) -> std::ops::Ra
         ..offsets.get(span.end).copied().unwrap_or(fallback)
 }
 
-fn emit_one(d: &Diag, source_name: &str, source: &Source<&str>, byte_to_char: &[usize]) {
+fn emit_one(
+    d: &Diag,
+    source_name: &str,
+    source: &Source<&str>,
+    byte_to_char: &[usize],
+) -> Result<(), CompilerError> {
+    emit_one_with_writer(
+        d,
+        source_name,
+        source,
+        byte_to_char,
+        &mut std::io::stderr().lock(),
+    )
+}
+
+fn emit_one_with_writer<W: std::io::Write>(
+    d: &Diag,
+    source_name: &str,
+    source: &Source<&str>,
+    byte_to_char: &[usize],
+    out: &mut W,
+) -> Result<(), CompilerError> {
     let kind = match d.severity {
         Severity::Error => ReportKind::Error,
         Severity::Warning => ReportKind::Warning,
@@ -103,11 +125,14 @@ fn emit_one(d: &Diag, source_name: &str, source: &Source<&str>, byte_to_char: &[
             report = report.with_note(&note.message);
         }
     }
-    if report.finish().eprint((source_name, source)).is_err() {
-        // Ariadne can fail on out-of-range spans or stderr write
-        // errors; fall back to a plain line rather than panicking
-        // mid-report and suppressing the remaining diagnostics.
-        eprintln!("{}: {}", code, d.message);
+    match report.finish().write((source_name, source), &mut *out) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(_) => {
+            // Try a plain line for rendering failures. If that write also
+            // fails, preserve the output error unless the pipe has closed.
+            crate::output::write_and_flush(out, format_args!("{}: {}\n", code, d.message))
+        }
     }
 }
 
@@ -243,7 +268,7 @@ pub(super) fn finalize_diags(
 ) -> Result<(), CompilerError> {
     let has_errors = diags.iter().any(|d| d.severity == Severity::Error);
     if !diags.is_empty() {
-        render_diags(&diags, input, source_name);
+        render_diags(&diags, input, source_name)?;
     }
     if has_errors {
         Err(CompilerError::Diagnostics(diags))
@@ -477,5 +502,84 @@ mod tests {
         // Out-of-range byte offsets fall back to the char length
         // instead of panicking.
         assert_eq!(to_char_span(&table, 5..9), 2..2);
+    }
+
+    struct FailFirstWrite {
+        kind: std::io::ErrorKind,
+        failed: bool,
+        output: Vec<u8>,
+    }
+
+    impl FailFirstWrite {
+        fn new(kind: std::io::ErrorKind) -> Self {
+            Self {
+                kind,
+                failed: false,
+                output: Vec::new(),
+            }
+        }
+    }
+
+    impl std::io::Write for FailFirstWrite {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.failed {
+                self.output.extend_from_slice(buf);
+                Ok(buf.len())
+            } else {
+                self.failed = true;
+                Err(std::io::Error::new(self.kind, "render failed"))
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn non_pipe_report_write_failure_uses_plain_fallback() {
+        let input = "print(name)\n";
+        let diag = Diag::error(
+            ryo_core::span::Span::new(6, 10),
+            DiagCode::UseAfterMove,
+            "use of moved value `name`",
+        );
+        let mut writer = FailFirstWrite::new(std::io::ErrorKind::Other);
+
+        emit_one_with_writer(
+            &diag,
+            "test.ryo",
+            &Source::from(input),
+            &byte_to_char_offsets(input),
+            &mut writer,
+        )
+        .expect("fallback write should succeed");
+
+        assert_eq!(
+            String::from_utf8(writer.output).expect("fallback should be UTF-8"),
+            "E0020: use of moved value `name`\n"
+        );
+    }
+
+    #[test]
+    fn closed_pipe_report_write_does_not_use_fallback() {
+        let input = "print(name)\n";
+        let diag = Diag::error(
+            ryo_core::span::Span::new(6, 10),
+            DiagCode::UseAfterMove,
+            "use of moved value `name`",
+        );
+        let mut writer = FailFirstWrite::new(std::io::ErrorKind::BrokenPipe);
+
+        emit_one_with_writer(
+            &diag,
+            "test.ryo",
+            &Source::from(input),
+            &byte_to_char_offsets(input),
+            &mut writer,
+        )
+        .expect("closed pipe should be ignored");
+
+        assert!(writer.output.is_empty());
     }
 }

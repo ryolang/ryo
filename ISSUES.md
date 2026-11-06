@@ -803,19 +803,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-260 — Compiler aborts (SIGABRT) when a multi-span diagnostic is piped to an early-closing reader
-
-**Severity:** Correctness / Hygiene
-**Area:** driver-cli
-
-**Files:** unknown (diagnostic rendering path)
-
-**Summary:** Repro: any program whose diagnostic renders with multiple spans plus a note (e.g. E0020 use-of-moved with 'value moved here' help) run as 'ryo run f.ryo | head -3' exits 134 (SIGABRT); the same input exits 1 cleanly when stdout/stderr are drained or a terminal. Single-span diagnostics (E0129) pipe fine. Likely a broken-pipe (EPIPE) write panicking in the diagnostic renderer instead of degrading. Found during structure-aware fuzzing (2026-11-04, commit e82f503). Fuzz harnesses must drain compiler output streams to avoid triggering it.
-
-**Resolution:** Decide the intended behavior for EPIPE on diagnostic output (ignore/SIGPIPE-default vs clean exit 1) and make the renderer tolerate closed pipes; add a regression test that pipes a multi-span diagnostic to a closing reader.
-
----
-
 ### I-262 — Compiler process leaks chumsky recursive parser allocations on every parse (found via Valgrind)
 
 **Severity:** Correctness / Hygiene

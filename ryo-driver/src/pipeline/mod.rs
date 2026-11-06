@@ -10,6 +10,7 @@ pub use inspect::{ir_command, lex_command, parse_command};
 pub use options::{EmitKind, LinkMode};
 pub use run::run_file;
 
+use crate::output::write_stdout;
 use ryo_core::ast;
 use ryo_core::diag::{Diag, DiagSink};
 use ryo_core::errors::CompilerError;
@@ -71,12 +72,12 @@ pub(super) fn lower_and_analyze(
             } else {
                 ""
             };
-            println!(
-                "{}() -> {}{}",
+            write_stdout(format_args!(
+                "{}() -> {}{}\n",
                 pool.str(signature.name),
                 pool.display(signature.return_type),
                 suffix
-            );
+            ))?;
         }
     }
     let analyzed = ryo_frontend::pipeline::BuiltProgram::build(report.tirs, pool)

@@ -1,3 +1,4 @@
+use crate::output::write_stdout;
 use ryo_core::diag::DiagSink;
 use ryo_core::errors::CompilerError;
 use ryo_core::types::InternPool;
@@ -24,7 +25,7 @@ pub fn parse_command(file: &Path) -> Result<(), CompilerError> {
         Ok(v) => v,
         Err(diags) => return Err(fail_with_diags(diags, &input, &name)),
     };
-    display_ast(&program, &pool);
+    display_ast(&program, &pool)?;
     finalize_diags(diags, &input, &name)?;
     Ok(())
 }
@@ -63,8 +64,8 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     };
 
     if want.ast {
-        display_ast(&program, &pool);
-        println!();
+        display_ast(&program, &pool)?;
+        write_stdout(format_args!("\n"))?;
     }
 
     // Lex/parse diagnostics accumulate with the middle-end's so a
@@ -85,8 +86,8 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     let uir = astgen::generate(&program, &mut pool, &mut sink);
 
     if want.uir {
-        display_uir(&uir, &pool);
-        println!();
+        display_uir(&uir, &pool)?;
+        write_stdout(format_args!("\n"))?;
     }
 
     if !(want.tir || want.flow || want.clif) {
@@ -115,8 +116,8 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     }
 
     if want.tir {
-        display_tir(tirs, &pool);
-        println!();
+        display_tir(tirs, &pool)?;
+        write_stdout(format_args!("\n"))?;
     }
     if want.flow {
         display_flow(tirs, flows, sidecar, &pool)?;

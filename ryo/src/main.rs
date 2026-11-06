@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 use ryo_core::errors::CompilerError;
+use ryo_driver::output::write_stdout;
 use ryo_driver::pipeline;
 use ryo_driver::toolchain;
 
@@ -158,7 +159,10 @@ fn cli_main() -> std::process::ExitCode {
             // std Termination handler add its own differently-formatted
             // summary line.)
             if !matches!(e, CompilerError::Diagnostics(_)) {
-                eprintln!("error: {e}");
+                use std::io::Write as _;
+                // Error reporting is best-effort; a stderr failure must not
+                // change the command's exit code.
+                writeln!(std::io::stderr(), "error: {e}").ok();
             }
             std::process::ExitCode::FAILURE
         }
@@ -202,19 +206,22 @@ fn run_command(cli: Cli) -> Result<std::process::ExitCode, CompilerError> {
         Commands::Toolchain { action } => match action {
             ToolchainAction::Install => {
                 toolchain::ensure_zig()?;
-                println!("Toolchain ready.");
+                write_stdout(format_args!("Toolchain ready.\n"))?;
             }
             ToolchainAction::Status { path } => {
                 if path {
                     let zig_path = toolchain::ensure_zig()?;
-                    print!("{}", zig_path.display());
+                    write_stdout(format_args!("{}", zig_path.display()))?;
                 } else {
                     let status = if toolchain::is_installed() {
                         "installed"
                     } else {
                         "not installed"
                     };
-                    println!("Zig version: {} ({status})", toolchain::pinned_version());
+                    write_stdout(format_args!(
+                        "Zig version: {} ({status})\n",
+                        toolchain::pinned_version()
+                    ))?;
                 }
             }
         },
