@@ -423,36 +423,7 @@ fn estimated_token_count(input: &str) -> usize {
 /// without Indent/Dedent markers, so this returns an empty vector
 /// and the driver skips parsing.
 pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Token, Span)> {
-    // Pre-size the raw-token buffer instead of growing it from zero.
-    // logos' `SpannedIter` reports only a trivial `(0, None)` size
-    // hint, so `collect` would otherwise repeatedly reallocate and
-    // memcpy the whole buffer as it grows. The estimate avoids most
-    // of those reallocations on typical input — but it is NOT an
-    // upper bound (see estimated_token_count): punctuation-dense
-    // input may still grow the buffer, costing a reallocation,
-    // nothing more.
-    let mut raw_tokens: Vec<(RawToken<'_>, Span)> =
-        Vec::with_capacity(estimated_token_count(input));
-    raw_tokens.extend(
-        RawToken::lexer(input)
-            .spanned()
-            .map(|(tok, span)| match tok {
-                Ok(t) => (t, span.into()),
-                Err(()) => {
-                    // logos matched nothing at this span: the source
-                    // holds a character the grammar doesn't recognize.
-                    // The text is sliced from the input and escaped so
-                    // control bytes (e.g. a lone `\r`) render readably.
-                    let text = input[span.clone()].escape_debug().to_string();
-                    sink.emit(Diag::error(
-                        crate::spans::cspan(SimpleSpan::new((), span.clone())),
-                        DiagCode::InvalidCharacter,
-                        format!("invalid character '{}'", text),
-                    ));
-                    (RawToken::Error, span.into())
-                }
-            }),
-    );
+    let raw_tokens = collect_raw_tokens(input, sink);
 
     let processed = match crate::indent::process(raw_tokens) {
         Ok(processed) => processed,
@@ -479,6 +450,207 @@ pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Toke
         out.push((tok, span));
     }
     out
+}
+
+/// Worst-case Logos DFA stack growth per escape source byte.
+///
+/// Logos compiles the `\\.` alternative of the string/bytes literal
+/// regexes into DFA state functions that hand off with plain
+/// `return stateN(...)` calls. Rust guarantees no tail calls, so in
+/// debug builds every escape sequence in a literal body parks its
+/// state-function frames until the token's match completes — measured
+/// ~1.5 KB per escape, overflowing a 32 MiB stack between 20k and 25k
+/// `\xNN` escapes. The two-byte escapes (`\n`, `\t`, `\r`, `\\`, `\"`,
+/// `\0`) park roughly twice the frames per source byte of `\xNN`
+/// (~740 B/byte); 1024 covers both with headroom for fatter debug
+/// frames on other targets. Release builds do tail-call and stay flat,
+/// and the oversized reserve is lazily committed, so sizing for debug
+/// costs nothing there.
+const DFA_STACK_PER_BYTE: usize = 1024;
+
+/// Run the raw-token collection inline while the worst-case DFA depth
+/// of the input's largest literal fits the 2 MiB default stack of a
+/// spawned thread (the CLI worker sets 32 MiB explicitly; test threads
+/// get the 2 MiB std default), so typical sources pay no spawn cost.
+/// Only literals with more than ~2 KiB of escapes take the sized-thread path.
+const DFA_INLINE_BUDGET: usize = 2 * 1024 * 1024;
+
+/// Upper bound on the lexing-thread stack reserve. The reserve is
+/// lazily committed, but hosts without overcommit can refuse absurd
+/// reservations, and no literal can outgrow the whole input's worth of
+/// frames — 1 GiB covers more than a million escapes of either kind.
+const DFA_STACK_MAX: usize = 1024 * 1024 * 1024;
+
+/// Source bytes consumed by escape sequences in the largest literal.
+/// Ordinary literal bytes do not recurse through the DFA's `\\.`
+/// alternative and do not contribute to its stack requirement.
+fn longest_literal_escape_bytes(input: &str) -> usize {
+    let bytes = input.as_bytes();
+    let mut longest = 0;
+    let mut literal_escapes = None;
+    let mut at = 0;
+    while at < bytes.len() {
+        if let Some(escapes) = literal_escapes.as_mut() {
+            match bytes[at] {
+                b'"' => {
+                    longest = longest.max(*escapes);
+                    literal_escapes = None;
+                    at += 1;
+                }
+                b'\\' if bytes.get(at + 1) == Some(&b'\n') => {
+                    longest = longest.max(*escapes);
+                    literal_escapes = None;
+                    at += 1;
+                }
+                b'\\' => {
+                    let width = 1 + input[at + 1..].chars().next().map_or(0, char::len_utf8);
+                    *escapes += width;
+                    at += width;
+                }
+                _ => at += 1,
+            }
+            continue;
+        }
+        match bytes[at] {
+            b'#' if bytes.get(at + 1) != Some(&b'[') => {
+                at += 1;
+                while at < bytes.len() && !matches!(bytes[at], b'\r' | b'\n') {
+                    at += 1;
+                }
+            }
+            b'"' => {
+                literal_escapes = Some(0);
+                at += 1;
+            }
+            _ => at += 1,
+        }
+    }
+    if let Some(escapes) = literal_escapes {
+        longest = longest.max(escapes);
+    }
+    longest
+}
+
+/// Worst-case DFA stack the longest literal can need, clamped to a
+/// spawnable size.
+fn dfa_stack_size(escape_bytes: usize) -> usize {
+    escape_bytes
+        .saturating_mul(DFA_STACK_PER_BYTE)
+        .clamp(DFA_INLINE_BUDGET, DFA_STACK_MAX)
+}
+
+/// Spawn `f` on a scoped thread with the given stack. Extracted so the
+/// closure's borrow of its captures ends with the call — the caller's
+/// fallback path needs them back when the spawn is refused.
+fn spawn_sized<'scope, 'env, F, T>(
+    scope: &'scope std::thread::Scope<'scope, 'env>,
+    stack_size: usize,
+    f: F,
+) -> std::io::Result<std::thread::ScopedJoinHandle<'scope, T>>
+where
+    F: FnOnce() -> T + Send + 'env,
+    T: Send + 'env,
+{
+    #[cfg(test)]
+    if REFUSE_SIZED_SPAWN.with(|refuse| refuse.get()) {
+        return Err(std::io::Error::other("refused by test"));
+    }
+    std::thread::Builder::new()
+        .stack_size(stack_size)
+        .spawn_scoped(scope, f)
+}
+
+#[cfg(test)]
+thread_local! {
+    static REFUSE_SIZED_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Drive `RawToken::lexer` over the input, mapping logos misses to
+/// `RawToken::Error` plus an `InvalidCharacter` diagnostic. Split out
+/// of `lex` so the pass can run on a scoped thread with an input-sized
+/// stack: a single literal holding tens of thousands of escapes needs
+/// a stack proportional to its escape content, which no fixed caller
+/// stack guarantees (see `DFA_STACK_PER_BYTE`).
+fn collect_raw_tokens<'a>(input: &'a str, sink: &mut DiagSink) -> Vec<(RawToken<'a>, Span)> {
+    let collect = |sink: &mut DiagSink| {
+        // Pre-size the raw-token buffer instead of growing it from
+        // zero. logos' `SpannedIter` reports only a trivial
+        // `(0, None)` size hint, so `collect` would otherwise
+        // repeatedly reallocate and memcpy the whole buffer as it
+        // grows. The estimate avoids most of those reallocations on
+        // typical input — but it is NOT an upper bound (see
+        // estimated_token_count): punctuation-dense input may still
+        // grow the buffer, costing a reallocation, nothing more.
+        let mut raw_tokens: Vec<(RawToken<'_>, Span)> =
+            Vec::with_capacity(estimated_token_count(input));
+        raw_tokens.extend(
+            RawToken::lexer(input)
+                .spanned()
+                .map(|(tok, span)| match tok {
+                    Ok(t) => (t, span.into()),
+                    Err(()) => {
+                        // logos matched nothing at this span: the source
+                        // holds a character the grammar doesn't recognize.
+                        // The text is sliced from the input and escaped so
+                        // control bytes (e.g. a lone `\r`) render readably.
+                        let text = input[span.clone()].escape_debug().to_string();
+                        sink.emit(Diag::error(
+                            crate::spans::cspan(SimpleSpan::new((), span.clone())),
+                            DiagCode::InvalidCharacter,
+                            format!("invalid character '{}'", text),
+                        ));
+                        (RawToken::Error, span.into())
+                    }
+                }),
+        );
+        raw_tokens
+    };
+    let escape_bytes = longest_literal_escape_bytes(input);
+    let reject_too_large = |sink: &mut DiagSink| {
+        sink.emit(Diag::error(
+            crate::spans::cspan(SimpleSpan::new((), 0..input.len())),
+            DiagCode::LexerInputTooLarge,
+            format!(
+                "string literal is too large to lex ({} bytes of escapes in one literal; the limit is {})",
+                escape_bytes,
+                DFA_STACK_MAX / DFA_STACK_PER_BYTE,
+            ),
+        ));
+        Vec::new()
+    };
+    // Above the cap even the sized thread would overflow: reject instead
+    // of scanning. Needs >1 MiB of escapes in one literal.
+    if escape_bytes.saturating_mul(DFA_STACK_PER_BYTE) > DFA_STACK_MAX {
+        return reject_too_large(sink);
+    }
+    if escape_bytes.saturating_mul(DFA_STACK_PER_BYTE) <= DFA_INLINE_BUDGET {
+        return collect(sink);
+    }
+    enum Outcome<'a> {
+        Tokens(Vec<(RawToken<'a>, Span)>),
+        SpawnRefused,
+    }
+    // The scoped thread borrows `sink` for the whole scope, so a refused
+    // spawn is reported out and handled after the scope ends.
+    let outcome = std::thread::scope(|scope| {
+        match spawn_sized(scope, dfa_stack_size(escape_bytes), || collect(sink)) {
+            Ok(handle) => Outcome::Tokens(
+                handle
+                    .join()
+                    .unwrap_or_else(|payload| std::panic::resume_unwind(payload)),
+            ),
+            Err(_) => Outcome::SpawnRefused,
+        }
+    });
+    match outcome {
+        Outcome::Tokens(tokens) => tokens,
+        Outcome::SpawnRefused
+            if escape_bytes.saturating_mul(DFA_STACK_PER_BYTE) <= DFA_INLINE_BUDGET =>
+        {
+            collect(sink)
+        }
+        Outcome::SpawnRefused => reject_too_large(sink),
+    }
 }
 
 /// Decode standard escape sequences in a string/bytes-literal body.
@@ -1453,6 +1625,174 @@ mod tests {
         match toks[2] {
             Token::BytesLit(id) => assert_eq!(pool.bytes_payload(id), b"\n\t\r\\\"\0"),
             ref t => panic!("expected BytesLit at index 2, got {:?}", t),
+        }
+    }
+
+    #[test]
+    fn bytes_literal_with_many_escapes_does_not_overflow_stack() {
+        // The Logos DFA for literal bodies recurses per escape
+        // (~1.5 KB per escape in debug builds), so a bytes literal with
+        // tens of thousands of `\xNN` escapes blows through any fixed
+        // caller stack. 100k escapes must still decode.
+        let mut src = String::from("x = b\"");
+        src.push_str(&"\\x61".repeat(100_000));
+        src.push('"');
+        let (toks, pool) = lex_strings(&src);
+        match toks[2] {
+            Token::BytesLit(id) => {
+                assert_eq!(pool.bytes_payload(id).len(), 100_000);
+                assert!(pool.bytes_payload(id).iter().all(|&b| b == b'a'));
+            }
+            ref t => panic!("expected BytesLit at index 2, got {:?}", t),
+        }
+    }
+
+    #[test]
+    fn dfa_stack_size_is_clamped() {
+        // Small bodies stay at the inline budget; absurd bodies clamp to
+        // the spawnable maximum instead of requesting a stack proportional
+        // to the literal (hosts without overcommit can refuse that).
+        assert_eq!(dfa_stack_size(0), DFA_INLINE_BUDGET);
+        assert_eq!(dfa_stack_size(100), DFA_INLINE_BUDGET);
+        assert_eq!(dfa_stack_size(usize::MAX), DFA_STACK_MAX);
+    }
+
+    #[test]
+    fn longest_literal_escape_bytes_ignores_plain_bytes() {
+        assert_eq!(longest_literal_escape_bytes(""), 0);
+        assert_eq!(longest_literal_escape_bytes("print(1)"), 0);
+        assert_eq!(longest_literal_escape_bytes(r#"s = "abc""#), 0);
+        assert_eq!(longest_literal_escape_bytes(r#"b = b"a\x00b""#), 2);
+        // An escaped quote does not end the body early.
+        assert_eq!(longest_literal_escape_bytes(r#"s = "a\"b" + "xy""#), 2);
+        // Ordinary code around and between literals is not counted.
+        let code = "fn main():\n\ta = \"short\"\n\tprint(a)\n\tb = b\"\\x61\\x62\"\n\tprint(b)\n";
+        assert_eq!(longest_literal_escape_bytes(code), 4);
+        // Quotes in comments do not shift literal boundaries.
+        let adversarial = "# 12\" ruler\ns = \"a\\naa\"\n";
+        assert_eq!(longest_literal_escape_bytes(adversarial), 2);
+        assert_eq!(longest_literal_escape_bytes("#\r\"a\\naa\""), 2);
+        // Unterminated literals count their escapes through EOF.
+        assert_eq!(longest_literal_escape_bytes(r#"s = "a\nbc"#), 2);
+        // A backslash outside a literal does not hide the next literal's escapes.
+        assert_eq!(longest_literal_escape_bytes("\\\"a\\naa\""), 2);
+        assert_eq!(longest_literal_escape_bytes("\\\"a\\naa"), 2);
+    }
+
+    #[test]
+    fn literal_after_invalid_backslash_uses_sized_stack() {
+        // The stray backslash is invalid code (not an escape), so the DFA
+        // opens the string at the quote the parity check marks odd. The
+        // pre-pass must still measure the 100k-escape body and pick the
+        // sized thread instead of overflowing inline.
+        let mut src = String::from("\\\"");
+        src.push_str(&"\\n".repeat(100_000));
+        src.push('"');
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let toks = lex(&src, &mut pool, &mut sink);
+        assert!(
+            sink.into_diags()
+                .iter()
+                .any(|d| d.code == DiagCode::InvalidCharacter),
+            "expected an invalid-character diagnostic for the stray backslash"
+        );
+        assert!(
+            toks.iter()
+                .any(|(t, _)| matches!(t, Token::StrLit(id) if pool.str(*id).len() == 100_000)),
+            "expected the 100k-escape string to lex fully"
+        );
+    }
+
+    #[test]
+    fn ordinary_bytes_do_not_trigger_too_large_diagnostic() {
+        let oversized = "a".repeat(DFA_STACK_MAX / DFA_STACK_PER_BYTE + 1);
+        let cases = [
+            format!("s = \"ok\"\n#{oversized}"),
+            format!("s = \"ok\"\n#{oversized}\nt = \"ok\""),
+            format!("s = \"{oversized}\""),
+        ];
+        for src in cases {
+            let mut pool = InternPool::new();
+            let mut sink = DiagSink::new();
+            let toks = lex(&src, &mut pool, &mut sink);
+            assert!(
+                !sink
+                    .into_diags()
+                    .iter()
+                    .any(|d| d.code == DiagCode::LexerInputTooLarge),
+                "ordinary source bytes must not be rejected as a literal"
+            );
+            assert!(toks.iter().any(|(t, _)| matches!(t, Token::StrLit(_))));
+        }
+    }
+
+    #[test]
+    fn refused_sized_spawn_rejects_over_budget_literal() {
+        let mut src = String::from("s = \"");
+        src.push_str(&"\\n".repeat(2_000));
+        src.push('"');
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        REFUSE_SIZED_SPAWN.with(|refuse| refuse.set(true));
+        let toks = lex(&src, &mut pool, &mut sink);
+        REFUSE_SIZED_SPAWN.with(|refuse| refuse.set(false));
+        assert!(
+            sink.into_diags()
+                .iter()
+                .any(|d| d.code == DiagCode::LexerInputTooLarge)
+        );
+        assert!(toks.is_empty());
+    }
+
+    #[test]
+    fn over_cap_literal_is_rejected_without_scanning() {
+        // 600k escapes = 1.2 MiB body, past the 1 GiB stack cap: the
+        // lexer must reject with a diagnostic instead of overflowing the
+        // sized thread. Scanning would take a long time; this test also
+        // proves the reject happens before the DFA runs.
+        let mut src = String::from("s = \"");
+        src.push_str(&"\\n".repeat(600_000));
+        src.push('"');
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let toks = lex(&src, &mut pool, &mut sink);
+        assert!(
+            sink.into_diags()
+                .iter()
+                .any(|d| d.code == DiagCode::LexerInputTooLarge),
+            "expected a too-large-literal diagnostic"
+        );
+        assert!(toks.is_empty(), "over-cap input must not be scanned");
+    }
+
+    #[test]
+    fn unterminated_literal_with_many_escapes_does_not_overflow_stack() {
+        // One unescaped quote, then a long run of escapes and no closer:
+        // the pre-pass must measure the tail so the sized thread is used
+        // instead of the inline-budget path. Must report an error, not crash.
+        let mut src = String::from("s = \"");
+        src.push_str(&"\\n".repeat(100_000));
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let _ = lex(&src, &mut pool, &mut sink);
+        assert!(
+            !sink.into_diags().is_empty(),
+            "expected an unterminated-literal error"
+        );
+    }
+
+    #[test]
+    fn string_literal_with_many_short_escapes_does_not_overflow_stack() {
+        // The two-byte escapes (\n et al.) park ~2x the DFA frames per
+        // source byte of \xNN; 100k of them must still lex.
+        let mut src = String::from("s = \"");
+        src.push_str(&"\\n".repeat(100_000));
+        src.push('"');
+        let (toks, pool) = lex_strings(&src);
+        match toks[2] {
+            Token::StrLit(id) => assert_eq!(pool.str(id).len(), 100_000),
+            ref t => panic!("expected StrLit at index 2, got {:?}", t),
         }
     }
 

@@ -3,6 +3,7 @@
 use super::{FuncCtx, Scope, Sema, analyze_match, check_call};
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::extra::enum_lit_extra;
+use ryo_core::spine::ChainSpine;
 use ryo_core::tir::{TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, StructField, TypeId, TypeKind, VariantKind, ViewKind};
 use ryo_core::uir::{InstData, InstRef, InstTag, Span, StructLitView, Uir};
@@ -159,59 +160,8 @@ pub(crate) fn analyze_expr_allow_never(
         | InstTag::LtEq
         | InstTag::GtEq
         | InstTag::And
-        | InstTag::Or => {
-            let (lhs, rhs) = match inst.data {
-                InstData::BinOp { lhs, rhs } => (lhs, rhs),
-                _ => unreachable!("binary op must carry InstData::BinOp"),
-            };
-            let l = analyze_expr(sema, fcx, scope, lhs);
-            let r2 = analyze_expr(sema, fcx, scope, rhs);
-            let lhs_ty = fcx.builder.ty_of(l);
-            let rhs_ty = fcx.builder.ty_of(r2);
-            // Constant-evaluate pure integer arithmetic for
-            // diagnostics. A constant-zero divisor always panics at
-            // runtime (the codegen zero-divisor guard), so reject it
-            // at compile time; constant overflow is a compile error
-            // per §18 (overflow traps in all build modes). Float
-            // `x / 0.0` is IEEE-defined (inf) and unaffected.
-            if matches!(
-                inst.tag,
-                InstTag::Add | InstTag::Sub | InstTag::Mul | InstTag::Div | InstTag::Mod
-            ) && lhs_ty == sema.pool.int()
-                && rhs_ty == sema.pool.int()
-            {
-                if matches!(inst.tag, InstTag::Div | InstTag::Mod)
-                    && matches!(const_eval_int(sema.uir, rhs), ConstInt::Value(0))
-                {
-                    sema.sink.emit(Diag::error(
-                        span,
-                        DiagCode::DivisionByZero,
-                        if inst.tag == InstTag::Div {
-                            "division by zero".to_string()
-                        } else {
-                            "modulo by zero".to_string()
-                        },
-                    ));
-                    return fcx.builder.unreachable(sema.pool.error_type(), span);
-                }
-                if matches!(const_eval_int(sema.uir, r), ConstInt::Overflow) {
-                    sema.sink.emit(Diag::error(
-                        span,
-                        DiagCode::ConstEvalFailure,
-                        "integer overflow in constant expression".to_string(),
-                    ));
-                    return fcx.builder.unreachable(sema.pool.error_type(), span);
-                }
-            }
-            check_binary_op(sema, fcx, inst.tag, lhs_ty, rhs_ty, l, r2, span)
-        }
-        InstTag::Neg | InstTag::Not => {
-            let operand = match inst.data {
-                InstData::UnOp(o) => o,
-                _ => unreachable!("unary operator must carry InstData::UnOp"),
-            };
-            operators::analyze_unary_operator(sema, fcx, scope, inst.tag, r, operand, span)
-        }
+        | InstTag::Or => analyze_binop_chain(sema, fcx, scope, r),
+        InstTag::Neg | InstTag::Not => analyze_unary_chain(sema, fcx, scope, r),
         InstTag::Call => {
             let view = sema.uir.call_view(r);
             check_call(sema, fcx, scope, &view, span)
@@ -470,6 +420,368 @@ pub(crate) fn analyze_expr_allow_never(
 
     fcx.inst_map[r.index()] = Some(emitted);
     emitted
+}
+
+/// Binary operators whose UIR operand links can chain to arbitrary
+/// depth: `1+1+1+...` nests one `BinOp` lhs link per term.
+fn is_chain_binop_tag(tag: InstTag) -> bool {
+    matches!(
+        tag,
+        InstTag::Add
+            | InstTag::Sub
+            | InstTag::Mul
+            | InstTag::Div
+            | InstTag::Mod
+            | InstTag::Eq
+            | InstTag::NotEq
+            | InstTag::Lt
+            | InstTag::Gt
+            | InstTag::LtEq
+            | InstTag::GtEq
+            | InstTag::And
+            | InstTag::Or
+    )
+}
+
+/// Analyze one binary-operator link: demand-analyze the rhs, run the
+/// §18 constant checks against the accumulated lhs, and lower through
+/// `check_binary_op`. Shared by the single-link fast path and the
+/// chain walk's fold. `lhs_const` is the folded constant of the
+/// accumulated lhs (`const_eval_int` of it).
+///
+/// Returns `(tir, node_const, memoize)`. The early-error paths
+/// (division/modulo by zero, constant overflow) return `memoize =
+/// false` — the old recursion returned from those without memoizing,
+/// and the chain walk preserves that. `node_const` is the folded
+/// constant of the node: `Overflow` is what the cascade re-reports on
+/// later int-typed links, and a division by zero folds to `NotConst`
+/// exactly like `const_eval_int`.
+#[allow(clippy::too_many_arguments)]
+fn analyze_binop_link(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    tag: InstTag,
+    acc: TirRef,
+    lhs_const: ConstInt,
+    rhs: InstRef,
+    span: Span,
+) -> (TirRef, ConstInt, bool) {
+    let r2 = analyze_expr(sema, fcx, scope, rhs);
+    let lhs_ty = fcx.builder.ty_of(acc);
+    let rhs_ty = fcx.builder.ty_of(r2);
+    // Constant-evaluate pure integer arithmetic for diagnostics.
+    // A constant-zero divisor always panics at runtime (the
+    // codegen zero-divisor guard), so reject it at compile time;
+    // constant overflow is a compile error per §18 (overflow traps
+    // in all build modes). Float `x / 0.0` is IEEE-defined (inf)
+    // and unaffected.
+    let is_int_arith = matches!(
+        tag,
+        InstTag::Add | InstTag::Sub | InstTag::Mul | InstTag::Div | InstTag::Mod
+    ) && lhs_ty == sema.pool.int()
+        && rhs_ty == sema.pool.int();
+    if is_int_arith {
+        if matches!(tag, InstTag::Div | InstTag::Mod)
+            && matches!(const_eval_int(sema.uir, rhs), ConstInt::Value(0))
+        {
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::DivisionByZero,
+                if tag == InstTag::Div {
+                    "division by zero".to_string()
+                } else {
+                    "modulo by zero".to_string()
+                },
+            ));
+            return (
+                fcx.builder.unreachable(sema.pool.error_type(), span),
+                ConstInt::NotConst,
+                false,
+            );
+        }
+        let node_const = combine_const_int(tag, lhs_const, const_eval_int(sema.uir, rhs));
+        if matches!(node_const, ConstInt::Overflow) {
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::ConstEvalFailure,
+                "integer overflow in constant expression".to_string(),
+            ));
+            return (
+                fcx.builder.unreachable(sema.pool.error_type(), span),
+                node_const,
+                false,
+            );
+        }
+        return (
+            check_binary_op(sema, fcx, tag, lhs_ty, rhs_ty, acc, r2, span),
+            node_const,
+            true,
+        );
+    }
+    (
+        check_binary_op(sema, fcx, tag, lhs_ty, rhs_ty, acc, r2, span),
+        ConstInt::NotConst,
+        true,
+    )
+}
+
+/// Analyze a left-associative binary-operator chain iteratively.
+///
+/// The demand recursion descended one stack frame per chain link and
+/// overflowed the compiler's 32 MiB stack around ~7k terms (found by
+/// the 2026-11-04 grammar/recovery fuzz campaign). The walk below keeps
+/// the spine on an explicit `Vec`: each link's lhs is the accumulated
+/// subexpression; its rhs is demand-analyzed through the ordinary path,
+/// so nesting through parens or calls stays recursive exactly as
+/// before. Constant evaluation folds one link at a time — equal to
+/// `const_eval_int` of the accumulated lhs by induction — so a chain is
+/// O(n) instead of re-walking the accumulated subtree per link.
+/// Per-link diagnostics, recovery, and memoization match the old
+/// recursion link for link.
+#[inline]
+fn analyze_binop_chain(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    root: InstRef,
+) -> TirRef {
+    analyze_binop_d(sema, fcx, scope, root, 0)
+}
+
+/// Operator-chain recursion budget: how many chain links the
+/// old-style recursion may consume before the remaining spine lowers
+/// iteratively (`analyze_binop_spill` / `analyze_unary_spill`). Far
+/// below the compiler thread's 32 MiB stack (a debug frame per link is
+/// kilobytes), far above anything a hand-written expression chains.
+const CHAIN_RECURSION_LIMIT: u32 = 64;
+
+/// One link of a left-associative binary-operator chain, recursing like
+/// the old demand recursion. Shallow chains (everything hand-written)
+/// pay nothing for the deep-chain machinery; past
+/// [`CHAIN_RECURSION_LIMIT`] links the remaining spine hands off to
+/// the iterative walker so a 100k-term `1+1+...` chain cannot
+/// overflow the stack. Diagnostics, recovery, and memoization match
+/// the old recursion link for link.
+fn analyze_binop_d(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    node: InstRef,
+    depth: u32,
+) -> TirRef {
+    let inst = sema.uir.inst(node);
+    let InstData::BinOp { lhs, rhs } = inst.data else {
+        unreachable!("chain tag must carry InstData::BinOp");
+    };
+    let l = if is_chain_binop_tag(sema.uir.inst(lhs).tag) && fcx.inst_map[lhs.index()].is_none() {
+        if depth < CHAIN_RECURSION_LIMIT {
+            analyze_binop_d(sema, fcx, scope, lhs, depth + 1)
+        } else {
+            analyze_binop_spill(sema, fcx, scope, lhs)
+        }
+    } else {
+        analyze_expr(sema, fcx, scope, lhs)
+    };
+    let r2 = analyze_expr(sema, fcx, scope, rhs);
+    let lhs_ty = fcx.builder.ty_of(l);
+    let rhs_ty = fcx.builder.ty_of(r2);
+    let span = sema.uir.span(node);
+    // Constant-evaluate pure integer arithmetic for diagnostics.
+    // A constant-zero divisor always panics at runtime (the
+    // codegen zero-divisor guard), so reject it at compile time;
+    // constant overflow is a compile error per §18 (overflow traps
+    // in all build modes). Float `x / 0.0` is IEEE-defined (inf)
+    // and unaffected.
+    if matches!(
+        inst.tag,
+        InstTag::Add | InstTag::Sub | InstTag::Mul | InstTag::Div | InstTag::Mod
+    ) && lhs_ty == sema.pool.int()
+        && rhs_ty == sema.pool.int()
+    {
+        if matches!(inst.tag, InstTag::Div | InstTag::Mod)
+            && matches!(const_eval_int(sema.uir, rhs), ConstInt::Value(0))
+        {
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::DivisionByZero,
+                if inst.tag == InstTag::Div {
+                    "division by zero".to_string()
+                } else {
+                    "modulo by zero".to_string()
+                },
+            ));
+            return fcx.builder.unreachable(sema.pool.error_type(), span);
+        }
+        if matches!(const_eval_int(sema.uir, node), ConstInt::Overflow) {
+            sema.sink.emit(Diag::error(
+                span,
+                DiagCode::ConstEvalFailure,
+                "integer overflow in constant expression".to_string(),
+            ));
+            return fcx.builder.unreachable(sema.pool.error_type(), span);
+        }
+    }
+    let emitted = check_binary_op(sema, fcx, inst.tag, lhs_ty, rhs_ty, l, r2, span);
+    fcx.inst_map[node.index()] = Some(emitted);
+    emitted
+}
+
+/// Iterative fallback for the deep tail of a binary-operator chain —
+/// see [`analyze_binop_d`]. Walks the remaining spine on an explicit
+/// stack, folding constants incrementally so the deep tail stays O(n).
+/// Per-link diagnostics, recovery, and memoization match the recursion.
+fn analyze_binop_spill(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    root: InstRef,
+) -> TirRef {
+    // Spine links, outermost first. Stop descending at an already-
+    // analyzed link (`inst_map` hit) — demand analysis memoizes every
+    // analyzed inst, and re-analyzing would emit duplicate TIR.
+    let mut spine = ChainSpine::new();
+    let inner_lhs = {
+        let mut cur = root;
+        loop {
+            let inst = sema.uir.inst(cur);
+            let InstData::BinOp { lhs, .. } = inst.data else {
+                unreachable!("chain tag must carry InstData::BinOp");
+            };
+            spine.push(cur);
+            if is_chain_binop_tag(sema.uir.inst(lhs).tag) && fcx.inst_map[lhs.index()].is_none() {
+                cur = lhs;
+            } else {
+                break lhs;
+            }
+        }
+    };
+    let mut acc = analyze_expr(sema, fcx, scope, inner_lhs);
+    // Constant value of the accumulated lhs; kept in lockstep with
+    // `acc` so per-link checks are O(1).
+    let mut acc_const = const_eval_int(sema.uir, inner_lhs);
+    spine.fold_rev(|node| {
+        let inst = sema.uir.inst(node);
+        let span = sema.uir.span(node);
+        let InstData::BinOp { rhs, .. } = inst.data else {
+            unreachable!("chain tag must carry InstData::BinOp");
+        };
+        let (next, node_const, memo) =
+            analyze_binop_link(sema, fcx, scope, inst.tag, acc, acc_const, rhs, span);
+        // Early-error links are not memoized, matching the old
+        // recursion's early return; keep folding so outer links still
+        // see the error-typed accumulator.
+        if memo {
+            fcx.inst_map[node.index()] = Some(next);
+        }
+        acc_const = node_const;
+        acc = next;
+    });
+    acc
+}
+
+/// Analyze a unary-operator chain (`not not ...`, `- - ...`) — depth-
+/// bounded recursion like [`analyze_binop_chain`], iterative spill for
+/// the deep tail.
+#[inline]
+fn analyze_unary_chain(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    root: InstRef,
+) -> TirRef {
+    analyze_unary_d(sema, fcx, scope, root, 0)
+}
+
+fn analyze_unary_d(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    node: InstRef,
+    depth: u32,
+) -> TirRef {
+    let inst = sema.uir.inst(node);
+    let InstData::UnOp(operand) = inst.data else {
+        unreachable!("unary chain tag must carry InstData::UnOp");
+    };
+    // Analyze the operand chain (the resulting TirRef is not needed
+    // here — the operator call below reads the memoized analysis).
+    if matches!(sema.uir.inst(operand).tag, InstTag::Neg | InstTag::Not)
+        && fcx.inst_map[operand.index()].is_none()
+    {
+        if depth < CHAIN_RECURSION_LIMIT {
+            analyze_unary_d(sema, fcx, scope, operand, depth + 1);
+        } else {
+            analyze_unary_spill(sema, fcx, scope, operand);
+        }
+    } else {
+        analyze_expr(sema, fcx, scope, operand);
+    }
+    let span = sema.uir.span(node);
+    let emitted = operators::analyze_unary_operator(
+        sema,
+        fcx,
+        scope,
+        inst.tag,
+        operand,
+        const_eval_int(sema.uir, operand),
+        span,
+    );
+    fcx.inst_map[node.index()] = Some(emitted);
+    emitted
+}
+
+/// Iterative fallback for the deep tail of a unary-operator chain —
+/// see [`analyze_unary_d`]. `sub` is the already-analyzed operand Tir;
+/// only the per-link Neg/Not lowering runs here, folding the constant
+/// incrementally so the deep tail stays O(n).
+fn analyze_unary_spill(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    root: InstRef,
+) -> TirRef {
+    let mut spine = ChainSpine::new();
+    let inner = {
+        let mut cur = root;
+        loop {
+            let inst = sema.uir.inst(cur);
+            let InstData::UnOp(operand) = inst.data else {
+                unreachable!("unary chain tag must carry InstData::UnOp");
+            };
+            spine.push(cur);
+            if matches!(sema.uir.inst(operand).tag, InstTag::Neg | InstTag::Not)
+                && fcx.inst_map[operand.index()].is_none()
+            {
+                cur = operand;
+            } else {
+                break operand;
+            }
+        }
+    };
+    let mut acc = analyze_expr(sema, fcx, scope, inner);
+    let mut acc_const = const_eval_int(sema.uir, inner);
+    spine.fold_rev(|node| {
+        let inst = sema.uir.inst(node);
+        let span = sema.uir.span(node);
+        let InstData::UnOp(operand) = inst.data else {
+            unreachable!("unary chain tag must carry InstData::UnOp");
+        };
+        acc =
+            operators::analyze_unary_operator(sema, fcx, scope, inst.tag, operand, acc_const, span);
+        if fcx.builder.ty_of(acc) == sema.pool.int() {
+            // Only Neg reaches here with an int operand; keep the
+            // folded constant in lockstep with `acc`.
+            acc_const = match acc_const {
+                ConstInt::Value(v) => v.checked_neg().map_or(ConstInt::Overflow, ConstInt::Value),
+                other => other,
+            };
+        } else {
+            acc_const = ConstInt::NotConst;
+        }
+        fcx.inst_map[node.index()] = Some(acc);
+    });
+    acc
 }
 
 /// The `&` marker (M8.3): lowers to the inner value's TirRef.
@@ -1311,6 +1623,7 @@ pub(crate) fn check_slice_bound(
 /// Result of compile-time evaluating a pure integer constant
 /// expression: int literals, unary minus, and `+ - * / %` over
 /// constants.
+#[derive(Clone, Copy)]
 pub(crate) enum ConstInt {
     /// Not a constant expression, or contains an inner division /
     /// modulo by zero (that inner node reports E0037 itself — don't
@@ -1328,42 +1641,136 @@ pub(crate) enum ConstInt {
 /// constant-folds at `opt_level = "speed"` for codegen, so sema
 /// evaluates only to reject constant-zero divisors (E0037) and
 /// overflowing constant arithmetic (E0200) early.
+///
+/// Leaves answer directly with no setup at all — `const_eval_int` runs
+/// for every operand of every integer operator, so the common literal /
+/// variable cases must stay free. Negated and arithmetic nodes run the
+/// iterative machine: UIR operand links mirror the AST's nesting, and a
+/// long operator chain nests one link per term — recursion here would
+/// overflow the stack on exactly the chains sema must accept. The
+/// machine's stacks stay inline for shallow subtrees.
+enum ConstEvalTask {
+    Enter(InstRef),
+    Exit(InstRef),
+}
+
+/// Iterative constant evaluation of one Neg- or arith-BinOp-rooted
+/// subtree; see [`const_eval_int`].
+fn const_eval_machine(uir: &Uir, root: InstRef) -> ConstInt {
+    let mut stack: ChainSpine<ConstEvalTask> = ChainSpine::new();
+    let mut vals: ChainSpine<ConstInt> = ChainSpine::new();
+    stack.push(ConstEvalTask::Enter(root));
+    while let Some(task) = stack.pop() {
+        match task {
+            ConstEvalTask::Enter(x) => {
+                let inst = uir.inst(x);
+                match inst.data {
+                    InstData::Int(v) => vals.push(ConstInt::Value(v)),
+                    InstData::UnOp(operand) if inst.tag == InstTag::Neg => {
+                        stack.push(ConstEvalTask::Exit(x));
+                        stack.push(ConstEvalTask::Enter(operand));
+                    }
+                    InstData::BinOp { lhs, rhs }
+                        if matches!(
+                            inst.tag,
+                            InstTag::Add
+                                | InstTag::Sub
+                                | InstTag::Mul
+                                | InstTag::Div
+                                | InstTag::Mod
+                        ) =>
+                    {
+                        stack.push(ConstEvalTask::Exit(x));
+                        stack.push(ConstEvalTask::Enter(rhs));
+                        stack.push(ConstEvalTask::Enter(lhs));
+                    }
+                    _ => vals.push(ConstInt::NotConst),
+                }
+            }
+            ConstEvalTask::Exit(x) => {
+                let inst = uir.inst(x);
+                if inst.tag == InstTag::Neg {
+                    let v = vals.pop().expect("neg operand evaluated");
+                    vals.push(match v {
+                        ConstInt::Value(v) => {
+                            v.checked_neg().map_or(ConstInt::Overflow, ConstInt::Value)
+                        }
+                        other => other,
+                    });
+                } else {
+                    let rv = vals.pop().expect("rhs evaluated");
+                    let l = vals.pop().expect("lhs evaluated");
+                    vals.push(combine_const_int(inst.tag, l, rv));
+                }
+            }
+        }
+    }
+    debug_assert!(!vals.is_empty(), "one root value remains");
+    vals.pop().expect("root value")
+}
+
+/// Combine two evaluated operands under `tag` with the exact
+/// short-circuit semantics the recursive formulation had: overflow
+/// propagates past everything, any non-constant operand poisons the
+/// node, a constant-zero divisor makes div/mod non-constant.
+fn combine_const_int(tag: InstTag, l: ConstInt, rv: ConstInt) -> ConstInt {
+    if matches!(l, ConstInt::Overflow) || matches!(rv, ConstInt::Overflow) {
+        return ConstInt::Overflow;
+    }
+    let (ConstInt::Value(l), ConstInt::Value(rv)) = (l, rv) else {
+        return ConstInt::NotConst;
+    };
+    let result = match tag {
+        InstTag::Add => l.checked_add(rv),
+        InstTag::Sub => l.checked_sub(rv),
+        InstTag::Mul => l.checked_mul(rv),
+        // A constant zero divisor gets E0037 from the inner
+        // division's own analysis — treat as non-constant here.
+        InstTag::Div if rv != 0 => l.checked_div(rv),
+        InstTag::Mod if rv != 0 => l.checked_rem(rv),
+        InstTag::Div | InstTag::Mod => return ConstInt::NotConst,
+        _ => unreachable!("tag set fixed by the callers"),
+    };
+    result.map_or(ConstInt::Overflow, ConstInt::Value)
+}
+
 pub(crate) fn const_eval_int(uir: &Uir, r: InstRef) -> ConstInt {
+    const_eval_d(uir, r, 0)
+}
+
+/// Subtree depth the constant evaluator may recurse before the
+/// remaining subtree evaluates iteratively (`const_eval_machine`) —
+/// same overflow-guard pattern as the operator-chain walkers.
+const CONST_EVAL_DEPTH_LIMIT: u32 = 64;
+
+/// Recursive constant evaluation with the exact semantics of the old
+/// formulation; leaves answer directly (this runs for every operand of
+/// every integer operator, so the common cases must stay free).
+fn const_eval_d(uir: &Uir, r: InstRef, depth: u32) -> ConstInt {
     let inst = uir.inst(r);
     match inst.data {
         InstData::Int(v) => ConstInt::Value(v),
-        InstData::UnOp(operand) if inst.tag == InstTag::Neg => match const_eval_int(uir, operand) {
-            ConstInt::Value(v) => v.checked_neg().map_or(ConstInt::Overflow, ConstInt::Value),
-            other => other,
-        },
+        InstData::UnOp(operand) if inst.tag == InstTag::Neg => {
+            if depth == CONST_EVAL_DEPTH_LIMIT {
+                return const_eval_machine(uir, r);
+            }
+            match const_eval_d(uir, operand, depth + 1) {
+                ConstInt::Value(v) => v.checked_neg().map_or(ConstInt::Overflow, ConstInt::Value),
+                other => other,
+            }
+        }
         InstData::BinOp { lhs, rhs }
             if matches!(
                 inst.tag,
                 InstTag::Add | InstTag::Sub | InstTag::Mul | InstTag::Div | InstTag::Mod
             ) =>
         {
-            let l = const_eval_int(uir, lhs);
-            let rv = const_eval_int(uir, rhs);
-            // Overflow propagates past non-constant sub-expressions;
-            // anything else non-constant poisons the whole tree.
-            if matches!(l, ConstInt::Overflow) || matches!(rv, ConstInt::Overflow) {
-                return ConstInt::Overflow;
+            if depth == CONST_EVAL_DEPTH_LIMIT {
+                return const_eval_machine(uir, r);
             }
-            let (ConstInt::Value(l), ConstInt::Value(rv)) = (l, rv) else {
-                return ConstInt::NotConst;
-            };
-            let result = match inst.tag {
-                InstTag::Add => l.checked_add(rv),
-                InstTag::Sub => l.checked_sub(rv),
-                InstTag::Mul => l.checked_mul(rv),
-                // A constant zero divisor gets E0037 from the inner
-                // division's own analysis — treat as non-constant here.
-                InstTag::Div if rv != 0 => l.checked_div(rv),
-                InstTag::Mod if rv != 0 => l.checked_rem(rv),
-                InstTag::Div | InstTag::Mod => return ConstInt::NotConst,
-                _ => unreachable!("tag set fixed by the match guard"),
-            };
-            result.map_or(ConstInt::Overflow, ConstInt::Value)
+            let l = const_eval_d(uir, lhs, depth + 1);
+            let rv = const_eval_d(uir, rhs, depth + 1);
+            combine_const_int(inst.tag, l, rv)
         }
         _ => ConstInt::NotConst,
     }

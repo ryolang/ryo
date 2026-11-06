@@ -22,7 +22,6 @@ use crate::tir::ParamMode;
 use crate::types::{InternPool, VariantKind};
 use std::borrow::Cow;
 use std::fmt;
-use std::fmt::Write as _;
 
 /// Render a type expression back to source-shaped text: a plain name
 /// as-is, an anonymous struct literal as `{q: int, r: int}`, a
@@ -95,7 +94,12 @@ pub fn render_program(ast: &Ast, pool: &InternPool) -> String {
     out
 }
 
-fn write_program(out: &mut String, ast: &Ast, pool: &InternPool) -> fmt::Result {
+/// Stream the full program render into `out`. Unlike
+/// [`render_program`] this never materializes the whole render in
+/// memory — a deep program's tree dump is quadratic in the nesting
+/// depth (every line carries its full indentation prefix), far too
+/// large to buffer for the operator-chain shapes the compiler accepts.
+pub fn write_program(out: &mut dyn fmt::Write, ast: &Ast, pool: &InternPool) -> fmt::Result {
     writeln!(out, "Program ({}..{})", ast.span().start, ast.span().end)?;
     let stmts = ast.top_level_stmts();
     for (idx, &stmt) in stmts.iter().enumerate() {
@@ -107,7 +111,7 @@ fn write_program(out: &mut String, ast: &Ast, pool: &InternPool) -> fmt::Result 
 /// Write a statement as a tree node: inline label on its own line
 /// with a branch connector, then its children on continuation lines.
 fn write_stmt_tree(
-    out: &mut String,
+    out: &mut dyn fmt::Write,
     ast: &Ast,
     stmt: StmtId,
     prefix: &str,
@@ -129,7 +133,7 @@ fn continuation(is_last: bool) -> &'static str {
     if is_last { "    " } else { "│   " }
 }
 
-fn write_stmt_inline(out: &mut String, ast: &Ast, stmt: StmtId) -> fmt::Result {
+fn write_stmt_inline(out: &mut dyn fmt::Write, ast: &Ast, stmt: StmtId) -> fmt::Result {
     let stmt = ast.stmt(stmt);
     let label = match stmt.kind {
         StmtKind::VarDecl(_) => "VarDecl",
@@ -162,7 +166,7 @@ fn write_stmt_inline(out: &mut String, ast: &Ast, stmt: StmtId) -> fmt::Result {
 /// Write a list of block statements (function/if/loop bodies) under a
 /// header line such as `body:` or `then:`.
 fn write_block(
-    out: &mut String,
+    out: &mut dyn fmt::Write,
     header: &str,
     body: &[StmtId],
     prefix: &str,
@@ -179,7 +183,7 @@ fn write_block(
 }
 
 fn write_stmt_children(
-    out: &mut String,
+    out: &mut dyn fmt::Write,
     ast: &Ast,
     stmt: StmtId,
     prefix: &str,
@@ -361,7 +365,7 @@ fn write_stmt_children(
 }
 
 fn write_function_def(
-    out: &mut String,
+    out: &mut dyn fmt::Write,
     ast: &Ast,
     func: &FunctionDef,
     prefix: &str,
@@ -404,7 +408,7 @@ fn write_function_def(
 }
 
 fn write_if_stmt(
-    out: &mut String,
+    out: &mut dyn fmt::Write,
     ast: &Ast,
     if_stmt: &IfStmt,
     prefix: &str,
@@ -454,7 +458,7 @@ fn write_if_stmt(
 }
 
 fn write_var_decl(
-    out: &mut String,
+    out: &mut dyn fmt::Write,
     ast: &Ast,
     decl: &VarDecl,
     prefix: &str,
@@ -488,10 +492,30 @@ fn write_var_decl(
     write_expr(out, ast, decl.initializer, &init_prefix, true, "", pool)
 }
 
+/// One unit of rendering work for the iterative expression printer
+/// ([`write_expr`]). `Enter` draws a node's header line and schedules
+/// its children; `Leave` restores the prefix to the marked length once
+/// the node's subtree is done; `NoneLine` draws an absent optional
+/// child (e.g. a missing slice bound) the recursive printer spelled
+/// out as `<none>`.
+enum ExprTask {
+    Enter(ExprId, bool, String),
+    NoneLine(bool, String),
+    Leave(usize),
+}
+
 /// Write an expression node: `{prefix}{connector}{label}{name} (span)`
 /// followed by its children under the proper continuation prefix.
+///
+/// The tree is walked iteratively: a long left-associative operator
+/// chain nests one child link per term, and the recursive printer this
+/// replaces overflowed the stack around ~7k terms. Kinds whose
+/// rendering interleaves non-expression output (match arms, catch
+/// bodies) delegate their children to [`write_expr_children`], which
+/// stays recursive — construct nesting is shallow in practice, and its
+/// plain expression grandchildren route back through this driver.
 fn write_expr(
-    out: &mut String,
+    out: &mut dyn fmt::Write,
     ast: &Ast,
     expr: ExprId,
     prefix: &str,
@@ -499,96 +523,287 @@ fn write_expr(
     label: &str,
     pool: &InternPool,
 ) -> fmt::Result {
-    let expr = ast.expr(expr);
-    // `Cow` so the constant labels borrow instead of allocating.
-    let name: Cow<'static, str> = match expr.kind {
-        ExprKind::Literal(lit) => match lit {
-            Literal::Int(n) => Cow::Owned(format!("Literal(Int({}))", n)),
-            Literal::Str(s) => Cow::Owned(format!("Literal(Str({:?}))", pool.str(s))),
-            Literal::Bytes(s) => Cow::Owned(format!("Literal(Bytes({:?}))", pool.bytes_payload(s))),
-            Literal::Bool(b) => Cow::Owned(format!("Literal(Bool({}))", b)),
-            Literal::Float(v) => Cow::Owned(format!("Literal(Float({}))", v)),
-        },
-        ExprKind::Ident(name) => Cow::Owned(format!("Ident({})", pool.str(name))),
-        ExprKind::BinaryOp(_, op, _) => Cow::Owned(format!("BinaryOp({})", op)),
-        ExprKind::UnaryOp(op, _) => Cow::Owned(format!("UnaryOp({})", op)),
-        ExprKind::Call(name, _) => Cow::Owned(format!("Call({})", pool.str(name))),
-        ExprKind::MethodCall { method, .. } => {
-            Cow::Owned(format!("MethodCall(.{})", pool.str(method)))
+    let mut prefix_buf = prefix.to_string();
+    let mut stack: Vec<ExprTask> = vec![ExprTask::Enter(expr, is_last, label.to_string())];
+    while let Some(task) = stack.pop() {
+        match task {
+            ExprTask::Leave(mark) => prefix_buf.truncate(mark),
+            ExprTask::NoneLine(is_last, label) => {
+                writeln!(out, "{}{}{}<none>", prefix_buf, connector(is_last), label)?;
+            }
+            ExprTask::Enter(e, is_last, label) => {
+                let node = ast.expr(e);
+                // `Cow` so the constant labels borrow instead of allocating.
+                let name: Cow<'static, str> = match node.kind {
+                    ExprKind::Literal(lit) => match lit {
+                        Literal::Int(n) => Cow::Owned(format!("Literal(Int({}))", n)),
+                        Literal::Str(s) => Cow::Owned(format!("Literal(Str({:?}))", pool.str(s))),
+                        Literal::Bytes(s) => {
+                            Cow::Owned(format!("Literal(Bytes({:?}))", pool.bytes_payload(s)))
+                        }
+                        Literal::Bool(b) => Cow::Owned(format!("Literal(Bool({}))", b)),
+                        Literal::Float(v) => Cow::Owned(format!("Literal(Float({}))", v)),
+                    },
+                    ExprKind::Ident(name) => Cow::Owned(format!("Ident({})", pool.str(name))),
+                    ExprKind::BinaryOp(_, op, _) => Cow::Owned(format!("BinaryOp({})", op)),
+                    ExprKind::UnaryOp(op, _) => Cow::Owned(format!("UnaryOp({})", op)),
+                    ExprKind::Call(name, _) => Cow::Owned(format!("Call({})", pool.str(name))),
+                    ExprKind::MethodCall { method, .. } => {
+                        Cow::Owned(format!("MethodCall(.{})", pool.str(method)))
+                    }
+                    ExprKind::Borrow(_) => Cow::Borrowed("Borrow"),
+                    ExprKind::Slice { .. } => Cow::Borrowed("Slice"),
+                    ExprKind::Index { .. } => Cow::Borrowed("Index"),
+                    ExprKind::StructLiteral(lit) => {
+                        let name = match lit.name {
+                            Some(ident) => pool.str(ident.name),
+                            None => "anonymous",
+                        };
+                        Cow::Owned(format!("StructLiteral({name})"))
+                    }
+                    ExprKind::FieldAccess { field, .. } => {
+                        Cow::Owned(format!("FieldAccess(.{})", pool.str(field.name)))
+                    }
+                    ExprKind::VariantConstruct(c) => Cow::Owned(format!(
+                        "VariantConstruct({}.{})",
+                        pool.str(c.enum_name.name),
+                        pool.str(c.variant.name)
+                    )),
+                    ExprKind::Match { .. } => Cow::Borrowed("Match"),
+                    ExprKind::ErrorConstruct(c) => {
+                        Cow::Owned(format!("ErrorConstruct({})", pool.str(c.name.name)))
+                    }
+                    ExprKind::Try(_) => Cow::Borrowed("Try"),
+                    ExprKind::Catch(c) => Cow::Owned(match c.binding {
+                        Some(binding) => format!("Catch(as {})", pool.str(binding.name)),
+                        None => "Catch".to_string(),
+                    }),
+                };
+
+                writeln!(
+                    out,
+                    "{}{}{}{} ({}..{})",
+                    prefix_buf,
+                    connector(is_last),
+                    label,
+                    name,
+                    node.span.start,
+                    node.span.end
+                )?;
+
+                let mark = prefix_buf.len();
+                prefix_buf.push_str(continuation(is_last));
+                stack.push(ExprTask::Leave(mark));
+
+                match node.kind {
+                    ExprKind::Literal(_) | ExprKind::Ident(_) => {}
+                    ExprKind::Match { .. } => write_expr_children(out, ast, e, &prefix_buf, pool)?,
+                    ExprKind::Catch(c)
+                        if matches!(
+                            c.body,
+                            CatchBody::Handler(MatchArmBody::Stmts(_)) | CatchBody::Arms(_)
+                        ) =>
+                    {
+                        write_expr_children(out, ast, e, &prefix_buf, pool)?
+                    }
+                    _ => {
+                        let mut children: Vec<ExprChild> = Vec::new();
+                        push_expr_children(ast, pool, e, &mut children);
+                        for child in children.into_iter().rev() {
+                            match child {
+                                ExprChild::Node(child, last, child_label) => {
+                                    stack.push(ExprTask::Enter(child, last, child_label));
+                                }
+                                ExprChild::Missing(last, label) => {
+                                    stack.push(ExprTask::NoneLine(last, label));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-        ExprKind::Borrow(_) => Cow::Borrowed("Borrow"),
-        ExprKind::Slice { .. } => Cow::Borrowed("Slice"),
-        ExprKind::Index { .. } => Cow::Borrowed("Index"),
+    }
+    Ok(())
+}
+
+/// One scheduled child of an expression node: either a plain
+/// expression or an absent optional bound the tree format spells out
+/// as a `<none>` line.
+enum ExprChild {
+    Node(ExprId, bool, String),
+    Missing(bool, String),
+}
+
+/// Append an expression node's plain-expression children to `out`, in
+/// source order — the scheduling shared by the iterative [`write_expr`]
+/// driver. Kinds with non-expression children (match, catch-with-
+/// statements) are absent: the driver renders those through
+/// [`write_expr_children`] instead.
+fn push_expr_children(ast: &Ast, pool: &InternPool, expr: ExprId, out: &mut Vec<ExprChild>) {
+    let node = ast.expr(expr);
+    match node.kind {
+        ExprKind::BinaryOp(lhs, _, rhs) => {
+            out.push(ExprChild::Node(lhs, false, String::new()));
+            out.push(ExprChild::Node(rhs, true, String::new()));
+        }
+        ExprKind::UnaryOp(_, operand) => {
+            out.push(ExprChild::Node(operand, true, String::new()));
+        }
+        ExprKind::Call(_, args) => {
+            let args = ast.expr_list(args);
+            for (i, &arg) in args.iter().enumerate() {
+                out.push(ExprChild::Node(arg, i == args.len() - 1, String::new()));
+            }
+        }
+        ExprKind::MethodCall { receiver, args, .. } => {
+            let args = ast.expr_list(args);
+            out.push(ExprChild::Node(
+                receiver,
+                args.is_empty(),
+                "recv: ".to_string(),
+            ));
+            for (i, &arg) in args.iter().enumerate() {
+                out.push(ExprChild::Node(arg, i == args.len() - 1, String::new()));
+            }
+        }
+        ExprKind::Borrow(inner) => {
+            out.push(ExprChild::Node(inner, true, String::new()));
+        }
+        ExprKind::Slice { base, start, end } => {
+            out.push(ExprChild::Node(base, false, "base: ".to_string()));
+            match start {
+                Some(start) => out.push(ExprChild::Node(start, false, "start: ".to_string())),
+                None => out.push(ExprChild::Missing(false, "start: ".to_string())),
+            }
+            match end {
+                Some(end) => out.push(ExprChild::Node(end, true, "end: ".to_string())),
+                None => out.push(ExprChild::Missing(true, "end: ".to_string())),
+            }
+        }
+        ExprKind::Index { base, index } => {
+            out.push(ExprChild::Node(base, false, "base: ".to_string()));
+            out.push(ExprChild::Node(index, true, "index: ".to_string()));
+        }
         ExprKind::StructLiteral(lit) => {
-            let name = match lit.name {
-                Some(ident) => pool.str(ident.name),
-                None => "anonymous",
-            };
-            Cow::Owned(format!("StructLiteral({name})"))
+            let fields = ast.struct_field_inits(lit.fields);
+            for (i, (name, value)) in fields.iter().enumerate() {
+                out.push(ExprChild::Node(
+                    *value,
+                    i == fields.len() - 1,
+                    format!("{}: ", pool.str(*name)),
+                ));
+            }
         }
-        ExprKind::FieldAccess { field, .. } => {
-            Cow::Owned(format!("FieldAccess(.{})", pool.str(field.name)))
+        ExprKind::FieldAccess { object, .. } => {
+            out.push(ExprChild::Node(object, true, "object: ".to_string()));
         }
-        ExprKind::VariantConstruct(c) => Cow::Owned(format!(
-            "VariantConstruct({}.{})",
-            pool.str(c.enum_name.name),
-            pool.str(c.variant.name)
-        )),
-        ExprKind::Match { .. } => Cow::Borrowed("Match"),
-        ExprKind::ErrorConstruct(c) => {
-            Cow::Owned(format!("ErrorConstruct({})", pool.str(c.name.name)))
+        ExprKind::VariantConstruct(c) => match &c.args {
+            Some(VariantArgs {
+                positional: Some(list),
+                ..
+            }) => {
+                let args = ast.expr_list(*list);
+                for (i, &arg) in args.iter().enumerate() {
+                    out.push(ExprChild::Node(arg, i == args.len() - 1, String::new()));
+                }
+            }
+            Some(VariantArgs {
+                named: Some(inits), ..
+            }) => {
+                let inits = ast.struct_field_inits(*inits);
+                for (i, (name, value)) in inits.iter().enumerate() {
+                    out.push(ExprChild::Node(
+                        *value,
+                        i == inits.len() - 1,
+                        format!("{}: ", pool.str(*name)),
+                    ));
+                }
+            }
+            _ => {}
+        },
+        ExprKind::ErrorConstruct(c) => match &c.args {
+            Some(VariantArgs {
+                positional: Some(list),
+                ..
+            }) => {
+                let args = ast.expr_list(*list);
+                for (i, &arg) in args.iter().enumerate() {
+                    out.push(ExprChild::Node(arg, i == args.len() - 1, String::new()));
+                }
+            }
+            Some(VariantArgs {
+                named: Some(inits), ..
+            }) => {
+                let inits = ast.struct_field_inits(*inits);
+                for (i, (name, value)) in inits.iter().enumerate() {
+                    out.push(ExprChild::Node(
+                        *value,
+                        i == inits.len() - 1,
+                        format!("{}: ", pool.str(*name)),
+                    ));
+                }
+            }
+            _ => {}
+        },
+        ExprKind::Try(operand) => {
+            out.push(ExprChild::Node(operand, true, "operand: ".to_string()));
         }
-        ExprKind::Try(_) => Cow::Borrowed("Try"),
-        ExprKind::Catch(c) => Cow::Owned(match c.binding {
-            Some(binding) => format!("Catch(as {})", pool.str(binding.name)),
-            None => "Catch".to_string(),
-        }),
-    };
+        ExprKind::Catch(c) => match c.body {
+            CatchBody::Handler(MatchArmBody::Expr(handler)) => {
+                out.push(ExprChild::Node(c.operand, false, "operand: ".to_string()));
+                out.push(ExprChild::Node(handler, true, "handler: ".to_string()));
+            }
+            CatchBody::Handler(MatchArmBody::Stmts(_)) | CatchBody::Arms(_) => {
+                unreachable!("catch with statement/arms body is rendered by write_expr_children")
+            }
+        },
+        ExprKind::Literal(_) | ExprKind::Ident(_) | ExprKind::Match { .. } => {}
+    }
+}
 
-    writeln!(
-        out,
-        "{}{}{}{} ({}..{})",
-        prefix,
-        connector(is_last),
-        label,
-        name,
-        expr.span.start,
-        expr.span.end
-    )?;
-
-    let new_prefix = format!("{}{}", prefix, continuation(is_last));
+/// Render the children of the node `expr` under `new_prefix`; the
+/// iterative [`write_expr`] driver has already written the node's
+/// header line. Recursive — used only for kinds whose children
+/// interleave non-expression output (match arms, catch bodies).
+fn write_expr_children(
+    out: &mut dyn fmt::Write,
+    ast: &Ast,
+    expr: ExprId,
+    new_prefix: &str,
+    pool: &InternPool,
+) -> fmt::Result {
+    let expr = ast.expr(expr);
     match expr.kind {
         ExprKind::Literal(_) | ExprKind::Ident(_) => Ok(()),
         ExprKind::BinaryOp(lhs, _, rhs) => {
-            write_expr(out, ast, lhs, &new_prefix, false, "", pool)?;
-            write_expr(out, ast, rhs, &new_prefix, true, "", pool)
+            write_expr(out, ast, lhs, new_prefix, false, "", pool)?;
+            write_expr(out, ast, rhs, new_prefix, true, "", pool)
         }
-        ExprKind::UnaryOp(_, operand) => write_expr(out, ast, operand, &new_prefix, true, "", pool),
-        ExprKind::Call(_, args) => {
-            write_expr_args(out, ast, ast.expr_list(args), &new_prefix, pool)
-        }
+        ExprKind::UnaryOp(_, operand) => write_expr(out, ast, operand, new_prefix, true, "", pool),
+        ExprKind::Call(_, args) => write_expr_args(out, ast, ast.expr_list(args), new_prefix, pool),
         ExprKind::MethodCall { receiver, args, .. } => {
             let args = ast.expr_list(args);
             write_expr(
                 out,
                 ast,
                 receiver,
-                &new_prefix,
+                new_prefix,
                 args.is_empty(),
                 "recv: ",
                 pool,
             )?;
-            write_expr_args(out, ast, args, &new_prefix, pool)
+            write_expr_args(out, ast, args, new_prefix, pool)
         }
-        ExprKind::Borrow(inner) => write_expr(out, ast, inner, &new_prefix, true, "", pool),
+        ExprKind::Borrow(inner) => write_expr(out, ast, inner, new_prefix, true, "", pool),
         ExprKind::Slice { base, start, end } => {
-            write_expr(out, ast, base, &new_prefix, false, "base: ", pool)?;
-            write_optional_bound(out, ast, start, &new_prefix, false, "start: ", pool)?;
-            write_optional_bound(out, ast, end, &new_prefix, true, "end: ", pool)
+            write_expr(out, ast, base, new_prefix, false, "base: ", pool)?;
+            write_optional_bound(out, ast, start, new_prefix, false, "start: ", pool)?;
+            write_optional_bound(out, ast, end, new_prefix, true, "end: ", pool)
         }
         ExprKind::Index { base, index } => {
-            write_expr(out, ast, base, &new_prefix, false, "base: ", pool)?;
-            write_expr(out, ast, index, &new_prefix, true, "index: ", pool)
+            write_expr(out, ast, base, new_prefix, false, "base: ", pool)?;
+            write_expr(out, ast, index, new_prefix, true, "index: ", pool)
         }
         ExprKind::StructLiteral(lit) => {
             let fields = ast.struct_field_inits(lit.fields);
@@ -598,7 +813,7 @@ fn write_expr(
                     out,
                     ast,
                     *value,
-                    &new_prefix,
+                    new_prefix,
                     i == fields.len() - 1,
                     &label,
                     pool,
@@ -607,13 +822,13 @@ fn write_expr(
             Ok(())
         }
         ExprKind::FieldAccess { object, .. } => {
-            write_expr(out, ast, object, &new_prefix, true, "object: ", pool)
+            write_expr(out, ast, object, new_prefix, true, "object: ", pool)
         }
         ExprKind::VariantConstruct(c) => match &c.args {
             Some(VariantArgs {
                 positional: Some(list),
                 ..
-            }) => write_expr_args(out, ast, ast.expr_list(*list), &new_prefix, pool),
+            }) => write_expr_args(out, ast, ast.expr_list(*list), new_prefix, pool),
             Some(VariantArgs {
                 named: Some(inits), ..
             }) => {
@@ -624,7 +839,7 @@ fn write_expr(
                         out,
                         ast,
                         *value,
-                        &new_prefix,
+                        new_prefix,
                         i == inits.len() - 1,
                         &label,
                         pool,
@@ -640,18 +855,18 @@ fn write_expr(
                 out,
                 ast,
                 scrutinee,
-                &new_prefix,
+                new_prefix,
                 arms.is_empty(),
                 "scrut: ",
                 pool,
             )?;
-            write_match_arms(out, ast, arms, &new_prefix, pool)
+            write_match_arms(out, ast, arms, new_prefix, pool)
         }
         ExprKind::ErrorConstruct(c) => match &c.args {
             Some(VariantArgs {
                 positional: Some(list),
                 ..
-            }) => write_expr_args(out, ast, ast.expr_list(*list), &new_prefix, pool),
+            }) => write_expr_args(out, ast, ast.expr_list(*list), new_prefix, pool),
             Some(VariantArgs {
                 named: Some(inits), ..
             }) => {
@@ -662,7 +877,7 @@ fn write_expr(
                         out,
                         ast,
                         *value,
-                        &new_prefix,
+                        new_prefix,
                         i == inits.len() - 1,
                         &label,
                         pool,
@@ -673,20 +888,20 @@ fn write_expr(
             _ => Ok(()),
         },
         ExprKind::Try(operand) => {
-            write_expr(out, ast, operand, &new_prefix, true, "operand: ", pool)
+            write_expr(out, ast, operand, new_prefix, true, "operand: ", pool)
         }
         ExprKind::Catch(c) => match c.body {
             CatchBody::Handler(MatchArmBody::Expr(handler)) => {
-                write_expr(out, ast, c.operand, &new_prefix, false, "operand: ", pool)?;
-                write_expr(out, ast, handler, &new_prefix, true, "handler: ", pool)
+                write_expr(out, ast, c.operand, new_prefix, false, "operand: ", pool)?;
+                write_expr(out, ast, handler, new_prefix, true, "handler: ", pool)
             }
             CatchBody::Handler(MatchArmBody::Stmts(list)) => {
-                write_expr(out, ast, c.operand, &new_prefix, false, "operand: ", pool)?;
+                write_expr(out, ast, c.operand, new_prefix, false, "operand: ", pool)?;
                 write_block(
                     out,
                     "handler:",
                     ast.stmt_list(list),
-                    &new_prefix,
+                    new_prefix,
                     true,
                     ast,
                     pool,
@@ -698,19 +913,19 @@ fn write_expr(
                     out,
                     ast,
                     c.operand,
-                    &new_prefix,
+                    new_prefix,
                     arms.is_empty(),
                     "operand: ",
                     pool,
                 )?;
-                write_match_arms(out, ast, arms, &new_prefix, pool)
+                write_match_arms(out, ast, arms, new_prefix, pool)
             }
         },
     }
 }
 
 fn write_match_arms(
-    out: &mut String,
+    out: &mut dyn fmt::Write,
     ast: &Ast,
     arms: &[crate::ast::MatchArm],
     prefix: &str,
@@ -737,7 +952,7 @@ fn write_match_arms(
 }
 
 fn write_expr_args(
-    out: &mut String,
+    out: &mut dyn fmt::Write,
     ast: &Ast,
     args: &[ExprId],
     prefix: &str,
@@ -752,7 +967,7 @@ fn write_expr_args(
 /// Render a destructuring pattern subtree (M10) in the same
 /// tree-drawing style as [`write_expr`].
 fn write_pattern(
-    out: &mut String,
+    out: &mut dyn fmt::Write,
     ast: &Ast,
     pat: PatternId,
     prefix: &str,
@@ -860,7 +1075,7 @@ fn fmt_lit_pattern(lit: LitPattern, pool: &InternPool) -> String {
 }
 
 fn write_optional_bound(
-    out: &mut String,
+    out: &mut dyn fmt::Write,
     ast: &Ast,
     bound: Option<ExprId>,
     prefix: &str,
@@ -1014,5 +1229,42 @@ Program (0..0)
         // One node per line: Program, Statement, Literal — the raw
         // newline in the string must not split the literal's line.
         assert_eq!(out.lines().count(), 3, "{out}");
+    }
+
+    #[test]
+    fn deep_operator_chain_renders_without_overflow() {
+        // A left-associative chain nests one child link per term; the
+        // iterative printer must walk it on the small test-thread stack
+        // (the recursion this replaced overflowed within a few hundred
+        // frames here). Output is quadratic in depth (every line
+        // carries its indentation prefix), so render into a counting
+        // sink instead of a String.
+        struct Sink(u64);
+        impl fmt::Write for Sink {
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                self.0 += s.len() as u64;
+                Ok(())
+            }
+        }
+
+        const TERMS: usize = 5_000;
+        let pool = InternPool::new();
+        let mut ast = Ast::new();
+        let mut chain = int_expr(&mut ast, 1);
+        for _ in 1..TERMS {
+            let one = int_expr(&mut ast, 1);
+            chain = ast.binary(BinaryOperator::Add, chain, one, span(0, 0));
+        }
+        let stmt = ast.expr_stmt(chain, span(0, 0));
+        ast.set_top_level(vec![stmt]);
+
+        let mut sink = Sink(0);
+        write_program(&mut sink, &ast, &pool).expect("render deep chain");
+        // Quadratic prefix growth: the dump is ~TERMS^2 bytes.
+        assert!(
+            sink.0 > (TERMS * TERMS / 2) as u64,
+            "deep chain rendered too little: {} bytes",
+            sink.0
+        );
     }
 }
