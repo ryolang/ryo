@@ -7,6 +7,7 @@
 //! - `codegen/mod.rs`, `decls.rs`: statement/declaration roots.
 
 use super::super::tests::{RunOk, run};
+use super::walker::with_expr_limit;
 use ryo_core::diag::Diag;
 use std::process::Command;
 
@@ -53,6 +54,32 @@ impl DeepExpr {
             expr.push(')');
         }
         Self::program(expr)
+    }
+
+    fn scalar_shapes(depth: usize) -> Vec<String> {
+        if depth == 0 {
+            return vec!["1".to_string()];
+        }
+        let mut shapes = Vec::new();
+        for inner in Self::scalar_shapes(depth - 1) {
+            shapes.push(format!("-({inner})"));
+            shapes.push(format!("({inner})+1"));
+            shapes.push(format!("1+({inner})"));
+            shapes.push(format!("({inner})+(1+1)"));
+        }
+        shapes
+    }
+
+    fn diagnostic_cases() -> Vec<(&'static str, String)> {
+        vec![
+            ("division_by_zero", Self::program("1/(1-1)".to_string())),
+            (
+                "overflow",
+                Self::program("9223372036854775807+1".to_string()),
+            ),
+            ("never_rhs", Self::program("1+panic(\"boom\")".to_string())),
+            ("never_lhs", Self::program("panic(\"boom\")+1".to_string())),
+        ]
     }
 
     fn small_cases() -> Vec<(&'static str, String)> {
@@ -127,8 +154,8 @@ impl DeepExpr {
     }
 }
 
-fn run_with_expr_limit(src: &str, _limit: u32) -> Result<RunOk, Vec<Diag>> {
-    run(src)
+fn run_with_expr_limit(src: &str, limit: u32) -> Result<RunOk, Vec<Diag>> {
+    with_expr_limit(limit, || run(src))
 }
 
 fn snapshot(result: Result<RunOk, Vec<Diag>>) -> String {
@@ -164,7 +191,6 @@ fn run_deep_repro(test_name: &str, src: String) {
 }
 
 #[test]
-#[ignore = "I-269: unary operands still reset expression depth"]
 fn unary_mediated_rhs_chain_analyzes_without_overflow() {
     run_deep_repro(
         "sema::expr::walker_tests::unary_mediated_rhs_chain_analyzes_without_overflow",
@@ -188,6 +214,37 @@ fn nested_call_chain_analyzes_without_overflow() {
         "sema::expr::walker_tests::nested_call_chain_analyzes_without_overflow",
         DeepExpr::nested_calls(50_000),
     );
+}
+
+#[test]
+fn scalar_trees_match_at_every_depth_limit() {
+    for depth in 0..=4 {
+        for expr in DeepExpr::scalar_shapes(depth) {
+            let src = DeepExpr::program(expr.clone());
+            let baseline = snapshot(run(&src));
+            for limit in [0, 1, 64] {
+                assert_eq!(
+                    snapshot(run_with_expr_limit(&src, limit)),
+                    baseline,
+                    "{expr} differed at expression depth limit {limit}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn scalar_diagnostics_match_at_every_depth_limit() {
+    for (name, src) in DeepExpr::diagnostic_cases() {
+        let baseline = snapshot(run(&src));
+        for limit in [0, 1, 64] {
+            assert_eq!(
+                snapshot(run_with_expr_limit(&src, limit)),
+                baseline,
+                "{name} differed at expression depth limit {limit}"
+            );
+        }
+    }
 }
 
 #[test]

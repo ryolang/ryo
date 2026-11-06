@@ -7,10 +7,11 @@ use ryo_core::spine::ChainSpine;
 use ryo_core::tir::{TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, StructField, TypeId, TypeKind, VariantKind, ViewKind};
 use ryo_core::uir::{InstData, InstRef, InstTag, Span, StructLitView, Uir};
-use std::collections::HashMap;
 
 mod methods;
 mod operators;
+mod walker;
+use walker::{NeverMode, SemaExprContext, analyze_expr_machine};
 #[cfg(test)]
 mod walker_tests;
 
@@ -91,18 +92,26 @@ pub(crate) fn analyze_expr(
     scope: &Scope,
     r: InstRef,
 ) -> TirRef {
-    analyze_expr_d(sema, fcx, scope, r, 0)
+    analyze_expr_with(
+        sema,
+        fcx,
+        scope,
+        r,
+        NeverMode::Reject,
+        SemaExprContext::root(),
+    )
 }
 
-fn analyze_expr_d(
+fn analyze_expr_with(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     r: InstRef,
-    depth: u32,
+    mode: NeverMode,
+    context: SemaExprContext,
 ) -> TirRef {
-    let t = analyze_expr_allow_never_d(sema, fcx, scope, r, depth);
-    if sema.pool.is_never(fcx.builder.ty_of(t)) {
+    let t = analyze_expr_allow_never_with(sema, fcx, scope, r, context);
+    if mode == NeverMode::Reject && sema.pool.is_never(fcx.builder.ty_of(t)) {
         sema.sink.emit(Diag::error(
             sema.uir.span(r),
             DiagCode::VoidValueInExpression,
@@ -122,15 +131,22 @@ pub(crate) fn analyze_expr_allow_never(
     scope: &Scope,
     r: InstRef,
 ) -> TirRef {
-    analyze_expr_allow_never_d(sema, fcx, scope, r, 0)
+    analyze_expr_with(
+        sema,
+        fcx,
+        scope,
+        r,
+        NeverMode::Allow,
+        SemaExprContext::root(),
+    )
 }
 
-fn analyze_expr_allow_never_d(
+fn analyze_expr_allow_never_with(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     r: InstRef,
-    depth: u32,
+    context: SemaExprContext,
 ) -> TirRef {
     if let Some(t) = fcx.inst_map[r.index()] {
         return t;
@@ -186,13 +202,16 @@ fn analyze_expr_allow_never_d(
         | InstTag::GtEq
         | InstTag::And
         | InstTag::Or => {
-            if depth < CHAIN_RECURSION_LIMIT {
-                analyze_binop_d(sema, fcx, scope, r, depth)
+            if context.depth < context.limit {
+                analyze_binop_d(sema, fcx, scope, r, context)
             } else {
-                analyze_binop_machine(sema, fcx, scope, r)
+                analyze_expr_machine(sema, fcx, scope, r, context)
             }
         }
-        InstTag::Neg | InstTag::Not => analyze_unary_chain(sema, fcx, scope, r),
+        InstTag::Neg | InstTag::Not if context.depth >= context.limit => {
+            analyze_expr_machine(sema, fcx, scope, r, context)
+        }
+        InstTag::Neg | InstTag::Not => analyze_unary_chain(sema, fcx, scope, r, context),
         InstTag::Call => {
             let view = sema.uir.call_view(r);
             check_call(sema, fcx, scope, &view, span)
@@ -552,102 +571,9 @@ fn analyze_binop_link(
     )
 }
 
-/// Iterative fallback when either operand nests past the chain
-/// recursion budget. Enter tasks descend into a chain lhs, after-lhs
-/// tasks descend into the rhs, and exit tasks lower links on the way
-/// back out, preserving demand recursion's diagnostic and memoization
-/// order. Values and constants are local to this machine invocation, so
-/// nested analysis keeps independent state without whole-UIR vectors.
-#[cold]
-#[inline(never)]
-fn analyze_binop_machine(
-    sema: &mut Sema<'_>,
-    fcx: &mut FuncCtx,
-    scope: &Scope,
-    root: InstRef,
-) -> TirRef {
-    enum Task {
-        Enter(InstRef),
-        AfterLhs(InstRef),
-        Exit(InstRef),
-    }
-
-    let mut tasks = ChainSpine::new();
-    let mut early_errors = Vec::new();
-    let mut consts = HashMap::new();
-    let mut analyzed = HashMap::new();
-    tasks.push(Task::Enter(root));
-    while let Some(task) = tasks.pop() {
-        match task {
-            Task::Enter(node) => {
-                if fcx.inst_map[node.index()].is_some() {
-                    analyzed.insert(node, analyze_expr(sema, fcx, scope, node));
-                    consts.insert(node, const_eval_int(sema.uir, node));
-                    continue;
-                }
-                let InstData::BinOp { lhs, rhs: _ } = sema.uir.inst(node).data else {
-                    unreachable!("chain tag must carry InstData::BinOp");
-                };
-                tasks.push(Task::Exit(node));
-                tasks.push(Task::AfterLhs(node));
-                if is_chain_binop_tag(sema.uir.inst(lhs).tag) && fcx.inst_map[lhs.index()].is_none()
-                {
-                    tasks.push(Task::Enter(lhs));
-                } else {
-                    analyzed.insert(lhs, analyze_expr(sema, fcx, scope, lhs));
-                    consts.insert(lhs, const_eval_int(sema.uir, lhs));
-                }
-            }
-            Task::AfterLhs(node) => {
-                let InstData::BinOp { rhs, .. } = sema.uir.inst(node).data else {
-                    unreachable!("chain tag must carry InstData::BinOp");
-                };
-                if is_chain_binop_tag(sema.uir.inst(rhs).tag) && fcx.inst_map[rhs.index()].is_none()
-                {
-                    tasks.push(Task::Enter(rhs));
-                } else {
-                    analyzed.insert(rhs, analyze_expr(sema, fcx, scope, rhs));
-                    consts.insert(rhs, const_eval_int(sema.uir, rhs));
-                }
-            }
-            Task::Exit(node) => {
-                let inst = sema.uir.inst(node);
-                let InstData::BinOp { lhs, rhs } = inst.data else {
-                    unreachable!("chain tag must carry InstData::BinOp");
-                };
-                let acc = analyzed.get(&lhs).copied().expect("lhs analyzed first");
-                let r2 = analyzed.get(&rhs).copied().expect("rhs analyzed second");
-                let (next, node_const, memo) = analyze_binop_link(
-                    sema,
-                    fcx,
-                    inst.tag,
-                    acc,
-                    consts[&lhs],
-                    r2,
-                    consts[&rhs],
-                    sema.uir.span(node),
-                );
-                analyzed.insert(node, next);
-                consts.insert(node, node_const);
-                fcx.inst_map[node.index()] = Some(next);
-                if !memo {
-                    early_errors.push(node);
-                }
-            }
-        }
-    }
-    let result = analyzed[&root];
-    for node in early_errors {
-        fcx.inst_map[node.index()] = None;
-    }
-    result
-}
-
-/// Operator-chain recursion budget: how many chain links the
-/// old-style recursion may consume before the remaining subtree lowers
-/// iteratively (`analyze_binop_machine` / `analyze_unary_spill`). Far
-/// below the compiler thread's 32 MiB stack (a debug frame per link is
-/// kilobytes), far above anything a hand-written expression chains.
+/// Expression recursion budget before the remaining subtree switches to
+/// the generic iterative walker. Far below the compiler thread's stack,
+/// far above ordinary hand-written nesting.
 const CHAIN_RECURSION_LIMIT: u32 = 64;
 
 /// One link of a binary-operator chain, recursing like the old demand
@@ -661,76 +587,47 @@ fn analyze_binop_d(
     fcx: &mut FuncCtx,
     scope: &Scope,
     node: InstRef,
-    depth: u32,
+    context: SemaExprContext,
 ) -> TirRef {
     let inst = sema.uir.inst(node);
     let InstData::BinOp { lhs, rhs } = inst.data else {
         unreachable!("chain tag must carry InstData::BinOp");
     };
     let l = if is_chain_binop_tag(sema.uir.inst(lhs).tag) && fcx.inst_map[lhs.index()].is_none() {
-        if depth < CHAIN_RECURSION_LIMIT {
-            analyze_binop_d(sema, fcx, scope, lhs, depth + 1)
+        if context.depth < context.limit {
+            analyze_binop_d(sema, fcx, scope, lhs, context.child())
         } else {
-            analyze_binop_machine(sema, fcx, scope, lhs)
+            analyze_expr_machine(sema, fcx, scope, lhs, context)
         }
     } else {
-        analyze_expr(sema, fcx, scope, lhs)
+        analyze_expr_with(sema, fcx, scope, lhs, NeverMode::Reject, context.child())
     };
-    let r2 = analyze_expr_d(sema, fcx, scope, rhs, depth + 1);
-    let lhs_ty = fcx.builder.ty_of(l);
-    let rhs_ty = fcx.builder.ty_of(r2);
-    let span = sema.uir.span(node);
-    // Constant-evaluate pure integer arithmetic for diagnostics.
-    // A constant-zero divisor always panics at runtime (the
-    // codegen zero-divisor guard), so reject it at compile time;
-    // constant overflow is a compile error per §18 (overflow traps
-    // in all build modes). Float `x / 0.0` is IEEE-defined (inf)
-    // and unaffected.
-    if matches!(
+    let r2 = analyze_expr_with(sema, fcx, scope, rhs, NeverMode::Reject, context.child());
+    let (emitted, _, _) = analyze_binop_link(
+        sema,
+        fcx,
         inst.tag,
-        InstTag::Add | InstTag::Sub | InstTag::Mul | InstTag::Div | InstTag::Mod
-    ) && lhs_ty == sema.pool.int()
-        && rhs_ty == sema.pool.int()
-    {
-        if matches!(inst.tag, InstTag::Div | InstTag::Mod)
-            && matches!(const_eval_int(sema.uir, rhs), ConstInt::Value(0))
-        {
-            sema.sink.emit(Diag::error(
-                span,
-                DiagCode::DivisionByZero,
-                if inst.tag == InstTag::Div {
-                    "division by zero".to_string()
-                } else {
-                    "modulo by zero".to_string()
-                },
-            ));
-            return fcx.builder.unreachable(sema.pool.error_type(), span);
-        }
-        if matches!(const_eval_int(sema.uir, node), ConstInt::Overflow) {
-            sema.sink.emit(Diag::error(
-                span,
-                DiagCode::ConstEvalFailure,
-                "integer overflow in constant expression".to_string(),
-            ));
-            return fcx.builder.unreachable(sema.pool.error_type(), span);
-        }
-    }
-    let emitted = check_binary_op(sema, fcx, inst.tag, lhs_ty, rhs_ty, l, r2, span);
+        l,
+        const_eval_int(sema.uir, lhs),
+        r2,
+        const_eval_int(sema.uir, rhs),
+        sema.uir.span(node),
+    );
     fcx.inst_map[node.index()] = Some(emitted);
     emitted
 }
 
-/// Analyze a unary-operator chain (`not not ...`, `- - ...`) — depth-
-/// bounded recursion like [`analyze_binop_chain`], iterative spill for
-/// the deep tail.
+/// Analyze a unary-operator chain (`not not ...`, `- - ...`) with the
+/// same depth-bounded recursion and generic fallback as binary operators.
 #[inline]
 fn analyze_unary_chain(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     root: InstRef,
+    context: SemaExprContext,
 ) -> TirRef {
-    analyze_unary_d(sema, fcx, scope, root, 0)
+    analyze_unary_d(sema, fcx, scope, root, context)
 }
 
 fn analyze_unary_d(
@@ -738,7 +635,7 @@ fn analyze_unary_d(
     fcx: &mut FuncCtx,
     scope: &Scope,
     node: InstRef,
-    depth: u32,
+    context: SemaExprContext,
 ) -> TirRef {
     let inst = sema.uir.inst(node);
     let InstData::UnOp(operand) = inst.data else {
@@ -749,16 +646,23 @@ fn analyze_unary_d(
     if matches!(sema.uir.inst(operand).tag, InstTag::Neg | InstTag::Not)
         && fcx.inst_map[operand.index()].is_none()
     {
-        if depth < CHAIN_RECURSION_LIMIT {
-            analyze_unary_d(sema, fcx, scope, operand, depth + 1);
+        if context.depth < context.limit {
+            analyze_unary_d(sema, fcx, scope, operand, context.child());
         } else {
-            analyze_unary_spill(sema, fcx, scope, operand);
+            analyze_expr_machine(sema, fcx, scope, operand, context);
         }
     } else {
-        analyze_expr(sema, fcx, scope, operand);
+        analyze_expr_with(
+            sema,
+            fcx,
+            scope,
+            operand,
+            NeverMode::Reject,
+            context.child(),
+        );
     }
     let span = sema.uir.span(node);
-    let emitted = operators::analyze_unary_operator(
+    let (emitted, _) = analyze_unary_link(
         sema,
         fcx,
         scope,
@@ -771,57 +675,26 @@ fn analyze_unary_d(
     emitted
 }
 
-/// Iterative fallback for the deep tail of a unary-operator chain —
-/// see [`analyze_unary_d`]. `sub` is the already-analyzed operand Tir;
-/// only the per-link Neg/Not lowering runs here, folding the constant
-/// incrementally so the deep tail stays O(n).
-fn analyze_unary_spill(
+fn analyze_unary_link(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
-    root: InstRef,
-) -> TirRef {
-    let mut spine = ChainSpine::new();
-    let inner = {
-        let mut cur = root;
-        loop {
-            let inst = sema.uir.inst(cur);
-            let InstData::UnOp(operand) = inst.data else {
-                unreachable!("unary chain tag must carry InstData::UnOp");
-            };
-            spine.push(cur);
-            if matches!(sema.uir.inst(operand).tag, InstTag::Neg | InstTag::Not)
-                && fcx.inst_map[operand.index()].is_none()
-            {
-                cur = operand;
-            } else {
-                break operand;
-            }
+    tag: InstTag,
+    operand: InstRef,
+    operand_const: ConstInt,
+    span: Span,
+) -> (TirRef, ConstInt) {
+    let emitted =
+        operators::analyze_unary_operator(sema, fcx, scope, tag, operand, operand_const, span);
+    let node_const = if fcx.builder.ty_of(emitted) == sema.pool.int() {
+        match operand_const {
+            ConstInt::Value(v) => v.checked_neg().map_or(ConstInt::Overflow, ConstInt::Value),
+            other => other,
         }
+    } else {
+        ConstInt::NotConst
     };
-    let mut acc = analyze_expr(sema, fcx, scope, inner);
-    let mut acc_const = const_eval_int(sema.uir, inner);
-    spine.fold_rev(|node| {
-        let inst = sema.uir.inst(node);
-        let span = sema.uir.span(node);
-        let InstData::UnOp(operand) = inst.data else {
-            unreachable!("unary chain tag must carry InstData::UnOp");
-        };
-        acc =
-            operators::analyze_unary_operator(sema, fcx, scope, inst.tag, operand, acc_const, span);
-        if fcx.builder.ty_of(acc) == sema.pool.int() {
-            // Only Neg reaches here with an int operand; keep the
-            // folded constant in lockstep with `acc`.
-            acc_const = match acc_const {
-                ConstInt::Value(v) => v.checked_neg().map_or(ConstInt::Overflow, ConstInt::Value),
-                other => other,
-            };
-        } else {
-            acc_const = ConstInt::NotConst;
-        }
-        fcx.inst_map[node.index()] = Some(acc);
-    });
-    acc
+    (emitted, node_const)
 }
 
 /// The `&` marker (M8.3): lowers to the inner value's TirRef.
