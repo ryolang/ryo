@@ -92,9 +92,12 @@ fn check_instruction_coverage(flow: &Flow, tir: &Tir) {
         covered.insert(*inst);
     }
 
-    fn walk(tir: &Tir, r: TirRef, seen: &mut HashSet<TirRef>, covered: &HashSet<TirRef>) {
+    // Iterative DFS: operand links can nest arbitrarily deep (a long
+    // operator chain), which the old recursion could not survive.
+    let mut stack: Vec<TirRef> = tir.body_stmts().into_iter().collect();
+    while let Some(r) = stack.pop() {
         if !seen.insert(r) {
-            return;
+            continue;
         }
         debug_assert!(
             covered.contains(&r),
@@ -103,12 +106,8 @@ fn check_instruction_coverage(flow: &Flow, tir: &Tir) {
             tir.inst(r).tag
         );
         tir.walk_operands(r, &mut |_p, child, _kind| {
-            walk(tir, child, seen, covered);
+            stack.push(child);
         });
-    }
-
-    for stmt in tir.body_stmts() {
-        walk(tir, stmt, &mut seen, &covered);
     }
 }
 
@@ -120,10 +119,13 @@ fn check_instruction_coverage(flow: &Flow, tir: &Tir) {
 /// real order. Match arm bodies are control edges (they run after the
 /// dispatch) and are likewise excluded.
 fn check_def_before_use(flow: &Flow, tir: &Tir) {
+    // Iterative DFS: operand links can nest arbitrarily deep (a long
+    // operator chain), which the old recursion could not survive.
     let mut seen: HashSet<TirRef> = HashSet::new();
-    fn walk(tir: &Tir, flow: &Flow, r: TirRef, seen: &mut HashSet<TirRef>) {
+    let mut stack: Vec<TirRef> = tir.body_stmts().into_iter().collect();
+    while let Some(r) = stack.pop() {
         if !seen.insert(r) {
-            return;
+            continue;
         }
         let Some(parent_order) = flow.order_of(r) else {
             unreachable!("uncovered instruction in def-before-use walk: {r:?}")
@@ -146,11 +148,8 @@ fn check_def_before_use(flow: &Flow, tir: &Tir) {
                     parent_order
                 );
             }
-            walk(tir, flow, child, seen);
+            stack.push(child);
         });
-    }
-    for stmt in tir.body_stmts() {
-        walk(tir, flow, stmt, &mut seen);
     }
 }
 

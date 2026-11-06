@@ -186,9 +186,12 @@ def max_id_ever(entries, issues_file):
     file's history; fall back to the live file (with a warning) if git fails.
     """
     highest = max((int(e[0][2:]) for e in entries), default=0)
-    marker = HIGH_WATER_RE.search(issues_file.read_text(encoding="utf-8"))
-    if marker:
-        highest = max(highest, int(marker.group(1)))
+    # The file's watermark is the LAST marker-shaped line: an entry title or
+    # body can contain marker-shaped text, and only the file's own marker
+    # (kept at the end) is authoritative.
+    matches = list(HIGH_WATER_RE.finditer(issues_file.read_text(encoding="utf-8")))
+    if matches:
+        highest = max(highest, int(matches[-1].group(1)))
     try:
         log = subprocess.run(
             ["git", "log", "-p", "--format=", "--", str(issues_file)],
@@ -312,6 +315,20 @@ def cmd_file(_entries, issues_file, args):
             text = head + "\n\n" + entry + "\n---\n\n" + tail
         else:
             text = text.rstrip("\n") + "\n\n---\n\n" + entry
+        # Maintain the watermark AFTER inserting the new entry: drop any
+        # standalone marker lines (entry fields are single-line, so a
+        # full-line marker can only be a previously written watermark)
+        # and pin the fresh marker at the very end, behind an entry
+        # boundary, where deleting the last entry cannot swallow it.
+        # Marker-shaped text inside a title or body is never a full
+        # line, so it stays untouched.
+        marker = f"<!-- issue-id high-water: {int(issue_id[2:])} -->"
+        lines = [
+            l
+            for l in text.split("\n")
+            if not (l.strip() and HIGH_WATER_RE.fullmatch(l.strip()))
+        ]
+        text = "\n".join(lines).rstrip("\n") + "\n\n---\n\n" + marker + "\n"
         write_atomic(issues_file, text)
     line_no = text[:text.find(f"### {issue_id}")].count("\n") + 1
     print(f"filed {issue_id} at {issues_file}:{line_no}")
@@ -370,10 +387,14 @@ def cmd_delete(_entries, issues_file, args):
         seam = re.sub(r"---\n(?:\n---\n)+", "---\n", seam)
         # An entry can be resolved before its first commit. Git history alone
         # cannot keep that number retired, so retain the allocation watermark.
+        # Replace only the file's own marker (the last marker-shaped line) —
+        # marker-shaped text inside surviving entry bodies must not be rewritten.
         highest = max_id_ever(parse_entries(text), issues_file)
         marker = f"<!-- issue-id high-water: {highest} -->"
-        if HIGH_WATER_RE.search(seam):
-            seam = HIGH_WATER_RE.sub(marker, seam)
+        matches = list(HIGH_WATER_RE.finditer(seam))
+        if matches:
+            last = matches[-1]
+            seam = seam[: last.start()] + marker + seam[last.end() :]
         else:
             seam = seam.rstrip("\n") + "\n\n" + marker
         write_atomic(issues_file, seam.rstrip("\n") + "\n")

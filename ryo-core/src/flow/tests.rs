@@ -684,6 +684,48 @@ fn bool_and_chain_split_pins_join_pred_shape() {
 }
 
 #[test]
+fn deep_bool_and_chain_stays_on_the_iterative_flow_builder() {
+    let mut cx = Ctx::new();
+    let bool_ty = cx.pool.bool_();
+    let mut b = cx.builder();
+    let mut chain = b.bool_const(true, bool_ty, sp());
+    for _ in 0..20_000 {
+        let rhs = b.bool_const(true, bool_ty, sp());
+        chain = b.binary(TirTag::BoolAnd, bool_ty, chain, rhs, sp());
+    }
+    let decl = b.var_decl(cx.x, false, bool_ty, chain, sp());
+    let tir = b.finish(&[decl]);
+
+    let flow = Flow::build(&tir, &cx.pool);
+    assert!(flow.step_block_of(chain).is_some());
+}
+
+#[test]
+fn deep_chain_through_diverging_calls_stays_iterative() {
+    let mut cx = Ctx::new();
+    let int = cx.int;
+    let mut b = cx.builder();
+    let die = cx.pool.intern_str("die");
+    let mut chain = b.int_const(1, int, sp());
+    for _ in 0..20_000 {
+        let call = b.call(
+            die,
+            &[chain],
+            &[crate::tir::ParamMode::Borrow],
+            cx.never,
+            sp(),
+        );
+        let lhs = b.int_const(1, int, sp());
+        chain = b.binary(TirTag::IAdd, int, lhs, call, sp());
+    }
+    let decl = b.var_decl(cx.x, false, int, chain, sp());
+    let tir = b.finish(&[decl]);
+
+    let flow = Flow::build(&tir, &cx.pool);
+    assert!(flow.step_block_of(chain).is_some());
+}
+
+#[test]
 fn bool_and_if_condition_branches_from_the_merge_join() {
     let mut cx = Ctx::new();
     let bool_ty = cx.pool.bool_();
