@@ -7,6 +7,7 @@ use ryo_core::spine::ChainSpine;
 use ryo_core::tir::{TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, StructField, TypeId, TypeKind, VariantKind, ViewKind};
 use ryo_core::uir::{InstData, InstRef, InstTag, Span, StructLitView, Uir};
+use std::collections::HashMap;
 
 mod methods;
 mod operators;
@@ -550,9 +551,11 @@ fn analyze_binop_link(
 }
 
 /// Iterative fallback when either operand nests past the chain
-/// recursion budget. Enter tasks analyze the lhs before descending into
-/// a chain rhs; exit tasks lower links on the way back out, preserving
-/// demand recursion's diagnostic and memoization order.
+/// recursion budget. Enter tasks descend into a chain lhs, after-lhs
+/// tasks descend into the rhs, and exit tasks lower links on the way
+/// back out, preserving demand recursion's diagnostic and memoization
+/// order. Values and constants are local to this machine invocation, so
+/// nested analysis keeps independent state without whole-UIR vectors.
 #[cold]
 #[inline(never)]
 fn analyze_binop_machine(
@@ -563,58 +566,67 @@ fn analyze_binop_machine(
 ) -> TirRef {
     enum Task {
         Enter(InstRef),
+        AfterLhs(InstRef),
         Exit(InstRef),
     }
 
     let mut tasks = ChainSpine::new();
     let mut early_errors = Vec::new();
-    let mut consts = vec![ConstInt::NotConst; sema.uir.instructions.len()];
-    let mut analyzed = vec![None; sema.uir.instructions.len()];
+    let mut consts = HashMap::new();
+    let mut analyzed = HashMap::new();
     tasks.push(Task::Enter(root));
     while let Some(task) = tasks.pop() {
         match task {
             Task::Enter(node) => {
                 if fcx.inst_map[node.index()].is_some() {
-                    analyzed[node.index()] = Some(analyze_expr(sema, fcx, scope, node));
+                    analyzed.insert(node, analyze_expr(sema, fcx, scope, node));
+                    consts.insert(node, const_eval_int(sema.uir, node));
                     continue;
                 }
-                let InstData::BinOp { lhs, rhs } = sema.uir.inst(node).data else {
+                let InstData::BinOp { lhs, rhs: _ } = sema.uir.inst(node).data else {
                     unreachable!("chain tag must carry InstData::BinOp");
                 };
-                analyzed[lhs.index()] = Some(analyze_expr(sema, fcx, scope, lhs));
                 tasks.push(Task::Exit(node));
+                tasks.push(Task::AfterLhs(node));
+                if is_chain_binop_tag(sema.uir.inst(lhs).tag) && fcx.inst_map[lhs.index()].is_none()
+                {
+                    tasks.push(Task::Enter(lhs));
+                } else {
+                    analyzed.insert(lhs, analyze_expr(sema, fcx, scope, lhs));
+                    consts.insert(lhs, const_eval_int(sema.uir, lhs));
+                }
+            }
+            Task::AfterLhs(node) => {
+                let InstData::BinOp { rhs, .. } = sema.uir.inst(node).data else {
+                    unreachable!("chain tag must carry InstData::BinOp");
+                };
                 if is_chain_binop_tag(sema.uir.inst(rhs).tag) && fcx.inst_map[rhs.index()].is_none()
                 {
                     tasks.push(Task::Enter(rhs));
                 } else {
-                    analyzed[rhs.index()] = Some(analyze_expr(sema, fcx, scope, rhs));
-                    consts[rhs.index()] = const_eval_int(sema.uir, rhs);
+                    analyzed.insert(rhs, analyze_expr(sema, fcx, scope, rhs));
+                    consts.insert(rhs, const_eval_int(sema.uir, rhs));
                 }
             }
             Task::Exit(node) => {
-                if fcx.inst_map[node.index()].is_some() {
-                    consts[node.index()] = const_eval_int(sema.uir, node);
-                    continue;
-                }
                 let inst = sema.uir.inst(node);
                 let InstData::BinOp { lhs, rhs } = inst.data else {
                     unreachable!("chain tag must carry InstData::BinOp");
                 };
-                let acc = analyzed[lhs.index()].expect("lhs analyzed by enter task");
-                let r2 = analyzed[rhs.index()].expect("rhs analyzed by enter task");
-                let lhs_const = const_eval_int(sema.uir, lhs);
+                let acc = analyzed.get(&lhs).copied().expect("lhs analyzed first");
+                let r2 = analyzed.get(&rhs).copied().expect("rhs analyzed second");
                 let (next, node_const, memo) = analyze_binop_link(
                     sema,
                     fcx,
                     inst.tag,
                     acc,
-                    lhs_const,
+                    consts[&lhs],
                     r2,
-                    consts[rhs.index()],
+                    consts[&rhs],
                     sema.uir.span(node),
                 );
-                analyzed[node.index()] = Some(next);
-                consts[node.index()] = node_const;
+                analyzed.insert(node, next);
+                consts.insert(node, node_const);
                 fcx.inst_map[node.index()] = Some(next);
                 if !memo {
                     early_errors.push(node);
@@ -622,7 +634,7 @@ fn analyze_binop_machine(
             }
         }
     }
-    let result = fcx.inst_map[root.index()].expect("root analyzed by machine");
+    let result = analyzed[&root];
     for node in early_errors {
         fcx.inst_map[node.index()] = None;
     }

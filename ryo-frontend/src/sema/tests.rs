@@ -1448,6 +1448,41 @@ fn hundred_k_term_right_nested_addition_chain_analyzes_without_overflow() {
     assert_eq!(iadds, terms - 1, "chain must lower fully, not truncated");
 }
 
+#[test]
+fn alternating_left_and_right_nested_chain_analyzes_without_overflow() {
+    let terms = 50_000;
+    let mut prefixes = Vec::with_capacity(terms - 1);
+    let mut suffix = String::new();
+    for i in 0..terms - 1 {
+        if i % 2 == 0 {
+            prefixes.push("(");
+            suffix.push_str("+1)");
+        } else {
+            prefixes.push("(1+");
+            suffix.push(')');
+        }
+    }
+    let mut src = String::from("fn main():\n\tprint(");
+    for prefix in prefixes.iter().rev() {
+        src.push_str(prefix);
+    }
+    src.push('1');
+    src.push_str(&suffix);
+    src.push_str(")\n");
+
+    let (tirs, pool) = run(&src).expect("alternating nested chain should analyze");
+    let main = tirs
+        .iter()
+        .find(|t| pool.str(t.name) == "main")
+        .expect("main TIR");
+    let iadds = main
+        .instructions
+        .iter()
+        .filter(|i| i.tag == TirTag::IAdd)
+        .count();
+    assert_eq!(iadds, terms - 1, "chain must lower fully, not truncated");
+}
+
 fn right_nested_chain_with_inner(links: usize, inner: &str) -> String {
     let mut src = String::from("fn main():\n\tprint(");
     for _ in 0..links {

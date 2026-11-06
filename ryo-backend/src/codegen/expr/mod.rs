@@ -379,9 +379,10 @@ impl<M: Module> Codegen<M> {
     }
 
     /// Iterative fallback when either operand nests past the chain
-    /// recursion budget. Enter tasks evaluate the lhs before descending
-    /// into a chain rhs; exit tasks emit links on the way back out,
-    /// preserving demand recursion's evaluation and memoization order.
+    /// recursion budget. Enter tasks descend into a chain lhs, after-lhs
+    /// tasks descend into the rhs, and exit tasks emit links on the way
+    /// back out, preserving demand recursion's evaluation and
+    /// memoization order.
     #[cold]
     #[inline(never)]
     fn eval_binop_machine(
@@ -391,6 +392,7 @@ impl<M: Module> Codegen<M> {
     ) -> Result<Value, String> {
         enum Task {
             Enter(TirRef),
+            AfterLhs(TirRef),
             Exit(TirRef),
         }
 
@@ -402,11 +404,23 @@ impl<M: Module> Codegen<M> {
                     if Self::cached_repr(ctx, node).is_some() {
                         continue;
                     }
-                    let TirData::BinOp { lhs, rhs } = ctx.tir.inst(node).data else {
+                    let TirData::BinOp { lhs, rhs: _ } = ctx.tir.inst(node).data else {
                         unreachable!("chain tag must carry TirData::BinOp");
                     };
-                    Self::eval_inst(builder, ctx, lhs)?;
                     tasks.push(Task::Exit(node));
+                    tasks.push(Task::AfterLhs(node));
+                    if Self::is_chain_binop_tag(ctx.tir.inst(lhs).tag)
+                        && Self::cached_repr(ctx, lhs).is_none()
+                    {
+                        tasks.push(Task::Enter(lhs));
+                    } else {
+                        Self::eval_inst(builder, ctx, lhs)?;
+                    }
+                }
+                Task::AfterLhs(node) => {
+                    let TirData::BinOp { rhs, .. } = ctx.tir.inst(node).data else {
+                        unreachable!("chain tag must carry TirData::BinOp");
+                    };
                     if Self::is_chain_binop_tag(ctx.tir.inst(rhs).tag)
                         && Self::cached_repr(ctx, rhs).is_none()
                     {

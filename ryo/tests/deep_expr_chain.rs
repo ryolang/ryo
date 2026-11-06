@@ -64,6 +64,53 @@ fn jit_run_right_nested_addition_chain_prints_sum() {
     );
 }
 
+fn alternating_add_chain(terms: usize) -> String {
+    let mut prefixes = Vec::with_capacity(terms - 1);
+    let mut suffix = String::new();
+    for i in 0..terms - 1 {
+        if i % 2 == 0 {
+            prefixes.push("(");
+            suffix.push_str("+1)");
+        } else {
+            prefixes.push("(1+");
+            suffix.push(')');
+        }
+    }
+    let mut src = String::from("fn main():\n\tprint(");
+    for prefix in prefixes.iter().rev() {
+        src.push_str(prefix);
+    }
+    src.push('1');
+    src.push_str(&suffix);
+    src.push_str(")\n");
+    src
+}
+
+#[test]
+fn jit_run_alternating_nested_addition_chain_prints_sum() {
+    let terms = 20_000;
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "alternating_chain.ryo",
+        &alternating_add_chain(terms),
+    );
+
+    let output = run_ryo_command(&["run", "alternating_chain.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "alternating nested chain compile failed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        terms.to_string(),
+        "alternating nested chain must evaluate to its term count"
+    );
+}
+
 #[test]
 fn jit_run_deep_addition_chain_prints_sum() {
     // 20k terms: well past the old recursion's ~7k overflow threshold.
