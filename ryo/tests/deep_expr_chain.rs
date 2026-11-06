@@ -111,6 +111,48 @@ fn jit_run_alternating_nested_addition_chain_prints_sum() {
     );
 }
 
+fn nested_left_spines_add_chain(groups: usize, spine_terms: usize) -> String {
+    let mut src = String::from("fn main():\n\tprint(");
+    for _ in 1..groups {
+        src.push_str("1+(");
+    }
+    src.push('1');
+    for _ in 1..groups {
+        src.push(')');
+        for _ in 0..spine_terms {
+            src.push_str("+1");
+        }
+    }
+    src.push_str(")\n");
+    src
+}
+
+#[test]
+fn jit_run_nested_long_left_spines_print_sum() {
+    let groups = 1_000;
+    let spine_terms = 70;
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "nested_left_spines_chain.ryo",
+        &nested_left_spines_add_chain(groups, spine_terms),
+    );
+
+    let output = run_ryo_command(&["run", "nested_left_spines_chain.ryo"], &test_file)
+        .expect("Failed to run ryo run command");
+
+    assert!(
+        output.status.success(),
+        "nested long left spines compile failed. STDERR: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        ((groups - 1) * (spine_terms + 1) + 1).to_string(),
+        "nested long left spines must evaluate to their term count"
+    );
+}
+
 #[test]
 fn jit_run_deep_addition_chain_prints_sum() {
     // 20k terms: well past the old recursion's ~7k overflow threshold.

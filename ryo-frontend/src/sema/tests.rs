@@ -1448,6 +1448,44 @@ fn hundred_k_term_right_nested_addition_chain_analyzes_without_overflow() {
     assert_eq!(iadds, terms - 1, "chain must lower fully, not truncated");
 }
 
+fn nested_left_spines_add_chain(groups: usize, spine_terms: usize) -> String {
+    let mut src = String::from("fn main():\n\tprint(");
+    for _ in 1..groups {
+        src.push_str("1+(");
+    }
+    src.push('1');
+    for _ in 1..groups {
+        src.push(')');
+        for _ in 0..spine_terms {
+            src.push_str("+1");
+        }
+    }
+    src.push_str(")\n");
+    src
+}
+
+#[test]
+fn nested_long_left_spines_analyze_without_overflow() {
+    let groups = 200;
+    let spine_terms = 70;
+    let (tirs, pool) = run(&nested_left_spines_add_chain(groups, spine_terms))
+        .expect("nested long left spines should analyze");
+    let main = tirs
+        .iter()
+        .find(|t| pool.str(t.name) == "main")
+        .expect("main TIR");
+    let iadds = main
+        .instructions
+        .iter()
+        .filter(|i| i.tag == TirTag::IAdd)
+        .count();
+    assert_eq!(
+        iadds,
+        (groups - 1) * (spine_terms + 1),
+        "chain must lower fully, not truncated"
+    );
+}
+
 #[test]
 fn alternating_left_and_right_nested_chain_analyzes_without_overflow() {
     let terms = 50_000;

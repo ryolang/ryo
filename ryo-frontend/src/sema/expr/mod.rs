@@ -643,10 +643,9 @@ fn analyze_binop_machine(
 
 /// Operator-chain recursion budget: how many chain links the
 /// old-style recursion may consume before the remaining subtree lowers
-/// iteratively (`analyze_binop_spill` / `analyze_binop_machine` /
-/// `analyze_unary_spill`). Far below the compiler thread's 32 MiB stack
-/// (a debug frame per link is kilobytes), far above anything a
-/// hand-written expression chains.
+/// iteratively (`analyze_binop_machine` / `analyze_unary_spill`). Far
+/// below the compiler thread's 32 MiB stack (a debug frame per link is
+/// kilobytes), far above anything a hand-written expression chains.
 const CHAIN_RECURSION_LIMIT: u32 = 64;
 
 /// One link of a binary-operator chain, recursing like the old demand
@@ -670,7 +669,7 @@ fn analyze_binop_d(
         if depth < CHAIN_RECURSION_LIMIT {
             analyze_binop_d(sema, fcx, scope, lhs, depth + 1)
         } else {
-            analyze_binop_spill(sema, fcx, scope, lhs)
+            analyze_binop_machine(sema, fcx, scope, lhs)
         }
     } else {
         analyze_expr(sema, fcx, scope, lhs)
@@ -717,68 +716,6 @@ fn analyze_binop_d(
     let emitted = check_binary_op(sema, fcx, inst.tag, lhs_ty, rhs_ty, l, r2, span);
     fcx.inst_map[node.index()] = Some(emitted);
     emitted
-}
-
-/// Iterative fallback for the deep tail of a binary-operator chain —
-/// see [`analyze_binop_d`]. Walks the remaining spine on an explicit
-/// stack, folding constants incrementally so the deep tail stays O(n).
-/// Per-link diagnostics, recovery, and memoization match the recursion.
-fn analyze_binop_spill(
-    sema: &mut Sema<'_>,
-    fcx: &mut FuncCtx,
-    scope: &Scope,
-    root: InstRef,
-) -> TirRef {
-    // Spine links, outermost first. Stop descending at an already-
-    // analyzed link (`inst_map` hit) — demand analysis memoizes every
-    // analyzed inst, and re-analyzing would emit duplicate TIR.
-    let mut spine = ChainSpine::new();
-    let inner_lhs = {
-        let mut cur = root;
-        loop {
-            let inst = sema.uir.inst(cur);
-            let InstData::BinOp { lhs, .. } = inst.data else {
-                unreachable!("chain tag must carry InstData::BinOp");
-            };
-            spine.push(cur);
-            if is_chain_binop_tag(sema.uir.inst(lhs).tag) && fcx.inst_map[lhs.index()].is_none() {
-                cur = lhs;
-            } else {
-                break lhs;
-            }
-        }
-    };
-    let mut acc = analyze_expr(sema, fcx, scope, inner_lhs);
-    // Constant value of the accumulated lhs; kept in lockstep with
-    // `acc` so per-link checks are O(1).
-    let mut acc_const = const_eval_int(sema.uir, inner_lhs);
-    spine.fold_rev(|node| {
-        let inst = sema.uir.inst(node);
-        let span = sema.uir.span(node);
-        let InstData::BinOp { rhs, .. } = inst.data else {
-            unreachable!("chain tag must carry InstData::BinOp");
-        };
-        let r2 = analyze_expr(sema, fcx, scope, rhs);
-        let (next, node_const, memo) = analyze_binop_link(
-            sema,
-            fcx,
-            inst.tag,
-            acc,
-            acc_const,
-            r2,
-            const_eval_int(sema.uir, rhs),
-            span,
-        );
-        // Early-error links are not memoized, matching the old
-        // recursion's early return; keep folding so outer links still
-        // see the error-typed accumulator.
-        if memo {
-            fcx.inst_map[node.index()] = Some(next);
-        }
-        acc_const = node_const;
-        acc = next;
-    });
-    acc
 }
 
 /// Analyze a unary-operator chain (`not not ...`, `- - ...`) — depth-

@@ -334,10 +334,9 @@ impl<M: Module> Codegen<M> {
 
     /// Operator-chain recursion budget: how many chain links the
     /// old-style recursion may consume before the remaining subtree
-    /// lowers iteratively (`eval_binop_spill` / `eval_binop_machine` /
-    /// `eval_unary_spill`). Far below the compiler thread's 32 MiB stack
-    /// (a debug frame per link is kilobytes), far above anything a
-    /// hand-written chain.
+    /// lowers iteratively (`eval_binop_machine` / `eval_unary_spill`).
+    /// Far below the compiler thread's 32 MiB stack (a debug frame per
+    /// link is kilobytes), far above anything a hand-written chain.
     const CHAIN_RECURSION_LIMIT: u32 = 64;
 
     /// Materialize one link of a scalar binary-operator chain, recursing
@@ -365,7 +364,7 @@ impl<M: Module> Codegen<M> {
             if depth < Self::CHAIN_RECURSION_LIMIT {
                 Self::eval_binop_chain(builder, ctx, lhs, depth + 1)?
             } else {
-                Self::eval_binop_spill(builder, ctx, lhs)?
+                Self::eval_binop_machine(builder, ctx, lhs)?
             }
         } else {
             Self::eval_inst(builder, ctx, lhs)?
@@ -445,66 +444,6 @@ impl<M: Module> Codegen<M> {
             }
         }
         Self::eval_inst(builder, ctx, root)
-    }
-
-    /// Iterative fallback for the deep tail of a scalar binary-
-    /// operator chain — see [`Self::eval_binop_chain`]. Spine links,
-    /// outermost first; stop descending at an already-materialized
-    /// link (the Flow driver may have evaluated an inner step before
-    /// the outer chain's root — every operator inst is a step — and
-    /// re-emitting it would duplicate instructions the memo exists to
-    /// prevent).
-    fn eval_binop_spill(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        root: TirRef,
-    ) -> Result<Value, String> {
-        let mut spine = ChainSpine::new();
-        let inner_lhs = {
-            let mut cur = root;
-            loop {
-                let inst = ctx.tir.inst(cur);
-                let TirData::BinOp { lhs, .. } = inst.data else {
-                    unreachable!("chain tag must carry TirData::BinOp");
-                };
-                spine.push(cur);
-                if Self::is_chain_binop_tag(ctx.tir.inst(lhs).tag)
-                    && Self::cached_repr(ctx, lhs).is_none()
-                {
-                    cur = lhs;
-                } else {
-                    break lhs;
-                }
-            }
-        };
-        let mut acc = Self::eval_inst(builder, ctx, inner_lhs)?;
-        let mut result: Result<Value, String> = Ok(acc);
-        spine.fold_rev_until(|node| {
-            let inst = ctx.tir.inst(node);
-            let TirData::BinOp { lhs, rhs } = inst.data else {
-                unreachable!("chain tag must carry TirData::BinOp");
-            };
-            let rv = match Self::eval_inst(builder, ctx, rhs) {
-                Ok(rv) => rv,
-                Err(e) => {
-                    result = Err(e);
-                    return false;
-                }
-            };
-            acc = match Self::emit_numeric_binop(builder, ctx, inst.tag, lhs, rhs, acc, rv) {
-                Ok(v) => v,
-                Err(e) => {
-                    result = Err(e);
-                    return false;
-                }
-            };
-            if Self::cached_repr(ctx, node).is_none() {
-                Self::cache_repr(ctx, node, ValueRepr::Scalar(acc));
-            }
-            result = Ok(acc);
-            true
-        });
-        result
     }
 
     /// Materialize one link of a unary-operator chain (`not not ...`,
