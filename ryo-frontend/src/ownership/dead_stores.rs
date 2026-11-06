@@ -3,7 +3,7 @@
 #[cfg(test)]
 use super::collect_loop_nesting;
 use super::{
-    DeadStoreEntry, LoopNesting, Owner, RegionStop, UNTRACKED_PLACE, collect_region,
+    DeadStoreEntry, Dominators, LoopNesting, Owner, RegionStop, UNTRACKED_PLACE, collect_region,
     flow_owner_place, loop_test_block, needs_tracking,
 };
 use ryo_core::flow::{BlockId, Flow, Place, PlaceId, Terminator};
@@ -125,7 +125,7 @@ impl DeadStoreAnalysis {
             return Self::default();
         }
         let transfers = build_transfers(tir, flow, pool, &stores, &by_home, &generations, nesting);
-        let dominators = compute_dominators(flow);
+        let dominators = Dominators::new(flow);
         let outs = propagate(flow, &stores, &transfers, &initial, &dominators);
         let pending = collect_pending(flow, &stores, &outs, &dominators, &read_orders);
         let (arm_dead, arm_dead_order) =
@@ -439,78 +439,10 @@ fn generation_at(generations: &[Vec<(PlaceId, u32)>], inst: TirRef, home: PlaceI
         .find_map(|(candidate, id)| (*candidate == home).then_some(*id))
 }
 
-fn compute_dominators(flow: &Flow) -> Vec<Option<BlockId>> {
-    let count = flow.blocks.len();
-    let mut idom = vec![None; count];
-    for block in flow.forward_order() {
-        if block == flow.entry
-            || (!flow.blocks[block.0 as usize].unreachable && flow.predecessors(block).is_empty())
-        {
-            idom[block.0 as usize] = Some(block);
-        }
-    }
-    let mut changed = true;
-    let mut rounds = 0;
-    while changed {
-        changed = false;
-        rounds += 1;
-        assert!(rounds <= count + 1, "dominator computation converges");
-        for block in flow.forward_order() {
-            if idom[block.0 as usize] == Some(block) {
-                continue;
-            }
-            let mut new = None;
-            for pred in flow.predecessors(block) {
-                if flow.blocks[pred.0 as usize].unreachable || idom[pred.0 as usize].is_none() {
-                    continue;
-                }
-                new = Some(match new {
-                    None => *pred,
-                    Some(current) => intersect_dominators(&idom, current, *pred),
-                });
-            }
-            if new != idom[block.0 as usize] {
-                idom[block.0 as usize] = new;
-                changed = true;
-            }
-        }
-    }
-    idom
-}
-
-fn intersect_dominators(idom: &[Option<BlockId>], mut a: BlockId, mut b: BlockId) -> BlockId {
-    while a != b {
-        while a.0 > b.0 {
-            a = idom[a.0 as usize].expect("dominator parent");
-        }
-        while b.0 > a.0 {
-            b = idom[b.0 as usize].expect("dominator parent");
-        }
-    }
-    a
-}
-
-fn dominates(idom: &[Option<BlockId>], dom: BlockId, block: BlockId) -> bool {
-    let mut current = Some(block);
-    for _ in 0..idom.len() {
-        let Some(block) = current else {
-            return false;
-        };
-        if block == dom {
-            return true;
-        }
-        current = idom[block.0 as usize];
-        if current == Some(block) {
-            return block == dom;
-        }
-    }
-    false
-}
-
-fn store_dominates(store: StoreGeneration, block: BlockId, idom: &[Option<BlockId>]) -> bool {
+fn store_dominates(store: StoreGeneration, block: BlockId, dominators: &Dominators) -> bool {
     store
         .def_block
-        .is_none_or(|def| dominates(idom, def, block))
+        .is_none_or(|def| dominators.dominates(def, block))
 }
 
 fn propagate(
@@ -518,7 +450,7 @@ fn propagate(
     stores: &[StoreGeneration],
     transfers: &[BlockTransfer],
     initial: &BitSet,
-    dominators: &[Option<BlockId>],
+    dominators: &Dominators,
 ) -> Vec<BitSet> {
     let mut top = BitSet::new(stores.len());
     for id in 0..stores.len() as u32 {
@@ -556,16 +488,14 @@ fn join_predecessors(
     block: BlockId,
     stores: &[StoreGeneration],
     outs: &[BitSet],
-    dominators: &[Option<BlockId>],
+    dominators: &Dominators,
     output: &mut BitSet,
 ) {
     let preds: Vec<_> = flow
         .predecessors(block)
         .iter()
         .copied()
-        .filter(|pred| {
-            !flow.blocks[pred.0 as usize].unreachable && dominators[pred.0 as usize].is_some()
-        })
+        .filter(|pred| !flow.blocks[pred.0 as usize].unreachable && dominators.is_reachable(*pred))
         .collect();
     if preds.is_empty() {
         output.words.fill(0);
@@ -588,7 +518,7 @@ fn collect_pending(
     flow: &Flow,
     stores: &[StoreGeneration],
     outs: &[BitSet],
-    dominators: &[Option<BlockId>],
+    dominators: &Dominators,
     read_orders: &[u32],
 ) -> HashMap<Owner, DeadStoreEntry> {
     let terminals: Vec<_> = flow
@@ -736,10 +666,10 @@ mod tests {
         );
         let (_, _, tirs, pool) = check_src_full(src);
         let flow = Flow::build(&tirs[0], &pool);
-        let idom = compute_dominators(&flow);
+        let dominators = Dominators::new(&flow);
         for block in flow.forward_order() {
             if flow.blocks[block.0 as usize].unreachable {
-                assert_eq!(idom[block.0 as usize], None, "dead block {block:?}");
+                assert_eq!(dominators.immediate(block), None, "dead block {block:?}");
             }
         }
     }

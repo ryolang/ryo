@@ -9,72 +9,16 @@
 //! in TIR terms, outside the Flow-walked body).
 
 use super::super::{
-    Owner, OwnerState, Ownership, anchored_drops, drop_anchor, match_arm_bodies, owner_sort_key,
-    stmt_match, visit_operand_matches,
+    Dominators, Owner, OwnerState, Ownership, anchored_drops, drop_anchor, match_arm_bodies,
+    owner_sort_key, stmt_match, visit_operand_matches,
 };
 use super::{TirStmtList, declared_before_stmt};
-use ryo_core::flow::{BlockId, DropOp, DropPosition, Flow};
+use ryo_core::flow::{DropOp, DropPosition};
 use ryo_core::ownership::FunctionSidecar;
 use ryo_core::tir::{ExtraList, MatchBodyView, Tir, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
-
-/// Iterative dominator sets over the Flow CFG, dense per block id.
-/// Function graphs are small (tens of blocks), so the textbook
-/// set-intersection fixpoint is the cheapest correct choice.
-fn compute_dominators(flow: &Flow) -> Vec<HashSet<BlockId>> {
-    let order: Vec<BlockId> = flow.forward_order().collect();
-    // The dense `doms[b.0]` indexing below relies on forward_order
-    // yielding EVERY block (unreachable ones included) in id order
-    // (Flow::forward_order is `(0..blocks.len()).map(BlockId)` today).
-    // Pin that contract: if it ever changes to skip unreachable blocks
-    // or yield a propagation order, this must become BlockId-keyed.
-    debug_assert!(
-        order.iter().enumerate().all(|(i, &b)| b.0 as usize == i),
-        "compute_dominators requires forward_order to yield all blocks in id order"
-    );
-    let all: HashSet<BlockId> = order.iter().copied().collect();
-    let mut doms: Vec<HashSet<BlockId>> = order
-        .iter()
-        .map(|&b| {
-            if b == flow.entry {
-                HashSet::from([b])
-            } else {
-                all.clone()
-            }
-        })
-        .collect();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &b in &order {
-            if b == flow.entry {
-                continue;
-            }
-            let preds = flow.predecessors(b);
-            let mut new_dom = HashSet::from([b]);
-            if let Some((&first, rest)) = preds.split_first() {
-                let mut intersect = doms[first.0 as usize].clone();
-                for &p in rest {
-                    intersect.retain(|blk| doms[p.0 as usize].contains(blk));
-                }
-                new_dom.extend(intersect);
-            }
-            if new_dom != doms[b.0 as usize] {
-                doms[b.0 as usize] = new_dom;
-                changed = true;
-            }
-        }
-    }
-    doms
-}
-
-/// `def` dominates `use_` when every path from the entry to `use_`
-/// passes through `def`.
-fn dominates(doms: &[HashSet<BlockId>], def: BlockId, use_: BlockId) -> bool {
-    def == use_ || doms[use_.0 as usize].contains(&def)
-}
 
 // ---------- Post-walk jump-exit free scheduling (kept TIR-based) ----------
 
@@ -90,11 +34,9 @@ pub(crate) struct LoopExitCtx<'a> {
     loop_carried_owners: HashSet<TirRef>,
     reassigned_after_loop_bindings: HashSet<TirRef>,
     sorted_owners: Vec<Owner>,
-    /// Dominator sets for the owning function's Flow CFG (see
-    /// `compute_dominators`). Computed lazily — only the break
-    /// defensive-emit path needs them — and shared by every loop in
-    /// the function, so loops that never reach that path pay nothing.
-    doms: &'a OnceCell<Vec<HashSet<BlockId>>>,
+    /// Computed lazily — only the break defensive-emit path needs
+    /// dominance — and shared by every loop in the function.
+    doms: &'a OnceCell<Dominators>,
 }
 
 /// Collect every `Assign` (site, name, value) reachable from `stmts`,
@@ -204,7 +146,7 @@ fn assignments_immediately_after_loop<S: TirStmtList + ?Sized>(
 impl<'a> LoopExitCtx<'a> {
     fn new(
         tir: &'a Tir,
-        doms: &'a OnceCell<Vec<HashSet<BlockId>>>,
+        doms: &'a OnceCell<Dominators>,
         own: &Ownership,
         sidecar: &FunctionSidecar,
         loop_inst: TirRef,
@@ -263,7 +205,7 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
     sidecar: &mut FunctionSidecar,
     stmts: &S,
     enclosing: Option<&LoopExitCtx<'_>>,
-    doms: &OnceCell<Vec<HashSet<BlockId>>>,
+    doms: &OnceCell<Dominators>,
 ) {
     schedule_loop_exit_frees_in_inner(tir, flow, pool, own, sidecar, stmts, enclosing, doms);
 }
@@ -277,7 +219,7 @@ fn schedule_loop_exit_frees_in_inner<S: TirStmtList + ?Sized>(
     sidecar: &mut FunctionSidecar,
     stmts: &S,
     enclosing: Option<&LoopExitCtx<'_>>,
-    doms: &OnceCell<Vec<HashSet<BlockId>>>,
+    doms: &OnceCell<Dominators>,
 ) {
     for r in stmts.iter_refs() {
         let r = stmt_match(tir, r).unwrap_or(r);
@@ -543,11 +485,9 @@ fn schedule_break_continue_frees(
                 flow.step_block_of(r).or_else(|| flow.term_block_of(r))
             };
             let producer_dominates = producer_block.is_some_and(|b| {
-                dominates(
-                    ctx.doms.get_or_init(|| compute_dominators(flow)),
-                    b,
-                    jump_block,
-                )
+                ctx.doms
+                    .get_or_init(|| Dominators::new(flow))
+                    .dominates(b, jump_block)
             });
             if !producer_dominates {
                 continue;

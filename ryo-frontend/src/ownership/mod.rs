@@ -31,6 +31,8 @@ use ryo_core::flow::{Analysis, BlockId, DropOp, Flow, PlaceId};
 
 mod diag_fmt;
 pub(crate) use diag_fmt::*;
+mod dominance;
+pub(crate) use dominance::*;
 mod dead_stores;
 pub(crate) use dead_stores::*;
 mod cleanup;
@@ -811,6 +813,8 @@ fn analyze_function(
         tir,
         flow,
         pool,
+        fire_points: ryo_core::flow::fire_points::FirePoints::new(flow),
+        dominators: std::cell::OnceCell::new(),
         body_stmts,
         order: &order,
         projections_of: &projections_of,

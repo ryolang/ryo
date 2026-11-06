@@ -13,15 +13,18 @@
 //! see its module doc.
 
 use super::{
-    BranchState, Owner, OwnerState, Ownership, RegionStop, StopKind, Walk, binding_state_writes,
-    branch_states_differ, collect_region, flow_owner_place, match_arm_bodies, merge_loop_plain,
-    merge_non_monotone, remove_loop_deferred_views, stmt_match, visit_operand_matches,
+    BranchState, Dominators, Owner, OwnerState, Ownership, RegionStop, StopKind, Walk,
+    binding_state_writes, branch_states_differ, collect_region, flow_owner_place, match_arm_bodies,
+    merge_loop_plain, merge_non_monotone, remove_loop_deferred_views, stmt_match,
+    visit_operand_matches,
 };
 use ryo_core::diag::DiagSink;
-use ryo_core::flow::{BlockId, Flow, Place, Terminator, WriteKind};
+use ryo_core::flow::fire_points::{FirePoint, FirePoints, FireVerdict};
+use ryo_core::flow::{BlockId, DropPosition, Flow, Place, Terminator, WriteKind};
 use ryo_core::ownership::FunctionSidecar;
 use ryo_core::tir::{ExtraList, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 
 mod jumps;
@@ -1083,11 +1086,51 @@ pub(crate) fn outermost_branch_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
     walk(tir, &body, target, &mut Vec::new())
 }
 
+fn declaration_dominates_anchor(
+    flow: &Flow,
+    fire_points: &FirePoints,
+    dominators: &OnceCell<Dominators>,
+    declaration: TirRef,
+    anchor: TirRef,
+) -> bool {
+    let Some(declaration_block) = flow
+        .step_block_of(declaration)
+        .or_else(|| flow.term_block_of(declaration))
+    else {
+        return false;
+    };
+    let dominated = |point: FirePoint| {
+        dominators
+            .get_or_init(|| Dominators::new(flow))
+            .dominates(declaration_block, point.block)
+    };
+    match fire_points.resolve(DropPosition::AfterStep { inst: anchor }) {
+        FireVerdict::Resolved(point) => dominated(point),
+        FireVerdict::ResolvedPerArm(points) => {
+            !points.is_empty() && points.into_iter().all(dominated)
+        }
+        FireVerdict::NonExact(_) | FireVerdict::Unresolved => false,
+    }
+}
+
+fn normally_completing_branch(tir: &Tir, branch: TirRef) -> bool {
+    let mut body = HashSet::new();
+    tir.collect_reachable(branch, &mut body);
+    body.into_iter().all(|r| {
+        !matches!(
+            tir.inst(r).tag,
+            TirTag::Return | TirTag::ReturnVoid | TirTag::Break | TirTag::Continue
+        )
+    })
+}
+
 /// Last-use Free anchor for a named-binding owner whose raw last read
 /// sits inside a branch or loop: the OUTERMOST branch/loop statement's
 /// exit (the earliest point dead on ALL paths), except a loop-carried
-/// owner read again after the loop anchors at its true last read. Kept
-/// for the post-walk passes.
+/// owner read again after the loop anchors at its true last read. A
+/// loop-local owner's last read in a normally completing branch anchors
+/// at that branch's exit, covering every path through the iteration.
+/// Kept for the post-walk passes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn last_use_anchor(
     tir: &Tir,
@@ -1099,6 +1142,8 @@ pub(crate) fn last_use_anchor(
     order: &[u32],
     last_read_by_name: &HashMap<StringId, TirRef>,
     loop_carried_owners: &HashSet<TirRef>,
+    fire_points: &FirePoints,
+    dominators: &OnceCell<Dominators>,
     return_transferred: bool,
 ) -> Option<TirRef> {
     // Assignment sites inherit the declaring binding, even when names shadow.
@@ -1198,10 +1243,57 @@ pub(crate) fn last_use_anchor(
                 )
         }) =>
         {
+            let declaration = binding.map(|(decl, _)| decl);
             match innermost_branch_of(tir, after) {
-                Some(inner) if Some(inner) != outermost => inner,
+                Some(inner)
+                    if Some(inner) != outermost
+                        && declaration.is_some_and(|decl| {
+                            declaration_dominates_anchor(flow, fire_points, dominators, decl, inner)
+                        }) =>
+                {
+                    inner
+                }
                 _ => after,
             }
+        }
+        // A loop-local value can use a normally completing branch's exit
+        // only when its declaration dominates every firing point.
+        None if outermost.is_some_and(|branch_stmt| {
+            binding.is_some()
+                && matches!(
+                    tir.inst(branch_stmt).tag,
+                    TirTag::WhileLoop | TirTag::ForRange
+                )
+        }) =>
+        {
+            let declaration = binding.map(|(decl, _)| decl);
+            let ancestors = ancestor_branches_of(tir, after);
+            let loop_depth = ancestors.iter().rposition(|&branch_stmt| {
+                matches!(
+                    tir.inst(branch_stmt).tag,
+                    TirTag::WhileLoop | TirTag::ForRange
+                ) && declaration.is_some_and(|decl| tir.contains_reachable(branch_stmt, decl))
+            });
+            loop_depth
+                .and_then(|depth| {
+                    ancestors
+                        .iter()
+                        .skip(depth + 1)
+                        .copied()
+                        .find(|&candidate| {
+                            normally_completing_branch(tir, candidate)
+                                && declaration.is_some_and(|decl| {
+                                    declaration_dominates_anchor(
+                                        flow,
+                                        fire_points,
+                                        dominators,
+                                        decl,
+                                        candidate,
+                                    )
+                                })
+                        })
+                })
+                .unwrap_or(after)
         }
         _ => after,
     })
