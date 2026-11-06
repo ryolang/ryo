@@ -6,11 +6,13 @@ use ryo_core::tir::{self, Tir};
 use ryo_core::types::InternPool;
 use ryo_core::uir::Uir;
 use ryo_frontend::lexer::{self, Token};
+use std::io::{self, Write as _};
 use std::path::Path;
 use target_lexicon::Triple;
 
 use super::diagnostics::finalize_diags;
 use super::source_name;
+use crate::output::{finish_output, write_stdout};
 
 pub(super) fn display_tokens(input: &str, file: &Path) -> Result<(), CompilerError> {
     let mut pool = InternPool::new();
@@ -26,52 +28,74 @@ pub(super) fn display_tokens(input: &str, file: &Path) -> Result<(), CompilerErr
         return finalize_diags(sink.into_diags(), input, &name);
     }
 
-    println!("Token stream for '{}':", file.display());
-    println!();
+    write_stdout(format_args!("Token stream for '{}':\n", file.display()))?;
+    write_stdout(format_args!("\n"))?;
 
     // Render identifier and string-literal payloads through the
     // pool so the user sees the actual text rather than an opaque
     // handle id. Other variants format normally via Debug.
     for (tok, span) in &tokens {
         match tok {
-            Token::Ident(id) => {
-                println!("Ident({:?}) @ {}..{}", pool.str(*id), span.start, span.end)
-            }
-            Token::StrLit(id) => {
-                println!("StrLit({:?}) @ {}..{}", pool.str(*id), span.start, span.end)
-            }
-            other => println!("{:?} @ {}..{}", other, span.start, span.end),
+            Token::Ident(id) => write_stdout(format_args!(
+                "Ident({:?}) @ {}..{}\n",
+                pool.str(*id),
+                span.start,
+                span.end
+            ))?,
+            Token::StrLit(id) => write_stdout(format_args!(
+                "StrLit({:?}) @ {}..{}\n",
+                pool.str(*id),
+                span.start,
+                span.end
+            ))?,
+            other => write_stdout(format_args!("{:?} @ {}..{}\n", other, span.start, span.end))?,
         }
     }
     Ok(())
 }
 
-pub(super) fn display_ast(program: &ast::Ast, pool: &InternPool) {
-    use std::io::Write as _;
-
-    println!("[AST]");
+pub(super) fn display_ast(program: &ast::Ast, pool: &InternPool) -> Result<(), CompilerError> {
+    write_stdout(format_args!("[AST]\n"))?;
     // Stream instead of buffering: a deeply nested program's tree dump
     // is quadratic in depth, far larger than any reasonable buffer.
-    struct IoWriter<'a, W: std::io::Write>(&'a mut W);
+    struct IoWriter<'a, W: std::io::Write> {
+        out: &'a mut W,
+        error: Option<io::Error>,
+    }
     impl<W: std::io::Write> std::fmt::Write for IoWriter<'_, W> {
         fn write_str(&mut self, s: &str) -> std::fmt::Result {
-            self.0.write_all(s.as_bytes()).map_err(|_| std::fmt::Error)
+            match self.out.write_all(s.as_bytes()) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    self.error = Some(error);
+                    Err(std::fmt::Error)
+                }
+            }
         }
     }
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
-    let _ = ryo_core::ast_pretty::write_program(&mut IoWriter(&mut out), program, pool);
-    let _ = out.flush();
+    let mut writer = IoWriter {
+        out: &mut out,
+        error: None,
+    };
+    let _ = ryo_core::ast_pretty::write_program(&mut writer, program, pool);
+    let error = writer.error.take();
+    drop(writer);
+    finish_output(match error {
+        Some(error) => Err(error),
+        None => out.flush(),
+    })
 }
 
-pub(super) fn display_uir(uir: &Uir, pool: &InternPool) {
-    println!("[UIR]");
-    print!("{}", uir.dump(pool));
+pub(super) fn display_uir(uir: &Uir, pool: &InternPool) -> Result<(), CompilerError> {
+    write_stdout(format_args!("[UIR]\n"))?;
+    write_stdout(format_args!("{}", uir.dump(pool)))
 }
 
-pub(super) fn display_tir(tirs: &[Tir], pool: &InternPool) {
-    println!("[TIR]");
-    print!("{}", tir::dump(tirs, pool));
+pub(super) fn display_tir(tirs: &[Tir], pool: &InternPool) -> Result<(), CompilerError> {
+    write_stdout(format_args!("[TIR]\n"))?;
+    write_stdout(format_args!("{}", tir::dump(tirs, pool)))
 }
 
 pub(super) fn display_flow(
@@ -80,13 +104,13 @@ pub(super) fn display_flow(
     sidecar: &ryo_core::ownership::OwnershipSidecar,
     pool: &InternPool,
 ) -> Result<(), CompilerError> {
-    println!("[Flow]");
+    write_stdout(format_args!("[Flow]\n"))?;
     for ((tir, flow), cleanup) in tirs.iter().zip(flows).zip(&sidecar.functions) {
-        print!(
+        write_stdout(format_args!(
             "{}",
             flow.dump(tir, cleanup, pool)
                 .map_err(CompilerError::CodegenError)?
-        );
+        ))?;
     }
     Ok(())
 }
@@ -103,8 +127,6 @@ pub(super) fn generate_and_display_ir(
         .compile_and_dump_ir(tirs, flows, pool, sidecar)
         .map_err(CompilerError::CodegenError)?;
 
-    println!("[Cranelift IR]");
-    print!("{}", ir);
-
-    Ok(())
+    write_stdout(format_args!("[Cranelift IR]\n"))?;
+    write_stdout(format_args!("{}", ir))
 }

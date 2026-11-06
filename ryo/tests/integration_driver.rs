@@ -962,3 +962,87 @@ fn multibyte_source_with_paren_fixed_compiles_and_runs() {
         "32\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F600}\u{1F98A}\n"
     );
 }
+
+fn closed_pipe() -> std::process::Stdio {
+    let (reader, writer) = std::io::pipe().expect("create closed pipe");
+    drop(reader);
+    writer.into()
+}
+
+fn run_with_closed_stderr(args: &[&str], file: &std::path::Path) -> std::process::ExitStatus {
+    std::process::Command::new(env!("CARGO_BIN_EXE_ryo"))
+        .args(&args[..args.len() - 1])
+        .arg(file)
+        .stdout(std::process::Stdio::null())
+        .stderr(closed_pipe())
+        .status()
+        .expect("run ryo with closed stderr")
+}
+
+#[test]
+fn multi_span_diagnostic_survives_closed_stderr() {
+    let temp_dir = TempDir::new().expect("temp");
+    let file = create_test_file(
+        temp_dir.path(),
+        "closed_diagnostic_pipe.ryo",
+        "name: str = \"Alice\"\nother: str = name\nprint(name)\n",
+    );
+
+    let status = run_with_closed_stderr(&["run", "closed_diagnostic_pipe.ryo"], &file);
+
+    assert_eq!(status.code(), Some(1));
+}
+
+#[test]
+fn ordinary_error_survives_closed_stderr() {
+    let temp_dir = TempDir::new().expect("temp");
+    let file = temp_dir.path().join("missing.ryo");
+
+    let status = run_with_closed_stderr(&["parse", "missing.ryo"], &file);
+
+    assert_eq!(status.code(), Some(1));
+}
+
+#[test]
+fn lex_output_survives_closed_stdout() {
+    let temp_dir = TempDir::new().expect("temp");
+    let file = create_test_file(temp_dir.path(), "closed_lex_pipe.ryo", "x = 1 + 2\n");
+
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_ryo"))
+        .arg("lex")
+        .arg(file)
+        .stdout(closed_pipe())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run ryo lex with closed stdout");
+
+    assert!(status.success());
+}
+
+#[test]
+fn ir_output_survives_closed_stdout() {
+    let temp_dir = TempDir::new().expect("temp");
+    let file = create_test_file(temp_dir.path(), "closed_ir_pipe.ryo", "x = 1 + 2\n");
+
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_ryo"))
+        .args(["ir", "--emit=uir"])
+        .arg(file)
+        .stdout(closed_pipe())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run ryo ir with closed stdout");
+
+    assert!(status.success());
+}
+
+#[test]
+fn toolchain_status_survives_closed_stdout() {
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_ryo"))
+        .args(["toolchain", "status"])
+        .stdout(closed_pipe())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run ryo toolchain status with closed stdout");
+
+    assert!(status.success());
+}

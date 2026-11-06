@@ -23,7 +23,7 @@ pub(super) fn fail_with_diags(diags: Vec<Diag>, input: &str, source_name: &str) 
 /// span and would otherwise sort to the top; it's rendered
 /// out-of-band after the sorted sweep so the suppression marker
 /// always lands at the bottom of the report.
-fn render_diags(diags: &[Diag], input: &str, source_name: &str) {
+fn render_diags(diags: &[Diag], input: &str, source_name: &str) -> Result<(), CompilerError> {
     let source = Source::from(input);
     // Ariadne 0.6 indexes `Source` by CHARACTER offset, but every span
     // in the compiler is a BYTE offset (logos + `str` slicing). On pure
@@ -41,11 +41,12 @@ fn render_diags(diags: &[Diag], input: &str, source_name: &str) {
     let mut sorted = regular;
     sorted.sort_by_key(|d| (d.span.start, d.span.end));
     for d in sorted {
-        emit_one(d, source_name, &source, &byte_to_char);
+        emit_one(d, source_name, &source, &byte_to_char)?;
     }
     for d in truncation {
-        emit_one(d, source_name, &source, &byte_to_char);
+        emit_one(d, source_name, &source, &byte_to_char)?;
     }
+    Ok(())
 }
 
 /// Prefix table mapping byte offsets to character offsets: entry `i`
@@ -74,7 +75,12 @@ fn to_char_span(offsets: &[usize], span: std::ops::Range<usize>) -> std::ops::Ra
         ..offsets.get(span.end).copied().unwrap_or(fallback)
 }
 
-fn emit_one(d: &Diag, source_name: &str, source: &Source<&str>, byte_to_char: &[usize]) {
+fn emit_one(
+    d: &Diag,
+    source_name: &str,
+    source: &Source<&str>,
+    byte_to_char: &[usize],
+) -> Result<(), CompilerError> {
     let kind = match d.severity {
         Severity::Error => ReportKind::Error,
         Severity::Warning => ReportKind::Warning,
@@ -103,11 +109,14 @@ fn emit_one(d: &Diag, source_name: &str, source: &Source<&str>, byte_to_char: &[
             report = report.with_note(&note.message);
         }
     }
-    if report.finish().eprint((source_name, source)).is_err() {
-        // Ariadne can fail on out-of-range spans or stderr write
-        // errors; fall back to a plain line rather than panicking
-        // mid-report and suppressing the remaining diagnostics.
-        eprintln!("{}: {}", code, d.message);
+    match report.finish().eprint((source_name, source)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(_) => {
+            // Try a plain line for rendering failures. If that write also
+            // fails, preserve the output error unless the pipe has closed.
+            crate::output::write_stderr(format_args!("{}: {}\n", code, d.message))
+        }
     }
 }
 
@@ -243,7 +252,7 @@ pub(super) fn finalize_diags(
 ) -> Result<(), CompilerError> {
     let has_errors = diags.iter().any(|d| d.severity == Severity::Error);
     if !diags.is_empty() {
-        render_diags(&diags, input, source_name);
+        render_diags(&diags, input, source_name)?;
     }
     if has_errors {
         Err(CompilerError::Diagnostics(diags))

@@ -1,3 +1,4 @@
+use crate::output::write_stdout;
 use ryo_backend::codegen;
 use ryo_core::errors::CompilerError;
 use ryo_core::types::InternPool;
@@ -36,8 +37,8 @@ pub fn run_file(
     };
 
     if want.ast {
-        display_ast(&program, &pool);
-        println!();
+        display_ast(&program, &pool)?;
+        write_stdout(format_args!("\n"))?;
     }
 
     let (uir, analyzed) = lower_and_analyze(
@@ -57,12 +58,12 @@ pub fn run_file(
     let sidecar = analyzed.cleanup();
 
     if want.uir {
-        display_uir(&uir, &pool);
-        println!();
+        display_uir(&uir, &pool)?;
+        write_stdout(format_args!("\n"))?;
     }
     if want.tir {
-        display_tir(tirs, &pool);
-        println!();
+        display_tir(tirs, &pool)?;
+        write_stdout(format_args!("\n"))?;
     }
     if want.flow {
         display_flow(tirs, flows, sidecar, &pool)?;
@@ -73,8 +74,8 @@ pub fn run_file(
         .compile(tirs, flows, &pool, sidecar, want.clif)
         .map_err(CompilerError::CodegenError)?;
     if want.clif {
-        println!("[Cranelift IR]");
-        print!("{clif}");
+        write_stdout(format_args!("[Cranelift IR]\n"))?;
+        write_stdout(format_args!("{clif}"))?;
     }
 
     let mut argv = Vec::with_capacity(program_args.len() + 1);
