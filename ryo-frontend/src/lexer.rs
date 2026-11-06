@@ -1480,7 +1480,7 @@ mod tests {
     #[test]
     fn lex_int_prefixed_overflow_emits_error() {
         // A prefixed literal above the i64::MIN magnitude is an error
-        // until sized unsigned types land (M17) — same recovery as
+        // until sized unsigned types land (M20) — same recovery as
         // decimal overflow: one diagnostic, IntLit(0).
         let mut pool = InternPool::new();
         let mut sink = DiagSink::new();

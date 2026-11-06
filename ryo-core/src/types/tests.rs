@@ -364,7 +364,7 @@ fn bytes_display_and_copy_classification() {
     assert!(!pool.is_copy(pool.bytes()));
     assert!(pool.is_copy(pool.bytes_view()));
     assert!(pool.is_view(pool.bytes_view()));
-    assert_eq!(pool.view_elem(pool.bytes_view()), None); // u8 lands at M17
+    assert_eq!(pool.view_elem(pool.bytes_view()), None); // u8 lands at M20
 }
 
 #[test]

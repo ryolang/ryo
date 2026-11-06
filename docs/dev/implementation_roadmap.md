@@ -1952,7 +1952,7 @@ fn main():
 
 ### Milestone 19: Bit Operations
 
-**Status:** ⏳ Planned — v0.1/alpha, after M18 and before M20. Spelling approved 2026-11-05: conventional symbols `& | ^ ~ << >>` with Rust/Python-shaped precedence, per the ratified design [Bitwise Operators](spec_bitwise_operators.md). The approved behavior is now documented in the spec (§3, Bitwise Operators).
+**Status:** ⏳ Planned — v0.1.0/beta, after M18 and before M20. Spelling approved 2026-11-05: conventional symbols `& | ^ ~ << >>` with Rust/Python-shaped precedence, per the ratified design [Bitwise Operators](spec_bitwise_operators.md). The approved behavior is now documented in the spec (§3, Bitwise Operators).
 
 **Goal:** Bitwise shifts, AND, OR, XOR, and NOT on the existing `int` type (64-bit two's-complement), unlocking SHA-256, CRC32, compression, binary protocols, and simpler Base64 code on top of M18's arrays and `bytes`. Sized-type (`u8`/`u32`/…) variants and rotations follow M20; nothing here depends on explicit sizes.
 
@@ -2041,7 +2041,7 @@ fn main():
 
 **Implementation Notes:**
 
-- Dependencies: Milestones 16.1, 17, and 17.1
+- Dependencies: Milestones 17 (f-string interpolation), 20 (sized numeric types), and 21 (`char`)
 - Dynamic width or precision and custom `Display` formatting remain v0.2 work
 
 ### Milestone 23: Interpolation Conversions & Debug Capture
@@ -2103,10 +2103,10 @@ impl Circle:
   return 3.14159 * self.radius * self.radius
 
  fn scale(self, factor: float) -> Circle:
-  return Circle(radius=self.radius * factor)
+  return Circle{radius=self.radius * factor}
 
 fn main():
- c = Circle(radius=5.0)
+ c = Circle{radius=5.0}
  a = c.area()              # Consumes c (moved)
  # c.area()                # Error: c was moved
 ```
@@ -2205,7 +2205,7 @@ fn main():
 - Clone: Copy-classified enums get buffer memcpy; owning enums clone element-wise, per the eager-clone model from M25's COW decision (COW itself stays Phase 5)
 - Map keys and values: hashability mirrors the synthesized-Eq predicate (M9.1); resolves the M25 hashability open decision for enums via snapshot-at-insertion
 - Recursive types: support an enum whose variant holds `list[the enum itself]` (`Json = Null | … | Arr(list[Json])`) — the pool-based type representation already permits the cycle
-- Tests: JSON DOM construction/traversal, AST interpretation with exhaustive `match`, event-stream dispatch, enum-keyed map, recursive-enum acceptance/rejection cases
+- Tests: JSON DOM construction/traversal, AST interpretation with exhaustive `match`, event-stream dispatch, enum-valued map (`map[str, E]`), recursive-enum acceptance/rejection cases
 
 **Visible Progress:** JSON DOM, AST-interpreter, and event-stream programs compile in v0.1.
 
@@ -2716,7 +2716,7 @@ ryo upgrade
 - All files in `~/.ryo/` directory for clean uninstall
 - Windows is a first-class citizen (PowerShell script works seamlessly)
 - `x86_64-apple-darwin` (Intel Mac) is intentionally excluded; `release.yml` currently ships linux-x64 and linux-arm64 (both glibc) plus macos-arm64 (libSystem) — static musl artifacts stay gated on the musl evaluation in `ISSUES.md`, and the `x86_64-pc-windows-msvc` target is still open
-- Dependencies: Milestone 33 prep work (this enables distribution)
+- Dependencies: none among the language milestones — the installer and release pipeline are alpha-blocking (alpha_scope.md) and proceed in parallel against whatever release artifacts exist; M32's cross-compilation widens the artifact matrix afterwards
 
 ### Milestone 32: Cross-Compilation (64-bit) [alpha]
 

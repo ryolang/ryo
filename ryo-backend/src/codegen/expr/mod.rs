@@ -1235,7 +1235,7 @@ impl<M: Module> Codegen<M> {
             return Self::emit_io_eprint(builder, ctx, r);
         }
 
-        // TODO(M18): interim call form — replaced by `process.args`.
+        // TODO(M28): interim call form — replaced by `process.args`.
         if ids.process_argc == Some(name_id) {
             return Self::emit_process_argc(builder, ctx, r);
         }
