@@ -8,7 +8,7 @@ The approach follows the [structure-aware fuzzing experiment](https://fitzgen.co
 
 ## 1. Set Up an Isolated Campaign
 
-Build the compiler under test, then put every harness, generated source, binary, log, minimized repro, and report outside the checkout:
+Build the compiler under test, then put every harness, generated source, binary, log, minimized repro, and report outside the checkout (the only committed artifact is a summary entry in the campaign register — see §9):
 
 ```bash
 cargo build
@@ -155,6 +155,8 @@ Include in every report:
 - confirmation that no repository files were changed.
 
 Zero defects in one track is useful evidence only when its valid inputs reached backend and runtime. Keep that evidence separate from tracks that found defects.
+
+Every campaign, clean or defect-finding, gets one entry in the [campaign register](fuzz_campaign_register.md) — a committed document that records the compiler commit each campaign ran against and what it covered, so future campaigns don't rerun settled ground. Append a new entry (compiler SHA, tracks, result, findings, artifact locations) when the campaign ends; keep the full harnesses, logs, and repro sets outside the repository as described above.
 
 ## 10. Build the Python Harness
 
@@ -486,6 +488,7 @@ For a small campaign that invokes `ryo run` and `ryo build` as separate processe
 
 - Spec: [Ryo specification](../../docs/specification.md)
 - Roadmap: [implementation_roadmap.md](../../docs/dev/implementation_roadmap.md)
+- Campaign register: [fuzz_campaign_register.md](fuzz_campaign_register.md)
 - External: [Structure-Aware Fuzzing Experiment](https://fitzgen.com/2026/06/01/structure-aware-fuzzing-experiment.html)
 - External: [How Fuzzy Are Your Fuzzers?](https://fitzgen.com/2022/10/24/how-fuzzy-are-your-fuzzers.html)
 - External: [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz)
