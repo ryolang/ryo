@@ -81,6 +81,22 @@ fn emit_one(
     source: &Source<&str>,
     byte_to_char: &[usize],
 ) -> Result<(), CompilerError> {
+    emit_one_with_writer(
+        d,
+        source_name,
+        source,
+        byte_to_char,
+        &mut std::io::stderr().lock(),
+    )
+}
+
+fn emit_one_with_writer<W: std::io::Write>(
+    d: &Diag,
+    source_name: &str,
+    source: &Source<&str>,
+    byte_to_char: &[usize],
+    out: &mut W,
+) -> Result<(), CompilerError> {
     let kind = match d.severity {
         Severity::Error => ReportKind::Error,
         Severity::Warning => ReportKind::Warning,
@@ -109,13 +125,13 @@ fn emit_one(
             report = report.with_note(&note.message);
         }
     }
-    match report.finish().eprint((source_name, source)) {
+    match report.finish().write((source_name, source), &mut *out) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         Err(_) => {
             // Try a plain line for rendering failures. If that write also
             // fails, preserve the output error unless the pipe has closed.
-            crate::output::write_stderr(format_args!("{}: {}\n", code, d.message))
+            crate::output::write_and_flush(out, format_args!("{}: {}\n", code, d.message))
         }
     }
 }
@@ -486,5 +502,84 @@ mod tests {
         // Out-of-range byte offsets fall back to the char length
         // instead of panicking.
         assert_eq!(to_char_span(&table, 5..9), 2..2);
+    }
+
+    struct FailFirstWrite {
+        kind: std::io::ErrorKind,
+        failed: bool,
+        output: Vec<u8>,
+    }
+
+    impl FailFirstWrite {
+        fn new(kind: std::io::ErrorKind) -> Self {
+            Self {
+                kind,
+                failed: false,
+                output: Vec::new(),
+            }
+        }
+    }
+
+    impl std::io::Write for FailFirstWrite {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.failed {
+                self.output.extend_from_slice(buf);
+                Ok(buf.len())
+            } else {
+                self.failed = true;
+                Err(std::io::Error::new(self.kind, "render failed"))
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn non_pipe_report_write_failure_uses_plain_fallback() {
+        let input = "print(name)\n";
+        let diag = Diag::error(
+            ryo_core::span::Span::new(6, 10),
+            DiagCode::UseAfterMove,
+            "use of moved value `name`",
+        );
+        let mut writer = FailFirstWrite::new(std::io::ErrorKind::Other);
+
+        emit_one_with_writer(
+            &diag,
+            "test.ryo",
+            &Source::from(input),
+            &byte_to_char_offsets(input),
+            &mut writer,
+        )
+        .expect("fallback write should succeed");
+
+        assert_eq!(
+            String::from_utf8(writer.output).expect("fallback should be UTF-8"),
+            "E0020: use of moved value `name`\n"
+        );
+    }
+
+    #[test]
+    fn closed_pipe_report_write_does_not_use_fallback() {
+        let input = "print(name)\n";
+        let diag = Diag::error(
+            ryo_core::span::Span::new(6, 10),
+            DiagCode::UseAfterMove,
+            "use of moved value `name`",
+        );
+        let mut writer = FailFirstWrite::new(std::io::ErrorKind::BrokenPipe);
+
+        emit_one_with_writer(
+            &diag,
+            "test.ryo",
+            &Source::from(input),
+            &byte_to_char_offsets(input),
+            &mut writer,
+        )
+        .expect("closed pipe should be ignored");
+
+        assert!(writer.output.is_empty());
     }
 }

@@ -971,7 +971,7 @@ fn closed_pipe() -> std::process::Stdio {
 
 fn run_with_closed_stderr(args: &[&str], file: &std::path::Path) -> std::process::ExitStatus {
     std::process::Command::new(env!("CARGO_BIN_EXE_ryo"))
-        .args(&args[..args.len() - 1])
+        .args(args)
         .arg(file)
         .stdout(std::process::Stdio::null())
         .stderr(closed_pipe())
@@ -988,7 +988,7 @@ fn multi_span_diagnostic_survives_closed_stderr() {
         "name: str = \"Alice\"\nother: str = name\nprint(name)\n",
     );
 
-    let status = run_with_closed_stderr(&["run", "closed_diagnostic_pipe.ryo"], &file);
+    let status = run_with_closed_stderr(&["run"], &file);
 
     assert_eq!(status.code(), Some(1));
 }
@@ -998,7 +998,7 @@ fn ordinary_error_survives_closed_stderr() {
     let temp_dir = TempDir::new().expect("temp");
     let file = temp_dir.path().join("missing.ryo");
 
-    let status = run_with_closed_stderr(&["parse", "missing.ryo"], &file);
+    let status = run_with_closed_stderr(&["parse"], &file);
 
     assert_eq!(status.code(), Some(1));
 }

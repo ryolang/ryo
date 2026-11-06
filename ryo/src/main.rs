@@ -160,7 +160,9 @@ fn cli_main() -> std::process::ExitCode {
             // summary line.)
             if !matches!(e, CompilerError::Diagnostics(_)) {
                 use std::io::Write as _;
-                let _ = writeln!(std::io::stderr(), "error: {e}");
+                // Error reporting is best-effort; a stderr failure must not
+                // change the command's exit code.
+                writeln!(std::io::stderr(), "error: {e}").ok();
             }
             std::process::ExitCode::FAILURE
         }

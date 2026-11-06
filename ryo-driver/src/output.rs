@@ -6,11 +6,10 @@ pub fn write_stdout(args: fmt::Arguments) -> Result<(), CompilerError> {
     write_and_flush(io::stdout().lock(), args)
 }
 
-pub(crate) fn write_stderr(args: fmt::Arguments) -> Result<(), CompilerError> {
-    write_and_flush(io::stderr().lock(), args)
-}
-
-fn write_and_flush<W: Write>(mut out: W, args: fmt::Arguments) -> Result<(), CompilerError> {
+pub(crate) fn write_and_flush<W: Write>(
+    mut out: W,
+    args: fmt::Arguments,
+) -> Result<(), CompilerError> {
     finish_output(out.write_fmt(args).and_then(|_| out.flush()))
 }
 

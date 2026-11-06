@@ -79,7 +79,8 @@ pub(super) fn display_ast(program: &ast::Ast, pool: &InternPool) -> Result<(), C
         out: &mut out,
         error: None,
     };
-    let _ = ryo_core::ast_pretty::write_program(&mut writer, program, pool);
+    // Writer I/O failures are captured in `writer.error` and reported below.
+    ryo_core::ast_pretty::write_program(&mut writer, program, pool).ok();
     let error = writer.error.take();
     drop(writer);
     finish_output(match error {
