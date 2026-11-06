@@ -69,11 +69,11 @@ A compiled template definition stores reusable structure and accepts its context
 
 ### 2.4 Milestone placement
 
-Basic f-string interpolation ships as **M16.1 — F-Strings & String Interpolation** in v0.1/alpha, after M16 Optional Types and before M17.4 Method Implementations. The execution order is **M13 → M13.8 → M16 → M16.1 → M17.4**. M16.1 requires no traits, t-strings, or template machinery.
+Basic f-string interpolation ships as **M17 — F-Strings & String Interpolation** in v0.1/alpha, after M16 Optional Types and before M24 Method Implementations. The execution order is **M13 → M13.8 → M16 → M17 → M24**. M17 requires no traits, t-strings, or template machinery.
 
-**M17.2 — Static Format Specifications** follows M17 Explicit Sizes and M17.1 `char`. M17 and M17.1 extend plain interpolation and the existing default conversion paths to their new types. M17.2 adds static precision, width, alignment, fill, alternate-form, and numeric-base specifications across the complete numeric and character type system. It must not duplicate or redesign the plain conversion paths. Text width counts Unicode scalar values, not UTF-8 bytes, grapheme clusters, or terminal display columns.
+**M22 — Static Format Specifications** follows M20 Explicit Sizes and M21 `char`. M20 and M21 extend plain interpolation and the existing default conversion paths to their new types. M22 adds static precision, width, alignment, fill, alternate-form, and numeric-base specifications across the complete numeric and character type system. It must not duplicate or redesign the plain conversion paths. Text width counts Unicode scalar values, not UTF-8 bytes, grapheme clusters, or terminal display columns.
 
-Conversions and `{value=}` ship in **M17.3**, after the static format-specification work. Dynamic width or precision and custom `Display` formatting remain v0.2 work. T-strings and compiled templates remain deferred under Sections 11 and 12.
+Conversions and `{value=}` ship in **M23**, after the static format-specification work. Dynamic width or precision and custom `Display` formatting remain v0.2 work. T-strings and compiled templates remain deferred under Sections 11 and 12.
 
 ## 3. Non-goals
 
@@ -198,7 +198,7 @@ These restrictions should produce targeted diagnostics where practical rather th
 
 ### 5.1 Result and conversion rules
 
-The result type is always `str` after successful semantic analysis. M16.1 uses a compiler-provided default conversion and performs no trait lookup.
+The result type is always `str` after successful semantic analysis. M17 uses a compiler-provided default conversion and performs no trait lookup.
 
 | Interpolated type | Required behavior |
 |---|---|
@@ -586,7 +586,7 @@ The intended properties are:
 
 The processing library owns any SQL, HTML, logging, or other domain-safety guarantee. The literal syntax alone provides no such guarantee.
 
-F-string work may reuse the interpolation scanner with this future feature, but must not expose `TemplateView`, reserve a public runtime ABI, or implement an owning captured `Template`. M16.1 does not expose processor metadata or change its runtime lowering to support t-strings.
+F-string work may reuse the interpolation scanner with this future feature, but must not expose `TemplateView`, reserve a public runtime ABI, or implement an owning captured `Template`. M17 does not expose processor metadata or change its runtime lowering to support t-strings.
 
 ## 12. Deferred compiled-template direction
 
@@ -641,5 +641,5 @@ cargo test --workspace
 ## References
 
 - Spec: [Section 2](../specification.md) (string and f-string literals), [Section 6.1.2](../specification.md) (interpolation as the non-variadic printing idiom)
-- Dev: [implementation_roadmap.md](implementation_roadmap.md) (M16.1, M17.2, and M17.3)
+- Dev: [implementation_roadmap.md](implementation_roadmap.md) (M17, M22, and M23)
 - Dev: [guide_compiler.md](guide_compiler.md) (pipeline, AST/UIR, semantic-analysis, backend, and testing conventions)

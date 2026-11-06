@@ -74,14 +74,13 @@ Collection pipelines stay on the iterator-chain and free-function forms. This is
 
 Initial implementation supports the existing signed `int` type:
 
-- Binary operands must have the same type.
-- `&`, `|`, and `^` return that type.
-- Shift counts use `int`.
+- `&`, `|`, `^`: both operands must have the same type, and the result is that type.
+- `<<`, `>>`: the left operand is the shifted integer value; the shift count is `int`. The result has the value's type.
 - `~` returns the operand type.
 - No implicit conversions between numeric types.
 - `bool`, floats, strings, and aggregates are rejected.
 
-Milestone 17 (explicit sizes) extends the operators to sized integers:
+Milestone 20 (explicit sizes) extends the operators to sized integers:
 
 - Signed and unsigned integers support all six operators.
 - Mixed sized types still require explicit conversion.
@@ -108,7 +107,7 @@ This is a bit operation, not checked multiplication. For example, shifting into 
 `>>` is:
 
 - **Arithmetic for signed integers**, preserving the sign bit.
-- **Logical for unsigned integers** after M17, inserting zero bits.
+- **Logical for unsigned integers** after M20, inserting zero bits.
 
 Thus, for signed `int`:
 
@@ -137,7 +136,8 @@ unary -, not, ~
 &
 ^
 |
-ordering and equality
+ordering
+equality
 and
 or
 ```
@@ -185,7 +185,7 @@ fn main():
 1. Add operator tokens and precedence levels.
 2. Add AST, UIR, and TIR representations.
 3. Add semantic checks for integer operands and shift counts.
-4. Lower to Cranelift `band`, `bor`, `bxor`, `bnot`, `shl`, `sshr`, and later `ushr`.
+4. Lower to Cranelift `band`, `bor`, `bxor`, `bnot`, `ishl`, `sshr`, and later `ushr`.
 5. Add compound-assignment lowering.
 6. Test precedence, negative values, sign shifts, discarded bits, invalid counts, and `INT_MIN`.
 
@@ -207,4 +207,4 @@ The accepted tradeoff: **bare `|` becomes bitwise OR in expressions, and the bar
 
 - Spec: Section 4.2 (explicit sizes — the sized-type extension), Section 18 (traps in all build modes — the invalid-shift-count rule)
 - Spec: the operator-uniqueness rule ("each operator has exactly one meaning") — this proposal amends it to one-meaning-per-syntactic-role
-- Roadmap: [Milestone 16.3 — Bit Operations](implementation_roadmap.md#milestone-163-bit-operations)
+- Roadmap: [Milestone 19 — Bit Operations](implementation_roadmap.md#milestone-19-bit-operations)

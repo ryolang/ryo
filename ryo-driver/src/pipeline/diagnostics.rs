@@ -211,6 +211,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::InvalidCharacter => "E0102",
         DiagCode::UnknownEscape => "E0103",
+        DiagCode::LexerInputTooLarge => "E0130",
         DiagCode::ConstEvalFailure => "E0200",
         DiagCode::CycleInComptime => "E0201",
         DiagCode::GenericInstantiation => "E0202",
@@ -312,6 +313,7 @@ mod tests {
             (DiagCode::TooManyDiagnostics, "E0101"),
             (DiagCode::InvalidCharacter, "E0102"),
             (DiagCode::UnknownEscape, "E0103"),
+            (DiagCode::LexerInputTooLarge, "E0130"),
             (DiagCode::ChainedComparison, "E0104"),
             (DiagCode::RangeArity, "E0105"),
             (DiagCode::EmptyBrackets, "E0106"),
@@ -449,6 +451,7 @@ mod tests {
                 | DiagCode::TooManyDiagnostics
                 | DiagCode::InvalidCharacter
                 | DiagCode::UnknownEscape
+                | DiagCode::LexerInputTooLarge
                 | DiagCode::ConstEvalFailure
                 | DiagCode::CycleInComptime
                 | DiagCode::GenericInstantiation => {}

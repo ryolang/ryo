@@ -431,9 +431,9 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Files:** `ryo-frontend/src/grammar/statements.rs` (attribute placement rule; `attr_group_parser` :642), `ryo-frontend/src/grammar/enums.rs` (`attributed_type_decl_parser` :368 — the placement gate), `ryo-frontend/src/lexer.rs`, `ryo-core/src/diag.rs` (`ParseDiag::UnknownAttribute`/`MisplacedAttribute` note text), `docs/specification.md` (§2, §19)
 
-**Summary:** Milestone 9.1 introduced `#[...]` attributes restricted to struct definitions; an attribute before a function or any other item is a compile error (the misplaced-attribute diagnostic, "attributes are only supported on struct definitions"). Roadmap features that need function attributes — the testing framework's `#[test]`, contracts (`#[pre]`/`#[post]`), `#[no_mangle]` (spec §19) — are blocked until placement widens. The groundwork is already M26-ready: the lexer exposes `#[` everywhere and the parser's attribute *contents* are generic (`ident` + optional parenthesized comma-list), so the change is the placement rule, per-name recognition with per-item validation, and the misplaced-attribute message (`ParseDiag::MisplacedAttribute`).
+**Summary:** Milestone 9.1 introduced `#[...]` attributes restricted to struct definitions; an attribute before a function or any other item is a compile error (the misplaced-attribute diagnostic, "attributes are only supported on struct definitions"). Roadmap features that need function attributes — the testing framework's `#[test]`, contracts (`#[pre]`/`#[post]`), `#[no_mangle]` (spec §19) — are blocked until placement widens. The groundwork is already M30-ready: the lexer exposes `#[` everywhere and the parser's attribute *contents* are generic (`ident` + optional parenthesized comma-list), so the change is the placement rule, per-name recognition with per-item validation, and the misplaced-attribute message (`ParseDiag::MisplacedAttribute`).
 
-**Resolution:** Lands with Milestone 26 (the general attribute system) at the earliest; a narrower interim step (e.g. `#[test]` only) would widen the placement rule for functions without the full system.
+**Resolution:** Lands with Milestone 30 (the general attribute system) at the earliest; a narrower interim step (e.g. `#[test]` only) would widen the placement rule for functions without the full system.
 **Update (2026-10-09, Milestone 11):** Placement widened to enum definitions and the diagnostic text now reads "attributes are only supported on struct and enum definitions". Functions and other items are still rejected; the rest of this entry stays open.
 
 ---
@@ -453,7 +453,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Resolution:** Compare full field-access paths (or a path-prefix disjointness test) in the Rule-7 partition instead of root owners; keep the root-owner fallback for non-struct bases. When it lands, differentiate the E0032 message so the aliasing case (`&p.a, &p.a`) can name the field. Until then the workaround is splitting the call per field.
 
-**Priority recommendation:** High-priority ownership correction after M13, M13.8, and M16. Schedule around M16.2 and before M18; M16.2 can retain conservative indexed-element rejection. This is not alpha-blocking because current behavior is conservative and has documented workarounds, but it should not slip to v0.2. Methods will not fix free functions that borrow multiple fields, and collections increase the value of place-based tracking.
+**Priority recommendation:** High-priority ownership correction after M13, M13.8, and M16. Schedule around M18 and before M25; M18 can retain conservative indexed-element rejection. This is not alpha-blocking because current behavior is conservative and has documented workarounds, but it should not slip to v0.2. Methods will not fix free functions that borrow multiple fields, and collections increase the value of place-based tracking.
 
 ---
 
@@ -680,7 +680,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Files:** ryo-frontend/src/ownership (W0003 emission), docs/specification.md (eventual syntax decision)
 
-**Summary:** RedundantMaterialize (W0003) fires when a str(...) copy 'never escapes and its source is never mutated' and recommends using the view directly. When the copy's purpose is TYPE CONVERSION (slice view -> owned str, e.g. int_str = str(s[start:dot]) into an str binding), following the advice is a compile error (E0012: a slice yields strview) — the recommendation is unreachable, a false positive for the materialize-where-owned-is-required pattern. The warning-free spellings today: keep str(...), or declare the binding strview end-to-end, which currently needs the noisy full-slice 'mut v = ""[:]' as the empty view. The empty-initializer syntax should be decided BEFORE slice[T]/list[T]/map[K,V] land so all view/collection types stay consistent. Options: (a) annotation-driven literal coercion 'mut v: strview = ""' (Rust/Swift style; minimal, literal-backed only), (b) context-typed builtin empty() (none-style precedent; uniform across collections; needs return-type-driven builtin resolution), (c) typed empty literals for collections (Pythonic, DX-consistent). Note M18's draft already uses constructor-style 'list[int]()'. The W0003 escape heuristic should also learn the conversion-purpose shape regardless of the syntax decision.
+**Summary:** RedundantMaterialize (W0003) fires when a str(...) copy 'never escapes and its source is never mutated' and recommends using the view directly. When the copy's purpose is TYPE CONVERSION (slice view -> owned str, e.g. int_str = str(s[start:dot]) into an str binding), following the advice is a compile error (E0012: a slice yields strview) — the recommendation is unreachable, a false positive for the materialize-where-owned-is-required pattern. The warning-free spellings today: keep str(...), or declare the binding strview end-to-end, which currently needs the noisy full-slice 'mut v = ""[:]' as the empty view. The empty-initializer syntax should be decided BEFORE slice[T]/list[T]/map[K,V] land so all view/collection types stay consistent. Options: (a) annotation-driven literal coercion 'mut v: strview = ""' (Rust/Swift style; minimal, literal-backed only), (b) context-typed builtin empty() (none-style precedent; uniform across collections; needs return-type-driven builtin resolution), (c) typed empty literals for collections (Pythonic, DX-consistent). Note M25's draft already uses constructor-style 'list[int]()'. The W0003 escape heuristic should also learn the conversion-purpose shape regardless of the syntax decision.
 
 **Resolution:** Pending language-owner decision. The W0003 heuristic fix (recognize materialize-for-conversion) is independent of the syntax choice and can land first.
 
@@ -803,10 +803,77 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-260 — Compiler aborts (SIGABRT) when a multi-span diagnostic is piped to an early-closing reader
+
+**Severity:** Correctness / Hygiene
+**Area:** driver-cli
+
+**Files:** unknown (diagnostic rendering path)
+
+**Summary:** Repro: any program whose diagnostic renders with multiple spans plus a note (e.g. E0020 use-of-moved with 'value moved here' help) run as 'ryo run f.ryo | head -3' exits 134 (SIGABRT); the same input exits 1 cleanly when stdout/stderr are drained or a terminal. Single-span diagnostics (E0129) pipe fine. Likely a broken-pipe (EPIPE) write panicking in the diagnostic renderer instead of degrading. Found during structure-aware fuzzing (2026-11-04, commit e82f503). Fuzz harnesses must drain compiler output streams to avoid triggering it.
+
+**Resolution:** Decide the intended behavior for EPIPE on diagnostic output (ignore/SIGPIPE-default vs clean exit 1) and make the renderer tolerate closed pipes; add a regression test that pipes a multi-span diagnostic to a closing reader.
+
+---
+
+### I-262 — Compiler process leaks chumsky recursive parser allocations on every parse (found via Valgrind)
+
+**Severity:** Correctness / Hygiene
+**Area:** frontend-parser
+
+**Files:** ryo-frontend/src/grammar/statements.rs, ryo-frontend/src/grammar/destructure.rs (chumsky Recursive::declare), ryo-frontend/src/parse.rs
+
+**Summary:** Running `valgrind --leak-check=full ryo run <any-file.ryo>` on Linux (arm64) reports ~2.4 KB definitely lost in 14 blocks per invocation. The leak records point at chumsky recursive::Indirect Rc allocations created by Recursive::declare in destructure_stmt_parser / body_statement_parser / program_parser — the per-parse parser combinator tree is never fully dropped (Rc cycle between recursive declarations). Deterministic, small, and unrelated to generated-code memory behavior, but it accumulates per parse in any long-lived process (future REPL/LSP/watch mode). Found by the 2026-11-04 CI-grade Valgrind fuzz pass (commit e82f503); the repo test suite only valgrinds compiled programs, never the compiler process, so CI does not see it.
+
+**Resolution:** Break the Rc cycle (chumsky docs suggest avoid cycles via once_cell/lazy or explicit teardown; e.g. build the recursive parsers once per thread instead of per parse, or switch recursive::Indirect to a Weak back-reference). Add a compiler-process valgrind check (valgrind on `ryo run examples/hello.ryo` asserting no definitely-lost blocks) to the Linux test script.
+
+---
+
+### I-263 — Compile time is quadratic in per-function statement count (~156s for 40k statements)
+
+**Severity:** Correctness / Hygiene
+**Area:** ownership
+
+**Files:** ryo-frontend/src/sema, ryo-frontend/src/ownership (per-statement passes suspect). Repro: one function with N chained bindings `x_i = x_{i-1} + i` (measured at 10k/20k/40k).
+
+**Summary:** A single function with N simple statements takes O(N^2) total compile time: chained bindings (x_i = x_{i-1} + i) measure 10k=10.7s, 20k=40.7s, 40k=156.7s (4x per doubling). Independent bindings are similar (100k statements = 391s). Parsing is NOT the bottleneck — 'ryo parse' on the 100k-statement file takes 1.2s, so the quadratic lives in post-parse stages (sema and/or ownership/dead-store dataflow rescanning per-statement state). Long literals (10MB string: 0.6s), many functions (10k: 4.2s), big structs (5000 fields: 0.9s) are all fine. The same quadratic shows with string-literal bindings: 5000 distinct str bindings in one function take ~29s, 20000 exceed 120s. Found by compiler-input size torture fuzzing 2026-11-04 (commit e82f503).
+
+**Resolution:** Profile a 40k-statement chained build to find the per-statement O(N) rescan (suspects: binding-state maps copied or linearly scanned per statement in ownership/dead-store; sema scope lookups). Make per-statement work O(1) amortized. Add a scaling regression test (compile-time budget for 20k statements) to CI.
+
+---
+
+### I-265 — oracle.ryo panics in ownership cleanup validation (leak path-coverage assert)
+
+**Severity:** Correctness / Hygiene
+**Area:** ownership
+
+**Files:** examples/oracle.ryo; ryo-frontend/src/ownership/cleanup_validation.rs
+
+**Summary:** 'ryo run examples/oracle.ryo' (a committed example) aborts with SIGABRT: thread panicked at ryo-frontend/src/ownership/cleanup_validation.rs:1309 'path coverage: place union 21 (Temp producer TirRef(53) + Local decl TirRef(54)) established at FirePoint { block 9, ordinal 15 } has a path to an exit or a replacement write with no release or transfer of the generation — a leak'. Reproduces identically on eaf2f9b (pre-existing, unrelated to the deep operator-chain stack-overflow fix) with and without CLI args/stdin. Debug-build assert (cleanup validation); release behavior unverified.
+
+**Resolution:** Investigate the leak path for the io_read_line/env temp in oracle.ryo; the union is established at block 9 ordinal 15 and never released on some exit path. Found while verifying the deep operator-chain stack-overflow fix.
+
+---
+
+### I-267 — Stack overflow on deeply right-nested operator chains (paren-nested RHS)
+
+**Severity:** Correctness / Hygiene
+**Area:** sema
+
+**Files:** ryo-frontend/src/sema/expr (general expression recursion), ryo-backend/src/codegen/expr (eval_inst); repro at bug_reports/bug_right_nested_chain_stack_overflow.ryo
+
+**Summary:** A right-nested chain 1+(1+(1+...)) 100k deep aborts ryo run with a stack overflow in debug builds. The I-261 depth budgets propagate through LHS chain links only; each parenthesized RHS restarts the depth at zero via the general expression entrypoint, so the budget never trips and the recursion grows one frame group per paren level. Pre-existing: main overflows at 50k already (not a PR regression; the PR fixed the left-nested shape). Repro: 100k nested parens, ryo run exits 134; ryo parse alone is fine to 300k.
+
+**Resolution:** Propagate the chain depth through parenthesized RHS operands (or bound the general expression recursion by depth with the existing iterative walkers as spill), keeping the hot path free of per-frame bookkeeping — see how c4c6c99 balances depth limits with the perf gate. Add a regression test with a 100k-deep right-nested chain.
+
+---
+
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
 
-<!-- issue-id high-water: 259 -->
+---
+
+<!-- issue-id high-water: 267 -->

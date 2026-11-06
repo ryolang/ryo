@@ -58,6 +58,7 @@
 //! internal-error `Diag` — see the `unreachable!` sites in this file.
 
 use crate::ast::CompoundOp;
+use crate::spine::ChainSpine;
 use crate::types::{InternPool, StringId, TypeId};
 use std::collections::HashSet;
 use std::num::NonZeroU32;
@@ -202,7 +203,7 @@ pub enum TirTag {
     /// `bytes`/`bytesview` inequality (M8.4.2). Payload in `TirData::BinOp`.
     BytesCmpNe,
     /// `bytes`/`bytesview` scalar indexing (M8.4.2): bounds-checked byte
-    /// load → `int` (`u8` at M17). Payload in `TirData::BinOp`.
+    /// load → `int` (`u8` at M20). Payload in `TirData::BinOp`.
     BytesIndex,
 
     /// Memberwise struct equality (M9.1). Payload in `TirData::BinOp`; result `bool`.
@@ -1187,24 +1188,21 @@ impl Tir {
     /// one O(N) walk per built body in debug builds only.
     #[cfg(debug_assertions)]
     fn validate_tree_shape(&self) {
-        fn walk(tir: &Tir, r: TirRef, seen: &mut HashSet<TirRef>) {
-            tir.walk_operands(r, &mut |_parent, child, _kind| {
-                debug_assert!(
-                    seen.insert(child),
-                    "TIR body is not tree-shaped: instruction raw={} has more than one parent",
-                    child.raw()
-                );
-                walk(tir, child, seen);
-            });
-        }
+        // Iterative DFS: a long operator chain nests one operand link
+        // per term, and this walk runs on every built body — recursion
+        // here overflows the stack on exactly the deep programs the
+        // rest of the pipeline now accepts.
         let mut seen: HashSet<TirRef> = HashSet::new();
-        for stmt in self.body_stmts() {
+        let mut stack: Vec<TirRef> = self.body_stmts().into_iter().collect();
+        while let Some(r) = stack.pop() {
             debug_assert!(
-                seen.insert(stmt),
-                "TIR body is not tree-shaped: statement raw={} is listed twice in the body roots",
-                stmt.raw()
+                seen.insert(r),
+                "TIR body is not tree-shaped: instruction raw={} has more than one parent",
+                r.raw()
             );
-            walk(self, stmt, &mut seen);
+            self.walk_operands(r, &mut |_parent, child, _kind| {
+                stack.push(child);
+            });
         }
     }
 
@@ -1237,13 +1235,49 @@ impl Tir {
     /// and nested body statements — into `set`.
     /// [`Tir::walk_operands`] is shallow; this helper drives the
     /// recursion.
+    /// Operand depth the reachability probes may recurse before the
+    /// remaining subtree walks on an explicit stack — same
+    /// overflow-guard pattern as the operator-chain walkers. UIR/TIR
+    /// operand links can nest arbitrarily deep (a long operator
+    /// chain), which unbounded recursion cannot survive.
+    const REACHABILITY_DEPTH_LIMIT: u32 = 64;
+
     pub fn collect_reachable(&self, r: TirRef, set: &mut HashSet<TirRef>) {
+        self.collect_reachable_d(r, set, 0)
+    }
+
+    fn collect_reachable_d(&self, r: TirRef, set: &mut HashSet<TirRef>, depth: u32) {
         if !set.insert(r) {
             return;
         }
+        if depth == Self::REACHABILITY_DEPTH_LIMIT {
+            self.collect_reachable_stack(r, set);
+            return;
+        }
         self.walk_operands(r, &mut |_parent, child, _kind| {
-            self.collect_reachable(child, set);
+            self.collect_reachable_d(child, set, depth + 1);
         });
+    }
+
+    /// Iterative continuation of [`Tir::collect_reachable_d`] past the
+    /// recursion budget; `r` is already in `set`. Cold: only
+    /// pathologically deep operand nesting reaches here.
+    #[cold]
+    #[inline(never)]
+    fn collect_reachable_stack(&self, r: TirRef, set: &mut HashSet<TirRef>) {
+        let mut stack = ChainSpine::new();
+        self.walk_operands(r, &mut |_parent, child, _kind| {
+            if set.insert(child) {
+                stack.push(child);
+            }
+        });
+        while let Some(x) = stack.pop() {
+            self.walk_operands(x, &mut |_parent, child, _kind| {
+                if set.insert(child) {
+                    stack.push(child);
+                }
+            });
+        }
     }
 
     /// Return `true` iff `target` is reachable from `root` — `target`
@@ -1253,17 +1287,71 @@ impl Tir {
     /// [`Tir::collect_reachable`] does. Used for containment probes
     /// (e.g. `collect_jump_path`'s arm selection) where the set itself
     /// is never needed.
+    ///
+    /// Runs on an explicit stack rather than recursing, so deep operand
+    /// links cannot overflow the thread stack; a single non-recursive
+    /// loop also keeps the hot probe free of per-frame depth
+    /// bookkeeping. No visited set — this trusts the tree-shape
+    /// invariant (a debug build asserts it in `validate_tree_shape`).
     pub fn contains_reachable(&self, root: TirRef, target: TirRef) -> bool {
         if root == target {
             return true;
         }
-        let mut found = false;
-        self.walk_operands(root, &mut |_parent, child, _kind| {
-            if !found && self.contains_reachable(child, target) {
-                found = true;
+        // Ordinary operand nesting fits a small fixed inline stack, so
+        // the hot probe never touches the heap. Should a pathologically
+        // deep subtree outgrow it, the probe restarts on the heap-backed
+        // cold path (the walk has no side effects, so restarting is
+        // sound).
+        const INLINE: usize = 32;
+        let mut stack = [root; INLINE];
+        let mut len = 1usize;
+        let mut overflow = false;
+        while len > 0 {
+            len -= 1;
+            let x = stack[len];
+            let mut found = false;
+            self.walk_operands(x, &mut |_parent, child, _kind| {
+                if child == target {
+                    found = true;
+                } else if len < INLINE {
+                    stack[len] = child;
+                    len += 1;
+                } else {
+                    overflow = true;
+                }
+            });
+            if found {
+                return true;
             }
-        });
-        found
+            if overflow {
+                return self.contains_reachable_deep(root, target);
+            }
+        }
+        false
+    }
+
+    /// Heap-backed continuation of [`Tir::contains_reachable`] for
+    /// subtrees deeper than its inline stack. Cold: only
+    /// pathologically deep operand nesting (a long operator chain)
+    /// reaches here.
+    #[cold]
+    #[inline(never)]
+    fn contains_reachable_deep(&self, root: TirRef, target: TirRef) -> bool {
+        let mut stack = vec![root];
+        while let Some(x) = stack.pop() {
+            let mut found = false;
+            self.walk_operands(x, &mut |_parent, child, _kind| {
+                if child == target {
+                    found = true;
+                } else {
+                    stack.push(child);
+                }
+            });
+            if found {
+                return true;
+            }
+        }
+        false
     }
 
     /// Return `true` iff every execution path through `stmts` returns

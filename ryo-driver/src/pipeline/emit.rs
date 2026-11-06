@@ -47,8 +47,21 @@ pub(super) fn display_tokens(input: &str, file: &Path) -> Result<(), CompilerErr
 }
 
 pub(super) fn display_ast(program: &ast::Ast, pool: &InternPool) {
+    use std::io::Write as _;
+
     println!("[AST]");
-    print!("{}", ryo_core::ast_pretty::render_program(program, pool));
+    // Stream instead of buffering: a deeply nested program's tree dump
+    // is quadratic in depth, far larger than any reasonable buffer.
+    struct IoWriter<'a, W: std::io::Write>(&'a mut W);
+    impl<W: std::io::Write> std::fmt::Write for IoWriter<'_, W> {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            self.0.write_all(s.as_bytes()).map_err(|_| std::fmt::Error)
+        }
+    }
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
+    let _ = ryo_core::ast_pretty::write_program(&mut IoWriter(&mut out), program, pool);
+    let _ = out.flush();
 }
 
 pub(super) fn display_uir(uir: &Uir, pool: &InternPool) {

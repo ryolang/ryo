@@ -86,7 +86,7 @@ pub const BUILTINS: &[BuiltinFunction] = &[
         max_output_len: None,
     },
     BuiltinFunction {
-        // TODO(M18): interim call form — replaced by `process.args`.
+        // TODO(M28): interim call form — replaced by `process.args`.
         name: "process_argc",
         return_ty: BuiltinReturn::Int,
         borrowed_scalar_params: &[],
@@ -94,7 +94,7 @@ pub const BUILTINS: &[BuiltinFunction] = &[
         max_output_len: None,
     },
     BuiltinFunction {
-        // TODO(M18): interim call form — replaced by `process.args`.
+        // TODO(M28): interim call form — replaced by `process.args`.
         name: "process_argv",
         return_ty: BuiltinReturn::Str,
         borrowed_scalar_params: &[],

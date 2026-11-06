@@ -31,7 +31,7 @@ Since Ryo targets **General Purpose** use (Web, CLI, Scripts), the standard libr
 
 **Gating & lifecycle (net):**
 
-* **Post-alpha.** The ergonomic `http.get(url) -> Response` surface needs M9 (structs), M13 (error types), and M17.4 (methods) — all **beta** — plus M6 (module system) so the Rust platform layer is bundled by reachability, not paid by every binary.
+* **Post-alpha.** The ergonomic `http.get(url) -> Response` surface needs M9 (structs), M13 (error types), and M24 (methods) — all **beta** — plus M27 (module system) so the Rust platform layer is bundled by reachability, not paid by every binary.
 * **No Tokio before v0.4.** Ryo's concurrency runtime is v0.4+. A blocking `ureq` call is a plain `extern "C"` invocation today; do **not** pull an async runtime into Ryo binaries before Ryo has its own scheduler. A native async net stack, when it lands, *replaces* the blocking client rather than preceding it.
 * **Binary size.** `ureq` + `rustls` + `webpki-roots` are linked only when `std.net` is imported, so programs that don't do networking pay zero. TLS is ~90% of the weight; the HTTP code is trivial. (This is why the `no_std` floor and batteries-included don't conflict — see [`spec_builtins.md`](spec_builtins.md), `no_std` scope.)
 * **Toolchain pinning.** The runtime pins `ureq` / `rustls` / `webpki-roots` per Ryo release; security backports flow through compiler releases (the Go model). Keeping `std.net`'s surface small lets version-volatile heavyweights (DB drivers, cloud SDKs) live in the package registry instead — see [`spec_official_packages.md`](spec_official_packages.md).

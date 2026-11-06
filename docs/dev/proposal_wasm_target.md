@@ -60,7 +60,7 @@ At the project's current ~8 hr/week pace, a realistic estimate is **4–6 weeks*
 If the team decides WASM is worth a second backend:
 
 1. **Confirm the strategic priority.** WASM is on the long-term vision ([spec §1](../specification.md)), but post-spike it costs roughly the same as building a second compiler backend. That's a real choice, not a free win. Don't revive WASM as a side quest.
-2. **New milestone, not a phase.** Replace any references to "M8d Phase A plumbing" with a properly-sized milestone (e.g. "WASM Backend"). Slot it after the language surface is stable (probably post-M27, "Core Language Complete").
+2. **New milestone, not a phase.** Replace any references to "M8d Phase A plumbing" with a properly-sized milestone (e.g. "WASM Backend"). Slot it after the language surface is stable (probably post-M33, "Core Language Complete").
 3. **Backend abstraction first.** Before writing TIR→WASM, factor the existing TIR→Cranelift backend behind a `Backend` trait so dispatch is explicit. This is the genuine plumbing work — and unlike the original M8d, it is both useful (forces the contract between TIR and codegen to be named) and small (~few hundred LOC).
 4. **Spike `wasm-encoder` for real.** Emit a minimal `.wasm` module via `wasm-encoder` (constant function, no imports), validate with `wasm-tools validate`, run under `wasmtime`. Confirm the output is genuinely loadable. ~1 day.
 5. **Then design the parallel codegen.** TIR→WASM design doc, scope, phasing, CI integration. That is what the *next* version of this proposal looks like.
@@ -80,7 +80,7 @@ The following sections describe target tradeoffs that hold under any emission ba
 ### Goals (if pursued)
 
 1. `ryo build --target wasm32-wasip1 <file.ryo>` produces a `.wasm` module that runs under `wasmtime`, `wasmer`, and Node.js (via WASI shim).
-2. All synchronous Ryo programs through Milestone 27 (Core Language Complete) compile and run on WASM with identical observable behavior to native targets.
+2. All synchronous Ryo programs through Milestone 33 (Core Language Complete) compile and run on WASM with identical observable behavior to native targets.
 3. The implementation does not regress native AOT or JIT pipelines.
 
 ### Non-Goals
@@ -138,6 +138,6 @@ The pointer-width audit motivation outlives the WASM target — it applies to an
 - Spec: [§1](../specification.md) (Target Domains — mentions Wasm), [§16](../specification.md) (Tooling), [§19](../specification.md) (Future Work — WebAssembly Target Details)
 - Dev: [spec_concurrency.md](spec_concurrency.md) — WasmFX future direction for concurrency-on-WASM
 - Dev: [spec_arc_optimizer.md](spec_arc_optimizer.md) — target-agnostic ARC pass remains correct under any backend
-- Milestone: None active. Proposal is deferred; revival would slot as a new "WASM Backend" milestone after M27 (Core Language Complete) in [implementation_roadmap.md](implementation_roadmap.md).
+- Milestone: None active. Proposal is deferred; revival would slot as a new "WASM Backend" milestone after M33 (Core Language Complete) in [implementation_roadmap.md](implementation_roadmap.md).
 - Spike record: working notes kept locally under `docs/analysis/` (gitignored per [docs/AGENTS.md](../AGENTS.md) — scratch/uncommitted); the substantive findings are inlined above under "Why this is deferred."
 - External: [wasm-encoder source](https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-encoder), [WASI preview 1](https://github.com/WebAssembly/WASI/tree/main/legacy/preview1), [WasmFX](https://wasmfx.dev/)
