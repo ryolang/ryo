@@ -173,6 +173,68 @@ fn jit_run_aggregate_field_evaluation_order() {
     assert_jit_prints("aggregate_order.ryo", src, "121");
 }
 
+fn nested_bool_and(links: usize) -> String {
+    let mut src = String::from("fn main():\n\tprint(");
+    for _ in 0..links {
+        src.push_str("true and (");
+    }
+    src.push_str("true");
+    for _ in 0..links {
+        src.push(')');
+    }
+    src.push_str(")\n");
+    src
+}
+
+fn nested_statement_matches(depth: usize) -> String {
+    let mut src = String::from("fn main():\n");
+    for level in 0..=depth {
+        src.push_str(&"\t".repeat(2 * level + 1));
+        src.push_str("match 1:\n");
+        src.push_str(&"\t".repeat(2 * level + 2));
+        src.push_str("1:\n");
+    }
+    src.push_str(&"\t".repeat(2 * depth + 3));
+    src.push_str("print(0)\n");
+    for level in (0..=depth).rev() {
+        src.push_str(&"\t".repeat(2 * level + 2));
+        src.push_str("_:\n");
+        src.push_str(&"\t".repeat(2 * level + 3));
+        src.push_str("print(0)\n");
+    }
+    src
+}
+
+fn nested_ifs(depth: usize) -> String {
+    let mut src = String::from("fn main():\n");
+    for level in 0..depth {
+        src.push_str(&"\t".repeat(level + 1));
+        src.push_str("if true:\n");
+    }
+    src.push_str(&"\t".repeat(depth + 1));
+    src.push_str("print(1)\n");
+    src
+}
+
+#[test]
+fn jit_run_nested_bool_and() {
+    assert_jit_prints("nested_bool_and.ryo", &nested_bool_and(10_000), "true");
+}
+
+#[test]
+fn jit_run_nested_statement_matches() {
+    assert_jit_prints(
+        "nested_statement_matches.ryo",
+        &nested_statement_matches(1_000),
+        "0",
+    );
+}
+
+#[test]
+fn jit_run_nested_ifs() {
+    assert_jit_prints("nested_ifs.ryo", &nested_ifs(1_000), "1");
+}
+
 fn alternating_add_chain(terms: usize) -> String {
     let mut prefixes = Vec::with_capacity(terms - 1);
     let mut suffix = String::new();
