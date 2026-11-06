@@ -32,7 +32,7 @@ impl CodegenExprContext {
     }
 }
 
-#[allow(dead_code)]
+#[derive(Clone, Copy)]
 pub(crate) enum EvalRequest {
     Scalar,
     Fat,
@@ -69,6 +69,34 @@ impl<M: Module> Codegen<M> {
         ) || Self::is_chain_binop_tag(tag)
     }
 
+    pub(crate) fn is_generic_expr_tag(tag: TirTag) -> bool {
+        Self::is_generic_scalar_tag(tag)
+            || matches!(
+                tag,
+                TirTag::StrConcat
+                    | TirTag::BytesConcat
+                    | TirTag::Slice
+                    | TirTag::ToView
+                    | TirTag::ViewAsOwner
+                    | TirTag::StrLen
+                    | TirTag::BytesIndex
+                    | TirTag::StructLit
+                    | TirTag::EnumLit
+                    | TirTag::FieldAccess
+                    | TirTag::DebugRepr
+                    | TirTag::ErrorMessage
+                    | TirTag::ErrorUnionCoerce
+                    | TirTag::StructEq
+                    | TirTag::StructNe
+                    | TirTag::EnumEq
+                    | TirTag::EnumNe
+                    | TirTag::StrCmpEq
+                    | TirTag::StrCmpNe
+                    | TirTag::BytesCmpEq
+                    | TirTag::BytesCmpNe
+            )
+    }
+
     pub(crate) fn eval_inst_with(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -76,12 +104,17 @@ impl<M: Module> Codegen<M> {
         request: EvalRequest,
         context: CodegenExprContext,
     ) -> Result<ValueRepr, String> {
+        if context.depth >= context.limit && Self::is_generic_expr_tag(ctx.tir.inst(r).tag) {
+            return Self::eval_expr_machine(builder, ctx, r, request);
+        }
         match request {
             EvalRequest::Scalar => {
                 Self::eval_inst_d(builder, ctx, r, context).map(ValueRepr::Scalar)
             }
-            EvalRequest::Fat => Self::eval_inst_fat(builder, ctx, r),
-            EvalRequest::FatSlot(slot) => Self::eval_inst_fat_slot(builder, ctx, r, slot),
+            EvalRequest::Fat => Self::eval_inst_fat_slot_d(builder, ctx, r, None, context),
+            EvalRequest::FatSlot(slot) => {
+                Self::eval_inst_fat_slot_d(builder, ctx, r, slot, context)
+            }
             EvalRequest::View => Self::eval_inst_view(builder, ctx, r),
             EvalRequest::Struct => {
                 Self::eval_inst_struct(builder, ctx, r).map(|addr| ValueRepr::Struct { addr })
@@ -97,24 +130,39 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         node: TirRef,
     ) -> Result<ValueRepr, String> {
+        let context = CodegenExprContext {
+            depth: 0,
+            limit: u32::MAX,
+        };
         let ty = ctx.tir.inst(node).ty;
         if super::is_fat_type(ty, ctx.pool) {
-            return Self::eval_inst_fat(builder, ctx, node);
+            return Self::eval_inst_with(builder, ctx, node, EvalRequest::Fat, context);
         }
         if ctx.pool.is_view(ty) {
-            return Self::eval_inst_view(builder, ctx, node);
+            return Self::eval_inst_with(builder, ctx, node, EvalRequest::View, context);
         }
         match ctx.pool.kind(ty) {
             TypeKind::Struct | TypeKind::AnonStruct => {
-                Self::eval_inst_struct(builder, ctx, node).map(|addr| ValueRepr::Struct { addr })
+                Self::eval_inst_with(builder, ctx, node, EvalRequest::Struct, context)
             }
             TypeKind::Enum
             | TypeKind::DeclaredError
             | TypeKind::ErrorSet
             | TypeKind::ErrorUnion => {
-                Self::eval_inst_enum(builder, ctx, node).map(|addr| ValueRepr::Enum { addr })
+                Self::eval_inst_with(builder, ctx, node, EvalRequest::Enum, context)
             }
-            _ => Self::eval_inst(builder, ctx, node).map(ValueRepr::Scalar),
+            _ => Self::eval_inst_with(builder, ctx, node, EvalRequest::Scalar, context),
+        }
+    }
+
+    pub(super) fn eval_scalar_machine(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        root: TirRef,
+    ) -> Result<Value, String> {
+        match Self::eval_expr_machine(builder, ctx, root, EvalRequest::Scalar)? {
+            ValueRepr::Scalar(value) => Ok(value),
+            _ => unreachable!("scalar request must produce a scalar value"),
         }
     }
 
@@ -124,7 +172,8 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         root: TirRef,
-    ) -> Result<Value, String> {
+        request: EvalRequest,
+    ) -> Result<ValueRepr, String> {
         enum Task {
             Enter(TirRef),
             AfterLhs(TirRef),
@@ -145,6 +194,14 @@ impl<M: Module> Codegen<M> {
                         tasks.push(Task::Exit(node));
                         for arg in view.args.iter().rev() {
                             tasks.push(Task::Enter(arg));
+                        }
+                        continue;
+                    }
+                    if is_composite_tag(inst.tag) {
+                        let children = composite_children(ctx, node);
+                        tasks.push(Task::Exit(node));
+                        for child in children.into_iter().rev() {
+                            tasks.push(Task::Enter(child));
                         }
                         continue;
                     }
@@ -217,16 +274,143 @@ impl<M: Module> Codegen<M> {
                             Self::cache_repr(ctx, node, ValueRepr::Scalar(value));
                         }
                         _ if inst.tag == TirTag::Call => {
-                            let value = Self::emit_call(builder, ctx, node)?;
-                            if Self::cached_repr(ctx, node).is_none() {
-                                Self::cache_repr(ctx, node, ValueRepr::Scalar(value));
+                            if super::is_fat_type(inst.ty, ctx.pool) {
+                                if let EvalRequest::FatSlot(slot) = request
+                                    && node == root
+                                {
+                                    Self::eval_inst_fat_slot_d(
+                                        builder,
+                                        ctx,
+                                        node,
+                                        slot,
+                                        CodegenExprContext {
+                                            depth: 0,
+                                            limit: u32::MAX,
+                                        },
+                                    )?;
+                                } else {
+                                    Self::eval_non_chain(builder, ctx, node)?;
+                                }
+                            } else {
+                                let value = Self::emit_call(builder, ctx, node)?;
+                                if Self::cached_repr(ctx, node).is_none() {
+                                    Self::cache_repr(ctx, node, ValueRepr::Scalar(value));
+                                }
                             }
                         }
-                        _ => unreachable!("only scalar chain nodes have exit tasks"),
+                        _ if is_composite_tag(inst.tag) => {
+                            if let EvalRequest::FatSlot(slot) = request
+                                && node == root
+                            {
+                                Self::eval_inst_fat_slot_d(
+                                    builder,
+                                    ctx,
+                                    node,
+                                    slot,
+                                    CodegenExprContext {
+                                        depth: 0,
+                                        limit: u32::MAX,
+                                    },
+                                )?;
+                            } else {
+                                Self::eval_non_chain(builder, ctx, node)?;
+                            }
+                        }
+                        _ => unreachable!("only scheduled nodes have exit tasks"),
                     }
                 }
             }
         }
-        Self::eval_inst(builder, ctx, root)
+        match request {
+            EvalRequest::FatSlot(slot) => {
+                Self::eval_inst_fat_slot_d(builder, ctx, root, slot, CodegenExprContext::root())
+            }
+            _ => Self::eval_non_chain(builder, ctx, root),
+        }
+    }
+}
+
+fn is_composite_tag(tag: TirTag) -> bool {
+    matches!(
+        tag,
+        TirTag::StrConcat
+            | TirTag::BytesConcat
+            | TirTag::Slice
+            | TirTag::ToView
+            | TirTag::ViewAsOwner
+            | TirTag::StrLen
+            | TirTag::BytesIndex
+            | TirTag::StructLit
+            | TirTag::EnumLit
+            | TirTag::FieldAccess
+            | TirTag::DebugRepr
+            | TirTag::ErrorMessage
+            | TirTag::ErrorUnionCoerce
+            | TirTag::StructEq
+            | TirTag::StructNe
+            | TirTag::EnumEq
+            | TirTag::EnumNe
+            | TirTag::StrCmpEq
+            | TirTag::StrCmpNe
+            | TirTag::BytesCmpEq
+            | TirTag::BytesCmpNe
+    )
+}
+
+fn composite_children<M: Module>(ctx: &FunctionContext<'_, M>, node: TirRef) -> Vec<TirRef> {
+    let inst = ctx.tir.inst(node);
+    match inst.tag {
+        TirTag::Slice => {
+            let TirData::Slice { base, start, end } = inst.data else {
+                unreachable!()
+            };
+            std::iter::once(base).chain(start).chain(end).collect()
+        }
+        TirTag::StructLit => ctx
+            .tir
+            .struct_lit_view(node)
+            .fields()
+            .map(|(_, value)| value)
+            .collect(),
+        TirTag::EnumLit => ctx
+            .tir
+            .enum_lit_view(node)
+            .fields()
+            .map(|(_, value)| value)
+            .collect(),
+        TirTag::FieldAccess => {
+            let TirData::FieldAccess { object, .. } = inst.data else {
+                unreachable!()
+            };
+            vec![object]
+        }
+        TirTag::StrConcat
+        | TirTag::BytesConcat
+        | TirTag::BytesIndex
+        | TirTag::StructEq
+        | TirTag::StructNe
+        | TirTag::EnumEq
+        | TirTag::EnumNe
+        | TirTag::StrCmpEq
+        | TirTag::StrCmpNe
+        | TirTag::BytesCmpEq
+        | TirTag::BytesCmpNe => {
+            let TirData::BinOp { lhs, rhs } = inst.data else {
+                unreachable!()
+            };
+            vec![lhs, rhs]
+        }
+        TirTag::ToView
+        | TirTag::ViewAsOwner
+        | TirTag::StrLen
+        | TirTag::DebugRepr
+        | TirTag::ErrorMessage
+        | TirTag::ErrorUnionCoerce => {
+            let TirData::UnOp(operand) = inst.data else {
+                unreachable!()
+            };
+            vec![operand]
+        }
+        _ => unreachable!("not a composite expression"),
     }
 }

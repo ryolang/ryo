@@ -1,6 +1,7 @@
 //! `eval_inst_fat_slot` — the fat-slot mirror of `eval_inst`, split from
 //! `expr.rs`; see module docs there.
 
+use super::walker::{CodegenExprContext, EvalRequest};
 use super::{Codegen, FunctionContext, ValueRepr};
 use cranelift::codegen::ir::{MemFlagsData, StackSlot};
 use cranelift::prelude::*;
@@ -21,6 +22,22 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
         out_slot: Option<StackSlot>,
+    ) -> Result<ValueRepr, String> {
+        Self::eval_inst_with(
+            builder,
+            ctx,
+            r,
+            EvalRequest::FatSlot(out_slot),
+            CodegenExprContext::root(),
+        )
+    }
+
+    pub(super) fn eval_inst_fat_slot_d(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        out_slot: Option<StackSlot>,
+        context: CodegenExprContext,
     ) -> Result<ValueRepr, String> {
         if let Some(repr) = Self::cached_repr(ctx, r) {
             return Ok(repr);
@@ -65,16 +82,16 @@ impl<M: Module> Codegen<M> {
             }
             TirTag::Call => {
                 let view = ctx.tir.call_view(r);
-                if let Some(repr) =
-                    Self::emit_fat_builtin_call(builder, ctx, view.name, view.args, out_slot)?
-                {
+                if let Some(repr) = Self::emit_fat_builtin_call(
+                    builder, ctx, view.name, view.args, out_slot, context,
+                )? {
                     repr
                 } else {
                     // User call — emit_call handles sret for fat-returning
                     // calls and caches the triple. Called directly
                     // (not via eval_inst): the scalar path rejects
                     // fat-returning calls.
-                    Self::emit_call_slot(builder, ctx, r, out_slot)?;
+                    Self::emit_call_slot_d(builder, ctx, r, out_slot, context)?;
                     if let Some(repr) = Self::cached_repr(ctx, r) {
                         return Ok(repr);
                     }
@@ -92,8 +109,10 @@ impl<M: Module> Codegen<M> {
                 // eval_str_or_view_parts) is sound here: each extraction
                 // spills to its own fresh scratch slot and the pointers
                 // are consumed by the concat call itself.
-                let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs)?;
-                let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
+                let (l_ptr, l_len) =
+                    Self::eval_str_or_view_parts_d(builder, ctx, lhs, context.child())?;
+                let (r_ptr, r_len) =
+                    Self::eval_str_or_view_parts_d(builder, ctx, rhs, context.child())?;
 
                 let (ptr, len, cap) = Self::emit_slot_out_call(
                     builder,
@@ -115,8 +134,10 @@ impl<M: Module> Codegen<M> {
                     _ => unreachable!(),
                 };
                 // Transient extraction, as in StrConcat above.
-                let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs)?;
-                let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
+                let (l_ptr, l_len) =
+                    Self::eval_str_or_view_parts_d(builder, ctx, lhs, context.child())?;
+                let (r_ptr, r_len) =
+                    Self::eval_str_or_view_parts_d(builder, ctx, rhs, context.child())?;
 
                 let (ptr, len, cap) = Self::emit_slot_out_call(
                     builder,

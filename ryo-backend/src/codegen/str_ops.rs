@@ -16,6 +16,7 @@ use cranelift::prelude::*;
 use cranelift_module::Module;
 use ryo_core::tir::{TirData, TirRef, TirTag};
 
+use super::expr::walker::{CodegenExprContext, EvalRequest};
 use super::{Codegen, FunctionContext, ValueRepr};
 
 /// Upper size bound for the inline byte-compare specialization of
@@ -304,14 +305,25 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
     ) -> Result<(Value, Value), String> {
+        Self::eval_str_or_view_parts_d(builder, ctx, r, CodegenExprContext::root())
+    }
+
+    pub(super) fn eval_str_or_view_parts_d(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        context: CodegenExprContext,
+    ) -> Result<(Value, Value), String> {
         let ty = ctx.tir.inst(r).ty;
         if ctx.pool.is_view(ty) {
-            let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, r)? else {
+            let ValueRepr::View { ptr, len } =
+                Self::eval_inst_with(builder, ctx, r, EvalRequest::View, context.child())?
+            else {
                 unreachable!("eval_inst_view must produce ValueRepr::View");
             };
             return Ok((ptr, len));
         }
-        match Self::eval_inst_fat(builder, ctx, r)? {
+        match Self::eval_inst_with(builder, ctx, r, EvalRequest::Fat, context.child())? {
             ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
                 // A home-backed Var's inline bytes already sit in the
                 // home slot — extract against that address, no spill.

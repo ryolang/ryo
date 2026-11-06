@@ -1,7 +1,7 @@
 //! Expression evaluation and call emission — split from `mod.rs`; see module docs there.
 
 mod fat_slot;
-mod walker;
+pub(crate) mod walker;
 use walker::{CodegenExprContext, EvalRequest};
 #[cfg(test)]
 mod walker_tests;
@@ -93,8 +93,11 @@ impl<M: Module> Codegen<M> {
                 r.index()
             ));
         }
-        if context.depth >= context.limit && Self::is_generic_scalar_tag(inst.tag) {
-            return Self::eval_expr_machine(builder, ctx, r);
+        if context.depth >= context.limit && Self::is_generic_expr_tag(inst.tag) {
+            return match Self::eval_expr_machine(builder, ctx, r, EvalRequest::Scalar)? {
+                ValueRepr::Scalar(value) => Ok(value),
+                _ => unreachable!("scalar request must produce a scalar value"),
+            };
         }
         let value = match inst.tag {
             TirTag::IntConst => match inst.data {
@@ -370,7 +373,7 @@ impl<M: Module> Codegen<M> {
             if context.depth < context.limit {
                 Self::eval_binop_chain(builder, ctx, lhs, context.child())?
             } else {
-                Self::eval_expr_machine(builder, ctx, lhs)?
+                Self::eval_scalar_machine(builder, ctx, lhs)?
             }
         } else {
             Self::eval_inst_d(builder, ctx, lhs, context.child())?
@@ -404,7 +407,7 @@ impl<M: Module> Codegen<M> {
             if context.depth < context.limit {
                 Self::eval_unary_chain(builder, ctx, operand, context.child())?
             } else {
-                Self::eval_expr_machine(builder, ctx, operand)?
+                Self::eval_scalar_machine(builder, ctx, operand)?
             }
         } else {
             Self::eval_inst_d(builder, ctx, operand, context.child())?
@@ -723,7 +726,13 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
     ) -> Result<ValueRepr, String> {
-        Self::eval_inst_fat_slot(builder, ctx, r, None)
+        Self::eval_inst_with(
+            builder,
+            ctx,
+            r,
+            EvalRequest::Fat,
+            CodegenExprContext::root(),
+        )
     }
 
     /// Lower the builtins that produce owned `str` or `bytes` values.
@@ -734,13 +743,15 @@ impl<M: Module> Codegen<M> {
         name_id: StringId,
         args: ryo_core::tir::ExtraList<'_, TirRef>,
         out_slot: Option<StackSlot>,
+        context: CodegenExprContext,
     ) -> Result<Option<ValueRepr>, String> {
         // These ids are interned once per compilation. Keep the dispatch
         // here so the caller's cache and user-call paths stay centralized.
         let ids = ctx.name_ids;
         let repr = if ids.str_from_view == Some(name_id) {
             // `str(view)` materialization evaluates its argument as a view.
-            let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, args.at(0))?
+            let ValueRepr::View { ptr, len } =
+                Self::eval_inst_with(builder, ctx, args.at(0), EvalRequest::View, context.child())?
             else {
                 unreachable!("__ryo_str_from_view argument must produce ValueRepr::View")
             };
@@ -754,7 +765,8 @@ impl<M: Module> Codegen<M> {
             ValueRepr::Str { ptr, len, cap }
         } else if ids.bytes_from_view == Some(name_id) {
             // `bytes(bview)` materialization evaluates its argument as a view.
-            let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, args.at(0))?
+            let ValueRepr::View { ptr, len } =
+                Self::eval_inst_with(builder, ctx, args.at(0), EvalRequest::View, context.child())?
             else {
                 unreachable!("__ryo_bytes_from_view argument must produce ValueRepr::View")
             };
@@ -767,7 +779,8 @@ impl<M: Module> Codegen<M> {
             )?;
             ValueRepr::Bytes { ptr, len, cap }
         } else if ids.str_to_bytes == Some(name_id) {
-            let (ptr_arg, len_arg) = Self::eval_str_or_view_parts(builder, ctx, args.at(0))?;
+            let (ptr_arg, len_arg) =
+                Self::eval_str_or_view_parts_d(builder, ctx, args.at(0), context.child())?;
             let (ptr, len, cap) = Self::emit_slot_out_call(
                 builder,
                 ctx,
@@ -777,7 +790,8 @@ impl<M: Module> Codegen<M> {
             )?;
             ValueRepr::Bytes { ptr, len, cap }
         } else if ids.bytes_repr == Some(name_id) {
-            let (ptr_arg, len_arg) = Self::eval_str_or_view_parts(builder, ctx, args.at(0))?;
+            let (ptr_arg, len_arg) =
+                Self::eval_str_or_view_parts_d(builder, ctx, args.at(0), context.child())?;
             let (ptr, len, cap) = Self::emit_slot_out_call(
                 builder,
                 ctx,
@@ -792,7 +806,7 @@ impl<M: Module> Codegen<M> {
             if out_slot.is_some() {
                 return Err("bool_to_str is codegen-inlined but was handed an out slot".to_string());
             }
-            let cond = Self::eval_inst(builder, ctx, args.at(0))?;
+            let cond = Self::eval_inst_d(builder, ctx, args.at(0), context.child())?;
             let true_id =
                 Self::store_guard_msg(ctx.module, ctx.data_ctx, ctx.guard_msg_data, "true")?;
             let false_id =
@@ -808,7 +822,7 @@ impl<M: Module> Codegen<M> {
             let cap = builder.ins().iconst(types::I64, 0);
             ValueRepr::Str { ptr, len, cap }
         } else if ids.int_to_str == Some(name_id) || ids.float_to_str == Some(name_id) {
-            let arg_val = Self::eval_inst(builder, ctx, args.at(0))?;
+            let arg_val = Self::eval_inst_d(builder, ctx, args.at(0), context.child())?;
             let (fn_name, param_ty) = if ids.int_to_str == Some(name_id) {
                 ("ryo_int_to_str", ctx.int_type)
             } else {
@@ -819,13 +833,14 @@ impl<M: Module> Codegen<M> {
             ValueRepr::Str { ptr, len, cap }
         } else if ids.process_argv == Some(name_id) {
             // Interim form until process.args replaces process_argv.
-            let arg_val = Self::eval_inst(builder, ctx, args.at(0))?;
+            let arg_val = Self::eval_inst_d(builder, ctx, args.at(0), context.child())?;
             let (ptr, len, cap) = Self::emit_process_argv(builder, ctx, arg_val, out_slot)?;
             ValueRepr::Str { ptr, len, cap }
         } else if ids.process_env == Some(name_id) {
             // Interim form until process.env replaces process_env. The key
             // bytes are consumed by ryo_getenv immediately after extraction.
-            let (key_ptr, key_len) = Self::eval_str_or_view_parts(builder, ctx, args.at(0))?;
+            let (key_ptr, key_len) =
+                Self::eval_str_or_view_parts_d(builder, ctx, args.at(0), context.child())?;
             let (ptr, len, cap) = Self::emit_slot_out_call_out_last(
                 builder,
                 ctx,
@@ -1043,15 +1058,6 @@ impl<M: Module> Codegen<M> {
     /// `emit_call` with a caller-provided sret destination: a
     /// fat-returning call writes `out_slot` directly instead of a
     /// fresh temp slot (see `eval_inst_fat_slot`).
-    pub(super) fn emit_call_slot(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        r: TirRef,
-        out_slot: Option<StackSlot>,
-    ) -> Result<Value, String> {
-        Self::emit_call_slot_d(builder, ctx, r, out_slot, CodegenExprContext::root())
-    }
-
     fn emit_call_slot_d(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,

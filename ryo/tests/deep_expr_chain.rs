@@ -135,6 +135,44 @@ fn jit_run_nested_call_chain() {
     assert_jit_prints("nested_calls.ryo", &nested_call_chain(10_000), "1");
 }
 
+fn nested_string_concat(links: usize) -> String {
+    let mut src = String::from("fn main():\n\ts = ");
+    for _ in 0..links {
+        src.push_str("\"a\"+(");
+    }
+    src.push_str("\"a\"");
+    for _ in 0..links {
+        src.push(')');
+    }
+    src.push_str("\n\tprint(s.len())\n");
+    src
+}
+
+fn nested_slices(links: usize) -> String {
+    let mut src = String::from("fn main():\n\ts = \"a\"\n\tv = s");
+    for _ in 0..links {
+        src.push_str("[0:1]");
+    }
+    src.push_str("\n\tprint(v.len())\n");
+    src
+}
+
+#[test]
+fn jit_run_nested_string_concat() {
+    assert_jit_prints("nested_concat.ryo", &nested_string_concat(10_000), "10001");
+}
+
+#[test]
+fn jit_run_nested_slices() {
+    assert_jit_prints("nested_slices.ryo", &nested_slices(1_000), "1");
+}
+
+#[test]
+fn jit_run_aggregate_field_evaluation_order() {
+    let src = "fn mark(x: int) -> int:\n\tprint(x)\n\treturn x\n\nstruct Pair:\n\tx: int\n\ty: int\n\nfn main():\n\tp = Pair{x=mark(1), y=mark(2)}\n\tprint(p.x)\n";
+    assert_jit_prints("aggregate_order.ryo", src, "121");
+}
+
 fn alternating_add_chain(terms: usize) -> String {
     let mut prefixes = Vec::with_capacity(terms - 1);
     let mut suffix = String::new();
