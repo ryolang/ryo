@@ -32,7 +32,7 @@ The IR shapes differ — Rust MIR is an explicit CFG with basic blocks and termi
 | **Ryo (M8.1)** | ASAP — `Free` inserted at last use of the value, not at scope end. |
 | **Mojo** | Same as Ryo (ASAP). |
 
-This is the biggest semantic divergence from Rust. Rust's lexical drop is famously surprising for `MutexGuard` and `RefCell::borrow_mut()` — `let _ = m.lock();` doesn't release the guard until scope end. Ryo (and Mojo) sidestep this by destroying eagerly. Spec Section 5.4 calls it "Hybrid Eager Destruction" because resource types (`File`, `Mutex`) can opt back into scope-end drop via the future `Drop` trait (M23), while pure-memory types like `str` always get ASAP destruction.
+This is the biggest semantic divergence from Rust. Rust's lexical drop is famously surprising for `MutexGuard` and `RefCell::borrow_mut()` — `let _ = m.lock();` doesn't release the guard until scope end. Ryo (and Mojo) sidestep this by destroying eagerly. Spec Section 5.4 calls it "Hybrid Eager Destruction" because resource types (`File`, `Mutex`) can opt back into scope-end drop via the future `Drop` trait (M26), while pure-memory types like `str` always get ASAP destruction.
 
 ### 2. Lifetime / origin handling
 

@@ -424,7 +424,7 @@ pub unsafe extern "C" fn ryo_rt_init(argc: c_int, argv: *const *const c_char) {
 
 /// Runtime backing for `process_argc() -> int` (M9.2). argv[0] (the
 /// program path) is included, matching C convention.
-/// TODO(M22): interim call form — replaced by `process.args`.
+/// TODO(M28): interim call form — replaced by `process.args`.
 ///
 /// # Safety
 /// No additional contract — the Acquire load cannot fault. Marked
@@ -439,7 +439,7 @@ pub unsafe extern "C" fn ryo_process_argc() -> i64 {
 /// `argv[i]` into `out` as a tagged slot (inline when it fits the SSO
 /// cap, else a fresh heap buffer). Out-of-range — including negative
 /// indices — panics with a message naming the failing index: stderr +
-/// exit 101, the `ryo_panic` contract. TODO(M22): interim call form —
+/// exit 101, the `ryo_panic` contract. TODO(M28): interim call form —
 /// replaced by `process.args`.
 ///
 /// # Safety
@@ -1464,7 +1464,7 @@ pub unsafe extern "C" fn ryo_bytes_eq(
 
 /// Runtime backing for `bytes_push(b: inout bytes, x: int)` (M8.4.2
 /// stopgap: the byte is an `int`, range-checked here; becomes `u8` at
-/// M17.1). Appends a SINGLE byte. Panics (exit 101) when `byte > 255`.
+/// M20). Appends a SINGLE byte. Panics (exit 101) when `byte > 255`.
 ///
 /// # Safety
 /// `s_ptr` points to a valid `RyoStrFat` owned by the caller.

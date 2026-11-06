@@ -1,5 +1,5 @@
 # bytes/bytesview (M8.4.2) — owned byte buffers and read-only views.
-# Interim: b[i] yields int (0-255) until M17.1.
+# Interim: b[i] yields int (0-255) until M20.
 fn main():
 	raw = b"\x01\x02\x03"
 	header = raw[0:2]             # bytesview — projection, no copy

@@ -352,7 +352,7 @@ pub(crate) fn analyze_expr_allow_never(
             let base_ty = fcx.builder.ty_of(base_tir);
             let base_kind = sema.pool.kind(base_ty);
             // M8.4.2 stopgap: scalar indexing exists for bytes/bytesview
-            // only and yields `int` (0-255) until M17.1 makes it `u8`.
+            // only and yields `int` (0-255) until M20 makes it `u8`.
             // `str` indexing stays forbidden (§4.7).
             match base_kind {
                 TypeKind::Bytes | TypeKind::View(ViewKind::Bytes) => {}

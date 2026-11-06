@@ -40,7 +40,7 @@ impl<M: Module> Codegen<M> {
 
     /// `process_argc() -> int` → `ryo_process_argc() -> i64`, the
     /// runtime's argv count (argv[0] included, matching the C
-    /// convention). TODO(M22): interim call form — replaced by
+    /// convention). TODO(M28): interim call form — replaced by
     /// `process.args`.
     pub(crate) fn emit_process_argc(
         builder: &mut FunctionBuilder,
@@ -66,7 +66,7 @@ impl<M: Module> Codegen<M> {
     /// call `ryo_process_argv(3, &mut slot)`), so this lowers through
     /// `emit_slot_out_call_out_last`. The runtime copies argv[i] into
     /// the tagged slot (SSO inline or fresh heap buffer); out-of-range
-    /// panics there. TODO(M22): interim call form — replaced by
+    /// panics there. TODO(M28): interim call form — replaced by
     /// `process.args`.
     pub(crate) fn emit_process_argv(
         builder: &mut FunctionBuilder,

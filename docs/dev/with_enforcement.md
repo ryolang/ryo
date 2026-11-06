@@ -1,6 +1,6 @@
-# `with` Enforcement — The `Scoped` Marker (Draft — M23)
+# `with` Enforcement — The `Scoped` Marker (Draft — M26)
 
-**Status:** Design (Draft — M23, pending approval)
+**Status:** Design (Draft — M26, pending approval)
 
 Proposal to generalize the spec's mandatory-`with` rule (§14.5.4, currently written only
 for `mutex[T].lock()` / `rwlock` guards) into a user-accessible core trait, so any type
@@ -129,7 +129,7 @@ the roadmap Phase 5 table (same dependency as E0034's fix).
   `with` binds a value, the body can use it as an ordinary in-scope `Drop` value. The
   ownership pass destroys it at block exit, per §5.4 rule 2.
 - **Facet, not a parallel hierarchy.** `Scoped` is a boolean facet on `TypeId`
-  metadata, like the `Drop` facet M23 already tracks; no new IR instructions, no
+  metadata, like the `Drop` facet M26 already tracks; no new IR instructions, no
   codegen surface.
 - **Stdlib surface.** The three guard types in §14.5.4 implement it the moment the
   facet exists; §14.5.4's prose becomes a reference to the trait rather than a
@@ -166,4 +166,4 @@ the roadmap Phase 5 table (same dependency as E0034's fix).
 - Spec: [Section 14.5.4](../specification.md) (Synchronization Primitives — the guard rule this proposal generalizes)
 - Spec: [Section 6.1.3 / E0017](../specification.md) (`never` binding restriction — the enforcement precedent)
 - Dev: `concurrency.md` milestone summary ("`with` enforcement", Phase 6)
-- Milestone: RAII & Drop (M23) — see implementation_roadmap.md
+- Milestone: RAII & Drop (M26) — see implementation_roadmap.md

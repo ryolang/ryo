@@ -203,7 +203,7 @@ pub enum TirTag {
     /// `bytes`/`bytesview` inequality (M8.4.2). Payload in `TirData::BinOp`.
     BytesCmpNe,
     /// `bytes`/`bytesview` scalar indexing (M8.4.2): bounds-checked byte
-    /// load → `int` (`u8` at M17.1). Payload in `TirData::BinOp`.
+    /// load → `int` (`u8` at M20). Payload in `TirData::BinOp`.
     BytesIndex,
 
     /// Memberwise struct equality (M9.1). Payload in `TirData::BinOp`; result `bool`.

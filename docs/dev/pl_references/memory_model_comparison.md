@@ -32,7 +32,7 @@ Companion to [`rust.md`](rust.md), [`mojo.md`](mojo.md), [`swift.md`](swift.md),
 |---|---|---|---|---|
 | **When** | Scope end (lexical) | Last use (ASAP) | Last strong ref drops | Last use for memory; scope end for resources (hybrid) |
 | **Order in scope** | Reverse declaration | Use-order driven | Refcount-driven | Use-order for memory; reverse-decl for resources |
-| **User hook** | `impl Drop for T` | `fn __del__(owned self)` | `deinit { }` | `fn drop(self)` (M23) |
+| **User hook** | `impl Drop for T` | `fn __del__(owned self)` | `deinit { }` | `fn drop(self)` (M26) |
 | **Surprises** | `MutexGuard` held until `}` | Eager, predictable | Eager, predictable | Eager for memory; lexical for `with`-blocks |
 | **NLL / early release** | Borrows release early (NLL); destructor doesn't | N/A (already eager) | N/A | N/A (already eager) |
 
@@ -59,7 +59,7 @@ Companion to [`rust.md`](rust.md), [`mojo.md`](mojo.md), [`swift.md`](swift.md),
 | **Cycle handling** | `Weak<T>` (explicit) | `WeakPointer[T]` | `weak` / `unowned` qualifiers | `weak[T]` / `unowned[T]` |
 | **Cycle collection** | No (leaks) | No (leaks) | No (leaks) | No (leaks; documented as foot-gun) |
 | **Stack promotion** | No | Limited | Yes (escape-analyzed) | Planned via `arc_optimizer.rs` |
-| **COW collections** | No (`Vec` is owned, slices are borrows) | Limited | Yes (`Array`/`Dictionary`/`String`) | Yes (planned for `list`/`map`/`str`, M22) |
+| **COW collections** | No (`Vec` is owned, slices are borrows) | Limited | Yes (`Array`/`Dictionary`/`String`) | Yes (planned for `list`/`map`/`str`; deferred from M25 to v0.2/Phase 5 — v0.1 ships eager `clone()`) |
 
 ## 6. Allocation strategy
 
@@ -102,7 +102,7 @@ Companion to [`rust.md`](rust.md), [`mojo.md`](mojo.md), [`swift.md`](swift.md),
 | **Owned string** | `String` (`Vec<u8>`) | `String` | `String` (COW class) | `str` (fat ptr, M8.1) |
 | **Borrowed string** | `&str` (slice) | `StringSlice` | `Substring` (refcount-shared) | scope-locked `&str` (M8.4) |
 | **Literal type** | `&'static str` | `StringLiteral` | `StaticString` | `.rodata` + `ryo_str_alloc` at use |
-| **List type** | `Vec<T>` (owned, contig) | `List[T]` | `Array<T>` (COW class) | `list[T]` (planned COW, M22) |
+| **List type** | `Vec<T>` (owned, contig) | `List[T]` | `Array<T>` (COW class) | `list[T]` (eager `clone()` in M25; COW deferred to v0.2) |
 | **Inline storage** | No SSO in std; ecosystem crates | TBD | SSO for `String` | Planned SSO |
 | **Slice type** | `&[T]` | `Span[T]` | `ArraySlice` | scope-locked view (M8.4+) |
 
