@@ -32,7 +32,7 @@ The original "WASM Target Plumbing" milestone was sold as "1 week of plumbing" o
 If WASM is revived, the realistic path is **Option α — `wasm-encoder` parallel codegen**:
 
 - [`wasm-encoder`](https://github.com/bytecodealliance/wasm-tools/tree/main/crates/wasm-encoder) (bytecodealliance) is the production-grade low-level WASM module builder. It is the emission layer underneath wasm-bindgen, walrus, and most production WASM toolchains. Mature, idiomatic Rust, well-shaped API (function/section/data builders, encode-to-bytes finalization).
-- Ryo would gain a second backend (e.g. `ryo-backend/src/codegen_wasm.rs`) parallel to the existing Cranelift backend in [codegen.rs](../../ryo-backend/src/codegen.rs). Both backends consume the same TIR; the dispatch happens at codegen entry.
+- Ryo would gain a second backend (e.g. `ryo-backend/src/codegen_wasm.rs`) parallel to the existing Cranelift backend in [codegen.rs](../../ryo-backend/src/codegen/mod.rs). Both backends consume the same TIR; the dispatch happens at codegen entry.
 
 ### Architectural implications
 
@@ -44,7 +44,7 @@ If WASM is revived, the realistic path is **Option α — `wasm-encoder` paralle
 
 ### Scope estimate
 
-- **Initial backend** for the current language surface (M8c complete: int, bool, float, arithmetic, comparisons, if/else, while, for-range, function calls, returns, read-only strings, top-level `print` via WASI `fd_write`): ~800–1500 LOC. Comparable to the current [codegen.rs](../../ryo-backend/src/codegen.rs).
+- **Initial backend** for the current language surface (M8c complete: int, bool, float, arithmetic, comparisons, if/else, while, for-range, function calls, returns, read-only strings, top-level `print` via WASI `fd_write`): ~800–1500 LOC. Comparable to the current [codegen.rs](../../ryo-backend/src/codegen/mod.rs).
 - **Per future language feature:** roughly 1.5× codegen work going forward — every new `TirTag` needs handling in both backends. Heap allocation (M8.1), fat pointers, ownership intrinsics, structs (M9), enums (M11) — all parallel implementations.
 - **CI:** new job that builds programs for WASM, executes under `wasmtime`, asserts behavioral parity with the native backend. New dep on `wasmtime` in the CI environment.
 - **Testing:** cross-backend behavioral tests for every language feature. The existing integration suite effectively runs twice (once per backend), with a thin parity-checking wrapper.

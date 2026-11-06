@@ -40,4 +40,4 @@ Comptime is Ryo's only generics substrate — generic functions are functions wi
 
 - Spec: [Section 10](../specification.md) (comptime — one-line reserved today), [Section 2](../specification.md) (reserved keywords), [Section 19](../specification.md) (Future Work — comptime entries removed when the surface ships)
 - Roadmap: [implementation_roadmap.md](implementation_roadmap.md) (M25, M25.1, Phase 5 Traits & Generics, "No Generics in v0.1.0")
-- Dev: [pipeline_migration.md](pipeline_migration.md) (step 8; shared-analysis default), [pipeline_alignment.md](pipeline_alignment.md) (comptime hook status), [concurrency_poc.md](concurrency_poc.md) (proven gate), [alpha_scope.md](alpha_scope.md) (non-goals table — stays true)
+- Dev: [pipeline_migration.md](pipeline_migration.md) (step 8; shared-analysis default), [pipeline_alignment.md](pipeline_alignment.md) (comptime hook status), [record_concurrency_poc.md](record_concurrency_poc.md) (proven gate), [alpha_scope.md](alpha_scope.md) (non-goals table — stays true)

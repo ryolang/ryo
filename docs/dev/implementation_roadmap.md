@@ -3238,6 +3238,8 @@ fn main():
 
 **Goal:** User-facing `trait` keyword, trait bounds, generic types and functions — shipped together
 
+> **Pending approval:** the substrate and sequencing for this section are decided by [proposal_comptime_substrate.md](proposal_comptime_substrate.md) — comptime is the generics substrate (no classic-generics syntax); the instance axis lands pre-v0.1 via M25.1, and the evaluator, `type_info`, and user surface debut here, co-designed with derives. Awaiting language-owner ruling; the section body below predates the proposal.
+
 **Why Post-v0.1.0:**
 
 - Hardcoded collections (Milestone 25) sufficient for v0.1.0
