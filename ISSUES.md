@@ -855,6 +855,32 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-271 — Shallow binary early errors ignore non-memoization contract
+
+**Severity:** Cleanup
+**Area:** sema
+
+**Files:** ryo-frontend/src/sema/expr/mod.rs; ryo-frontend/src/sema/expr/walker_tests.rs
+
+**Summary:** analyze_binop_link returns memoize=false for division-by-zero and constant-overflow early errors, and the iterative walker removes those temporary inst_map entries. The shallow analyze_binop_d path discards the flag and memoizes unconditionally. Forced-limit differential diagnostics and TIR match, but reanalysis of an errored DAG node can be skipped and the internal cleanup contract differs between paths.
+
+**Resolution:** Honor analyze_binop_link's memo flag in analyze_binop_d and only retain successful/memoizable entries. Add a direct inst_map/reanalysis regression covering division by zero and constant overflow on shared nodes, and require shallow and iterative cleanup behavior to agree.
+
+---
+
+### I-272 — JIT compilation of 50k nested slices exceeds 15 minutes
+
+**Severity:** Correctness / Hygiene
+**Area:** codegen
+
+**Files:** ryo/tests/deep_expr_chain.rs; ryo-backend/src/codegen; ryo-driver/src/pipeline
+
+**Summary:** The jit_run_deep_slice_nesting regression generates 50,000 successive [0:1] expressions. TIR emission completes and 1,000-level JIT execution succeeds, but debug JIT compilation exceeded a 900-second timeout while consuming one CPU core; no stack overflow or deadlock was observed. The long case prevents the default deep-expression and workspace suites from completing in a practical validation window.
+
+**Resolution:** Profile the 50,000-slice JIT pipeline to locate the superlinear pass or emission path, then remove the scaling bottleneck without weakening stack-safety coverage. Add scaling measurements for nested views and keep a large regression practical for CI while retaining adversarial stress coverage.
+
+---
+
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
@@ -863,4 +889,4 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-<!-- issue-id high-water: 270 -->
+<!-- issue-id high-water: 272 -->
