@@ -598,7 +598,7 @@ fn jit_run_nested_statement_matches_50000() {
 }
 
 #[test]
-#[ignore = "I-270: blocked by recursive Flow match arms"]
+#[ignore = "I-274: blocked by recursive Flow match arms"]
 fn jit_run_nested_catches_50000() {
     assert_jit_prints("nested_catches_50000.ryo", &nested_catches(50_000), "0");
 }

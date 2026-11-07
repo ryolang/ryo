@@ -25,8 +25,17 @@ fn snapshot((uir, diags): (Uir, Vec<Diag>)) -> String {
         .collect();
     direct_catch_matches.sort_unstable();
     format!(
-        "{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
-        uir.instructions, uir.extra, uir.func_bodies, uir.spans, diags, direct_catch_matches
+        "{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
+        uir.instructions,
+        uir.extra,
+        uir.spans,
+        uir.func_bodies,
+        uir.struct_decls,
+        uir.enum_decls,
+        uir.error_decls,
+        uir.error_families,
+        diags,
+        direct_catch_matches
     )
 }
 
@@ -233,6 +242,15 @@ fn match_catch_cases() -> Vec<(&'static str, &'static str)> {
 			E: 0
 			_: 1
 		_: 2
+"#,
+        ),
+        (
+            "ordinary_expression_handler",
+            r#"fn main():
+	value = 1 catch as err:
+		match 1:
+			1: 0
+			_: 1
 "#,
         ),
         (
