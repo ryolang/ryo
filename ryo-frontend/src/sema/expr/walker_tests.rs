@@ -645,7 +645,88 @@ fn non_struct_call_target_does_not_reach_struct_layout_lookup() {
 }
 
 #[test]
+fn compound_field_struct_literal_matches_at_every_depth_limit() {
+    let src = r#"error A
+struct Holder:
+	inner: {value: A!int}
+fn main():
+	mut holder = Holder{inner={value=1}}
+	match 1:
+		1:
+			holder.inner += {value=true}
+		_:
+			print(0)
+"#;
+    let baseline_diags = run(src).expect_err("compound struct assignment must be invalid");
+    assert_eq!(baseline_diags.len(), 1, "{baseline_diags:?}");
+    assert_eq!(
+        baseline_diags[0].code,
+        ryo_core::diag::DiagCode::UnsupportedOperator
+    );
+    let baseline = snapshot(Err(baseline_diags));
+    for limit in [0, 1, 64] {
+        assert_eq!(
+            snapshot(run_with_expr_limit(src, limit)),
+            baseline,
+            "compound-field RHS gained an expected struct target at limit {limit}"
+        );
+    }
+}
+
+#[test]
 fn non_simple_match_arm_statements_use_one_machine() {
+    let cases = [
+        (
+            "if_elif_else",
+            "fn main():\n\tmatch 1:\n\t\t1:\n\t\t\tif true:\n\t\t\t\tprint(1)\n\t\t\telif false:\n\t\t\t\tprint(2)\n\t\t\telse:\n\t\t\t\tprint(3)\n\t\t_:\n\t\t\tprint(0)\n",
+        ),
+        (
+            "while",
+            "fn main():\n\tmatch 1:\n\t\t1:\n\t\t\twhile false:\n\t\t\t\tprint(1)\n\t\t_:\n\t\t\tprint(0)\n",
+        ),
+        (
+            "for_range",
+            "fn main():\n\tmatch 1:\n\t\t1:\n\t\t\tfor i in range(0, 3):\n\t\t\t\tprint(i)\n\t\t_:\n\t\t\tprint(0)\n",
+        ),
+        (
+            "declaration_and_assignment",
+            "fn main():\n\tmut value = 0\n\tmatch 1:\n\t\t1:\n\t\t\tother = 1\n\t\t\tvalue = other\n\t\t_:\n\t\t\tprint(0)\n",
+        ),
+        (
+            "return",
+            "fn choose() -> int:\n\tmatch 1:\n\t\t1:\n\t\t\treturn 1\n\t\t_:\n\t\t\treturn 0\n",
+        ),
+        (
+            "anonymous_struct_return_error_union",
+            r#"error A
+error B
+fn narrow() -> A!int:
+	return 3
+fn choose() -> {value: (A | B)!int}:
+	match 1:
+		1:
+			return {value=narrow()}
+		_:
+			return {value=1}
+"#,
+        ),
+    ];
+    for (name, src) in cases {
+        let baseline = run(src).unwrap_or_else(|diags| panic!("{name} baseline failed: {diags:?}"));
+        let baseline = snapshot(Ok(baseline));
+        super::walker::reset_machine_call_count();
+        let analyzed = snapshot(run_with_expr_limit(src, 0));
+        assert_eq!(
+            super::walker::machine_call_count(),
+            1,
+            "{name} started nested sema machines"
+        );
+        assert_eq!(analyzed, baseline, "{name} changed forced-limit analysis");
+    }
+}
+
+#[test]
+fn non_simple_match_arm_statement_diagnostics_match_at_every_depth_limit() {
     let cases = [
         (
             "if_elif_else",
@@ -663,35 +744,22 @@ fn non_simple_match_arm_statements_use_one_machine() {
             "declaration_and_assignment",
             "fn main():\n\tmut value = 0\n\tmatch 1:\n\t\t1:\n\t\t\tother = 1\n\t\t\tvalue = other\n\t\t_: 0\n",
         ),
-        (
-            "return",
-            "fn choose() -> int:\n\tmatch 1:\n\t\t1:\n\t\t\treturn 1\n\t\t_:\n\t\t\treturn 0\n",
-        ),
-        (
-            "anonymous_struct_return_error_union",
-            r#"error A
-error B
-fn narrow() -> A!int:
-	return 3
-fn choose() -> {value: (A | B)!int}:
-	result = match 1:
-		1:
-			return {value=narrow()}
-		_:
-			return {value=1}
-	return result
-"#,
-        ),
     ];
     for (name, src) in cases {
-        let baseline = snapshot(run(src));
-        super::walker::reset_machine_call_count();
-        let analyzed = snapshot(run_with_expr_limit(src, 0));
-        assert_eq!(
-            super::walker::machine_call_count(),
-            1,
-            "{name} started nested sema machines"
+        let baseline_diags = run(src).expect_err("falling statement arm must be invalid");
+        assert!(
+            baseline_diags
+                .iter()
+                .any(|diag| diag.code == ryo_core::diag::DiagCode::ArmNoValue),
+            "{name} baseline did not report E0135: {baseline_diags:?}"
         );
-        assert_eq!(analyzed, baseline, "{name} changed forced-limit analysis");
+        let baseline = snapshot(Err(baseline_diags));
+        for limit in [0, 1, 64] {
+            assert_eq!(
+                snapshot(run_with_expr_limit(src, limit)),
+                baseline,
+                "{name} changed diagnostics at limit {limit}"
+            );
+        }
     }
 }

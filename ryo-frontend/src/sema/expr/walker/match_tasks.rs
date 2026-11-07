@@ -403,7 +403,9 @@ impl<'a> MatchState<'a> {
             }
             _ => unreachable!("target continuation for non-field assignment"),
         };
-        if sema.uir.inst(value).tag == InstTag::StructLit {
+        if sema.uir.inst(state.statement).tag == InstTag::FieldAssign
+            && sema.uir.inst(value).tag == InstTag::StructLit
+        {
             struct_state.expect(value, fcx.builder.ty_of(analyzed[&target]));
         }
         let scope_id = state.scope_id;
