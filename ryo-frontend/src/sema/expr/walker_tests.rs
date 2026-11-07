@@ -645,7 +645,6 @@ fn non_struct_call_target_does_not_reach_struct_layout_lookup() {
 }
 
 #[test]
-#[ignore = "I-273: enable with sema statement traversal"]
 fn non_simple_match_arm_statements_use_one_machine() {
     let cases = [
         (
@@ -658,7 +657,7 @@ fn non_simple_match_arm_statements_use_one_machine() {
         ),
         (
             "for_range",
-            "fn main():\n\tmatch 1:\n\t\t1:\n\t\t\tfor i in range(3):\n\t\t\t\tprint(i)\n\t\t_: 0\n",
+            "fn main():\n\tmatch 1:\n\t\t1:\n\t\t\tfor i in range(0, 3):\n\t\t\t\tprint(i)\n\t\t_: 0\n",
         ),
         (
             "declaration_and_assignment",
@@ -666,7 +665,7 @@ fn non_simple_match_arm_statements_use_one_machine() {
         ),
         (
             "return",
-            "fn choose() -> int:\n\tmatch 1:\n\t\t1:\n\t\t\treturn 1\n\t\t_:\n\t\t\treturn 0\nfn main():\n\tprint(choose())\n",
+            "fn choose() -> int:\n\tmatch 1:\n\t\t1:\n\t\t\treturn 1\n\t\t_:\n\t\t\treturn 0\n",
         ),
         (
             "anonymous_struct_return_error_union",

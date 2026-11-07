@@ -302,71 +302,54 @@ pub(crate) fn analyze_stmt_with_context(
         }
         InstTag::Destructure => analyze_destructure(sema, fcx, scope, r, span, context),
         InstTag::WhileLoop => {
-            let uir = sema.uir;
-            let view = uir.while_loop_view(r);
-            let cond = view.cond;
-            let body = view.body;
-
-            let cond_tir =
-                analyze_expr_with(sema, fcx, scope, cond, NeverMode::Reject, context.child());
-            check_condition_bool(sema, fcx, cond_tir, cond);
+            let view = sema.uir.while_loop_view(r);
+            let cond_tir = analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                view.cond,
+                NeverMode::Reject,
+                context.child(),
+            );
+            check_condition_bool(sema, fcx, cond_tir, view.cond);
 
             fcx.loop_depth += 1;
             let body_tirs = analyze_block_iter_with_context(
                 sema,
                 fcx,
                 scope,
-                body.into_iter(),
+                view.body.into_iter(),
                 context.child(),
             );
             fcx.loop_depth -= 1;
 
-            fcx.builder
-                .while_loop(cond_tir, &body_tirs, sema.pool.void(), span)
+            finish_while_loop(sema, fcx, r, cond_tir, &body_tirs)
         }
         InstTag::ForRange => {
-            let uir = sema.uir;
-            let view = uir.for_range_view(r);
-            let var_name = view.var_name;
-            let start = view.start;
-            let end = view.end;
-            let body = view.body;
-
-            let start_tir =
-                analyze_expr_with(sema, fcx, scope, start, NeverMode::Reject, context.child());
-            let end_tir =
-                analyze_expr_with(sema, fcx, scope, end, NeverMode::Reject, context.child());
-
-            let start_ty = fcx.builder.ty_of(start_tir);
-            let end_ty = fcx.builder.ty_of(end_tir);
-
-            if !sema.pool.is_error(start_ty) && start_ty != sema.pool.int() {
-                sema.sink.emit(Diag::error(
-                    sema.uir.span(start),
-                    DiagCode::RangeArgType,
-                    format!(
-                        "range() start must be 'int', got '{}'",
-                        sema.pool.display(start_ty),
-                    ),
-                ));
-            }
-            if !sema.pool.is_error(end_ty) && end_ty != sema.pool.int() {
-                sema.sink.emit(Diag::error(
-                    sema.uir.span(end),
-                    DiagCode::RangeArgType,
-                    format!(
-                        "range() end must be 'int', got '{}'",
-                        sema.pool.display(end_ty),
-                    ),
-                ));
-            }
+            let view = sema.uir.for_range_view(r);
+            let start_tir = analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                view.start,
+                NeverMode::Reject,
+                context.child(),
+            );
+            let end_tir = analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                view.end,
+                NeverMode::Reject,
+                context.child(),
+            );
+            check_range_args(sema, fcx, view.start, start_tir, view.end, end_tir);
 
             let int_ty = sema.pool.int();
-            let void_ty = sema.pool.void();
             fcx.loop_depth += 1;
             let is_reserved = check_reserved_name(
                 sema,
-                var_name,
+                view.var_name,
                 span,
                 "is a reserved builtin and cannot be redefined",
             );
@@ -375,20 +358,25 @@ pub(crate) fn analyze_stmt_with_context(
                 sema,
                 fcx,
                 scope,
-                body.into_iter(),
+                view.body.into_iter(),
                 context.child(),
                 |child_scope| {
                     if is_reserved {
-                        child_scope.insert_binding(var_name, error_ty, false, false);
+                        child_scope.insert_binding(view.var_name, error_ty, false, false);
                     } else {
-                        child_scope.insert_dead_store_binding(var_name, int_ty, false, false, span);
+                        child_scope.insert_dead_store_binding(
+                            view.var_name,
+                            int_ty,
+                            false,
+                            false,
+                            span,
+                        );
                     }
                 },
             );
             fcx.loop_depth -= 1;
 
-            fcx.builder
-                .for_range(var_name, start_tir, end_tir, &body_tirs, void_ty, span)
+            finish_for_range(sema, fcx, r, view.var_name, start_tir, end_tir, &body_tirs)
         }
         InstTag::Break => {
             // break outside a loop is a compile error (spec §3, Control Flow)
@@ -423,6 +411,68 @@ pub(crate) fn analyze_stmt_with_context(
     }
 }
 
+pub(crate) fn finish_while_loop(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    r: InstRef,
+    cond_tir: TirRef,
+    body_tirs: &[TirRef],
+) -> TirRef {
+    fcx.builder
+        .while_loop(cond_tir, body_tirs, sema.pool.void(), sema.uir.span(r))
+}
+
+pub(crate) fn check_range_args(
+    sema: &mut Sema<'_>,
+    fcx: &FuncCtx,
+    start: InstRef,
+    start_tir: TirRef,
+    end: InstRef,
+    end_tir: TirRef,
+) {
+    let start_ty = fcx.builder.ty_of(start_tir);
+    let end_ty = fcx.builder.ty_of(end_tir);
+    if !sema.pool.is_error(start_ty) && start_ty != sema.pool.int() {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(start),
+            DiagCode::RangeArgType,
+            format!(
+                "range() start must be 'int', got '{}'",
+                sema.pool.display(start_ty),
+            ),
+        ));
+    }
+    if !sema.pool.is_error(end_ty) && end_ty != sema.pool.int() {
+        sema.sink.emit(Diag::error(
+            sema.uir.span(end),
+            DiagCode::RangeArgType,
+            format!(
+                "range() end must be 'int', got '{}'",
+                sema.pool.display(end_ty),
+            ),
+        ));
+    }
+}
+
+pub(crate) fn finish_for_range(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    r: InstRef,
+    var_name: StringId,
+    start_tir: TirRef,
+    end_tir: TirRef,
+    body_tirs: &[TirRef],
+) -> TirRef {
+    fcx.builder.for_range(
+        var_name,
+        start_tir,
+        end_tir,
+        body_tirs,
+        sema.pool.void(),
+        sema.uir.span(r),
+    )
+}
+
 fn analyze_if_stmt(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -430,7 +480,6 @@ fn analyze_if_stmt(
     r: InstRef,
     context: SemaExprContext,
 ) -> TirRef {
-    let span = sema.uir.span(r);
     let view = sema.uir.if_stmt_view(r);
     let cond_tir = analyze_expr_with(
         sema,
@@ -472,13 +521,33 @@ fn analyze_if_stmt(
     let else_tirs = view.else_stmts.map(|stmts| {
         analyze_block_iter_with_context(sema, fcx, scope, stmts.into_iter(), context.child())
     });
-    fcx.builder.if_stmt(
+    finish_if_stmt(
+        sema,
+        fcx,
+        r,
         cond_tir,
         &then_tirs,
         &elif_tirs,
         else_tirs.as_deref(),
+    )
+}
+
+pub(crate) fn finish_if_stmt(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    r: InstRef,
+    cond_tir: TirRef,
+    then_tirs: &[TirRef],
+    elif_tirs: &[(TirRef, Vec<TirRef>)],
+    else_tirs: Option<&[TirRef]>,
+) -> TirRef {
+    fcx.builder.if_stmt(
+        cond_tir,
+        then_tirs,
+        elif_tirs,
+        else_tirs,
         sema.pool.void(),
-        span,
+        sema.uir.span(r),
     )
 }
 
@@ -803,6 +872,20 @@ fn check_field_chain(
     target: InstRef,
     context: SemaExprContext,
 ) -> Option<(TirRef, TypeId)> {
+    if !check_field_assignment_root(sema, scope, target) {
+        return None;
+    }
+    let target_tir =
+        analyze_expr_with(sema, fcx, scope, target, NeverMode::Reject, context.child());
+    let field_ty = fcx.builder.ty_of(target_tir);
+    Some((target_tir, field_ty))
+}
+
+pub(crate) fn check_field_assignment_root(
+    sema: &mut Sema<'_>,
+    scope: &Scope,
+    target: InstRef,
+) -> bool {
     let mut root = target;
     loop {
         match sema.uir.inst(root).data {
@@ -810,7 +893,7 @@ fn check_field_chain(
             InstData::Var(name) => {
                 let root_span = sema.uir.span(root);
                 match scope.lookup_full(name) {
-                    Some((_, true)) => break,
+                    Some((_, true)) => return true,
                     Some((_, false)) => {
                         sema.sink.emit(Diag::error(
                             root_span,
@@ -820,7 +903,7 @@ fn check_field_chain(
                                 sema.pool.str(name)
                             ),
                         ));
-                        return None;
+                        return false;
                     }
                     None => {
                         sema.sink.emit(Diag::error(
@@ -831,17 +914,13 @@ fn check_field_chain(
                                 sema.pool.str(name)
                             ),
                         ));
-                        return None;
+                        return false;
                     }
                 }
             }
             _ => unreachable!("field-assign target chain must be rooted at a Var"),
         }
     }
-    let target_tir =
-        analyze_expr_with(sema, fcx, scope, target, NeverMode::Reject, context.child());
-    let field_ty = fcx.builder.ty_of(target_tir);
-    Some((target_tir, field_ty))
 }
 
 type DestructureField = (u32, Option<StringId>, TypeId);
