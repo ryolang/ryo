@@ -183,7 +183,6 @@ fn nested_constructor_lowering_uses_one_machine() {
 }
 
 #[test]
-#[ignore = "I-270: enable with astgen traversal"]
 fn alternating_constructor_match_lowering_uses_one_machine() {
     for (name, src) in constructor_match_cases() {
         assert_single_machine_at_limit_zero(name, &src);
@@ -197,6 +196,81 @@ fn alternating_constructor_match_lowering_matches_at_every_depth_limit() {
         for limit in [0, 1, 64] {
             assert_eq!(
                 snapshot(lower_with_expr_limit(&src, limit)),
+                baseline,
+                "{name} differed at expression depth limit {limit}"
+            );
+        }
+    }
+}
+
+fn match_catch_cases() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "expression_arms",
+            r#"fn main():
+	value = match 1:
+		1: match 2:
+			2: 3
+			_: 4
+		_: 0
+"#,
+        ),
+        (
+            "borrowed_scrutinee",
+            r#"fn choose(p: int) -> int:
+	return match &p:
+		1: match &p:
+			1: 0
+			_: 1
+		_: 2
+"#,
+        ),
+        (
+            "direct_catch",
+            r#"fn main():
+	value = 1 catch as err:
+		E: 1 catch as nested:
+			E: 0
+			_: 1
+		_: 2
+"#,
+        ),
+        (
+            "invalid_patterns",
+            r#"errors IoError:
+	Eof(int)
+fn main():
+	value = match 1:
+		(0, (1, 2)): match 3:
+			IoError.Missing: 4
+			_: 5
+		_: 0
+"#,
+        ),
+    ]
+}
+
+#[test]
+fn match_catch_lowering_uses_one_machine() {
+    for (name, src) in match_catch_cases() {
+        assert_single_machine_at_limit_zero(name, src);
+    }
+}
+
+#[test]
+fn match_catch_lowering_matches_at_every_depth_limit() {
+    for (name, src) in match_catch_cases() {
+        let baseline = lower(src);
+        if name == "direct_catch" {
+            assert!(
+                !baseline.0.direct_catch_matches.is_empty(),
+                "direct-catch fixture lost its marker"
+            );
+        }
+        let baseline = snapshot(baseline);
+        for limit in [0, 1, 64] {
+            assert_eq!(
+                snapshot(lower_with_expr_limit(src, limit)),
                 baseline,
                 "{name} differed at expression depth limit {limit}"
             );

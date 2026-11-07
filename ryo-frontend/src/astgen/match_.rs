@@ -82,6 +82,110 @@ impl OwnedBody {
     }
 }
 
+pub(super) struct MatchState {
+    scrutinee: Option<InstRef>,
+    arms: ast::MatchArmList,
+    next_arm: usize,
+    owned: Vec<(OwnedPattern, OwnedBody)>,
+    pending_pattern: Option<OwnedPattern>,
+    span: Span,
+}
+
+pub(super) enum MatchStep {
+    Body(MatchState, ast::ExprId),
+    Complete(InstRef),
+}
+
+pub(super) fn prepare_match(arms: ast::MatchArmList, span: Span) -> MatchState {
+    MatchState {
+        scrutinee: None,
+        arms,
+        next_arm: 0,
+        owned: Vec::new(),
+        pending_pattern: None,
+        span,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn resume_match_scrutinee(
+    mut state: MatchState,
+    scrutinee: InstRef,
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+    types: &TypeResolver,
+    defined_enums: &HashSet<TypeId>,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+) -> MatchStep {
+    state.scrutinee = Some(scrutinee);
+    resume_match_arm(state, b, ast, types, defined_enums, pool, sink)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn resume_match_body(
+    mut state: MatchState,
+    body: InstRef,
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+    types: &TypeResolver,
+    defined_enums: &HashSet<TypeId>,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+) -> MatchStep {
+    let pattern = state.pending_pattern.take().expect("match arm prepared");
+    state.owned.push((pattern, OwnedBody::Expr(body)));
+    resume_match_arm(state, b, ast, types, defined_enums, pool, sink)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resume_match_arm(
+    mut state: MatchState,
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+    types: &TypeResolver,
+    defined_enums: &HashSet<TypeId>,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+) -> MatchStep {
+    let source_arms = ast.match_arms(state.arms);
+    while state.next_arm < source_arms.len() {
+        let arm = source_arms[state.next_arm];
+        state.next_arm += 1;
+        let pattern = lower_match_pattern(ast, arm.pattern, types, pool, sink);
+        match arm.body {
+            ast::MatchArmBody::Expr(expr) => {
+                state.pending_pattern = Some(pattern);
+                return MatchStep::Body(state, expr);
+            }
+            ast::MatchArmBody::Stmts(list) => {
+                let body = lower_stmt_body(b, ast, list, types, defined_enums, pool, sink);
+                state.owned.push((pattern, body));
+            }
+        }
+    }
+    MatchStep::Complete(finish_match(state, b, ast))
+}
+
+fn finish_match(state: MatchState, b: &mut UirBuilder, ast: &ast::Ast) -> InstRef {
+    let source_arms = ast.match_arms(state.arms);
+    let uir_arms: Vec<UirMatchArm<'_>> = state
+        .owned
+        .iter()
+        .zip(source_arms)
+        .map(|((pattern, body), arm)| UirMatchArm {
+            span: ast.pattern_span(arm.pattern),
+            pattern: pattern.view(),
+            body: body.view(),
+        })
+        .collect();
+    b.match_expr(
+        state.scrutinee.expect("match scrutinee lowered"),
+        &uir_arms,
+        state.span,
+    )
+}
+
 /// Lower `match scrutinee:` (M12) to [`InstTag::Match`]. The scrutinee
 /// lowers first; each arm's body lowers next (its insts precede the
 /// Match inst in the arena), then the arms are assembled as
@@ -99,110 +203,214 @@ pub(super) fn gen_match(
     sink: &mut DiagSink,
     span: Span,
 ) -> InstRef {
-    let scrutinee_ref = gen_expr(b, ast, scrutinee, types, defined_enums, pool, sink);
-    gen_match_from_ref(
+    gen_match_d(
         b,
         ast,
-        scrutinee_ref,
+        scrutinee,
         arms,
         types,
         defined_enums,
         pool,
         sink,
         span,
+        0,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn gen_match_from_ref(
+pub(super) fn gen_match_d(
     b: &mut UirBuilder,
     ast: &ast::Ast,
-    scrutinee_ref: InstRef,
+    scrutinee: ast::ExprId,
     arms: ast::MatchArmList,
     types: &TypeResolver,
     defined_enums: &HashSet<TypeId>,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     span: Span,
+    depth: u32,
 ) -> InstRef {
-    let source_arms = ast.match_arms(arms);
-    let owned: Vec<(OwnedPattern, OwnedBody)> = source_arms
-        .iter()
-        .map(|arm| lower_arm(b, ast, arm, types, defined_enums, pool, sink))
-        .collect();
-    let uir_arms: Vec<UirMatchArm<'_>> = owned
-        .iter()
-        .zip(source_arms)
-        .map(|((pattern, body), arm)| UirMatchArm {
-            span: ast.pattern_span(arm.pattern),
-            pattern: pattern.view(),
-            body: body.view(),
-        })
-        .collect();
-    b.match_expr(scrutinee_ref, &uir_arms, span)
+    let scrutinee_ref = super::expr::gen_expr_d(
+        b,
+        ast,
+        scrutinee,
+        types,
+        defined_enums,
+        pool,
+        sink,
+        depth + 1,
+    );
+    let step = resume_match_scrutinee(
+        prepare_match(arms, span),
+        scrutinee_ref,
+        b,
+        ast,
+        types,
+        defined_enums,
+        pool,
+        sink,
+    );
+    gen_match_step(step, b, ast, types, defined_enums, pool, sink, depth)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn gen_catch(
+fn gen_match_step(
+    mut step: MatchStep,
     b: &mut UirBuilder,
     ast: &ast::Ast,
-    catch: ast::CatchExpr,
     types: &TypeResolver,
     defined_enums: &HashSet<TypeId>,
     pool: &mut InternPool,
     sink: &mut DiagSink,
-    span: Span,
+    depth: u32,
 ) -> InstRef {
-    let operand = gen_expr(b, ast, catch.operand, types, defined_enums, pool, sink);
-    let binding = catch.binding.map(|ident| ident.name);
-    let success = pool.intern_str(&format!("__ryo_catch_success_{}", span.start));
-    let error =
-        binding.unwrap_or_else(|| pool.intern_str(&format!("__ryo_catch_error_{}", span.start)));
-    let ok = pool.intern_str("Ok");
-    let err = pool.intern_str("Err");
-    let success_ref = b.temp_var_ref(success, span);
-    let error_span = catch.binding.map(|ident| ident.span).unwrap_or(span);
-    let error_body = match catch.body {
-        ast::CatchBody::Handler(body) => lower_body(b, ast, body, types, defined_enums, pool, sink),
+    loop {
+        match step {
+            MatchStep::Complete(result) => return result,
+            MatchStep::Body(state, expr) => {
+                let body = super::expr::gen_expr_d(
+                    b,
+                    ast,
+                    expr,
+                    types,
+                    defined_enums,
+                    pool,
+                    sink,
+                    depth + 1,
+                );
+                step = resume_match_body(state, body, b, ast, types, defined_enums, pool, sink);
+            }
+        }
+    }
+}
+
+pub(super) struct CatchState {
+    catch: ast::CatchExpr,
+    span: Span,
+    operand: Option<InstRef>,
+    success: Option<StringId>,
+    error: Option<StringId>,
+    ok: Option<StringId>,
+    err: Option<StringId>,
+    success_ref: Option<InstRef>,
+}
+
+pub(super) enum CatchStep {
+    Body(CatchState, ast::ExprId),
+    Match(CatchState, MatchStep),
+    Complete(InstRef),
+}
+
+pub(super) fn prepare_catch(catch: ast::CatchExpr, span: Span) -> CatchState {
+    CatchState {
+        catch,
+        span,
+        operand: None,
+        success: None,
+        error: None,
+        ok: None,
+        err: None,
+        success_ref: None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn resume_catch_operand(
+    mut state: CatchState,
+    operand: InstRef,
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+    types: &TypeResolver,
+    defined_enums: &HashSet<TypeId>,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+) -> CatchStep {
+    state.operand = Some(operand);
+    let binding = state.catch.binding.map(|ident| ident.name);
+    let success = pool.intern_str(&format!("__ryo_catch_success_{}", state.span.start));
+    let error = binding
+        .unwrap_or_else(|| pool.intern_str(&format!("__ryo_catch_error_{}", state.span.start)));
+    state.success = Some(success);
+    state.error = Some(error);
+    state.ok = Some(pool.intern_str("Ok"));
+    state.err = Some(pool.intern_str("Err"));
+    state.success_ref = Some(b.temp_var_ref(success, state.span));
+    match state.catch.body {
+        ast::CatchBody::Handler(ast::MatchArmBody::Expr(expr)) => CatchStep::Body(state, expr),
+        ast::CatchBody::Handler(ast::MatchArmBody::Stmts(list)) => {
+            let body = lower_stmt_body(b, ast, list, types, defined_enums, pool, sink);
+            CatchStep::Complete(finish_catch(state, body, b))
+        }
         ast::CatchBody::Arms(arms) => {
+            let error_span = state
+                .catch
+                .binding
+                .map(|ident| ident.span)
+                .unwrap_or(state.span);
             let error_ref = b.temp_var_ref(error, error_span);
-            let direct = gen_match_from_ref(
+            let step = resume_match_scrutinee(
+                prepare_match(arms, state.span),
+                error_ref,
                 b,
                 ast,
-                error_ref,
-                arms,
                 types,
                 defined_enums,
                 pool,
                 sink,
-                span,
             );
-            if binding.is_some() {
-                b.mark_direct_catch_match(direct);
-            }
-            OwnedBody::Expr(direct)
+            CatchStep::Match(state, step)
         }
-    };
+    }
+}
+
+pub(super) fn resume_catch_body(state: CatchState, body: InstRef, b: &mut UirBuilder) -> InstRef {
+    finish_catch(state, OwnedBody::Expr(body), b)
+}
+
+pub(super) fn resume_catch_match(
+    state: CatchState,
+    direct: InstRef,
+    b: &mut UirBuilder,
+) -> InstRef {
+    if state.catch.binding.is_some() {
+        b.mark_direct_catch_match(direct);
+    }
+    finish_catch(state, OwnedBody::Expr(direct), b)
+}
+
+fn finish_catch(state: CatchState, error_body: OwnedBody, b: &mut UirBuilder) -> InstRef {
+    let binding = state.catch.binding.map(|ident| ident.name);
+    let error_span = state
+        .catch
+        .binding
+        .map(|ident| ident.span)
+        .unwrap_or(state.span);
     let owned = [
         (
             OwnedPattern::Variant {
                 enum_name: None,
-                variant: ok,
+                variant: state.ok.expect("catch names prepared"),
                 args: Some(OwnedVariantArgs {
                     by_position: true,
-                    args: vec![(None, UirArgTarget::Bind(success))],
+                    args: vec![(
+                        None,
+                        UirArgTarget::Bind(state.success.expect("catch names prepared")),
+                    )],
                 }),
             },
-            OwnedBody::Expr(success_ref),
-            span,
+            OwnedBody::Expr(state.success_ref.expect("catch success lowered")),
+            state.span,
         ),
         (
             OwnedPattern::Variant {
                 enum_name: None,
-                variant: err,
+                variant: state.err.expect("catch names prepared"),
                 args: Some(OwnedVariantArgs {
                     by_position: true,
-                    args: vec![(None, UirArgTarget::Bind(error))],
+                    args: vec![(
+                        None,
+                        UirArgTarget::Bind(state.error.expect("catch names prepared")),
+                    )],
                 }),
             },
             error_body,
@@ -217,46 +425,89 @@ pub(super) fn gen_catch(
             body: body.view(),
         })
         .collect();
-    b.catch(operand, binding, &arms, span)
+    b.catch(
+        state.operand.expect("catch operand lowered"),
+        binding,
+        &arms,
+        state.span,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn lower_arm(
+pub(super) fn gen_catch(
     b: &mut UirBuilder,
     ast: &ast::Ast,
-    arm: &ast::MatchArm,
+    catch: ast::CatchExpr,
     types: &TypeResolver,
     defined_enums: &HashSet<TypeId>,
     pool: &mut InternPool,
     sink: &mut DiagSink,
-) -> (OwnedPattern, OwnedBody) {
-    let pattern = lower_match_pattern(ast, arm.pattern, types, pool, sink);
-    let body = lower_body(b, ast, arm.body, types, defined_enums, pool, sink);
-    (pattern, body)
+    span: Span,
+) -> InstRef {
+    gen_catch_d(b, ast, catch, types, defined_enums, pool, sink, span, 0)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn lower_body(
+pub(super) fn gen_catch_d(
     b: &mut UirBuilder,
     ast: &ast::Ast,
-    body: ast::MatchArmBody,
+    catch: ast::CatchExpr,
+    types: &TypeResolver,
+    defined_enums: &HashSet<TypeId>,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+    span: Span,
+    depth: u32,
+) -> InstRef {
+    let operand = super::expr::gen_expr_d(
+        b,
+        ast,
+        catch.operand,
+        types,
+        defined_enums,
+        pool,
+        sink,
+        depth + 1,
+    );
+    let step = resume_catch_operand(
+        prepare_catch(catch, span),
+        operand,
+        b,
+        ast,
+        types,
+        defined_enums,
+        pool,
+        sink,
+    );
+    match step {
+        CatchStep::Complete(result) => result,
+        CatchStep::Body(state, expr) => {
+            let body =
+                super::expr::gen_expr_d(b, ast, expr, types, defined_enums, pool, sink, depth + 1);
+            resume_catch_body(state, body, b)
+        }
+        CatchStep::Match(state, step) => {
+            let direct = gen_match_step(step, b, ast, types, defined_enums, pool, sink, depth);
+            resume_catch_match(state, direct, b)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_stmt_body(
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+    list: ast::StmtList,
     types: &TypeResolver,
     defined_enums: &HashSet<TypeId>,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) -> OwnedBody {
-    match body {
-        ast::MatchArmBody::Expr(expr) => {
-            OwnedBody::Expr(gen_expr(b, ast, expr, types, defined_enums, pool, sink))
-        }
-        ast::MatchArmBody::Stmts(list) => {
-            let mut refs = Vec::new();
-            for &stmt in ast.stmt_list(list) {
-                gen_stmt(b, ast, stmt, types, defined_enums, pool, sink, &mut refs);
-            }
-            OwnedBody::Stmts(refs)
-        }
+    let mut refs = Vec::new();
+    for &stmt in ast.stmt_list(list) {
+        gen_stmt(b, ast, stmt, types, defined_enums, pool, sink, &mut refs);
     }
+    OwnedBody::Stmts(refs)
 }
 
 /// Lower one arm pattern to its [`UirPattern`] builder-input shape.

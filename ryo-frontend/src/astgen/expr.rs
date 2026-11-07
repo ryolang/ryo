@@ -71,7 +71,7 @@ pub(super) fn gen_expr(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn gen_expr_d(
+pub(super) fn gen_expr_d(
     b: &mut UirBuilder,
     ast: &ast::Ast,
     expr: ast::ExprId,
@@ -270,17 +270,34 @@ fn gen_expr_d(
         }
         // Match expressions (M12) lower to the UIR `Match` wire; see
         // `astgen/match_.rs` for the pattern/body mapping.
-        ast::ExprKind::Match { scrutinee, arms } => match_::gen_match(
-            b,
-            ast,
-            scrutinee,
-            arms,
-            types,
-            defined_layouts,
-            pool,
-            sink,
-            span,
-        ),
+        ast::ExprKind::Match { scrutinee, arms } => {
+            if depth == 0 {
+                match_::gen_match(
+                    b,
+                    ast,
+                    scrutinee,
+                    arms,
+                    types,
+                    defined_layouts,
+                    pool,
+                    sink,
+                    span,
+                )
+            } else {
+                match_::gen_match_d(
+                    b,
+                    ast,
+                    scrutinee,
+                    arms,
+                    types,
+                    defined_layouts,
+                    pool,
+                    sink,
+                    span,
+                    depth,
+                )
+            }
+        }
         ast::ExprKind::ErrorConstruct(c) => {
             errors::lower_error_construct(b, ast, c, types, defined_layouts, pool, sink, span)
         }
@@ -298,7 +315,21 @@ fn gen_expr_d(
             b.unary(InstTag::Try, operand, span)
         }
         ast::ExprKind::Catch(catch) => {
-            match_::gen_catch(b, ast, catch, types, defined_layouts, pool, sink, span)
+            if depth == 0 {
+                match_::gen_catch(b, ast, catch, types, defined_layouts, pool, sink, span)
+            } else {
+                match_::gen_catch_d(
+                    b,
+                    ast,
+                    catch,
+                    types,
+                    defined_layouts,
+                    pool,
+                    sink,
+                    span,
+                    depth,
+                )
+            }
         }
     }
 }
@@ -314,6 +345,25 @@ enum ExprTask {
     Exit(ast::ExprId),
     Variant(variants::VariantState),
     Error(errors::ErrorState),
+    MatchScrutinee(match_::MatchState),
+    MatchBody(match_::MatchState),
+    CatchOperand(match_::CatchState),
+    CatchBody(match_::CatchState),
+    CatchMatch(match_::CatchState),
+}
+
+fn push_match_step(
+    stack: &mut ChainSpine<ExprTask>,
+    results: &mut ChainSpine<InstRef>,
+    step: match_::MatchStep,
+) {
+    match step {
+        match_::MatchStep::Complete(result) => results.push(result),
+        match_::MatchStep::Body(state, expr) => {
+            stack.push(ExprTask::MatchBody(state));
+            stack.push(ExprTask::Enter(expr));
+        }
+    }
 }
 
 /// Iterative lowering machine used as the deep-nesting fallback for
@@ -327,10 +377,8 @@ enum ExprTask {
 /// nests 100k `BinaryOp` lhs links), so a recursive descent overflows
 /// the stack long before sema sees the program. The machine below
 /// keeps the recursion on the explicit `stack`; each `Exit` finds its
-/// children's refs on `results` in source order. Variant and error
-/// constructors retain their argument state on that same stack. Match
-/// and catch still delegate to their helpers, which re-enter `gen_expr`
-/// per sub-expression.
+/// children's refs on `results` in source order. Constructor, match,
+/// and catch state stays on that same stack while children lower.
 fn gen_expr_machine(
     b: &mut UirBuilder,
     ast: &ast::Ast,
@@ -497,17 +545,10 @@ fn gen_expr_machine(
                     }
                     // Match expressions (M12) lower to the UIR `Match` wire; see
                     // `astgen/match_.rs` for the pattern/body mapping.
-                    ast::ExprKind::Match { scrutinee, arms } => results.push(match_::gen_match(
-                        b,
-                        ast,
-                        scrutinee,
-                        arms,
-                        types,
-                        defined_layouts,
-                        pool,
-                        sink,
-                        span,
-                    )),
+                    ast::ExprKind::Match { scrutinee, arms } => {
+                        stack.push(ExprTask::MatchScrutinee(match_::prepare_match(arms, span)));
+                        stack.push(ExprTask::Enter(scrutinee));
+                    }
                     ast::ExprKind::ErrorConstruct(c) => {
                         let step =
                             errors::prepare_error_construct(b, ast, c, types, pool, sink, span);
@@ -523,16 +564,10 @@ fn gen_expr_machine(
                         stack.push(ExprTask::Exit(e));
                         stack.push(ExprTask::Enter(operand));
                     }
-                    ast::ExprKind::Catch(catch) => results.push(match_::gen_catch(
-                        b,
-                        ast,
-                        catch,
-                        types,
-                        defined_layouts,
-                        pool,
-                        sink,
-                        span,
-                    )),
+                    ast::ExprKind::Catch(catch) => {
+                        stack.push(ExprTask::CatchOperand(match_::prepare_catch(catch, span)));
+                        stack.push(ExprTask::Enter(catch.operand));
+                    }
                 }
             }
             ExprTask::Variant(state) => {
@@ -557,6 +592,66 @@ fn gen_expr_machine(
                         stack.push(ExprTask::Enter(arg));
                     }
                 }
+            }
+            ExprTask::MatchScrutinee(state) => {
+                let scrutinee = results.pop().expect("match scrutinee lowered");
+                let step = match_::resume_match_scrutinee(
+                    state,
+                    scrutinee,
+                    b,
+                    ast,
+                    types,
+                    defined_layouts,
+                    pool,
+                    sink,
+                );
+                push_match_step(&mut stack, &mut results, step);
+            }
+            ExprTask::MatchBody(state) => {
+                let body = results.pop().expect("match body lowered");
+                let step = match_::resume_match_body(
+                    state,
+                    body,
+                    b,
+                    ast,
+                    types,
+                    defined_layouts,
+                    pool,
+                    sink,
+                );
+                push_match_step(&mut stack, &mut results, step);
+            }
+            ExprTask::CatchOperand(state) => {
+                let operand = results.pop().expect("catch operand lowered");
+                let step = match_::resume_catch_operand(
+                    state,
+                    operand,
+                    b,
+                    ast,
+                    types,
+                    defined_layouts,
+                    pool,
+                    sink,
+                );
+                match step {
+                    match_::CatchStep::Complete(result) => results.push(result),
+                    match_::CatchStep::Body(state, expr) => {
+                        stack.push(ExprTask::CatchBody(state));
+                        stack.push(ExprTask::Enter(expr));
+                    }
+                    match_::CatchStep::Match(state, step) => {
+                        stack.push(ExprTask::CatchMatch(state));
+                        push_match_step(&mut stack, &mut results, step);
+                    }
+                }
+            }
+            ExprTask::CatchBody(state) => {
+                let body = results.pop().expect("catch body lowered");
+                results.push(match_::resume_catch_body(state, body, b));
+            }
+            ExprTask::CatchMatch(state) => {
+                let direct = results.pop().expect("direct catch match lowered");
+                results.push(match_::resume_catch_match(state, direct, b));
             }
             ExprTask::Exit(e) => {
                 let span = ast.expr_span(e);
