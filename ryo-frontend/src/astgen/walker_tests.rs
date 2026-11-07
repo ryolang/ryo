@@ -131,6 +131,57 @@ fn assert_single_machine_at_limit_zero(name: &str, src: &str) {
     assert_eq!(lowered, baseline, "{name} changed forced-limit lowering");
 }
 
+fn nested_constructor_cases() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "named_variant",
+            r#"enum Shape:
+	Rectangle(width: int)
+fn main():
+	value = Shape.Rectangle{width=Shape.Rectangle{width=1}}
+"#,
+        ),
+        (
+            "tuple_variant",
+            r#"enum Shape:
+	Circle(int)
+fn main():
+	value = Shape.Circle(Shape.Circle(1))
+"#,
+        ),
+        (
+            "declared_error",
+            r#"error E(int)
+fn main():
+	value = E(E(1))
+"#,
+        ),
+        (
+            "qualified_error_family_member",
+            r#"errors IoError:
+	Eof(int)
+fn main():
+	value = IoError.Eof(IoError.Eof(1))
+"#,
+        ),
+        (
+            "invalid_payload",
+            r#"enum Shape:
+	Rectangle(width: int)
+fn main():
+	value = Shape.Rectangle{unknown=Shape.Rectangle{unknown=1}}
+"#,
+        ),
+    ]
+}
+
+#[test]
+fn nested_constructor_lowering_uses_one_machine() {
+    for (name, src) in nested_constructor_cases() {
+        assert_single_machine_at_limit_zero(name, src);
+    }
+}
+
 #[test]
 #[ignore = "I-270: enable with astgen traversal"]
 fn alternating_constructor_match_lowering_uses_one_machine() {
