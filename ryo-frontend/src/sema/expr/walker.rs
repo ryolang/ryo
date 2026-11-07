@@ -2,12 +2,12 @@ use super::super::ScopeParent;
 use super::super::call::{finish_call, prepare_call};
 use super::{
     CHAIN_RECURSION_LIMIT, ConstInt, FuncCtx, Scope, Sema, analyze_binop_link,
-    analyze_expr_allow_never_with, analyze_expr_with, analyze_struct_lit_with_target_and_context,
-    analyze_unary_link, const_eval_int, is_chain_binop_tag, operators, reject_never,
+    analyze_expr_allow_never_with, analyze_expr_with, analyze_unary_link, const_eval_int,
+    is_chain_binop_tag, operators, reject_never,
 };
 use ryo_core::spine::ChainSpine;
 use ryo_core::tir::TirRef;
-use ryo_core::types::{TypeKind, VariantKind, ViewKind};
+use ryo_core::types::{TypeId, TypeKind, VariantKind, ViewKind};
 use ryo_core::uir::{InstData, InstRef, InstTag};
 use std::collections::HashMap;
 
@@ -46,6 +46,17 @@ pub(crate) enum NeverMode {
 #[cfg(test)]
 std::thread_local! {
     static TEST_EXPR_LIMIT: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+    static TEST_MACHINE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_machine_call_count() {
+    TEST_MACHINE_CALLS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn machine_call_count() -> usize {
+    TEST_MACHINE_CALLS.with(|count| count.get())
 }
 
 #[cfg(test)]
@@ -142,12 +153,20 @@ impl<'a> ScopeArena<'a> {
 }
 
 mod match_tasks;
+mod struct_tasks;
+mod variant_tasks;
 use match_tasks::{ArmStatement, MatchState, match_scrutinee};
+use struct_tasks::StructState;
+use variant_tasks::VariantState;
 
 #[derive(Clone, Copy)]
 enum Task {
     Enter(InstRef, ScopeId, NeverMode),
     CallArg(InstRef, usize, ScopeId),
+    StructField(InstRef, usize, ScopeId),
+    AfterStructField(InstRef, usize, ScopeId),
+    VariantField(InstRef, usize, ScopeId),
+    AfterVariantField(InstRef, usize, ScopeId),
     AfterBase(InstRef, ScopeId),
     AfterLhs(InstRef, ScopeId),
     AfterScrutinee(InstRef, ScopeId),
@@ -162,8 +181,6 @@ fn is_chain(sema: &Sema<'_>, node: InstRef) -> bool {
     is_generic_expr_tag(sema.uir.inst(node).tag)
 }
 
-#[cold]
-#[inline(never)]
 pub(crate) fn analyze_expr_machine(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -171,6 +188,33 @@ pub(crate) fn analyze_expr_machine(
     root: InstRef,
     context: SemaExprContext,
 ) -> TirRef {
+    analyze_expr_machine_inner(sema, fcx, scope, root, None, context)
+}
+
+pub(crate) fn analyze_struct_lit_machine(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    root: InstRef,
+    target: TypeId,
+    context: SemaExprContext,
+) -> TirRef {
+    analyze_expr_machine_inner(sema, fcx, scope, root, Some(target), context)
+}
+
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_lines)]
+fn analyze_expr_machine_inner(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    root: InstRef,
+    root_target: Option<TypeId>,
+    context: SemaExprContext,
+) -> TirRef {
+    #[cfg(test)]
+    TEST_MACHINE_CALLS.with(|count| count.set(count.get() + 1));
     let mut match_state = MatchState::new(scope);
     let root_scope = match_state.scopes.root_id();
     let mut tasks = ChainSpine::new();
@@ -179,6 +223,8 @@ pub(crate) fn analyze_expr_machine(
     let mut analyzed = HashMap::new();
     let mut calls = HashMap::new();
     let mut method_recoveries = HashMap::new();
+    let mut struct_state = StructState::new(root, root_target);
+    let mut variant_state = VariantState::default();
     tasks.push(Task::Enter(root, root_scope, NeverMode::Reject));
     while let Some(task) = tasks.pop() {
         match task {
@@ -237,6 +283,14 @@ pub(crate) fn analyze_expr_machine(
                     tasks.push(Task::Exit(node, scope_id, mode));
                     tasks.push(Task::AfterBase(node, scope_id));
                     tasks.push(Task::Enter(base, scope_id, NeverMode::Reject));
+                    continue;
+                }
+                if struct_state.enter(&mut tasks, sema, node, scope_id, mode) {
+                    continue;
+                }
+                if !composite_has_leaf_recovery(sema, scope, node)
+                    && variant_state.enter(&mut tasks, sema, node, scope_id, mode)
+                {
                     continue;
                 }
                 if is_composite_tag(inst.tag) && !composite_has_leaf_recovery(sema, scope, node) {
@@ -309,6 +363,18 @@ pub(crate) fn analyze_expr_machine(
                     }
                 }
             }
+            Task::StructField(node, index, scope_id) => {
+                struct_state.before_field(&mut tasks, sema, node, index, scope_id);
+            }
+            Task::AfterStructField(node, index, _scope_id) => {
+                struct_state.after_field(sema, fcx, &analyzed, node, index);
+            }
+            Task::VariantField(node, index, scope_id) => {
+                variant_state.before_field(&mut tasks, sema, node, index, scope_id);
+            }
+            Task::AfterVariantField(node, index, _scope_id) => {
+                variant_state.after_field(sema, fcx, &analyzed, node, index);
+            }
             Task::CallArg(node, index, scope_id) => {
                 let scope = match_state.scopes.get(scope_id);
                 let view = sema.uir.call_view(node);
@@ -320,16 +386,8 @@ pub(crate) fn analyze_expr_machine(
                 if let Some(target) = target
                     && sema.uir.inst(arg).tag == InstTag::StructLit
                 {
-                    let value = analyze_struct_lit_with_target_and_context(
-                        sema,
-                        fcx,
-                        scope,
-                        arg,
-                        target,
-                        context.child(),
-                    );
-                    analyzed.insert(arg, value);
-                    consts.insert(arg, ConstInt::NotConst);
+                    struct_state.expect(arg, target);
+                    tasks.push(Task::Enter(arg, scope_id, NeverMode::Reject));
                 } else if is_chain(sema, arg) && fcx.inst_map[arg.index()].is_none() {
                     tasks.push(Task::Enter(arg, scope_id, NeverMode::Reject));
                 } else {
@@ -435,7 +493,6 @@ pub(crate) fn analyze_expr_machine(
                 }
                 if matches!(inst.tag, InstTag::Match | InstTag::Catch) {
                     let next = match_state.finish_match(sema, fcx, node);
-                    fcx.inst_map[node.index()] = Some(next);
                     let next = if node == root || mode == NeverMode::Allow {
                         next
                     } else {
@@ -443,6 +500,7 @@ pub(crate) fn analyze_expr_machine(
                     };
                     analyzed.insert(node, next);
                     consts.insert(node, ConstInt::NotConst);
+                    fcx.inst_map[node.index()] = Some(next);
                     continue;
                 }
                 if inst.tag == InstTag::Call {
@@ -455,7 +513,6 @@ pub(crate) fn analyze_expr_machine(
                     let plan = calls.remove(&node).expect("call prepared first");
                     let next =
                         finish_call(sema, fcx, scope, &view, sema.uir.span(node), plan, arg_tirs);
-                    fcx.inst_map[node.index()] = Some(next);
                     let next = if node == root || mode == NeverMode::Allow {
                         next
                     } else {
@@ -463,6 +520,7 @@ pub(crate) fn analyze_expr_machine(
                     };
                     analyzed.insert(node, next);
                     consts.insert(node, ConstInt::NotConst);
+                    fcx.inst_map[node.index()] = Some(next);
                     continue;
                 }
                 match inst.data {
@@ -503,16 +561,17 @@ pub(crate) fn analyze_expr_machine(
                         fcx.inst_map[node.index()] = Some(next);
                     }
                     _ if is_composite_tag(inst.tag) => {
-                        let next = analyze_expr_allow_never_with(
-                            sema,
-                            fcx,
-                            scope,
-                            node,
-                            SemaExprContext {
-                                depth: 0,
-                                limit: u32::MAX,
-                            },
-                        );
+                        let leaf_context = SemaExprContext {
+                            depth: 0,
+                            limit: u32::MAX,
+                        };
+                        let next = if inst.tag == InstTag::StructLit {
+                            struct_state.finish(sema, fcx, scope, node, leaf_context)
+                        } else if matches!(inst.tag, InstTag::EnumLit | InstTag::ErrorConstruct) {
+                            variant_state.finish(sema, fcx, scope, node, leaf_context)
+                        } else {
+                            analyze_expr_allow_never_with(sema, fcx, scope, node, leaf_context)
+                        };
                         let next = if node == root || mode == NeverMode::Allow {
                             next
                         } else {
@@ -520,6 +579,7 @@ pub(crate) fn analyze_expr_machine(
                         };
                         analyzed.insert(node, next);
                         consts.insert(node, const_eval_int(sema.uir, node));
+                        fcx.inst_map[node.index()] = Some(next);
                     }
                     _ => unreachable!("only scheduled nodes have exit tasks"),
                 }
@@ -636,7 +696,14 @@ fn composite_has_leaf_recovery(sema: &Sema<'_>, scope: &Scope, node: InstRef) ->
         }
     }
     if tag == InstTag::ErrorConstruct {
-        let view = sema.uir.error_construct_view(node).3;
+        let (name, family_root, family_member, view) = sema.uir.error_construct_view(node);
+        if family_root.is_some()
+            && family_member.is_some()
+            && sema.pool.is_error(view.ty)
+            && !sema.error_types.contains_key(&name)
+        {
+            return true;
+        }
         if sema.pool.kind(view.ty) == TypeKind::DeclaredError {
             let kind = sema
                 .pool

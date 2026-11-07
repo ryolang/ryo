@@ -270,6 +270,18 @@ pub(super) fn analyze_error_construct(
     span: Span,
     context: SemaExprContext,
 ) -> TirRef {
+    analyze_error_construct_with_skips(sema, fcx, scope, r, span, context, None)
+}
+
+pub(super) fn analyze_error_construct_with_skips(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    span: Span,
+    context: SemaExprContext,
+    diagnosed: Option<std::collections::HashSet<usize>>,
+) -> TirRef {
     let (name, family_root, family_member, view) = sema.uir.error_construct_view(r);
     let shadowed = match (family_root, family_member) {
         (Some(root), Some(_)) => scope.lookup(root).map(|bound| (root, bound)),
@@ -426,7 +438,10 @@ pub(super) fn analyze_error_construct(
 
     let mut by_index: Vec<Option<TirRef>> = vec![None; fields.len()];
     let mut field_errored = false;
-    for (selector, value_ref) in view.fields() {
+    for (field_position, (selector, value_ref)) in view.fields().enumerate() {
+        let skip = diagnosed
+            .as_ref()
+            .is_some_and(|fields| fields.contains(&field_position));
         let value = analyze_expr_with(
             sema,
             fcx,
@@ -457,26 +472,30 @@ pub(super) fn analyze_error_construct(
                     sema.pool.str(StringId::from_raw(selector))
                 )
             };
-            sema.sink
-                .emit(Diag::error(span, DiagCode::UnknownVariantField, message));
+            if !skip {
+                sema.sink
+                    .emit(Diag::error(span, DiagCode::UnknownVariantField, message));
+            }
             continue;
         };
         let index = field.idx as usize;
         if by_index[index].is_some() {
             field_errored = true;
-            sema.sink.emit(Diag::error(
-                sema.uir.span(value_ref),
-                DiagCode::DuplicateVariantField,
-                format!(
-                    "field '{}' is specified more than once in error '{}'",
-                    sema.pool.str(field.name),
-                    sema.pool.str(error_name)
-                ),
-            ));
+            if !skip {
+                sema.sink.emit(Diag::error(
+                    sema.uir.span(value_ref),
+                    DiagCode::DuplicateVariantField,
+                    format!(
+                        "field '{}' is specified more than once in error '{}'",
+                        sema.pool.str(field.name),
+                        sema.pool.str(error_name)
+                    ),
+                ));
+            }
             continue;
         }
         let actual = fcx.builder.ty_of(value);
-        if !sema.pool.compatible(actual, field.ty) {
+        if !skip && !sema.pool.compatible(actual, field.ty) {
             sema.sink.emit(Diag::error(
                 sema.uir.span(value_ref),
                 DiagCode::TypeMismatch,

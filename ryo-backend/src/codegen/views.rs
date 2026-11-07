@@ -58,7 +58,7 @@ impl<M: Module> Codegen<M> {
         // struct IS the owner-side storage (its drop glue loads the
         // field triple from this address).
         if matches!(ctx.tir.inst(r).tag, TirTag::FieldAccess) {
-            let (addr, field_ty) = Self::field_addr_of(builder, ctx, r)?;
+            let (addr, field_ty) = Self::field_addr_of_d(builder, ctx, r, context.child())?;
             let is_bytes = matches!(ctx.pool.kind(field_ty), TypeKind::Bytes);
             let callee = if is_bytes {
                 "__ryo_bytes_ensure_heap"

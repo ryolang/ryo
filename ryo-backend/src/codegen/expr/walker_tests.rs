@@ -67,3 +67,13 @@ fn control_flow_clif_matches_at_every_depth_limit() {
         }
     }
 }
+
+#[test]
+fn shallow_codegen_does_not_start_allocating_machine() {
+    let src = "fn main():\n\tprint(1+2*3-4)\n";
+    super::walker::reset_machine_call_count();
+    with_expr_limit(64, || clif_of(src));
+    assert_eq!(super::walker::machine_call_count(), 0);
+    with_expr_limit(0, || clif_of(src));
+    assert!(super::walker::machine_call_count() > 0);
+}

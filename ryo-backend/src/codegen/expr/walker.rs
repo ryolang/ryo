@@ -1,10 +1,11 @@
-use super::{Codegen, FunctionContext, ValueRepr};
-use cranelift::codegen::ir::StackSlot;
+use super::{CallArgSnapshots, Codegen, FunctionContext, ValueRepr};
+use cranelift::codegen::ir::{MemFlagsData, StackSlot};
 use cranelift::prelude::*;
 use cranelift_module::Module;
 use ryo_core::spine::ChainSpine;
-use ryo_core::tir::{TirData, TirRef, TirTag};
+use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::TypeKind;
+use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
 pub(crate) struct CodegenExprContext {
@@ -45,6 +46,17 @@ pub(crate) enum EvalRequest {
 #[cfg(test)]
 std::thread_local! {
     static TEST_EXPR_LIMIT: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+    static TEST_MACHINE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_machine_call_count() {
+    TEST_MACHINE_CALLS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn machine_call_count() -> usize {
+    TEST_MACHINE_CALLS.with(|count| count.get())
 }
 
 #[cfg(test)]
@@ -166,19 +178,25 @@ impl<M: Module> Codegen<M> {
 
     #[cold]
     #[inline(never)]
-    pub(super) fn eval_expr_machine(
+    pub(crate) fn eval_expr_machine(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         root: TirRef,
         request: EvalRequest,
     ) -> Result<ValueRepr, String> {
+        #[cfg(test)]
+        TEST_MACHINE_CALLS.with(|count| count.set(count.get() + 1));
         enum Task {
             Enter(TirRef),
+            SnapshotCallArg(TirRef, usize),
+            AggregateField(TirRef, usize),
             AfterLhs(TirRef),
             Exit(TirRef),
         }
 
         let mut tasks = ChainSpine::new();
+        let mut snapshots = CallArgSnapshots::new();
+        let mut aggregate_slots = HashMap::new();
         tasks.push(Task::Enter(root));
         while let Some(task) = tasks.pop() {
             match task {
@@ -190,8 +208,20 @@ impl<M: Module> Codegen<M> {
                     if inst.tag == TirTag::Call {
                         let view = ctx.tir.call_view(node);
                         tasks.push(Task::Exit(node));
-                        for arg in view.args.iter().rev() {
-                            tasks.push(Task::Enter(arg));
+                        for index in (0..view.args.len()).rev() {
+                            tasks.push(Task::SnapshotCallArg(node, index));
+                            tasks.push(Task::Enter(view.args.at(index)));
+                        }
+                        continue;
+                    }
+                    if matches!(inst.tag, TirTag::StructLit | TirTag::EnumLit) {
+                        let addr = Self::prepare_aggregate_machine(builder, ctx, node)?;
+                        aggregate_slots.insert(node, addr);
+                        let children = composite_children(ctx, node);
+                        tasks.push(Task::Exit(node));
+                        for index in (0..children.len()).rev() {
+                            tasks.push(Task::AggregateField(node, index));
+                            tasks.push(Task::Enter(children[index]));
                         }
                         continue;
                     }
@@ -235,6 +265,34 @@ impl<M: Module> Codegen<M> {
                         }
                     }
                 }
+                Task::SnapshotCallArg(node, index) => {
+                    let view = ctx.tir.call_view(node);
+                    let arg = view.args.at(index);
+                    let mode = view.modes.at(index);
+                    if mode != ParamMode::Move {
+                        continue;
+                    }
+                    let context = CodegenExprContext {
+                        depth: 0,
+                        limit: u32::MAX,
+                    };
+                    let addr = match Self::cached_repr(ctx, arg) {
+                        Some(ValueRepr::Struct { .. }) => Some(Self::emit_struct_call_arg_d(
+                            builder, ctx, arg, mode, context,
+                        )?),
+                        Some(ValueRepr::Enum { .. }) => Some(Self::emit_enum_call_arg_d(
+                            builder, ctx, arg, mode, context,
+                        )?),
+                        _ => None,
+                    };
+                    if let Some(addr) = addr {
+                        snapshots.insert((node, arg), addr);
+                    }
+                }
+                Task::AggregateField(node, index) => {
+                    let addr = aggregate_slots[&node];
+                    Self::store_aggregate_field_machine(builder, ctx, node, index, addr)?;
+                }
                 Task::AfterLhs(node) => {
                     let TirData::BinOp { rhs, .. } = ctx.tir.inst(node).data else {
                         unreachable!("chain tag must carry TirData::BinOp");
@@ -272,29 +330,16 @@ impl<M: Module> Codegen<M> {
                             Self::cache_repr(ctx, node, ValueRepr::Scalar(value));
                         }
                         _ if inst.tag == TirTag::Call => {
-                            if super::is_fat_type(inst.ty, ctx.pool) {
-                                if let EvalRequest::FatSlot(slot) = request
-                                    && node == root
-                                {
-                                    Self::eval_inst_fat_slot_d(
-                                        builder,
-                                        ctx,
-                                        node,
-                                        slot,
-                                        CodegenExprContext {
-                                            depth: 0,
-                                            limit: u32::MAX,
-                                        },
-                                    )?;
-                                } else {
-                                    Self::eval_non_chain(builder, ctx, node)?;
-                                }
+                            Self::eval_call_machine(builder, ctx, node, root, request, &snapshots)?;
+                        }
+                        _ if matches!(inst.tag, TirTag::StructLit | TirTag::EnumLit) => {
+                            let addr = aggregate_slots.remove(&node).expect("aggregate slot");
+                            let repr = if inst.tag == TirTag::StructLit {
+                                ValueRepr::Struct { addr }
                             } else {
-                                let value = Self::emit_call(builder, ctx, node)?;
-                                if Self::cached_repr(ctx, node).is_none() {
-                                    Self::cache_repr(ctx, node, ValueRepr::Scalar(value));
-                                }
-                            }
+                                ValueRepr::Enum { addr }
+                            };
+                            Self::cache_repr(ctx, node, repr);
                         }
                         _ if is_composite_tag(inst.tag) => {
                             if let EvalRequest::FatSlot(slot) = request
@@ -325,6 +370,108 @@ impl<M: Module> Codegen<M> {
             }
             _ => Self::eval_non_chain(builder, ctx, root),
         }
+    }
+
+    fn prepare_aggregate_machine(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        node: TirRef,
+    ) -> Result<Value, String> {
+        let inst = ctx.tir.inst(node);
+        let slot = match inst.tag {
+            TirTag::StructLit => Self::struct_slot(builder, ctx, inst.ty),
+            TirTag::EnumLit => Self::enum_slot(builder, ctx, inst.ty),
+            _ => unreachable!("aggregate literal expected"),
+        };
+        let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
+        if inst.tag == TirTag::EnumLit {
+            let view = ctx.tir.enum_lit_view(node);
+            let tag = builder
+                .ins()
+                .iconst(types::I32, i64::from(view.variant_index));
+            builder.ins().store(MemFlagsData::trusted(), tag, addr, 0);
+        }
+        Ok(addr)
+    }
+
+    fn store_aggregate_field_machine(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        node: TirRef,
+        index: usize,
+        addr: Value,
+    ) -> Result<(), String> {
+        let inst = ctx.tir.inst(node);
+        let context = CodegenExprContext {
+            depth: 0,
+            limit: u32::MAX,
+        };
+        match inst.tag {
+            TirTag::StructLit => {
+                let view = ctx.tir.struct_lit_view(node);
+                let (field_index, value) = view.fields().nth(index).expect("struct field");
+                let field = ctx.pool.struct_view(view.ty).fields[field_index as usize];
+                Self::store_field_value(builder, ctx, addr, field.offset, field.ty, value, context)
+            }
+            TirTag::EnumLit => {
+                let view = ctx.tir.enum_lit_view(node);
+                let (field_index, value) = view.fields().nth(index).expect("enum field");
+                let field = ctx
+                    .pool
+                    .enum_view(view.ty)
+                    .variants()
+                    .nth(view.variant_index as usize)
+                    .expect("enum variant")
+                    .fields[field_index as usize];
+                Self::store_field_value(builder, ctx, addr, field.offset, field.ty, value, context)
+            }
+            _ => unreachable!("aggregate literal expected"),
+        }
+    }
+
+    fn eval_call_machine(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        node: TirRef,
+        root: TirRef,
+        request: EvalRequest,
+        snapshots: &CallArgSnapshots,
+    ) -> Result<(), String> {
+        let context = CodegenExprContext {
+            depth: 0,
+            limit: u32::MAX,
+        };
+        if super::is_fat_type(ctx.tir.inst(node).ty, ctx.pool) {
+            let out_slot = if node == root {
+                match request {
+                    EvalRequest::FatSlot(slot) => slot,
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            Self::eval_inst_fat_slot_with_snapshots(
+                builder,
+                ctx,
+                node,
+                out_slot,
+                context,
+                Some(snapshots),
+            )?;
+            return Ok(());
+        }
+        let value = Self::emit_call_slot_with_snapshots(
+            builder,
+            ctx,
+            node,
+            None,
+            context,
+            Some(snapshots),
+        )?;
+        if Self::cached_repr(ctx, node).is_none() {
+            Self::cache_repr(ctx, node, ValueRepr::Scalar(value));
+        }
+        Ok(())
     }
 }
 

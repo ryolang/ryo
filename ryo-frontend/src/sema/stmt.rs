@@ -2,7 +2,8 @@
 
 use super::{
     ConstInt, FuncCtx, NeverMode, Scope, Sema, SemaExprContext, analyze_expr_with,
-    analyze_struct_lit_with_target, check_reserved_name, const_eval_int, with_struct_shape_notes,
+    analyze_struct_lit_with_target_and_context, check_reserved_name, const_eval_int,
+    with_struct_shape_notes,
 };
 use ryo_core::ast::CompoundOp;
 use ryo_core::diag::{Diag, DiagCode};
@@ -20,6 +21,7 @@ pub(crate) fn analyze_stmt(
     analyze_stmt_with_context(sema, fcx, scope, r, SemaExprContext::root())
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn analyze_stmt_with_context(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -35,7 +37,14 @@ pub(crate) fn analyze_stmt_with_context(
             let mut init_tir = if let Some(target) = view.ty
                 && sema.uir.inst(view.initializer).tag == InstTag::StructLit
             {
-                analyze_struct_lit_with_target(sema, fcx, scope, view.initializer, target)
+                analyze_struct_lit_with_target_and_context(
+                    sema,
+                    fcx,
+                    scope,
+                    view.initializer,
+                    target,
+                    context.child(),
+                )
             } else {
                 analyze_expr_with(
                     sema,
@@ -98,7 +107,14 @@ pub(crate) fn analyze_stmt_with_context(
                 _ => unreachable!("Return must carry InstData::UnOp"),
             };
             let mut val_tir = if sema.uir.inst(operand).tag == InstTag::StructLit {
-                analyze_struct_lit_with_target(sema, fcx, scope, operand, fcx.return_type)
+                analyze_struct_lit_with_target_and_context(
+                    sema,
+                    fcx,
+                    scope,
+                    operand,
+                    fcx.return_type,
+                    context.child(),
+                )
             } else {
                 analyze_expr_with(
                     sema,
@@ -191,7 +207,14 @@ pub(crate) fn analyze_stmt_with_context(
             let mut value_tir = if let Some((existing_ty, true)) = scope.lookup_full(view.name)
                 && sema.uir.inst(view.value).tag == InstTag::StructLit
             {
-                analyze_struct_lit_with_target(sema, fcx, scope, view.value, existing_ty)
+                analyze_struct_lit_with_target_and_context(
+                    sema,
+                    fcx,
+                    scope,
+                    view.value,
+                    existing_ty,
+                    context.child(),
+                )
             } else {
                 analyze_expr_with(
                     sema,
@@ -625,7 +648,14 @@ fn analyze_field_assign(
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     };
     let mut value_tir = if sema.uir.inst(view.value).tag == InstTag::StructLit {
-        analyze_struct_lit_with_target(sema, fcx, scope, view.value, field_ty)
+        analyze_struct_lit_with_target_and_context(
+            sema,
+            fcx,
+            scope,
+            view.value,
+            field_ty,
+            context.child(),
+        )
     } else {
         analyze_expr_with(
             sema,

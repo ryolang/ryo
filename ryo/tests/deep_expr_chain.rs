@@ -445,3 +445,128 @@ fn parse_deep_addition_chain_succeeds() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+fn nested_fat_return_chain(links: usize) -> String {
+    let mut src =
+        String::from("fn id(move x: str) -> str:\n\treturn x\nfn make() -> str:\n\treturn ");
+    src.push_str(&"id(".repeat(links));
+    src.push_str("\"x\"");
+    src.push_str(&")".repeat(links));
+    src.push_str("\nfn main():\n\tprint(make())\n");
+    src
+}
+
+#[test]
+fn jit_run_deferred_fat_return_chain() {
+    assert_jit_prints(
+        "deferred_fat_return.ryo",
+        &nested_fat_return_chain(10_000),
+        "x",
+    );
+}
+
+#[test]
+fn jit_run_aggregate_arguments_snapshot_before_later_effects() {
+    let src = r#"struct Pair:
+	x: int
+fn mutate(inout pair: Pair) -> int:
+	pair.x = 9
+	return 0
+fn first(move pair: Pair, later: int) -> int:
+	return pair.x
+fn id(x: int) -> int:
+	return x
+fn make() -> int:
+	mut pair = Pair{x=1}
+	return ID(first(pair, mutate(&pair)))
+fn main():
+	print(make())
+"#;
+    let src = src.replace(
+        "ID(first(pair, mutate(&pair)))",
+        &format!(
+            "{}first(pair, mutate(&pair)){}",
+            "id(".repeat(70),
+            ")".repeat(70)
+        ),
+    );
+    assert_jit_prints("aggregate_argument_snapshot.ryo", &src, "1");
+}
+
+#[test]
+fn jit_run_aggregate_fields_snapshot_before_later_effects() {
+    let src = r#"struct Inner:
+	x: int
+struct Outer:
+	inner: Inner
+	later: int
+fn mutate(inout inner: Inner) -> int:
+	inner.x = 9
+	return 0
+fn id(move x: Outer) -> Outer:
+	return x
+fn make() -> int:
+	mut inner = Inner{x=1}
+	return ID(Outer{inner=inner, later=mutate(&inner)}).inner.x
+fn main():
+	print(make())
+"#;
+    let src = src.replace(
+        "ID(Outer{inner=inner, later=mutate(&inner)})",
+        &format!(
+            "{}Outer{{inner=inner, later=mutate(&inner)}}{}",
+            "id(".repeat(70),
+            ")".repeat(70)
+        ),
+    );
+    assert_jit_prints("aggregate_field_snapshot.ryo", &src, "1");
+}
+
+fn nested_struct_return_chain(links: usize) -> String {
+    let mut src = String::from(
+        "struct Pair:\n\tx: int\nfn id(move x: Pair) -> Pair:\n\treturn x\nfn make() -> Pair:\n\treturn ",
+    );
+    src.push_str(&"id(".repeat(links));
+    src.push_str("Pair{x=7}");
+    src.push_str(&")".repeat(links));
+    src.push_str("\nfn main():\n\tprint(make().x)\n");
+    src
+}
+
+#[test]
+fn jit_run_deferred_struct_return_chain() {
+    assert_jit_prints(
+        "deferred_struct_return.ryo",
+        &nested_struct_return_chain(10_000),
+        "7",
+    );
+}
+
+fn nested_enum_return_chain(links: usize) -> String {
+    let mut src = String::from(
+        "enum Shape:\n\tCircle(int)\nfn id(move x: Shape) -> Shape:\n\treturn x\nfn make() -> Shape:\n\treturn ",
+    );
+    src.push_str(&"id(".repeat(links));
+    src.push_str("Shape.Circle(8)");
+    src.push_str(&")".repeat(links));
+    src.push_str("\nfn main():\n\tresult = make()\n\tmatch result:\n\t\tShape.Circle(value):\n\t\t\tprint(value)\n");
+    src
+}
+
+#[test]
+fn jit_run_deferred_enum_return_chain() {
+    assert_jit_prints(
+        "deferred_enum_return.ryo",
+        &nested_enum_return_chain(10_000),
+        "8",
+    );
+}
+
+#[test]
+fn jit_run_deferred_slice_length_chain() {
+    let src = format!(
+        "fn make() -> int:\n\ts = \"abc\"\n\treturn s{}.len()\nfn main():\n\tprint(make())\n",
+        "[0:2]".repeat(1_000)
+    );
+    assert_jit_prints("deferred_slice_length.ryo", &src, "2");
+}

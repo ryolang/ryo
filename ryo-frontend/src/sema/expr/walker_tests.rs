@@ -457,3 +457,121 @@ fn main():
         assert_eq!(main.direct_catch_matches.len(), 1, "limit {limit}");
     }
 }
+
+fn expected_type_struct_chain(depth: usize) -> String {
+    let mut src = String::from("struct S0:\n\tvalue: int\n");
+    for index in 1..=depth {
+        src.push_str(&format!("struct S{index}:\n\tvalue: S{}\n", index - 1));
+    }
+    src.push_str(&format!(
+        "fn make() -> S{depth}:\n\treturn S{depth}{{value="
+    ));
+    for index in (0..depth).rev() {
+        src.push_str(&format!("S{index}{{value="));
+    }
+    src.push('0');
+    for _ in 0..=depth {
+        src.push('}');
+    }
+    src.push_str("\nfn main():\n\tvalue = make()\n");
+    src
+}
+
+#[test]
+fn expected_type_struct_chain_analyzes_without_overflow() {
+    run_deep_repro(
+        "sema::expr::walker_tests::expected_type_struct_chain_analyzes_without_overflow",
+        expected_type_struct_chain(10_000),
+    );
+}
+
+#[test]
+fn composite_diagnostics_match_at_every_depth_limit() {
+    let cases = [
+        (
+            "error_slice_base",
+            DeepExpr::program("missing[1+true:2]".to_string()),
+        ),
+        (
+            "borrow_before_inner",
+            DeepExpr::program("print(&missing)".to_string()),
+        ),
+        (
+            "unknown_error_member",
+            "errors IoError:\n\tEof\nfn main():\n\tvalue = IoError.Unknown(missing())\n"
+                .to_string(),
+        ),
+        (
+            "struct_field_order",
+            "struct Point:\n\tx: int\nfn main():\n\tp = Point{z=1+true, x=missing()}\n".to_string(),
+        ),
+        (
+            "duplicate_enum_field_order",
+            "enum Shape:\n\tRectangle(width: int)\nfn main():\n\tshape = Shape.Rectangle{width=1+true, width=missing()}\n"
+                .to_string(),
+        ),
+        (
+            "error_payload_order",
+            "error E(int, int)\nfn main():\n\tvalue = E(1+true, missing())\n".to_string(),
+        ),
+        (
+            "never_under_unary",
+            DeepExpr::program("-panic(\"boom\")".to_string()),
+        ),
+        (
+            "never_under_composite",
+            DeepExpr::program("({x=panic(\"boom\")}).x".to_string()),
+        ),
+    ];
+    for (name, src) in cases {
+        let baseline = snapshot(run(&src));
+        for limit in [0, 1, 64] {
+            assert_eq!(
+                snapshot(run_with_expr_limit(&src, limit)),
+                baseline,
+                "{name} differed at expression depth limit {limit}"
+            );
+        }
+    }
+}
+
+#[test]
+fn never_rejection_matches_at_every_depth_limit() {
+    for src in [
+        DeepExpr::program("-panic(\"boom\")".to_string()),
+        DeepExpr::program("({x=panic(\"boom\")}).x".to_string()),
+    ] {
+        let baseline = snapshot(run(&src));
+        for limit in [0, 1, 64] {
+            assert_eq!(snapshot(run_with_expr_limit(&src, limit)), baseline);
+        }
+    }
+}
+
+#[test]
+fn nested_expected_struct_coercions_match_at_every_depth_limit() {
+    let src = r#"error A
+error B
+struct AnonymousNested:
+	value: {value: (A | B)!int}
+struct NamedNested:
+	value: {value: (A | B)!int}
+fn main():
+	anonymous = AnonymousNested{value={value=1}}
+	named = NamedNested{value={value=A}}
+"#;
+    let baseline = snapshot(run(src));
+    for limit in [0, 1, 64] {
+        assert_eq!(snapshot(run_with_expr_limit(src, limit)), baseline);
+    }
+}
+
+#[test]
+fn shallow_analysis_does_not_start_allocating_machine() {
+    let src = DeepExpr::program("1+2*3-4".to_string());
+    super::walker::reset_machine_call_count();
+    run(&src).expect("shallow expression analyzes");
+    assert_eq!(super::walker::machine_call_count(), 0);
+    run_with_expr_limit(&src, 0).expect("forced fallback analyzes");
+    assert!(super::walker::machine_call_count() > 0);
+}

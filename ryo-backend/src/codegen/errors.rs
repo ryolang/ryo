@@ -10,10 +10,11 @@ use super::enums::invalid_tag_trap;
 use super::expr::walker::{CodegenExprContext, EvalRequest};
 use super::{Codegen, FunctionContext, STR_SLOT_SIZE, ValueRepr, cranelift_type_for};
 
-pub(crate) fn emit_error_message<M: Module>(
+pub(crate) fn emit_error_message_d<M: Module>(
     builder: &mut FunctionBuilder,
     ctx: &mut FunctionContext<'_, M>,
     r: TirRef,
+    context: CodegenExprContext,
 ) -> Result<ValueRepr, String> {
     let inst = ctx.tir.inst(r);
     let TirData::UnOp(operand) = inst.data else {
@@ -24,7 +25,7 @@ pub(crate) fn emit_error_message<M: Module>(
         ctx.pool.kind(operand_ty),
         TypeKind::DeclaredError | TypeKind::ErrorSet
     ));
-    let addr = Codegen::eval_inst_enum(builder, ctx, operand)?;
+    let addr = Codegen::eval_inst_enum_d(builder, ctx, operand, context.child())?;
     let slot = builder.create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
         STR_SLOT_SIZE,

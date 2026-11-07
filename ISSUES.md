@@ -881,6 +881,19 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-273 — Nested match statement analysis resets expression depth
+
+**Severity:** Cleanup
+**Area:** sema
+
+**Files:** ryo-frontend/src/sema/expr/walker/match_tasks.rs; ryo-frontend/src/sema/stmt.rs; ryo-frontend/src/sema/expr/walker_tests.rs
+
+**Summary:** Non-simple statements in an iterative match arm still call zero-depth analyze_stmt. Nested expression machines can therefore start below an active machine instead of sharing its traversal context. Source-driven deep match reproduction is currently blocked earlier by I-270, which limits immediate exposure but leaves the sema no-nested-machine contract incomplete.
+
+**Resolution:** Carry SemaExprContext through block_stmt/finish_stmt and replace remaining nested statement recursion with depth-carrying continuations. After I-270 is fixed, add deep non-simple statement arms that cross the expression fallback boundary and verify diagnostics, scopes, and memoization.
+
+---
+
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
@@ -889,4 +902,4 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-<!-- issue-id high-water: 272 -->
+<!-- issue-id high-water: 273 -->

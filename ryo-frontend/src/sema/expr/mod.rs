@@ -12,7 +12,7 @@ mod methods;
 mod operators;
 pub(crate) mod walker;
 pub(crate) use walker::{NeverMode, SemaExprContext};
-use walker::{analyze_expr_machine, is_generic_expr_tag};
+use walker::{analyze_expr_machine, analyze_struct_lit_machine, is_generic_expr_tag};
 #[cfg(test)]
 mod walker_tests;
 
@@ -95,7 +95,9 @@ pub(crate) fn analyze_expr_with(
 ) -> TirRef {
     let t = analyze_expr_allow_never_with(sema, fcx, scope, r, context);
     if mode == NeverMode::Reject {
-        reject_never(sema, fcx, r, t)
+        let rejected = reject_never(sema, fcx, r, t);
+        fcx.inst_map[r.index()] = Some(rejected);
+        rejected
     } else {
         t
     }
@@ -730,16 +732,6 @@ fn analyze_borrow(
 /// recover with an error-typed `Unreachable`. The anonymous path
 /// infers the structural type from the field values — see
 /// [`analyze_anon_struct_lit`].
-pub(crate) fn analyze_struct_lit_with_target(
-    sema: &mut Sema<'_>,
-    fcx: &mut FuncCtx,
-    scope: &Scope,
-    r: InstRef,
-    target: TypeId,
-) -> TirRef {
-    analyze_struct_lit_with_target_and_context(sema, fcx, scope, r, target, SemaExprContext::root())
-}
-
 pub(crate) fn analyze_struct_lit_with_target_and_context(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -750,6 +742,9 @@ pub(crate) fn analyze_struct_lit_with_target_and_context(
 ) -> TirRef {
     if let Some(t) = fcx.inst_map[r.index()] {
         return t;
+    }
+    if context.depth >= context.limit {
+        return analyze_struct_lit_machine(sema, fcx, scope, r, target, context);
     }
     let span = sema.uir.span(r);
     let emitted = analyze_struct_lit(sema, fcx, scope, r, span, Some(target), context);
@@ -766,9 +761,32 @@ fn analyze_struct_lit(
     expected: Option<TypeId>,
     context: SemaExprContext,
 ) -> TirRef {
+    analyze_struct_lit_with_skips(sema, fcx, scope, r, span, expected, context, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_struct_lit_with_skips(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    span: Span,
+    expected: Option<TypeId>,
+    context: SemaExprContext,
+    diagnosed: Option<std::collections::HashSet<usize>>,
+) -> TirRef {
     let view = sema.uir.struct_lit_view(r);
     let Some(name) = view.name else {
-        return analyze_anon_struct_lit(sema, fcx, scope, &view, span, expected, context);
+        return analyze_anon_struct_lit(
+            sema,
+            fcx,
+            scope,
+            &view,
+            span,
+            expected,
+            context,
+            diagnosed.as_ref(),
+        );
     };
     let Some(&sty) = sema.struct_types.get(&name) else {
         // Never declared — this one is on the user.
@@ -792,20 +810,25 @@ fn analyze_struct_lit(
     // top is noise. Mistyped-but-present fields do not set this: a
     // type mismatch is not a shape error.
     let mut field_errored = false;
-    for (fname, value_ref) in view.fields() {
+    for (index, (fname, value_ref)) in view.fields().enumerate() {
+        let skip = diagnosed
+            .as_ref()
+            .is_some_and(|fields| fields.contains(&index));
         let fspan = sema.uir.span(value_ref);
         let Some(field) = sema.pool.struct_field(sty, fname) else {
             field_errored = true;
-            sema.sink.emit(Diag::error(
-                fspan,
-                DiagCode::UnknownField,
-                format!(
-                    "'{}' has no field '{}' (fields: {})",
-                    sema.pool.str(sview.name),
-                    sema.pool.str(fname),
-                    field_list(sema.pool, &sview.fields),
-                ),
-            ));
+            if !skip {
+                sema.sink.emit(Diag::error(
+                    fspan,
+                    DiagCode::UnknownField,
+                    format!(
+                        "'{}' has no field '{}' (fields: {})",
+                        sema.pool.str(sview.name),
+                        sema.pool.str(fname),
+                        field_list(sema.pool, &sview.fields),
+                    ),
+                ));
+            }
             // Still analyze the initializer so diagnostics inside it
             // (unknown names, type errors) are reported.
             analyze_expr_with(
@@ -820,14 +843,16 @@ fn analyze_struct_lit(
         };
         if by_index[field.idx as usize].is_some() {
             field_errored = true;
-            sema.sink.emit(Diag::error(
-                fspan,
-                DiagCode::DuplicateStructField,
-                format!(
-                    "field '{}' is specified more than once",
-                    sema.pool.str(fname)
-                ),
-            ));
+            if !skip {
+                sema.sink.emit(Diag::error(
+                    fspan,
+                    DiagCode::DuplicateStructField,
+                    format!(
+                        "field '{}' is specified more than once",
+                        sema.pool.str(fname)
+                    ),
+                ));
+            }
             // Same recovery: analyze the duplicate's initializer too.
             analyze_expr_with(
                 sema,
@@ -841,7 +866,10 @@ fn analyze_struct_lit(
         }
         let value = analyze_struct_field_value(sema, fcx, scope, value_ref, field.ty, context);
         let vty = fcx.builder.ty_of(value);
-        if !super::errors::is_error_union(sema, field.ty) && !sema.pool.compatible(vty, field.ty) {
+        if !skip
+            && !super::errors::is_error_union(sema, field.ty)
+            && !sema.pool.compatible(vty, field.ty)
+        {
             sema.sink.emit(Diag::error(
                 fspan,
                 DiagCode::TypeMismatch,
@@ -955,6 +983,18 @@ fn analyze_variant_construct(
     span: Span,
     context: SemaExprContext,
 ) -> TirRef {
+    analyze_variant_construct_with_skips(sema, fcx, scope, r, span, context, None)
+}
+
+fn analyze_variant_construct_with_skips(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    span: Span,
+    context: SemaExprContext,
+    diagnosed: Option<std::collections::HashSet<usize>>,
+) -> TirRef {
     let view = sema.uir.enum_lit_view(r);
     let ety = view.ty;
     if sema.pool.is_error(ety) {
@@ -1031,7 +1071,10 @@ fn analyze_variant_construct(
     // shape is untrustworthy — a derived "missing field(s)" error on
     // top is noise (the struct-literal precedent).
     let mut field_errored = false;
-    for (fidx, value_ref) in view.fields() {
+    for (index, (fidx, value_ref)) in view.fields().enumerate() {
+        let skip = diagnosed
+            .as_ref()
+            .is_some_and(|fields| fields.contains(&index));
         let fspan = sema.uir.span(value_ref);
         if fidx == enum_lit_extra::ORPHANED_FIELD {
             // A braced field astgen didn't recognize (E0038 already
@@ -1072,8 +1115,10 @@ fn analyze_variant_construct(
                     field_list(sema.pool, &fields),
                 )
             };
-            sema.sink
-                .emit(Diag::error(fspan, DiagCode::UnknownVariantField, message));
+            if !skip {
+                sema.sink
+                    .emit(Diag::error(fspan, DiagCode::UnknownVariantField, message));
+            }
             // Still analyze the arg so diagnostics inside it surface.
             analyze_expr_with(
                 sema,
@@ -1087,16 +1132,18 @@ fn analyze_variant_construct(
         };
         if by_index[fidx as usize].is_some() {
             field_errored = true;
-            sema.sink.emit(Diag::error(
-                fspan,
-                DiagCode::DuplicateVariantField,
-                format!(
-                    "field '{}' is specified more than once in variant '{}' of enum '{}'",
-                    sema.pool.str(field.name),
-                    sema.pool.str(vname),
-                    sema.pool.str(ename),
-                ),
-            ));
+            if !skip {
+                sema.sink.emit(Diag::error(
+                    fspan,
+                    DiagCode::DuplicateVariantField,
+                    format!(
+                        "field '{}' is specified more than once in variant '{}' of enum '{}'",
+                        sema.pool.str(field.name),
+                        sema.pool.str(vname),
+                        sema.pool.str(ename),
+                    ),
+                ));
+            }
             analyze_expr_with(
                 sema,
                 fcx,
@@ -1116,7 +1163,7 @@ fn analyze_variant_construct(
             context.child(),
         );
         let vty = fcx.builder.ty_of(value);
-        if !sema.pool.compatible(vty, field.ty) {
+        if !skip && !sema.pool.compatible(vty, field.ty) {
             // Tuple payloads carry synthesized "0"/"1" field names the
             // user never wrote — name the argument position instead
             // (1-based, matching how developers count call arguments).
@@ -1196,6 +1243,7 @@ fn analyze_variant_construct(
 /// expected anonymous shape instead supplies field targets so error-union
 /// fields coerce recursively. Shape and non-union mismatches still infer
 /// the source type for the enclosing compatibility check.
+#[allow(clippy::too_many_arguments)]
 fn analyze_anon_struct_lit(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -1204,6 +1252,7 @@ fn analyze_anon_struct_lit(
     span: Span,
     expected: Option<TypeId>,
     context: SemaExprContext,
+    diagnosed: Option<&std::collections::HashSet<usize>>,
 ) -> TirRef {
     let expected = expected.and_then(|ty| {
         if sema.pool.kind(ty) != TypeKind::AnonStruct {
@@ -1223,16 +1272,19 @@ fn analyze_anon_struct_lit(
     let mut poisoned = false;
     let mut expected_compatible = true;
     for (index, (fname, value_ref)) in view.fields().enumerate() {
+        let skip = diagnosed.is_some_and(|fields| fields.contains(&index));
         let fspan = sema.uir.span(value_ref);
         if fields.iter().any(|(n, _, _)| *n == fname) {
-            sema.sink.emit(Diag::error(
-                fspan,
-                DiagCode::DuplicateStructField,
-                format!(
-                    "field '{}' is specified more than once",
-                    sema.pool.str(fname)
-                ),
-            ));
+            if !skip {
+                sema.sink.emit(Diag::error(
+                    fspan,
+                    DiagCode::DuplicateStructField,
+                    format!(
+                        "field '{}' is specified more than once",
+                        sema.pool.str(fname)
+                    ),
+                ));
+            }
             // Same recovery as the named path: analyze the duplicate's
             // initializer so its own errors still surface.
             analyze_expr_with(
@@ -1268,7 +1320,7 @@ fn analyze_anon_struct_lit(
         if sema.pool.is_error(vty) {
             poisoned = true;
         }
-        if sema.pool.is_view(vty) {
+        if !skip && sema.pool.is_view(vty) {
             sema.sink.emit(Diag::error(
                 fspan,
                 DiagCode::ViewFieldType,

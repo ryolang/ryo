@@ -105,6 +105,12 @@ impl<M: Module> Codegen<M> {
             };
         }
         let inst = ctx.tir.inst(r);
+        if context.depth >= context.limit && Self::is_generic_expr_tag(inst.tag) {
+            return match Self::eval_expr_machine(builder, ctx, r, EvalRequest::Enum)? {
+                ValueRepr::Enum { addr } => Ok(addr),
+                _ => unreachable!("enum request must produce an enum repr"),
+            };
+        }
         let addr = match inst.tag {
             TirTag::EnumLit => Self::emit_enum_lit(builder, ctx, r, context)?,
             TirTag::ErrorUnionCoerce => {
@@ -119,7 +125,7 @@ impl<M: Module> Codegen<M> {
                     .ok_or_else(|| format!("Undefined enum variable: '{}'", ctx.pool.str(name)))?;
                 builder.use_var(var)
             }
-            TirTag::FieldAccess => Self::field_addr_of(builder, ctx, r)?.0,
+            TirTag::FieldAccess => Self::field_addr_of_d(builder, ctx, r, context)?.0,
             TirTag::Match => {
                 // M12: an aggregate-result match writes each value arm's
                 // result into its pre-allocated result slot; the join
@@ -596,13 +602,14 @@ impl<M: Module> Codegen<M> {
     /// address; Move/Copy transfer a tag + active-payload copy in a
     /// fresh caller-side slot (the callee may drop the contents per
     /// its mode).
-    pub(crate) fn emit_enum_call_arg(
+    pub(super) fn emit_enum_call_arg_d(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
         mode: ParamMode,
+        context: CodegenExprContext,
     ) -> Result<Value, String> {
-        let src = Self::eval_inst_enum(builder, ctx, r)?;
+        let src = Self::eval_inst_enum_d(builder, ctx, r, context.child())?;
         if mode == ParamMode::Borrow {
             return Ok(src);
         }
