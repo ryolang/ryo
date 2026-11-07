@@ -3,7 +3,7 @@ use super::super::call::{finish_call, prepare_call};
 use super::{
     CHAIN_RECURSION_LIMIT, ConstInt, FuncCtx, Scope, Sema, analyze_binop_link,
     analyze_expr_allow_never_with, analyze_expr_with, analyze_struct_lit_with_target_and_context,
-    analyze_unary_link, const_eval_int, is_chain_binop_tag, reject_never,
+    analyze_unary_link, const_eval_int, is_chain_binop_tag, operators, reject_never,
 };
 use ryo_core::spine::ChainSpine;
 use ryo_core::tir::TirRef;
@@ -467,8 +467,7 @@ pub(crate) fn analyze_expr_machine(
                 }
                 match inst.data {
                     InstData::BinOp { lhs, rhs } if is_chain_binop_tag(inst.tag) => {
-                        let acc = analyzed.get(&lhs).copied().expect("lhs analyzed first");
-                        let r2 = analyzed.get(&rhs).copied().expect("rhs analyzed second");
+                        let (acc, r2) = (analyzed[&lhs], analyzed[&rhs]);
                         let (next, node_const, memo) = analyze_binop_link(
                             sema,
                             fcx,
@@ -491,10 +490,13 @@ pub(crate) fn analyze_expr_machine(
                             sema,
                             fcx,
                             scope,
-                            inst.tag,
-                            operand,
-                            consts[&operand],
-                            sema.uir.span(node),
+                            operators::UnaryOp {
+                                tag: inst.tag,
+                                operand,
+                                operand_const: consts[&operand],
+                                span: sema.uir.span(node),
+                                context,
+                            },
                         );
                         analyzed.insert(node, next);
                         consts.insert(node, node_const);
@@ -623,6 +625,15 @@ fn composite_has_leaf_recovery(sema: &Sema<'_>, scope: &Scope, node: InstRef) ->
     let tag = sema.uir.inst(node).tag;
     if tag == InstTag::FieldAccess && field_access_has_type_recovery(sema, scope, node) {
         return true;
+    }
+    if tag == InstTag::StructLit {
+        let view = sema.uir.struct_lit_view(node);
+        if let Some(name) = view.name {
+            return sema
+                .struct_types
+                .get(&name)
+                .is_none_or(|&sty| sema.pool.is_error(sty));
+        }
     }
     if tag == InstTag::ErrorConstruct {
         let view = sema.uir.error_construct_view(node).3;

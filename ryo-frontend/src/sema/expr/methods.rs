@@ -6,11 +6,11 @@
 //! `expr/mod.rs` and compares interned ids; these paths materialize
 //! name strings and diagnostics only on failure.
 
-use super::{FuncCtx, Scope, Sema, analyze_expr};
+use super::{FuncCtx, NeverMode, Scope, Sema, SemaExprContext, analyze_expr_with};
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::tir::{ParamMode, TirRef};
 use ryo_core::types::{StringId, TypeId, TypeKind, ViewKind};
-use ryo_core::uir::{InstData, InstRef, InstTag, Span};
+use ryo_core::uir::{InstData, InstRef, InstTag, MethodCallView, Span};
 
 /// M11: `color.red(5)` where `color` is an enum — the parser only
 /// claims uppercase-led receivers for variant construction (spec §1
@@ -87,16 +87,15 @@ pub(super) fn lowercase_enum_method_receiver(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
-    receiver: InstRef,
-    method: StringId,
-    args: &ryo_core::uir::ExtraList<'_, InstRef>,
+    view: &MethodCallView<'_>,
     span: Span,
+    context: SemaExprContext,
 ) -> Option<TirRef> {
     let recovery =
-        lowercase_enum_method_receiver_recovery(sema, fcx, scope, receiver, method, span);
+        lowercase_enum_method_receiver_recovery(sema, fcx, scope, view.receiver, view.name, span);
     if recovery.is_some() {
-        for arg in args {
-            analyze_expr(sema, fcx, scope, arg);
+        for arg in &view.args {
+            analyze_expr_with(sema, fcx, scope, arg, NeverMode::Reject, context.child());
         }
     }
     recovery

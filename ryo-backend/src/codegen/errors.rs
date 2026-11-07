@@ -7,6 +7,7 @@ use ryo_core::tir::{TirData, TirRef};
 use ryo_core::types::{EnumVariantView, StructField, TypeId, TypeKind, VariantKind};
 
 use super::enums::invalid_tag_trap;
+use super::expr::walker::{CodegenExprContext, EvalRequest};
 use super::{Codegen, FunctionContext, STR_SLOT_SIZE, ValueRepr, cranelift_type_for};
 
 pub(crate) fn emit_error_message<M: Module>(
@@ -177,6 +178,7 @@ pub(crate) fn emit_error_union_coerce<M: Module>(
     builder: &mut FunctionBuilder,
     ctx: &mut FunctionContext<'_, M>,
     r: TirRef,
+    context: CodegenExprContext,
 ) -> Result<Value, String> {
     let inst = ctx.tir.inst(r);
     let TirData::UnOp(operand) = inst.data else {
@@ -191,7 +193,11 @@ pub(crate) fn emit_error_union_coerce<M: Module>(
         TypeKind::DeclaredError | TypeKind::ErrorSet => {
             let target_err = union_variant_fields(ctx, target).1;
             store_union_tag(builder, dst, 1);
-            let src = Codegen::eval_inst_enum(builder, ctx, operand)?;
+            let ValueRepr::Enum { addr: src } =
+                Codegen::eval_inst_with(builder, ctx, operand, EvalRequest::Enum, context.child())?
+            else {
+                unreachable!("error-set operand must produce an enum repr")
+            };
             let dst_err = offset_addr(builder, dst, target_err.offset);
             emit_error_set_convert(builder, ctx, dst_err, src, source, target_err.ty)?;
         }
@@ -209,6 +215,7 @@ pub(crate) fn emit_error_union_coerce<M: Module>(
                     target_ok.offset,
                     target_ok.ty,
                     operand,
+                    context,
                 )?;
             }
         }

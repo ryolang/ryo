@@ -82,27 +82,9 @@ fn resolve_temp_read(sema: &mut Sema<'_>, fcx: &mut FuncCtx, name: StringId, spa
 /// `panic` call) is rejected: `panic` may only appear as a bare
 /// statement, never where a value is required (return operand,
 /// operator operands, call args, conditions, slice/range bounds).
-/// All recursive descent goes through this wrapper, so the rule
-/// covers every operand position uniformly. The never-tolerant
-/// entry points — a bare ExprStmt and the binding sites, which run
-/// their own valueless-RHS check — call [`analyze_expr_allow_never`].
-#[inline]
-pub(crate) fn analyze_expr(
-    sema: &mut Sema<'_>,
-    fcx: &mut FuncCtx,
-    scope: &Scope,
-    r: InstRef,
-) -> TirRef {
-    analyze_expr_with(
-        sema,
-        fcx,
-        scope,
-        r,
-        NeverMode::Reject,
-        SemaExprContext::root(),
-    )
-}
-
+/// Recursive descent carries a depth context through `analyze_expr_with`.
+/// Bare ExprStmt and binding sites use `NeverMode::Allow` and run their
+/// own valueless-RHS checks.
 pub(crate) fn analyze_expr_with(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -136,23 +118,6 @@ pub(crate) fn reject_never(
             .unreachable(sema.pool.error_type(), sema.uir.span(r));
     }
     value
-}
-
-#[inline]
-pub(crate) fn analyze_expr_allow_never(
-    sema: &mut Sema<'_>,
-    fcx: &mut FuncCtx,
-    scope: &Scope,
-    r: InstRef,
-) -> TirRef {
-    analyze_expr_with(
-        sema,
-        fcx,
-        scope,
-        r,
-        NeverMode::Allow,
-        SemaExprContext::root(),
-    )
 }
 
 fn analyze_expr_allow_never_with(
@@ -226,23 +191,24 @@ fn analyze_expr_allow_never_with(
         }
         InstTag::MethodCall => {
             let view = sema.uir.method_call_view(r);
-            if let Some(recovery) = methods::lowercase_enum_method_receiver(
+            if let Some(recovery) =
+                methods::lowercase_enum_method_receiver(sema, fcx, scope, &view, span, context)
+            {
+                return recovery;
+            }
+            let receiver_tir = analyze_expr_with(
                 sema,
                 fcx,
                 scope,
                 view.receiver,
-                view.name,
-                &view.args,
-                span,
-            ) {
-                return recovery;
-            }
-            let receiver_tir = analyze_expr(sema, fcx, scope, view.receiver);
+                NeverMode::Reject,
+                context.child(),
+            );
             let receiver_ty = fcx.builder.ty_of(receiver_tir);
             let ids = sema.names;
 
             for arg in &view.args {
-                analyze_expr(sema, fcx, scope, arg);
+                analyze_expr_with(sema, fcx, scope, arg, NeverMode::Reject, context.child());
             }
             if super::errors::is_error_union(sema, receiver_ty) {
                 let diag = if view.name == ids.message {
@@ -362,7 +328,14 @@ fn analyze_expr_allow_never_with(
                 InstData::Slice { base, start, end } => (base, start, end),
                 _ => unreachable!("Slice must carry InstData::Slice"),
             };
-            let base_tir = analyze_expr(sema, fcx, scope, base_uir);
+            let base_tir = analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                base_uir,
+                NeverMode::Reject,
+                context.child(),
+            );
             let base_ty = fcx.builder.ty_of(base_tir);
             let base_kind = sema.pool.kind(base_ty);
             // §3.2 P1: a slice projects an owner (`str`/`bytes`) or
@@ -383,8 +356,8 @@ fn analyze_expr_allow_never_with(
                 ));
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
-            let start_tir = start_uir.map(|b| check_slice_bound(sema, fcx, scope, b));
-            let end_tir = end_uir.map(|b| check_slice_bound(sema, fcx, scope, b));
+            let start_tir = start_uir.map(|b| check_slice_bound(sema, fcx, scope, b, context));
+            let end_tir = end_uir.map(|b| check_slice_bound(sema, fcx, scope, b, context));
             let view_ty = match base_kind {
                 TypeKind::Str | TypeKind::View(ViewKind::Str) => sema.pool.str_view(),
                 TypeKind::Bytes | TypeKind::View(ViewKind::Bytes) => sema.pool.bytes_view(),
@@ -406,7 +379,14 @@ fn analyze_expr_allow_never_with(
                 InstData::BinOp { lhs, rhs } => (lhs, rhs),
                 _ => unreachable!("Index must carry InstData::BinOp"),
             };
-            let base_tir = analyze_expr(sema, fcx, scope, base_uir);
+            let base_tir = analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                base_uir,
+                NeverMode::Reject,
+                context.child(),
+            );
             let base_ty = fcx.builder.ty_of(base_tir);
             let base_kind = sema.pool.kind(base_ty);
             // M8.4.2 stopgap: scalar indexing exists for bytes/bytesview
@@ -433,7 +413,14 @@ fn analyze_expr_allow_never_with(
                     return fcx.builder.unreachable(sema.pool.error_type(), span);
                 }
             }
-            let index_tir = analyze_expr(sema, fcx, scope, index_uir);
+            let index_tir = analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                index_uir,
+                NeverMode::Reject,
+                context.child(),
+            );
             let index_ty = fcx.builder.ty_of(index_tir);
             if sema.pool.kind(index_ty) != TypeKind::Int && !sema.pool.is_error(index_ty) {
                 sema.sink.emit(Diag::error(
@@ -450,22 +437,22 @@ fn analyze_expr_allow_never_with(
                 span,
             )
         }
-        InstTag::Borrow => analyze_borrow(sema, fcx, scope, r, inst.data, span),
+        InstTag::Borrow => analyze_borrow(sema, fcx, scope, r, inst.data, span, context),
         InstTag::StructLit => analyze_struct_lit(sema, fcx, scope, r, span, None, context),
-        InstTag::EnumLit => analyze_variant_construct(sema, fcx, scope, r, span),
+        InstTag::EnumLit => analyze_variant_construct(sema, fcx, scope, r, span, context),
         InstTag::ErrorConstruct => {
-            super::errors::analyze_error_construct(sema, fcx, scope, r, span)
+            super::errors::analyze_error_construct(sema, fcx, scope, r, span, context)
         }
         InstTag::Match => {
-            let emitted = analyze_match(sema, fcx, scope, r, span);
+            let emitted = analyze_match(sema, fcx, scope, r, context);
             if sema.uir.is_direct_catch_match(r) {
                 fcx.builder.mark_direct_catch_match(emitted);
             }
             emitted
         }
-        InstTag::Catch => super::errors::analyze_catch(sema, fcx, scope, r, span),
-        InstTag::Try => super::errors::analyze_try(sema, fcx, scope, r, span),
-        InstTag::FieldAccess => analyze_field_access(sema, fcx, scope, r, span),
+        InstTag::Catch => super::errors::analyze_catch(sema, fcx, scope, r, context),
+        InstTag::Try => super::errors::analyze_try(sema, fcx, scope, r, span, context),
+        InstTag::FieldAccess => analyze_field_access(sema, fcx, scope, r, span, context),
         // UIR trusted-producer contract (see the `uir.rs` module
         // header): astgen is the only producer, so a non-expression tag
         // reaching `analyze_expr` is a compiler bug, not user input.
@@ -674,10 +661,13 @@ fn analyze_unary_d(
         sema,
         fcx,
         scope,
-        inst.tag,
-        operand,
-        const_eval_int(sema.uir, operand),
-        span,
+        operators::UnaryOp {
+            tag: inst.tag,
+            operand,
+            operand_const: const_eval_int(sema.uir, operand),
+            span,
+            context,
+        },
     );
     fcx.inst_map[node.index()] = Some(emitted);
     emitted
@@ -687,13 +677,10 @@ fn analyze_unary_link(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
-    tag: InstTag,
-    operand: InstRef,
-    operand_const: ConstInt,
-    span: Span,
+    op: operators::UnaryOp,
 ) -> (TirRef, ConstInt) {
-    let emitted =
-        operators::analyze_unary_operator(sema, fcx, scope, tag, operand, operand_const, span);
+    let operand_const = op.operand_const;
+    let emitted = operators::analyze_unary_operator(sema, fcx, scope, op);
     let node_const = if fcx.builder.ty_of(emitted) == sema.pool.int() {
         match operand_const {
             ConstInt::Value(v) => v.checked_neg().map_or(ConstInt::Overflow, ConstInt::Value),
@@ -716,6 +703,7 @@ fn analyze_borrow(
     r: InstRef,
     data: InstData,
     span: Span,
+    context: SemaExprContext,
 ) -> TirRef {
     let inner = match data {
         InstData::Borrow(inner) => inner,
@@ -730,7 +718,7 @@ fn analyze_borrow(
             "`&` is only valid as an argument to an `inout` parameter".to_string(),
         ));
     }
-    analyze_expr(sema, fcx, scope, inner)
+    analyze_expr_with(sema, fcx, scope, inner, NeverMode::Reject, context.child())
 }
 
 /// Struct literal `Name{field = value, ...}` (M9) or the anonymous
@@ -965,6 +953,7 @@ fn analyze_variant_construct(
     scope: &Scope,
     r: InstRef,
     span: Span,
+    context: SemaExprContext,
 ) -> TirRef {
     let view = sema.uir.enum_lit_view(r);
     let ety = view.ty;
@@ -1052,7 +1041,14 @@ fn analyze_variant_construct(
             // missing-fields error, matching the unknown/duplicate
             // field recoveries below.
             field_errored = true;
-            analyze_expr(sema, fcx, scope, value_ref);
+            analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                value_ref,
+                NeverMode::Reject,
+                context.child(),
+            );
             continue;
         }
         let Some(field) = fields.get(fidx as usize) else {
@@ -1079,7 +1075,14 @@ fn analyze_variant_construct(
             sema.sink
                 .emit(Diag::error(fspan, DiagCode::UnknownVariantField, message));
             // Still analyze the arg so diagnostics inside it surface.
-            analyze_expr(sema, fcx, scope, value_ref);
+            analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                value_ref,
+                NeverMode::Reject,
+                context.child(),
+            );
             continue;
         };
         if by_index[fidx as usize].is_some() {
@@ -1094,10 +1097,24 @@ fn analyze_variant_construct(
                     sema.pool.str(ename),
                 ),
             ));
-            analyze_expr(sema, fcx, scope, value_ref);
+            analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                value_ref,
+                NeverMode::Reject,
+                context.child(),
+            );
             continue;
         }
-        let value = analyze_expr(sema, fcx, scope, value_ref);
+        let value = analyze_expr_with(
+            sema,
+            fcx,
+            scope,
+            value_ref,
+            NeverMode::Reject,
+            context.child(),
+        );
         let vty = fcx.builder.ty_of(value);
         if !sema.pool.compatible(vty, field.ty) {
             // Tuple payloads carry synthesized "0"/"1" field names the
@@ -1291,6 +1308,7 @@ fn analyze_field_access(
     scope: &Scope,
     r: InstRef,
     span: Span,
+    context: SemaExprContext,
 ) -> TirRef {
     let (object, field) = match sema.uir.inst(r).data {
         InstData::FieldAccess { object, field } => (object, field),
@@ -1326,7 +1344,7 @@ fn analyze_field_access(
             }
         }
     }
-    let obj = analyze_expr(sema, fcx, scope, object);
+    let obj = analyze_expr_with(sema, fcx, scope, object, NeverMode::Reject, context.child());
     analyze_value_field_access(sema, fcx, obj, field, span)
 }
 
@@ -1584,8 +1602,9 @@ pub(crate) fn check_slice_bound(
     fcx: &mut FuncCtx,
     scope: &Scope,
     b: InstRef,
+    context: SemaExprContext,
 ) -> TirRef {
-    let t = analyze_expr(sema, fcx, scope, b);
+    let t = analyze_expr_with(sema, fcx, scope, b, NeverMode::Reject, context.child());
     let ty = fcx.builder.ty_of(t);
     if sema.pool.kind(ty) != TypeKind::Int && !sema.pool.is_error(ty) {
         sema.sink.emit(Diag::error(

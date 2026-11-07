@@ -16,6 +16,10 @@ pub(crate) enum CallPlan {
     BytesMaterialize,
     Builtin(&'static crate::builtins::BuiltinFunction),
     Error,
+    UndefinedFunction {
+        name_id: StringId,
+        carriers: Vec<(StringId, VariantKind)>,
+    },
     User {
         callee: DeclId,
         expected: Vec<TypeId>,
@@ -89,42 +93,7 @@ pub(crate) fn prepare_call(sema: &mut Sema<'_>, view: &CallView<'_>, span: Span)
         Some(d) => d,
         None => {
             let carriers = enum_variant_carriers(sema, name_id);
-            if carriers.is_empty() {
-                if !super::errors::is_rejected_error_declaration(sema, name_id) {
-                    sema.sink.emit(Diag::error(
-                        span,
-                        DiagCode::UndefinedFunction,
-                        format!("undefined function: '{}'", sema.pool.str(name_id)),
-                    ));
-                }
-            } else {
-                let name = sema.pool.str(name_id).to_string();
-                let mut list = carriers
-                    .iter()
-                    .take(3)
-                    .map(|&(e, _)| format!("'{}'", sema.pool.str(e)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                if carriers.len() > 3 {
-                    list.push_str(", …");
-                }
-                let (first, kind) = carriers[0];
-                let first = sema.pool.str(first);
-                let plural = if carriers.len() > 1 { "s" } else { "" };
-                let example = match kind {
-                    VariantKind::Unit => format!("{first}.{name}"),
-                    VariantKind::Tuple => format!("{first}.{name}(...)"),
-                    VariantKind::Named => format!("{first}.{name}{{field=value}}"),
-                };
-                sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::UndefinedFunction,
-                    format!(
-                        "'{name}' is a variant of enum{plural} {list} — construct it as {example}"
-                    ),
-                ));
-            }
-            return CallPlan::Error;
+            return CallPlan::UndefinedFunction { name_id, carriers };
         }
     };
     if super::error_inference::is_inferred(sema, callee)
@@ -189,6 +158,44 @@ pub(crate) fn finish_call(
         }
         CallPlan::Builtin(builtin) => {
             return emit_builtin_call(sema, fcx, scope, view, &arg_tirs, span, builtin);
+        }
+        CallPlan::UndefinedFunction { name_id, carriers } => {
+            if carriers.is_empty() {
+                if !super::errors::is_rejected_error_declaration(sema, *name_id) {
+                    sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::UndefinedFunction,
+                        format!("undefined function: '{}'", sema.pool.str(*name_id)),
+                    ));
+                }
+            } else {
+                let name = sema.pool.str(*name_id).to_string();
+                let mut list = carriers
+                    .iter()
+                    .take(3)
+                    .map(|&(e, _)| format!("'{}'", sema.pool.str(e)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if carriers.len() > 3 {
+                    list.push_str(", …");
+                }
+                let (first, kind) = carriers[0];
+                let first = sema.pool.str(first);
+                let plural = if carriers.len() > 1 { "s" } else { "" };
+                let example = match kind {
+                    VariantKind::Unit => format!("{first}.{name}"),
+                    VariantKind::Tuple => format!("{first}.{name}(...)"),
+                    VariantKind::Named => format!("{first}.{name}{{field=value}}"),
+                };
+                sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::UndefinedFunction,
+                    format!(
+                        "'{name}' is a variant of enum{plural} {list} — construct it as {example}"
+                    ),
+                ));
+            }
+            return fcx.builder.unreachable(sema.pool.error_type(), span);
         }
         CallPlan::Error => return fcx.builder.unreachable(sema.pool.error_type(), span),
         CallPlan::User { .. } => {}

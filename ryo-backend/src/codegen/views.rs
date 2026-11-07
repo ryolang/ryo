@@ -11,6 +11,7 @@ use cranelift_module::Module;
 use ryo_core::tir::{TirRef, TirTag};
 use ryo_core::types::TypeKind;
 
+use super::expr::walker::{CodegenExprContext, EvalRequest};
 use super::{Codegen, FunctionContext, STR_SLOT_SIZE, ValueRepr};
 
 impl<M: Module> Codegen<M> {
@@ -36,15 +37,18 @@ impl<M: Module> Codegen<M> {
     ///   freed by the callee; the ownership pass schedules the free.
     /// - Anonymous temporaries spill into a scratch slot and re-cache
     ///   the promoted triple — their scheduled Free reads `cached_repr`.
-    pub(crate) fn emit_ensure_heap_for_view_base(
+    pub(super) fn emit_ensure_heap_for_view_base_d(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
+        context: CodegenExprContext,
     ) -> Result<(Value, Value), String> {
         // A view-typed base (reslice, strview of a view param) already
         // addresses stable memory — pass it through untouched.
         if ctx.pool.is_view(ctx.tir.inst(r).ty) {
-            let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, r)? else {
+            let ValueRepr::View { ptr, len } =
+                Self::eval_inst_with(builder, ctx, r, EvalRequest::View, context.child())?
+            else {
                 unreachable!("eval_inst_view must produce ValueRepr::View");
             };
             return Ok((ptr, len));
@@ -89,11 +93,12 @@ impl<M: Module> Codegen<M> {
             return Ok((out_ptr, out_len));
         }
 
-        let (ptr, len, cap, is_bytes) = match Self::eval_inst_fat(builder, ctx, r)? {
-            ValueRepr::Str { ptr, len, cap } => (ptr, len, cap, false),
-            ValueRepr::Bytes { ptr, len, cap } => (ptr, len, cap, true),
-            _ => unreachable!("view base must be fat or view typed"),
-        };
+        let (ptr, len, cap, is_bytes) =
+            match Self::eval_inst_with(builder, ctx, r, EvalRequest::Fat, context.child())? {
+                ValueRepr::Str { ptr, len, cap } => (ptr, len, cap, false),
+                ValueRepr::Bytes { ptr, len, cap } => (ptr, len, cap, true),
+                _ => unreachable!("view base must be fat or view typed"),
+            };
         // Static .rodata bases are already stable: skip the
         // spill/call/reload entirely so the cached cap stays an
         // `iconst 0` and downstream dead-free elision keeps firing.

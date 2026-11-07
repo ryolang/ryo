@@ -135,6 +135,45 @@ fn jit_run_nested_call_chain() {
     assert_jit_prints("nested_calls.ryo", &nested_call_chain(10_000), "1");
 }
 
+fn assert_aot_prints(test_name: &str, src: &str, expected: &str) {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(temp_dir.path(), &format!("{test_name}.ryo"), src);
+    let build = run_ryo_build(&test_file, temp_dir.path());
+    assert!(
+        build.status.success(),
+        "AOT compile failed. STDERR: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = Command::new(exe_path(temp_dir.path(), test_name))
+        .output()
+        .expect("Failed to run AOT binary");
+    assert!(
+        run.status.success(),
+        "AOT binary failed. STDERR: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout), expected);
+}
+
+#[test]
+fn aot_run_unary_mediated_rhs_chain() {
+    assert_aot_prints("unary_mediated_aot", &unary_mediated_add_chain(10_000), "1");
+}
+
+#[test]
+fn aot_run_call_mediated_rhs_chain() {
+    assert_aot_prints(
+        "call_mediated_aot",
+        &call_mediated_add_chain(10_000),
+        "10001",
+    );
+}
+
+#[test]
+fn aot_run_nested_call_chain() {
+    assert_aot_prints("nested_calls_aot", &nested_call_chain(10_000), "1");
+}
+
 fn nested_string_concat(links: usize) -> String {
     let mut src = String::from("fn main():\n\ts = ");
     for _ in 0..links {
@@ -165,6 +204,39 @@ fn jit_run_nested_string_concat() {
 #[test]
 fn jit_run_nested_slices() {
     assert_jit_prints("nested_slices.ryo", &nested_slices(1_000), "1");
+}
+
+#[test]
+fn jit_run_deep_slice_nesting() {
+    assert_jit_prints("deep_slices.ryo", &nested_slices(50_000), "1");
+}
+
+#[test]
+fn jit_run_nested_direct_catch_ownership() {
+    let src = r#"error A(str)
+fn id(move x: str) -> str:
+	return x
+fn consume(move message: str):
+	print(message)
+fn describe(err: A, move message: str) -> str:
+	consume(message)
+	return err.message()
+fn find() -> A!str:
+	return A("x")
+fn main():
+	value = find() catch as err:
+		A(message): describe(err, message)
+	print(value)
+"#;
+    let src = src.replace(
+        "A(message): describe(err, message)",
+        &format!(
+            "A(message): {}describe(err, message){}",
+            "id(".repeat(70),
+            ")".repeat(70)
+        ),
+    );
+    assert_jit_prints("nested_direct_catch.ryo", &src, "xx");
 }
 
 #[test]

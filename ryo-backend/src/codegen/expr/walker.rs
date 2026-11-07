@@ -115,13 +115,11 @@ impl<M: Module> Codegen<M> {
             EvalRequest::FatSlot(slot) => {
                 Self::eval_inst_fat_slot_d(builder, ctx, r, slot, context)
             }
-            EvalRequest::View => Self::eval_inst_view(builder, ctx, r),
-            EvalRequest::Struct => {
-                Self::eval_inst_struct(builder, ctx, r).map(|addr| ValueRepr::Struct { addr })
-            }
-            EvalRequest::Enum => {
-                Self::eval_inst_enum(builder, ctx, r).map(|addr| ValueRepr::Enum { addr })
-            }
+            EvalRequest::View => Self::eval_inst_view_d(builder, ctx, r, context),
+            EvalRequest::Struct => Self::eval_inst_struct_d(builder, ctx, r, context)
+                .map(|addr| ValueRepr::Struct { addr }),
+            EvalRequest::Enum => Self::eval_inst_enum_d(builder, ctx, r, context)
+                .map(|addr| ValueRepr::Enum { addr }),
         }
     }
 

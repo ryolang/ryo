@@ -56,6 +56,22 @@ impl DeepExpr {
         Self::program(expr)
     }
 
+    fn identity_expr(expr: &str, links: usize) -> String {
+        let mut wrapped = String::new();
+        for _ in 0..links {
+            wrapped.push_str("id(");
+        }
+        wrapped.push_str(expr);
+        for _ in 0..links {
+            wrapped.push(')');
+        }
+        wrapped
+    }
+
+    fn identity_calls(expr: &str, links: usize) -> String {
+        Self::program(Self::identity_expr(expr, links))
+    }
+
     fn nested_matches(depth: usize) -> String {
         let mut src = String::from("fn main():\n");
         for level in 0..=depth {
@@ -375,5 +391,69 @@ fn small_expression_families_match_at_every_depth_limit() {
                 "{name} differed at expression depth limit {limit}"
             );
         }
+    }
+}
+#[test]
+fn resolution_broken_nested_match_arm_matches_at_every_depth_limit() {
+    let unary = format!("{}0{}", "-(".repeat(70), ")".repeat(70));
+    let src = format!(
+        "fn id(x: int) -> int:\n\treturn x\n\nfn main():\n\tmatch 0:\n\t\t0:\n\t\t\tvalue = match 1:\n\t\t\t\ttrue: {unary}\n\t\t\t\t_: 0\n\t\t\tprint(value)\n\t\t_:\n\t\t\tprint(0)\n",
+    );
+    let baseline = snapshot(run(&src));
+    for limit in [0, 1, 64] {
+        assert_eq!(snapshot(run_with_expr_limit(&src, limit)), baseline);
+    }
+}
+
+#[test]
+fn unknown_struct_suppresses_field_diagnostics_at_every_depth_limit() {
+    let src = DeepExpr::identity_calls("1+(Missing{x=missing()})", 70);
+    for limit in [0, 1, 64] {
+        let diags = run_with_expr_limit(&src, limit).expect_err("struct must be unknown");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, ryo_core::diag::DiagCode::UnknownType);
+    }
+}
+
+#[test]
+fn undefined_function_diagnostic_follows_argument_diagnostics() {
+    let src = DeepExpr::identity_calls("missing(1+true)", 70);
+    for limit in [0, 1, 64] {
+        let diags = run_with_expr_limit(&src, limit).expect_err("call must be invalid");
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        assert_eq!(diags[0].code, ryo_core::diag::DiagCode::TypeMismatch);
+        assert_eq!(diags[1].code, ryo_core::diag::DiagCode::UndefinedFunction);
+    }
+}
+
+#[test]
+fn direct_catch_marker_is_preserved_at_every_depth_limit() {
+    let src = r#"error A(str)
+fn id(move x: str) -> str:
+	return x
+fn describe(err: A, move message: str) -> str:
+	return err.message()
+fn find() -> A!str:
+	return A("message")
+fn main():
+	value = find() catch as err:
+		A(message): describe(err, message)
+	print(value)
+"#;
+    let src = src.replace(
+        "A(message): describe(err, message)",
+        &format!(
+            "A(message): {}describe(err, message){}",
+            "id(".repeat(70),
+            ")".repeat(70)
+        ),
+    );
+    for limit in [0, 1, 64] {
+        let (tirs, pool) = run_with_expr_limit(&src, limit).expect("direct catch analyzes");
+        let main = tirs
+            .iter()
+            .find(|tir| pool.str(tir.name) == "main")
+            .expect("main TIR");
+        assert_eq!(main.direct_catch_matches.len(), 1, "limit {limit}");
     }
 }

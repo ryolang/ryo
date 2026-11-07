@@ -255,8 +255,8 @@ impl<M: Module> Codegen<M> {
                 };
                 // Bounds check + panic are runtime-side, mirroring the
                 // inline slice guards — no Cranelift branch needed.
-                let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, base)?;
-                let idx = Self::eval_inst(builder, ctx, index)?;
+                let (ptr, len) = Self::eval_str_or_view_parts_d(builder, ctx, base, context)?;
+                let idx = Self::eval_inst_d(builder, ctx, index, context.child())?;
                 let index_ref = Self::declare_runtime_fn(
                     ctx,
                     builder,
@@ -871,6 +871,21 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
     ) -> Result<ValueRepr, String> {
+        Self::eval_inst_with(
+            builder,
+            ctx,
+            r,
+            EvalRequest::View,
+            CodegenExprContext::root(),
+        )
+    }
+
+    pub(super) fn eval_inst_view_d(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        context: CodegenExprContext,
+    ) -> Result<ValueRepr, String> {
         if let Some(repr) = Self::cached_repr(ctx, r) {
             return Ok(repr);
         }
@@ -885,13 +900,13 @@ impl<M: Module> Codegen<M> {
                 // its slot; the view must point at memory that never
                 // moves, so owners go through ensure_heap first.
                 let (base_ptr, base_len) =
-                    Self::emit_ensure_heap_for_view_base(builder, ctx, base)?;
+                    Self::emit_ensure_heap_for_view_base_d(builder, ctx, base, context)?;
                 let start_v = match start {
-                    Some(s) => Self::eval_inst(builder, ctx, s)?,
+                    Some(s) => Self::eval_inst_d(builder, ctx, s, context.child())?,
                     None => builder.ins().iconst(types::I64, 0),
                 };
                 let end_v = match end {
-                    Some(e) => Self::eval_inst(builder, ctx, e)?,
+                    Some(e) => Self::eval_inst_d(builder, ctx, e, context.child())?,
                     None => base_len,
                 };
                 // M8.4.2: bytes slices skip the UTF-8 boundary check —
@@ -909,7 +924,8 @@ impl<M: Module> Codegen<M> {
                 };
                 // Promote-on-view for owner operands: the view must
                 // address stable memory (see emit_ensure_heap_for_view_base).
-                let (ptr, len) = Self::emit_ensure_heap_for_view_base(builder, ctx, operand)?;
+                let (ptr, len) =
+                    Self::emit_ensure_heap_for_view_base_d(builder, ctx, operand, context)?;
                 ValueRepr::View { ptr, len }
             }
             TirTag::Var => {
@@ -1046,7 +1062,7 @@ impl<M: Module> Codegen<M> {
         Self::emit_call_slot_d(builder, ctx, r, None, CodegenExprContext::root())
     }
 
-    fn emit_call_d(
+    pub(super) fn emit_call_d(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,

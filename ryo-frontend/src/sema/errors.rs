@@ -1,4 +1,4 @@
-use super::{FuncCtx, Scope, Sema, analyze_expr};
+use super::{FuncCtx, NeverMode, Scope, Sema, SemaExprContext, analyze_expr_with};
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::tir::{
     Discriminant, MatchBinding, TirData, TirRef, TirTag, TypedMatchArm, TypedMatchBody,
@@ -72,9 +72,9 @@ pub(super) fn analyze_catch(
     fcx: &mut FuncCtx,
     scope: &Scope,
     r: InstRef,
-    span: Span,
+    context: SemaExprContext,
 ) -> TirRef {
-    super::match_::analyze_catch(sema, fcx, scope, r, span)
+    super::match_::analyze_catch(sema, fcx, scope, r, context)
 }
 
 pub(super) fn analyze_try(
@@ -83,12 +83,20 @@ pub(super) fn analyze_try(
     scope: &Scope,
     r: InstRef,
     span: Span,
+    context: SemaExprContext,
 ) -> TirRef {
     let operand_ref = match sema.uir.inst(r).data {
         InstData::UnOp(operand) => operand,
         _ => unreachable!("Try must carry InstData::UnOp"),
     };
-    let operand = analyze_expr(sema, fcx, scope, operand_ref);
+    let operand = analyze_expr_with(
+        sema,
+        fcx,
+        scope,
+        operand_ref,
+        NeverMode::Reject,
+        context.child(),
+    );
     let operand_ty = fcx.builder.ty_of(operand);
     if sema.pool.is_error(operand_ty) {
         return fcx.builder.unreachable(sema.pool.error_type(), span);
@@ -260,6 +268,7 @@ pub(super) fn analyze_error_construct(
     scope: &Scope,
     r: InstRef,
     span: Span,
+    context: SemaExprContext,
 ) -> TirRef {
     let (name, family_root, family_member, view) = sema.uir.error_construct_view(r);
     let shadowed = match (family_root, family_member) {
@@ -275,7 +284,7 @@ pub(super) fn analyze_error_construct(
             return fcx.builder.var(bound_name, bound, span);
         }
         for (_, value) in view.fields() {
-            analyze_expr(sema, fcx, scope, value);
+            analyze_expr_with(sema, fcx, scope, value, NeverMode::Reject, context.child());
         }
         sema.sink.emit(Diag::error(
             span,
@@ -314,7 +323,7 @@ pub(super) fn analyze_error_construct(
             ));
         } else if let (Some(root), None) = (family_root, family_member) {
             for (_, value) in view.fields() {
-                analyze_expr(sema, fcx, scope, value);
+                analyze_expr_with(sema, fcx, scope, value, NeverMode::Reject, context.child());
             }
             if root == name {
                 let prefix = format!("{}.", sema.pool.str(root));
@@ -375,7 +384,7 @@ pub(super) fn analyze_error_construct(
 
     if sema.pool.is_error(view.ty) {
         for (_, value) in view.fields() {
-            analyze_expr(sema, fcx, scope, value);
+            analyze_expr_with(sema, fcx, scope, value, NeverMode::Reject, context.child());
         }
         sema.sink.emit(Diag::error(
             span,
@@ -418,7 +427,14 @@ pub(super) fn analyze_error_construct(
     let mut by_index: Vec<Option<TirRef>> = vec![None; fields.len()];
     let mut field_errored = false;
     for (selector, value_ref) in view.fields() {
-        let value = analyze_expr(sema, fcx, scope, value_ref);
+        let value = analyze_expr_with(
+            sema,
+            fcx,
+            scope,
+            value_ref,
+            NeverMode::Reject,
+            context.child(),
+        );
         let field = if view.positional {
             fields.get(selector as usize)
         } else {

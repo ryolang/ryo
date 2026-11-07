@@ -842,19 +842,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-269 — Stack overflow when deep RHS chains cross unary or call boundaries
-
-**Severity:** Correctness / Hygiene
-**Area:** sema
-
-**Files:** ryo-frontend/src/sema/expr/mod.rs; ryo-frontend/src/sema/expr/walker_tests.rs; ryo-frontend/src/sema/call.rs; ryo-backend/src/codegen/expr/mod.rs
-
-**Summary:** Depth is now carried through direct parenthesized binary RHS links, but unary operators and call arguments still enter analyze_expr/eval_inst at depth zero. Confirmed on debug builds: 50k levels of 1+(-(1+(-(...)))), 1+id(1+id(...)), and id(id(...)) all abort with a stack overflow. Codegen has the same reset at unary operands and call-argument evaluation, currently masked by the earlier sema crash.
-
-**Resolution:** Propagate a general expression-depth budget across unary and call boundaries in sema and codegen, with iterative spill for the remaining subtree rather than adding per-frame allocation to the hot path. Add 50k-deep unary-mediated, call-mediated, and call-only regressions, then exercise end-to-end codegen as well as sema.
-
----
-
 ### I-270 — Stack overflow lowering deeply nested match and catch blocks
 
 **Severity:** Correctness / Hygiene
@@ -873,10 +860,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
 - Spec: [docs/specification.md](docs/specification.md)
 - Phase plan: [docs/dev/pipeline_alignment.md](docs/dev/pipeline_alignment.md)
-
----
-
----
 
 ---
 

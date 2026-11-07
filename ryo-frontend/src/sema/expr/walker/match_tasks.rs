@@ -3,7 +3,7 @@ use super::super::super::match_::{
     finish_typed_match, prepare_match, prepare_match_arm,
 };
 use super::super::super::stmt::analyze_stmt;
-use super::{FuncCtx, NeverMode, Scope, ScopeArena, ScopeId, Sema, Task};
+use super::{FuncCtx, NeverMode, Scope, ScopeArena, ScopeId, Sema, SemaExprContext, Task};
 use ryo_core::spine::ChainSpine;
 use ryo_core::tir::TirRef;
 use ryo_core::types::TypeId;
@@ -54,7 +54,8 @@ impl<'a> MatchState<'a> {
         let scope = self.scopes.get(scope_id);
         let catch = sema.uir.inst(node).tag == InstTag::Catch;
         let scrutinee_ref = match_scrutinee(sema, node);
-        let (scrutinee, borrowed) = analyze_scrutinee(sema, fcx, scope, scrutinee_ref);
+        let (scrutinee, borrowed) =
+            analyze_scrutinee(sema, fcx, scope, scrutinee_ref, SemaExprContext::root());
         let plan = prepare_match(sema, fcx, node, catch, scrutinee, borrowed);
         let arm_count = plan.analysis.arms.len();
         self.typed_arms
@@ -75,6 +76,9 @@ impl<'a> MatchState<'a> {
         index: usize,
         scope_id: ScopeId,
     ) {
+        if self.plans[&node].analysis.arms[index].had_error {
+            return;
+        }
         let parent = self.scopes.take_parent(scope_id);
         let uir_arms = match_arms(sema, node);
         let (expr_body, stmt_bodies) = match uir_arms[index].body {
@@ -260,7 +264,11 @@ impl<'a> MatchState<'a> {
             .flatten()
             .collect();
         let owners = self.owner_tokens.remove(&node).expect("owner list");
-        finish_typed_match(sema, fcx, plan.analysis, arms, owners, plan.span, plan.mode)
+        let next = finish_typed_match(sema, fcx, plan.analysis, arms, owners, plan.span, plan.mode);
+        if sema.uir.is_direct_catch_match(node) {
+            fcx.builder.mark_direct_catch_match(next);
+        }
+        next
     }
 }
 

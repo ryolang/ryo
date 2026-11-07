@@ -3,23 +3,42 @@
 //! or diagnostic, and returns the TirRef. Split out of `expr/mod.rs` to
 //! stay under the file-length limit.
 
-use super::{ConstInt, FuncCtx, Scope, Sema, analyze_expr};
+use super::{ConstInt, FuncCtx, NeverMode, Scope, Sema, SemaExprContext, analyze_expr_with};
 use crate::sema::errors;
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::tir::{TirRef, TirTag};
 use ryo_core::types::{TypeId, TypeKind, ViewKind};
 use ryo_core::uir::{InstRef, InstTag, Span};
 
+pub(super) struct UnaryOp {
+    pub(super) tag: InstTag,
+    pub(super) operand: InstRef,
+    pub(super) operand_const: ConstInt,
+    pub(super) span: Span,
+    pub(super) context: SemaExprContext,
+}
+
 pub(super) fn analyze_unary_operator(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
-    tag: InstTag,
-    operand: InstRef,
-    operand_const: ConstInt,
-    span: Span,
+    op: UnaryOp,
 ) -> TirRef {
-    let sub = analyze_expr(sema, fcx, scope, operand);
+    let UnaryOp {
+        tag,
+        operand,
+        operand_const,
+        span,
+        context,
+    } = op;
+    let sub = analyze_expr_with(
+        sema,
+        fcx,
+        scope,
+        operand,
+        NeverMode::Reject,
+        context.child(),
+    );
     let sub_ty = fcx.builder.ty_of(sub);
     if let Some(recovery) = errors::reject_direct_use(
         sema,

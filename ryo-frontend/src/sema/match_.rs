@@ -19,8 +19,8 @@
 //! continue through both passes.
 
 use super::{
-    FuncCtx, Scope, ScopeParent, Sema, analyze_block, analyze_expr, analyze_expr_allow_never,
-    check_reserved_name, field_list, ordinal, with_struct_shape_notes,
+    FuncCtx, NeverMode, Scope, ScopeParent, Sema, SemaExprContext, analyze_block_with_context,
+    analyze_expr_with, check_reserved_name, field_list, ordinal, with_struct_shape_notes,
 };
 use ryo_core::ast::LitPattern;
 use ryo_core::diag::{Diag, DiagCode};
@@ -99,7 +99,7 @@ pub(crate) struct MatchArmAnalysis {
     /// True when the pattern produced a diagnostic. The match recovers
     /// error-typed when any arm (or the scrutinee) errored; arm typing
     /// skips the arm's typing so the original error doesn't cascade.
-    had_error: bool,
+    pub(crate) had_error: bool,
 }
 
 /// The matchable scrutinee kinds: enums and error sets by nominal
@@ -126,9 +126,9 @@ pub(crate) fn analyze_match(
     fcx: &mut FuncCtx,
     scope: &Scope,
     r: InstRef,
-    span: Span,
+    context: SemaExprContext,
 ) -> TirRef {
-    analyze_match_impl(sema, fcx, scope, r, span, false)
+    analyze_match_impl(sema, fcx, scope, r, false, context)
 }
 
 pub(super) fn analyze_catch(
@@ -136,9 +136,9 @@ pub(super) fn analyze_catch(
     fcx: &mut FuncCtx,
     scope: &Scope,
     r: InstRef,
-    span: Span,
+    context: SemaExprContext,
 ) -> TirRef {
-    analyze_match_impl(sema, fcx, scope, r, span, true)
+    analyze_match_impl(sema, fcx, scope, r, true, context)
 }
 
 mod plan;
@@ -149,8 +149,8 @@ fn analyze_match_impl(
     fcx: &mut FuncCtx,
     scope: &Scope,
     r: InstRef,
-    span: Span,
     catch: bool,
+    context: SemaExprContext,
 ) -> TirRef {
     let uir = sema.uir;
     let scrutinee_ref = if catch {
@@ -158,14 +158,14 @@ fn analyze_match_impl(
     } else {
         uir.match_view(r).scrutinee
     };
-    let (scrutinee, borrowed) = analyze_scrutinee(sema, fcx, scope, scrutinee_ref);
+    let (scrutinee, borrowed) = analyze_scrutinee(sema, fcx, scope, scrutinee_ref, context);
     let plan = prepare_match(sema, fcx, r, catch, scrutinee, borrowed);
     let uir_arms = if catch {
         uir.catch_view(r).arms
     } else {
         uir.match_view(r).arms
     };
-    type_and_emit_match(sema, fcx, scope, &uir_arms, plan.analysis, span, plan.mode)
+    type_and_emit_match(sema, fcx, scope, &uir_arms, plan, context)
 }
 
 // ---------- Arm typing + typed TIR emission ----------
@@ -183,6 +183,7 @@ pub(crate) fn analyze_scrutinee(
     fcx: &mut FuncCtx,
     scope: &Scope,
     scrutinee: InstRef,
+    context: SemaExprContext,
 ) -> (TirRef, bool) {
     let inst = sema.uir.inst(scrutinee);
     if inst.tag == InstTag::Borrow {
@@ -190,7 +191,10 @@ pub(crate) fn analyze_scrutinee(
             InstData::Borrow(inner) => inner,
             _ => unreachable!("Borrow must carry InstData::Borrow"),
         };
-        return (analyze_expr(sema, fcx, scope, inner), true);
+        return (
+            analyze_expr_with(sema, fcx, scope, inner, NeverMode::Reject, context.child()),
+            true,
+        );
     }
     let borrowed = match inst.data {
         InstData::Var(name) => scope.lookup_borrowed(name),
@@ -206,7 +210,17 @@ pub(crate) fn analyze_scrutinee(
         }
         _ => false,
     };
-    (analyze_expr(sema, fcx, scope, scrutinee), borrowed)
+    (
+        analyze_expr_with(
+            sema,
+            fcx,
+            scope,
+            scrutinee,
+            NeverMode::Reject,
+            context.child(),
+        ),
+        borrowed,
+    )
 }
 
 /// One arm's typed body before it is handed to [`TirBuilder::match_expr`].
@@ -376,10 +390,14 @@ fn type_and_emit_match(
     fcx: &mut FuncCtx,
     scope: &Scope,
     uir_arms: &[UirMatchArmView<'_>],
-    mut analysis: MatchAnalysis,
-    span: Span,
-    mode: MatchMode,
+    plan: MatchPlan,
+    context: SemaExprContext,
 ) -> TirRef {
+    let MatchPlan {
+        mut analysis,
+        mode,
+        span,
+    } = plan;
     let mut arms_out: Vec<TypedArm> = Vec::with_capacity(analysis.arms.len());
     let mut owner_tokens: Vec<(u32, TypeId)> = Vec::new();
     for (arm, uir_arm) in analysis.arms.iter().zip(uir_arms) {
@@ -398,15 +416,23 @@ fn type_and_emit_match(
             continue;
         };
         let body = match uir_arm.body {
-            UirArmBodyView::Expr(body_ref) => TypedArmBody::Expr(analyze_expr_allow_never(
+            UirArmBodyView::Expr(body_ref) => TypedArmBody::Expr(analyze_expr_with(
                 sema,
                 fcx,
                 &preparation.scope,
                 body_ref,
+                NeverMode::Allow,
+                context.child(),
             )),
             UirArmBodyView::Stmts(_) => {
                 let stmt_refs: Vec<InstRef> = uir_arm.body.stmts().collect();
-                TypedArmBody::Stmts(analyze_block(sema, fcx, &preparation.scope, &stmt_refs))
+                TypedArmBody::Stmts(analyze_block_with_context(
+                    sema,
+                    fcx,
+                    &preparation.scope,
+                    &stmt_refs,
+                    context.child(),
+                ))
             }
         };
         let (typed, owners, binding_error) = finish_match_arm(sema, fcx, preparation, arm, body);

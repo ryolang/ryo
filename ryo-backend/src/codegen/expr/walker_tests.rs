@@ -47,7 +47,6 @@ fn representation_clif_matches_at_every_depth_limit() {
     }
 }
 
-
 #[test]
 fn control_flow_clif_matches_at_every_depth_limit() {
     let cases = [
