@@ -9,12 +9,41 @@ use ryo_core::tir::{ParamMode, TirRef};
 use ryo_core::types::{StringId, TypeId, VariantKind};
 use ryo_core::uir::{CallView, InstData, InstRef, InstTag, Span};
 
+use super::{DeclId, NeverMode, SemaExprContext, analyze_expr_with};
+
+pub(crate) enum CallPlan {
+    StrMaterialize,
+    BytesMaterialize,
+    Builtin(&'static crate::builtins::BuiltinFunction),
+    Error,
+    UndefinedFunction {
+        name_id: StringId,
+        carriers: Vec<(StringId, VariantKind)>,
+    },
+    User {
+        callee: DeclId,
+        expected: Vec<TypeId>,
+        modes: Vec<ParamMode>,
+        return_type: TypeId,
+    },
+}
+
+impl CallPlan {
+    pub(super) fn expected(&self) -> Option<&[TypeId]> {
+        match self {
+            Self::User { expected, .. } => Some(expected),
+            _ => None,
+        }
+    }
+}
+
 fn analyze_call_args(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     view: &CallView<'_>,
     expected: Option<&[TypeId]>,
+    context: SemaExprContext,
 ) -> Vec<TirRef> {
     view.args
         .iter()
@@ -23,12 +52,78 @@ fn analyze_call_args(
             if let Some(target) = expected.and_then(|types| types.get(index))
                 && sema.uir.inst(arg).tag == InstTag::StructLit
             {
-                super::analyze_struct_lit_with_target(sema, fcx, scope, arg, *target)
+                super::analyze_struct_lit_with_target_and_context(
+                    sema,
+                    fcx,
+                    scope,
+                    arg,
+                    *target,
+                    context.child(),
+                )
             } else {
-                super::analyze_expr(sema, fcx, scope, arg)
+                analyze_expr_with(sema, fcx, scope, arg, NeverMode::Reject, context.child())
             }
         })
         .collect()
+}
+
+pub(crate) fn prepare_call(sema: &mut Sema<'_>, view: &CallView<'_>, span: Span) -> CallPlan {
+    let name_id = view.name;
+    let names = sema.names;
+
+    if name_id == names.str_ && !sema.name_to_decl.contains_key(&name_id) {
+        return CallPlan::StrMaterialize;
+    }
+    if name_id == names.bytes && !sema.name_to_decl.contains_key(&name_id) {
+        return CallPlan::BytesMaterialize;
+    }
+    if let Some(&(_, builtin)) = sema.builtin_by_id.iter().find(|&&(id, _)| id == name_id) {
+        return CallPlan::Builtin(builtin);
+    }
+    if check_reserved_name(
+        sema,
+        name_id,
+        span,
+        "is a syntactic construct, not a callable function; use `for i in range(start, end):`",
+    ) {
+        return CallPlan::Error;
+    }
+
+    let callee = match sema.name_to_decl.get(&name_id).copied() {
+        Some(d) => d,
+        None => {
+            let carriers = enum_variant_carriers(sema, name_id);
+            return CallPlan::UndefinedFunction { name_id, carriers };
+        }
+    };
+    if super::error_inference::is_inferred(sema, callee)
+        && !super::error_inference::resolve_inferred_callee(sema, callee, span)
+    {
+        return CallPlan::Error;
+    }
+
+    let callee_modes: Vec<ParamMode> = sema.uir.func_bodies[callee.index()]
+        .params
+        .iter()
+        .map(|p| p.mode)
+        .collect();
+    let sig = sema
+        .signatures
+        .get(&name_id)
+        .expect("signature must be present once decl exists");
+    let expected: Vec<TypeId> = sig.params.clone();
+    let return_type = sig.return_type;
+    let modes: Vec<ParamMode> = if view.args.len() == callee_modes.len() {
+        callee_modes
+    } else {
+        vec![ParamMode::Borrow; view.args.len()]
+    };
+    CallPlan::User {
+        callee,
+        expected,
+        modes,
+        return_type,
+    }
 }
 
 pub(crate) fn check_call(
@@ -37,63 +132,44 @@ pub(crate) fn check_call(
     scope: &Scope,
     view: &CallView<'_>,
     span: Span,
+    context: SemaExprContext,
+) -> TirRef {
+    let plan = prepare_call(sema, view, span);
+    let arg_tirs = analyze_call_args(sema, fcx, scope, view, plan.expected(), context);
+    finish_call(sema, fcx, scope, view, span, plan, arg_tirs)
+}
+
+pub(crate) fn finish_call(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    view: &CallView<'_>,
+    span: Span,
+    plan: CallPlan,
+    arg_tirs: Vec<TirRef>,
 ) -> TirRef {
     let name_id = view.name;
-    let names = sema.names;
-
-    // M8.4.1.2: `str(view)` materialization — a call-form intercept,
-    // NOT a BUILTINS-table builtin. Type names are not reserved names,
-    // so a user-defined `fn str` must win over the intercept (least
-    // surprise): it fires only when no user declaration carries the name.
-    if name_id == names.str_ && !sema.name_to_decl.contains_key(&name_id) {
-        let arg_tirs = analyze_call_args(sema, fcx, scope, view, None);
-        return emit_str_materialize(sema, fcx, view, &arg_tirs, span);
-    }
-
-    // M8.4.2: `bytes(bview)` materialization — same call-form
-    // intercept rule as `str(view)`: a user-defined `fn bytes` wins.
-    if name_id == names.bytes && !sema.name_to_decl.contains_key(&name_id) {
-        let arg_tirs = analyze_call_args(sema, fcx, scope, view, None);
-        return emit_bytes_materialize(sema, fcx, view, &arg_tirs, span);
-    }
-
-    // Builtins short-circuit: they're not in `signatures` /
-    // `name_to_decl`, so signature resolution and the worklist
-    // never see them.
-    if let Some(&(_, builtin)) = sema.builtin_by_id.iter().find(|&&(id, _)| id == name_id) {
-        let arg_tirs = analyze_call_args(sema, fcx, scope, view, None);
-        return emit_builtin_call(sema, fcx, scope, view, &arg_tirs, span, builtin);
-    }
-
-    if check_reserved_name(
-        sema,
-        name_id,
-        span,
-        "is a syntactic construct, not a callable function; use `for i in range(start, end):`",
-    ) {
-        let _arg_tirs = analyze_call_args(sema, fcx, scope, view, None);
-        return fcx.builder.unreachable(sema.pool.error_type(), span);
-    }
-
-    let callee = match sema.name_to_decl.get(&name_id).copied() {
-        Some(d) => d,
-        None => {
-            let _arg_tirs = analyze_call_args(sema, fcx, scope, view, None);
-            // `Some(1)` — the callee name may be an enum variant
-            // written without its enum. Name every enum declaring it
-            // (sorted for a stable message) and show the construct
-            // spelling; still E0011 — the name is no function.
-            let carriers = enum_variant_carriers(sema, name_id);
+    match &plan {
+        CallPlan::StrMaterialize => {
+            return emit_str_materialize(sema, fcx, view, &arg_tirs, span);
+        }
+        CallPlan::BytesMaterialize => {
+            return emit_bytes_materialize(sema, fcx, view, &arg_tirs, span);
+        }
+        CallPlan::Builtin(builtin) => {
+            return emit_builtin_call(sema, fcx, scope, view, &arg_tirs, span, builtin);
+        }
+        CallPlan::UndefinedFunction { name_id, carriers } => {
             if carriers.is_empty() {
-                if !super::errors::is_rejected_error_declaration(sema, name_id) {
+                if !super::errors::is_rejected_error_declaration(sema, *name_id) {
                     sema.sink.emit(Diag::error(
                         span,
                         DiagCode::UndefinedFunction,
-                        format!("undefined function: '{}'", sema.pool.str(name_id)),
+                        format!("undefined function: '{}'", sema.pool.str(*name_id)),
                     ));
                 }
             } else {
-                let name = sema.pool.str(name_id).to_string();
+                let name = sema.pool.str(*name_id).to_string();
                 let mut list = carriers
                     .iter()
                     .take(3)
@@ -106,10 +182,6 @@ pub(crate) fn check_call(
                 let (first, kind) = carriers[0];
                 let first = sema.pool.str(first);
                 let plural = if carriers.len() > 1 { "s" } else { "" };
-                // The example keeps the matched variant's payload
-                // shape: named payloads construct with braces, tuple
-                // payloads with parens, unit variants with no
-                // argument list at all.
                 let example = match kind {
                     VariantKind::Unit => format!("{first}.{name}"),
                     VariantKind::Tuple => format!("{first}.{name}(...)"),
@@ -125,42 +197,18 @@ pub(crate) fn check_call(
             }
             return fcx.builder.unreachable(sema.pool.error_type(), span);
         }
-    };
-    if super::error_inference::is_inferred(sema, callee)
-        && !super::error_inference::resolve_inferred_callee(sema, callee, span)
-    {
-        let _arg_tirs = analyze_call_args(sema, fcx, scope, view, None);
-        return fcx.builder.unreachable(sema.pool.error_type(), span);
+        CallPlan::Error => return fcx.builder.unreachable(sema.pool.error_type(), span),
+        CallPlan::User { .. } => {}
     }
-
-    // Snapshot the callee's per-parameter modes from its UIR
-    // body so we can stamp `ParamMode`s without holding a borrow on
-    // `sema` through the per-argument diagnostics below.
-    let callee_modes: Vec<ParamMode> = sema.uir.func_bodies[callee.index()]
-        .params
-        .iter()
-        .map(|p| p.mode)
-        .collect();
-
-    let sig = sema
-        .signatures
-        .get(&name_id)
-        .expect("signature must be present once decl exists");
-
-    // Snapshot the parts of `sig` we need so we can release the
-    // borrow on `sema` before emitting per-argument diagnostics.
-    let expected: Vec<TypeId> = sig.params.clone();
-    let return_type = sig.return_type;
-    // One mode per call-site argument, stamped from the callee
-    // signature's parameter modes. When the arity mismatches we
-    // fall back to all-Borrow over the actual argument count so the
-    // encoded payload stays well-formed on the error path.
-    let modes: Vec<ParamMode> = if view.args.len() == callee_modes.len() {
-        callee_modes.clone()
-    } else {
-        vec![ParamMode::Borrow; view.args.len()]
+    let CallPlan::User {
+        callee,
+        expected,
+        modes,
+        return_type,
+    } = plan
+    else {
+        unreachable!()
     };
-    let arg_tirs = analyze_call_args(sema, fcx, scope, view, Some(&expected));
 
     // Per-argument validation may replace an arg's TirRef with a
     // conversion inst (M8.4 §3.4), so the call is built from this

@@ -10,6 +10,11 @@ use ryo_core::uir::{InstData, InstRef, InstTag, Span, StructLitView, Uir};
 
 mod methods;
 mod operators;
+pub(crate) mod walker;
+pub(crate) use walker::{NeverMode, SemaExprContext};
+use walker::{analyze_expr_machine, analyze_struct_lit_machine, is_generic_expr_tag};
+#[cfg(test)]
+mod walker_tests;
 
 /// Resolve a user-spelled variable read. The `__ryo_` namespace belongs
 /// to compiler-generated temporaries (nested-destructuring temps,
@@ -77,18 +82,34 @@ fn resolve_temp_read(sema: &mut Sema<'_>, fcx: &mut FuncCtx, name: StringId, spa
 /// `panic` call) is rejected: `panic` may only appear as a bare
 /// statement, never where a value is required (return operand,
 /// operator operands, call args, conditions, slice/range bounds).
-/// All recursive descent goes through this wrapper, so the rule
-/// covers every operand position uniformly. The never-tolerant
-/// entry points — a bare ExprStmt and the binding sites, which run
-/// their own valueless-RHS check — call [`analyze_expr_allow_never`].
-pub(crate) fn analyze_expr(
+/// Recursive descent carries a depth context through `analyze_expr_with`.
+/// Bare ExprStmt and binding sites use `NeverMode::Allow` and run their
+/// own valueless-RHS checks.
+pub(crate) fn analyze_expr_with(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     r: InstRef,
+    mode: NeverMode,
+    context: SemaExprContext,
 ) -> TirRef {
-    let t = analyze_expr_allow_never(sema, fcx, scope, r);
-    if sema.pool.is_never(fcx.builder.ty_of(t)) {
+    let t = analyze_expr_allow_never_with(sema, fcx, scope, r, context);
+    if mode == NeverMode::Reject {
+        let rejected = reject_never(sema, fcx, r, t);
+        fcx.inst_map[r.index()] = Some(rejected);
+        rejected
+    } else {
+        t
+    }
+}
+
+pub(crate) fn reject_never(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    r: InstRef,
+    value: TirRef,
+) -> TirRef {
+    if sema.pool.is_never(fcx.builder.ty_of(value)) {
         sema.sink.emit(Diag::error(
             sema.uir.span(r),
             DiagCode::VoidValueInExpression,
@@ -98,20 +119,24 @@ pub(crate) fn analyze_expr(
             .builder
             .unreachable(sema.pool.error_type(), sema.uir.span(r));
     }
-    t
+    value
 }
 
-pub(crate) fn analyze_expr_allow_never(
+fn analyze_expr_allow_never_with(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     r: InstRef,
+    context: SemaExprContext,
 ) -> TirRef {
     if let Some(t) = fcx.inst_map[r.index()] {
         return t;
     }
 
     let inst = sema.uir.inst(r);
+    if context.depth >= context.limit && is_generic_expr_tag(inst.tag) {
+        return analyze_expr_machine(sema, fcx, scope, r, context);
+    }
     let span = sema.uir.span(r);
     let emitted = match inst.tag {
         InstTag::IntLiteral => match inst.data {
@@ -160,31 +185,32 @@ pub(crate) fn analyze_expr_allow_never(
         | InstTag::LtEq
         | InstTag::GtEq
         | InstTag::And
-        | InstTag::Or => analyze_binop_chain(sema, fcx, scope, r),
-        InstTag::Neg | InstTag::Not => analyze_unary_chain(sema, fcx, scope, r),
+        | InstTag::Or => analyze_binop_d(sema, fcx, scope, r, context),
+        InstTag::Neg | InstTag::Not => analyze_unary_chain(sema, fcx, scope, r, context),
         InstTag::Call => {
             let view = sema.uir.call_view(r);
-            check_call(sema, fcx, scope, &view, span)
+            check_call(sema, fcx, scope, &view, span, context)
         }
         InstTag::MethodCall => {
             let view = sema.uir.method_call_view(r);
-            if let Some(recovery) = methods::lowercase_enum_method_receiver(
+            if let Some(recovery) =
+                methods::lowercase_enum_method_receiver(sema, fcx, scope, &view, span, context)
+            {
+                return recovery;
+            }
+            let receiver_tir = analyze_expr_with(
                 sema,
                 fcx,
                 scope,
                 view.receiver,
-                view.name,
-                &view.args,
-                span,
-            ) {
-                return recovery;
-            }
-            let receiver_tir = analyze_expr(sema, fcx, scope, view.receiver);
+                NeverMode::Reject,
+                context.child(),
+            );
             let receiver_ty = fcx.builder.ty_of(receiver_tir);
             let ids = sema.names;
 
             for arg in &view.args {
-                analyze_expr(sema, fcx, scope, arg);
+                analyze_expr_with(sema, fcx, scope, arg, NeverMode::Reject, context.child());
             }
             if super::errors::is_error_union(sema, receiver_ty) {
                 let diag = if view.name == ids.message {
@@ -304,7 +330,14 @@ pub(crate) fn analyze_expr_allow_never(
                 InstData::Slice { base, start, end } => (base, start, end),
                 _ => unreachable!("Slice must carry InstData::Slice"),
             };
-            let base_tir = analyze_expr(sema, fcx, scope, base_uir);
+            let base_tir = analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                base_uir,
+                NeverMode::Reject,
+                context.child(),
+            );
             let base_ty = fcx.builder.ty_of(base_tir);
             let base_kind = sema.pool.kind(base_ty);
             // §3.2 P1: a slice projects an owner (`str`/`bytes`) or
@@ -325,8 +358,8 @@ pub(crate) fn analyze_expr_allow_never(
                 ));
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
-            let start_tir = start_uir.map(|b| check_slice_bound(sema, fcx, scope, b));
-            let end_tir = end_uir.map(|b| check_slice_bound(sema, fcx, scope, b));
+            let start_tir = start_uir.map(|b| check_slice_bound(sema, fcx, scope, b, context));
+            let end_tir = end_uir.map(|b| check_slice_bound(sema, fcx, scope, b, context));
             let view_ty = match base_kind {
                 TypeKind::Str | TypeKind::View(ViewKind::Str) => sema.pool.str_view(),
                 TypeKind::Bytes | TypeKind::View(ViewKind::Bytes) => sema.pool.bytes_view(),
@@ -348,7 +381,14 @@ pub(crate) fn analyze_expr_allow_never(
                 InstData::BinOp { lhs, rhs } => (lhs, rhs),
                 _ => unreachable!("Index must carry InstData::BinOp"),
             };
-            let base_tir = analyze_expr(sema, fcx, scope, base_uir);
+            let base_tir = analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                base_uir,
+                NeverMode::Reject,
+                context.child(),
+            );
             let base_ty = fcx.builder.ty_of(base_tir);
             let base_kind = sema.pool.kind(base_ty);
             // M8.4.2 stopgap: scalar indexing exists for bytes/bytesview
@@ -375,7 +415,14 @@ pub(crate) fn analyze_expr_allow_never(
                     return fcx.builder.unreachable(sema.pool.error_type(), span);
                 }
             }
-            let index_tir = analyze_expr(sema, fcx, scope, index_uir);
+            let index_tir = analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                index_uir,
+                NeverMode::Reject,
+                context.child(),
+            );
             let index_ty = fcx.builder.ty_of(index_tir);
             if sema.pool.kind(index_ty) != TypeKind::Int && !sema.pool.is_error(index_ty) {
                 sema.sink.emit(Diag::error(
@@ -392,22 +439,22 @@ pub(crate) fn analyze_expr_allow_never(
                 span,
             )
         }
-        InstTag::Borrow => analyze_borrow(sema, fcx, scope, r, inst.data, span),
-        InstTag::StructLit => analyze_struct_lit(sema, fcx, scope, r, span, None),
-        InstTag::EnumLit => analyze_variant_construct(sema, fcx, scope, r, span),
+        InstTag::Borrow => analyze_borrow(sema, fcx, scope, r, inst.data, span, context),
+        InstTag::StructLit => analyze_struct_lit(sema, fcx, scope, r, span, None, context),
+        InstTag::EnumLit => analyze_variant_construct(sema, fcx, scope, r, span, context),
         InstTag::ErrorConstruct => {
-            super::errors::analyze_error_construct(sema, fcx, scope, r, span)
+            super::errors::analyze_error_construct(sema, fcx, scope, r, span, context)
         }
         InstTag::Match => {
-            let emitted = analyze_match(sema, fcx, scope, r, span);
+            let emitted = analyze_match(sema, fcx, scope, r, context);
             if sema.uir.is_direct_catch_match(r) {
                 fcx.builder.mark_direct_catch_match(emitted);
             }
             emitted
         }
-        InstTag::Catch => super::errors::analyze_catch(sema, fcx, scope, r, span),
-        InstTag::Try => super::errors::analyze_try(sema, fcx, scope, r, span),
-        InstTag::FieldAccess => analyze_field_access(sema, fcx, scope, r, span),
+        InstTag::Catch => super::errors::analyze_catch(sema, fcx, scope, r, context),
+        InstTag::Try => super::errors::analyze_try(sema, fcx, scope, r, span, context),
+        InstTag::FieldAccess => analyze_field_access(sema, fcx, scope, r, span, context),
         // UIR trusted-producer contract (see the `uir.rs` module
         // header): astgen is the only producer, so a non-expression tag
         // reaching `analyze_expr` is a compiler bug, not user input.
@@ -443,11 +490,9 @@ fn is_chain_binop_tag(tag: InstTag) -> bool {
     )
 }
 
-/// Analyze one binary-operator link: demand-analyze the rhs, run the
-/// §18 constant checks against the accumulated lhs, and lower through
-/// `check_binary_op`. Shared by the single-link fast path and the
-/// chain walk's fold. `lhs_const` is the folded constant of the
-/// accumulated lhs (`const_eval_int` of it).
+/// Analyze one binary-operator link: run the §18 constant checks
+/// against the folded operands and lower the analyzed operands through
+/// `check_binary_op`. Shared by the chain walks.
 ///
 /// Returns `(tir, node_const, memoize)`. The early-error paths
 /// (division/modulo by zero, constant overflow) return `memoize =
@@ -460,14 +505,13 @@ fn is_chain_binop_tag(tag: InstTag) -> bool {
 fn analyze_binop_link(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
-    scope: &Scope,
     tag: InstTag,
     acc: TirRef,
     lhs_const: ConstInt,
-    rhs: InstRef,
+    r2: TirRef,
+    rhs_const: ConstInt,
     span: Span,
 ) -> (TirRef, ConstInt, bool) {
-    let r2 = analyze_expr(sema, fcx, scope, rhs);
     let lhs_ty = fcx.builder.ty_of(acc);
     let rhs_ty = fcx.builder.ty_of(r2);
     // Constant-evaluate pure integer arithmetic for diagnostics.
@@ -482,9 +526,7 @@ fn analyze_binop_link(
     ) && lhs_ty == sema.pool.int()
         && rhs_ty == sema.pool.int();
     if is_int_arith {
-        if matches!(tag, InstTag::Div | InstTag::Mod)
-            && matches!(const_eval_int(sema.uir, rhs), ConstInt::Value(0))
-        {
+        if matches!(tag, InstTag::Div | InstTag::Mod) && matches!(rhs_const, ConstInt::Value(0)) {
             sema.sink.emit(Diag::error(
                 span,
                 DiagCode::DivisionByZero,
@@ -500,7 +542,7 @@ fn analyze_binop_link(
                 false,
             );
         }
-        let node_const = combine_const_int(tag, lhs_const, const_eval_int(sema.uir, rhs));
+        let node_const = combine_const_int(tag, lhs_const, rhs_const);
         if matches!(node_const, ConstInt::Overflow) {
             sema.sink.emit(Diag::error(
                 span,
@@ -526,171 +568,63 @@ fn analyze_binop_link(
     )
 }
 
-/// Analyze a left-associative binary-operator chain iteratively.
-///
-/// The demand recursion descended one stack frame per chain link and
-/// overflowed the compiler's 32 MiB stack around ~7k terms (found by
-/// the 2026-11-04 grammar/recovery fuzz campaign). The walk below keeps
-/// the spine on an explicit `Vec`: each link's lhs is the accumulated
-/// subexpression; its rhs is demand-analyzed through the ordinary path,
-/// so nesting through parens or calls stays recursive exactly as
-/// before. Constant evaluation folds one link at a time — equal to
-/// `const_eval_int` of the accumulated lhs by induction — so a chain is
-/// O(n) instead of re-walking the accumulated subtree per link.
-/// Per-link diagnostics, recovery, and memoization match the old
-/// recursion link for link.
-#[inline]
-fn analyze_binop_chain(
-    sema: &mut Sema<'_>,
-    fcx: &mut FuncCtx,
-    scope: &Scope,
-    root: InstRef,
-) -> TirRef {
-    analyze_binop_d(sema, fcx, scope, root, 0)
-}
-
-/// Operator-chain recursion budget: how many chain links the
-/// old-style recursion may consume before the remaining spine lowers
-/// iteratively (`analyze_binop_spill` / `analyze_unary_spill`). Far
-/// below the compiler thread's 32 MiB stack (a debug frame per link is
-/// kilobytes), far above anything a hand-written expression chains.
+/// Expression recursion budget before the remaining subtree switches to
+/// the generic iterative walker. Far below the compiler thread's stack,
+/// far above ordinary hand-written nesting.
 const CHAIN_RECURSION_LIMIT: u32 = 64;
 
-/// One link of a left-associative binary-operator chain, recursing like
-/// the old demand recursion. Shallow chains (everything hand-written)
-/// pay nothing for the deep-chain machinery; past
-/// [`CHAIN_RECURSION_LIMIT`] links the remaining spine hands off to
-/// the iterative walker so a 100k-term `1+1+...` chain cannot
-/// overflow the stack. Diagnostics, recovery, and memoization match
-/// the old recursion link for link.
+/// One link of a binary-operator chain, recursing like the old demand
+/// recursion. Shallow chains (everything hand-written) pay nothing for
+/// the deep-chain machinery; past [`CHAIN_RECURSION_LIMIT`] links the
+/// remaining subtree hands off to an iterative walker so both left- and
+/// right-nested 100k-term chains avoid stack overflow. Diagnostics,
+/// recovery, and memoization match the old recursion link for link.
 fn analyze_binop_d(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     node: InstRef,
-    depth: u32,
+    context: SemaExprContext,
 ) -> TirRef {
     let inst = sema.uir.inst(node);
     let InstData::BinOp { lhs, rhs } = inst.data else {
         unreachable!("chain tag must carry InstData::BinOp");
     };
     let l = if is_chain_binop_tag(sema.uir.inst(lhs).tag) && fcx.inst_map[lhs.index()].is_none() {
-        if depth < CHAIN_RECURSION_LIMIT {
-            analyze_binop_d(sema, fcx, scope, lhs, depth + 1)
+        if context.depth < context.limit {
+            analyze_binop_d(sema, fcx, scope, lhs, context.child())
         } else {
-            analyze_binop_spill(sema, fcx, scope, lhs)
+            analyze_expr_machine(sema, fcx, scope, lhs, context)
         }
     } else {
-        analyze_expr(sema, fcx, scope, lhs)
+        analyze_expr_with(sema, fcx, scope, lhs, NeverMode::Reject, context.child())
     };
-    let r2 = analyze_expr(sema, fcx, scope, rhs);
-    let lhs_ty = fcx.builder.ty_of(l);
-    let rhs_ty = fcx.builder.ty_of(r2);
-    let span = sema.uir.span(node);
-    // Constant-evaluate pure integer arithmetic for diagnostics.
-    // A constant-zero divisor always panics at runtime (the
-    // codegen zero-divisor guard), so reject it at compile time;
-    // constant overflow is a compile error per §18 (overflow traps
-    // in all build modes). Float `x / 0.0` is IEEE-defined (inf)
-    // and unaffected.
-    if matches!(
+    let r2 = analyze_expr_with(sema, fcx, scope, rhs, NeverMode::Reject, context.child());
+    let (emitted, _, _) = analyze_binop_link(
+        sema,
+        fcx,
         inst.tag,
-        InstTag::Add | InstTag::Sub | InstTag::Mul | InstTag::Div | InstTag::Mod
-    ) && lhs_ty == sema.pool.int()
-        && rhs_ty == sema.pool.int()
-    {
-        if matches!(inst.tag, InstTag::Div | InstTag::Mod)
-            && matches!(const_eval_int(sema.uir, rhs), ConstInt::Value(0))
-        {
-            sema.sink.emit(Diag::error(
-                span,
-                DiagCode::DivisionByZero,
-                if inst.tag == InstTag::Div {
-                    "division by zero".to_string()
-                } else {
-                    "modulo by zero".to_string()
-                },
-            ));
-            return fcx.builder.unreachable(sema.pool.error_type(), span);
-        }
-        if matches!(const_eval_int(sema.uir, node), ConstInt::Overflow) {
-            sema.sink.emit(Diag::error(
-                span,
-                DiagCode::ConstEvalFailure,
-                "integer overflow in constant expression".to_string(),
-            ));
-            return fcx.builder.unreachable(sema.pool.error_type(), span);
-        }
-    }
-    let emitted = check_binary_op(sema, fcx, inst.tag, lhs_ty, rhs_ty, l, r2, span);
+        l,
+        const_eval_int(sema.uir, lhs),
+        r2,
+        const_eval_int(sema.uir, rhs),
+        sema.uir.span(node),
+    );
     fcx.inst_map[node.index()] = Some(emitted);
     emitted
 }
 
-/// Iterative fallback for the deep tail of a binary-operator chain —
-/// see [`analyze_binop_d`]. Walks the remaining spine on an explicit
-/// stack, folding constants incrementally so the deep tail stays O(n).
-/// Per-link diagnostics, recovery, and memoization match the recursion.
-fn analyze_binop_spill(
-    sema: &mut Sema<'_>,
-    fcx: &mut FuncCtx,
-    scope: &Scope,
-    root: InstRef,
-) -> TirRef {
-    // Spine links, outermost first. Stop descending at an already-
-    // analyzed link (`inst_map` hit) — demand analysis memoizes every
-    // analyzed inst, and re-analyzing would emit duplicate TIR.
-    let mut spine = ChainSpine::new();
-    let inner_lhs = {
-        let mut cur = root;
-        loop {
-            let inst = sema.uir.inst(cur);
-            let InstData::BinOp { lhs, .. } = inst.data else {
-                unreachable!("chain tag must carry InstData::BinOp");
-            };
-            spine.push(cur);
-            if is_chain_binop_tag(sema.uir.inst(lhs).tag) && fcx.inst_map[lhs.index()].is_none() {
-                cur = lhs;
-            } else {
-                break lhs;
-            }
-        }
-    };
-    let mut acc = analyze_expr(sema, fcx, scope, inner_lhs);
-    // Constant value of the accumulated lhs; kept in lockstep with
-    // `acc` so per-link checks are O(1).
-    let mut acc_const = const_eval_int(sema.uir, inner_lhs);
-    spine.fold_rev(|node| {
-        let inst = sema.uir.inst(node);
-        let span = sema.uir.span(node);
-        let InstData::BinOp { rhs, .. } = inst.data else {
-            unreachable!("chain tag must carry InstData::BinOp");
-        };
-        let (next, node_const, memo) =
-            analyze_binop_link(sema, fcx, scope, inst.tag, acc, acc_const, rhs, span);
-        // Early-error links are not memoized, matching the old
-        // recursion's early return; keep folding so outer links still
-        // see the error-typed accumulator.
-        if memo {
-            fcx.inst_map[node.index()] = Some(next);
-        }
-        acc_const = node_const;
-        acc = next;
-    });
-    acc
-}
-
-/// Analyze a unary-operator chain (`not not ...`, `- - ...`) — depth-
-/// bounded recursion like [`analyze_binop_chain`], iterative spill for
-/// the deep tail.
+/// Analyze a unary-operator chain (`not not ...`, `- - ...`) with the
+/// same depth-bounded recursion and generic fallback as binary operators.
 #[inline]
 fn analyze_unary_chain(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     root: InstRef,
+    context: SemaExprContext,
 ) -> TirRef {
-    analyze_unary_d(sema, fcx, scope, root, 0)
+    analyze_unary_d(sema, fcx, scope, root, context)
 }
 
 fn analyze_unary_d(
@@ -698,7 +632,7 @@ fn analyze_unary_d(
     fcx: &mut FuncCtx,
     scope: &Scope,
     node: InstRef,
-    depth: u32,
+    context: SemaExprContext,
 ) -> TirRef {
     let inst = sema.uir.inst(node);
     let InstData::UnOp(operand) = inst.data else {
@@ -709,79 +643,55 @@ fn analyze_unary_d(
     if matches!(sema.uir.inst(operand).tag, InstTag::Neg | InstTag::Not)
         && fcx.inst_map[operand.index()].is_none()
     {
-        if depth < CHAIN_RECURSION_LIMIT {
-            analyze_unary_d(sema, fcx, scope, operand, depth + 1);
+        if context.depth < context.limit {
+            analyze_unary_d(sema, fcx, scope, operand, context.child());
         } else {
-            analyze_unary_spill(sema, fcx, scope, operand);
+            analyze_expr_machine(sema, fcx, scope, operand, context);
         }
     } else {
-        analyze_expr(sema, fcx, scope, operand);
+        analyze_expr_with(
+            sema,
+            fcx,
+            scope,
+            operand,
+            NeverMode::Reject,
+            context.child(),
+        );
     }
     let span = sema.uir.span(node);
-    let emitted = operators::analyze_unary_operator(
+    let (emitted, _) = analyze_unary_link(
         sema,
         fcx,
         scope,
-        inst.tag,
-        operand,
-        const_eval_int(sema.uir, operand),
-        span,
+        operators::UnaryOp {
+            tag: inst.tag,
+            operand,
+            operand_const: const_eval_int(sema.uir, operand),
+            span,
+            context,
+        },
     );
     fcx.inst_map[node.index()] = Some(emitted);
     emitted
 }
 
-/// Iterative fallback for the deep tail of a unary-operator chain —
-/// see [`analyze_unary_d`]. `sub` is the already-analyzed operand Tir;
-/// only the per-link Neg/Not lowering runs here, folding the constant
-/// incrementally so the deep tail stays O(n).
-fn analyze_unary_spill(
+fn analyze_unary_link(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
-    root: InstRef,
-) -> TirRef {
-    let mut spine = ChainSpine::new();
-    let inner = {
-        let mut cur = root;
-        loop {
-            let inst = sema.uir.inst(cur);
-            let InstData::UnOp(operand) = inst.data else {
-                unreachable!("unary chain tag must carry InstData::UnOp");
-            };
-            spine.push(cur);
-            if matches!(sema.uir.inst(operand).tag, InstTag::Neg | InstTag::Not)
-                && fcx.inst_map[operand.index()].is_none()
-            {
-                cur = operand;
-            } else {
-                break operand;
-            }
+    op: operators::UnaryOp,
+) -> (TirRef, ConstInt) {
+    let operand_const = op.operand_const;
+    let emitted = operators::analyze_unary_operator(sema, fcx, scope, op);
+    let node_const = if fcx.builder.ty_of(emitted) == sema.pool.int() {
+        match operand_const {
+            ConstInt::Value(v) => v.checked_neg().map_or(ConstInt::Overflow, ConstInt::Value),
+            other => other,
         }
+    } else {
+        ConstInt::NotConst
     };
-    let mut acc = analyze_expr(sema, fcx, scope, inner);
-    let mut acc_const = const_eval_int(sema.uir, inner);
-    spine.fold_rev(|node| {
-        let inst = sema.uir.inst(node);
-        let span = sema.uir.span(node);
-        let InstData::UnOp(operand) = inst.data else {
-            unreachable!("unary chain tag must carry InstData::UnOp");
-        };
-        acc =
-            operators::analyze_unary_operator(sema, fcx, scope, inst.tag, operand, acc_const, span);
-        if fcx.builder.ty_of(acc) == sema.pool.int() {
-            // Only Neg reaches here with an int operand; keep the
-            // folded constant in lockstep with `acc`.
-            acc_const = match acc_const {
-                ConstInt::Value(v) => v.checked_neg().map_or(ConstInt::Overflow, ConstInt::Value),
-                other => other,
-            };
-        } else {
-            acc_const = ConstInt::NotConst;
-        }
-        fcx.inst_map[node.index()] = Some(acc);
-    });
-    acc
+    (emitted, node_const)
 }
 
 /// The `&` marker (M8.3): lowers to the inner value's TirRef.
@@ -795,6 +705,7 @@ fn analyze_borrow(
     r: InstRef,
     data: InstData,
     span: Span,
+    context: SemaExprContext,
 ) -> TirRef {
     let inner = match data {
         InstData::Borrow(inner) => inner,
@@ -809,7 +720,7 @@ fn analyze_borrow(
             "`&` is only valid as an argument to an `inout` parameter".to_string(),
         ));
     }
-    analyze_expr(sema, fcx, scope, inner)
+    analyze_expr_with(sema, fcx, scope, inner, NeverMode::Reject, context.child())
 }
 
 /// Struct literal `Name{field = value, ...}` (M9) or the anonymous
@@ -821,18 +732,22 @@ fn analyze_borrow(
 /// recover with an error-typed `Unreachable`. The anonymous path
 /// infers the structural type from the field values — see
 /// [`analyze_anon_struct_lit`].
-pub(crate) fn analyze_struct_lit_with_target(
+pub(crate) fn analyze_struct_lit_with_target_and_context(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     r: InstRef,
     target: TypeId,
+    context: SemaExprContext,
 ) -> TirRef {
     if let Some(t) = fcx.inst_map[r.index()] {
         return t;
     }
+    if context.depth >= context.limit {
+        return analyze_struct_lit_machine(sema, fcx, scope, r, target, context);
+    }
     let span = sema.uir.span(r);
-    let emitted = analyze_struct_lit(sema, fcx, scope, r, span, Some(target));
+    let emitted = analyze_struct_lit(sema, fcx, scope, r, span, Some(target), context);
     fcx.inst_map[r.index()] = Some(emitted);
     emitted
 }
@@ -844,10 +759,34 @@ fn analyze_struct_lit(
     r: InstRef,
     span: Span,
     expected: Option<TypeId>,
+    context: SemaExprContext,
+) -> TirRef {
+    analyze_struct_lit_with_skips(sema, fcx, scope, r, span, expected, context, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_struct_lit_with_skips(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    span: Span,
+    expected: Option<TypeId>,
+    context: SemaExprContext,
+    diagnosed: Option<std::collections::HashSet<usize>>,
 ) -> TirRef {
     let view = sema.uir.struct_lit_view(r);
     let Some(name) = view.name else {
-        return analyze_anon_struct_lit(sema, fcx, scope, &view, span, expected);
+        return analyze_anon_struct_lit(
+            sema,
+            fcx,
+            scope,
+            &view,
+            span,
+            expected,
+            context,
+            diagnosed.as_ref(),
+        );
     };
     let Some(&sty) = sema.struct_types.get(&name) else {
         // Never declared — this one is on the user.
@@ -871,42 +810,66 @@ fn analyze_struct_lit(
     // top is noise. Mistyped-but-present fields do not set this: a
     // type mismatch is not a shape error.
     let mut field_errored = false;
-    for (fname, value_ref) in view.fields() {
+    for (index, (fname, value_ref)) in view.fields().enumerate() {
+        let skip = diagnosed
+            .as_ref()
+            .is_some_and(|fields| fields.contains(&index));
         let fspan = sema.uir.span(value_ref);
         let Some(field) = sema.pool.struct_field(sty, fname) else {
             field_errored = true;
-            sema.sink.emit(Diag::error(
-                fspan,
-                DiagCode::UnknownField,
-                format!(
-                    "'{}' has no field '{}' (fields: {})",
-                    sema.pool.str(sview.name),
-                    sema.pool.str(fname),
-                    field_list(sema.pool, &sview.fields),
-                ),
-            ));
+            if !skip {
+                sema.sink.emit(Diag::error(
+                    fspan,
+                    DiagCode::UnknownField,
+                    format!(
+                        "'{}' has no field '{}' (fields: {})",
+                        sema.pool.str(sview.name),
+                        sema.pool.str(fname),
+                        field_list(sema.pool, &sview.fields),
+                    ),
+                ));
+            }
             // Still analyze the initializer so diagnostics inside it
             // (unknown names, type errors) are reported.
-            analyze_expr(sema, fcx, scope, value_ref);
+            analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                value_ref,
+                NeverMode::Reject,
+                context.child(),
+            );
             continue;
         };
         if by_index[field.idx as usize].is_some() {
             field_errored = true;
-            sema.sink.emit(Diag::error(
-                fspan,
-                DiagCode::DuplicateStructField,
-                format!(
-                    "field '{}' is specified more than once",
-                    sema.pool.str(fname)
-                ),
-            ));
+            if !skip {
+                sema.sink.emit(Diag::error(
+                    fspan,
+                    DiagCode::DuplicateStructField,
+                    format!(
+                        "field '{}' is specified more than once",
+                        sema.pool.str(fname)
+                    ),
+                ));
+            }
             // Same recovery: analyze the duplicate's initializer too.
-            analyze_expr(sema, fcx, scope, value_ref);
+            analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                value_ref,
+                NeverMode::Reject,
+                context.child(),
+            );
             continue;
         }
-        let value = analyze_struct_field_value(sema, fcx, scope, value_ref, field.ty);
+        let value = analyze_struct_field_value(sema, fcx, scope, value_ref, field.ty, context);
         let vty = fcx.builder.ty_of(value);
-        if !super::errors::is_error_union(sema, field.ty) && !sema.pool.compatible(vty, field.ty) {
+        if !skip
+            && !super::errors::is_error_union(sema, field.ty)
+            && !sema.pool.compatible(vty, field.ty)
+        {
             sema.sink.emit(Diag::error(
                 fspan,
                 DiagCode::TypeMismatch,
@@ -958,11 +921,26 @@ fn analyze_struct_field_value(
     scope: &Scope,
     value_ref: InstRef,
     target: TypeId,
+    context: SemaExprContext,
 ) -> TirRef {
     let mut value = if sema.uir.inst(value_ref).tag == InstTag::StructLit {
-        analyze_struct_lit_with_target(sema, fcx, scope, value_ref, target)
+        analyze_struct_lit_with_target_and_context(
+            sema,
+            fcx,
+            scope,
+            value_ref,
+            target,
+            context.child(),
+        )
     } else {
-        analyze_expr(sema, fcx, scope, value_ref)
+        analyze_expr_with(
+            sema,
+            fcx,
+            scope,
+            value_ref,
+            NeverMode::Reject,
+            context.child(),
+        )
     };
     if super::errors::is_error_union(sema, target) {
         value = super::errors::coerce_to_error_union(
@@ -1003,6 +981,19 @@ fn analyze_variant_construct(
     scope: &Scope,
     r: InstRef,
     span: Span,
+    context: SemaExprContext,
+) -> TirRef {
+    analyze_variant_construct_with_skips(sema, fcx, scope, r, span, context, None)
+}
+
+fn analyze_variant_construct_with_skips(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    span: Span,
+    context: SemaExprContext,
+    diagnosed: Option<std::collections::HashSet<usize>>,
 ) -> TirRef {
     let view = sema.uir.enum_lit_view(r);
     let ety = view.ty;
@@ -1080,7 +1071,10 @@ fn analyze_variant_construct(
     // shape is untrustworthy — a derived "missing field(s)" error on
     // top is noise (the struct-literal precedent).
     let mut field_errored = false;
-    for (fidx, value_ref) in view.fields() {
+    for (index, (fidx, value_ref)) in view.fields().enumerate() {
+        let skip = diagnosed
+            .as_ref()
+            .is_some_and(|fields| fields.contains(&index));
         let fspan = sema.uir.span(value_ref);
         if fidx == enum_lit_extra::ORPHANED_FIELD {
             // A braced field astgen didn't recognize (E0038 already
@@ -1090,7 +1084,14 @@ fn analyze_variant_construct(
             // missing-fields error, matching the unknown/duplicate
             // field recoveries below.
             field_errored = true;
-            analyze_expr(sema, fcx, scope, value_ref);
+            analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                value_ref,
+                NeverMode::Reject,
+                context.child(),
+            );
             continue;
         }
         let Some(field) = fields.get(fidx as usize) else {
@@ -1114,30 +1115,55 @@ fn analyze_variant_construct(
                     field_list(sema.pool, &fields),
                 )
             };
-            sema.sink
-                .emit(Diag::error(fspan, DiagCode::UnknownVariantField, message));
+            if !skip {
+                sema.sink
+                    .emit(Diag::error(fspan, DiagCode::UnknownVariantField, message));
+            }
             // Still analyze the arg so diagnostics inside it surface.
-            analyze_expr(sema, fcx, scope, value_ref);
+            analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                value_ref,
+                NeverMode::Reject,
+                context.child(),
+            );
             continue;
         };
         if by_index[fidx as usize].is_some() {
             field_errored = true;
-            sema.sink.emit(Diag::error(
-                fspan,
-                DiagCode::DuplicateVariantField,
-                format!(
-                    "field '{}' is specified more than once in variant '{}' of enum '{}'",
-                    sema.pool.str(field.name),
-                    sema.pool.str(vname),
-                    sema.pool.str(ename),
-                ),
-            ));
-            analyze_expr(sema, fcx, scope, value_ref);
+            if !skip {
+                sema.sink.emit(Diag::error(
+                    fspan,
+                    DiagCode::DuplicateVariantField,
+                    format!(
+                        "field '{}' is specified more than once in variant '{}' of enum '{}'",
+                        sema.pool.str(field.name),
+                        sema.pool.str(vname),
+                        sema.pool.str(ename),
+                    ),
+                ));
+            }
+            analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                value_ref,
+                NeverMode::Reject,
+                context.child(),
+            );
             continue;
         }
-        let value = analyze_expr(sema, fcx, scope, value_ref);
+        let value = analyze_expr_with(
+            sema,
+            fcx,
+            scope,
+            value_ref,
+            NeverMode::Reject,
+            context.child(),
+        );
         let vty = fcx.builder.ty_of(value);
-        if !sema.pool.compatible(vty, field.ty) {
+        if !skip && !sema.pool.compatible(vty, field.ty) {
             // Tuple payloads carry synthesized "0"/"1" field names the
             // user never wrote — name the argument position instead
             // (1-based, matching how developers count call arguments).
@@ -1217,6 +1243,7 @@ fn analyze_variant_construct(
 /// expected anonymous shape instead supplies field targets so error-union
 /// fields coerce recursively. Shape and non-union mismatches still infer
 /// the source type for the enclosing compatibility check.
+#[allow(clippy::too_many_arguments)]
 fn analyze_anon_struct_lit(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -1224,6 +1251,8 @@ fn analyze_anon_struct_lit(
     view: &StructLitView<'_>,
     span: Span,
     expected: Option<TypeId>,
+    context: SemaExprContext,
+    diagnosed: Option<&std::collections::HashSet<usize>>,
 ) -> TirRef {
     let expected = expected.and_then(|ty| {
         if sema.pool.kind(ty) != TypeKind::AnonStruct {
@@ -1243,26 +1272,43 @@ fn analyze_anon_struct_lit(
     let mut poisoned = false;
     let mut expected_compatible = true;
     for (index, (fname, value_ref)) in view.fields().enumerate() {
+        let skip = diagnosed.is_some_and(|fields| fields.contains(&index));
         let fspan = sema.uir.span(value_ref);
         if fields.iter().any(|(n, _, _)| *n == fname) {
-            sema.sink.emit(Diag::error(
-                fspan,
-                DiagCode::DuplicateStructField,
-                format!(
-                    "field '{}' is specified more than once",
-                    sema.pool.str(fname)
-                ),
-            ));
+            if !skip {
+                sema.sink.emit(Diag::error(
+                    fspan,
+                    DiagCode::DuplicateStructField,
+                    format!(
+                        "field '{}' is specified more than once",
+                        sema.pool.str(fname)
+                    ),
+                ));
+            }
             // Same recovery as the named path: analyze the duplicate's
             // initializer so its own errors still surface.
-            analyze_expr(sema, fcx, scope, value_ref);
+            analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                value_ref,
+                NeverMode::Reject,
+                context.child(),
+            );
             continue;
         }
         let expected_field = expected.as_ref().map(|(_, fields)| fields[index]);
         let value = if let Some(field) = expected_field {
-            analyze_struct_field_value(sema, fcx, scope, value_ref, field.ty)
+            analyze_struct_field_value(sema, fcx, scope, value_ref, field.ty, context)
         } else {
-            analyze_expr(sema, fcx, scope, value_ref)
+            analyze_expr_with(
+                sema,
+                fcx,
+                scope,
+                value_ref,
+                NeverMode::Reject,
+                context.child(),
+            )
         };
         let vty = fcx.builder.ty_of(value);
         if let Some(field) = expected_field
@@ -1274,7 +1320,7 @@ fn analyze_anon_struct_lit(
         if sema.pool.is_error(vty) {
             poisoned = true;
         }
-        if sema.pool.is_view(vty) {
+        if !skip && sema.pool.is_view(vty) {
             sema.sink.emit(Diag::error(
                 fspan,
                 DiagCode::ViewFieldType,
@@ -1314,6 +1360,7 @@ fn analyze_field_access(
     scope: &Scope,
     r: InstRef,
     span: Span,
+    context: SemaExprContext,
 ) -> TirRef {
     let (object, field) = match sema.uir.inst(r).data {
         InstData::FieldAccess { object, field } => (object, field),
@@ -1349,7 +1396,7 @@ fn analyze_field_access(
             }
         }
     }
-    let obj = analyze_expr(sema, fcx, scope, object);
+    let obj = analyze_expr_with(sema, fcx, scope, object, NeverMode::Reject, context.child());
     analyze_value_field_access(sema, fcx, obj, field, span)
 }
 
@@ -1607,8 +1654,9 @@ pub(crate) fn check_slice_bound(
     fcx: &mut FuncCtx,
     scope: &Scope,
     b: InstRef,
+    context: SemaExprContext,
 ) -> TirRef {
-    let t = analyze_expr(sema, fcx, scope, b);
+    let t = analyze_expr_with(sema, fcx, scope, b, NeverMode::Reject, context.child());
     let ty = fcx.builder.ty_of(t);
     if sema.pool.kind(ty) != TypeKind::Int && !sema.pool.is_error(ty) {
         sema.sink.emit(Diag::error(

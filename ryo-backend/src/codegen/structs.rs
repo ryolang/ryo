@@ -19,6 +19,7 @@ use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, StructField, TypeId, TypeKind};
 
 use super::enums::is_enum_type;
+use super::expr::walker::{CodegenExprContext, EvalRequest};
 use super::literals::store_string;
 use super::{
     Codegen, CodegenNameIds, FunctionContext, STR_SLOT_SIZE, Terminator, ValueRepr,
@@ -50,6 +51,27 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
     ) -> Result<Value, String> {
+        match Self::eval_inst_with(
+            builder,
+            ctx,
+            r,
+            EvalRequest::Struct,
+            CodegenExprContext::root(),
+        )? {
+            ValueRepr::Struct { addr } => Ok(addr),
+            other => Err(format!(
+                "eval_inst_struct: non-struct repr cached for %{}: {other:?}",
+                r.index()
+            )),
+        }
+    }
+
+    pub(super) fn eval_inst_struct_d(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        context: CodegenExprContext,
+    ) -> Result<Value, String> {
         if let Some(repr) = Self::cached_repr(ctx, r) {
             return match repr {
                 ValueRepr::Struct { addr } => Ok(addr),
@@ -60,8 +82,14 @@ impl<M: Module> Codegen<M> {
             };
         }
         let inst = ctx.tir.inst(r);
+        if context.depth >= context.limit && Self::is_generic_expr_tag(inst.tag) {
+            return match Self::eval_expr_machine(builder, ctx, r, EvalRequest::Struct)? {
+                ValueRepr::Struct { addr } => Ok(addr),
+                _ => unreachable!("struct request must produce a struct repr"),
+            };
+        }
         let addr = match inst.tag {
-            TirTag::StructLit => Self::emit_struct_lit(builder, ctx, r)?,
+            TirTag::StructLit => Self::emit_struct_lit(builder, ctx, r, context)?,
             TirTag::Var => {
                 let name = match inst.data {
                     TirData::Var(name) => name,
@@ -72,7 +100,7 @@ impl<M: Module> Codegen<M> {
                 })?;
                 builder.use_var(var)
             }
-            TirTag::FieldAccess => Self::field_addr_of(builder, ctx, r)?.0,
+            TirTag::FieldAccess => Self::field_addr_of_d(builder, ctx, r, context)?.0,
             TirTag::Match => {
                 // M12: an aggregate-result match writes each value arm's
                 // result into its pre-allocated result slot; the join
@@ -92,7 +120,7 @@ impl<M: Module> Codegen<M> {
             TirTag::Call => {
                 // Struct-returning call: emit_call handles sret and
                 // caches ValueRepr::Struct for r.
-                Self::emit_call(builder, ctx, r)?;
+                Self::emit_call_d(builder, ctx, r, context)?;
                 match Self::cached_repr(ctx, r) {
                     Some(ValueRepr::Struct { addr }) => return Ok(addr),
                     _ => unreachable!("struct-returning call must cache ValueRepr::Struct"),
@@ -116,6 +144,15 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
     ) -> Result<(Value, TypeId), String> {
+        Self::field_addr_of_d(builder, ctx, r, CodegenExprContext::root())
+    }
+
+    pub(super) fn field_addr_of_d(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        context: CodegenExprContext,
+    ) -> Result<(Value, TypeId), String> {
         let inst = ctx.tir.inst(r);
         let TirData::FieldAccess {
             object,
@@ -128,7 +165,7 @@ impl<M: Module> Codegen<M> {
             ));
         };
         let obj_ty = ctx.tir.inst(object).ty;
-        let base = Self::eval_inst_struct(builder, ctx, object)?;
+        let base = Self::eval_inst_struct_d(builder, ctx, object, context.child())?;
         let view = ctx.pool.struct_view(obj_ty);
         let field = view.fields[field_index as usize];
         let addr = if field.offset == 0 {
@@ -144,17 +181,18 @@ impl<M: Module> Codegen<M> {
     /// its slot via the enum entry point, a whole struct to its slot.
     /// Passed directly to the callee, which mutates in place —
     /// no spill, no reload, no write-back entry.
-    pub(crate) fn inout_pointee_addr(
+    pub(super) fn inout_pointee_addr_d(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
+        context: CodegenExprContext,
     ) -> Result<Value, String> {
         if matches!(ctx.tir.inst(r).data, TirData::FieldAccess { .. }) {
-            Ok(Self::field_addr_of(builder, ctx, r)?.0)
+            Ok(Self::field_addr_of_d(builder, ctx, r, context.child())?.0)
         } else if is_enum_type(ctx.tir.inst(r).ty, ctx.pool) {
-            Self::eval_inst_enum(builder, ctx, r)
+            Self::eval_inst_enum_d(builder, ctx, r, context.child())
         } else {
-            Self::eval_inst_struct(builder, ctx, r)
+            Self::eval_inst_struct_d(builder, ctx, r, context.child())
         }
     }
 
@@ -163,6 +201,7 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
+        context: CodegenExprContext,
     ) -> Result<Value, String> {
         let view = ctx.tir.struct_lit_view(r);
         let slot = Self::struct_slot(builder, ctx, view.ty);
@@ -170,7 +209,7 @@ impl<M: Module> Codegen<M> {
         let sview = ctx.pool.struct_view(view.ty);
         for (field_index, value) in view.fields() {
             let field = sview.fields[field_index as usize];
-            Self::store_field_value(builder, ctx, addr, field.offset, field.ty, value)?;
+            Self::store_field_value(builder, ctx, addr, field.offset, field.ty, value, context)?;
         }
         Ok(addr)
     }
@@ -189,11 +228,13 @@ impl<M: Module> Codegen<M> {
         offset: u32,
         field_ty: TypeId,
         v: TirRef,
+        context: CodegenExprContext,
     ) -> Result<(), String> {
         let off = i32::try_from(offset).expect("struct field offset exceeds i32");
         match ctx.pool.kind(field_ty) {
             TypeKind::Str | TypeKind::Bytes => {
-                let repr = Self::eval_inst_fat(builder, ctx, v)?;
+                let repr =
+                    Self::eval_inst_with(builder, ctx, v, EvalRequest::Fat, context.child())?;
                 let (ptr, len, cap) = match repr {
                     ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
                         (ptr, len, cap)
@@ -213,7 +254,11 @@ impl<M: Module> Codegen<M> {
                 Err("view struct field reached codegen; sema Rule 6 rejects it".to_string())
             }
             TypeKind::Struct | TypeKind::AnonStruct => {
-                let src = Self::eval_inst_struct(builder, ctx, v)?;
+                let ValueRepr::Struct { addr: src } =
+                    Self::eval_inst_with(builder, ctx, v, EvalRequest::Struct, context.child())?
+                else {
+                    unreachable!("nested struct field must produce a struct repr")
+                };
                 let dst = if offset == 0 {
                     base
                 } else {
@@ -225,7 +270,11 @@ impl<M: Module> Codegen<M> {
             | TypeKind::DeclaredError
             | TypeKind::ErrorSet
             | TypeKind::ErrorUnion => {
-                let src = Self::eval_inst_enum(builder, ctx, v)?;
+                let ValueRepr::Enum { addr: src } =
+                    Self::eval_inst_with(builder, ctx, v, EvalRequest::Enum, context.child())?
+                else {
+                    unreachable!("nested enum field must produce an enum repr")
+                };
                 let dst = if offset == 0 {
                     base
                 } else {
@@ -234,7 +283,11 @@ impl<M: Module> Codegen<M> {
                 Self::emit_enum_copy(builder, ctx, dst, src, field_ty)
             }
             _ => {
-                let val = Self::eval_inst(builder, ctx, v)?;
+                let ValueRepr::Scalar(val) =
+                    Self::eval_inst_with(builder, ctx, v, EvalRequest::Scalar, context.child())?
+                else {
+                    unreachable!("scalar field value must produce a scalar repr")
+                };
                 builder.ins().store(MemFlagsData::trusted(), val, base, off);
                 Ok(())
             }
@@ -243,12 +296,13 @@ impl<M: Module> Codegen<M> {
 
     /// Scalar field read (M9): load the field's value from its
     /// computed address. Backs the `FieldAccess` arm of `eval_inst`.
-    pub(crate) fn eval_field_access_scalar(
+    pub(super) fn eval_field_access_scalar_d(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
+        context: CodegenExprContext,
     ) -> Result<Value, String> {
-        let (addr, field_ty) = Self::field_addr_of(builder, ctx, r)?;
+        let (addr, field_ty) = Self::field_addr_of_d(builder, ctx, r, context.child())?;
         debug_assert!(
             !matches!(
                 ctx.pool.kind(field_ty),
@@ -267,12 +321,13 @@ impl<M: Module> Codegen<M> {
     /// str/bytes field read (M9): load the (ptr, len, cap) triple from
     /// the field's address. Backs the `FieldAccess` arm of
     /// `eval_inst_fat`.
-    pub(crate) fn eval_field_access_fat(
+    pub(super) fn eval_field_access_fat_d(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
+        context: CodegenExprContext,
     ) -> Result<ValueRepr, String> {
-        let (addr, field_ty) = Self::field_addr_of(builder, ctx, r)?;
+        let (addr, field_ty) = Self::field_addr_of_d(builder, ctx, r, context.child())?;
         let ptr = builder
             .ins()
             .load(ctx.int_type, MemFlagsData::trusted(), addr, 0);
@@ -543,13 +598,14 @@ impl<M: Module> Codegen<M> {
     /// address. Borrow passes the existing slot address; Move/Copy
     /// transfer a field-wise copy in a fresh caller-side slot (the
     /// callee may mutate/free the contents per its mode).
-    pub(crate) fn emit_struct_call_arg(
+    pub(super) fn emit_struct_call_arg_d(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
         mode: ParamMode,
+        context: CodegenExprContext,
     ) -> Result<Value, String> {
-        let src = Self::eval_inst_struct(builder, ctx, r)?;
+        let src = Self::eval_inst_struct_d(builder, ctx, r, context.child())?;
         if mode == ParamMode::Borrow {
             return Ok(src);
         }

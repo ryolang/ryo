@@ -124,8 +124,28 @@ struct Binding {
     dead_store_help: Option<&'static str>,
 }
 
+pub(crate) enum ScopeParent<'a> {
+    Borrowed(&'a Scope<'a>),
+    Owned(Box<Scope<'a>>),
+}
+
+impl<'a> ScopeParent<'a> {
+    pub(crate) fn scope(&self) -> &Scope<'a> {
+        match self {
+            Self::Borrowed(scope) => scope,
+            Self::Owned(scope) => scope,
+        }
+    }
+}
+
+impl<'a> From<&'a Scope<'a>> for ScopeParent<'a> {
+    fn from(scope: &'a Scope<'a>) -> Self {
+        Self::Borrowed(scope)
+    }
+}
+
 pub(crate) struct Scope<'a> {
-    parent: Option<&'a Scope<'a>>,
+    parent: Option<ScopeParent<'a>>,
     bindings: HashMap<StringId, Binding>,
 }
 
@@ -197,6 +217,10 @@ impl<'a> Scope<'a> {
         }
     }
 
+    pub(crate) fn take_parent(&mut self) -> Option<ScopeParent<'a>> {
+        self.parent.take()
+    }
+
     fn contains_in_current(&self, name: StringId) -> bool {
         self.bindings.contains_key(&name)
     }
@@ -206,7 +230,7 @@ impl<'a> Scope<'a> {
             binding.used.set(true);
             Some(binding.ty)
         } else {
-            self.parent?.lookup(name)
+            self.parent.as_ref()?.scope().lookup(name)
         }
     }
 
@@ -214,7 +238,7 @@ impl<'a> Scope<'a> {
         self.bindings
             .get(&name)
             .map(|b| (b.ty, b.mutable))
-            .or_else(|| self.parent?.lookup_full(name))
+            .or_else(|| self.parent.as_ref()?.scope().lookup_full(name))
     }
 
     /// Whether the nearest binding for `name` is a borrowed parameter
@@ -225,7 +249,11 @@ impl<'a> Scope<'a> {
         self.bindings
             .get(&name)
             .map(|b| b.borrowed)
-            .unwrap_or_else(|| self.parent.is_some_and(|p| p.lookup_borrowed(name)))
+            .unwrap_or_else(|| {
+                self.parent
+                    .as_ref()
+                    .is_some_and(|parent| parent.scope().lookup_borrowed(name))
+            })
     }
 }
 

@@ -16,6 +16,7 @@ use cranelift::prelude::*;
 use cranelift_module::Module;
 use ryo_core::tir::{TirData, TirRef, TirTag};
 
+use super::expr::walker::{CodegenExprContext, EvalRequest};
 use super::{Codegen, FunctionContext, ValueRepr};
 
 /// Upper size bound for the inline byte-compare specialization of
@@ -114,39 +115,43 @@ impl<M: Module> Codegen<M> {
     /// `str`/`strview` equality (M8.4 §3.3): shared pair-compare with
     /// `StrConst`/`BytesConst` literal specialization and the
     /// `ryo_str_eq` fallback.
-    pub(crate) fn emit_str_eq(
+    pub(super) fn emit_str_eq_d(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         tag: TirTag,
         lhs: TirRef,
         rhs: TirRef,
+        context: CodegenExprContext,
     ) -> Result<Value, String> {
-        Self::emit_pair_eq(
+        Self::emit_pair_eq_d(
             builder,
             ctx,
             lhs,
             rhs,
             tag == TirTag::StrCmpNe,
             "ryo_str_eq",
+            context,
         )
     }
 
     /// `bytes`/`bytesview` equality (M8.4.2): same literal
     /// specialization as `emit_str_eq`, `ryo_bytes_eq` fallback.
-    pub(crate) fn emit_bytes_eq(
+    pub(super) fn emit_bytes_eq_d(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         tag: TirTag,
         lhs: TirRef,
         rhs: TirRef,
+        context: CodegenExprContext,
     ) -> Result<Value, String> {
-        Self::emit_pair_eq(
+        Self::emit_pair_eq_d(
             builder,
             ctx,
             lhs,
             rhs,
             tag == TirTag::BytesCmpNe,
             "ryo_bytes_eq",
+            context,
         )
     }
 
@@ -157,18 +162,19 @@ impl<M: Module> Codegen<M> {
     /// length check so loads never run past the other buffer. Anything
     /// else falls back to the extern `fallback(ptr, len, ptr, len)`.
     /// `invert` flips the result for the `!=` tags.
-    fn emit_pair_eq(
+    fn emit_pair_eq_d(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         lhs: TirRef,
         rhs: TirRef,
         invert: bool,
         fallback: &'static str,
+        context: CodegenExprContext,
     ) -> Result<Value, String> {
         // Operands may be owned triples or view pairs (mixed equality
         // wraps the owned side in ToView); only (ptr, len) is read.
-        let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs)?;
-        let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
+        let (l_ptr, l_len) = Self::eval_str_or_view_parts_d(builder, ctx, lhs, context.child())?;
+        let (r_ptr, r_len) = Self::eval_str_or_view_parts_d(builder, ctx, rhs, context.child())?;
 
         let literal = Self::literal_bytes(ctx, lhs)
             .map(|lit| (true, lit))
@@ -304,14 +310,25 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
     ) -> Result<(Value, Value), String> {
+        Self::eval_str_or_view_parts_d(builder, ctx, r, CodegenExprContext::root())
+    }
+
+    pub(super) fn eval_str_or_view_parts_d(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        context: CodegenExprContext,
+    ) -> Result<(Value, Value), String> {
         let ty = ctx.tir.inst(r).ty;
         if ctx.pool.is_view(ty) {
-            let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, r)? else {
+            let ValueRepr::View { ptr, len } =
+                Self::eval_inst_with(builder, ctx, r, EvalRequest::View, context.child())?
+            else {
                 unreachable!("eval_inst_view must produce ValueRepr::View");
             };
             return Ok((ptr, len));
         }
-        match Self::eval_inst_fat(builder, ctx, r)? {
+        match Self::eval_inst_with(builder, ctx, r, EvalRequest::Fat, context.child())? {
             ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
                 // A home-backed Var's inline bytes already sit in the
                 // home slot — extract against that address, no spill.
@@ -332,12 +349,13 @@ impl<M: Module> Codegen<M> {
     /// The `len` word of a `str`/`bytes`/`strview`/`bytesview`-typed
     /// operand, from either representation (M8.4/M8.4.2). Backs the
     /// `StrLen` arm.
-    pub(super) fn eval_str_or_view_len(
+    pub(super) fn eval_str_or_view_len_d(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
+        context: CodegenExprContext,
     ) -> Result<Value, String> {
-        let (_, len) = Self::eval_str_or_view_parts(builder, ctx, r)?;
+        let (_, len) = Self::eval_str_or_view_parts_d(builder, ctx, r, context.child())?;
         Ok(len)
     }
 }

@@ -829,16 +829,68 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-267 — Stack overflow on deeply right-nested operator chains (paren-nested RHS)
+### I-268 — Define broken-pipe semantics for Ryo CLI programs
 
 **Severity:** Correctness / Hygiene
+**Area:** runtime
+
+**Files:** runtime/src/lib.rs; ryo-backend/src/codegen/jit.rs; ryo-driver/src/pipeline/run.rs; ryo/tests/integration_driver.rs; docs/specification.md
+
+**Summary:** Ryo targets first-class CLI applications, but broken-pipe handling currently covers only compiler-owned diagnostics and inspection output. Generated-program behavior is a separate contract: JIT execution inherits the Rust compiler process's SIGPIPE disposition, while AOT programs have an independent native runtime, so execution modes can diverge when a downstream reader closes stdout or stderr early.
+
+**Resolution:** Adopt conventional Unix-filter behavior for generated Ryo programs: default SIGPIPE termination on Unix, with explicit non-panicking EPIPE handling and documented exit behavior on Windows. Implement the policy at the runtime/JIT execution boundary so JIT and AOT agree without changing the existing compiler diagnostic broken-pipe behavior. Specify stdout/stderr and exit-status semantics, and add early-closing-reader tests for both execution modes plus Windows coverage.
+
+---
+
+### I-270 — Stack overflow lowering deeply nested match and catch blocks
+
+**Severity:** Correctness / Hygiene
+**Area:** frontend-parser
+
+**Files:** ryo-frontend/src/astgen/match_.rs; ryo-frontend/src/astgen/expr.rs; ryo-frontend/src/astgen.rs
+
+**Summary:** Nested statement-form match and catch expressions recurse through arm statement lowering. Confirmed on debug builds: 500 nested statement matches and 1,000 nested catches parse successfully but abort during astgen with a stack overflow, before sema starts. The generic sema expression walker cannot reach these inputs through source-driven tests.
+
+**Resolution:** Lower nested arm bodies and statement blocks with explicit tasks instead of recursive gen_stmt/gen_expr calls, preserving source order and UIR wire shape. Add deep nested match and catch regressions through parse and UIR generation so sema can be exercised end to end.
+
+---
+
+### I-271 — Shallow binary early errors ignore non-memoization contract
+
+**Severity:** Cleanup
 **Area:** sema
 
-**Files:** ryo-frontend/src/sema/expr (general expression recursion), ryo-backend/src/codegen/expr (eval_inst); repro at bug_reports/bug_right_nested_chain_stack_overflow.ryo
+**Files:** ryo-frontend/src/sema/expr/mod.rs; ryo-frontend/src/sema/expr/walker_tests.rs
 
-**Summary:** A right-nested chain 1+(1+(1+...)) 100k deep aborts ryo run with a stack overflow in debug builds. The I-261 depth budgets propagate through LHS chain links only; each parenthesized RHS restarts the depth at zero via the general expression entrypoint, so the budget never trips and the recursion grows one frame group per paren level. Pre-existing: main overflows at 50k already (not a PR regression; the PR fixed the left-nested shape). Repro: 100k nested parens, ryo run exits 134; ryo parse alone is fine to 300k.
+**Summary:** analyze_binop_link returns memoize=false for division-by-zero and constant-overflow early errors, and the iterative walker removes those temporary inst_map entries. The shallow analyze_binop_d path discards the flag and memoizes unconditionally. Forced-limit differential diagnostics and TIR match, but reanalysis of an errored DAG node can be skipped and the internal cleanup contract differs between paths.
 
-**Resolution:** Propagate the chain depth through parenthesized RHS operands (or bound the general expression recursion by depth with the existing iterative walkers as spill), keeping the hot path free of per-frame bookkeeping — see how c4c6c99 balances depth limits with the perf gate. Add a regression test with a 100k-deep right-nested chain.
+**Resolution:** Honor analyze_binop_link's memo flag in analyze_binop_d and only retain successful/memoizable entries. Add a direct inst_map/reanalysis regression covering division by zero and constant overflow on shared nodes, and require shallow and iterative cleanup behavior to agree.
+
+---
+
+### I-272 — JIT compilation of 50k nested slices exceeds 15 minutes
+
+**Severity:** Correctness / Hygiene
+**Area:** codegen
+
+**Files:** ryo/tests/deep_expr_chain.rs; ryo-backend/src/codegen; ryo-driver/src/pipeline
+
+**Summary:** The jit_run_deep_slice_nesting regression generates 50,000 successive [0:1] expressions. TIR emission completes and 1,000-level JIT execution succeeds, but debug JIT compilation exceeded a 900-second timeout while consuming one CPU core; no stack overflow or deadlock was observed. The long case prevents the default deep-expression and workspace suites from completing in a practical validation window.
+
+**Resolution:** Profile the 50,000-slice JIT pipeline to locate the superlinear pass or emission path, then remove the scaling bottleneck without weakening stack-safety coverage. Add scaling measurements for nested views and keep a large regression practical for CI while retaining adversarial stress coverage.
+
+---
+
+### I-273 — Nested match statement analysis resets expression depth
+
+**Severity:** Cleanup
+**Area:** sema
+
+**Files:** ryo-frontend/src/sema/expr/walker/match_tasks.rs; ryo-frontend/src/sema/stmt.rs; ryo-frontend/src/sema/expr/walker_tests.rs
+
+**Summary:** Non-simple statements in an iterative match arm still call zero-depth analyze_stmt. Nested expression machines can therefore start below an active machine instead of sharing its traversal context. Source-driven deep match reproduction is currently blocked earlier by I-270, which limits immediate exposure but leaves the sema no-nested-machine contract incomplete.
+
+**Resolution:** Carry SemaExprContext through block_stmt/finish_stmt and replace remaining nested statement recursion with depth-carrying continuations. After I-270 is fixed, add deep non-simple statement arms that cross the expression fallback boundary and verify diagnostics, scopes, and memoization.
 
 ---
 
@@ -850,4 +902,4 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-<!-- issue-id high-water: 267 -->
+<!-- issue-id high-water: 273 -->

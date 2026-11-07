@@ -1,6 +1,10 @@
 //! Expression evaluation and call emission — split from `mod.rs`; see module docs there.
 
 mod fat_slot;
+pub(crate) mod walker;
+use walker::{CodegenExprContext, EvalRequest};
+#[cfg(test)]
+mod walker_tests;
 
 use super::arith::{DIV_OVERFLOW_MSG, DIV_ZERO_MSG, MOD_OVERFLOW_MSG, MOD_ZERO_MSG};
 use super::literals::store_string;
@@ -11,7 +15,6 @@ use super::{
 use cranelift::codegen::ir::{FuncRef, MemFlagsData, StackSlot};
 use cranelift::prelude::*;
 use cranelift_module::{Linkage, Module};
-use ryo_core::spine::ChainSpine;
 use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, TypeKind, ViewKind};
 use std::collections::HashMap;
@@ -29,6 +32,8 @@ pub(super) struct MarshalledArgs {
     pub(super) inout_reloads: Vec<(TirRef, StackSlot)>,
 }
 
+pub(super) type CallArgSnapshots = HashMap<(TirRef, TirRef), Value>;
+
 impl<M: Module> Codegen<M> {
     /// Materialize an instruction's value, recursively materializing
     /// operand `TirRef`s as needed. Memoized: a second visit hands
@@ -39,17 +44,25 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
     ) -> Result<Value, String> {
-        Self::eval_inst_d(builder, ctx, r, 0)
+        match Self::eval_inst_with(
+            builder,
+            ctx,
+            r,
+            EvalRequest::Scalar,
+            CodegenExprContext::root(),
+        )? {
+            ValueRepr::Scalar(value) => Ok(value),
+            _ => unreachable!("scalar request must produce a scalar value"),
+        }
     }
 
-    /// Depth-carrying body of [`Self::eval_inst`]; `depth` is the
-    /// operator-chain recursion budget consumed so far (see
-    /// [`Self::eval_binop_chain`]).
+    /// Depth-carrying body of [`Self::eval_inst`]; `context` tracks the
+    /// expression recursion budget (see [`Self::eval_binop_chain`]).
     fn eval_inst_d(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
-        depth: u32,
+        context: CodegenExprContext,
     ) -> Result<Value, String> {
         if let Some(repr) = Self::cached_repr(ctx, r) {
             return match repr {
@@ -81,6 +94,12 @@ impl<M: Module> Codegen<M> {
                 "eval_inst: fat/view-typed inst %{} reached the scalar entry point; use eval_inst_fat / eval_inst_view",
                 r.index()
             ));
+        }
+        if context.depth >= context.limit && Self::is_generic_expr_tag(inst.tag) {
+            return match Self::eval_expr_machine(builder, ctx, r, EvalRequest::Scalar)? {
+                ValueRepr::Scalar(value) => Ok(value),
+                _ => unreachable!("scalar request must produce a scalar value"),
+            };
         }
         let value = match inst.tag {
             TirTag::IntConst => match inst.data {
@@ -117,7 +136,7 @@ impl<M: Module> Codegen<M> {
             // the demand recursion they replace overflowed the stack
             // around ~7k terms.
             TirTag::INeg | TirTag::FNeg | TirTag::BoolNot => {
-                Self::eval_unary_chain(builder, ctx, r, depth)?
+                Self::eval_unary_chain(builder, ctx, r, context)?
             }
             TirTag::IAdd
             | TirTag::ISub
@@ -139,7 +158,7 @@ impl<M: Module> Codegen<M> {
             | TirTag::FCmpLt
             | TirTag::FCmpLe
             | TirTag::FCmpGt
-            | TirTag::FCmpGe => Self::eval_binop_chain(builder, ctx, r, depth)?,
+            | TirTag::FCmpGe => Self::eval_binop_chain(builder, ctx, r, context)?,
             TirTag::BoolAnd | TirTag::BoolOr => {
                 // The short-circuit control flow is explicit in
                 // the Flow IR — the lhs block's Branch terminator
@@ -165,7 +184,7 @@ impl<M: Module> Codegen<M> {
                         r.index()
                     ));
                 }
-                Self::emit_call(builder, ctx, r)?
+                Self::emit_call_d(builder, ctx, r, context)?
             }
             TirTag::IfStmt => {
                 // Sema's `assert` desugar puts an IfStmt in
@@ -186,21 +205,21 @@ impl<M: Module> Codegen<M> {
                     TirData::UnOp(r) => r,
                     _ => unreachable!("StrLen must carry TirData::UnOp"),
                 };
-                Self::eval_str_or_view_len(builder, ctx, operand)?
+                Self::eval_str_or_view_len_d(builder, ctx, operand, context)?
             }
             TirTag::StrCmpEq | TirTag::StrCmpNe => {
                 let (lhs, rhs) = match inst.data {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
                     _ => unreachable!(),
                 };
-                Self::emit_str_eq(builder, ctx, inst.tag, lhs, rhs)?
+                Self::emit_str_eq_d(builder, ctx, inst.tag, lhs, rhs, context)?
             }
             TirTag::BytesCmpEq | TirTag::BytesCmpNe => {
                 let (lhs, rhs) = match inst.data {
                     TirData::BinOp { lhs, rhs } => (lhs, rhs),
                     _ => unreachable!(),
                 };
-                Self::emit_bytes_eq(builder, ctx, inst.tag, lhs, rhs)?
+                Self::emit_bytes_eq_d(builder, ctx, inst.tag, lhs, rhs, context)?
             }
             TirTag::StructEq | TirTag::StructNe => {
                 let (lhs, rhs) = match inst.data {
@@ -211,8 +230,8 @@ impl<M: Module> Codegen<M> {
                 // addresses (never the scalar entry — structs are
                 // memory-first), then memberwise-compare. The
                 // comparison borrows both operands.
-                let lv = Self::eval_inst_struct(builder, ctx, lhs)?;
-                let rv = Self::eval_inst_struct(builder, ctx, rhs)?;
+                let lv = Self::eval_inst_struct_d(builder, ctx, lhs, context.child())?;
+                let rv = Self::eval_inst_struct_d(builder, ctx, rhs, context.child())?;
                 let ty = ctx.tir.inst(lhs).ty;
                 Self::emit_struct_eq(builder, ctx, lv, rv, ty, inst.tag == TirTag::StructNe)?
             }
@@ -226,8 +245,8 @@ impl<M: Module> Codegen<M> {
                 // memory-first), then compare the i32 tags and the
                 // active variant's payload. The comparison borrows
                 // both operands.
-                let lv = Self::eval_inst_enum(builder, ctx, lhs)?;
-                let rv = Self::eval_inst_enum(builder, ctx, rhs)?;
+                let lv = Self::eval_inst_enum_d(builder, ctx, lhs, context.child())?;
+                let rv = Self::eval_inst_enum_d(builder, ctx, rhs, context.child())?;
                 let ty = ctx.tir.inst(lhs).ty;
                 Self::emit_enum_eq(builder, ctx, lv, rv, ty, inst.tag == TirTag::EnumNe)?
             }
@@ -238,8 +257,8 @@ impl<M: Module> Codegen<M> {
                 };
                 // Bounds check + panic are runtime-side, mirroring the
                 // inline slice guards — no Cranelift branch needed.
-                let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, base)?;
-                let idx = Self::eval_inst(builder, ctx, index)?;
+                let (ptr, len) = Self::eval_str_or_view_parts_d(builder, ctx, base, context)?;
+                let idx = Self::eval_inst_d(builder, ctx, index, context.child())?;
                 let index_ref = Self::declare_runtime_fn(
                     ctx,
                     builder,
@@ -261,7 +280,7 @@ impl<M: Module> Codegen<M> {
                     "codegen reached an Unreachable TIR inst — sema must have errored".to_string(),
                 );
             }
-            TirTag::FieldAccess => Self::eval_field_access_scalar(builder, ctx, r)?,
+            TirTag::FieldAccess => Self::eval_field_access_scalar_d(builder, ctx, r, context)?,
             // M12 match expression — enum tag dispatch / guard chains,
             // scalar/void/aggregate merges; lowered in codegen/match_.rs.
             // The match's Switch terminator was dispatched when
@@ -326,27 +345,25 @@ impl<M: Module> Codegen<M> {
         )
     }
 
-    /// Operator-chain recursion budget: how many chain links the
-    /// old-style recursion may consume before the remaining spine
-    /// lowers iteratively (`eval_binop_spill` / `eval_unary_spill`).
-    /// Far below the compiler thread's 32 MiB stack (a debug frame per
-    /// link is kilobytes), far above anything a hand-written chain.
+    /// Expression recursion budget before the generic iterative walker
+    /// takes over. Far below the compiler thread's stack, far above
+    /// ordinary hand-written nesting.
     const CHAIN_RECURSION_LIMIT: u32 = 64;
 
-    /// Materialize one link of a left-associative scalar binary-
-    /// operator chain, recursing like the old demand recursion
-    /// (`eval_inst` → `emit_numeric_binary_op` → `eval_inst(lhs)`).
-    /// Shallow chains (everything hand-written) pay nothing for the
-    /// deep-chain machinery; past [`Self::CHAIN_RECURSION_LIMIT`] links
-    /// the remaining spine hands off to the iterative walker so a
-    /// 100k-term `1+1+...` chain cannot overflow the stack. Emission
-    /// order (innermost link first) and the per-link memo are
-    /// identical to the old recursion.
+    /// Materialize one link of a scalar binary-operator chain, recursing
+    /// like the old demand recursion (`eval_inst` →
+    /// `emit_numeric_binary_op` → `eval_inst(lhs)`). Shallow chains
+    /// (everything hand-written) pay nothing for the deep-chain
+    /// machinery; past [`Self::CHAIN_RECURSION_LIMIT`] links the
+    /// remaining subtree hands off to an iterative walker so both left-
+    /// and right-nested 100k-term chains avoid stack overflow. Emission
+    /// order (innermost link first) and the per-link memo are identical
+    /// to the old recursion.
     fn eval_binop_chain(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         root: TirRef,
-        depth: u32,
+        context: CodegenExprContext,
     ) -> Result<Value, String> {
         let inst = ctx.tir.inst(root);
         let TirData::BinOp { lhs, rhs } = inst.data else {
@@ -355,80 +372,20 @@ impl<M: Module> Codegen<M> {
         let lv = if Self::is_chain_binop_tag(ctx.tir.inst(lhs).tag)
             && Self::cached_repr(ctx, lhs).is_none()
         {
-            if depth < Self::CHAIN_RECURSION_LIMIT {
-                Self::eval_binop_chain(builder, ctx, lhs, depth + 1)?
+            if context.depth < context.limit {
+                Self::eval_binop_chain(builder, ctx, lhs, context.child())?
             } else {
-                Self::eval_binop_spill(builder, ctx, lhs)?
+                Self::eval_scalar_machine(builder, ctx, lhs)?
             }
         } else {
-            Self::eval_inst(builder, ctx, lhs)?
+            Self::eval_inst_d(builder, ctx, lhs, context.child())?
         };
-        let rv = Self::eval_inst(builder, ctx, rhs)?;
+        let rv = Self::eval_inst_d(builder, ctx, rhs, context.child())?;
         let v = Self::emit_numeric_binop(builder, ctx, inst.tag, lhs, rhs, lv, rv)?;
         if Self::cached_repr(ctx, root).is_none() {
             Self::cache_repr(ctx, root, ValueRepr::Scalar(v));
         }
         Ok(v)
-    }
-
-    /// Iterative fallback for the deep tail of a scalar binary-
-    /// operator chain — see [`Self::eval_binop_chain`]. Spine links,
-    /// outermost first; stop descending at an already-materialized
-    /// link (the Flow driver may have evaluated an inner step before
-    /// the outer chain's root — every operator inst is a step — and
-    /// re-emitting it would duplicate instructions the memo exists to
-    /// prevent).
-    fn eval_binop_spill(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        root: TirRef,
-    ) -> Result<Value, String> {
-        let mut spine = ChainSpine::new();
-        let inner_lhs = {
-            let mut cur = root;
-            loop {
-                let inst = ctx.tir.inst(cur);
-                let TirData::BinOp { lhs, .. } = inst.data else {
-                    unreachable!("chain tag must carry TirData::BinOp");
-                };
-                spine.push(cur);
-                if Self::is_chain_binop_tag(ctx.tir.inst(lhs).tag)
-                    && Self::cached_repr(ctx, lhs).is_none()
-                {
-                    cur = lhs;
-                } else {
-                    break lhs;
-                }
-            }
-        };
-        let mut acc = Self::eval_inst(builder, ctx, inner_lhs)?;
-        let mut result: Result<Value, String> = Ok(acc);
-        spine.fold_rev_until(|node| {
-            let inst = ctx.tir.inst(node);
-            let TirData::BinOp { lhs, rhs } = inst.data else {
-                unreachable!("chain tag must carry TirData::BinOp");
-            };
-            let rv = match Self::eval_inst(builder, ctx, rhs) {
-                Ok(rv) => rv,
-                Err(e) => {
-                    result = Err(e);
-                    return false;
-                }
-            };
-            acc = match Self::emit_numeric_binop(builder, ctx, inst.tag, lhs, rhs, acc, rv) {
-                Ok(v) => v,
-                Err(e) => {
-                    result = Err(e);
-                    return false;
-                }
-            };
-            if Self::cached_repr(ctx, node).is_none() {
-                Self::cache_repr(ctx, node, ValueRepr::Scalar(acc));
-            }
-            result = Ok(acc);
-            true
-        });
-        result
     }
 
     /// Materialize one link of a unary-operator chain (`not not ...`,
@@ -438,7 +395,7 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         root: TirRef,
-        depth: u32,
+        context: CodegenExprContext,
     ) -> Result<Value, String> {
         let inst = ctx.tir.inst(root);
         let TirData::UnOp(operand) = inst.data else {
@@ -449,15 +406,29 @@ impl<M: Module> Codegen<M> {
             TirTag::INeg | TirTag::FNeg | TirTag::BoolNot
         ) && Self::cached_repr(ctx, operand).is_none()
         {
-            if depth < Self::CHAIN_RECURSION_LIMIT {
-                Self::eval_unary_chain(builder, ctx, operand, depth + 1)?
+            if context.depth < context.limit {
+                Self::eval_unary_chain(builder, ctx, operand, context.child())?
             } else {
-                Self::eval_unary_spill(builder, ctx, operand)?
+                Self::eval_scalar_machine(builder, ctx, operand)?
             }
         } else {
-            Self::eval_inst(builder, ctx, operand)?
+            Self::eval_inst_d(builder, ctx, operand, context.child())?
         };
-        let value = match inst.tag {
+        let value = Self::emit_unary_link(builder, ctx, inst.tag, operand, acc)?;
+        if Self::cached_repr(ctx, root).is_none() {
+            Self::cache_repr(ctx, root, ValueRepr::Scalar(value));
+        }
+        Ok(value)
+    }
+
+    fn emit_unary_link(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        tag: TirTag,
+        operand: TirRef,
+        acc: Value,
+    ) -> Result<Value, String> {
+        let value = match tag {
             TirTag::INeg => {
                 // Spec §18 checked negation: `-(x)` as `0 - x` so
                 // `-(i64::MIN)` sets the overflow flag and panics.
@@ -480,85 +451,9 @@ impl<M: Module> Codegen<M> {
                 let one = builder.ins().iconst(types::I8, 1);
                 builder.ins().bxor(acc, one)
             }
-            _ => unreachable!("non-unary tag in eval_unary_chain: {:?}", inst.tag),
+            _ => unreachable!("non-unary tag in emit_unary_link: {:?}", tag),
         };
-        if Self::cached_repr(ctx, root).is_none() {
-            Self::cache_repr(ctx, root, ValueRepr::Scalar(value));
-        }
         Ok(value)
-    }
-
-    /// Iterative fallback for the deep tail of a unary-operator chain —
-    /// see [`Self::eval_unary_chain`].
-    fn eval_unary_spill(
-        builder: &mut FunctionBuilder,
-        ctx: &mut FunctionContext<'_, M>,
-        root: TirRef,
-    ) -> Result<Value, String> {
-        let mut spine = ChainSpine::new();
-        let inner = {
-            let mut cur = root;
-            loop {
-                let inst = ctx.tir.inst(cur);
-                let TirData::UnOp(operand) = inst.data else {
-                    unreachable!("unary chain tag must carry TirData::UnOp");
-                };
-                spine.push(cur);
-                if matches!(
-                    ctx.tir.inst(operand).tag,
-                    TirTag::INeg | TirTag::FNeg | TirTag::BoolNot
-                ) && Self::cached_repr(ctx, operand).is_none()
-                {
-                    cur = operand;
-                } else {
-                    break operand;
-                }
-            }
-        };
-        let mut acc = Self::eval_inst(builder, ctx, inner)?;
-        let mut result: Result<Value, String> = Ok(acc);
-        spine.fold_rev_until(|node| {
-            let inst = ctx.tir.inst(node);
-            let TirData::UnOp(operand) = inst.data else {
-                unreachable!("unary chain tag must carry TirData::UnOp");
-            };
-            let next = match inst.tag {
-                TirTag::INeg => {
-                    let zero = builder.ins().iconst(ctx.int_type, 0);
-                    if ranges::int_range_of(ctx.tir, &ctx.range_facts, operand)
-                        .and_then(|r| r.checked_neg())
-                        .is_some()
-                    {
-                        Ok(builder.ins().isub(zero, acc))
-                    } else {
-                        let (r, of) = builder.ins().ssub_overflow(zero, acc);
-                        match Self::emit_panic_guard(builder, ctx, of, OVERFLOW_MSG) {
-                            Ok(()) => Ok(r),
-                            Err(e) => Err(e),
-                        }
-                    }
-                }
-                TirTag::FNeg => Ok(builder.ins().fneg(acc)),
-                TirTag::BoolNot => {
-                    let one = builder.ins().iconst(types::I8, 1);
-                    Ok(builder.ins().bxor(acc, one))
-                }
-                _ => unreachable!("non-unary tag in eval_unary_spill: {:?}", inst.tag),
-            };
-            acc = match next {
-                Ok(v) => v,
-                Err(e) => {
-                    result = Err(e);
-                    return false;
-                }
-            };
-            if Self::cached_repr(ctx, node).is_none() {
-                Self::cache_repr(ctx, node, ValueRepr::Scalar(acc));
-            }
-            result = Ok(acc);
-            true
-        });
-        result
     }
 
     /// Lower a scalar numeric binary instruction from its two operand
@@ -833,7 +728,13 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
     ) -> Result<ValueRepr, String> {
-        Self::eval_inst_fat_slot(builder, ctx, r, None)
+        Self::eval_inst_with(
+            builder,
+            ctx,
+            r,
+            EvalRequest::Fat,
+            CodegenExprContext::root(),
+        )
     }
 
     /// Lower the builtins that produce owned `str` or `bytes` values.
@@ -844,13 +745,15 @@ impl<M: Module> Codegen<M> {
         name_id: StringId,
         args: ryo_core::tir::ExtraList<'_, TirRef>,
         out_slot: Option<StackSlot>,
+        context: CodegenExprContext,
     ) -> Result<Option<ValueRepr>, String> {
         // These ids are interned once per compilation. Keep the dispatch
         // here so the caller's cache and user-call paths stay centralized.
         let ids = ctx.name_ids;
         let repr = if ids.str_from_view == Some(name_id) {
             // `str(view)` materialization evaluates its argument as a view.
-            let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, args.at(0))?
+            let ValueRepr::View { ptr, len } =
+                Self::eval_inst_with(builder, ctx, args.at(0), EvalRequest::View, context.child())?
             else {
                 unreachable!("__ryo_str_from_view argument must produce ValueRepr::View")
             };
@@ -864,7 +767,8 @@ impl<M: Module> Codegen<M> {
             ValueRepr::Str { ptr, len, cap }
         } else if ids.bytes_from_view == Some(name_id) {
             // `bytes(bview)` materialization evaluates its argument as a view.
-            let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, args.at(0))?
+            let ValueRepr::View { ptr, len } =
+                Self::eval_inst_with(builder, ctx, args.at(0), EvalRequest::View, context.child())?
             else {
                 unreachable!("__ryo_bytes_from_view argument must produce ValueRepr::View")
             };
@@ -877,7 +781,8 @@ impl<M: Module> Codegen<M> {
             )?;
             ValueRepr::Bytes { ptr, len, cap }
         } else if ids.str_to_bytes == Some(name_id) {
-            let (ptr_arg, len_arg) = Self::eval_str_or_view_parts(builder, ctx, args.at(0))?;
+            let (ptr_arg, len_arg) =
+                Self::eval_str_or_view_parts_d(builder, ctx, args.at(0), context.child())?;
             let (ptr, len, cap) = Self::emit_slot_out_call(
                 builder,
                 ctx,
@@ -887,7 +792,8 @@ impl<M: Module> Codegen<M> {
             )?;
             ValueRepr::Bytes { ptr, len, cap }
         } else if ids.bytes_repr == Some(name_id) {
-            let (ptr_arg, len_arg) = Self::eval_str_or_view_parts(builder, ctx, args.at(0))?;
+            let (ptr_arg, len_arg) =
+                Self::eval_str_or_view_parts_d(builder, ctx, args.at(0), context.child())?;
             let (ptr, len, cap) = Self::emit_slot_out_call(
                 builder,
                 ctx,
@@ -902,7 +808,7 @@ impl<M: Module> Codegen<M> {
             if out_slot.is_some() {
                 return Err("bool_to_str is codegen-inlined but was handed an out slot".to_string());
             }
-            let cond = Self::eval_inst(builder, ctx, args.at(0))?;
+            let cond = Self::eval_inst_d(builder, ctx, args.at(0), context.child())?;
             let true_id =
                 Self::store_guard_msg(ctx.module, ctx.data_ctx, ctx.guard_msg_data, "true")?;
             let false_id =
@@ -918,7 +824,7 @@ impl<M: Module> Codegen<M> {
             let cap = builder.ins().iconst(types::I64, 0);
             ValueRepr::Str { ptr, len, cap }
         } else if ids.int_to_str == Some(name_id) || ids.float_to_str == Some(name_id) {
-            let arg_val = Self::eval_inst(builder, ctx, args.at(0))?;
+            let arg_val = Self::eval_inst_d(builder, ctx, args.at(0), context.child())?;
             let (fn_name, param_ty) = if ids.int_to_str == Some(name_id) {
                 ("ryo_int_to_str", ctx.int_type)
             } else {
@@ -929,13 +835,14 @@ impl<M: Module> Codegen<M> {
             ValueRepr::Str { ptr, len, cap }
         } else if ids.process_argv == Some(name_id) {
             // Interim form until process.args replaces process_argv.
-            let arg_val = Self::eval_inst(builder, ctx, args.at(0))?;
+            let arg_val = Self::eval_inst_d(builder, ctx, args.at(0), context.child())?;
             let (ptr, len, cap) = Self::emit_process_argv(builder, ctx, arg_val, out_slot)?;
             ValueRepr::Str { ptr, len, cap }
         } else if ids.process_env == Some(name_id) {
             // Interim form until process.env replaces process_env. The key
             // bytes are consumed by ryo_getenv immediately after extraction.
-            let (key_ptr, key_len) = Self::eval_str_or_view_parts(builder, ctx, args.at(0))?;
+            let (key_ptr, key_len) =
+                Self::eval_str_or_view_parts_d(builder, ctx, args.at(0), context.child())?;
             let (ptr, len, cap) = Self::emit_slot_out_call_out_last(
                 builder,
                 ctx,
@@ -966,6 +873,21 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
     ) -> Result<ValueRepr, String> {
+        Self::eval_inst_with(
+            builder,
+            ctx,
+            r,
+            EvalRequest::View,
+            CodegenExprContext::root(),
+        )
+    }
+
+    pub(super) fn eval_inst_view_d(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        context: CodegenExprContext,
+    ) -> Result<ValueRepr, String> {
         if let Some(repr) = Self::cached_repr(ctx, r) {
             return Ok(repr);
         }
@@ -980,13 +902,13 @@ impl<M: Module> Codegen<M> {
                 // its slot; the view must point at memory that never
                 // moves, so owners go through ensure_heap first.
                 let (base_ptr, base_len) =
-                    Self::emit_ensure_heap_for_view_base(builder, ctx, base)?;
+                    Self::emit_ensure_heap_for_view_base_d(builder, ctx, base, context)?;
                 let start_v = match start {
-                    Some(s) => Self::eval_inst(builder, ctx, s)?,
+                    Some(s) => Self::eval_inst_d(builder, ctx, s, context.child())?,
                     None => builder.ins().iconst(types::I64, 0),
                 };
                 let end_v = match end {
-                    Some(e) => Self::eval_inst(builder, ctx, e)?,
+                    Some(e) => Self::eval_inst_d(builder, ctx, e, context.child())?,
                     None => base_len,
                 };
                 // M8.4.2: bytes slices skip the UTF-8 boundary check —
@@ -1004,7 +926,8 @@ impl<M: Module> Codegen<M> {
                 };
                 // Promote-on-view for owner operands: the view must
                 // address stable memory (see emit_ensure_heap_for_view_base).
-                let (ptr, len) = Self::emit_ensure_heap_for_view_base(builder, ctx, operand)?;
+                let (ptr, len) =
+                    Self::emit_ensure_heap_for_view_base_d(builder, ctx, operand, context)?;
                 ValueRepr::View { ptr, len }
             }
             TirTag::Var => {
@@ -1133,22 +1056,35 @@ impl<M: Module> Codegen<M> {
         })
     }
 
-    pub(super) fn emit_call(
+    pub(super) fn emit_call_d(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
+        context: CodegenExprContext,
     ) -> Result<Value, String> {
-        Self::emit_call_slot(builder, ctx, r, None)
+        Self::emit_call_slot_d(builder, ctx, r, None, context)
     }
 
     /// `emit_call` with a caller-provided sret destination: a
     /// fat-returning call writes `out_slot` directly instead of a
     /// fresh temp slot (see `eval_inst_fat_slot`).
-    pub(super) fn emit_call_slot(
+    fn emit_call_slot_d(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
         out_slot: Option<StackSlot>,
+        context: CodegenExprContext,
+    ) -> Result<Value, String> {
+        Self::emit_call_slot_with_snapshots(builder, ctx, r, out_slot, context, None)
+    }
+
+    pub(super) fn emit_call_slot_with_snapshots(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        out_slot: Option<StackSlot>,
+        context: CodegenExprContext,
+        snapshots: Option<&CallArgSnapshots>,
     ) -> Result<Value, String> {
         let view = ctx.tir.call_view(r);
         let name_id = view.name;
@@ -1218,7 +1154,8 @@ impl<M: Module> Codegen<M> {
                 ),
                 "sema should reject non-str print() args",
             );
-            let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, view.args.at(0))?;
+            let (ptr, len) =
+                Self::eval_str_or_view_parts_d(builder, ctx, view.args.at(0), context.child())?;
             let print_ref = Self::declare_runtime_fn(
                 ctx,
                 builder,
@@ -1255,8 +1192,9 @@ impl<M: Module> Codegen<M> {
             // runtime mutates the field in place, so no snapshot, spill,
             // or reload is needed.
             if matches!(ctx.tir.inst(s_ref).data, TirData::FieldAccess { .. }) {
-                let addr = Self::inout_pointee_addr(builder, ctx, s_ref)?;
-                let (suf_ptr, suf_len) = Self::eval_str_or_view_parts(builder, ctx, suffix_ref)?;
+                let addr = Self::inout_pointee_addr_d(builder, ctx, s_ref, context.child())?;
+                let (suf_ptr, suf_len) =
+                    Self::eval_str_or_view_parts_d(builder, ctx, suffix_ref, context.child())?;
                 let func_ref = Self::declare_runtime_fn(
                     ctx,
                     builder,
@@ -1269,7 +1207,8 @@ impl<M: Module> Codegen<M> {
             }
             let home_addr =
                 Self::local_name_of(ctx, s_ref).and_then(|n| Self::fat_home_addr(builder, ctx, n));
-            let s_repr = Self::eval_inst_fat(builder, ctx, s_ref)?;
+            let s_repr =
+                Self::eval_inst_with(builder, ctx, s_ref, EvalRequest::Fat, context.child())?;
             let ValueRepr::Str { ptr, len, cap } = s_repr else {
                 unreachable!("str_push target must be a str");
             };
@@ -1292,7 +1231,8 @@ impl<M: Module> Codegen<M> {
             // passes its ptr+len, a slice/view passes directly (no
             // ToView wrap: builtins bypass check_call's §3.4
             // conversion, so sema accepts `Str | View(_)` here).
-            let (suf_ptr, suf_len) = Self::eval_str_or_view_parts(builder, ctx, suffix_ref)?;
+            let (suf_ptr, suf_len) =
+                Self::eval_str_or_view_parts_d(builder, ctx, suffix_ref, context.child())?;
             let func_ref = Self::declare_runtime_fn(
                 ctx,
                 builder,
@@ -1344,8 +1284,8 @@ impl<M: Module> Codegen<M> {
             // str_push arm: pass the field's address in the root
             // struct's slot directly; the runtime mutates in place.
             if matches!(ctx.tir.inst(b_ref).data, TirData::FieldAccess { .. }) {
-                let addr = Self::inout_pointee_addr(builder, ctx, b_ref)?;
-                let x_val = Self::eval_inst(builder, ctx, x_ref)?;
+                let addr = Self::inout_pointee_addr_d(builder, ctx, b_ref, context.child())?;
+                let x_val = Self::eval_inst_d(builder, ctx, x_ref, context.child())?;
                 let func_ref = Self::declare_runtime_fn(
                     ctx,
                     builder,
@@ -1358,7 +1298,8 @@ impl<M: Module> Codegen<M> {
             }
             let home_addr =
                 Self::local_name_of(ctx, b_ref).and_then(|n| Self::fat_home_addr(builder, ctx, n));
-            let b_repr = Self::eval_inst_fat(builder, ctx, b_ref)?;
+            let b_repr =
+                Self::eval_inst_with(builder, ctx, b_ref, EvalRequest::Fat, context.child())?;
             let ValueRepr::Bytes { ptr, len, cap } = b_repr else {
                 unreachable!("bytes_push target must be bytes");
             };
@@ -1426,7 +1367,9 @@ impl<M: Module> Codegen<M> {
             .map(|(id, abi)| (*id, abi.result))
             .ok_or_else(|| format!("Undefined function: '{}'", name_str))?;
 
-        let marshalled = Self::marshal_user_call_args(builder, ctx, r, out_slot)?;
+        let marshalled = Self::marshal_user_call_args_with_snapshots(
+            builder, ctx, r, out_slot, context, snapshots,
+        )?;
         // Guard recursive (call-graph cycle) calls with the
         // stack-limit check, right before the call instruction.
         Self::maybe_emit_stack_check(builder, ctx, name_id)?;
@@ -1535,6 +1478,27 @@ impl<M: Module> Codegen<M> {
         r: TirRef,
         out_slot: Option<StackSlot>,
     ) -> Result<MarshalledArgs, String> {
+        Self::marshal_user_call_args_d(builder, ctx, r, out_slot, CodegenExprContext::root())
+    }
+
+    fn marshal_user_call_args_d(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        out_slot: Option<StackSlot>,
+        context: CodegenExprContext,
+    ) -> Result<MarshalledArgs, String> {
+        Self::marshal_user_call_args_with_snapshots(builder, ctx, r, out_slot, context, None)
+    }
+
+    fn marshal_user_call_args_with_snapshots(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        out_slot: Option<StackSlot>,
+        context: CodegenExprContext,
+        snapshots: Option<&CallArgSnapshots>,
+    ) -> Result<MarshalledArgs, String> {
         let view = ctx.tir.call_view(r);
         let name_id = view.name;
         let name_str = ctx.pool.str(name_id);
@@ -1581,10 +1545,11 @@ impl<M: Module> Codegen<M> {
                     // pointee already lives in the caller's stack slot —
                     // pass its address directly so the callee mutates
                     // in place. No spill, no reload, no write-back.
-                    let addr = Self::inout_pointee_addr(builder, ctx, arg)?;
+                    let addr = Self::inout_pointee_addr_d(builder, ctx, arg, context.child())?;
                     values.push(addr);
                 } else if lowered.value == super::ValueAbi::Fat {
-                    let repr = Self::eval_inst_fat(builder, ctx, arg)?;
+                    let repr =
+                        Self::eval_inst_with(builder, ctx, arg, EvalRequest::Fat, context.child())?;
                     let (ptr, len, cap) = match repr {
                         ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
                             (ptr, len, cap)
@@ -1630,13 +1595,14 @@ impl<M: Module> Codegen<M> {
                         3,
                     ));
                     let addr = builder.ins().stack_addr(ctx.int_type, slot, 0);
-                    let cur = Self::eval_inst(builder, ctx, arg)?;
+                    let cur = Self::eval_inst_d(builder, ctx, arg, context.child())?;
                     builder.ins().store(MemFlagsData::trusted(), cur, addr, 0);
                     values.push(addr);
                     inout_reloads.push((arg, slot));
                 }
             } else if lowered.value == super::ValueAbi::Fat {
-                let repr = Self::eval_inst_fat(builder, ctx, arg)?;
+                let repr =
+                    Self::eval_inst_with(builder, ctx, arg, EvalRequest::Fat, context.child())?;
                 match repr {
                     ValueRepr::Str { ptr, len, cap } | ValueRepr::Bytes { ptr, len, cap } => {
                         values.push(ptr);
@@ -1649,23 +1615,30 @@ impl<M: Module> Codegen<M> {
                 // `strview` arg → 2-word ABI (ptr, len), matching the
                 // callee's build_signature. Sema has already inserted
                 // ToView for owned-str actuals (§3.4).
-                let (ptr, len) = Self::eval_str_or_view_parts(builder, ctx, arg)?;
+                let (ptr, len) =
+                    Self::eval_str_or_view_parts_d(builder, ctx, arg, context.child())?;
                 values.push(ptr);
                 values.push(len);
             } else if lowered.value == super::ValueAbi::Struct {
                 // M9 named / M10 anon struct arg: a single slot
                 // address — the existing slot for Borrow, a fresh
                 // field-wise copy for Move/Copy.
-                let addr = Self::emit_struct_call_arg(builder, ctx, arg, mode)?;
+                let addr = match snapshots.and_then(|values| values.get(&(r, arg)).copied()) {
+                    Some(addr) => addr,
+                    None => Self::emit_struct_call_arg_d(builder, ctx, arg, mode, context.child())?,
+                };
                 values.push(addr);
             } else if lowered.value == super::ValueAbi::Enum {
                 // M11 enum arg: a single slot address — the existing
                 // slot for Borrow, a fresh tag + active-payload copy
                 // for Move/Copy.
-                let addr = Self::emit_enum_call_arg(builder, ctx, arg, mode)?;
+                let addr = match snapshots.and_then(|values| values.get(&(r, arg)).copied()) {
+                    Some(addr) => addr,
+                    None => Self::emit_enum_call_arg_d(builder, ctx, arg, mode, context.child())?,
+                };
                 values.push(addr);
             } else {
-                values.push(Self::eval_inst(builder, ctx, arg)?);
+                values.push(Self::eval_inst_d(builder, ctx, arg, context.child())?);
             }
         }
 

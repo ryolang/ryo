@@ -1,6 +1,7 @@
 //! `eval_inst_fat_slot` — the fat-slot mirror of `eval_inst`, split from
 //! `expr.rs`; see module docs there.
 
+use super::walker::{CodegenExprContext, EvalRequest};
 use super::{Codegen, FunctionContext, ValueRepr};
 use cranelift::codegen::ir::{MemFlagsData, StackSlot};
 use cranelift::prelude::*;
@@ -21,6 +22,33 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         r: TirRef,
         out_slot: Option<StackSlot>,
+    ) -> Result<ValueRepr, String> {
+        Self::eval_inst_with(
+            builder,
+            ctx,
+            r,
+            EvalRequest::FatSlot(out_slot),
+            CodegenExprContext::root(),
+        )
+    }
+
+    pub(super) fn eval_inst_fat_slot_d(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        out_slot: Option<StackSlot>,
+        context: CodegenExprContext,
+    ) -> Result<ValueRepr, String> {
+        Self::eval_inst_fat_slot_with_snapshots(builder, ctx, r, out_slot, context, None)
+    }
+
+    pub(super) fn eval_inst_fat_slot_with_snapshots(
+        builder: &mut FunctionBuilder,
+        ctx: &mut FunctionContext<'_, M>,
+        r: TirRef,
+        out_slot: Option<StackSlot>,
+        context: CodegenExprContext,
+        snapshots: Option<&super::CallArgSnapshots>,
     ) -> Result<ValueRepr, String> {
         if let Some(repr) = Self::cached_repr(ctx, r) {
             return Ok(repr);
@@ -59,22 +87,24 @@ impl<M: Module> Codegen<M> {
                     }
                 } else {
                     // Not a fat local — fall through to scalar
-                    let val = Self::eval_inst(builder, ctx, r)?;
+                    let val = Self::eval_inst_d(builder, ctx, r, context.child())?;
                     return Ok(ValueRepr::Scalar(val));
                 }
             }
             TirTag::Call => {
                 let view = ctx.tir.call_view(r);
-                if let Some(repr) =
-                    Self::emit_fat_builtin_call(builder, ctx, view.name, view.args, out_slot)?
-                {
+                if let Some(repr) = Self::emit_fat_builtin_call(
+                    builder, ctx, view.name, view.args, out_slot, context,
+                )? {
                     repr
                 } else {
                     // User call — emit_call handles sret for fat-returning
                     // calls and caches the triple. Called directly
                     // (not via eval_inst): the scalar path rejects
                     // fat-returning calls.
-                    Self::emit_call_slot(builder, ctx, r, out_slot)?;
+                    Self::emit_call_slot_with_snapshots(
+                        builder, ctx, r, out_slot, context, snapshots,
+                    )?;
                     if let Some(repr) = Self::cached_repr(ctx, r) {
                         return Ok(repr);
                     }
@@ -92,8 +122,10 @@ impl<M: Module> Codegen<M> {
                 // eval_str_or_view_parts) is sound here: each extraction
                 // spills to its own fresh scratch slot and the pointers
                 // are consumed by the concat call itself.
-                let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs)?;
-                let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
+                let (l_ptr, l_len) =
+                    Self::eval_str_or_view_parts_d(builder, ctx, lhs, context.child())?;
+                let (r_ptr, r_len) =
+                    Self::eval_str_or_view_parts_d(builder, ctx, rhs, context.child())?;
 
                 let (ptr, len, cap) = Self::emit_slot_out_call(
                     builder,
@@ -115,8 +147,10 @@ impl<M: Module> Codegen<M> {
                     _ => unreachable!(),
                 };
                 // Transient extraction, as in StrConcat above.
-                let (l_ptr, l_len) = Self::eval_str_or_view_parts(builder, ctx, lhs)?;
-                let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
+                let (l_ptr, l_len) =
+                    Self::eval_str_or_view_parts_d(builder, ctx, lhs, context.child())?;
+                let (r_ptr, r_len) =
+                    Self::eval_str_or_view_parts_d(builder, ctx, rhs, context.child())?;
 
                 let (ptr, len, cap) = Self::emit_slot_out_call(
                     builder,
@@ -132,7 +166,7 @@ impl<M: Module> Codegen<M> {
                 )?;
                 ValueRepr::Bytes { ptr, len, cap }
             }
-            TirTag::FieldAccess => Self::eval_field_access_fat(builder, ctx, r)?,
+            TirTag::FieldAccess => Self::eval_field_access_fat_d(builder, ctx, r, context)?,
             TirTag::ViewAsOwner => {
                 let operand = match inst.data {
                     TirData::UnOp(o) => o,
@@ -140,7 +174,13 @@ impl<M: Module> Codegen<M> {
                 };
                 // Re-borrow into the fat triple: cap=0 static sentinel,
                 // identical to literals. No allocation.
-                let ValueRepr::View { ptr, len } = Self::eval_inst_view(builder, ctx, operand)?
+                let ValueRepr::View { ptr, len } = Self::eval_inst_with(
+                    builder,
+                    ctx,
+                    operand,
+                    EvalRequest::View,
+                    context.child(),
+                )?
                 else {
                     unreachable!("ViewAsOwner operand must produce ValueRepr::View")
                 };
@@ -156,7 +196,7 @@ impl<M: Module> Codegen<M> {
                     out_slot.is_none(),
                     "ErrorMessage manages its own result slot"
                 );
-                super::super::errors::emit_error_message(builder, ctx, r)?
+                super::super::errors::emit_error_message_d(builder, ctx, r, context)?
             }
             TirTag::DebugRepr => {
                 // M9.1/M11 print() gate: render the operand's Debug
@@ -175,7 +215,7 @@ impl<M: Module> Codegen<M> {
                 let operand_ty = ctx.tir.inst(operand).ty;
                 match ctx.pool.kind(operand_ty) {
                     TypeKind::Int | TypeKind::Float | TypeKind::Bool => {
-                        let v = Self::eval_inst(builder, ctx, operand)?;
+                        let v = Self::eval_inst_d(builder, ctx, operand, context.child())?;
                         let (fn_name, param_ty) = match ctx.pool.kind(operand_ty) {
                             TypeKind::Int => ("ryo_int_to_str", ctx.int_type),
                             TypeKind::Float => ("ryo_float_to_str", types::F64),
@@ -197,7 +237,8 @@ impl<M: Module> Codegen<M> {
                             out_slot.is_none(),
                             "DebugRepr struct operand manages its own repr slot"
                         );
-                        let addr = Self::eval_inst_struct(builder, ctx, operand)?;
+                        let addr =
+                            Self::eval_inst_struct_d(builder, ctx, operand, context.child())?;
                         let repr_addr = Self::emit_debug_repr(builder, ctx, addr, operand_ty)?;
                         let ptr =
                             builder
@@ -228,7 +269,7 @@ impl<M: Module> Codegen<M> {
                             out_slot.is_none(),
                             "DebugRepr enum operand manages its own repr slot"
                         );
-                        let addr = Self::eval_inst_enum(builder, ctx, operand)?;
+                        let addr = Self::eval_inst_enum_d(builder, ctx, operand, context.child())?;
                         let repr_addr = Self::eval_enum_debug_repr(builder, ctx, addr, operand_ty)?;
                         let ptr =
                             builder
@@ -273,7 +314,7 @@ impl<M: Module> Codegen<M> {
             }
             _ => {
                 // Delegate to scalar eval_inst for non-fat instructions
-                let val = Self::eval_inst(builder, ctx, r)?;
+                let val = Self::eval_inst_d(builder, ctx, r, context.child())?;
                 return Ok(ValueRepr::Scalar(val));
             }
         };

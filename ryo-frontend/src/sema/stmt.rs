@@ -1,8 +1,9 @@
 //! Statement analysis — split from `mod.rs`; see module docs there.
 
 use super::{
-    ConstInt, FuncCtx, Scope, Sema, analyze_expr, analyze_expr_allow_never,
-    analyze_struct_lit_with_target, check_reserved_name, const_eval_int, with_struct_shape_notes,
+    ConstInt, FuncCtx, NeverMode, Scope, Sema, SemaExprContext, analyze_expr_with,
+    analyze_struct_lit_with_target_and_context, check_reserved_name, const_eval_int,
+    with_struct_shape_notes,
 };
 use ryo_core::ast::CompoundOp;
 use ryo_core::diag::{Diag, DiagCode};
@@ -17,6 +18,17 @@ pub(crate) fn analyze_stmt(
     scope: &mut Scope,
     r: InstRef,
 ) -> TirRef {
+    analyze_stmt_with_context(sema, fcx, scope, r, SemaExprContext::root())
+}
+
+#[allow(clippy::too_many_lines)]
+pub(crate) fn analyze_stmt_with_context(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &mut Scope,
+    r: InstRef,
+    context: SemaExprContext,
+) -> TirRef {
     let inst = sema.uir.inst(r);
     let span = sema.uir.span(r);
     match inst.tag {
@@ -25,9 +37,23 @@ pub(crate) fn analyze_stmt(
             let mut init_tir = if let Some(target) = view.ty
                 && sema.uir.inst(view.initializer).tag == InstTag::StructLit
             {
-                analyze_struct_lit_with_target(sema, fcx, scope, view.initializer, target)
+                analyze_struct_lit_with_target_and_context(
+                    sema,
+                    fcx,
+                    scope,
+                    view.initializer,
+                    target,
+                    context.child(),
+                )
             } else {
-                analyze_expr_allow_never(sema, fcx, scope, view.initializer)
+                analyze_expr_with(
+                    sema,
+                    fcx,
+                    scope,
+                    view.initializer,
+                    NeverMode::Allow,
+                    context.child(),
+                )
             };
             let mut inferred = fcx.builder.ty_of(init_tir);
             // Reject void/never RHS and recover with the error
@@ -81,9 +107,23 @@ pub(crate) fn analyze_stmt(
                 _ => unreachable!("Return must carry InstData::UnOp"),
             };
             let mut val_tir = if sema.uir.inst(operand).tag == InstTag::StructLit {
-                analyze_struct_lit_with_target(sema, fcx, scope, operand, fcx.return_type)
+                analyze_struct_lit_with_target_and_context(
+                    sema,
+                    fcx,
+                    scope,
+                    operand,
+                    fcx.return_type,
+                    context.child(),
+                )
             } else {
-                analyze_expr(sema, fcx, scope, operand)
+                analyze_expr_with(
+                    sema,
+                    fcx,
+                    scope,
+                    operand,
+                    NeverMode::Reject,
+                    context.child(),
+                )
             };
             let actual = fcx.builder.ty_of(val_tir);
             if super::errors::is_error_union(sema, fcx.return_type) {
@@ -156,47 +196,34 @@ pub(crate) fn analyze_stmt(
             };
             // The one position where a `never` value is legal: a bare
             // `panic(...)` statement diverges by design.
-            let val_tir = analyze_expr_allow_never(sema, fcx, scope, operand);
+            let val_tir =
+                analyze_expr_with(sema, fcx, scope, operand, NeverMode::Allow, context.child());
             fcx.builder
                 .unary(TirTag::ExprStmt, sema.pool.void(), val_tir, span)
         }
-        InstTag::IfStmt => {
-            let view = sema.uir.if_stmt_view(r);
-
-            let cond_tir = analyze_expr(sema, fcx, scope, view.cond);
-            check_condition_bool(sema, fcx, cond_tir, view.cond);
-
-            let then_tirs = analyze_block_iter(sema, fcx, scope, view.then_stmts.into_iter());
-
-            let mut elif_tirs = Vec::with_capacity(view.elif_branches.len());
-            for elif in view.elif_branches {
-                let elif_cond_tir = analyze_expr(sema, fcx, scope, elif.cond);
-                check_condition_bool(sema, fcx, elif_cond_tir, elif.cond);
-                let elif_body_tirs = analyze_block_iter(sema, fcx, scope, elif.body.into_iter());
-                elif_tirs.push((elif_cond_tir, elif_body_tirs));
-            }
-
-            let else_tirs = view
-                .else_stmts
-                .map(|stmts| analyze_block_iter(sema, fcx, scope, stmts.into_iter()));
-
-            fcx.builder.if_stmt(
-                cond_tir,
-                &then_tirs,
-                &elif_tirs,
-                else_tirs.as_deref(),
-                sema.pool.void(),
-                span,
-            )
-        }
+        InstTag::IfStmt => analyze_if_stmt(sema, fcx, scope, r, context),
         InstTag::AssignOrDecl => {
             let view = sema.uir.assign_or_decl_view(r);
             let mut value_tir = if let Some((existing_ty, true)) = scope.lookup_full(view.name)
                 && sema.uir.inst(view.value).tag == InstTag::StructLit
             {
-                analyze_struct_lit_with_target(sema, fcx, scope, view.value, existing_ty)
+                analyze_struct_lit_with_target_and_context(
+                    sema,
+                    fcx,
+                    scope,
+                    view.value,
+                    existing_ty,
+                    context.child(),
+                )
             } else {
-                analyze_expr_allow_never(sema, fcx, scope, view.value)
+                analyze_expr_with(
+                    sema,
+                    fcx,
+                    scope,
+                    view.value,
+                    NeverMode::Allow,
+                    context.child(),
+                )
             };
             let value_ty = fcx.builder.ty_of(value_tir);
 
@@ -268,21 +295,30 @@ pub(crate) fn analyze_stmt(
                 }
             }
         }
-        InstTag::CompoundAssign => analyze_compound_assign(sema, fcx, scope, r, span),
-        InstTag::FieldAssign => analyze_field_assign(sema, fcx, scope, r, span),
-        InstTag::CompoundFieldAssign => analyze_compound_field_assign(sema, fcx, scope, r, span),
-        InstTag::Destructure => analyze_destructure(sema, fcx, scope, r, span),
+        InstTag::CompoundAssign => analyze_compound_assign(sema, fcx, scope, r, span, context),
+        InstTag::FieldAssign => analyze_field_assign(sema, fcx, scope, r, span, context),
+        InstTag::CompoundFieldAssign => {
+            analyze_compound_field_assign(sema, fcx, scope, r, span, context)
+        }
+        InstTag::Destructure => analyze_destructure(sema, fcx, scope, r, span, context),
         InstTag::WhileLoop => {
             let uir = sema.uir;
             let view = uir.while_loop_view(r);
             let cond = view.cond;
             let body = view.body;
 
-            let cond_tir = analyze_expr(sema, fcx, scope, cond);
+            let cond_tir =
+                analyze_expr_with(sema, fcx, scope, cond, NeverMode::Reject, context.child());
             check_condition_bool(sema, fcx, cond_tir, cond);
 
             fcx.loop_depth += 1;
-            let body_tirs = analyze_block_iter(sema, fcx, scope, body.into_iter());
+            let body_tirs = analyze_block_iter_with_context(
+                sema,
+                fcx,
+                scope,
+                body.into_iter(),
+                context.child(),
+            );
             fcx.loop_depth -= 1;
 
             fcx.builder
@@ -296,8 +332,10 @@ pub(crate) fn analyze_stmt(
             let end = view.end;
             let body = view.body;
 
-            let start_tir = analyze_expr(sema, fcx, scope, start);
-            let end_tir = analyze_expr(sema, fcx, scope, end);
+            let start_tir =
+                analyze_expr_with(sema, fcx, scope, start, NeverMode::Reject, context.child());
+            let end_tir =
+                analyze_expr_with(sema, fcx, scope, end, NeverMode::Reject, context.child());
 
             let start_ty = fcx.builder.ty_of(start_tir);
             let end_ty = fcx.builder.ty_of(end_tir);
@@ -333,14 +371,20 @@ pub(crate) fn analyze_stmt(
                 "is a reserved builtin and cannot be redefined",
             );
             let error_ty = sema.pool.error_type();
-            let body_tirs =
-                analyze_block_seeded_iter(sema, fcx, scope, body.into_iter(), |child_scope| {
+            let body_tirs = analyze_block_seeded_iter(
+                sema,
+                fcx,
+                scope,
+                body.into_iter(),
+                context.child(),
+                |child_scope| {
                     if is_reserved {
                         child_scope.insert_binding(var_name, error_ty, false, false);
                     } else {
                         child_scope.insert_dead_store_binding(var_name, int_ty, false, false, span);
                     }
-                });
+                },
+            );
             fcx.loop_depth -= 1;
 
             fcx.builder
@@ -379,22 +423,83 @@ pub(crate) fn analyze_stmt(
     }
 }
 
-pub(crate) fn analyze_block(
+fn analyze_if_stmt(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &mut Scope,
+    r: InstRef,
+    context: SemaExprContext,
+) -> TirRef {
+    let span = sema.uir.span(r);
+    let view = sema.uir.if_stmt_view(r);
+    let cond_tir = analyze_expr_with(
+        sema,
+        fcx,
+        scope,
+        view.cond,
+        NeverMode::Reject,
+        context.child(),
+    );
+    check_condition_bool(sema, fcx, cond_tir, view.cond);
+
+    let then_tirs = analyze_block_iter_with_context(
+        sema,
+        fcx,
+        scope,
+        view.then_stmts.into_iter(),
+        context.child(),
+    );
+    let mut elif_tirs = Vec::with_capacity(view.elif_branches.len());
+    for elif in view.elif_branches {
+        let elif_cond_tir = analyze_expr_with(
+            sema,
+            fcx,
+            scope,
+            elif.cond,
+            NeverMode::Reject,
+            context.child(),
+        );
+        check_condition_bool(sema, fcx, elif_cond_tir, elif.cond);
+        let elif_body_tirs = analyze_block_iter_with_context(
+            sema,
+            fcx,
+            scope,
+            elif.body.into_iter(),
+            context.child(),
+        );
+        elif_tirs.push((elif_cond_tir, elif_body_tirs));
+    }
+    let else_tirs = view.else_stmts.map(|stmts| {
+        analyze_block_iter_with_context(sema, fcx, scope, stmts.into_iter(), context.child())
+    });
+    fcx.builder.if_stmt(
+        cond_tir,
+        &then_tirs,
+        &elif_tirs,
+        else_tirs.as_deref(),
+        sema.pool.void(),
+        span,
+    )
+}
+
+pub(crate) fn analyze_block_with_context(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     stmts: &[InstRef],
+    context: SemaExprContext,
 ) -> Vec<TirRef> {
-    analyze_block_seeded(sema, fcx, scope, stmts, |_| {})
+    analyze_block_seeded_with_context(sema, fcx, scope, stmts, context, |_| {})
 }
 
-fn analyze_block_iter(
+fn analyze_block_iter_with_context(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     stmts: impl ExactSizeIterator<Item = InstRef>,
+    context: SemaExprContext,
 ) -> Vec<TirRef> {
-    analyze_block_seeded_iter(sema, fcx, scope, stmts, |_| {})
+    analyze_block_seeded_iter(sema, fcx, scope, stmts, context, |_| {})
 }
 
 /// The final field name of a field-assign target chain, for
@@ -416,9 +521,17 @@ fn analyze_compound_assign(
     scope: &mut Scope,
     r: InstRef,
     span: Span,
+    context: SemaExprContext,
 ) -> TirRef {
     let view = sema.uir.compound_assign_view(r);
-    let value_tir = analyze_expr_allow_never(sema, fcx, scope, view.value);
+    let value_tir = analyze_expr_with(
+        sema,
+        fcx,
+        scope,
+        view.value,
+        NeverMode::Allow,
+        context.child(),
+    );
     let value_ty = fcx.builder.ty_of(value_tir);
 
     let (existing_ty, is_mutable) = match scope.lookup_full(view.name) {
@@ -526,16 +639,32 @@ fn analyze_field_assign(
     scope: &mut Scope,
     r: InstRef,
     span: Span,
+    context: SemaExprContext,
 ) -> TirRef {
     let view = sema.uir.field_assign_view(r);
     let field_name = field_assign_target_name(sema, view.target);
-    let Some((target_tir, field_ty)) = check_field_chain(sema, fcx, scope, view.target) else {
+    let Some((target_tir, field_ty)) = check_field_chain(sema, fcx, scope, view.target, context)
+    else {
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     };
     let mut value_tir = if sema.uir.inst(view.value).tag == InstTag::StructLit {
-        analyze_struct_lit_with_target(sema, fcx, scope, view.value, field_ty)
+        analyze_struct_lit_with_target_and_context(
+            sema,
+            fcx,
+            scope,
+            view.value,
+            field_ty,
+            context.child(),
+        )
     } else {
-        analyze_expr_allow_never(sema, fcx, scope, view.value)
+        analyze_expr_with(
+            sema,
+            fcx,
+            scope,
+            view.value,
+            NeverMode::Allow,
+            context.child(),
+        )
     };
     let value_ty = fcx.builder.ty_of(value_tir);
     if check_bindable_value(sema, field_name, value_ty, sema.uir.span(view.value)) {
@@ -577,14 +706,23 @@ fn analyze_compound_field_assign(
     scope: &mut Scope,
     r: InstRef,
     span: Span,
+    context: SemaExprContext,
 ) -> TirRef {
     let view = sema.uir.compound_field_assign_view(r);
     let field_name = field_assign_target_name(sema, view.target);
-    let Some((target_tir, field_ty)) = check_field_chain(sema, fcx, scope, view.target) else {
+    let Some((target_tir, field_ty)) = check_field_chain(sema, fcx, scope, view.target, context)
+    else {
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     };
     let op = view.op;
-    let value_tir = analyze_expr_allow_never(sema, fcx, scope, view.value);
+    let value_tir = analyze_expr_with(
+        sema,
+        fcx,
+        scope,
+        view.value,
+        NeverMode::Allow,
+        context.child(),
+    );
     let value_ty = fcx.builder.ty_of(value_tir);
 
     if field_ty == sema.pool.error_type() {
@@ -663,6 +801,7 @@ fn check_field_chain(
     fcx: &mut FuncCtx,
     scope: &Scope,
     target: InstRef,
+    context: SemaExprContext,
 ) -> Option<(TirRef, TypeId)> {
     let mut root = target;
     loop {
@@ -699,7 +838,8 @@ fn check_field_chain(
             _ => unreachable!("field-assign target chain must be rooted at a Var"),
         }
     }
-    let target_tir = analyze_expr(sema, fcx, scope, target);
+    let target_tir =
+        analyze_expr_with(sema, fcx, scope, target, NeverMode::Reject, context.child());
     let field_ty = fcx.builder.ty_of(target_tir);
     Some((target_tir, field_ty))
 }
@@ -949,9 +1089,17 @@ fn analyze_destructure(
     scope: &mut Scope,
     r: InstRef,
     span: Span,
+    context: SemaExprContext,
 ) -> TirRef {
     let view = sema.uir.destructure_view(r);
-    let value_tir = analyze_expr_allow_never(sema, fcx, scope, view.value);
+    let value_tir = analyze_expr_with(
+        sema,
+        fcx,
+        scope,
+        view.value,
+        NeverMode::Allow,
+        context.child(),
+    );
     let value_ty = fcx.builder.ty_of(value_tir);
     if sema.pool.is_error(value_ty) {
         return fail_destructure_registered(sema, fcx, scope, &view.plan, span);
@@ -1108,14 +1256,15 @@ fn fcx_temp_name(sema: &Sema<'_>, name: StringId) -> bool {
 /// Variant of [`analyze_block`] that accepts a closure to seed the
 /// child scope before analyzing body statements. Used by for-range
 /// to inject the loop variable into scope.
-pub(crate) fn analyze_block_seeded(
+pub(crate) fn analyze_block_seeded_with_context(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     stmts: &[InstRef],
+    context: SemaExprContext,
     seed: impl FnOnce(&mut Scope),
 ) -> Vec<TirRef> {
-    analyze_block_seeded_iter(sema, fcx, scope, stmts.iter().copied(), seed)
+    analyze_block_seeded_iter(sema, fcx, scope, stmts.iter().copied(), context, seed)
 }
 
 fn analyze_block_seeded_iter(
@@ -1123,16 +1272,23 @@ fn analyze_block_seeded_iter(
     fcx: &mut FuncCtx,
     scope: &Scope,
     stmts: impl ExactSizeIterator<Item = InstRef>,
+    context: SemaExprContext,
     seed: impl FnOnce(&mut Scope),
 ) -> Vec<TirRef> {
     let mut child_scope = Scope {
-        parent: Some(scope),
+        parent: Some(scope.into()),
         bindings: HashMap::new(),
     };
     seed(&mut child_scope);
     let mut tirs = Vec::with_capacity(stmts.len());
     for stmt_ref in stmts {
-        tirs.push(analyze_stmt(sema, fcx, &mut child_scope, stmt_ref));
+        tirs.push(analyze_stmt_with_context(
+            sema,
+            fcx,
+            &mut child_scope,
+            stmt_ref,
+            context,
+        ));
     }
     child_scope.drain_dead_stores(sema);
     tirs

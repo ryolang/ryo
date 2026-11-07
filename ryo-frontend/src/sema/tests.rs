@@ -1423,6 +1423,140 @@ fn hundred_k_term_addition_chain_analyzes_without_overflow() {
 }
 
 #[test]
+fn hundred_k_term_right_nested_addition_chain_analyzes_without_overflow() {
+    let terms = 100_000;
+    let mut src = String::from("fn main():\n\tprint(");
+    for _ in 1..terms {
+        src.push_str("1+(");
+    }
+    src.push('1');
+    for _ in 1..terms {
+        src.push(')');
+    }
+    src.push_str(")\n");
+
+    let (tirs, pool) = run(&src).expect("100k-term right-nested chain should analyze");
+    let main = tirs
+        .iter()
+        .find(|t| pool.str(t.name) == "main")
+        .expect("main TIR");
+    let iadds = main
+        .instructions
+        .iter()
+        .filter(|i| i.tag == TirTag::IAdd)
+        .count();
+    assert_eq!(iadds, terms - 1, "chain must lower fully, not truncated");
+}
+
+fn nested_left_spines_add_chain(groups: usize, spine_terms: usize) -> String {
+    let mut src = String::from("fn main():\n\tprint(");
+    for _ in 1..groups {
+        src.push_str("1+(");
+    }
+    src.push('1');
+    for _ in 1..groups {
+        src.push(')');
+        for _ in 0..spine_terms {
+            src.push_str("+1");
+        }
+    }
+    src.push_str(")\n");
+    src
+}
+
+#[test]
+fn nested_long_left_spines_analyze_without_overflow() {
+    let groups = 200;
+    let spine_terms = 70;
+    let (tirs, pool) = run(&nested_left_spines_add_chain(groups, spine_terms))
+        .expect("nested long left spines should analyze");
+    let main = tirs
+        .iter()
+        .find(|t| pool.str(t.name) == "main")
+        .expect("main TIR");
+    let iadds = main
+        .instructions
+        .iter()
+        .filter(|i| i.tag == TirTag::IAdd)
+        .count();
+    assert_eq!(
+        iadds,
+        (groups - 1) * (spine_terms + 1),
+        "chain must lower fully, not truncated"
+    );
+}
+
+#[test]
+fn alternating_left_and_right_nested_chain_analyzes_without_overflow() {
+    let terms = 50_000;
+    let mut prefixes = Vec::with_capacity(terms - 1);
+    let mut suffix = String::new();
+    for i in 0..terms - 1 {
+        if i % 2 == 0 {
+            prefixes.push("(");
+            suffix.push_str("+1)");
+        } else {
+            prefixes.push("(1+");
+            suffix.push(')');
+        }
+    }
+    let mut src = String::from("fn main():\n\tprint(");
+    for prefix in prefixes.iter().rev() {
+        src.push_str(prefix);
+    }
+    src.push('1');
+    src.push_str(&suffix);
+    src.push_str(")\n");
+
+    let (tirs, pool) = run(&src).expect("alternating nested chain should analyze");
+    let main = tirs
+        .iter()
+        .find(|t| pool.str(t.name) == "main")
+        .expect("main TIR");
+    let iadds = main
+        .instructions
+        .iter()
+        .filter(|i| i.tag == TirTag::IAdd)
+        .count();
+    assert_eq!(iadds, terms - 1, "chain must lower fully, not truncated");
+}
+
+fn right_nested_chain_with_inner(links: usize, inner: &str) -> String {
+    let mut src = String::from("fn main():\n\tprint(");
+    for _ in 0..links {
+        src.push_str("1+(");
+    }
+    src.push_str(inner);
+    for _ in 0..links {
+        src.push(')');
+    }
+    src.push_str(")\n");
+    src
+}
+
+#[test]
+fn deep_right_nested_never_rhs_reports_one_void_value_error() {
+    let diags = run(&right_nested_chain_with_inner(70, "panic(\"boom\")")).unwrap_err();
+    assert_eq!(count_code(&diags, DiagCode::VoidValueInExpression), 1);
+    assert_eq!(
+        diags.len(),
+        1,
+        "unexpected cascading diagnostics: {diags:?}"
+    );
+}
+
+#[test]
+fn deep_right_nested_never_lhs_recovers_with_error_type() {
+    let diags = run(&right_nested_chain_with_inner(69, "panic(\"boom\")+1")).unwrap_err();
+    assert_eq!(count_code(&diags, DiagCode::VoidValueInExpression), 1);
+    assert_eq!(
+        diags.len(),
+        1,
+        "unexpected cascading diagnostics: {diags:?}"
+    );
+}
+
+#[test]
 fn hundred_k_term_unary_chain_analyzes_without_overflow() {
     let mut src = String::from("fn main():\n\tprint(");
     for _ in 0..100_000 {
