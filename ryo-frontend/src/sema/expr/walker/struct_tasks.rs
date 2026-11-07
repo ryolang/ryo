@@ -29,10 +29,15 @@ impl StructState {
     }
 
     fn target(&self, sema: &Sema<'_>, node: InstRef) -> Option<TypeId> {
-        self.targets.get(&node).copied().or_else(|| {
-            let name = sema.uir.struct_lit_view(node).name?;
-            sema.struct_types.get(&name).copied()
-        })
+        let target = match sema.uir.struct_lit_view(node).name {
+            Some(name) => sema.struct_types.get(&name).copied(),
+            None => self.targets.get(&node).copied(),
+        }?;
+        matches!(
+            sema.pool.kind(target),
+            TypeKind::Struct | TypeKind::AnonStruct
+        )
+        .then_some(target)
     }
 
     fn field_target(&self, sema: &Sema<'_>, node: InstRef, index: usize) -> Option<TypeId> {

@@ -613,3 +613,33 @@ fn main():
         assert_eq!(snapshot(run_with_expr_limit(src, limit)), baseline);
     }
 }
+
+#[test]
+fn named_struct_uses_declared_shape_not_incompatible_call_target() {
+    let src = r#"struct Point:
+	x: int
+struct Other:
+	y: int
+fn take(other: Other):
+	return
+fn main():
+	take(Point{x=1})
+"#;
+    let baseline = snapshot(run(src));
+    for limit in [0, 1, 64] {
+        assert_eq!(snapshot(run_with_expr_limit(src, limit)), baseline);
+    }
+}
+
+#[test]
+fn non_struct_call_target_does_not_reach_struct_layout_lookup() {
+    for literal in ["Point{x=1}", "{x=1}"] {
+        let src = format!(
+            "struct Point:\n\tx: int\nfn take(value: int):\n\treturn\nfn main():\n\ttake({literal})\n"
+        );
+        let baseline = snapshot(run(&src));
+        for limit in [0, 1, 64] {
+            assert_eq!(snapshot(run_with_expr_limit(&src, limit)), baseline);
+        }
+    }
+}
