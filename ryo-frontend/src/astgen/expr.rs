@@ -4,9 +4,9 @@
 //! Split out of `astgen.rs` to keep that file under the line-count
 //! gate; see the module docs there for the lowering pipeline.
 
-use super::{TypeResolver, errors, match_, variants};
+use super::{TypeResolver, errors, lower_destructure_pattern, match_, variants};
 use ryo_core::ast;
-use ryo_core::diag::DiagSink;
+use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::spine::ChainSpine;
 use ryo_core::types::{InternPool, StringId, TypeId};
 use ryo_core::uir::{InstRef, InstTag, UirBuilder};
@@ -48,7 +48,7 @@ pub(crate) fn with_expr_limit<T>(limit: u32, f: impl FnOnce() -> T) -> T {
     f()
 }
 
-fn expr_depth_limit() -> u32 {
+pub(super) fn expr_depth_limit() -> u32 {
     #[cfg(test)]
     if let Some(limit) = TEST_EXPR_LIMIT.with(|limit| limit.get()) {
         return limit;
@@ -334,12 +334,55 @@ pub(super) fn gen_expr_d(
     }
 }
 
-/// One unit of expr-lowering work for [`gen_expr`]'s explicit stack.
-///
-/// `Enter` visits a node, scheduling its children and an `Exit`;
-/// `Exit` emits the node's own instruction from the children's
-/// lowered refs (source-order post-order, exactly as the old
-/// recursive descent produced).
+struct BlockState {
+    list: Option<ast::StmtList>,
+    next_stmt: usize,
+    refs: Vec<InstRef>,
+}
+
+impl BlockState {
+    fn new(list: ast::StmtList) -> Self {
+        Self {
+            list: Some(list),
+            next_stmt: 0,
+            refs: Vec::new(),
+        }
+    }
+
+    fn statement_root() -> Self {
+        Self {
+            list: None,
+            next_stmt: 0,
+            refs: Vec::new(),
+        }
+    }
+}
+
+struct StmtState {
+    stmt: ast::StmtId,
+    block: BlockState,
+    cond: Option<InstRef>,
+    value: Option<InstRef>,
+    then_stmts: Option<Vec<InstRef>>,
+    elif_branches: Vec<(InstRef, Vec<InstRef>)>,
+    next_elif: usize,
+}
+
+impl StmtState {
+    fn new(stmt: ast::StmtId, block: BlockState) -> Self {
+        Self {
+            stmt,
+            block,
+            cond: None,
+            value: None,
+            then_stmts: None,
+            elif_branches: Vec::new(),
+            next_elif: 0,
+        }
+    }
+}
+
+/// One unit of expression, statement, or block work on the active stack.
 enum ExprTask {
     Enter(ast::ExprId),
     Exit(ast::ExprId),
@@ -347,9 +390,85 @@ enum ExprTask {
     Error(errors::ErrorState),
     MatchScrutinee(match_::MatchState),
     MatchBody(match_::MatchState),
+    MatchStmts(match_::MatchState),
     CatchOperand(match_::CatchState),
     CatchBody(match_::CatchState),
+    CatchStmts(match_::CatchState),
     CatchMatch(match_::CatchState),
+    BlockEnter(ast::StmtList),
+    BlockNext(BlockState),
+    StmtEnter(StmtState),
+    StmtValue(StmtState),
+    StmtTarget(StmtState),
+    StmtBody(StmtState),
+    ElifCond(StmtState),
+    ElifBody(StmtState),
+    IfElse(StmtState),
+    ForStart(StmtState),
+}
+
+fn statement_done(stack: &mut ChainSpine<ExprTask>, mut state: StmtState, result: Option<InstRef>) {
+    if let Some(result) = result {
+        state.block.refs.push(result);
+    }
+    stack.push(ExprTask::BlockNext(state.block));
+}
+
+fn advance_block(
+    stack: &mut ChainSpine<ExprTask>,
+    block_results: &mut ChainSpine<Vec<InstRef>>,
+    ast: &ast::Ast,
+    mut block: BlockState,
+) {
+    if let Some(list) = block.list {
+        let stmts = ast.stmt_list(list);
+        if block.next_stmt < stmts.len() {
+            let stmt = stmts[block.next_stmt];
+            block.next_stmt += 1;
+            stack.push(ExprTask::StmtEnter(StmtState::new(stmt, block)));
+            return;
+        }
+    }
+    block_results.push(block.refs);
+}
+
+fn finish_if(
+    state: &mut StmtState,
+    else_stmts: Option<Vec<InstRef>>,
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+) -> InstRef {
+    let then_stmts = state.then_stmts.take().expect("if then block lowered");
+    b.if_stmt(
+        state.cond.take().expect("if condition lowered"),
+        &then_stmts,
+        &state.elif_branches,
+        else_stmts.as_deref(),
+        ast.stmt_span(state.stmt),
+    )
+}
+
+fn schedule_if_branches(
+    stack: &mut ChainSpine<ExprTask>,
+    mut state: StmtState,
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+) {
+    let ast::StmtKind::IfStmt(if_stmt) = &ast.stmt(state.stmt).kind else {
+        unreachable!("if continuation for non-if statement")
+    };
+    let branches = ast.elif_list(if_stmt.elif_branches);
+    if state.next_elif < branches.len() {
+        let cond = branches[state.next_elif].cond;
+        stack.push(ExprTask::ElifCond(state));
+        stack.push(ExprTask::Enter(cond));
+    } else if let Some(else_block) = if_stmt.else_block {
+        stack.push(ExprTask::IfElse(state));
+        stack.push(ExprTask::BlockEnter(else_block));
+    } else {
+        let result = finish_if(&mut state, None, b, ast);
+        statement_done(stack, state, Some(result));
+    }
 }
 
 fn push_match_step(
@@ -363,22 +482,25 @@ fn push_match_step(
             stack.push(ExprTask::MatchBody(state));
             stack.push(ExprTask::Enter(expr));
         }
+        match_::MatchStep::Stmts(state, list) => {
+            stack.push(ExprTask::MatchStmts(state));
+            stack.push(ExprTask::BlockEnter(list));
+        }
     }
 }
 
-/// Iterative lowering machine used as the deep-nesting fallback for
-/// [`gen_expr`]: once expression nesting passes [`EXPR_DEPTH_LIMIT`],
-/// the recursion hands the remaining subtree to this explicit-stack
-/// walker (a 100k-term operator chain nests one link per term — deep
-/// enough to overflow the compiler's stack long before sema sees it).
-/// Common shapes never reach here; they stay on the recursive path.
-///
-/// The AST is a tree of arbitrary depth (a 100k-term operator chain
-/// nests 100k `BinaryOp` lhs links), so a recursive descent overflows
-/// the stack long before sema sees the program. The machine below
-/// keeps the recursion on the explicit `stack`; each `Exit` finds its
-/// children's refs on `results` in source order. Constructor, match,
-/// and catch state stays on that same stack while children lower.
+#[derive(Clone, Copy)]
+enum MachineRoot {
+    Expr(ast::ExprId),
+    Stmt(ast::StmtId),
+    Block(ast::StmtList),
+}
+
+enum MachineResult {
+    Expr(InstRef),
+    Stmts(Vec<InstRef>),
+}
+
 fn gen_expr_machine(
     b: &mut UirBuilder,
     ast: &ast::Ast,
@@ -388,18 +510,91 @@ fn gen_expr_machine(
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) -> InstRef {
+    match gen_machine(
+        b,
+        ast,
+        MachineRoot::Expr(expr),
+        types,
+        defined_layouts,
+        pool,
+        sink,
+    ) {
+        MachineResult::Expr(result) => result,
+        MachineResult::Stmts(_) => unreachable!("expression root returned statements"),
+    }
+}
+
+pub(super) fn gen_stmt_machine(
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+    stmt: ast::StmtId,
+    types: &TypeResolver,
+    defined_layouts: &HashSet<TypeId>,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+) -> Vec<InstRef> {
+    match gen_machine(
+        b,
+        ast,
+        MachineRoot::Stmt(stmt),
+        types,
+        defined_layouts,
+        pool,
+        sink,
+    ) {
+        MachineResult::Stmts(result) => result,
+        MachineResult::Expr(_) => unreachable!("statement root returned an expression"),
+    }
+}
+
+pub(super) fn gen_block_machine(
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+    list: ast::StmtList,
+    types: &TypeResolver,
+    defined_layouts: &HashSet<TypeId>,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+) -> Vec<InstRef> {
+    match gen_machine(
+        b,
+        ast,
+        MachineRoot::Block(list),
+        types,
+        defined_layouts,
+        pool,
+        sink,
+    ) {
+        MachineResult::Stmts(result) => result,
+        MachineResult::Expr(_) => unreachable!("block root returned an expression"),
+    }
+}
+
+/// Deep expression, statement, and block nesting shares this explicit-stack
+/// walker. Ordinary shallow input stays on the recursive path.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn gen_machine(
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+    root: MachineRoot,
+    types: &TypeResolver,
+    defined_layouts: &HashSet<TypeId>,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+) -> MachineResult {
     #[cfg(test)]
     TEST_MACHINE_CALLS.with(|count| count.set(count.get() + 1));
-    // Both stacks stay inline for expression-sized shapes; deep chains
-    // spill to the heap. No allocation at all for ordinary expressions.
     let mut stack: ChainSpine<ExprTask> = ChainSpine::new();
-    stack.push(ExprTask::Enter(expr));
-    // Children refs, consumed by `Exit` in source order. One slot per
-    // node on the current path, so the footprint mirrors the old
-    // recursion's locals.
+    match root {
+        MachineRoot::Expr(expr) => stack.push(ExprTask::Enter(expr)),
+        MachineRoot::Stmt(stmt) => stack.push(ExprTask::StmtEnter(StmtState::new(
+            stmt,
+            BlockState::statement_root(),
+        ))),
+        MachineRoot::Block(list) => stack.push(ExprTask::BlockEnter(list)),
+    }
     let mut results: ChainSpine<InstRef> = ChainSpine::new();
-    // Scratch for variadic `Exit` arms (call/struct-literal args); no
-    // heap until a variadic node actually pops.
+    let mut block_results: ChainSpine<Vec<InstRef>> = ChainSpine::new();
     let mut arity_buf: Vec<InstRef> = Vec::new();
     while let Some(task) = stack.pop() {
         match task {
@@ -621,6 +816,20 @@ fn gen_expr_machine(
                 );
                 push_match_step(&mut stack, &mut results, step);
             }
+            ExprTask::MatchStmts(state) => {
+                let body = block_results.pop().expect("match statement body lowered");
+                let step = match_::resume_match_stmts(
+                    state,
+                    body,
+                    b,
+                    ast,
+                    types,
+                    defined_layouts,
+                    pool,
+                    sink,
+                );
+                push_match_step(&mut stack, &mut results, step);
+            }
             ExprTask::CatchOperand(state) => {
                 let operand = results.pop().expect("catch operand lowered");
                 let step = match_::resume_catch_operand(
@@ -634,10 +843,13 @@ fn gen_expr_machine(
                     sink,
                 );
                 match step {
-                    match_::CatchStep::Complete(result) => results.push(result),
                     match_::CatchStep::Body(state, expr) => {
                         stack.push(ExprTask::CatchBody(state));
                         stack.push(ExprTask::Enter(expr));
+                    }
+                    match_::CatchStep::Stmts(state, list) => {
+                        stack.push(ExprTask::CatchStmts(state));
+                        stack.push(ExprTask::BlockEnter(list));
                     }
                     match_::CatchStep::Match(state, step) => {
                         stack.push(ExprTask::CatchMatch(state));
@@ -649,9 +861,244 @@ fn gen_expr_machine(
                 let body = results.pop().expect("catch body lowered");
                 results.push(match_::resume_catch_body(state, body, b));
             }
+            ExprTask::CatchStmts(state) => {
+                let body = block_results.pop().expect("catch statement body lowered");
+                results.push(match_::resume_catch_stmts(state, body, b));
+            }
             ExprTask::CatchMatch(state) => {
                 let direct = results.pop().expect("direct catch match lowered");
                 results.push(match_::resume_catch_match(state, direct, b));
+            }
+            ExprTask::BlockEnter(list) => {
+                advance_block(&mut stack, &mut block_results, ast, BlockState::new(list));
+            }
+            ExprTask::BlockNext(block) => {
+                advance_block(&mut stack, &mut block_results, ast, block);
+            }
+            ExprTask::StmtEnter(state) => {
+                let span = ast.stmt_span(state.stmt);
+                match &ast.stmt(state.stmt).kind {
+                    ast::StmtKind::VarDecl(decl) => {
+                        stack.push(ExprTask::StmtValue(state));
+                        stack.push(ExprTask::Enter(decl.initializer));
+                    }
+                    ast::StmtKind::Return(Some(expr)) => {
+                        stack.push(ExprTask::StmtValue(state));
+                        stack.push(ExprTask::Enter(*expr));
+                    }
+                    ast::StmtKind::Return(None) => {
+                        let result = b.return_void(span);
+                        statement_done(&mut stack, state, Some(result));
+                    }
+                    ast::StmtKind::ExprStmt(expr) => {
+                        stack.push(ExprTask::StmtValue(state));
+                        stack.push(ExprTask::Enter(*expr));
+                    }
+                    ast::StmtKind::FunctionDef(_) => {
+                        sink.emit(Diag::error(
+                            span,
+                            DiagCode::NestedFunctionDef,
+                            "nested function definitions are not supported",
+                        ));
+                        statement_done(&mut stack, state, None);
+                    }
+                    ast::StmtKind::AssignOrDecl { value, .. }
+                    | ast::StmtKind::CompoundAssign { value, .. } => {
+                        stack.push(ExprTask::StmtValue(state));
+                        stack.push(ExprTask::Enter(*value));
+                    }
+                    ast::StmtKind::FieldAssign { target, .. }
+                    | ast::StmtKind::CompoundFieldAssign { target, .. } => {
+                        stack.push(ExprTask::StmtTarget(state));
+                        stack.push(ExprTask::Enter(*target));
+                    }
+                    ast::StmtKind::Destructure { value, .. } => {
+                        stack.push(ExprTask::StmtValue(state));
+                        stack.push(ExprTask::Enter(*value));
+                    }
+                    ast::StmtKind::IfStmt(if_stmt) => {
+                        stack.push(ExprTask::StmtValue(state));
+                        stack.push(ExprTask::Enter(if_stmt.cond));
+                    }
+                    ast::StmtKind::WhileLoop { cond, .. } => {
+                        stack.push(ExprTask::StmtValue(state));
+                        stack.push(ExprTask::Enter(*cond));
+                    }
+                    ast::StmtKind::ForRange {
+                        iterator, start, ..
+                    } => {
+                        if iterator.name != types.range {
+                            sink.emit(Diag::error(
+                                iterator.span,
+                                DiagCode::ParseError,
+                                format!(
+                                    "only `range(...)` is supported in `for` loops in v0.1, got `{}`",
+                                    pool.str(iterator.name),
+                                ),
+                            ));
+                        }
+                        stack.push(ExprTask::ForStart(state));
+                        stack.push(ExprTask::Enter(*start));
+                    }
+                    ast::StmtKind::Break => {
+                        let result = b.break_stmt(span);
+                        statement_done(&mut stack, state, Some(result));
+                    }
+                    ast::StmtKind::Continue => {
+                        let result = b.continue_stmt(span);
+                        statement_done(&mut stack, state, Some(result));
+                    }
+                    ast::StmtKind::Error => {
+                        let result = b.unreachable(span);
+                        statement_done(&mut stack, state, Some(result));
+                    }
+                    ast::StmtKind::StructDef(_)
+                    | ast::StmtKind::EnumDef(_)
+                    | ast::StmtKind::ErrorDef(_) => {
+                        statement_done(&mut stack, state, None);
+                    }
+                    ast::StmtKind::ErrorFamilyDef(def) => {
+                        sink.emit(Diag::error(
+                            def.name.span,
+                            DiagCode::ParseError,
+                            "nested error family declarations are not supported",
+                        ));
+                        statement_done(&mut stack, state, None);
+                    }
+                }
+            }
+            ExprTask::StmtValue(mut state) => {
+                let value = results.pop().expect("statement expression lowered");
+                let span = ast.stmt_span(state.stmt);
+                match &ast.stmt(state.stmt).kind {
+                    ast::StmtKind::VarDecl(decl) => {
+                        let ty = decl
+                            .type_annotation
+                            .as_ref()
+                            .map(|ann| types.resolve_type(ann, ast, pool, sink, defined_layouts));
+                        let result = b.var_decl(decl.name.name, decl.mutable, ty, value, span);
+                        statement_done(&mut stack, state, Some(result));
+                    }
+                    ast::StmtKind::Return(Some(_)) => {
+                        let result = b.unary(InstTag::Return, value, span);
+                        statement_done(&mut stack, state, Some(result));
+                    }
+                    ast::StmtKind::ExprStmt(_) => {
+                        let result = b.unary(InstTag::ExprStmt, value, span);
+                        statement_done(&mut stack, state, Some(result));
+                    }
+                    ast::StmtKind::AssignOrDecl { target, .. } => {
+                        let result = b.assign_or_decl(target.name, value, span);
+                        statement_done(&mut stack, state, Some(result));
+                    }
+                    ast::StmtKind::CompoundAssign { target, op, .. } => {
+                        let result = b.compound_assign(target.name, *op, value, span);
+                        statement_done(&mut stack, state, Some(result));
+                    }
+                    ast::StmtKind::FieldAssign { .. } => {
+                        let target = state.value.take().expect("assignment target lowered");
+                        let result = b.field_assign(target, value, span);
+                        statement_done(&mut stack, state, Some(result));
+                    }
+                    ast::StmtKind::CompoundFieldAssign { op, .. } => {
+                        let target = state.value.take().expect("assignment target lowered");
+                        let result = b.compound_field_assign(target, *op, value, span);
+                        statement_done(&mut stack, state, Some(result));
+                    }
+                    ast::StmtKind::Destructure { target, .. } => {
+                        lower_destructure_pattern(
+                            b,
+                            ast,
+                            pool,
+                            *target,
+                            value,
+                            span,
+                            sink,
+                            &mut state.block.refs,
+                        );
+                        statement_done(&mut stack, state, None);
+                    }
+                    ast::StmtKind::IfStmt(if_stmt) => {
+                        state.cond = Some(value);
+                        stack.push(ExprTask::StmtBody(state));
+                        stack.push(ExprTask::BlockEnter(if_stmt.then_block));
+                    }
+                    ast::StmtKind::WhileLoop { body, .. } => {
+                        state.cond = Some(value);
+                        stack.push(ExprTask::StmtBody(state));
+                        stack.push(ExprTask::BlockEnter(*body));
+                    }
+                    ast::StmtKind::ForRange { body, .. } => {
+                        state.value = Some(value);
+                        stack.push(ExprTask::StmtBody(state));
+                        stack.push(ExprTask::BlockEnter(*body));
+                    }
+                    other => unreachable!("unexpected statement value continuation: {other:?}"),
+                }
+            }
+            ExprTask::StmtTarget(mut state) => {
+                let target = results.pop().expect("assignment target lowered");
+                state.value = Some(target);
+                let value = match &ast.stmt(state.stmt).kind {
+                    ast::StmtKind::FieldAssign { value, .. }
+                    | ast::StmtKind::CompoundFieldAssign { value, .. } => *value,
+                    other => unreachable!("unexpected assignment target continuation: {other:?}"),
+                };
+                stack.push(ExprTask::StmtValue(state));
+                stack.push(ExprTask::Enter(value));
+            }
+            ExprTask::StmtBody(mut state) => {
+                let body = block_results.pop().expect("statement body lowered");
+                let span = ast.stmt_span(state.stmt);
+                match &ast.stmt(state.stmt).kind {
+                    ast::StmtKind::IfStmt(_) => {
+                        state.then_stmts = Some(body);
+                        schedule_if_branches(&mut stack, state, b, ast);
+                    }
+                    ast::StmtKind::WhileLoop { .. } => {
+                        let cond = state.cond.take().expect("while condition lowered");
+                        let result = b.while_loop(cond, &body, span);
+                        statement_done(&mut stack, state, Some(result));
+                    }
+                    ast::StmtKind::ForRange { var, .. } => {
+                        let start = state.cond.take().expect("range start lowered");
+                        let end = state.value.take().expect("range end lowered");
+                        let result = b.for_range(var.name, start, end, &body, span);
+                        statement_done(&mut stack, state, Some(result));
+                    }
+                    other => unreachable!("unexpected statement body continuation: {other:?}"),
+                }
+            }
+            ExprTask::ElifCond(mut state) => {
+                let cond = results.pop().expect("elif condition lowered");
+                state.value = Some(cond);
+                let ast::StmtKind::IfStmt(if_stmt) = &ast.stmt(state.stmt).kind else {
+                    unreachable!("elif continuation for non-if statement")
+                };
+                let block = ast.elif_list(if_stmt.elif_branches)[state.next_elif].block;
+                stack.push(ExprTask::ElifBody(state));
+                stack.push(ExprTask::BlockEnter(block));
+            }
+            ExprTask::ElifBody(mut state) => {
+                let body = block_results.pop().expect("elif body lowered");
+                let cond = state.value.take().expect("elif condition lowered");
+                state.elif_branches.push((cond, body));
+                state.next_elif += 1;
+                schedule_if_branches(&mut stack, state, b, ast);
+            }
+            ExprTask::IfElse(mut state) => {
+                let body = block_results.pop().expect("else body lowered");
+                let result = finish_if(&mut state, Some(body), b, ast);
+                statement_done(&mut stack, state, Some(result));
+            }
+            ExprTask::ForStart(mut state) => {
+                let start = results.pop().expect("range start lowered");
+                state.cond = Some(start);
+                let ast::StmtKind::ForRange { end, .. } = &ast.stmt(state.stmt).kind else {
+                    unreachable!("range continuation for non-range statement")
+                };
+                stack.push(ExprTask::StmtValue(state));
+                stack.push(ExprTask::Enter(*end));
             }
             ExprTask::Exit(e) => {
                 let span = ast.expr_span(e);
@@ -738,5 +1185,10 @@ fn gen_expr_machine(
             }
         }
     }
-    results.pop().expect("one root ref remains")
+    match root {
+        MachineRoot::Expr(_) => MachineResult::Expr(results.pop().expect("one root ref remains")),
+        MachineRoot::Stmt(_) | MachineRoot::Block(_) => {
+            MachineResult::Stmts(block_results.pop().expect("one root block remains"))
+        }
+    }
 }

@@ -588,7 +588,6 @@ fn nested_catches(depth: usize) -> String {
 }
 
 #[test]
-#[ignore = "I-270: enable with astgen traversal"]
 fn jit_run_nested_statement_matches_50000() {
     assert_jit_prints(
         "nested_statement_matches_50000.ryo",

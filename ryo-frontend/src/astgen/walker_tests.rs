@@ -300,7 +300,7 @@ fn non_simple_statement_cases() -> Vec<(&'static str, String)> {
     vec![
         (
             "declaration",
-            "fn main():\n\tmatch 1:\n\t\t1:\n\t\t\tvalue = 1\n\t\t\tprint(value)\n\t\t_: 0\n"
+            "fn main():\n\tmatch 1:\n\t\t1:\n\t\t\tvalue: int = 1\n\t\t\tprint(value)\n\t\t_: 0\n"
                 .to_string(),
         ),
         (
@@ -310,7 +310,7 @@ fn non_simple_statement_cases() -> Vec<(&'static str, String)> {
         ),
         (
             "return",
-            "fn choose() -> int:\n\tmatch 1:\n\t\t1:\n\t\t\treturn 1\n\t\t_:\n\t\t\treturn 0\nfn main():\n\tprint(choose())\n"
+            "fn choose() -> int:\n\tmatch 1:\n\t\t1:\n\t\t\treturn 1\n\t\t_:\n\t\t\treturn 0\n"
                 .to_string(),
         ),
         (
@@ -336,9 +336,22 @@ fn non_simple_statement_cases() -> Vec<(&'static str, String)> {
 }
 
 #[test]
-#[ignore = "I-270: enable with astgen traversal"]
 fn non_simple_statement_lowering_uses_one_machine() {
     for (name, src) in non_simple_statement_cases() {
         assert_single_machine_at_limit_zero(name, &src);
+    }
+}
+
+#[test]
+fn non_simple_statement_lowering_matches_at_every_depth_limit() {
+    for (name, src) in non_simple_statement_cases() {
+        let baseline = snapshot(lower(&src));
+        for limit in [0, 1, 64] {
+            assert_eq!(
+                snapshot(lower_with_expr_limit(&src, limit)),
+                baseline,
+                "{name} differed at expression depth limit {limit}"
+            );
+        }
     }
 }

@@ -93,6 +93,7 @@ pub(super) struct MatchState {
 
 pub(super) enum MatchStep {
     Body(MatchState, ast::ExprId),
+    Stmts(MatchState, ast::StmtList),
     Complete(InstRef),
 }
 
@@ -139,8 +140,9 @@ pub(super) fn resume_match_body(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn resume_match_arm(
+pub(super) fn resume_match_stmts(
     mut state: MatchState,
+    body: Vec<InstRef>,
     b: &mut UirBuilder,
     ast: &ast::Ast,
     types: &TypeResolver,
@@ -148,8 +150,23 @@ fn resume_match_arm(
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) -> MatchStep {
+    let pattern = state.pending_pattern.take().expect("match arm prepared");
+    state.owned.push((pattern, OwnedBody::Stmts(body)));
+    resume_match_arm(state, b, ast, types, defined_enums, pool, sink)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resume_match_arm(
+    mut state: MatchState,
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+    types: &TypeResolver,
+    _defined_enums: &HashSet<TypeId>,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+) -> MatchStep {
     let source_arms = ast.match_arms(state.arms);
-    while state.next_arm < source_arms.len() {
+    if state.next_arm < source_arms.len() {
         let arm = source_arms[state.next_arm];
         state.next_arm += 1;
         let pattern = lower_match_pattern(ast, arm.pattern, types, pool, sink);
@@ -159,8 +176,8 @@ fn resume_match_arm(
                 return MatchStep::Body(state, expr);
             }
             ast::MatchArmBody::Stmts(list) => {
-                let body = lower_stmt_body(b, ast, list, types, defined_enums, pool, sink);
-                state.owned.push((pattern, body));
+                state.pending_pattern = Some(pattern);
+                return MatchStep::Stmts(state, list);
             }
         }
     }
@@ -280,6 +297,11 @@ fn gen_match_step(
                 );
                 step = resume_match_body(state, body, b, ast, types, defined_enums, pool, sink);
             }
+            MatchStep::Stmts(state, list) => {
+                let body =
+                    lower_stmt_body(b, ast, list, types, defined_enums, pool, sink, depth + 1);
+                step = resume_match_stmts(state, body, b, ast, types, defined_enums, pool, sink);
+            }
         }
     }
 }
@@ -297,8 +319,8 @@ pub(super) struct CatchState {
 
 pub(super) enum CatchStep {
     Body(CatchState, ast::ExprId),
+    Stmts(CatchState, ast::StmtList),
     Match(CatchState, MatchStep),
-    Complete(InstRef),
 }
 
 pub(super) fn prepare_catch(catch: ast::CatchExpr, span: Span) -> CatchState {
@@ -337,10 +359,7 @@ pub(super) fn resume_catch_operand(
     state.success_ref = Some(b.temp_var_ref(success, state.span));
     match state.catch.body {
         ast::CatchBody::Handler(ast::MatchArmBody::Expr(expr)) => CatchStep::Body(state, expr),
-        ast::CatchBody::Handler(ast::MatchArmBody::Stmts(list)) => {
-            let body = lower_stmt_body(b, ast, list, types, defined_enums, pool, sink);
-            CatchStep::Complete(finish_catch(state, body, b))
-        }
+        ast::CatchBody::Handler(ast::MatchArmBody::Stmts(list)) => CatchStep::Stmts(state, list),
         ast::CatchBody::Arms(arms) => {
             let error_span = state
                 .catch
@@ -365,6 +384,14 @@ pub(super) fn resume_catch_operand(
 
 pub(super) fn resume_catch_body(state: CatchState, body: InstRef, b: &mut UirBuilder) -> InstRef {
     finish_catch(state, OwnedBody::Expr(body), b)
+}
+
+pub(super) fn resume_catch_stmts(
+    state: CatchState,
+    body: Vec<InstRef>,
+    b: &mut UirBuilder,
+) -> InstRef {
+    finish_catch(state, OwnedBody::Stmts(body), b)
 }
 
 pub(super) fn resume_catch_match(
@@ -480,11 +507,14 @@ pub(super) fn gen_catch_d(
         sink,
     );
     match step {
-        CatchStep::Complete(result) => result,
         CatchStep::Body(state, expr) => {
             let body =
                 super::expr::gen_expr_d(b, ast, expr, types, defined_enums, pool, sink, depth + 1);
             resume_catch_body(state, body, b)
+        }
+        CatchStep::Stmts(state, list) => {
+            let body = lower_stmt_body(b, ast, list, types, defined_enums, pool, sink, depth + 1);
+            resume_catch_stmts(state, body, b)
         }
         CatchStep::Match(state, step) => {
             let direct = gen_match_step(step, b, ast, types, defined_enums, pool, sink, depth);
@@ -502,12 +532,9 @@ fn lower_stmt_body(
     defined_enums: &HashSet<TypeId>,
     pool: &mut InternPool,
     sink: &mut DiagSink,
-) -> OwnedBody {
-    let mut refs = Vec::new();
-    for &stmt in ast.stmt_list(list) {
-        gen_stmt(b, ast, stmt, types, defined_enums, pool, sink, &mut refs);
-    }
-    OwnedBody::Stmts(refs)
+    depth: u32,
+) -> Vec<InstRef> {
+    lower_block_d(b, ast, list, types, defined_enums, pool, sink, depth)
 }
 
 /// Lower one arm pattern to its [`UirPattern`] builder-input shape.

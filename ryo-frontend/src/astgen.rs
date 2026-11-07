@@ -1199,15 +1199,42 @@ impl TypeDefiner<'_> {
 fn lower_block(
     b: &mut UirBuilder,
     ast: &ast::Ast,
-    stmts: &[ast::StmtId],
+    stmts: ast::StmtList,
     types: &TypeResolver,
     defined_layouts: &HashSet<TypeId>,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) -> Vec<InstRef> {
+    lower_block_d(b, ast, stmts, types, defined_layouts, pool, sink, 0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_block_d(
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+    stmts: ast::StmtList,
+    types: &TypeResolver,
+    defined_layouts: &HashSet<TypeId>,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+    depth: u32,
+) -> Vec<InstRef> {
+    if depth == expr::expr_depth_limit() {
+        return expr::gen_block_machine(b, ast, stmts, types, defined_layouts, pool, sink);
+    }
     let mut out = Vec::new();
-    for &s in stmts {
-        gen_stmt(b, ast, s, types, defined_layouts, pool, sink, &mut out);
+    for &s in ast.stmt_list(stmts) {
+        gen_stmt_d(
+            b,
+            ast,
+            s,
+            types,
+            defined_layouts,
+            pool,
+            sink,
+            &mut out,
+            depth,
+        );
     }
     out
 }
@@ -1291,15 +1318,7 @@ fn gen_function_def(
         }
     }
 
-    let body_stmts = lower_block(
-        b,
-        ast,
-        ast.stmt_list(func.body),
-        types,
-        defined_layouts,
-        pool,
-        sink,
-    );
+    let body_stmts = lower_block(b, ast, func.body, types, defined_layouts, pool, sink);
 
     b.add_function(
         func.name.name,
@@ -1415,11 +1434,46 @@ fn gen_stmt(
     sink: &mut DiagSink,
     out: &mut Vec<InstRef>,
 ) {
+    gen_stmt_d(b, ast, stmt, types, defined_layouts, pool, sink, out, 0);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gen_stmt_d(
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+    stmt: ast::StmtId,
+    types: &TypeResolver,
+    defined_layouts: &HashSet<TypeId>,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+    out: &mut Vec<InstRef>,
+    depth: u32,
+) {
+    if depth == expr::expr_depth_limit() {
+        out.extend(expr::gen_stmt_machine(
+            b,
+            ast,
+            stmt,
+            types,
+            defined_layouts,
+            pool,
+            sink,
+        ));
+        return;
+    }
     let span = ast.stmt_span(stmt);
     match &ast.stmt(stmt).kind {
         ast::StmtKind::VarDecl(decl) => {
-            let initializer =
-                gen_expr(b, ast, decl.initializer, types, defined_layouts, pool, sink);
+            let initializer = expr::gen_expr_d(
+                b,
+                ast,
+                decl.initializer,
+                types,
+                defined_layouts,
+                pool,
+                sink,
+                depth + 1,
+            );
             let ty = decl
                 .type_annotation
                 .as_ref()
@@ -1429,7 +1483,8 @@ fn gen_stmt(
         }
         ast::StmtKind::Return(value) => match value {
             Some(expr) => {
-                let value = gen_expr(b, ast, *expr, types, defined_layouts, pool, sink);
+                let value =
+                    expr::gen_expr_d(b, ast, *expr, types, defined_layouts, pool, sink, depth + 1);
                 out.push(b.unary(InstTag::Return, value, span));
             }
             None => {
@@ -1437,7 +1492,16 @@ fn gen_stmt(
             }
         },
         ast::StmtKind::ExprStmt(value) => {
-            let value = gen_expr(b, ast, *value, types, defined_layouts, pool, sink);
+            let value = expr::gen_expr_d(
+                b,
+                ast,
+                *value,
+                types,
+                defined_layouts,
+                pool,
+                sink,
+                depth + 1,
+            );
             out.push(b.unary(InstTag::ExprStmt, value, span));
         }
         ast::StmtKind::FunctionDef(_) => {
@@ -1448,71 +1512,146 @@ fn gen_stmt(
             ));
         }
         ast::StmtKind::AssignOrDecl { target, value } => {
-            let value_ref = gen_expr(b, ast, *value, types, defined_layouts, pool, sink);
-            let r = b.assign_or_decl(target.name, value_ref, span);
-            out.push(r);
-        }
-        ast::StmtKind::CompoundAssign { target, op, value } => {
-            let value_ref = gen_expr(b, ast, *value, types, defined_layouts, pool, sink);
-            let r = b.compound_assign(target.name, *op, value_ref, span);
-            out.push(r);
-        }
-        ast::StmtKind::FieldAssign { target, value } => {
-            let target_ref = gen_expr(b, ast, *target, types, defined_layouts, pool, sink);
-            let value_ref = gen_expr(b, ast, *value, types, defined_layouts, pool, sink);
-            let r = b.field_assign(target_ref, value_ref, span);
-            out.push(r);
-        }
-        ast::StmtKind::CompoundFieldAssign { target, op, value } => {
-            let target_ref = gen_expr(b, ast, *target, types, defined_layouts, pool, sink);
-            let value_ref = gen_expr(b, ast, *value, types, defined_layouts, pool, sink);
-            let r = b.compound_field_assign(target_ref, *op, value_ref, span);
-            out.push(r);
-        }
-        ast::StmtKind::Destructure { target, value } => {
-            let value_ref = gen_expr(b, ast, *value, types, defined_layouts, pool, sink);
-            lower_destructure_pattern(b, ast, pool, *target, value_ref, span, sink, out);
-        }
-        ast::StmtKind::IfStmt(if_stmt) => {
-            let cond = gen_expr(b, ast, if_stmt.cond, types, defined_layouts, pool, sink);
-            let then_stmts = lower_block(
+            let value_ref = expr::gen_expr_d(
                 b,
                 ast,
-                ast.stmt_list(if_stmt.then_block),
+                *value,
                 types,
                 defined_layouts,
                 pool,
                 sink,
+                depth + 1,
+            );
+            let r = b.assign_or_decl(target.name, value_ref, span);
+            out.push(r);
+        }
+        ast::StmtKind::CompoundAssign { target, op, value } => {
+            let value_ref = expr::gen_expr_d(
+                b,
+                ast,
+                *value,
+                types,
+                defined_layouts,
+                pool,
+                sink,
+                depth + 1,
+            );
+            let r = b.compound_assign(target.name, *op, value_ref, span);
+            out.push(r);
+        }
+        ast::StmtKind::FieldAssign { target, value } => {
+            let target_ref = expr::gen_expr_d(
+                b,
+                ast,
+                *target,
+                types,
+                defined_layouts,
+                pool,
+                sink,
+                depth + 1,
+            );
+            let value_ref = expr::gen_expr_d(
+                b,
+                ast,
+                *value,
+                types,
+                defined_layouts,
+                pool,
+                sink,
+                depth + 1,
+            );
+            let r = b.field_assign(target_ref, value_ref, span);
+            out.push(r);
+        }
+        ast::StmtKind::CompoundFieldAssign { target, op, value } => {
+            let target_ref = expr::gen_expr_d(
+                b,
+                ast,
+                *target,
+                types,
+                defined_layouts,
+                pool,
+                sink,
+                depth + 1,
+            );
+            let value_ref = expr::gen_expr_d(
+                b,
+                ast,
+                *value,
+                types,
+                defined_layouts,
+                pool,
+                sink,
+                depth + 1,
+            );
+            let r = b.compound_field_assign(target_ref, *op, value_ref, span);
+            out.push(r);
+        }
+        ast::StmtKind::Destructure { target, value } => {
+            let value_ref = expr::gen_expr_d(
+                b,
+                ast,
+                *value,
+                types,
+                defined_layouts,
+                pool,
+                sink,
+                depth + 1,
+            );
+            lower_destructure_pattern(b, ast, pool, *target, value_ref, span, sink, out);
+        }
+        ast::StmtKind::IfStmt(if_stmt) => {
+            let cond = expr::gen_expr_d(
+                b,
+                ast,
+                if_stmt.cond,
+                types,
+                defined_layouts,
+                pool,
+                sink,
+                depth + 1,
+            );
+            let then_stmts = lower_block_d(
+                b,
+                ast,
+                if_stmt.then_block,
+                types,
+                defined_layouts,
+                pool,
+                sink,
+                depth + 1,
             );
 
             let elif_branches: Vec<_> = ast
                 .elif_list(if_stmt.elif_branches)
                 .iter()
                 .map(|elif| {
-                    let elif_cond = gen_expr(b, ast, elif.cond, types, defined_layouts, pool, sink);
-                    let elif_body = lower_block(
+                    let elif_cond = expr::gen_expr_d(
                         b,
                         ast,
-                        ast.stmt_list(elif.block),
+                        elif.cond,
                         types,
                         defined_layouts,
                         pool,
                         sink,
+                        depth + 1,
+                    );
+                    let elif_body = lower_block_d(
+                        b,
+                        ast,
+                        elif.block,
+                        types,
+                        defined_layouts,
+                        pool,
+                        sink,
+                        depth + 1,
                     );
                     (elif_cond, elif_body)
                 })
                 .collect();
 
             let else_stmts = if_stmt.else_block.map(|stmts| {
-                lower_block(
-                    b,
-                    ast,
-                    ast.stmt_list(stmts),
-                    types,
-                    defined_layouts,
-                    pool,
-                    sink,
-                )
+                lower_block_d(b, ast, stmts, types, defined_layouts, pool, sink, depth + 1)
             });
 
             let r = b.if_stmt(
@@ -1525,16 +1664,10 @@ fn gen_stmt(
             out.push(r);
         }
         ast::StmtKind::WhileLoop { cond, body } => {
-            let cond_ref = gen_expr(b, ast, *cond, types, defined_layouts, pool, sink);
-            let body_refs = lower_block(
-                b,
-                ast,
-                ast.stmt_list(*body),
-                types,
-                defined_layouts,
-                pool,
-                sink,
-            );
+            let cond_ref =
+                expr::gen_expr_d(b, ast, *cond, types, defined_layouts, pool, sink, depth + 1);
+            let body_refs =
+                lower_block_d(b, ast, *body, types, defined_layouts, pool, sink, depth + 1);
             let r = b.while_loop(cond_ref, &body_refs, span);
             out.push(r);
         }
@@ -1558,17 +1691,20 @@ fn gen_stmt(
                     ),
                 ));
             }
-            let start_ref = gen_expr(b, ast, *start, types, defined_layouts, pool, sink);
-            let end_ref = gen_expr(b, ast, *end, types, defined_layouts, pool, sink);
-            let body_refs = lower_block(
+            let start_ref = expr::gen_expr_d(
                 b,
                 ast,
-                ast.stmt_list(*body),
+                *start,
                 types,
                 defined_layouts,
                 pool,
                 sink,
+                depth + 1,
             );
+            let end_ref =
+                expr::gen_expr_d(b, ast, *end, types, defined_layouts, pool, sink, depth + 1);
+            let body_refs =
+                lower_block_d(b, ast, *body, types, defined_layouts, pool, sink, depth + 1);
             let r = b.for_range(var.name, start_ref, end_ref, &body_refs, span);
             out.push(r);
         }
