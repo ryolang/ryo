@@ -268,11 +268,12 @@ fn analyze_expr_machine_inner(
                 if matches!(inst.tag, InstTag::Match | InstTag::Catch) {
                     tasks.push(Task::Exit(node, scope_id, mode));
                     tasks.push(Task::AfterScrutinee(node, scope_id));
-                    tasks.push(Task::Enter(
-                        match_scrutinee(sema, node),
-                        scope_id,
-                        NeverMode::Reject,
-                    ));
+                    let scrutinee = match_scrutinee(sema, node);
+                    let entered = match sema.uir.inst(scrutinee).data {
+                        InstData::Borrow(inner) => inner,
+                        _ => scrutinee,
+                    };
+                    tasks.push(Task::Enter(entered, scope_id, NeverMode::Reject));
                     continue;
                 }
                 if matches!(inst.tag, InstTag::Slice | InstTag::Index) {
@@ -468,6 +469,7 @@ fn analyze_expr_machine_inner(
                     &mut tasks,
                     sema,
                     fcx,
+                    &mut struct_state,
                     ArmStatement {
                         node,
                         arm_index,

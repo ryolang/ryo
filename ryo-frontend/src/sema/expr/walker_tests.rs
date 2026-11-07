@@ -575,3 +575,41 @@ fn shallow_analysis_does_not_start_allocating_machine() {
     run_with_expr_limit(&src, 0).expect("forced fallback analyzes");
     assert!(super::walker::machine_call_count() > 0);
 }
+
+#[test]
+fn match_return_struct_literal_uses_function_return_type() {
+    let src = r#"error A
+error B
+fn narrow() -> A!int:
+	return 3
+fn choose() -> {value: (A | B)!int}:
+	result = match 1:
+		1:
+			return {value=narrow()}
+		_:
+			return {value=1}
+	return result
+"#;
+    let baseline = snapshot(run(src));
+    for limit in [0, 1, 64] {
+        assert_eq!(snapshot(run_with_expr_limit(src, limit)), baseline);
+    }
+}
+
+#[test]
+fn borrowed_match_scrutinee_matches_at_every_depth_limit() {
+    let src = r#"enum Opt:
+	Some(value: int)
+	None
+fn main():
+	o = Opt.Some{value=5}
+	x = match &o:
+		Opt.Some(v): v
+		Opt.None: 0
+	print(x)
+"#;
+    let baseline = snapshot(run(src));
+    for limit in [0, 1, 64] {
+        assert_eq!(snapshot(run_with_expr_limit(src, limit)), baseline);
+    }
+}

@@ -3,7 +3,9 @@ use super::super::super::match_::{
     finish_typed_match, prepare_match, prepare_match_arm,
 };
 use super::super::super::stmt::analyze_stmt;
-use super::{FuncCtx, NeverMode, Scope, ScopeArena, ScopeId, Sema, SemaExprContext, Task};
+use super::{
+    FuncCtx, NeverMode, Scope, ScopeArena, ScopeId, Sema, SemaExprContext, StructState, Task,
+};
 use ryo_core::spine::ChainSpine;
 use ryo_core::tir::TirRef;
 use ryo_core::types::TypeId;
@@ -136,6 +138,7 @@ impl<'a> MatchState<'a> {
         tasks: &mut ChainSpine<Task>,
         sema: &mut Sema<'_>,
         fcx: &mut FuncCtx,
+        struct_state: &mut StructState,
         statement: ArmStatement,
         scope_id: ScopeId,
     ) {
@@ -167,6 +170,11 @@ impl<'a> MatchState<'a> {
             _ => None,
         };
         if let Some(expression) = expression {
+            if sema.uir.inst(stmt).tag == InstTag::Return
+                && sema.uir.inst(expression).tag == InstTag::StructLit
+            {
+                struct_state.expect(expression, fcx.return_type);
+            }
             tasks.push(Task::FinishStmt(node, arm_index, stmt_index, scope_id));
             tasks.push(Task::Enter(expression, scope_id, NeverMode::Allow));
         } else {
