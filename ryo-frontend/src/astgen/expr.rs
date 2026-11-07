@@ -18,6 +18,44 @@ use std::collections::HashSet;
 /// debug), far above anything a hand-written expression nests.
 const EXPR_DEPTH_LIMIT: u32 = 64;
 
+#[cfg(test)]
+std::thread_local! {
+    static TEST_EXPR_LIMIT: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+    static TEST_MACHINE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_machine_call_count() {
+    TEST_MACHINE_CALLS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn machine_call_count() -> usize {
+    TEST_MACHINE_CALLS.with(|count| count.get())
+}
+
+#[cfg(test)]
+pub(crate) fn with_expr_limit<T>(limit: u32, f: impl FnOnce() -> T) -> T {
+    struct Reset(Option<u32>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            TEST_EXPR_LIMIT.with(|current| current.set(self.0));
+        }
+    }
+
+    let previous = TEST_EXPR_LIMIT.with(|current| current.replace(Some(limit)));
+    let _reset = Reset(previous);
+    f()
+}
+
+fn expr_depth_limit() -> u32 {
+    #[cfg(test)]
+    if let Some(limit) = TEST_EXPR_LIMIT.with(|limit| limit.get()) {
+        return limit;
+    }
+    EXPR_DEPTH_LIMIT
+}
+
 /// Lower one expression to a UIR inst.
 #[inline]
 pub(super) fn gen_expr(
@@ -43,7 +81,7 @@ fn gen_expr_d(
     sink: &mut DiagSink,
     depth: u32,
 ) -> InstRef {
-    if depth == EXPR_DEPTH_LIMIT {
+    if depth == expr_depth_limit() {
         // Deep enough to threaten the stack — finish the subtree
         // iteratively (see `gen_expr_machine`).
         return gen_expr_machine(b, ast, expr, types, defined_layouts, pool, sink);
@@ -302,6 +340,8 @@ fn gen_expr_machine(
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) -> InstRef {
+    #[cfg(test)]
+    TEST_MACHINE_CALLS.with(|count| count.set(count.get() + 1));
     // Both stacks stay inline for expression-sized shapes; deep chains
     // spill to the heap. No allocation at all for ordinary expressions.
     let mut stack: ChainSpine<ExprTask> = ChainSpine::new();

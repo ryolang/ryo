@@ -643,3 +643,56 @@ fn non_struct_call_target_does_not_reach_struct_layout_lookup() {
         }
     }
 }
+
+#[test]
+#[ignore = "I-273: enable with sema statement traversal"]
+fn non_simple_match_arm_statements_use_one_machine() {
+    let cases = [
+        (
+            "if_elif_else",
+            "fn main():\n\tmatch 1:\n\t\t1:\n\t\t\tif true:\n\t\t\t\tprint(1)\n\t\t\telif false:\n\t\t\t\tprint(2)\n\t\t\telse:\n\t\t\t\tprint(3)\n\t\t_: 0\n",
+        ),
+        (
+            "while",
+            "fn main():\n\tmatch 1:\n\t\t1:\n\t\t\twhile false:\n\t\t\t\tprint(1)\n\t\t_: 0\n",
+        ),
+        (
+            "for_range",
+            "fn main():\n\tmatch 1:\n\t\t1:\n\t\t\tfor i in range(3):\n\t\t\t\tprint(i)\n\t\t_: 0\n",
+        ),
+        (
+            "declaration_and_assignment",
+            "fn main():\n\tmut value = 0\n\tmatch 1:\n\t\t1:\n\t\t\tother = 1\n\t\t\tvalue = other\n\t\t_: 0\n",
+        ),
+        (
+            "return",
+            "fn choose() -> int:\n\tmatch 1:\n\t\t1:\n\t\t\treturn 1\n\t\t_:\n\t\t\treturn 0\nfn main():\n\tprint(choose())\n",
+        ),
+        (
+            "anonymous_struct_return_error_union",
+            r#"error A
+error B
+fn narrow() -> A!int:
+	return 3
+fn choose() -> {value: (A | B)!int}:
+	result = match 1:
+		1:
+			return {value=narrow()}
+		_:
+			return {value=1}
+	return result
+"#,
+        ),
+    ];
+    for (name, src) in cases {
+        let baseline = snapshot(run(src));
+        super::walker::reset_machine_call_count();
+        let analyzed = snapshot(run_with_expr_limit(src, 0));
+        assert_eq!(
+            super::walker::machine_call_count(),
+            1,
+            "{name} started nested sema machines"
+        );
+        assert_eq!(analyzed, baseline, "{name} changed forced-limit analysis");
+    }
+}
