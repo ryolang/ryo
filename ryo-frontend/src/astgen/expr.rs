@@ -312,6 +312,8 @@ fn gen_expr_d(
 enum ExprTask {
     Enter(ast::ExprId),
     Exit(ast::ExprId),
+    Variant(variants::VariantState),
+    Error(errors::ErrorState),
 }
 
 /// Iterative lowering machine used as the deep-nesting fallback for
@@ -325,12 +327,10 @@ enum ExprTask {
 /// nests 100k `BinaryOp` lhs links), so a recursive descent overflows
 /// the stack long before sema sees the program. The machine below
 /// keeps the recursion on the explicit `stack`; each `Exit` finds its
-/// children's refs on `results` in source order. Kinds whose lowering
-/// interleaves non-expr scaffolding (match, variant/error construct,
-/// catch) delegate to their helpers, which re-enter `gen_expr`
-/// per sub-expression — a fresh machine each time, so nesting depth
-/// through those kinds stays bounded by the construct count, not the
-/// operand-chain length.
+/// children's refs on `results` in source order. Variant and error
+/// constructors retain their argument state on that same stack. Match
+/// and catch still delegate to their helpers, which re-enter `gen_expr`
+/// per sub-expression.
 fn gen_expr_machine(
     b: &mut UirBuilder,
     ast: &ast::Ast,
@@ -431,18 +431,24 @@ fn gen_expr_machine(
                         if let ast::ExprKind::Ident(root) = ast.expr(object).kind
                             && types.error_family_members.contains_key(&root)
                         {
-                            results.push(errors::lower_qualified_error_construct(
+                            let step = errors::prepare_qualified_error_construct(
                                 b,
                                 ast,
                                 ast::Ident::new(root, ast.expr_span(object)),
                                 field,
                                 None,
                                 types,
-                                defined_layouts,
                                 pool,
                                 sink,
                                 span,
-                            ));
+                            );
+                            match step {
+                                errors::ErrorStep::Complete(result) => results.push(result),
+                                errors::ErrorStep::Child(state, arg) => {
+                                    stack.push(ExprTask::Error(state));
+                                    stack.push(ExprTask::Enter(arg));
+                                }
+                            }
                         } else {
                             stack.push(ExprTask::Exit(e));
                             stack.push(ExprTask::Enter(object));
@@ -450,33 +456,44 @@ fn gen_expr_machine(
                     }
                     // Variant construction (M11) lowers to `EnumLit`.
                     ast::ExprKind::VariantConstruct(c) => {
-                        results.push(
-                            if types.error_family_members.contains_key(&c.enum_name.name) {
-                                errors::lower_qualified_error_construct(
-                                    b,
-                                    ast,
-                                    c.enum_name,
-                                    c.variant,
-                                    c.args,
-                                    types,
-                                    defined_layouts,
-                                    pool,
-                                    sink,
-                                    span,
-                                )
-                            } else {
-                                variants::lower_variant_construct(
-                                    b,
-                                    ast,
-                                    c,
-                                    types,
-                                    defined_layouts,
-                                    pool,
-                                    sink,
-                                    span,
-                                )
-                            },
-                        );
+                        if types.error_family_members.contains_key(&c.enum_name.name) {
+                            let step = errors::prepare_qualified_error_construct(
+                                b,
+                                ast,
+                                c.enum_name,
+                                c.variant,
+                                c.args,
+                                types,
+                                pool,
+                                sink,
+                                span,
+                            );
+                            match step {
+                                errors::ErrorStep::Complete(result) => results.push(result),
+                                errors::ErrorStep::Child(state, arg) => {
+                                    stack.push(ExprTask::Error(state));
+                                    stack.push(ExprTask::Enter(arg));
+                                }
+                            }
+                        } else {
+                            let step = variants::prepare_variant_construct(
+                                b,
+                                ast,
+                                c,
+                                types,
+                                defined_layouts,
+                                pool,
+                                sink,
+                                span,
+                            );
+                            match step {
+                                variants::VariantStep::Complete(result) => results.push(result),
+                                variants::VariantStep::Child(state, arg) => {
+                                    stack.push(ExprTask::Variant(state));
+                                    stack.push(ExprTask::Enter(arg));
+                                }
+                            }
+                        }
                     }
                     // Match expressions (M12) lower to the UIR `Match` wire; see
                     // `astgen/match_.rs` for the pattern/body mapping.
@@ -492,16 +509,15 @@ fn gen_expr_machine(
                         span,
                     )),
                     ast::ExprKind::ErrorConstruct(c) => {
-                        results.push(errors::lower_error_construct(
-                            b,
-                            ast,
-                            c,
-                            types,
-                            defined_layouts,
-                            pool,
-                            sink,
-                            span,
-                        ))
+                        let step =
+                            errors::prepare_error_construct(b, ast, c, types, pool, sink, span);
+                        match step {
+                            errors::ErrorStep::Complete(result) => results.push(result),
+                            errors::ErrorStep::Child(state, arg) => {
+                                stack.push(ExprTask::Error(state));
+                                stack.push(ExprTask::Enter(arg));
+                            }
+                        }
                     }
                     ast::ExprKind::Try(operand) => {
                         stack.push(ExprTask::Exit(e));
@@ -517,6 +533,29 @@ fn gen_expr_machine(
                         sink,
                         span,
                     )),
+                }
+            }
+            ExprTask::Variant(state) => {
+                let value = results.pop().expect("variant argument lowered");
+                let step =
+                    variants::resume_variant_construct(state, value, b, ast, types, pool, sink);
+                match step {
+                    variants::VariantStep::Complete(result) => results.push(result),
+                    variants::VariantStep::Child(state, arg) => {
+                        stack.push(ExprTask::Variant(state));
+                        stack.push(ExprTask::Enter(arg));
+                    }
+                }
+            }
+            ExprTask::Error(state) => {
+                let value = results.pop().expect("error argument lowered");
+                let step = errors::resume_error_construct(state, value, b, ast, pool);
+                match step {
+                    errors::ErrorStep::Complete(result) => results.push(result),
+                    errors::ErrorStep::Child(state, arg) => {
+                        stack.push(ExprTask::Error(state));
+                        stack.push(ExprTask::Enter(arg));
+                    }
                 }
             }
             ExprTask::Exit(e) => {

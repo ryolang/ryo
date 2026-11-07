@@ -140,7 +140,6 @@ fn alternating_constructor_match_lowering_uses_one_machine() {
 }
 
 #[test]
-#[ignore = "I-270: enable with astgen traversal"]
 fn alternating_constructor_match_lowering_matches_at_every_depth_limit() {
     for (name, src) in constructor_match_cases() {
         let baseline = snapshot(lower(&src));
