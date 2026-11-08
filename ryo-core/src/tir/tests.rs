@@ -790,6 +790,27 @@ fn terminates_parity_through_builder_and_tir() {
 }
 
 #[test]
+fn nested_if_termination_uses_bounded_stack() {
+    let mut pool = InternPool::new();
+    let main = pool.intern_str("main");
+    let bool_ty = pool.bool_();
+    let void = pool.void();
+    let mut b = TirBuilder::new(main, vec![], void, sp());
+    let cond = b.bool_const(true, bool_ty, sp());
+    let then_ret = b.return_void(void, sp());
+    let else_ret = b.return_void(void, sp());
+    let mut root = b.if_stmt(cond, &[then_ret], &[], Some(&[else_ret]), void, sp());
+    for _ in 1..50_000 {
+        let cond = b.bool_const(true, bool_ty, sp());
+        let else_ret = b.return_void(void, sp());
+        root = b.if_stmt(cond, &[root], &[], Some(&[else_ret]), void, sp());
+    }
+    let tir = b.finish(&[root]);
+
+    assert!(tir.block_definitely_terminates(&[root], &pool));
+}
+
+#[test]
 fn float_const_and_fadd_round_trip() {
     let mut pool = InternPool::new();
     let main = pool.intern_str("main");

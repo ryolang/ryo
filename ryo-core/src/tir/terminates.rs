@@ -29,6 +29,8 @@ use super::{
     TirData, TirRef, TirTag, TypedInst, assign_extra, compound_assign_extra, if_stmt_extra,
     var_decl_extra,
 };
+use crate::extra::{ExtraList, ExtraListIter};
+use crate::spine::ChainSpine;
 use crate::types::InternPool;
 
 pub(super) fn block_terminates(
@@ -38,9 +40,12 @@ pub(super) fn block_terminates(
     pool: &InternPool,
     jumps: bool,
 ) -> bool {
-    stmts
-        .into_iter()
-        .any(|s| stmt_terminates(insts, extra, s, pool, jumps))
+    for stmt in stmts {
+        if stmt_terminates(insts, extra, stmt, pool, jumps) {
+            return true;
+        }
+    }
+    false
 }
 
 fn stmt_terminates(
@@ -50,46 +55,110 @@ fn stmt_terminates(
     pool: &InternPool,
     jumps: bool,
 ) -> bool {
-    let inst = &insts[r.index()];
-    match inst.tag {
-        TirTag::Return | TirTag::ReturnVoid | TirTag::Unreachable => true,
-        TirTag::Break | TirTag::Continue => jumps,
-        TirTag::ExprStmt => {
-            let TirData::UnOp(operand) = inst.data else {
-                unreachable!("ExprStmt must carry TirData::UnOp");
-            };
-            pool.is_never(insts[operand.index()].ty)
-        }
-        TirTag::VarDecl => {
-            let view = var_decl_extra::decode(extra_slice(extra, inst));
-            pool.is_never(insts[view.initializer.index()].ty)
-        }
-        TirTag::Assign => {
-            let view = assign_extra::decode(extra_slice(extra, inst));
-            pool.is_never(insts[view.value.index()].ty)
-        }
-        TirTag::CompoundAssign => {
-            let view = compound_assign_extra::decode(extra_slice(extra, inst));
-            pool.is_never(insts[view.value.index()].ty)
-        }
-        TirTag::IfStmt => {
-            // Only the bodies matter here; the fused decoder reads the
-            // same wire `Tir::if_stmt_view` documents.
-            let view = if_stmt_extra::decode(extra_slice(extra, inst));
-            let Some(else_stmts) = view.else_stmts else {
-                return false;
-            };
-            if !block_terminates(insts, extra, view.then_stmts, pool, jumps) {
-                return false;
-            }
-            for elif in &view.elif_branches {
-                if !block_terminates(insts, extra, elif.body, pool, jumps) {
-                    return false;
+    enum Task<'a> {
+        Statement(TirRef),
+        Body(ExtraList<'a, TirRef>),
+        Result(bool),
+    }
+
+    enum Cursor<'a> {
+        Body(ExtraListIter<'a, TirRef>),
+        If {
+            elifs: if_stmt_extra::TirElifIter<'a>,
+            else_stmts: Option<ExtraList<'a, TirRef>>,
+        },
+    }
+
+    let mut cursors = ChainSpine::new();
+    let mut task = Task::Statement(r);
+    loop {
+        task = match task {
+            Task::Statement(r) => {
+                let inst = &insts[r.index()];
+                match inst.tag {
+                    TirTag::Return | TirTag::ReturnVoid | TirTag::Unreachable => Task::Result(true),
+                    TirTag::Break | TirTag::Continue => Task::Result(jumps),
+                    TirTag::ExprStmt => {
+                        let TirData::UnOp(operand) = inst.data else {
+                            unreachable!("ExprStmt must carry TirData::UnOp");
+                        };
+                        Task::Result(pool.is_never(insts[operand.index()].ty))
+                    }
+                    TirTag::VarDecl => {
+                        let view = var_decl_extra::decode(extra_slice(extra, inst));
+                        Task::Result(pool.is_never(insts[view.initializer.index()].ty))
+                    }
+                    TirTag::Assign => {
+                        let view = assign_extra::decode(extra_slice(extra, inst));
+                        Task::Result(pool.is_never(insts[view.value.index()].ty))
+                    }
+                    TirTag::CompoundAssign => {
+                        let view = compound_assign_extra::decode(extra_slice(extra, inst));
+                        Task::Result(pool.is_never(insts[view.value.index()].ty))
+                    }
+                    TirTag::IfStmt => {
+                        // Only the bodies matter here; the fused decoder reads the
+                        // same wire `Tir::if_stmt_view` documents.
+                        let view = if_stmt_extra::decode(extra_slice(extra, inst));
+                        let Some(else_stmts) = view.else_stmts else {
+                            task = Task::Result(false);
+                            continue;
+                        };
+                        cursors.push(Cursor::If {
+                            elifs: view.elif_branches.iter(),
+                            else_stmts: Some(else_stmts),
+                        });
+                        Task::Body(view.then_stmts)
+                    }
+                    _ => Task::Result(false),
                 }
             }
-            block_terminates(insts, extra, else_stmts, pool, jumps)
-        }
-        _ => false,
+            Task::Body(stmts) => {
+                let mut stmts = stmts.into_iter();
+                if let Some(stmt) = stmts.next() {
+                    cursors.push(Cursor::Body(stmts));
+                    Task::Statement(stmt)
+                } else {
+                    Task::Result(false)
+                }
+            }
+            Task::Result(terminates) => {
+                let Some(cursor) = cursors.pop() else {
+                    return terminates;
+                };
+                match cursor {
+                    Cursor::Body(mut stmts) => {
+                        if terminates {
+                            Task::Result(true)
+                        } else if let Some(stmt) = stmts.next() {
+                            cursors.push(Cursor::Body(stmts));
+                            Task::Statement(stmt)
+                        } else {
+                            Task::Result(false)
+                        }
+                    }
+                    Cursor::If {
+                        mut elifs,
+                        mut else_stmts,
+                    } => {
+                        if !terminates {
+                            Task::Result(false)
+                        } else if let Some(elif) = elifs.next() {
+                            cursors.push(Cursor::If { elifs, else_stmts });
+                            Task::Body(elif.body)
+                        } else if let Some(stmts) = else_stmts.take() {
+                            cursors.push(Cursor::If {
+                                elifs,
+                                else_stmts: None,
+                            });
+                            Task::Body(stmts)
+                        } else {
+                            Task::Result(true)
+                        }
+                    }
+                }
+            }
+        };
     }
 }
 

@@ -74,6 +74,29 @@ fn value_match_has_exact_block_step_and_place_layout() {
 }
 
 #[test]
+fn nested_projection_resolution_uses_bounded_stack() {
+    let mut cx = Ctx::new();
+    let int = cx.int;
+    let mut b = cx.builder();
+    let init = b.int_const(1, int, sp());
+    let decl = b.var_decl(cx.x, false, int, init, sp());
+    let mut projection = b.var(cx.x, int, sp());
+    for _ in 0..50_000 {
+        projection = b.field_access(projection, 0, int, sp());
+    }
+    let tir = b.finish(&[decl, projection]);
+
+    let flow = Flow::build(&tir, &cx.pool);
+    let base = flow.local_of_decl(decl).expect("local place");
+    let final_step = flow
+        .block_steps(flow.entry)
+        .last()
+        .expect("projection step");
+    assert_eq!(final_step.inst, projection);
+    assert_eq!(final_step.facts.read, Some(base));
+}
+
+#[test]
 fn elif_match_condition_has_exact_branch_metadata() {
     let mut cx = Ctx::new();
     let bool_ty = cx.pool.bool_();

@@ -799,17 +799,22 @@ impl FlowBuilder<'_> {
     /// view conversions, and anonymous temporaries. The explicit
     /// analogue of the ownership pass's `projection_root`.
     fn resolve_view_base(&self, r: TirRef) -> Option<PlaceId> {
-        let inst = self.tir.inst(r);
-        match inst.data {
-            crate::tir::TirData::Var(name) => self.resolve(name),
-            crate::tir::TirData::FieldAccess { object, .. } => self.resolve_view_base(object),
-            crate::tir::TirData::UnOp(operand)
-                if matches!(inst.tag, TirTag::ViewAsOwner | TirTag::ToView) =>
-            {
-                self.resolve_view_base(operand)
+        let mut current = r;
+        loop {
+            let inst = self.tir.inst(current);
+            match inst.data {
+                crate::tir::TirData::Var(name) => return self.resolve(name),
+                crate::tir::TirData::FieldAccess { object, .. } => current = object,
+                crate::tir::TirData::UnOp(operand)
+                    if matches!(inst.tag, TirTag::ViewAsOwner | TirTag::ToView) =>
+                {
+                    current = operand;
+                }
+                crate::tir::TirData::Slice { base, .. } => current = base,
+                _ => {
+                    return self.inst_meta.get(current.index()).and_then(|m| m.temp);
+                }
             }
-            crate::tir::TirData::Slice { base, .. } => self.resolve_view_base(base),
-            _ => self.inst_meta.get(r.index()).and_then(|m| m.temp),
         }
     }
 
