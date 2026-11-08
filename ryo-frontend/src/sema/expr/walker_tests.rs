@@ -6,9 +6,11 @@
 //! - `codegen/structs.rs`, `match_.rs`, `control.rs`: aggregates and Flow barriers.
 //! - `codegen/mod.rs`, `decls.rs`: statement/declaration roots.
 
-use super::super::tests::{RunOk, run};
+use super::super::tests::{RunOk, run, run_with_errors};
 use super::walker::with_expr_limit;
 use ryo_core::diag::Diag;
+use ryo_core::tir::Tir;
+use ryo_core::types::InternPool;
 use std::process::Command;
 
 const DEEP_REPRO_CHILD: &str = "RYO_DEEP_EXPR_REPRO_CHILD";
@@ -277,19 +279,42 @@ fn run_with_expr_limit(src: &str, limit: u32) -> Result<RunOk, Vec<Diag>> {
     with_expr_limit(limit, || run(src))
 }
 
-fn snapshot(result: Result<RunOk, Vec<Diag>>) -> String {
-    match result {
-        Ok((tirs, _pool)) => tirs
-            .iter()
-            .map(|tir| {
-                format!(
-                    "{:?}\n{:?}\n{:?}\n{:?}",
-                    tir.instructions, tir.extra, tir.body, tir.spans
-                )
-            })
-            .collect(),
-        Err(diags) => format!("{diags:?}"),
-    }
+type Differential = (Vec<Tir>, Vec<Diag>, InternPool);
+
+fn run_differential(src: &str) -> Differential {
+    run_with_errors(src)
+}
+
+fn run_differential_with_expr_limit(src: &str, limit: u32) -> Differential {
+    with_expr_limit(limit, || run_differential(src))
+}
+
+fn snapshot((tirs, diags, _pool): Differential) -> String {
+    tirs.iter()
+        .map(|tir| {
+            let mut direct_catch_matches = tir
+                .direct_catch_matches
+                .iter()
+                .map(|inst| inst.raw())
+                .collect::<Vec<_>>();
+            direct_catch_matches.sort_unstable();
+            format!(
+                "{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
+                tir.name,
+                tir.params,
+                tir.return_type,
+                tir.instructions,
+                tir.extra,
+                tir.body,
+                tir.spans,
+                tir.span,
+                tir.contains_match,
+                direct_catch_matches
+            )
+        })
+        .chain(std::iter::once(format!("{diags:?}")))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn run_deep_repro(test_name: &str, src: String) {
@@ -354,10 +379,10 @@ fn scalar_trees_match_at_every_depth_limit() {
     for depth in 0..=4 {
         for expr in DeepExpr::scalar_shapes(depth) {
             let src = DeepExpr::program(expr.clone());
-            let baseline = snapshot(run(&src));
+            let baseline = snapshot(run_differential(&src));
             for limit in [0, 1, 64] {
                 assert_eq!(
-                    snapshot(run_with_expr_limit(&src, limit)),
+                    snapshot(run_differential_with_expr_limit(&src, limit)),
                     baseline,
                     "{expr} differed at expression depth limit {limit}"
                 );
@@ -369,10 +394,10 @@ fn scalar_trees_match_at_every_depth_limit() {
 #[test]
 fn scalar_diagnostics_match_at_every_depth_limit() {
     for (name, src) in DeepExpr::diagnostic_cases() {
-        let baseline = snapshot(run(&src));
+        let baseline = snapshot(run_differential(&src));
         for limit in [0, 1, 64] {
             assert_eq!(
-                snapshot(run_with_expr_limit(&src, limit)),
+                snapshot(run_differential_with_expr_limit(&src, limit)),
                 baseline,
                 "{name} differed at expression depth limit {limit}"
             );
@@ -383,10 +408,10 @@ fn scalar_diagnostics_match_at_every_depth_limit() {
 #[test]
 fn small_expression_families_match_at_every_depth_limit() {
     for (name, src) in DeepExpr::small_cases() {
-        let baseline = snapshot(run(&src));
+        let baseline = snapshot(run_differential(&src));
         for limit in [0, 1, 64] {
             assert_eq!(
-                snapshot(run_with_expr_limit(&src, limit)),
+                snapshot(run_differential_with_expr_limit(&src, limit)),
                 baseline,
                 "{name} differed at expression depth limit {limit}"
             );
@@ -399,9 +424,12 @@ fn resolution_broken_nested_match_arm_matches_at_every_depth_limit() {
     let src = format!(
         "fn id(x: int) -> int:\n\treturn x\n\nfn main():\n\tmatch 0:\n\t\t0:\n\t\t\tvalue = match 1:\n\t\t\t\ttrue: {unary}\n\t\t\t\t_: 0\n\t\t\tprint(value)\n\t\t_:\n\t\t\tprint(0)\n",
     );
-    let baseline = snapshot(run(&src));
+    let baseline = snapshot(run_differential(&src));
     for limit in [0, 1, 64] {
-        assert_eq!(snapshot(run_with_expr_limit(&src, limit)), baseline);
+        assert_eq!(
+            snapshot(run_differential_with_expr_limit(&src, limit)),
+            baseline
+        );
     }
 }
 
@@ -524,10 +552,10 @@ fn composite_diagnostics_match_at_every_depth_limit() {
         ),
     ];
     for (name, src) in cases {
-        let baseline = snapshot(run(&src));
+        let baseline = snapshot(run_differential(&src));
         for limit in [0, 1, 64] {
             assert_eq!(
-                snapshot(run_with_expr_limit(&src, limit)),
+                snapshot(run_differential_with_expr_limit(&src, limit)),
                 baseline,
                 "{name} differed at expression depth limit {limit}"
             );
@@ -541,9 +569,12 @@ fn never_rejection_matches_at_every_depth_limit() {
         DeepExpr::program("-panic(\"boom\")".to_string()),
         DeepExpr::program("({x=panic(\"boom\")}).x".to_string()),
     ] {
-        let baseline = snapshot(run(&src));
+        let baseline = snapshot(run_differential(&src));
         for limit in [0, 1, 64] {
-            assert_eq!(snapshot(run_with_expr_limit(&src, limit)), baseline);
+            assert_eq!(
+                snapshot(run_differential_with_expr_limit(&src, limit)),
+                baseline
+            );
         }
     }
 }
@@ -560,9 +591,12 @@ fn main():
 	anonymous = AnonymousNested{value={value=1}}
 	named = NamedNested{value={value=A}}
 "#;
-    let baseline = snapshot(run(src));
+    let baseline = snapshot(run_differential(src));
     for limit in [0, 1, 64] {
-        assert_eq!(snapshot(run_with_expr_limit(src, limit)), baseline);
+        assert_eq!(
+            snapshot(run_differential_with_expr_limit(src, limit)),
+            baseline
+        );
     }
 }
 
@@ -574,6 +608,14 @@ fn shallow_analysis_does_not_start_allocating_machine() {
     assert_eq!(super::walker::machine_call_count(), 0);
     run_with_expr_limit(&src, 0).expect("forced fallback analyzes");
     assert!(super::walker::machine_call_count() > 0);
+}
+
+#[test]
+fn shallow_statements_do_not_start_allocating_machine() {
+    let src = "fn condition() -> bool:\n\treturn true\nfn limit() -> int:\n\treturn 1\nfn main():\n\tif condition():\n\t\twhile condition():\n\t\t\tfor i in range(0, limit()):\n\t\t\t\tprint(i)\n";
+    super::walker::reset_machine_call_count();
+    run(src).expect("shallow statements analyze");
+    assert_eq!(super::walker::machine_call_count(), 0);
 }
 
 #[test]
@@ -590,9 +632,12 @@ fn choose() -> {value: (A | B)!int}:
 			return {value=1}
 	return result
 "#;
-    let baseline = snapshot(run(src));
+    let baseline = snapshot(run_differential(src));
     for limit in [0, 1, 64] {
-        assert_eq!(snapshot(run_with_expr_limit(src, limit)), baseline);
+        assert_eq!(
+            snapshot(run_differential_with_expr_limit(src, limit)),
+            baseline
+        );
     }
 }
 
@@ -608,9 +653,12 @@ fn main():
 		Opt.None: 0
 	print(x)
 "#;
-    let baseline = snapshot(run(src));
+    let baseline = snapshot(run_differential(src));
     for limit in [0, 1, 64] {
-        assert_eq!(snapshot(run_with_expr_limit(src, limit)), baseline);
+        assert_eq!(
+            snapshot(run_differential_with_expr_limit(src, limit)),
+            baseline
+        );
     }
 }
 
@@ -625,9 +673,12 @@ fn take(other: Other):
 fn main():
 	take(Point{x=1})
 "#;
-    let baseline = snapshot(run(src));
+    let baseline = snapshot(run_differential(src));
     for limit in [0, 1, 64] {
-        assert_eq!(snapshot(run_with_expr_limit(src, limit)), baseline);
+        assert_eq!(
+            snapshot(run_differential_with_expr_limit(src, limit)),
+            baseline
+        );
     }
 }
 
@@ -637,9 +688,12 @@ fn non_struct_call_target_does_not_reach_struct_layout_lookup() {
         let src = format!(
             "struct Point:\n\tx: int\nfn take(value: int):\n\treturn\nfn main():\n\ttake({literal})\n"
         );
-        let baseline = snapshot(run(&src));
+        let baseline = snapshot(run_differential(&src));
         for limit in [0, 1, 64] {
-            assert_eq!(snapshot(run_with_expr_limit(&src, limit)), baseline);
+            assert_eq!(
+                snapshot(run_differential_with_expr_limit(&src, limit)),
+                baseline
+            );
         }
     }
 }
@@ -663,10 +717,10 @@ fn main():
         baseline_diags[0].code,
         ryo_core::diag::DiagCode::UnsupportedOperator
     );
-    let baseline = snapshot(Err(baseline_diags));
+    let baseline = snapshot(run_differential(src));
     for limit in [0, 1, 64] {
         assert_eq!(
-            snapshot(run_with_expr_limit(src, limit)),
+            snapshot(run_differential_with_expr_limit(src, limit)),
             baseline,
             "compound-field RHS gained an expected struct target at limit {limit}"
         );
@@ -712,10 +766,10 @@ fn choose() -> {value: (A | B)!int}:
         ),
     ];
     for (name, src) in cases {
-        let baseline = run(src).unwrap_or_else(|diags| panic!("{name} baseline failed: {diags:?}"));
-        let baseline = snapshot(Ok(baseline));
+        run(src).unwrap_or_else(|diags| panic!("{name} baseline failed: {diags:?}"));
+        let baseline = snapshot(run_differential(src));
         super::walker::reset_machine_call_count();
-        let analyzed = snapshot(run_with_expr_limit(src, 0));
+        let analyzed = snapshot(run_differential_with_expr_limit(src, 0));
         assert_eq!(
             super::walker::machine_call_count(),
             1,
@@ -753,13 +807,132 @@ fn non_simple_match_arm_statement_diagnostics_match_at_every_depth_limit() {
                 .any(|diag| diag.code == ryo_core::diag::DiagCode::ArmNoValue),
             "{name} baseline did not report E0135: {baseline_diags:?}"
         );
-        let baseline = snapshot(Err(baseline_diags));
+        let baseline = snapshot(run_differential(src));
         for limit in [0, 1, 64] {
             assert_eq!(
-                snapshot(run_with_expr_limit(src, limit)),
+                snapshot(run_differential_with_expr_limit(src, limit)),
                 baseline,
                 "{name} changed diagnostics at limit {limit}"
             );
         }
     }
+}
+
+#[test]
+fn statement_arm_dead_store_warnings_match_at_every_depth_limit() {
+    let src = "fn main():\n\tmatch 1:\n\t\t1:\n\t\t\tfor i in range(0, 1):\n\t\t\t\tprint(0)\n\t\t_:\n\t\t\tprint(0)\n";
+    let (tirs, diags, pool) = run_differential(src);
+    assert!(!tirs.is_empty(), "warning analysis must retain TIR");
+    assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+    assert_eq!(diags[0].severity, ryo_core::diag::Severity::Warning);
+    assert_eq!(diags[0].code, ryo_core::diag::DiagCode::DeadStore);
+    let baseline = snapshot((tirs, diags, pool));
+    for limit in [0, 1, 64] {
+        assert_eq!(
+            snapshot(run_differential_with_expr_limit(src, limit)),
+            baseline,
+            "statement-arm warning differed at limit {limit}"
+        );
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NestedStatement {
+    If,
+    While,
+    For,
+}
+
+fn nested_statements(kind: NestedStatement, depth: usize, non_literal: bool) -> String {
+    let helper = match (kind, non_literal) {
+        (NestedStatement::For, true) => "fn limit() -> int:\n\treturn 1\n",
+        (_, true) => "fn condition() -> bool:\n\treturn true\n",
+        (_, false) => "",
+    };
+    let mut src = format!("{helper}fn main():\n");
+    for level in 0..depth {
+        src.push_str(&"\t".repeat(level + 1));
+        match (kind, non_literal) {
+            (NestedStatement::If, false) => src.push_str("if true:\n"),
+            (NestedStatement::If, true) => src.push_str("if condition():\n"),
+            (NestedStatement::While, false) => src.push_str("while true:\n"),
+            (NestedStatement::While, true) => src.push_str("while condition():\n"),
+            (NestedStatement::For, false) => src.push_str("for i in range(0, 1):\n"),
+            (NestedStatement::For, true) => src.push_str("for i in range(0, limit()):\n"),
+        }
+    }
+    src.push_str(&"\t".repeat(depth + 1));
+    src.push_str("value = 1\n");
+    src
+}
+
+fn run_deep_statement_repro(test_name: &str, src: String) {
+    if std::env::var_os(DEEP_REPRO_CHILD).is_some() {
+        super::walker::reset_machine_call_count();
+        run(&src).expect("deep statements should analyze");
+        assert_eq!(
+            super::walker::machine_call_count(),
+            1,
+            "deep statements must share one active sema machine"
+        );
+        return;
+    }
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([test_name, "--exact", "--nocapture"])
+        .env(DEEP_REPRO_CHILD, "1")
+        .output()
+        .expect("spawn deep statement child");
+    assert!(
+        output.status.success(),
+        "deep statement child failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn nested_literal_ifs_use_one_machine_at_default_limit() {
+    run_deep_statement_repro(
+        "sema::expr::walker_tests::nested_literal_ifs_use_one_machine_at_default_limit",
+        nested_statements(NestedStatement::If, 128, false),
+    );
+}
+
+#[test]
+fn nested_call_ifs_use_one_machine_at_default_limit() {
+    run_deep_statement_repro(
+        "sema::expr::walker_tests::nested_call_ifs_use_one_machine_at_default_limit",
+        nested_statements(NestedStatement::If, 128, true),
+    );
+}
+
+#[test]
+fn nested_literal_whiles_use_one_machine_at_default_limit() {
+    run_deep_statement_repro(
+        "sema::expr::walker_tests::nested_literal_whiles_use_one_machine_at_default_limit",
+        nested_statements(NestedStatement::While, 128, false),
+    );
+}
+
+#[test]
+fn nested_call_whiles_use_one_machine_at_default_limit() {
+    run_deep_statement_repro(
+        "sema::expr::walker_tests::nested_call_whiles_use_one_machine_at_default_limit",
+        nested_statements(NestedStatement::While, 128, true),
+    );
+}
+
+#[test]
+fn nested_literal_fors_use_one_machine_at_default_limit() {
+    run_deep_statement_repro(
+        "sema::expr::walker_tests::nested_literal_fors_use_one_machine_at_default_limit",
+        nested_statements(NestedStatement::For, 128, false),
+    );
+}
+
+#[test]
+fn nested_call_fors_use_one_machine_at_default_limit() {
+    run_deep_statement_repro(
+        "sema::expr::walker_tests::nested_call_fors_use_one_machine_at_default_limit",
+        nested_statements(NestedStatement::For, 128, true),
+    );
 }

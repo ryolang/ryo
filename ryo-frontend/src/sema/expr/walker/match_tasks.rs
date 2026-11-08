@@ -31,7 +31,7 @@ pub(super) struct BlockState {
 }
 
 impl BlockState {
-    fn arm(statements: Vec<InstRef>, scope_id: ScopeId) -> Self {
+    pub(super) fn arm(statements: Vec<InstRef>, scope_id: ScopeId) -> Self {
         Self {
             statements,
             next_statement: 0,

@@ -188,6 +188,16 @@ fn is_chain(sema: &Sema<'_>, node: InstRef) -> bool {
     is_generic_expr_tag(sema.uir.inst(node).tag)
 }
 
+enum MachineRoot {
+    Expr(InstRef),
+    Block(Vec<InstRef>),
+}
+
+enum MachineResult {
+    Expr(TirRef),
+    Stmts(Vec<TirRef>),
+}
+
 pub(crate) fn analyze_expr_machine(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -195,7 +205,10 @@ pub(crate) fn analyze_expr_machine(
     root: InstRef,
     context: SemaExprContext,
 ) -> TirRef {
-    analyze_expr_machine_inner(sema, fcx, scope, root, None, context)
+    match analyze_machine_inner(sema, fcx, scope, MachineRoot::Expr(root), None, context) {
+        MachineResult::Expr(result) => result,
+        MachineResult::Stmts(_) => unreachable!("expression root returned statements"),
+    }
 }
 
 pub(crate) fn analyze_struct_lit_machine(
@@ -206,20 +219,53 @@ pub(crate) fn analyze_struct_lit_machine(
     target: TypeId,
     context: SemaExprContext,
 ) -> TirRef {
-    analyze_expr_machine_inner(sema, fcx, scope, root, Some(target), context)
+    match analyze_machine_inner(
+        sema,
+        fcx,
+        scope,
+        MachineRoot::Expr(root),
+        Some(target),
+        context,
+    ) {
+        MachineResult::Expr(result) => result,
+        MachineResult::Stmts(_) => unreachable!("struct root returned statements"),
+    }
+}
+
+pub(crate) fn analyze_stmt_machine(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    root: InstRef,
+    context: SemaExprContext,
+) -> TirRef {
+    match analyze_machine_inner(
+        sema,
+        fcx,
+        scope,
+        MachineRoot::Block(vec![root]),
+        None,
+        context,
+    ) {
+        MachineResult::Expr(_) => unreachable!("statement root returned an expression"),
+        MachineResult::Stmts(mut result) => {
+            assert_eq!(result.len(), 1, "statement root produced multiple roots");
+            result.pop().expect("statement root produced no result")
+        }
+    }
 }
 
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_lines)]
-fn analyze_expr_machine_inner(
+fn analyze_machine_inner(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
-    root: InstRef,
+    root: MachineRoot,
     root_target: Option<TypeId>,
     context: SemaExprContext,
-) -> TirRef {
+) -> MachineResult {
     #[cfg(test)]
     TEST_MACHINE_CALLS.with(|count| count.set(count.get() + 1));
     let mut match_state = MatchState::new(scope);
@@ -231,9 +277,21 @@ fn analyze_expr_machine_inner(
     let mut analyzed = HashMap::new();
     let mut calls = HashMap::new();
     let mut method_recoveries = HashMap::new();
-    let mut struct_state = StructState::new(root, root_target);
+    let expression_root = match &root {
+        MachineRoot::Expr(node) => Some(*node),
+        MachineRoot::Block(_) => None,
+    };
+    let mut struct_state = match expression_root {
+        Some(node) => StructState::new(node, root_target),
+        None => StructState::empty(),
+    };
     let mut variant_state = VariantState::default();
-    tasks.push(Task::Enter(root, root_scope, NeverMode::Reject));
+    match root {
+        MachineRoot::Expr(node) => tasks.push(Task::Enter(node, root_scope, NeverMode::Reject)),
+        MachineRoot::Block(stmts) => {
+            tasks.push(Task::BlockEnter(BlockState::arm(stmts, root_scope)));
+        }
+    }
     while let Some(task) = tasks.pop() {
         match task {
             Task::Enter(node, scope_id, mode) => {
@@ -528,7 +586,7 @@ fn analyze_expr_machine_inner(
                 }
                 if matches!(inst.tag, InstTag::Match | InstTag::Catch) {
                     let next = match_state.finish_match(sema, fcx, node);
-                    let next = if node == root || mode == NeverMode::Allow {
+                    let next = if Some(node) == expression_root || mode == NeverMode::Allow {
                         next
                     } else {
                         reject_never(sema, fcx, node, next)
@@ -548,7 +606,7 @@ fn analyze_expr_machine_inner(
                     let plan = calls.remove(&node).expect("call prepared first");
                     let next =
                         finish_call(sema, fcx, scope, &view, sema.uir.span(node), plan, arg_tirs);
-                    let next = if node == root || mode == NeverMode::Allow {
+                    let next = if Some(node) == expression_root || mode == NeverMode::Allow {
                         next
                     } else {
                         reject_never(sema, fcx, node, next)
@@ -607,7 +665,7 @@ fn analyze_expr_machine_inner(
                         } else {
                             analyze_expr_allow_never_with(sema, fcx, scope, node, leaf_context)
                         };
-                        let next = if node == root || mode == NeverMode::Allow {
+                        let next = if Some(node) == expression_root || mode == NeverMode::Allow {
                             next
                         } else {
                             reject_never(sema, fcx, node, next)
@@ -621,7 +679,10 @@ fn analyze_expr_machine_inner(
             }
         }
     }
-    let result = analyzed[&root];
+    let result = match expression_root {
+        Some(node) => MachineResult::Expr(analyzed[&node]),
+        None => MachineResult::Stmts(block_results.pop().expect("one root block remains")),
+    };
     for node in early_errors {
         fcx.inst_map[node.index()] = None;
     }

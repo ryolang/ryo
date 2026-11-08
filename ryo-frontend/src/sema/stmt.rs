@@ -2,8 +2,8 @@
 
 use super::{
     ConstInt, FuncCtx, NeverMode, Scope, Sema, SemaExprContext, analyze_expr_with,
-    analyze_struct_lit_with_target_and_context, check_reserved_name, const_eval_int,
-    with_struct_shape_notes,
+    analyze_stmt_machine, analyze_struct_lit_with_target_and_context, check_reserved_name,
+    const_eval_int, is_generic_expr_tag, with_struct_shape_notes,
 };
 use ryo_core::ast::CompoundOp;
 use ryo_core::diag::{Diag, DiagCode};
@@ -31,6 +31,32 @@ pub(crate) fn analyze_stmt_with_context(
 ) -> TirRef {
     let inst = sema.uir.inst(r);
     let span = sema.uir.span(r);
+    let nested_statement = matches!(
+        inst.tag,
+        InstTag::IfStmt | InstTag::WhileLoop | InstTag::ForRange
+    );
+    let generic_condition = match inst.tag {
+        InstTag::IfStmt => {
+            let cond = sema.uir.if_stmt_view(r).cond;
+            is_generic_expr_tag(sema.uir.inst(cond).tag)
+        }
+        InstTag::WhileLoop => {
+            let cond = sema.uir.while_loop_view(r).cond;
+            is_generic_expr_tag(sema.uir.inst(cond).tag)
+        }
+        InstTag::ForRange => {
+            let view = sema.uir.for_range_view(r);
+            is_generic_expr_tag(sema.uir.inst(view.start).tag)
+                || is_generic_expr_tag(sema.uir.inst(view.end).tag)
+        }
+        _ => false,
+    };
+    if nested_statement
+        && (context.depth >= context.limit
+            || (generic_condition && context.depth.saturating_add(1) >= context.limit))
+    {
+        return analyze_stmt_machine(sema, fcx, scope, r, context);
+    }
     match inst.tag {
         InstTag::VarDecl => {
             let view = sema.uir.var_decl_view(r);
