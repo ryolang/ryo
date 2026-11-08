@@ -5,6 +5,8 @@ use super::*;
 use crate::tir::{TirBuilder, TirTag, TypedMatchArm, TypedMatchBody};
 use crate::types::InternPool;
 
+mod emission;
+
 fn sp() -> Span {
     Span::EMPTY
 }
