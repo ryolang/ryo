@@ -11,8 +11,8 @@ use ryo_core::uir::{InstData, InstRef, InstTag, Span, StructLitView, Uir};
 mod methods;
 mod operators;
 pub(crate) mod walker;
-pub(crate) use walker::{NeverMode, SemaExprContext};
-use walker::{analyze_expr_machine, analyze_struct_lit_machine, is_generic_expr_tag};
+pub(crate) use walker::{NeverMode, SemaExprContext, analyze_stmt_machine, is_generic_expr_tag};
+use walker::{analyze_expr_machine, analyze_struct_lit_machine};
 #[cfg(test)]
 mod walker_tests;
 

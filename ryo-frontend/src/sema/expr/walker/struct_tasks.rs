@@ -13,15 +13,19 @@ pub(super) struct StructState {
 }
 
 impl StructState {
-    pub(super) fn new(root: InstRef, target: Option<TypeId>) -> Self {
-        let mut targets = HashMap::new();
-        if let Some(target) = target {
-            targets.insert(root, target);
-        }
+    pub(super) fn empty() -> Self {
         Self {
-            targets,
+            targets: HashMap::new(),
             diagnosed: HashMap::new(),
         }
+    }
+
+    pub(super) fn new(root: InstRef, target: Option<TypeId>) -> Self {
+        let mut state = Self::empty();
+        if let Some(target) = target {
+            state.targets.insert(root, target);
+        }
+        state
     }
 
     pub(super) fn expect(&mut self, node: InstRef, target: TypeId) {

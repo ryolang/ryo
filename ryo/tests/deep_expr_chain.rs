@@ -570,3 +570,35 @@ fn jit_run_deferred_slice_length_chain() {
     );
     assert_jit_prints("deferred_slice_length.ryo", &src, "2");
 }
+
+fn nested_catches(depth: usize) -> String {
+    let mut src = String::from("error E\nfn find() -> E!int:\n\treturn E\nfn main():\n");
+    for level in 0..=depth {
+        src.push_str(&"\t".repeat(level + 1));
+        if level == 0 {
+            src.push_str("value = find() catch as err:\n");
+        } else {
+            src.push_str("E: find() catch as err:\n");
+        }
+    }
+    src.push_str(&"\t".repeat(depth + 2));
+    src.push_str("E: 0\n");
+    src.push_str("\tprint(value)\n");
+    src
+}
+
+#[test]
+#[ignore = "I-275: source spans exceed the UIR u32 range"]
+fn jit_run_nested_statement_matches_50000() {
+    assert_jit_prints(
+        "nested_statement_matches_50000.ryo",
+        &nested_statement_matches(50_000),
+        "0",
+    );
+}
+
+#[test]
+#[ignore = "I-274: blocked by recursive Flow match arms"]
+fn jit_run_nested_catches_50000() {
+    assert_jit_prints("nested_catches_50000.ryo", &nested_catches(50_000), "0");
+}
