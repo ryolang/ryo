@@ -39,13 +39,23 @@ pub(super) fn lower_variant_construct(
     pool: &mut InternPool,
     sink: &mut DiagSink,
     span: Span,
+    depth: u32,
 ) -> InstRef {
     let mut step = prepare_variant_construct(b, ast, c, types, defined_enums, pool, sink, span);
     loop {
         match step {
             VariantStep::Complete(result) => return result,
             VariantStep::Child(state, arg) => {
-                let value = gen_expr(b, ast, arg, types, defined_enums, pool, sink);
+                let value = super::expr::gen_expr_d(
+                    b,
+                    ast,
+                    arg,
+                    types,
+                    defined_enums,
+                    pool,
+                    sink,
+                    depth + 1,
+                );
                 step = resume_variant_construct(state, value, b, ast, types, pool, sink);
             }
         }

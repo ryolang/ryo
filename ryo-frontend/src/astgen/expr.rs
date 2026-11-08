@@ -1,5 +1,5 @@
-//! Expression, statement, and block lowering: recursive `gen_expr`/`gen_expr_d`
-//! and statement helpers hand deep nesting to the shared iterative `gen_machine`.
+//! Expression, statement, and block lowering: recursive `gen_expr_d` and
+//! statement helpers hand deep nesting to the shared iterative `gen_machine`.
 //! Expressions, statement bodies, and block continuations stay on one explicit
 //! stack so nested matches and catches do not start fresh lowering machines.
 //!
@@ -56,20 +56,6 @@ pub(super) fn expr_depth_limit() -> u32 {
         return limit;
     }
     EXPR_DEPTH_LIMIT
-}
-
-/// Lower one expression to a UIR inst.
-#[inline]
-pub(super) fn gen_expr(
-    b: &mut UirBuilder,
-    ast: &ast::Ast,
-    expr: ast::ExprId,
-    types: &TypeResolver,
-    defined_layouts: &HashSet<TypeId>,
-    pool: &mut InternPool,
-    sink: &mut DiagSink,
-) -> InstRef {
-    gen_expr_d(b, ast, expr, types, defined_layouts, pool, sink, 0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -227,6 +213,7 @@ pub(super) fn gen_expr_d(
                     pool,
                     sink,
                     span,
+                    depth,
                 )
             } else {
                 let obj = gen_expr_d(
@@ -256,6 +243,7 @@ pub(super) fn gen_expr_d(
                     pool,
                     sink,
                     span,
+                    depth,
                 )
             } else {
                 variants::lower_variant_construct(
@@ -267,6 +255,7 @@ pub(super) fn gen_expr_d(
                     pool,
                     sink,
                     span,
+                    depth,
                 )
             }
         }
@@ -300,9 +289,17 @@ pub(super) fn gen_expr_d(
                 )
             }
         }
-        ast::ExprKind::ErrorConstruct(c) => {
-            errors::lower_error_construct(b, ast, c, types, defined_layouts, pool, sink, span)
-        }
+        ast::ExprKind::ErrorConstruct(c) => errors::lower_error_construct(
+            b,
+            ast,
+            c,
+            types,
+            defined_layouts,
+            pool,
+            sink,
+            span,
+            depth,
+        ),
         ast::ExprKind::Try(operand) => {
             let operand = gen_expr_d(
                 b,
@@ -1182,7 +1179,7 @@ fn gen_machine(
                         let operand = results.pop().expect("try operand lowered");
                         results.push(b.unary(InstTag::Try, operand, span));
                     }
-                    other => unreachable!("non-deferred kind reached gen_expr Exit: {other:?}"),
+                    other => unreachable!("non-deferred kind reached gen_machine Exit: {other:?}"),
                 }
             }
         }

@@ -1743,7 +1743,6 @@ fn gen_stmt_d(
 mod expr;
 mod match_;
 mod variants;
-use expr::gen_expr;
 
 #[cfg(test)]
 mod tests;

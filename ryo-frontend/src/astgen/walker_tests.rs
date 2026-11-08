@@ -363,3 +363,45 @@ fn non_simple_statement_lowering_matches_at_every_depth_limit() {
         }
     }
 }
+
+#[test]
+fn deep_constructor_lowering_uses_machine_at_default_limit() {
+    let depth = 100;
+    let cases = [
+        (
+            "variant",
+            format!(
+                "enum Shape:\n\tCircle(int)\nfn main():\n\tvalue = {}Shape.Circle(1){}\n",
+                "Shape.Circle(".repeat(depth),
+                ")".repeat(depth)
+            ),
+        ),
+        (
+            "declared_error",
+            format!(
+                "error E(int)\nfn main():\n\tvalue = {}E(1){}\n",
+                "E(".repeat(depth),
+                ")".repeat(depth)
+            ),
+        ),
+        (
+            "qualified_error",
+            format!(
+                "errors IoError:\n\tEof(int)\nfn main():\n\tvalue = {}IoError.Eof(1){}\n",
+                "IoError.Eof(".repeat(depth),
+                ")".repeat(depth)
+            ),
+        ),
+    ];
+    for (name, src) in cases {
+        let baseline = snapshot(lower_with_expr_limit(&src, 0));
+        reset_machine_call_count();
+        let lowered = snapshot(lower(&src));
+        assert_eq!(
+            machine_call_count(),
+            1,
+            "{name} reset recursion depth before reaching the fallback"
+        );
+        assert_eq!(lowered, baseline, "{name} changed deep lowering");
+    }
+}

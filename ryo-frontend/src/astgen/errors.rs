@@ -136,9 +136,10 @@ pub(super) fn lower_error_construct(
     pool: &mut InternPool,
     sink: &mut DiagSink,
     span: Span,
+    depth: u32,
 ) -> InstRef {
     let step = prepare_error_construct(b, ast, c, types, pool, sink, span);
-    drive_error_construct(step, b, ast, types, defined_layouts, pool, sink)
+    drive_error_construct(step, b, ast, types, defined_layouts, pool, sink, depth)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -153,10 +154,11 @@ pub(super) fn lower_qualified_error_construct(
     pool: &mut InternPool,
     sink: &mut DiagSink,
     span: Span,
+    depth: u32,
 ) -> InstRef {
     let step =
         prepare_qualified_error_construct(b, ast, family, member, args, types, pool, sink, span);
-    drive_error_construct(step, b, ast, types, defined_layouts, pool, sink)
+    drive_error_construct(step, b, ast, types, defined_layouts, pool, sink, depth)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -168,12 +170,22 @@ fn drive_error_construct(
     defined_layouts: &HashSet<TypeId>,
     pool: &mut InternPool,
     sink: &mut DiagSink,
+    depth: u32,
 ) -> InstRef {
     loop {
         match step {
             ErrorStep::Complete(result) => return result,
             ErrorStep::Child(state, arg) => {
-                let value = gen_expr(b, ast, arg, types, defined_layouts, pool, sink);
+                let value = super::expr::gen_expr_d(
+                    b,
+                    ast,
+                    arg,
+                    types,
+                    defined_layouts,
+                    pool,
+                    sink,
+                    depth + 1,
+                );
                 step = resume_error_construct(state, value, b, ast, pool);
             }
         }
