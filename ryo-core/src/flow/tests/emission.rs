@@ -218,6 +218,126 @@ fn elif_match_condition_has_exact_branch_metadata() {
 }
 
 #[test]
+fn deep_linear_expression_preserves_postorder() {
+    let mut cx = Ctx::new();
+    let int = cx.int;
+    let mut b = cx.builder();
+    let mut expr = b.int_const(0, int, sp());
+    let mut expected = vec![expr];
+    for value in 1..=50_000 {
+        let rhs = b.int_const(value, int, sp());
+        expr = b.binary(TirTag::IAdd, int, expr, rhs, sp());
+        expected.push(rhs);
+        expected.push(expr);
+    }
+    let decl = b.var_decl(cx.x, false, int, expr, sp());
+    expected.push(decl);
+    let tir = b.finish(&[decl]);
+
+    let flow = Flow::build(&tir, &cx.pool);
+    assert_eq!(flow.blocks.len(), 1);
+    assert_eq!(step_insts(&flow, flow.entry), expected);
+}
+
+#[test]
+fn statement_completion_preserves_binding_order() {
+    let mut cx = Ctx::new();
+    let int = cx.int;
+    let field = cx.pool.intern_str("field");
+    let pair = cx.pool.anon_struct(&[(field, int)]);
+    let y = cx.pool.intern_str("y");
+    let mut b = cx.builder();
+
+    let initial = b.int_const(1, int, sp());
+    let initial_lit = b.struct_lit(pair, &[(0, initial)], sp());
+    let decl = b.var_decl(cx.x, true, pair, initial_lit, sp());
+
+    let replacement = b.int_const(2, int, sp());
+    let replacement_lit = b.struct_lit(pair, &[(0, replacement)], sp());
+    let assign = b.assign(cx.x, pair, replacement_lit, sp());
+
+    let target_base = b.var(cx.x, pair, sp());
+    let target = b.field_access(target_base, 0, int, sp());
+    let field_value = b.int_const(3, int, sp());
+    let field_assign = b.field_assign(target, field_value, cx.void, sp());
+
+    let rhs_value = b.int_const(4, int, sp());
+    let rhs = b.struct_lit(pair, &[(0, rhs_value)], sp());
+    let _owner_token = b.field_access(rhs, 0, int, sp());
+    let destructure = b.destructure(rhs, &[(0, Some(y), int)], sp());
+
+    let expr_read = b.var(y, int, sp());
+    let expr_stmt = b.unary(TirTag::ExprStmt, cx.void, expr_read, sp());
+    let return_read = b.var(y, int, sp());
+    let ret = b.unary(TirTag::Return, cx.void, return_read, sp());
+    let tir = b.finish(&[decl, assign, field_assign, destructure, expr_stmt, ret]);
+
+    let flow = Flow::build(&tir, &cx.pool);
+    assert_eq!(flow.blocks.len(), 1);
+    assert_eq!(
+        step_insts(&flow, flow.entry),
+        [
+            initial,
+            initial_lit,
+            decl,
+            replacement,
+            replacement_lit,
+            assign,
+            target_base,
+            target,
+            field_value,
+            field_assign,
+            rhs_value,
+            rhs,
+            destructure,
+            expr_read,
+            expr_stmt,
+            return_read,
+        ]
+    );
+    let local = flow.local_of_decl(decl).expect("declared local");
+    let token = flow.token_places(destructure);
+    assert_eq!(token.len(), 1);
+    assert_eq!(flow.facts_of(assign).unwrap().write.unwrap().place, local);
+    assert_eq!(
+        flow.facts_of(field_assign).unwrap().write.unwrap().place,
+        local
+    );
+    assert_eq!(flow.facts_of(expr_read).unwrap().read, Some(token[0]));
+    assert_eq!(flow.facts_of(return_read).unwrap().read, Some(token[0]));
+    assert!(matches!(
+        flow.term(flow.entry),
+        Terminator::Return { value } if *value == return_read
+    ));
+}
+
+#[test]
+fn error_shaped_duplicate_terminator_keeps_dead_continuation() {
+    let mut cx = Ctx::new();
+    let error = cx.pool.error_type();
+    let int = cx.int;
+    let mut b = cx.builder();
+    let unreachable = b.unreachable(error, sp());
+    let return_value = b.int_const(7, int, sp());
+    let ret = b.unary(TirTag::Return, cx.void, return_value, sp());
+    let tir = b.finish(&[unreachable, ret]);
+
+    let flow = Flow::build(&tir, &cx.pool);
+    let dead = BlockId(1);
+    assert_eq!(flow.blocks.len(), 2);
+    assert!(matches!(flow.term(flow.entry), Terminator::Unreachable));
+    assert_eq!(step_insts(&flow, dead), [return_value]);
+    assert!(matches!(
+        flow.term(dead),
+        Terminator::Return { value } if *value == return_value
+    ));
+    assert!(flow.blocks[dead.0 as usize].unreachable);
+    assert!(flow.predecessors(dead).is_empty());
+    assert_eq!(flow.term_block_of(unreachable), Some(flow.entry));
+    assert_eq!(flow.term_block_of(ret), Some(dead));
+}
+
+#[test]
 fn nested_loop_has_exact_terminator_and_write_layout() {
     let mut cx = Ctx::new();
     let int = cx.int;

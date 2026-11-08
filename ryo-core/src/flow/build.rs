@@ -15,8 +15,9 @@ use super::{
     WriteKind,
 };
 use crate::extra::ExtraRange;
-use crate::spine::ChainSpine;
 use crate::tir::{MatchBodyView, Tir, TirRef, TirTag};
+
+mod emission;
 use crate::types::{InternPool, StringId, TypeId};
 
 pub(super) struct FlowBuilder<'a> {
@@ -51,6 +52,7 @@ pub(super) struct FlowBuilder<'a> {
     /// no step but still consume an order.
     next_order: u32,
     cur: BlockId,
+    pending: Option<emission::Task<'a>>,
 }
 
 struct LoopFrame {
@@ -81,6 +83,7 @@ pub(super) fn build_flow(tir: &Tir, pool: &InternPool) -> Flow {
         writes_flat: Vec::new(),
         next_order: 0,
         cur: BlockId::NONE,
+        pending: None,
     };
     fb.run()
 }
@@ -100,10 +103,7 @@ impl FlowBuilder<'_> {
             self.scopes[0].push((p.name, place));
         }
 
-        let tir = self.tir;
-        for stmt in tir.body_stmts() {
-            self.emit_stmt(stmt);
-        }
+        emission::emit_root(&mut self);
 
         // Void functions (and `main`) fall off the end; sema's E0036
         // guarantees non-void bodies end in an explicit return.
@@ -270,438 +270,17 @@ impl FlowBuilder<'_> {
     }
 
     fn emit_stmt(&mut self, stmt: TirRef) {
-        // Stamp the single-parent consumer edge for the statement's
-        // operands, exactly as `emit_expr` does for expression
-        // internals (see `Flow::parent_of`).
-        self.tir.walk_operands(stmt, &mut |_p, child, kind| {
-            if kind == crate::tir::ChildKind::Operand {
-                self.inst_meta[child.index()].parent = Some(stmt.raw());
-            }
-        });
-        let inst = *self.tir.inst(stmt);
-        match inst.tag {
-            TirTag::VarDecl => {
-                let v = self.tir.var_decl_view(stmt);
-                self.emit_expr(v.initializer);
-                let place = self.push_place(Place::Local {
-                    decl: stmt,
-                    name: v.name,
-                    ty: inst.ty,
-                    mutable: v.mutable,
-                });
-                self.inst_meta[stmt.index()].local = Some(place);
-                self.record_write(place, stmt);
-                self.push_step(
-                    stmt,
-                    StepFacts {
-                        write: Some(PlaceWrite {
-                            place,
-                            kind: WriteKind::Init,
-                        }),
-                        ..StepFacts::default()
-                    },
-                );
-                self.bind(v.name, place);
-            }
-            TirTag::Assign => {
-                let v = self.tir.assign_view(stmt);
-                self.emit_expr(v.value);
-                let place = self
-                    .resolve(v.name)
-                    .expect("assign to unresolved binding (post-sema TIR)");
-                self.record_write(place, stmt);
-                self.push_step(
-                    stmt,
-                    StepFacts {
-                        write: Some(PlaceWrite {
-                            place,
-                            kind: WriteKind::Replace,
-                        }),
-                        ..StepFacts::default()
-                    },
-                );
-            }
-            TirTag::CompoundAssign => {
-                let v = self.tir.compound_assign_view(stmt);
-                self.emit_expr(v.value);
-                let place = self
-                    .resolve(v.name)
-                    .expect("compound-assign to unresolved binding (post-sema TIR)");
-                self.push_step(
-                    stmt,
-                    StepFacts {
-                        read: Some(place),
-                        write: Some(PlaceWrite {
-                            place,
-                            kind: WriteKind::Mutate,
-                        }),
-                        ..StepFacts::default()
-                    },
-                );
-            }
-            TirTag::FieldAssign | TirTag::CompoundFieldAssign => {
-                let (target, value, is_compound) = match inst.tag {
-                    TirTag::FieldAssign => {
-                        let v = self.tir.field_assign_view(stmt);
-                        (v.target, v.value, false)
-                    }
-                    _ => {
-                        let v = self.tir.compound_field_assign_view(stmt);
-                        (v.target, v.value, true)
-                    }
-                };
-                self.emit_expr(target);
-                self.emit_expr(value);
-                let (base, field) = self
-                    .resolve_field_target(target)
-                    .expect("field-assign target is not a place projection");
-                self.push_step(
-                    stmt,
-                    StepFacts {
-                        read: is_compound.then_some(base),
-                        write: Some(PlaceWrite {
-                            place: base,
-                            kind: WriteKind::FieldReplace { field },
-                        }),
-                        ..StepFacts::default()
-                    },
-                );
-            }
-            TirTag::IfStmt => self.build_if(stmt),
-            TirTag::WhileLoop => self.build_while(stmt),
-            TirTag::ForRange => self.build_for(stmt),
-            TirTag::Destructure => {
-                let v = self.tir.destructure_view(stmt);
-                self.emit_expr(v.rhs);
-                let refs = self.tir.destructure_bound_owner_refs(stmt);
-                let names: Vec<StringId> = v.fields.iter().filter_map(|f| f.bind).collect();
-                debug_assert_eq!(refs.len(), names.len(), "token/binding mismatch");
-                self.register_tokens(stmt, &refs, &names);
-                // Destructure bindings persist in the current scope.
-                let places = self.token_places_of(stmt).to_vec();
-                for place in places {
-                    if let Place::Token { name, .. } = self.places[place.0 as usize] {
-                        self.bind(name, place);
-                    }
-                }
-                self.push_step(stmt, StepFacts::default());
-            }
-            TirTag::Return => match inst.data {
-                crate::tir::TirData::UnOp(value) => {
-                    self.emit_expr(value);
-                    self.set_term(self.cur, Terminator::Return { value }, Some(stmt));
-                }
-                _ => unreachable!("Return carries UnOp"),
-            },
-            TirTag::ReturnVoid => self.set_term(self.cur, Terminator::ReturnVoid, Some(stmt)),
-            TirTag::Break | TirTag::Continue => {
-                // Outside a loop, sema has already emitted E0024/E0025
-                // and the unit will not codegen; keep the analysis
-                // well-formed with an unreachable terminator rather
-                // than aborting the whole diagnostic pass.
-                let term = match (inst.tag, self.loops.last()) {
-                    (TirTag::Break, Some(f)) => Terminator::Break { target: f.exit },
-                    (TirTag::Continue, Some(f)) => Terminator::Continue { target: f.header },
-                    _ => Terminator::Unreachable,
-                };
-                self.set_term(self.cur, term, Some(stmt));
-            }
-            TirTag::Unreachable => {
-                self.set_term(self.cur, Terminator::Unreachable, Some(stmt));
-            }
-            TirTag::Match => {
-                // Sema ExprStmt-wraps statement-level matches; a bare
-                // Match statement is tolerated the same way (the match
-                // itself is the Switch terminator — no step).
-                self.emit_expr(stmt);
-            }
-            TirTag::ExprStmt => match inst.data {
-                crate::tir::TirData::UnOp(e) => {
-                    self.emit_expr(e);
-                    // Marks the statement boundary for consumers that
-                    // sweep at statement end; carries no facts of its own.
-                    self.push_step(stmt, StepFacts::default());
-                }
-                _ => unreachable!("ExprStmt carries UnOp"),
-            },
-            other => {
-                // Hand-built or future statement shapes that produce a
-                // value (a bare call, a literal, …): evaluate and mark
-                // the statement boundary, exactly like ExprStmt.
-                debug_assert!(
-                    !matches!(other, TirTag::Return | TirTag::ReturnVoid),
-                    "returns are handled above"
-                );
-                self.emit_expr(stmt);
-                if self.inst_meta[stmt.index()].step.is_none() {
-                    // Value-producing statements were stepped by the
-                    // evaluation itself; structural ones (match/if)
-                    // need the boundary marker.
-                    self.push_step(stmt, StepFacts::default());
-                }
-            }
-        }
+        emission::emit_stmt(self, stmt);
     }
 
     // ---------- expressions ----------
-
-    /// Expression nesting the recursive emitter may consume before
-    /// handing the remaining subtree to the iterative machine. Far
-    /// below the compiler thread's 32 MiB stack, far above anything a
-    /// hand-written expression nests.
-    const EXPR_DEPTH_LIMIT: u32 = 64;
 
     /// Evaluate `r` and its operands into the current block. After a
     /// match or a diverging call, `self.cur` is the continuation block
     /// (join, or an unreachable block).
     #[inline]
     fn emit_expr(&mut self, r: TirRef) {
-        self.emit_expr_d(r, 0);
-    }
-
-    /// Depth-carrying body of [`FlowBuilder::emit_expr`]: the old
-    /// demand recursion, verbatim, plus a budget check per level.
-    /// Past [`FlowBuilder::EXPR_DEPTH_LIMIT`] the remaining subtree
-    /// lowers via [`FlowBuilder::emit_expr_machine`].
-    fn emit_expr_d(&mut self, r: TirRef, depth: u32) {
-        if depth == Self::EXPR_DEPTH_LIMIT {
-            return self.emit_expr_machine(r);
-        }
-        // Stamp the single-parent consumer edge for every operand
-        // (the TIR is tree-shaped): consumers of Flow facts read
-        // `parent_of` instead of re-walking TIR operand trees. Only
-        // `Operand`-kind edges count — body statements are reachable,
-        // not consumed.
-        self.tir.walk_operands(r, &mut |_p, child, kind| {
-            if kind == crate::tir::ChildKind::Operand {
-                self.inst_meta[child.index()].parent = Some(r.raw());
-            }
-        });
-        let inst = *self.tir.inst(r);
-        match inst.tag {
-            // Control constructs are position-agnostic: sema lowers
-            // some calls (assert) to an IfStmt in expression position,
-            // and a match is equally at home in an initializer or a
-            // statement. The builders cut blocks wherever they stand.
-            TirTag::Match => self.build_match(r),
-            TirTag::IfStmt => self.build_if(r),
-            TirTag::WhileLoop => self.build_while(r),
-            TirTag::ForRange => self.build_for(r),
-            TirTag::BoolAnd | TirTag::BoolOr => {
-                // Short-circuit control flow made explicit: the RHS is
-                // reachable only through the taken edge. `lhs` is
-                // evaluated in the current block, which the Branch then
-                // terminates; the merged value is a step in the join
-                // block (its operands dominate it by emission order).
-                let is_and = inst.tag == TirTag::BoolAnd;
-                let (lhs, rhs) = match inst.data {
-                    crate::tir::TirData::BinOp { lhs, rhs } => (lhs, rhs),
-                    _ => unreachable!("BoolAnd/BoolOr must carry TirData::BinOp"),
-                };
-                self.emit_expr_d(lhs, depth + 1);
-                let rhs_block = self.new_block(false);
-                let join = self.new_block(false);
-                let (then_, else_) = if is_and {
-                    (rhs_block, join)
-                } else {
-                    (join, rhs_block)
-                };
-                self.set_term(
-                    self.cur,
-                    Terminator::Branch {
-                        cond: lhs,
-                        then_,
-                        else_,
-                    },
-                    None,
-                );
-                self.cur = rhs_block;
-                self.emit_expr_d(rhs, depth + 1);
-                self.close_region(self.cur, join);
-                self.cur = join;
-                self.push_step(r, StepFacts::default());
-            }
-            TirTag::Call if self.pool.is_never(inst.ty) => {
-                let view = self.tir.call_view(r);
-                for arg in &view.args {
-                    self.emit_expr_d(arg, depth + 1);
-                }
-                let next = self.new_block(true);
-                self.set_term(self.cur, Terminator::Call { call: r, next }, Some(r));
-                self.cur = next;
-            }
-            _ => {
-                let tir = self.tir;
-                tir.walk_operands(r, &mut |_p, child, kind| {
-                    debug_assert!(
-                        kind == crate::tir::ChildKind::Operand,
-                        "expression insts announce operands only"
-                    );
-                    self.emit_expr_d(child, depth + 1);
-                });
-                let facts = self.facts_for(r);
-                self.push_step(r, facts);
-            }
-        }
-    }
-
-    /// Iterative fallback for deeply nested expressions — see
-    /// [`FlowBuilder::emit_expr_d`]. TIR operand links mirror the
-    /// AST's nesting (a 100k-term operator chain nests 100k `BinOp`
-    /// lhs links), so past the recursion budget the remaining subtree
-    /// walks on an explicit task stack. `Enter` schedules a node's
-    /// operands and an `Exit`; `Exit` pushes the step after its
-    /// operands, preserving the exact post-order the recursion
-    /// produced. Boolean operands and diverging-call arguments use
-    /// continuation tasks to preserve control flow without returning to
-    /// the recursive entrypoint. Other control constructs manage their
-    /// own sub-emissions.
-    fn emit_expr_machine(&mut self, r: TirRef) {
-        enum Task {
-            Enter(TirRef),
-            Exit(TirRef),
-            AfterBoolLhs {
-                expr: TirRef,
-                lhs: TirRef,
-                rhs: TirRef,
-                is_and: bool,
-            },
-            AfterBoolRhs {
-                expr: TirRef,
-                join: BlockId,
-            },
-            AfterNeverArgs(TirRef),
-        }
-        // Task stack stays inline for statement-sized expressions; deep
-        // operator chains spill to the heap.
-        let mut tasks: ChainSpine<Task> = ChainSpine::new();
-        tasks.push(Task::Enter(r));
-        // Operand scratch, reused across iterations.
-        let mut children: Vec<TirRef> = Vec::new();
-        while let Some(task) = tasks.pop() {
-            match task {
-                Task::Enter(x) => {
-                    // Stamp the single-parent consumer edge for every operand
-                    // (the TIR is tree-shaped): consumers of Flow facts read
-                    // `parent_of` instead of re-walking TIR operand trees. Only
-                    // `Operand`-kind edges count — body statements are reachable,
-                    // not consumed.
-                    self.tir.walk_operands(x, &mut |_p, child, kind| {
-                        if kind == crate::tir::ChildKind::Operand {
-                            self.inst_meta[child.index()].parent = Some(x.raw());
-                        }
-                    });
-                    let inst = *self.tir.inst(x);
-                    match inst.tag {
-                        // Control constructs are position-agnostic: sema lowers
-                        // some calls (assert) to an IfStmt in expression position,
-                        // and a match is equally at home in an initializer or a
-                        // statement. The builders cut blocks wherever they stand.
-                        TirTag::Match => self.build_match(x),
-                        TirTag::IfStmt => self.build_if(x),
-                        TirTag::WhileLoop => self.build_while(x),
-                        TirTag::ForRange => self.build_for(x),
-                        TirTag::BoolAnd | TirTag::BoolOr => {
-                            let is_and = inst.tag == TirTag::BoolAnd;
-                            let (lhs, rhs) = match inst.data {
-                                crate::tir::TirData::BinOp { lhs, rhs } => (lhs, rhs),
-                                _ => unreachable!("BoolAnd/BoolOr must carry TirData::BinOp"),
-                            };
-                            tasks.push(Task::AfterBoolLhs {
-                                expr: x,
-                                lhs,
-                                rhs,
-                                is_and,
-                            });
-                            tasks.push(Task::Enter(lhs));
-                        }
-                        TirTag::Call if self.pool.is_never(inst.ty) => {
-                            let view = self.tir.call_view(x);
-                            tasks.push(Task::AfterNeverArgs(x));
-                            for arg in view.args.iter().rev() {
-                                tasks.push(Task::Enter(arg));
-                            }
-                        }
-                        _ => {
-                            // Hot shapes push their operands directly;
-                            // everything else buffers the operand list
-                            // once and replays it in reverse.
-                            match inst.data {
-                                crate::tir::TirData::BinOp { lhs, rhs } => {
-                                    tasks.push(Task::Exit(x));
-                                    tasks.push(Task::Enter(rhs));
-                                    tasks.push(Task::Enter(lhs));
-                                }
-                                crate::tir::TirData::UnOp(operand) => {
-                                    tasks.push(Task::Exit(x));
-                                    tasks.push(Task::Enter(operand));
-                                }
-                                _ => {
-                                    let tir = self.tir;
-                                    children.clear();
-                                    tir.walk_operands(x, &mut |_p, child, kind| {
-                                        debug_assert!(
-                                            kind == crate::tir::ChildKind::Operand,
-                                            "expression insts announce operands only"
-                                        );
-                                        children.push(child);
-                                    });
-                                    if children.is_empty() {
-                                        let facts = self.facts_for(x);
-                                        self.push_step(x, facts);
-                                    } else {
-                                        tasks.push(Task::Exit(x));
-                                        for &child in children.iter().rev() {
-                                            tasks.push(Task::Enter(child));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Task::Exit(x) => {
-                    let facts = self.facts_for(x);
-                    self.push_step(x, facts);
-                }
-                Task::AfterBoolLhs {
-                    expr,
-                    lhs,
-                    rhs,
-                    is_and,
-                } => {
-                    let rhs_block = self.new_block(false);
-                    let join = self.new_block(false);
-                    let (then_, else_) = if is_and {
-                        (rhs_block, join)
-                    } else {
-                        (join, rhs_block)
-                    };
-                    self.set_term(
-                        self.cur,
-                        Terminator::Branch {
-                            cond: lhs,
-                            then_,
-                            else_,
-                        },
-                        None,
-                    );
-                    self.cur = rhs_block;
-                    tasks.push(Task::AfterBoolRhs { expr, join });
-                    tasks.push(Task::Enter(rhs));
-                }
-                Task::AfterBoolRhs { expr, join } => {
-                    self.close_region(self.cur, join);
-                    self.cur = join;
-                    self.push_step(expr, StepFacts::default());
-                }
-                Task::AfterNeverArgs(expr) => {
-                    let next = self.new_block(true);
-                    self.set_term(self.cur, Terminator::Call { call: expr, next }, Some(expr));
-                    self.cur = next;
-                }
-            }
-        }
+        emission::emit_expr(self, r);
     }
 
     /// Storage facts for a value-producing instruction.
