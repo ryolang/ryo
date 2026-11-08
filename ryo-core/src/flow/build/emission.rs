@@ -1,4 +1,5 @@
 use super::FlowBuilder;
+use super::control::{self, ControlTask};
 use crate::extra::ExtraList;
 use crate::spine::ChainSpine;
 use crate::tir::{TirData, TirRef, TirTag};
@@ -40,6 +41,7 @@ pub(super) enum Task<'a> {
         join: BlockId,
     },
     AfterNeverArgs(TirRef),
+    Control(ControlTask),
     LegacyControl(TirRef),
 }
 
@@ -79,7 +81,8 @@ pub(super) fn emit_root(builder: &mut FlowBuilder<'_>) {
                 });
                 let inst = *builder.tir.inst(expr);
                 match inst.tag {
-                    TirTag::Match | TirTag::IfStmt | TirTag::WhileLoop | TirTag::ForRange => {
+                    TirTag::Match => control::schedule_control(builder, expr, &mut tasks),
+                    TirTag::IfStmt | TirTag::WhileLoop | TirTag::ForRange => {
                         tasks.push(Task::LegacyControl(expr));
                     }
                     TirTag::BoolAnd | TirTag::BoolOr => {
@@ -177,7 +180,8 @@ pub(super) fn emit_root(builder: &mut FlowBuilder<'_>) {
                         tasks.push(Task::EnterExpr(value));
                         tasks.push(Task::EnterExpr(target));
                     }
-                    TirTag::IfStmt | TirTag::WhileLoop | TirTag::ForRange | TirTag::Match => {
+                    TirTag::Match => control::schedule_control(builder, stmt, &mut tasks),
+                    TirTag::IfStmt | TirTag::WhileLoop | TirTag::ForRange => {
                         tasks.push(Task::LegacyControl(stmt));
                     }
                     TirTag::Destructure => {
@@ -377,8 +381,8 @@ pub(super) fn emit_root(builder: &mut FlowBuilder<'_>) {
                 );
                 builder.cur = next;
             }
+            Task::Control(control) => control::resume_control(builder, control, &mut tasks),
             Task::LegacyControl(stmt) => match builder.tir.inst(stmt).tag {
-                TirTag::Match => builder.build_match(stmt),
                 TirTag::IfStmt => builder.build_if(stmt),
                 TirTag::WhileLoop => builder.build_while(stmt),
                 TirTag::ForRange => builder.build_for(stmt),

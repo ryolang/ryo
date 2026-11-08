@@ -74,6 +74,100 @@ fn value_match_has_exact_block_step_and_place_layout() {
 }
 
 #[test]
+fn nested_match_arms_use_bounded_stack() {
+    let mut cx = Ctx::new();
+    let int = cx.int;
+    let mut b = cx.builder();
+    let mut root = b.int_const(0, int, sp());
+    for value in 1..=50_000 {
+        let scrutinee = b.int_const(value, int, sp());
+        root = b.match_expr(
+            scrutinee,
+            int,
+            &[TypedMatchArm {
+                span: sp(),
+                discriminant: crate::tir::Discriminant::Wildcard,
+                bindings: &[],
+                guards: &[],
+                body: TypedMatchBody::Expr(root),
+            }],
+            sp(),
+        );
+    }
+    let expr_stmt = b.unary(TirTag::ExprStmt, cx.void, root, sp());
+    let tir = b.finish(&[expr_stmt]);
+
+    let flow = Flow::build(&tir, &cx.pool);
+    assert_eq!(flow.blocks.len(), 2 * 50_000 + 1);
+    assert!(flow.match_result(root).is_some());
+}
+
+#[test]
+fn sibling_match_arms_keep_independent_token_state() {
+    let mut cx = Ctx::new();
+    let str_ty = cx.pool.str_();
+    let left = cx.pool.intern_str("left");
+    let right = cx.pool.intern_str("right");
+    let field = cx.pool.intern_str("field");
+    let pair_ty = cx.pool.anon_struct(&[(field, str_ty), (field, str_ty)]);
+    let mut b = cx.builder();
+    let first = b.str_const(cx.pool.intern_str("first"), str_ty, sp());
+    let second = b.str_const(cx.pool.intern_str("second"), str_ty, sp());
+    let scrutinee = b.struct_lit(pair_ty, &[(0, first), (1, second)], sp());
+    let left_read = b.var(left, str_ty, sp());
+    let left_stmt = b.unary(TirTag::ExprStmt, cx.void, left_read, sp());
+    let right_read = b.var(right, str_ty, sp());
+    let right_stmt = b.unary(TirTag::ExprStmt, cx.void, right_read, sp());
+    let left_token = b.field_access(scrutinee, 0, str_ty, sp());
+    let right_token = b.field_access(scrutinee, 1, str_ty, sp());
+    let m = b.match_expr(
+        scrutinee,
+        cx.void,
+        &[
+            TypedMatchArm {
+                span: sp(),
+                discriminant: crate::tir::Discriminant::Variant(0),
+                bindings: &[crate::tir::MatchBinding {
+                    field_index: 0,
+                    name: left,
+                    ty: str_ty,
+                }],
+                guards: &[],
+                body: TypedMatchBody::Stmts(&[left_stmt]),
+            },
+            TypedMatchArm {
+                span: sp(),
+                discriminant: crate::tir::Discriminant::Variant(1),
+                bindings: &[crate::tir::MatchBinding {
+                    field_index: 1,
+                    name: right,
+                    ty: str_ty,
+                }],
+                guards: &[],
+                body: TypedMatchBody::Stmts(&[right_stmt]),
+            },
+        ],
+        sp(),
+    );
+    let tir = b.finish(&[m]);
+
+    let flow = Flow::build(&tir, &cx.pool);
+    let tokens = flow.token_places(m);
+    assert_eq!(tokens.len(), 2);
+    assert_ne!(tokens[0], tokens[1]);
+    assert!(matches!(
+        flow.place(tokens[0]),
+        Place::Token { inst, name, .. } if *inst == left_token && *name == left
+    ));
+    assert!(matches!(
+        flow.place(tokens[1]),
+        Place::Token { inst, name, .. } if *inst == right_token && *name == right
+    ));
+    assert_eq!(flow.facts_of(left_read).unwrap().read, Some(tokens[0]));
+    assert_eq!(flow.facts_of(right_read).unwrap().read, Some(tokens[1]));
+}
+
+#[test]
 fn nested_projection_resolution_uses_bounded_stack() {
     let mut cx = Ctx::new();
     let int = cx.int;

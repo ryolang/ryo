@@ -15,8 +15,9 @@ use super::{
     WriteKind,
 };
 use crate::extra::ExtraRange;
-use crate::tir::{MatchBodyView, Tir, TirRef, TirTag};
+use crate::tir::{Tir, TirRef, TirTag};
 
+mod control;
 mod emission;
 use crate::types::{InternPool, StringId, TypeId};
 
@@ -258,10 +259,6 @@ impl FlowBuilder<'_> {
     }
 
     // ---------- statements ----------
-
-    fn emit_stmts(&mut self, stmts: &[TirRef]) {
-        self.emit_stmts_iter(stmts.iter().copied());
-    }
 
     fn emit_stmts_iter(&mut self, stmts: impl IntoIterator<Item = TirRef>) {
         for stmt in stmts {
@@ -616,120 +613,6 @@ impl FlowBuilder<'_> {
         }
 
         self.cur = exit;
-    }
-
-    fn build_match(&mut self, stmt: TirRef) {
-        let view = self.tir.match_view(stmt);
-        let match_ty = view.ty;
-        self.emit_expr(view.scrutinee);
-
-        // By-move owner tokens (arm order, binding order, non-Copy),
-        // named from the arm bindings — minted up front so arm scopes
-        // can bind them while building.
-        let tokens = self.tir.match_by_move_owner_refs(stmt, self.pool);
-        let names: Vec<StringId> = view
-            .arms()
-            .flat_map(|arm| arm.bindings())
-            .filter(|b| !self.pool.is_copy(b.ty))
-            .map(|b| b.name)
-            .collect();
-        debug_assert_eq!(tokens.len(), names.len(), "token/binding mismatch");
-        self.register_tokens(stmt, &tokens, &names);
-
-        // Arm block ids up front (the Switch terminator references them).
-        let arm_start = self.extra.len() as u32;
-        let arm_blocks: Vec<BlockId> = (0..view.len()).map(|_| self.new_block(false)).collect();
-        for &b in &arm_blocks {
-            self.extra.push(b.0);
-        }
-
-        // Divergence per arm decides whether a join exists.
-        let mut any_falls_through = false;
-        for arm in view.arms() {
-            let terminates = match arm.body {
-                MatchBodyView::Expr(e) => self.pool.is_never(self.tir.inst(e).ty),
-                MatchBodyView::Stmts(_) => {
-                    let stmts: Vec<TirRef> = arm.body.stmts().collect();
-                    self.tir.block_definitely_terminates(&stmts, self.pool)
-                }
-            };
-            any_falls_through |= !terminates;
-        }
-        let join = any_falls_through.then(|| self.new_block(false));
-
-        self.set_term(
-            self.cur,
-            Terminator::Switch {
-                match_inst: stmt,
-                scrutinee: view.scrutinee,
-                arms: ExtraRange {
-                    offset: arm_start,
-                    len: self.extra.len() as u32 - arm_start,
-                },
-                join,
-            },
-            Some(stmt),
-        );
-
-        if !self.pool.is_never(match_ty) && match_ty != self.pool.void() {
-            let place = self.push_place(Place::MatchResult {
-                match_inst: stmt,
-                ty: match_ty,
-            });
-            self.inst_meta[stmt.index()].match_result = Some(place);
-        }
-
-        let token_places = self.token_places_of(stmt).to_vec();
-        let mut token_iter = token_places.iter().copied();
-        for (i, arm) in view.arms().enumerate() {
-            self.cur = arm_blocks[i];
-            self.push_scope();
-            for binding in arm.bindings() {
-                if !self.pool.is_copy(binding.ty) {
-                    let place = token_iter
-                        .next()
-                        .expect("token count mismatch with by-move bindings");
-                    self.bind(binding.name, place);
-                }
-            }
-            match arm.body {
-                MatchBodyView::Expr(body) => {
-                    self.emit_expr(body);
-                }
-                MatchBodyView::Stmts(_) => {
-                    let stmts: Vec<TirRef> = arm.body.stmts().collect();
-                    self.emit_stmts(&stmts);
-                }
-            }
-            match join {
-                Some(join) => self.close_region(self.cur, join),
-                None => {
-                    // The arm itself must have terminated; close any
-                    // dead continuation its divergence created.
-                    debug_assert!(
-                        self.terminated(arm_blocks[i]),
-                        "all-diverging match arm fell through"
-                    );
-                    if !self.terminated(self.cur) {
-                        debug_assert!(
-                            !self.has_pred[self.cur.0 as usize],
-                            "live fall-through in an all-diverging match"
-                        );
-                        self.set_term(self.cur, Terminator::Unreachable, None);
-                    }
-                }
-            }
-            self.pop_scope();
-        }
-        debug_assert!(token_iter.next().is_none(), "unused by-move tokens");
-
-        match join {
-            Some(join) => self.cur = join,
-            None => {
-                // Every arm diverged: the continuation is unreachable.
-                self.cur = self.new_block(true);
-            }
-        }
     }
 
     // ---------- tokens ----------
