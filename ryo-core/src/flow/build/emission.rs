@@ -81,8 +81,10 @@ pub(super) fn emit_root(builder: &mut FlowBuilder<'_>) {
                 });
                 let inst = *builder.tir.inst(expr);
                 match inst.tag {
-                    TirTag::Match => control::schedule_control(builder, expr, &mut tasks),
-                    TirTag::IfStmt | TirTag::WhileLoop | TirTag::ForRange => {
+                    TirTag::Match | TirTag::IfStmt => {
+                        control::schedule_control(builder, expr, &mut tasks)
+                    }
+                    TirTag::WhileLoop | TirTag::ForRange => {
                         tasks.push(Task::LegacyControl(expr));
                     }
                     TirTag::BoolAnd | TirTag::BoolOr => {
@@ -180,8 +182,10 @@ pub(super) fn emit_root(builder: &mut FlowBuilder<'_>) {
                         tasks.push(Task::EnterExpr(value));
                         tasks.push(Task::EnterExpr(target));
                     }
-                    TirTag::Match => control::schedule_control(builder, stmt, &mut tasks),
-                    TirTag::IfStmt | TirTag::WhileLoop | TirTag::ForRange => {
+                    TirTag::Match | TirTag::IfStmt => {
+                        control::schedule_control(builder, stmt, &mut tasks)
+                    }
+                    TirTag::WhileLoop | TirTag::ForRange => {
                         tasks.push(Task::LegacyControl(stmt));
                     }
                     TirTag::Destructure => {
@@ -383,7 +387,6 @@ pub(super) fn emit_root(builder: &mut FlowBuilder<'_>) {
             }
             Task::Control(control) => control::resume_control(builder, control, &mut tasks),
             Task::LegacyControl(stmt) => match builder.tir.inst(stmt).tag {
-                TirTag::IfStmt => builder.build_if(stmt),
                 TirTag::WhileLoop => builder.build_while(stmt),
                 TirTag::ForRange => builder.build_for(stmt),
                 _ => unreachable!("legacy control dispatch for non-control instruction"),

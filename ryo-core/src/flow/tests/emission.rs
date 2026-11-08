@@ -168,6 +168,38 @@ fn sibling_match_arms_keep_independent_token_state() {
 }
 
 #[test]
+fn nested_if_bodies_use_bounded_stack() {
+    let mut cx = Ctx::new();
+    let bool_ty = cx.pool.bool_();
+    let mut b = cx.builder();
+    let innermost_return = b.return_void(cx.void, sp());
+    let mut root = innermost_return;
+    let mut innermost_if = None;
+    let mut root_cond = None;
+    for _ in 0..50_000 {
+        let cond = b.bool_const(true, bool_ty, sp());
+        let else_return = b.return_void(cx.void, sp());
+        root = b.if_stmt(cond, &[root], &[], Some(&[else_return]), cx.void, sp());
+        innermost_if.get_or_insert(root);
+        root_cond = Some(cond);
+    }
+    let tir = b.finish(&[root]);
+
+    let flow = Flow::build(&tir, &cx.pool);
+    assert!(matches!(
+        flow.term(flow.entry),
+        Terminator::Branch { cond, .. } if *cond == root_cond.expect("root condition")
+    ));
+    let innermost_return_block = flow
+        .branch_arm_blocks(innermost_if.expect("innermost if"))
+        .then_block;
+    assert!(matches!(
+        flow.term(innermost_return_block),
+        Terminator::ReturnVoid
+    ));
+}
+
+#[test]
 fn nested_projection_resolution_uses_bounded_stack() {
     let mut cx = Ctx::new();
     let int = cx.int;
@@ -309,6 +341,55 @@ fn elif_match_condition_has_exact_branch_metadata() {
         Place::MatchResult { match_inst, ty } if *match_inst == m && *ty == bool_ty
     ));
     assert_eq!(flow.place_writes(PlaceId(0)), &[]);
+}
+
+#[test]
+fn nested_match_in_elif_condition_records_actual_join() {
+    let mut cx = Ctx::new();
+    let bool_ty = cx.pool.bool_();
+    let mut b = cx.builder();
+    let first_cond = b.bool_const(false, bool_ty, sp());
+    let scrut = b.bool_const(true, bool_ty, sp());
+    let arm = b.bool_const(true, bool_ty, sp());
+    let m = b.match_expr(
+        scrut,
+        bool_ty,
+        &[TypedMatchArm {
+            span: sp(),
+            discriminant: crate::tir::Discriminant::Wildcard,
+            bindings: &[],
+            guards: &[],
+            body: TypedMatchBody::Expr(arm),
+        }],
+        sp(),
+    );
+    let ifs = b.if_stmt(
+        first_cond,
+        &[],
+        &[(m, Vec::new())],
+        Some(&[]),
+        cx.void,
+        sp(),
+    );
+    let tir = b.finish(&[ifs]);
+
+    let flow = Flow::build(&tir, &cx.pool);
+    let arms = flow.branch_arm_blocks(ifs);
+    assert_eq!(arms.elif_blocks.len(), 1);
+    let branch_block = arms.elif_blocks[0];
+    assert!(matches!(
+        flow.term(branch_block),
+        Terminator::Branch { cond, .. } if *cond == m
+    ));
+    let condition_entry = flow.term_block_of(m).expect("match terminator block");
+    let match_join = match flow.term(condition_entry) {
+        Terminator::Switch {
+            join: Some(join), ..
+        } => *join,
+        other => panic!("match must have a join, got {other:?}"),
+    };
+    assert_eq!(branch_block, match_join);
+    assert_ne!(branch_block, condition_entry);
 }
 
 #[test]

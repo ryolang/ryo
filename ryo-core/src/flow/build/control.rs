@@ -6,7 +6,28 @@ use crate::tir::{MatchBodyView, TirRef, TirTag};
 use crate::types::StringId;
 
 pub(super) enum ControlTask {
+    If(IfFrame),
     Match(MatchFrame),
+}
+
+pub(super) struct IfFrame {
+    stmt: TirRef,
+    phase: IfPhase,
+    then_block: BlockId,
+    elif_condition_blocks: Box<[BlockId]>,
+    elif_branch_blocks: Vec<BlockId>,
+    else_block: BlockId,
+    join: BlockId,
+    next_branch: usize,
+}
+
+#[derive(Clone, Copy)]
+enum IfPhase {
+    InitialCondition,
+    Then,
+    ElifCondition,
+    ElifBody,
+    Else,
 }
 
 pub(super) struct MatchFrame {
@@ -31,6 +52,20 @@ pub(super) fn schedule_control(
     tasks: &mut ChainSpine<Task<'_>>,
 ) {
     match builder.tir.inst(stmt).tag {
+        TirTag::IfStmt => {
+            let cond = builder.tir.if_stmt_view(stmt).cond;
+            tasks.push(Task::Control(ControlTask::If(IfFrame {
+                stmt,
+                phase: IfPhase::InitialCondition,
+                then_block: BlockId::NONE,
+                elif_condition_blocks: Box::new([]),
+                elif_branch_blocks: Vec::new(),
+                else_block: BlockId::NONE,
+                join: BlockId::NONE,
+                next_branch: 0,
+            })));
+            tasks.push(Task::EnterExpr(cond));
+        }
         TirTag::Match => {
             let scrutinee = builder.tir.match_view(stmt).scrutinee;
             tasks.push(Task::Control(ControlTask::Match(MatchFrame {
@@ -44,7 +79,7 @@ pub(super) fn schedule_control(
             })));
             tasks.push(Task::EnterExpr(scrutinee));
         }
-        _ => unreachable!("typed control scheduling for non-match instruction"),
+        _ => unreachable!("typed control scheduling for non-control instruction"),
     }
 }
 
@@ -54,8 +89,152 @@ pub(super) fn resume_control<'a>(
     tasks: &mut ChainSpine<Task<'a>>,
 ) {
     match control {
+        ControlTask::If(frame) => resume_if(builder, frame, tasks),
         ControlTask::Match(frame) => resume_match(builder, frame, tasks),
     }
+}
+
+fn resume_if<'a>(
+    builder: &mut FlowBuilder<'a>,
+    mut frame: IfFrame,
+    tasks: &mut ChainSpine<Task<'a>>,
+) {
+    match frame.phase {
+        IfPhase::InitialCondition => {
+            prepare_if(builder, &mut frame);
+            schedule_then(builder, frame, tasks);
+        }
+        IfPhase::Then => {
+            builder.pop_scope();
+            builder.close_region(builder.cur, frame.join);
+            schedule_elif_or_else(builder, frame, tasks);
+        }
+        IfPhase::ElifCondition => {
+            let branch = frame.next_branch;
+            frame.elif_branch_blocks.push(builder.cur);
+            let body_block = builder.new_block(false);
+            let next = frame
+                .elif_condition_blocks
+                .get(branch + 1)
+                .copied()
+                .unwrap_or(frame.else_block);
+            let elif = builder
+                .tir
+                .if_stmt_view(frame.stmt)
+                .elif_branches
+                .iter()
+                .nth(branch)
+                .expect("elif branch");
+            builder.set_term(
+                builder.cur,
+                Terminator::Branch {
+                    cond: elif.cond,
+                    then_: body_block,
+                    else_: next,
+                },
+                None,
+            );
+            builder.cur = body_block;
+            builder.push_scope();
+            frame.phase = IfPhase::ElifBody;
+            tasks.push(Task::Control(ControlTask::If(frame)));
+            tasks.push(Task::Body(BodyCursor::new(elif.body)));
+        }
+        IfPhase::ElifBody => {
+            builder.pop_scope();
+            builder.close_region(builder.cur, frame.join);
+            frame.next_branch += 1;
+            schedule_elif_or_else(builder, frame, tasks);
+        }
+        IfPhase::Else => {
+            builder.pop_scope();
+            finish_if(builder, frame);
+        }
+    }
+}
+
+fn prepare_if(builder: &mut FlowBuilder<'_>, frame: &mut IfFrame) {
+    let view = builder.tir.if_stmt_view(frame.stmt);
+    frame.then_block = builder.new_block(false);
+    frame.elif_condition_blocks = (0..view.elif_branches.len())
+        .map(|_| builder.new_block(false))
+        .collect();
+    frame.else_block = builder.new_block(false);
+    frame.join = builder.new_block(false);
+    frame.elif_branch_blocks = Vec::with_capacity(view.elif_branches.len());
+    let first_else = frame
+        .elif_condition_blocks
+        .first()
+        .copied()
+        .unwrap_or(frame.else_block);
+    builder.set_term(
+        builder.cur,
+        Terminator::Branch {
+            cond: view.cond,
+            then_: frame.then_block,
+            else_: first_else,
+        },
+        Some(frame.stmt),
+    );
+}
+
+fn schedule_then<'a>(
+    builder: &mut FlowBuilder<'a>,
+    mut frame: IfFrame,
+    tasks: &mut ChainSpine<Task<'a>>,
+) {
+    let body = builder.tir.if_stmt_view(frame.stmt).then_stmts;
+    builder.cur = frame.then_block;
+    builder.push_scope();
+    frame.phase = IfPhase::Then;
+    tasks.push(Task::Control(ControlTask::If(frame)));
+    tasks.push(Task::Body(BodyCursor::new(body)));
+}
+
+fn schedule_elif_or_else<'a>(
+    builder: &mut FlowBuilder<'a>,
+    mut frame: IfFrame,
+    tasks: &mut ChainSpine<Task<'a>>,
+) {
+    if frame.next_branch < frame.elif_condition_blocks.len() {
+        let cond = builder
+            .tir
+            .if_stmt_view(frame.stmt)
+            .elif_branches
+            .iter()
+            .nth(frame.next_branch)
+            .expect("elif branch")
+            .cond;
+        builder.cur = frame.elif_condition_blocks[frame.next_branch];
+        frame.phase = IfPhase::ElifCondition;
+        tasks.push(Task::Control(ControlTask::If(frame)));
+        tasks.push(Task::EnterExpr(cond));
+        return;
+    }
+
+    builder.cur = frame.else_block;
+    if let Some(body) = builder.tir.if_stmt_view(frame.stmt).else_stmts {
+        builder.push_scope();
+        frame.phase = IfPhase::Else;
+        tasks.push(Task::Control(ControlTask::If(frame)));
+        tasks.push(Task::Body(BodyCursor::new(body)));
+    } else {
+        finish_if(builder, frame);
+    }
+}
+
+fn finish_if(builder: &mut FlowBuilder<'_>, frame: IfFrame) {
+    builder.close_region(builder.cur, frame.join);
+    builder.branch_arms.insert(
+        frame.stmt,
+        crate::flow::BranchArms {
+            then_block: frame.then_block,
+            elif_blocks: frame.elif_branch_blocks,
+            else_block: frame.else_block,
+            join: frame.join,
+        },
+    );
+    builder.cur = frame.join;
 }
 
 fn resume_match<'a>(
