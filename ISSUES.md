@@ -849,9 +849,9 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Files:** ryo-frontend/src/astgen/match_.rs; ryo-frontend/src/astgen/expr.rs; ryo-frontend/src/astgen.rs
 
-**Summary:** Nested statement-form match and catch expressions recurse through arm statement lowering. Confirmed on debug builds: 500 nested statement matches and 1,000 nested catches parse successfully but abort during astgen with a stack overflow, before sema starts. The generic sema expression walker cannot reach these inputs through source-driven tests.
+**Summary:** Nested statement-form match and catch expressions recursed through arm statement lowering and overflowed during astgen. Iterative lowering now covers the smaller regressions, but the original 50,000-level statement-match source remains blocked by I-275's source-span range, and the original 50,000-level catch JIT remains blocked by I-274's recursive Flow traversal. The exact reproductions therefore cannot yet run end to end.
 
-**Resolution:** Lower nested arm bodies and statement blocks with explicit tasks instead of recursive gen_stmt/gen_expr calls, preserving source order and UIR wire shape. Add deep nested match and catch regressions through parse and UIR generation so sema can be exercised end to end.
+**Resolution:** Resolve I-275 so the statement-match source is representable and I-274 so the catch source reaches JIT, then enable both retained 50,000-level reproductions and verify them end to end. Do not close this issue on the smaller passing regressions alone.
 
 ---
 
@@ -881,16 +881,29 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-273 — Nested match statement analysis resets expression depth
+### I-274 — Stack overflow emitting nested match arms in Flow
 
-**Severity:** Cleanup
-**Area:** sema
+**Severity:** Correctness / Hygiene
+**Area:** core-ir
 
-**Files:** ryo-frontend/src/sema/expr/walker/match_tasks.rs; ryo-frontend/src/sema/stmt.rs; ryo-frontend/src/sema/expr/walker_tests.rs
+**Files:** ryo-core/src/flow/build.rs; ryo/tests/deep_expr_chain.rs
 
-**Summary:** Non-simple statements in an iterative match arm still call zero-depth analyze_stmt. Nested expression machines can therefore start below an active machine instead of sharing its traversal context. Source-driven deep match reproduction is currently blocked earlier by I-270, which limits immediate exposure but leaves the sema no-nested-machine contract incomplete.
+**Summary:** After iterative astgen lowering, the original 50,000-level nested-catch source succeeds through UIR but still aborts during TIR/Flow construction. FlowBuilder::build_match calls emit_expr or emit_stmts for each arm at depth zero, so nested match arms never reach the existing expression fallback. This is a separate downstream traversal reset from I-270 and also blocks full JIT execution of the original catch reproduction.
 
-**Resolution:** Carry SemaExprContext through block_stmt/finish_stmt and replace remaining nested statement recursion with depth-carrying continuations. After I-270 is fixed, add deep non-simple statement arms that cross the expression fallback boundary and verify diagnostics, scopes, and memoization.
+**Resolution:** Propagate depth through Flow match-arm expression and statement emission and move deep arm bodies to explicit continuations or the existing iterative fallback, preserving block order, scopes, terminators, and match-result storage. Add crash-contained nested match and catch tests through TIR, Flow, JIT, and AOT.
+
+---
+
+### I-275 — Deep match source spans exceed the UIR wire range
+
+**Severity:** Correctness / Hygiene
+**Area:** core-ir
+
+**Files:** ryo-core/src/uir/match_.rs; ryo-core/src/uir.rs; ryo/tests/deep_expr_chain.rs
+
+**Summary:** The original 50,000-level nested statement-match source is approximately 9.3 GB because indentation grows quadratically. After iterative astgen lowering, it reaches a pattern-span range error instead of overflowing the native stack. Pattern spans use u32 source offsets, so inputs beyond 4 GiB cannot be represented even though traversal no longer overflows.
+
+**Resolution:** Decide whether UIR source spans should be widened or very large inputs should receive a documented size-limit diagnostic. Preserve iterative traversal and add a boundary test proving inputs beyond the span range fail cleanly without a stack overflow. Do not change the wire format without design approval.
 
 ---
 
@@ -902,4 +915,4 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-<!-- issue-id high-water: 273 -->
+<!-- issue-id high-water: 275 -->

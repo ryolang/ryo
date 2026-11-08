@@ -1,5 +1,7 @@
-//! Expression lowering: the recursive `gen_expr`/`gen_expr_d` and the
-//! iterative deep-nesting fallback `gen_expr_machine`.
+//! Expression, statement, and block lowering: recursive `gen_expr`/`gen_expr_d`
+//! and statement helpers hand deep nesting to the shared iterative `gen_machine`.
+//! Expressions, statement bodies, and block continuations stay on one explicit
+//! stack so nested matches and catches do not start fresh lowering machines.
 //!
 //! Split out of `astgen.rs` to keep that file under the line-count
 //! gate; see the module docs there for the lowering pipeline.

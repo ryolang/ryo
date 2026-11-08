@@ -254,6 +254,14 @@ fn match_catch_cases() -> Vec<(&'static str, &'static str)> {
 "#,
         ),
         (
+            "statement_handler",
+            r#"fn main():
+	value = 1 catch as err:
+		result = 0
+		print(result)
+"#,
+        ),
+        (
             "invalid_patterns",
             r#"errors IoError:
 	Eof(int)

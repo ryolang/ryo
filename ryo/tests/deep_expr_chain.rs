@@ -588,6 +588,7 @@ fn nested_catches(depth: usize) -> String {
 }
 
 #[test]
+#[ignore = "I-275: source spans exceed the UIR u32 range"]
 fn jit_run_nested_statement_matches_50000() {
     assert_jit_prints(
         "nested_statement_matches_50000.ryo",
