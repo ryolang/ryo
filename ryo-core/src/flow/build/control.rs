@@ -88,12 +88,9 @@ fn prepare_match(builder: &mut FlowBuilder<'_>, frame: &mut MatchFrame) {
     for arm in view.arms() {
         let terminates = match arm.body {
             MatchBodyView::Expr(body) => builder.pool.is_never(builder.tir.inst(body).ty),
-            MatchBodyView::Stmts(_) => {
-                let stmts: Vec<TirRef> = arm.body.stmts().collect();
-                builder
-                    .tir
-                    .block_definitely_terminates(&stmts, builder.pool)
-            }
+            MatchBodyView::Stmts(_) => builder
+                .tir
+                .block_definitely_terminates(arm.body.stmts(), builder.pool),
         };
         any_falls_through |= !terminates;
     }

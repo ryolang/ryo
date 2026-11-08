@@ -1387,11 +1387,15 @@ impl Tir {
     /// [`Tir::block_definitely_returns`], but a statement arm ending in
     /// `break`/`continue` also counts as terminating (the arm is
     /// `never` at the join, never an E0135 fallthrough).
-    pub fn block_definitely_terminates(&self, stmts: &[TirRef], pool: &InternPool) -> bool {
+    pub fn block_definitely_terminates(
+        &self,
+        stmts: impl IntoIterator<Item = impl std::borrow::Borrow<TirRef>>,
+        pool: &InternPool,
+    ) -> bool {
         terminates::block_terminates(
             &self.instructions,
             &self.extra,
-            stmts.iter().copied(),
+            stmts.into_iter().map(|stmt| *stmt.borrow()),
             pool,
             true,
         )
@@ -1517,6 +1521,8 @@ mod dump;
 pub use dump::{TirDump, dump};
 
 #[cfg(test)]
+// Keep borrowed-slice call sites covered alongside owned-iterator callers.
+#[allow(clippy::needless_borrows_for_generic_args)]
 mod tests;
 
 mod destructure;
