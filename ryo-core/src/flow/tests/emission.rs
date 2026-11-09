@@ -597,3 +597,281 @@ fn nested_loop_has_exact_terminator_and_write_layout() {
     ));
     assert_eq!(flow.place_writes(PlaceId(0)), &[f]);
 }
+
+#[test]
+fn nested_while_bodies_use_bounded_stack() {
+    let mut cx = Ctx::new();
+    let bool_ty = cx.pool.bool_();
+    let mut b = cx.builder();
+    let branch_cond = b.bool_const(true, bool_ty, sp());
+    let inner_break = b.break_stmt(cx.never, sp());
+    let inner_continue = b.continue_stmt(cx.never, sp());
+    let mut root = b.if_stmt(
+        branch_cond,
+        &[inner_break],
+        &[],
+        Some(&[inner_continue]),
+        cx.void,
+        sp(),
+    );
+    let mut innermost_while = None;
+    let mut outermost_cond = None;
+    for _ in 0..50_000 {
+        let cond = b.bool_const(true, bool_ty, sp());
+        root = b.while_loop(cond, &[root], cx.void, sp());
+        innermost_while.get_or_insert(root);
+        outermost_cond = Some(cond);
+    }
+    let tir = b.finish(&[root]);
+
+    let flow = Flow::build(&tir, &cx.pool);
+    assert!(matches!(
+        flow.term(flow.entry),
+        Terminator::While { loop_inst, .. }
+            if *loop_inst == root
+    ));
+    let inner = innermost_while.expect("innermost while");
+    let preheader = flow.term_block_of(inner).expect("inner while preheader");
+    let header = match flow.term(preheader) {
+        Terminator::While { loop_inst, header } if *loop_inst == inner => *header,
+        other => panic!("inner while preheader has wrong terminator: {other:?}"),
+    };
+    let (body, exit) = match flow.term(header) {
+        Terminator::WhileTest {
+            loop_inst,
+            body,
+            exit,
+            ..
+        } if *loop_inst == inner => (*body, *exit),
+        other => panic!("inner while header has wrong terminator: {other:?}"),
+    };
+    assert!(matches!(
+        flow.term(flow.term_block_of(inner_break).expect("break block")),
+        Terminator::Break { target } if *target == exit
+    ));
+    assert!(matches!(
+        flow.term(flow.term_block_of(inner_continue).expect("continue block")),
+        Terminator::Continue { target } if *target == header
+    ));
+    assert!(matches!(
+        flow.term(body),
+        Terminator::Branch { cond, .. } if *cond == branch_cond
+    ));
+    assert!(flow.forward_order().all(|block| !matches!(
+        flow.term(block),
+        Terminator::Backedge { to, .. } if *to == header
+    )));
+    assert_eq!(
+        outermost_cond,
+        Some(match flow.term(flow.entry) {
+            Terminator::While { header, .. } => match flow.term(*header) {
+                Terminator::WhileTest { cond, .. } => *cond,
+                other => panic!("outer while header has wrong terminator: {other:?}"),
+            },
+            other => panic!("outer while preheader has wrong terminator: {other:?}"),
+        })
+    );
+}
+
+#[test]
+fn nested_for_bodies_use_bounded_stack() {
+    let mut cx = Ctx::new();
+    let int = cx.int;
+    let bool_ty = cx.pool.bool_();
+    let mut b = cx.builder();
+    let branch_cond = b.bool_const(true, bool_ty, sp());
+    let inner_break = b.break_stmt(cx.never, sp());
+    let inner_continue = b.continue_stmt(cx.never, sp());
+    let mut root = b.if_stmt(
+        branch_cond,
+        &[inner_break],
+        &[],
+        Some(&[inner_continue]),
+        cx.void,
+        sp(),
+    );
+    let mut innermost_for = None;
+    let mut innermost_end = None;
+    let mut outermost_bounds = None;
+    for value in 0..50_000 {
+        let start = b.int_const(value, int, sp());
+        let end = b.int_const(value + 1, int, sp());
+        root = b.for_range(cx.i, start, end, &[root], cx.void, sp());
+        if innermost_for.is_none() {
+            innermost_for = Some(root);
+            innermost_end = Some(end);
+        }
+        outermost_bounds = Some((start, end));
+    }
+    let tir = b.finish(&[root]);
+
+    let flow = Flow::build(&tir, &cx.pool);
+    let (outer_start, outer_end) = outermost_bounds.expect("outer for bounds");
+    assert_eq!(step_insts(&flow, flow.entry), [outer_start, outer_end]);
+    let inner = innermost_for.expect("innermost for");
+    let inner_var = flow.loop_var(inner).expect("inner induction place");
+    let preheader = flow.term_block_of(inner).expect("inner for preheader");
+    let header = match flow.term(preheader) {
+        Terminator::For { loop_inst, header } if *loop_inst == inner => *header,
+        other => panic!("inner for preheader has wrong terminator: {other:?}"),
+    };
+    let (body, exit) = match flow.term(header) {
+        Terminator::ForTest {
+            loop_inst,
+            var,
+            end,
+            body,
+            exit,
+        } if *loop_inst == inner
+            && *var == inner_var
+            && *end == innermost_end.expect("inner end") =>
+        {
+            (*body, *exit)
+        }
+        other => panic!("inner for header has wrong terminator: {other:?}"),
+    };
+    assert!(matches!(
+        flow.term(flow.term_block_of(inner_break).expect("break block")),
+        Terminator::Break { target } if *target == exit
+    ));
+    assert!(matches!(
+        flow.term(flow.term_block_of(inner_continue).expect("continue block")),
+        Terminator::Continue { target } if *target == header
+    ));
+    assert!(matches!(
+        flow.term(body),
+        Terminator::Branch { cond, .. } if *cond == branch_cond
+    ));
+    assert!(flow.forward_order().all(|block| !matches!(
+        flow.term(block),
+        Terminator::Backedge { to, .. } if *to == header
+    )));
+}
+
+#[test]
+fn nested_match_and_loop_break_continue_keep_active_targets() {
+    let mut cx = Ctx::new();
+    let bool_ty = cx.pool.bool_();
+    let mut b = cx.builder();
+    let outer_cond = b.bool_const(true, bool_ty, sp());
+    let inner_cond = b.bool_const(true, bool_ty, sp());
+    let scrutinee = b.bool_const(true, bool_ty, sp());
+    let outer_break = b.break_stmt(cx.never, sp());
+    let outer_continue = b.continue_stmt(cx.never, sp());
+    let inner_break = b.break_stmt(cx.never, sp());
+    let inner_continue = b.continue_stmt(cx.never, sp());
+    let inner = b.while_loop(inner_cond, &[inner_break, inner_continue], cx.void, sp());
+    let m = b.match_expr(
+        scrutinee,
+        cx.void,
+        &[
+            TypedMatchArm {
+                span: sp(),
+                discriminant: crate::tir::Discriminant::Bool(true),
+                bindings: &[],
+                guards: &[],
+                body: TypedMatchBody::Stmts(&[outer_break]),
+            },
+            TypedMatchArm {
+                span: sp(),
+                discriminant: crate::tir::Discriminant::Bool(false),
+                bindings: &[],
+                guards: &[],
+                body: TypedMatchBody::Stmts(&[inner, outer_continue]),
+            },
+        ],
+        sp(),
+    );
+    let outer = b.while_loop(outer_cond, &[m], cx.void, sp());
+    let tir = b.finish(&[outer]);
+
+    let flow = Flow::build(&tir, &cx.pool);
+    let outer_header = match flow.term(flow.entry) {
+        Terminator::While { loop_inst, header } if *loop_inst == outer => *header,
+        other => panic!("outer while preheader has wrong terminator: {other:?}"),
+    };
+    let outer_exit = match flow.term(outer_header) {
+        Terminator::WhileTest { exit, .. } => *exit,
+        other => panic!("outer while header has wrong terminator: {other:?}"),
+    };
+    let inner_preheader = flow.term_block_of(inner).expect("inner while preheader");
+    let inner_header = match flow.term(inner_preheader) {
+        Terminator::While { header, .. } => *header,
+        other => panic!("inner while preheader has wrong terminator: {other:?}"),
+    };
+    let inner_exit = match flow.term(inner_header) {
+        Terminator::WhileTest { exit, .. } => *exit,
+        other => panic!("inner while header has wrong terminator: {other:?}"),
+    };
+
+    assert!(matches!(
+        flow.term(flow.term_block_of(outer_break).expect("outer break block")),
+        Terminator::Break { target } if *target == outer_exit
+    ));
+    assert!(matches!(
+        flow.term(flow.term_block_of(outer_continue).expect("outer continue block")),
+        Terminator::Continue { target } if *target == outer_header
+    ));
+    assert!(matches!(
+        flow.term(flow.term_block_of(inner_break).expect("inner break block")),
+        Terminator::Break { target } if *target == inner_exit
+    ));
+    assert!(matches!(
+        flow.term(flow.term_block_of(inner_continue).expect("inner continue block")),
+        Terminator::Continue { target } if *target == inner_header
+    ));
+    assert_ne!(outer_header, inner_header);
+    assert_ne!(outer_exit, inner_exit);
+}
+
+#[test]
+fn dead_loop_join_after_nested_divergence_has_no_backedge() {
+    let mut cx = Ctx::new();
+    let bool_ty = cx.pool.bool_();
+    let error = cx.pool.error_type();
+    let mut b = cx.builder();
+    let cond = b.bool_const(true, bool_ty, sp());
+    let scrutinee = b.bool_const(true, bool_ty, sp());
+    let left_return = b.return_void(cx.void, sp());
+    let right_return = b.return_void(cx.void, sp());
+    let m = b.match_expr(
+        scrutinee,
+        cx.void,
+        &[
+            TypedMatchArm {
+                span: sp(),
+                discriminant: crate::tir::Discriminant::Bool(true),
+                bindings: &[],
+                guards: &[],
+                body: TypedMatchBody::Stmts(&[left_return]),
+            },
+            TypedMatchArm {
+                span: sp(),
+                discriminant: crate::tir::Discriminant::Bool(false),
+                bindings: &[],
+                guards: &[],
+                body: TypedMatchBody::Stmts(&[right_return]),
+            },
+        ],
+        sp(),
+    );
+    let error_stmt = b.unreachable(error, sp());
+    let whl = b.while_loop(cond, &[m, error_stmt], cx.void, sp());
+    let tir = b.finish(&[whl]);
+
+    let flow = Flow::build(&tir, &cx.pool);
+    let header = match flow.term(flow.entry) {
+        Terminator::While { header, .. } => *header,
+        other => panic!("while preheader has wrong terminator: {other:?}"),
+    };
+    let dead = flow
+        .term_block_of(error_stmt)
+        .expect("error statement block");
+    assert!(matches!(flow.term(dead), Terminator::Unreachable));
+    assert!(flow.predecessors(dead).is_empty());
+    assert!(flow.blocks[dead.0 as usize].unreachable);
+    assert!(flow.forward_order().all(|block| !matches!(
+        flow.term(block),
+        Terminator::Backedge { to, .. } if *to == header
+    )));
+}

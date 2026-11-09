@@ -8,6 +8,8 @@ use crate::types::StringId;
 pub(super) enum ControlTask {
     If(IfFrame),
     Match(MatchFrame),
+    While(WhileFrame),
+    For(ForFrame),
 }
 
 pub(super) struct IfFrame {
@@ -46,6 +48,36 @@ enum MatchPhase {
     AfterArm,
 }
 
+pub(super) struct WhileFrame {
+    stmt: TirRef,
+    phase: WhilePhase,
+    header: BlockId,
+    body: BlockId,
+    exit: BlockId,
+}
+
+#[derive(Clone, Copy)]
+enum WhilePhase {
+    AfterCondition,
+    Body,
+}
+
+pub(super) struct ForFrame {
+    stmt: TirRef,
+    phase: ForPhase,
+    header: BlockId,
+    body: BlockId,
+    exit: BlockId,
+    var: PlaceId,
+}
+
+#[derive(Clone, Copy)]
+enum ForPhase {
+    Start,
+    End,
+    Body,
+}
+
 pub(super) fn schedule_control(
     builder: &mut FlowBuilder<'_>,
     stmt: TirRef,
@@ -79,6 +111,45 @@ pub(super) fn schedule_control(
             })));
             tasks.push(Task::EnterExpr(scrutinee));
         }
+        TirTag::WhileLoop => {
+            let cond = builder.tir.while_loop_view(stmt).cond;
+            let frame = WhileFrame {
+                stmt,
+                phase: WhilePhase::AfterCondition,
+                header: builder.new_block(false),
+                body: builder.new_block(false),
+                exit: builder.new_block(false),
+            };
+            builder.set_term(
+                builder.cur,
+                Terminator::While {
+                    loop_inst: stmt,
+                    header: frame.header,
+                },
+                Some(stmt),
+            );
+            builder.cur = frame.header;
+            tasks.push(Task::Control(ControlTask::While(frame)));
+            tasks.push(Task::EnterExpr(cond));
+        }
+        TirTag::ForRange => {
+            let view = builder.tir.for_range_view(stmt);
+            let frame = ForFrame {
+                stmt,
+                phase: ForPhase::Start,
+                header: builder.new_block(false),
+                body: builder.new_block(false),
+                exit: builder.new_block(false),
+                var: builder.push_place(Place::LoopVar {
+                    loop_inst: stmt,
+                    name: view.var_name,
+                    ty: builder.tir.inst(stmt).ty,
+                }),
+            };
+            builder.inst_meta[stmt.index()].loop_var = Some(frame.var);
+            tasks.push(Task::Control(ControlTask::For(frame)));
+            tasks.push(Task::EnterExpr(view.start));
+        }
         _ => unreachable!("typed control scheduling for non-control instruction"),
     }
 }
@@ -91,6 +162,8 @@ pub(super) fn resume_control<'a>(
     match control {
         ControlTask::If(frame) => resume_if(builder, frame, tasks),
         ControlTask::Match(frame) => resume_match(builder, frame, tasks),
+        ControlTask::While(frame) => resume_while(builder, frame, tasks),
+        ControlTask::For(frame) => resume_for(builder, frame, tasks),
     }
 }
 
@@ -363,4 +436,108 @@ fn schedule_next_arm<'a>(
             tasks.push(Task::Body(BodyCursor::new(ExtraList::new(words))))
         }
     }
+}
+
+fn resume_while<'a>(
+    builder: &mut FlowBuilder<'a>,
+    mut frame: WhileFrame,
+    tasks: &mut ChainSpine<Task<'a>>,
+) {
+    match frame.phase {
+        WhilePhase::AfterCondition => {
+            let view = builder.tir.while_loop_view(frame.stmt);
+            builder.set_term(
+                builder.cur,
+                Terminator::WhileTest {
+                    loop_inst: frame.stmt,
+                    cond: view.cond,
+                    body: frame.body,
+                    exit: frame.exit,
+                },
+                None,
+            );
+            builder.loops.push(super::LoopFrame {
+                header: frame.header,
+                exit: frame.exit,
+            });
+            builder.cur = frame.body;
+            builder.push_scope();
+            frame.phase = WhilePhase::Body;
+            tasks.push(Task::Control(ControlTask::While(frame)));
+            tasks.push(Task::Body(BodyCursor::new(view.body)));
+        }
+        WhilePhase::Body => {
+            finish_loop(builder, frame.header, frame.exit, None);
+        }
+    }
+}
+
+fn resume_for<'a>(
+    builder: &mut FlowBuilder<'a>,
+    mut frame: ForFrame,
+    tasks: &mut ChainSpine<Task<'a>>,
+) {
+    match frame.phase {
+        ForPhase::Start => {
+            let end = builder.tir.for_range_view(frame.stmt).end;
+            frame.phase = ForPhase::End;
+            tasks.push(Task::Control(ControlTask::For(frame)));
+            tasks.push(Task::EnterExpr(end));
+        }
+        ForPhase::End => {
+            let view = builder.tir.for_range_view(frame.stmt);
+            builder.record_write(frame.var, frame.stmt);
+            builder.set_term(
+                builder.cur,
+                Terminator::For {
+                    loop_inst: frame.stmt,
+                    header: frame.header,
+                },
+                Some(frame.stmt),
+            );
+            builder.cur = frame.header;
+            builder.set_term(
+                builder.cur,
+                Terminator::ForTest {
+                    loop_inst: frame.stmt,
+                    var: frame.var,
+                    end: view.end,
+                    body: frame.body,
+                    exit: frame.exit,
+                },
+                None,
+            );
+            builder.loops.push(super::LoopFrame {
+                header: frame.header,
+                exit: frame.exit,
+            });
+            builder.cur = frame.body;
+            builder.push_scope();
+            builder.bind(view.var_name, frame.var);
+            frame.phase = ForPhase::Body;
+            tasks.push(Task::Control(ControlTask::For(frame)));
+            tasks.push(Task::Body(BodyCursor::new(view.body)));
+        }
+        ForPhase::Body => {
+            finish_loop(builder, frame.header, frame.exit, Some(frame.var));
+        }
+    }
+}
+
+fn finish_loop(
+    builder: &mut FlowBuilder<'_>,
+    header: BlockId,
+    exit: BlockId,
+    inc: Option<PlaceId>,
+) {
+    builder.pop_scope();
+    builder.loops.pop();
+    if !builder.terminated(builder.cur) {
+        if builder.has_pred[builder.cur.0 as usize] {
+            builder.set_term(builder.cur, Terminator::Backedge { to: header, inc }, None);
+        } else {
+            builder.set_term(builder.cur, Terminator::Unreachable, None);
+        }
+    }
+    builder.cur = exit;
 }

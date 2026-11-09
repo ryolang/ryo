@@ -53,7 +53,6 @@ pub(super) struct FlowBuilder<'a> {
     /// no step but still consume an order.
     next_order: u32,
     cur: BlockId,
-    pending: Option<emission::Task<'a>>,
 }
 
 struct LoopFrame {
@@ -84,7 +83,6 @@ pub(super) fn build_flow(tir: &Tir, pool: &InternPool) -> Flow {
         writes_flat: Vec::new(),
         next_order: 0,
         cur: BlockId::NONE,
-        pending: None,
     };
     fb.run()
 }
@@ -258,28 +256,6 @@ impl FlowBuilder<'_> {
             .map(|(_, p)| *p)
     }
 
-    // ---------- statements ----------
-
-    fn emit_stmts_iter(&mut self, stmts: impl IntoIterator<Item = TirRef>) {
-        for stmt in stmts {
-            self.emit_stmt(stmt);
-        }
-    }
-
-    fn emit_stmt(&mut self, stmt: TirRef) {
-        emission::emit_stmt(self, stmt);
-    }
-
-    // ---------- expressions ----------
-
-    /// Evaluate `r` and its operands into the current block. After a
-    /// match or a diverging call, `self.cur` is the continuation block
-    /// (join, or an unreachable block).
-    #[inline]
-    fn emit_expr(&mut self, r: TirRef) {
-        emission::emit_expr(self, r);
-    }
-
     /// Storage facts for a value-producing instruction.
     fn facts_for(&mut self, r: TirRef) -> StepFacts {
         let inst = *self.tir.inst(r);
@@ -405,130 +381,6 @@ impl FlowBuilder<'_> {
                 .map(|base| (base, field_index)),
             _ => None,
         }
-    }
-
-    // ---------- control constructs ----------
-
-    fn build_while(&mut self, stmt: TirRef) {
-        let tir = self.tir;
-        let view = tir.while_loop_view(stmt);
-        let header = self.new_block(false);
-        let body = self.new_block(false);
-        let exit = self.new_block(false);
-
-        self.set_term(
-            self.cur,
-            Terminator::While {
-                loop_inst: stmt,
-                header,
-            },
-            Some(stmt),
-        );
-
-        self.cur = header;
-        self.emit_expr(view.cond);
-        self.set_term(
-            self.cur,
-            Terminator::WhileTest {
-                loop_inst: stmt,
-                cond: view.cond,
-                body,
-                exit,
-            },
-            None,
-        );
-
-        self.loops.push(LoopFrame { header, exit });
-        self.cur = body;
-        self.push_scope();
-        self.emit_stmts_iter(view.body);
-        self.pop_scope();
-        self.loops.pop();
-        if !self.terminated(self.cur) {
-            if self.has_pred[self.cur.0 as usize] {
-                self.set_term(
-                    self.cur,
-                    Terminator::Backedge {
-                        to: header,
-                        inc: None,
-                    },
-                    None,
-                );
-            } else {
-                // Dead join inside the body (every path returned/broke).
-                self.set_term(self.cur, Terminator::Unreachable, None);
-            }
-        }
-
-        self.cur = exit;
-    }
-
-    fn build_for(&mut self, stmt: TirRef) {
-        let tir = self.tir;
-        let view = tir.for_range_view(stmt);
-        let header = self.new_block(false);
-        let body = self.new_block(false);
-        let exit = self.new_block(false);
-        let ty = self.tir.inst(stmt).ty;
-        let var = self.push_place(Place::LoopVar {
-            loop_inst: stmt,
-            name: view.var_name,
-            ty,
-        });
-        self.inst_meta[stmt.index()].loop_var = Some(var);
-
-        // Bounds evaluate ONCE, in the pre-header: the backedge targets
-        // the header directly, so bound steps must not live where the
-        // backedge can reach them again.
-        self.emit_expr(view.start);
-        self.emit_expr(view.end);
-        self.record_write(var, stmt);
-        self.set_term(
-            self.cur,
-            Terminator::For {
-                loop_inst: stmt,
-                header,
-            },
-            Some(stmt),
-        );
-
-        self.cur = header;
-        self.set_term(
-            self.cur,
-            Terminator::ForTest {
-                loop_inst: stmt,
-                var,
-                end: view.end,
-                body,
-                exit,
-            },
-            None,
-        );
-
-        self.loops.push(LoopFrame { header, exit });
-        self.cur = body;
-        self.push_scope();
-        self.bind(view.var_name, var);
-        self.emit_stmts_iter(view.body);
-        self.pop_scope();
-        self.loops.pop();
-        if !self.terminated(self.cur) {
-            if self.has_pred[self.cur.0 as usize] {
-                self.set_term(
-                    self.cur,
-                    Terminator::Backedge {
-                        to: header,
-                        inc: Some(var),
-                    },
-                    None,
-                );
-            } else {
-                // Dead join inside the body (every path returned/broke/continued).
-                self.set_term(self.cur, Terminator::Unreachable, None);
-            }
-        }
-
-        self.cur = exit;
     }
 
     // ---------- tokens ----------
