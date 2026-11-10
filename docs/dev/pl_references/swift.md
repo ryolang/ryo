@@ -2,9 +2,9 @@
 
 # Swift Programming Language
 
-Last updated on 2026-09-01 (commit [cee6e91](https://github.com/swiftlang/swift/commit/cee6e9180ca26d09ef364311516b92c6c61a0a6e), `main`).
+Last updated on 2026-11-08 for the Swift 6.4.2 release.
 
-Latest release: [Swift 6.3.3](https://github.com/swiftlang/swift/releases/tag/swift-6.3.3-RELEASE) (2026-06-30), the third patch on the [Swift 6.3](https://swift.org/blog/swift-6.3-released/) line (2026-03-24).
+Latest release: [Swift 6.4.2](https://github.com/swiftlang/swift/releases/tag/swift-6.4.2-RELEASE) (2026-10-30), the latest patch on the [Swift 6.4](https://www.swift.org/blog/swift-6.4-released/) minor feature line (2026-09-15).
 
 [View on GitHub](https://github.com/swiftlang/swift)
 
@@ -78,9 +78,11 @@ SIL passes split into two pipelines: **mandatory** passes (definite initializati
 
 - **Value types** (`struct`, `enum`, tuples) — copy semantics; no refcounting when they contain only value data. `Copyable` is the default; `~Copyable` opts out (move-only types, e.g. `File` wrappers that must not be duplicated).
 - **Class types** — reference semantics with implicit ARC. Retain/release are compiler-inserted; user code never calls them.
+- **Unique heap ownership** — Swift 6.4's `UniqueBox` owns one heap value without reference counting. Moving the box preserves the contained value's address. `UniqueArray` stores non-copyable elements without copy-on-write storage.
 - **Parameter conventions** — `borrowing` (default for most; callee does not consume), `consuming` (callee takes ownership; source invalidated), `inout` (exclusive mutable borrow). `consuming` on a value type enables move semantics.
 - **Move semantics** — the compiler diagnoses use-after-`consume` at compile time via the mandatory ownership pass on OSSA SIL.
-- **No lifetime annotations** — like Mojo and Ryo, Swift infers everything; there is no `'a` syntax.
+- **Nonescapable references** — `Span` and `MutableSpan` provide dependent views of contiguous memory. Swift 6.4 adds `Ref` and `MutableRef` for single values. These types are `~Escapable`; their use keeps the target borrowed or exclusively accessed. `Ref` and `MutableRef` can be fields of other nonescapable types.
+- **Lifetime dependencies** — class references need no lifetime annotations because ARC keeps their targets alive. Nonescapable references instead use annotations such as `@_lifetime(borrow target)` and `@_lifetime(&target)` when a returned value depends on a parameter. Swift has no Rust-style named lifetime parameters, but its nonescapable APIs are not lifetime-annotation-free.
 
 ## Concurrency
 
@@ -88,33 +90,37 @@ SIL passes split into two pipelines: **mandatory** passes (definite initializati
 - `Sendable` protocol — marker for types safe to share across isolation domains; checked by the compiler.
 - Structured concurrency — `Task`, `async let`, task groups; tasks form a tree with cancellation propagation.
 - Swift 6 language mode enables full data-race safety checking by default.
+- Swift 6.4 permits `await` in `defer` blocks. `withTaskCancellationShield` lets necessary cleanup finish despite cancellation of the enclosing task.
 
 ## Standard Library
 
 - `stdlib/public/core/` — fundamental types (`Int`, `String`, `Array`, `Optional`), protocols, built-in generics
 - `stdlib/public/Concurrency/` — the concurrency runtime library (tasks, actors, executors)
 - Copy-on-write is a stdlib-level pattern (`isKnownUniquelyReferenced`), not a language feature — worth studying for Ryo's collections.
+- Swift 6.4's `Iterable` protocol supports iteration by borrowing elements, including non-copyable elements. `UniqueArray` provides a growable collection without copy-on-write overhead.
 
-## Swift 6.3 (latest minor line)
+## Swift 6.4 (latest minor line)
 
-Per the [release announcement](https://swift.org/blog/swift-6.3-released/) (2026-03-24; current patch 6.3.3):
+Per the [release announcement](https://www.swift.org/blog/swift-6.4-released/) (2026-09-15):
 
-- **Language:** `@c` attribute to expose Swift functions/enums to C (with optional `@implementation` validation against an existing C header); module selectors (`ModuleA::getValue()`) for disambiguation, including `Swift::` for concurrency/String APIs; library-authoring attributes `@specialize`, `@inline(always)`, `@export(implementation)`.
-- **Build:** Swift Build integrated into SwiftPM (preview, unified cross-platform build engine); `swift package show-traits`; prebuilt swift-syntax for macro-only libraries.
-- **Testing/DocC:** warning-severity issues, test cancellation, image attachments; experimental Markdown output and code-block annotations in DocC.
-- **Platforms:** Embedded Swift improvements (C interop, debugging, linkage model); first official **Swift SDK for Android**.
+- **References and ownership:** `Ref` and `MutableRef` add safe first-class references with lifetime dependencies. Borrow and mutate accessors project `Span` and `InlineArray` storage. Non-copyable types gain standard protocol conformances and optional inspection.
+- **Allocation and iteration:** `UniqueBox` adds unique heap ownership without ARC. `UniqueArray` stores non-copyable elements without copy-on-write overhead. `Iterable` supports copy-free element access.
+- **Concurrency and cleanup:** asynchronous `defer` blocks and `withTaskCancellationShield` support cleanup that must finish before a scope exits.
+- **Interoperability and platforms:** `Span` bridges with C++20 `std::span`. Swift/Java interop expands async and callback support. The Wasm SDK is available from Swift.org. Embedded Swift adds existential types and richer error handling.
+- **Tooling:** Swift Build becomes the default Swift Package Manager build system. Subprocess reaches 1.0. Debug-info module tracking reduces debug build sizes and improves debugger module loading.
 
 ## How Ryo Borrows from Swift
 
 - **`shared[T]` (spec 5.6)** — modeled on Swift's class reference semantics: refcount ops are implicit on assignment, no `.clone()` in user code. See `docs/dev/pl_references/rust.md` for the explicit Swift-vs-Rust comparison.
 - **ARC optimizer** — the pass design in `docs/dev/spec_arc_optimizer.md` (retain/release elision, stack promotion, COW support) is a direct port of the SIL ARC optimizer's responsibilities onto Ryo's TIR. Swift proves the elision-pass investment is what makes implicit refcounting viable.
 - **Copy-on-write collections** — stdlib-level COW via uniqueness checking is the model for Ryo's `str`/collections (see `docs/dev/spec_stdlib_optimizations.md`).
-- **No lifetime annotations, borrow-by-default conventions** — Swift's `borrowing`/`consuming`/`inout` triad maps to Ryo's default borrow / `move` / `inout` parameter modes (spec 5.2–5.3).
+- **Parameter conventions** — Swift's `borrowing`/`consuming`/`inout` triad maps to Ryo's default borrow / `move` / `inout` parameter modes (spec 5.2–5.3).
 
 ### What we DON'T take from Swift
 
 - **Classes and inheritance.** Ryo's `shared[T]` is a stdlib smart-pointer type over Ryo values, not a separate class hierarchy.
 - **Actors.** Ryo's concurrency model is Go-style tasks + channels (see `docs/dev/spec_concurrency.md`), not actor isolation.
+- **Public lifetime dependencies and nonescapable generic types.** Swift's `Span`, `Ref`, and `MutableRef` can cross API boundaries when their dependencies are declared. Ryo keeps ordinary views scope-locked and uses retaining views over `shared[T]` for persistent zero-copy access. This trades some expressiveness for a smaller ownership model.
 - **LLVM-scale pass pipeline.** Ryo's Cranelift backend has no SIL analog; the ARC optimizer runs as a TIR→TIR transform pre-codegen.
 - **Stable ABI / library evolution.** Swift pays heavy complexity for ABI stability (`@export`, resilience domains); Ryo is pre-alpha with no ABI commitments.
 
@@ -125,4 +131,6 @@ Per the [release announcement](https://swift.org/blog/swift-6.3-released/) (2026
 - Dev: `docs/dev/pl_references/memory_model_comparison.md` (cross-language memory-model table)
 - Dev: `docs/dev/pl_references/rust.md` (comparison against Rust's manual `Arc<T>`)
 - Milestone: TBD (sequenced with `shared[T]`) — see `docs/dev/implementation_roadmap.md`
-- Upstream: <https://github.com/swiftlang/swift>, `lib/SILOptimizer/ARC/`, `SwiftCompilerSources/`, [Swift 6.3 release notes](https://swift.org/blog/swift-6.3-released/)
+- Upstream: <https://github.com/swiftlang/swift>, `lib/SILOptimizer/ARC/`, `SwiftCompilerSources/`
+- Releases: [Swift 6.4](https://www.swift.org/blog/swift-6.4-released/)
+- Ownership proposals: [SE-0517 `UniqueBox`](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0517-uniquebox.md), [SE-0519 `Ref` and `MutableRef`](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0519-ref-mutableref-types.md)
