@@ -1,9 +1,9 @@
 //! Flow-block emission driver: the backend lowers a function
-//! body by walking its canonical Flow IR in DFS pre-order from the entry —
-//! one
-//! pre-created Cranelift block per Flow block, per-step evaluation
-//! through the `eval_inst` family, and an exhaustive terminator
-//! handler per block. The TIR statement lists are never traversed to
+//! body by walking its canonical Flow IR in DFS pre-order from the entry.
+//! Empty single-predecessor Goto chains share a Cranelift block; every
+//! other reachable Flow block gets its own. Per-step evaluation uses the
+//! `eval_inst` family, with an exhaustive terminator handler per block.
+//! The TIR statement lists are never traversed to
 //! discover executable branches, scopes, or cleanup paths; TIR remains
 //! readable for spans, types, and operation payloads.
 //!
@@ -100,30 +100,85 @@ impl<M: Module> Codegen<M> {
             "the entry Flow block is block 0 (construction order)"
         );
 
-        // 1. Pre-create one Cranelift block per Flow block. The ONLY
-        //    block params: a Flow block whose first step is a
-        //    BoolAnd/BoolOr (the short-circuit join) gets one I8
-        //    param — the merged boolean.
-        let mut mapped: Vec<Block> = Vec::with_capacity(block_count);
-        mapped.push(entry_block);
-        for _ in 1..block_count {
-            mapped.push(builder.create_block());
+        let order = Self::emission_order(ctx);
+        let mut position = vec![usize::MAX; block_count];
+        for (i, &b) in order.iter().enumerate() {
+            position[b.0 as usize] = i;
         }
+
+        // Empty single-predecessor Goto chains share one Cranelift block.
+        // Every Flow block still emits its joins, drops, steps, and arm
+        // result writes in the same order; only the internal jump vanishes.
+        let mut coalesced_succ = vec![None; block_count];
+        let mut region_head: Vec<BlockId> = flow.forward_order().collect();
+        for head in flow.forward_order() {
+            if region_head[head.0 as usize] != head {
+                continue;
+            }
+            let mut current = head;
+            loop {
+                if current == flow.entry
+                    || flow.blocks[current.0 as usize].unreachable
+                    || !flow.block_steps(current).is_empty()
+                {
+                    break;
+                }
+                let FlowTerm::Goto { target } = *flow.term(current) else {
+                    break;
+                };
+                if flow.blocks[target.0 as usize].unreachable
+                    || flow.predecessors(target).len() != 1
+                    || position[current.0 as usize] >= position[target.0 as usize]
+                {
+                    break;
+                }
+                coalesced_succ[current.0 as usize] = Some(target);
+                region_head[target.0 as usize] = head;
+                current = target;
+            }
+        }
+
+        // Unreachable IDs use the entry only as an inert lookup value.
+        // The ONLY block params: a Flow block whose first step is a
+        // BoolAnd/BoolOr (the short-circuit join) gets one I8 param.
+        let mut created = vec![None; block_count];
+        created[0] = Some(entry_block);
+        for b in flow.forward_order().skip(1) {
+            let i = b.0 as usize;
+            if !flow.blocks[i].unreachable && region_head[i] == b {
+                created[i] = Some(builder.create_block());
+            }
+        }
+        let mapped: Vec<Block> = flow
+            .forward_order()
+            .map(|b| {
+                let i = b.0 as usize;
+                created[region_head[i].0 as usize].unwrap_or(entry_block)
+            })
+            .collect();
         let mut bool_join = vec![false; block_count];
         for b in flow.forward_order() {
             let i = b.0 as usize;
             if let Some(first) = flow.block_steps(b).first()
+                && !flow.blocks[i].unreachable
                 && matches!(
                     ctx.tir.inst(first.inst).tag,
                     TirTag::BoolAnd | TirTag::BoolOr
                 )
             {
+                debug_assert_eq!(region_head[i], b);
                 bool_join[i] = true;
                 builder.append_block_param(mapped[i], types::I8);
             }
         }
         ctx.flow_blocks = mapped;
-        ctx.flow_sealed = vec![false; block_count];
+        ctx.flow_sealed = flow
+            .forward_order()
+            .map(|b| {
+                let i = b.0 as usize;
+                flow.blocks[i].unreachable || region_head[i] != b
+            })
+            .collect();
         ctx.flow_sealed[0] = true; // entry is sealed up front
         ctx.flow_preds_emitted = vec![0; block_count];
         #[cfg(debug_assertions)]
@@ -133,41 +188,32 @@ impl<M: Module> Codegen<M> {
         ctx.bool_join = bool_join;
         Self::build_flow_maps(ctx);
 
-        // 2. Walk the blocks in DFS pre-order from the entry (see
-        //    `emission_order`): each region (cascade arms, loop bodies,
-        //    match arms) completes before the continuation that
-        //    restores its scope tables, exactly like the old recursive
-        //    emitters. Cranelift sealing still waits for every Flow
-        //    predecessor (the count rule below), so a continuation
-        //    reached early is simply unsealed until its remaining
-        //    preds emit.
-        //
-        //    The id-ordered tail holds the blocks deferred above
-        //    (bool-join blocks — no table effects) plus the blocks
-        //    unreachable from the entry (dead continuations after
-        //    returns and diverging calls): their steps still emit —
-        //    mirroring the old emitter, which kept lowering after a
-        //    noreturn call — but unreachable blocks skip their
-        //    prologues and block-start drops (a dead region's scope
-        //    restores and arm drops are meaningless and could free
-        //    live buffers). The flow's own reachability flag (set at
-        //    build) tells the two apart.
-        let order = Self::emission_order(ctx);
+        // Each region (cascade arms, loop bodies, match arms) completes
+        // before the continuation that restores its scope tables. Dead
+        // blocks add no instructions.
         for &b in &order {
-            // The flow's own reachability pass decides prologue/drop
-            // emission: deferred joins are reachable (their prologues
-            // must run); dead continuations are not (their scope
-            // restores and arm drops are meaningless and could free
-            // live buffers — see `emit_flow_block`).
-            let reachable = !flow.blocks[b.0 as usize].unreachable;
-            Self::emit_flow_block(builder, ctx, b, reachable)?;
+            let i = b.0 as usize;
+            if flow.blocks[i].unreachable || region_head[i] != b {
+                continue;
+            }
+            let mut current = b;
+            let mut switch_to = true;
+            loop {
+                let next = coalesced_succ[current.0 as usize];
+                Self::emit_flow_block(builder, ctx, current, true, switch_to, next.is_none())?;
+                let Some(next) = next else {
+                    break;
+                };
+                current = next;
+                switch_to = false;
+            }
         }
 
-        // 3. Seal anything still unsealed: a tail-called arm never
-        //    emits its Goto edge, so its join's predecessor count never
-        //    completes. All actual Cranelift edges are in by now.
-        for i in 0..block_count {
-            if !ctx.flow_sealed[i] {
+        // Seal anything still unsealed: a tail-called arm never emits
+        // its Goto edge, so its join's predecessor count never completes.
+        for b in flow.forward_order() {
+            let i = b.0 as usize;
+            if region_head[i] == b && !ctx.flow_sealed[i] {
                 let cb = ctx.flow_blocks[i];
                 builder.seal_block(cb);
                 ctx.flow_sealed[i] = true;
@@ -189,6 +235,7 @@ impl<M: Module> Codegen<M> {
         let mut match_region_seen = vec![0u32; block_count];
         let mut match_region_stamp = 0u32;
         let mut if_arm_owner: Vec<Option<TirRef>> = vec![None; block_count];
+        let mut switches = Vec::new();
         for b in flow.forward_order() {
             match flow.term(b) {
                 FlowTerm::Branch { .. } => {
@@ -230,48 +277,8 @@ impl<M: Module> Codegen<M> {
                     // prologue.
                     if let Some(j) = join {
                         match_join[j.0 as usize] = Some(*match_inst);
-                        // Each falling-through arm contributes exactly
-                        // one `Goto { join }` edge, from the last live
-                        // block of its region — for an expression arm
-                        // that is a nested value match, the source is
-                        // the inner match's join, not the arm block.
-                        // Walk each arm's region (never crossing the
-                        // join) to find it.
-                        for (k, &ab) in arm_blocks.iter().enumerate() {
-                            let mut stack = vec![ab];
-                            match_region_stamp = match_region_stamp.wrapping_add(1);
-                            if match_region_stamp == 0 {
-                                match_region_seen.fill(0);
-                                match_region_stamp = 1;
-                            }
-                            while let Some(r) = stack.pop() {
-                                let idx = r.0 as usize;
-                                if match_region_seen[idx] == match_region_stamp {
-                                    continue;
-                                }
-                                match_region_seen[idx] = match_region_stamp;
-                                if let FlowTerm::Goto { target } = flow.term(r)
-                                    && *target == *j
-                                {
-                                    match_fallthrough[r.0 as usize] = Some((*match_inst, k));
-                                    continue;
-                                }
-                                if matches!(
-                                    flow.term(r),
-                                    FlowTerm::Break { .. }
-                                        | FlowTerm::Continue { .. }
-                                        | FlowTerm::Backedge { .. }
-                                ) {
-                                    continue;
-                                }
-                                for &s in flow.successors(r) {
-                                    if s != *j {
-                                        stack.push(s);
-                                    }
-                                }
-                            }
-                        }
                     }
+                    switches.push((*match_inst, arm_blocks, *join));
                 }
                 FlowTerm::WhileTest {
                     loop_inst,
@@ -300,6 +307,58 @@ impl<M: Module> Codegen<M> {
                     };
                 }
                 _ => {}
+            }
+        }
+        // Inner matches are already mapped, so an outer arm can jump over
+        // each nested region instead of rescanning all of its descendants.
+        for (match_inst, arm_blocks, join) in switches.into_iter().rev() {
+            let Some(join) = join else {
+                continue;
+            };
+            for (k, ab) in arm_blocks.into_iter().enumerate() {
+                let mut stack = vec![ab];
+                match_region_stamp = match_region_stamp.wrapping_add(1);
+                if match_region_stamp == 0 {
+                    match_region_seen.fill(0);
+                    match_region_stamp = 1;
+                }
+                while let Some(r) = stack.pop() {
+                    if r == join {
+                        continue;
+                    }
+                    let idx = r.0 as usize;
+                    if match_region_seen[idx] == match_region_stamp {
+                        continue;
+                    }
+                    match_region_seen[idx] = match_region_stamp;
+                    if let FlowTerm::Goto { target } = flow.term(r)
+                        && *target == join
+                    {
+                        match_fallthrough[idx] = Some((match_inst, k));
+                        continue;
+                    }
+                    if matches!(
+                        flow.term(r),
+                        FlowTerm::Break { .. }
+                            | FlowTerm::Continue { .. }
+                            | FlowTerm::Backedge { .. }
+                    ) {
+                        continue;
+                    }
+                    if let FlowTerm::Switch {
+                        join: Some(nested_join),
+                        ..
+                    } = flow.term(r)
+                    {
+                        stack.push(*nested_join);
+                        continue;
+                    }
+                    for &s in flow.successors(r) {
+                        if s != join {
+                            stack.push(s);
+                        }
+                    }
+                }
             }
         }
         ctx.block_prologue = prologue;
@@ -509,6 +568,8 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
         b: BlockId,
         reachable: bool,
+        switch_to: bool,
+        seal_after: bool,
     ) -> Result<(), String> {
         let flow = ctx.flow;
         let cb = ctx.flow_blocks[b.0 as usize];
@@ -536,9 +597,10 @@ impl<M: Module> Codegen<M> {
         // current (the param preamble, hosted-main shim, and literal
         // hoisting emit into it) and is unfilled — Cranelift forbids
         // switching away from an unfilled block, so the entry visit
-        // skips the switch. Every other visit switches away from the
-        // previous block, which its terminator handler just filled.
-        if b != flow.entry {
+        // skips the switch. A region head switches away from the previous
+        // block, which its terminator handler just filled; a coalesced
+        // continuation is already current and must not switch away.
+        if switch_to && b != flow.entry {
             builder.switch_to_block(cb);
         }
         if reachable {
@@ -603,7 +665,9 @@ impl<M: Module> Codegen<M> {
         {
             ctx.flow_visit_state[b.0 as usize] |= 0x80;
         }
-        Self::seal_after_terminator(builder, ctx, b);
+        if seal_after {
+            Self::seal_after_terminator(builder, ctx, b);
+        }
         Ok(())
     }
 
@@ -1067,11 +1131,10 @@ impl<M: Module> Codegen<M> {
                     }
                     FlowTerm::ForTest {
                         loop_inst,
-                        end,
                         body,
                         exit,
                         ..
-                    } => Self::term_for_test(builder, ctx, loop_inst, end, body, exit),
+                    } => Self::term_for_test(builder, ctx, loop_inst, body, exit),
                     FlowTerm::Backedge { to, inc } => Self::term_backedge(builder, ctx, to, inc),
                     FlowTerm::Unreachable => {
                         // Dead continuation (after a return / diverging
@@ -1098,6 +1161,19 @@ impl<M: Module> Codegen<M> {
             FlowTerm::Continue { target } => Self::term_continue(builder, ctx, b, target),
             FlowTerm::Return { value } => Self::term_return(builder, ctx, b, value),
             FlowTerm::ReturnVoid => Self::term_return_void(builder, ctx, b),
+        }
+    }
+
+    pub(crate) fn emit_region_jump(
+        builder: &mut FunctionBuilder,
+        ctx: &FunctionContext<'_, M>,
+        from: BlockId,
+        target: BlockId,
+    ) {
+        let from_block = ctx.flow_blocks[from.0 as usize];
+        let target_block = ctx.flow_blocks[target.0 as usize];
+        if from_block != target_block {
+            builder.ins().jump(target_block, &[]);
         }
     }
 
@@ -1129,9 +1205,17 @@ impl<M: Module> Codegen<M> {
                 TirData::BinOp { rhs, .. } => rhs,
                 _ => unreachable!("BoolAnd/BoolOr must carry TirData::BinOp"),
             };
-            // Only the rhs block's Goto carries the value; the
-            // short-circuit edge arrives via the Branch terminator.
-            if ctx.flow.step_block_of(rhs) == Some(from) {
+            // Only the rhs fallthrough carries the value; the
+            // short-circuit edge arrives via the Branch terminator. A
+            // root match has no step, so its join identifies the edge.
+            let match_join =
+                ctx.flow
+                    .term_block_of(rhs)
+                    .and_then(|block| match ctx.flow.term(block) {
+                        FlowTerm::Switch { join, .. } => *join,
+                        _ => None,
+                    });
+            if ctx.flow.step_block_of(rhs) == Some(from) || match_join == Some(from) {
                 let v = Self::eval_inst(builder, ctx, rhs)?;
                 let jb = ctx.flow_blocks[target.0 as usize];
                 builder.ins().jump(jb, &[BlockArg::Value(v)]);
@@ -1142,8 +1226,7 @@ impl<M: Module> Codegen<M> {
         // the jump (its steps — including any lazy materialization —
         // are complete).
         Self::fire_at_terminator(builder, ctx, from)?;
-        let tb = ctx.flow_blocks[target.0 as usize];
-        builder.ins().jump(tb, &[]);
+        Self::emit_region_jump(builder, ctx, from, target);
         Ok(())
     }
 
@@ -1214,9 +1297,8 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
-    /// For pre-header: evaluate the (cached) start bound into the
-    /// hidden induction counter and jump to the header. The end bound
-    /// is a pre-header step, already emitted.
+    /// For pre-header: evaluate the cached bounds into hidden SSA
+    /// variables so their values dominate every header iteration.
     fn term_for(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -1228,10 +1310,14 @@ impl<M: Module> Codegen<M> {
         let start_val = Self::eval_inst(builder, ctx, view.start)?;
         let counter = builder.declare_var(ctx.int_type);
         builder.def_var(counter, start_val);
+        let end_val = Self::eval_inst(builder, ctx, view.end)?;
+        let end = builder.declare_var(ctx.int_type);
+        builder.def_var(end, end_val);
         ctx.loop_records.insert(
             loop_inst,
             LoopRecord::For(ForRecord {
                 counter,
+                end,
                 var_name: view.var_name,
                 saved_local: None,
                 saved_fact: None,
@@ -1243,25 +1329,24 @@ impl<M: Module> Codegen<M> {
     }
 
     /// For header test: compare the induction counter against the
-    /// (cached) end bound and branch to body / exit.
+    /// invariant end bound and branch to body / exit.
     fn term_for_test(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         loop_inst: TirRef,
-        end: TirRef,
         body: BlockId,
         exit: BlockId,
     ) -> Result<(), String> {
-        let counter = match ctx
+        let (counter, end) = match ctx
             .loop_records
             .get(&loop_inst)
             .expect("for record created at the pre-header")
         {
-            LoopRecord::For(rec) => rec.counter,
+            LoopRecord::For(rec) => (rec.counter, rec.end),
             LoopRecord::While(_) => unreachable!("for test of a while loop"),
         };
         let i = builder.use_var(counter);
-        let end_val = Self::eval_inst(builder, ctx, end)?;
+        let end_val = builder.use_var(end);
         let cond = builder.ins().icmp(IntCC::SignedLessThan, i, end_val);
         let bb = ctx.flow_blocks[body.0 as usize];
         let eb = ctx.flow_blocks[exit.0 as usize];

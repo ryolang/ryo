@@ -373,11 +373,13 @@ fn check_bool_split_shapes(flow: &Flow, tir: &Tir) {
     }
 }
 
-/// For-loop preheader shape. The range bounds are stepped in the block
-/// holding the `For` terminator (the backedge targets the header
-/// directly, so bound steps must not live where the backedge can reach
-/// them again); the header holds only the `ForTest` terminator — no
-/// steps; and every backedge names its loop's test shape: a `for` latch
+/// For-loop preheader shape. The range bounds evaluate in source order
+/// before the `For` terminator. A cutting bound can finish in an earlier
+/// join, while the end bound's step is in the final pre-header. The
+/// backedge targets the header directly, so bound steps must not live
+/// where the backedge can reach them again; the header holds only the
+/// `ForTest` terminator — no steps; and every backedge names its loop's
+/// test shape: a `for` latch
 /// targets its `ForTest` header carrying the same induction place, a
 /// `while` latch targets the loop header — the `WhileTest` itself for a
 /// simple condition, or the condition's cutting terminator (Switch /
@@ -390,18 +392,26 @@ fn check_for_preheader_shapes(flow: &Flow, tir: &Tir) {
             continue;
         };
         let view = tir.for_range_view(loop_inst);
-        debug_assert_eq!(
-            flow.step_block_of(view.start),
-            Some(p),
-            "for-range start must be stepped in the pre-header {:?}",
-            p
+        let start_order = flow.order_of(view.start).expect("start bound order");
+        let end_order = flow.order_of(view.end).expect("end bound order");
+        debug_assert!(
+            start_order < end_order,
+            "for-range bounds must evaluate in source order"
         );
-        debug_assert_eq!(
-            flow.step_block_of(view.end),
-            Some(p),
-            "for-range end must be stepped in the pre-header {:?}",
-            p
-        );
+        if let Some(end_step) = flow.step_block_of(view.end) {
+            debug_assert_eq!(
+                end_step, p,
+                "for-range end must be stepped in the pre-header {p:?}"
+            );
+        } else {
+            let control = flow
+                .term_block_of(view.end)
+                .expect("cutting for-range end terminator");
+            debug_assert!(
+                matches!(flow.term(control), Terminator::Switch { join, .. } if *join == Some(p) || flow.blocks[p.0 as usize].unreachable),
+                "a cutting for-range end must join at the pre-header {p:?}"
+            );
+        }
         debug_assert!(
             flow.block_steps(header).is_empty(),
             "for header {:?} holds only its ForTest terminator",

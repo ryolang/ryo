@@ -11,10 +11,7 @@
 //! knows when it passes a projection's last use.
 
 use super::aggregates::field_path_of;
-use super::{
-    LoopNesting, Owner, OwnerState, Ownership, StopKind, collect_region, format_binding,
-    needs_tracking,
-};
+use super::{LoopNesting, Owner, OwnerState, Ownership, StopKind, format_binding, needs_tracking};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::flow::{Analysis, BlockId, Flow, PlaceId, Terminator};
 use ryo_core::tir::{Span, Tir, TirData, TirRef, TirTag};
@@ -415,7 +412,6 @@ pub(crate) fn collect_view_liveness(
         processed: vec![false; flow.blocks.len()],
         epoch: vec![0; flow.blocks.len()],
         epoch_next: 0,
-        region_scratch: Vec::new(),
     };
     let mut last_use: HashMap<TirRef, TirRef> = HashMap::new();
     let epoch = lw.next_epoch();
@@ -458,7 +454,113 @@ struct LivenessWalk {
     processed: Vec<bool>,
     epoch: Vec<u32>,
     epoch_next: u32,
-    region_scratch: Vec<bool>,
+}
+
+type ReadMapId = usize;
+type ReadMaps = Vec<HashMap<TirRef, TirRef>>;
+type BindingWrites = HashMap<StringId, Option<HashSet<Option<TirRef>>>>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WalkMode {
+    Open,
+    List(RegionBoundary),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RegionBoundary {
+    At(BlockId),
+    Through(BlockId),
+    Loop { exit: BlockId, test: BlockId },
+}
+
+impl RegionBoundary {
+    fn kind(self, b: BlockId) -> StopKind {
+        match self {
+            Self::At(join) if b == join => StopKind::Skip,
+            Self::Through(holder) if b == holder => StopKind::VisitStop,
+            Self::Loop { exit, test } if b == exit || b == test => StopKind::Skip,
+            _ => StopKind::Visit,
+        }
+    }
+}
+
+struct RegionCursor {
+    pending: Vec<BlockId>,
+    boundary: RegionBoundary,
+    epoch: u32,
+    reads: ReadMapId,
+}
+
+struct MatchFrame {
+    arm_blocks: Vec<BlockId>,
+    next_arm: usize,
+    current_arm: Option<ReadMapId>,
+    arm_maps: Vec<BindingWrites>,
+    mark: usize,
+    join: Option<BlockId>,
+    epoch: u32,
+    reads: ReadMapId,
+}
+
+#[derive(Clone, Copy)]
+enum IfStage {
+    Then,
+    ElifChain(usize),
+    ElifBody(usize),
+    Else,
+    Done,
+}
+
+struct IfFrame {
+    arm_entries: Vec<BlockId>,
+    elif_chains: Vec<(BlockId, BlockId)>,
+    stage: IfStage,
+    current_arm: Option<(ReadMapId, BlockId, bool)>,
+    arm_maps: Vec<BindingWrites>,
+    mark: usize,
+    join: BlockId,
+    epoch: u32,
+    reads: ReadMapId,
+    else_present: bool,
+}
+
+#[derive(Clone, Copy)]
+enum LoopStage {
+    PassStart,
+    Condition,
+    Body,
+}
+
+struct LoopFrame {
+    header: BlockId,
+    body: BlockId,
+    test: BlockId,
+    exit: BlockId,
+    stage: LoopStage,
+    pass_epoch: u32,
+    mark: usize,
+    entry: HashMap<StringId, HashSet<Option<TirRef>>>,
+    header_bindings: HashMap<StringId, HashSet<Option<TirRef>>>,
+    reads: ReadMapId,
+}
+
+enum LivenessTask {
+    Block {
+        block: BlockId,
+        epoch: u32,
+        reads: ReadMapId,
+        mode: WalkMode,
+    },
+    Region(RegionCursor),
+    Resume {
+        target: Option<BlockId>,
+        epoch: u32,
+        reads: ReadMapId,
+        mode: WalkMode,
+    },
+    Match(MatchFrame),
+    If(IfFrame),
+    Loop(LoopFrame),
 }
 
 impl LivenessWalk {
@@ -468,7 +570,8 @@ impl LivenessWalk {
     }
 
     /// Open-ended id-ordered walk (the driver): DFS preorder following
-    /// continuations, like `Walk::walk_region`.
+    /// continuations, like `Walk::walk_region`. Nested constructs suspend
+    /// their parent cursors on this same stack instead of re-entering it.
     fn walk_open(
         &mut self,
         tir: &Tir,
@@ -478,42 +581,126 @@ impl LivenessWalk {
         epoch: u32,
         reads: &mut HashMap<TirRef, TirRef>,
     ) {
-        let mut stack = vec![entry];
-        while let Some(b) = stack.pop() {
-            if self.processed[b.0 as usize] || self.epoch[b.0 as usize] == epoch {
-                continue;
-            }
-            self.epoch[b.0 as usize] = epoch;
-            self.processed[b.0 as usize] = true;
-            let conts = self.visit_block(tir, flow, pool, b, epoch, reads);
-            for c in conts.into_iter().flatten().rev() {
-                stack.push(c);
+        let mut stack = ryo_core::spine::ChainSpine::new();
+        stack.push(LivenessTask::Block {
+            block: entry,
+            epoch,
+            reads: 0,
+            mode: WalkMode::Open,
+        });
+        let mut read_maps = vec![std::mem::take(reads)];
+        while let Some(task) = stack.pop() {
+            match task {
+                LivenessTask::Block {
+                    block,
+                    epoch,
+                    reads,
+                    mode,
+                } => {
+                    if mode == WalkMode::Open && !self.enter_open_block(block, epoch) {
+                        continue;
+                    }
+                    self.visit_block(
+                        tir,
+                        flow,
+                        pool,
+                        block,
+                        epoch,
+                        reads,
+                        mode,
+                        &mut stack,
+                        &mut read_maps,
+                    );
+                }
+                LivenessTask::Region(mut region) => {
+                    while let Some(block) = region.pending.pop() {
+                        let kind = region.boundary.kind(block);
+                        if kind == StopKind::Skip || self.epoch[block.0 as usize] == region.epoch {
+                            continue;
+                        }
+                        self.epoch[block.0 as usize] = region.epoch;
+                        self.processed[block.0 as usize] = true;
+                        if kind == StopKind::Visit {
+                            for successor in super::region_successors(flow, block).into_iter().rev()
+                            {
+                                region.pending.push(successor);
+                            }
+                        }
+                        let epoch = region.epoch;
+                        let reads = region.reads;
+                        let boundary = region.boundary;
+                        stack.push(LivenessTask::Region(region));
+                        stack.push(LivenessTask::Block {
+                            block,
+                            epoch,
+                            reads,
+                            mode: WalkMode::List(boundary),
+                        });
+                        break;
+                    }
+                }
+                LivenessTask::Resume {
+                    target,
+                    epoch,
+                    reads,
+                    mode,
+                } => {
+                    let Some(target) = target else {
+                        continue;
+                    };
+                    match mode {
+                        WalkMode::Open => stack.push(LivenessTask::Block {
+                            block: target,
+                            epoch,
+                            reads,
+                            mode,
+                        }),
+                        WalkMode::List(boundary) => {
+                            Self::push_region(&mut stack, target, boundary, epoch, reads);
+                        }
+                    }
+                }
+                LivenessTask::Match(frame) => {
+                    self.match_task(flow, frame, &mut stack, &mut read_maps);
+                }
+                LivenessTask::If(frame) => {
+                    self.if_task(flow, frame, &mut stack, &mut read_maps);
+                }
+                LivenessTask::Loop(frame) => {
+                    self.loop_task(frame, &mut stack, &mut read_maps);
+                }
             }
         }
+        *reads = std::mem::take(&mut read_maps[0]);
     }
 
-    /// Bounded region walk: exactly `list`, continuations ignored
-    /// (every reachable block is a list member).
-    fn walk_list(
-        &mut self,
-        tir: &Tir,
-        flow: &Flow,
-        pool: &InternPool,
-        list: &[BlockId],
+    fn enter_open_block(&mut self, b: BlockId, epoch: u32) -> bool {
+        if self.processed[b.0 as usize] || self.epoch[b.0 as usize] == epoch {
+            return false;
+        }
+        self.epoch[b.0 as usize] = epoch;
+        self.processed[b.0 as usize] = true;
+        true
+    }
+
+    fn push_region(
+        stack: &mut ryo_core::spine::ChainSpine<LivenessTask>,
+        entry: BlockId,
+        boundary: RegionBoundary,
         epoch: u32,
-        reads: &mut HashMap<TirRef, TirRef>,
+        reads: ReadMapId,
     ) {
-        for &b in list {
-            if self.epoch[b.0 as usize] == epoch {
-                continue;
-            }
-            self.epoch[b.0 as usize] = epoch;
-            self.processed[b.0 as usize] = true;
-            let _ = self.visit_block(tir, flow, pool, b, epoch, reads);
-        }
+        stack.push(LivenessTask::Region(RegionCursor {
+            pending: vec![entry],
+            boundary,
+            epoch,
+            reads,
+        }));
     }
 
-    /// Steps + terminator dispatch for one block.
+    /// Steps + terminator dispatch for one block. Every control path below
+    /// returns to the machine loop before visiting a child region.
+    #[allow(clippy::too_many_arguments)]
     fn visit_block(
         &mut self,
         tir: &Tir,
@@ -521,28 +708,384 @@ impl LivenessWalk {
         pool: &InternPool,
         b: BlockId,
         epoch: u32,
-        reads: &mut HashMap<TirRef, TirRef>,
-    ) -> [Option<BlockId>; 2] {
+        reads: ReadMapId,
+        mode: WalkMode,
+        stack: &mut ryo_core::spine::ChainSpine<LivenessTask>,
+        read_maps: &mut ReadMaps,
+    ) {
         for step in flow.block_steps(b) {
-            liveness_step(tir, flow, pool, step.inst, &mut self.bindings, reads);
+            liveness_step(
+                tir,
+                flow,
+                pool,
+                step.inst,
+                &mut self.bindings,
+                &mut read_maps[reads],
+            );
         }
         match *flow.term(b) {
-            Terminator::Goto { target } => [Some(target), None],
-            Terminator::Branch { then_, else_, .. } => match flow.branch_if(b) {
-                Some(if_inst) => [
-                    liveness_if(self, tir, flow, pool, b, if_inst, epoch, reads),
-                    None,
-                ],
-                None => [Some(then_), Some(else_)],
-            },
-            Terminator::Switch { match_inst, .. } => [
-                liveness_match(self, tir, flow, pool, b, match_inst, epoch, reads),
-                None,
-            ],
-            Terminator::While { .. } | Terminator::For { .. } => {
-                [liveness_loop(self, tir, flow, pool, b, epoch, reads), None]
+            Terminator::Goto { target } => {
+                if mode == WalkMode::Open {
+                    stack.push(LivenessTask::Block {
+                        block: target,
+                        epoch,
+                        reads,
+                        mode,
+                    });
+                }
             }
-            _ => [None, None],
+            Terminator::Branch { then_, else_, .. } => {
+                if let Some(if_inst) = flow.branch_if(b) {
+                    let (frame, join) = self.if_frame(tir, flow, b, if_inst, epoch, reads);
+                    stack.push(LivenessTask::Resume {
+                        target: Some(join),
+                        epoch,
+                        reads,
+                        mode,
+                    });
+                    stack.push(LivenessTask::If(frame));
+                } else if mode == WalkMode::Open {
+                    stack.push(LivenessTask::Block {
+                        block: else_,
+                        epoch,
+                        reads,
+                        mode,
+                    });
+                    stack.push(LivenessTask::Block {
+                        block: then_,
+                        epoch,
+                        reads,
+                        mode,
+                    });
+                }
+            }
+            Terminator::Switch {
+                match_inst, join, ..
+            } => {
+                let frame = self.match_frame(tir, flow, b, match_inst, join, epoch, reads);
+                stack.push(LivenessTask::Resume {
+                    target: join,
+                    epoch,
+                    reads,
+                    mode,
+                });
+                stack.push(LivenessTask::Match(frame));
+            }
+            Terminator::While { .. } | Terminator::For { .. } => {
+                let (frame, exit) = self.loop_frame(flow, b, reads);
+                stack.push(LivenessTask::Resume {
+                    target: Some(exit),
+                    epoch,
+                    reads,
+                    mode,
+                });
+                stack.push(LivenessTask::Loop(frame));
+            }
+            _ => {}
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn match_frame(
+        &mut self,
+        tir: &Tir,
+        flow: &Flow,
+        sw: BlockId,
+        match_inst: TirRef,
+        join: Option<BlockId>,
+        epoch: u32,
+        reads: ReadMapId,
+    ) -> MatchFrame {
+        let arm_count = tir.match_view(match_inst).arms().count();
+        let Terminator::Switch { arms: rng, .. } = *flow.term(sw) else {
+            unreachable!("match is a switch")
+        };
+        let arm_blocks: Vec<BlockId> = rng.as_range().map(|i| BlockId(flow.extra[i])).collect();
+        MatchFrame {
+            arm_blocks,
+            next_arm: 0,
+            current_arm: None,
+            arm_maps: Vec::with_capacity(arm_count),
+            mark: self.bindings.mark(),
+            join,
+            epoch,
+            reads,
+        }
+    }
+
+    fn if_frame(
+        &mut self,
+        tir: &Tir,
+        flow: &Flow,
+        fb: BlockId,
+        if_inst: TirRef,
+        epoch: u32,
+        reads: ReadMapId,
+    ) -> (IfFrame, BlockId) {
+        let view = tir.if_stmt_view(if_inst);
+        let arms = flow.branch_arm_blocks(if_inst);
+        let join = arms.join;
+        let elif_count = view.elif_branches.len();
+        let else_present = view.else_stmts.is_some();
+        let mut arm_entries = Vec::with_capacity(2 + elif_count);
+        arm_entries.push(arms.then_block);
+        for &holder in &arms.elif_blocks {
+            let Terminator::Branch { then_, .. } = *flow.term(holder) else {
+                unreachable!("recorded elif block holds a Branch")
+            };
+            arm_entries.push(then_);
+        }
+        arm_entries.push(arms.else_block);
+        let Terminator::Branch { else_, .. } = *flow.term(fb) else {
+            unreachable!("cascade entry block holds a Branch")
+        };
+        let mut prev_else = else_;
+        let mut elif_chains = Vec::with_capacity(elif_count);
+        for &holder in &arms.elif_blocks {
+            elif_chains.push((prev_else, holder));
+            let Terminator::Branch { else_, .. } = *flow.term(holder) else {
+                unreachable!("recorded elif block holds a Branch")
+            };
+            prev_else = else_;
+        }
+        (
+            IfFrame {
+                arm_entries,
+                elif_chains,
+                stage: IfStage::Then,
+                current_arm: None,
+                arm_maps: Vec::with_capacity(2 + elif_count),
+                mark: self.bindings.mark(),
+                join,
+                epoch,
+                reads,
+                else_present,
+            },
+            join,
+        )
+    }
+
+    fn loop_frame(&mut self, flow: &Flow, ph: BlockId, reads: ReadMapId) -> (LoopFrame, BlockId) {
+        let (loop_inst, header) = match *flow.term(ph) {
+            Terminator::While { loop_inst, header } | Terminator::For { loop_inst, header } => {
+                (loop_inst, header)
+            }
+            _ => unreachable!("liveness_loop at a non-loop terminator"),
+        };
+        let test_block = super::loop_test_block(flow, loop_inst, header);
+        let (body, exit) = match *flow.term(test_block) {
+            Terminator::WhileTest { body, exit, .. } | Terminator::ForTest { body, exit, .. } => {
+                (body, exit)
+            }
+            _ => unreachable!("loop test block holds the test"),
+        };
+        let mark = self.bindings.mark();
+        let entry = self.bindings.map.clone();
+        (
+            LoopFrame {
+                header,
+                body,
+                test: test_block,
+                exit,
+                stage: LoopStage::PassStart,
+                pass_epoch: 0,
+                mark,
+                header_bindings: entry.clone(),
+                entry,
+                reads,
+            },
+            exit,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_arm(
+        &mut self,
+        flow: &Flow,
+        read_maps: &mut ReadMaps,
+        parent: ReadMapId,
+        child: ReadMapId,
+        arm: BlockId,
+        record: bool,
+        mark: usize,
+    ) -> BindingWrites {
+        let body_reads = std::mem::take(&mut read_maps[child]);
+        merge_reads(&mut read_maps[parent], body_reads.clone(), flow);
+        if record {
+            record_arm_reads(&mut self.arm_last_reads, arm, body_reads, flow);
+        }
+        self.bindings.rollback(mark)
+    }
+
+    fn merge_arm_bindings(&mut self, arm_maps: Vec<BindingWrites>) {
+        let entry = self.bindings.map.clone();
+        let names: HashSet<StringId> = arm_maps.iter().flat_map(|m| m.keys().copied()).collect();
+        for name in names {
+            let mut values = HashSet::new();
+            for arm in &arm_maps {
+                match arm.get(&name) {
+                    Some(Some(targets)) => values.extend(targets.iter().copied()),
+                    Some(None) => {}
+                    None => values.extend(entry.get(&name).into_iter().flatten().copied()),
+                }
+            }
+            if !values.is_empty() {
+                self.bindings.insert_all(name, values);
+            }
+        }
+    }
+
+    fn match_task(
+        &mut self,
+        flow: &Flow,
+        mut frame: MatchFrame,
+        stack: &mut ryo_core::spine::ChainSpine<LivenessTask>,
+        read_maps: &mut ReadMaps,
+    ) {
+        if let Some(child) = frame.current_arm.take() {
+            let arm = frame.arm_blocks[frame.next_arm - 1];
+            let writes =
+                self.finish_arm(flow, read_maps, frame.reads, child, arm, true, frame.mark);
+            frame.arm_maps.push(writes);
+        }
+        if frame.next_arm == frame.arm_blocks.len() {
+            self.merge_arm_bindings(frame.arm_maps);
+            return;
+        }
+        let index = frame.next_arm;
+        frame.next_arm += 1;
+        let child = read_maps.len();
+        read_maps.push(HashMap::new());
+        frame.current_arm = Some(child);
+        let entry = frame.arm_blocks[index];
+        let boundary = RegionBoundary::At(frame.join.unwrap_or(BlockId::NONE));
+        let epoch = frame.epoch;
+        stack.push(LivenessTask::Match(frame));
+        Self::push_region(stack, entry, boundary, epoch, child);
+    }
+
+    fn if_task(
+        &mut self,
+        flow: &Flow,
+        mut frame: IfFrame,
+        stack: &mut ryo_core::spine::ChainSpine<LivenessTask>,
+        read_maps: &mut ReadMaps,
+    ) {
+        loop {
+            if let Some((child, arm, record)) = frame.current_arm.take() {
+                let writes =
+                    self.finish_arm(flow, read_maps, frame.reads, child, arm, record, frame.mark);
+                frame.arm_maps.push(writes);
+            }
+            match frame.stage {
+                IfStage::Then => {
+                    frame.stage = IfStage::ElifChain(0);
+                    let child = read_maps.len();
+                    read_maps.push(HashMap::new());
+                    frame.current_arm = Some((child, frame.arm_entries[0], true));
+                    let entry = frame.arm_entries[0];
+                    let epoch = frame.epoch;
+                    let join = frame.join;
+                    stack.push(LivenessTask::If(frame));
+                    Self::push_region(stack, entry, RegionBoundary::At(join), epoch, child);
+                    return;
+                }
+                IfStage::ElifChain(index) => {
+                    if index == frame.elif_chains.len() {
+                        frame.stage = IfStage::Else;
+                        continue;
+                    }
+                    frame.stage = IfStage::ElifBody(index);
+                    let (entry, holder) = frame.elif_chains[index];
+                    let epoch = frame.epoch;
+                    let reads = frame.reads;
+                    stack.push(LivenessTask::If(frame));
+                    Self::push_region(stack, entry, RegionBoundary::Through(holder), epoch, reads);
+                    return;
+                }
+                IfStage::ElifBody(index) => {
+                    frame.stage = IfStage::ElifChain(index + 1);
+                    let child = read_maps.len();
+                    read_maps.push(HashMap::new());
+                    frame.current_arm = Some((child, frame.arm_entries[index + 1], true));
+                    let entry = frame.arm_entries[index + 1];
+                    let epoch = frame.epoch;
+                    let join = frame.join;
+                    stack.push(LivenessTask::If(frame));
+                    Self::push_region(stack, entry, RegionBoundary::At(join), epoch, child);
+                    return;
+                }
+                IfStage::Else => {
+                    frame.stage = IfStage::Done;
+                    let last = frame.arm_entries.len() - 1;
+                    let child = read_maps.len();
+                    read_maps.push(HashMap::new());
+                    frame.current_arm = Some((child, frame.arm_entries[last], frame.else_present));
+                    let entry = frame.arm_entries[last];
+                    let epoch = frame.epoch;
+                    let join = frame.join;
+                    stack.push(LivenessTask::If(frame));
+                    Self::push_region(stack, entry, RegionBoundary::At(join), epoch, child);
+                    return;
+                }
+                IfStage::Done => {
+                    self.merge_arm_bindings(frame.arm_maps);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn loop_task(
+        &mut self,
+        mut frame: LoopFrame,
+        stack: &mut ryo_core::spine::ChainSpine<LivenessTask>,
+        _read_maps: &mut ReadMaps,
+    ) {
+        loop {
+            match frame.stage {
+                LoopStage::PassStart => {
+                    self.bindings.map.clone_from(&frame.header_bindings);
+                    frame.pass_epoch = self.next_epoch();
+                    frame.stage = LoopStage::Condition;
+                    let header = frame.header;
+                    let test = frame.test;
+                    let epoch = frame.pass_epoch;
+                    let reads = frame.reads;
+                    stack.push(LivenessTask::Loop(frame));
+                    Self::push_region(stack, header, RegionBoundary::Through(test), epoch, reads);
+                    return;
+                }
+                LoopStage::Condition => {
+                    frame.stage = LoopStage::Body;
+                    let body = frame.body;
+                    let boundary = RegionBoundary::Loop {
+                        exit: frame.exit,
+                        test: frame.test,
+                    };
+                    let epoch = frame.pass_epoch;
+                    let reads = frame.reads;
+                    stack.push(LivenessTask::Loop(frame));
+                    Self::push_region(stack, body, boundary, epoch, reads);
+                    return;
+                }
+                LoopStage::Body => {
+                    let body_exit = self.bindings.map.clone();
+                    self.bindings.rollback(frame.mark);
+                    let next = union_binding_states(&frame.entry, &body_exit);
+                    if next == frame.header_bindings {
+                        self.bindings.map.clone_from(&frame.entry);
+                        for (name, targets) in frame.header_bindings {
+                            if frame.entry.get(&name) != Some(&targets) {
+                                self.bindings.insert_all(name, targets);
+                            }
+                        }
+                        return;
+                    }
+                    frame.header_bindings = next;
+                    frame.stage = LoopStage::PassStart;
+                }
+            }
         }
     }
 }
@@ -639,232 +1182,6 @@ fn union_binding_states(
         merged.entry(name).or_default().extend(targets);
     }
     merged
-}
-
-/// If-cascade liveness: the mark/rollback arm discipline of the old
-/// `view_liveness_stmt`, keyed by Flow IR arm blocks. Each arm's reads
-/// become a `Present` entry keyed by the arm's entry block; the cond
-/// chains between arms record against the enclosing scope.
-#[allow(clippy::too_many_arguments)]
-fn liveness_if(
-    lw: &mut LivenessWalk,
-    tir: &Tir,
-    flow: &Flow,
-    pool: &InternPool,
-    fb: BlockId,
-    if_inst: TirRef,
-    epoch: u32,
-    reads: &mut HashMap<TirRef, TirRef>,
-) -> Option<BlockId> {
-    let view = tir.if_stmt_view(if_inst);
-    let arms = flow.branch_arm_blocks(if_inst);
-    let join = arms.join;
-    let mut arm_entries: Vec<BlockId> = Vec::with_capacity(2 + view.elif_branches.len());
-    arm_entries.push(arms.then_block);
-    for &holder in &arms.elif_blocks {
-        let Terminator::Branch { then_, .. } = *flow.term(holder) else {
-            unreachable!("recorded elif block holds a Branch")
-        };
-        arm_entries.push(then_);
-    }
-    arm_entries.push(arms.else_block);
-    let arm_regions: Vec<Vec<BlockId>> = arm_entries
-        .iter()
-        .map(|&entry| {
-            collect_region(flow, &mut lw.region_scratch, entry, |b| {
-                super::RegionStop::At(join).kind(b)
-            })
-            .0
-        })
-        .collect();
-
-    let mark = lw.bindings.mark();
-    let mut arm_maps: Vec<HashMap<StringId, Option<HashSet<Option<TirRef>>>>> = Vec::new();
-    // Then arm.
-    let mut then_reads = HashMap::new();
-    lw.walk_list(tir, flow, pool, &arm_regions[0], epoch, &mut then_reads);
-    merge_reads(reads, then_reads.clone(), flow);
-    record_arm_reads(&mut lw.arm_last_reads, arm_entries[0], then_reads, flow);
-    arm_maps.push(lw.bindings.rollback(mark));
-    // Elif arms: cond chain first (enclosing scope), then the body.
-    let Terminator::Branch { else_, .. } = *flow.term(fb) else {
-        unreachable!("cascade entry block holds a Branch")
-    };
-    let mut prev_else = else_;
-    for e in 0..view.elif_branches.len() {
-        let holder = arms.elif_blocks[e];
-        let (chain, _) = collect_region(flow, &mut lw.region_scratch, prev_else, |b| {
-            super::RegionStop::Through(holder).kind(b)
-        });
-        lw.walk_list(tir, flow, pool, &chain, epoch, reads);
-        let mut body_reads = HashMap::new();
-        lw.walk_list(tir, flow, pool, &arm_regions[1 + e], epoch, &mut body_reads);
-        merge_reads(reads, body_reads.clone(), flow);
-        record_arm_reads(&mut lw.arm_last_reads, arm_entries[1 + e], body_reads, flow);
-        arm_maps.push(lw.bindings.rollback(mark));
-        let Terminator::Branch { else_, .. } = *flow.term(holder) else {
-            unreachable!("recorded elif block holds a Branch")
-        };
-        prev_else = else_;
-    }
-    // Else arm — walked uniformly; for an else-less if the region is
-    // the empty synthetic fallthrough, whose (absent) reads simply fold.
-    let last = arm_regions.len() - 1;
-    let mut else_reads = HashMap::new();
-    lw.walk_list(tir, flow, pool, &arm_regions[last], epoch, &mut else_reads);
-    merge_reads(reads, else_reads.clone(), flow);
-    if view.else_stmts.is_some() {
-        record_arm_reads(&mut lw.arm_last_reads, arm_entries[last], else_reads, flow);
-    }
-    arm_maps.push(lw.bindings.rollback(mark));
-    // Keep every possible incoming view binding. The enclosing state is
-    // one possible path when an arm does not write the binding.
-    let entry = lw.bindings.map.clone();
-    let names: HashSet<StringId> = arm_maps.iter().flat_map(|m| m.keys().copied()).collect();
-    for name in names {
-        let mut values = HashSet::new();
-        for arm in &arm_maps {
-            match arm.get(&name) {
-                Some(Some(targets)) => values.extend(targets.iter().copied()),
-                Some(None) => {}
-                None => values.extend(entry.get(&name).into_iter().flatten().copied()),
-            }
-        }
-        if !values.is_empty() {
-            lw.bindings.insert_all(name, values);
-        }
-    }
-    Some(join)
-}
-
-/// Match liveness: the same mark/rollback arm discipline; the
-/// scrutinee's steps already ran against the enclosing scope (like an
-/// if condition). Statement and value positions are the same Switch.
-#[allow(clippy::too_many_arguments)]
-fn liveness_match(
-    lw: &mut LivenessWalk,
-    tir: &Tir,
-    flow: &Flow,
-    pool: &InternPool,
-    sw: BlockId,
-    match_inst: TirRef,
-    epoch: u32,
-    reads: &mut HashMap<TirRef, TirRef>,
-) -> Option<BlockId> {
-    let view = tir.match_view(match_inst);
-    let Terminator::Switch {
-        arms: rng, join, ..
-    } = *flow.term(sw)
-    else {
-        unreachable!("match is a switch")
-    };
-    let arm_blocks: Vec<BlockId> = rng.as_range().map(|i| BlockId(flow.extra[i])).collect();
-    let stop = match join {
-        Some(j) => super::RegionStop::At(j),
-        None => super::RegionStop::At(BlockId::NONE),
-    };
-    let mark = lw.bindings.mark();
-    let mut arm_maps: Vec<HashMap<StringId, Option<HashSet<Option<TirRef>>>>> =
-        Vec::with_capacity(arm_blocks.len());
-    for (i, _arm) in view.arms().enumerate() {
-        let (region, _) = collect_region(flow, &mut lw.region_scratch, arm_blocks[i], |b| {
-            stop.kind(b)
-        });
-        let mut body_reads = HashMap::new();
-        lw.walk_list(tir, flow, pool, &region, epoch, &mut body_reads);
-        merge_reads(reads, body_reads.clone(), flow);
-        record_arm_reads(&mut lw.arm_last_reads, arm_blocks[i], body_reads, flow);
-        arm_maps.push(lw.bindings.rollback(mark));
-    }
-    let entry = lw.bindings.map.clone();
-    let names: HashSet<StringId> = arm_maps.iter().flat_map(|m| m.keys().copied()).collect();
-    for name in names {
-        let mut values = HashSet::new();
-        for arm in &arm_maps {
-            match arm.get(&name) {
-                Some(Some(targets)) => values.extend(targets.iter().copied()),
-                Some(None) => {}
-                None => values.extend(entry.get(&name).into_iter().flatten().copied()),
-            }
-        }
-        if !values.is_empty() {
-            lw.bindings.insert_all(name, values);
-        }
-    }
-    join
-}
-
-/// Loop liveness: solve view bindings to a fixed point across the
-/// back-edge. The union includes the entry state, which preserves the
-/// zero-iteration path for reads after the loop.
-fn liveness_loop(
-    lw: &mut LivenessWalk,
-    tir: &Tir,
-    flow: &Flow,
-    pool: &InternPool,
-    ph: BlockId,
-    _epoch: u32,
-    reads: &mut HashMap<TirRef, TirRef>,
-) -> Option<BlockId> {
-    let (loop_inst, header) = match *flow.term(ph) {
-        Terminator::While { loop_inst, header } | Terminator::For { loop_inst, header } => {
-            (loop_inst, header)
-        }
-        _ => unreachable!("liveness_loop at a non-loop terminator"),
-    };
-    let test_block = super::loop_test_block(flow, loop_inst, header);
-    let (body, exit) = match *flow.term(test_block) {
-        Terminator::WhileTest { body, exit, .. } | Terminator::ForTest { body, exit, .. } => {
-            (body, exit)
-        }
-        _ => unreachable!("loop test block holds the test"),
-    };
-    // Condition region (header + any complex-cond cascade, ending at
-    // the test block).
-    let (cond_region, _) = collect_region(flow, &mut lw.region_scratch, header, |b| {
-        super::RegionStop::Through(test_block).kind(b)
-    });
-    let (region, _) = collect_region(flow, &mut lw.region_scratch, body, |b| {
-        if b == exit || b == test_block {
-            StopKind::Skip
-        } else {
-            StopKind::Visit
-        }
-    });
-    let mark = lw.bindings.mark();
-    let entry = lw.bindings.map.clone();
-    let mut header_bindings = entry.clone();
-    loop {
-        lw.bindings.map.clone_from(&header_bindings);
-        let pass_epoch = lw.next_epoch();
-        lw.walk_list(tir, flow, pool, &cond_region, pass_epoch, reads);
-        lw.walk_list(tir, flow, pool, &region, pass_epoch, reads);
-        let body_exit = lw.bindings.map.clone();
-        lw.bindings.rollback(mark);
-
-        let next = union_binding_states(&entry, &body_exit);
-        if next == header_bindings {
-            header_bindings = next;
-            break;
-        }
-        header_bindings = next;
-    }
-    // The fixed-point `clone_from` above bypassed the undo log, so the
-    // map still holds the last header state; reset it to the true
-    // pre-loop state. Otherwise the logged writes below record header
-    // values as `old`, and an enclosing arm's rollback would restore
-    // the loop's merged bindings instead of the pre-branch state,
-    // crediting sibling arms with reads of loop-rebound views.
-    lw.bindings.map.clone_from(&entry);
-    // Post-loop code may see either the original binding (zero
-    // iterations) or a value produced by the body. The fixed-point
-    // header state contains both possibilities.
-    for (name, targets) in header_bindings {
-        if entry.get(&name) != Some(&targets) {
-            lw.bindings.insert_all(name, targets);
-        }
-    }
-    Some(exit)
 }
 
 /// The view instruction a `strview`-typed binding aliases: through

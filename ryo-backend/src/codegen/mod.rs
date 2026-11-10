@@ -4,8 +4,9 @@
 //! `sema` (one [`Tir`] per function body) and lowers them to
 //! Cranelift IR. There is no [`crate::uir::Uir`] import here:
 //! every operand is already typed, every variable already
-//! resolved. Control structure comes from the Flow IR — one
-//! Cranelift block per Flow block, walked in DFS order from the
+//! resolved. Control structure comes from the Flow IR — Cranelift
+//! blocks represent Flow regions, with empty single-predecessor Goto
+//! chains coalesced, walked in DFS order from the
 //! entry (`codegen/control.rs` explains why raw construction order is
 //! not sufficient) —
 //! never from TIR statement lists: TIR remains readable for
@@ -342,10 +343,11 @@ pub(crate) struct WhileRecord {
     pub(crate) slot_marks: SlotMarks,
 }
 
-/// Per-`for range` state: the induction counter plus the shadowed
-/// binding the loop variable replaced (restored at the exit block).
+/// Per-`for range` state: the induction counter, invariant end bound,
+/// and shadowed binding the loop variable replaced (restored at exit).
 pub(crate) struct ForRecord {
     pub(crate) counter: Variable,
+    pub(crate) end: Variable,
     pub(crate) var_name: StringId,
     pub(crate) saved_local: Option<Variable>,
     pub(crate) saved_fact: Option<ranges::IntRange>,
@@ -572,7 +574,8 @@ impl Codegen<ObjectModule> {
     }
 
     pub fn finish(self) -> Result<Vec<u8>, String> {
-        self.module
+        let Codegen { module, .. } = self;
+        module
             .finish()
             .emit()
             .map_err(|e| format!("Failed to emit object file: {}", e))
@@ -793,11 +796,10 @@ impl<M: Module> Codegen<M> {
                 ryo_core::flow::DropPosition::BlockStart { block } => {
                     // The unified cleanup schedule: arm-start payload
                     // destruction and conditional dead drops travel with
-                    // everything else. Under the 1:1 Flow-block →
-                    // Cranelift-block mapping each Flow block has
-                    // exactly one start — the driver fires this bucket
-                    // when it enters the block, before the block's
-                    // steps.
+                    // everything else. Each Flow block has exactly one
+                    // start even when its Cranelift block is shared with
+                    // a coalesced Goto chain — the driver fires this
+                    // bucket when it enters the Flow block, before its steps.
                     debug_assert!(
                         matches!(
                             fire_points.resolve(position),
@@ -1298,7 +1300,8 @@ impl<M: Module> Codegen<M> {
             }
 
             // The backend drives emission from the canonical Flow
-            // IR — one pre-created Cranelift block per Flow block, walked
+            // IR — pre-created Cranelift region blocks, with empty
+            // single-predecessor Goto chains coalesced, walked
             // in DFS order from the entry, with per-step evaluation through the
             // `eval_inst` family and terminator handlers dispatching the
             // block's explicit `Terminator`. No TIR statement list is

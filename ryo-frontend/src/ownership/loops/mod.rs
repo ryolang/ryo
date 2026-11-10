@@ -100,296 +100,245 @@ pub(crate) fn loop_test_block(flow: &Flow, loop_inst: TirRef, header: BlockId) -
 /// propagate-then-check body fixed point over the body region, then the
 /// deferred-projection cleanup. Returns the loop's exit block
 /// (continuation — processed later with the merged post-loop state).
-pub(crate) fn analyze_loop(
-    w: &mut Walk<'_>,
-    own: &mut Ownership,
-    sink: &mut DiagSink,
-    sidecar: &mut FunctionSidecar,
-    ph: BlockId,
+pub(crate) struct LoopFrame {
+    loop_inst: TirRef,
+    cond_region: Vec<BlockId>,
+    region: Vec<BlockId>,
+    stage: LoopStage,
     epoch: u32,
-) -> Option<BlockId> {
-    let (loop_inst, header) = match *w.flow.term(ph) {
-        Terminator::While { loop_inst, header } | Terminator::For { loop_inst, header } => {
-            (loop_inst, header)
-        }
-        _ => unreachable!("analyze_loop at a non-loop terminator"),
-    };
-    let test_block = loop_test_block(w.flow, loop_inst, header);
-    let (body, exit) = match *w.flow.term(test_block) {
-        Terminator::WhileTest { body, exit, .. } | Terminator::ForTest { body, exit, .. } => {
-            (body, exit)
-        }
-        _ => unreachable!("loop test block holds the test"),
-    };
-    // Condition region: the header block plus any cascade a match/
-    // `and`/`or` condition cuts, ending at the test block (inclusive).
-    // For a `while` these steps are the condition — processed ONCE with
-    // the entry state (the fixed-point phases walk the body region
-    // only, so cond steps never re-run and cond-tied projections are
-    // not drained mid-body — the old walk visited the cond exactly
-    // once). A `for` test carries no steps; its bounds ran in the
-    // pre-header. The test terminator is not dispatched: body and exit
-    // are driven explicitly below.
-    let (cond_region, _) = collect_region(w.flow, &mut w.region_scratch, header, |b| {
-        RegionStop::Through(test_block).kind(b)
-    });
-    w.walk_block_list(own, sink, sidecar, &cond_region, epoch);
-    // Body region: blocks reachable from `body` that cannot leave
-    // without passing `exit` or the test block (the backedge targets
-    // the test, which is not part of the body).
-    let (region, _) = collect_region(w.flow, &mut w.region_scratch, body, |b| {
-        if b == exit || b == test_block {
-            StopKind::Skip
-        } else {
-            StopKind::Visit
-        }
-    });
-    let mut loop_carried_homes = HashSet::new();
-    for &b in &region {
-        for step in w.flow.block_steps(b) {
-            if w.tir.inst(step.inst).tag != TirTag::Assign {
-                continue;
+    after_flows_off_end: bool,
+    snap: Option<BranchState>,
+    hazard_count: usize,
+    entry_state: Option<BranchState>,
+    converged: bool,
+    height_cap: usize,
+    pass_count: usize,
+    pass_active: bool,
+    pub(crate) pass_io: Option<usize>,
+}
+
+enum LoopStage {
+    Condition,
+    Prepare,
+    Propagate,
+    Check,
+    Final,
+}
+
+impl LoopFrame {
+    pub(crate) fn new(
+        w: &mut Walk<'_>,
+        _own: &mut Ownership,
+        ph: BlockId,
+        epoch: u32,
+    ) -> (Self, BlockId) {
+        let (loop_inst, header) = match *w.flow.term(ph) {
+            Terminator::While { loop_inst, header } | Terminator::For { loop_inst, header } => {
+                (loop_inst, header)
             }
-            let view = w.tir.assign_view(step.inst);
-            if w.tir.inst(view.value).tag != TirTag::Match {
-                continue;
-            }
-            let Some(write) = step.facts.write else {
-                continue;
-            };
-            if write.kind != WriteKind::Replace {
-                continue;
-            }
-            let Place::Local { ty, .. } = w.flow.place(write.place) else {
-                continue;
-            };
-            if w.pool.needs_drop(*ty) && own.current_owner.contains_key(&write.place) {
-                loop_carried_homes.insert(write.place);
-            }
-        }
-    }
-    // A mutable binding assigned from a match in the loop can hold
-    // values produced by any iteration. Give that runtime slot a stable
-    // owner identity before the fixed-point walk, so no later release
-    // names a producer that may not dominate the loop exit.
-    for &home in &loop_carried_homes {
-        let dynamic_owner = Owner(home);
-        let Some(old_owner) = own.current_owner.insert(home, dynamic_owner) else {
-            continue;
+            _ => unreachable!("loop frame at a non-loop terminator"),
         };
-        if old_owner != dynamic_owner {
-            let state = own
-                .states
-                .get(&old_owner)
-                .cloned()
-                .unwrap_or(OwnerState::NotTracked);
-            own.states.insert(dynamic_owner, state);
-            if !own.current_owner.values().any(|owner| *owner == old_owner) {
-                own.states.remove(&old_owner);
+        let test_block = loop_test_block(w.flow, loop_inst, header);
+        let (body, exit) = match *w.flow.term(test_block) {
+            Terminator::WhileTest { body, exit, .. } | Terminator::ForTest { body, exit, .. } => {
+                (body, exit)
             }
-        }
-    }
-    // Record the body region for the post-walk loop-carried scan.
-    // The region is marked processed only after the fixed point below:
-    // phase passes must re-walk these blocks, and the `processed` mark
-    // gates the once-ever walks (the outer driver and enclosing arm
-    // lists skip the region from then on).
-    w.loop_regions.push((loop_inst, region.clone()));
-    w.active_loop_carried_homes.push(loop_carried_homes);
-    // Structural whole-region test, never per-owner — the Flow IR
-    // replacement for the old `!stmt_must_return(last body stmt)`: the
-    // body's end-state reaches the back-edge / post-loop join iff some
-    // live region exit falls through (Backedge), breaks to the exit, or
-    // continues to the header. A body returning on every live path
-    // (only Return exits) cannot complete without exiting the function
-    // — its Moved end-state reaches neither the backedge nor the join,
-    // so the merges below drop it (merge_non_monotone).
-    let after_flows_off_end = region.iter().any(|&b| {
-        matches!(
-            w.flow.term(b),
-            Terminator::Backedge { .. } | Terminator::Break { .. } | Terminator::Continue { .. }
+            _ => unreachable!("loop test block holds the test"),
+        };
+        let (cond_region, _) = collect_region(w.flow, &mut w.region_scratch, header, |b| {
+            RegionStop::Through(test_block).kind(b)
+        });
+        let (region, _) = collect_region(w.flow, &mut w.region_scratch, body, |b| {
+            if b == exit || b == test_block {
+                StopKind::Skip
+            } else {
+                StopKind::Visit
+            }
+        });
+        (
+            Self {
+                loop_inst,
+                cond_region,
+                region,
+                stage: LoopStage::Condition,
+                epoch,
+                after_flows_off_end: false,
+                snap: None,
+                hazard_count: 0,
+                entry_state: None,
+                converged: false,
+                height_cap: 5 * w.tir.instructions.len() + 2,
+                pass_count: 0,
+                pass_active: false,
+                pass_io: None,
+            },
+            exit,
         )
-    });
+    }
 
-    let snap = own.snapshot_branch();
-    // Phase 1 — convergent propagation (G3). Chaotic iteration of a
-    // MONOTONE loop-entry join to a real fixed point:
-    //
-    // Lattice. Per-owner state ordered NotTracked < {Valid, Borrowed}
-    // < Moved (Moved absorbing; the join never distinguishes Valid vs
-    // Borrowed once merged — entry first-observed wins — so the two
-    // form one class below Moved), product-ordered over the owner set;
-    // plus live-projection sets under union (membership grows in one
-    // direction only); plus the first-wins home/binding maps (see
-    // `BranchState` — the four merge-mutated fields).
-    //
-    // Operator monotonicity. Each pass merges `entry ⊔ post-body` with
-    // `merge_loop_plain`: any-Moved-wins adds Moved-ness and inserts
-    // missing keys; projections union; the maps keep the entry side.
-    // The four maps (states, current_owner, binding_of_name,
-    // live_projections) therefore ASCEND the product order (never
-    // removes a Moved, never shrinks a projection set, never changes a
-    // seated home).
-    //
-    // Convergence test. `differ` compares the PREVIOUS entry against
-    // the MERGED state now in `own` — the state the iteration actually
-    // feeds back. Comparing against the RAW post-body state instead is
-    // a real bug (cap abort): when the body's live exits are Return-only,
-    // the merge DISCARDS the body's changes (path-local to the exit —
-    // see merge_loop_plain), the merged entry equals the previous entry
-    // (a genuine fixed point), while the raw post-body state keeps
-    // differing on every pass. The merged-vs-entry comparison covers
-    // all four merge-mutated components (see branch_states_differ) —
-    // for live_projections by set MEMBERSHIP, not emptiness: the merged
-    // set is the state the next pass consumes, and `{v1}` vs `{v1, v2}`
-    // are different states even though both are non-empty — so
-    // `differ == false` exactly when the next pass could observe
-    // nothing new.
-    //
-    // Height. Every non-converging pass consumes at least one ascension
-    // unit on the four monotone maps: a state key inserted or flipped
-    // toward Moved (≤ 2 per owner), a home or binding-map key inserted
-    // (≤ 1 per binding), a projection view inserted (≤ 1 per view) —
-    // owners, bindings, and views are all bounded by the instruction
-    // arena A. Projection-set insertion was already counted at ≤ 1 unit
-    // per view, and the membership witness adds no
-    // new ascension kind: the join is monotone (pointwise ≥ the
-    // previous entry), so a membership difference between previous and
-    // merged entry IS a strict set growth — at least one view inserted
-    // — never a lateral move that the stricter compare would chase
-    // forever. Chain height ≤ 2A + A + A + A, so the cap below
-    // bounds every real pass sequence. (For real bodies the walk is
-    // state-independent, so the fixed point is reached in exactly 2
-    // passes; the bound is the guarantee, not the expectation.)
-    //
-    // The binding-aware override (`binding_state_writes`) is NOT
-    // monotone — it can write a binding's end-of-body state over a
-    // Moved owner (the consume-then-rebind shape), which fed back into
-    // the old per-pass merge and made the entry oscillate (the old
-    // load-bearing two-pass cap existed for exactly that). It is
-    // therefore kept OUT of the iteration and applied once as a final
-    // polish on the converged entry — legal because no further
-    // iteration consumes the result (plan option (a)). The Phase-2
-    // check pass and the final merge see the polished state, matching
-    // the old cap's observable behavior on the pinned shapes. When the
-    // body's live exits are Return-only the after side is excluded
-    // from the polish (same path-locality rule as the merge — a
-    // Return-only body's moves/reseats never reach the join).
-    //
-    // Fallback. Cap exhaustion is UNREACHABLE for the monotone operator
-    // — reaching it is an INTERNAL ANALYSIS FAILURE (a compiler bug),
-    // never a normal outcome: the debug_assert above makes it LOUD in
-    // debug builds. The release fallback is purely the defensive arm:
-    // it restores the pre-loop snapshot, whose conservative direction
-    // is documented, not assumed —
-    // (a) the walk's transitions are state-independent — every
-    // reachable free/consume still schedules from the snap-based pass;
-    // (b) the iterated chain ASCENDS from `snap`, so snap ≤ every
-    // iterated entry: snap-based post-loop states UNDER-approximate
-    // Moved / OVER-approximate destruction obligations — leak-safe,
-    // never a UAF;
-    // (c) the cost of (b) is that diagnostics can UNDER-REPORT (the
-    // check pass ran against a smaller Moved set). That under-reporting
-    // is the fallback's documented conservative direction: tolerable
-    // only because the state is unreachable-by-proof, never a silently
-    // accepted analysis result.
-    let hazard_count = own.owner_hazards.len();
-    let mut entry_state = snap.clone();
-    let mut converged = false;
-    let height_cap = 5 * w.tir.instructions.len() + 2;
-    let mut pass_count = 0usize;
-    while pass_count < height_cap {
-        pass_count += 1;
-        let mut scratch = DiagSink::new();
-        // Fresh scratch sidecar: speculative sidecar writes are
-        // discarded at the end of each pass, and the walk never reads
-        // pre-existing sidecar content (the only readers — LoopExitCtx /
-        // the return epilogue — run post-walk against the REAL
-        // sidecar).
-        let mut staging = FunctionSidecar::new(w.tir.name, w.tir.instructions.len());
-        let pass_epoch = w.next_epoch();
-        w.walk_phase(own, &mut scratch, &mut staging, &region, pass_epoch);
-        // Move the post-body state out, installing an empty placeholder
-        // — the merge overwrites all four fields below.
-        let after = own.take_branch(BranchState::default());
-        // Compute the binding-aware override writes while `after` is
-        // intact; applied only on the converging pass (below) — never
-        // fed back into iteration. The pre-owner side is the PRE-LOOP
-        // snapshot (not the converged entry): the override models a
-        // reseated binding's home holding a fresh value each iteration,
-        // so the pre-rebind owner's header state is the one from BEFORE
-        // the loop — reproducing the old feedback merge's final state
-        // exactly (the pinned consume-then-rebind shape). A Return-only
-        // body's after side is path-local to the exit (see the proof
-        // comment) and contributes nothing.
-        let writes = if after_flows_off_end {
-            binding_state_writes(
-                &snap.current_owner,
-                &[
-                    (&snap.current_owner, &snap.states),
-                    (&after.current_owner, &after.states),
-                ],
-            )
-        } else {
-            Vec::new()
-        };
-        // Always merge (entry ⊔ post-body) into `own`. The convergence
-        // test compares the PREVIOUS entry against THIS MERGED state
-        // (not the raw post-body state — see the proof comment): the
-        // merged state is what the next pass would walk from.
-        let prev_entry = entry_state.clone();
-        merge_loop_plain(own, entry_state, after, after_flows_off_end);
-        let differ = branch_states_differ(&prev_entry, own);
-        if !differ {
-            // Final polish (no feedback — see the proof comment).
-            for (owner, state) in writes {
-                own.states.insert(owner, state);
+    pub(crate) fn advance(
+        &mut self,
+        w: &mut Walk<'_>,
+        own: &mut Ownership,
+        _sink: &mut DiagSink,
+        _sidecar: &mut FunctionSidecar,
+    ) -> super::walk::machine::WalkAdvance {
+        loop {
+            match self.stage {
+                LoopStage::Condition => {
+                    self.stage = LoopStage::Prepare;
+                    return super::walk::machine::WalkAdvance::seen(
+                        self.cond_region.clone(),
+                        self.epoch,
+                    );
+                }
+                LoopStage::Prepare => {
+                    self.prepare(w, own);
+                    self.stage = LoopStage::Propagate;
+                }
+                LoopStage::Propagate => {
+                    if !self.pass_active {
+                        if self.converged || self.pass_count == self.height_cap {
+                            debug_assert!(
+                                self.converged,
+                                "INTERNAL ANALYSIS FAILURE: loop propagate did not converge within \
+                                 the lattice-height bound ({} passes) — the monotone operator regressed",
+                                self.pass_count,
+                            );
+                            if !self.converged {
+                                let _discarded = own.take_branch(
+                                    self.snap.as_ref().expect("loop snapshot").clone(),
+                                );
+                            }
+                            own.owner_hazards.truncate(self.hazard_count);
+                            self.stage = LoopStage::Check;
+                            continue;
+                        }
+                        self.pass_count += 1;
+                        self.pass_active = true;
+                        let pass_epoch = w.next_epoch();
+                        return super::walk::machine::WalkAdvance::staging(
+                            self.region.clone(),
+                            pass_epoch,
+                            DiagSink::new(),
+                            FunctionSidecar::new(w.tir.name, w.tir.instructions.len()),
+                        );
+                    }
+                    self.pass_active = false;
+                    let after = own.take_branch(BranchState::default());
+                    let snap = self.snap.as_ref().expect("loop snapshot");
+                    let writes = if self.after_flows_off_end {
+                        binding_state_writes(
+                            &snap.current_owner,
+                            &[
+                                (&snap.current_owner, &snap.states),
+                                (&after.current_owner, &after.states),
+                            ],
+                        )
+                    } else {
+                        Vec::new()
+                    };
+                    let previous = self.entry_state.take().expect("loop entry state");
+                    let differ = {
+                        let prior = previous.clone();
+                        merge_loop_plain(own, previous, after, self.after_flows_off_end);
+                        branch_states_differ(&prior, own)
+                    };
+                    if !differ {
+                        for (owner, state) in writes {
+                            own.states.insert(owner, state);
+                        }
+                        self.converged = true;
+                    } else {
+                        self.entry_state = Some(own.snapshot_branch());
+                    }
+                }
+                LoopStage::Check => {
+                    self.stage = LoopStage::Final;
+                    let pass_epoch = w.next_epoch();
+                    return super::walk::machine::WalkAdvance::phase(
+                        self.region.clone(),
+                        pass_epoch,
+                    );
+                }
+                LoopStage::Final => {
+                    let after = own.take_branch(BranchState::default());
+                    merge_non_monotone(
+                        own,
+                        self.snap.take().expect("loop snapshot"),
+                        after,
+                        self.after_flows_off_end,
+                    );
+                    w.active_loop_carried_homes.pop();
+                    remove_loop_deferred_views(own, self.loop_inst);
+                    for &b in self.region.iter().chain(self.cond_region.iter()) {
+                        w.mark_processed(b);
+                        w.epoch[b.0 as usize] = self.epoch;
+                    }
+                    w.last_inst = Some(self.loop_inst);
+                    return super::walk::machine::WalkAdvance::Done;
+                }
             }
-            converged = true;
-            break;
         }
-        entry_state = own.snapshot_branch();
-    }
-    debug_assert!(
-        converged,
-        "INTERNAL ANALYSIS FAILURE: loop propagate did not converge within \
-         the lattice-height bound ({} passes) — the monotone operator regressed",
-        pass_count,
-    );
-    if !converged {
-        // Defensive arm (unreachable — see the proof comment): restore
-        // the pre-loop snapshot. Its conservative direction is
-        // documented there: leak-safe, never a UAF; diagnostics may
-        // under-report.
-        let _discarded = own.take_branch(snap.clone());
     }
 
-    // Phase 2 — single check pass against the real sink and sidecar:
-    // a binding moved inside the body without rebinding before the
-    // back-edge surfaces as E0020 on this pass. Speculative hazards are
-    // discarded with their staging sidecars; only this pass drives
-    // displacement validation.
-    own.owner_hazards.truncate(hazard_count);
-    let pass_epoch = w.next_epoch();
-    w.walk_phase(own, sink, sidecar, &region, pass_epoch);
-    // Final merge with the loop-entry snapshot: the loop may execute
-    // zero times, so post-loop state = entry ⊔ post-check-pass.
-    let after = own.take_branch(BranchState::default());
-    merge_non_monotone(own, snap, after, after_flows_off_end);
-    w.active_loop_carried_homes.pop();
-    // P4 (final spec §3.2): projections whose last read is inside this
-    // loop (but whose creation is outside it) die at the loop's exit.
-    remove_loop_deferred_views(own, loop_inst);
-    for &b in region.iter().chain(cond_region.iter()) {
-        w.mark_processed(b);
-        // Re-stamp the finished region with the enclosing generation's
-        // epoch: enclosing once-ever walks (the id-ordered driver, an
-        // arm block list) skip it via the epoch guard, while the
-        // per-pass phase epochs above stay distinct.
-        w.epoch[b.0 as usize] = epoch;
+    fn prepare(&mut self, w: &mut Walk<'_>, own: &mut Ownership) {
+        let mut loop_carried_homes = HashSet::new();
+        for &b in &self.region {
+            for step in w.flow.block_steps(b) {
+                if w.tir.inst(step.inst).tag != TirTag::Assign {
+                    continue;
+                }
+                let view = w.tir.assign_view(step.inst);
+                if w.tir.inst(view.value).tag != TirTag::Match {
+                    continue;
+                }
+                let Some(write) = step.facts.write else {
+                    continue;
+                };
+                if write.kind != WriteKind::Replace {
+                    continue;
+                }
+                let Place::Local { ty, .. } = w.flow.place(write.place) else {
+                    continue;
+                };
+                if w.pool.needs_drop(*ty) && own.current_owner.contains_key(&write.place) {
+                    loop_carried_homes.insert(write.place);
+                }
+            }
+        }
+        for &home in &loop_carried_homes {
+            let dynamic_owner = Owner(home);
+            let Some(old_owner) = own.current_owner.insert(home, dynamic_owner) else {
+                continue;
+            };
+            if old_owner != dynamic_owner {
+                let state = own
+                    .states
+                    .get(&old_owner)
+                    .cloned()
+                    .unwrap_or(OwnerState::NotTracked);
+                own.states.insert(dynamic_owner, state);
+                if !own.current_owner.values().any(|owner| *owner == old_owner) {
+                    own.states.remove(&old_owner);
+                }
+            }
+        }
+        w.loop_regions.push((self.loop_inst, self.region.clone()));
+        w.active_loop_carried_homes.push(loop_carried_homes);
+        self.after_flows_off_end = self.region.iter().any(|&b| {
+            matches!(
+                w.flow.term(b),
+                Terminator::Backedge { .. }
+                    | Terminator::Break { .. }
+                    | Terminator::Continue { .. }
+            )
+        });
+        let snap = own.snapshot_branch();
+        self.entry_state = Some(snap.clone());
+        self.snap = Some(snap);
+        self.hazard_count = own.owner_hazards.len();
     }
-    w.last_inst = Some(loop_inst);
-    Some(exit)
 }
 
 /// Per-instruction loop nesting as parent-pointer chains (see the

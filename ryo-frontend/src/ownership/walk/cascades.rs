@@ -1,16 +1,10 @@
 //! `if` / `elif` / `else` cascade analysis and the operand/step
-//! helpers the arm walks share: the CFG-join cascade driver
-//! (`analyze_if_cascade` — snapshot, per-arm walks, any-Moved-wins
-//! merge, arm-conditional Frees, join-time projection prune), the
-//! arm-reseat collector, the operand use-safety checks
-//! (`check_operands_moved`), and the small binding helpers the VarDecl
-//! /Assign steps seat values through (`rebind_to_init`,
-//! `inout_escape_owner`).
+//! helpers the arm walks share.
 
 use super::super::{
     BranchState, Owner, OwnerState, Ownership, RegionStop, ReseatDrop, UNTRACKED_PLACE,
     check_use_moved, collect_region, drain_dying_views, flow_owner_place, needs_tracking,
-    owner_sort_key, param_idx, prune_branch_dead_projections, walk_if_arm,
+    owner_sort_key, param_idx, prune_branch_dead_projections,
 };
 use super::Walk;
 use ryo_core::diag::DiagSink;
@@ -19,6 +13,7 @@ use ryo_core::ownership::FunctionSidecar;
 use ryo_core::tir::{Tir, TirData, TirRef, TirTag};
 use ryo_core::types::InternPool;
 use std::collections::HashSet;
+
 /// The `check_use_moved` half of the old `recurse_operands`: operand
 /// steps already ran (block iteration order), so only the parent's
 /// use-safety checks remain. Mirrors the old recursion's shapes.
@@ -44,7 +39,6 @@ pub(super) fn check_operands_moved(
             }
         }
         TirData::Slice { base, start, end } => {
-            // M8.4: slicing is a non-consuming read of the base.
             if needs_tracking(tir.inst(base).ty, pool) {
                 check_use_moved(tir, pool, own, sink, base, tir.span(base));
             }
@@ -55,7 +49,6 @@ pub(super) fn check_operands_moved(
             }
         }
         TirData::FieldAccess { object, .. } => {
-            // M9: a field access reads its object (non-consuming).
             if needs_tracking(tir.inst(object).ty, pool) {
                 check_use_moved(tir, pool, own, sink, object, tir.span(object));
             }
@@ -70,166 +63,225 @@ pub(super) fn check_operands_moved(
     }
 }
 
-/// CFG join for `if` / `elif` / `else`, driven by the recorded Flow IR
-/// arm blocks. Semantics identical to the old statement-recursive
-/// `analyze_if_stmt`: snapshot, walk each arm from the snapshot, merge
-/// (any-Moved-wins over arms that reach the join), schedule
-/// arm-conditional Frees for owners that diverge across arms, record
-/// conditional reseats, prune projections whose last use is inside the
-/// cascade. Block membership replaces the old TIR subtree sets; the
-/// else-less fallthrough is the (empty) recorded else block, walked
-/// uniformly. Returns the cascade's join block (continuation).
-#[allow(clippy::too_many_arguments)]
-pub(super) fn analyze_if_cascade(
-    w: &mut Walk<'_>,
-    own: &mut Ownership,
-    sink: &mut DiagSink,
-    sidecar: &mut FunctionSidecar,
-    fb: BlockId,
+pub(crate) struct IfFrame {
     if_inst: TirRef,
+    pub(crate) join: BlockId,
+    pub(crate) parent_region: Option<usize>,
+    pub(crate) region_exit: Option<BlockId>,
+    arm_entries: Vec<BlockId>,
+    arm_regions: Vec<Vec<BlockId>>,
+    cond_chains: Vec<(BlockId, BlockId)>,
+    cascade_set: HashSet<BlockId>,
+    snap: BranchState,
+    branch_results: Vec<BranchState>,
+    falls_through: Vec<bool>,
+    arm_lasts: Vec<Option<TirRef>>,
+    else_present: bool,
+    stage: IfStage,
+    current_arm: Option<IfArm>,
     epoch: u32,
-) -> Option<BlockId> {
-    let tir = w.tir;
-    let view = tir.if_stmt_view(if_inst);
-    let arms = w.flow.branch_arm_blocks(if_inst);
-    let join = arms.join;
-    // P4 lift (final spec §3.2): a projection whose last use is the
-    // condition is dead before any arm runs — drain now so every arm
-    // starts from the same freeze state. (The condition's steps ran in
-    // `fb` before this dispatch.)
-    drain_dying_views(own);
+}
 
-    // Arm body entries: then body, each elif's `then_` successor, the
-    // else/fallthrough block (empty for an else-less if).
-    let mut arm_entries: Vec<BlockId> = Vec::with_capacity(2 + view.elif_branches.len());
-    arm_entries.push(arms.then_block);
-    for &holder in &arms.elif_blocks {
-        let Terminator::Branch { then_, .. } = *w.flow.term(holder) else {
-            unreachable!("recorded elif block holds a Branch")
-        };
-        arm_entries.push(then_);
-    }
-    arm_entries.push(arms.else_block);
+enum IfStage {
+    Then,
+    ElifChain(usize),
+    ElifBody(usize),
+    Else,
+    Done,
+}
 
-    // The full cascade block set (cond chains + arm regions) precomputed
-    // for the per-arm freeze refinement and the join-time prune — the
-    // Flow IR replacement for the old `collect_reachable` subtree sets.
-    let mut cascade_blocks: Vec<BlockId> = vec![fb];
-    let mut arm_regions: Vec<Vec<BlockId>> = Vec::with_capacity(arm_entries.len());
-    for &entry in &arm_entries {
-        let (region, _) = collect_region(w.flow, &mut w.region_scratch, entry, |b| {
-            RegionStop::At(join).kind(b)
-        });
-        cascade_blocks.extend_from_slice(&region);
-        arm_regions.push(region);
-    }
-    let mut cond_chains: Vec<(BlockId, BlockId)> = Vec::with_capacity(arms.elif_blocks.len());
-    let Terminator::Branch { else_, .. } = *w.flow.term(fb) else {
-        unreachable!("cascade entry block holds a Branch")
-    };
-    let mut prev_else = else_;
-    for &holder in &arms.elif_blocks {
-        let (chain, _) = collect_region(w.flow, &mut w.region_scratch, prev_else, |b| {
-            RegionStop::Through(holder).kind(b)
-        });
-        cascade_blocks.extend_from_slice(&chain);
-        cond_chains.push((prev_else, holder));
-        let Terminator::Branch { else_, .. } = *w.flow.term(holder) else {
-            unreachable!("recorded elif block holds a Branch")
-        };
-        prev_else = else_;
-    }
-    debug_assert_eq!(prev_else, arms.else_block, "cascade else chain");
-    let cascade_set: HashSet<BlockId> = cascade_blocks.iter().copied().collect();
+struct IfArm {
+    index: usize,
+    saved: Vec<(TirRef, TirRef)>,
+    saved_last: Option<TirRef>,
+}
 
-    let snap = own.snapshot_branch();
-    let mut branch_results: Vec<BranchState> = Vec::with_capacity(arm_entries.len());
-    let mut falls_through: Vec<bool> = Vec::with_capacity(arm_entries.len());
-    let mut arm_lasts: Vec<Option<TirRef>> = Vec::with_capacity(arm_entries.len());
-
-    // Then arm (index 0).
-    let (state, falls, last) = walk_if_arm(
-        w,
-        own,
-        sink,
-        sidecar,
-        &arm_regions,
-        &cascade_set,
-        &snap,
-        0,
-        Some(arms.then_block),
-        join,
-        epoch,
-    );
-    branch_results.push(state);
-    falls_through.push(falls);
-    arm_lasts.push(last);
-
-    // Elif arms: the cond chain walks first (with the snapshot state,
-    // like the old visit_expr(elif.cond)), then the body.
-    for e in 0..view.elif_branches.len() {
-        let (chain_entry, holder) = cond_chains[e];
-        w.walk_region(
-            own,
-            sink,
-            sidecar,
-            chain_entry,
-            RegionStop::Through(holder),
-            epoch,
-        );
+impl IfFrame {
+    pub(crate) fn new(
+        w: &mut Walk<'_>,
+        own: &mut Ownership,
+        _sink: &mut DiagSink,
+        _sidecar: &mut FunctionSidecar,
+        fb: BlockId,
+        if_inst: TirRef,
+        epoch: u32,
+    ) -> (Self, BlockId) {
+        let view = w.tir.if_stmt_view(if_inst);
+        let arms = w.flow.branch_arm_blocks(if_inst);
+        let join = arms.join;
         drain_dying_views(own);
-        let body = arm_entries[1 + e];
-        let (state, falls, last) = walk_if_arm(
-            w,
-            own,
-            sink,
-            sidecar,
-            &arm_regions,
-            &cascade_set,
-            &snap,
-            1 + e,
-            Some(body),
+        let mut arm_entries: Vec<BlockId> = Vec::with_capacity(2 + view.elif_branches.len());
+        arm_entries.push(arms.then_block);
+        for &holder in &arms.elif_blocks {
+            let Terminator::Branch { then_, .. } = *w.flow.term(holder) else {
+                unreachable!("recorded elif block holds a Branch")
+            };
+            arm_entries.push(then_);
+        }
+        arm_entries.push(arms.else_block);
+        let mut cascade_blocks: Vec<BlockId> = vec![fb];
+        let mut arm_regions: Vec<Vec<BlockId>> = Vec::with_capacity(arm_entries.len());
+        for &entry in &arm_entries {
+            let (region, _) = collect_region(w.flow, &mut w.region_scratch, entry, |b| {
+                RegionStop::At(join).kind(b)
+            });
+            cascade_blocks.extend_from_slice(&region);
+            arm_regions.push(region);
+        }
+        let mut cond_chains: Vec<(BlockId, BlockId)> = Vec::with_capacity(arms.elif_blocks.len());
+        let Terminator::Branch { else_, .. } = *w.flow.term(fb) else {
+            unreachable!("cascade entry block holds a Branch")
+        };
+        let mut prev_else = else_;
+        for &holder in &arms.elif_blocks {
+            let (chain, _) = collect_region(w.flow, &mut w.region_scratch, prev_else, |b| {
+                RegionStop::Through(holder).kind(b)
+            });
+            cascade_blocks.extend_from_slice(&chain);
+            cond_chains.push((prev_else, holder));
+            let Terminator::Branch { else_, .. } = *w.flow.term(holder) else {
+                unreachable!("recorded elif block holds a Branch")
+            };
+            prev_else = else_;
+        }
+        debug_assert_eq!(prev_else, arms.else_block, "cascade else chain");
+        let cascade_set: HashSet<BlockId> = cascade_blocks.iter().copied().collect();
+        let snap = own.snapshot_branch();
+        (
+            Self {
+                if_inst,
+                join,
+                parent_region: None,
+                region_exit: None,
+                arm_entries,
+                arm_regions,
+                cond_chains,
+                cascade_set,
+                snap,
+                branch_results: Vec::with_capacity(2 + view.elif_branches.len()),
+                falls_through: Vec::with_capacity(2 + view.elif_branches.len()),
+                arm_lasts: Vec::with_capacity(2 + view.elif_branches.len()),
+                else_present: view.else_stmts.is_some(),
+                stage: IfStage::Then,
+                current_arm: None,
+                epoch,
+            },
             join,
-            epoch,
-        );
-        branch_results.push(state);
-        falls_through.push(falls);
-        arm_lasts.push(last);
+        )
     }
 
-    // Else arm — uniform walk; for an else-less if the region is the
-    // empty synthetic fallthrough block, which contributes the
-    // pre-branch state and reaches the join (the old pseudo-arm).
-    let else_key = if view.else_stmts.is_some() {
-        Some(arms.else_block)
-    } else {
-        None
-    };
-    let last_index = arm_entries.len() - 1;
-    let (state, falls, last) = walk_if_arm(
-        w,
-        own,
-        sink,
-        sidecar,
-        &arm_regions,
-        &cascade_set,
-        &snap,
-        last_index,
-        else_key,
-        join,
-        epoch,
-    );
-    branch_results.push(state);
-    falls_through.push(falls);
-    arm_lasts.push(last);
+    pub(crate) fn advance(
+        &mut self,
+        w: &mut Walk<'_>,
+        own: &mut Ownership,
+        _sink: &mut DiagSink,
+        sidecar: &mut FunctionSidecar,
+    ) -> super::machine::WalkAdvance {
+        if let Some(arm) = self.current_arm.take() {
+            self.finish_arm(w, own, arm);
+        }
+        loop {
+            match self.stage {
+                IfStage::Then => {
+                    self.stage = IfStage::ElifChain(0);
+                    self.start_arm(w, own, 0, Some(self.arm_entries[0]));
+                    return super::machine::WalkAdvance::seen(
+                        self.arm_regions[0].clone(),
+                        self.epoch,
+                    );
+                }
+                IfStage::ElifChain(index) => {
+                    if index == self.cond_chains.len() {
+                        self.stage = IfStage::Else;
+                        continue;
+                    }
+                    self.stage = IfStage::ElifBody(index);
+                    let (entry, holder) = self.cond_chains[index];
+                    return super::machine::WalkAdvance::Open {
+                        entry,
+                        stop: RegionStop::Through(holder),
+                        epoch: self.epoch,
+                    };
+                }
+                IfStage::ElifBody(index) => {
+                    drain_dying_views(own);
+                    self.stage = IfStage::ElifChain(index + 1);
+                    let arm_index = index + 1;
+                    self.start_arm(w, own, arm_index, Some(self.arm_entries[arm_index]));
+                    return super::machine::WalkAdvance::seen(
+                        self.arm_regions[arm_index].clone(),
+                        self.epoch,
+                    );
+                }
+                IfStage::Else => {
+                    self.stage = IfStage::Done;
+                    let index = self.arm_entries.len() - 1;
+                    let key = self.else_present.then_some(self.arm_entries[index]);
+                    self.start_arm(w, own, index, key);
+                    return super::machine::WalkAdvance::seen(
+                        self.arm_regions[index].clone(),
+                        self.epoch,
+                    );
+                }
+                IfStage::Done => {
+                    self.finish(w, own, sidecar);
+                    return super::machine::WalkAdvance::Done;
+                }
+            }
+        }
+    }
 
-    // Schedule arm-conditional Frees for owners that diverge across
-    // arms (Valid in some, Moved in others): for each Valid arm, anchor
-    // a Free after that arm's last instruction — the anchor's block
-    // membership gates it to the arm's path. The else-less fallthrough
-    // pseudo-arm deliberately schedules nothing (the post-merge
-    // last-use pass covers owners still Valid at the join).
-    {
+    fn start_arm(
+        &mut self,
+        w: &mut Walk<'_>,
+        own: &mut Ownership,
+        index: usize,
+        refine_key: Option<BlockId>,
+    ) {
+        let saved = refine_key.map(|key| {
+            let arm_set: HashSet<BlockId> = self.arm_regions[index].iter().copied().collect();
+            let analysis = own.arm_last_reads.get(&key).cloned();
+            super::super::refine_view_liveness_for_arm(
+                own,
+                w.flow,
+                &self.cascade_set,
+                &arm_set,
+                analysis.as_ref(),
+            )
+        });
+        let saved_last = w.last_inst;
+        w.last_inst = None;
+        self.current_arm = Some(IfArm {
+            index,
+            saved: saved.unwrap_or_default(),
+            saved_last,
+        });
+    }
+
+    fn finish_arm(&mut self, w: &mut Walk<'_>, own: &mut Ownership, arm: IfArm) {
+        let arm_last = w.last_inst;
+        w.last_inst = arm.saved_last;
+        super::super::restore_view_last_use(own, arm.saved);
+        if self.region_exit.is_none() {
+            self.region_exit = self.arm_regions[arm.index].iter().find_map(|&block| {
+                matches!(
+                    w.flow.term(block),
+                    Terminator::Return { .. }
+                        | Terminator::ReturnVoid
+                        | Terminator::Break { .. }
+                        | Terminator::Continue { .. }
+                )
+                .then_some(block)
+            });
+        }
+        self.branch_results.push(own.take_branch(self.snap.clone()));
+        self.falls_through
+            .push(arm_reaches_join(w, &self.arm_regions[arm.index], self.join));
+        self.arm_lasts.push(arm_last);
+    }
+
+    fn finish(&mut self, w: &mut Walk<'_>, own: &mut Ownership, sidecar: &mut FunctionSidecar) {
+        let arms = w.flow.branch_arm_blocks(self.if_inst);
         let is_tracked = |own: &Ownership, owner: Owner| match owner.inst_tirref(w.flow) {
             Some(_) => true,
             None => {
@@ -238,7 +290,8 @@ pub(super) fn analyze_if_cascade(
             }
         };
         let span_of = |_: &Ownership, owner: Owner| owner.span(w.flow, w.tir);
-        let mut all_keys: HashSet<Owner> = branch_results
+        let mut all_keys: HashSet<Owner> = self
+            .branch_results
             .iter()
             .flat_map(|s| s.states.keys().copied())
             .collect();
@@ -248,18 +301,22 @@ pub(super) fn analyze_if_cascade(
             if !is_tracked(own, owner) {
                 continue;
             }
-            let any_moved = branch_results.iter().zip(&falls_through).any(|(s, &ft)| {
-                ft && matches!(s.states.get(&owner), Some(OwnerState::Moved { .. }))
-            });
+            let any_moved = self
+                .branch_results
+                .iter()
+                .zip(&self.falls_through)
+                .any(|(s, &ft)| {
+                    ft && matches!(s.states.get(&owner), Some(OwnerState::Moved { .. }))
+                });
             if !any_moved {
                 continue;
             }
-            for (i, s) in branch_results.iter().enumerate() {
-                if !falls_through[i] {
+            for (i, s) in self.branch_results.iter().enumerate() {
+                if !self.falls_through[i] {
                     continue;
                 }
                 if matches!(s.states.get(&owner), Some(OwnerState::Valid))
-                    && let Some(after) = arm_lasts[i]
+                    && let Some(after) = self.arm_lasts[i]
                 {
                     sidecar.drops.push(DropOp {
                         position: DropPosition::AfterStep { inst: after },
@@ -269,19 +326,9 @@ pub(super) fn analyze_if_cascade(
                 }
             }
         }
-    }
-
-    // Record conditional reseats — bindings that SOME arm reseated
-    // while other arms kept the pre-if owner. The dead-store drain
-    // converts a record into block-keyed `ConditionalDeadDrop`s when
-    // the reassigned value is never read afterwards.
-    {
         let mut arm_states: Vec<(BlockId, &BranchState, &[BlockId])> =
-            Vec::with_capacity(branch_results.len());
-        for (i, state) in branch_results.iter().enumerate() {
-            // The reseat record keys: then body block, the elif
-            // BRANCH-HOLDER blocks (codegen fires dead drops when it
-            // enters the arm), and the else/fallthrough block.
+            Vec::with_capacity(self.branch_results.len());
+        for (i, state) in self.branch_results.iter().enumerate() {
             let key = if i == 0 {
                 arms.then_block
             } else if i <= arms.elif_blocks.len() {
@@ -289,13 +336,9 @@ pub(super) fn analyze_if_cascade(
             } else {
                 arms.else_block
             };
-            arm_states.push((key, state, &arm_regions[i]));
+            arm_states.push((key, state, &self.arm_regions[i]));
         }
-        for (home, owner_pre) in &snap.current_owner {
-            // Only tracked (Move-typed) locals need drops; Copy values
-            // have no buffer, and params are covered by the exit-time
-            // param free. The home's own type decides (params'
-            // home places are their own).
+        for (home, owner_pre) in &self.snap.current_owner {
             let home_ty = match w.flow.place(*home) {
                 ryo_core::flow::Place::Local { ty, .. } => *ty,
                 ryo_core::flow::Place::Param { ty, .. } => *ty,
@@ -305,7 +348,7 @@ pub(super) fn analyze_if_cascade(
                 continue;
             }
             let name = w.flow.place(*home).name();
-            let pre_binding = snap.binding_of_name.get(&name).copied();
+            let pre_binding = self.snap.binding_of_name.get(&name).copied();
             let mut reseat_owners: HashSet<Owner> = HashSet::new();
             let mut untouched_arms: Vec<BlockId> = Vec::new();
             for (block, b, region) in &arm_states {
@@ -317,36 +360,27 @@ pub(super) fn analyze_if_cascade(
                     } else {
                         reseat_owners.insert(owner_b);
                     }
-                } else {
-                    // The arm shadows `name` with an arm-local binding
-                    // (a different home place). An earlier reseat of
-                    // the PRE-branch binding may hide anywhere in the
-                    // arm (including nested conditionals): scan the
-                    // arm's blocks for Assigns attributed to the
-                    // pre-branch binding.
-                    if let Some(binding) = pre_binding {
-                        collect_arm_reseats(
-                            w.tir,
-                            w.pool,
-                            sidecar,
-                            w.flow,
-                            region,
-                            binding,
-                            &mut reseat_owners,
-                        );
-                    }
+                } else if let Some(binding) = pre_binding {
+                    collect_arm_reseats(
+                        w.tir,
+                        w.pool,
+                        sidecar,
+                        w.flow,
+                        region,
+                        binding,
+                        &mut reseat_owners,
+                    );
                 }
             }
-            // Dedup: loop-convergence re-walks revisit this if.
             if !reseat_owners.is_empty()
                 && !untouched_arms.is_empty()
                 && !own
                     .reseat_drops
                     .iter()
-                    .any(|d| d.if_stmt == if_inst && d.name == name)
+                    .any(|d| d.if_stmt == self.if_inst && d.name == name)
             {
                 own.reseat_drops.push(ReseatDrop {
-                    if_stmt: if_inst,
+                    if_stmt: self.if_inst,
                     name,
                     pre_owner: *owner_pre,
                     reseat_owners,
@@ -354,25 +388,18 @@ pub(super) fn analyze_if_cascade(
                 });
             }
         }
+        own.merge_branches(
+            std::mem::take(&mut self.branch_results),
+            &self.falls_through,
+        );
+        prune_branch_dead_projections(own, w.flow, &self.cascade_set);
+        w.last_inst = Some(self.if_inst);
     }
-
-    // `own` already holds the pre-if non-monotone fields (installed by
-    // the last take_branch) — merge every arm's end state into them.
-    own.merge_branches(branch_results, &falls_through);
-    // P4 (final spec §3.2): a view whose last use is inside this if is
-    // dead at the join on every path — prune it from the merged freeze
-    // ranges.
-    prune_branch_dead_projections(own, w.flow, &cascade_set);
-    w.last_inst = Some(if_inst);
-    Some(join)
 }
 
 /// Collect every `Assign` value in the arm's blocks (including nested
 /// conditionals) that stores into `binding` — the pre-branch binding a
-/// shadowing arm took the name from. Flow IR replacement for the old
-/// statement-recursive `collect_arm_reseats`: block membership covers
-/// exactly the arm's reachable blocks, and `sidecar.assign_binding`
-/// (stamped when each Assign step ran) attributes the reseat.
+/// shadowing arm took the name from.
 pub(crate) fn collect_arm_reseats(
     tir: &Tir,
     pool: &InternPool,
@@ -399,26 +426,12 @@ pub(crate) fn collect_arm_reseats(
 }
 
 /// Seat the value `init` resolves to as the current owner of the
-/// binding home place (the `VarDecl`/`Assign` step's write fact). The
-/// seat is the RESOLVED owner (a fresh temp for producers, the source
-/// binding's seated owner for `x = y`), never the home itself — free
-/// targets derived from it must map through the binding tables to the
-/// right home slot. After a consume, the source owner is `Moved`; the
-/// re-validated seat gives subsequent reads a `Valid` owner instead of
-/// tripping over the just-moved value.
+/// binding home place (the `VarDecl`/`Assign` step's write fact).
 pub(crate) fn rebind_to_init(own: &mut Ownership, home: PlaceId, init: TirRef) -> Owner {
-    // The seat is the initializer EXPRESSION's own place: fresh for
-    // every rebind (a `Var` init seats the read's place — a slot
-    // distinct from the source binding's seated owner, so the source's
-    // `Moved` state is never resurrected), and value-identity for the
-    // free targets derived from it. A place-less initializer
-    // (error-shaped TIR) seats the shared untracked owner.
     let owner = match own.inst_place[init.index()] {
         Some(p) => Owner(p),
         None => Owner(UNTRACKED_PLACE),
     };
-    // The untracked sentinel never enters the lattice (nothing owns
-    // it; stamping it Valid would put it in the exit-time passes).
     if owner.0 != UNTRACKED_PLACE {
         own.states.insert(owner, OwnerState::Valid);
     }
@@ -428,10 +441,20 @@ pub(crate) fn rebind_to_init(own: &mut Ownership, home: PlaceId, init: TirRef) -
 
 /// True if `owner` is the value currently seated in an `inout str`
 /// parameter's home place (escapes through the write-back pointer at
-/// exit).
+/// function exit).
 pub(crate) fn inout_escape_owner(own: &Ownership, owner: Owner) -> bool {
     own.inout_str_params.iter().any(|n| {
         let idx = own.param_index[n];
         own.current_owner.get(&own.param_places[idx]) == Some(&owner)
+    })
+}
+
+/// True when the walked arm region's exit reaches `join`.
+pub(crate) fn arm_reaches_join(w: &Walk<'_>, region: &[BlockId], join: BlockId) -> bool {
+    region.iter().any(|&b| {
+        matches!(
+            w.flow.term(b),
+            Terminator::Goto { target } if *target == join
+        )
     })
 }

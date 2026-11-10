@@ -618,8 +618,7 @@ pub(crate) fn finalize_cleanup(
         ctx.pool,
         own,
         sidecar,
-        &ctx.body_stmts,
-        None,
+        ctx.body_stmts,
         &ctx.dominators,
     );
 

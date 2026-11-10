@@ -8,19 +8,19 @@
 //! record the exit-path epilogue. `BoolAnd`/`BoolOr` splits, elif
 //! branches, loop tests and backedges carry no payload and need nothing.
 //!
-//! Region walks (arms, loop bodies) recurse through the same
-//! step/terminator machinery and mark their blocks visited, so the
-//! outer driver never re-processes them; join/exit blocks stay unmarked
-//! and are processed later with the merged state, exactly where the old
+//! Region walks (arms, loop bodies) suspend their continuations on one
+//! explicit stack and mark their blocks visited, so the outer driver
+//! never re-processes them; join/exit blocks stay unmarked and are
+//! processed later with the merged state, exactly where the old
 //! recursive statement walk resumed after an arm/loop body.
 
 use super::{
     BorrowedAction, HazardKind, Owner, OwnerState, Ownership, PromoCandidate, analyze_destructure,
-    analyze_enum_lit, analyze_loop, analyze_match_switch, check_field_target_projected,
-    check_source_projected, check_use_moved, consume_for_assignment, consume_struct_lit_fields,
-    consume_underlying, consumed_binding_name, drain_dying_views, field_path_of, needs_tracking,
-    owner_name_for_diag, owner_sort_key, projection_root, push_unique, record_return_epilogue,
-    register_projection, rule7_owner_name, struct_base_name, struct_root,
+    analyze_enum_lit, check_field_target_projected, check_source_projected, check_use_moved,
+    consume_for_assignment, consume_struct_lit_fields, consume_underlying, consumed_binding_name,
+    drain_dying_views, field_path_of, needs_tracking, owner_name_for_diag, owner_sort_key,
+    projection_root, push_unique, record_return_epilogue, register_projection, rule7_owner_name,
+    struct_base_name, struct_root,
 };
 use crate::builtins::{is_borrowed_scalar_param, view_borrow_params};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
@@ -31,8 +31,9 @@ use ryo_core::types::{InternPool, StringId, TypeKind};
 use std::collections::{HashMap, HashSet};
 
 mod cascades;
+pub(crate) mod machine;
 
-use cascades::{analyze_if_cascade, check_operands_moved};
+use cascades::check_operands_moved;
 pub(crate) use cascades::{inout_escape_owner, rebind_to_init};
 
 /// How a region walk treats its boundary block.
@@ -127,7 +128,7 @@ pub(crate) fn collect_region(
 /// returns only the join — region collection must include EVERYTHING
 /// the enclosing region will visit, so if-cascade arms and match arms
 /// expand here and the DFS is bounded only by the caller's stop block.
-fn region_successors(flow: &Flow, b: BlockId) -> Vec<BlockId> {
+pub(crate) fn region_successors(flow: &Flow, b: BlockId) -> Vec<BlockId> {
     match *flow.term(b) {
         Terminator::Goto { target } => vec![target],
         Terminator::Branch { then_, else_, .. } => vec![then_, else_],
@@ -402,154 +403,6 @@ impl<'a> Walk<'a> {
         }
         self.epoch[b.0 as usize] = epoch;
         true
-    }
-
-    /// Open-ended region walk (the outer driver, if/match cond
-    /// chains): DFS preorder from `entry`, stopping per `stop`.
-    /// Returns true when the `At` boundary was reached.
-    pub(crate) fn walk_region(
-        &mut self,
-        own: &mut Ownership,
-        sink: &mut DiagSink,
-        sidecar: &mut FunctionSidecar,
-        entry: BlockId,
-        stop: RegionStop,
-        epoch: u32,
-    ) -> bool {
-        let mut reached_stop = false;
-        let mut stack = vec![entry];
-        while let Some(b) = stack.pop() {
-            if stop.excludes(b) {
-                reached_stop = true;
-                continue;
-            }
-            if !self.enter_seen(b, epoch) {
-                continue;
-            }
-            let conts = self.visit_block(own, sink, sidecar, b, epoch);
-            if stop.freezes(b) {
-                continue;
-            }
-            for c in conts.into_iter().flatten().rev() {
-                stack.push(c);
-            }
-        }
-        reached_stop
-    }
-
-    /// Bounded region walk (if/match arms, loop-body fixed points):
-    /// visits exactly the precomputed `list`, ignoring continuations
-    /// (every block a construct dispatch would reach is a list member).
-    pub(crate) fn walk_block_list(
-        &mut self,
-        own: &mut Ownership,
-        sink: &mut DiagSink,
-        sidecar: &mut FunctionSidecar,
-        list: &[BlockId],
-        epoch: u32,
-    ) {
-        for &b in list {
-            if !self.enter_seen(b, epoch) {
-                continue;
-            }
-            let _ = self.visit_block(own, sink, sidecar, b, epoch);
-        }
-    }
-
-    /// Bounded region walk for fixed-point passes: visits exactly
-    /// `list`, allowing re-visits across passes (per-pass epoch) but
-    /// never within one.
-    pub(crate) fn walk_phase(
-        &mut self,
-        own: &mut Ownership,
-        sink: &mut DiagSink,
-        sidecar: &mut FunctionSidecar,
-        list: &[BlockId],
-        epoch: u32,
-    ) {
-        for &b in list {
-            if !self.enter_epoch(b, epoch) {
-                continue;
-            }
-            let _ = self.visit_block(own, sink, sidecar, b, epoch);
-        }
-    }
-
-    /// Process one block's steps, then dispatch its terminator.
-    /// Returns the continuation blocks (a `BoolAnd`/`BoolOr` rhs+join, a
-    /// cascade/match/loop join) in visit order.
-    fn visit_block(
-        &mut self,
-        own: &mut Ownership,
-        sink: &mut DiagSink,
-        sidecar: &mut FunctionSidecar,
-        b: BlockId,
-        epoch: u32,
-    ) -> [Option<BlockId>; 2] {
-        let dead = self.flow.blocks[b.0 as usize].unreachable;
-        for step in self.flow.block_steps(b) {
-            self.process_step(own, sink, sidecar, *step, dead);
-        }
-        match *self.flow.term(b) {
-            Terminator::Goto { target } => [Some(target), None],
-            Terminator::Branch { then_, else_, .. } => match self.flow.branch_if(b) {
-                Some(if_inst) => [
-                    analyze_if_cascade(self, own, sink, sidecar, b, if_inst, epoch),
-                    None,
-                ],
-                None => [Some(then_), Some(else_)],
-            },
-            Terminator::Switch { match_inst, .. } => [
-                analyze_match_switch(self, own, sink, sidecar, b, match_inst, epoch),
-                None,
-            ],
-            Terminator::While { .. } | Terminator::For { .. } => {
-                [analyze_loop(self, own, sink, sidecar, b, epoch), None]
-            }
-            Terminator::Return { .. } => {
-                // The return's own steps (the operand expression) ran
-                // above; the payload instruction is the consumer: E1 /
-                // the move-or-borrowed transition, then the exit-path
-                // epilogue snapshot.
-                if let Some(payload) = self.flow.term_payload(b) {
-                    self.analyze_return(own, sink, payload);
-                    record_return_epilogue(self.tir, self.flow, own, payload);
-                }
-                [None, None]
-            }
-            Terminator::ReturnVoid => {
-                // The implicit end-of-body `ReturnVoid` carries no
-                // payload (no TIR instruction exists for it) — the
-                // promo fallthrough backstop and synthesized-return
-                // epilogue own that path, exactly as when the old walk
-                // saw no explicit return statement.
-                if let Some(payload) = self.flow.term_payload(b) {
-                    record_return_epilogue(self.tir, self.flow, own, payload);
-                }
-                [None, None]
-            }
-            Terminator::Backedge { .. }
-            | Terminator::Break { .. }
-            | Terminator::Continue { .. }
-            | Terminator::Unreachable
-            | Terminator::WhileTest { .. }
-            | Terminator::ForTest { .. } => [None, None],
-            Terminator::Call { .. } => {
-                // A diverging call (`panic`, …): the call instruction
-                // is the terminator payload, never a step, but it still
-                // needs the Call analysis — the borrowed-scalar arg
-                // un-seeding and the Rule-7 partition run here (the arg
-                // operand steps already ran above). There is no
-                // continuation: `next` is an unreachable block the
-                // outer driver processes as dead code.
-                let payload = self
-                    .flow
-                    .term_payload(b)
-                    .expect("diverging calls carry their instruction");
-                self.analyze_call(own, sink, payload);
-                [None, None]
-            }
-        }
     }
 
     /// Handle one stepped instruction. Operand steps have already run

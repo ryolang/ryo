@@ -12,6 +12,7 @@ mod frees_w0003;
 mod frees_w0004;
 mod inout;
 mod jump_defensive_emit;
+mod liveness;
 mod loops;
 mod match_;
 mod merge;

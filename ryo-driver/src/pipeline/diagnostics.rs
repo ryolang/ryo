@@ -41,21 +41,25 @@ fn render_diags(diags: &[Diag], input: &str, source_name: &str) -> Result<(), Co
     let mut sorted = regular;
     sorted.sort_by_key(|d| (d.span.start, d.span.end));
     for d in sorted {
-        emit_one(d, source_name, &source, &byte_to_char)?;
+        emit_one(d, source_name, input, &source, &byte_to_char)?;
     }
     for d in truncation {
-        emit_one(d, source_name, &source, &byte_to_char)?;
+        emit_one(d, source_name, input, &source, &byte_to_char)?;
     }
     Ok(())
 }
 
 /// Prefix table mapping byte offsets to character offsets: entry `i`
 /// holds the char offset of the char starting at byte `i`. The final
-/// entry holds the total char count. Compiler spans always sit on char
-/// boundaries (the lexer slices tokens on them), so interior bytes of a
-/// multi-byte char — left at their zero-initialized value — are never
-/// queried; out-of-range lookups fall back to the char length.
+/// entry holds the total char count. ASCII uses an empty table because
+/// its byte and character offsets are identical. Compiler spans always
+/// sit on char boundaries, so interior bytes of a multi-byte char — left
+/// at their zero-initialized value — are never queried; out-of-range
+/// lookups fall back to the char length.
 fn byte_to_char_offsets(input: &str) -> Vec<usize> {
+    if input.is_ascii() {
+        return Vec::new();
+    }
     let mut offsets = vec![0; input.len() + 1];
     let mut chars = 0;
     for (byte, _) in input.char_indices() {
@@ -68,6 +72,9 @@ fn byte_to_char_offsets(input: &str) -> Vec<usize> {
 
 /// Convert a byte span to the char span ariadne's `Source` expects.
 fn to_char_span(offsets: &[usize], span: std::ops::Range<usize>) -> std::ops::Range<usize> {
+    if offsets.is_empty() {
+        return span;
+    }
     let fallback = *offsets
         .last()
         .expect("the table always has the len+1 entry");
@@ -75,15 +82,27 @@ fn to_char_span(offsets: &[usize], span: std::ops::Range<usize>) -> std::ops::Ra
         ..offsets.get(span.end).copied().unwrap_or(fallback)
 }
 
+fn source_line_is_long(input: &str, offset: usize) -> bool {
+    const MAX_SOURCE_LINE_BYTES: usize = 16 * 1024;
+    let offset = offset.min(input.len());
+    let line_start = input[..offset].rfind('\n').map_or(0, |index| index + 1);
+    let line_end = input[offset..]
+        .find('\n')
+        .map_or(input.len(), |index| offset + index);
+    line_end - line_start > MAX_SOURCE_LINE_BYTES
+}
+
 fn emit_one(
     d: &Diag,
     source_name: &str,
+    input: &str,
     source: &Source<&str>,
     byte_to_char: &[usize],
 ) -> Result<(), CompilerError> {
     emit_one_with_writer(
         d,
         source_name,
+        input,
         source,
         byte_to_char,
         &mut std::io::stderr().lock(),
@@ -93,10 +112,17 @@ fn emit_one(
 fn emit_one_with_writer<W: std::io::Write>(
     d: &Diag,
     source_name: &str,
+    input: &str,
     source: &Source<&str>,
     byte_to_char: &[usize],
     out: &mut W,
 ) -> Result<(), CompilerError> {
+    if source_line_is_long(input, d.span.start) {
+        return crate::output::write_and_flush(
+            out,
+            format_args!("{}: {}\n", diag_code_str(d.code), d.message),
+        );
+    }
     let kind = match d.severity {
         Severity::Error => ReportKind::Error,
         Severity::Warning => ReportKind::Warning,
@@ -486,9 +512,10 @@ mod tests {
 
     #[test]
     fn byte_to_char_offsets_map_boundaries() {
-        // Pure ASCII: byte offset == char offset.
+        // Pure ASCII: byte offset == char offset, so no table is needed.
         let ascii = byte_to_char_offsets("ab\ncd");
-        assert_eq!(ascii, vec![0, 1, 2, 3, 4, 5]);
+        assert!(ascii.is_empty());
+        assert_eq!(to_char_span(&ascii, 1..4), 1..4);
 
         // Multi-byte chars: byte offsets of later chars exceed their
         // char offsets (emoji are 4 bytes each).
@@ -549,6 +576,7 @@ mod tests {
         emit_one_with_writer(
             &diag,
             "test.ryo",
+            input,
             &Source::from(input),
             &byte_to_char_offsets(input),
             &mut writer,
@@ -574,6 +602,7 @@ mod tests {
         emit_one_with_writer(
             &diag,
             "test.ryo",
+            input,
             &Source::from(input),
             &byte_to_char_offsets(input),
             &mut writer,
@@ -581,5 +610,34 @@ mod tests {
         .expect("closed pipe should be ignored");
 
         assert!(writer.output.is_empty());
+    }
+
+    #[test]
+    fn pathological_source_line_uses_compact_diagnostic() {
+        let input = format!("{}err\n", "\t".repeat(20_000));
+        let diag = Diag::warning(
+            ryo_core::span::Span::new(20_000, 20_003),
+            DiagCode::DeadStore,
+            "value `err` is declared but never used",
+        );
+        let mut output = Vec::new();
+
+        emit_one_with_writer(
+            &diag,
+            "test.ryo",
+            &input,
+            &Source::from(input.as_str()),
+            &byte_to_char_offsets(&input),
+            &mut output,
+        )
+        .expect("compact diagnostic should render");
+
+        let output = String::from_utf8(output).expect("diagnostic should be UTF-8");
+        assert!(
+            output.len() < 1_000,
+            "pathological source line should be omitted, got {} bytes",
+            output.len()
+        );
+        assert!(output.contains("value `err` is declared but never used"));
     }
 }

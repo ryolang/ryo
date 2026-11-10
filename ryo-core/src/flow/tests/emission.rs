@@ -393,6 +393,57 @@ fn nested_match_in_elif_condition_records_actual_join() {
 }
 
 #[test]
+fn short_circuit_match_elif_records_boolean_join() {
+    let mut cx = Ctx::new();
+    let bool_ty = cx.pool.bool_();
+    let mut b = cx.builder();
+    let first_cond = b.bool_const(false, bool_ty, sp());
+    let lhs = b.bool_const(true, bool_ty, sp());
+    let scrut = b.bool_const(true, bool_ty, sp());
+    let arm = b.bool_const(true, bool_ty, sp());
+    let m = b.match_expr(
+        scrut,
+        bool_ty,
+        &[TypedMatchArm {
+            span: sp(),
+            discriminant: crate::tir::Discriminant::Wildcard,
+            bindings: &[],
+            guards: &[],
+            body: TypedMatchBody::Expr(arm),
+        }],
+        sp(),
+    );
+    let condition = b.binary(TirTag::BoolAnd, bool_ty, lhs, m, sp());
+    let ifs = b.if_stmt(
+        first_cond,
+        &[],
+        &[(condition, Vec::new())],
+        Some(&[]),
+        cx.void,
+        sp(),
+    );
+    let tir = b.finish(&[ifs]);
+
+    let flow = Flow::build(&tir, &cx.pool);
+    let arms = flow.branch_arm_blocks(ifs);
+    let boolean_join = flow.step_block_of(condition).expect("boolean join");
+    assert_eq!(arms.elif_blocks, [boolean_join]);
+    assert!(matches!(
+        flow.term(boolean_join),
+        Terminator::Branch { cond, .. } if *cond == condition
+    ));
+    let condition_entry = flow.term_block_of(m).expect("match terminator block");
+    let match_join = match flow.term(condition_entry) {
+        Terminator::Switch {
+            join: Some(join), ..
+        } => *join,
+        other => panic!("match must have a join, got {other:?}"),
+    };
+    assert_ne!(boolean_join, condition_entry);
+    assert_ne!(boolean_join, match_join);
+}
+
+#[test]
 fn deep_linear_expression_preserves_postorder() {
     let mut cx = Ctx::new();
     let int = cx.int;

@@ -849,9 +849,9 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Files:** ryo-frontend/src/astgen/match_.rs; ryo-frontend/src/astgen/expr.rs; ryo-frontend/src/astgen.rs
 
-**Summary:** Nested statement-form match and catch expressions recursed through arm statement lowering and overflowed during astgen. Iterative lowering now covers the smaller regressions, but the original 50,000-level statement-match source remains blocked by I-275's source-span range, and the original 50,000-level catch JIT remains blocked by I-274's recursive Flow traversal. The exact reproductions therefore cannot yet run end to end.
+**Summary:** Nested statement-form match and catch expressions recursed through arm statement lowering and overflowed during astgen. Iterative lowering now covers the smaller regressions, and the original 50,000-level catch reproduction succeeds through JIT and AOT. The original 50,000-level statement-match source remains blocked by I-275's source-span range, so that exact reproduction cannot yet run end to end.
 
-**Resolution:** Resolve I-275 so the statement-match source is representable and I-274 so the catch source reaches JIT, then enable both retained 50,000-level reproductions and verify them end to end. Do not close this issue on the smaller passing regressions alone.
+**Resolution:** Resolve I-275 so the statement-match source is representable, then enable the retained 50,000-level statement-match reproduction and verify it end to end. The catch reproduction is verified through JIT and AOT; do not close this issue until the statement-match source also passes.
 
 ---
 
@@ -881,19 +881,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-274 — Stack overflow emitting nested match arms in Flow
-
-**Severity:** Correctness / Hygiene
-**Area:** core-ir
-
-**Files:** ryo-core/src/flow/build.rs; ryo/tests/deep_expr_chain.rs
-
-**Summary:** After iterative astgen lowering, the original 50,000-level nested-catch source succeeds through UIR but still aborts during TIR/Flow construction. FlowBuilder::build_match calls emit_expr or emit_stmts for each arm at depth zero, so nested match arms never reach the existing expression fallback. This is a separate downstream traversal reset from I-270 and also blocks full JIT execution of the original catch reproduction.
-
-**Resolution:** Propagate depth through Flow match-arm expression and statement emission and move deep arm bodies to explicit continuations or the existing iterative fallback, preserving block order, scopes, terminators, and match-result storage. Add crash-contained nested match and catch tests through TIR, Flow, JIT, and AOT.
-
----
-
 ### I-275 — Deep match source spans exceed the UIR wire range
 
 **Severity:** Correctness / Hygiene
@@ -920,6 +907,19 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-277 — Debug join validation rescans nested match descendants
+
+**Severity:** Correctness / Hygiene
+**Area:** core-ir
+
+**Files:** ryo-core/src/flow/invariants.rs; ryo-core/src/flow/tests/emission.rs
+
+**Summary:** check_join_shapes revisits nested arm descendants for every switch. The 50,000-match debug regression takes about 952 seconds while optimized runs complete quickly.
+
+**Resolution:** Remove repeated descendant traversal or reuse prior reachability facts while preserving join validation, and add practical scaling coverage.
+
+---
+
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
@@ -928,6 +928,4 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
----
-
-<!-- issue-id high-water: 276 -->
+<!-- issue-id high-water: 279 -->

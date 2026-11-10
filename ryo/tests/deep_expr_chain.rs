@@ -110,7 +110,9 @@ fn assert_jit_prints(file_name: &str, src: &str, expected: &str) {
         run_ryo_command(&["run", file_name], &test_file).expect("Failed to run ryo run command");
     assert!(
         output.status.success(),
-        "expression compile failed. STDERR: {}",
+        "expression compile failed. STATUS: {} STDOUT: {} STDERR: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
@@ -597,8 +599,67 @@ fn jit_run_nested_statement_matches_50000() {
     );
 }
 
+fn alternating_match_control_source() -> &'static str {
+    r#"fn choose(value: int) -> int:
+	return match value:
+		0: 2
+		_: 3
+fn main():
+	selected = match true:
+		true: 1
+		false: 0
+	nested = match (match selected:
+		1: 0
+		_: 1
+	):
+		0: 4
+		_: 5
+	mut total = nested
+	for i in range((match true:
+		true: 0
+		false: 9
+	), (match true:
+		true: 2
+		false: 0
+	)):
+		total += i
+	if false:
+		total = 100
+	elif false or (match true:
+		true: true
+		false: false
+	):
+		total += choose(0)
+	else:
+		total = 200
+	print(total)
+"#
+}
+
 #[test]
-#[ignore = "I-274: blocked by recursive Flow match arms"]
+fn jit_run_alternating_match_control_positions() {
+    assert_jit_prints(
+        "alternating_match_control_positions.ryo",
+        alternating_match_control_source(),
+        "7",
+    );
+}
+
+#[test]
+fn aot_run_alternating_match_control_positions() {
+    assert_aot_prints(
+        "alternating_match_control_positions_aot",
+        alternating_match_control_source(),
+        "7",
+    );
+}
+
+#[test]
 fn jit_run_nested_catches_50000() {
     assert_jit_prints("nested_catches_50000.ryo", &nested_catches(50_000), "0");
+}
+
+#[test]
+fn aot_run_nested_catches_50000() {
+    assert_aot_prints("nested_catches_50000_aot", &nested_catches(50_000), "0");
 }

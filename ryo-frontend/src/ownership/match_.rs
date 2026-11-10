@@ -50,217 +50,299 @@ use std::collections::HashSet;
 /// `None` tells the caller there is no continuation. Errored matches
 /// never reach here — sema recovers with the error-typed `Unreachable`
 /// sentinel.
-pub(crate) fn analyze_match_switch(
-    w: &mut Walk<'_>,
-    own: &mut Ownership,
-    sink: &mut DiagSink,
-    sidecar: &mut FunctionSidecar,
-    sw: BlockId,
+pub(crate) struct MatchFrame {
     match_inst: TirRef,
+    scrutinee: TirRef,
+    scrutinee_ty: TypeId,
+    tracked: bool,
+    shared_catch: bool,
+    borrowed: bool,
+    aggregate_result: bool,
+    scrutinee_owner: Owner,
+    sw: BlockId,
+    pub(crate) join: Option<BlockId>,
+    arm_blocks: Vec<BlockId>,
+    tokens: Vec<TirRef>,
+    token_places: Vec<PlaceId>,
+    token_cursor: usize,
+    snap: BranchState,
+    arm_results: Vec<BranchState>,
+    falls_through: Vec<bool>,
+    arm_lasts: Vec<Option<TirRef>>,
+    next_arm: usize,
+    current_arm: Option<MatchArm>,
     epoch: u32,
-) -> Option<BlockId> {
-    let view = w.tir.match_view(match_inst);
-    if view.is_empty() {
-        // Defensive: sema diagnoses source-level; well-formed TIR
-        // always has at least the catch-all arm.
-        return None;
-    }
-    let scrutinee = view.scrutinee;
-    let scrutinee_ty = w.tir.inst(scrutinee).ty;
-    let tracked = needs_tracking(scrutinee_ty, w.pool);
-    // Whether ANY arm binds a non-`Copy` field by move — the consume
-    // authority for the scrutinee.
-    let any_consumes = view
-        .arms()
-        .flat_map(|arm| arm.bindings())
-        .any(|b| !w.pool.is_copy(b.ty));
-    // P4 lift (final spec §3.2), mirroring the if-condition drain: a
-    // projection whose last use is a read inside the scrutinee is dead
-    // before any arm runs.
-    drain_dying_views(own);
-    if tracked && !any_consumes {
-        // No arm consumes: nothing else will check the scrutinee read —
-        // a moved scrutinee is a use-after-move here.
-        check_use_moved(w.tir, w.pool, own, sink, scrutinee, w.tir.span(scrutinee));
-    }
-    // Borrow-ness is sourced from OWNERSHIP's own lattice (unchanged).
-    let scrutinee_owner = own.underlying_owner(scrutinee);
-    let borrowed = matches!(own.states.get(&scrutinee_owner), Some(OwnerState::Borrowed));
-    // Shared direct-catch arms receive independent payload copies, so
-    // the original error stays owned and readable until its last use.
-    let shared_catch = any_consumes && w.tir.is_direct_catch_match(match_inst);
-    // The borrowed-source family keeps its unchanged guards.
-    let aggregate_result = w.pool.needs_drop(w.tir.inst(match_inst).ty);
+    pub(crate) region_id: Option<usize>,
+    pub(crate) region_summary: Option<super::walk::machine::FlowRegionSummary>,
+    pub(crate) parent_region: Option<usize>,
+    pub(crate) region_exit: Option<BlockId>,
+}
 
-    // The arm blocks (wire order) and the join from the Switch.
-    let Terminator::Switch {
-        arms: rng, join, ..
-    } = *w.flow.term(sw)
-    else {
-        unreachable!("match is a switch")
-    };
-    let arm_blocks: Vec<BlockId> = rng.as_range().map(|i| BlockId(w.flow.extra[i])).collect();
+struct MatchArm {
+    binds: Vec<(TirRef, PlaceId)>,
+    saved: Vec<(TirRef, TirRef)>,
+    saved_last: Option<TirRef>,
+}
 
-    // By-move owner tokens, arm order then binding order (the
-    // `TirBuilder::match_expr` convention) — and their Flow places
-    // (same order, non-`Copy` only), the owner identities.
-    let tokens = w.tir.match_by_move_owner_refs(match_inst, w.pool);
-    let token_places = w.flow.token_places(match_inst);
+fn match_arm_region(w: &mut Walk<'_>, entry: BlockId, join: Option<BlockId>) -> Vec<BlockId> {
+    let stop = RegionStop::At(join.unwrap_or(BlockId::NONE));
+    super::collect_region(w.flow, &mut w.region_scratch, entry, |b| stop.kind(b)).0
+}
 
-    // Arm regions + the whole-match block set, precomputed for the
-    // per-arm freeze refinement and the join-time prune (block
-    // membership replaces the old `collect_reachable` subtree sets).
-    let stop = match join {
-        Some(j) => RegionStop::At(j),
-        None => RegionStop::At(BlockId::NONE),
-    };
-    let mut match_blocks: Vec<BlockId> = vec![sw];
-    let mut arm_regions: Vec<Vec<BlockId>> = Vec::with_capacity(arm_blocks.len());
-    for &ab in &arm_blocks {
-        let (region, _) =
-            super::collect_region(w.flow, &mut w.region_scratch, ab, |b| stop.kind(b));
-        match_blocks.extend_from_slice(&region);
-        arm_regions.push(region);
+fn match_block_set(
+    w: &mut Walk<'_>,
+    sw: BlockId,
+    arm_blocks: &[BlockId],
+    join: Option<BlockId>,
+) -> HashSet<BlockId> {
+    let mut blocks = vec![sw];
+    for &entry in arm_blocks {
+        blocks.extend(match_arm_region(w, entry, join));
     }
-    let match_set: HashSet<BlockId> = match_blocks.iter().copied().collect();
+    blocks.into_iter().collect()
+}
 
-    if aggregate_result {
-        let result = w
-            .flow
-            .match_result(match_inst)
-            .expect("aggregate match result place");
-        own.states.remove(&Owner(result));
+impl MatchFrame {
+    pub(crate) fn new(
+        w: &mut Walk<'_>,
+        own: &mut Ownership,
+        sink: &mut DiagSink,
+        _sidecar: &mut FunctionSidecar,
+        sw: BlockId,
+        match_inst: TirRef,
+        epoch: u32,
+    ) -> (Option<Self>, Option<BlockId>) {
+        let view = w.tir.match_view(match_inst);
+        if view.is_empty() {
+            return (None, None);
+        }
+        let scrutinee = view.scrutinee;
+        let scrutinee_ty = w.tir.inst(scrutinee).ty;
+        let tracked = needs_tracking(scrutinee_ty, w.pool);
+        let any_consumes = view
+            .arms()
+            .flat_map(|arm| arm.bindings())
+            .any(|b| !w.pool.is_copy(b.ty));
+        drain_dying_views(own);
+        if tracked && !any_consumes {
+            check_use_moved(w.tir, w.pool, own, sink, scrutinee, w.tir.span(scrutinee));
+        }
+        let scrutinee_owner = own.underlying_owner(scrutinee);
+        let borrowed = matches!(own.states.get(&scrutinee_owner), Some(OwnerState::Borrowed));
+        let shared_catch = any_consumes && w.tir.is_direct_catch_match(match_inst);
+        let aggregate_result = w.pool.needs_drop(w.tir.inst(match_inst).ty);
+        let Terminator::Switch {
+            arms: rng, join, ..
+        } = *w.flow.term(sw)
+        else {
+            unreachable!("match is a switch")
+        };
+        let arm_blocks: Vec<BlockId> = rng.as_range().map(|i| BlockId(w.flow.extra[i])).collect();
+        let tokens = w.tir.match_by_move_owner_refs(match_inst, w.pool);
+        let token_places = w.flow.token_places(match_inst);
+        if aggregate_result {
+            let result = w
+                .flow
+                .match_result(match_inst)
+                .expect("aggregate match result place");
+            own.states.remove(&Owner(result));
+        }
+        let snap = own.snapshot_branch();
+        (
+            Some(Self {
+                match_inst,
+                scrutinee,
+                scrutinee_ty,
+                tracked,
+                shared_catch,
+                borrowed,
+                aggregate_result,
+                scrutinee_owner,
+                sw,
+                join,
+                arm_blocks,
+                tokens,
+                token_places: token_places.to_vec(),
+                token_cursor: 0,
+                snap,
+                arm_results: Vec::with_capacity(view.len()),
+                falls_through: Vec::with_capacity(view.len()),
+                arm_lasts: Vec::with_capacity(view.len()),
+                next_arm: 0,
+                current_arm: None,
+                epoch,
+                region_id: None,
+                region_summary: None,
+                parent_region: None,
+                region_exit: None,
+            }),
+            join,
+        )
     }
-    let snap = own.snapshot_branch();
-    let mut arm_results: Vec<BranchState> = Vec::with_capacity(view.len());
-    let mut falls_through: Vec<bool> = Vec::with_capacity(view.len());
-    let mut arm_lasts: Vec<Option<TirRef>> = Vec::with_capacity(view.len());
-    let mut token_cursor = 0;
-    for (arm_index, arm) in view.arms().enumerate() {
-        // (a) Seed the arm's payload bindings as fresh owners keyed on
-        // their owner tokens — arm-local. Copy binds need no owner.
+
+    pub(crate) fn advance(
+        &mut self,
+        w: &mut Walk<'_>,
+        own: &mut Ownership,
+        sink: &mut DiagSink,
+        sidecar: &mut FunctionSidecar,
+    ) -> super::walk::machine::WalkAdvance {
+        if let Some(arm) = self.current_arm.take() {
+            self.finish_arm(w, own, sink, sidecar, arm);
+            self.next_arm += 1;
+        }
+        if self.next_arm == self.arm_blocks.len() {
+            debug_assert_eq!(
+                self.token_cursor,
+                self.tokens.len(),
+                "one owner token consumed per by-move binding"
+            );
+            schedule_arm_divergence_frees(
+                w,
+                self.join,
+                &self.arm_blocks,
+                own,
+                sidecar,
+                &self.arm_lasts,
+                &self.arm_results,
+                &self.falls_through,
+            );
+            own.merge_branches(std::mem::take(&mut self.arm_results), &self.falls_through);
+            if !own.root_owner.is_empty() {
+                let match_set = match_block_set(w, self.sw, &self.arm_blocks, self.join);
+                prune_branch_dead_projections(own, w.flow, &match_set);
+            }
+            w.last_inst = Some(self.match_inst);
+            return super::walk::machine::WalkAdvance::Done;
+        }
+        self.start_arm(w, own, sink, sidecar);
+        super::walk::machine::WalkAdvance::flow(
+            self.arm_blocks[self.next_arm],
+            RegionStop::At(self.join.unwrap_or(BlockId::NONE)),
+            self.epoch,
+        )
+    }
+
+    fn start_arm(
+        &mut self,
+        w: &mut Walk<'_>,
+        own: &mut Ownership,
+        sink: &mut DiagSink,
+        sidecar: &mut FunctionSidecar,
+    ) {
+        let arm_index = self.next_arm;
+        let arm = w
+            .tir
+            .match_view(self.match_inst)
+            .arms()
+            .nth(arm_index)
+            .expect("match arm");
         let mut arm_binds: Vec<(TirRef, PlaceId)> = Vec::new();
         for b in arm.bindings() {
-            own.binding_of_name.insert(b.name, match_inst);
+            own.binding_of_name.insert(b.name, self.match_inst);
             if w.pool.is_copy(b.ty) {
                 continue;
             }
-            let token = tokens[token_cursor];
-            let token_place = token_places[token_cursor];
-            token_cursor += 1;
-            // The token's place is both the binding's identity (Flow
-            // binds the payload name directly to the token place, so
-            // reads of it resolve without a name lookup) and the owner
-            // of the moved payload field.
+            let token = self.tokens[self.token_cursor];
+            let token_place = self.token_places[self.token_cursor];
+            self.token_cursor += 1;
             let owner = Owner(token_place);
             own.states.insert(owner, OwnerState::Valid);
             arm_binds.push((token, token_place));
         }
-        // (b) Consumption: an arm binding a non-`Copy` field by move
-        // consumes the scrutinee unless this is a shared direct catch,
-        // whose binding owns a deep copy instead.
         let consumes = !arm_binds.is_empty();
-        if consumes && tracked {
-            let span = w.tir.span(match_inst);
-            let consumed_name = consumed_binding_name(w.tir, scrutinee);
+        if consumes && self.tracked {
+            let span = w.tir.span(self.match_inst);
+            let consumed_name = consumed_binding_name(w.tir, self.scrutinee);
             check_source_projected(
                 w.tir,
                 w.flow,
                 w.pool,
                 own,
                 sink,
-                scrutinee_owner,
+                self.scrutinee_owner,
                 span,
                 "move",
                 consumed_name,
             );
-            if !shared_catch {
+            if !self.shared_catch {
                 consume_for_assignment(
                     w.tir,
                     w.pool,
                     own,
                     sink,
-                    scrutinee,
+                    self.scrutinee,
                     span,
                     consumed_name,
-                    match_inst,
+                    self.match_inst,
                 );
             }
         }
-        // (c) Arm-start drops: on an OWNED scrutinee, the consuming
-        // arm's unbound needs-drop payload fields are destroyed when
-        // the arm starts. Registered on the unified DropOp schedule as
-        // ONE block-start drop per arm, target = the scrutinee: codegen
-        // recomputes the arm's unbound fields at the fire point (the
-        // same `unbound_payload_fields` derivation) and drops each —
-        // keeping the target a TirRef the free path can resolve while
-        // the field list stays derivable from the typed match wire.
         if consumes
-            && !shared_catch
-            && !borrowed
-            && !unbound_payload_fields(w.pool, scrutinee_ty, &arm).is_empty()
+            && !self.shared_catch
+            && !self.borrowed
+            && !unbound_payload_fields(w.pool, self.scrutinee_ty, &arm).is_empty()
         {
             sidecar.drops.push(DropOp {
                 position: DropPosition::BlockStart {
-                    block: arm_blocks[arm_index],
+                    block: self.arm_blocks[arm_index],
                 },
-                target: scrutinee,
-                span: w.tir.span(scrutinee),
+                target: self.scrutinee,
+                span: w.tir.span(self.scrutinee),
             });
         }
-        // (d) The E0138 borrowed-source guard runs BEFORE the arm body
-        // steps (it inspects the pre-arm lattice).
         if let MatchBodyView::Expr(e) = arm.body {
-            check_arm_result_borrowed(w.tir, own, sink, e, aggregate_result);
+            check_arm_result_borrowed(w.tir, own, sink, e, self.aggregate_result);
         }
-        // (e) Per-arm freeze refinement, then the body walk from the
-        // pre-match snapshot.
-        let arm_set: HashSet<BlockId> = arm_regions[arm_index].iter().copied().collect();
-        let analysis = own.arm_last_reads.get(&arm_blocks[arm_index]).cloned();
-        let saved =
-            refine_view_liveness_for_arm(own, w.flow, &match_set, &arm_set, analysis.as_ref());
+        let saved = if own.root_owner.is_empty() {
+            Vec::new()
+        } else {
+            let region = match_arm_region(w, self.arm_blocks[arm_index], self.join);
+            let match_set = match_block_set(w, self.sw, &self.arm_blocks, self.join);
+            let arm_set: HashSet<BlockId> = region.iter().copied().collect();
+            let analysis = own.arm_last_reads.get(&self.arm_blocks[arm_index]).cloned();
+            refine_view_liveness_for_arm(own, w.flow, &match_set, &arm_set, analysis.as_ref())
+        };
         let saved_last = w.last_inst;
         w.last_inst = None;
-        w.walk_block_list(own, sink, sidecar, &arm_regions[arm_index], epoch);
-        let arm_last = w.last_inst;
-        w.last_inst = saved_last;
-        restore_view_last_use(own, saved);
-        let arm_exit = arm_regions[arm_index].iter().find_map(|&block| {
-            matches!(
-                w.flow.term(block),
-                Terminator::Return { .. }
-                    | Terminator::ReturnVoid
-                    | Terminator::Break { .. }
-                    | Terminator::Continue { .. }
-            )
-            .then_some(block)
+        self.current_arm = Some(MatchArm {
+            binds: arm_binds,
+            saved,
+            saved_last,
         });
-        // (e2) arm-result transfer: a non-diverging aggregate
-        // value arm's body is consumed into the match inst, so the
-        // result slot's buffer is owned by exactly one identity — the
-        // match inst the result's consumers (VarDecl/Assign/Return/
-        // call arg) then move on. Runs after the body steps (so the
-        // standalone dead-store pass sees the transferred bind's read)
-        // and before the dead-bind sweep.
-        if let MatchBodyView::Expr(e) = arm.body {
-            // E0138's borrowed family was already rejected at (d) —
-            // skip the consume there or the same arm would double-report
-            // (E0138 + the transfer's E0021).
-            if aggregate_result
-                && needs_tracking(w.tir.inst(e).ty, w.pool)
-                && !arm_result_borrows_caller(w.tir, own, e)
-            {
-                transfer_arm_result(w, own, sink, match_inst, e);
-            }
+    }
+
+    fn finish_arm(
+        &mut self,
+        w: &mut Walk<'_>,
+        own: &mut Ownership,
+        sink: &mut DiagSink,
+        sidecar: &mut FunctionSidecar,
+        arm: MatchArm,
+    ) {
+        let arm_index = self.next_arm;
+        let match_arm = w
+            .tir
+            .match_view(self.match_inst)
+            .arms()
+            .nth(arm_index)
+            .expect("match arm");
+        let arm_last = w.last_inst;
+        w.last_inst = arm.saved_last;
+        restore_view_last_use(own, arm.saved);
+        let summary = self.region_summary.take().expect("walked arm summary");
+        if self.region_exit.is_none() {
+            self.region_exit = summary.exit;
         }
-        let falls = arm_reaches_stop(w, &arm_regions[arm_index], join);
-        // (f) Dead arm-local binds: the standalone dead-store pass
-        // identifies them; ownership schedules the arm-gated Free only
-        // where the anchor actually executes:
-        // * a Return end — the return epilogue owns the exit;
-        // * a Break/Continue end — codegen fires due Frees before the
-        //   jump, and the loop-exit pass dedups against it;
-        // * any other end — only when the arm falls through.
+        let arm_exit = summary.exit;
+        if let MatchBodyView::Expr(e) = match_arm.body
+            && self.aggregate_result
+            && needs_tracking(w.tir.inst(e).ty, w.pool)
+            && !arm_result_borrows_caller(w.tir, own, e)
+        {
+            transfer_arm_result(w, own, sink, self.match_inst, e);
+        }
+        let falls = summary.falls_through;
         let anchor_fires = match arm_last.map(|a| w.tir.inst(a).tag) {
             Some(TirTag::Return | TirTag::ReturnVoid) => false,
             Some(TirTag::Break | TirTag::Continue) => true,
@@ -270,7 +352,7 @@ pub(crate) fn analyze_match_switch(
                 _ => falls,
             },
         };
-        for (token_ref, token_place) in &arm_binds {
+        for (token_ref, token_place) in &arm.binds {
             if let Some((_, span, _, _)) = w.dead_stores.arm_dead_store(*token_place)
                 && anchor_fires
             {
@@ -288,10 +370,6 @@ pub(crate) fn analyze_match_switch(
                 }
             }
         }
-        // A break/continue arm does not contribute its branch-local
-        // owners to the merged ownership state, so the later loop-exit
-        // pass cannot release them. Handle locals declared in the exit
-        // block while this arm's state is still available.
         if !falls
             && let Some(block) = arm_exit
             && matches!(
@@ -345,43 +423,10 @@ pub(crate) fn analyze_match_switch(
                 }
             }
         }
-        arm_results.push(own.take_branch(snap.clone()));
-        falls_through.push(falls);
-        arm_lasts.push(arm_last);
+        self.arm_results.push(own.take_branch(self.snap.clone()));
+        self.falls_through.push(falls);
+        self.arm_lasts.push(arm_last);
     }
-    debug_assert_eq!(
-        token_cursor,
-        tokens.len(),
-        "one owner token consumed per by-move binding"
-    );
-
-    // (g) Conditional divergence frees + union merge + join prune.
-    schedule_arm_divergence_frees(
-        w.tir,
-        w.flow,
-        w.pool,
-        own,
-        sidecar,
-        &arm_lasts,
-        &arm_regions,
-        &arm_results,
-        &falls_through,
-    );
-    own.merge_branches(arm_results, &falls_through);
-    prune_branch_dead_projections(own, w.flow, &match_set);
-    w.last_inst = Some(match_inst);
-    join
-}
-
-/// True when the walked arm region's exit reaches the Switch's join.
-fn arm_reaches_stop(w: &Walk<'_>, region: &[BlockId], join: Option<BlockId>) -> bool {
-    let Some(join) = join else { return false };
-    region.iter().any(|&b| {
-        matches!(
-            w.flow.term(b),
-            Terminator::Goto { target } if *target == join
-        )
-    })
 }
 
 /// The E0138 borrowed-source guard for an expression arm body: an
@@ -566,13 +611,12 @@ fn unbound_payload_fields(
 /// exemption the else-less fall-through arm has in `analyze_if_cascade`.
 #[allow(clippy::too_many_arguments)]
 fn schedule_arm_divergence_frees(
-    tir: &Tir,
-    flow: &ryo_core::flow::Flow,
-    pool: &InternPool,
+    w: &mut Walk<'_>,
+    join: Option<BlockId>,
+    arm_blocks: &[BlockId],
     pre_match: &Ownership,
     sidecar: &mut FunctionSidecar,
     arm_lasts: &[Option<TirRef>],
-    arm_regions: &[Vec<BlockId>],
     arm_results: &[BranchState],
     falls_through: &[bool],
 ) {
@@ -584,9 +628,9 @@ fn schedule_arm_divergence_frees(
     let mut all_keys: Vec<Owner> = all_keys.drain().collect();
     all_keys.sort_by_key(owner_sort_key);
     for owner in all_keys {
-        let is_tracked = match flow.place(owner.0) {
+        let is_tracked = match w.flow.place(owner.0) {
             ryo_core::flow::Place::Param { index, .. } => {
-                needs_tracking(tir.params[*index as usize].ty, pool)
+                needs_tracking(w.tir.params[*index as usize].ty, w.pool)
             }
             _ => true,
         };
@@ -611,12 +655,19 @@ fn schedule_arm_divergence_frees(
             // it here would release the replacement before its later
             // use. The replacement's own owner and the post-match
             // binding cleanup retain its destruction obligation.
+            let needs_region = pre_match
+                .current_owner
+                .values()
+                .any(|&before| before == owner);
+            let region = needs_region.then(|| match_arm_region(w, arm_blocks[i], join));
             let is_reseated = pre_match.current_owner.iter().any(|(&home, &before)| {
                 before == owner
-                    && arm_regions[i].iter().any(|&block| {
-                        flow.block_steps(block).iter().any(|step| {
-                            step.facts.write.is_some_and(|write| {
-                                write.place == home && write.kind == WriteKind::Replace
+                    && region.as_ref().is_some_and(|region| {
+                        region.iter().any(|&block| {
+                            w.flow.block_steps(block).iter().any(|step| {
+                                step.facts.write.is_some_and(|write| {
+                                    write.place == home && write.kind == WriteKind::Replace
+                                })
                             })
                         })
                     })
@@ -627,8 +678,8 @@ fn schedule_arm_divergence_frees(
             {
                 sidecar.drops.push(DropOp {
                     position: DropPosition::AfterStep { inst: after },
-                    target: owner.tirref(flow),
-                    span: owner.span(flow, tir),
+                    target: owner.tirref(w.flow),
+                    span: owner.span(w.flow, w.tir),
                 });
             }
         }
@@ -688,83 +739,33 @@ pub(crate) fn visit_operand_matches(tir: &Tir, r: TirRef, f: &mut impl FnMut(Tir
     if !tir.contains_match {
         return;
     }
-    fn visit(tir: &Tir, memo: &[bool], r: TirRef, f: &mut impl FnMut(TirRef)) {
-        if !memo[r.index()] {
-            return;
+    enum Task {
+        Visit(TirRef),
+        Emit(TirRef),
+    }
+    let memo = tir.operand_match_memo();
+    let mut stack = ryo_core::spine::ChainSpine::new();
+    stack.push(Task::Visit(r));
+    while let Some(task) = stack.pop() {
+        match task {
+            Task::Emit(r) => f(r),
+            Task::Visit(r) => {
+                if !memo[r.index()] {
+                    continue;
+                }
+                let mut children = Vec::new();
+                tir.walk_operands(r, &mut |_parent, child, kind| {
+                    if kind == ChildKind::Operand {
+                        children.push(child);
+                    }
+                });
+                for child in children.into_iter().rev() {
+                    stack.push(Task::Visit(child));
+                    if tir.inst(child).tag == TirTag::Match {
+                        stack.push(Task::Emit(child));
+                    }
+                }
+            }
         }
-        tir.walk_operands(r, &mut |_parent, child, kind| {
-            if tir.inst(child).tag == TirTag::Match {
-                f(child);
-            }
-            if matches!(kind, ChildKind::Operand) {
-                visit(tir, memo, child, f);
-            }
-        });
     }
-    visit(tir, tir.operand_match_memo(), r, f);
-}
-
-// ---------- If-arm region machinery ----------
-
-/// Per-arm walker for `analyze_if_cascade`: refine the freeze state
-/// for the arm (when the liveness pre-pass recorded a per-arm map for
-/// it — `refine_key`), walk the arm's region blocks from the pre-branch
-/// snapshot, restore, and record the arm end state plus whether the arm
-/// reaches the join. The per-arm analysis map is cloned out first (arm
-/// maps are small; refine needs `&mut Ownership`).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn walk_if_arm(
-    w: &mut Walk<'_>,
-    own: &mut Ownership,
-    sink: &mut DiagSink,
-    sidecar: &mut FunctionSidecar,
-    arm_regions: &[Vec<BlockId>],
-    cascade_set: &HashSet<BlockId>,
-    snap: &BranchState,
-    arm_index: usize,
-    refine_key: Option<BlockId>,
-    join: BlockId,
-    epoch: u32,
-) -> (BranchState, bool, Option<TirRef>) {
-    if let Some(key) = refine_key {
-        let arm_set: HashSet<BlockId> = arm_regions[arm_index].iter().copied().collect();
-        let analysis = own.arm_last_reads.get(&key).cloned();
-        let saved =
-            refine_view_liveness_for_arm(own, w.flow, cascade_set, &arm_set, analysis.as_ref());
-        let saved_last = w.last_inst;
-        w.last_inst = None;
-        w.walk_block_list(own, sink, sidecar, &arm_regions[arm_index], epoch);
-        let arm_last = w.last_inst;
-        w.last_inst = saved_last;
-        restore_view_last_use(own, saved);
-        (
-            own.take_branch(snap.clone()),
-            arm_reaches_join(w, &arm_regions[arm_index], join),
-            arm_last,
-        )
-    } else {
-        let saved_last = w.last_inst;
-        w.last_inst = None;
-        w.walk_block_list(own, sink, sidecar, &arm_regions[arm_index], epoch);
-        let arm_last = w.last_inst;
-        w.last_inst = saved_last;
-        (
-            own.take_branch(snap.clone()),
-            arm_reaches_join(w, &arm_regions[arm_index], join),
-            arm_last,
-        )
-    }
-}
-
-/// True when the walked arm region's exit reaches `join` (the arm's
-/// last live block jumps there). Arms whose every live path diverges
-/// return false; their end-state is path-local to an exit the join
-/// never sees.
-pub(crate) fn arm_reaches_join(w: &Walk<'_>, region: &[BlockId], join: BlockId) -> bool {
-    region.iter().any(|&b| {
-        matches!(
-            w.flow.term(b),
-            Terminator::Goto { target } if *target == join
-        )
-    })
 }

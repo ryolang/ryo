@@ -220,6 +220,33 @@ impl<M: Module> Codegen<M> {
         (cases, otherwise)
     }
 
+    fn emit_tag_dispatch_select(
+        builder: &mut FunctionBuilder,
+        case_count: usize,
+        tag: Value,
+        merge: Block,
+        active: &[bool],
+    ) -> (Vec<Block>, Block) {
+        let cases: Vec<Block> = active
+            .iter()
+            .map(|&needed| {
+                if needed {
+                    builder.create_block()
+                } else {
+                    merge
+                }
+            })
+            .collect();
+        debug_assert_eq!(cases.len(), case_count);
+        let mut switch = Switch::new();
+        for (index, block) in cases.iter().enumerate() {
+            switch.set_entry(index as u128, *block);
+        }
+        let otherwise = builder.create_block();
+        switch.emit(builder, tag, otherwise);
+        (cases, otherwise)
+    }
+
     /// Field-wise enum copy (M11): NEVER a byte-wise block copy —
     /// reading the inactive variants' uninitialized padding fails the
     /// ASan/Valgrind suites. The discriminant is copied
@@ -264,10 +291,17 @@ impl<M: Module> Codegen<M> {
         builder.ins().store(MemFlagsData::trusted(), tag, dst, 0);
         let variants: Vec<_> = ctx.pool.enum_view(ty).variants().collect();
         let merge = builder.create_block();
-        let (cases, otherwise) = Self::emit_tag_dispatch(builder, variants.len(), tag);
+        let active: Vec<bool> = variants
+            .iter()
+            .map(|variant| !variant.fields.is_empty())
+            .collect();
+        let (cases, otherwise) =
+            Self::emit_tag_dispatch_select(builder, variants.len(), tag, merge, &active);
         for (block, variant) in cases.iter().zip(&variants) {
-            builder.seal_block(*block);
-            builder.switch_to_block(*block);
+            if *block != merge {
+                builder.seal_block(*block);
+                builder.switch_to_block(*block);
+            }
             for field in variant.fields {
                 if deep {
                     Self::emit_field_deep_copy(builder, ctx, dst, src, field)?;
@@ -275,7 +309,9 @@ impl<M: Module> Codegen<M> {
                     Self::emit_field_copy(builder, ctx, dst, src, field)?;
                 }
             }
-            builder.ins().jump(merge, &[]);
+            if *block != merge {
+                builder.ins().jump(merge, &[]);
+            }
         }
         builder.seal_block(otherwise);
         builder.switch_to_block(otherwise);
@@ -296,21 +332,43 @@ impl<M: Module> Codegen<M> {
         addr: Value,
         ty: TypeId,
     ) -> Result<(), String> {
+        let variants: Vec<_> = ctx.pool.enum_view(ty).variants().collect();
+        if variants.iter().all(|variant| {
+            variant
+                .fields
+                .iter()
+                .all(|field| !ctx.pool.needs_drop(field.ty))
+        }) {
+            return Ok(());
+        }
         let tag = builder
             .ins()
             .load(types::I32, MemFlagsData::trusted(), addr, 0);
-        let variants: Vec<_> = ctx.pool.enum_view(ty).variants().collect();
         let merge = builder.create_block();
-        let (cases, otherwise) = Self::emit_tag_dispatch(builder, variants.len(), tag);
+        let active: Vec<bool> = variants
+            .iter()
+            .map(|variant| {
+                variant
+                    .fields
+                    .iter()
+                    .any(|field| ctx.pool.needs_drop(field.ty))
+            })
+            .collect();
+        let (cases, otherwise) =
+            Self::emit_tag_dispatch_select(builder, variants.len(), tag, merge, &active);
         for (block, variant) in cases.iter().zip(&variants) {
-            builder.seal_block(*block);
-            builder.switch_to_block(*block);
+            if *block != merge {
+                builder.seal_block(*block);
+                builder.switch_to_block(*block);
+            }
             for field in variant.fields {
                 if ctx.pool.needs_drop(field.ty) {
                     Self::emit_field_drop(builder, ctx, addr, field.offset, field.ty)?;
                 }
             }
-            builder.ins().jump(merge, &[]);
+            if *block != merge {
+                builder.ins().jump(merge, &[]);
+            }
         }
         builder.seal_block(otherwise);
         builder.switch_to_block(otherwise);
@@ -471,7 +529,9 @@ impl<M: Module> Codegen<M> {
                     Self::push_debug_static(builder, ctx, result, "}")?;
                 }
             }
-            builder.ins().jump(merge, &[]);
+            if *block != merge {
+                builder.ins().jump(merge, &[]);
+            }
         }
         builder.seal_block(otherwise);
         builder.switch_to_block(otherwise);

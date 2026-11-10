@@ -1,12 +1,11 @@
 //! Post-walk jump-exit Free scheduling — `break`/`continue` cleanup.
 //!
-//! `schedule_loop_exit_frees_in` and its `LoopExitCtx` stay
-//! statement-recursive: they are sidecar↔TIR relation transforms (jump
-//! paths, loop-carried classification) pinned by the free-scheduling
-//! tests, outside the walk migration's scope (see `mod.rs`). They keep
-//! `stmt_match` / `visit_operand_matches` / `match_arm_bodies` alive
-//! (the scheduling helpers still reason about statement-level matches
-//! in TIR terms, outside the Flow-walked body).
+//! `schedule_loop_exit_frees_in` keeps statement bodies and enclosing
+//! loop contexts on explicit stacks. `LoopExitCtx` remains a
+//! sidecar↔TIR relation transform (jump paths, loop-carried
+//! classification) pinned by the free-scheduling tests. The scheduling
+//! helpers reason about statement-level matches in TIR terms through
+//! `stmt_match` / `visit_operand_matches` / `match_arm_bodies`.
 
 use super::super::{
     Dominators, Owner, OwnerState, Ownership, anchored_drops, drop_anchor, match_arm_bodies,
@@ -90,54 +89,81 @@ fn collect_assign_writes<S: TirStmtList + ?Sized>(
 /// same statement list. These stores run on every normal path out of
 /// the loop, so break cleanup can leave their old home value for the
 /// assignment's displacement free.
-fn assignments_immediately_after_loop<S: TirStmtList + ?Sized>(
-    tir: &Tir,
-    stmts: &S,
+fn assignments_immediately_after_loop<'tir>(
+    tir: &'tir Tir,
+    stmts: ExtraList<'tir, TirRef>,
     loop_inst: TirRef,
     out: &mut Vec<TirRef>,
 ) -> bool {
-    for (index, stmt) in stmts.iter_refs().enumerate() {
-        let stmt = stmt_match(tir, stmt).unwrap_or(stmt);
-        if stmt == loop_inst {
-            for after in stmts.iter_refs().skip(index + 1) {
-                let after = stmt_match(tir, after).unwrap_or(after);
-                if tir.inst(after).tag != TirTag::Assign {
-                    break;
+    enum Task<'a> {
+        Body(ExtraList<'a, TirRef>, usize),
+        Owned(Vec<TirRef>, usize),
+        Stmt(TirRef),
+    }
+    let mut stack = ryo_core::spine::ChainSpine::new();
+    stack.push(Task::Body(stmts, 0));
+    while let Some(task) = stack.pop() {
+        match task {
+            Task::Body(body, index) => {
+                let Some(stmt) = body.iter().nth(index) else {
+                    continue;
+                };
+                let stmt = stmt_match(tir, stmt).unwrap_or(stmt);
+                if stmt == loop_inst {
+                    for after in body.iter().skip(index + 1) {
+                        let after = stmt_match(tir, after).unwrap_or(after);
+                        if tir.inst(after).tag != TirTag::Assign {
+                            break;
+                        }
+                        out.push(after);
+                    }
+                    return true;
                 }
-                out.push(after);
+                stack.push(Task::Body(body, index + 1));
+                stack.push(Task::Stmt(stmt));
             }
-            return true;
-        }
-        let found = match tir.inst(stmt).tag {
-            TirTag::IfStmt => {
-                let view = tir.if_stmt_view(stmt);
-                assignments_immediately_after_loop(tir, &view.then_stmts, loop_inst, out)
-                    || view.elif_branches.iter().any(|arm| {
-                        assignments_immediately_after_loop(tir, &arm.body, loop_inst, out)
-                    })
-                    || view.else_stmts.as_ref().is_some_and(|body| {
-                        assignments_immediately_after_loop(tir, body, loop_inst, out)
-                    })
+            Task::Owned(body, index) => {
+                let Some(&stmt) = body.get(index) else {
+                    continue;
+                };
+                let stmt = stmt_match(tir, stmt).unwrap_or(stmt);
+                if stmt == loop_inst {
+                    for &after in &body[index + 1..] {
+                        let after = stmt_match(tir, after).unwrap_or(after);
+                        if tir.inst(after).tag != TirTag::Assign {
+                            break;
+                        }
+                        out.push(after);
+                    }
+                    return true;
+                }
+                stack.push(Task::Owned(body, index + 1));
+                stack.push(Task::Stmt(stmt));
             }
-            TirTag::WhileLoop => assignments_immediately_after_loop(
-                tir,
-                &tir.while_loop_body_view(stmt),
-                loop_inst,
-                out,
-            ),
-            TirTag::ForRange => assignments_immediately_after_loop(
-                tir,
-                &tir.for_range_body_view(stmt),
-                loop_inst,
-                out,
-            ),
-            TirTag::Match => match_arm_bodies(tir, stmt)
-                .into_iter()
-                .any(|body| assignments_immediately_after_loop(tir, &body, loop_inst, out)),
-            _ => false,
-        };
-        if found {
-            return true;
+            Task::Stmt(stmt) => match tir.inst(stmt).tag {
+                TirTag::IfStmt => {
+                    let view = tir.if_stmt_view(stmt);
+                    let mut bodies = Vec::new();
+                    bodies.push(view.then_stmts);
+                    bodies.extend(view.elif_branches.iter().map(|arm| arm.body));
+                    bodies.extend(view.else_stmts);
+                    for body in bodies.into_iter().rev() {
+                        stack.push(Task::Body(body, 0));
+                    }
+                }
+                TirTag::WhileLoop => {
+                    stack.push(Task::Body(tir.while_loop_body_view(stmt), 0));
+                }
+                TirTag::ForRange => {
+                    stack.push(Task::Body(tir.for_range_body_view(stmt), 0));
+                }
+                TirTag::Match => {
+                    for body in match_arm_bodies(tir, stmt).into_iter().rev() {
+                        stack.push(Task::Owned(body, 0));
+                    }
+                }
+                _ => {}
+            },
         }
     }
     false
@@ -172,7 +198,7 @@ impl<'a> LoopExitCtx<'a> {
             .collect();
         let mut following_assignments = Vec::new();
         let root_stmts = tir.body_stmts();
-        assignments_immediately_after_loop(tir, &root_stmts, loop_inst, &mut following_assignments);
+        assignments_immediately_after_loop(tir, root_stmts, loop_inst, &mut following_assignments);
         let reassigned_after_loop_bindings = following_assignments
             .into_iter()
             .filter(|site| sidecar.free_on_reassign[site.index()].is_some())
@@ -193,97 +219,110 @@ impl<'a> LoopExitCtx<'a> {
     }
 }
 
-/// Schedule unconditional Frees on `break`/`continue` paths. Runs after
-/// the last-use, anonymous-temp, and dead-store passes have populated
-/// `sidecar.drops`. Kept statement-recursive (see the module header).
+/// Schedule unconditional Frees on `break`/`continue` paths. Statement
+/// bodies and their enclosing loop contexts stay on explicit stacks.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
-    tir: &Tir,
+pub(crate) fn schedule_loop_exit_frees_in<'tir>(
+    tir: &'tir Tir,
     flow: &ryo_core::flow::Flow,
     pool: &InternPool,
     own: &Ownership,
     sidecar: &mut FunctionSidecar,
-    stmts: &S,
-    enclosing: Option<&LoopExitCtx<'_>>,
-    doms: &OnceCell<Dominators>,
+    stmts: ExtraList<'tir, TirRef>,
+    doms: &'tir OnceCell<Dominators>,
 ) {
-    schedule_loop_exit_frees_in_inner(tir, flow, pool, own, sidecar, stmts, enclosing, doms);
-}
-
-#[allow(clippy::too_many_arguments)]
-fn schedule_loop_exit_frees_in_inner<S: TirStmtList + ?Sized>(
-    tir: &Tir,
-    flow: &ryo_core::flow::Flow,
-    pool: &InternPool,
-    own: &Ownership,
-    sidecar: &mut FunctionSidecar,
-    stmts: &S,
-    enclosing: Option<&LoopExitCtx<'_>>,
-    doms: &OnceCell<Dominators>,
-) {
-    for r in stmts.iter_refs() {
-        let r = stmt_match(tir, r).unwrap_or(r);
+    enum BodyList<'a> {
+        Extra(ExtraList<'a, TirRef>),
+        Owned(Vec<TirRef>),
+    }
+    struct BodyTask<'a> {
+        list: BodyList<'a>,
+        next: usize,
+        enclosing: Option<usize>,
+    }
+    impl BodyList<'_> {
+        fn get(&self, index: usize) -> Option<TirRef> {
+            match self {
+                Self::Extra(list) => list.iter().nth(index),
+                Self::Owned(list) => list.get(index).copied(),
+            }
+        }
+    }
+    let mut tasks = ryo_core::spine::ChainSpine::new();
+    let mut contexts: Vec<LoopExitCtx<'tir>> = Vec::new();
+    tasks.push(BodyTask {
+        list: BodyList::Extra(stmts),
+        next: 0,
+        enclosing: None,
+    });
+    while let Some(mut task) = tasks.pop() {
+        let Some(next) = task.list.get(task.next) else {
+            continue;
+        };
+        task.next += 1;
+        let enclosing = task.enclosing;
+        tasks.push(task);
+        let r = stmt_match(tir, next).unwrap_or(next);
         let inst = *tir.inst(r);
         match inst.tag {
             TirTag::Break | TirTag::Continue => {
-                if let Some(ctx) = enclosing {
+                if let Some(ctx) = enclosing.map(|id| &contexts[id]) {
                     schedule_break_continue_frees(tir, flow, pool, own, sidecar, r, ctx);
                 }
             }
             TirTag::WhileLoop | TirTag::ForRange => {
                 if let Some(ctx) = LoopExitCtx::new(tir, doms, own, sidecar, r) {
-                    schedule_loop_exit_frees_in_inner(
-                        tir,
-                        flow,
-                        pool,
-                        own,
-                        sidecar,
-                        &ctx.body,
-                        Some(&ctx),
-                        doms,
-                    );
+                    let id = contexts.len();
+                    let body = ctx.body;
+                    contexts.push(ctx);
+                    tasks.push(BodyTask {
+                        list: BodyList::Extra(body),
+                        next: 0,
+                        enclosing: Some(id),
+                    });
                 }
             }
             TirTag::IfStmt => {
                 let view = tir.if_stmt_view(r);
-                schedule_loop_exit_frees_in_inner(
-                    tir,
-                    flow,
-                    pool,
-                    own,
-                    sidecar,
-                    &view.then_stmts,
-                    enclosing,
-                    doms,
+                let mut bodies = Vec::new();
+                bodies.push(BodyList::Extra(view.then_stmts));
+                bodies.extend(
+                    view.elif_branches
+                        .iter()
+                        .map(|arm| BodyList::Extra(arm.body)),
                 );
-                for elif in &view.elif_branches {
-                    schedule_loop_exit_frees_in_inner(
-                        tir, flow, pool, own, sidecar, &elif.body, enclosing, doms,
-                    );
-                }
-                if let Some(else_stmts) = &view.else_stmts {
-                    schedule_loop_exit_frees_in_inner(
-                        tir, flow, pool, own, sidecar, else_stmts, enclosing, doms,
-                    );
+                bodies.extend(view.else_stmts.map(BodyList::Extra));
+                for body in bodies.into_iter().rev() {
+                    tasks.push(BodyTask {
+                        list: body,
+                        next: 0,
+                        enclosing,
+                    });
                 }
             }
             TirTag::Match => {
-                for body in match_arm_bodies(tir, r) {
-                    schedule_loop_exit_frees_in_inner(
-                        tir, flow, pool, own, sidecar, &body, enclosing, doms,
-                    );
+                for body in match_arm_bodies(tir, r).into_iter().rev() {
+                    tasks.push(BodyTask {
+                        list: BodyList::Owned(body),
+                        next: 0,
+                        enclosing,
+                    });
                 }
             }
             _ => {}
         }
         if !matches!(inst.tag, TirTag::WhileLoop | TirTag::ForRange) {
+            let mut bodies = Vec::new();
             visit_operand_matches(tir, r, &mut |m| {
-                for body in match_arm_bodies(tir, m) {
-                    schedule_loop_exit_frees_in_inner(
-                        tir, flow, pool, own, sidecar, &body, enclosing, doms,
-                    );
-                }
+                bodies.extend(match_arm_bodies(tir, m));
             });
+            for body in bodies.into_iter().rev() {
+                tasks.push(BodyTask {
+                    list: BodyList::Owned(body),
+                    next: 0,
+                    enclosing,
+                });
+            }
         }
     }
 }
@@ -498,5 +537,52 @@ fn schedule_break_continue_frees(
                 span: tir.span(jump_inst),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryo_core::span::Span;
+    use ryo_core::tir::{Discriminant, TirBuilder, TypedMatchArm, TypedMatchBody};
+
+    #[test]
+    fn finds_assignments_after_loop_directly_in_match_arm() {
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let name = pool.intern_str("s");
+        let span = Span::EMPTY;
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let initial = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(name, true, str_ty, initial, span);
+        let cond = tb.bool_const(true, bool_ty, span);
+        let loop_inst = tb.while_loop(cond, &[], void, span);
+        let value = tb.str_const(pool.intern_str("b"), str_ty, span);
+        let assignment = tb.assign(name, str_ty, value, span);
+        let scrutinee = tb.int_const(1, int_ty, span);
+        let match_inst = tb.match_expr(
+            scrutinee,
+            void,
+            &[TypedMatchArm {
+                span,
+                discriminant: Discriminant::Wildcard,
+                bindings: &[],
+                guards: &[],
+                body: TypedMatchBody::Stmts(&[loop_inst, assignment]),
+            }],
+            span,
+        );
+        let tir = tb.finish(&[decl, match_inst]);
+        let mut assignments = Vec::new();
+
+        let found =
+            assignments_immediately_after_loop(&tir, tir.body_stmts(), loop_inst, &mut assignments);
+
+        assert!(found, "the loop is directly in the match arm body");
+        assert_eq!(assignments, [assignment]);
     }
 }
