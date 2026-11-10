@@ -412,7 +412,7 @@ fn estimated_token_count(input: &str) -> usize {
     // more than len/2 — so the buffer may still grow there. That costs
     // a reallocation, nothing more. Always reserve at least a little,
     // but never reserve more than one million entries speculatively.
-    (input.len() / 2).max(16).min(1_000_000)
+    (input.len() / 2).clamp(16, 1_000_000)
 }
 
 /// Run logos, indentation processing, and string/int interning in
