@@ -855,6 +855,19 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-276 — Views of inout parameters do not freeze the owner, enabling use-after-free
+
+**Severity:** Correctness / Hygiene
+**Area:** ownership
+
+**Files:** ryo-frontend/src/ownership/views.rs (projection_root), ryo-frontend/src/ownership/walk.rs, ryo-frontend/src/ownership/tests/ (view/inout regressions), ryo/tests/ (JIT/AOT runtime regressions)
+
+**Summary:** projection_root returns None for inout parameters, so a strview/bytesview derived from an inout str/bytes parameter never registers a live projection. Mutation through the same inout binding is therefore accepted while the view is still read, violating P2 and the specification's use-after-free guarantee. Repro: fn f(inout s: str): v = s[0:24]; str_push(&s, <32 bytes>); print(v), called with an owned 24-byte heap string. JIT prints freed/garbage bytes; AOT also prints corrupted data. A one-byte suffix control that does not reallocate prints the original view. The same missing root affects bytesview and other mutation/reassignment forms.
+
+**Resolution:** Represent inout parameters as projection roots for freeze and view-liveness purposes while preserving caller-owned cleanup semantics. Cover direct and transitive views, strview and bytesview, reallocating str_push/bytes_push and reassignment, last-use lifting, branches/loops, and JIT+AOT execution. Cleanup validation must not turn the caller's buffer into a callee destruction obligation.
+
+---
+
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
@@ -863,4 +876,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-<!-- issue-id high-water: 275 -->
+---
+
+<!-- issue-id high-water: 276 -->
