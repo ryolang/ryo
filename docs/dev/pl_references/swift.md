@@ -2,9 +2,9 @@
 
 # Swift Programming Language
 
-Last updated on 2026-11-08 for the Swift 6.4 release.
+Last updated on 2026-11-08 for the Swift 6.4.2 release.
 
-Latest release: [Swift 6.4](https://www.swift.org/blog/swift-6.4-released/) (2026-09-15).
+Latest release: [Swift 6.4.2](https://github.com/swiftlang/swift/releases/tag/swift-6.4.2-RELEASE) (2026-10-30), the latest patch on the [Swift 6.4](https://www.swift.org/blog/swift-6.4-released/) minor feature line (2026-09-15).
 
 [View on GitHub](https://github.com/swiftlang/swift)
 

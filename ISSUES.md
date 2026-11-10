@@ -876,6 +876,4 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
----
-
 <!-- issue-id high-water: 276 -->

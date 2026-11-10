@@ -103,7 +103,7 @@ Hylo's captured projections also describe dependencies on existing external obje
 
 | Aspect | Rust | Mojo | Hylo | Swift | Ryo |
 |---|---|---|---|---|---|
-| **Owned string** | `String` (`Vec<u8>`) | `String` | `String` value type | `String` (COW class) | `str` (fat ptr, M8.1) |
+| **Owned string** | `String` (`Vec<u8>`) | `String` | `String` value type | `String` (value type with COW storage) | `str` (fat ptr, M8.1) |
 | **Borrowed string** | `&str` (slice) | `StringSlice` | Projection of string storage | `Substring` (refcount-shared) | scope-locked `&str` (M8.4) |
 | **Literal type** | `&'static str` | `StringLiteral` | Value literal; no ARC requirement | `StaticString` | `.rodata` + `ryo_str_alloc` at use |
 | **List type** | `Vec<T>` (owned, contig) | `List[T]` | Array value type with unique ownership | `Array<T>` (COW); `UniqueArray` (no COW, 6.4) | `list[T]` (eager `clone()` in M25; COW deferred to v0.2) |

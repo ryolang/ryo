@@ -32,7 +32,7 @@ This directory contains implementation notes, architectural decisions, and desig
 | [pl_references/hylo.md](pl_references/hylo.md) | Hylo projections and access modes — reference for scope-locked views and owner protection | **Keep** as a projection-model reference |
 | [pl_references/rust.md](pl_references/rust.md) | Rust borrowck/`Arc` comparison — the bar for Ryo's ownership pass and `shared[T]` | **Keep** as comparison reference |
 | [pl_references/go.md](pl_references/go.md) | Go language/toolchain snapshot — inspiration for the concurrency model | **Keep** while the concurrency model tracks Go |
-| [pl_references/swift.md](pl_references/swift.md) | Swift compiler snapshot (latest release 6.4) — SIL ARC optimizer (`lib/SILOptimizer/ARC/`), nonescapable references, and unique heap ownership | **Keep** while `shared[T]`/ARC-optimizer work tracks Swift |
+| [pl_references/swift.md](pl_references/swift.md) | Swift compiler snapshot (latest release 6.4.2) — SIL ARC optimizer (`lib/SILOptimizer/ARC/`), nonescapable references, and unique heap ownership | **Keep** while `shared[T]`/ARC-optimizer work tracks Swift |
 | [pl_references/memory_model_comparison.md](pl_references/memory_model_comparison.md) | Side-by-side memory-model comparison of Rust, Mojo, Hylo, Swift, and Ryo | **Keep** as comparison reference |
 
 ### Architecture & Design Decisions
