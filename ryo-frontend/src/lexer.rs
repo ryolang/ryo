@@ -447,11 +447,7 @@ pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Toke
             // unusable, so hand back an empty stream; the driver
             // skips parsing when it sees this together with sink
             // errors.
-            sink.emit(Diag::error(
-                crate::spans::cspan(e.span),
-                DiagCode::ParseError,
-                e.message,
-            ));
+            sink.emit(Diag::error(crate::spans::cspan(e.span), e.code, e.message));
             return Vec::new();
         }
     };

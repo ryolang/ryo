@@ -13,8 +13,6 @@ use common::*;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
-static OVERSIZED_SOURCE_REGRESSIONS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// `print(1+1+... )` with `terms` ones.
 fn add_chain(terms: usize) -> String {
     let mut src = String::from("fn main():\n\tprint(");
@@ -610,9 +608,6 @@ fn nested_catches(depth: usize) -> String {
 
 #[test]
 fn jit_run_nested_statement_matches_50000() {
-    let _guard = OVERSIZED_SOURCE_REGRESSIONS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     assert_run_fails_with_diagnostic(
         "nested_statement_matches_50000.ryo",
         nested_statement_matches(50_000),
@@ -622,8 +617,5 @@ fn jit_run_nested_statement_matches_50000() {
 
 #[test]
 fn jit_run_nested_catches_50000() {
-    let _guard = OVERSIZED_SOURCE_REGRESSIONS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     assert_jit_nesting_rejected("nested_catches_50000.ryo", nested_catches(50_000));
 }
