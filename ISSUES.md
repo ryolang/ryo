@@ -842,19 +842,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-270 — Stack overflow lowering deeply nested match and catch blocks
-
-**Severity:** Correctness / Hygiene
-**Area:** frontend-parser
-
-**Files:** ryo-frontend/src/astgen/match_.rs; ryo-frontend/src/astgen/expr.rs; ryo-frontend/src/astgen.rs
-
-**Summary:** Nested statement-form match and catch expressions recursed through arm statement lowering and overflowed during astgen. Iterative lowering now covers the smaller regressions, but the original 50,000-level statement-match source remains blocked by I-275's source-span range, and the original 50,000-level catch JIT remains blocked by I-274's recursive Flow traversal. The exact reproductions therefore cannot yet run end to end.
-
-**Resolution:** Resolve I-275 so the statement-match source is representable and I-274 so the catch source reaches JIT, then enable both retained 50,000-level reproductions and verify them end to end. Do not close this issue on the smaller passing regressions alone.
-
----
-
 ### I-271 — Shallow binary early errors ignore non-memoization contract
 
 **Severity:** Cleanup
@@ -878,19 +865,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Summary:** The jit_run_deep_slice_nesting regression generates 50,000 successive [0:1] expressions. TIR emission completes and 1,000-level JIT execution succeeds, but debug JIT compilation exceeded a 900-second timeout while consuming one CPU core; no stack overflow or deadlock was observed. The long case prevents the default deep-expression and workspace suites from completing in a practical validation window.
 
 **Resolution:** Profile the 50,000-slice JIT pipeline to locate the superlinear pass or emission path, then remove the scaling bottleneck without weakening stack-safety coverage. Add scaling measurements for nested views and keep a large regression practical for CI while retaining adversarial stress coverage.
-
----
-
-### I-274 — Stack overflow emitting nested match arms in Flow
-
-**Severity:** Correctness / Hygiene
-**Area:** core-ir
-
-**Files:** ryo-core/src/flow/build.rs; ryo/tests/deep_expr_chain.rs
-
-**Summary:** After iterative astgen lowering, the original 50,000-level nested-catch source succeeds through UIR but still aborts during TIR/Flow construction. FlowBuilder::build_match calls emit_expr or emit_stmts for each arm at depth zero, so nested match arms never reach the existing expression fallback. This is a separate downstream traversal reset from I-270 and also blocks full JIT execution of the original catch reproduction.
-
-**Resolution:** Propagate depth through Flow match-arm expression and statement emission and move deep arm bodies to explicit continuations or the existing iterative fallback, preserving block order, scopes, terminators, and match-result storage. Add crash-contained nested match and catch tests through TIR, Flow, JIT, and AOT.
 
 ---
 

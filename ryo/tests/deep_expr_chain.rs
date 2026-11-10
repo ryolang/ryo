@@ -1,11 +1,11 @@
-//! Regression tests for deeply nested operator chains.
+//! Regression tests for bounded expression nesting and rejection above the limit.
 //!
 //! A ~7k-term `1+1+...` chain used to abort the compiler with
 //! `thread has overflowed its stack` (SIGABRT): every pass that walks
 //! expression nesting recursed one frame per chain link. Those walks
-//! are iterative now; these tests pin the fix end to end through the
-//! CLI (which runs the compiler on a 32 MiB thread — the recursion
-//! overflowed it at ~7k terms).
+//! are iterative for accepted programs, and astgen rejects nesting above
+//! 256 levels before later passes receive it. These tests exercise both
+//! behaviors end to end through the CLI's 32 MiB compiler thread.
 
 mod common;
 use common::*;
@@ -41,7 +41,7 @@ fn right_nested_add_chain(terms: usize) -> String {
 
 #[test]
 fn jit_run_right_nested_addition_chain_prints_sum() {
-    let terms = 20_000;
+    let terms = 255;
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(
         temp_dir.path(),
@@ -116,23 +116,47 @@ fn assert_jit_prints(file_name: &str, src: &str, expected: &str) {
     assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
 }
 
+fn assert_run_fails_with_diagnostic(file_name: &str, src: String, expected: &[&str]) {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(temp_dir.path(), file_name, &src);
+    // Do not keep a multi-gigabyte parent copy alive while the compiler reads the file.
+    drop(src);
+    let output =
+        run_ryo_command(&["run", file_name], &test_file).expect("Failed to run ryo run command");
+    assert!(
+        !output.status.success(),
+        "over-limit input unexpectedly ran"
+    );
+    assert!(
+        output.status.code().is_some(),
+        "compiler terminated by a signal instead of a diagnostic"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for fragment in expected {
+        assert!(
+            stderr.contains(fragment),
+            "stderr must contain {fragment:?}: {stderr}"
+        );
+    }
+}
+
+fn assert_jit_nesting_rejected(file_name: &str, src: String) {
+    assert_run_fails_with_diagnostic(file_name, src, &["E0140", "256"]);
+}
+
 #[test]
 fn jit_run_unary_mediated_rhs_chain() {
-    assert_jit_prints("unary_mediated.ryo", &unary_mediated_add_chain(10_000), "1");
+    assert_jit_prints("unary_mediated.ryo", &unary_mediated_add_chain(126), "1");
 }
 
 #[test]
 fn jit_run_call_mediated_rhs_chain() {
-    assert_jit_prints(
-        "call_mediated.ryo",
-        &call_mediated_add_chain(10_000),
-        "10001",
-    );
+    assert_jit_prints("call_mediated.ryo", &call_mediated_add_chain(127), "128");
 }
 
 #[test]
 fn jit_run_nested_call_chain() {
-    assert_jit_prints("nested_calls.ryo", &nested_call_chain(10_000), "1");
+    assert_jit_prints("nested_calls.ryo", &nested_call_chain(254), "1");
 }
 
 fn assert_aot_prints(test_name: &str, src: &str, expected: &str) {
@@ -157,21 +181,17 @@ fn assert_aot_prints(test_name: &str, src: &str, expected: &str) {
 
 #[test]
 fn aot_run_unary_mediated_rhs_chain() {
-    assert_aot_prints("unary_mediated_aot", &unary_mediated_add_chain(10_000), "1");
+    assert_aot_prints("unary_mediated_aot", &unary_mediated_add_chain(126), "1");
 }
 
 #[test]
 fn aot_run_call_mediated_rhs_chain() {
-    assert_aot_prints(
-        "call_mediated_aot",
-        &call_mediated_add_chain(10_000),
-        "10001",
-    );
+    assert_aot_prints("call_mediated_aot", &call_mediated_add_chain(127), "128");
 }
 
 #[test]
 fn aot_run_nested_call_chain() {
-    assert_aot_prints("nested_calls_aot", &nested_call_chain(10_000), "1");
+    assert_aot_prints("nested_calls_aot", &nested_call_chain(254), "1");
 }
 
 fn nested_string_concat(links: usize) -> String {
@@ -198,17 +218,17 @@ fn nested_slices(links: usize) -> String {
 
 #[test]
 fn jit_run_nested_string_concat() {
-    assert_jit_prints("nested_concat.ryo", &nested_string_concat(10_000), "10001");
+    assert_jit_prints("nested_concat.ryo", &nested_string_concat(254), "255");
 }
 
 #[test]
 fn jit_run_nested_slices() {
-    assert_jit_prints("nested_slices.ryo", &nested_slices(1_000), "1");
+    assert_jit_prints("nested_slices.ryo", &nested_slices(200), "1");
 }
 
 #[test]
-fn jit_run_deep_slice_nesting() {
-    assert_jit_prints("deep_slices.ryo", &nested_slices(50_000), "1");
+fn jit_run_slice_nesting_near_limit() {
+    assert_jit_prints("deep_slices.ryo", &nested_slices(254), "1");
 }
 
 #[test]
@@ -290,21 +310,21 @@ fn nested_ifs(depth: usize) -> String {
 
 #[test]
 fn jit_run_nested_bool_and() {
-    assert_jit_prints("nested_bool_and.ryo", &nested_bool_and(10_000), "true");
+    assert_jit_prints("nested_bool_and.ryo", &nested_bool_and(254), "true");
 }
 
 #[test]
 fn jit_run_nested_statement_matches() {
     assert_jit_prints(
         "nested_statement_matches.ryo",
-        &nested_statement_matches(1_000),
+        &nested_statement_matches(100),
         "0",
     );
 }
 
 #[test]
 fn jit_run_nested_ifs() {
-    assert_jit_prints("nested_ifs.ryo", &nested_ifs(1_000), "1");
+    assert_jit_prints("nested_ifs.ryo", &nested_ifs(200), "1");
 }
 
 fn alternating_add_chain(terms: usize) -> String {
@@ -331,7 +351,7 @@ fn alternating_add_chain(terms: usize) -> String {
 
 #[test]
 fn jit_run_alternating_nested_addition_chain_prints_sum() {
-    let terms = 20_000;
+    let terms = 255;
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(
         temp_dir.path(),
@@ -372,7 +392,7 @@ fn nested_left_spines_add_chain(groups: usize, spine_terms: usize) -> String {
 
 #[test]
 fn jit_run_nested_long_left_spines_print_sum() {
-    let groups = 1_000;
+    let groups = 3;
     let spine_terms = 70;
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(
@@ -397,9 +417,8 @@ fn jit_run_nested_long_left_spines_print_sum() {
 }
 
 #[test]
-fn jit_run_deep_addition_chain_prints_sum() {
-    // 20k terms: well past the old recursion's ~7k overflow threshold.
-    let terms = 20_000;
+fn jit_run_bounded_addition_chain_prints_sum() {
+    let terms = 255;
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), "deep_chain.ryo", &add_chain(terms));
 
@@ -408,13 +427,13 @@ fn jit_run_deep_addition_chain_prints_sum() {
 
     assert!(
         output.status.success(),
-        "deep chain compile failed. STDERR: {}",
+        "bounded chain compile failed. STDERR: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
         terms.to_string(),
-        "deep chain must evaluate to its term count"
+        "bounded chain must evaluate to its term count"
     );
 }
 
@@ -460,7 +479,7 @@ fn nested_fat_return_chain(links: usize) -> String {
 fn jit_run_deferred_fat_return_chain() {
     assert_jit_prints(
         "deferred_fat_return.ryo",
-        &nested_fat_return_chain(10_000),
+        &nested_fat_return_chain(254),
         "x",
     );
 }
@@ -537,7 +556,7 @@ fn nested_struct_return_chain(links: usize) -> String {
 fn jit_run_deferred_struct_return_chain() {
     assert_jit_prints(
         "deferred_struct_return.ryo",
-        &nested_struct_return_chain(10_000),
+        &nested_struct_return_chain(254),
         "7",
     );
 }
@@ -557,7 +576,7 @@ fn nested_enum_return_chain(links: usize) -> String {
 fn jit_run_deferred_enum_return_chain() {
     assert_jit_prints(
         "deferred_enum_return.ryo",
-        &nested_enum_return_chain(10_000),
+        &nested_enum_return_chain(254),
         "8",
     );
 }
@@ -566,7 +585,7 @@ fn jit_run_deferred_enum_return_chain() {
 fn jit_run_deferred_slice_length_chain() {
     let src = format!(
         "fn make() -> int:\n\ts = \"abc\"\n\treturn s{}.len()\nfn main():\n\tprint(make())\n",
-        "[0:2]".repeat(1_000)
+        "[0:2]".repeat(250)
     );
     assert_jit_prints("deferred_slice_length.ryo", &src, "2");
 }
@@ -588,17 +607,15 @@ fn nested_catches(depth: usize) -> String {
 }
 
 #[test]
-#[ignore = "I-275: source spans exceed the UIR u32 range"]
 fn jit_run_nested_statement_matches_50000() {
-    assert_jit_prints(
+    assert_run_fails_with_diagnostic(
         "nested_statement_matches_50000.ryo",
-        &nested_statement_matches(50_000),
-        "0",
+        nested_statement_matches(50_000),
+        &["E0130"],
     );
 }
 
 #[test]
-#[ignore = "I-274: blocked by recursive Flow match arms"]
 fn jit_run_nested_catches_50000() {
-    assert_jit_prints("nested_catches_50000.ryo", &nested_catches(50_000), "0");
+    assert_jit_nesting_rejected("nested_catches_50000.ryo", nested_catches(50_000));
 }

@@ -423,6 +423,19 @@ fn estimated_token_count(input: &str) -> usize {
 /// without Indent/Dedent markers, so this returns an empty vector
 /// and the driver skips parsing.
 pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Token, Span)> {
+    if input.len() > u32::MAX as usize {
+        sink.emit(Diag::error(
+            crate::spans::cspan(SimpleSpan::new((), 0..0)),
+            DiagCode::LexerInputTooLarge,
+            format!(
+                "source is too large to lex ({} bytes; the limit is {})",
+                input.len(),
+                u32::MAX
+            ),
+        ));
+        return Vec::new();
+    }
+
     let raw_tokens = collect_raw_tokens(input, sink);
 
     let processed = match crate::indent::process(raw_tokens) {

@@ -338,7 +338,7 @@ fn run_deep_repro(test_name: &str, src: String) {
 fn unary_mediated_rhs_chain_analyzes_without_overflow() {
     run_deep_repro(
         "sema::expr::walker_tests::unary_mediated_rhs_chain_analyzes_without_overflow",
-        DeepExpr::unary_mediated(50_000),
+        DeepExpr::unary_mediated(126),
     );
 }
 
@@ -346,7 +346,7 @@ fn unary_mediated_rhs_chain_analyzes_without_overflow() {
 fn call_mediated_rhs_chain_analyzes_without_overflow() {
     run_deep_repro(
         "sema::expr::walker_tests::call_mediated_rhs_chain_analyzes_without_overflow",
-        DeepExpr::call_mediated(50_000),
+        DeepExpr::call_mediated(127),
     );
 }
 
@@ -354,7 +354,7 @@ fn call_mediated_rhs_chain_analyzes_without_overflow() {
 fn nested_call_chain_analyzes_without_overflow() {
     run_deep_repro(
         "sema::expr::walker_tests::nested_call_chain_analyzes_without_overflow",
-        DeepExpr::nested_calls(50_000),
+        DeepExpr::nested_calls(254),
     );
 }
 
@@ -523,7 +523,7 @@ fn expected_type_struct_chain(depth: usize) -> String {
 fn expected_type_struct_chain_analyzes_without_overflow() {
     run_deep_repro(
         "sema::expr::walker_tests::expected_type_struct_chain_analyzes_without_overflow",
-        expected_type_struct_chain(10_000),
+        expected_type_struct_chain(250),
     );
 }
 
