@@ -414,14 +414,13 @@ fn estimated_token_count(input: &str) -> usize {
 }
 
 /// Run logos, indentation processing, and string/int interning in
-/// one pass. Never fails hard: problems are emitted to `sink` and
-/// lexing recovers (a `Token::Error` placeholder for invalid
-/// characters, a zero literal for unparseable ints/floats) so the
-/// parser still sees a well-formed stream and later stages can
-/// co-surface their own diagnostics in the same run. The one
-/// exception is an indentation failure: the stream is unusable
-/// without Indent/Dedent markers, so this returns an empty vector
-/// and the driver skips parsing.
+/// one pass. Ordinary problems are emitted to `sink` and lexing
+/// recovers (a `Token::Error` placeholder for invalid characters, a
+/// zero literal for unparseable ints/floats) so the parser still sees
+/// a well-formed stream and later stages can co-surface their own
+/// diagnostics in the same run. Whole-source width overflow, an
+/// over-budget literal, or indentation failure instead returns an
+/// empty vector and the driver skips parsing.
 pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Token, Span)> {
     if input.len() > u32::MAX as usize {
         sink.emit(Diag::error(

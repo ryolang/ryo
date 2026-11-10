@@ -20,8 +20,8 @@ pub fn parse_source(
     pool: &mut InternPool,
 ) -> Result<(ast::Ast, Vec<Diag>), Vec<Diag>> {
     // `lexer::lex` runs logos + indent processing + string and
-    // integer interning in a single pass and never fails hard: it
-    // emits structured `Diag`s into the sink and recovers so the
+    // integer interning in a single pass. It emits structured `Diag`s
+    // into the sink and recovers from ordinary lexing problems so the
     // parser still sees a well-formed stream. Lex and parse
     // diagnostics accumulate in the same sink so both can surface in
     // one run, rendered through the same Ariadne pipeline as the
@@ -29,9 +29,10 @@ pub fn parse_source(
     let mut sink = DiagSink::new();
     let tokens = lexer::lex(input, pool, &mut sink);
 
-    // Indentation failure: the lexer returned an empty stream because
-    // without Indent/Dedent markers parsing is meaningless. Skip the
-    // parser and report the lex diagnostics as-is.
+    // Whole-source width overflow, an over-budget literal, or
+    // indentation failure: the lexer returned an empty stream because
+    // it cannot produce usable tokens. Skip the parser and report the
+    // lex diagnostics as-is.
     if tokens.is_empty() && sink.has_errors() {
         return Err(sink.into_diags());
     }
