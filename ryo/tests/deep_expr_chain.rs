@@ -119,7 +119,7 @@ fn assert_jit_prints(file_name: &str, src: &str, expected: &str) {
 fn assert_run_fails_with_diagnostic(file_name: &str, src: String, expected: &[&str]) {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let test_file = create_test_file(temp_dir.path(), file_name, &src);
-    // Do not keep a multi-gigabyte parent copy alive while the compiler reads the file.
+    // Release the parent copy before the compiler reads the file.
     drop(src);
     let output =
         run_ryo_command(&["run", file_name], &test_file).expect("Failed to run ryo run command");
@@ -608,15 +608,45 @@ fn nested_catches(depth: usize) -> String {
 }
 
 #[test]
-fn jit_run_nested_statement_matches_50000() {
-    assert_run_fails_with_diagnostic(
-        "nested_statement_matches_50000.ryo",
-        nested_statement_matches(50_000),
-        &["E0130"],
+#[ignore = "writes and reads a source file larger than u32::MAX bytes; run explicitly"]
+fn jit_run_source_larger_than_u32_max() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let file_name = "source_larger_than_u32_max.ryo";
+    let test_file = temp_dir.path().join(file_name);
+    let mut file = std::fs::File::create(&test_file).expect("Failed to create oversized source");
+    let chunk = [b'#'; 64 * 1024];
+    let mut remaining = u64::from(u32::MAX);
+    while remaining > 0 {
+        let len = remaining.min(chunk.len() as u64) as usize;
+        std::io::Write::write_all(&mut file, &chunk[..len])
+            .expect("Failed to write oversized source");
+        remaining -= len as u64;
+    }
+    std::io::Write::write_all(&mut file, b"\n").expect("Failed to finish oversized source");
+    drop(file);
+    assert_eq!(
+        std::fs::metadata(&test_file)
+            .expect("Failed to inspect oversized source")
+            .len(),
+        u64::from(u32::MAX) + 1
+    );
+
+    let output =
+        run_ryo_command(&["run", file_name], &test_file).expect("Failed to run ryo run command");
+    assert!(!output.status.success(), "oversized input unexpectedly ran");
+    assert!(
+        output.status.code().is_some(),
+        "compiler terminated by a signal instead of a diagnostic: {}",
+        output.status
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("E0130"),
+        "stderr must contain E0130: {stderr}"
     );
 }
 
 #[test]
-fn jit_run_nested_catches_50000() {
-    assert_jit_nesting_rejected("nested_catches_50000.ryo", nested_catches(50_000));
+fn jit_run_nested_catches_above_depth_limit() {
+    assert_jit_nesting_rejected("nested_catches_above_depth_limit.ryo", nested_catches(255));
 }

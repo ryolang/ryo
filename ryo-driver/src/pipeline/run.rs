@@ -82,6 +82,7 @@ pub fn run_file(
         write_stdout(format_args!("{clif}"))?;
     }
 
+    drop((analyzed, pool));
     let mut argv = Vec::with_capacity(program_args.len() + 1);
     argv.push(file.to_string_lossy().into_owned());
     argv.extend_from_slice(program_args);
