@@ -129,7 +129,8 @@ fn assert_run_fails_with_diagnostic(file_name: &str, src: String, expected: &[&s
     );
     assert!(
         output.status.code().is_some(),
-        "compiler terminated by a signal instead of a diagnostic"
+        "compiler terminated by a signal instead of a diagnostic: {}",
+        output.status
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     for fragment in expected {

@@ -401,7 +401,8 @@ pub(crate) enum RawToken<'a> {
 /// Heuristic estimate of the number of raw tokens in `input`, used to
 /// pre-size the token buffers so the collect/indent passes don't
 /// repeatedly reallocate. It is only a hint — correctness never
-/// depends on it.
+/// depends on it. The speculative reservation is capped so huge inputs
+/// cannot force a multi-gigabyte allocation before lexing starts.
 fn estimated_token_count(input: &str) -> usize {
     // Average observed token width across representative Ryo sources is
     // ~3 bytes (identifiers/keywords/literals dominate over 1-byte
@@ -409,8 +410,9 @@ fn estimated_token_count(input: &str) -> usize {
     // case. It is NOT an upper bound: punctuation-dense input (a run of
     // 1-byte tokens like `(((((`) yields close to one token per byte —
     // more than len/2 — so the buffer may still grow there. That costs
-    // a reallocation, nothing more. Always reserve at least a little.
-    (input.len() / 2).max(16)
+    // a reallocation, nothing more. Always reserve at least a little,
+    // but never reserve more than one million entries speculatively.
+    (input.len() / 2).max(16).min(1_000_000)
 }
 
 /// Run logos, indentation processing, and string/int interning in
@@ -1653,6 +1655,13 @@ mod tests {
             }
             ref t => panic!("expected BytesLit at index 2, got {:?}", t),
         }
+    }
+
+    #[test]
+    fn estimated_token_count_caps_large_sources() {
+        assert_eq!(estimated_token_count(""), 16);
+        assert_eq!(estimated_token_count(&"a".repeat(100)), 50);
+        assert_eq!(estimated_token_count(&"a".repeat(2_000_002)), 1_000_000);
     }
 
     #[test]
