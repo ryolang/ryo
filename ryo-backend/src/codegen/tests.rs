@@ -451,15 +451,22 @@ fn unreachable_continuations_are_not_emitted() {
     );
 }
 
+fn clif_function<'a>(clif: &'a str, header: &str) -> &'a str {
+    let start = clif
+        .find(header)
+        .unwrap_or_else(|| panic!("missing function header {header}: {clif}"));
+    clif[start..]
+        .split("\nfunction ")
+        .next()
+        .expect("selected function body")
+}
+
 #[test]
 fn enum_copy_skips_fieldless_variant_blocks() {
     let clif = clif_of(
         "enum Choice:\n\tA(int)\n\tB\nfn choose(x: Choice) -> Choice:\n\treturn x\nfn main():\n\tvalue = choose(Choice.A(1))\n\tprint(value)\n",
     );
-    let choose = clif
-        .split("function u0:0(i64, i64)")
-        .next()
-        .expect("choose function");
+    let choose = clif_function(&clif, "function u0:0(i64 sret, i64)");
     assert!(
         !choose.contains("block4:"),
         "fieldless variant should share the merge block: {choose}"
@@ -471,13 +478,10 @@ fn copy_only_enum_drop_emits_no_dispatch() {
     let clif = clif_of(
         "enum Choice:\n\tA(int)\n\tB\nfn discard(value: Choice):\n\treturn\nfn main():\n\tdiscard(Choice.A(1))\n",
     );
-    let discard = clif
-        .split("function u0:0")
-        .next()
-        .expect("discard function");
+    let discard = clif_function(&clif, "function u0:0(i64)");
     assert!(
         !discard.contains("br_table"),
-        "copy-only enum drop should have no tag dispatch: {clif}"
+        "copy-only enum drop should have no tag dispatch: {discard}"
     );
 }
 

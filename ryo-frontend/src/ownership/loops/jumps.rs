@@ -56,7 +56,7 @@ fn collect_assign_writes<S: TirStmtList + ?Sized>(
     impl BodyList<'_> {
         fn get(&self, index: usize) -> Option<TirRef> {
             match self {
-                Self::Extra(list) => list.iter().nth(index),
+                Self::Extra(list) => list.get(index),
                 Self::Owned(list) => list.get(index).copied(),
             }
         }
@@ -134,7 +134,7 @@ fn assignments_immediately_after_loop<'tir>(
     while let Some(task) = stack.pop() {
         match task {
             Task::Body(body, index) => {
-                let Some(stmt) = body.iter().nth(index) else {
+                let Some(stmt) = body.get(index) else {
                     continue;
                 };
                 let stmt = stmt_match(tir, stmt).unwrap_or(stmt);
@@ -272,7 +272,7 @@ pub(crate) fn schedule_loop_exit_frees_in<'tir>(
     impl BodyList<'_> {
         fn get(&self, index: usize) -> Option<TirRef> {
             match self {
-                Self::Extra(list) => list.iter().nth(index),
+                Self::Extra(list) => list.get(index),
                 Self::Owned(list) => list.get(index).copied(),
             }
         }

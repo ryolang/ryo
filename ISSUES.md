@@ -896,7 +896,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ### I-276 — Views of inout parameters do not freeze the owner, enabling use-after-free
 
-**Severity:** Correctness / Hygiene
+**Severity:** Correctness
 **Area:** ownership
 
 **Files:** ryo-frontend/src/ownership/views.rs (projection_root), ryo-frontend/src/ownership/walk.rs, ryo-frontend/src/ownership/tests/ (view/inout regressions), ryo/tests/ (JIT/AOT runtime regressions)

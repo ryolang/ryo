@@ -381,6 +381,8 @@ impl<'a> Walk<'a> {
                             action,
                             &mut region_results,
                         );
+                    } else if let Some(parent) = frame.parent_region {
+                        region_results[parent].continuations.push(frame.exit);
                     }
                 }
             }
@@ -524,7 +526,7 @@ impl<'a> Walk<'a> {
                 }
             }
             Terminator::While { .. } | Terminator::For { .. } => {
-                let (frame, exit) = LoopFrame::new(self, own, b, epoch);
+                let (mut frame, exit) = LoopFrame::new(self, own, b, epoch);
                 if let Some(stop) = follow {
                     stack.push(WalkTask::Resume {
                         target: Some(exit),
@@ -533,6 +535,10 @@ impl<'a> Walk<'a> {
                         stop,
                     });
                 }
+                frame.parent_region = match mode {
+                    BlockMode::Entered(result) => result,
+                    _ => None,
+                };
                 stack.push(WalkTask::Loop { frame, io });
             }
             Terminator::Return { .. } => {

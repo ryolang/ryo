@@ -115,6 +115,8 @@ pub(crate) struct LoopFrame {
     pass_count: usize,
     pass_active: bool,
     pub(crate) pass_io: Option<usize>,
+    pub(crate) parent_region: Option<usize>,
+    pub(crate) exit: BlockId,
 }
 
 enum LoopStage {
@@ -171,6 +173,8 @@ impl LoopFrame {
                 pass_count: 0,
                 pass_active: false,
                 pass_io: None,
+                parent_region: None,
+                exit,
             },
             exit,
         )
