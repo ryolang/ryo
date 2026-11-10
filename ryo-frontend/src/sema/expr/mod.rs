@@ -455,6 +455,7 @@ fn analyze_expr_allow_never_with(
         InstTag::Catch => super::errors::analyze_catch(sema, fcx, scope, r, context),
         InstTag::Try => super::errors::analyze_try(sema, fcx, scope, r, span, context),
         InstTag::FieldAccess => analyze_field_access(sema, fcx, scope, r, span, context),
+        InstTag::Unreachable => fcx.builder.unreachable(sema.pool.error_type(), span),
         // UIR trusted-producer contract (see the `uir.rs` module
         // header): astgen is the only producer, so a non-expression tag
         // reaching `analyze_expr` is a compiler bug, not user input.

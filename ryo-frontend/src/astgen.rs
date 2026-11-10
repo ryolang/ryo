@@ -1220,7 +1220,7 @@ fn lower_block_d(
     depth: u32,
 ) -> Vec<InstRef> {
     if depth == expr::expr_depth_limit() {
-        return expr::gen_block_machine(b, ast, stmts, types, defined_layouts, pool, sink);
+        return expr::gen_block_machine(b, ast, stmts, types, defined_layouts, pool, sink, depth);
     }
     let mut out = Vec::new();
     for &s in ast.stmt_list(stmts) {
@@ -1458,6 +1458,7 @@ fn gen_stmt_d(
             defined_layouts,
             pool,
             sink,
+            depth,
         ));
         return;
     }

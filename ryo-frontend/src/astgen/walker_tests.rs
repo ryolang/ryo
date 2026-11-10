@@ -405,3 +405,83 @@ fn deep_constructor_lowering_uses_machine_at_default_limit() {
         assert_eq!(lowered, baseline, "{name} changed deep lowering");
     }
 }
+
+fn nested_call_program(depth: usize) -> String {
+    let calls = depth - 1;
+    format!(
+        "fn main():\n\tvalue = {}1{}\n",
+        "id(".repeat(calls),
+        ")".repeat(calls)
+    )
+}
+
+#[test]
+fn nesting_limit_boundary() {
+    let (_, accepted_diags) = lower(&nested_call_program(256));
+    assert!(accepted_diags.is_empty(), "{accepted_diags:?}");
+
+    let (_, rejected_diags) = lower(&nested_call_program(257));
+    assert_eq!(rejected_diags.len(), 1, "{rejected_diags:?}");
+    let diag = &rejected_diags[0];
+    assert_eq!(diag.code, DiagCode::NestingLimitExceeded);
+    assert!(diag.message.contains("256"), "{}", diag.message);
+    assert!(diag.span.start < diag.span.end, "{:?}", diag.span);
+}
+
+#[test]
+fn over_depth_expression_recovers_with_one_diagnostic() {
+    let (_, diags) = lower(&nested_call_program(300));
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, DiagCode::NestingLimitExceeded);
+}
+
+#[test]
+fn nested_match_catch_depth_is_not_reset() {
+    const MATCH_DEPTH: usize = 125;
+    const CATCH_DEPTH: usize = 4;
+
+    let mut src = String::from("fn main():\n");
+    for level in 0..=MATCH_DEPTH {
+        src.push_str(&"\t".repeat(2 * level + 1));
+        src.push_str("match 1:\n");
+        src.push_str(&"\t".repeat(2 * level + 2));
+        src.push_str("1:\n");
+    }
+    for level in 0..CATCH_DEPTH {
+        src.push_str(&"\t".repeat(2 * MATCH_DEPTH + 3 + level));
+        if level == 0 {
+            src.push_str("value = 1 catch as err:\n");
+        } else {
+            src.push_str("E: 1 catch as err:\n");
+        }
+    }
+    src.push_str(&"\t".repeat(2 * MATCH_DEPTH + 3 + CATCH_DEPTH));
+    src.push_str("E: 0\n");
+    for level in (0..=MATCH_DEPTH).rev() {
+        src.push_str(&"\t".repeat(2 * level + 2));
+        src.push_str("_:\n");
+        src.push_str(&"\t".repeat(2 * level + 3));
+        src.push_str("0\n");
+    }
+
+    let (_, diags) = lower(&src);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, DiagCode::NestingLimitExceeded);
+}
+
+#[test]
+fn siblings_do_not_consume_nesting_budget() {
+    let args = vec!["1"; 300].join(", ");
+    let mut src = format!("fn main():\n\tid({args})\n");
+    for index in 0..300 {
+        src.push_str(&format!("\tvalue_{index} = {index}\n"));
+    }
+
+    let (_, diags) = lower(&src);
+    assert!(
+        !diags
+            .iter()
+            .any(|diag| diag.code == DiagCode::NestingLimitExceeded),
+        "{diags:?}"
+    );
+}

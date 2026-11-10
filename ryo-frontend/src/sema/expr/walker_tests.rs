@@ -6,10 +6,10 @@
 //! - `codegen/structs.rs`, `match_.rs`, `control.rs`: aggregates and Flow barriers.
 //! - `codegen/mod.rs`, `decls.rs`: statement/declaration roots.
 
-use super::super::tests::{RunOk, run, run_with_errors};
+use super::super::tests::{RunOk, run, run_with_errors, tir_named};
 use super::walker::with_expr_limit;
-use ryo_core::diag::Diag;
-use ryo_core::tir::Tir;
+use ryo_core::diag::{Diag, DiagCode};
+use ryo_core::tir::{Tir, TirTag};
 use ryo_core::types::InternPool;
 use std::process::Command;
 
@@ -356,6 +356,20 @@ fn nested_call_chain_analyzes_without_overflow() {
         "sema::expr::walker_tests::nested_call_chain_analyzes_without_overflow",
         DeepExpr::nested_calls(50_000),
     );
+}
+
+#[test]
+fn over_depth_expression_recovers_with_error_typed_unreachable() {
+    let (tirs, diags, pool) = run_with_errors(&DeepExpr::nested_calls(255));
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, DiagCode::NestingLimitExceeded);
+
+    let main = tir_named(&tirs, &pool, "main");
+    let recovery = main.instructions[1..]
+        .iter()
+        .find(|inst| matches!(inst.tag, TirTag::Unreachable))
+        .expect("over-depth expression should recover with Unreachable");
+    assert_eq!(recovery.ty, pool.error_type());
 }
 
 #[test]
