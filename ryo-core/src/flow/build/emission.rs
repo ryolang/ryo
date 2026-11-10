@@ -41,7 +41,7 @@ pub(super) enum Task<'a> {
         join: BlockId,
     },
     AfterNeverArgs(TirRef),
-    Control(ControlTask),
+    Control(ControlTask<'a>),
 }
 
 pub(super) fn emit_root(builder: &mut FlowBuilder<'_>) {

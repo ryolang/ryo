@@ -50,8 +50,9 @@ use std::collections::HashSet;
 /// `None` tells the caller there is no continuation. Errored matches
 /// never reach here — sema recovers with the error-typed `Unreachable`
 /// sentinel.
-pub(crate) struct MatchFrame {
+pub(crate) struct MatchFrame<'a> {
     match_inst: TirRef,
+    arms: Box<[MatchArmView<'a>]>,
     scrutinee: TirRef,
     scrutinee_ty: TypeId,
     tracked: bool,
@@ -102,9 +103,9 @@ fn match_block_set(
     blocks.into_iter().collect()
 }
 
-impl MatchFrame {
+impl<'a> MatchFrame<'a> {
     pub(crate) fn new(
-        w: &mut Walk<'_>,
+        w: &mut Walk<'a>,
         own: &mut Ownership,
         sink: &mut DiagSink,
         _sidecar: &mut FunctionSidecar,
@@ -151,6 +152,7 @@ impl MatchFrame {
         (
             Some(Self {
                 match_inst,
+                arms: view.arms().collect(),
                 scrutinee,
                 scrutinee_ty,
                 tracked,
@@ -231,12 +233,7 @@ impl MatchFrame {
         sidecar: &mut FunctionSidecar,
     ) {
         let arm_index = self.next_arm;
-        let arm = w
-            .tir
-            .match_view(self.match_inst)
-            .arms()
-            .nth(arm_index)
-            .expect("match arm");
+        let arm = self.arms[arm_index];
         let mut arm_binds: Vec<(TirRef, PlaceId)> = Vec::new();
         for b in arm.bindings() {
             own.binding_of_name.insert(b.name, self.match_inst);
@@ -321,12 +318,7 @@ impl MatchFrame {
         arm: MatchArm,
     ) {
         let arm_index = self.next_arm;
-        let match_arm = w
-            .tir
-            .match_view(self.match_inst)
-            .arms()
-            .nth(arm_index)
-            .expect("match arm");
+        let match_arm = self.arms[arm_index];
         let arm_last = w.last_inst;
         w.last_inst = arm.saved_last;
         restore_view_last_use(own, arm.saved);

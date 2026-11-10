@@ -106,7 +106,7 @@ enum BlockMode {
     Entered(Option<usize>),
 }
 
-enum WalkTask {
+enum WalkTask<'a> {
     Block {
         block: BlockId,
         epoch: u32,
@@ -134,7 +134,7 @@ enum WalkTask {
         stop: RegionStop,
     },
     Match {
-        frame: MatchFrame,
+        frame: MatchFrame<'a>,
         io: usize,
     },
     If {
@@ -391,7 +391,7 @@ impl<'a> Walk<'a> {
     }
 
     fn schedule_action(
-        stack: &mut ChainSpine<WalkTask>,
+        stack: &mut ChainSpine<WalkTask<'a>>,
         ios: &mut Vec<Option<WalkIo<'_>>>,
         current_io: usize,
         action: WalkAdvance,
@@ -442,7 +442,7 @@ impl<'a> Walk<'a> {
         &mut self,
         own: &mut Ownership,
         ios: &mut [Option<WalkIo<'_>>],
-        stack: &mut ChainSpine<WalkTask>,
+        stack: &mut ChainSpine<WalkTask<'a>>,
         b: BlockId,
         epoch: u32,
         io: usize,

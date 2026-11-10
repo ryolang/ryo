@@ -1546,3 +1546,33 @@ pub use views::{
     FieldAssignView, ForRangeView, StructLitView, TirElifIter, TirElifList, TirElifView,
     TirIfStmtView, VarDeclView, WhileLoopView,
 };
+
+#[cfg(test)]
+thread_local! {
+    static MATCH_ARM_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ELIF_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn note_match_arm_decode() {
+    MATCH_ARM_DECODES.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+pub(crate) fn note_elif_decode() {
+    ELIF_DECODES.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+pub(crate) fn reset_control_decode_counts() {
+    MATCH_ARM_DECODES.with(|count| count.set(0));
+    ELIF_DECODES.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn control_decode_counts() -> (usize, usize) {
+    (
+        MATCH_ARM_DECODES.with(std::cell::Cell::get),
+        ELIF_DECODES.with(std::cell::Cell::get),
+    )
+}

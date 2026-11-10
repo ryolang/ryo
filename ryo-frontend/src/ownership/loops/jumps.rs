@@ -19,6 +19,20 @@ use ryo_core::types::{InternPool, StringId};
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+thread_local! {
+    static ACTIVE_LOOP_CONTEXTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MAX_ACTIVE_LOOP_CONTEXTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn loop_exit_context_counts() -> (usize, usize) {
+    (
+        ACTIVE_LOOP_CONTEXTS.with(std::cell::Cell::get),
+        MAX_ACTIVE_LOOP_CONTEXTS.with(std::cell::Cell::get),
+    )
+}
+
 // ---------- Post-walk jump-exit free scheduling (kept TIR-based) ----------
 
 /// Per-loop invariants for jump-exit Free scheduling, computed once
@@ -268,6 +282,7 @@ pub(crate) fn schedule_loop_exit_frees_in<'tir>(
         list: BodyList<'a>,
         next: usize,
         enclosing: Option<usize>,
+        release_on_complete: Option<usize>,
     }
     impl BodyList<'_> {
         fn get(&self, index: usize) -> Option<TirRef> {
@@ -277,15 +292,29 @@ pub(crate) fn schedule_loop_exit_frees_in<'tir>(
             }
         }
     }
+    #[cfg(test)]
+    {
+        ACTIVE_LOOP_CONTEXTS.with(|count| count.set(0));
+        MAX_ACTIVE_LOOP_CONTEXTS.with(|count| count.set(0));
+    }
     let mut tasks = ryo_core::spine::ChainSpine::new();
-    let mut contexts: Vec<LoopExitCtx<'tir>> = Vec::new();
+    let mut contexts: Vec<Option<LoopExitCtx<'tir>>> = Vec::new();
     tasks.push(BodyTask {
         list: BodyList::Extra(stmts),
         next: 0,
         enclosing: None,
+        release_on_complete: None,
     });
     while let Some(mut task) = tasks.pop() {
         let Some(next) = task.list.get(task.next) else {
+            if let Some(id) = task.release_on_complete {
+                let released = contexts[id]
+                    .take()
+                    .expect("completed loop still owns its context");
+                drop(released);
+                #[cfg(test)]
+                ACTIVE_LOOP_CONTEXTS.with(|count| count.set(count.get() - 1));
+            }
             continue;
         };
         task.next += 1;
@@ -295,7 +324,7 @@ pub(crate) fn schedule_loop_exit_frees_in<'tir>(
         let inst = *tir.inst(r);
         match inst.tag {
             TirTag::Break | TirTag::Continue => {
-                if let Some(ctx) = enclosing.map(|id| &contexts[id]) {
+                if let Some(ctx) = enclosing.and_then(|id| contexts[id].as_ref()) {
                     schedule_break_continue_frees(tir, flow, pool, own, sidecar, r, ctx);
                 }
             }
@@ -303,11 +332,18 @@ pub(crate) fn schedule_loop_exit_frees_in<'tir>(
                 if let Some(ctx) = LoopExitCtx::new(tir, doms, own, sidecar, r) {
                     let id = contexts.len();
                     let body = ctx.body;
-                    contexts.push(ctx);
+                    contexts.push(Some(ctx));
+                    #[cfg(test)]
+                    ACTIVE_LOOP_CONTEXTS.with(|count| {
+                        let active = count.get() + 1;
+                        count.set(active);
+                        MAX_ACTIVE_LOOP_CONTEXTS.with(|max| max.set(max.get().max(active)));
+                    });
                     tasks.push(BodyTask {
                         list: BodyList::Extra(body),
                         next: 0,
                         enclosing: Some(id),
+                        release_on_complete: Some(id),
                     });
                 }
             }
@@ -326,6 +362,7 @@ pub(crate) fn schedule_loop_exit_frees_in<'tir>(
                         list: body,
                         next: 0,
                         enclosing,
+                        release_on_complete: None,
                     });
                 }
             }
@@ -335,6 +372,7 @@ pub(crate) fn schedule_loop_exit_frees_in<'tir>(
                         list: BodyList::Owned(body),
                         next: 0,
                         enclosing,
+                        release_on_complete: None,
                     });
                 }
             }
@@ -350,6 +388,7 @@ pub(crate) fn schedule_loop_exit_frees_in<'tir>(
                     list: BodyList::Owned(body),
                     next: 0,
                     enclosing,
+                    release_on_complete: None,
                 });
             }
         }

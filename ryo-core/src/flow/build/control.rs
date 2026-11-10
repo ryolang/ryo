@@ -2,21 +2,22 @@ use super::emission::{BodyCursor, Task};
 use super::{BlockId, FlowBuilder, Place, PlaceId, Terminator};
 use crate::extra::{ExtraList, ExtraRange};
 use crate::spine::ChainSpine;
-use crate::tir::{MatchBodyView, TirRef, TirTag};
+use crate::tir::{MatchArmView, MatchBodyView, TirElifView, TirRef, TirTag};
 use crate::types::StringId;
 
-pub(super) enum ControlTask {
-    If(IfFrame),
-    Match(MatchFrame),
+pub(super) enum ControlTask<'a> {
+    If(IfFrame<'a>),
+    Match(MatchFrame<'a>),
     While(WhileFrame),
     For(ForFrame),
 }
 
-pub(super) struct IfFrame {
+pub(super) struct IfFrame<'a> {
     stmt: TirRef,
     phase: IfPhase,
     then_block: BlockId,
     elif_condition_blocks: Box<[BlockId]>,
+    elif_branches: Box<[TirElifView<'a>]>,
     elif_branch_blocks: Vec<BlockId>,
     else_block: BlockId,
     join: BlockId,
@@ -32,9 +33,10 @@ enum IfPhase {
     Else,
 }
 
-pub(super) struct MatchFrame {
+pub(super) struct MatchFrame<'a> {
     stmt: TirRef,
     phase: MatchPhase,
+    arms: Box<[MatchArmView<'a>]>,
     arm_blocks: Box<[BlockId]>,
     next_arm: usize,
     join: Option<BlockId>,
@@ -78,10 +80,10 @@ enum ForPhase {
     Body,
 }
 
-pub(super) fn schedule_control(
-    builder: &mut FlowBuilder<'_>,
+pub(super) fn schedule_control<'a>(
+    builder: &mut FlowBuilder<'a>,
     stmt: TirRef,
-    tasks: &mut ChainSpine<Task<'_>>,
+    tasks: &mut ChainSpine<Task<'a>>,
 ) {
     match builder.tir.inst(stmt).tag {
         TirTag::IfStmt => {
@@ -91,6 +93,7 @@ pub(super) fn schedule_control(
                 phase: IfPhase::InitialCondition,
                 then_block: BlockId::NONE,
                 elif_condition_blocks: Box::new([]),
+                elif_branches: Box::new([]),
                 elif_branch_blocks: Vec::new(),
                 else_block: BlockId::NONE,
                 join: BlockId::NONE,
@@ -103,6 +106,7 @@ pub(super) fn schedule_control(
             tasks.push(Task::Control(ControlTask::Match(MatchFrame {
                 stmt,
                 phase: MatchPhase::AfterScrutinee,
+                arms: Box::new([]),
                 arm_blocks: Box::new([]),
                 next_arm: 0,
                 join: None,
@@ -156,7 +160,7 @@ pub(super) fn schedule_control(
 
 pub(super) fn resume_control<'a>(
     builder: &mut FlowBuilder<'a>,
-    control: ControlTask,
+    control: ControlTask<'a>,
     tasks: &mut ChainSpine<Task<'a>>,
 ) {
     match control {
@@ -169,7 +173,7 @@ pub(super) fn resume_control<'a>(
 
 fn resume_if<'a>(
     builder: &mut FlowBuilder<'a>,
-    mut frame: IfFrame,
+    mut frame: IfFrame<'a>,
     tasks: &mut ChainSpine<Task<'a>>,
 ) {
     match frame.phase {
@@ -191,13 +195,7 @@ fn resume_if<'a>(
                 .get(branch + 1)
                 .copied()
                 .unwrap_or(frame.else_block);
-            let elif = builder
-                .tir
-                .if_stmt_view(frame.stmt)
-                .elif_branches
-                .iter()
-                .nth(branch)
-                .expect("elif branch");
+            let elif = frame.elif_branches[branch];
             builder.set_term(
                 builder.cur,
                 Terminator::Branch {
@@ -226,8 +224,9 @@ fn resume_if<'a>(
     }
 }
 
-fn prepare_if(builder: &mut FlowBuilder<'_>, frame: &mut IfFrame) {
+fn prepare_if<'a>(builder: &mut FlowBuilder<'a>, frame: &mut IfFrame<'a>) {
     let view = builder.tir.if_stmt_view(frame.stmt);
+    frame.elif_branches = view.elif_branches.iter().collect();
     frame.then_block = builder.new_block(false);
     frame.elif_condition_blocks = (0..view.elif_branches.len())
         .map(|_| builder.new_block(false))
@@ -253,7 +252,7 @@ fn prepare_if(builder: &mut FlowBuilder<'_>, frame: &mut IfFrame) {
 
 fn schedule_then<'a>(
     builder: &mut FlowBuilder<'a>,
-    mut frame: IfFrame,
+    mut frame: IfFrame<'a>,
     tasks: &mut ChainSpine<Task<'a>>,
 ) {
     let body = builder.tir.if_stmt_view(frame.stmt).then_stmts;
@@ -266,18 +265,11 @@ fn schedule_then<'a>(
 
 fn schedule_elif_or_else<'a>(
     builder: &mut FlowBuilder<'a>,
-    mut frame: IfFrame,
+    mut frame: IfFrame<'a>,
     tasks: &mut ChainSpine<Task<'a>>,
 ) {
     if frame.next_branch < frame.elif_condition_blocks.len() {
-        let cond = builder
-            .tir
-            .if_stmt_view(frame.stmt)
-            .elif_branches
-            .iter()
-            .nth(frame.next_branch)
-            .expect("elif branch")
-            .cond;
+        let cond = frame.elif_branches[frame.next_branch].cond;
         builder.cur = frame.elif_condition_blocks[frame.next_branch];
         frame.phase = IfPhase::ElifCondition;
         tasks.push(Task::Control(ControlTask::If(frame)));
@@ -296,7 +288,7 @@ fn schedule_elif_or_else<'a>(
     }
 }
 
-fn finish_if(builder: &mut FlowBuilder<'_>, frame: IfFrame) {
+fn finish_if<'a>(builder: &mut FlowBuilder<'a>, frame: IfFrame<'a>) {
     builder.close_region(builder.cur, frame.join);
     builder.branch_arms.insert(
         frame.stmt,
@@ -312,7 +304,7 @@ fn finish_if(builder: &mut FlowBuilder<'_>, frame: IfFrame) {
 
 fn resume_match<'a>(
     builder: &mut FlowBuilder<'a>,
-    mut frame: MatchFrame,
+    mut frame: MatchFrame<'a>,
     tasks: &mut ChainSpine<Task<'a>>,
 ) {
     match frame.phase {
@@ -322,9 +314,10 @@ fn resume_match<'a>(
     schedule_next_arm(builder, frame, tasks);
 }
 
-fn prepare_match(builder: &mut FlowBuilder<'_>, frame: &mut MatchFrame) {
+fn prepare_match<'a>(builder: &mut FlowBuilder<'a>, frame: &mut MatchFrame<'a>) {
     let stmt = frame.stmt;
     let view = builder.tir.match_view(stmt);
+    frame.arms = view.arms().collect();
     let match_ty = view.ty;
     let tokens = builder.tir.match_by_move_owner_refs(stmt, builder.pool);
     let names: Vec<StringId> = view
@@ -380,7 +373,7 @@ fn prepare_match(builder: &mut FlowBuilder<'_>, frame: &mut MatchFrame) {
     frame.owner_tokens = builder.token_places_of(stmt).to_vec().into_boxed_slice();
 }
 
-fn finish_arm(builder: &mut FlowBuilder<'_>, frame: &mut MatchFrame) {
+fn finish_arm<'a>(builder: &mut FlowBuilder<'a>, frame: &mut MatchFrame<'a>) {
     let arm_block = frame.arm_blocks[frame.next_arm];
     match frame.join {
         Some(join) => builder.close_region(builder.cur, join),
@@ -404,7 +397,7 @@ fn finish_arm(builder: &mut FlowBuilder<'_>, frame: &mut MatchFrame) {
 
 fn schedule_next_arm<'a>(
     builder: &mut FlowBuilder<'a>,
-    mut frame: MatchFrame,
+    mut frame: MatchFrame<'a>,
     tasks: &mut ChainSpine<Task<'a>>,
 ) {
     if frame.next_arm == frame.arm_blocks.len() {
@@ -416,7 +409,7 @@ fn schedule_next_arm<'a>(
         return;
     }
 
-    let arm = builder.tir.match_view(frame.stmt).arm(frame.next_arm);
+    let arm = frame.arms[frame.next_arm];
     builder.cur = frame.arm_blocks[frame.next_arm];
     builder.push_scope();
     for binding in arm.bindings() {

@@ -196,10 +196,9 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// block param.
     pub(super) flow_blocks: Vec<Block>,
     /// Per-Flow-block sealing discipline: a block seals once every Flow
-    /// predecessor's terminator has been emitted (loop headers
-    /// naturally wait for their backedge); unreachable no-predecessor
-    /// blocks self-seal right after their own terminator. Entry starts
-    /// sealed.
+    /// predecessor's terminator has been emitted (loop headers naturally
+    /// wait for their backedge). Unreachable blocks are marked sealed during
+    /// setup without emission. Entry starts sealed.
     pub(super) flow_sealed: Vec<bool>,
     /// Per-Flow-block count of emitted predecessor terminators, for
     /// the sealing rule above.

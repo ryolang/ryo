@@ -33,11 +33,10 @@
 //!   writes the result slot and jumps to the join. The join caches
 //!   the result value on the match instruction.
 //! * Sealing: a block seals once every Flow predecessor's terminator
-//!   has been emitted (loop headers therefore wait for their
-//!   backedge); unreachable no-predecessor blocks self-seal after
-//!   their own terminator, and any block still unsealed after the
-//!   walk (a tail-called arm never emits its Goto edge) is sealed in
-//!   the final sweep.
+//!   has been emitted (loop headers therefore wait for their backedge).
+//!   Unreachable blocks are marked sealed during setup without emission,
+//!   and any reachable block still unsealed after the walk (a tail-called
+//!   arm never emits its Goto edge) is sealed in the final sweep.
 
 use super::{
     BlockPrologue, Codegen, ForRecord, FunctionContext, IfRecord, LoopRecord, SlotMarks,
@@ -560,11 +559,10 @@ impl<M: Module> Codegen<M> {
         order
     }
 
-    /// Emit one Flow block: region prologue, block-start drops, steps
-    /// (with tail/return operand deferral), terminator, sealing.
-    /// Unreachable blocks skip the prologue and block-start drops (the
-    /// dead region's scope restores and arm drops are meaningless) but
-    /// still emit steps and terminators, mirroring the old emitter.
+    /// Emit one reachable Flow block: region prologue, block-start drops,
+    /// steps (with tail/return operand deferral), terminator, sealing.
+    /// The driver skips unreachable blocks without emitting their prologues,
+    /// steps, drops, or terminators.
     fn emit_flow_block(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -1563,9 +1561,8 @@ impl<M: Module> Codegen<M> {
     /// Post-terminator sealing: every Flow successor's predecessor
     /// count advances; a block seals once ALL its Flow predecessors
     /// have emitted (loop headers therefore wait for their backedge —
-    /// Cranelift dominance is preserved). Unreachable
-    /// no-predecessor blocks self-seal: live blocks never target them,
-    /// so they can gain no further predecessors.
+    /// Cranelift dominance is preserved). Unreachable blocks were marked
+    /// sealed during setup and never reach this handler.
     fn seal_after_terminator(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
