@@ -920,6 +920,58 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-280 — resolve_decl can overwrite DeclState::Failed with Resolved for a rejected inferred SCC member
+
+**Severity:** Correctness / Hygiene
+**Area:** sema
+
+**Files:** ryo-frontend/src/sema/mod.rs:671-686, ryo-frontend/src/sema/error_inference.rs:129-152
+
+**Summary:** resolve_decl sets InProgress, analyzes, then calls finalize_inferred_function, then unconditionally writes DeclState::Resolved. finalize_inferred_function marks every inferred member of a rejected recursive SCC Failed (error_inference.rs:147-151) — including the decl currently on the resolve_decl stack. The unconditional Resolved write silently undoes that marking, leaving one member of a rejected cycle fully resolved with results[decl] populated while its SCC siblings stay Failed with results[decl] = None: an inconsistent state split within a single SCC. require_decl returns true for both states, so the difference only surfaces in results consumers. Found during a state-machine invalid-state review of the sema/astgen task machines.
+
+**Resolution:** Run the SCC rejection before the Resolved write, or make resolve_decl skip the write when finalize marked the decl Failed. Add a regression test: two mutually recursive inferred-error functions entered through the one that gets resolved first.
+
+---
+
+### I-281 — Flow match builder guards token/binding pairing with debug_assert only; release builds can miscompile
+
+**Severity:** Correctness / Hygiene
+**Area:** core-ir
+
+**Files:** ryo-core/src/flow/build/control.rs:329, ryo-core/src/flow/build/control.rs:403-421
+
+**Summary:** prepare_match checks tokens.len() == names.len() with debug_assert_eq!, where tokens come from match_by_move_owner_refs and names from independently filtering bindings by !is_copy. The invariant guards frame.owner_tokens[frame.next_token] indexing in schedule_next_arm and a second debug_assert_eq! on the final count. In release, a disagreement between the two filters means an out-of-bounds panic (fewer tokens) or silently pairing the wrong owner token to a by-move binding (more tokens) — a miscompile with no diagnostic. Found during a state-machine invalid-state review.
+
+**Resolution:** Promote both debug_assert_eq! sites to hard asserts (or emit an internal-error diagnostic and recover), so a filter disagreement fails loudly in every build mode.
+
+---
+
+### I-282 — Loop ownership fixed-point cap is debug_assert-only; release builds proceed with unconverged state
+
+**Severity:** Correctness / Hygiene
+**Area:** ownership
+
+**Files:** ryo-frontend/src/ownership/loops/mod.rs:203-220
+
+**Summary:** LoopFrame::advance bounds the propagate/check fixed point at height_cap = 5 * instruction count + 2, but exceeding the cap fires only a debug_assert ("INTERNAL ANALYSIS FAILURE: loop propagate did not converge"). Release builds silently discard the current branch state, truncate owner hazards, and continue to Check with un-converged ownership facts — wrong frees/moves can reach codegen with no diagnostic. Debug and CI (which run debug tests) can never observe the failure mode users would hit. Found during a state-machine invalid-state review.
+
+**Resolution:** Either promote to a hard assert (treat non-convergence as a compiler bug in all modes) or emit an internal-error diagnostic before the graceful degradation, so release behavior is deliberate and observable.
+
+---
+
+### I-283 — Ownership walk machine derives Flow result index and staging IO index from side-effect ordering
+
+**Severity:** Correctness / Hygiene
+**Area:** ownership
+
+**Files:** ryo-frontend/src/ownership/walk/machine.rs:354-386, ryo-frontend/src/ownership/walk/machine.rs:393-438
+
+**Summary:** schedule_action's Flow arm targets region_results.len() - 1, which is only correct because WalkAdvance::Flow is produced solely by Match frames that reserve a fresh summary slot immediately before; If/Loop frames call the same schedule_action but never return Flow today. The Loop staging arm captures pass_io = ios.len() before schedule_action pushes the staging entry, correct only because exactly one staged Region is scheduled per resume. Either coupling silently targets the wrong slot — or wraps usize to a huge index in release — if a new Flow producer appears or an advance returns two staged regions. Found during a state-machine invalid-state review.
+
+**Resolution:** Carry result_index and staging_index explicitly in the WalkAdvance::Flow and WalkAdvance::Region variants instead of recomputing them at the push site, making the wrong pairing unrepresentable.
+
+---
+
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
@@ -928,4 +980,12 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-<!-- issue-id high-water: 279 -->
+---
+
+---
+
+---
+
+---
+
+<!-- issue-id high-water: 283 -->
