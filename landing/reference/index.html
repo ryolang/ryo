@@ -310,6 +310,11 @@
               A long operator chain can reach the limit even without nested
               delimiters.
             </p>
+            <p>
+              A source file may contain at most 4,294,967,295 bytes
+              (<code>u32::MAX</code>), the range representable by source spans.
+              Larger sources are rejected at lexer entry.
+            </p>
 
             <h3>Diagnostics</h3>
             <div class="ref-table-wrap">
@@ -327,6 +332,13 @@
                       AST nesting exceeds the maximum depth of 256 — depth 256
                       is accepted; the first node that would require depth 257
                       is rejected
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>E0130</code></td>
+                    <td>
+                      Source is too large to lex — sources above 4,294,967,295
+                      bytes are rejected at lexer entry
                     </td>
                   </tr>
                 </tbody>

@@ -855,32 +855,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-272 — JIT compilation of 50k nested slices exceeds 15 minutes
-
-**Severity:** Correctness / Hygiene
-**Area:** codegen
-
-**Files:** ryo/tests/deep_expr_chain.rs; ryo-backend/src/codegen; ryo-driver/src/pipeline
-
-**Summary:** The jit_run_deep_slice_nesting regression generates 50,000 successive [0:1] expressions. TIR emission completes and 1,000-level JIT execution succeeds, but debug JIT compilation exceeded a 900-second timeout while consuming one CPU core; no stack overflow or deadlock was observed. The long case prevents the default deep-expression and workspace suites from completing in a practical validation window.
-
-**Resolution:** Profile the 50,000-slice JIT pipeline to locate the superlinear pass or emission path, then remove the scaling bottleneck without weakening stack-safety coverage. Add scaling measurements for nested views and keep a large regression practical for CI while retaining adversarial stress coverage.
-
----
-
-### I-275 — Deep match source spans exceed the UIR wire range
-
-**Severity:** Correctness / Hygiene
-**Area:** core-ir
-
-**Files:** ryo-core/src/uir/match_.rs; ryo-core/src/uir.rs; ryo/tests/deep_expr_chain.rs
-
-**Summary:** The original 50,000-level nested statement-match source is approximately 9.3 GB because indentation grows quadratically. After iterative astgen lowering, it reaches a pattern-span range error instead of overflowing the native stack. Pattern spans use u32 source offsets, so inputs beyond 4 GiB cannot be represented even though traversal no longer overflows.
-
-**Resolution:** Decide whether UIR source spans should be widened or very large inputs should receive a documented size-limit diagnostic. Preserve iterative traversal and add a boundary test proving inputs beyond the span range fail cleanly without a stack overflow. Do not change the wire format without design approval.
-
----
-
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)

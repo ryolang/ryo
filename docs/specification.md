@@ -219,6 +219,7 @@ Ryo assumes a workflow where AI agents write code and human developers review, d
   - **Note:** Code examples in this documentation may display spaces for markdown rendering compatibility, but actual `.ryo` source files **MUST** use tabs. The compiler will enforce this requirement and reject files with mixed tabs and spaces.
 - **Statements:** Generally one per line; semicolons are not required or used.
 - **Source nesting:** Abstract-syntax-tree nesting depth may not exceed 256. A root expression or statement has depth zero; every parent-to-child edge adds one, while siblings retain the same depth. This includes operator and call operands, projections, match and catch bodies, and nested statement blocks. Depth 256 is accepted; the first node that would require depth 257 is rejected with diagnostic **E0140** (`AST nesting exceeds the maximum depth of 256`). A long operator chain can reach this limit even without nested delimiters.
+- **Source size:** A source file may contain at most 4,294,967,295 bytes (`u32::MAX`), the range representable by source spans. Larger sources are rejected at lexer entry with diagnostic **E0130** (`source is too large to lex`).
 
 ## 3. Syntax & Grammar
 
