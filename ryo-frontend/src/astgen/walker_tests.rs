@@ -438,7 +438,7 @@ fn over_depth_expression_recovers_with_one_diagnostic() {
 #[test]
 fn nested_match_catch_depth_is_not_reset() {
     const MATCH_DEPTH: usize = 125;
-    const CATCH_DEPTH: usize = 4;
+    const CATCH_DEPTH: usize = 3;
 
     let mut src = String::from("fn main():\n");
     for level in 0..=MATCH_DEPTH {
@@ -456,7 +456,7 @@ fn nested_match_catch_depth_is_not_reset() {
         }
     }
     src.push_str(&"\t".repeat(2 * MATCH_DEPTH + 3 + CATCH_DEPTH));
-    src.push_str("E: 0\n");
+    src.push_str("E: id(0)\n");
     for level in (0..=MATCH_DEPTH).rev() {
         src.push_str(&"\t".repeat(2 * level + 2));
         src.push_str("_:\n");
