@@ -1281,3 +1281,31 @@ fn nested_loops_with_carried_views_converges() {
         "nested loops with a carried view must compile clean: {diags:?}"
     );
 }
+
+#[test]
+fn sequential_loop_exit_contexts_are_released() {
+    let mut src = String::from("fn main():\n");
+    for _ in 0..32 {
+        src.push_str("\twhile false:\n\t\tprint(\"loop\")\n");
+    }
+
+    let _ = check_src_full(&src);
+
+    assert_eq!(
+        super::super::loops::loop_exit_context_counts(),
+        (0, 1),
+        "completed sequential loop contexts must be released"
+    );
+}
+
+#[test]
+fn nested_loop_exit_contexts_remain_active_until_their_body_completes() {
+    let _ =
+        check_src_full("fn main():\n\twhile false:\n\t\twhile false:\n\t\t\tprint(\"nested\")\n");
+
+    assert_eq!(
+        super::super::loops::loop_exit_context_counts(),
+        (0, 2),
+        "the inner loop must not release its parent context"
+    );
+}

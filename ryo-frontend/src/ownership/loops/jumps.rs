@@ -20,6 +20,20 @@ use ryo_core::types::{InternPool, StringId};
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+thread_local! {
+    static ACTIVE_LOOP_CONTEXTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MAX_ACTIVE_LOOP_CONTEXTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn loop_exit_context_counts() -> (usize, usize) {
+    (
+        ACTIVE_LOOP_CONTEXTS.with(std::cell::Cell::get),
+        MAX_ACTIVE_LOOP_CONTEXTS.with(std::cell::Cell::get),
+    )
+}
+
 // ---------- Post-walk jump-exit free scheduling (kept TIR-based) ----------
 
 /// Per-loop invariants for jump-exit Free scheduling, computed once
@@ -193,6 +207,12 @@ impl<'a> LoopExitCtx<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum EnclosingLoopExitCtx<'a, 'tir> {
+    Borrowed(&'a LoopExitCtx<'tir>),
+    Stored(usize),
+}
+
 /// Schedule unconditional Frees on `break`/`continue` paths. Runs after
 /// the last-use, anonymous-temp, and dead-store passes have populated
 /// `sidecar.drops`. Kept statement-recursive (see the module header).
@@ -207,41 +227,79 @@ pub(crate) fn schedule_loop_exit_frees_in<S: TirStmtList + ?Sized>(
     enclosing: Option<&LoopExitCtx<'_>>,
     doms: &OnceCell<Dominators>,
 ) {
-    schedule_loop_exit_frees_in_inner(tir, flow, pool, own, sidecar, stmts, enclosing, doms);
+    #[cfg(test)]
+    {
+        ACTIVE_LOOP_CONTEXTS.with(|count| count.set(0));
+        MAX_ACTIVE_LOOP_CONTEXTS.with(|count| count.set(0));
+    }
+    let mut contexts = Vec::new();
+    let enclosing = enclosing.map(EnclosingLoopExitCtx::Borrowed);
+    schedule_loop_exit_frees_in_inner(
+        tir,
+        flow,
+        pool,
+        own,
+        sidecar,
+        stmts,
+        enclosing,
+        &mut contexts,
+        doms,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
-fn schedule_loop_exit_frees_in_inner<S: TirStmtList + ?Sized>(
-    tir: &Tir,
+fn schedule_loop_exit_frees_in_inner<'a, 'tir, S: TirStmtList + ?Sized>(
+    tir: &'tir Tir,
     flow: &ryo_core::flow::Flow,
     pool: &InternPool,
     own: &Ownership,
     sidecar: &mut FunctionSidecar,
     stmts: &S,
-    enclosing: Option<&LoopExitCtx<'_>>,
-    doms: &OnceCell<Dominators>,
+    enclosing: Option<EnclosingLoopExitCtx<'a, 'tir>>,
+    contexts: &mut Vec<Option<LoopExitCtx<'tir>>>,
+    doms: &'tir OnceCell<Dominators>,
 ) {
     for r in stmts.iter_refs() {
         let r = stmt_match(tir, r).unwrap_or(r);
         let inst = *tir.inst(r);
         match inst.tag {
             TirTag::Break | TirTag::Continue => {
+                let enclosing = enclosing.and_then(|enclosing| match enclosing {
+                    EnclosingLoopExitCtx::Borrowed(ctx) => Some(ctx),
+                    EnclosingLoopExitCtx::Stored(id) => contexts[id].as_ref(),
+                });
                 if let Some(ctx) = enclosing {
                     schedule_break_continue_frees(tir, flow, pool, own, sidecar, r, ctx);
                 }
             }
             TirTag::WhileLoop | TirTag::ForRange => {
                 if let Some(ctx) = LoopExitCtx::new(tir, doms, own, sidecar, r) {
+                    let id = contexts.len();
+                    let body = ctx.body;
+                    contexts.push(Some(ctx));
+                    #[cfg(test)]
+                    ACTIVE_LOOP_CONTEXTS.with(|count| {
+                        let active = count.get() + 1;
+                        count.set(active);
+                        MAX_ACTIVE_LOOP_CONTEXTS.with(|max| max.set(max.get().max(active)));
+                    });
                     schedule_loop_exit_frees_in_inner(
                         tir,
                         flow,
                         pool,
                         own,
                         sidecar,
-                        &ctx.body,
-                        Some(&ctx),
+                        &body,
+                        Some(EnclosingLoopExitCtx::Stored(id)),
+                        contexts,
                         doms,
                     );
+                    let released = contexts[id]
+                        .take()
+                        .expect("completed loop still owns its context");
+                    drop(released);
+                    #[cfg(test)]
+                    ACTIVE_LOOP_CONTEXTS.with(|count| count.set(count.get() - 1));
                 }
             }
             TirTag::IfStmt => {
@@ -254,23 +312,24 @@ fn schedule_loop_exit_frees_in_inner<S: TirStmtList + ?Sized>(
                     sidecar,
                     &view.then_stmts,
                     enclosing,
+                    contexts,
                     doms,
                 );
                 for elif in &view.elif_branches {
                     schedule_loop_exit_frees_in_inner(
-                        tir, flow, pool, own, sidecar, &elif.body, enclosing, doms,
+                        tir, flow, pool, own, sidecar, &elif.body, enclosing, contexts, doms,
                     );
                 }
                 if let Some(else_stmts) = &view.else_stmts {
                     schedule_loop_exit_frees_in_inner(
-                        tir, flow, pool, own, sidecar, else_stmts, enclosing, doms,
+                        tir, flow, pool, own, sidecar, else_stmts, enclosing, contexts, doms,
                     );
                 }
             }
             TirTag::Match => {
                 for body in match_arm_bodies(tir, r) {
                     schedule_loop_exit_frees_in_inner(
-                        tir, flow, pool, own, sidecar, &body, enclosing, doms,
+                        tir, flow, pool, own, sidecar, &body, enclosing, contexts, doms,
                     );
                 }
             }
@@ -280,7 +339,7 @@ fn schedule_loop_exit_frees_in_inner<S: TirStmtList + ?Sized>(
             visit_operand_matches(tir, r, &mut |m| {
                 for body in match_arm_bodies(tir, m) {
                     schedule_loop_exit_frees_in_inner(
-                        tir, flow, pool, own, sidecar, &body, enclosing, doms,
+                        tir, flow, pool, own, sidecar, &body, enclosing, contexts, doms,
                     );
                 }
             });
