@@ -56,6 +56,7 @@ use super::{
     is_enum_type, is_struct_type,
 };
 use cranelift::codegen::ir::{MemFlagsData, StackSlotData, StackSlotKind};
+use cranelift::frontend::Switch;
 use cranelift::prelude::*;
 use cranelift_module::Module;
 use ryo_core::ast::LitPattern;
@@ -470,7 +471,6 @@ impl<M: Module> Codegen<M> {
             FlowTerm::Switch { join: Some(j), .. } => *j,
             _ => unreachable!("a falling arm implies a join"),
         };
-        let jb = ctx.flow_blocks[join.0 as usize];
         let (_scrut, shape, slot_addr) = {
             let rec = ctx
                 .match_records
@@ -497,7 +497,7 @@ impl<M: Module> Codegen<M> {
                         // this handler); the promotion family keeps its
                         // own hook.
                         fire_join_bucket(builder, ctx)?;
-                        builder.ins().jump(jb, &[]);
+                        Self::emit_region_jump(builder, ctx, from, join);
                     }
                     MatchShape::Scalar(_) => {
                         // The arm body expression was a step in this
@@ -512,7 +512,7 @@ impl<M: Module> Codegen<M> {
                             .ins()
                             .store(MemFlagsData::trusted(), v, slot_addr, 0);
                         fire_join_bucket(builder, ctx)?;
-                        builder.ins().jump(jb, &[]);
+                        Self::emit_region_jump(builder, ctx, from, join);
                     }
                     MatchShape::Void => {
                         let _ = Self::eval_inst(builder, ctx, e)?;
@@ -521,7 +521,7 @@ impl<M: Module> Codegen<M> {
                         // this handler); the promotion family keeps its
                         // own hook.
                         fire_join_bucket(builder, ctx)?;
-                        builder.ins().jump(jb, &[]);
+                        Self::emit_region_jump(builder, ctx, from, join);
                     }
                     MatchShape::Never => {
                         unreachable!("never match has no falling arm")
@@ -535,7 +535,7 @@ impl<M: Module> Codegen<M> {
                 match shape {
                     MatchShape::Void => {
                         fire_join_bucket(builder, ctx)?;
-                        builder.ins().jump(jb, &[]);
+                        Self::emit_region_jump(builder, ctx, from, join);
                     }
                     MatchShape::Scalar(_) | MatchShape::Aggregate(_) => {
                         return Err(
@@ -719,15 +719,14 @@ impl<M: Module> Codegen<M> {
         }
     }
 
-    /// Enum scrutinee: nonempty enums use an i32 tag load plus
-    /// `emit_tag_dispatch`; an empty error set jumps directly to its
-    /// wildcard arm. Each variant's case block jumps to the FIRST arm
-    /// covering it (written order wins; duplicate arms past the first are
-    /// W0005-dead and get no case edge), and the wildcard arm's entry takes
-    /// the switch's `otherwise` — full coverage without a wildcard keeps the
-    /// invalid-tag trap, exactly the M11 invariant semantics. The case
-    /// blocks are pure dispatch: the arm bodies are the pre-mapped Flow
-    /// arm blocks, filled by the driver.
+    /// Enum scrutinee: nonempty enums use an i32 tag load plus `Switch`;
+    /// an empty error set jumps directly to its wildcard arm. Each variant
+    /// routes directly to the FIRST arm covering it (written order wins;
+    /// duplicate arms past the first are W0005-dead and get no case edge),
+    /// and the wildcard arm's entry takes the switch's `otherwise` — full
+    /// coverage without a wildcard keeps the invalid-tag trap, exactly the
+    /// M11 invariant semantics. The targets are the pre-mapped Flow arm
+    /// blocks, filled by the driver without dispatch trampolines.
     fn route_enum_dispatch(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -797,32 +796,24 @@ impl<M: Module> Codegen<M> {
         let tag = builder
             .ins()
             .load(types::I32, MemFlagsData::trusted(), scrutinee_addr, 0);
-        let (cases, otherwise) = Self::emit_tag_dispatch(builder, variant_count, tag);
-        for (v, case) in cases.iter().enumerate() {
-            // Pure dispatch: jump to the routed arm's pre-mapped Flow
-            // block (the driver fills it), or trap on a violated-
-            // exhaustiveness path (with a wildcard present every case
-            // is routed, so `None` is a compiler invariant).
-            builder.seal_block(*case);
-            builder.switch_to_block(*case);
-            match case_arm[v] {
-                Some(i) => {
-                    let entry = arm_entry[i].expect("a routed arm always has an entry block");
-                    builder.ins().jump(entry, &[]);
-                }
-                None => super::enums::invalid_tag_trap(builder),
+        let otherwise = match wildcard {
+            Some(i) => *arm_entry[i]
+                .as_ref()
+                .expect("the wildcard arm's mapped block exists"),
+            None => builder.create_block(),
+        };
+        let mut dispatch = Switch::new();
+        for (v, arm) in case_arm.iter().enumerate() {
+            if let Some(i) = arm {
+                let entry = arm_entry[*i].expect("a routed arm always has an entry block");
+                dispatch.set_entry(v as u128, entry);
             }
         }
-        builder.seal_block(otherwise);
-        builder.switch_to_block(otherwise);
-        match wildcard {
-            Some(i) => {
-                let entry = *arm_entry[i]
-                    .as_ref()
-                    .expect("the wildcard arm's mapped block exists");
-                builder.ins().jump(entry, &[]);
-            }
-            None => super::enums::invalid_tag_trap(builder),
+        dispatch.emit(builder, tag, otherwise);
+        if wildcard.is_none() {
+            builder.seal_block(otherwise);
+            builder.switch_to_block(otherwise);
+            super::enums::invalid_tag_trap(builder);
         }
         Ok(())
     }

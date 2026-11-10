@@ -441,3 +441,95 @@ fn backend_rejects_edits_to_cloned_body_and_execution_arenas() {
             .is_err()
     );
 }
+
+fn assert_jit_succeeds(src: &str) {
+    let (tirs, flows, pool, cleanup) = analyze(src);
+    let mut codegen = Codegen::new_jit().expect("JIT");
+    let (main, _) = codegen
+        .compile(&tirs, &flows, &pool, &cleanup, false)
+        .expect("emission");
+    assert_eq!(codegen.execute(main, &[]).expect("execution"), 0);
+}
+
+fn clif_block_count(clif: &str) -> usize {
+    clif.lines()
+        .filter(|line| line.starts_with("block"))
+        .count()
+}
+
+fn clif_function<'a>(clif: &'a str, header: &str) -> &'a str {
+    let start = clif
+        .find(header)
+        .unwrap_or_else(|| panic!("missing function header {header}: {clif}"));
+    clif[start..]
+        .split("\nfunction ")
+        .next()
+        .expect("selected function body")
+}
+
+#[test]
+fn unreachable_continuations_are_not_emitted() {
+    let clif = clif_of("fn main():\n\treturn\n\tprint(\"unreachable-marker\")\n");
+    assert!(
+        !clif.contains("block1:"),
+        "dead continuation reached code generation: {clif}"
+    );
+}
+
+#[test]
+fn coalescing_keeps_diverging_sibling_before_owned_match_join() {
+    let src = "enum Opt:\n\tSome(str)\n\tNone\nfn returning(flag: bool) -> str:\n\tpad = \"0123456789012345678901234567890123456789\"\n\to = Opt.Some(pad + \"!\")\n\tresult = match flag:\n\t\ttrue: match o:\n\t\t\tSome(v): v\n\t\t\tNone: \"none\"\n\t\tfalse: return \"early\"\n\treturn result\nfn main():\n\tprint(returning(true))\n";
+    let clif = clif_of(src);
+    assert_eq!(clif_block_count(&clif), 15, "{clif}");
+    assert_jit_succeeds(src);
+}
+
+#[test]
+fn enum_copy_skips_fieldless_variant_blocks() {
+    let clif = clif_of(
+        "enum Choice:\n\tA(int)\n\tB\nfn choose(x: Choice) -> Choice:\n\treturn x\nfn main():\n\tvalue = choose(Choice.A(1))\n\tprint(value)\n",
+    );
+    let choose = clif_function(&clif, "function u0:0(i64 sret, i64)");
+    assert!(
+        !choose.contains("block4:"),
+        "fieldless variant should share the merge block: {choose}"
+    );
+}
+
+#[test]
+fn copy_only_enum_drop_emits_no_dispatch() {
+    let clif = clif_of(
+        "enum Choice:\n\tA(int)\n\tB\nfn discard(value: Choice):\n\treturn\nfn main():\n\tdiscard(Choice.A(1))\n",
+    );
+    let discard = clif_function(&clif, "function u0:0(i64)");
+    assert!(
+        !discard.contains("br_table"),
+        "copy-only enum drop should have no tag dispatch: {discard}"
+    );
+}
+
+#[test]
+fn coalesces_single_predecessor_empty_match_join_chains() {
+    let src = "error E\nfn find() -> E!int:\n\treturn E\nfn main():\n\tvalue = find() catch as err:\n\t\tE: find() catch as err:\n\t\t\tE: 0\n\tassert(value == 0, \"nested match result\")\n";
+    let clif = clif_of(src);
+    assert_eq!(
+        clif_block_count(&clif),
+        30,
+        "empty join chains and enum dispatch trampolines should not allocate blocks: {clif}"
+    );
+    assert_jit_succeeds(src);
+}
+
+#[test]
+fn coalescing_preserves_short_circuit_value_joins() {
+    assert_jit_succeeds(
+        "fn main():\n\tassert((false and false) == false, \"and short circuit\")\n\tassert((true or true) == true, \"or short circuit\")\n\tassert(true and (match true:\n\t\ttrue: true\n\t\tfalse: false\n\t), \"and rhs value\")\n\tassert(false or (match true:\n\t\ttrue: true\n\t\tfalse: false\n\t), \"or rhs value\")\n",
+    );
+}
+
+#[test]
+fn coalescing_preserves_owned_match_cleanup_positions() {
+    assert_jit_succeeds(
+        "enum Opt:\n\tSome(str)\n\tNone\nfn main():\n\tpad = \"0123456789012345678901234567890123456789\"\n\to = Opt.Some(pad + \"!\")\n\tx = match true:\n\t\ttrue: match o:\n\t\t\tSome(v): v\n\t\t\tNone: \"none\"\n\t\tfalse: \"other\"\n\tassert(x == pad + \"!\", \"moved match result\")\n\to2 = Opt.Some(pad + \"?\")\n\ty = match true:\n\t\ttrue: match o2:\n\t\t\tSome(_): \"selected\"\n\t\t\tNone: \"none\"\n\t\tfalse: \"other\"\n\tassert(y == \"selected\", \"arm payload drop\")\n",
+    );
+}
