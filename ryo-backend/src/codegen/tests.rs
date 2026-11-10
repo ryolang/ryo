@@ -528,3 +528,11 @@ fn coalescing_preserves_owned_match_cleanup_positions() {
         "enum Opt:\n\tSome(str)\n\tNone\nfn main():\n\tpad = \"0123456789012345678901234567890123456789\"\n\to = Opt.Some(pad + \"!\")\n\tx = match true:\n\t\ttrue: match o:\n\t\t\tSome(v): v\n\t\t\tNone: \"none\"\n\t\tfalse: \"other\"\n\tassert(x == pad + \"!\", \"moved match result\")\n\to2 = Opt.Some(pad + \"?\")\n\ty = match true:\n\t\ttrue: match o2:\n\t\t\tSome(_): \"selected\"\n\t\t\tNone: \"none\"\n\t\tfalse: \"other\"\n\tassert(y == \"selected\", \"arm payload drop\")\n",
     );
 }
+
+#[test]
+fn coalescing_keeps_diverging_sibling_before_owned_match_join() {
+    let src = "enum Opt:\n\tSome(str)\n\tNone\nfn returning(flag: bool) -> str:\n\tpad = \"0123456789012345678901234567890123456789\"\n\to = Opt.Some(pad + \"!\")\n\tresult = match flag:\n\t\ttrue: match o:\n\t\t\tSome(v): v\n\t\t\tNone: \"none\"\n\t\tfalse: return \"early\"\n\treturn result\nfn main():\n\tprint(returning(true))\n";
+    let clif = clif_of(src);
+    assert_eq!(clif_block_count(&clif), 15, "{clif}");
+    assert_jit_succeeds(src);
+}

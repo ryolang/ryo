@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 /// Per-loop invariants for jump-exit Free scheduling, computed once
 /// when the traversal enters a `WhileLoop`/`ForRange` and shared by
 /// every `break`/`continue` jump inside the loop. See
-/// `schedule_loop_exit_frees_in` (kept statement-recursive).
+/// `schedule_loop_exit_frees_in` (kept TIR-based).
 pub(crate) struct LoopExitCtx<'a> {
     body: ExtraList<'a, TirRef>,
     inside_loop: HashSet<TirRef>,
@@ -39,49 +39,78 @@ pub(crate) struct LoopExitCtx<'a> {
 }
 
 /// Collect every `Assign` (site, name, value) reachable from `stmts`,
-/// descending through if/loop bodies. Kept for `LoopExitCtx`.
+/// descending through control and operand-match bodies on an explicit stack.
 fn collect_assign_writes<S: TirStmtList + ?Sized>(
     tir: &Tir,
     stmts: &S,
     out: &mut Vec<(TirRef, StringId, TirRef)>,
 ) {
-    for r in stmts.iter_refs() {
-        let r = stmt_match(tir, r).unwrap_or(r);
-        match tir.inst(r).tag {
-            TirTag::Assign => {
-                let view = tir.assign_view(r);
-                out.push((r, view.name, view.value));
+    enum BodyList<'a> {
+        Extra(ExtraList<'a, TirRef>),
+        Owned(Vec<TirRef>),
+    }
+    enum Task<'a> {
+        Body(BodyList<'a>, usize),
+        Stmt(TirRef),
+    }
+    impl BodyList<'_> {
+        fn get(&self, index: usize) -> Option<TirRef> {
+            match self {
+                Self::Extra(list) => list.iter().nth(index),
+                Self::Owned(list) => list.get(index).copied(),
             }
-            TirTag::IfStmt => {
-                let view = tir.if_stmt_view(r);
-                collect_assign_writes(tir, &view.then_stmts, out);
-                for elif in &view.elif_branches {
-                    collect_assign_writes(tir, &elif.body, out);
-                }
-                if let Some(else_stmts) = &view.else_stmts {
-                    collect_assign_writes(tir, else_stmts, out);
-                }
-            }
-            TirTag::WhileLoop => {
-                let body = tir.while_loop_body_view(r);
-                collect_assign_writes(tir, &body, out);
-            }
-            TirTag::ForRange => {
-                let body = tir.for_range_body_view(r);
-                collect_assign_writes(tir, &body, out);
-            }
-            TirTag::Match => {
-                for body in match_arm_bodies(tir, r) {
-                    collect_assign_writes(tir, &body, out);
-                }
-            }
-            _ => {}
         }
-        visit_operand_matches(tir, r, &mut |m| {
-            for body in match_arm_bodies(tir, m) {
-                collect_assign_writes(tir, &body, out);
+    }
+    let mut stack = ryo_core::spine::ChainSpine::new();
+    for stmt in stmts.iter_refs().collect::<Vec<_>>().into_iter().rev() {
+        stack.push(Task::Stmt(stmt));
+    }
+    while let Some(task) = stack.pop() {
+        match task {
+            Task::Body(body, index) => {
+                let Some(stmt) = body.get(index) else {
+                    continue;
+                };
+                stack.push(Task::Body(body, index + 1));
+                stack.push(Task::Stmt(stmt));
             }
-        });
+            Task::Stmt(stmt) => {
+                let r = stmt_match(tir, stmt).unwrap_or(stmt);
+                if tir.inst(r).tag == TirTag::Assign {
+                    let view = tir.assign_view(r);
+                    out.push((r, view.name, view.value));
+                }
+                let mut bodies = Vec::new();
+                match tir.inst(r).tag {
+                    TirTag::IfStmt => {
+                        let view = tir.if_stmt_view(r);
+                        bodies.push(BodyList::Extra(view.then_stmts));
+                        bodies.extend(
+                            view.elif_branches
+                                .iter()
+                                .map(|arm| BodyList::Extra(arm.body)),
+                        );
+                        bodies.extend(view.else_stmts.map(BodyList::Extra));
+                    }
+                    TirTag::WhileLoop => {
+                        bodies.push(BodyList::Extra(tir.while_loop_body_view(r)));
+                    }
+                    TirTag::ForRange => {
+                        bodies.push(BodyList::Extra(tir.for_range_body_view(r)));
+                    }
+                    TirTag::Match => {
+                        bodies.extend(match_arm_bodies(tir, r).into_iter().map(BodyList::Owned));
+                    }
+                    _ => {}
+                }
+                visit_operand_matches(tir, r, &mut |m| {
+                    bodies.extend(match_arm_bodies(tir, m).into_iter().map(BodyList::Owned));
+                });
+                for body in bodies.into_iter().rev() {
+                    stack.push(Task::Body(body, 0));
+                }
+            }
+        }
     }
 }
 
@@ -584,5 +613,111 @@ mod tests {
 
         assert!(found, "the loop is directly in the match arm body");
         assert_eq!(assignments, [assignment]);
+    }
+
+    #[test]
+    fn collect_assign_writes_preserves_body_and_operand_match_order() {
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let int_ty = pool.int();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let name = pool.intern_str("s");
+        let span = Span::EMPTY;
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let initial = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(name, true, str_ty, initial, span);
+        let before_value = tb.str_const(pool.intern_str("before"), str_ty, span);
+        let before = tb.assign(name, str_ty, before_value, span);
+        let then_value = tb.str_const(pool.intern_str("then"), str_ty, span);
+        let then_assign = tb.assign(name, str_ty, then_value, span);
+        let else_value = tb.str_const(pool.intern_str("else"), str_ty, span);
+        let else_assign = tb.assign(name, str_ty, else_value, span);
+        let operand_value = tb.str_const(pool.intern_str("operand"), str_ty, span);
+        let operand_assign = tb.assign(name, str_ty, operand_value, span);
+        let match_result = tb.bool_const(true, bool_ty, span);
+        let scrutinee = tb.int_const(1, int_ty, span);
+        let cond = tb.match_expr(
+            scrutinee,
+            bool_ty,
+            &[TypedMatchArm {
+                span,
+                discriminant: Discriminant::Wildcard,
+                bindings: &[],
+                guards: &[],
+                body: TypedMatchBody::Stmts(&[operand_assign, match_result]),
+            }],
+            span,
+        );
+        let if_inst = tb.if_stmt(cond, &[then_assign], &[], Some(&[else_assign]), void, span);
+        let tir = tb.finish(&[decl, before, if_inst]);
+        let mut writes = Vec::new();
+
+        collect_assign_writes(&tir, &tir.body_stmts(), &mut writes);
+
+        let sites: Vec<TirRef> = writes.into_iter().map(|(site, _, _)| site).collect();
+        assert_eq!(sites, [before, then_assign, else_assign, operand_assign]);
+    }
+}
+
+#[cfg(test)]
+mod deep_collection_tests {
+    use super::*;
+    use ryo_core::span::Span;
+    use ryo_core::tir::TirBuilder;
+    use std::process::Command;
+
+    const CHILD: &str = "RYO_DEEP_ASSIGN_COLLECTION_CHILD";
+
+    fn collect_deep_assignment() {
+        let mut pool = InternPool::new();
+        let str_ty = pool.str_();
+        let bool_ty = pool.bool_();
+        let void = pool.void();
+        let main = pool.intern_str("main");
+        let name = pool.intern_str("s");
+        let span = Span::EMPTY;
+        let mut tb = TirBuilder::new(main, vec![], void, span);
+        let initial = tb.str_const(pool.intern_str("a"), str_ty, span);
+        let decl = tb.var_decl(name, true, str_ty, initial, span);
+        let value = tb.str_const(pool.intern_str("b"), str_ty, span);
+        let assignment = tb.assign(name, str_ty, value, span);
+        let mut root = assignment;
+        for _ in 0..20_000 {
+            let cond = tb.bool_const(true, bool_ty, span);
+            root = tb.if_stmt(cond, &[root], &[], None, void, span);
+        }
+        let loop_cond = tb.bool_const(false, bool_ty, span);
+        let loop_inst = tb.while_loop(loop_cond, &[root], void, span);
+        let tir = tb.finish(&[decl, loop_inst]);
+        let body = tir.while_loop_body_view(loop_inst);
+        let mut writes = Vec::new();
+
+        collect_assign_writes(&tir, &body, &mut writes);
+
+        assert_eq!(writes, [(assignment, name, value)]);
+    }
+
+    #[test]
+    fn deep_nested_control_assignment_collection_uses_bounded_stack() {
+        if std::env::var_os(CHILD).is_some() {
+            collect_deep_assignment();
+            return;
+        }
+        let output = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "ownership::loops::jumps::deep_collection_tests::deep_nested_control_assignment_collection_uses_bounded_stack",
+                "--exact",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("spawn deep assignment collection child");
+        assert!(
+            output.status.success(),
+            "deep assignment collection child failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

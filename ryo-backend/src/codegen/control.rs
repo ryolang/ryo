@@ -106,9 +106,11 @@ impl<M: Module> Codegen<M> {
             position[b.0 as usize] = i;
         }
 
-        // Empty single-predecessor Goto chains share one Cranelift block.
-        // Every Flow block still emits its joins, drops, steps, and arm
-        // result writes in the same order; only the internal jump vanishes.
+        // Empty single-predecessor Goto chains share one Cranelift block only
+        // when each target is the next block in emission order. Skipping over
+        // a sibling arm would run the join's scope restoration before that arm.
+        // Every Flow block still emits its joins, drops, steps, and arm result
+        // writes in the same order; only the internal jump vanishes.
         let mut coalesced_succ = vec![None; block_count];
         let mut region_head: Vec<BlockId> = flow.forward_order().collect();
         for head in flow.forward_order() {
@@ -128,7 +130,7 @@ impl<M: Module> Codegen<M> {
                 };
                 if flow.blocks[target.0 as usize].unreachable
                     || flow.predecessors(target).len() != 1
-                    || position[current.0 as usize] >= position[target.0 as usize]
+                    || position[target.0 as usize] != position[current.0 as usize] + 1
                 {
                     break;
                 }

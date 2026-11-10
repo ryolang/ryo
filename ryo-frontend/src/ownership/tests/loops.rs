@@ -1281,3 +1281,13 @@ fn nested_loops_with_carried_views_converges() {
         "nested loops with a carried view must compile clean: {diags:?}"
     );
 }
+
+#[test]
+fn speculative_loop_io_is_released_after_propagation() {
+    let _ = check_src_full("fn main():\n\twhile false:\n\t\tprint(\"pass\")\n");
+
+    assert!(
+        !super::super::walk::machine::staging_io_retained_after_resume(),
+        "the propagation pass retained its staging diagnostics and sidecar"
+    );
+}

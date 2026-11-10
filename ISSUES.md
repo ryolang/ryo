@@ -914,7 +914,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Files:** ryo-core/src/flow/invariants.rs; ryo-core/src/flow/tests/emission.rs
 
-**Summary:** check_join_shapes revisits nested arm descendants for every switch. The 50,000-match debug regression takes about 952 seconds while optimized runs complete quickly.
+**Summary:** check_join_shapes revisits nested arm descendants for every switch. Historical full-core-suite evidence took about 952 seconds in debug while optimized runs complete quickly. The later 7,439.56-second JIT and 7,675.97-second AOT end-to-end runs also include ownership and backend compilation; they are not measurements of join validation alone.
 
 **Resolution:** Remove repeated descendant traversal or reuse prior reachability facts while preserving join validation, and add practical scaling coverage.
 

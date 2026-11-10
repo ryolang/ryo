@@ -1171,3 +1171,23 @@ fn match_fallthrough_before_continue_in_loop_aot() {
         "two\ndone\n",
     );
 }
+
+const MATCH_FALLTHROUGH_BEFORE_DIVERGING_ARM: &str = "enum Opt:\n\tSome(str)\n\tNone\nfn returning(flag: bool) -> str:\n\tpad = \"0123456789012345678901234567890123456789\"\n\to = Opt.Some(pad + \"!\")\n\tresult = match flag:\n\t\ttrue: match o:\n\t\t\tSome(v): v\n\t\t\tNone: \"none\"\n\t\tfalse: return \"early\"\n\treturn result\nfn main():\n\tprint(returning(true))\n\tprint(\"\\n\")\n";
+
+#[test]
+fn match_fallthrough_before_diverging_arm_preserves_owned_result_jit() {
+    assert_ryo_output(
+        "match_fallthrough_before_diverging_arm",
+        MATCH_FALLTHROUGH_BEFORE_DIVERGING_ARM,
+        "0123456789012345678901234567890123456789!\n",
+    );
+}
+
+#[test]
+fn match_fallthrough_before_diverging_arm_preserves_owned_result_aot() {
+    assert_match_aot_output(
+        "match_fallthrough_before_diverging_arm_aot.ryo",
+        MATCH_FALLTHROUGH_BEFORE_DIVERGING_ARM,
+        "0123456789012345678901234567890123456789!\n",
+    );
+}

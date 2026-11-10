@@ -6,6 +6,17 @@ use ryo_core::flow::{BlockId, Terminator};
 use ryo_core::ownership::FunctionSidecar;
 use ryo_core::spine::ChainSpine;
 
+#[cfg(test)]
+thread_local! {
+    static STAGING_IO_RETAINED_AFTER_RESUME: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn staging_io_retained_after_resume() -> bool {
+    STAGING_IO_RETAINED_AFTER_RESUME.with(std::cell::Cell::get)
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct FlowRegionSummary {
     pub(crate) exit: Option<BlockId>,
@@ -148,6 +159,8 @@ impl<'a> Walk<'a> {
         stop: RegionStop,
         epoch: u32,
     ) -> bool {
+        #[cfg(test)]
+        STAGING_IO_RETAINED_AFTER_RESUME.with(|retained| retained.set(false));
         let mut reached_stop = false;
         let mut stack = ChainSpine::new();
         let mut ios = vec![Some(WalkIo::Real { sink, sidecar })];
@@ -342,6 +355,10 @@ impl<'a> Walk<'a> {
                     if let Some(staging) = frame.pass_io.take() {
                         ios[staging] = None;
                     }
+                    #[cfg(test)]
+                    if ios.iter().any(|io| matches!(io, Some(WalkIo::Staging(..)))) {
+                        STAGING_IO_RETAINED_AFTER_RESUME.with(|retained| retained.set(true));
+                    }
                     let action = {
                         let (sink, sidecar) = ios[io].as_mut().expect("loop IO").parts();
                         frame.advance(self, own, sink, sidecar)
@@ -355,7 +372,6 @@ impl<'a> Walk<'a> {
                             }
                         ) {
                             frame.pass_io = Some(ios.len());
-                            ios.push(None);
                         }
                         stack.push(WalkTask::Loop { frame, io });
                         Self::schedule_action(
