@@ -303,6 +303,52 @@ fn flow_build_call_heavy(bencher: divan::Bencher, functions: usize) {
         });
 }
 
+#[divan::bench(args = [(4, 4), (64, 8), (64, 16)])]
+fn flow_build_nested_control(bencher: divan::Bencher, case: (usize, usize)) {
+    let src = nested_control_source(case.0, case.1);
+    bencher
+        .with_inputs(|| sema_program(&src))
+        .bench_values(|(tirs, pool)| {
+            let flows: Vec<ryo_core::flow::Flow> = tirs
+                .iter()
+                .map(|t| ryo_core::flow::Flow::build(t, &pool))
+                .collect();
+            divan::black_box(flows);
+        });
+}
+
+/// Match-dispatch-dense functions: each body matches an int scrutinee
+/// against `arms` literal arms yielding distinct int constants.
+fn match_arms_source(functions: usize, arms: usize) -> String {
+    let mut src = String::new();
+    for i in 0..functions {
+        src.push_str(&format!(
+            "fn dispatch_{i}(n: int) -> int:\n\tx = match n:\n"
+        ));
+        for k in 0..arms {
+            src.push_str(&format!("\t\t{k}: {}\n", 1000 + i * 100 + k));
+        }
+        src.push_str(&format!("\t\t_: -{i}\n"));
+        src.push_str("\treturn x * 3 + 1\n\n");
+    }
+    src.push_str("fn main():\n\tprint(\"bench\\n\")\n");
+    src
+}
+
+#[divan::bench(args = [4, 16, 64])]
+fn flow_build_match_arms(bencher: divan::Bencher, arms: usize) {
+    let src = match_arms_source(16, arms);
+    bencher
+        .with_inputs(|| sema_program(&src))
+        .bench_values(|(tirs, pool)| {
+            let flows: Vec<ryo_core::flow::Flow> = tirs
+                .iter()
+                .map(|t| ryo_core::flow::Flow::build(t, &pool))
+                .collect();
+            divan::black_box(flows);
+        });
+}
+
 /// A 40-char string literal — past the SSO inline cap, so every
 /// binding initialized from it owns a real destruction event.
 fn heap_lit(tag: usize) -> String {
