@@ -65,13 +65,15 @@ pub(crate) fn analyze_match_switch(
         // always has at least the catch-all arm.
         return None;
     }
+    let mut arms = Vec::with_capacity(view.len());
+    arms.extend(view.arms());
     let scrutinee = view.scrutinee;
     let scrutinee_ty = w.tir.inst(scrutinee).ty;
     let tracked = needs_tracking(scrutinee_ty, w.pool);
     // Whether ANY arm binds a non-`Copy` field by move — the consume
     // authority for the scrutinee.
-    let any_consumes = view
-        .arms()
+    let any_consumes = arms
+        .iter()
         .flat_map(|arm| arm.bindings())
         .any(|b| !w.pool.is_copy(b.ty));
     // P4 lift (final spec §3.2), mirroring the if-condition drain: a
@@ -132,11 +134,11 @@ pub(crate) fn analyze_match_switch(
         own.states.remove(&Owner(result));
     }
     let snap = own.snapshot_branch();
-    let mut arm_results: Vec<BranchState> = Vec::with_capacity(view.len());
-    let mut falls_through: Vec<bool> = Vec::with_capacity(view.len());
-    let mut arm_lasts: Vec<Option<TirRef>> = Vec::with_capacity(view.len());
+    let mut arm_results: Vec<BranchState> = Vec::with_capacity(arms.len());
+    let mut falls_through: Vec<bool> = Vec::with_capacity(arms.len());
+    let mut arm_lasts: Vec<Option<TirRef>> = Vec::with_capacity(arms.len());
     let mut token_cursor = 0;
-    for (arm_index, arm) in view.arms().enumerate() {
+    for (arm_index, arm) in arms.into_iter().enumerate() {
         // (a) Seed the arm's payload bindings as fresh owners keyed on
         // their owner tokens — arm-local. Copy binds need no owner.
         let mut arm_binds: Vec<(TirRef, PlaceId)> = Vec::new();

@@ -1036,6 +1036,8 @@ impl FlowBuilder<'_> {
 
     fn build_match(&mut self, stmt: TirRef) {
         let view = self.tir.match_view(stmt);
+        let mut arms = Vec::with_capacity(view.len());
+        arms.extend(view.arms());
         let match_ty = view.ty;
         self.emit_expr(view.scrutinee);
 
@@ -1043,8 +1045,8 @@ impl FlowBuilder<'_> {
         // named from the arm bindings — minted up front so arm scopes
         // can bind them while building.
         let tokens = self.tir.match_by_move_owner_refs(stmt, self.pool);
-        let names: Vec<StringId> = view
-            .arms()
+        let names: Vec<StringId> = arms
+            .iter()
             .flat_map(|arm| arm.bindings())
             .filter(|b| !self.pool.is_copy(b.ty))
             .map(|b| b.name)
@@ -1061,7 +1063,7 @@ impl FlowBuilder<'_> {
 
         // Divergence per arm decides whether a join exists.
         let mut any_falls_through = false;
-        for arm in view.arms() {
+        for arm in arms.iter().copied() {
             let terminates = match arm.body {
                 MatchBodyView::Expr(e) => self.pool.is_never(self.tir.inst(e).ty),
                 MatchBodyView::Stmts(_) => {
@@ -1097,7 +1099,7 @@ impl FlowBuilder<'_> {
 
         let token_places = self.token_places_of(stmt).to_vec();
         let mut token_iter = token_places.iter().copied();
-        for (i, arm) in view.arms().enumerate() {
+        for (i, arm) in arms.into_iter().enumerate() {
             self.cur = arm_blocks[i];
             self.push_scope();
             for binding in arm.bindings() {

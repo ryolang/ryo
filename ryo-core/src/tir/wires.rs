@@ -510,6 +510,8 @@ pub mod if_stmt_extra {
             if self.remaining == 0 {
                 return None;
             }
+            #[cfg(test)]
+            crate::tir::note_elif_decode();
             let cond = TirRef::from_raw(self.words[self.pos]);
             self.pos += 1;
             let body = read_ref_list_view(self.words, &mut self.pos);

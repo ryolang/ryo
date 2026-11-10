@@ -1421,3 +1421,51 @@ fn fire_points_unresolved_never_guesses() {
         FireVerdict::Unresolved
     );
 }
+
+#[test]
+fn wide_match_and_elif_decode_each_control_linearly() {
+    const WIDTH: usize = 64;
+    let mut cx = Ctx::new();
+    let int = cx.int;
+    let bool_ty = cx.pool.bool_();
+    let mut b = cx.builder();
+    let scrutinee = b.int_const(1, int, sp());
+    let arms: Vec<_> = (0..WIDTH)
+        .map(|_| {
+            let body = b.int_const(0, int, sp());
+            TypedMatchArm {
+                span: sp(),
+                discriminant: crate::tir::Discriminant::Wildcard,
+                bindings: &[],
+                guards: &[],
+                body: TypedMatchBody::Expr(body),
+            }
+        })
+        .collect();
+    let match_inst = b.match_expr(scrutinee, int, &arms, sp());
+    let match_stmt = b.unary(TirTag::ExprStmt, cx.void, match_inst, sp());
+    let initial = b.bool_const(false, bool_ty, sp());
+    let elifs: Vec<_> = (0..WIDTH)
+        .map(|_| (b.bool_const(false, bool_ty, sp()), Vec::new()))
+        .collect();
+    let if_inst = b.if_stmt(initial, &[], &elifs, None, cx.void, sp());
+    let tir = b.finish(&[match_stmt, if_inst]);
+    crate::tir::reset_control_decode_counts();
+
+    let _flow = Flow::build(&tir, &cx.pool);
+
+    let (match_decodes, elif_decodes) = crate::tir::control_decode_counts();
+    println!("match_decodes={match_decodes} elif_decodes={elif_decodes}");
+    assert!(
+        match_decodes <= 8 * WIDTH,
+        "wide match decoded arms {match_decodes} times for {WIDTH} arms"
+    );
+    assert!(
+        elif_decodes <= 4 * WIDTH,
+        "wide if decoded elif branches {elif_decodes} times for {WIDTH} branches"
+    );
+    assert!(
+        match_decodes <= 6 * WIDTH,
+        "wide match repeated {match_decodes} arm decodes instead of reusing collected views for {WIDTH} arms"
+    );
+}

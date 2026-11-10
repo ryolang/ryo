@@ -223,6 +223,8 @@ impl<'a> MatchView<'a> {
         debug_assert!(index < self.arm_count, "match arm index out of range");
         let mut wire = self.wire;
         for _ in 0..index {
+            #[cfg(test)]
+            super::note_match_arm_decode();
             wire = &wire[1 + wire[match_extra::ARM_LEN] as usize..];
         }
         decode_match_arm(wire)
@@ -646,6 +648,8 @@ impl Tir {
 /// begins at `slice[1 + arm_len..]`. A cursor that ends at
 /// `1 + arm_len` is a trusted-producer invariant.
 fn decode_match_arm(slice: &[u32]) -> MatchArmView<'_> {
+    #[cfg(test)]
+    super::note_match_arm_decode();
     let arm_words = 1 + slice[match_extra::ARM_LEN] as usize;
     debug_assert!(
         slice.len() >= arm_words,
