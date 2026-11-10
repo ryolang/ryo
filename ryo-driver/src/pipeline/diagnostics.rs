@@ -233,6 +233,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::InvalidMatchScrutinee => "E0136",
         DiagCode::MatchViewResult => "E0137",
         DiagCode::MatchValueArmBorrowed => "E0138",
+        DiagCode::NestingLimitExceeded => "E0140",
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::InvalidCharacter => "E0102",
         DiagCode::UnknownEscape => "E0103",
@@ -368,6 +369,7 @@ mod tests {
             (DiagCode::InvalidMatchScrutinee, "E0136"),
             (DiagCode::MatchViewResult, "E0137"),
             (DiagCode::MatchValueArmBorrowed, "E0138"),
+            (DiagCode::NestingLimitExceeded, "E0140"),
             (DiagCode::ConstEvalFailure, "E0200"),
             (DiagCode::CycleInComptime, "E0201"),
             (DiagCode::GenericInstantiation, "E0202"),
@@ -473,6 +475,7 @@ mod tests {
                 | DiagCode::InvalidMatchScrutinee
                 | DiagCode::MatchViewResult
                 | DiagCode::MatchValueArmBorrowed
+                | DiagCode::NestingLimitExceeded
                 | DiagCode::TooManyDiagnostics
                 | DiagCode::InvalidCharacter
                 | DiagCode::UnknownEscape

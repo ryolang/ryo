@@ -74,6 +74,8 @@ pub enum DiagCode {
     /// pool's `define_enum` panics on duplicate variant names; this
     /// is the pre-validation).
     DuplicateVariant,
+    /// Excessive AST nesting during lowering.
+    NestingLimitExceeded,
 
     // --- sema ---
     /// A user-defined function or variable uses the `__ryo_` prefix,
