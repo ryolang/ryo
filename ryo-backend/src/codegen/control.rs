@@ -1447,8 +1447,8 @@ impl<M: Module> Codegen<M> {
     /// Diverging call (`panic`, …): the call instruction is the
     /// terminator payload, never a step. `eval_inst` emits the call
     /// plus its trap and switches into its own sealed dead block;
-    /// terminate that block — the Flow continuation (`next`) is an
-    /// unreachable block the driver emits separately.
+    /// terminate that block — the driver skips the unreachable Flow
+    /// continuation (`next`).
     fn term_call(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -1578,14 +1578,7 @@ impl<M: Module> Codegen<M> {
                 ctx.flow_sealed[i] = true;
             }
         }
-        let i = b.0 as usize;
-        if !ctx.flow_sealed[i]
-            && ctx.flow.blocks[i].unreachable
-            && ctx.flow.predecessors(b).is_empty()
-        {
-            let cb = ctx.flow_blocks[i];
-            builder.seal_block(cb);
-            ctx.flow_sealed[i] = true;
-        }
+        // Unreachable blocks need no self-sealing fallback: setup marked
+        // them sealed, and the driver never calls this handler for them.
     }
 }

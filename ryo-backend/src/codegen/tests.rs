@@ -509,6 +509,34 @@ fn copy_only_enum_drop_emits_no_dispatch() {
 }
 
 #[test]
+fn mixed_enum_drop_routes_drop_free_variant_directly_to_merge() {
+    let clif = clif_of(
+        "enum Choice:\n\tA(str)\n\tB\nfn discard(move value: Choice):\n\treturn\nfn main():\n\tdiscard(Choice.B)\n",
+    );
+    let discard = clif_function(&clif, "function u0:0(i64)");
+    let dispatch = discard
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("br_table"))
+        .expect("mixed enum drop dispatch");
+    assert!(
+        dispatch.ends_with("[block2, block1]"),
+        "the needs-drop variant must keep its case and the drop-free variant must route to merge: {discard}"
+    );
+    let drop_case = discard
+        .split("block2:\n")
+        .nth(1)
+        .expect("needs-drop case")
+        .split("\nblock")
+        .next()
+        .expect("needs-drop case body");
+    assert!(
+        drop_case.contains("call fn0") && drop_case.contains("jump block1"),
+        "the needs-drop case must release its payload and jump to merge: {discard}"
+    );
+}
+
+#[test]
 fn coalesces_single_predecessor_empty_match_join_chains() {
     let src = "error E\nfn find() -> E!int:\n\treturn E\nfn main():\n\tvalue = find() catch as err:\n\t\tE: find() catch as err:\n\t\t\tE: 0\n\tassert(value == 0, \"nested match result\")\n";
     let clif = clif_of(src);
