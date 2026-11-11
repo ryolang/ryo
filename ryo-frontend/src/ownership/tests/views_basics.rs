@@ -460,3 +460,81 @@ fn view_return_is_escape() {
         "expected ViewEscape on the view return; got: {diags:?}"
     );
 }
+
+#[test]
+fn inout_str_push_rejected_while_view_live() {
+    let diags = check_src(
+        "fn mutate(inout s: str):\n\tv = s[0:24]\n\tstr_push(&s, \"01234567890123456789012345678901\")\n\tprint(v)\n\nfn main():\n\tmut s = \"abcdefghijklmnopqrstuvw\" + \"x\"\n\tmutate(&s)\n",
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|diag| diag.code == DiagCode::SourceProjected),
+        "expected E0035: {diags:?}"
+    );
+}
+
+#[test]
+fn inout_reassign_rejected_while_view_live() {
+    let diags = check_src(
+        "fn replace(inout s: str):\n\tv = s[0:1]\n\ts = \"new\"\n\tprint(v)\n\nfn main():\n\tmut s = \"old\"\n\treplace(&s)\n",
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|diag| diag.code == DiagCode::SourceProjected),
+        "expected E0035: {diags:?}"
+    );
+}
+
+#[test]
+fn inout_small_append_rejected_when_view_read_later() {
+    let diags = check_src(
+        "fn mutate(inout s: str):\n\tv = s[0:1]\n\tstr_push(&s, \"!\")\n\tprint(v)\n\nfn main():\n\tmut s = \"a\"\n\tmutate(&s)\n",
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|diag| diag.code == DiagCode::SourceProjected),
+        "expected E0035: {diags:?}"
+    );
+}
+
+#[test]
+fn inout_mutation_allowed_after_last_view_read() {
+    let diags = check_src(
+        "fn mutate(inout s: str):\n\tv = s[0:1]\n\tprint(v)\n\tstr_push(&s, \"!\")\n\nfn main():\n\tmut s = \"a\"\n\tmutate(&s)\n",
+    );
+    assert!(
+        !diags
+            .iter()
+            .any(|diag| diag.code == DiagCode::SourceProjected),
+        "unexpected E0035: {diags:?}"
+    );
+}
+
+#[test]
+fn inout_reslice_and_alias_freeze_param_root() {
+    let diags = check_src(
+        "fn mutate(inout s: str):\n\tv = s[0:4]\n\tw = v[1:3]\n\ta = w\n\tstr_push(&s, \"!\")\n\tprint(a)\n\nfn main():\n\tmut s = \"abcd\"\n\tmutate(&s)\n",
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|diag| { diag.code == DiagCode::SourceProjected && diag.message.contains("`s`") }),
+        "expected E0035 naming `s`: {diags:?}"
+    );
+}
+
+#[test]
+fn inout_never_read_view_freezes_to_scope_end() {
+    let diags = check_src(
+        "fn mutate(inout s: str):\n\tv = s[0:1]\n\tstr_push(&s, \"!\")\n\nfn main():\n\tmut s = \"a\"\n\tmutate(&s)\n",
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|diag| diag.code == DiagCode::SourceProjected),
+        "expected E0035: {diags:?}"
+    );
+}

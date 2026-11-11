@@ -616,3 +616,21 @@ fn inout_and_nested_copy_var_read_other_binding_ok() {
         "no E0032 expected for a different binding; got {diags:?}"
     );
 }
+
+#[test]
+fn inout_view_does_not_schedule_callee_param_free() {
+    let (diags, mut sidecar, _, _) =
+        check_src_full("fn scan(inout s: str):\n\tv = s[0:1]\n\tprint(v)\n");
+    assert!(
+        !diags
+            .iter()
+            .any(|diag| diag.severity == ryo_core::diag::Severity::Error),
+        "unexpected errors: {diags:?}"
+    );
+    let sc = take_function_sidecar(&mut sidecar, 0);
+    assert!(
+        !sc.drops.iter().any(|drop| drop.target == TirRef::param(0)),
+        "an inout view must not transfer caller cleanup to the callee: {:?}",
+        sc.drops
+    );
+}

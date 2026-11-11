@@ -201,3 +201,16 @@ fn as_bytes_return_is_view_escape() {
         diags.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn inout_bytes_push_rejected_while_view_live() {
+    let diags = check_src(
+        "fn mutate(inout b: bytes):\n\tv = b[0:24]\n\tbytes_push(&b, 1)\n\tprint(v)\n\nfn main():\n\tmut b = \"abcdefghijklmnopqrstuvwx\".to_bytes()\n\tmutate(&b)\n",
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|diag| diag.code == DiagCode::SourceProjected),
+        "expected E0035: {diags:?}"
+    );
+}

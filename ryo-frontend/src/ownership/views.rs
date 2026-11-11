@@ -38,7 +38,7 @@ pub(crate) fn owner_sort_key(owner: &Owner) -> (u8, u32) {
 /// current buffer exactly like reads do.
 pub(crate) fn projection_root(
     own: &Ownership,
-    tir: &Tir,
+    _tir: &Tir,
     flow: &Flow,
     pool: &InternPool,
     r: TirRef,
@@ -49,21 +49,13 @@ pub(crate) fn projection_root(
     let step = flow.step_of(r)?;
     let f = step.facts;
     let p = f.view.or(f.read).or(own.inst_place[r.index()])?;
-    // Param-rooted projections: a `move` param's buffer is callee-
-    // owned — its projections register, freeze, and defer the exit
-    // free exactly like a local's. A borrowed/inout param's (and a
-    // `strview` param's) buffer belongs to the caller — the projection
-    // resolves to nothing, as before.
+    // Projection identity describes where a view points. Destruction
+    // ownership describes who releases that storage. Parameter mode
+    // governs the second relation and does not exclude the first.
     let param_root = |place: PlaceId| -> Option<Owner> {
         match flow.place(place) {
-            ryo_core::flow::Place::Param { index, ty, .. } => {
-                // Owner-typed (needs-drop) borrow/move params resolve:
-                // their slices register, freeze, and defer the exit
-                // free exactly like a local's (`move` params defer;
-                // borrowed params promote). Inout params and view
-                // params (caller-owned storage) resolve to nothing.
-                let param = &tir.params[*index as usize];
-                if param.mode != ryo_core::tir::ParamMode::Inout && pool.needs_drop(*ty) {
+            ryo_core::flow::Place::Param { ty, .. } => {
+                if pool.needs_drop(*ty) {
                     Some(Owner(place))
                 } else {
                     None
