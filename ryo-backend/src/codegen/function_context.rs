@@ -185,19 +185,20 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// block-start emission did).
     pub(super) fire_at_block_start: HashMap<ryo_core::flow::BlockId, Vec<usize>>,
     /// ---- Flow-block driver state ----
-    /// One Cranelift block per Flow IR block, pre-created 1:1 before
-    /// the driver runs. The entry Flow block reuses the function's
-    /// entry block (index 0). The ONLY block params: a Flow block whose
+    /// Flow block → Cranelift block mapping, pre-created before the
+    /// driver runs. Empty single-predecessor Goto chains share a block;
+    /// every other reachable Flow block gets its own. The entry Flow
+    /// block reuses the function's entry block (index 0). The ONLY
+    /// block params: a Flow block whose
     /// first step is a `BoolAnd`/`BoolOr` (the short-circuit join) gets
     /// one I8 param — the merged boolean. Every other value merge
     /// (match results) rides a pre-allocated result slot, never a
     /// block param.
     pub(super) flow_blocks: Vec<Block>,
     /// Per-Flow-block sealing discipline: a block seals once every Flow
-    /// predecessor's terminator has been emitted (loop headers
-    /// naturally wait for their backedge); unreachable no-predecessor
-    /// blocks self-seal right after their own terminator. Entry starts
-    /// sealed.
+    /// predecessor's terminator has been emitted (loop headers naturally
+    /// wait for their backedge). Unreachable blocks are marked sealed during
+    /// setup without emission. Entry starts sealed.
     pub(super) flow_sealed: Vec<bool>,
     /// Per-Flow-block count of emitted predecessor terminators, for
     /// the sealing rule above.
@@ -327,7 +328,8 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// evaluated on the arm's path — not by any branch predicate.
     pub(super) sidecar: &'a ryo_core::ownership::FunctionSidecar,
     /// The canonical Flow IR for this body — the backend's emission
-    /// driver: one pre-created Cranelift block per Flow block,
+    /// driver: pre-created Cranelift region blocks, with empty
+    /// single-predecessor Goto chains coalesced,
     /// walked in DFS order from the entry, with per-step evaluation and
     /// terminator handlers. Positional with the sidecar entry (both
     /// are built once per pipeline run, right after sema).

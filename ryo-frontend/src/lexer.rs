@@ -401,7 +401,8 @@ pub(crate) enum RawToken<'a> {
 /// Heuristic estimate of the number of raw tokens in `input`, used to
 /// pre-size the token buffers so the collect/indent passes don't
 /// repeatedly reallocate. It is only a hint — correctness never
-/// depends on it.
+/// depends on it. The speculative reservation is capped so huge inputs
+/// cannot force a multi-gigabyte allocation before lexing starts.
 fn estimated_token_count(input: &str) -> usize {
     // Average observed token width across representative Ryo sources is
     // ~3 bytes (identifiers/keywords/literals dominate over 1-byte
@@ -409,20 +410,33 @@ fn estimated_token_count(input: &str) -> usize {
     // case. It is NOT an upper bound: punctuation-dense input (a run of
     // 1-byte tokens like `(((((`) yields close to one token per byte —
     // more than len/2 — so the buffer may still grow there. That costs
-    // a reallocation, nothing more. Always reserve at least a little.
-    (input.len() / 2).max(16)
+    // a reallocation, nothing more. Always reserve at least a little,
+    // but never reserve more than one million entries speculatively.
+    (input.len() / 2).clamp(16, 1_000_000)
 }
 
 /// Run logos, indentation processing, and string/int interning in
-/// one pass. Never fails hard: problems are emitted to `sink` and
-/// lexing recovers (a `Token::Error` placeholder for invalid
-/// characters, a zero literal for unparseable ints/floats) so the
-/// parser still sees a well-formed stream and later stages can
-/// co-surface their own diagnostics in the same run. The one
-/// exception is an indentation failure: the stream is unusable
-/// without Indent/Dedent markers, so this returns an empty vector
-/// and the driver skips parsing.
+/// one pass. Ordinary problems are emitted to `sink` and lexing
+/// recovers (a `Token::Error` placeholder for invalid characters, a
+/// zero literal for unparseable ints/floats) so the parser still sees
+/// a well-formed stream and later stages can co-surface their own
+/// diagnostics in the same run. Whole-source width overflow, an
+/// over-budget literal, or indentation failure instead returns an
+/// empty vector and the driver skips parsing.
 pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Token, Span)> {
+    if input.len() > u32::MAX as usize {
+        sink.emit(Diag::error(
+            crate::spans::cspan(SimpleSpan::new((), 0..0)),
+            DiagCode::LexerInputTooLarge,
+            format!(
+                "source is too large to lex ({} bytes; the limit is {})",
+                input.len(),
+                u32::MAX
+            ),
+        ));
+        return Vec::new();
+    }
+
     let raw_tokens = collect_raw_tokens(input, sink);
 
     let processed = match crate::indent::process(raw_tokens) {
@@ -435,11 +449,7 @@ pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Toke
             // unusable, so hand back an empty stream; the driver
             // skips parsing when it sees this together with sink
             // errors.
-            sink.emit(Diag::error(
-                crate::spans::cspan(e.span),
-                DiagCode::ParseError,
-                e.message,
-            ));
+            sink.emit(Diag::error(crate::spans::cspan(e.span), e.code, e.message));
             return Vec::new();
         }
     };
@@ -1645,6 +1655,13 @@ mod tests {
             }
             ref t => panic!("expected BytesLit at index 2, got {:?}", t),
         }
+    }
+
+    #[test]
+    fn estimated_token_count_caps_large_sources() {
+        assert_eq!(estimated_token_count(""), 16);
+        assert_eq!(estimated_token_count(&"a".repeat(100)), 50);
+        assert_eq!(estimated_token_count(&"a".repeat(2_000_002)), 1_000_000);
     }
 
     #[test]

@@ -69,6 +69,10 @@ pub fn run_file(
         display_flow(tirs, flows, sidecar, &pool)?;
     }
 
+    // Cranelift needs only the analyzed bodies and type pool, not the
+    // source text or earlier representations retained by the front end.
+    drop((program, uir, input));
+
     let mut codegen = codegen::Codegen::new_jit().map_err(CompilerError::CodegenError)?;
     let (main_id, clif) = codegen
         .compile(tirs, flows, &pool, sidecar, want.clif)
@@ -78,6 +82,7 @@ pub fn run_file(
         write_stdout(format_args!("{clif}"))?;
     }
 
+    drop((analyzed, pool));
     let mut argv = Vec::with_capacity(program_args.len() + 1);
     argv.push(file.to_string_lossy().into_owned());
     argv.extend_from_slice(program_args);

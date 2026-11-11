@@ -80,6 +80,9 @@ pub fn build_file(
         display_flow(tirs, flows, sidecar, &pool)?;
     }
 
+    // Object emission needs only the analyzed bodies and type pool.
+    drop((program, uir, input));
+
     let (obj_filename, exe_filename) = get_output_filenames(file);
 
     let target = Triple::host();
@@ -91,6 +94,9 @@ pub fn build_file(
         write_stdout(format_args!("[Cranelift IR]\n"))?;
         write_stdout(format_args!("{clif}"))?;
     }
+
+    // Cranelift's compiled module no longer reads frontend artifacts.
+    drop((analyzed, pool));
     let obj_bytes = codegen.finish().map_err(CompilerError::CodegenError)?;
 
     fs::write(&obj_filename, obj_bytes).map_err(CompilerError::from)?;

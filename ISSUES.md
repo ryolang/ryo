@@ -842,19 +842,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-270 — Stack overflow lowering deeply nested match and catch blocks
-
-**Severity:** Correctness / Hygiene
-**Area:** frontend-parser
-
-**Files:** ryo-frontend/src/astgen/match_.rs; ryo-frontend/src/astgen/expr.rs; ryo-frontend/src/astgen.rs
-
-**Summary:** Nested statement-form match and catch expressions recursed through arm statement lowering and overflowed during astgen. Iterative lowering now covers the smaller regressions, but the original 50,000-level statement-match source remains blocked by I-275's source-span range, and the original 50,000-level catch JIT remains blocked by I-274's recursive Flow traversal. The exact reproductions therefore cannot yet run end to end.
-
-**Resolution:** Resolve I-275 so the statement-match source is representable and I-274 so the catch source reaches JIT, then enable both retained 50,000-level reproductions and verify them end to end. Do not close this issue on the smaller passing regressions alone.
-
----
-
 ### I-271 — Shallow binary early errors ignore non-memoization contract
 
 **Severity:** Cleanup
@@ -868,42 +855,42 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-272 — JIT compilation of 50k nested slices exceeds 15 minutes
+### I-276 — Views of inout parameters do not freeze the owner, enabling use-after-free
 
 **Severity:** Correctness / Hygiene
-**Area:** codegen
+**Area:** ownership
 
-**Files:** ryo/tests/deep_expr_chain.rs; ryo-backend/src/codegen; ryo-driver/src/pipeline
+**Files:** ryo-frontend/src/ownership/views.rs (projection_root), ryo-frontend/src/ownership/walk.rs, ryo-frontend/src/ownership/tests/ (view/inout regressions), ryo/tests/ (JIT/AOT runtime regressions)
 
-**Summary:** The jit_run_deep_slice_nesting regression generates 50,000 successive [0:1] expressions. TIR emission completes and 1,000-level JIT execution succeeds, but debug JIT compilation exceeded a 900-second timeout while consuming one CPU core; no stack overflow or deadlock was observed. The long case prevents the default deep-expression and workspace suites from completing in a practical validation window.
+**Summary:** projection_root returns None for inout parameters, so a strview/bytesview derived from an inout str/bytes parameter never registers a live projection. Mutation through the same inout binding is therefore accepted while the view is still read, violating P2 and the specification's use-after-free guarantee. Repro: fn f(inout s: str): v = s[0:24]; str_push(&s, <32 bytes>); print(v), called with an owned 24-byte heap string. JIT prints freed/garbage bytes; AOT also prints corrupted data. A one-byte suffix control that does not reallocate prints the original view. The same missing root affects bytesview and other mutation/reassignment forms.
 
-**Resolution:** Profile the 50,000-slice JIT pipeline to locate the superlinear pass or emission path, then remove the scaling bottleneck without weakening stack-safety coverage. Add scaling measurements for nested views and keep a large regression practical for CI while retaining adversarial stress coverage.
+**Resolution:** Represent inout parameters as projection roots for freeze and view-liveness purposes while preserving caller-owned cleanup semantics. Cover direct and transitive views, strview and bytesview, reallocating str_push/bytes_push and reassignment, last-use lifting, branches/loops, and JIT+AOT execution. Cleanup validation must not turn the caller's buffer into a callee destruction obligation.
 
 ---
 
-### I-274 — Stack overflow emitting nested match arms in Flow
+### I-280 — resolve_decl can overwrite DeclState::Failed with Resolved for a rejected inferred SCC member
 
 **Severity:** Correctness / Hygiene
-**Area:** core-ir
+**Area:** sema
 
-**Files:** ryo-core/src/flow/build.rs; ryo/tests/deep_expr_chain.rs
+**Files:** ryo-frontend/src/sema/mod.rs:671-686, ryo-frontend/src/sema/error_inference.rs:129-152
 
-**Summary:** After iterative astgen lowering, the original 50,000-level nested-catch source succeeds through UIR but still aborts during TIR/Flow construction. FlowBuilder::build_match calls emit_expr or emit_stmts for each arm at depth zero, so nested match arms never reach the existing expression fallback. This is a separate downstream traversal reset from I-270 and also blocks full JIT execution of the original catch reproduction.
+**Summary:** resolve_decl sets InProgress, analyzes, then calls finalize_inferred_function, then unconditionally writes DeclState::Resolved. finalize_inferred_function marks every inferred member of a rejected recursive SCC Failed (error_inference.rs:147-151) — including the decl currently on the resolve_decl stack. The unconditional Resolved write silently undoes that marking, leaving one member of a rejected cycle fully resolved with results[decl] populated while its SCC siblings stay Failed with results[decl] = None: an inconsistent state split within a single SCC. require_decl returns true for both states, so the difference only surfaces in results consumers. Found during a state-machine invalid-state review of the sema/astgen task machines.
 
-**Resolution:** Propagate depth through Flow match-arm expression and statement emission and move deep arm bodies to explicit continuations or the existing iterative fallback, preserving block order, scopes, terminators, and match-result storage. Add crash-contained nested match and catch tests through TIR, Flow, JIT, and AOT.
+**Resolution:** Run the SCC rejection before the Resolved write, or make resolve_decl skip the write when finalize marked the decl Failed. Add a regression test: two mutually recursive inferred-error functions entered through the one that gets resolved first.
 
 ---
 
-### I-275 — Deep match source spans exceed the UIR wire range
+### I-282 — Loop ownership fixed-point cap is debug_assert-only; release builds proceed with unconverged state
 
 **Severity:** Correctness / Hygiene
-**Area:** core-ir
+**Area:** ownership
 
-**Files:** ryo-core/src/uir/match_.rs; ryo-core/src/uir.rs; ryo/tests/deep_expr_chain.rs
+**Files:** ryo-frontend/src/ownership/loops/mod.rs:299-365
 
-**Summary:** The original 50,000-level nested statement-match source is approximately 9.3 GB because indentation grows quadratically. After iterative astgen lowering, it reaches a pattern-span range error instead of overflowing the native stack. Pattern spans use u32 source offsets, so inputs beyond 4 GiB cannot be represented even though traversal no longer overflows.
+**Summary:** analyze_loop bounds the propagate/check fixed point at height_cap = 5 * instruction count + 2, but exceeding the cap fires only a debug_assert ("INTERNAL ANALYSIS FAILURE: loop propagate did not converge"). Release builds silently discard the current branch state, truncate owner hazards, and continue to Check with un-converged ownership facts — wrong frees/moves can reach codegen with no diagnostic. Debug and CI (which run debug tests) can never observe the failure mode users would hit. Found during a state-machine invalid-state review.
 
-**Resolution:** Decide whether UIR source spans should be widened or very large inputs should receive a documented size-limit diagnostic. Preserve iterative traversal and add a boundary test proving inputs beyond the span range fail cleanly without a stack overflow. Do not change the wire format without design approval.
+**Resolution:** Either promote to a hard assert (treat non-convergence as a compiler bug in all modes) or emit an internal-error diagnostic before the graceful degradation, so release behavior is deliberate and observable.
 
 ---
 
@@ -915,4 +902,4 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-<!-- issue-id high-water: 275 -->
+<!-- issue-id high-water: 283 -->

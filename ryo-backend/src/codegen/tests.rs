@@ -441,3 +441,169 @@ fn backend_rejects_edits_to_cloned_body_and_execution_arenas() {
             .is_err()
     );
 }
+
+fn assert_jit_succeeds(src: &str) {
+    let (tirs, flows, pool, cleanup) = analyze(src);
+    let mut codegen = Codegen::new_jit().expect("JIT");
+    let (main, _) = codegen
+        .compile(&tirs, &flows, &pool, &cleanup, false)
+        .expect("emission");
+    assert_eq!(codegen.execute(main, &[]).expect("execution"), 0);
+}
+
+fn clif_block_count(clif: &str) -> usize {
+    clif.lines()
+        .filter(|line| line.starts_with("block"))
+        .count()
+}
+
+fn clif_function<'a>(clif: &'a str, header: &str) -> &'a str {
+    let start = clif
+        .find(header)
+        .unwrap_or_else(|| panic!("missing function header {header}: {clif}"));
+    clif[start..]
+        .split("\nfunction ")
+        .next()
+        .expect("selected function body")
+}
+
+fn clif_block_containing(clif: &str, needle: &str) -> String {
+    let position = clif
+        .find(needle)
+        .unwrap_or_else(|| panic!("missing {needle:?}: {clif}"));
+    let suffix = clif[..position]
+        .rsplit_once("\nblock")
+        .unwrap_or_else(|| panic!("{needle:?} is not inside a block: {clif}"))
+        .1;
+    let label = suffix.split(':').next().expect("block label");
+    format!("block{label}")
+}
+
+fn clif_block_body<'a>(clif: &'a str, label: &str) -> &'a str {
+    let marker = format!("\n{label}:\n");
+    clif.split(&marker)
+        .nth(1)
+        .unwrap_or_else(|| panic!("missing {label}: {clif}"))
+        .split("\nblock")
+        .next()
+        .expect("block body")
+        .split("\n}")
+        .next()
+        .expect("block body before function end")
+}
+
+fn clif_br_table_targets(dispatch: &str) -> Vec<&str> {
+    let start = dispatch.find('[').expect("br_table target list") + 1;
+    let end = dispatch[start..]
+        .find(']')
+        .map(|offset| start + offset)
+        .expect("closed br_table target list");
+    dispatch[start..end].split(", ").collect()
+}
+
+fn clif_jump_target(body: &str) -> &str {
+    body.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("jump "))
+        .and_then(|targets| targets.split_whitespace().next())
+        .expect("block jump target")
+}
+
+#[test]
+fn unreachable_continuations_are_not_emitted() {
+    let clif = clif_of("fn main():\n\treturn\n\tprint(\"unreachable-marker\")\n");
+    let without_dead_code = clif_of("fn main():\n\treturn\n");
+    assert_eq!(
+        clif_block_count(&clif),
+        clif_block_count(&without_dead_code),
+        "dead continuation reached code generation: {clif}"
+    );
+}
+
+#[test]
+fn coalescing_keeps_diverging_sibling_before_owned_match_join() {
+    let src = "enum Opt:\n\tSome(str)\n\tNone\nfn returning(flag: bool) -> str:\n\tpad = \"0123456789012345678901234567890123456789\"\n\to = Opt.Some(pad + \"!\")\n\tresult = match flag:\n\t\ttrue: match o:\n\t\t\tSome(v): v\n\t\t\tNone: \"none\"\n\t\tfalse: return \"early\"\n\treturn result\nfn main():\n\tprint(returning(true))\n";
+    let clif = clif_of(src);
+    assert_eq!(clif_block_count(&clif), 15, "{clif}");
+    assert_jit_succeeds(src);
+}
+
+#[test]
+fn enum_copy_skips_fieldless_variant_blocks() {
+    let src = "enum Choice:\n\tA(int)\n\tB\nfn choose(x: Choice) -> Choice:\n\treturn x\nfn main():\n\tvalue = choose(Choice.A(1))\n\tmatch value:\n\t\tChoice.A(payload):\n\t\t\tassert(payload == 1, \"returned payload\")\n\t\tChoice.B:\n\t\t\tassert(false, \"returned variant\")\n";
+    let clif = clif_of(src);
+    let choose = clif_function(&clif, "function u0:0(i64 sret, i64)");
+    let dispatch = choose
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("br_table"))
+        .expect("enum copy dispatch");
+    let targets = clif_br_table_targets(dispatch);
+    let return_block = clif_block_containing(choose, "\n    return");
+    assert_eq!(targets.len(), 2, "two enum variants: {choose}");
+    assert_eq!(
+        targets[1], return_block,
+        "fieldless variant should route directly to the return merge: {choose}"
+    );
+    assert_jit_succeeds(src);
+}
+
+#[test]
+fn copy_only_enum_drop_emits_no_dispatch() {
+    let clif = clif_of(
+        "enum Choice:\n\tA(int)\n\tB\nfn discard(value: Choice):\n\treturn\nfn main():\n\tdiscard(Choice.A(1))\n",
+    );
+    let discard = clif_function(&clif, "function u0:0(i64)");
+    assert!(
+        !discard.contains("br_table"),
+        "copy-only enum drop should have no tag dispatch: {discard}"
+    );
+}
+
+#[test]
+fn mixed_enum_drop_routes_drop_free_variant_directly_to_merge() {
+    let clif = clif_of(
+        "enum Choice:\n\tA(str)\n\tB\nfn discard(move value: Choice):\n\treturn\nfn main():\n\tdiscard(Choice.B)\n",
+    );
+    let discard = clif_function(&clif, "function u0:0(i64)");
+    let dispatch = discard
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("br_table"))
+        .expect("mixed enum drop dispatch");
+    let targets = clif_br_table_targets(dispatch);
+    let drop_case = clif_block_containing(discard, "call fn0");
+    let drop_case_body = clif_block_body(discard, &drop_case);
+    let merge = clif_jump_target(drop_case_body);
+    assert_eq!(
+        targets,
+        [drop_case.as_str(), merge],
+        "both variants must reach the same post-drop continuation: {discard}"
+    );
+}
+
+#[test]
+fn coalesces_single_predecessor_empty_match_join_chains() {
+    let src = "error E\nfn find() -> E!int:\n\treturn E\nfn main():\n\tvalue = find() catch as err:\n\t\tE: find() catch as err:\n\t\t\tE: 0\n\tassert(value == 0, \"nested match result\")\n";
+    let clif = clif_of(src);
+    assert_eq!(
+        clif_block_count(&clif),
+        30,
+        "empty join chains and enum dispatch trampolines should not allocate blocks: {clif}"
+    );
+    assert_jit_succeeds(src);
+}
+
+#[test]
+fn coalescing_preserves_short_circuit_value_joins() {
+    assert_jit_succeeds(
+        "fn main():\n\tassert((false and false) == false, \"and short circuit\")\n\tassert((true or true) == true, \"or short circuit\")\n\tassert(true and (match true:\n\t\ttrue: true\n\t\tfalse: false\n\t), \"and rhs value\")\n\tassert(false or (match true:\n\t\ttrue: true\n\t\tfalse: false\n\t), \"or rhs value\")\n",
+    );
+}
+
+#[test]
+fn coalescing_preserves_owned_match_cleanup_positions() {
+    assert_jit_succeeds(
+        "enum Opt:\n\tSome(str)\n\tNone\nfn main():\n\tpad = \"0123456789012345678901234567890123456789\"\n\to = Opt.Some(pad + \"!\")\n\tx = match true:\n\t\ttrue: match o:\n\t\t\tSome(v): v\n\t\t\tNone: \"none\"\n\t\tfalse: \"other\"\n\tassert(x == pad + \"!\", \"moved match result\")\n\to2 = Opt.Some(pad + \"?\")\n\ty = match true:\n\t\ttrue: match o2:\n\t\t\tSome(_): \"selected\"\n\t\t\tNone: \"none\"\n\t\tfalse: \"other\"\n\tassert(y == \"selected\", \"arm payload drop\")\n",
+    );
+}

@@ -6,10 +6,10 @@
 //! - `codegen/structs.rs`, `match_.rs`, `control.rs`: aggregates and Flow barriers.
 //! - `codegen/mod.rs`, `decls.rs`: statement/declaration roots.
 
-use super::super::tests::{RunOk, run, run_with_errors};
+use super::super::tests::{RunOk, run, run_with_errors, tir_named};
 use super::walker::with_expr_limit;
-use ryo_core::diag::Diag;
-use ryo_core::tir::Tir;
+use ryo_core::diag::{Diag, DiagCode};
+use ryo_core::tir::{Tir, TirTag};
 use ryo_core::types::InternPool;
 use std::process::Command;
 
@@ -338,7 +338,7 @@ fn run_deep_repro(test_name: &str, src: String) {
 fn unary_mediated_rhs_chain_analyzes_without_overflow() {
     run_deep_repro(
         "sema::expr::walker_tests::unary_mediated_rhs_chain_analyzes_without_overflow",
-        DeepExpr::unary_mediated(50_000),
+        DeepExpr::unary_mediated(126),
     );
 }
 
@@ -346,7 +346,7 @@ fn unary_mediated_rhs_chain_analyzes_without_overflow() {
 fn call_mediated_rhs_chain_analyzes_without_overflow() {
     run_deep_repro(
         "sema::expr::walker_tests::call_mediated_rhs_chain_analyzes_without_overflow",
-        DeepExpr::call_mediated(50_000),
+        DeepExpr::call_mediated(127),
     );
 }
 
@@ -354,8 +354,22 @@ fn call_mediated_rhs_chain_analyzes_without_overflow() {
 fn nested_call_chain_analyzes_without_overflow() {
     run_deep_repro(
         "sema::expr::walker_tests::nested_call_chain_analyzes_without_overflow",
-        DeepExpr::nested_calls(50_000),
+        DeepExpr::nested_calls(254),
     );
+}
+
+#[test]
+fn over_depth_expression_recovers_with_error_typed_unreachable() {
+    let (tirs, diags, pool) = run_with_errors(&DeepExpr::nested_calls(255));
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, DiagCode::NestingLimitExceeded);
+
+    let main = tir_named(&tirs, &pool, "main");
+    let recovery = main.instructions[1..]
+        .iter()
+        .find(|inst| matches!(inst.tag, TirTag::Unreachable))
+        .expect("over-depth expression should recover with Unreachable");
+    assert_eq!(recovery.ty, pool.error_type());
 }
 
 #[test]
@@ -509,7 +523,7 @@ fn expected_type_struct_chain(depth: usize) -> String {
 fn expected_type_struct_chain_analyzes_without_overflow() {
     run_deep_repro(
         "sema::expr::walker_tests::expected_type_struct_chain_analyzes_without_overflow",
-        expected_type_struct_chain(10_000),
+        expected_type_struct_chain(250),
     );
 }
 

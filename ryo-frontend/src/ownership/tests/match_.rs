@@ -1263,3 +1263,19 @@ fn main():
         "the original shared error allocation must be destroyed after its reads"
     );
 }
+
+#[test]
+fn loop_directly_in_match_arm_walks_owned_use_after_exit() {
+    let src = "fn consume(move value: str):\n\treturn\nfn main():\n\ts = \"owned\"\n\tmatch true:\n\t\ttrue:\n\t\t\twhile false:\n\t\t\t\tprint(\"loop\")\n\t\t\tconsume(s)\n\t\tfalse:\n\t\t\tprint(\"other\")\n\tprint(s)\n";
+
+    let diags = check_src(src);
+
+    assert_eq!(
+        diags
+            .iter()
+            .filter(|diag| diag.code == DiagCode::UseAfterMove)
+            .count(),
+        1,
+        "the post-match read must observe the move after the in-arm loop: {diags:?}"
+    );
+}

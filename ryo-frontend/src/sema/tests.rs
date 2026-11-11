@@ -1386,12 +1386,11 @@ fn reserved_name_no_cascade_undefined_variable() {
 
 // ---------- Deep operator chains ----------
 //
-// A left-associative chain nests one `BinOp`/`UnOp` link per term, so
-// a 100k-term `1+1+...` expression is a 100k-deep tree. Every pass
-// that walks expression nesting (astgen, sema's chain walkers, the
-// TIR tree-shape validation) is iterative; these tests pin that on
-// the small test-thread stack — the recursive formulations they
-// replaced overflowed the CLI's 32 MiB stack around ~7k terms.
+// A left-associative chain nests one `BinOp`/`UnOp` link per term.
+// Every pass that walks accepted expression nesting (astgen, sema's
+// chain walkers, the TIR tree-shape validation) is iterative. These
+// tests exercise that machinery near the 256-level source-nesting
+// limit on the small test-thread stack.
 
 /// `print(1+1+... )` with `terms` ones.
 fn add_chain_src(terms: usize) -> String {
@@ -1407,8 +1406,9 @@ fn add_chain_src(terms: usize) -> String {
 }
 
 #[test]
-fn hundred_k_term_addition_chain_analyzes_without_overflow() {
-    let (tirs, pool) = run(&add_chain_src(100_000)).expect("100k-term chain should analyze");
+fn bounded_addition_chain_analyzes_without_overflow() {
+    let terms = 255;
+    let (tirs, pool) = run(&add_chain_src(terms)).expect("bounded chain should analyze");
     let main = tirs
         .iter()
         .find(|t| pool.str(t.name) == "main")
@@ -1419,12 +1419,12 @@ fn hundred_k_term_addition_chain_analyzes_without_overflow() {
         .iter()
         .filter(|i| i.tag == TirTag::IAdd)
         .count();
-    assert_eq!(iadds, 100_000 - 1, "chain must lower fully, not truncated");
+    assert_eq!(iadds, terms - 1, "chain must lower fully, not truncated");
 }
 
 #[test]
-fn hundred_k_term_right_nested_addition_chain_analyzes_without_overflow() {
-    let terms = 100_000;
+fn bounded_right_nested_addition_chain_analyzes_without_overflow() {
+    let terms = 255;
     let mut src = String::from("fn main():\n\tprint(");
     for _ in 1..terms {
         src.push_str("1+(");
@@ -1435,7 +1435,7 @@ fn hundred_k_term_right_nested_addition_chain_analyzes_without_overflow() {
     }
     src.push_str(")\n");
 
-    let (tirs, pool) = run(&src).expect("100k-term right-nested chain should analyze");
+    let (tirs, pool) = run(&src).expect("bounded right-nested chain should analyze");
     let main = tirs
         .iter()
         .find(|t| pool.str(t.name) == "main")
@@ -1466,7 +1466,7 @@ fn nested_left_spines_add_chain(groups: usize, spine_terms: usize) -> String {
 
 #[test]
 fn nested_long_left_spines_analyze_without_overflow() {
-    let groups = 200;
+    let groups = 3;
     let spine_terms = 70;
     let (tirs, pool) = run(&nested_left_spines_add_chain(groups, spine_terms))
         .expect("nested long left spines should analyze");
@@ -1488,7 +1488,7 @@ fn nested_long_left_spines_analyze_without_overflow() {
 
 #[test]
 fn alternating_left_and_right_nested_chain_analyzes_without_overflow() {
-    let terms = 50_000;
+    let terms = 255;
     let mut prefixes = Vec::with_capacity(terms - 1);
     let mut suffix = String::new();
     for i in 0..terms - 1 {
@@ -1557,13 +1557,13 @@ fn deep_right_nested_never_lhs_recovers_with_error_type() {
 }
 
 #[test]
-fn hundred_k_term_unary_chain_analyzes_without_overflow() {
+fn bounded_unary_chain_analyzes_without_overflow() {
     let mut src = String::from("fn main():\n\tprint(");
-    for _ in 0..100_000 {
+    for _ in 0..254 {
         src.push_str("not ");
     }
     src.push_str("true)\n");
-    run(&src).expect("100k-term unary chain should analyze");
+    run(&src).expect("bounded unary chain should analyze");
 }
 
 #[test]
@@ -1573,7 +1573,7 @@ fn deep_chain_const_eval_reports_overflow() {
     // the old recursion's per-link re-reporting — verified against the
     // pre-fix compiler).
     let mut src = String::from("fn main():\n\tprint(9223372036854775807");
-    for _ in 0..999 {
+    for _ in 0..200 {
         src.push_str("+1");
     }
     src.push_str(")\n");
@@ -1587,13 +1587,13 @@ fn deep_chain_const_eval_reports_overflow() {
 #[test]
 fn deep_chain_const_eval_reports_division_by_zero() {
     let mut src = String::from("fn main():\n\tprint(1/(");
-    for i in 0..10_000 {
+    for i in 0..200 {
         if i > 0 {
             src.push('+');
         }
         src.push('1');
     }
-    src.push_str("-10000)+1)\n");
+    src.push_str("-200)+1)\n");
     let diags = run(&src).unwrap_err();
     assert!(
         any_code(&diags, DiagCode::DivisionByZero),

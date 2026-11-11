@@ -24,7 +24,14 @@ pub(super) fn fail_with_diags(diags: Vec<Diag>, input: &str, source_name: &str) 
 /// out-of-band after the sorted sweep so the suppression marker
 /// always lands at the bottom of the report.
 fn render_diags(diags: &[Diag], input: &str, source_name: &str) -> Result<(), CompilerError> {
-    let source = Source::from(input);
+    // Oversized sources have only a synthetic size diagnostic, not a
+    // source-line label; do not allocate an offset table per source byte.
+    let render_input = if input.len() > u32::MAX as usize {
+        &input[..0]
+    } else {
+        input
+    };
+    let source = Source::from(render_input);
     // Ariadne 0.6 indexes `Source` by CHARACTER offset, but every span
     // in the compiler is a BYTE offset (logos + `str` slicing). On pure
     // ASCII the two coincide; with any multi-byte character before the
@@ -33,7 +40,7 @@ fn render_diags(diags: &[Diag], input: &str, source_name: &str) -> Result<(), Co
     // when the offset passes the source's char count. Convert once
     // here so every diagnostic (and its note labels) renders at its
     // true position.
-    let byte_to_char = byte_to_char_offsets(input);
+    let byte_to_char = byte_to_char_offsets(render_input);
     let (truncation, regular): (Vec<&Diag>, Vec<&Diag>) = diags
         .iter()
         .partition(|d| d.code == DiagCode::TooManyDiagnostics);
@@ -233,6 +240,7 @@ fn diag_code_str(code: DiagCode) -> &'static str {
         DiagCode::InvalidMatchScrutinee => "E0136",
         DiagCode::MatchViewResult => "E0137",
         DiagCode::MatchValueArmBorrowed => "E0138",
+        DiagCode::NestingLimitExceeded => "E0140",
         DiagCode::TooManyDiagnostics => "E0101",
         DiagCode::InvalidCharacter => "E0102",
         DiagCode::UnknownEscape => "E0103",
@@ -368,6 +376,7 @@ mod tests {
             (DiagCode::InvalidMatchScrutinee, "E0136"),
             (DiagCode::MatchViewResult, "E0137"),
             (DiagCode::MatchValueArmBorrowed, "E0138"),
+            (DiagCode::NestingLimitExceeded, "E0140"),
             (DiagCode::ConstEvalFailure, "E0200"),
             (DiagCode::CycleInComptime, "E0201"),
             (DiagCode::GenericInstantiation, "E0202"),
@@ -473,6 +482,7 @@ mod tests {
                 | DiagCode::InvalidMatchScrutinee
                 | DiagCode::MatchViewResult
                 | DiagCode::MatchValueArmBorrowed
+                | DiagCode::NestingLimitExceeded
                 | DiagCode::TooManyDiagnostics
                 | DiagCode::InvalidCharacter
                 | DiagCode::UnknownEscape

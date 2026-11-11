@@ -10,8 +10,12 @@
 use chumsky::span::{SimpleSpan, Span};
 
 use crate::lexer::RawToken;
+use ryo_core::diag::DiagCode;
 
 type Spanned<'a> = (RawToken<'a>, SimpleSpan);
+
+const AST_DEPTH_LIMIT: usize = 256;
+const INDENT_DEPTH_LIMIT: usize = AST_DEPTH_LIMIT + 1;
 
 /// Failure of the indentation pre-processor.
 ///
@@ -22,6 +26,7 @@ type Spanned<'a> = (RawToken<'a>, SimpleSpan);
 #[derive(Debug, Clone)]
 pub(crate) struct IndentError {
     pub span: SimpleSpan,
+    pub code: DiagCode,
     pub message: String,
 }
 
@@ -54,6 +59,7 @@ pub(crate) fn process<'a>(tokens: Vec<Spanned<'a>>) -> Result<Vec<Spanned<'a>>, 
                 if let Err(message) = validate_indentation(whitespace) {
                     return Err(IndentError {
                         span: *span,
+                        code: DiagCode::ParseError,
                         message,
                     });
                 }
@@ -63,6 +69,15 @@ pub(crate) fn process<'a>(tokens: Vec<Spanned<'a>>) -> Result<Vec<Spanned<'a>>, 
                     .expect("indent stack is seeded with base level 0 and never fully popped");
 
                 if new_level > current_level {
+                    if indent_stack.len() > INDENT_DEPTH_LIMIT {
+                        return Err(IndentError {
+                            span: *span,
+                            code: DiagCode::NestingLimitExceeded,
+                            message: format!(
+                                "AST nesting exceeds the maximum depth of {AST_DEPTH_LIMIT}"
+                            ),
+                        });
+                    }
                     indent_stack.push(new_level);
                     result.push((RawToken::Indent, *span));
                 } else if new_level < current_level {
@@ -81,6 +96,7 @@ pub(crate) fn process<'a>(tokens: Vec<Spanned<'a>>) -> Result<Vec<Spanned<'a>>, 
                     {
                         return Err(IndentError {
                             span: *span,
+                            code: DiagCode::ParseError,
                             message: format!(
                                 "Indentation error: dedent to level {} does not match any outer indentation level",
                                 new_level
@@ -132,7 +148,10 @@ fn validate_indentation(whitespace: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lexer::{Token, lex};
     use logos::Logos;
+    use ryo_core::diag::DiagSink;
+    use ryo_core::types::InternPool;
 
     fn lex_raw(input: &str) -> Vec<Spanned<'_>> {
         RawToken::lexer(input)
@@ -150,6 +169,48 @@ mod tests {
 
     fn count_token(tokens: &[Spanned<'_>], predicate: impl Fn(&RawToken<'_>) -> bool) -> usize {
         tokens.iter().filter(|(tok, _)| predicate(tok)).count()
+    }
+
+    #[test]
+    fn lex_enforces_indentation_depth_limit_before_parsing() {
+        fn source_at_depth(depth: usize) -> String {
+            let mut src = String::from("fn main():\n");
+            for level in 1..depth {
+                src.push_str(&"\t".repeat(level));
+                src.push_str("if true:\n");
+            }
+            src.push_str(&"\t".repeat(depth));
+            src.push_str("print(1)");
+            src
+        }
+
+        let accepted = source_at_depth(256);
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let tokens = lex(&accepted, &mut pool, &mut sink);
+        assert!(!sink.has_errors(), "depth 256 must remain accepted");
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|(token, _)| matches!(token, Token::Indent))
+                .count(),
+            256
+        );
+
+        let rejected = source_at_depth(258);
+        let offending_newline = rejected.rfind('\n').expect("nested source has newlines");
+        let mut pool = InternPool::new();
+        let mut sink = DiagSink::new();
+        let tokens = lex(&rejected, &mut pool, &mut sink);
+        assert!(tokens.is_empty(), "parsing must not receive deep tokens");
+        let diags = sink.into_diags();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, DiagCode::NestingLimitExceeded);
+        assert!(diags[0].message.contains("256"));
+        assert_eq!(
+            diags[0].span,
+            ryo_core::span::Span::new(offending_newline, offending_newline + 259)
+        );
     }
 
     #[test]

@@ -173,6 +173,7 @@
               <p class="ref-nav-title">Basics</p>
               <nav class="ref-nav-list">
                 <a href="#variables">Variables &amp; Mutability</a>
+                <a href="#source-nesting">Source Nesting</a>
                 <a href="#types">Primitive Types</a>
                 <a href="#integers">Integers &amp; Arithmetic</a>
                 <a href="#booleans">Booleans &amp; Logic</a>
@@ -291,6 +292,57 @@
                   static.
                 </p>
               </div>
+            </div>
+          </section>
+
+          <!-- =================================================== -->
+          <section id="source-nesting">
+            <h2>
+              Source Nesting
+              <a class="anchor" href="#source-nesting" aria-label="Permalink">#</a>
+            </h2>
+            <p>
+              Abstract-syntax-tree nesting depth may not exceed
+              <strong>256</strong>. A root expression or statement has depth
+              zero; each parent-to-child edge adds one, while siblings retain
+              the same depth. This includes operator and call operands,
+              projections, match and catch bodies, and nested statement blocks.
+              A long operator chain can reach the limit even without nested
+              delimiters.
+            </p>
+            <p>
+              A source file may contain at most 4,294,967,295 bytes
+              (<code>u32::MAX</code>), the range representable by source spans.
+              Larger sources are rejected at lexer entry.
+            </p>
+
+            <h3>Diagnostics</h3>
+            <div class="ref-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Code</th>
+                    <th>Meaning</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>E0140</code></td>
+                    <td>
+                      AST nesting exceeds the maximum depth of 256 — depth 256
+                      is accepted; the first node that would require depth 257
+                      is rejected
+                    </td>
+                  </tr>
+                  <tr>
+                    <td><code>E0130</code></td>
+                    <td>
+                      Source is too large to lex — sources above 4,294,967,295
+                      bytes are rejected at lexer entry
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </section>
 
