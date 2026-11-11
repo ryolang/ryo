@@ -429,6 +429,29 @@ fn nesting_limit_boundary() {
 }
 
 #[test]
+fn nesting_limit_distinguishes_void_return_from_its_operand() {
+    fn nested_return(value: &str) -> String {
+        let mut src = String::from("fn main():\n");
+        for level in 1..=256 {
+            src.push_str(&"\t".repeat(level));
+            src.push_str("if true:\n");
+        }
+        src.push_str(&"\t".repeat(257));
+        src.push_str("return");
+        src.push_str(value);
+        src.push('\n');
+        src
+    }
+
+    let (_, accepted_diags) = lower(&nested_return(""));
+    assert!(accepted_diags.is_empty(), "{accepted_diags:?}");
+
+    let (_, rejected_diags) = lower(&nested_return(" 1"));
+    assert_eq!(rejected_diags.len(), 1, "{rejected_diags:?}");
+    assert_eq!(rejected_diags[0].code, DiagCode::NestingLimitExceeded);
+}
+
+#[test]
 fn over_depth_expression_recovers_with_one_diagnostic() {
     let (_, diags) = lower(&nested_call_program(300));
     assert_eq!(diags.len(), 1, "{diags:?}");

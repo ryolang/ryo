@@ -467,11 +467,55 @@ fn clif_function<'a>(clif: &'a str, header: &str) -> &'a str {
         .expect("selected function body")
 }
 
+fn clif_block_containing(clif: &str, needle: &str) -> String {
+    let position = clif
+        .find(needle)
+        .unwrap_or_else(|| panic!("missing {needle:?}: {clif}"));
+    let suffix = clif[..position]
+        .rsplit_once("\nblock")
+        .unwrap_or_else(|| panic!("{needle:?} is not inside a block: {clif}"))
+        .1;
+    let label = suffix.split(':').next().expect("block label");
+    format!("block{label}")
+}
+
+fn clif_block_body<'a>(clif: &'a str, label: &str) -> &'a str {
+    let marker = format!("\n{label}:\n");
+    clif.split(&marker)
+        .nth(1)
+        .unwrap_or_else(|| panic!("missing {label}: {clif}"))
+        .split("\nblock")
+        .next()
+        .expect("block body")
+        .split("\n}")
+        .next()
+        .expect("block body before function end")
+}
+
+fn clif_br_table_targets(dispatch: &str) -> Vec<&str> {
+    let start = dispatch.find('[').expect("br_table target list") + 1;
+    let end = dispatch[start..]
+        .find(']')
+        .map(|offset| start + offset)
+        .expect("closed br_table target list");
+    dispatch[start..end].split(", ").collect()
+}
+
+fn clif_jump_target(body: &str) -> &str {
+    body.lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("jump "))
+        .and_then(|targets| targets.split_whitespace().next())
+        .expect("block jump target")
+}
+
 #[test]
 fn unreachable_continuations_are_not_emitted() {
     let clif = clif_of("fn main():\n\treturn\n\tprint(\"unreachable-marker\")\n");
-    assert!(
-        !clif.contains("block1:"),
+    let without_dead_code = clif_of("fn main():\n\treturn\n");
+    assert_eq!(
+        clif_block_count(&clif),
+        clif_block_count(&without_dead_code),
         "dead continuation reached code generation: {clif}"
     );
 }
@@ -490,9 +534,17 @@ fn enum_copy_skips_fieldless_variant_blocks() {
         "enum Choice:\n\tA(int)\n\tB\nfn choose(x: Choice) -> Choice:\n\treturn x\nfn main():\n\tvalue = choose(Choice.A(1))\n\tprint(value)\n",
     );
     let choose = clif_function(&clif, "function u0:0(i64 sret, i64)");
-    assert!(
-        !choose.contains("block4:"),
-        "fieldless variant should share the merge block: {choose}"
+    let dispatch = choose
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with("br_table"))
+        .expect("enum copy dispatch");
+    let targets = clif_br_table_targets(dispatch);
+    let return_block = clif_block_containing(choose, "\n    return");
+    assert_eq!(targets.len(), 2, "two enum variants: {choose}");
+    assert_eq!(
+        targets[1], return_block,
+        "fieldless variant should route directly to the return merge: {choose}"
     );
 }
 
@@ -519,20 +571,14 @@ fn mixed_enum_drop_routes_drop_free_variant_directly_to_merge() {
         .map(str::trim_start)
         .find(|line| line.starts_with("br_table"))
         .expect("mixed enum drop dispatch");
-    assert!(
-        dispatch.ends_with("[block2, block1]"),
-        "the needs-drop variant must keep its case and the drop-free variant must route to merge: {discard}"
-    );
-    let drop_case = discard
-        .split("block2:\n")
-        .nth(1)
-        .expect("needs-drop case")
-        .split("\nblock")
-        .next()
-        .expect("needs-drop case body");
-    assert!(
-        drop_case.contains("call fn0") && drop_case.contains("jump block1"),
-        "the needs-drop case must release its payload and jump to merge: {discard}"
+    let targets = clif_br_table_targets(dispatch);
+    let drop_case = clif_block_containing(discard, "call fn0");
+    let drop_case_body = clif_block_body(discard, &drop_case);
+    let merge = clif_jump_target(drop_case_body);
+    assert_eq!(
+        targets,
+        [drop_case.as_str(), merge],
+        "both variants must reach the same post-drop continuation: {discard}"
     );
 }
 

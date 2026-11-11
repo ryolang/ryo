@@ -14,7 +14,8 @@ use ryo_core::diag::DiagCode;
 
 type Spanned<'a> = (RawToken<'a>, SimpleSpan);
 
-const INDENT_DEPTH_LIMIT: usize = 256;
+const AST_DEPTH_LIMIT: usize = 256;
+const INDENT_DEPTH_LIMIT: usize = AST_DEPTH_LIMIT + 1;
 
 /// Failure of the indentation pre-processor.
 ///
@@ -73,7 +74,7 @@ pub(crate) fn process<'a>(tokens: Vec<Spanned<'a>>) -> Result<Vec<Spanned<'a>>, 
                             span: *span,
                             code: DiagCode::NestingLimitExceeded,
                             message: format!(
-                                "AST nesting exceeds the maximum depth of {INDENT_DEPTH_LIMIT}"
+                                "AST nesting exceeds the maximum depth of {AST_DEPTH_LIMIT}"
                             ),
                         });
                     }
@@ -196,7 +197,7 @@ mod tests {
             256
         );
 
-        let rejected = source_at_depth(257);
+        let rejected = source_at_depth(258);
         let offending_newline = rejected.rfind('\n').expect("nested source has newlines");
         let mut pool = InternPool::new();
         let mut sink = DiagSink::new();
@@ -208,7 +209,7 @@ mod tests {
         assert!(diags[0].message.contains("256"));
         assert_eq!(
             diags[0].span,
-            ryo_core::span::Span::new(offending_newline, offending_newline + 258)
+            ryo_core::span::Span::new(offending_newline, offending_newline + 259)
         );
     }
 
