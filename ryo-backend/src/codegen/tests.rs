@@ -530,9 +530,8 @@ fn coalescing_keeps_diverging_sibling_before_owned_match_join() {
 
 #[test]
 fn enum_copy_skips_fieldless_variant_blocks() {
-    let clif = clif_of(
-        "enum Choice:\n\tA(int)\n\tB\nfn choose(x: Choice) -> Choice:\n\treturn x\nfn main():\n\tvalue = choose(Choice.A(1))\n\tprint(value)\n",
-    );
+    let src = "enum Choice:\n\tA(int)\n\tB\nfn choose(x: Choice) -> Choice:\n\treturn x\nfn main():\n\tvalue = choose(Choice.A(1))\n\tmatch value:\n\t\tChoice.A(payload):\n\t\t\tassert(payload == 1, \"returned payload\")\n\t\tChoice.B:\n\t\t\tassert(false, \"returned variant\")\n";
+    let clif = clif_of(src);
     let choose = clif_function(&clif, "function u0:0(i64 sret, i64)");
     let dispatch = choose
         .lines()
@@ -546,6 +545,7 @@ fn enum_copy_skips_fieldless_variant_blocks() {
         targets[1], return_block,
         "fieldless variant should route directly to the return merge: {choose}"
     );
+    assert_jit_succeeds(src);
 }
 
 #[test]
