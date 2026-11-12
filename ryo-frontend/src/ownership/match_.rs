@@ -58,12 +58,12 @@ pub(crate) fn analyze_match_switch(
     sw: BlockId,
     match_inst: TirRef,
     epoch: u32,
-) -> Option<BlockId> {
+) -> Result<Option<BlockId>, super::OwnershipError> {
     let view = w.tir.match_view(match_inst);
     if view.is_empty() {
         // Defensive: sema diagnoses source-level; well-formed TIR
         // always has at least the catch-all arm.
-        return None;
+        return Ok(None);
     }
     let scrutinee = view.scrutinee;
     let scrutinee_ty = w.tir.inst(scrutinee).ty;
@@ -221,7 +221,7 @@ pub(crate) fn analyze_match_switch(
             refine_view_liveness_for_arm(own, w.flow, &match_set, &arm_set, analysis.as_ref());
         let saved_last = w.last_inst;
         w.last_inst = None;
-        w.walk_block_list(own, sink, sidecar, &arm_regions[arm_index], epoch);
+        w.walk_block_list(own, sink, sidecar, &arm_regions[arm_index], epoch)?;
         let arm_last = w.last_inst;
         w.last_inst = saved_last;
         restore_view_last_use(own, saved);
@@ -370,7 +370,7 @@ pub(crate) fn analyze_match_switch(
     own.merge_branches(arm_results, &falls_through);
     prune_branch_dead_projections(own, w.flow, &match_set);
     w.last_inst = Some(match_inst);
-    join
+    Ok(join)
 }
 
 /// True when the walked arm region's exit reaches the Switch's join.
@@ -725,7 +725,7 @@ pub(crate) fn walk_if_arm(
     refine_key: Option<BlockId>,
     join: BlockId,
     epoch: u32,
-) -> (BranchState, bool, Option<TirRef>) {
+) -> Result<(BranchState, bool, Option<TirRef>), super::OwnershipError> {
     if let Some(key) = refine_key {
         let arm_set: HashSet<BlockId> = arm_regions[arm_index].iter().copied().collect();
         let analysis = own.arm_last_reads.get(&key).cloned();
@@ -733,26 +733,26 @@ pub(crate) fn walk_if_arm(
             refine_view_liveness_for_arm(own, w.flow, cascade_set, &arm_set, analysis.as_ref());
         let saved_last = w.last_inst;
         w.last_inst = None;
-        w.walk_block_list(own, sink, sidecar, &arm_regions[arm_index], epoch);
+        w.walk_block_list(own, sink, sidecar, &arm_regions[arm_index], epoch)?;
         let arm_last = w.last_inst;
         w.last_inst = saved_last;
         restore_view_last_use(own, saved);
-        (
+        Ok((
             own.take_branch(snap.clone()),
             arm_reaches_join(w, &arm_regions[arm_index], join),
             arm_last,
-        )
+        ))
     } else {
         let saved_last = w.last_inst;
         w.last_inst = None;
-        w.walk_block_list(own, sink, sidecar, &arm_regions[arm_index], epoch);
+        w.walk_block_list(own, sink, sidecar, &arm_regions[arm_index], epoch)?;
         let arm_last = w.last_inst;
         w.last_inst = saved_last;
-        (
+        Ok((
             own.take_branch(snap.clone()),
             arm_reaches_join(w, &arm_regions[arm_index], join),
             arm_last,
-        )
+        ))
     }
 }
 

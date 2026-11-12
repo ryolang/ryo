@@ -56,6 +56,46 @@ pub(in crate::ownership) fn check_src_full(
     Vec<ryo_core::tir::Tir>,
     InternPool,
 ) {
+    let (diags, sidecar, tirs, pool) = check_src_full_with_loop_budget(input, None);
+    (
+        diags,
+        sidecar.expect("ownership analysis failed"),
+        tirs,
+        pool,
+    )
+}
+
+pub(super) fn try_check_src_with_loop_budget(
+    input: &str,
+    budget: usize,
+) -> (Vec<Diag>, Result<OwnershipSidecar, OwnershipError>) {
+    let (diags, sidecar, _tirs, _pool) =
+        check_src_full_with_loop_budget(input, Some(LoopHeightCapOverride::Uniform(budget)));
+    (diags, sidecar)
+}
+
+pub(super) fn try_check_src_with_loop_budget_sequence(
+    input: &str,
+    budgets: &[Option<usize>],
+) -> (Vec<Diag>, Result<OwnershipSidecar, OwnershipError>) {
+    let (diags, sidecar, _tirs, _pool) = check_src_full_with_loop_budget(
+        input,
+        Some(LoopHeightCapOverride::Sequence(
+            budgets.iter().copied().collect(),
+        )),
+    );
+    (diags, sidecar)
+}
+
+fn check_src_full_with_loop_budget(
+    input: &str,
+    loop_budget: Option<LoopHeightCapOverride>,
+) -> (
+    Vec<Diag>,
+    Result<OwnershipSidecar, OwnershipError>,
+    Vec<ryo_core::tir::Tir>,
+    InternPool,
+) {
     use crate::grammar::ParseState;
     use chumsky::Parser as _;
     use chumsky::input::Input as _;
@@ -87,10 +127,15 @@ pub(in crate::ownership) fn check_src_full(
         .iter()
         .map(|t| ryo_core::flow::Flow::build(t, &pool))
         .collect();
-    let sidecar = check(&tirs, &flows, &pool, &mut sink);
+    let sidecar = match loop_budget {
+        Some(override_) => {
+            try_check_with_loop_budget_override(&tirs, &flows, &pool, &mut sink, override_)
+        }
+        None => try_check(&tirs, &flows, &pool, &mut sink),
+    };
     // Match the driver's deferred flush: sema warnings surface only
     // when the whole unit (including the ownership pass) is clean.
-    if !sink.has_errors() {
+    if sidecar.is_ok() && !sink.has_errors() {
         for d in sema_warnings {
             sink.emit(d);
         }

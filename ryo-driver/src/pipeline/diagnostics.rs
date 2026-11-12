@@ -1,6 +1,29 @@
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use ryo_core::diag::{Diag, DiagCode, Severity};
 use ryo_core::errors::CompilerError;
+use ryo_frontend::ownership::OwnershipError;
+
+pub(super) fn ownership_error_diag(error: OwnershipError) -> Diag {
+    match error {
+        OwnershipError::LoopDidNotConverge {
+            function,
+            span,
+            passes,
+        } => Diag::error(
+            span,
+            DiagCode::InternalError,
+            "internal compiler error: ownership analysis could not prove loop convergence",
+        )
+        .with_note(None, format!("function: {function}"))
+        .with_note(None, format!("loop propagation exhausted {passes} passes")),
+        OwnershipError::IncompatibleArtifacts(detail) => Diag::error(
+            ryo_core::span::Span::EMPTY,
+            DiagCode::InternalError,
+            "internal compiler error: ownership analysis received incompatible artifacts",
+        )
+        .with_note(None, detail),
+    }
+}
 
 /// Render + wrap for paths whose diagnostics are always error
 /// severity (lex / parse failures), where `finalize_diags` therefore
@@ -157,6 +180,7 @@ fn color_for_severity(s: Severity) -> Color {
 
 fn diag_code_str(code: DiagCode) -> &'static str {
     match code {
+        DiagCode::InternalError => "ICE",
         DiagCode::UnknownType => "E0001",
         DiagCode::NestedFunctionDef => "E0002",
         DiagCode::TopLevelWithExplicitMain => "E0003",
@@ -293,6 +317,7 @@ mod tests {
     #[test]
     fn diag_code_strings_are_stable_and_unique() {
         let expected: &[(DiagCode, &str)] = &[
+            (DiagCode::InternalError, "ICE"),
             (DiagCode::UnknownType, "E0001"),
             (DiagCode::NestedFunctionDef, "E0002"),
             (DiagCode::TopLevelWithExplicitMain, "E0003"),
@@ -489,9 +514,36 @@ mod tests {
                 | DiagCode::LexerInputTooLarge
                 | DiagCode::ConstEvalFailure
                 | DiagCode::CycleInComptime
-                | DiagCode::GenericInstantiation => {}
+                | DiagCode::GenericInstantiation
+                | DiagCode::InternalError => {}
             }
         }
+    }
+
+    #[test]
+    fn loop_nonconvergence_diag_is_source_located_ice() {
+        let span = ryo_core::span::Span::new(4, 9);
+        let diag = ownership_error_diag(
+            ryo_frontend::ownership::OwnershipError::LoopDidNotConverge {
+                function: "main".into(),
+                span,
+                passes: 0,
+            },
+        );
+
+        assert_eq!(diag.code, DiagCode::InternalError);
+        assert_eq!(diag.span, span);
+        assert_eq!(
+            diag.message,
+            "internal compiler error: ownership analysis could not prove loop convergence"
+        );
+        let notes: Vec<_> = diag
+            .notes
+            .iter()
+            .map(|note| note.message.as_str())
+            .collect();
+        assert!(notes.contains(&"function: main"));
+        assert!(notes.contains(&"loop propagation exhausted 0 passes"));
     }
 
     #[test]

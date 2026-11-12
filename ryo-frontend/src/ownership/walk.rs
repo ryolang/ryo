@@ -182,6 +182,7 @@ pub(crate) struct Walk<'a> {
     /// Mutable needs-drop homes assigned in the active loop bodies.
     /// Their owner identity is the runtime home slot across iterations.
     pub(crate) active_loop_carried_homes: Vec<HashSet<PlaceId>>,
+    pub(crate) loop_height_cap_override: Option<super::LoopHeightCapOverride>,
     /// Owner-keyed last-use reads, recorded at `Var` steps (replaces the
     /// old post-walk `collect_last_uses` scan).
     pub(crate) last_use: HashMap<TirRef, TirRef>,
@@ -204,6 +205,7 @@ impl<'a> Walk<'a> {
         flow: &'a Flow,
         pool: &'a InternPool,
         dead_stores: &'a super::DeadStoreAnalysis,
+        loop_height_cap_override: Option<super::LoopHeightCapOverride>,
     ) -> Self {
         let len = tir.instructions.len();
         // Statement roots (drain gates) and `stmt_of` (promo anchors)
@@ -268,6 +270,7 @@ impl<'a> Walk<'a> {
             block_order: Vec::new(),
             loop_regions: Vec::new(),
             active_loop_carried_homes: Vec::new(),
+            loop_height_cap_override,
             last_use: HashMap::new(),
             last_read_by_name: HashMap::new(),
             region_scratch: Vec::new(),
@@ -415,7 +418,7 @@ impl<'a> Walk<'a> {
         entry: BlockId,
         stop: RegionStop,
         epoch: u32,
-    ) -> bool {
+    ) -> Result<bool, super::OwnershipError> {
         let mut reached_stop = false;
         let mut stack = vec![entry];
         while let Some(b) = stack.pop() {
@@ -426,7 +429,7 @@ impl<'a> Walk<'a> {
             if !self.enter_seen(b, epoch) {
                 continue;
             }
-            let conts = self.visit_block(own, sink, sidecar, b, epoch);
+            let conts = self.visit_block(own, sink, sidecar, b, epoch)?;
             if stop.freezes(b) {
                 continue;
             }
@@ -434,7 +437,7 @@ impl<'a> Walk<'a> {
                 stack.push(c);
             }
         }
-        reached_stop
+        Ok(reached_stop)
     }
 
     /// Bounded region walk (if/match arms, loop-body fixed points):
@@ -447,13 +450,14 @@ impl<'a> Walk<'a> {
         sidecar: &mut FunctionSidecar,
         list: &[BlockId],
         epoch: u32,
-    ) {
+    ) -> Result<(), super::OwnershipError> {
         for &b in list {
             if !self.enter_seen(b, epoch) {
                 continue;
             }
-            let _ = self.visit_block(own, sink, sidecar, b, epoch);
+            let _ = self.visit_block(own, sink, sidecar, b, epoch)?;
         }
+        Ok(())
     }
 
     /// Bounded region walk for fixed-point passes: visits exactly
@@ -466,13 +470,14 @@ impl<'a> Walk<'a> {
         sidecar: &mut FunctionSidecar,
         list: &[BlockId],
         epoch: u32,
-    ) {
+    ) -> Result<(), super::OwnershipError> {
         for &b in list {
             if !self.enter_epoch(b, epoch) {
                 continue;
             }
-            let _ = self.visit_block(own, sink, sidecar, b, epoch);
+            let _ = self.visit_block(own, sink, sidecar, b, epoch)?;
         }
+        Ok(())
     }
 
     /// Process one block's steps, then dispatch its terminator.
@@ -485,26 +490,26 @@ impl<'a> Walk<'a> {
         sidecar: &mut FunctionSidecar,
         b: BlockId,
         epoch: u32,
-    ) -> [Option<BlockId>; 2] {
+    ) -> Result<[Option<BlockId>; 2], super::OwnershipError> {
         let dead = self.flow.blocks[b.0 as usize].unreachable;
         for step in self.flow.block_steps(b) {
             self.process_step(own, sink, sidecar, *step, dead);
         }
-        match *self.flow.term(b) {
+        Ok(match *self.flow.term(b) {
             Terminator::Goto { target } => [Some(target), None],
             Terminator::Branch { then_, else_, .. } => match self.flow.branch_if(b) {
                 Some(if_inst) => [
-                    analyze_if_cascade(self, own, sink, sidecar, b, if_inst, epoch),
+                    analyze_if_cascade(self, own, sink, sidecar, b, if_inst, epoch)?,
                     None,
                 ],
                 None => [Some(then_), Some(else_)],
             },
             Terminator::Switch { match_inst, .. } => [
-                analyze_match_switch(self, own, sink, sidecar, b, match_inst, epoch),
+                analyze_match_switch(self, own, sink, sidecar, b, match_inst, epoch)?,
                 None,
             ],
             Terminator::While { .. } | Terminator::For { .. } => {
-                [analyze_loop(self, own, sink, sidecar, b, epoch), None]
+                [analyze_loop(self, own, sink, sidecar, b, epoch)?, None]
             }
             Terminator::Return { .. } => {
                 // The return's own steps (the operand expression) ran
@@ -549,7 +554,7 @@ impl<'a> Walk<'a> {
                 self.analyze_call(own, sink, payload);
                 [None, None]
             }
-        }
+        })
     }
 
     /// Handle one stepped instruction. Operand steps have already run

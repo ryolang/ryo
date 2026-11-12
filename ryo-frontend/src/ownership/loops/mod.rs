@@ -107,7 +107,7 @@ pub(crate) fn analyze_loop(
     sidecar: &mut FunctionSidecar,
     ph: BlockId,
     epoch: u32,
-) -> Option<BlockId> {
+) -> Result<Option<BlockId>, super::OwnershipError> {
     let (loop_inst, header) = match *w.flow.term(ph) {
         Terminator::While { loop_inst, header } | Terminator::For { loop_inst, header } => {
             (loop_inst, header)
@@ -133,7 +133,7 @@ pub(crate) fn analyze_loop(
     let (cond_region, _) = collect_region(w.flow, &mut w.region_scratch, header, |b| {
         RegionStop::Through(test_block).kind(b)
     });
-    w.walk_block_list(own, sink, sidecar, &cond_region, epoch);
+    w.walk_block_list(own, sink, sidecar, &cond_region, epoch)?;
     // Body region: blocks reachable from `body` that cannot leave
     // without passing `exit` or the test block (the backedge targets
     // the test, which is not part of the body).
@@ -212,91 +212,125 @@ pub(crate) fn analyze_loop(
     });
 
     let snap = own.snapshot_branch();
-    // Phase 1 — convergent propagation (G3). Chaotic iteration of a
-    // MONOTONE loop-entry join to a real fixed point:
-    //
-    // Lattice. Per-owner state ordered NotTracked < {Valid, Borrowed}
-    // < Moved (Moved absorbing; the join never distinguishes Valid vs
-    // Borrowed once merged — entry first-observed wins — so the two
-    // form one class below Moved), product-ordered over the owner set;
-    // plus live-projection sets under union (membership grows in one
-    // direction only); plus the first-wins home/binding maps (see
-    // `BranchState` — the four merge-mutated fields).
-    //
-    // Operator monotonicity. Each pass merges `entry ⊔ post-body` with
-    // `merge_loop_plain`: any-Moved-wins adds Moved-ness and inserts
-    // missing keys; projections union; the maps keep the entry side.
-    // The four maps (states, current_owner, binding_of_name,
-    // live_projections) therefore ASCEND the product order (never
-    // removes a Moved, never shrinks a projection set, never changes a
-    // seated home).
-    //
-    // Convergence test. `differ` compares the PREVIOUS entry against
-    // the MERGED state now in `own` — the state the iteration actually
-    // feeds back. Comparing against the RAW post-body state instead is
-    // a real bug (cap abort): when the body's live exits are Return-only,
-    // the merge DISCARDS the body's changes (path-local to the exit —
-    // see merge_loop_plain), the merged entry equals the previous entry
-    // (a genuine fixed point), while the raw post-body state keeps
-    // differing on every pass. The merged-vs-entry comparison covers
-    // all four merge-mutated components (see branch_states_differ) —
-    // for live_projections by set MEMBERSHIP, not emptiness: the merged
-    // set is the state the next pass consumes, and `{v1}` vs `{v1, v2}`
-    // are different states even though both are non-empty — so
-    // `differ == false` exactly when the next pass could observe
-    // nothing new.
-    //
-    // Height. Every non-converging pass consumes at least one ascension
-    // unit on the four monotone maps: a state key inserted or flipped
-    // toward Moved (≤ 2 per owner), a home or binding-map key inserted
-    // (≤ 1 per binding), a projection view inserted (≤ 1 per view) —
-    // owners, bindings, and views are all bounded by the instruction
-    // arena A. Projection-set insertion was already counted at ≤ 1 unit
-    // per view, and the membership witness adds no
-    // new ascension kind: the join is monotone (pointwise ≥ the
-    // previous entry), so a membership difference between previous and
-    // merged entry IS a strict set growth — at least one view inserted
-    // — never a lateral move that the stricter compare would chase
-    // forever. Chain height ≤ 2A + A + A + A, so the cap below
-    // bounds every real pass sequence. (For real bodies the walk is
-    // state-independent, so the fixed point is reached in exactly 2
-    // passes; the bound is the guarantee, not the expectation.)
-    //
-    // The binding-aware override (`binding_state_writes`) is NOT
-    // monotone — it can write a binding's end-of-body state over a
-    // Moved owner (the consume-then-rebind shape), which fed back into
-    // the old per-pass merge and made the entry oscillate (the old
-    // load-bearing two-pass cap existed for exactly that). It is
-    // therefore kept OUT of the iteration and applied once as a final
-    // polish on the converged entry — legal because no further
-    // iteration consumes the result (plan option (a)). The Phase-2
-    // check pass and the final merge see the polished state, matching
-    // the old cap's observable behavior on the pinned shapes. When the
-    // body's live exits are Return-only the after side is excluded
-    // from the polish (same path-locality rule as the merge — a
-    // Return-only body's moves/reseats never reach the join).
-    //
-    // Fallback. Cap exhaustion is UNREACHABLE for the monotone operator
-    // — reaching it is an INTERNAL ANALYSIS FAILURE (a compiler bug),
-    // never a normal outcome: the debug_assert above makes it LOUD in
-    // debug builds. The release fallback is purely the defensive arm:
-    // it restores the pre-loop snapshot, whose conservative direction
-    // is documented, not assumed —
-    // (a) the walk's transitions are state-independent — every
-    // reachable free/consume still schedules from the snap-based pass;
-    // (b) the iterated chain ASCENDS from `snap`, so snap ≤ every
-    // iterated entry: snap-based post-loop states UNDER-approximate
-    // Moved / OVER-approximate destruction obligations — leak-safe,
-    // never a UAF;
-    // (c) the cost of (b) is that diagnostics can UNDER-REPORT (the
-    // check pass ran against a smaller Moved set). That under-reporting
-    // is the fallback's documented conservative direction: tolerable
-    // only because the state is unreachable-by-proof, never a silently
-    // accepted analysis result.
     let hazard_count = own.owner_hazards.len();
+    let default_height_cap = 5 * w.tir.instructions.len() + 2;
+    let height_cap = match w.loop_height_cap_override.as_mut() {
+        Some(super::LoopHeightCapOverride::Uniform(cap)) => *cap,
+        #[cfg(test)]
+        Some(super::LoopHeightCapOverride::Sequence(caps)) => {
+            caps.pop_front().flatten().unwrap_or(default_height_cap)
+        }
+        None => default_height_cap,
+    };
+    let converged = propagate_loop(
+        w,
+        own,
+        &region,
+        &snap,
+        after_flows_off_end,
+        loop_inst,
+        height_cap,
+    )?;
+    check_loop(
+        w,
+        own,
+        sink,
+        sidecar,
+        &region,
+        snap,
+        after_flows_off_end,
+        hazard_count,
+        converged,
+    )?;
+    w.active_loop_carried_homes.pop();
+    // P4 (final spec §3.2): projections whose last read is inside this
+    // loop (but whose creation is outside it) die at the loop's exit.
+    remove_loop_deferred_views(own, loop_inst);
+    for &b in region.iter().chain(cond_region.iter()) {
+        w.mark_processed(b);
+        // Re-stamp the finished region with the enclosing generation's
+        // epoch: enclosing once-ever walks (the id-ordered driver, an
+        // arm block list) skip it via the epoch guard, while the
+        // per-pass phase epochs above stay distinct.
+        w.epoch[b.0 as usize] = epoch;
+    }
+    w.last_inst = Some(loop_inst);
+    Ok(Some(exit))
+}
+
+struct ConvergedLoop {
+    entry: BranchState,
+}
+
+// Convergent propagation (G3). Chaotic iteration of a MONOTONE
+// loop-entry join to a real fixed point:
+//
+// Lattice. Per-owner state ordered NotTracked < {Valid, Borrowed} <
+// Moved (Moved absorbing; the join never distinguishes Valid vs Borrowed
+// once merged — entry first-observed wins — so the two form one class
+// below Moved), product-ordered over the owner set; plus live-projection
+// sets under union (membership grows in one direction only); plus the
+// first-wins home/binding maps (see `BranchState` — the four
+// merge-mutated fields).
+//
+// Operator monotonicity. Each pass merges `entry ⊔ post-body` with
+// `merge_loop_plain`: any-Moved-wins adds Moved-ness and inserts missing
+// keys; projections union; the maps keep the entry side. The four maps
+// (states, current_owner, binding_of_name, live_projections) therefore
+// ASCEND the product order (never removes a Moved, never shrinks a
+// projection set, never changes a seated home).
+//
+// Convergence test. `differ` compares the PREVIOUS entry against the
+// MERGED state now in `own` — the state the iteration actually feeds
+// back. Comparing against the RAW post-body state instead is a real bug
+// (cap abort): when the body's live exits are Return-only, the merge
+// DISCARDS the body's changes (path-local to the exit — see
+// merge_loop_plain), the merged entry equals the previous entry (a
+// genuine fixed point), while the raw post-body state keeps differing on
+// every pass. The merged-vs-entry comparison covers all four
+// merge-mutated components (see branch_states_differ) — for
+// live_projections by set MEMBERSHIP, not emptiness: the merged set is
+// the state the next pass consumes, and `{v1}` vs `{v1, v2}` are
+// different states even though both are non-empty — so `differ == false`
+// exactly when the next pass could observe nothing new.
+//
+// Height. Every non-converging pass consumes at least one ascension unit
+// on the four monotone maps: a state key inserted or flipped toward Moved
+// (≤ 2 per owner), a home or binding-map key inserted (≤ 1 per binding),
+// a projection view inserted (≤ 1 per view) — owners, bindings, and views
+// are all bounded by the instruction arena A. Projection-set insertion
+// was already counted at ≤ 1 unit per view, and the membership witness
+// adds no new ascension kind: the join is monotone (pointwise ≥ the
+// previous entry), so a membership difference between previous and merged
+// entry IS a strict set growth — at least one view inserted — never a
+// lateral move that the stricter compare would chase forever. Chain
+// height ≤ 2A + A + A + A, so the cap bounds every real pass sequence.
+// (For real bodies the walk is state-independent, so the fixed point is
+// reached in exactly 2 passes; the bound is the guarantee, not the
+// expectation.)
+//
+// The binding-aware override (`binding_state_writes`) is NOT monotone —
+// it can write a binding's end-of-body state over a Moved owner (the
+// consume-then-rebind shape), which fed back into the old per-pass merge
+// and made the entry oscillate (the old load-bearing two-pass cap existed
+// for exactly that). It is therefore kept OUT of the iteration and
+// applied once as a final polish on the converged entry — legal because
+// no further iteration consumes the result. The check pass and final
+// merge see the polished state, matching the old cap's observable
+// behavior on the pinned shapes. When the body's live exits are
+// Return-only the after side is excluded from the polish (same
+// path-locality rule as the merge — a Return-only body's moves/reseats
+// never reach the join).
+fn propagate_loop(
+    w: &mut Walk<'_>,
+    own: &mut Ownership,
+    region: &[BlockId],
+    snap: &BranchState,
+    after_flows_off_end: bool,
+    loop_inst: TirRef,
+    height_cap: usize,
+) -> Result<ConvergedLoop, super::OwnershipError> {
     let mut entry_state = snap.clone();
-    let mut converged = false;
-    let height_cap = 5 * w.tir.instructions.len() + 2;
     let mut pass_count = 0usize;
     while pass_count < height_cap {
         pass_count += 1;
@@ -304,11 +338,10 @@ pub(crate) fn analyze_loop(
         // Fresh scratch sidecar: speculative sidecar writes are
         // discarded at the end of each pass, and the walk never reads
         // pre-existing sidecar content (the only readers — LoopExitCtx /
-        // the return epilogue — run post-walk against the REAL
-        // sidecar).
+        // the return epilogue — run post-walk against the REAL sidecar).
         let mut staging = FunctionSidecar::new(w.tir.name, w.tir.instructions.len());
         let pass_epoch = w.next_epoch();
-        w.walk_phase(own, &mut scratch, &mut staging, &region, pass_epoch);
+        w.walk_phase(own, &mut scratch, &mut staging, region, pass_epoch)?;
         // Move the post-body state out, installing an empty placeholder
         // — the merge overwrites all four fields below.
         let after = own.take_branch(BranchState::default());
@@ -341,55 +374,48 @@ pub(crate) fn analyze_loop(
         merge_loop_plain(own, entry_state, after, after_flows_off_end);
         let differ = branch_states_differ(&prev_entry, own);
         if !differ {
-            // Final polish (no feedback — see the proof comment).
             for (owner, state) in writes {
                 own.states.insert(owner, state);
             }
-            converged = true;
-            break;
+            return Ok(ConvergedLoop {
+                entry: own.snapshot_branch(),
+            });
         }
         entry_state = own.snapshot_branch();
     }
-    debug_assert!(
-        converged,
-        "INTERNAL ANALYSIS FAILURE: loop propagate did not converge within \
-         the lattice-height bound ({} passes) — the monotone operator regressed",
-        pass_count,
-    );
-    if !converged {
-        // Defensive arm (unreachable — see the proof comment): restore
-        // the pre-loop snapshot. Its conservative direction is
-        // documented there: leak-safe, never a UAF; diagnostics may
-        // under-report.
-        let _discarded = own.take_branch(snap.clone());
-    }
+    Err(super::OwnershipError::LoopDidNotConverge {
+        function: w.pool.str(w.tir.name).to_owned(),
+        span: w.tir.span(loop_inst),
+        passes: pass_count,
+    })
+}
 
-    // Phase 2 — single check pass against the real sink and sidecar:
-    // a binding moved inside the body without rebinding before the
-    // back-edge surfaces as E0020 on this pass. Speculative hazards are
-    // discarded with their staging sidecars; only this pass drives
-    // displacement validation.
+#[allow(clippy::too_many_arguments)]
+fn check_loop(
+    w: &mut Walk<'_>,
+    own: &mut Ownership,
+    sink: &mut DiagSink,
+    sidecar: &mut FunctionSidecar,
+    region: &[BlockId],
+    snap: BranchState,
+    after_flows_off_end: bool,
+    hazard_count: usize,
+    converged: ConvergedLoop,
+) -> Result<(), super::OwnershipError> {
+    let _ = own.take_branch(converged.entry);
+    // Single check pass against the real sink and sidecar: a binding
+    // moved inside the body without rebinding before the back-edge
+    // surfaces as E0020 on this pass. Speculative hazards are discarded
+    // with their staging sidecars; only this pass drives displacement
+    // validation.
     own.owner_hazards.truncate(hazard_count);
     let pass_epoch = w.next_epoch();
-    w.walk_phase(own, sink, sidecar, &region, pass_epoch);
+    w.walk_phase(own, sink, sidecar, region, pass_epoch)?;
     // Final merge with the loop-entry snapshot: the loop may execute
     // zero times, so post-loop state = entry ⊔ post-check-pass.
     let after = own.take_branch(BranchState::default());
     merge_non_monotone(own, snap, after, after_flows_off_end);
-    w.active_loop_carried_homes.pop();
-    // P4 (final spec §3.2): projections whose last read is inside this
-    // loop (but whose creation is outside it) die at the loop's exit.
-    remove_loop_deferred_views(own, loop_inst);
-    for &b in region.iter().chain(cond_region.iter()) {
-        w.mark_processed(b);
-        // Re-stamp the finished region with the enclosing generation's
-        // epoch: enclosing once-ever walks (the id-ordered driver, an
-        // arm block list) skip it via the epoch guard, while the
-        // per-pass phase epochs above stay distinct.
-        w.epoch[b.0 as usize] = epoch;
-    }
-    w.last_inst = Some(loop_inst);
-    Some(exit)
+    Ok(())
 }
 
 /// Per-instruction loop nesting as parent-pointer chains (see the

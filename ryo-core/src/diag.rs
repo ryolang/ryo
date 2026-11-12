@@ -428,6 +428,9 @@ pub enum DiagCode {
     // --- reserved (not constructed yet) ---
     CycleInComptime,
     GenericInstantiation,
+
+    // --- internal compiler errors ---
+    InternalError,
 }
 
 #[derive(Debug, Clone)]

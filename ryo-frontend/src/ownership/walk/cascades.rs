@@ -88,7 +88,7 @@ pub(super) fn analyze_if_cascade(
     fb: BlockId,
     if_inst: TirRef,
     epoch: u32,
-) -> Option<BlockId> {
+) -> Result<Option<BlockId>, super::super::OwnershipError> {
     let tir = w.tir;
     let view = tir.if_stmt_view(if_inst);
     let arms = w.flow.branch_arm_blocks(if_inst);
@@ -160,7 +160,7 @@ pub(super) fn analyze_if_cascade(
         Some(arms.then_block),
         join,
         epoch,
-    );
+    )?;
     branch_results.push(state);
     falls_through.push(falls);
     arm_lasts.push(last);
@@ -176,7 +176,7 @@ pub(super) fn analyze_if_cascade(
             chain_entry,
             RegionStop::Through(holder),
             epoch,
-        );
+        )?;
         drain_dying_views(own);
         let body = arm_entries[1 + e];
         let (state, falls, last) = walk_if_arm(
@@ -191,7 +191,7 @@ pub(super) fn analyze_if_cascade(
             Some(body),
             join,
             epoch,
-        );
+        )?;
         branch_results.push(state);
         falls_through.push(falls);
         arm_lasts.push(last);
@@ -218,7 +218,7 @@ pub(super) fn analyze_if_cascade(
         else_key,
         join,
         epoch,
-    );
+    )?;
     branch_results.push(state);
     falls_through.push(falls);
     arm_lasts.push(last);
@@ -364,7 +364,7 @@ pub(super) fn analyze_if_cascade(
     // ranges.
     prune_branch_dead_projections(own, w.flow, &cascade_set);
     w.last_inst = Some(if_inst);
-    Some(join)
+    Ok(Some(join))
 }
 
 /// Collect every `Assign` value in the arm's blocks (including nested

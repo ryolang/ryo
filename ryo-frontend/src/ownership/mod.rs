@@ -498,6 +498,46 @@ pub(crate) struct PromoCandidate {
     pub(crate) stmt: TirRef,
 }
 
+#[derive(Clone)]
+pub(crate) enum LoopHeightCapOverride {
+    #[cfg_attr(not(test), allow(dead_code))]
+    Uniform(usize),
+    #[cfg(test)]
+    Sequence(std::collections::VecDeque<Option<usize>>),
+}
+
+#[derive(Debug)]
+pub enum OwnershipError {
+    IncompatibleArtifacts(String),
+    LoopDidNotConverge {
+        function: String,
+        span: Span,
+        passes: usize,
+    },
+}
+
+impl std::fmt::Display for OwnershipError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IncompatibleArtifacts(message) => f.write_str(message),
+            Self::LoopDidNotConverge {
+                function, passes, ..
+            } => write!(
+                f,
+                "ownership analysis for function `{function}` did not converge within {passes} passes"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OwnershipError {}
+
+impl From<String> for OwnershipError {
+    fn from(message: String) -> Self {
+        Self::IncompatibleArtifacts(message)
+    }
+}
+
 /// Validate move safety for every function body. Emits diagnostics
 /// into `sink`. Returns an [`OwnershipSidecar`] that codegen consults
 /// to decide where to emit `ryo_str_free` calls. The TIR itself is
@@ -509,16 +549,16 @@ pub(crate) struct PromoCandidate {
 /// whole unit compiles without errors — an error that fired anywhere,
 /// in any function and from any stage, makes every derived warning
 /// noise ("declared but never used" for a binding whose use failed to
-/// compile, etc.). Analysis itself always runs to completion so the
-/// sidecar (frees, anchors) is complete for tooling that reads it on
-/// the error path.
+/// compile, etc.). Ordinary source diagnostics still allow analysis to
+/// complete with a full sidecar for tooling. Typed analysis failures
+/// abort the unit, and [`try_check`] returns no sidecar.
 pub fn check(
     tirs: &[Tir],
     flows: &[ryo_core::flow::Flow],
     pool: &InternPool,
     sink: &mut DiagSink,
 ) -> OwnershipSidecar {
-    try_check(tirs, flows, pool, sink).expect("ownership requires compatible built artifacts")
+    try_check(tirs, flows, pool, sink).expect("ownership analysis failed")
 }
 
 /// Reject incompatible analysis inputs before reading body-local indices.
@@ -527,8 +567,8 @@ pub fn try_check(
     flows: &[ryo_core::flow::Flow],
     pool: &InternPool,
     sink: &mut DiagSink,
-) -> Result<OwnershipSidecar, String> {
-    try_check_with_optimizations(tirs, flows, pool, sink, true)
+) -> Result<OwnershipSidecar, OwnershipError> {
+    try_check_with_optimizations(tirs, flows, pool, sink, true, None)
 }
 
 /// Analyze required cleanup with optional allocation reuse disabled.
@@ -537,8 +577,19 @@ pub fn check_without_optimizations(
     flows: &[Flow],
     pool: &InternPool,
     sink: &mut DiagSink,
-) -> Result<OwnershipSidecar, String> {
-    try_check_with_optimizations(tirs, flows, pool, sink, false)
+) -> Result<OwnershipSidecar, OwnershipError> {
+    try_check_with_optimizations(tirs, flows, pool, sink, false, None)
+}
+
+#[cfg(test)]
+pub(crate) fn try_check_with_loop_budget_override(
+    tirs: &[Tir],
+    flows: &[Flow],
+    pool: &InternPool,
+    sink: &mut DiagSink,
+    override_: LoopHeightCapOverride,
+) -> Result<OwnershipSidecar, OwnershipError> {
+    try_check_with_optimizations(tirs, flows, pool, sink, true, Some(override_))
 }
 
 fn try_check_with_optimizations(
@@ -547,9 +598,12 @@ fn try_check_with_optimizations(
     pool: &InternPool,
     sink: &mut DiagSink,
     optional_optimizations: bool,
-) -> Result<OwnershipSidecar, String> {
+    loop_height_cap_override: Option<LoopHeightCapOverride>,
+) -> Result<OwnershipSidecar, OwnershipError> {
     if tirs.len() != flows.len() {
-        return Err("ownership requires one Flow per typed body".into());
+        return Err("ownership requires one Flow per typed body"
+            .to_owned()
+            .into());
     }
     for flow in flows {
         flow.require_layout(pool)?;
@@ -571,7 +625,8 @@ fn try_check_with_optimizations(
             &mut warnings,
             &mut func_sidecar,
             optional_optimizations,
-        );
+            loop_height_cap_override.clone(),
+        )?;
         sidecar.functions.push(func_sidecar);
     }
     if !sink.has_errors() {
@@ -691,7 +746,8 @@ fn analyze_function(
     warnings: &mut DiagSink,
     sidecar: &mut FunctionSidecar,
     optional_optimizations: bool,
-) {
+    loop_height_cap_override: Option<LoopHeightCapOverride>,
+) -> Result<(), OwnershipError> {
     let mut own = initialize_function_ownership(tir, flow, pool);
     let dead_stores = DeadStoreAnalysis::analyze_with_nesting(tir, flow, pool, &own.loop_nesting);
 
@@ -704,7 +760,7 @@ fn analyze_function(
     // processed later with the merged state. Dead continuations the
     // regions never reach (statements after a return/break) are
     // processed inline by the driver in block order.
-    let mut w = Walk::new(tir, flow, pool, &dead_stores);
+    let mut w = Walk::new(tir, flow, pool, &dead_stores, loop_height_cap_override);
     let epoch = w.next_epoch();
     for b in flow.forward_order() {
         if w.is_processed(b) {
@@ -717,7 +773,7 @@ fn analyze_function(
             b,
             RegionStop::At(BlockId::NONE),
             epoch,
-        );
+        )?;
     }
     // Owner-keyed last-use reads and per-name latest reads were
     // recorded at `Var` steps during the walk (see `Walk::last_use`) —
@@ -859,6 +915,7 @@ fn analyze_function(
     );
 
     finalize_cleanup(&cleanup, &own, sidecar, optional_optimizations, sink);
+    Ok(())
 }
 
 #[cfg(test)]
