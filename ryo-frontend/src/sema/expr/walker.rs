@@ -676,11 +676,10 @@ fn analyze_machine_inner(
             }
         }
     }
-    let result = match expression_root {
+    match expression_root {
         Some(node) => MachineResult::Expr(analyzed[&node]),
         None => MachineResult::Stmts(block_results.pop().expect("one root block remains")),
-    };
-    result
+    }
 }
 
 fn is_composite_tag(tag: InstTag) -> bool {
