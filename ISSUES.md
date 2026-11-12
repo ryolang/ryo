@@ -816,19 +816,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-263 — Compile time is quadratic in per-function statement count (~156s for 40k statements)
-
-**Severity:** Correctness / Hygiene
-**Area:** ownership
-
-**Files:** ryo-frontend/src/sema, ryo-frontend/src/ownership (per-statement passes suspect). Repro: one function with N chained bindings `x_i = x_{i-1} + i` (measured at 10k/20k/40k).
-
-**Summary:** A single function with N simple statements takes O(N^2) total compile time: chained bindings (x_i = x_{i-1} + i) measure 10k=10.7s, 20k=40.7s, 40k=156.7s (4x per doubling). Independent bindings are similar (100k statements = 391s). Parsing is NOT the bottleneck — 'ryo parse' on the 100k-statement file takes 1.2s, so the quadratic lives in post-parse stages (sema and/or ownership/dead-store dataflow rescanning per-statement state). Long literals (10MB string: 0.6s), many functions (10k: 4.2s), big structs (5000 fields: 0.9s) are all fine. The same quadratic shows with string-literal bindings: 5000 distinct str bindings in one function take ~29s, 20000 exceed 120s. Found by compiler-input size torture fuzzing 2026-11-04 (commit e82f503).
-
-**Resolution:** Profile a 40k-statement chained build to find the per-statement O(N) rescan (suspects: binding-state maps copied or linearly scanned per statement in ownership/dead-store; sema scope lookups). Make per-statement work O(1) amortized. Add a scaling regression test (compile-time budget for 20k statements) to CI.
-
----
-
 ### I-268 — Define broken-pipe semantics for Ryo CLI programs
 
 **Severity:** Correctness / Hygiene
