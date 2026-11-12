@@ -33,6 +33,7 @@ pub(crate) struct CleanupContext<'a> {
     pub(super) live_binding_owners: &'a HashSet<Owner>,
     pub(super) inout_escape_owners: &'a HashSet<Owner>,
     pub(super) reassign_orders: &'a HashMap<TirRef, Vec<TirRef>>,
+    pub(super) displacement_orders: &'a HashMap<TirRef, Vec<TirRef>>,
     pub(super) decl_of_init: &'a HashMap<TirRef, TirRef>,
     pub(super) assign_value_of: &'a HashMap<TirRef, TirRef>,
     pub(super) dead_stores: &'a DeadStoreAnalysis,
@@ -143,7 +144,7 @@ fn covered_by_later_reassign(
     );
     if ctx.reassign_targets.contains(&owner)
         && let Some(&binding) = ctx.decl_of_init.get(&r).or(ctx.assign_value_of.get(&r))
-        && ctx.reassign_orders.get(&binding).is_some_and(|v| {
+        && ctx.displacement_orders.get(&binding).is_some_and(|v| {
             v.iter()
                 .any(|&rr| anchored_after(ctx.tir, ctx.order, rr, anchor))
         })
@@ -606,7 +607,7 @@ pub(crate) fn finalize_cleanup(
         ctx.order,
         ctx.decl_of_init,
         ctx.assign_value_of,
-        ctx.reassign_orders,
+        ctx.displacement_orders,
     );
 
     // Loop-exit Frees run LAST so they can inspect the now-complete
@@ -633,7 +634,7 @@ pub(crate) fn finalize_cleanup(
         ctx.order,
         ctx.decl_of_init,
         ctx.assign_value_of,
-        ctx.reassign_orders,
+        ctx.displacement_orders,
     );
 
     if !optional_optimizations {
@@ -668,6 +669,7 @@ pub(crate) fn finalize_cleanup(
             ctx.pool,
             own,
             sidecar,
+            ctx.reassign_orders,
             !_sink.has_errors(),
         );
         sidecar.validation = Some(summary);

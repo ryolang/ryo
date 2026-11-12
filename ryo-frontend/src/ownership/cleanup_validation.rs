@@ -125,6 +125,7 @@ pub(crate) struct Ctx<'a> {
     pub(crate) flow: &'a Flow,
     pub(crate) own: &'a Ownership,
     pub(crate) sidecar: &'a FunctionSidecar,
+    pub(crate) reassign_orders: &'a HashMap<TirRef, Vec<TirRef>>,
     pub(crate) fire_points: &'a FirePoints<'a>,
     pub(crate) events: &'a HashMap<PlaceId, Vec<Event>>,
     pub(crate) table: &'a GenerationTable,
@@ -144,6 +145,7 @@ pub(crate) fn validate_cleanup(
     pool: &InternPool,
     own: &Ownership,
     sidecar: &FunctionSidecar,
+    reassign_orders: &HashMap<TirRef, Vec<TirRef>>,
     body_clean: bool,
 ) -> ValidationSummary {
     let places = TargetPlaces::build(tir, flow, pool);
@@ -169,12 +171,32 @@ pub(crate) fn validate_cleanup(
             flow,
             own,
             sidecar,
+            reassign_orders,
             fire_points: &fire_points,
             events: &events,
             table: &table,
         };
-        validate_no_path_double_destruction(tir, flow, own, sidecar, &events, &table, &mut summary);
-        validate_path_coverage(tir, flow, pool, own, sidecar, &events, &table, &mut summary);
+        validate_no_path_double_destruction(
+            tir,
+            flow,
+            own,
+            sidecar,
+            reassign_orders,
+            &events,
+            &table,
+            &mut summary,
+        );
+        validate_path_coverage(
+            tir,
+            flow,
+            pool,
+            own,
+            sidecar,
+            reassign_orders,
+            &events,
+            &table,
+            &mut summary,
+        );
         validate_view_protection(&ctx, &mut summary);
         validate_displacement(&ctx, &mut summary);
         validate_promo(&ctx, &mut summary);
@@ -539,15 +561,18 @@ pub(crate) fn place_roots(
     flow: &Flow,
     own: &Ownership,
     sidecar: &FunctionSidecar,
+    reassign_orders: &HashMap<TirRef, Vec<TirRef>>,
 ) -> Vec<u32> {
     let n = flow.places.len();
     let mut parent: Vec<u32> = (0..n as u32).collect();
-    fn find(parent: &mut Vec<u32>, x: u32) -> u32 {
-        if parent[x as usize] != x {
-            let r = find(parent, parent[x as usize]);
-            parent[x as usize] = r;
+    fn find(parent: &mut [u32], mut x: u32) -> u32 {
+        while parent[x as usize] != x {
+            let p = parent[x as usize];
+            let grandparent = parent[p as usize];
+            parent[x as usize] = grandparent;
+            x = grandparent;
         }
-        parent[x as usize]
+        x
     }
     // Binding LINEAGE: a home's slot and every value ever seated in it
     // share the runtime home slot — a release lowering through the
@@ -610,12 +635,9 @@ pub(crate) fn place_roots(
             }
             // Every Assign the walk stamped with this binding seats its
             // value.
-            for (slot, bound) in sidecar.assign_binding.iter().enumerate() {
-                if *bound == Some(*decl) {
-                    let assign = TirRef::from_raw(slot as u32);
-                    if tir.inst(assign).tag == TirTag::Assign {
-                        seat(&mut parent, home, tir.assign_view(assign).value);
-                    }
+            for &assign in reassign_orders.get(decl).into_iter().flatten() {
+                if tir.inst(assign).tag == TirTag::Assign {
+                    seat(&mut parent, home, tir.assign_view(assign).value);
                 }
             }
         }
@@ -871,17 +893,19 @@ pub(crate) fn validate_no_duplicate_destruction(
 /// (`ValidationSummary`) so the check path propagates it to the consumer
 /// on `FunctionSidecar::validation`; see its docs and the module header
 /// for the category list.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_no_path_double_destruction(
     tir: &Tir,
     flow: &Flow,
     own: &Ownership,
     sidecar: &FunctionSidecar,
+    reassign_orders: &HashMap<TirRef, Vec<TirRef>>,
     events: &HashMap<PlaceId, Vec<Event>>,
     table: &GenerationTable,
     summary: &mut ValidationSummary,
 ) {
     let reachable = reachable_blocks(flow);
-    let roots = place_roots(tir, flow, own, sidecar);
+    let roots = place_roots(tir, flow, own, sidecar, reassign_orders);
     let index = StepIndex::build(flow);
     let by_root = group_path_events(events, &roots);
     let reseat_cuts = reseat_cuts(flow, &index, &roots);
@@ -1185,12 +1209,13 @@ pub(crate) fn validate_path_coverage(
     pool: &InternPool,
     own: &Ownership,
     sidecar: &FunctionSidecar,
+    reassign_orders: &HashMap<TirRef, Vec<TirRef>>,
     events: &HashMap<PlaceId, Vec<Event>>,
     table: &GenerationTable,
     summary: &mut ValidationSummary,
 ) {
     let reachable = reachable_blocks(flow);
-    let roots = place_roots(tir, flow, own, sidecar);
+    let roots = place_roots(tir, flow, own, sidecar, reassign_orders);
     // Group by place-union root (one buffer, one obligation group): a
     // root's events/writes merge across the member places.
     let mut members: HashMap<u32, Vec<PlaceId>> = HashMap::new();

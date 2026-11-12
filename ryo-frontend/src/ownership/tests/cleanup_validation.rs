@@ -8,6 +8,7 @@
 use super::super::cleanup_validation as cv;
 use super::super::*;
 use super::common::*;
+use ryo_core::flow::{Place, Terminator};
 
 /// Positive pin: `check` + both own-free checks accept a straight-line
 /// last-use free.
@@ -344,6 +345,192 @@ fn path_check_harness(
     (tirs, pool, main_ref, flow, own, sc)
 }
 
+fn naive_place_roots(
+    tir: &ryo_core::tir::Tir,
+    flow: &Flow,
+    own: &Ownership,
+    sidecar: &FunctionSidecar,
+) -> Vec<u32> {
+    fn find(parent: &[u32], mut x: u32) -> u32 {
+        while parent[x as usize] != x {
+            x = parent[x as usize];
+        }
+        x
+    }
+
+    fn union(parent: &mut [u32], a: u32, b: u32) {
+        let (ra, rb) = (find(parent, a), find(parent, b));
+        if ra != rb {
+            parent[ra as usize] = rb;
+        }
+    }
+
+    let n = flow.places.len();
+    let mut parent: Vec<u32> = (0..n as u32).collect();
+    let seat = |parent: &mut [u32], home: PlaceId, value: TirRef| {
+        let seated = flow
+            .temp_of(value)
+            .or_else(|| flow.match_result(value))
+            .map(|p| p.0);
+        if let Some(sp) = seated {
+            union(parent, home.0, sp);
+        }
+    };
+
+    for (slot, bound) in sidecar.assign_binding.iter().enumerate() {
+        let Some(decl) = *bound else { continue };
+        if !decl.is_param() {
+            continue;
+        }
+        let Some(idx) = decl.as_param_index() else {
+            continue;
+        };
+        let Some(param_place) = flow
+            .places
+            .iter()
+            .position(|pl| matches!(pl, Place::Param { index, .. } if *index == idx))
+        else {
+            continue;
+        };
+        let assign = TirRef::from_raw(slot as u32);
+        if tir.inst(assign).tag == TirTag::Assign {
+            seat(
+                &mut parent,
+                PlaceId(param_place as u32),
+                tir.assign_view(assign).value,
+            );
+        }
+    }
+
+    let mut lineage_decls = std::collections::HashSet::new();
+    for place in &flow.places {
+        if let Place::Local { decl, .. } = place {
+            if !lineage_decls.insert(*decl) {
+                continue;
+            }
+            let Some(home) = flow.local_of_decl(*decl) else {
+                continue;
+            };
+            if tir.inst(*decl).tag == TirTag::VarDecl {
+                seat(&mut parent, home, tir.var_decl_view(*decl).initializer);
+            }
+            for (slot, bound) in sidecar.assign_binding.iter().enumerate() {
+                if *bound == Some(*decl) {
+                    let assign = TirRef::from_raw(slot as u32);
+                    if tir.inst(assign).tag == TirTag::Assign {
+                        seat(&mut parent, home, tir.assign_view(assign).value);
+                    }
+                }
+            }
+        }
+    }
+
+    for (home, owner) in &own.current_owner {
+        let (a, b) = (home.0, owner.0.0);
+        if a as usize >= n || b as usize >= n {
+            continue;
+        }
+        union(&mut parent, a, b);
+    }
+
+    for (match_inst, token_places) in flow.token_places_iter() {
+        let Some(sw_block) = flow.term_block_of(match_inst) else {
+            continue;
+        };
+        let Terminator::Switch { scrutinee, .. } = flow.term(sw_block) else {
+            continue;
+        };
+        if let Some(sp) = flow_owner_place(flow, *scrutinee) {
+            for &tp in token_places {
+                if (tp.0 as usize) < n {
+                    union(&mut parent, sp.0, tp.0);
+                }
+            }
+        }
+    }
+
+    (0..n as u32).map(|i| find(&parent, i)).collect()
+}
+
+#[test]
+fn indexed_place_roots_match_naive_union_find() {
+    let src = r#"enum Pair:
+	Both(str, str)
+fn take(move value: str):
+	print(value)
+fn main():
+	mut s = "a" + "b"
+	take(s)
+	s = "c" + "d"
+	s = "e" + "f"
+	p = Pair.Both(s, "g")
+	match p:
+		Both(x, _):
+			print(x)
+"#;
+    let (tirs, pool, _main, flow, own, sc) = path_check_harness(src, "main");
+    let tir = tirs
+        .iter()
+        .find(|t| pool.str(t.name) == "main")
+        .expect("the fixture's main body");
+    let order: Vec<u32> = (0..tir.instructions.len() as u32)
+        .map(|i| {
+            if i == 0 {
+                0
+            } else {
+                flow.order_of(TirRef::from_raw(i)).unwrap_or(0)
+            }
+        })
+        .collect();
+    let (reassign_orders, _, _, _) = binding_value_maps(tir, &sc, &order);
+    let mut saw_repeated_reassignment = false;
+    for place in &flow.places {
+        let Place::Local { decl, .. } = place else {
+            continue;
+        };
+        let expected: Vec<TirRef> = sc
+            .assign_binding
+            .iter()
+            .enumerate()
+            .filter(|(slot, bound)| {
+                **bound == Some(*decl)
+                    && tir.inst(TirRef::from_raw(*slot as u32)).tag == TirTag::Assign
+            })
+            .map(|(slot, _)| TirRef::from_raw(slot as u32))
+            .collect();
+        saw_repeated_reassignment |= expected.len() >= 2;
+        assert_eq!(
+            reassign_orders.get(decl).map(Vec::as_slice).unwrap_or(&[]),
+            expected,
+            "shared assignments must match the sidecar scan for {decl:?}"
+        );
+    }
+    assert!(
+        saw_repeated_reassignment,
+        "fixture must exercise repeated reassignment"
+    );
+
+    let indexed = cv::place_roots(tir, &flow, &own, &sc, &reassign_orders);
+    assert_eq!(indexed, naive_place_roots(tir, &flow, &own, &sc));
+}
+
+fn reassign_orders_for(
+    tir: &ryo_core::tir::Tir,
+    flow: &Flow,
+    sc: &FunctionSidecar,
+) -> std::collections::HashMap<TirRef, Vec<TirRef>> {
+    let order: Vec<u32> = (0..tir.instructions.len() as u32)
+        .map(|i| {
+            if i == 0 {
+                0
+            } else {
+                flow.order_of(TirRef::from_raw(i)).unwrap_or(0)
+            }
+        })
+        .collect();
+    binding_value_maps(tir, sc, &order).0
+}
+
 fn run_path_checks(
     tirs: &[ryo_core::tir::Tir],
     pool: &InternPool,
@@ -356,6 +543,7 @@ fn run_path_checks(
         .iter()
         .find(|t| build_flow(t, pool).blocks.len() == flow.blocks.len())
         .expect("the fixture's tir");
+    let reassign_orders = reassign_orders_for(tir, flow, sc);
     let places = cv::TargetPlaces::build(tir, flow, pool);
     let idx = cv::StepIndex::build(flow);
     let fire_points = ryo_core::flow::fire_points::FirePoints::new(flow);
@@ -365,13 +553,33 @@ fn run_path_checks(
         required_checks_ran: true,
         ..Default::default()
     };
-    cv::validate_no_path_double_destruction(tir, flow, own, sc, &events, &table, &mut summary);
-    cv::validate_path_coverage(tir, flow, pool, own, sc, &events, &table, &mut summary);
+    cv::validate_no_path_double_destruction(
+        tir,
+        flow,
+        own,
+        sc,
+        &reassign_orders,
+        &events,
+        &table,
+        &mut summary,
+    );
+    cv::validate_path_coverage(
+        tir,
+        flow,
+        pool,
+        own,
+        sc,
+        &reassign_orders,
+        &events,
+        &table,
+        &mut summary,
+    );
     let ctx = cv::Ctx {
         tir,
         flow,
         own,
         sidecar: sc,
+        reassign_orders: &reassign_orders,
         fire_points: &fire_points,
         events: &events,
         table: &table,
@@ -504,6 +712,7 @@ fn path_double_destruction_flags_release_and_return_transfer() {
             &flow,
             &own,
             &sc,
+            &reassign_orders_for(tir, &flow, &sc),
             &events,
             &table,
             &mut summary,
@@ -537,7 +746,7 @@ fn path_double_destruction_checks_same_block_reentry() {
         .map(|(place, event)| (place, *event))
         .expect("the allocated string has a scheduled release");
     let table = cv::generation_table(tir, &flow, &pool, &index, &sc);
-    let roots = cv::place_roots(tir, &flow, &own, &sc);
+    let roots = cv::place_roots(tir, &flow, &own, &sc, &reassign_orders_for(tir, &flow, &sc));
     let reachable = cv::reachable_blocks(&flow);
     let (place, template) = template;
     let root = roots[place.0 as usize];
@@ -596,6 +805,7 @@ fn path_double_destruction_checks_same_block_reentry() {
             &flow,
             &own,
             &sc,
+            &reassign_orders_for(tir, &flow, &sc),
             &events,
             &table,
             &mut summary,
@@ -811,7 +1021,15 @@ fn unresolved_cleanup_position_is_reported_as_invalid() {
         block: ryo_core::flow::BlockId(u32::MAX),
     };
 
-    let summary = cv::validate_cleanup(&tirs[0], &flow, &pool, &own, &sidecar, true);
+    let summary = cv::validate_cleanup(
+        &tirs[0],
+        &flow,
+        &pool,
+        &own,
+        &sidecar,
+        &reassign_orders_for(&tirs[0], &flow, &sidecar),
+        true,
+    );
     assert!(
         summary.invalid,
         "unresolved anchor must be invalid: {summary:?}"
@@ -1064,12 +1282,14 @@ fn run_view_protection_only(
     let fire_points = ryo_core::flow::fire_points::FirePoints::new(flow);
     let events = cv::collect_events(tir, &places, flow, &fire_points, sc, own, pool);
     let table = cv::generation_table(tir, flow, pool, &idx, sc);
+    let reassign_orders = reassign_orders_for(tir, flow, sc);
     let mut summary = cv::ValidationSummary::default();
     let ctx = cv::Ctx {
         tir,
         flow,
         own,
         sidecar: sc,
+        reassign_orders: &reassign_orders,
         fire_points: &fire_points,
         events: &events,
         table: &table,
@@ -1368,7 +1588,15 @@ fn skipped_validation_does_not_prove_completeness() {
     let sc = take_function_sidecar(&mut sidecar, 0);
     let flow = build_flow(&tirs[0], &pool);
     let own = cv::take_test_ownership(tirs[0].name).expect("ownership recorded");
-    let summary = cv::validate_cleanup(&tirs[0], &flow, &pool, &own, &sc, false);
+    let summary = cv::validate_cleanup(
+        &tirs[0],
+        &flow,
+        &pool,
+        &own,
+        &sc,
+        &reassign_orders_for(&tirs[0], &flow, &sc),
+        false,
+    );
     assert!(!summary.required_checks_ran);
     assert!(!summary.proof_complete());
 }

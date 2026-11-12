@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 pub(crate) fn validate_view_protection(ctx: &Ctx<'_>, summary: &mut ValidationSummary) {
     let flow = ctx.flow;
     let reachable = reachable_blocks(flow);
-    let roots = place_roots(ctx.tir, flow, ctx.own, ctx.sidecar);
+    let roots = place_roots(ctx.tir, flow, ctx.own, ctx.sidecar, ctx.reassign_orders);
     let idx = StepIndex::build(flow);
     let mut member_of: HashMap<PlaceId, u32> = HashMap::new();
     let mut by_group: HashMap<u32, Vec<Event>> = HashMap::new();
