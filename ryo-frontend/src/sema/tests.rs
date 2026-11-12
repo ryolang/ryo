@@ -14,10 +14,7 @@ pub(super) fn sp() -> Span {
 
 pub(super) type RunOk = (Vec<Tir>, InternPool);
 
-/// Lex + parse + astgen + sema. Returns either the typed TIR
-/// (alongside the pool) or the diagnostics that stopped one of
-/// those stages.
-pub(super) fn run(input: &str) -> Result<RunOk, Vec<Diag>> {
+pub(super) fn lower(input: &str) -> (Uir, InternPool, Vec<Diag>) {
     let mut pool = InternPool::new();
     let mut lex_sink = DiagSink::new();
     let tokens = lex(input, &mut pool, &mut lex_sink);
@@ -36,9 +33,21 @@ pub(super) fn run(input: &str) -> Result<RunOk, Vec<Diag>> {
 
     let mut sink = DiagSink::new();
     let uir = astgen::generate(&ast, &mut pool, &mut sink);
-    if sink.has_errors() {
-        return Err(sink.into_diags());
+    (uir, pool, sink.into_diags())
+}
+
+/// Lex + parse + astgen + sema. Returns either the typed TIR
+/// (alongside the pool) or the diagnostics that stopped one of
+/// those stages.
+pub(super) fn run(input: &str) -> Result<RunOk, Vec<Diag>> {
+    let (uir, mut pool, diags) = lower(input);
+    if diags
+        .iter()
+        .any(|diag| diag.severity == ryo_core::diag::Severity::Error)
+    {
+        return Err(diags);
     }
+    let mut sink = DiagSink::new();
     let tirs = analyze(&uir, &mut pool, &mut sink, input, Path::new("<test>"));
     if sink.has_errors() {
         return Err(sink.into_diags());
@@ -49,24 +58,11 @@ pub(super) fn run(input: &str) -> Result<RunOk, Vec<Diag>> {
 /// Variant that returns TIR even when sema reported errors —
 /// used to assert the "Unreachable + diag" invariant from §4.5.
 pub(super) fn run_with_errors(input: &str) -> (Vec<Tir>, Vec<Diag>, InternPool) {
-    let mut pool = InternPool::new();
-    let mut lex_sink = DiagSink::new();
-    let tokens = lex(input, &mut pool, &mut lex_sink);
-    assert!(
-        !lex_sink.has_errors(),
-        "lex errors: {:?}",
-        lex_sink.into_diags()
-    );
-    let token_stream = tokens[..].split_token_span((0..input.len()).into());
-    let mut state = ParseState::new(pool);
-    program_parser()
-        .parse_with_state(token_stream, &mut state)
-        .into_result()
-        .expect("parse ok");
-    let (ast, mut pool) = state.into_parts();
-
+    let (uir, mut pool, diags) = lower(input);
     let mut sink = DiagSink::new();
-    let uir = astgen::generate(&ast, &mut pool, &mut sink);
+    for diag in diags {
+        sink.emit(diag);
+    }
     let tirs = analyze(&uir, &mut pool, &mut sink, input, Path::new("<test>"));
     (tirs, sink.into_diags(), pool)
 }

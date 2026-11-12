@@ -177,6 +177,59 @@ fn mutual_inferred_recursion_requires_explicit_unions() {
 }
 
 #[test]
+fn rejected_inferred_scc_members_stay_failed_in_both_source_orders() {
+    fn assert_failed_members(src: &str, first: &str, second: &str) {
+        let (uir, mut pool, astgen_diags) = lower(src);
+        assert!(astgen_diags.is_empty(), "got {astgen_diags:?}");
+        let mut sink = DiagSink::new();
+        let mut sema = Sema::new(&uir, &mut pool, &mut sink, src, Path::new("<test>"));
+        sema.register_structs();
+        sema.register_enums();
+        errors::register_errors(&mut sema);
+        sema.resolve_signatures();
+        error_inference::reject_recursive_inferred_components(&mut sema);
+        sema.seed_worklist();
+        sema.drive();
+
+        for name in [first, second] {
+            let name_id = sema.pool.find_str(name).expect("SCC member name");
+            let decl = sema.name_to_decl[&name_id];
+            assert_eq!(sema.decl_state[decl.index()], DeclState::Failed, "{name}");
+            assert!(sema.results[decl.index()].is_none(), "{name}");
+            assert!(sema.inference[decl.index()].final_union.is_none(), "{name}");
+        }
+
+        let main_name = sema.pool.find_str("main").expect("main name");
+        let main_decl = sema.name_to_decl[&main_name];
+        assert_eq!(sema.decl_state[main_decl.index()], DeclState::Resolved);
+        let main_tir = sema.results[main_decl.index()]
+            .as_ref()
+            .expect("caller recovery TIR");
+        assert!(
+            main_tir
+                .instructions
+                .iter()
+                .any(|inst| inst.tag == TirTag::Unreachable)
+        );
+        drop(sema);
+        let diags = sink.into_diags();
+        assert_eq!(diags.len(), 1, "unexpected cascading errors: {diags:?}");
+        assert_eq!(count_code(&diags, DiagCode::CycleInResolution), 1);
+    }
+
+    assert_failed_members(
+        "fn a() -> !int:\n\treturn b()\n\nfn b() -> !int:\n\treturn a()\n\nfn main():\n\tx = a()\n",
+        "a",
+        "b",
+    );
+    assert_failed_members(
+        "fn b() -> !int:\n\treturn a()\n\nfn a() -> !int:\n\treturn b()\n\nfn main():\n\tx = b()\n",
+        "b",
+        "a",
+    );
+}
+
+#[test]
 fn mixed_explicit_and_inferred_cycle_gets_targeted_diagnostic() {
     assert_inferred_cycle_rejected(
         "fn a() -> !int:\n\treturn b()\n\nfn b() -> int:\n\treturn a()\n",
