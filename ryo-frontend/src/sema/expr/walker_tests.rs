@@ -201,6 +201,113 @@ fn nested_machine_rollback_preserves_outer_early_errors() {
 }
 
 #[test]
+fn nested_machine_early_error_root_is_scoped_to_expression_root() {
+    let mut builder = UirBuilder::new();
+    let one = builder.int_literal(1, Span::EMPTY);
+    let zero = builder.int_literal(0, Span::EMPTY);
+    let nested = builder.binary(InstTag::Div, one, zero, Span::EMPTY);
+    let root = builder.binary(InstTag::Add, one, nested, Span::EMPTY);
+    let uir = builder.finish();
+    let mut pool = InternPool::new();
+    let int = pool.int();
+    let name = pool.intern_str("test");
+    let mut fcx = FuncCtx {
+        decl: DeclId::from_index(0),
+        builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
+        inst_map: vec![None; uir.instructions.len()],
+        chain_local_errors: Vec::new(),
+        return_type: int,
+        loop_depth: 0,
+        destructure_temps: Default::default(),
+        inferred_call_dependencies: Default::default(),
+    };
+    let scope = Scope::new();
+    let mut sink = DiagSink::new();
+    let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+    with_expr_limit(1, || {
+        super::walker::reset_machine_call_count();
+        analyze_expr_with(
+            &mut sema,
+            &mut fcx,
+            &scope,
+            root,
+            NeverMode::Reject,
+            SemaExprContext::root(),
+        );
+        assert_eq!(super::walker::machine_call_count(), 1);
+        assert_eq!(sema.sink.error_count(), 1);
+        assert!(fcx.inst_map[nested.index()].is_none());
+        analyze_expr_with(
+            &mut sema,
+            &mut fcx,
+            &scope,
+            nested,
+            NeverMode::Reject,
+            SemaExprContext::root(),
+        );
+        assert_eq!(sema.sink.error_count(), 2);
+        assert!(fcx.inst_map[nested.index()].is_none());
+    });
+    drop(sema);
+    let diags = sink.into_diags();
+    assert_eq!(diags.len(), 2, "{diags:?}");
+    assert!(
+        diags
+            .iter()
+            .all(|diag| diag.code == DiagCode::DivisionByZero),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn statement_root_removes_early_error_before_direct_reanalysis() {
+    let mut builder = UirBuilder::new();
+    let one = builder.int_literal(1, Span::EMPTY);
+    let zero = builder.int_literal(0, Span::EMPTY);
+    let expression = builder.binary(InstTag::Div, one, zero, Span::EMPTY);
+    let statement = builder.unary(InstTag::Return, expression, Span::EMPTY);
+    let uir = builder.finish();
+    let mut pool = InternPool::new();
+    let int = pool.int();
+    let name = pool.intern_str("test");
+    let mut fcx = FuncCtx {
+        decl: DeclId::from_index(0),
+        builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
+        inst_map: vec![None; uir.instructions.len()],
+        chain_local_errors: Vec::new(),
+        return_type: int,
+        loop_depth: 0,
+        destructure_temps: Default::default(),
+        inferred_call_dependencies: Default::default(),
+    };
+    let mut scope = Scope::new();
+    let mut sink = DiagSink::new();
+    let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+    super::super::analyze_stmt(&mut sema, &mut fcx, &mut scope, statement);
+    assert_eq!(sema.sink.error_count(), 1);
+    assert!(fcx.inst_map[expression.index()].is_none());
+    analyze_expr_with(
+        &mut sema,
+        &mut fcx,
+        &scope,
+        expression,
+        NeverMode::Reject,
+        SemaExprContext::root(),
+    );
+    assert_eq!(sema.sink.error_count(), 2);
+    assert!(fcx.inst_map[expression.index()].is_none());
+    drop(sema);
+    let diags = sink.into_diags();
+    assert_eq!(diags.len(), 2, "{diags:?}");
+    assert!(
+        diags
+            .iter()
+            .all(|diag| diag.code == DiagCode::DivisionByZero),
+        "{diags:?}"
+    );
+}
+
+#[test]
 fn successful_binop_result_stays_memoized() {
     for limit in [64, 0] {
         let (uir, mut pool, _root, shared) = shared_binop_dag(InstTag::Add, 1, 2);

@@ -2,8 +2,8 @@ use super::super::ScopeParent;
 use super::super::call::{finish_call, prepare_call};
 use super::{
     CHAIN_RECURSION_LIMIT, ConstInt, FuncCtx, Scope, Sema, analyze_binop_link,
-    analyze_expr_allow_never_with, analyze_expr_with, analyze_unary_link, checkpoint,
-    const_eval_int, is_chain_binop_tag, operators, reject_never, rollback_to,
+    analyze_expr_allow_never_with, analyze_expr_with, analyze_unary_link, const_eval_int,
+    is_chain_binop_tag, operators, reject_never,
 };
 use ryo_core::spine::ChainSpine;
 use ryo_core::tir::TirRef;
@@ -280,11 +280,6 @@ fn analyze_machine_inner(
         MachineRoot::Expr(node) => Some(*node),
         MachineRoot::Block(_) => None,
     };
-    // The depth-zero generic expression machine belongs to the enclosing
-    // expression root, whose rollback follows the wrapper's final cache write.
-    let root_checkpoint =
-        (context.depth != 0 || expression_root.is_none() || root_target.is_some())
-            .then(|| checkpoint(fcx));
     let mut struct_state = match expression_root {
         Some(node) => StructState::new(node, root_target),
         None => StructState::empty(),
@@ -685,9 +680,6 @@ fn analyze_machine_inner(
         Some(node) => MachineResult::Expr(analyzed[&node]),
         None => MachineResult::Stmts(block_results.pop().expect("one root block remains")),
     };
-    if let Some(checkpoint) = root_checkpoint {
-        rollback_to(fcx, checkpoint);
-    }
     result
 }
 

@@ -78,11 +78,11 @@ fn resolve_temp_read(sema: &mut Sema<'_>, fcx: &mut FuncCtx, name: StringId, spa
     }
 }
 
-fn checkpoint(fcx: &FuncCtx) -> usize {
+pub(super) fn checkpoint(fcx: &FuncCtx) -> usize {
     fcx.chain_local_errors.len()
 }
 
-fn rollback_to(fcx: &mut FuncCtx, checkpoint: usize) {
+pub(super) fn rollback_to(fcx: &mut FuncCtx, checkpoint: usize) {
     for &node in &fcx.chain_local_errors[checkpoint..] {
         fcx.inst_map[node.index()] = None;
     }
