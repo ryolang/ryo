@@ -855,19 +855,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-280 — resolve_decl can overwrite DeclState::Failed with Resolved for a rejected inferred SCC member
-
-**Severity:** Correctness / Hygiene
-**Area:** sema
-
-**Files:** ryo-frontend/src/sema/mod.rs:671-686, ryo-frontend/src/sema/error_inference.rs:129-152
-
-**Summary:** resolve_decl sets InProgress, analyzes, then calls finalize_inferred_function, then unconditionally writes DeclState::Resolved. finalize_inferred_function marks every inferred member of a rejected recursive SCC Failed (error_inference.rs:147-151) — including the decl currently on the resolve_decl stack. The unconditional Resolved write silently undoes that marking, leaving one member of a rejected cycle fully resolved with results[decl] populated while its SCC siblings stay Failed with results[decl] = None: an inconsistent state split within a single SCC. require_decl returns true for both states, so the difference only surfaces in results consumers. Found during a state-machine invalid-state review of the sema/astgen task machines.
-
-**Resolution:** Run the SCC rejection before the Resolved write, or make resolve_decl skip the write when finalize marked the decl Failed. Add a regression test: two mutually recursive inferred-error functions entered through the one that gets resolved first.
-
----
-
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
