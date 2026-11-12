@@ -182,6 +182,7 @@ pub(crate) struct Walk<'a> {
     /// Mutable needs-drop homes assigned in the active loop bodies.
     /// Their owner identity is the runtime home slot across iterations.
     pub(crate) active_loop_carried_homes: Vec<HashSet<PlaceId>>,
+    pub(crate) loop_height_cap_override: Option<usize>,
     /// Owner-keyed last-use reads, recorded at `Var` steps (replaces the
     /// old post-walk `collect_last_uses` scan).
     pub(crate) last_use: HashMap<TirRef, TirRef>,
@@ -204,6 +205,7 @@ impl<'a> Walk<'a> {
         flow: &'a Flow,
         pool: &'a InternPool,
         dead_stores: &'a super::DeadStoreAnalysis,
+        loop_height_cap_override: Option<usize>,
     ) -> Self {
         let len = tir.instructions.len();
         // Statement roots (drain gates) and `stmt_of` (promo anchors)
@@ -268,6 +270,7 @@ impl<'a> Walk<'a> {
             block_order: Vec::new(),
             loop_regions: Vec::new(),
             active_loop_carried_homes: Vec::new(),
+            loop_height_cap_override,
             last_use: HashMap::new(),
             last_read_by_name: HashMap::new(),
             region_scratch: Vec::new(),
