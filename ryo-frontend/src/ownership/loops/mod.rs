@@ -213,9 +213,15 @@ pub(crate) fn analyze_loop(
 
     let snap = own.snapshot_branch();
     let hazard_count = own.owner_hazards.len();
-    let height_cap = w
-        .loop_height_cap_override
-        .unwrap_or(5 * w.tir.instructions.len() + 2);
+    let default_height_cap = 5 * w.tir.instructions.len() + 2;
+    let height_cap = match w.loop_height_cap_override.as_mut() {
+        Some(super::LoopHeightCapOverride::Uniform(cap)) => *cap,
+        #[cfg(test)]
+        Some(super::LoopHeightCapOverride::Sequence(caps)) => {
+            caps.pop_front().flatten().unwrap_or(default_height_cap)
+        }
+        None => default_height_cap,
+    };
     let converged = propagate_loop(
         w,
         own,

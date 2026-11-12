@@ -1351,3 +1351,37 @@ fn loop_fixed_point_nested_failure_propagates() {
     ));
     assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
 }
+
+#[test]
+fn loop_fixed_point_inner_failure_during_outer_check_propagates() {
+    let src = "fn take(move s: str):\n\tprint(s)\n\nfn main():\n\ts = \"abc\"\n\twhile true:\n\t\twhile true:\n\t\t\ttake(s)\n\tprint(s)\n";
+    let normal_diags = check_src(src);
+    assert_eq!(
+        normal_diags
+            .iter()
+            .filter(|diag| diag.code == DiagCode::UseAfterMove)
+            .count(),
+        2,
+        "fixture must diagnose both the inner check and the post-loop merge: {normal_diags:?}"
+    );
+
+    let (diags, result) =
+        try_check_src_with_loop_budget_sequence(src, &[None, None, None, Some(0)]);
+
+    match result {
+        Err(OwnershipError::LoopDidNotConverge {
+            function,
+            passes,
+            span,
+        }) => {
+            assert_eq!(function, "main");
+            assert_eq!(passes, 0);
+            assert_eq!(span, Span::new(70, 94));
+        }
+        other => panic!("expected inner loop convergence failure, got {other:?}"),
+    }
+    assert!(
+        diags.is_empty(),
+        "inner failure must abort the outer check before final-merge diagnostics escape: {diags:?}"
+    );
+}

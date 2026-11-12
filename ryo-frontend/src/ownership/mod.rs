@@ -498,6 +498,14 @@ pub(crate) struct PromoCandidate {
     pub(crate) stmt: TirRef,
 }
 
+#[derive(Clone)]
+pub(crate) enum LoopHeightCapOverride {
+    #[cfg_attr(not(test), allow(dead_code))]
+    Uniform(usize),
+    #[cfg(test)]
+    Sequence(std::collections::VecDeque<Option<usize>>),
+}
+
 #[derive(Debug)]
 pub enum OwnershipError {
     IncompatibleArtifacts(String),
@@ -541,9 +549,9 @@ impl From<String> for OwnershipError {
 /// whole unit compiles without errors — an error that fired anywhere,
 /// in any function and from any stage, makes every derived warning
 /// noise ("declared but never used" for a binding whose use failed to
-/// compile, etc.). Analysis itself always runs to completion so the
-/// sidecar (frees, anchors) is complete for tooling that reads it on
-/// the error path.
+/// compile, etc.). Ordinary source diagnostics still allow analysis to
+/// complete with a full sidecar for tooling. Typed analysis failures
+/// abort the unit, and [`try_check`] returns no sidecar.
 pub fn check(
     tirs: &[Tir],
     flows: &[ryo_core::flow::Flow],
@@ -574,14 +582,14 @@ pub fn check_without_optimizations(
 }
 
 #[cfg(test)]
-pub(crate) fn try_check_with_loop_budget(
+pub(crate) fn try_check_with_loop_budget_override(
     tirs: &[Tir],
     flows: &[Flow],
     pool: &InternPool,
     sink: &mut DiagSink,
-    budget: usize,
+    override_: LoopHeightCapOverride,
 ) -> Result<OwnershipSidecar, OwnershipError> {
-    try_check_with_optimizations(tirs, flows, pool, sink, true, Some(budget))
+    try_check_with_optimizations(tirs, flows, pool, sink, true, Some(override_))
 }
 
 fn try_check_with_optimizations(
@@ -590,7 +598,7 @@ fn try_check_with_optimizations(
     pool: &InternPool,
     sink: &mut DiagSink,
     optional_optimizations: bool,
-    loop_height_cap_override: Option<usize>,
+    loop_height_cap_override: Option<LoopHeightCapOverride>,
 ) -> Result<OwnershipSidecar, OwnershipError> {
     if tirs.len() != flows.len() {
         return Err("ownership requires one Flow per typed body"
@@ -617,7 +625,7 @@ fn try_check_with_optimizations(
             &mut warnings,
             &mut func_sidecar,
             optional_optimizations,
-            loop_height_cap_override,
+            loop_height_cap_override.clone(),
         )?;
         sidecar.functions.push(func_sidecar);
     }
@@ -738,7 +746,7 @@ fn analyze_function(
     warnings: &mut DiagSink,
     sidecar: &mut FunctionSidecar,
     optional_optimizations: bool,
-    loop_height_cap_override: Option<usize>,
+    loop_height_cap_override: Option<LoopHeightCapOverride>,
 ) -> Result<(), OwnershipError> {
     let mut own = initialize_function_ownership(tir, flow, pool);
     let dead_stores = DeadStoreAnalysis::analyze_with_nesting(tir, flow, pool, &own.loop_nesting);
