@@ -212,10 +212,9 @@ fn rejected_inferred_scc_members_stay_failed_in_both_source_orders() {
                 .any(|inst| inst.tag == TirTag::Unreachable)
         );
         drop(sema);
-        assert_eq!(
-            count_code(&sink.into_diags(), DiagCode::CycleInResolution),
-            1
-        );
+        let diags = sink.into_diags();
+        assert_eq!(diags.len(), 1, "unexpected cascading errors: {diags:?}");
+        assert_eq!(count_code(&diags, DiagCode::CycleInResolution), 1);
     }
 
     assert_failed_members(
