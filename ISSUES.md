@@ -868,19 +868,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-282 — Loop ownership fixed-point cap is debug_assert-only; release builds proceed with unconverged state
-
-**Severity:** Correctness / Hygiene
-**Area:** ownership
-
-**Files:** ryo-frontend/src/ownership/loops/mod.rs:299-365
-
-**Summary:** analyze_loop bounds the propagate/check fixed point at height_cap = 5 * instruction count + 2, but exceeding the cap fires only a debug_assert ("INTERNAL ANALYSIS FAILURE: loop propagate did not converge"). Release builds silently discard the current branch state, truncate owner hazards, and continue to Check with un-converged ownership facts — wrong frees/moves can reach codegen with no diagnostic. Debug and CI (which run debug tests) can never observe the failure mode users would hit. Found during a state-machine invalid-state review.
-
-**Resolution:** Either promote to a hard assert (treat non-convergence as a compiler bug in all modes) or emit an internal-error diagnostic before the graceful degradation, so release behavior is deliberate and observable.
-
----
-
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
