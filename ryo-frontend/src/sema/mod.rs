@@ -787,6 +787,7 @@ fn analyze_function(sema: &mut Sema<'_>, decl: DeclId, body: &FuncBody) -> Tir {
         decl,
         builder: TirBuilder::new(body.name, params, body.return_type, body.span),
         inst_map: vec![None; sema.uir.instructions.len()],
+        chain_local_errors: Vec::new(),
         return_type: body.return_type,
         loop_depth: 0,
         destructure_temps: HashMap::new(),
@@ -832,6 +833,7 @@ pub(crate) struct FuncCtx {
     decl: DeclId,
     builder: TirBuilder,
     inst_map: Vec<Option<TirRef>>,
+    chain_local_errors: Vec<InstRef>,
     return_type: TypeId,
     loop_depth: u32,
     /// Compiler-temp bindings synthesized by astgen for nested

@@ -78,6 +78,17 @@ fn resolve_temp_read(sema: &mut Sema<'_>, fcx: &mut FuncCtx, name: StringId, spa
     }
 }
 
+fn checkpoint(fcx: &FuncCtx) -> usize {
+    fcx.chain_local_errors.len()
+}
+
+fn rollback_to(fcx: &mut FuncCtx, checkpoint: usize) {
+    for &node in &fcx.chain_local_errors[checkpoint..] {
+        fcx.inst_map[node.index()] = None;
+    }
+    fcx.chain_local_errors.truncate(checkpoint);
+}
+
 /// Expression-position analysis. A `never`-typed result (e.g. a
 /// `panic` call) is rejected: `panic` may only appear as a bare
 /// statement, never where a value is required (return operand,
@@ -93,14 +104,19 @@ pub(crate) fn analyze_expr_with(
     mode: NeverMode,
     context: SemaExprContext,
 ) -> TirRef {
+    let root_checkpoint = (context.depth == 0).then(|| checkpoint(fcx));
     let t = analyze_expr_allow_never_with(sema, fcx, scope, r, context);
-    if mode == NeverMode::Reject {
+    let result = if mode == NeverMode::Reject {
         let rejected = reject_never(sema, fcx, r, t);
         fcx.inst_map[r.index()] = Some(rejected);
         rejected
     } else {
         t
+    };
+    if let Some(checkpoint) = root_checkpoint {
+        rollback_to(fcx, checkpoint);
     }
+    result
 }
 
 pub(crate) fn reject_never(
@@ -495,10 +511,9 @@ fn is_chain_binop_tag(tag: InstTag) -> bool {
 /// against the folded operands and lower the analyzed operands through
 /// `check_binary_op`. Shared by the chain walks.
 ///
-/// Returns `(tir, node_const, memoize)`. The early-error paths
-/// (division/modulo by zero, constant overflow) return `memoize =
-/// false` — the old recursion returned from those without memoizing,
-/// and the chain walk preserves that. `node_const` is the folded
+/// Returns `(tir, node_const)`. Division/modulo by zero and constant
+/// overflow are journaled so their results stay reusable until the
+/// current analysis root rolls them back. `node_const` is the folded
 /// constant of the node: `Overflow` is what the cascade re-reports on
 /// later int-typed links, and a division by zero folds to `NotConst`
 /// exactly like `const_eval_int`.
@@ -506,13 +521,14 @@ fn is_chain_binop_tag(tag: InstTag) -> bool {
 fn analyze_binop_link(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
+    node: InstRef,
     tag: InstTag,
     acc: TirRef,
     lhs_const: ConstInt,
     r2: TirRef,
     rhs_const: ConstInt,
     span: Span,
-) -> (TirRef, ConstInt, bool) {
+) -> (TirRef, ConstInt) {
     let lhs_ty = fcx.builder.ty_of(acc);
     let rhs_ty = fcx.builder.ty_of(r2);
     // Constant-evaluate pure integer arithmetic for diagnostics.
@@ -537,10 +553,10 @@ fn analyze_binop_link(
                     "modulo by zero".to_string()
                 },
             ));
+            fcx.chain_local_errors.push(node);
             return (
                 fcx.builder.unreachable(sema.pool.error_type(), span),
                 ConstInt::NotConst,
-                false,
             );
         }
         let node_const = combine_const_int(tag, lhs_const, rhs_const);
@@ -550,22 +566,20 @@ fn analyze_binop_link(
                 DiagCode::ConstEvalFailure,
                 "integer overflow in constant expression".to_string(),
             ));
+            fcx.chain_local_errors.push(node);
             return (
                 fcx.builder.unreachable(sema.pool.error_type(), span),
                 node_const,
-                false,
             );
         }
         return (
             check_binary_op(sema, fcx, tag, lhs_ty, rhs_ty, acc, r2, span),
             node_const,
-            true,
         );
     }
     (
         check_binary_op(sema, fcx, tag, lhs_ty, rhs_ty, acc, r2, span),
         ConstInt::NotConst,
-        true,
     )
 }
 
@@ -601,9 +615,10 @@ fn analyze_binop_d(
         analyze_expr_with(sema, fcx, scope, lhs, NeverMode::Reject, context.child())
     };
     let r2 = analyze_expr_with(sema, fcx, scope, rhs, NeverMode::Reject, context.child());
-    let (emitted, _, _) = analyze_binop_link(
+    let (emitted, _) = analyze_binop_link(
         sema,
         fcx,
+        node,
         inst.tag,
         l,
         const_eval_int(sema.uir, lhs),

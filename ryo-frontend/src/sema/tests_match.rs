@@ -692,6 +692,7 @@ fn compiler_error_union_dispatch_synthesizes_hidden_alternatives() {
         decl: DeclId::from_index(0),
         builder: ryo_core::tir::TirBuilder::new(function_name, vec![], int, sp()),
         inst_map: vec![],
+        chain_local_errors: Vec::new(),
         return_type: int,
         loop_depth: 0,
         destructure_temps: Default::default(),

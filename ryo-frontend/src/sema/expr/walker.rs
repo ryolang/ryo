@@ -2,8 +2,8 @@ use super::super::ScopeParent;
 use super::super::call::{finish_call, prepare_call};
 use super::{
     CHAIN_RECURSION_LIMIT, ConstInt, FuncCtx, Scope, Sema, analyze_binop_link,
-    analyze_expr_allow_never_with, analyze_expr_with, analyze_unary_link, const_eval_int,
-    is_chain_binop_tag, operators, reject_never,
+    analyze_expr_allow_never_with, analyze_expr_with, analyze_unary_link, checkpoint,
+    const_eval_int, is_chain_binop_tag, operators, reject_never, rollback_to,
 };
 use ryo_core::spine::ChainSpine;
 use ryo_core::tir::TirRef;
@@ -272,7 +272,6 @@ fn analyze_machine_inner(
     let root_scope = match_state.scopes.root_id();
     let mut tasks = ChainSpine::new();
     let mut block_results = ChainSpine::new();
-    let mut early_errors = Vec::new();
     let mut consts = HashMap::new();
     let mut analyzed = HashMap::new();
     let mut calls = HashMap::new();
@@ -281,6 +280,11 @@ fn analyze_machine_inner(
         MachineRoot::Expr(node) => Some(*node),
         MachineRoot::Block(_) => None,
     };
+    // The depth-zero generic expression machine belongs to the enclosing
+    // expression root, whose rollback follows the wrapper's final cache write.
+    let root_checkpoint =
+        (context.depth != 0 || expression_root.is_none() || root_target.is_some())
+            .then(|| checkpoint(fcx));
     let mut struct_state = match expression_root {
         Some(node) => StructState::new(node, root_target),
         None => StructState::empty(),
@@ -619,9 +623,10 @@ fn analyze_machine_inner(
                 match inst.data {
                     InstData::BinOp { lhs, rhs } if is_chain_binop_tag(inst.tag) => {
                         let (acc, r2) = (analyzed[&lhs], analyzed[&rhs]);
-                        let (next, node_const, memo) = analyze_binop_link(
+                        let (next, node_const) = analyze_binop_link(
                             sema,
                             fcx,
+                            node,
                             inst.tag,
                             acc,
                             consts[&lhs],
@@ -632,9 +637,6 @@ fn analyze_machine_inner(
                         analyzed.insert(node, next);
                         consts.insert(node, node_const);
                         fcx.inst_map[node.index()] = Some(next);
-                        if !memo {
-                            early_errors.push(node);
-                        }
                     }
                     InstData::UnOp(operand) if matches!(inst.tag, InstTag::Neg | InstTag::Not) => {
                         let (next, node_const) = analyze_unary_link(
@@ -683,8 +685,8 @@ fn analyze_machine_inner(
         Some(node) => MachineResult::Expr(analyzed[&node]),
         None => MachineResult::Stmts(block_results.pop().expect("one root block remains")),
     };
-    for node in early_errors {
-        fcx.inst_map[node.index()] = None;
+    if let Some(checkpoint) = root_checkpoint {
+        rollback_to(fcx, checkpoint);
     }
     result
 }
