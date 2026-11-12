@@ -842,19 +842,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-271 — Shallow binary early errors ignore non-memoization contract
-
-**Severity:** Cleanup
-**Area:** sema
-
-**Files:** ryo-frontend/src/sema/expr/mod.rs; ryo-frontend/src/sema/expr/walker_tests.rs
-
-**Summary:** analyze_binop_link returns memoize=false for division-by-zero and constant-overflow early errors, and the iterative walker removes those temporary inst_map entries. The shallow analyze_binop_d path discards the flag and memoizes unconditionally. Forced-limit differential diagnostics and TIR match, but reanalysis of an errored DAG node can be skipped and the internal cleanup contract differs between paths.
-
-**Resolution:** Honor analyze_binop_link's memo flag in analyze_binop_d and only retain successful/memoizable entries. Add a direct inst_map/reanalysis regression covering division by zero and constant overflow on shared nodes, and require shallow and iterative cleanup behavior to agree.
-
----
-
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
