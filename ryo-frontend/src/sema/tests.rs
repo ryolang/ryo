@@ -484,8 +484,7 @@ fn neg_on_float_literal_accepted() {
 fn nested_expression_types_all_filled() {
     let (tirs, _) = run("x = (1 + 2) * -3").unwrap();
     for tir in &tirs {
-        for idx in 1..tir.instructions.len() {
-            let inst = &tir.instructions[idx];
+        for inst in tir.instructions.iter().skip(1) {
             // Every emitted instruction has *some* TypeId. The
             // error sentinel is allowed only at Unreachable; an
             // error-free run shouldn't have any.
@@ -514,8 +513,8 @@ fn type_error_emits_unreachable_and_keeps_going() {
     // Find the Unreachable inserted in place of the failed
     // initializer.
     let mut saw_unreachable = false;
-    for idx in 1..main.instructions.len() {
-        if matches!(main.instructions[idx].tag, TirTag::Unreachable) {
+    for inst in main.instructions.iter().skip(1) {
+        if matches!(inst.tag, TirTag::Unreachable) {
             saw_unreachable = true;
             break;
         }

@@ -47,9 +47,9 @@ fn main():
     let mut pre_owner = None;
     let mut in_loop_value = None;
     let mut assign_ref = None;
-    for r in 1..tir.instructions.len() {
+    for (r, inst) in tir.instructions.iter().enumerate().skip(1) {
         let rr = TirRef::from_raw(r as u32);
-        match tir.instructions[r].tag {
+        match inst.tag {
             TirTag::VarDecl => {
                 let v = tir.var_decl_view(rr);
                 if v.name == child {
@@ -125,8 +125,8 @@ fn shadowed_binding_reassign_does_not_suppress_outer_owner_free() {
 
     let x = pool.intern_str("x");
     let mut outer_init = None;
-    for r in 1..tir.instructions.len() {
-        if tir.instructions[r].tag == TirTag::VarDecl {
+    for (r, inst) in tir.instructions.iter().enumerate().skip(1) {
+        if inst.tag == TirTag::VarDecl {
             let v = tir.var_decl_view(TirRef::from_raw(r as u32));
             if v.name == x && outer_init.is_none() {
                 outer_init = Some(v.initializer);
@@ -170,8 +170,8 @@ fn sibling_scope_bindings_do_not_share_reassign_sets() {
     // same-name reassigns.
     let x = pool.intern_str("x");
     let mut values = Vec::new();
-    for r in 1..tir.instructions.len() {
-        if tir.instructions[r].tag == TirTag::VarDecl {
+    for (r, inst) in tir.instructions.iter().enumerate().skip(1) {
+        if inst.tag == TirTag::VarDecl {
             let v = tir.var_decl_view(TirRef::from_raw(r as u32));
             if v.name == x {
                 values.push(v.initializer);
@@ -231,8 +231,8 @@ fn main():
 
     let mut outer_return = None;
     let mut inner_return = None;
-    for r in 1..tir.instructions.len() {
-        if tir.instructions[r].tag == TirTag::Return {
+    for (r, inst) in tir.instructions.iter().enumerate().skip(1) {
+        if inst.tag == TirTag::Return {
             let rr = TirRef::from_raw(r as u32);
             match inner_return {
                 None => inner_return = Some(rr),
@@ -249,9 +249,9 @@ fn main():
             && {
                 // the free targets a value of `s` (decl init or reassign value)
                 let mut found = false;
-                for rr2 in 1..tir.instructions.len() {
+                for (rr2, inst) in tir.instructions.iter().enumerate().skip(1) {
                     let t2 = TirRef::from_raw(rr2 as u32);
-                    match tir.instructions[rr2].tag {
+                    match inst.tag {
                         TirTag::VarDecl => {
                             let v = tir.var_decl_view(t2);
                             if v.name == s && v.initializer == fp.target {

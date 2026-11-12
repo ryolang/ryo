@@ -37,8 +37,8 @@ pub(crate) fn scan_recursive_sccs(tirs: &[Tir]) -> HashMap<StringId, u32> {
     let mut self_loop = vec![false; tirs.len()];
     for (caller, tir) in tirs.iter().enumerate() {
         // Slot 0 is the reserved arena sentinel, never an instruction.
-        for idx in 1..tir.instructions.len() {
-            if tir.instructions[idx].tag != TirTag::Call {
+        for (idx, inst) in tir.instructions.iter().enumerate().skip(1) {
+            if inst.tag != TirTag::Call {
                 continue;
             }
             let r = TirRef::from_raw(idx as u32);

@@ -601,8 +601,7 @@ impl Tir {
         self.operand_match_memo
             .get_or_init(|| {
                 let mut memo = vec![false; self.instructions.len()];
-                for i in 1..self.instructions.len() {
-                    let inst = &self.instructions[i];
+                for (i, inst) in self.instructions.iter().enumerate().skip(1) {
                     if inst.tag == TirTag::Match {
                         memo[i] = true;
                         continue;

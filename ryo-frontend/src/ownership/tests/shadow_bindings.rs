@@ -33,8 +33,8 @@ fn shadow_scope_dead_reseat_mints_no_outer_dead_drop() {
 
     let x = pool.intern_str("x");
     let mut outer_init = None;
-    for r in 1..tir.instructions.len() {
-        if tir.instructions[r].tag == TirTag::VarDecl {
+    for (r, inst) in tir.instructions.iter().enumerate().skip(1) {
+        if inst.tag == TirTag::VarDecl {
             let v = tir.var_decl_view(TirRef::from_raw(r as u32));
             if v.name == x && outer_init.is_none() {
                 outer_init = Some(v.initializer);
@@ -85,8 +85,8 @@ fn arm_reseat_then_shadow_keeps_fallthrough_drop() {
 
     let x = pool.intern_str("x");
     let mut outer_init = None;
-    for r in 1..tir.instructions.len() {
-        if tir.instructions[r].tag == TirTag::VarDecl {
+    for (r, inst) in tir.instructions.iter().enumerate().skip(1) {
+        if inst.tag == TirTag::VarDecl {
             let v = tir.var_decl_view(TirRef::from_raw(r as u32));
             if v.name == x && outer_init.is_none() {
                 outer_init = Some(v.initializer);
@@ -132,8 +132,8 @@ fn nested_reseat_then_shadow_keeps_fallthrough_drop() {
 
     let x = pool.intern_str("x");
     let mut outer_init = None;
-    for r in 1..tir.instructions.len() {
-        if tir.instructions[r].tag == TirTag::VarDecl {
+    for (r, inst) in tir.instructions.iter().enumerate().skip(1) {
+        if inst.tag == TirTag::VarDecl {
             let v = tir.var_decl_view(TirRef::from_raw(r as u32));
             if v.name == x && outer_init.is_none() {
                 outer_init = Some(v.initializer);
@@ -171,8 +171,8 @@ fn conditional_dead_reassign_still_minted_for_same_binding() {
 
     let x = pool.intern_str("x");
     let mut outer_init = None;
-    for r in 1..tir.instructions.len() {
-        if tir.instructions[r].tag == TirTag::VarDecl {
+    for (r, inst) in tir.instructions.iter().enumerate().skip(1) {
+        if inst.tag == TirTag::VarDecl {
             let v = tir.var_decl_view(TirRef::from_raw(r as u32));
             if v.name == x && outer_init.is_none() {
                 outer_init = Some(v.initializer);

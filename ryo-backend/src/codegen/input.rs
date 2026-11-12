@@ -8,8 +8,8 @@ pub(crate) fn no_unreachable_in(tirs: &[Tir]) -> bool {
         // Slot 0 is the reserved sentinel and intentionally has
         // tag = Unreachable in the builder; it is *never* part of a
         // body. Skip it.
-        for idx in 1..tir.instructions.len() {
-            if matches!(tir.instructions[idx].tag, TirTag::Unreachable) {
+        for inst in tir.instructions.iter().skip(1) {
+            if matches!(inst.tag, TirTag::Unreachable) {
                 return false;
             }
         }
