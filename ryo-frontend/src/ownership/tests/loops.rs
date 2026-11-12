@@ -1338,15 +1338,16 @@ fn loop_fixed_point_failure_discards_unit_sidecar() {
 #[test]
 fn loop_fixed_point_nested_failure_propagates() {
     let src = "fn take(move s: str):\n\tprint(s)\n\nfn main():\n\ts = \"abc\"\n\twhile true:\n\t\twhile true:\n\t\t\ttake(s)\n";
-    let (diags, result) = try_check_src_with_loop_budget(src, 0);
+    let (diags, result) = try_check_src_with_loop_budget(src, 1);
 
     assert!(matches!(
         result,
         Err(OwnershipError::LoopDidNotConverge {
             ref function,
-            passes: 0,
+            passes: 1,
+            span,
             ..
-        }) if function == "main"
+        }) if function == "main" && span == Span::new(70, 93)
     ));
     assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
 }
