@@ -648,3 +648,110 @@ fn nested_heap_shadows_preserve_outer_storage() {
         "deepreplacementouterdeepreplacementouterouter_0123456789012345678901234567890123456789!outerouterouter_0123456789012345678901234567890123456789!",
     );
 }
+
+const INOUT_STR_PUSH_REJECTED_SOURCE: &str = "fn mutate(inout s: str):\n\tv = s[0:24]\n\tstr_push(&s, \"01234567890123456789012345678901\")\n\tprint(v)\n\nfn main():\n\tmut s = \"abcdefghijklmnopqrstuvw\" + \"x\"\n\tmutate(&s)\n";
+
+const INOUT_BYTES_PUSH_REJECTED_SOURCE: &str = "fn mutate(inout b: bytes):\n\tv = b[0:24]\n\tbytes_push(&b, 1)\n\tprint(v)\n\nfn main():\n\tmut b = \"abcdefghijklmnopqrstuvwx\".to_bytes()\n\tmutate(&b)\n";
+
+const INOUT_MUTATION_AFTER_LAST_USE_SOURCE: &str = "fn mutate(inout s: str):\n\tv = s[0:24]\n\tassert(v.len() == 24, \"view length\")\n\tstr_push(&s, \"!\")\n\nfn main():\n\tmut s = \"abcdefghijklmnopqrstuvw\" + \"x\"\n\tmutate(&s)\n\tprint(s)\n";
+
+#[test]
+fn test_inout_str_push_rejected_before_jit() {
+    let temp_dir = TempDir::new().expect("temp");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "inout_str_push_jit.ryo",
+        INOUT_STR_PUSH_REJECTED_SOURCE,
+    );
+    let output = run_ryo_command(&["run", "inout_str_push_jit.ryo"], &test_file).expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "expected E0035: {stderr}");
+    assert!(stderr.contains("E0035"), "expected E0035: {stderr}");
+    assert!(
+        output.stdout.is_empty(),
+        "rejected program produced stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn test_inout_str_push_rejected_before_aot() {
+    let temp_dir = TempDir::new().expect("temp");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "inout_str_push_aot.ryo",
+        INOUT_STR_PUSH_REJECTED_SOURCE,
+    );
+    let build = run_ryo_build(&test_file, temp_dir.path());
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(!build.status.success(), "expected E0035: {stderr}");
+    assert!(stderr.contains("E0035"), "expected E0035: {stderr}");
+}
+
+#[test]
+fn test_inout_bytes_push_rejected_before_jit() {
+    let temp_dir = TempDir::new().expect("temp");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "inout_bytes_push_jit.ryo",
+        INOUT_BYTES_PUSH_REJECTED_SOURCE,
+    );
+    let output = run_ryo_command(&["run", "inout_bytes_push_jit.ryo"], &test_file).expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "expected E0035: {stderr}");
+    assert!(stderr.contains("E0035"), "expected E0035: {stderr}");
+    assert!(
+        output.stdout.is_empty(),
+        "rejected program produced stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn test_inout_mutation_after_last_use_runs_jit() {
+    let temp_dir = TempDir::new().expect("temp");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "inout_after_last_use_jit.ryo",
+        INOUT_MUTATION_AFTER_LAST_USE_SOURCE,
+    );
+    let output =
+        run_ryo_command(&["run", "inout_after_last_use_jit.ryo"], &test_file).expect("run");
+    assert!(
+        output.status.success(),
+        "run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "abcdefghijklmnopqrstuvwx!"
+    );
+}
+
+#[test]
+fn test_inout_mutation_after_last_use_runs_aot() {
+    let temp_dir = TempDir::new().expect("temp");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "inout_after_last_use_aot.ryo",
+        INOUT_MUTATION_AFTER_LAST_USE_SOURCE,
+    );
+    let build = run_ryo_build(&test_file, temp_dir.path());
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = std::process::Command::new(exe_path(temp_dir.path(), "inout_after_last_use_aot"))
+        .output()
+        .expect("run AOT binary");
+    assert!(
+        run.status.success(),
+        "AOT binary failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "abcdefghijklmnopqrstuvwx!"
+    );
+}

@@ -658,3 +658,16 @@ fn p5_view_read_inside_if_arm_anchors_free_at_if_exit() {
         sc.drops
     );
 }
+
+#[test]
+fn inout_view_argument_borrows_param_root_for_call() {
+    let diags = check_src(
+        "fn consume(inout s: str, v: strview):\n\tprint(v)\n\nfn mutate(inout s: str):\n\tv = s[0:1]\n\tconsume(&s, v)\n\tprint(v)\n\nfn main():\n\tmut s = \"a\"\n\tmutate(&s)\n",
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|diag| diag.code == DiagCode::MutableAliasingViolation),
+        "expected E0032: {diags:?}"
+    );
+}

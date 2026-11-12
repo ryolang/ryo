@@ -1339,3 +1339,39 @@ fn temp_view_used_in_branch_frees_at_merge() {
         "no errors expected; got: {diags:?}"
     );
 }
+
+#[test]
+fn inout_branch_last_use_follows_path() {
+    let diags = check_src(
+        "fn mutate(inout s: str, flag: bool):\n\tv = s[0:1]\n\tif flag:\n\t\tprint(v)\n\telse:\n\t\tprint(\"no\")\n\tstr_push(&s, \"!\")\n\nfn main():\n\tmut s = \"a\"\n\tmutate(&s, true)\n",
+    );
+    assert!(
+        !diags
+            .iter()
+            .any(|diag| diag.code == DiagCode::SourceProjected),
+        "unexpected E0035: {diags:?}"
+    );
+}
+
+#[test]
+fn inout_loop_deferred_view_freezes_until_exit() {
+    let rejected = check_src(
+        "fn mutate(inout s: str):\n\tv = s[0:1]\n\tmut i = 0\n\twhile i < 2:\n\t\tprint(v)\n\t\tstr_push(&s, \"!\")\n\t\ti += 1\n\nfn main():\n\tmut s = \"a\"\n\tmutate(&s)\n",
+    );
+    assert!(
+        rejected
+            .iter()
+            .any(|diag| diag.code == DiagCode::SourceProjected),
+        "expected E0035: {rejected:?}"
+    );
+
+    let accepted = check_src(
+        "fn mutate(inout s: str):\n\tv = s[0:1]\n\tmut i = 0\n\twhile i < 2:\n\t\tprint(v)\n\t\ti += 1\n\tstr_push(&s, \"!\")\n\nfn main():\n\tmut s = \"a\"\n\tmutate(&s)\n",
+    );
+    assert!(
+        !accepted
+            .iter()
+            .any(|diag| diag.code == DiagCode::SourceProjected),
+        "unexpected E0035 after loop exit: {accepted:?}"
+    );
+}
