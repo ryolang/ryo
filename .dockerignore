@@ -6,7 +6,6 @@
 
 target
 .git
-graphify-out
 .local
 .cache
 .claude

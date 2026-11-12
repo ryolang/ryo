@@ -44,9 +44,6 @@ docs/analysis/
 # Git worktrees (local isolated workspaces)
 .worktrees/
 
-# Graphify
-graphify-out/
-
 # Claude Code (personal settings)
 .claude/
 
