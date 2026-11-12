@@ -53,6 +53,23 @@ it does not belong in an existing module.
 
 ---
 
+## State Machine Review
+
+New development proposals must review the proposed state machine before
+implementation. If no stateful behavior is affected, state that explicitly.
+
+- Identify states, ownership, valid transitions, entry/exit conditions, and
+  failure and cleanup paths.
+- Make invalid transitions unrepresentable where practical; otherwise explain
+  the guards that prevent them.
+- Cover nested or reentrant calls, early returns, rollback, and publication
+  boundaries.
+- Add regression tests for boundary transitions and prove invalid transitions
+  cannot occur, not only the happy path.
+- Re-review the model whenever implementation deviates from the proposal.
+
+---
+
 ## Critical Syntax Rules
 
 **⚠️ CRITICAL: Python-Style Syntax is MANDATORY**
