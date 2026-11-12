@@ -107,7 +107,7 @@ pub(crate) fn analyze_loop(
     sidecar: &mut FunctionSidecar,
     ph: BlockId,
     epoch: u32,
-) -> Option<BlockId> {
+) -> Result<Option<BlockId>, super::OwnershipError> {
     let (loop_inst, header) = match *w.flow.term(ph) {
         Terminator::While { loop_inst, header } | Terminator::For { loop_inst, header } => {
             (loop_inst, header)
@@ -133,7 +133,7 @@ pub(crate) fn analyze_loop(
     let (cond_region, _) = collect_region(w.flow, &mut w.region_scratch, header, |b| {
         RegionStop::Through(test_block).kind(b)
     });
-    w.walk_block_list(own, sink, sidecar, &cond_region, epoch);
+    w.walk_block_list(own, sink, sidecar, &cond_region, epoch)?;
     // Body region: blocks reachable from `body` that cannot leave
     // without passing `exit` or the test block (the backedge targets
     // the test, which is not part of the body).
@@ -308,7 +308,7 @@ pub(crate) fn analyze_loop(
         // sidecar).
         let mut staging = FunctionSidecar::new(w.tir.name, w.tir.instructions.len());
         let pass_epoch = w.next_epoch();
-        w.walk_phase(own, &mut scratch, &mut staging, &region, pass_epoch);
+        w.walk_phase(own, &mut scratch, &mut staging, &region, pass_epoch)?;
         // Move the post-body state out, installing an empty placeholder
         // — the merge overwrites all four fields below.
         let after = own.take_branch(BranchState::default());
@@ -371,7 +371,7 @@ pub(crate) fn analyze_loop(
     // displacement validation.
     own.owner_hazards.truncate(hazard_count);
     let pass_epoch = w.next_epoch();
-    w.walk_phase(own, sink, sidecar, &region, pass_epoch);
+    w.walk_phase(own, sink, sidecar, &region, pass_epoch)?;
     // Final merge with the loop-entry snapshot: the loop may execute
     // zero times, so post-loop state = entry ⊔ post-check-pass.
     let after = own.take_branch(BranchState::default());
@@ -389,7 +389,7 @@ pub(crate) fn analyze_loop(
         w.epoch[b.0 as usize] = epoch;
     }
     w.last_inst = Some(loop_inst);
-    Some(exit)
+    Ok(Some(exit))
 }
 
 /// Per-instruction loop nesting as parent-pointer chains (see the

@@ -498,6 +498,38 @@ pub(crate) struct PromoCandidate {
     pub(crate) stmt: TirRef,
 }
 
+#[derive(Debug)]
+pub enum OwnershipError {
+    IncompatibleArtifacts(String),
+    LoopDidNotConverge {
+        function: String,
+        span: Span,
+        passes: usize,
+    },
+}
+
+impl std::fmt::Display for OwnershipError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IncompatibleArtifacts(message) => f.write_str(message),
+            Self::LoopDidNotConverge {
+                function, passes, ..
+            } => write!(
+                f,
+                "ownership analysis for function `{function}` did not converge within {passes} passes"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OwnershipError {}
+
+impl From<String> for OwnershipError {
+    fn from(message: String) -> Self {
+        Self::IncompatibleArtifacts(message)
+    }
+}
+
 /// Validate move safety for every function body. Emits diagnostics
 /// into `sink`. Returns an [`OwnershipSidecar`] that codegen consults
 /// to decide where to emit `ryo_str_free` calls. The TIR itself is
@@ -527,7 +559,7 @@ pub fn try_check(
     flows: &[ryo_core::flow::Flow],
     pool: &InternPool,
     sink: &mut DiagSink,
-) -> Result<OwnershipSidecar, String> {
+) -> Result<OwnershipSidecar, OwnershipError> {
     try_check_with_optimizations(tirs, flows, pool, sink, true)
 }
 
@@ -537,7 +569,7 @@ pub fn check_without_optimizations(
     flows: &[Flow],
     pool: &InternPool,
     sink: &mut DiagSink,
-) -> Result<OwnershipSidecar, String> {
+) -> Result<OwnershipSidecar, OwnershipError> {
     try_check_with_optimizations(tirs, flows, pool, sink, false)
 }
 
@@ -547,9 +579,11 @@ fn try_check_with_optimizations(
     pool: &InternPool,
     sink: &mut DiagSink,
     optional_optimizations: bool,
-) -> Result<OwnershipSidecar, String> {
+) -> Result<OwnershipSidecar, OwnershipError> {
     if tirs.len() != flows.len() {
-        return Err("ownership requires one Flow per typed body".into());
+        return Err("ownership requires one Flow per typed body"
+            .to_owned()
+            .into());
     }
     for flow in flows {
         flow.require_layout(pool)?;
@@ -571,7 +605,7 @@ fn try_check_with_optimizations(
             &mut warnings,
             &mut func_sidecar,
             optional_optimizations,
-        );
+        )?;
         sidecar.functions.push(func_sidecar);
     }
     if !sink.has_errors() {
@@ -691,7 +725,7 @@ fn analyze_function(
     warnings: &mut DiagSink,
     sidecar: &mut FunctionSidecar,
     optional_optimizations: bool,
-) {
+) -> Result<(), OwnershipError> {
     let mut own = initialize_function_ownership(tir, flow, pool);
     let dead_stores = DeadStoreAnalysis::analyze_with_nesting(tir, flow, pool, &own.loop_nesting);
 
@@ -717,7 +751,7 @@ fn analyze_function(
             b,
             RegionStop::At(BlockId::NONE),
             epoch,
-        );
+        )?;
     }
     // Owner-keyed last-use reads and per-name latest reads were
     // recorded at `Var` steps during the walk (see `Walk::last_use`) —
@@ -859,6 +893,7 @@ fn analyze_function(
     );
 
     finalize_cleanup(&cleanup, &own, sidecar, optional_optimizations, sink);
+    Ok(())
 }
 
 #[cfg(test)]
