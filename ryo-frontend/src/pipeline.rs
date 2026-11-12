@@ -20,7 +20,7 @@ pub struct AnalysisReady<'a> {
     pool: &'a InternPool,
 }
 
-/// Immutable published analysis and cleanup artifacts, including partial results.
+/// Immutable published analysis and cleanup artifacts.
 #[derive(Debug)]
 pub struct CleanupProgram {
     built: BuiltProgram,
@@ -46,8 +46,12 @@ impl BuiltProgram {
         })
     }
 
-    pub fn analyze(self, pool: &InternPool, sink: &mut DiagSink) -> Result<CleanupProgram, String> {
-        let cleanup = self.analysis_ready(pool)?.analyze(sink);
+    pub fn analyze(
+        self,
+        pool: &InternPool,
+        sink: &mut DiagSink,
+    ) -> Result<CleanupProgram, crate::ownership::OwnershipError> {
+        let cleanup = self.analysis_ready(pool)?.analyze(sink)?;
         Ok(CleanupProgram {
             built: self,
             cleanup,
@@ -57,8 +61,11 @@ impl BuiltProgram {
 }
 
 impl AnalysisReady<'_> {
-    fn analyze(self, sink: &mut DiagSink) -> OwnershipSidecar {
-        crate::ownership::check(self.tirs, self.flows, self.pool, sink)
+    fn analyze(
+        self,
+        sink: &mut DiagSink,
+    ) -> Result<OwnershipSidecar, crate::ownership::OwnershipError> {
+        crate::ownership::try_check(self.tirs, self.flows, self.pool, sink)
     }
 }
 
@@ -106,6 +113,25 @@ mod tests {
         assert!(
             crate::ownership::try_check(&[second], &[flow], &pool, &mut DiagSink::new()).is_err()
         );
+    }
+
+    #[test]
+    fn failed_analysis_does_not_publish_cleanup_program() {
+        let mut pool = InternPool::new();
+        let first = body(&mut pool);
+        let second = body(&mut pool);
+        let flow = Flow::build(&first, &pool);
+        let built = BuiltProgram {
+            tirs: vec![second],
+            flows: vec![flow],
+        };
+
+        let result = built.analyze(&pool, &mut DiagSink::new());
+
+        assert!(matches!(
+            result,
+            Err(crate::ownership::OwnershipError::IncompatibleArtifacts(_))
+        ));
     }
 
     #[test]

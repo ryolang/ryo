@@ -20,7 +20,7 @@ use ryo_frontend::{astgen, sema};
 use std::fs;
 use std::path::Path;
 
-use diagnostics::finalize_diags;
+use diagnostics::{fail_with_diags, finalize_diags, ownership_error_diag};
 
 #[cfg(test)]
 mod tests;
@@ -80,9 +80,15 @@ pub(super) fn lower_and_analyze(
             ))?;
         }
     }
-    let analyzed = ryo_frontend::pipeline::BuiltProgram::build(report.tirs, pool)
+    let analyzed = match ryo_frontend::pipeline::BuiltProgram::build(report.tirs, pool)
         .analyze(pool, &mut sink)
-        .map_err(CompilerError::CodegenError)?;
+    {
+        Ok(analyzed) => analyzed,
+        Err(error) => {
+            sink.emit(ownership_error_diag(error));
+            return Err(fail_with_diags(sink.into_diags(), input, source_name));
+        }
+    };
     if !sink.has_errors() {
         for d in report.warnings {
             sink.emit(d);

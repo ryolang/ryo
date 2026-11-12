@@ -5,7 +5,7 @@ use ryo_core::types::InternPool;
 use ryo_frontend::{astgen, sema};
 use std::path::Path;
 
-use super::diagnostics::{fail_with_diags, finalize_diags};
+use super::diagnostics::{fail_with_diags, finalize_diags, ownership_error_diag};
 use super::emit::{
     display_ast, display_flow, display_tir, display_tokens, display_uir, generate_and_display_ir,
 };
@@ -101,9 +101,14 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     // slots), and `--emit=tir` deliberately prints that partial
     // TIR — the whole point of the flag is debugging sema.
     let (tirs, sema_warnings) = sema::analyze_buffered(&uir, &mut pool, &mut sink, &input, file);
-    let analyzed = ryo_frontend::pipeline::BuiltProgram::build(tirs, &pool)
-        .analyze(&pool, &mut sink)
-        .map_err(CompilerError::CodegenError)?;
+    let analyzed =
+        match ryo_frontend::pipeline::BuiltProgram::build(tirs, &pool).analyze(&pool, &mut sink) {
+            Ok(analyzed) => analyzed,
+            Err(error) => {
+                sink.emit(ownership_error_diag(error));
+                return Err(fail_with_diags(sink.into_diags(), &input, &name));
+            }
+        };
     let tirs = analyzed.tirs();
     let flows = analyzed.flows();
     let sidecar = analyzed.cleanup();
