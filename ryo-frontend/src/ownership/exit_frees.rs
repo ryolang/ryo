@@ -386,12 +386,12 @@ pub(crate) fn binding_value_maps(
     // Assign value → the binding the Assign targeted (recorded by the
     // walk), same purpose for reseated values.
     let mut assign_value_of: HashMap<TirRef, TirRef> = HashMap::new();
-    for r in 1..tir.instructions.len() {
-        if tir.instructions[r].tag == TirTag::VarDecl {
+    for (r, inst) in tir.instructions.iter().enumerate().skip(1) {
+        if inst.tag == TirTag::VarDecl {
             let rr = TirRef::from_raw(r as u32);
             let view = tir.var_decl_view(rr);
             decl_of_init.entry(view.initializer).or_insert(rr);
-        } else if tir.instructions[r].tag == TirTag::Assign {
+        } else if inst.tag == TirTag::Assign {
             let Some(binding) = sidecar.assign_binding[r] else {
                 continue;
             };

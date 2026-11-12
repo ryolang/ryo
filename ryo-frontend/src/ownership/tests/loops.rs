@@ -978,9 +978,9 @@ fn main():
     let mut break_ref = None;
     let mut post_break_owner = None;
     let child = pool.intern_str("child");
-    for r in 1..tir.instructions.len() {
+    for (r, inst) in tir.instructions.iter().enumerate().skip(1) {
         let rr = TirRef::from_raw(r as u32);
-        match tir.instructions[r].tag {
+        match inst.tag {
             TirTag::Break => break_ref = Some(rr),
             TirTag::VarDecl => {
                 let v = tir.var_decl_view(rr);
@@ -1058,9 +1058,9 @@ fn main():
     let mut continue_ref = None;
     let mut post_continue_owner = None;
     let child = pool.intern_str("child");
-    for r in 1..tir.instructions.len() {
+    for (r, inst) in tir.instructions.iter().enumerate().skip(1) {
         let rr = TirRef::from_raw(r as u32);
-        match tir.instructions[r].tag {
+        match inst.tag {
             TirTag::Continue => continue_ref = Some(rr),
             TirTag::VarDecl => {
                 let v = tir.var_decl_view(rr);

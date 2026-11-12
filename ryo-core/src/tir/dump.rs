@@ -41,7 +41,7 @@ impl<'a> fmt::Display for TirDump<'a> {
             writeln!(f)?;
 
             // Skip slot 0 (reserved sentinel).
-            for idx in 1..tir.instructions.len() {
+            for (idx, _) in tir.instructions.iter().enumerate().skip(1) {
                 let r = TirRef::from_index(idx);
                 write_inst(f, tir, self.pool, r)?;
             }

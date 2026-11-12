@@ -1,5 +1,6 @@
 //! Statement analysis — split from `mod.rs`; see module docs there.
 
+use super::expr::{checkpoint, rollback_to};
 use super::{
     ConstInt, FuncCtx, NeverMode, Scope, Sema, SemaExprContext, analyze_expr_with,
     analyze_stmt_machine, analyze_struct_lit_with_target_and_context, check_reserved_name,
@@ -21,8 +22,23 @@ pub(crate) fn analyze_stmt(
     analyze_stmt_with_context(sema, fcx, scope, r, SemaExprContext::root())
 }
 
-#[allow(clippy::too_many_lines)]
 pub(crate) fn analyze_stmt_with_context(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &mut Scope,
+    r: InstRef,
+    context: SemaExprContext,
+) -> TirRef {
+    let root_checkpoint = (context.depth == 0).then(|| checkpoint(fcx));
+    let result = analyze_stmt_with_context_inner(sema, fcx, scope, r, context);
+    if let Some(checkpoint) = root_checkpoint {
+        rollback_to(fcx, checkpoint);
+    }
+    result
+}
+
+#[allow(clippy::too_many_lines)]
+fn analyze_stmt_with_context_inner(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &mut Scope,

@@ -7,13 +7,353 @@
 //! - `codegen/mod.rs`, `decls.rs`: statement/declaration roots.
 
 use super::super::tests::{RunOk, run, run_with_errors, tir_named};
+use super::super::{DeclId, FuncCtx, Scope, Sema};
 use super::walker::with_expr_limit;
-use ryo_core::diag::{Diag, DiagCode};
-use ryo_core::tir::{Tir, TirTag};
+use super::{NeverMode, SemaExprContext, analyze_expr_with};
+use ryo_core::diag::{Diag, DiagCode, DiagSink};
+use ryo_core::tir::{Tir, TirBuilder, TirTag};
 use ryo_core::types::InternPool;
+use ryo_core::uir::{InstRef, InstTag, Span, Uir, UirBuilder};
+use std::path::Path;
 use std::process::Command;
 
 const DEEP_REPRO_CHILD: &str = "RYO_DEEP_EXPR_REPRO_CHILD";
+
+fn shared_binop_dag(tag: InstTag, lhs: i64, rhs: i64) -> (Uir, InternPool, InstRef, InstRef) {
+    let mut builder = UirBuilder::new();
+    let lhs = builder.int_literal(lhs, Span::EMPTY);
+    let rhs = builder.int_literal(rhs, Span::EMPTY);
+    let shared = builder.binary(tag, lhs, rhs, Span::EMPTY);
+    let root = builder.binary(InstTag::Add, shared, shared, Span::EMPTY);
+    (builder.finish(), InternPool::new(), root, shared)
+}
+
+#[test]
+fn shared_division_by_zero_is_scoped_to_analysis_root() {
+    for limit in [64, 0] {
+        let (uir, mut pool, root, shared) = shared_binop_dag(InstTag::Div, 1, 0);
+        let int = pool.int();
+        let name = pool.intern_str("test");
+        let mut fcx = FuncCtx {
+            decl: DeclId::from_index(0),
+            builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
+            inst_map: vec![None; uir.instructions.len()],
+            chain_local_errors: Vec::new(),
+            return_type: int,
+            loop_depth: 0,
+            destructure_temps: Default::default(),
+            inferred_call_dependencies: Default::default(),
+        };
+        let scope = Scope::new();
+        let mut sink = DiagSink::new();
+        let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+        with_expr_limit(limit, || {
+            analyze_expr_with(
+                &mut sema,
+                &mut fcx,
+                &scope,
+                root,
+                NeverMode::Reject,
+                SemaExprContext::root(),
+            );
+            assert_eq!(sema.sink.error_count(), 1, "limit {limit}");
+            assert!(
+                fcx.inst_map[shared.index()].is_none(),
+                "shared early error remained cached at limit {limit}"
+            );
+            analyze_expr_with(
+                &mut sema,
+                &mut fcx,
+                &scope,
+                shared,
+                NeverMode::Reject,
+                SemaExprContext::root(),
+            );
+            assert_eq!(sema.sink.error_count(), 2, "limit {limit}");
+            assert!(fcx.inst_map[shared.index()].is_none(), "limit {limit}");
+        });
+        drop(sema);
+        let diags = sink.into_diags();
+        assert_eq!(diags.len(), 2, "limit {limit}: {diags:?}");
+        assert!(
+            diags
+                .iter()
+                .all(|diag| diag.code == DiagCode::DivisionByZero),
+            "limit {limit}: {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn shared_constant_overflow_is_scoped_to_analysis_root() {
+    for limit in [64, 0] {
+        let (uir, mut pool, root, shared) = shared_binop_dag(InstTag::Add, i64::MAX, 1);
+        let int = pool.int();
+        let name = pool.intern_str("test");
+        let mut fcx = FuncCtx {
+            decl: DeclId::from_index(0),
+            builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
+            inst_map: vec![None; uir.instructions.len()],
+            chain_local_errors: Vec::new(),
+            return_type: int,
+            loop_depth: 0,
+            destructure_temps: Default::default(),
+            inferred_call_dependencies: Default::default(),
+        };
+        let scope = Scope::new();
+        let mut sink = DiagSink::new();
+        let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+        with_expr_limit(limit, || {
+            analyze_expr_with(
+                &mut sema,
+                &mut fcx,
+                &scope,
+                root,
+                NeverMode::Reject,
+                SemaExprContext::root(),
+            );
+            assert_eq!(sema.sink.error_count(), 1, "limit {limit}");
+            assert!(
+                fcx.inst_map[shared.index()].is_none(),
+                "shared early error remained cached at limit {limit}"
+            );
+            analyze_expr_with(
+                &mut sema,
+                &mut fcx,
+                &scope,
+                shared,
+                NeverMode::Reject,
+                SemaExprContext::root(),
+            );
+            assert_eq!(sema.sink.error_count(), 2, "limit {limit}");
+            assert!(fcx.inst_map[shared.index()].is_none(), "limit {limit}");
+        });
+        drop(sema);
+        let diags = sink.into_diags();
+        assert_eq!(diags.len(), 2, "limit {limit}: {diags:?}");
+        assert!(
+            diags
+                .iter()
+                .all(|diag| diag.code == DiagCode::ConstEvalFailure),
+            "limit {limit}: {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn nested_machine_rollback_preserves_outer_early_errors() {
+    let mut builder = UirBuilder::new();
+    let one = builder.int_literal(1, Span::EMPTY);
+    let zero = builder.int_literal(0, Span::EMPTY);
+    let shared = builder.binary(InstTag::Div, one, zero, Span::EMPTY);
+    let rhs = builder.binary(InstTag::Add, one, shared, Span::EMPTY);
+    let root = builder.binary(InstTag::Add, shared, rhs, Span::EMPTY);
+    let uir = builder.finish();
+    let mut pool = InternPool::new();
+    let int = pool.int();
+    let name = pool.intern_str("test");
+    let mut fcx = FuncCtx {
+        decl: DeclId::from_index(0),
+        builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
+        inst_map: vec![None; uir.instructions.len()],
+        chain_local_errors: Vec::new(),
+        return_type: int,
+        loop_depth: 0,
+        destructure_temps: Default::default(),
+        inferred_call_dependencies: Default::default(),
+    };
+    let scope = Scope::new();
+    let mut sink = DiagSink::new();
+    let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+    with_expr_limit(1, || {
+        super::walker::reset_machine_call_count();
+        analyze_expr_with(
+            &mut sema,
+            &mut fcx,
+            &scope,
+            root,
+            NeverMode::Reject,
+            SemaExprContext::root(),
+        );
+        assert_eq!(super::walker::machine_call_count(), 1);
+        assert_eq!(sema.sink.error_count(), 1);
+        assert!(fcx.inst_map[shared.index()].is_none());
+        analyze_expr_with(
+            &mut sema,
+            &mut fcx,
+            &scope,
+            shared,
+            NeverMode::Reject,
+            SemaExprContext::root(),
+        );
+        assert_eq!(sema.sink.error_count(), 2);
+        assert!(fcx.inst_map[shared.index()].is_none());
+    });
+    drop(sema);
+    let diags = sink.into_diags();
+    assert_eq!(diags.len(), 2, "{diags:?}");
+    assert!(
+        diags
+            .iter()
+            .all(|diag| diag.code == DiagCode::DivisionByZero),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn nested_machine_early_error_root_is_scoped_to_expression_root() {
+    let mut builder = UirBuilder::new();
+    let one = builder.int_literal(1, Span::EMPTY);
+    let zero = builder.int_literal(0, Span::EMPTY);
+    let nested = builder.binary(InstTag::Div, one, zero, Span::EMPTY);
+    let root = builder.binary(InstTag::Add, one, nested, Span::EMPTY);
+    let uir = builder.finish();
+    let mut pool = InternPool::new();
+    let int = pool.int();
+    let name = pool.intern_str("test");
+    let mut fcx = FuncCtx {
+        decl: DeclId::from_index(0),
+        builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
+        inst_map: vec![None; uir.instructions.len()],
+        chain_local_errors: Vec::new(),
+        return_type: int,
+        loop_depth: 0,
+        destructure_temps: Default::default(),
+        inferred_call_dependencies: Default::default(),
+    };
+    let scope = Scope::new();
+    let mut sink = DiagSink::new();
+    let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+    with_expr_limit(1, || {
+        super::walker::reset_machine_call_count();
+        analyze_expr_with(
+            &mut sema,
+            &mut fcx,
+            &scope,
+            root,
+            NeverMode::Reject,
+            SemaExprContext::root(),
+        );
+        assert_eq!(super::walker::machine_call_count(), 1);
+        assert_eq!(sema.sink.error_count(), 1);
+        assert!(fcx.inst_map[nested.index()].is_none());
+        analyze_expr_with(
+            &mut sema,
+            &mut fcx,
+            &scope,
+            nested,
+            NeverMode::Reject,
+            SemaExprContext::root(),
+        );
+        assert_eq!(sema.sink.error_count(), 2);
+        assert!(fcx.inst_map[nested.index()].is_none());
+    });
+    drop(sema);
+    let diags = sink.into_diags();
+    assert_eq!(diags.len(), 2, "{diags:?}");
+    assert!(
+        diags
+            .iter()
+            .all(|diag| diag.code == DiagCode::DivisionByZero),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn statement_root_removes_early_error_before_direct_reanalysis() {
+    let mut builder = UirBuilder::new();
+    let one = builder.int_literal(1, Span::EMPTY);
+    let zero = builder.int_literal(0, Span::EMPTY);
+    let expression = builder.binary(InstTag::Div, one, zero, Span::EMPTY);
+    let statement = builder.unary(InstTag::Return, expression, Span::EMPTY);
+    let uir = builder.finish();
+    let mut pool = InternPool::new();
+    let int = pool.int();
+    let name = pool.intern_str("test");
+    let mut fcx = FuncCtx {
+        decl: DeclId::from_index(0),
+        builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
+        inst_map: vec![None; uir.instructions.len()],
+        chain_local_errors: Vec::new(),
+        return_type: int,
+        loop_depth: 0,
+        destructure_temps: Default::default(),
+        inferred_call_dependencies: Default::default(),
+    };
+    let mut scope = Scope::new();
+    let mut sink = DiagSink::new();
+    let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+    super::super::analyze_stmt(&mut sema, &mut fcx, &mut scope, statement);
+    assert_eq!(sema.sink.error_count(), 1);
+    assert!(fcx.inst_map[expression.index()].is_none());
+    analyze_expr_with(
+        &mut sema,
+        &mut fcx,
+        &scope,
+        expression,
+        NeverMode::Reject,
+        SemaExprContext::root(),
+    );
+    assert_eq!(sema.sink.error_count(), 2);
+    assert!(fcx.inst_map[expression.index()].is_none());
+    drop(sema);
+    let diags = sink.into_diags();
+    assert_eq!(diags.len(), 2, "{diags:?}");
+    assert!(
+        diags
+            .iter()
+            .all(|diag| diag.code == DiagCode::DivisionByZero),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn successful_binop_result_stays_memoized() {
+    for limit in [64, 0] {
+        let (uir, mut pool, _root, shared) = shared_binop_dag(InstTag::Add, 1, 2);
+        let int = pool.int();
+        let name = pool.intern_str("test");
+        let mut fcx = FuncCtx {
+            decl: DeclId::from_index(0),
+            builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
+            inst_map: vec![None; uir.instructions.len()],
+            chain_local_errors: Vec::new(),
+            return_type: int,
+            loop_depth: 0,
+            destructure_temps: Default::default(),
+            inferred_call_dependencies: Default::default(),
+        };
+        let scope = Scope::new();
+        let mut sink = DiagSink::new();
+        let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+        let first = with_expr_limit(limit, || {
+            let first = analyze_expr_with(
+                &mut sema,
+                &mut fcx,
+                &scope,
+                shared,
+                NeverMode::Reject,
+                SemaExprContext::root(),
+            );
+            let second = analyze_expr_with(
+                &mut sema,
+                &mut fcx,
+                &scope,
+                shared,
+                NeverMode::Reject,
+                SemaExprContext::root(),
+            );
+            assert_eq!(first, second, "limit {limit}");
+            assert!(fcx.inst_map[shared.index()].is_some(), "limit {limit}");
+            first
+        });
+        assert_eq!(sema.sink.error_count(), 0, "limit {limit}");
+        let tir = fcx.builder.finish(&[first]);
+        assert_eq!(tir.instructions.len(), 4, "limit {limit}");
+        drop(sema);
+        assert!(sink.into_diags().is_empty(), "limit {limit}");
+    }
+}
 
 struct DeepExpr;
 

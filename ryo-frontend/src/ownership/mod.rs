@@ -684,14 +684,20 @@ fn initialize_function_ownership(tir: &Tir, flow: &Flow, pool: &InternPool) -> O
         own.param_places.iter().all(|p| p.0 != u32::MAX),
         "every param has a place"
     );
-    for inst in 1..tir.instructions.len() {
+    for (inst, place) in own
+        .inst_place
+        .iter_mut()
+        .enumerate()
+        .take(tir.instructions.len())
+        .skip(1)
+    {
         let r = TirRef::from_raw(u32::try_from(inst).expect("TIR arena index fits u32"));
         if let Some(p) = flow.temp_of(r) {
-            own.inst_place[inst] = Some(p);
+            *place = Some(p);
         } else if let Some(p) = flow.match_result(r) {
-            own.inst_place[inst] = Some(p);
+            *place = Some(p);
         } else if let Some(p) = flow_owner_place(flow, r) {
-            own.inst_place[inst] = Some(p);
+            *place = Some(p);
         }
     }
     for (owner_inst, places) in flow.token_places_iter() {

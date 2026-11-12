@@ -77,7 +77,7 @@ impl<'a> fmt::Display for UirDump<'a> {
         // Slot 0 is the reserved sentinel (see `Uir::new`); skip it.
         if uir.instructions.len() > 1 {
             writeln!(f, "\ninstructions:")?;
-            for idx in 1..uir.instructions.len() {
+            for (idx, _) in uir.instructions.iter().enumerate().skip(1) {
                 let r = InstRef::from_index(idx);
                 write_inst(f, uir, pool, r, 0)?;
             }

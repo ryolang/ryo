@@ -434,7 +434,7 @@ fn bytes_literal_lowers_to_uir() {
     let body = body_named(&uir, &pool, "main");
     let _ = body;
     let mut found = false;
-    for idx in 1..uir.instructions.len() {
+    for (idx, _) in uir.instructions.iter().enumerate().skip(1) {
         let r = InstRef::from_raw(u32::try_from(idx).expect("idx fits u32"));
         let inst = uir.inst(r);
         if inst.tag == InstTag::BytesLiteral {
@@ -598,7 +598,7 @@ fn bytes_annotations_resolve() {
 fn bytes_index_lowers_to_uir() {
     let (uir, _pool) = parse_and_lower("b = b\"\\x01\"\nx = b[0]\n").expect("lower ok");
     let mut found = false;
-    for idx in 1..uir.instructions.len() {
+    for (idx, _) in uir.instructions.iter().enumerate().skip(1) {
         let r = InstRef::from_raw(u32::try_from(idx).expect("idx fits u32"));
         if uir.inst(r).tag == InstTag::Index {
             found = true;
@@ -608,7 +608,7 @@ fn bytes_index_lowers_to_uir() {
     // Slice form must still parse as Slice (grammar disambiguation).
     let (uir2, _p2) = parse_and_lower("b = b\"\\x01\"\nv = b[0:1]\n").expect("lower ok");
     let mut slices = 0;
-    for idx in 1..uir2.instructions.len() {
+    for (idx, _) in uir2.instructions.iter().enumerate().skip(1) {
         let r = InstRef::from_raw(u32::try_from(idx).expect("idx fits u32"));
         if uir2.inst(r).tag == InstTag::Slice {
             slices += 1;

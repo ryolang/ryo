@@ -990,8 +990,8 @@ impl<M: Module> Codegen<M> {
         ctx: &mut FunctionContext<'_, M>,
     ) -> Result<(), String> {
         let mut panic_args = vec![false; ctx.tir.instructions.len()];
-        for idx in 1..ctx.tir.instructions.len() {
-            if ctx.tir.instructions[idx].tag != TirTag::Call {
+        for (idx, inst) in ctx.tir.instructions.iter().enumerate().skip(1) {
+            if inst.tag != TirTag::Call {
                 continue;
             }
             let r = TirRef::from_raw(u32::try_from(idx).expect("TirRef index out of range"));
