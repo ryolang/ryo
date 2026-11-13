@@ -184,6 +184,8 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Resolution:** Centralize the fat-pointer layout in one place (offsets and size computed from `module.target_config().pointer_type()`) and mirror it in the runtime. Add target-layout checks that validate both emitted code and the runtime storage contract, not object emission alone. Prerequisite for any 32-bit target; interacts with I-021 (bool FFI width) when FFI lands.
 
+**Architecture:** I-293 owns the target layout context and physical ABI lowering. Implement this fat-layout correction through that boundary and the typed runtime contracts in I-289. Keep this issue open until generated calls and runtime storage pass the target-layout checks.
+
 ---
 
 ### I-092 — Sema per-function and per-call allocation churn
@@ -479,7 +481,9 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Summary:** The M9.2 argv state is process-wide: two atomics (`ARGC: AtomicIsize`, `ARGV: AtomicPtr<c_char>`) written by `ryo_rt_init` at hosted-`main` entry and read by the `process_argc`/`process_argv` intrinsics. The single-writer contract ("init exactly once, before any read") is enforced only by documentation. A second `ryo_rt_init` overlapping an active reader can interleave — `ARGC` from the newer call, `ARGV` from the older — and because the table is borrowed rather than copied, a count/table generation mix indexes past the older table's bounds and hands the out-of-bounds slot to `strlen`, which then scans arbitrary host memory. The Release/Acquire publication pair (data-then-flag) is verified by a threaded Miri test but only covers a single publication; it says nothing about re-init or cross-execution lifetime. Today's execution shapes never overlap hosted runs in one process (the `ryo run` CLI runs one program per process; AOT is one per process), so the exposure is conditional — but it gates the planned core/embedding flavour, where a host running multiple scripted executions per process is the entire point. Raised by the M9.2 PR's security-architecture review; no supported entry point can trigger it today. Same host-policy bucket, for the same future flavour: `process_env` reads the host environment with no allowlist (intentional capability in the CLI model), and the interim `io_read_line` accumulates stdin with no line-length cap — both need an explicit host-data/resource policy for untrusted embedding.
 
-**Resolution:** Before the embedding flavour ships, give hosted execution an explicit isolation contract. Cheapest sound option: whole-execution serialization — an execution-scoped init/exit handshake around the hosted run, with init aborting or blocking while a run is active (for the CLI, exit clears it, keeping sequential runs cheap). The per-execution-context alternative (thread a handle through the trampoline and store argv per execution) is a larger ABI change to the intrinsics' zero-arg signatures. Release/Acquire publication stays as the intra-run init contract either way. Decide the env and stdin policy in the same design: a curated environ/allowlist for `process_env`, and a line cap for `io_read_line` (the cap is separate hardening work, not part of M16's result-type integration).
+**Resolution:** Use the execution-owned argument storage and lifecycle proposed in I-290. Keep argument count and table in one context with a single lifetime. Hosted entry installs that context, and nested exit restores the previous context. Prevent overlapping executions from observing another context or retaining its released storage. Whole-execution serialization can guard an interim implementation, but must not replace the context boundary. Define environment access and input limits separately under explicit host-policy review. Preserve current CLI behavior until that review authorizes changes.
+
+**Validation:** Test repeated initialization, nested hosted calls, failed entry, and argument lifetime through exit. When concurrent hosted execution is enabled, test isolation with different argument counts and contents. Retain the single-publication memory-order tests, but do not treat them as evidence for context reinitialization or isolation.
 
 ---
 
@@ -842,6 +846,194 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
+### I-284 — Introduce a compilation context with resolved declaration and binding identities
+
+**Severity:** Correctness / Hygiene
+**Area:** core-ir
+
+**Files:** ryo-frontend/src/sema/expr/mod.rs:30; ryo-core/src/tir/wires.rs:19; ryo-core/src/flow/build.rs:251; ryo-core/src/types.rs:953; ryo-backend/src/codegen/binding_storage.rs:7
+
+**Summary:** Sema checks local names but emits StringId reads and callees. Flow repeats lexical resolution, while backend slot tables require scope restoration. Nominal structs, enums, and errors also deduplicate by spelling alone. These representations cannot distinguish same-named declarations across modules or generic instances without conventions that every consumer must repeat.
+
+**Resolution:** Introduce a compilation context that owns sources, module and declaration tables, and interned semantic types. Assign compilation-local DeclIds, body-local BindingIds, and SourceIds. Store resolved identities in typed reads, writes, and calls. Key nominal types by declaration identity and future generic instances by declaration plus type arguments. Derive backend symbols from declaration identity. Use names for lookup during resolution and for diagnostic labels afterward. Migrate backend storage to resolved places.
+
+**State machine:** The compilation context owns identity allocation. Separate signature resolution from body resolution so recursive function signatures do not require completed bodies. Each resolution progresses through Unresolved -> Resolving -> Resolved or Failed. Publish only complete results. Guard reentrant resolution with dependency-kind checks and cycle diagnostics. Failed resolution returns an error result without publishing an executable body. Reject cross-context handles and invalidate dependent analysis when a body changes.
+
+**Migration:** Architectural priority 1. Coordinate source ownership with I-288 and semantic resolution with I-285. Establish identities before the Flow redesign in I-286. Then separate ownership passes in I-287 and physical lowering in I-293. Complete execution contexts in I-290 before task integration. Keep existing crate boundaries during this migration.
+
+**Validation:** Test shadowed bindings, duplicate spellings in separate declaration environments, recursive signatures, failed dependencies, reentrant resolution, and cross-context rejection. Preserve current diagnostics and execution behavior. Future generic instantiation must distinguish argument sets without renaming source identifiers.
+
+**Gate:** This proposal changes compiler identity and ownership of compiler data. It does not authorize new module syntax, generic syntax, or language semantics.
+
+---
+
+### I-285 — Make UIR unresolved and consolidate semantic resolution in Sema
+
+**Severity:** Correctness / Hygiene
+**Area:** sema
+
+**Files:** ryo-frontend/src/astgen.rs:97,471,829; ryo-core/src/uir.rs:389; ryo-frontend/src/sema/mod.rs:354
+
+**Summary:** AST lowering resolves annotation names, defines nominal layouts, checks cycles, and rejects view fields before UIR reaches sema. UIR parameters and returns already contain concrete TypeIds. Generic parameters, imported declarations, and delayed layout would require AST lowering to acquire semantic environments already owned by sema.
+
+**Resolution:** Keep AST lowering structural. Preserve unresolved type-expression and declaration references in UIR, including parameter and return annotations. Move annotation resolution, nominal definition, dependency checking, and error-union type resolution into Sema. Sema owns resolution, typing, inference, and future instantiation. Publish target-independent TIR with resolved identities and concrete executable types. Delegate target layout to I-293. Move the final missing-return reachability check to Flow while retaining divergence queries needed for expression typing.
+
+**State machine:** Use the declaration states from I-284. Resolve signatures before dependent bodies where recursion permits. Finalize inferred error unions before publishing executable TIR. Failed definitions and unresolved placeholders can remain available for diagnostic inspection, but cannot enter executable Flow. Discard provisional body results on failure and retain diagnostics. Use an explicit dependency worklist so nested requests do not require recursive body analysis.
+
+**Dependencies:** Coordinate with I-284 and I-293. During migration, keep existing layout computation behind the semantic resolver until the target layout boundary is ready. Address per-body UIR ownership and map sizing through I-109.
+
+**Validation:** Compare UIR, TIR, diagnostics, and execution before and after migration. Cover forward references, legal recursion, invalid type cycles, inferred error dependencies, failed annotations, recovery, and missing returns. Preserve accepted programs and current ownership restrictions.
+
+---
+
+### I-286 — Make Flow a self-contained executable control-flow IR
+
+**Severity:** Correctness / Hygiene
+**Area:** core-ir
+
+**Files:** ryo-core/src/flow.rs:193,356; ryo-core/src/tir.rs:474; ryo-frontend/src/ownership/walk.rs:1; ryo-backend/src/codegen/control.rs:1,478
+
+**Summary:** Flow has explicit edges but consumers also require source-region metadata and ordered visits. Ownership dispatches structured region handlers. Codegen restores lexical slot tables at construct joins and restricts block coalescing to preserve that order. Boolean joins are recognized from their first TIR step. TIR additionally requires a single-parent forest. Inlining, shared values, and CFG simplification cannot operate on edges alone.
+
+**Resolution:** Make Flow own typed operations with ValueId operands, storage places with projection paths, explicit control-flow edges, and source provenance. Ownership and codegen must consume Flow without consulting TIR. Lower loops into ordinary blocks and branches. Represent short-circuit and match results through explicit joins and edge arguments. Keep lexical structure as diagnostic metadata. Allow multiple uses of a computed value under verified availability rules. Preserve TIR for semantic analysis and inspection, but transfer all executable information across the lowering boundary.
+
+**State machine:** A mutable builder produces an unverified body. Verification checks operand availability, types, place projections, edge arguments, and exactly one terminator per block. Publish an immutable verified body only on success. A transformation creates a new body version, invalidates affected analyses, and must pass verification before publication. A failed transformation leaves the previous body usable. Synthetic return and loop-exit edges must carry complete execution effects.
+
+**Dependencies:** Architectural priority 2, after resolved identities in I-284 and coordinated with I-285. Coordinate ownership consumers with I-287. Complete the execution contract before general CFG rewrites or the inlining work in I-217 depend on it.
+
+**Validation:** Test equivalent execution after block renumbering, edge splitting, and supported CFG simplification. Cover nested loops, short-circuit expressions, match joins, early returns, try propagation, break, and continue. Reject unavailable operands and incompatible join arguments. No executable branch or storage scope may depend on source-region visitation order.
+
+---
+
+### I-287 — Separate ownership analysis, cleanup elaboration, and cleanup optimization
+
+**Severity:** Correctness / Hygiene
+**Area:** ownership
+
+**Files:** ryo-core/src/ownership.rs:51; ryo-core/src/flow/cleanup.rs:43; ryo-core/src/flow/inspect.rs:13; ryo-backend/src/codegen/decls.rs:238; ryo-backend/src/codegen/structs.rs:714
+
+**Summary:** Cleanup remains distributed across DropOps, whole-binding and field replacement tables, promotion records, and consuming-concat selections. Backend branches decide which replacement release fires. CleanupPlan resolves only part of this protocol, and the Flow dump omits field replacement and concat-consumption decisions. A new backend or ownership optimization must reproduce these interactions.
+
+**Resolution:** Use three explicit passes over Flow. Ownership analysis computes initialization, ownership, and borrow facts on blocks and edges, with diagnostics but no destruction schedule. Cleanup elaboration inserts explicit drops, transfers, replacement releases, and promotion cleanup into Flow. Cleanup optimization removes redundant actions or selects consuming operations while preserving the elaborated contract. Validators, dumps, and backend emission consume that same executable representation. Remove backend decisions about whether an ownership release is required.
+
+**State machine:** Track initialization and ownership separately from active loans, keyed by places and projection paths. Moves consume initialized places. Replacement evaluates the new value in language order, discharges the old obligation, and installs the new value. Use predecessor joins and a worklist for loops. Keep return, break, continue, and backedge effects distinct. Where path joins cannot prove initialization, elaborate conditional cleanup. Publish cleanup only after convergence and verification. Failed analysis preserves diagnostics but cannot publish executable cleanup. Optimizations invalidate and repeat affected verification.
+
+**Dependencies:** Architectural priority 3, following the place and edge contracts in I-286. Adapt the existing path validator to explicit Flow actions. Keep whole-aggregate ownership as the initial policy, with projected places available for later extensions.
+
+**Validation:** Test every exit path, nested loops, zero iterations, error propagation, consume-then-rebind, field replacement, borrowed views, promotion lifetimes, and failed convergence. Verify elaborated Flow before and after optimization. Compare optimized and unoptimized execution and require the same transfer and destruction obligations on each path.
+
+**Gate:** Preserve current language rules. Partial moves, disjoint field borrows, and new borrow behavior require separate language-design approval. Representation support does not enable those features.
+
+---
+
+### I-288 — Add source-file identity to spans before multi-file compilation
+
+**Severity:** Correctness / Hygiene
+**Area:** core-ir
+
+**Files:** ryo-core/src/span.rs:8; ryo-core/src/diag.rs:33; ryo-driver/src/pipeline/diagnostics.rs:49,125; ryo-core/src/tir.rs:488
+
+**Summary:** Span contains only start and end byte offsets. The renderer receives one source string and filename and applies that filename to every diagnostic note. TIR and Flow retain offsets, but cannot identify an imported declaration or a generic definition in another file. Backend emission does not attach source locations to CLIF.
+
+**Resolution:** Make source storage part of the compilation context in I-284. Add SourceId to spans and resolve diagnostic labels through a source database. Preserve definition and call-site provenance through typed analysis, instantiation, Flow, and physical lowering. Mark synthetic operations explicitly and associate them with their originating source operation. Keep source identity independent of filenames used for display. Attach CLIF source locations when implementing debug information.
+
+**State machine:** Source registration assigns an identity to an immutable source revision. IR and diagnostics refer to that revision for their lifetime. Replacing source text creates a new revision rather than reinterpreting old offsets. Keep referenced revisions alive until dependent artifacts are discarded.
+
+**Validation:** Test diagnostics with primary and secondary labels in different files, Unicode offsets, synthetic operations, and stale-source revision rejection. Verify provenance survives body duplication and lowering without adding new language features.
+
+---
+
+### I-289 — Define typed runtime identities and ABI contracts for physical lowering
+
+**Severity:** Correctness / Hygiene
+**Area:** codegen
+
+**Files:** ryo-backend/src/codegen/expr/mod.rs:549; ryo-backend/src/codegen/jit.rs:16; ryo-core/src/builtins.rs; runtime/src/lib.rs
+
+**Summary:** Runtime imports accept a symbol string and caller-supplied parameter/result types. The import cache is keyed only by name and ignores supplied types after the first declaration. JIT registration separately erases Rust function signatures to addresses. The shared builtin registry describes language-level behavior, not the complete native ABI, so signature drift can survive Rust type checking.
+
+**Resolution:** Give runtime operations typed RuntimeFn identities and canonical ABI descriptions. Physical lowering in I-293 converts these operations into target-specific signatures and calls. Derive imports and JIT symbol registration from the same operation catalog. Include integer widths, calling convention, out-pointer placement, and ownership effects. Verify the Rust exports with typed function-pointer assertions. Eliminate caller-supplied signature reconstruction and string-based runtime dispatch from instruction emitters.
+
+**State machine:** A runtime operation resolves to a signature for one target and layout context before use. Cached imports must match that signature. Reject missing symbols, incompatible signatures, and mismatched runtime layouts before publishing executable code. Changing an ABI description invalidates dependent physical artifacts.
+
+**Dependencies:** Part of I-293. Coordinate execution-context parameters with I-290 and runtime archive consistency with I-291. Preserve current supported runtime behavior and the separate language-FFI approval gate in I-237.
+
+**Validation:** Test every runtime declaration against its canonical signature. Exercise out-pointer producers, scalar returns, non-returning calls, allocation, destruction, and context access through JIT and AOT. Add negative tests for conflicting cached signatures and incompatible runtime layout versions.
+
+---
+
+### I-290 — Introduce explicit execution and task contexts with owned lifecycles
+
+**Severity:** Correctness / Hygiene
+**Area:** runtime
+
+**Files:** runtime/src/lib.rs:392,407; ryo-backend/src/codegen/arith.rs:364; ryo-backend/src/codegen/jit.rs:97
+
+**Summary:** ryo_rt_init records the main stack limit in one process-global atomic. Generated recursive-call checks load that global directly. This is valid for the current single-stack execution model, but a task switch or concurrent hosted execution changes the relevant stack without changing the compiled contract. Green threads are not implemented in the production runtime yet.
+
+**Resolution:** Introduce an execution context that owns argument storage, host runtime policy, and the current task context. Each task context owns its stack bounds and scheduler-visible state. Generated code accesses context state through the typed runtime ABI, instead of process-wide globals. Keep compilation artifacts independent of mutable execution state. Implement one execution and one native stack first. Integrate scheduling later against this context contract. Reconcile the process-argument isolation work in I-201 with this ownership model.
+
+**State machine:** Execution progresses through Created -> Entered -> Exited, with failed entry releasing provisional resources. Future task states are Ready -> Running -> Suspended or Completed; a suspended task returns through Ready before another dispatch. Only one worker may own a Running task. Context installation saves the previous context and restores it on nested exit or recoverable failure. Switching publishes the selected task and its stack bounds together before generated code resumes. Do not release a suspended stack or its context while saved frames can resume. On failure, discharge runtime-owned resources according to the existing failure policy; do not introduce language unwinding implicitly.
+
+**Dependencies:** Architectural priority 5. Define context access in I-289 and I-293. Complete the lifecycle before green-thread integration or concurrent hosted execution. This issue owns the common context architecture; I-201 retains the concrete argument-lifetime and host-policy checks.
+
+**Validation:** Test sequential and nested hosted entry, failed initialization, context restoration, argument lifetime, and current-stack bounds. Before enabling task execution, test repeated suspend/resume, stack changes, completion, and rejection of concurrent dispatch of one task. Include concurrent isolated executions when supported.
+
+**Gate:** The initial implementation retains current language behavior. New scheduling, cancellation, panic, or host capability semantics require explicit language-design review. Do not treat context infrastructure as authorization to ship those features.
+
+---
+
+### I-291 — Track all inputs of the nested runtime archive build
+
+**Severity:** Correctness / Hygiene
+**Area:** tooling
+
+**Files:** build-support/src/lib.rs:37; ryo-backend/build.rs:12; ryo/build.rs:9; ryo/tests/common/runner.rs:5
+
+**Summary:** Both build scripts invoke a separate cargo rustc build and hash its archive. Their explicit rerun inputs include runtime/src, the archive, and RYO_RUNTIME_LIB, but omit runtime/Cargo.toml and Cargo.lock. A runtime dependency or feature change can therefore rebuild the JIT-linked rlib without refreshing the embedded AOT archive. Nested cargo commands also assume the inherited working directory identifies this workspace.
+
+**Resolution:** Watch runtime and workspace manifests, Cargo.lock, and relevant configuration used by the nested build. Set the nested command workspace explicitly with current_dir or manifest-path. Keep the separate target directory to avoid Cargo lock deadlock. Make the backend own archive preparation and expose the path needed by integration tests instead of repeating the build and hash in the CLI.
+
+---
+
+### I-292 — Test complete IR contracts and release-mode cleanup behavior
+
+**Severity:** Correctness / Hygiene
+**Area:** ci-benchmarks
+
+**Files:** ryo-core/src/flow/inspect.rs:13; ryo-driver/src/pipeline/options.rs:3; ryo-frontend/src/ownership/cleanup.rs:663; .github/workflows/ci.yml:83
+
+**Summary:** UIR, TIR, and combined Flow/cleanup dumps exist, but Flow inspection requires a cleanup sidecar and the dump does not cover every cleanup table. CI runs workspace tests in debug mode and only TIR sentinel tests in release mode. Thus release-specific ownership publication and backend preparation do not receive the same end-to-end coverage. Existing structural and cleanup corruption tests should be retained.
+
+**Resolution:** Make every publication boundary inspectable: unresolved UIR, resolved TIR, verified Flow, cleanup-elaborated Flow, optimized cleanup, and physical ABI lowering. Snapshot complete representations for a small corpus of boundary programs. Compare old and new execution during migration, including optimized and unoptimized cleanup. Add normalized diagnostic fixtures with source identities, spans, and notes. Run selected ownership and error-propagation programs through release JIT and AOT. Keep existing corruption tests and Valgrind checks for generated memory accesses.
+
+**Contract tests:** Exercise failed publication, stale artifact versions, wrong target contexts, unavailable operands, incompatible edge arguments, and incomplete cleanup. Add transformation tests for block renumbering and edge splitting. Cover nested loops, early returns, error propagation, break, continue, projections, and replacement. Test tiny inputs and scaling inputs on the same runner type to detect fixed setup and growth costs.
+
+**Dependencies:** Acceptance coverage for I-284 through I-290 and I-293. Add tests alongside each migrated boundary rather than waiting for the complete architecture. Test-harness changes do not alter compiler execution states.
+
+---
+
+### I-293 — Separate semantic types from target layout and ABI lowering
+
+**Severity:** Correctness / Hygiene
+**Area:** codegen
+
+**Files:** ryo-core/src/types.rs:980,1239; ryo-core/src/types/errors.rs; ryo-backend/src/codegen/abi.rs:52; ryo-backend/src/codegen/errors.rs:80; ryo-backend/src/codegen/expr/mod.rs:549
+
+**Summary:** InternPool stores semantic type identity together with sizes, alignment, and field offsets. Backend emitters mix representation lowering, runtime call selection, and language decisions with Cranelift emission. LoweredAbi centralizes user-function signatures, but its representation depends on Cranelift types. A second backend must repeat decisions that should be shared, and target changes can reuse assumptions from the semantic pool.
+
+**Resolution:** Keep semantic fields, variants, ownership properties, and error-set membership in Core. Move sizes, alignment, offsets, and calling conventions into a target-specific layout context. Lower verified Flow with explicit cleanup into physical operations before Cranelift emission. Resolve aggregate and error-union representations, hidden return pointers, argument passing, and typed runtime calls at that boundary. Move language decisions such as error-message field selection into typed analysis. Reuse existing crates initially.
+
+**State machine:** Semantic types resolve independently of target layout. Layout requests progress through Uncomputed -> Computing -> Complete or Failed within one target context. Guard recursive layout requests and publish no partial layouts. ABI preparation accepts only concrete types and verified Flow with complete cleanup. Publish immutable physical bodies tagged with the target, layout context, and source body version. Reject reuse after those inputs change. Failed lowering leaves the semantic body available for diagnostics or another target.
+
+**Dependencies:** Architectural priority 4. Coordinate semantic type ownership with I-285, executable Flow with I-286, cleanup with I-287, and runtime operations with I-289. Preserve and extend the shared user-function ABI logic. I-076 remains the concrete fat-layout compatibility check, and I-237 owns approval of language-visible FFI contracts.
+
+**Validation:** Test sizes, alignment, offsets, argument passing, and return mechanisms against runtime storage on supported targets. Cover nested aggregates, every error-union alternative, borrowed and moved arguments, inout writeback, and hidden return pointers. Reject mismatched target contexts. Compare JIT and AOT execution and snapshot physical lowering independently of Cranelift emission.
+
+**Gate:** Preserve existing supported layouts and language behavior during extraction. New targets or language-visible representation and FFI changes require their existing approval and conformance gates.
+
+---
+
 ## Cross-References
 
 - Roadmap: [docs/dev/implementation_roadmap.md](docs/dev/implementation_roadmap.md)
@@ -850,4 +1042,4 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-<!-- issue-id high-water: 283 -->
+<!-- issue-id high-water: 293 -->
