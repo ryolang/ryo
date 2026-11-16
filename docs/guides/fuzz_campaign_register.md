@@ -152,16 +152,22 @@ against, and what it covered — so future campaigns don't rerun settled ground.
   **48/49 clean — zero leaks, zero invalid accesses, exact output.** The
   memory/drop-critical families additionally ran JIT under Valgrind.
 - **Findings:**
-  - **I-262** (hygiene): the *compiler process* leaks ~2.4 KB of chumsky
-    recursive-parser allocations per parse — visible only when valgrinding
-    `ryo run` itself; the repo suite valgrinds compiled programs, so CI missed
-    it. Unrelated to generated-code memory behavior.
-  - `recursion-concat-chain` AOT hits Valgrind 3.24's ARM64 frontend gap
-    (`unhandled instruction 0xF830EBE4`, `load_store` class) — a Valgrind
-    limitation, not a program defect (native runs are clean, and the family
-    passed the macOS hardened-allocator pass). Excluded from the 48/49 count.
-- **Result: CI-grade memory evidence acquired; one compiler-hygiene leak
-  filed (I-262), no generated-code memory defects.**
+  - **Compiler parser ownership:** the *compiler process* leaked ~2.4 KB of
+    chumsky recursive-parser allocations per parse — visible only when
+    valgrinding `ryo run` itself; the repo suite valgrinds compiled programs,
+    so CI missed it. The destructuring and match-pattern grammars now use
+    direct weak recursion (`81b00f1`, `785efc5`), and the Valgrind smoke suite
+    covers the compiler's parse process. Unrelated to generated-code memory
+    behavior.
+  - `recursion-concat-chain` AOT hit Valgrind 3.24's ARM64 frontend gap
+    (`unhandled instruction 0xF830EBE4`, `load_store` class) and was excluded
+    from the 48/49 count. Follow-up on 2026-11-16: a reconstructed 3000-step
+    recursive concatenation case passed under both Valgrind 3.28 and 3.24 with
+    2,977 allocations and frees and zero errors. The original fixture is no
+    longer available, so this does not establish whether compiler or Valgrind
+    changes resolved the old failure.
+- **Result: CI-grade memory evidence acquired; the compiler-parser leak was
+  fixed with direct weak recursion, with no generated-code memory defects.**
 - **Artifacts:** `/tmp/ryo-linux-fuzz/` (manifest.json, results.json, container
   logs); harness script `/tmp/ryo-linux-fuzz/run_container.sh`
 
@@ -205,7 +211,7 @@ against, and what it covered — so future campaigns don't rerun settled ground.
 | Numeric edges (overflow guards, float formatting, NaN/Inf, boundary comparisons) | `e82f503` | `e82f503` | same campaign |
 | General grammar recovery (malformed sources, multi-error files, bad tokens/indent) | `e82f503` | `e82f503` | 360-case campaign, clean except expression-chain stack overflow (fixed in `3747e17`) |
 | Deep recursion / deep programs (to 20k depth, 1500-fns chains, 9000 parens) | `e82f503` | `e82f503` | same campaign; oversize expression chains → compiler stack overflow (fixed in `3747e17`) |
-| Generated-code memory safety (Valgrind on AOT fuzz binaries, linux/arm64) | `e82f503` | `e82f503` | 48/49 clean; I-262 compiler-process leak; 1 valgrind ARM64 gap |
+| Generated-code memory safety (Valgrind on AOT fuzz binaries, linux/arm64) | `e82f503` | `e82f503` | 48/49 clean at Valgrind 3.24; reconstructed concat case clean under 3.24 and 3.28; compiler-parser recursion cycles fixed in `81b00f1` and `785efc5` |
 | Input size scaling (to 10MB literals, 8k fns, 20k stmts, 5k-field structs) | `e82f503` | `e82f503` | statement-count identity indexing made linear in `d08844c`; bytes-escape overflow fixed in `6dede11` |
 
 ## Not Yet Fuzzed (candidates, in priority order)

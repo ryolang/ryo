@@ -1,9 +1,9 @@
 //! Valgrind leak-detection smoke tests.
 //!
-//! Compiles representative .ryo programs, links them without any
-//! sanitizer, and runs them under `valgrind --leak-check=full`. Any
-//! "definitely lost" or "indirectly lost" block fails the test via
-//! `--error-exitcode=42`.
+//! Runs the compiler's parse path and representative generated .ryo
+//! programs under `valgrind --leak-check=full`. Generated fixtures are
+//! linked without any sanitizer. Any "definitely lost" or "indirectly
+//! lost" block fails the test via `--error-exitcode=42`.
 //!
 //! Why a separate harness from `asan_smoke.rs`: ASan's leak detector
 //! (LSan) misses leaks originating from Cranelift-emitted code because
@@ -90,11 +90,24 @@ fn run_valgrind_smoke_allocating(source: &str, name: &str) {
     let Some(output) = run_valgrind_smoke_impl(source, name) else {
         return; // skipped (no valgrind / explicit opt-out)
     };
+    assert_valgrind_heap_visible(&output, name);
+}
+
+fn valgrind_alloc_count(stderr: &str) -> Option<u64> {
+    stderr.lines().find_map(|line| {
+        let rest = line.split("total heap usage:").nth(1)?;
+        rest.split("allocs")
+            .next()?
+            .trim()
+            .replace(',', "")
+            .parse::<u64>()
+            .ok()
+    })
+}
+
+fn assert_valgrind_heap_visible(output: &std::process::Output, name: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let allocs = stderr.lines().find_map(|l| {
-        let rest = l.split("total heap usage:").nth(1)?;
-        rest.split("allocs").next()?.trim().parse::<u64>().ok()
-    });
+    let allocs = valgrind_alloc_count(&stderr);
     assert!(
         allocs.is_some_and(|n| n > 0),
         "{name}: Valgrind must report non-zero allocations for this \
@@ -103,6 +116,27 @@ fn run_valgrind_smoke_allocating(source: &str, name: &str) {
          static-libc link (e.g. musl) is invisible to Valgrind's \
          malloc interception. stderr:\n{stderr}"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valgrind_alloc_count;
+
+    #[test]
+    fn valgrind_alloc_count_accepts_plain_and_grouped_counts() {
+        assert_eq!(
+            valgrind_alloc_count(
+                "==1== total heap usage: 354 allocs, 340 frees, 97,952 bytes allocated"
+            ),
+            Some(354)
+        );
+        assert_eq!(
+            valgrind_alloc_count(
+                "==1== total heap usage: 2,977 allocs, 2,977 frees, 6,695,200 bytes allocated"
+            ),
+            Some(2977)
+        );
+    }
 }
 
 /// Build, link, and run a fixture under Valgrind; assert the leak
@@ -138,6 +172,35 @@ fn run_valgrind_smoke_impl(source: &str, name: &str) -> Option<std::process::Out
         String::from_utf8_lossy(&run.stderr)
     );
     Some(run)
+}
+
+#[test]
+fn valgrind_compiler_parse_no_leaks() {
+    let name = "compiler_parse";
+    if !common::smoke_lane_active(name) || !require_valgrind(name) {
+        return;
+    }
+
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("ryo crate has a workspace parent")
+        .join("examples/hello.ryo");
+    let run = Command::new("valgrind")
+        .arg("--leak-check=full")
+        .arg("--errors-for-leak-kinds=definite,indirect")
+        .arg("--error-exitcode=42")
+        .arg(env!("CARGO_BIN_EXE_ryo"))
+        .arg("parse")
+        .arg(source)
+        .output()
+        .expect("run compiler parser under valgrind");
+    assert!(
+        run.status.success(),
+        "compiler parser leaked under valgrind:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_valgrind_heap_visible(&run, name);
 }
 
 #[test]
