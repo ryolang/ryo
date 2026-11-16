@@ -465,17 +465,23 @@ pub(crate) fn convert_honored_reseat_drops(
     // Sorted iteration for deterministic sidecar emission order.
     let mut honored: Vec<usize> = honored.into_iter().collect();
     honored.sort_unstable();
+    // Honored records take over cleanup on every path: untouched arms receive
+    // block-start drops, while reseated arms consume or displace the old value
+    // and clean up the new value independently. Remove all merge-anchored
+    // old-value frees in one stable pass before appending their replacements.
+    let superseded_merge_drops: HashSet<(TirRef, TirRef)> = honored
+        .iter()
+        .map(|&idx| {
+            let drop = &own.reseat_drops[idx];
+            (drop.pre_owner.tirref(flow), drop.if_stmt)
+        })
+        .collect();
+    sidecar.drops.retain(|existing| {
+        !matches!(existing.position, DropPosition::AfterStep { inst } if superseded_merge_drops.contains(&(existing.target, inst)))
+    });
     for idx in honored {
         let drop = &own.reseat_drops[idx];
         let target = drop.pre_owner.tirref(flow);
-        // The honored record takes over cleanup on every path: untouched arms
-        // receive the block-start drop below, while reseated arms either consume
-        // or displace the old value and clean up the new value independently.
-        // A merge-anchored old-value free would redirect to the reseated slot.
-        sidecar.drops.retain(|existing| {
-            existing.target != target
-                || existing.position != DropPosition::AfterStep { inst: drop.if_stmt }
-        });
         let span = match drop.pre_owner.inst_tirref(flow) {
             Some(r) => tir.span(r),
             None => tir.span(drop.if_stmt),
