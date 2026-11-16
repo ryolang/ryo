@@ -137,18 +137,15 @@ where
     let bind_target = select! { Token::Ident(name) => name }
         .map_with(|name, e: &mut Mx<'a, '_, I>| (name, e.span()));
 
-    let bind = bind_target
-        .clone()
-        .map_with(|(name, span), e: &mut Mx<'a, '_, I>| {
-            bind_pattern(e.state(), name, crate::spans::cspan(span))
-        });
+    let bind = bind_target.map_with(|(name, span), e: &mut Mx<'a, '_, I>| {
+        bind_pattern(e.state(), name, crate::spans::cspan(span))
+    });
 
     // Direct recursion keeps the nested positional pattern's self-reference weak.
-    let nested_bind_target = bind_target.clone();
     let pat = recursive(|pat| {
         choice((
             positional_pattern_parser(pat),
-            anonymous_pattern_parser(nested_bind_target.clone()),
+            anonymous_pattern_parser(bind_target),
             bind,
         ))
         .boxed()
@@ -189,7 +186,7 @@ where
     // Braced / parenthesized forms: a self-delimiting pattern followed
     // by `= value`.
     let shaped = choice((
-        anonymous_pattern_parser(bind_target.clone()),
+        anonymous_pattern_parser(bind_target),
         positional_pattern_parser(pat),
     ))
     .then_ignore(just(Token::Assign))
