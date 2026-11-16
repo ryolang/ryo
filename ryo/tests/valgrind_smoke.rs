@@ -93,12 +93,21 @@ fn run_valgrind_smoke_allocating(source: &str, name: &str) {
     assert_valgrind_heap_visible(&output, name);
 }
 
+fn valgrind_alloc_count(stderr: &str) -> Option<u64> {
+    stderr.lines().find_map(|line| {
+        let rest = line.split("total heap usage:").nth(1)?;
+        rest.split("allocs")
+            .next()?
+            .trim()
+            .replace(',', "")
+            .parse::<u64>()
+            .ok()
+    })
+}
+
 fn assert_valgrind_heap_visible(output: &std::process::Output, name: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let allocs = stderr.lines().find_map(|l| {
-        let rest = l.split("total heap usage:").nth(1)?;
-        rest.split("allocs").next()?.trim().parse::<u64>().ok()
-    });
+    let allocs = valgrind_alloc_count(&stderr);
     assert!(
         allocs.is_some_and(|n| n > 0),
         "{name}: Valgrind must report non-zero allocations for this \
@@ -107,6 +116,27 @@ fn assert_valgrind_heap_visible(output: &std::process::Output, name: &str) {
          static-libc link (e.g. musl) is invisible to Valgrind's \
          malloc interception. stderr:\n{stderr}"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valgrind_alloc_count;
+
+    #[test]
+    fn valgrind_alloc_count_accepts_plain_and_grouped_counts() {
+        assert_eq!(
+            valgrind_alloc_count(
+                "==1== total heap usage: 354 allocs, 340 frees, 97,952 bytes allocated"
+            ),
+            Some(354)
+        );
+        assert_eq!(
+            valgrind_alloc_count(
+                "==1== total heap usage: 2,977 allocs, 2,977 frees, 6,695,200 bytes allocated"
+            ),
+            Some(2977)
+        );
+    }
 }
 
 /// Build, link, and run a fixture under Valgrind; assert the leak
