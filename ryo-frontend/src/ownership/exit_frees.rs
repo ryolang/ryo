@@ -335,20 +335,23 @@ fn return_owner_was_superseded(
     })
 }
 
-/// Reassign points per BINDING, plus owner-value → binding maps (see
-/// the helpers for what the suppressions below use them). A binding is
-/// identified by its declaring `VarDecl`'s `TirRef` (or a param's
-/// virtual ref) — never by name: one name can denote several bindings
-/// (`mut` shadow, sibling scopes), and name-keyed grouping let a
-/// shadow's reassigns suppress the outer binding's cleanup.
+/// Reassign points per BINDING, displacement-only reassign points, plus
+/// owner-value → binding maps (see the helpers for what the suppressions
+/// below use them). A binding is identified by its declaring `VarDecl`'s
+/// `TirRef` (or a param's virtual ref) — never by name: one name can
+/// denote several bindings (`mut` shadow, sibling scopes), and name-keyed
+/// grouping let a shadow's reassigns suppress the outer binding's cleanup.
 type BindingValueMaps = (
+    HashMap<TirRef, Vec<TirRef>>,
     HashMap<TirRef, Vec<TirRef>>,
     HashMap<TirRef, TirRef>,
     HashMap<TirRef, TirRef>,
 );
 
-/// Maps built by [`binding_value_maps`]: reassign points per binding,
-/// VarDecl-init → declaring inst, and Assign-value → binding. The
+/// Maps built by [`binding_value_maps`]: all reassign points per binding
+/// for debug place identity, the displacement-only subset for cleanup scheduling,
+/// VarDecl-init → declaring inst, and Assign-value → binding. Release builds
+/// leave the identity map empty because they do not run cleanup validation. The
 /// anchor-order suppression and the epilogue's binding-covering check
 /// need "is this binding reassigned AFTER some program point" (not just
 /// "reassigned somewhere") and "which binding's home slot aliases this
@@ -366,19 +369,22 @@ pub(crate) fn binding_value_maps(
     sidecar: &FunctionSidecar,
     order: &[u32],
 ) -> BindingValueMaps {
+    #[cfg(debug_assertions)]
     let mut reassign_orders: HashMap<TirRef, Vec<TirRef>> = HashMap::new();
-    for (slot, t) in sidecar.free_on_reassign.iter().enumerate() {
-        if t.is_none() {
-            continue;
-        }
+    #[cfg(not(debug_assertions))]
+    let reassign_orders: HashMap<TirRef, Vec<TirRef>> = HashMap::new();
+    let mut displacement_orders: HashMap<TirRef, Vec<TirRef>> = HashMap::new();
+    for (slot, bound) in sidecar.assign_binding.iter().enumerate() {
+        let Some(binding) = *bound else { continue };
         let r = TirRef::from_raw(slot as u32);
-        if order[r.index()] == 0 {
+        if tir.inst(r).tag != TirTag::Assign {
             continue;
         }
-        let Some(binding) = sidecar.assign_binding[slot] else {
-            continue;
-        };
+        #[cfg(debug_assertions)]
         reassign_orders.entry(binding).or_default().push(r);
+        if sidecar.free_on_reassign[slot].is_some() && order[r.index()] != 0 {
+            displacement_orders.entry(binding).or_default().push(r);
+        }
     }
     // VarDecl init value → the declaring instruction (that VarDecl IS
     // the binding's identity).
@@ -399,7 +405,12 @@ pub(crate) fn binding_value_maps(
             assign_value_of.entry(view.value).or_insert(binding);
         }
     }
-    (reassign_orders, decl_of_init, assign_value_of)
+    (
+        reassign_orders,
+        displacement_orders,
+        decl_of_init,
+        assign_value_of,
+    )
 }
 
 /// Convert honored reseat records into block-start DropOps (the unified
@@ -454,6 +465,20 @@ pub(crate) fn convert_honored_reseat_drops(
     // Sorted iteration for deterministic sidecar emission order.
     let mut honored: Vec<usize> = honored.into_iter().collect();
     honored.sort_unstable();
+    // Honored records take over cleanup on every path: untouched arms receive
+    // block-start drops, while reseated arms consume or displace the old value
+    // and clean up the new value independently. Remove all merge-anchored
+    // old-value frees in one stable pass before appending their replacements.
+    let superseded_merge_drops: HashSet<(TirRef, TirRef)> = honored
+        .iter()
+        .map(|&idx| {
+            let drop = &own.reseat_drops[idx];
+            (drop.pre_owner.tirref(flow), drop.if_stmt)
+        })
+        .collect();
+    sidecar.drops.retain(|existing| {
+        !matches!(existing.position, DropPosition::AfterStep { inst } if superseded_merge_drops.contains(&(existing.target, inst)))
+    });
     for idx in honored {
         let drop = &own.reseat_drops[idx];
         let target = drop.pre_owner.tirref(flow);

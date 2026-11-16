@@ -1,16 +1,19 @@
-//! Regression tests for bounded expression nesting and rejection above the limit.
+//! Regression tests for bounded expression nesting, rejection above the limit,
+//! and statement-count scaling.
 //!
 //! A ~7k-term `1+1+...` chain used to abort the compiler with
 //! `thread has overflowed its stack` (SIGABRT): every pass that walks
 //! expression nesting recursed one frame per chain link. Those walks
 //! are iterative for accepted programs, and astgen rejects nesting above
-//! 256 levels before later passes receive it. These tests exercise both
-//! behaviors end to end through the CLI's 32 MiB compiler thread.
+//! 256 levels before later passes receive it. A separate 20k-statement chain
+//! guards against quadratic cleanup-validation identity indexing. These tests
+//! exercise the compiler end to end through the CLI's 32 MiB compiler thread.
 
 mod common;
 use common::*;
 
 use std::process::{Command, Stdio};
+use std::time::Instant;
 use tempfile::TempDir;
 
 /// `print(1+1+... )` with `terms` ones.
@@ -24,6 +27,46 @@ fn add_chain(terms: usize) -> String {
     }
     src.push_str(")\n");
     src
+}
+
+fn statement_chain(statements: usize) -> String {
+    let mut src = String::from("fn main():\n\tx0 = 0\n");
+    for i in 1..statements {
+        src.push_str(&format!("\tx{i} = x{} + {i}\n", i - 1));
+    }
+    src.push_str(&format!("\tprint(x{})\n", statements - 1));
+    src
+}
+
+#[test]
+fn deep_statement_chain_completes_within_scaling_budget() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let test_file = create_test_file(
+        temp_dir.path(),
+        "deep_statement_chain.ryo",
+        &statement_chain(20_000),
+    );
+    let started = Instant::now();
+    let output = Command::new(env!("CARGO_BIN_EXE_ryo"))
+        .arg("ir")
+        .arg("--emit=tir")
+        .arg(&test_file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("Failed to run ryo ir command");
+    let elapsed = started.elapsed();
+
+    assert!(
+        output.status.success(),
+        "deep statement chain analysis failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "20k statement chain took {elapsed:?}, exceeding the 30 second budget"
+    );
 }
 
 fn right_nested_add_chain(terms: usize) -> String {

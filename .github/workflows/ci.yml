@@ -87,6 +87,9 @@ jobs:
       - name: Release-profile sentinel tests
         if: matrix.os == 'ubuntu-latest'
         run: cargo test --release -p ryo-core --lib tir::tests
+      - name: Release-profile ownership cleanup tests
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --release -p ryo-frontend --lib ownership::tests::frees_reassign
 
   windows:
     name: Test (windows-latest)
