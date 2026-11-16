@@ -32,6 +32,7 @@ pub(crate) struct CleanupContext<'a> {
     pub(super) reassign_targets: &'a HashSet<Owner>,
     pub(super) live_binding_owners: &'a HashSet<Owner>,
     pub(super) inout_escape_owners: &'a HashSet<Owner>,
+    #[cfg(debug_assertions)]
     pub(super) reassign_orders: &'a HashMap<TirRef, Vec<TirRef>>,
     pub(super) displacement_orders: &'a HashMap<TirRef, Vec<TirRef>>,
     pub(super) decl_of_init: &'a HashMap<TirRef, TirRef>,

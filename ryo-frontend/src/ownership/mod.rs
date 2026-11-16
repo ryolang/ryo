@@ -856,7 +856,7 @@ fn analyze_function(
         .collect();
     // Identity and displacement-only reassign points per binding, plus
     // owner-value → binding maps (see the helpers for their consumers).
-    let (reassign_orders, displacement_orders, decl_of_init, assign_value_of) =
+    let (_reassign_orders, displacement_orders, decl_of_init, assign_value_of) =
         binding_value_maps(tir, sidecar, &order);
     let live_binding_owners: HashSet<Owner> = own.current_owner.values().copied().collect();
     // Owners that escape through an `inout str` param's write-back
@@ -887,7 +887,8 @@ fn analyze_function(
         reassign_targets: &reassign_targets,
         live_binding_owners: &live_binding_owners,
         inout_escape_owners: &inout_escape_owners,
-        reassign_orders: &reassign_orders,
+        #[cfg(debug_assertions)]
+        reassign_orders: &_reassign_orders,
         displacement_orders: &displacement_orders,
         decl_of_init: &decl_of_init,
         assign_value_of: &assign_value_of,

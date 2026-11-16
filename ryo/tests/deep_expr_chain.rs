@@ -1,11 +1,13 @@
-//! Regression tests for bounded expression nesting and rejection above the limit.
+//! Regression tests for bounded expression nesting, rejection above the limit,
+//! and statement-count scaling.
 //!
 //! A ~7k-term `1+1+...` chain used to abort the compiler with
 //! `thread has overflowed its stack` (SIGABRT): every pass that walks
 //! expression nesting recursed one frame per chain link. Those walks
 //! are iterative for accepted programs, and astgen rejects nesting above
-//! 256 levels before later passes receive it. These tests exercise both
-//! behaviors end to end through the CLI's 32 MiB compiler thread.
+//! 256 levels before later passes receive it. A separate 20k-statement chain
+//! guards against quadratic cleanup-validation identity indexing. These tests
+//! exercise the compiler end to end through the CLI's 32 MiB compiler thread.
 
 mod common;
 use common::*;

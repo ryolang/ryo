@@ -2,6 +2,138 @@ use super::super::*;
 use super::common::*;
 
 #[test]
+fn complete_reassign_index_is_debug_only() {
+    let src = r#"fn take(move value: str):
+	print(value)
+fn main():
+	mut s = "a" + "b"
+	take(s)
+	s = "c" + "d"
+	s = "e" + "f"
+"#;
+    let (diags, mut sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|diag| diag.severity != ryo_core::diag::Severity::Error),
+        "expected no errors: {diags:?}"
+    );
+    let main = tirs
+        .iter()
+        .position(|tir| pool.str(tir.name) == "main")
+        .expect("main TIR");
+    let tir = &tirs[main];
+    let sc = take_function_sidecar(&mut sidecar, main);
+    let flow = build_flow(tir, &pool);
+    let reseats: Vec<TirRef> = sc
+        .assign_binding
+        .iter()
+        .enumerate()
+        .filter(|(slot, bound)| {
+            bound.is_some() && tir.inst(TirRef::from_raw(*slot as u32)).tag == TirTag::Assign
+        })
+        .map(|(slot, _)| TirRef::from_raw(slot as u32))
+        .collect();
+    assert_eq!(reseats.len(), 2, "fixture must contain both reseats");
+    let binding = sc.assign_binding[reseats[0].index()].expect("reseat binding");
+    assert_eq!(sc.assign_binding[reseats[1].index()], Some(binding));
+    assert!(sc.free_on_reassign[reseats[0].index()].is_none());
+    assert!(sc.free_on_reassign[reseats[1].index()].is_some());
+    let order: Vec<u32> = (0..tir.instructions.len() as u32)
+        .map(|i| {
+            if i == 0 {
+                0
+            } else {
+                flow.order_of(TirRef::from_raw(i)).unwrap_or(0)
+            }
+        })
+        .collect();
+    let (complete, displacement, _, _) = binding_value_maps(tir, &sc, &order);
+
+    #[cfg(debug_assertions)]
+    assert_eq!(
+        complete.get(&binding).map(Vec::as_slice),
+        Some(reseats.as_slice()),
+        "debug cleanup validation needs every reseat"
+    );
+    #[cfg(not(debug_assertions))]
+    assert!(
+        complete.is_empty(),
+        "release must not retain the debug-only identity index"
+    );
+    assert_eq!(
+        displacement.get(&binding).map(Vec::as_slice),
+        Some(&reseats[1..]),
+        "release cleanup still needs the displacing reseat"
+    );
+}
+
+#[test]
+fn conditional_move_then_dead_reseat_has_one_cleanup_per_path() {
+    let src = r#"fn take(move value: str):
+	print(value)
+fn run(flag: bool):
+	mut s = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" + "b"
+	if flag:
+		take(s)
+		s = "cccccccccccccccccccccccccccccccccccccccc" + "d"
+	print("end")
+"#;
+    let (diags, mut sidecar, tirs, mut pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|diag| diag.severity != ryo_core::diag::Severity::Error),
+        "expected no errors: {diags:?}"
+    );
+    let run = tirs
+        .iter()
+        .position(|tir| pool.str(tir.name) == "run")
+        .expect("run TIR");
+    let tir = &tirs[run];
+    let sc = take_function_sidecar(&mut sidecar, run);
+    let s = pool.intern_str("s");
+    let mut pre_owner = None;
+    let mut reseat = None;
+    let mut if_stmt = None;
+    for (index, inst) in tir.instructions.iter().enumerate().skip(1) {
+        let r = TirRef::from_raw(index as u32);
+        match inst.tag {
+            TirTag::VarDecl if tir.var_decl_view(r).name == s => {
+                pre_owner = Some(tir.var_decl_view(r).initializer);
+            }
+            TirTag::Assign if tir.assign_view(r).name == s => reseat = Some(r),
+            TirTag::IfStmt => if_stmt = Some(r),
+            _ => {}
+        }
+    }
+    let pre_owner = pre_owner.expect("pre-branch owner");
+    let reseat = reseat.expect("conditional reseat");
+    let if_stmt = if_stmt.expect("if statement");
+    let new_owner = tir.assign_view(reseat).value;
+    assert!(sc.free_on_reassign[reseat.index()].is_none());
+
+    assert!(sc.drops.iter().any(|drop| {
+        drop.target == pre_owner
+            && matches!(
+                drop.position,
+                ryo_core::flow::DropPosition::BlockStart { .. }
+            )
+    }));
+    assert!(sc.drops.iter().any(|drop| {
+        drop.target == new_owner
+            && drop.position == ryo_core::flow::DropPosition::AfterStep { inst: reseat }
+    }));
+    assert!(
+        !sc.drops.iter().any(|drop| {
+            drop.target == pre_owner
+                && drop.position == ryo_core::flow::DropPosition::AfterStep { inst: if_stmt }
+        }),
+        "the untouched-path drop and the reseat-path cleanup cover every path; an exit free would release the reseated slot twice"
+    );
+}
+
+#[test]
 fn loop_carried_struct_reassign_pre_owner_not_double_freed() {
     // `mut child = f(); while c: child = g()` with child never read
     // after the loop (the natural do-while parser-loop shape): the

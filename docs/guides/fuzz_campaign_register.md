@@ -180,13 +180,16 @@ against, and what it covered — so future campaigns don't rerun settled ground.
   pass).
 - **Scaling evidence** (JIT wall time, this host): linear families — 10MB
   string literal 0.57s, 5MB bytes 0.3s, 8k functions 2.9s, 5000-field struct
-  0.85s, 1000-arm match 0.35s, 1000-deep chain 0.8s. Quadratic families
-  (I-263): statements 5k→5.0s, 10k→18.6s, 20k→71.5s; chained statements
+  0.85s, 1000-arm match 0.35s, 1000-deep chain 0.8s. Quadratic families at this
+  revision: statements 5k→5.0s, 10k→18.6s, 20k→71.5s; chained statements
   10k→10.7s→15k 22.6s; string-literal bindings 1k→1.2s, 3k→10.2s, 5k→28s.
-- **Findings filed:** I-263 (quadratic per-statement compile cost; parse of the
-  same file is 1.2s so the bottleneck is sema/ownership) and a bytes-escape
-  stack overflow past ~25k escapes (Logos DFA recursion per escape, not the
-  escape decoder; fixed in `6dede11`, repro in `bug_reports/`).
+  The statement-count bottleneck was quadratic cleanup-validation identity
+  construction; `d08844c` made that indexing linear and `f272763` records its
+  validation.
+- **Findings filed:** the statement-count compile-cost regression described
+  above (parse of the same file is 1.2s, so the bottleneck was sema/ownership)
+  and a bytes-escape stack overflow past ~25k escapes (Logos DFA recursion per
+  escape, not the escape decoder; fixed in `6dede11`, repro in `bug_reports/`).
 - **Artifacts:** `/tmp/ryo-size-fuzz/run-001/` (manifest.json, harness.py,
   per-case logs and timings); harness at `/tmp/ryo-size-fuzz/harness.py`
 
@@ -203,7 +206,7 @@ against, and what it covered — so future campaigns don't rerun settled ground.
 | General grammar recovery (malformed sources, multi-error files, bad tokens/indent) | `e82f503` | `e82f503` | 360-case campaign, clean except expression-chain stack overflow (fixed in `3747e17`) |
 | Deep recursion / deep programs (to 20k depth, 1500-fns chains, 9000 parens) | `e82f503` | `e82f503` | same campaign; oversize expression chains → compiler stack overflow (fixed in `3747e17`) |
 | Generated-code memory safety (Valgrind on AOT fuzz binaries, linux/arm64) | `e82f503` | `e82f503` | 48/49 clean; I-262 compiler-process leak; 1 valgrind ARM64 gap |
-| Input size scaling (to 10MB literals, 8k fns, 20k stmts, 5k-field structs) | `e82f503` | `e82f503` | clean except I-263 quadratic costs; bytes-escape overflow fixed in `6dede11` |
+| Input size scaling (to 10MB literals, 8k fns, 20k stmts, 5k-field structs) | `e82f503` | `e82f503` | statement-count identity indexing made linear in `d08844c`; bytes-escape overflow fixed in `6dede11` |
 
 ## Not Yet Fuzzed (candidates, in priority order)
 

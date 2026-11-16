@@ -482,7 +482,65 @@ fn main():
             }
         })
         .collect();
-    let (reassign_orders, _, _, _) = binding_value_maps(tir, &sc, &order);
+    let s_decl = flow.places.iter().find_map(|place| {
+        if let Place::Local { decl, name, .. } = place
+            && pool.str(*name) == "s"
+        {
+            Some(*decl)
+        } else {
+            None
+        }
+    });
+    let s_decl = s_decl.expect("fixture's s binding");
+    let s_reseats: Vec<TirRef> = sc
+        .assign_binding
+        .iter()
+        .enumerate()
+        .filter(|(slot, bound)| {
+            **bound == Some(s_decl)
+                && tir.inst(TirRef::from_raw(*slot as u32)).tag == TirTag::Assign
+        })
+        .map(|(slot, _)| TirRef::from_raw(slot as u32))
+        .collect();
+    assert_eq!(s_reseats.len(), 2, "fixture must contain both s reseats");
+    assert!(sc.free_on_reassign[s_reseats[0].index()].is_none());
+    assert!(sc.free_on_reassign[s_reseats[1].index()].is_some());
+    let (reassign_orders, displacement_orders, _, _) = binding_value_maps(tir, &sc, &order);
+    assert_eq!(
+        reassign_orders.get(&s_decl).map(Vec::as_slice),
+        Some(s_reseats.as_slice()),
+        "the complete identity index must contain both reseats"
+    );
+    assert_eq!(
+        displacement_orders.get(&s_decl).map(Vec::as_slice),
+        Some(&s_reseats[1..]),
+        "the displacement subset must contain only the displacing reseat"
+    );
+
+    let match_inst = (1..tir.instructions.len() as u32)
+        .map(TirRef::from_raw)
+        .find(|&r| tir.inst(r).tag == TirTag::Match)
+        .expect("fixture's match");
+    let expected_token = flow.places.iter().enumerate().find_map(|(index, place)| {
+        if let Place::Token { name, .. } = place
+            && pool.str(*name) == "x"
+        {
+            Some(ryo_core::flow::PlaceId(index as u32))
+        } else {
+            None
+        }
+    });
+    let expected_token = expected_token.expect("fixture's x token place");
+    let token_adoptions: Vec<(TirRef, Vec<ryo_core::flow::PlaceId>)> = flow
+        .token_places_iter()
+        .map(|(inst, places)| (inst, places.to_vec()))
+        .collect();
+    assert_eq!(
+        token_adoptions,
+        vec![(match_inst, vec![expected_token])],
+        "the match must adopt exactly the x payload token"
+    );
+
     let mut saw_repeated_reassignment = false;
     for place in &flow.places {
         let Place::Local { decl, .. } = place else {

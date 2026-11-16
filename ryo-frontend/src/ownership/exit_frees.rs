@@ -349,8 +349,9 @@ type BindingValueMaps = (
 );
 
 /// Maps built by [`binding_value_maps`]: all reassign points per binding
-/// for place identity, the displacement-only subset for cleanup scheduling,
-/// VarDecl-init → declaring inst, and Assign-value → binding. The
+/// for debug place identity, the displacement-only subset for cleanup scheduling,
+/// VarDecl-init → declaring inst, and Assign-value → binding. Release builds
+/// leave the identity map empty because they do not run cleanup validation. The
 /// anchor-order suppression and the epilogue's binding-covering check
 /// need "is this binding reassigned AFTER some program point" (not just
 /// "reassigned somewhere") and "which binding's home slot aliases this
@@ -368,7 +369,10 @@ pub(crate) fn binding_value_maps(
     sidecar: &FunctionSidecar,
     order: &[u32],
 ) -> BindingValueMaps {
+    #[cfg(debug_assertions)]
     let mut reassign_orders: HashMap<TirRef, Vec<TirRef>> = HashMap::new();
+    #[cfg(not(debug_assertions))]
+    let reassign_orders: HashMap<TirRef, Vec<TirRef>> = HashMap::new();
     let mut displacement_orders: HashMap<TirRef, Vec<TirRef>> = HashMap::new();
     for (slot, bound) in sidecar.assign_binding.iter().enumerate() {
         let Some(binding) = *bound else { continue };
@@ -376,6 +380,7 @@ pub(crate) fn binding_value_maps(
         if tir.inst(r).tag != TirTag::Assign {
             continue;
         }
+        #[cfg(debug_assertions)]
         reassign_orders.entry(binding).or_default().push(r);
         if sidecar.free_on_reassign[slot].is_some() && order[r.index()] != 0 {
             displacement_orders.entry(binding).or_default().push(r);
@@ -463,6 +468,14 @@ pub(crate) fn convert_honored_reseat_drops(
     for idx in honored {
         let drop = &own.reseat_drops[idx];
         let target = drop.pre_owner.tirref(flow);
+        // The honored record takes over cleanup on every path: untouched arms
+        // receive the block-start drop below, while reseated arms either consume
+        // or displace the old value and clean up the new value independently.
+        // A merge-anchored old-value free would redirect to the reseated slot.
+        sidecar.drops.retain(|existing| {
+            existing.target != target
+                || existing.position != DropPosition::AfterStep { inst: drop.if_stmt }
+        });
         let span = match drop.pre_owner.inst_tirref(flow) {
             Some(r) => tir.span(r),
             None => tir.span(drop.if_stmt),
