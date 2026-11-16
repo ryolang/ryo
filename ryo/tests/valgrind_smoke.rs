@@ -1,9 +1,9 @@
 //! Valgrind leak-detection smoke tests.
 //!
-//! Compiles representative .ryo programs, links them without any
-//! sanitizer, and runs them under `valgrind --leak-check=full`. Any
-//! "definitely lost" or "indirectly lost" block fails the test via
-//! `--error-exitcode=42`.
+//! Runs the compiler's parse path and representative generated .ryo
+//! programs under `valgrind --leak-check=full`. Generated fixtures are
+//! linked without any sanitizer. Any "definitely lost" or "indirectly
+//! lost" block fails the test via `--error-exitcode=42`.
 //!
 //! Why a separate harness from `asan_smoke.rs`: ASan's leak detector
 //! (LSan) misses leaks originating from Cranelift-emitted code because
@@ -90,6 +90,10 @@ fn run_valgrind_smoke_allocating(source: &str, name: &str) {
     let Some(output) = run_valgrind_smoke_impl(source, name) else {
         return; // skipped (no valgrind / explicit opt-out)
     };
+    assert_valgrind_heap_visible(&output, name);
+}
+
+fn assert_valgrind_heap_visible(output: &std::process::Output, name: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let allocs = stderr.lines().find_map(|l| {
         let rest = l.split("total heap usage:").nth(1)?;
@@ -138,6 +142,35 @@ fn run_valgrind_smoke_impl(source: &str, name: &str) -> Option<std::process::Out
         String::from_utf8_lossy(&run.stderr)
     );
     Some(run)
+}
+
+#[test]
+fn valgrind_compiler_parse_no_leaks() {
+    let name = "compiler_parse";
+    if !common::smoke_lane_active(name) || !require_valgrind(name) {
+        return;
+    }
+
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("ryo crate has a workspace parent")
+        .join("examples/hello.ryo");
+    let run = Command::new("valgrind")
+        .arg("--leak-check=full")
+        .arg("--errors-for-leak-kinds=definite,indirect")
+        .arg("--error-exitcode=42")
+        .arg(env!("CARGO_BIN_EXE_ryo"))
+        .arg("parse")
+        .arg(source)
+        .output()
+        .expect("run compiler parser under valgrind");
+    assert!(
+        run.status.success(),
+        "compiler parser leaked under valgrind:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_valgrind_heap_visible(&run, name);
 }
 
 #[test]
