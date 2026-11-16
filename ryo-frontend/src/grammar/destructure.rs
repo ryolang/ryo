@@ -18,6 +18,75 @@ fn bind_pattern(state: &mut ParseState, name: StringId, span: ryo_core::span::Sp
     }
 }
 
+fn anonymous_pattern_parser<'a, I>(
+    bind_target: impl Parser<'a, I, (StringId, SimpleSpan), PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, PatternId, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    // One field of an anonymous pattern: a pun (`q`), a wildcard
+    // field (`_` or `y = _`), or a rename (`x = quot`). Renaming a
+    // field spelled `_` (`{_ = x}`) is rejected: `_` binds nothing.
+    // Yields the scalar `PatternField`; the arena push happens at
+    // `pattern_anon`.
+    let field = bind_target
+        .clone()
+        .then(just(Token::Assign).ignore_then(bind_target).or_not())
+        .try_map_with(|((name, span), rename), e: &mut Mx<'a, '_, I>| {
+            let pool = &e.state().pool;
+            if pool.str(name) == "_" && rename.is_some() {
+                return Err(Rich::custom(
+                    span,
+                    ParseDiag::Message("wildcard field `_` binds nothing; drop the `= ...`".into()),
+                ));
+            }
+            let kind = match rename {
+                None if pool.str(name) == "_" => PatternFieldKind::Wildcard,
+                None => PatternFieldKind::Pun,
+                Some((bind_name, _)) if pool.str(bind_name) == "_" => PatternFieldKind::Wildcard,
+                Some((bind_name, _)) => PatternFieldKind::Rename(bind_name),
+            };
+            Ok(PatternField { name, kind })
+        });
+
+    field
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::LBrace), just(Token::RBrace))
+        .map_with(|fields, e: &mut Mx<'a, '_, I>| {
+            let span = crate::spans::cspan(e.span());
+            e.state().pattern_anon(&fields, span)
+        })
+}
+
+fn positional_pattern_parser<'a, I>(
+    pat: impl Parser<'a, I, PatternId, PExtra<'a>> + Clone + 'a,
+) -> impl Parser<'a, I, PatternId, PExtra<'a>> + Clone + 'a
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+{
+    // Positional pattern: the comma after the first element is
+    // mandatory — exactly like the value-side tuple sugar and the
+    // positional type sugar, `(a)` never parses here.
+    pat.clone()
+        .then_ignore(just(Token::Comma))
+        .then(
+            pat.separated_by(just(Token::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>(),
+        )
+        .delimited_by(just(Token::LParen), just(Token::RParen))
+        .map_with(|(first, rest), e: &mut Mx<'a, '_, I>| {
+            let span = crate::spans::cspan(e.span());
+            let mut elems = Vec::with_capacity(rest.len() + 1);
+            elems.push(first);
+            elems.extend(rest);
+            e.state().pattern_positional(&elems, span)
+        })
+}
+
 /// A destructuring statement `pattern = value` (M10). One parse per
 /// form, ordered choice, no `attempt()` — the alternatives are
 /// disjoint after their first token and a failing alternative rewinds
@@ -62,80 +131,28 @@ pub(super) fn destructure_stmt_parser<'a, I>(
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
 {
-    // The recursive pattern handle. `Recursive` (declare/define, what
-    // `recursive()` is sugar for) is what lets the anon and
-    // positional sub-parsers be shared between the full pattern
-    // grammar — positional elements recurse through `pat` — and the
-    // statement forms below.
-    let mut pat = Recursive::declare();
-
     // A bare binding target: an identifier, or `_` (by name). Yields
     // the name with its span; the pattern node is pushed by the
     // consumer, which decides between `bind` and the paren-less form.
     let bind_target = select! { Token::Ident(name) => name }
         .map_with(|name, e: &mut Mx<'a, '_, I>| (name, e.span()));
 
-    let bind = bind_target.map_with(|(name, span), e: &mut Mx<'a, '_, I>| {
-        bind_pattern(e.state(), name, crate::spans::cspan(span))
-    });
-
-    // One field of an anonymous pattern: a pun (`q`), a wildcard
-    // field (`_` or `y = _`), or a rename (`x = quot`). Renaming a
-    // field spelled `_` (`{_ = x}`) is rejected: `_` binds nothing.
-    // Yields the scalar `PatternField`; the arena push happens at
-    // `pattern_anon`.
-    let field = bind_target
-        .then(just(Token::Assign).ignore_then(bind_target).or_not())
-        .try_map_with(|((name, span), rename), e: &mut Mx<'a, '_, I>| {
-            let pool = &e.state().pool;
-            if pool.str(name) == "_" && rename.is_some() {
-                return Err(Rich::custom(
-                    span,
-                    ParseDiag::Message("wildcard field `_` binds nothing; drop the `= ...`".into()),
-                ));
-            }
-            let kind = match rename {
-                None if pool.str(name) == "_" => PatternFieldKind::Wildcard,
-                None => PatternFieldKind::Pun,
-                Some((bind_name, _)) if pool.str(bind_name) == "_" => PatternFieldKind::Wildcard,
-                Some((bind_name, _)) => PatternFieldKind::Rename(bind_name),
-            };
-            Ok(PatternField { name, kind })
-        });
-
-    let anon = field
-        .separated_by(just(Token::Comma))
-        .allow_trailing()
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .delimited_by(just(Token::LBrace), just(Token::RBrace))
-        .map_with(|fields, e: &mut Mx<'a, '_, I>| {
-            let span = crate::spans::cspan(e.span());
-            e.state().pattern_anon(&fields, span)
-        });
-
-    // Positional pattern: the comma after the first element is
-    // mandatory — exactly like the value-side tuple sugar and the
-    // positional type sugar, `(a)` never parses here.
-    let positional = pat
+    let bind = bind_target
         .clone()
-        .then_ignore(just(Token::Comma))
-        .then(
-            pat.clone()
-                .separated_by(just(Token::Comma))
-                .allow_trailing()
-                .collect::<Vec<_>>(),
-        )
-        .delimited_by(just(Token::LParen), just(Token::RParen))
-        .map_with(|(first, rest), e: &mut Mx<'a, '_, I>| {
-            let span = crate::spans::cspan(e.span());
-            let mut elems = Vec::with_capacity(rest.len() + 1);
-            elems.push(first);
-            elems.extend(rest);
-            e.state().pattern_positional(&elems, span)
+        .map_with(|(name, span), e: &mut Mx<'a, '_, I>| {
+            bind_pattern(e.state(), name, crate::spans::cspan(span))
         });
 
-    pat.define(choice((positional.clone(), anon, bind)).boxed());
+    // Direct recursion keeps the nested positional pattern's self-reference weak.
+    let nested_bind_target = bind_target.clone();
+    let pat = recursive(|pat| {
+        choice((
+            positional_pattern_parser(pat),
+            anonymous_pattern_parser(nested_bind_target.clone()),
+            bind,
+        ))
+        .boxed()
+    });
 
     // Paren-less form: `a, b = e`. Bindings only — nesting belongs to
     // the parenthesized form.
@@ -171,13 +188,16 @@ where
 
     // Braced / parenthesized forms: a self-delimiting pattern followed
     // by `= value`.
-    let shaped = choice((anon, positional))
-        .then_ignore(just(Token::Assign))
-        .then(value.clone())
-        .map_with(|(target, value), e: &mut Mx<'a, '_, I>| {
-            let span = crate::spans::cspan(e.span());
-            e.state().destructure(target, value, span)
-        });
+    let shaped = choice((
+        anonymous_pattern_parser(bind_target.clone()),
+        positional_pattern_parser(pat),
+    ))
+    .then_ignore(just(Token::Assign))
+    .then(value.clone())
+    .map_with(|(target, value), e: &mut Mx<'a, '_, I>| {
+        let span = crate::spans::cspan(e.span());
+        e.state().destructure(target, value, span)
+    });
 
     // `(a) = x`: one binding, no trailing comma, followed by `=`. The
     // shape is a targeted error (E0112), but recover as a PLAIN
