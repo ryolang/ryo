@@ -110,10 +110,9 @@ where
 /// - `(a) = x` — a one-element parenthesized pattern without the
 ///   trailing comma is unspellable (`(a)` is an expression), so the
 ///   shape parses whole and reports the targeted
-///   `SingleElemDestructuring` diagnostic, recovering the line to an
-///   `Error` statement — the `MisplacedAttribute` shape, so the
-///   message stands alone instead of degrading into a generic
-///   "expected newline" tail error.
+///   `SingleElemDestructuring` diagnostic, then recovers as a plain
+///   binding of `a` so downstream uses do not cascade undefined-variable
+///   errors.
 ///
 /// Note: when `shaped` parses a well-formed pattern that turns out
 /// not to be followed by `=` (a bare `(a, b)` or `{x=1}` expression
