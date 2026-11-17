@@ -38,6 +38,7 @@ unsafe extern "C" {
     fn _read(fd: c_int, buf: *mut c_void, count: u32) -> c_int;
     fn _setmode(fd: c_int, mode: c_int) -> c_int;
     fn _errno() -> *mut c_int;
+    fn GetLastError() -> u32;
 }
 
 // Thread-local errno accessors for the EINTR retry in `read_line_from`
@@ -162,10 +163,18 @@ fn errno() -> c_int {
         *__errno_location()
     }
     #[cfg(windows)]
-    // SAFETY: `_errno` always returns a valid pointer to the calling
-    // thread's CRT errno slot.
-    unsafe {
-        *_errno()
+    {
+        // SAFETY: GetLastError reads the calling thread's native error. This
+        // call follows the failed `_write` without an intervening Win32 call.
+        let native_error = unsafe { GetLastError() };
+        if native_error == 109 || native_error == 232 {
+            // ERROR_BROKEN_PIPE and ERROR_NO_DATA: the CRT reports these as
+            // EINVAL rather than EPIPE, so preserve the native distinction.
+            return libc::EPIPE;
+        }
+        // SAFETY: `_errno` always returns a valid pointer to the calling
+        // thread's CRT errno slot.
+        unsafe { *_errno() }
     }
 }
 

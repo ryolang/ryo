@@ -1727,3 +1727,40 @@ fn generated_process_policy_rejects_same_thread_reentry() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[cfg(all(not(windows), not(miri)))]
+#[test]
+fn generated_process_policy_rejects_pending_host_sigpipe() {
+    if std::env::var_os("RYO_RT_POLICY_PENDING_CHILD").is_some() {
+        let set = policy_sigpipe_set();
+        // SAFETY: a real host handler keeps the signal pending while blocked.
+        let mut host_action = unsafe { core::mem::zeroed::<libc::sigaction>() };
+        host_action.sa_sigaction = host_sigpipe_handler as *const () as usize;
+        unsafe {
+            assert_eq!(libc::sigemptyset(&mut host_action.sa_mask), 0);
+            assert_eq!(
+                libc::sigaction(libc::SIGPIPE, &host_action, core::ptr::null_mut()),
+                0
+            );
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_BLOCK, &set, core::ptr::null_mut()),
+                0
+            );
+            assert_eq!(libc::raise(libc::SIGPIPE), 0);
+        }
+        assert!(GeneratedProcessPolicyGuard::enter().is_none());
+        assert!(policy_sigpipe_is_blocked());
+        return;
+    }
+
+    let output = policy_child_output(
+        "tests::generated_process_policy_rejects_pending_host_sigpipe",
+        "RYO_RT_POLICY_PENDING_CHILD",
+    );
+    assert!(
+        output.status.success(),
+        "pending-signal child failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

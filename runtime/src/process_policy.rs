@@ -2,8 +2,6 @@ use core::ffi::c_int;
 use core::marker::PhantomData;
 
 #[cfg(all(not(windows), not(miri)))]
-use core::hint::spin_loop;
-#[cfg(all(not(windows), not(miri)))]
 use core::mem::MaybeUninit;
 #[cfg(all(not(windows), not(miri)))]
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -12,6 +10,10 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 static POLICY_LOCK: AtomicBool = AtomicBool::new(false);
 #[cfg(all(not(windows), not(miri)))]
 static POLICY_OWNER: AtomicUsize = AtomicUsize::new(0);
+#[cfg(all(not(windows), not(miri)))]
+static mut POLICY_MUTEX: libc::pthread_mutex_t = libc::PTHREAD_MUTEX_INITIALIZER;
+#[cfg(all(not(windows), not(miri)))]
+static mut POLICY_CONDITION: libc::pthread_cond_t = libc::PTHREAD_COND_INITIALIZER;
 
 #[cfg(all(not(windows), not(miri)))]
 struct PolicyState {
@@ -20,8 +22,31 @@ struct PolicyState {
 }
 
 #[cfg(all(not(windows), not(miri)))]
+fn lock_policy_mutex() {
+    // SAFETY: the static mutex has a valid process-lifetime initializer.
+    unsafe { libc::pthread_mutex_lock(core::ptr::addr_of_mut!(POLICY_MUTEX)) };
+}
+
+#[cfg(all(not(windows), not(miri)))]
+fn unlock_policy_mutex() {
+    // SAFETY: the caller owns the static mutex.
+    unsafe { libc::pthread_mutex_unlock(core::ptr::addr_of_mut!(POLICY_MUTEX)) };
+}
+
+#[cfg(all(not(windows), not(miri)))]
+fn release_policy() {
+    lock_policy_mutex();
+    POLICY_OWNER.store(0, Ordering::Release);
+    POLICY_LOCK.store(false, Ordering::Release);
+    // SAFETY: the condition and mutex are valid static objects. Signal while
+    // holding the mutex so one waiter can recheck the released state.
+    unsafe { libc::pthread_cond_signal(core::ptr::addr_of_mut!(POLICY_CONDITION)) };
+    unlock_policy_mutex();
+}
+
+#[cfg(all(not(windows), not(miri)))]
 fn sigpipe_set() -> Result<libc::sigset_t, ()> {
-    let mut set = MaybeUninit::<libc::sigset_t>::uninit();
+    let mut set = MaybeUninit::<libc::sigset_t>::zeroed();
     // SAFETY: set points to writable storage for a sigset_t.
     if unsafe { libc::sigemptyset(set.as_mut_ptr()) } != 0 {
         return Err(());
@@ -49,20 +74,42 @@ fn default_sigpipe_action() -> Result<libc::sigaction, ()> {
 }
 
 #[cfg(all(not(windows), not(miri)))]
+fn sigpipe_is_pending() -> Result<bool, ()> {
+    let mut pending = MaybeUninit::<libc::sigset_t>::zeroed();
+    // SAFETY: pending points to writable storage for a sigset_t.
+    if unsafe { libc::sigpending(pending.as_mut_ptr()) } != 0 {
+        return Err(());
+    }
+    // SAFETY: the buffer was zeroed and sigpending succeeded.
+    let pending = unsafe { pending.assume_init() };
+    // SAFETY: pending is initialized and SIGPIPE is a valid signal number.
+    match unsafe { libc::sigismember(&pending, libc::SIGPIPE) } {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(()),
+    }
+}
+
+#[cfg(all(not(windows), not(miri)))]
 fn enter_generated_policy() -> Result<PolicyState, ()> {
     let set = sigpipe_set()?;
-    let mut previous_mask = MaybeUninit::<libc::sigset_t>::uninit();
+    let mut previous_mask = MaybeUninit::<libc::sigset_t>::zeroed();
     // SAFETY: set is initialized and previous_mask is a valid out-pointer.
     // Blocking SIGPIPE during the transition prevents pending-signal delivery
     // while the action and thread mask are between states.
     if unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &set, previous_mask.as_mut_ptr()) } != 0 {
         return Err(());
     }
-    // SAFETY: pthread_sigmask initialized previous_mask above.
+    // SAFETY: the buffer was zeroed and pthread_sigmask succeeded.
     let previous_mask = unsafe { previous_mask.assume_init() };
 
     let result = (|| {
-        let mut previous_action = MaybeUninit::<libc::sigaction>::uninit();
+        if sigpipe_is_pending()? {
+            // A pending host signal must retain its host action and mask. Do
+            // not install SIG_DFL and deliver it before generated main runs.
+            return Err(());
+        }
+        let mut previous_action = MaybeUninit::<libc::sigaction>::zeroed();
         // SAFETY: a null new action queries the current action without changing it.
         if unsafe {
             libc::sigaction(
@@ -132,21 +179,27 @@ impl GeneratedProcessPolicyGuard {
             if POLICY_OWNER.load(Ordering::Acquire) == current_thread {
                 return None;
             }
-            while POLICY_LOCK
-                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-                .is_err()
-            {
-                spin_loop();
+            lock_policy_mutex();
+            while POLICY_LOCK.load(Ordering::Relaxed) {
+                // SAFETY: both static objects are valid. The wait releases the
+                // mutex while suspended and reacquires it before returning.
+                unsafe {
+                    libc::pthread_cond_wait(
+                        core::ptr::addr_of_mut!(POLICY_CONDITION),
+                        core::ptr::addr_of_mut!(POLICY_MUTEX),
+                    )
+                };
             }
+            POLICY_LOCK.store(true, Ordering::Relaxed);
             POLICY_OWNER.store(current_thread, Ordering::Release);
+            unlock_policy_mutex();
             match enter_generated_policy() {
                 Ok(previous) => Some(Self {
                     previous,
                     _not_send: PhantomData,
                 }),
                 Err(()) => {
-                    POLICY_OWNER.store(0, Ordering::Release);
-                    POLICY_LOCK.store(false, Ordering::Release);
+                    release_policy();
                     None
                 }
             }
@@ -179,8 +232,7 @@ impl Drop for GeneratedProcessPolicyGuard {
                     core::ptr::null_mut(),
                 )
             };
-            POLICY_OWNER.store(0, Ordering::Release);
-            POLICY_LOCK.store(false, Ordering::Release);
+            release_policy();
         }
     }
 }

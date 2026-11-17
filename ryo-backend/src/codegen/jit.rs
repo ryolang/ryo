@@ -182,8 +182,18 @@ impl Codegen<JITModule> {
         #[allow(unsafe_code)]
         let main_fn: extern "C" fn(i64, *const *const c_char) -> i64 =
             unsafe { std::mem::transmute(code_ptr) };
-        let process_policy = ryo_runtime::GeneratedProcessPolicyGuard::enter()
-            .ok_or_else(|| "Failed to initialize generated-program process policy".to_string())?;
+        let process_policy = match ryo_runtime::GeneratedProcessPolicyGuard::enter() {
+            Some(policy) => policy,
+            None => {
+                // SAFETY (R5 exception): generated code never ran, so no live
+                // code can remain in the finalized module.
+                #[allow(unsafe_code)]
+                unsafe {
+                    self.module.free_memory();
+                }
+                return Err("Failed to initialize generated-program process policy".to_string());
+            }
+        };
         let result = main_fn(argc, ptrs.as_ptr());
         drop(process_policy);
 

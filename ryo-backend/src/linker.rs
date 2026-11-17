@@ -16,10 +16,10 @@ pub enum LinkMode {
     /// implementation_roadmap.md (musl's resolver skips NSS plugins).
     #[default]
     Musl,
-    /// Omit `-target` and link natively against the host glibc (the
-    /// pre-musl behavior). Binaries are only as portable as the build
-    /// host's glibc, but they get the host's full NSS/getaddrinfo
-    /// stack.
+    /// Omit `-target`, link natively against the host glibc, and pass
+    /// `-pthread` for hosts where pthread symbols are outside libc.
+    /// Binaries are only as portable as the build host's glibc, but they
+    /// get the host's full NSS/getaddrinfo stack.
     Glibc,
 }
 
@@ -30,9 +30,14 @@ impl LinkMode {
     pub fn apply_to(self, cmd: &mut Command) {
         #[cfg(target_os = "linux")]
         {
-            if let Self::Musl = self {
-                cmd.arg("-target")
-                    .arg(format!("{}-linux-musl", std::env::consts::ARCH));
+            match self {
+                Self::Musl => {
+                    cmd.arg("-target")
+                        .arg(format!("{}-linux-musl", std::env::consts::ARCH));
+                }
+                Self::Glibc => {
+                    cmd.arg("-pthread");
+                }
             }
         }
         #[cfg(not(target_os = "linux"))]
@@ -95,6 +100,14 @@ mod tests {
         assert!(
             !glibc.iter().any(|a| a == "-target"),
             "glibc mode must omit -target so zig cc links host-native: {glibc:?}"
+        );
+        assert!(
+            glibc.iter().any(|a| a == "-pthread"),
+            "glibc mode must link pthread for pre-2.34 hosts: {glibc:?}"
+        );
+        assert!(
+            !musl.iter().any(|a| a == "-pthread"),
+            "musl mode must retain its existing link inputs: {musl:?}"
         );
     }
 
