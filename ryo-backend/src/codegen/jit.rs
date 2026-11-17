@@ -183,7 +183,7 @@ impl Codegen<JITModule> {
         let main_fn: extern "C" fn(i64, *const *const c_char) -> i64 =
             unsafe { std::mem::transmute(code_ptr) };
         let process_policy = ryo_runtime::GeneratedProcessPolicyGuard::enter()
-            .map_err(|_| "Failed to initialize generated-program process policy".to_string())?;
+            .ok_or_else(|| "Failed to initialize generated-program process policy".to_string())?;
         let result = main_fn(argc, ptrs.as_ptr());
         drop(process_policy);
 

@@ -45,14 +45,16 @@ pub struct GeneratedProcessPolicyGuard {
 }
 
 impl GeneratedProcessPolicyGuard {
-    pub fn enter() -> Result<Self, ()> {
+    pub fn enter() -> Option<Self> {
         #[cfg(all(not(windows), not(miri)))]
         {
-            install_default_sigpipe().map(|previous| Self { previous })
+            install_default_sigpipe()
+                .ok()
+                .map(|previous| Self { previous })
         }
         #[cfg(any(windows, miri))]
         {
-            Ok(Self {})
+            Some(Self {})
         }
     }
 }
