@@ -15,3 +15,5 @@ mod lexer_diagnostic_tests;
 mod lexer_source_identity_tests;
 #[cfg(test)]
 mod parse_source_identity_tests;
+#[cfg(test)]
+mod sema_source_identity_tests;

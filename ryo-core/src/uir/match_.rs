@@ -16,10 +16,12 @@
 //!   per arm (offsets relative to the arm's first word):
 //!   [0]      arm_len:      u32 — words in this arm AFTER the arm_len
 //!                           word itself (span + pattern payload + body)
-//!   [1..2]   pattern span start/end: u32 offsets
-//!   [3]      pattern_kind: u32 (0 = wildcard, 1 = literal, 2 = variant,
+//!   [1]      pattern span compilation-context tag: u32
+//!   [2]      pattern span source revision: u32
+//!   [3..4]   pattern span start/end: u32 offsets
+//!   [5]      pattern_kind: u32 (0 = wildcard, 1 = literal, 2 = variant,
 //!            3 = anon)
-//!   [4..]    pattern payload:
+//!   [6..]    pattern payload:
 //!     wildcard: (no words)
 //!     literal:  lit_kind u32 (0 = int, 1 = str, 2 = bool), then
 //!               int:  lo u32, hi u32 — the i64 split into two words
@@ -82,10 +84,12 @@ pub mod match_extra {
 
     /// Per-arm header, relative to the arm's first word.
     pub const ARM_LEN: usize = 0;
-    pub const PATTERN_SPAN_START: usize = 1;
-    pub const PATTERN_SPAN_END: usize = 2;
-    pub const PATTERN_KIND: usize = 3;
-    pub const PATTERN_START: usize = 4;
+    pub const PATTERN_SPAN_CONTEXT: usize = 1;
+    pub const PATTERN_SPAN_REVISION: usize = 2;
+    pub const PATTERN_SPAN_START: usize = 3;
+    pub const PATTERN_SPAN_END: usize = 4;
+    pub const PATTERN_KIND: usize = 5;
+    pub const PATTERN_START: usize = 6;
 
     /// `PATTERN_KIND` discriminants.
     pub const PATTERN_WILDCARD: u32 = 0;
@@ -420,6 +424,9 @@ impl UirBuilder {
         for arm in arms {
             let arm_len_slot = self.uir.extra.len();
             self.uir.extra.push(0); // arm_len, patched after the arm
+            let (source_context, source_revision) = arm.span.source.raw_parts();
+            self.uir.extra.push(source_context);
+            self.uir.extra.push(source_revision);
             self.uir.extra.push(
                 u32::try_from(arm.span.start).expect("pattern span start exceeds UIR wire range"),
             );
@@ -616,7 +623,12 @@ fn decode_lit_at(slice: &[u32], pos: usize) -> (LitPattern, usize) {
 /// `arm_len` word first, then exactly `arm_len` payload words — so a
 /// cursor that ends at `slice.len()` is a trusted-producer invariant.
 fn decode_match_arm(slice: &[u32]) -> UirMatchArmView<'_> {
-    let span = Span::new(
+    let source = crate::source::SourceId::from_raw_parts(
+        slice[match_extra::PATTERN_SPAN_CONTEXT],
+        slice[match_extra::PATTERN_SPAN_REVISION],
+    );
+    let span = Span::in_source(
+        source,
         slice[match_extra::PATTERN_SPAN_START] as usize,
         slice[match_extra::PATTERN_SPAN_END] as usize,
     );
@@ -1199,5 +1211,65 @@ mod tests {
             dump.contains("{x: 0, y: _}"),
             "anon fields arm missing, got:\n{dump}"
         );
+    }
+}
+
+#[cfg(test)]
+mod source_identity_tests {
+    use super::*;
+
+    fn sp() -> Span {
+        Span::EMPTY
+    }
+
+    #[test]
+    fn match_wire_preserves_source_identity() {
+        let source = crate::source::SourceId::from_raw_parts(41, 7);
+        let mut b = UirBuilder::new();
+        let scrutinee = b.int_literal(1, sp());
+        let body = b.int_literal(2, sp());
+        let m = b.match_expr(
+            scrutinee,
+            &[UirMatchArm {
+                span: Span::in_source(source, 3, 5),
+                pattern: UirPattern::Wildcard,
+                body: UirArmBody::Expr(body),
+            }],
+            sp(),
+        );
+        let expected = [
+            1,
+            7,
+            41,
+            7,
+            3,
+            5,
+            match_extra::PATTERN_WILDCARD,
+            match_extra::BODY_EXPR,
+            body.raw(),
+        ];
+
+        let mut uir = b.finish();
+        let InstData::Match { arms, .. } = uir.inst(m).data else {
+            panic!("expected match data");
+        };
+        assert_eq!(&uir.extra[arms.as_range()], &expected);
+
+        uir.extra.clear();
+        uir.extra.extend(expected);
+        uir.instructions[m.index()].data = InstData::Match {
+            scrutinee,
+            arms: ExtraRange {
+                offset: 0,
+                len: expected.len() as u32,
+            },
+        };
+        let view = uir.match_view(m);
+        assert_eq!(view.arms[0].span, Span::in_source(source, 3, 5));
+        drop(view);
+
+        uir.extra[2] = 43;
+        let other = crate::source::SourceId::from_raw_parts(43, 7);
+        assert_eq!(uir.match_view(m).arms[0].span.source, other);
     }
 }

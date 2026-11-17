@@ -14,12 +14,10 @@ impl SourceId {
         revision: u32::MAX,
     };
 
-    #[cfg(test)]
     pub(crate) const fn raw_parts(self) -> (u32, u32) {
         (self.context.raw(), self.revision)
     }
 
-    #[cfg(test)]
     pub(crate) const fn from_raw_parts(context: u32, revision: u32) -> Self {
         Self {
             context: CompilationContextId::from_raw(context),
