@@ -59,18 +59,25 @@ fn analyze(
     (tirs, flows, pool, sidecar, context)
 }
 
-fn clif_of(src: &str) -> (String, Vec<Tir>, InternPool) {
-    let (tirs, flows, pool, sidecar, _context) = analyze(src);
+fn clif_of(
+    src: &str,
+) -> (
+    String,
+    Vec<Tir>,
+    InternPool,
+    ryo_core::compilation::CompilationContext,
+) {
+    let (tirs, flows, pool, sidecar, context) = analyze(src);
     let mut codegen = Codegen::new_jit().expect("JIT codegen should initialize");
     let clif = codegen
         .compile_and_dump_ir(&tirs, &flows, &pool, &sidecar)
         .expect("codegen should succeed");
-    (clif, tirs, pool)
+    (clif, tirs, pool, context)
 }
 
 #[test]
 fn empty_try_and_catch_dispatch_has_no_zero_sized_payload_storage() {
-    let (clif, tirs, pool) = clif_of(
+    let (clif, tirs, pool, _context) = clif_of(
         r#"fn inner() -> !int:
 	return 7
 fn middle() -> !int:
@@ -113,7 +120,7 @@ fn main():
 
 #[test]
 fn empty_to_explicit_try_has_no_error_payload_tag_load() {
-    let (clif, _tirs, _pool) = clif_of(
+    let (clif, _tirs, _pool, _context) = clif_of(
         r#"error A
 fn inner() -> !int:
 	return 7

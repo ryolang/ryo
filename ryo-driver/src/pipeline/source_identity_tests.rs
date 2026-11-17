@@ -27,23 +27,23 @@ fn plain_output(bytes: &[u8]) -> String {
 #[test]
 fn cross_file_labels_use_their_own_sources() {
     let mut context = CompilationContext::new();
-    let first = context.register_source(PathBuf::from("first.ryo"), "😀name\n".into());
-    let second = context.register_source(PathBuf::from("second.ryo"), "other\n".into());
+    let first = context.register_source(PathBuf::from("first.ryo"), "éname\n".into());
+    let second = context.register_source(PathBuf::from("second.ryo"), "🌍🌍other\n".into());
     let diag = Diag::error(
-        Span::in_source(first, 4, 8),
+        Span::in_source(first, 2, 6),
         DiagCode::TypeMismatch,
         "primary message",
     )
-    .with_note(Some(Span::in_source(second, 0, 5)), "defined here");
+    .with_note(Some(Span::in_source(second, 8, 13)), "defined here");
     let mut output = Vec::new();
 
     render_diags_with_writer(&[diag], context.sources(), &mut output).unwrap();
     let output = plain_output(&output);
 
     assert!(output.contains("first.ryo:1:2"), "{output}");
-    assert!(output.contains("second.ryo"), "{output}");
-    assert!(output.contains("😀name"), "{output}");
-    assert!(output.contains("other"), "{output}");
+    assert!(output.contains("second.ryo:1:3"), "{output}");
+    assert!(output.contains("éname"), "{output}");
+    assert!(output.contains("🌍🌍other"), "{output}");
     assert!(output.contains("defined here"), "{output}");
 }
 
