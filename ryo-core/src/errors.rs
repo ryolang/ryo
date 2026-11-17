@@ -9,6 +9,7 @@ pub enum CompilerError {
     /// so the process exit code reflects the failure and the count
     /// is available for tests.
     Diagnostics(Vec<Diag>),
+    InternalError(String),
     CodegenError(String),
     LinkError(String),
     ToolchainError(String),
@@ -27,6 +28,7 @@ impl std::fmt::Display for CompilerError {
                 let noun = if errs == 1 { "error" } else { "errors" };
                 write!(f, "compilation failed: {} {}", errs, noun)
             }
+            CompilerError::InternalError(msg) => write!(f, "internal compiler error: {}", msg),
             CompilerError::CodegenError(msg) => write!(f, "Codegen error: {}", msg),
             CompilerError::LinkError(msg) => write!(f, "Link error: {}", msg),
             CompilerError::ToolchainError(msg) => write!(f, "Toolchain error: {}", msg),
@@ -40,6 +42,12 @@ impl std::error::Error for CompilerError {}
 impl From<std::io::Error> for CompilerError {
     fn from(error: std::io::Error) -> Self {
         CompilerError::IoError(error)
+    }
+}
+
+impl From<crate::source::SourceError> for CompilerError {
+    fn from(error: crate::source::SourceError) -> Self {
+        CompilerError::InternalError(error.to_string())
     }
 }
 

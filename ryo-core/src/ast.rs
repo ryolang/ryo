@@ -437,7 +437,7 @@ impl Ident {
 /// A surface type expression. Compound child lists live in side arenas;
 /// an error union's success type has its own [`TypeExprId`] node.
 ///
-/// 32 bytes: `span` (16 B, align 8) plus `kind` and padding.
+/// 40 bytes: source-identified `span` (24 B, align 8) plus `kind` (16 B).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TypeExpr {
     pub span: Span,
@@ -848,9 +848,7 @@ impl Ast {
     /// first and last statements.
     pub fn set_top_level(&mut self, stmts: Vec<StmtId>) {
         self.span = match (stmts.first(), stmts.last()) {
-            (Some(&first), Some(&last)) => {
-                Span::new(self.stmt_span(first).start, self.stmt_span(last).end)
-            }
+            (Some(&first), Some(&last)) => self.stmt_span(first).with_end(self.stmt_span(last).end),
             _ => Span::EMPTY,
         };
         self.top_level = stmts;
@@ -1624,10 +1622,10 @@ mod tests {
 
     #[test]
     fn type_expr_stays_small() {
-        // The error-union variant grows `kind` to 16 B; `span` plus
-        // `kind` must still pack into 32 B — see the field-order note
-        // on `TypeExpr`.
-        assert_eq!(std::mem::size_of::<TypeExpr>(), 32);
+        // Source identity adds eight bytes to the span while offsets
+        // retain their native usize representation.
+        assert_eq!(std::mem::size_of::<Span>(), 24);
+        assert_eq!(std::mem::size_of::<TypeExpr>(), 40);
         assert_eq!(std::mem::size_of::<TypeExprKind>(), 16);
     }
 
@@ -1797,5 +1795,19 @@ mod tests {
             }
             ref other => panic!("expected Index, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn top_level_span_preserves_source_when_joining_statements() {
+        let source = crate::source::SourceId::from_raw_parts(3, 0);
+        let mut ast = Ast::new();
+        let first_value = ast.literal_int(1, Span::in_source(source, 2, 3));
+        let first = ast.expr_stmt(first_value, Span::in_source(source, 2, 4));
+        let last_value = ast.literal_int(2, Span::in_source(source, 8, 9));
+        let last = ast.expr_stmt(last_value, Span::in_source(source, 8, 10));
+
+        ast.set_top_level(vec![first, last]);
+
+        assert_eq!(ast.span(), Span::in_source(source, 2, 10));
     }
 }

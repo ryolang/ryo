@@ -8,7 +8,7 @@ a foreign function interface (FFI). DLPack describes exchanged tensor data;
 it does not compile kernels or define the complete execution contract.
 
 The [roadmap](implementation_roadmap.md) owns delivery status.
-The [pipeline migration](pipeline_migration.md) defines compiler boundaries.
+The [pipeline migration](architectural_fixes/pipeline_migration.md) defines compiler boundaries.
 Tensor API names below are illustrative proposals, not additions to the language specification.
 JIT means just-in-time execution. AOT means ahead-of-time compilation.
 
@@ -249,7 +249,7 @@ Do not claim that host-only tests prove GPU lifetime or synchronization correctn
 ## References
 
 - Spec: [Section 4.11](../specification.md#411-ffi--c-interoperability) (C-header integration), [Section 5.4](../specification.md#54-hybrid-eager-destruction--raii-drop-trait) (resource destruction), and [Section 9](../specification.md#9-concurrency-model-taskfuturechannel) (tasks and cancellation).
-- Dev: [Pipeline migration](pipeline_migration.md), [incremental compilation](proposal_incremental_compilation.md), [Rust-backed std extensions](spec_std_extensions.md), and [closure representation](spec_closure_representation.md).
+- Dev: [Pipeline migration](architectural_fixes/pipeline_migration.md), [incremental compilation](proposal_incremental_compilation.md), [Rust-backed std extensions](spec_std_extensions.md), and [closure representation](spec_closure_representation.md).
 - Experiments: [CPU vectorization](../experimental/lightweight_vectorization.md) and [Mojo tensor backend](../experimental/mojo_tensor_backend.md).
 - Delivery: [Implementation roadmap](implementation_roadmap.md).
 - DLPack: [C API](https://dmlc.github.io/dlpack/latest/c_api.html) and [exchange specification](https://dmlc.github.io/dlpack/latest/python_spec.html) for representation, release, and stream contracts.

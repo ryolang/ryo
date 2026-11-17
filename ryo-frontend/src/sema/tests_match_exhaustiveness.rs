@@ -32,7 +32,10 @@ fn run_buffered(input: &str) -> (Vec<Tir>, Vec<Diag>, InternPool) {
         "lex errors: {:?}",
         lex_sink.into_diags()
     );
-    let token_stream = tokens[..].split_token_span((0..input.len()).into());
+    let token_stream = tokens[..].split_token_span(crate::lexer::eoi(
+        ryo_core::source::SourceId::NONE,
+        input.len(),
+    ));
     let mut state = ParseState::new(pool);
     program_parser()
         .parse_with_state(token_stream, &mut state)

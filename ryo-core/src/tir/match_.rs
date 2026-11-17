@@ -21,10 +21,12 @@
 //!   per arm (offsets relative to the arm's first word):
 //!   [0]      arm_len:           u32 — words in this arm AFTER the
 //!                                arm_len word itself
-//!   [1..2]   pattern span start/end: u32 offsets
-//!   [3]      discriminant_kind: u32 (0 = variant, 1 = int, 2 = str,
+//!   [1]      pattern span compilation-context tag: u32
+//!   [2]      pattern span source revision: u32
+//!   [3..4]   pattern span start/end: u32 offsets
+//!   [5]      discriminant_kind: u32 (0 = variant, 1 = int, 2 = str,
 //!                                3 = bool, 4 = wildcard)
-//!   [4..]    discriminant payload:
+//!   [6..]    discriminant payload:
 //!     variant:  variant_index u32 (declaration-order, the
 //!               `enum_lit_extra` convention — sema resolved the name)
 //!     int:      lo u32, hi u32 — the i64 split into two words
@@ -75,10 +77,12 @@ pub mod match_extra {
 
     /// Per-arm header, relative to the arm's first word.
     pub const ARM_LEN: usize = 0;
-    pub const PATTERN_SPAN_START: usize = 1;
-    pub const PATTERN_SPAN_END: usize = 2;
-    pub const DISC_KIND: usize = 3;
-    pub const DISC_PAYLOAD: usize = 4;
+    pub const PATTERN_SPAN_CONTEXT: usize = 1;
+    pub const PATTERN_SPAN_REVISION: usize = 2;
+    pub const PATTERN_SPAN_START: usize = 3;
+    pub const PATTERN_SPAN_END: usize = 4;
+    pub const DISC_KIND: usize = 5;
+    pub const DISC_PAYLOAD: usize = 6;
 
     /// `DISC_KIND` discriminants.
     pub const DISC_VARIANT: u32 = 0;
@@ -427,6 +431,9 @@ impl TirBuilder {
         for arm in arms {
             let arm_len_slot = self.extra.len();
             self.extra.push(0); // arm_len, patched after the arm
+            let (source_context, source_revision) = arm.span.source.raw_parts();
+            self.extra.push(source_context);
+            self.extra.push(source_revision);
             self.extra.push(
                 u32::try_from(arm.span.start).expect("pattern span start exceeds TIR wire range"),
             );
@@ -650,7 +657,12 @@ fn decode_match_arm(slice: &[u32]) -> MatchArmView<'_> {
         slice.len() >= arm_words,
         "match arm_len exceeds the remaining wire"
     );
-    let span = Span::new(
+    let source = crate::source::SourceId::from_raw_parts(
+        slice[match_extra::PATTERN_SPAN_CONTEXT],
+        slice[match_extra::PATTERN_SPAN_REVISION],
+    );
+    let span = Span::in_source(
+        source,
         slice[match_extra::PATTERN_SPAN_START] as usize,
         slice[match_extra::PATTERN_SPAN_END] as usize,
     );
@@ -777,8 +789,8 @@ mod tests {
         assert_eq!(arms[0], arm);
 
         // Wire header is pinned: [scrutinee, arm_count, arm_len,
-        // disc_kind, binding_count, guard_count, body_kind, body_ref] —
-        // a binding-less, guard-less wildcard arm is 5 payload words.
+        // source_context, source_revision, span_start, span_end,
+        // disc_kind, binding_count, guard_count, body_kind, body_ref].
         let inst = tir.inst(m);
         let TirData::Extra(rng) = inst.data else {
             panic!("expected TirData::Extra, got {:?}", inst.data);
@@ -786,7 +798,7 @@ mod tests {
         let wire = &tir.extra[rng.as_range()];
         assert_eq!(wire[match_extra::SCRUTINEE], scrut.raw());
         assert_eq!(wire[match_extra::ARM_COUNT], 1);
-        assert_eq!(wire[match_extra::ARMS_START + match_extra::ARM_LEN], 7);
+        assert_eq!(wire[match_extra::ARMS_START + match_extra::ARM_LEN], 9);
         assert_eq!(
             wire[match_extra::ARMS_START + match_extra::DISC_KIND],
             match_extra::DISC_WILDCARD
@@ -1225,5 +1237,70 @@ mod tests {
         let tir = b.finish(&[m]);
         let owners = tir.match_by_move_owner_refs(m, &pool);
         assert_eq!(owners, vec![tok0, tok1]);
+    }
+}
+
+#[cfg(test)]
+mod source_identity_tests {
+    use super::*;
+
+    fn sp() -> Span {
+        Span::EMPTY
+    }
+
+    #[test]
+    fn match_wire_preserves_source_identity() {
+        let source = crate::source::SourceId::from_raw_parts(41, 7);
+        let mut pool = InternPool::new();
+        let int = pool.int();
+        let main = pool.intern_str("main");
+        let mut b = TirBuilder::new(main, vec![], int, sp());
+        let scrutinee = b.int_const(1, int, sp());
+        let body = b.int_const(2, int, sp());
+        let m = b.match_expr(
+            scrutinee,
+            int,
+            &[TypedMatchArm {
+                span: Span::in_source(source, 3, 5),
+                discriminant: Discriminant::Wildcard,
+                bindings: &[],
+                guards: &[],
+                body: TypedMatchBody::Expr(body),
+            }],
+            sp(),
+        );
+        let expected = [
+            scrutinee.raw(),
+            1,
+            9,
+            41,
+            7,
+            3,
+            5,
+            match_extra::DISC_WILDCARD,
+            0,
+            0,
+            match_extra::BODY_EXPR,
+            body.raw(),
+        ];
+
+        let mut tir = b.finish(&[m]);
+        let TirData::Extra(range) = tir.inst(m).data else {
+            panic!("expected extra data");
+        };
+        assert_eq!(&tir.extra[range.as_range()], &expected);
+
+        tir.extra.clear();
+        tir.extra.extend(expected);
+        tir.instructions[m.index()].data = TirData::Extra(ExtraRange {
+            offset: 0,
+            len: expected.len() as u32,
+        });
+        let arm = tir.match_view(m).arm(0);
+        assert_eq!(arm.span, Span::in_source(source, 3, 5));
+
+        tir.extra[3] = 43;
+        let other = crate::source::SourceId::from_raw_parts(43, 7);
+        assert_eq!(tir.match_view(m).arm(0).span.source, other);
     }
 }

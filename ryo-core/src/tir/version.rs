@@ -20,6 +20,7 @@ impl Tir {
             param.name.hash(&mut hash);
             param.ty.hash(&mut hash);
             (param.mode as u8).hash(&mut hash);
+            param.span.source.hash(&mut hash);
             param.span.start.hash(&mut hash);
             param.span.end.hash(&mut hash);
         }
@@ -44,11 +45,37 @@ impl Tir {
             }
         }
         for span in &self.spans {
+            span.source.hash(&mut hash);
             span.start.hash(&mut hash);
             span.end.hash(&mut hash);
         }
+        self.span.source.hash(&mut hash);
         self.span.start.hash(&mut hash);
         self.span.end.hash(&mut hash);
         hash.finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::SourceId;
+    use crate::span::Span;
+    use crate::tir::TirBuilder;
+    use crate::types::InternPool;
+
+    fn body(span: Span) -> Tir {
+        let mut pool = InternPool::new();
+        let name = pool.intern_str("main");
+        let mut builder = TirBuilder::new(name, vec![], pool.void(), span);
+        let end = builder.return_void(pool.void(), span);
+        builder.finish(&[end])
+    }
+
+    #[test]
+    fn source_identity_changes_tir_representation_stamp() {
+        let first = body(Span::in_source(SourceId::from_raw_parts(1, 0), 0, 1));
+        let second = body(Span::in_source(SourceId::from_raw_parts(2, 0), 0, 1));
+        assert_ne!(first.representation_stamp(), second.representation_stamp());
     }
 }

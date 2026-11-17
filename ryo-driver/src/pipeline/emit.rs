@@ -2,33 +2,34 @@ use ryo_backend::codegen;
 use ryo_core::ast;
 use ryo_core::diag::DiagSink;
 use ryo_core::errors::CompilerError;
+use ryo_core::source::{Source, SourceDb};
 use ryo_core::tir::{self, Tir};
 use ryo_core::types::InternPool;
 use ryo_core::uir::Uir;
 use ryo_frontend::lexer::{self, Token};
 use std::io::{self, Write as _};
-use std::path::Path;
 use target_lexicon::Triple;
 
 use super::diagnostics::finalize_diags;
-use super::source_name;
 use crate::output::{finish_output, write_stdout};
 
-pub(super) fn display_tokens(input: &str, file: &Path) -> Result<(), CompilerError> {
+pub(super) fn display_tokens(source: &Source, sources: &SourceDb) -> Result<(), CompilerError> {
     let mut pool = InternPool::new();
-    let name = source_name(file);
     let mut sink = DiagSink::new();
-    let tokens = lexer::lex(input, &mut pool, &mut sink);
+    let tokens = lexer::lex(source, &mut pool, &mut sink);
     if !sink.is_empty() {
         // Route lex diagnostics through the same Diag pipeline as
         // parse / sema errors so `ryo lex` matches the rest of the
         // CLI's exit-code and rendering behaviour. Previously this
         // path silently `eprintln!`d and returned `Ok(())`, which
         // hid lex errors from CI.
-        return finalize_diags(sink.into_diags(), input, &name);
+        return finalize_diags(sink.into_diags(), sources);
     }
 
-    write_stdout(format_args!("Token stream for '{}':\n", file.display()))?;
+    write_stdout(format_args!(
+        "Token stream for '{}':\n",
+        source.name().display()
+    ))?;
     write_stdout(format_args!("\n"))?;
 
     // Render identifier and string-literal payloads through the

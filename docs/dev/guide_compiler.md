@@ -7,7 +7,7 @@ This guide is for agents and contributors extending the Ryo compiler. Load it wh
 ### Design Inspiration
 
 - **Views and projections:** Hylo is a reference for bounded access to storage — see [pl_references/hylo.md](pl_references/hylo.md). Ryo keeps its own immutable-view, owner-freeze, last-use, and escape rules. Hylo's mutable projections and yielding subscripts are not adopted by this comparison.
-- **Compiler architecture (lexer → parser → UIR → Sema → TIR → Flow → ownership/cleanup → codegen):** takes inspiration from the Zig compiler — see [`/docs/dev/pl_references/zig.md`](pl_references/zig.md). TIR stays Zig AIR-shaped; the Flow IR layer between TIR and codegen (explicit blocks/terminators/places — rustc-MIR-shaped in role, not in name) is Ryo's own addition, documented in [`docs/dev/pipeline_migration.md`](pipeline_migration.md).
+- **Compiler architecture (lexer → parser → UIR → Sema → TIR → Flow → ownership/cleanup → codegen):** takes inspiration from the Zig compiler — see [`/docs/dev/pl_references/zig.md`](pl_references/zig.md). TIR stays Zig AIR-shaped; the Flow IR layer between TIR and codegen (explicit blocks/terminators/places — rustc-MIR-shaped in role, not in name) is Ryo's own addition, documented in [`docs/dev/architectural_fixes/pipeline_migration.md`](architectural_fixes/pipeline_migration.md).
 - **Concurrency:** takes inspiration from Go — see [`/docs/dev/pl_references/go.md`](pl_references/go.md).
 - **Ownership pass (`ryo-frontend/src/ownership/mod.rs` & `ryo-core/src/ownership.rs`):** takes inspiration from Mojo — see [`/docs/dev/pl_references/mojo.md`](pl_references/mojo.md). Zig has no borrow checker, so it is not a useful reference for move semantics. Mojo's MLIR-based lifetime/ASAP-destruction passes are the closest published precedent for what Ryo's spec commits to (no annotated lifetimes, parameters borrow by default, eager destruction at last use). Sema and the IRs themselves remain Zig-shaped.
 - **`shared[T]` refcounting & ARC optimizer (planned; status lives in `docs/dev/implementation_roadmap.md`):** takes inspiration from Swift — see [`/docs/dev/spec_arc_optimizer.md`](spec_arc_optimizer.md). Swift's SIL ARC optimizer (aggressive retain/release elision, stack promotion, copy-on-write for collections) is the model. The performance promise of `shared[T]` in spec 5.6 depends on this pass actually existing and working; without it `shared[T]` benchmarks badly.
@@ -24,10 +24,10 @@ This guide is for agents and contributors extending the Ryo compiler. Load it wh
 ### Compilation Pipeline
 
 ```text
-Source → Lexer → Indent Preprocessor → Parser → AstGen → UIR → Sema → TIR → Flow → Ownership → Cleanup (DropOps) → Codegen → Linker → Executable
+CompilationContext (sources and revisions) → Lexer → Indent Preprocessor → Parser → AstGen → UIR → Sema → TIR → Flow → Ownership → Cleanup (DropOps) → Codegen → Linker → Executable
 ```
 
-(**Flow** — `ryo-core/src/flow.rs` — is the canonical control-flow graph built once per function body after sema: indexed blocks with explicit terminators, a place table for storage identity, and per-step read/write/view facts. Both consumers drive from it: the **Ownership** pass analyzes Flow blocks/terminators post-sema (see `docs/dev/pl_references/mojo.md` and `ryo-frontend/src/ownership/mod.rs`), its cleanup decisions are explicit `DropOp`s positioned on Flow blocks, and **Codegen** maps Flow blocks to Cranelift blocks and dispatches terminators — neither pass reconstructs control flow from TIR statement lists. The authoritative design and phase contracts live in `docs/dev/pipeline_migration.md`; see `docs/dev/pattern_matching.md` for the match representation contracts.)
+(**Flow** — `ryo-core/src/flow.rs` — is the canonical control-flow graph built once per function body after sema: indexed blocks with explicit terminators, a place table for storage identity, and per-step read/write/view facts. Both consumers drive from it: the **Ownership** pass analyzes Flow blocks/terminators post-sema (see `docs/dev/pl_references/mojo.md` and `ryo-frontend/src/ownership/mod.rs`), its cleanup decisions are explicit `DropOp`s positioned on Flow blocks, and **Codegen** maps Flow blocks to Cranelift blocks and dispatches terminators — neither pass reconstructs control flow from TIR statement lists. The authoritative design and phase contracts live in `docs/dev/architectural_fixes/pipeline_migration.md`; see `docs/dev/pattern_matching.md` for the match representation contracts.)
 
 The middle-end is split into two flat-arena IRs modeled after Zig's ZIR/AIR:
 
@@ -55,7 +55,7 @@ Ryo does not produce or consume Zig's ZIR/AIR — these are upstream design refe
 
 **Niche-filled refs.** `InstRef` (UIR) and `TirRef` (TIR) wrap `NonZeroU32`, so `Option<InstRef>` / `Option<TirRef>` fit in a single 32-bit slot. Slot 0 of each `instructions` arena is a reserved sentinel that is never emitted — do not hand out `InstRef(0)` / `TirRef(0)`, and do not assume index 0 is a real instruction when iterating.
 
-See `docs/dev/pipeline_alignment.md` for what remains of the Zig-alignment plan (pending features, divergence notes, future considerations); the shipped phase plan lives in git history.
+See `docs/dev/architectural_fixes/pipeline_alignment.md` for what remains of the Zig-alignment plan (pending features, divergence notes, future considerations); the shipped phase plan lives in git history.
 
 **Crate and Module Map** (distributed in workspace packages):
 
@@ -111,8 +111,11 @@ See `docs/dev/pipeline_alignment.md` for what remains of the Zig-alignment plan 
 | `ryo-core/src/flow/cleanup.rs` | Resolve releases to declaring Flow places or displaced produced values |
 | `ryo-core/src/ownership.rs` | Ownership sidecars, transfer records, promotion lifetimes, and validation outcomes |
 | `ryo-core/src/types.rs` | `InternPool` for types and strings; `TypeId` / `StringId` newtypes |
+| `ryo-core/src/compilation.rs` | Compilation context: owns the source database and its process-unique identity |
+| `ryo-core/src/source.rs` | Immutable source revisions, `SourceId` handles, current/stale lookup, and source/span validation |
+| `ryo-core/src/span.rs` | Byte offsets with explicit source identity or a source-less sentinel; derived spans preserve provenance |
 | `ryo-core/src/diag.rs` | Structured diagnostics: `Diag`, `DiagCode`, `DiagSink` |
-| `ryo-core/src/errors.rs` | Top-level `CompilerError` enum |
+| `ryo-core/src/errors.rs` | Top-level `CompilerError` enum, including invalid-source internal errors |
 
 #### 6. Standard Runtime Library Crate (`runtime`)
 | Path | Role |
@@ -121,7 +124,7 @@ See `docs/dev/pipeline_alignment.md` for what remains of the Zig-alignment plan 
 
 ---
 
-Dependencies flow unidirectionally from Frontend/Backend/Driver down to Core. The `InternPool` from `types.rs` threads through every stage so identifiers and string literals stay as `Copy` `StringId` handles instead of owned `String`s. `sema.rs` drives decls through `Unresolved → InProgress → Resolved/Failed` with cycle detection wired in.
+Dependencies flow unidirectionally from Frontend/Backend/Driver down to Core. The driver-owned `CompilationContext` outlives the artifacts that reference its sources. The `InternPool` from `types.rs` threads through every stage so identifiers and string literals stay as `Copy` `StringId` handles instead of owned `String`s. `sema.rs` drives decls through `Unresolved → InProgress → Resolved/Failed` with cycle detection wired in.
 
 ## Adding a New Language Feature
 
@@ -193,7 +196,7 @@ Grammar builders like `expression_parser()` construct the full parser graph eage
 
 ## Error Handling
 
-Middle-end stages emit structured `Diag` values (see `ryo-core/src/diag.rs`). `astgen::generate` and `sema::analyze` accumulate diagnostics through a `DiagSink` so analysis can continue past the first error; `parse_source` (in `ryo-frontend/src/parse.rs`) shares the same model. `lexer::lex` never fails hard — it recovers so the parser still sees a well-formed token stream — and the parser synchronizes at statement boundaries, yielding a diagnostic plus a partial AST with `Error` placeholder nodes (R10), so one syntax error never suppresses diagnostics for the rest of the file. The only early bail is an indentation failure, where the token stream is empty and parsing would be meaningless. All stages converge on the same Ariadne-backed `render_diags` and surface as a single `CompilerError::Diagnostics(Vec<Diag>)`. Other stages still use string-typed `CompilerError` variants: `IoError`, `CodegenError`, `LinkError`, `ToolchainError`, `ExecutionError`.
+Middle-end stages emit structured `Diag` values (see `ryo-core/src/diag.rs`). `astgen::generate` and `sema::analyze` accumulate diagnostics through a `DiagSink` so analysis can continue past the first error; `parse_source` (in `ryo-frontend/src/parse.rs`) shares the same model. `lexer::lex` never fails hard — it recovers so the parser still sees a well-formed token stream — and the parser synchronizes at statement boundaries, yielding a diagnostic plus a partial AST with `Error` placeholder nodes (R10), so one syntax error never suppresses diagnostics for the rest of the file. The only early bail is an indentation failure, where the token stream is empty and parsing would be meaningless. Every diagnostic label carries a `SourceId`; the Ariadne renderer resolves each primary and secondary label through the compilation's source database and converts that revision's byte offsets to character offsets independently. Synthetic source-less diagnostics never borrow a filename, and invalid or foreign source handles produce `CompilerError::InternalError`. All stages converge on the same Ariadne-backed `render_diags` and surface as a single `CompilerError::Diagnostics(Vec<Diag>)`. Other stages still use string-typed `CompilerError` variants: `IoError`, `CodegenError`, `LinkError`, `ToolchainError`, `ExecutionError`.
 
 ## Testing
 
@@ -216,8 +219,8 @@ cargo test -- --nocapture       # Show output
 ## References
 
 - Spec: [Section 3, Syntax & Grammar](../specification.md) and [Section 5, Memory Management](../specification.md)
-- Dev: [pipeline_migration.md](pipeline_migration.md) — compiler pipeline + Flow IR design: representation contracts, phase boundaries, migration steps (authoritative for the Flow layer)
-- Dev: [pipeline_alignment.md](pipeline_alignment.md) — UIR/TIR pipeline: remaining work (comptime/generics substrate), Zig divergence notes, future considerations
+- Dev: [architectural_fixes/pipeline_migration.md](architectural_fixes/pipeline_migration.md) — compiler pipeline + Flow IR design: representation contracts, phase boundaries, migration steps (authoritative for the Flow layer)
+- Dev: [architectural_fixes/pipeline_alignment.md](architectural_fixes/pipeline_alignment.md) — UIR/TIR pipeline: remaining work (comptime/generics substrate), Zig divergence notes, future considerations
 - Dev: [implementation_roadmap.md](implementation_roadmap.md) — feature roadmap
 - Dev: [guide_llm_instructions.md](guide_llm_instructions.md) — **normative contributor rules (R1–R21)** for compiler work: data-oriented design, Rust discipline, diagnostics, Cranelift discipline, testing
 - Dev: [spec_slicing_and_memory_model.md](spec_slicing_and_memory_model.md) — slicing/views/memory-model decisions (D1–D11); amends the base spec

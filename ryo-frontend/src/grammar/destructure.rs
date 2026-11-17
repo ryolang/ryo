@@ -176,9 +176,10 @@ where
             for (name, sp) in rest {
                 elems.push(bind_pattern(e.state(), name, crate::spans::cspan(sp)));
             }
-            let target = e
-                .state()
-                .pattern_positional(&elems, crate::spans::cspan(SimpleSpan::new((), start..end)));
+            let target = e.state().pattern_positional(
+                &elems,
+                crate::spans::cspan(SimpleSpan::new(first.1.context, start..end)),
+            );
             e.state().destructure(target, value, span)
         });
 

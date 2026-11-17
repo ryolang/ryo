@@ -4,10 +4,11 @@ use chumsky::error::{Rich, RichPattern, RichReason};
 use chumsky::{Parser, prelude::*};
 use ryo_core::ast;
 use ryo_core::diag::{Diag, DiagCode, DiagSink, ParseDiag};
+use ryo_core::source::{Source, SourceId};
 use ryo_core::types::InternPool;
 
 use crate::grammar::{ParseState, program_parser};
-use crate::lexer::{self, Token};
+use crate::lexer::{self, Span as SimpleSpan, Token};
 use crate::spans::cspan;
 
 /// Parse source text into an AST plus every diagnostic lexing and parsing
@@ -15,7 +16,32 @@ use crate::spans::cspan;
 /// recovered parse still yields a partial AST). `Err` means
 /// unrecoverable and carries the raw diagnostics — rendering is the
 /// caller's job.
+#[cfg(not(test))]
 pub fn parse_source(
+    source: &Source,
+    pool: &mut InternPool,
+) -> Result<(ast::Ast, Vec<Diag>), Vec<Diag>> {
+    parse_source_impl(source.id(), source.text(), pool)
+}
+
+#[cfg(test)]
+pub(crate) fn parse_source(
+    input: &str,
+    pool: &mut InternPool,
+) -> Result<(ast::Ast, Vec<Diag>), Vec<Diag>> {
+    parse_source_impl(SourceId::NONE, input, pool)
+}
+
+#[cfg(test)]
+pub(crate) fn parse_source_with_source(
+    source: &Source,
+    pool: &mut InternPool,
+) -> Result<(ast::Ast, Vec<Diag>), Vec<Diag>> {
+    parse_source_impl(source.id(), source.text(), pool)
+}
+
+fn parse_source_impl(
+    source: SourceId,
     input: &str,
     pool: &mut InternPool,
 ) -> Result<(ast::Ast, Vec<Diag>), Vec<Diag>> {
@@ -27,7 +53,7 @@ pub fn parse_source(
     // one run, rendered through the same Ariadne pipeline as the
     // middle-end diagnostics.
     let mut sink = DiagSink::new();
-    let tokens = lexer::lex(input, pool, &mut sink);
+    let tokens = lexer::lex_impl(source, input, pool, &mut sink);
 
     // Whole-source width overflow, an over-budget literal, or
     // indentation failure: the lexer returned an empty stream because
@@ -40,7 +66,7 @@ pub fn parse_source(
     // chumsky 0.12 added `Input::split_token_span`, which collapses the previous
     // `Stream::from_iter(...).map(eoi, |(t, s)| (t, s))` boilerplate that we used to
     // pull `(Token, Span)` slices into a parser-friendly shape.
-    let token_stream = tokens[..].split_token_span((0..input.len()).into());
+    let token_stream = tokens[..].split_token_span(SimpleSpan::new(source, 0..input.len()));
 
     // R10: the parser recovers at statement boundaries, so a syntax
     // error yields a diagnostic AND a partial program (with `Error`
@@ -50,7 +76,7 @@ pub fn parse_source(
     // The parser builds directly into the AST arenas, threaded as
     // chumsky parser state (the state also carries the intern pool
     // so positional field keys can mint their canonical names).
-    let mut state = ParseState::new(std::mem::take(pool));
+    let mut state = ParseState::with_source(std::mem::take(pool), source);
     let (out, errs) = program_parser()
         .parse_with_state(token_stream, &mut state)
         .into_output_errors();

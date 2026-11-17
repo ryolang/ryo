@@ -1421,3 +1421,35 @@ fn fire_points_unresolved_never_guesses() {
         FireVerdict::Unresolved
     );
 }
+
+#[cfg(test)]
+mod source_identity_tests {
+    use super::*;
+
+    #[test]
+    fn flow_accepts_source_identified_tir_without_losing_provenance() {
+        let source = crate::source::SourceId::from_raw_parts(41, 7);
+        let mut cx = Ctx::new();
+        let int = cx.int;
+        let mut b = cx.builder();
+        let scrutinee = b.int_const(1, int, sp());
+        let body = b.int_const(2, int, sp());
+        let m = b.match_expr(
+            scrutinee,
+            int,
+            &[TypedMatchArm {
+                span: Span::in_source(source, 3, 5),
+                discriminant: crate::tir::Discriminant::Wildcard,
+                bindings: &[],
+                guards: &[],
+                body: TypedMatchBody::Expr(body),
+            }],
+            sp(),
+        );
+        let tir = b.finish(&[m]);
+        let flow = Flow::build(&tir, &cx.pool);
+
+        flow.require_body(&tir).unwrap();
+        assert_eq!(tir.match_view(m).arm(0).span.source, source);
+    }
+}

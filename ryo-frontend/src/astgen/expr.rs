@@ -785,7 +785,7 @@ fn gen_machine(
                             match step {
                                 variants::VariantStep::Complete(result) => results.push(result),
                                 variants::VariantStep::Child(state, arg) => {
-                                    stack.push(ExprTask::Variant(state).at(depth));
+                                    stack.push(ExprTask::Variant(*state).at(depth));
                                     stack.push(ExprTask::Enter(arg).at(depth + 1));
                                 }
                             }
@@ -829,7 +829,7 @@ fn gen_machine(
                 match step {
                     variants::VariantStep::Complete(result) => results.push(result),
                     variants::VariantStep::Child(state, arg) => {
-                        stack.push(ExprTask::Variant(state).at(depth));
+                        stack.push(ExprTask::Variant(*state).at(depth));
                         stack.push(ExprTask::Enter(arg).at(depth + 1));
                     }
                 }

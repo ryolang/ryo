@@ -298,5 +298,5 @@ compiler-generated; source `Ok`/`Err` patterns are not accepted. `?T` /
 ## References
 
 - Spec: [Section 4.6](../specification.md) (enum type & `match`), [Section 7.4](../specification.md) (`catch` — error-union matching)
-- Dev: `pipeline_alignment.md`
+- Dev: `architectural_fixes/pipeline_alignment.md`
 - Milestone: M12 — see `implementation_roadmap.md` (deferral registers M12.5/M12.6, now Phase 5/v0.2; consumers: M13, M16)

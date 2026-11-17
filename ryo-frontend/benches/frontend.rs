@@ -8,9 +8,12 @@
 
 use chumsky::Parser;
 use chumsky::input::Input;
+use ryo_core::compilation::CompilationContext;
+use ryo_core::source::{Source, SourceId};
 use ryo_core::types::InternPool;
 use ryo_frontend::grammar::{ParseState, program_parser};
 use ryo_frontend::lexer::{self, Span, Token};
+use std::path::PathBuf;
 
 fn main() {
     divan::main();
@@ -62,23 +65,27 @@ fn large_source(functions: usize) -> String {
     src
 }
 
-/// Lex a source string, returning the interned token stream.
-fn lex(src: &str) -> Vec<(Token, Span)> {
+fn source_for_bench(text: &str) -> (CompilationContext, SourceId) {
+    let mut context = CompilationContext::new();
+    let id = context.register_source(PathBuf::from("bench.ryo"), text.to_owned());
+    (context, id)
+}
+
+fn lex(source: &Source) -> Vec<(Token, Span)> {
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
-    let tokens = lexer::lex(src, &mut pool, &mut sink);
+    let tokens = lexer::lex(source, &mut pool, &mut sink);
     assert!(!sink.has_errors(), "lex should succeed");
     tokens
 }
 
-/// Full lex + parse of a source string.
-fn parse(src: &str) {
+fn parse(source: &Source) {
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
-    let tokens = lexer::lex(src, &mut pool, &mut sink);
+    let tokens = lexer::lex(source, &mut pool, &mut sink);
     assert!(!sink.has_errors(), "lex should succeed");
-    let token_stream = tokens[..].split_token_span((0..src.len()).into());
-    let mut state = ParseState::new(pool);
+    let token_stream = tokens[..].split_token_span(lexer::eoi(source.id(), source.text().len()));
+    let mut state = ParseState::with_source(pool, source.id());
     program_parser()
         .parse_with_state(token_stream, &mut state)
         .into_result()
@@ -93,14 +100,22 @@ fn parse(src: &str) {
 
 #[divan::bench(args = [("fizzbuzz", FIZZBUZZ), ("fibonacci", FIBONACCI)])]
 fn lex_snippet(bencher: divan::Bencher, case: (&str, &str)) {
-    let src = case.1;
-    bencher.bench(|| divan::black_box(lex(divan::black_box(src))));
+    let (context, id) = source_for_bench(case.1);
+    let source = context
+        .sources()
+        .get(id)
+        .expect("bench source must resolve");
+    bencher.bench(|| divan::black_box(lex(divan::black_box(source))));
 }
 
 #[divan::bench(args = [16, 64, 256])]
 fn lex_large(bencher: divan::Bencher, functions: usize) {
-    let src = large_source(functions);
-    bencher.bench(|| divan::black_box(lex(divan::black_box(&src))));
+    let (context, id) = source_for_bench(&large_source(functions));
+    let source = context
+        .sources()
+        .get(id)
+        .expect("bench source must resolve");
+    bencher.bench(|| divan::black_box(lex(divan::black_box(source))));
 }
 
 // ============================================================================
@@ -109,14 +124,22 @@ fn lex_large(bencher: divan::Bencher, functions: usize) {
 
 #[divan::bench(args = [("fizzbuzz", FIZZBUZZ), ("fibonacci", FIBONACCI)])]
 fn parse_snippet(bencher: divan::Bencher, case: (&str, &str)) {
-    let src = case.1;
-    bencher.bench(|| parse(divan::black_box(src)));
+    let (context, id) = source_for_bench(case.1);
+    let source = context
+        .sources()
+        .get(id)
+        .expect("bench source must resolve");
+    bencher.bench(|| parse(divan::black_box(source)));
 }
 
 #[divan::bench(args = [16, 64, 256])]
 fn parse_large(bencher: divan::Bencher, functions: usize) {
-    let src = large_source(functions);
-    bencher.bench(|| parse(divan::black_box(&src)));
+    let (context, id) = source_for_bench(&large_source(functions));
+    let source = context
+        .sources()
+        .get(id)
+        .expect("bench source must resolve");
+    bencher.bench(|| parse(divan::black_box(source)));
 }
 
 // ============================================================================
@@ -124,19 +147,25 @@ fn parse_large(bencher: divan::Bencher, functions: usize) {
 // ============================================================================
 
 /// Full parse of a source string, returning the AST arena and populated InternPool.
-fn parse_program(src: &str) -> (ryo_core::ast::Ast, InternPool) {
+fn parse_program(src: &str) -> (ryo_core::ast::Ast, InternPool, CompilationContext) {
+    let mut context = CompilationContext::new();
+    let source_id = context.register_source(PathBuf::from("bench.ryo"), src.into());
+    let source = context
+        .sources()
+        .get(source_id)
+        .expect("bench source must resolve");
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
-    let tokens = lexer::lex(src, &mut pool, &mut sink);
+    let tokens = lexer::lex(source, &mut pool, &mut sink);
     assert!(!sink.has_errors(), "lex should succeed");
-    let token_stream = tokens[..].split_token_span((0..src.len()).into());
-    let mut state = ParseState::new(pool);
+    let token_stream = tokens[..].split_token_span(lexer::eoi(source_id, src.len()));
+    let mut state = ParseState::with_source(pool, source_id);
     program_parser()
         .parse_with_state(token_stream, &mut state)
         .into_result()
         .expect("parse should succeed");
     let (ast, pool) = state.into_parts();
-    (ast, pool)
+    (ast, pool, context)
 }
 
 #[divan::bench(args = [("fizzbuzz", FIZZBUZZ), ("fibonacci", FIBONACCI)])]
@@ -144,7 +173,7 @@ fn sema_snippet(bencher: divan::Bencher, case: (&str, &str)) {
     let src = case.1;
     bencher
         .with_inputs(|| parse_program(src))
-        .bench_values(|(program, mut pool)| {
+        .bench_values(|(program, mut pool, _context)| {
             let mut sink = ryo_core::diag::DiagSink::new();
             let uir = ryo_frontend::astgen::generate(&program, &mut pool, &mut sink);
             let mut sema_sink = ryo_core::diag::DiagSink::new();
@@ -164,7 +193,7 @@ fn sema_large(bencher: divan::Bencher, functions: usize) {
     let src = large_source(functions);
     bencher
         .with_inputs(|| parse_program(&src))
-        .bench_values(|(program, mut pool)| {
+        .bench_values(|(program, mut pool, _context)| {
             let mut sink = ryo_core::diag::DiagSink::new();
             let uir = ryo_frontend::astgen::generate(&program, &mut pool, &mut sink);
             let mut sema_sink = ryo_core::diag::DiagSink::new();
@@ -234,8 +263,8 @@ fn call_heavy_source(functions: usize) -> String {
 }
 
 /// Parse + astgen + sema a source string, returning the TIRs and pool.
-fn sema_program(src: &str) -> (Vec<ryo_core::tir::Tir>, InternPool) {
-    let (program, mut pool) = parse_program(src);
+fn sema_program(src: &str) -> (Vec<ryo_core::tir::Tir>, InternPool, CompilationContext) {
+    let (program, mut pool, context) = parse_program(src);
     let mut sink = ryo_core::diag::DiagSink::new();
     let uir = ryo_frontend::astgen::generate(&program, &mut pool, &mut sink);
     let mut sema_sink = ryo_core::diag::DiagSink::new();
@@ -247,7 +276,7 @@ fn sema_program(src: &str) -> (Vec<ryo_core::tir::Tir>, InternPool) {
         std::path::Path::new("bench.ryo"),
     );
     assert!(!sema_sink.has_errors(), "sema should succeed");
-    (tirs, pool)
+    (tirs, pool, context)
 }
 
 #[divan::bench(args = [(4, 4), (64, 8), (64, 16)])]
@@ -255,7 +284,7 @@ fn ownership_nested_control(bencher: divan::Bencher, case: (usize, usize)) {
     let src = nested_control_source(case.0, case.1);
     bencher
         .with_inputs(|| sema_program(&src))
-        .bench_values(|(tirs, pool)| {
+        .bench_values(|(tirs, pool, _context)| {
             let mut sink = ryo_core::diag::DiagSink::new();
             let flows: Vec<ryo_core::flow::Flow> = tirs
                 .iter()
@@ -273,14 +302,14 @@ fn ownership_call_heavy(bencher: divan::Bencher, functions: usize) {
     let src = call_heavy_source(functions);
     bencher
         .with_inputs(|| {
-            let (tirs, pool) = sema_program(&src);
+            let (tirs, pool, context) = sema_program(&src);
             let flows: Vec<ryo_core::flow::Flow> = tirs
                 .iter()
                 .map(|t| ryo_core::flow::Flow::build(t, &pool))
                 .collect();
-            (tirs, flows, pool)
+            (tirs, flows, pool, context)
         })
-        .bench_values(|(tirs, flows, pool)| {
+        .bench_values(|(tirs, flows, pool, _context)| {
             let mut sink = ryo_core::diag::DiagSink::new();
             let sidecar =
                 ryo_frontend::ownership::check(divan::black_box(&tirs), &flows, &pool, &mut sink);
@@ -294,7 +323,7 @@ fn flow_build_call_heavy(bencher: divan::Bencher, functions: usize) {
     let src = call_heavy_source(functions);
     bencher
         .with_inputs(|| sema_program(&src))
-        .bench_values(|(tirs, pool)| {
+        .bench_values(|(tirs, pool, _context)| {
             let flows: Vec<ryo_core::flow::Flow> = tirs
                 .iter()
                 .map(|t| ryo_core::flow::Flow::build(t, &pool))
@@ -308,7 +337,7 @@ fn flow_build_nested_control(bencher: divan::Bencher, case: (usize, usize)) {
     let src = nested_control_source(case.0, case.1);
     bencher
         .with_inputs(|| sema_program(&src))
-        .bench_values(|(tirs, pool)| {
+        .bench_values(|(tirs, pool, _context)| {
             let flows: Vec<ryo_core::flow::Flow> = tirs
                 .iter()
                 .map(|t| ryo_core::flow::Flow::build(t, &pool))
@@ -340,7 +369,7 @@ fn flow_build_match_arms(bencher: divan::Bencher, arms: usize) {
     let src = match_arms_source(16, arms);
     bencher
         .with_inputs(|| sema_program(&src))
-        .bench_values(|(tirs, pool)| {
+        .bench_values(|(tirs, pool, _context)| {
             let flows: Vec<ryo_core::flow::Flow> = tirs
                 .iter()
                 .map(|t| ryo_core::flow::Flow::build(t, &pool))
@@ -403,7 +432,7 @@ fn ownership_many_views(bencher: divan::Bencher, views: usize) {
     let src = many_views_source(4, views);
     bencher
         .with_inputs(|| sema_program(&src))
-        .bench_values(|(tirs, pool)| {
+        .bench_values(|(tirs, pool, _context)| {
             let mut sink = ryo_core::diag::DiagSink::new();
             let flows: Vec<ryo_core::flow::Flow> = tirs
                 .iter()
@@ -421,7 +450,7 @@ fn ownership_many_drops(bencher: divan::Bencher, drops: usize) {
     let src = many_drops_source(4, drops);
     bencher
         .with_inputs(|| sema_program(&src))
-        .bench_values(|(tirs, pool)| {
+        .bench_values(|(tirs, pool, _context)| {
             let mut sink = ryo_core::diag::DiagSink::new();
             let flows: Vec<ryo_core::flow::Flow> = tirs
                 .iter()

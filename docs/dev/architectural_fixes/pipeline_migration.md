@@ -4,7 +4,7 @@
 
 This document records the current compiler structure, the target pipeline,
 and the steps that connect them. The target preserves Ryo's language semantics.
-The [roadmap](implementation_roadmap.md) owns feature delivery and milestone status.
+The [roadmap](../implementation_roadmap.md) owns feature delivery and milestone status.
 
 ## Scope and terminology
 
@@ -77,10 +77,20 @@ flowchart TD
     H --> I[JIT execution or AOT object and linking]
 ```
 
+`CompilationContext` owns the source database. Each `SourceId` identifies one immutable
+source revision in one context; `get` resolves retained revisions, while `require_current`
+rejects stale input. Source text and display paths are independent, and wrong-context handles
+are rejected even when their local revision indices match.
+
 The frontend owns Flow construction and ownership analysis in
-[`pipeline.rs`](../../ryo-frontend/src/pipeline.rs).
+[`pipeline.rs`](../../../ryo-frontend/src/pipeline.rs).
 The driver shares these transitions across JIT, AOT, and IR inspection.
-Partial artifacts remain inspectable after source errors. Such errors block backend preparation.
+Every span carries its `SourceId` or an explicit source-less sentinel through AST, UIR,
+TIR, and Flow. UIR/TIR match wires preserve both source-handle words and offsets.
+Diagnostic rendering resolves primary and secondary labels through the source database,
+with an Ariadne cache and byte-to-character table per referenced revision. Source-less
+diagnostics never borrow the first registered filename, and invalid spans become internal
+compiler errors. Partial artifacts remain inspectable after source errors. Such errors block backend preparation.
 
 Typed bodies, Flow versions, and layout contexts carry process-local identities.
 Cleanup records its Flow identity. Backend preparation checks these associations in every build.
@@ -88,17 +98,17 @@ Equal names, arena lengths, or valid local indices do not establish compatibilit
 Published artifacts expose immutable references. Content stamps also reject edits to cloned
 TIR, Flow, and cleanup arenas. Rebuild an artifact and its analyses after a representation change.
 
-[`CleanupPlan`](../../ryo-core/src/flow/cleanup.rs) selects each release's storage before emission.
+[`CleanupPlan`](../../../ryo-core/src/flow/cleanup.rs) selects each release's storage before emission.
 A binding release names a Flow place. A displaced value release names its producer.
 The backend retains declaring-binding storage after lexical name restoration.
 Physical fat-value representations also record their declaring binding, which emission checks before destruction.
 Aggregate and payload storage follows the same declaring-binding identities.
 Promotion scratch allocations have separate identities for each base-expression site.
 They share the ordinary cleanup firing maps and the
-[shared resolver](../../ryo-core/src/flow/fire_points.rs); no promotion sweep reads representation caches.
+[shared resolver](../../../ryo-core/src/flow/fire_points.rs); no promotion sweep reads representation caches.
 Flow records call mutations and view bases. RHS aliasing uses resolved reads and parent metadata.
 
-[`LoweredAbi`](../../ryo-backend/src/codegen/abi.rs) records parameter modes and expansions,
+[`LoweredAbi`](../../../ryo-backend/src/codegen/abi.rs) records parameter modes and expansions,
 hidden result storage, result convention, target triple, pointer type, and layout context.
 Declarations, argument marshalling, callee entry, and return emission consume this description.
 Backend preparation rejects incompatible calls before body emission.
@@ -349,7 +359,7 @@ comptime is permitted to read, or reject them under the chosen evaluation contra
 
 Cache immutable artifacts or explicitly version their phase and analysis results.
 After a transformation, preserve proven facts or recompute invalidated analyses
-before consumption. Follow the [incremental compilation design](proposal_incremental_compilation.md)
+before consumption. Follow the [incremental compilation design](../proposal_incremental_compilation.md)
 for persistence and scheduling; this migration does not imply that caching is implemented.
 
 ### Package metadata and separate compilation
@@ -405,7 +415,7 @@ flowchart LR
 The Ryo wrapper defines the public API, ownership behavior, and error translation.
 Users of that wrapper do not need foreign declarations at each call site.
 User-authored foreign declarations serve direct foreign-library integration.
-This structure extends the [std design](spec_std.md) and [Rust wrapper plan](spec_std_extensions.md).
+This structure extends the [std design](../spec_std.md) and [Rust wrapper plan](../spec_std_extensions.md).
 Importable modules can use statically linked implementations. Import does not imply dynamic loading.
 
 #### Compiler and memory contracts
@@ -528,7 +538,7 @@ Preserve ownership and cleanup contracts, or rerun affected analyses.
 Apply growth budgets and measure compile time, allocations, and binary size.
 
 Automatic reference counting (ARC) optimization follows explicit retain/release
-insertion. Rebase the existing [ARC design](spec_arc_optimizer.md) onto Flow IR when implemented.
+insertion. Rebase the existing [ARC design](../spec_arc_optimizer.md) onto Flow IR when implemented.
 Its current TIR placement describes the earlier pipeline.
 
 ### Escape analysis and allocation placement
@@ -559,7 +569,7 @@ Closure lowering constructs explicit environments and capture operations.
 Ownership checks task transfers and scoped borrowed captures.
 A scoped child's borrowed capture protects its owner until the scope join.
 
-The [concurrency implementation plan](spec_concurrency.md) proposes inferred yield effects.
+The [concurrency implementation plan](../spec_concurrency.md) proposes inferred yield effects.
 Compute function summaries over the call graph, including recursive cycles.
 Keep generic summaries parametric and resolve concrete implementations when known.
 Include implicit destructor calls. Recheck effects after transformations that change calls.
@@ -646,16 +656,16 @@ Update architecture references after the relevant consumers migrate.
 
 ## References
 
-- Spec: [Section 5](../specification.md#5-memory-management-ownership-lite) (ownership, views, destruction, and shared values).
-- Spec: [Section 6](../specification.md#6-functions--closures) (functions and captures), [Section 8](../specification.md#8-traits-behavior) (traits).
-- Spec: [Section 9](../specification.md#9-concurrency-model-taskfuturechannel) (tasks, cancellation, and joins).
-- Spec: [Section 14](../specification.md#14-standard-library) (stdlib layering), [Section 4.11](../specification.md#411-ffi--c-interoperability) and [Section 17](../specification.md#17-ffi--unsafe) (foreign integration).
-- Dev: [Standard library foundation](spec_std.md), [Rust-backed std extensions](spec_std_extensions.md), and [official native packages](spec_official_packages.md).
-- Spec amendments: [Memory model](spec_slicing_and_memory_model.md), especially scoped task borrows and runtime profiles.
-- Dev: [Pipeline alignment](pipeline_alignment.md), [pattern matching](pattern_matching.md), [concurrency](spec_concurrency.md), [closure representation](spec_closure_representation.md), [ARC optimizer](spec_arc_optimizer.md).
-- Contributor rules: [Compiler instructions](guide_llm_instructions.md).
-- Milestones and delivery: [Implementation roadmap](implementation_roadmap.md).
-- Dev: [Incremental compilation](proposal_incremental_compilation.md) for queries, dependency tracking, and cache validity.
+- Spec: [Section 5](../../specification.md#5-memory-management-ownership-lite) (ownership, views, destruction, and shared values).
+- Spec: [Section 6](../../specification.md#6-functions--closures) (functions and captures), [Section 8](../../specification.md#8-traits-behavior) (traits).
+- Spec: [Section 9](../../specification.md#9-concurrency-model-taskfuturechannel) (tasks, cancellation, and joins).
+- Spec: [Section 14](../../specification.md#14-standard-library) (stdlib layering), [Section 4.11](../../specification.md#411-ffi--c-interoperability) and [Section 17](../../specification.md#17-ffi--unsafe) (foreign integration).
+- Dev: [Standard library foundation](../spec_std.md), [Rust-backed std extensions](../spec_std_extensions.md), and [official native packages](../spec_official_packages.md).
+- Spec amendments: [Memory model](../spec_slicing_and_memory_model.md), especially scoped task borrows and runtime profiles.
+- Dev: [Pipeline alignment](pipeline_alignment.md), [pattern matching](../pattern_matching.md), [concurrency](../spec_concurrency.md), [closure representation](../spec_closure_representation.md), [ARC optimizer](../spec_arc_optimizer.md).
+- Contributor rules: [Compiler instructions](../guide_llm_instructions.md).
+- Milestones and delivery: [Implementation roadmap](../implementation_roadmap.md).
+- Dev: [Incremental compilation](../proposal_incremental_compilation.md) for queries, dependency tracking, and cache validity.
 - Zig: [AIR](https://github.com/ziglang/zig/blob/master/src/Air.zig) and [liveness](https://github.com/ziglang/zig/blob/master/src/Air/Liveness.zig) for arena-based representation and explicit branch analysis.
 - Zig: [Sema](https://github.com/ziglang/zig/blob/master/src/Sema.zig) for integrated comptime evaluation and specialization; [AIR legalization](https://github.com/ziglang/zig/blob/master/src/Air/Legalize.zig) for backend preparation.
 - rustc: [MIR](https://rustc-dev-guide.rust-lang.org/mir/index.html), [dataflow](https://rustc-dev-guide.rust-lang.org/mir/dataflow.html), [drop elaboration](https://rustc-dev-guide.rust-lang.org/mir/drop-elaboration.html), and [monomorphization](https://rustc-dev-guide.rust-lang.org/backend/monomorph.html) for analysis boundaries and explicit operations.

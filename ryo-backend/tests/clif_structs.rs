@@ -24,13 +24,20 @@ fn analyze(
     Vec<ryo_core::flow::Flow>,
     InternPool,
     OwnershipSidecar,
+    ryo_core::compilation::CompilationContext,
 ) {
+    let mut context = ryo_core::compilation::CompilationContext::new();
+    let source_id = context.register_source(std::path::PathBuf::from("test.ryo"), src.into());
+    let source = context
+        .sources()
+        .get(source_id)
+        .expect("test source must resolve");
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
-    let tokens = lexer::lex(src, &mut pool, &mut sink);
+    let tokens = lexer::lex(source, &mut pool, &mut sink);
     assert!(!sink.has_errors(), "lex should succeed");
-    let token_stream = tokens[..].split_token_span((0..src.len()).into());
-    let mut state = ParseState::new(pool);
+    let token_stream = tokens[..].split_token_span(lexer::eoi(source_id, src.len()));
+    let mut state = ParseState::with_source(pool, source_id);
     program_parser()
         .parse_with_state(token_stream, &mut state)
         .into_result()
@@ -54,11 +61,11 @@ fn analyze(
         .collect();
     let sidecar = ryo_frontend::ownership::check(&tirs, &flows, &pool, &mut ownership_sink);
     assert!(!ownership_sink.has_errors(), "ownership should succeed");
-    (tirs, flows, pool, sidecar)
+    (tirs, flows, pool, sidecar, context)
 }
 
 fn clif_of(src: &str) -> String {
-    let (tirs, flows, pool, sidecar) = analyze(src);
+    let (tirs, flows, pool, sidecar, _context) = analyze(src);
     let mut codegen = Codegen::new_jit().expect("JIT codegen should initialize");
     codegen
         .compile_and_dump_ir(&tirs, &flows, &pool, &sidecar)
@@ -66,7 +73,7 @@ fn clif_of(src: &str) -> String {
 }
 
 fn object_bytes(src: &str) -> Vec<u8> {
-    let (tirs, flows, pool, sidecar) = analyze(src);
+    let (tirs, flows, pool, sidecar, _context) = analyze(src);
     let mut codegen = Codegen::new_aot(Triple::host()).expect("AOT codegen should initialize");
     codegen
         .compile(&tirs, &flows, &pool, &sidecar, false)

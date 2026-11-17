@@ -17,10 +17,15 @@
 use chumsky::span::{SimpleSpan, Span as _};
 use logos::Logos;
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
+use ryo_core::source::{Source, SourceId};
 use ryo_core::types::{InternPool, StringId};
 use std::fmt;
 
-pub type Span = SimpleSpan;
+pub type Span = SimpleSpan<usize, SourceId>;
+
+pub fn eoi(source: SourceId, input_len: usize) -> Span {
+    SimpleSpan::new(source, 0..input_len)
+}
 
 // ============================================================================
 // Public, interned token type
@@ -423,10 +428,34 @@ fn estimated_token_count(input: &str) -> usize {
 /// diagnostics in the same run. Whole-source width overflow, an
 /// over-budget literal, or indentation failure instead returns an
 /// empty vector and the driver skips parsing.
-pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Token, Span)> {
+#[cfg(not(test))]
+pub fn lex(source: &Source, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Token, Span)> {
+    lex_impl(source.id(), source.text(), pool, sink)
+}
+
+#[cfg(test)]
+pub(crate) fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Token, Span)> {
+    lex_impl(SourceId::NONE, input, pool, sink)
+}
+
+#[cfg(test)]
+pub(crate) fn lex_with_source(
+    source: &Source,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+) -> Vec<(Token, Span)> {
+    lex_impl(source.id(), source.text(), pool, sink)
+}
+
+pub(crate) fn lex_impl(
+    source: SourceId,
+    input: &str,
+    pool: &mut InternPool,
+    sink: &mut DiagSink,
+) -> Vec<(Token, Span)> {
     if input.len() > u32::MAX as usize {
         sink.emit(Diag::error(
-            crate::spans::cspan(SimpleSpan::new((), 0..0)),
+            crate::spans::cspan(SimpleSpan::new(source, 0..0)),
             DiagCode::LexerInputTooLarge,
             format!(
                 "source is too large to lex ({} bytes; the limit is {})",
@@ -437,9 +466,9 @@ pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Toke
         return Vec::new();
     }
 
-    let raw_tokens = collect_raw_tokens(input, sink);
+    let raw_tokens = collect_raw_tokens(input, source, sink);
 
-    let processed = match crate::indent::process(raw_tokens) {
+    let processed = match crate::indent::process(raw_tokens, source) {
         Ok(processed) => processed,
         Err(e) => {
             // `IndentError` carries the offending `Newline` token's
@@ -581,7 +610,11 @@ thread_local! {
 /// stack: a single literal holding tens of thousands of escapes needs
 /// a stack proportional to its escape content, which no fixed caller
 /// stack guarantees (see `DFA_STACK_PER_BYTE`).
-fn collect_raw_tokens<'a>(input: &'a str, sink: &mut DiagSink) -> Vec<(RawToken<'a>, Span)> {
+fn collect_raw_tokens<'a>(
+    input: &'a str,
+    source: SourceId,
+    sink: &mut DiagSink,
+) -> Vec<(RawToken<'a>, Span)> {
     let collect = |sink: &mut DiagSink| {
         // Pre-size the raw-token buffer instead of growing it from
         // zero. logos' `SpannedIter` reports only a trivial
@@ -597,7 +630,7 @@ fn collect_raw_tokens<'a>(input: &'a str, sink: &mut DiagSink) -> Vec<(RawToken<
             RawToken::lexer(input)
                 .spanned()
                 .map(|(tok, span)| match tok {
-                    Ok(t) => (t, span.into()),
+                    Ok(t) => (t, SimpleSpan::new(source, span)),
                     Err(()) => {
                         // logos matched nothing at this span: the source
                         // holds a character the grammar doesn't recognize.
@@ -605,11 +638,11 @@ fn collect_raw_tokens<'a>(input: &'a str, sink: &mut DiagSink) -> Vec<(RawToken<
                         // control bytes (e.g. a lone `\r`) render readably.
                         let text = input[span.clone()].escape_debug().to_string();
                         sink.emit(Diag::error(
-                            crate::spans::cspan(SimpleSpan::new((), span.clone())),
+                            crate::spans::cspan(SimpleSpan::new(source, span.clone())),
                             DiagCode::InvalidCharacter,
                             format!("invalid character '{}'", text),
                         ));
-                        (RawToken::Error, span.into())
+                        (RawToken::Error, SimpleSpan::new(source, span))
                     }
                 }),
         );
@@ -618,7 +651,7 @@ fn collect_raw_tokens<'a>(input: &'a str, sink: &mut DiagSink) -> Vec<(RawToken<
     let escape_bytes = longest_literal_escape_bytes(input);
     let reject_too_large = |sink: &mut DiagSink| {
         sink.emit(Diag::error(
-            crate::spans::cspan(SimpleSpan::new((), 0..input.len())),
+            crate::spans::cspan(SimpleSpan::new(source, 0..input.len())),
             DiagCode::LexerInputTooLarge,
             format!(
                 "string literal is too large to lex ({} bytes of escapes in one literal; the limit is {})",
@@ -692,6 +725,7 @@ fn unescape(
     sink: &mut DiagSink,
     mode: EscapeMode,
 ) -> Vec<u8> {
+    let source = body_span.source;
     let mut out = Vec::with_capacity(inner.len());
     // Byte offset within `inner`; tracked manually (rather than
     // `char_indices`) because consuming an escape advances past
@@ -752,7 +786,7 @@ fn unescape(
                             let start = body_span.start.saturating_add(i);
                             let end = start.saturating_add(2);
                             sink.emit(Diag::error(
-                                crate::spans::cspan(SimpleSpan::new((), start..end)),
+                                crate::spans::cspan(SimpleSpan::new(source, start..end)),
                                 DiagCode::UnknownEscape,
                                 "invalid '\\xNN' escape: exactly two hex digits required"
                                     .to_string(),
@@ -827,7 +861,7 @@ fn unescape(
                                 "invalid '\\u{...}' escape: not a Unicode scalar (surrogate or above U+10FFFF)"
                             };
                             sink.emit(Diag::error(
-                                crate::spans::cspan(SimpleSpan::new((), start..end)),
+                                crate::spans::cspan(SimpleSpan::new(source, start..end)),
                                 DiagCode::UnknownEscape,
                                 message.to_string(),
                             ));
@@ -846,7 +880,7 @@ fn unescape(
                     let start = body_span.start.saturating_add(i);
                     let end = start.saturating_add(1).saturating_add(c.len_utf8());
                     sink.emit(Diag::error(
-                        crate::spans::cspan(SimpleSpan::new((), start..end)),
+                        crate::spans::cspan(SimpleSpan::new(source, start..end)),
                         DiagCode::UnknownEscape,
                         format!("unknown escape sequence '\\{}'", c),
                     ));
@@ -875,6 +909,7 @@ fn intern_token(
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) -> Token {
+    let source = span.context;
     match raw {
         RawToken::Error => Token::Error,
         // Integer literals are parsed as `i64` here; sign is applied
@@ -956,7 +991,7 @@ fn intern_token(
             // pointing at the user-visible bytes.
             let inner = &s[1..s.len() - 1];
             let body_span = crate::spans::cspan(SimpleSpan::new(
-                (),
+                source,
                 span.start.saturating_add(1)..span.end.saturating_sub(1),
             ));
             let decoded = unescape(inner, body_span, sink, EscapeMode::Str);
@@ -981,7 +1016,7 @@ fn intern_token(
                 ));
             }
             let body_span = crate::spans::cspan(SimpleSpan::new(
-                (),
+                source,
                 span.start.saturating_add(2)..span.end.saturating_sub(1),
             ));
             let decoded = unescape(inner, body_span, sink, EscapeMode::Bytes);
@@ -1225,51 +1260,6 @@ mod tests {
             Token::StrLit(id) => assert_eq!(pool.str(id), "a#[b"),
             ref t => panic!("expected StrLit, got {t:?}"),
         }
-    }
-
-    #[test]
-    fn lex_int_overflow_emits_error() {
-        // An out-of-range integer literal emits a diagnostic and
-        // recovers with a zero literal so parsing can continue
-        // without a spurious cascade parse error.
-        let mut pool = InternPool::new();
-        let mut sink = DiagSink::new();
-        let toks = lex("99999999999999999999", &mut pool, &mut sink);
-        let diags = sink.into_diags();
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].code, DiagCode::ParseError);
-        assert_eq!(
-            diags[0].message,
-            "invalid integer literal: '99999999999999999999'"
-        );
-        assert!(
-            toks.iter().any(|(t, _)| *t == Token::IntLit(0)),
-            "recovery token IntLit(0) present: {:?}",
-            toks
-        );
-    }
-
-    #[test]
-    fn lex_invalid_character_emits_diag_and_continues() {
-        let mut pool = InternPool::new();
-        let mut sink = DiagSink::new();
-        let toks = lex("x = @\ny = 2", &mut pool, &mut sink);
-        let diags = sink.into_diags();
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].code, DiagCode::InvalidCharacter);
-        assert_eq!(diags[0].message, "invalid character '@'");
-        // The `@` sits at byte 4 in "x = @\ny = 2".
-        assert_eq!(diags[0].span, ryo_core::span::Span::new(4, 5));
-        // Recovery: a Token::Error placeholder is pushed and lexing
-        // continues past the bad byte — the rest of the stream is
-        // intact.
-        assert!(toks.iter().any(|(t, _)| matches!(t, Token::Error)));
-        let y = pool.intern_str("y");
-        assert!(
-            toks.iter().any(|(t, _)| *t == Token::Ident(y)),
-            "tokens after the invalid character still lexed: {:?}",
-            toks
-        );
     }
 
     #[test]

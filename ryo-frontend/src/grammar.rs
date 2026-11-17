@@ -23,10 +23,9 @@ use chumsky::{
     input::{MapExtra, ValueInput},
     prelude::*,
     recovery::via_parser,
-    span::SimpleSpan,
 };
 
-use crate::lexer::Token;
+use crate::lexer::{Span as SimpleSpan, Token};
 use ryo_core::ast::*;
 use ryo_core::diag::ParseDiag;
 use ryo_core::tir::ParamMode;
@@ -53,6 +52,7 @@ pub use statements::program_parser;
 pub struct ParseState {
     ast: Ast,
     pool: InternPool,
+    source: ryo_core::source::SourceId,
     /// Receiver-shape hint for the M11 postfix gates: `Some(name)`
     /// while the expression the postfix ops are folding is a bare
     /// uppercase-led identifier (`EnumName.Variant{...}` candidates
@@ -74,12 +74,21 @@ impl ParseState {
     /// Fresh arenas over the lexer's pool (ownership moves back out
     /// through [`ParseState::into_parts`]).
     pub fn new(pool: InternPool) -> Self {
+        Self::with_source(pool, ryo_core::source::SourceId::NONE)
+    }
+
+    pub fn with_source(pool: InternPool, source: ryo_core::source::SourceId) -> Self {
         ParseState {
             ast: Ast::new(),
             pool,
+            source,
             postfix_head_enum: None,
             recovery_checkpoints: Vec::new(),
         }
+    }
+
+    pub(crate) fn source(&self) -> ryo_core::source::SourceId {
+        self.source
     }
 
     pub fn into_parts(self) -> (Ast, InternPool) {
@@ -392,6 +401,7 @@ where
     atom.foldl_with(
         choice((dot_op, bracket_op)).repeated(),
         |receiver, op, e: &mut Mx<'a, '_, I>| {
+            let source = e.state().source();
             let start = e.state().expr_span(receiver).start;
             let result = match op {
                 PostfixOp::Method(method, args, span) => {
@@ -436,7 +446,7 @@ where
                                     named_parens: true,
                                     mixed_fields: false,
                                 }),
-                                crate::spans::cspan(SimpleSpan::new((), start..span.end)),
+                                crate::spans::cspan(SimpleSpan::new(source, start..span.end)),
                             )
                         }
                         Some(_) => {
@@ -463,14 +473,14 @@ where
                                     named_parens: false,
                                     mixed_fields: !named.is_empty(),
                                 }),
-                                crate::spans::cspan(SimpleSpan::new((), start..span.end)),
+                                crate::spans::cspan(SimpleSpan::new(source, start..span.end)),
                             )
                         }
                         None => e.state().method_call(
                             receiver,
                             method.name,
                             &positional,
-                            crate::spans::cspan(SimpleSpan::new((), start..span.end)),
+                            crate::spans::cspan(SimpleSpan::new(source, start..span.end)),
                         ),
                     }
                 }
@@ -498,7 +508,7 @@ where
                             named_parens: false,
                             mixed_fields: false,
                         }),
-                        crate::spans::cspan(SimpleSpan::new((), start..span.end)),
+                        crate::spans::cspan(SimpleSpan::new(source, start..span.end)),
                     )
                 }
                 PostfixOp::RecoveredPositionalBraces(variant, values, span) => {
@@ -525,7 +535,7 @@ where
                             named_parens: false,
                             mixed_fields: false,
                         }),
-                        crate::spans::cspan(SimpleSpan::new((), start..span.end)),
+                        crate::spans::cspan(SimpleSpan::new(source, start..span.end)),
                     )
                 }
                 PostfixOp::RecoveredMissingParens(variant, arg, span) => {
@@ -537,7 +547,7 @@ where
                     let enum_id = type_name_ident(receiver, e)
                         .expect("missing-parens op is gated on a type receiver");
                     e.emit(Rich::custom(
-                        SimpleSpan::new((), start..span.end),
+                        SimpleSpan::new(source, start..span.end),
                         ParseDiag::MissingArgListOnVariant {
                             enum_name: enum_id.name,
                             variant: variant.name,
@@ -555,25 +565,25 @@ where
                             named_parens: false,
                             mixed_fields: false,
                         }),
-                        crate::spans::cspan(SimpleSpan::new((), start..span.end)),
+                        crate::spans::cspan(SimpleSpan::new(source, start..span.end)),
                     )
                 }
                 PostfixOp::Field(field, span) => e.state().field_access(
                     receiver,
                     field,
-                    crate::spans::cspan(SimpleSpan::new((), start..span.end)),
+                    crate::spans::cspan(SimpleSpan::new(source, start..span.end)),
                 ),
                 PostfixOp::Missing => receiver,
                 PostfixOp::Slice(lo, hi, span) => e.state().slice(
                     receiver,
                     lo,
                     hi,
-                    crate::spans::cspan(SimpleSpan::new((), start..span.end)),
+                    crate::spans::cspan(SimpleSpan::new(source, start..span.end)),
                 ),
                 PostfixOp::Index(index, span) => e.state().index(
                     receiver,
                     index,
-                    crate::spans::cspan(SimpleSpan::new((), start..span.end)),
+                    crate::spans::cspan(SimpleSpan::new(source, start..span.end)),
                 ),
             };
             e.state().postfix_head_enum = type_name_ident(result, e).map(|id| id.name);
@@ -690,11 +700,12 @@ where
                     let span = crate::spans::cspan(e.span());
                     let mut target = inner;
                     for field in fields {
+                        let source = e.state().source();
                         let start = e.state().expr_span(target).start;
                         target = e.state().field_access(
                             target,
                             field,
-                            crate::spans::cspan(SimpleSpan::new((), start..field.span.end)),
+                            crate::spans::cspan(SimpleSpan::new(source, start..field.span.end)),
                         );
                     }
                     e.state().borrow(target, span)
@@ -805,12 +816,13 @@ where
         // breaks some profiling tooling (and compile times).
         let catch_tail = errors::catch_tail_parser(match_arms, match_arm_body);
         let fold_catch = |operand, tail: errors::CatchTail, e: &mut Mx<'a, '_, I>| {
+            let source = e.state().source();
             let start = e.state().expr_span(operand).start;
             e.state().catch_expr(
                 operand,
                 tail.binding,
                 tail.body,
-                crate::spans::cspan(SimpleSpan::new((), start..tail.span.end)),
+                crate::spans::cspan(SimpleSpan::new(source, start..tail.span.end)),
             )
         };
         // Every postfix operand may be followed by `catch`, so a miss
@@ -882,13 +894,14 @@ where
         where
             I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
         {
+            let source = e.state().source();
             let start = e.state().expr_span(left).start;
             let end = e.state().expr_span(right).end;
             e.state().binary(
                 op,
                 left,
                 right,
-                crate::spans::cspan(SimpleSpan::new((), start..end)),
+                crate::spans::cspan(SimpleSpan::new(source, start..end)),
             )
         }
 
@@ -935,7 +948,7 @@ where
         // which must keep parsing and fail in sema as before.)
         fn fold_non_assoc<'a, I>(
             (left, seen): (ExprId, bool),
-            (op, right): (chumsky::span::Spanned<BinaryOperator>, ExprId),
+            (op, right): (chumsky::span::Spanned<BinaryOperator, SimpleSpan>, ExprId),
             e: &mut Mx<'a, '_, I>,
         ) -> (ExprId, bool)
         where

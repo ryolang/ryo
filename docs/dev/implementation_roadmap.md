@@ -2,9 +2,9 @@
 
 # Ryo Implementation Roadmap
 
-Compiler architecture: [current pipeline, target Flow IR, and migration steps](pipeline_migration.md).
+Compiler architecture: [current pipeline, target Flow IR, and migration steps](architectural_fixes/pipeline_migration.md).
 This design note does not change milestone completion or feature sequencing.
-Migration validation: [regression checks and acceptance gates](pipeline_regression_checks.md).
+Migration validation: [regression checks and acceptance gates](architectural_fixes/pipeline_regression_checks.md).
 View design reference: [Hylo projections and the differences from Ryo views](pl_references/hylo.md).
 
 ## Milestone Index
@@ -353,7 +353,7 @@ _ = print("Second\n")
 - Lexer: `Arrow` (`->`), `Newline`, synthetic `Indent`/`Dedent` tokens
 - AST: `StmtKind::FunctionDef`, `StmtKind::Return`, `StmtKind::ExprStmt`, `ExprKind::Ident`
 - Parser: function definitions (`fn name(params) -> type:`), return statements, expression statements, variable references
-- Post-analysis IR with full type resolution, scope checking, and implicit main wrapping — analogous to Zig's AIR. (Originally a single tree-shaped HIR; since split into the flat UIR/TIR streams — see pipeline_alignment.md.)
+- Post-analysis IR with full type resolution, scope checking, and implicit main wrapping — analogous to Zig's AIR. (Originally a single tree-shaped HIR; since split into the flat UIR/TIR streams — see architectural_fixes/pipeline_alignment.md.)
 - Codegen: refactored to consume the typed IR (not AST), two-pass compilation (declare-then-define) for forward references, `FunctionContext` struct, Cranelift `Variable` storage for locals/params, user function calls
 - Builtin function registry (`src/builtins.rs`) for `print()` and future builtins
 - `ryo ir` command now displays actual Cranelift IR
@@ -4097,5 +4097,5 @@ This roadmap represents an **honest, achievable plan** for building Ryo v0.1.0. 
 ## References
 
 - Spec: [specification.md](../specification.md) — canonical language specification; this roadmap schedules its delivery
-- Dev: [alpha_scope.md](alpha_scope.md), [pipeline_alignment.md](pipeline_alignment.md), [guide_cranelift_lessons.md](guide_cranelift_lessons.md) — implementation plans linked from milestones; guide_cranelift_lessons.md records the 2026-08 Cranelift/codegen findings (ABI limits, packed-`u128` runtime ABI, guard flag-fusion, measurement lessons) — read before optimization work in `ryo-backend`
+- Dev: [alpha_scope.md](alpha_scope.md), [architectural_fixes/pipeline_alignment.md](architectural_fixes/pipeline_alignment.md), [guide_cranelift_lessons.md](guide_cranelift_lessons.md) — implementation plans linked from milestones; guide_cranelift_lessons.md records the 2026-08 Cranelift/codegen findings (ABI limits, packed-`u128` runtime ABI, guard flag-fusion, measurement lessons) — read before optimization work in `ryo-backend`
 - Milestone: alpha milestones tagged `[alpha]` inline; see [alpha_scope.md](alpha_scope.md) for the alpha delivery slice

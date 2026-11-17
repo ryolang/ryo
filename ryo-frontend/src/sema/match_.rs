@@ -729,7 +729,7 @@ fn seed_arm_bindings(
                 .get(as_start..span.start)
                 .is_some_and(|prefix| prefix == b"as ")
             {
-                Span::new(as_start, span.end)
+                span.with_start(as_start)
             } else {
                 span
             };
