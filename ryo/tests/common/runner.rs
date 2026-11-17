@@ -162,6 +162,12 @@ pub fn create_test_file(dir: &Path, filename: &str, content: &str) -> std::path:
     file_path
 }
 
+pub fn closed_pipe() -> std::process::Stdio {
+    let (reader, writer) = std::io::pipe().expect("create closed pipe");
+    drop(reader);
+    writer.into()
+}
+
 /// Path to an AOT-built binary, with the platform `.exe` suffix.
 pub fn exe_path(dir: &Path, stem: &str) -> PathBuf {
     dir.join(format!("{stem}{}", std::env::consts::EXE_SUFFIX))

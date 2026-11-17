@@ -1422,3 +1422,46 @@ fn stack_size_from_rlim_cur_finite_values_pass_through() {
         0x7fff_ffff_ffff_fffe
     );
 }
+
+#[cfg(all(not(windows), not(miri)))]
+#[test]
+fn generated_process_policy_restores_host_sigpipe() {
+    type SignalHandler = usize;
+    const SIGPIPE: c_int = 13;
+    const SIG_DFL: SignalHandler = 0;
+    const SIG_IGN: SignalHandler = 1;
+
+    unsafe extern "C" {
+        fn signal(signal: c_int, handler: SignalHandler) -> SignalHandler;
+    }
+
+    if std::env::var_os("RYO_RT_POLICY_CHILD").is_some() {
+        // SAFETY: all handlers are POSIX sentinel values; this child has no
+        // other threads or generated executions changing SIGPIPE.
+        unsafe { signal(SIGPIPE, SIG_IGN) };
+        {
+            let _guard = GeneratedProcessPolicyGuard::enter().expect("enter generated policy");
+            // SAFETY: setting the default is valid; the return reports the
+            // disposition that was active while the guard was entered.
+            let active = unsafe { signal(SIGPIPE, SIG_DFL) };
+            assert_eq!(active, SIG_DFL);
+        }
+        // SAFETY: the guard has dropped, so this reports its restored value.
+        let restored = unsafe { signal(SIGPIPE, SIG_DFL) };
+        assert_eq!(restored, SIG_IGN);
+        return;
+    }
+
+    let output = std::process::Command::new(std::env::current_exe().expect("current_exe"))
+        .arg("tests::generated_process_policy_restores_host_sigpipe")
+        .arg("--exact")
+        .env("RYO_RT_POLICY_CHILD", "1")
+        .output()
+        .expect("spawn process-policy child");
+    assert!(
+        output.status.success(),
+        "policy child failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

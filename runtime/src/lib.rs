@@ -14,6 +14,9 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+mod process_policy;
+pub use process_policy::GeneratedProcessPolicyGuard;
+
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_void};
 use core::hint::spin_loop;
@@ -34,11 +37,11 @@ unsafe extern "C" {
     fn _write(fd: c_int, buf: *const c_void, count: u32) -> c_int;
     fn _read(fd: c_int, buf: *mut c_void, count: u32) -> c_int;
     fn _setmode(fd: c_int, mode: c_int) -> c_int;
+    fn _errno() -> *mut c_int;
 }
 
-// Thread-local errno accessors for the EINTR retry in `read_line_from`.
-// Windows references neither: the CRT's `_read` reports no EINTR, so
-// any negative result there is a genuine error.
+// Thread-local errno accessors for the EINTR retry in `read_line_from`
+// and closed-pipe handling in `write_all`.
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn __error() -> *mut c_int;
@@ -102,12 +105,15 @@ fn os_write(fd: c_int, ptr: *const u8, len: usize) -> isize {
 }
 
 /// Write all `len` bytes to `fd`, retrying short writes. Gives
-/// up silently on hard errors (return <= 0): stdout/stderr output is
-/// best-effort and there is no error channel to report through.
+/// up silently on hard errors (return <= 0), except that a closed pipe
+/// follows the generated-program signal/exit contract.
 fn write_all(fd: c_int, mut ptr: *const u8, mut len: usize) {
     while len > 0 {
         let n = os_write(fd, ptr, len);
         if n <= 0 {
+            if n < 0 {
+                process_policy::handle_write_error(errno());
+            }
             return;
         }
         // SAFETY: os_write reported n bytes consumed, so advancing by n
@@ -142,7 +148,6 @@ fn os_read(fd: c_int, ptr: *mut u8, len: usize) -> isize {
 const EINTR: c_int = 4;
 
 /// The calling thread's current errno value.
-#[cfg(not(windows))]
 fn errno() -> c_int {
     #[cfg(target_os = "macos")]
     // SAFETY: `__error` always returns a valid pointer to the calling
@@ -155,6 +160,12 @@ fn errno() -> c_int {
     // calling thread's errno slot; the load reads its current value.
     unsafe {
         *__errno_location()
+    }
+    #[cfg(windows)]
+    // SAFETY: `_errno` always returns a valid pointer to the calling
+    // thread's CRT errno slot.
+    unsafe {
+        *_errno()
     }
 }
 
@@ -395,9 +406,10 @@ pub unsafe extern "C" fn ryo_stack_overflow() -> ! {
 #[unsafe(no_mangle)]
 pub static RYO_STACK_LIMIT: AtomicUsize = AtomicUsize::new(0);
 
-/// Store the C runtime's argv — the `(argc, argv)` passed to `main` —
-/// for the process lifetime. Called once at `main` entry by the
-/// codegen entry shim.
+/// Initialize generated-program process policy, then store the C runtime's
+/// argv — the `(argc, argv)` passed to `main` — for the process lifetime.
+/// Called once at `main` entry by the codegen entry shim. Policy setup
+/// failure aborts before any user instruction runs.
 ///
 /// # Safety
 /// `argv` must point to `argc` readable `*const c_char` entries, each a
@@ -405,6 +417,10 @@ pub static RYO_STACK_LIMIT: AtomicUsize = AtomicUsize::new(0);
 /// lifetime (the natural crt0 contract).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ryo_rt_init(argc: c_int, argv: *const *const c_char) {
+    if process_policy::install_generated_process_policy().is_err() {
+        // SAFETY: abort never returns; no generated instruction has run.
+        unsafe { abort() }
+    }
     // Data, then flag: a Release store publishes only writes
     // program-ordered BEFORE it, so ARGV must be stored first — a
     // reader that observes the ARGC store (Acquire) is then guaranteed
