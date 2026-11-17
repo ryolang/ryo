@@ -807,19 +807,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-268 — Define broken-pipe semantics for Ryo CLI programs
-
-**Severity:** Correctness / Hygiene
-**Area:** runtime
-
-**Files:** runtime/src/lib.rs; ryo-backend/src/codegen/jit.rs; ryo-driver/src/pipeline/run.rs; ryo/tests/integration_driver.rs; docs/specification.md
-
-**Summary:** Ryo targets first-class CLI applications, but broken-pipe handling currently covers only compiler-owned diagnostics and inspection output. Generated-program behavior is a separate contract: JIT execution inherits the Rust compiler process's SIGPIPE disposition, while AOT programs have an independent native runtime, so execution modes can diverge when a downstream reader closes stdout or stderr early.
-
-**Resolution:** Adopt conventional Unix-filter behavior for generated Ryo programs: default SIGPIPE termination on Unix, with explicit non-panicking EPIPE handling and documented exit behavior on Windows. Implement the policy at the runtime/JIT execution boundary so JIT and AOT agree without changing the existing compiler diagnostic broken-pipe behavior. Specify stdout/stderr and exit-status semantics, and add early-closing-reader tests for both execution modes plus Windows coverage.
-
----
-
 ### I-284 — Introduce a compilation context with resolved declaration and binding identities
 
 **Severity:** Correctness / Hygiene
