@@ -1,7 +1,34 @@
-//! Process-local identities for immutable compiler representations.
+//! Process-local identities for compiler contexts and immutable representations.
 
 use std::hash::Hasher;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CompilationContextId(u32);
+
+impl CompilationContextId {
+    pub(crate) const NONE: Self = Self(0);
+
+    pub(crate) fn fresh() -> Self {
+        static NEXT: AtomicU32 = AtomicU32::new(1);
+        let raw = NEXT
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .expect("compilation context id space exhausted");
+        Self(raw)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn raw(self) -> u32 {
+        self.0
+    }
+}
 
 /// A published representation version. A rebuilt body receives a fresh identity.
 /// Clones retain identity and must remain immutable while analyses refer to them.
