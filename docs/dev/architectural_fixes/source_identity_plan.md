@@ -153,7 +153,7 @@ Add tests using a `CompilationContext` and real registered `Source`:
 
 - [ ] **Step 2: Run the new tests and confirm failure**
 
-Run: `cargo test -p ryo-frontend parse::tests lexer::tests`
+Run: `cargo test -p ryo-frontend parse::tests` and then `cargo test -p ryo-frontend lexer::tests`
 Expected: FAIL because source-aware lexer/parser entry points do not exist.
 
 - [ ] **Step 3: Implement source-aware lexing and parsing**

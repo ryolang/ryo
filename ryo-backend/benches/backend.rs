@@ -102,7 +102,10 @@ fn analyze(
 ) {
     let mut context = ryo_core::compilation::CompilationContext::new();
     let source_id = context.register_source(std::path::PathBuf::from("bench.ryo"), src.into());
-    let source = context.sources().get(source_id).unwrap();
+    let source = context
+        .sources()
+        .get(source_id)
+        .expect("bench source must resolve");
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
     let tokens = lexer::lex(source, &mut pool, &mut sink);

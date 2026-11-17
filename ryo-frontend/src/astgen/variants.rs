@@ -56,14 +56,14 @@ pub(super) fn lower_variant_construct(
                     sink,
                     depth + 1,
                 );
-                step = resume_variant_construct(state, value, b, ast, types, pool, sink);
+                step = resume_variant_construct(*state, value, b, ast, types, pool, sink);
             }
         }
     }
 }
 
 pub(super) enum VariantStep {
-    Child(VariantState, ast::ExprId),
+    Child(Box<VariantState>, ast::ExprId),
     Complete(InstRef),
 }
 
@@ -309,7 +309,7 @@ fn next_variant_step(state: VariantState, b: &mut UirBuilder, ast: &ast::Ast) ->
         None
     };
     if let Some(child) = child {
-        return VariantStep::Child(state, child);
+        return VariantStep::Child(Box::new(state), child);
     }
 
     let result = match state.kind {

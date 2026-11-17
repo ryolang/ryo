@@ -299,6 +299,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::reversed_empty_ranges)]
     fn reversed_range_is_rejected() {
         let mut context = CompilationContext::new();
         let id = context.register_source(PathBuf::from("main.ryo"), "text".into());

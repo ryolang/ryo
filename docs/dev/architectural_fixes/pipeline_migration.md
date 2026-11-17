@@ -77,10 +77,20 @@ flowchart TD
     H --> I[JIT execution or AOT object and linking]
 ```
 
+`CompilationContext` owns the source database. Each `SourceId` identifies one immutable
+source revision in one context; `get` resolves retained revisions, while `require_current`
+rejects stale input. Source text and display paths are independent, and wrong-context handles
+are rejected even when their local revision indices match.
+
 The frontend owns Flow construction and ownership analysis in
 [`pipeline.rs`](../../../ryo-frontend/src/pipeline.rs).
 The driver shares these transitions across JIT, AOT, and IR inspection.
-Partial artifacts remain inspectable after source errors. Such errors block backend preparation.
+Every span carries its `SourceId` or an explicit source-less sentinel through AST, UIR,
+TIR, and Flow. UIR/TIR match wires preserve both source-handle words and offsets.
+Diagnostic rendering resolves primary and secondary labels through the source database,
+with an Ariadne cache and byte-to-character table per referenced revision. Source-less
+diagnostics never borrow the first registered filename, and invalid spans become internal
+compiler errors. Partial artifacts remain inspectable after source errors. Such errors block backend preparation.
 
 Typed bodies, Flow versions, and layout contexts carry process-local identities.
 Cleanup records its Flow identity. Backend preparation checks these associations in every build.

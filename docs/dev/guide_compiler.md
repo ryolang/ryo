@@ -24,7 +24,7 @@ This guide is for agents and contributors extending the Ryo compiler. Load it wh
 ### Compilation Pipeline
 
 ```text
-Source → Lexer → Indent Preprocessor → Parser → AstGen → UIR → Sema → TIR → Flow → Ownership → Cleanup (DropOps) → Codegen → Linker → Executable
+CompilationContext (sources and revisions) → Lexer → Indent Preprocessor → Parser → AstGen → UIR → Sema → TIR → Flow → Ownership → Cleanup (DropOps) → Codegen → Linker → Executable
 ```
 
 (**Flow** — `ryo-core/src/flow.rs` — is the canonical control-flow graph built once per function body after sema: indexed blocks with explicit terminators, a place table for storage identity, and per-step read/write/view facts. Both consumers drive from it: the **Ownership** pass analyzes Flow blocks/terminators post-sema (see `docs/dev/pl_references/mojo.md` and `ryo-frontend/src/ownership/mod.rs`), its cleanup decisions are explicit `DropOp`s positioned on Flow blocks, and **Codegen** maps Flow blocks to Cranelift blocks and dispatches terminators — neither pass reconstructs control flow from TIR statement lists. The authoritative design and phase contracts live in `docs/dev/architectural_fixes/pipeline_migration.md`; see `docs/dev/pattern_matching.md` for the match representation contracts.)
@@ -111,8 +111,11 @@ See `docs/dev/architectural_fixes/pipeline_alignment.md` for what remains of the
 | `ryo-core/src/flow/cleanup.rs` | Resolve releases to declaring Flow places or displaced produced values |
 | `ryo-core/src/ownership.rs` | Ownership sidecars, transfer records, promotion lifetimes, and validation outcomes |
 | `ryo-core/src/types.rs` | `InternPool` for types and strings; `TypeId` / `StringId` newtypes |
+| `ryo-core/src/compilation.rs` | Compilation context: owns the source database and its process-unique identity |
+| `ryo-core/src/source.rs` | Immutable source revisions, `SourceId` handles, current/stale lookup, and source/span validation |
+| `ryo-core/src/span.rs` | Byte offsets with explicit source identity or a source-less sentinel; derived spans preserve provenance |
 | `ryo-core/src/diag.rs` | Structured diagnostics: `Diag`, `DiagCode`, `DiagSink` |
-| `ryo-core/src/errors.rs` | Top-level `CompilerError` enum |
+| `ryo-core/src/errors.rs` | Top-level `CompilerError` enum, including invalid-source internal errors |
 
 #### 6. Standard Runtime Library Crate (`runtime`)
 | Path | Role |
@@ -121,7 +124,7 @@ See `docs/dev/architectural_fixes/pipeline_alignment.md` for what remains of the
 
 ---
 
-Dependencies flow unidirectionally from Frontend/Backend/Driver down to Core. The `InternPool` from `types.rs` threads through every stage so identifiers and string literals stay as `Copy` `StringId` handles instead of owned `String`s. `sema.rs` drives decls through `Unresolved → InProgress → Resolved/Failed` with cycle detection wired in.
+Dependencies flow unidirectionally from Frontend/Backend/Driver down to Core. The driver-owned `CompilationContext` outlives the artifacts that reference its sources. The `InternPool` from `types.rs` threads through every stage so identifiers and string literals stay as `Copy` `StringId` handles instead of owned `String`s. `sema.rs` drives decls through `Unresolved → InProgress → Resolved/Failed` with cycle detection wired in.
 
 ## Adding a New Language Feature
 
@@ -193,7 +196,7 @@ Grammar builders like `expression_parser()` construct the full parser graph eage
 
 ## Error Handling
 
-Middle-end stages emit structured `Diag` values (see `ryo-core/src/diag.rs`). `astgen::generate` and `sema::analyze` accumulate diagnostics through a `DiagSink` so analysis can continue past the first error; `parse_source` (in `ryo-frontend/src/parse.rs`) shares the same model. `lexer::lex` never fails hard — it recovers so the parser still sees a well-formed token stream — and the parser synchronizes at statement boundaries, yielding a diagnostic plus a partial AST with `Error` placeholder nodes (R10), so one syntax error never suppresses diagnostics for the rest of the file. The only early bail is an indentation failure, where the token stream is empty and parsing would be meaningless. All stages converge on the same Ariadne-backed `render_diags` and surface as a single `CompilerError::Diagnostics(Vec<Diag>)`. Other stages still use string-typed `CompilerError` variants: `IoError`, `CodegenError`, `LinkError`, `ToolchainError`, `ExecutionError`.
+Middle-end stages emit structured `Diag` values (see `ryo-core/src/diag.rs`). `astgen::generate` and `sema::analyze` accumulate diagnostics through a `DiagSink` so analysis can continue past the first error; `parse_source` (in `ryo-frontend/src/parse.rs`) shares the same model. `lexer::lex` never fails hard — it recovers so the parser still sees a well-formed token stream — and the parser synchronizes at statement boundaries, yielding a diagnostic plus a partial AST with `Error` placeholder nodes (R10), so one syntax error never suppresses diagnostics for the rest of the file. The only early bail is an indentation failure, where the token stream is empty and parsing would be meaningless. Every diagnostic label carries a `SourceId`; the Ariadne renderer resolves each primary and secondary label through the compilation's source database and converts that revision's byte offsets to character offsets independently. Synthetic source-less diagnostics never borrow a filename, and invalid or foreign source handles produce `CompilerError::InternalError`. All stages converge on the same Ariadne-backed `render_diags` and surface as a single `CompilerError::Diagnostics(Vec<Diag>)`. Other stages still use string-typed `CompilerError` variants: `IoError`, `CodegenError`, `LinkError`, `ToolchainError`, `ExecutionError`.
 
 ## Testing
 

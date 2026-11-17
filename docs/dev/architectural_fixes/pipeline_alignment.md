@@ -40,7 +40,7 @@ The Zig alignment was a starting point, not a constraint. The pipeline is expect
 These remain roadmap or future considerations, not part of any shipped phase:
 
 - **Splitting UIR into per-file arenas** (Zig does this for incremental compilation; Ryo doesn't compile incrementally yet).
-- **Replacing `String`-backed source storage with a `SourceMap`.** Useful for multi-file diagnostics.
+- **Multi-file parsing and declaration resolution.** The compilation context and source database now retain immutable source revisions and source-identified spans, and diagnostics resolve labels across files. Parsing multiple files and resolving their declarations remains future work.
 - **Moving `print` to the runtime crate.** It is still a compiler builtin (`ryo-frontend/src/builtins.rs`); with structured diagnostics and TIR in place, it can become a normal type-checked call against an external decl.
 - **TIR legalization** (Zig's `Air.Legalize`). Cranelift owns target legalization for us; if a non-Cranelift backend ever lands, an `air::legalize`-style pass becomes the right place for scalarizing vectors and expanding overflow checks.
 - **A target-specific machine IR.** Cranelift handles instruction selection, register allocation, and emission. Ryo does not need another machine layer. Flow IR serves ownership and cleanup before Cranelift and is not excluded by this decision.

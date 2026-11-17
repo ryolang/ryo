@@ -101,14 +101,20 @@ fn parse(source: &Source) {
 #[divan::bench(args = [("fizzbuzz", FIZZBUZZ), ("fibonacci", FIBONACCI)])]
 fn lex_snippet(bencher: divan::Bencher, case: (&str, &str)) {
     let (context, id) = source_for_bench(case.1);
-    let source = context.sources().get(id).unwrap();
+    let source = context
+        .sources()
+        .get(id)
+        .expect("bench source must resolve");
     bencher.bench(|| divan::black_box(lex(divan::black_box(source))));
 }
 
 #[divan::bench(args = [16, 64, 256])]
 fn lex_large(bencher: divan::Bencher, functions: usize) {
     let (context, id) = source_for_bench(&large_source(functions));
-    let source = context.sources().get(id).unwrap();
+    let source = context
+        .sources()
+        .get(id)
+        .expect("bench source must resolve");
     bencher.bench(|| divan::black_box(lex(divan::black_box(source))));
 }
 
@@ -119,14 +125,20 @@ fn lex_large(bencher: divan::Bencher, functions: usize) {
 #[divan::bench(args = [("fizzbuzz", FIZZBUZZ), ("fibonacci", FIBONACCI)])]
 fn parse_snippet(bencher: divan::Bencher, case: (&str, &str)) {
     let (context, id) = source_for_bench(case.1);
-    let source = context.sources().get(id).unwrap();
+    let source = context
+        .sources()
+        .get(id)
+        .expect("bench source must resolve");
     bencher.bench(|| parse(divan::black_box(source)));
 }
 
 #[divan::bench(args = [16, 64, 256])]
 fn parse_large(bencher: divan::Bencher, functions: usize) {
     let (context, id) = source_for_bench(&large_source(functions));
-    let source = context.sources().get(id).unwrap();
+    let source = context
+        .sources()
+        .get(id)
+        .expect("bench source must resolve");
     bencher.bench(|| parse(divan::black_box(source)));
 }
 
@@ -138,7 +150,10 @@ fn parse_large(bencher: divan::Bencher, functions: usize) {
 fn parse_program(src: &str) -> (ryo_core::ast::Ast, InternPool, CompilationContext) {
     let mut context = CompilationContext::new();
     let source_id = context.register_source(PathBuf::from("bench.ryo"), src.into());
-    let source = context.sources().get(source_id).unwrap();
+    let source = context
+        .sources()
+        .get(source_id)
+        .expect("bench source must resolve");
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
     let tokens = lexer::lex(source, &mut pool, &mut sink);
