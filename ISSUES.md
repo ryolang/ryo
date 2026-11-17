@@ -807,32 +807,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-262 — Compiler process leaks chumsky recursive parser allocations on every parse (found via Valgrind)
-
-**Severity:** Correctness / Hygiene
-**Area:** frontend-parser
-
-**Files:** ryo-frontend/src/grammar/statements.rs, ryo-frontend/src/grammar/destructure.rs (chumsky Recursive::declare), ryo-frontend/src/parse.rs
-
-**Summary:** Running `valgrind --leak-check=full ryo run <any-file.ryo>` on Linux (arm64) reports ~2.4 KB definitely lost in 14 blocks per invocation. The leak records point at chumsky recursive::Indirect Rc allocations created by Recursive::declare in destructure_stmt_parser / body_statement_parser / program_parser — the per-parse parser combinator tree is never fully dropped (Rc cycle between recursive declarations). Deterministic, small, and unrelated to generated-code memory behavior, but it accumulates per parse in any long-lived process (future REPL/LSP/watch mode). Found by the 2026-11-04 CI-grade Valgrind fuzz pass (commit e82f503); the repo test suite only valgrinds compiled programs, never the compiler process, so CI does not see it.
-
-**Resolution:** Break the Rc cycle (chumsky docs suggest avoid cycles via once_cell/lazy or explicit teardown; e.g. build the recursive parsers once per thread instead of per parse, or switch recursive::Indirect to a Weak back-reference). Add a compiler-process valgrind check (valgrind on `ryo run examples/hello.ryo` asserting no definitely-lost blocks) to the Linux test script.
-
----
-
-### I-268 — Define broken-pipe semantics for Ryo CLI programs
-
-**Severity:** Correctness / Hygiene
-**Area:** runtime
-
-**Files:** runtime/src/lib.rs; ryo-backend/src/codegen/jit.rs; ryo-driver/src/pipeline/run.rs; ryo/tests/integration_driver.rs; docs/specification.md
-
-**Summary:** Ryo targets first-class CLI applications, but broken-pipe handling currently covers only compiler-owned diagnostics and inspection output. Generated-program behavior is a separate contract: JIT execution inherits the Rust compiler process's SIGPIPE disposition, while AOT programs have an independent native runtime, so execution modes can diverge when a downstream reader closes stdout or stderr early.
-
-**Resolution:** Adopt conventional Unix-filter behavior for generated Ryo programs: default SIGPIPE termination on Unix, with explicit non-panicking EPIPE handling and documented exit behavior on Windows. Implement the policy at the runtime/JIT execution boundary so JIT and AOT agree without changing the existing compiler diagnostic broken-pipe behavior. Specify stdout/stderr and exit-status semantics, and add early-closing-reader tests for both execution modes plus Windows coverage.
-
----
-
 ### I-284 — Introduce a compilation context with resolved declaration and binding identities
 
 **Severity:** Correctness / Hygiene

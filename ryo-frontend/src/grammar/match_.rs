@@ -104,214 +104,216 @@ where
 {
     // ---- Patterns ----
     //
-    // `Recursive` because positional elements are full patterns
-    // (`(a, (b, c))`).
-    let mut pat = Recursive::declare();
+    // Direct recursion keeps the positional pattern's self-reference weak.
+    let pat = recursive(|pat| {
+        let ident = select! { Token::Ident(name) => name }
+            .map_with(|name, e: &mut Mx<'a, '_, I>| (name, e.span()));
 
-    let ident = select! { Token::Ident(name) => name }
-        .map_with(|name, e: &mut Mx<'a, '_, I>| (name, e.span()));
+        // `_` — the wildcard, recognized by name (gate: the identifier
+        // must be spelled `_`; the error rides a discarded choice
+        // alternative, like the M11 receiver gates).
+        let wildcard = ident
+            .try_map_with(|(name, span), e: &mut Mx<'a, '_, I>| {
+                if e.state().pool.str(name) == "_" {
+                    Ok(())
+                } else {
+                    Err(Rich::custom(span, ParseDiag::ExpectedEnumTypeName))
+                }
+            })
+            .map_with(|_, e: &mut Mx<'a, '_, I>| {
+                let span = crate::spans::cspan(e.span());
+                e.state().pattern_wildcard(span)
+            });
 
-    // `_` — the wildcard, recognized by name (gate: the identifier
-    // must be spelled `_`; the error rides a discarded choice
-    // alternative, like the M11 receiver gates).
-    let wildcard = ident
-        .try_map_with(|(name, span), e: &mut Mx<'a, '_, I>| {
-            if e.state().pool.str(name) == "_" {
-                Ok(())
-            } else {
-                Err(Rich::custom(span, ParseDiag::ExpectedEnumTypeName))
-            }
-        })
-        .map_with(|_, e: &mut Mx<'a, '_, I>| {
+        // Literal values: `-` folds into the int at parse time (the lexer
+        // marks `i64::MIN` as `IntLitMin`, grammatical only after `-`).
+        let neg_int = just(Token::Sub)
+            .ignore_then(choice((
+                just(Token::IntLitMin).to(i64::MIN),
+                select! { Token::IntLit(n) => n }.map(|n| {
+                    n.checked_neg().expect(
+                        "lexer emits i64::MIN as IntLitMin, so a plain IntLit always negates",
+                    )
+                }),
+            )))
+            .map(LitPattern::Int);
+        let lit_value = choice((
+            neg_int,
+            select! { Token::IntLit(n) => n }.map(LitPattern::Int),
+            select! { Token::StrLit(id) => id }.map(LitPattern::Str),
+            choice((
+                just(Token::True).to(LitPattern::Bool(true)),
+                just(Token::False).to(LitPattern::Bool(false)),
+            )),
+        ));
+        let literal = lit_value.map_with(|lit, e: &mut Mx<'a, '_, I>| {
             let span = crate::spans::cspan(e.span());
-            e.state().pattern_wildcard(span)
+            e.state().literal_pattern(lit, span)
         });
 
-    // Literal values: `-` folds into the int at parse time (the lexer
-    // marks `i64::MIN` as `IntLitMin`, grammatical only after `-`).
-    let neg_int = just(Token::Sub)
-        .ignore_then(choice((
-            just(Token::IntLitMin).to(i64::MIN),
-            select! { Token::IntLit(n) => n }.map(|n| {
-                n.checked_neg()
-                    .expect("lexer emits i64::MIN as IntLitMin, so a plain IntLit always negates")
+        // One field of an anonymous pattern: a pun (`q`), `name = ident`
+        // (rename/bind), `name = literal` (M12), or `name = _` (wildcard).
+        // A field spelled `_` binds nothing; renaming it (`{_ = x}`) is
+        // rejected — the M10 rule.
+        let field_target = choice((
+            ident.map_with(|(name, _), e: &mut Mx<'a, '_, I>| {
+                if e.state().pool.str(name) == "_" {
+                    PatternFieldKind::Wildcard
+                } else {
+                    PatternFieldKind::Rename(name)
+                }
             }),
-        )))
-        .map(LitPattern::Int);
-    let lit_value = choice((
-        neg_int,
-        select! { Token::IntLit(n) => n }.map(LitPattern::Int),
-        select! { Token::StrLit(id) => id }.map(LitPattern::Str),
-        choice((
-            just(Token::True).to(LitPattern::Bool(true)),
-            just(Token::False).to(LitPattern::Bool(false)),
-        )),
-    ));
-    let literal = lit_value.map_with(|lit, e: &mut Mx<'a, '_, I>| {
-        let span = crate::spans::cspan(e.span());
-        e.state().literal_pattern(lit, span)
-    });
+            lit_value.map(PatternFieldKind::Literal),
+        ));
+        let field = ident
+            .then(just(Token::Assign).ignore_then(field_target).or_not())
+            .try_map_with(|((name, span), target), e: &mut Mx<'a, '_, I>| {
+                let pool = &e.state().pool;
+                if pool.str(name) == "_" && target.is_some() {
+                    return Err(Rich::custom(
+                        span,
+                        ParseDiag::Message(
+                            "wildcard field `_` binds nothing; drop the `= ...`".into(),
+                        ),
+                    ));
+                }
+                let kind = match target {
+                    None if pool.str(name) == "_" => PatternFieldKind::Wildcard,
+                    None => PatternFieldKind::Pun,
+                    Some(kind) => kind,
+                };
+                Ok(PatternField { name, kind })
+            });
+        let anon = field
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace))
+            .map_with(|fields, e: &mut Mx<'a, '_, I>| {
+                let span = crate::spans::cspan(e.span());
+                e.state().pattern_anon(&fields, span)
+            });
 
-    // One field of an anonymous pattern: a pun (`q`), `name = ident`
-    // (rename/bind), `name = literal` (M12), or `name = _` (wildcard).
-    // A field spelled `_` binds nothing; renaming it (`{_ = x}`) is
-    // rejected — the M10 rule.
-    let field_target = choice((
-        ident.map_with(|(name, _), e: &mut Mx<'a, '_, I>| {
-            if e.state().pool.str(name) == "_" {
-                PatternFieldKind::Wildcard
-            } else {
-                PatternFieldKind::Rename(name)
-            }
-        }),
-        lit_value.map(PatternFieldKind::Literal),
-    ));
-    let field = ident
-        .then(just(Token::Assign).ignore_then(field_target).or_not())
-        .try_map_with(|((name, span), target), e: &mut Mx<'a, '_, I>| {
-            let pool = &e.state().pool;
-            if pool.str(name) == "_" && target.is_some() {
-                return Err(Rich::custom(
-                    span,
-                    ParseDiag::Message("wildcard field `_` binds nothing; drop the `= ...`".into()),
-                ));
-            }
-            let kind = match target {
-                None if pool.str(name) == "_" => PatternFieldKind::Wildcard,
-                None => PatternFieldKind::Pun,
-                Some(kind) => kind,
-            };
-            Ok(PatternField { name, kind })
-        });
-    let anon = field
-        .separated_by(just(Token::Comma))
-        .allow_trailing()
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .delimited_by(just(Token::LBrace), just(Token::RBrace))
-        .map_with(|fields, e: &mut Mx<'a, '_, I>| {
-            let span = crate::spans::cspan(e.span());
-            e.state().pattern_anon(&fields, span)
-        });
+        // Positional pattern: the comma after the first element is
+        // mandatory — `(a)` is never a pattern, the same rule as M10.
+        let positional = pat
+            .clone()
+            .then_ignore(just(Token::Comma))
+            .then(
+                pat.clone()
+                    .separated_by(just(Token::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>(),
+            )
+            .delimited_by(just(Token::LParen), just(Token::RParen))
+            .map_with(|(first, rest), e: &mut Mx<'a, '_, I>| {
+                let span = crate::spans::cspan(e.span());
+                let mut elems = Vec::with_capacity(rest.len() + 1);
+                elems.push(first);
+                elems.extend(rest);
+                e.state().pattern_positional(&elems, span)
+            });
 
-    // Positional pattern: the comma after the first element is
-    // mandatory — `(a)` is never a pattern, the same rule as M10.
-    let positional = pat
-        .clone()
-        .then_ignore(just(Token::Comma))
-        .then(
-            pat.clone()
-                .separated_by(just(Token::Comma))
-                .allow_trailing()
-                .collect::<Vec<_>>(),
-        )
-        .delimited_by(just(Token::LParen), just(Token::RParen))
-        .map_with(|(first, rest), e: &mut Mx<'a, '_, I>| {
-            let span = crate::spans::cspan(e.span());
-            let mut elems = Vec::with_capacity(rest.len() + 1);
-            elems.push(first);
-            elems.extend(rest);
-            e.state().pattern_positional(&elems, span)
-        });
-
-    // Variant patterns. Paren args bind or skip positionally; brace
-    // args bind by name (pun, `= ident`, `= _`). A `= literal` target
-    // in braces is payload-literal work deferred with nested patterns:
-    // diagnosed and recovered as a wildcard so the arm still parses.
-    let paren_arg = ident.map_with(|(name, _), e: &mut Mx<'a, '_, I>| {
-        let target = if e.state().pool.str(name) == "_" {
-            PatternVariantArgTarget::Wildcard
-        } else {
-            PatternVariantArgTarget::Bind(name)
-        };
-        PatternVariantArg { name: None, target }
-    });
-    let paren_args = paren_arg
-        .separated_by(just(Token::Comma))
-        .allow_trailing()
-        .collect::<Vec<_>>()
-        .delimited_by(just(Token::LParen), just(Token::RParen))
-        .map_with(|args, e: &mut Mx<'a, '_, I>| e.state().variant_pattern_args(true, &args));
-
-    let named_target = choice((
-        lit_value.map_with(|_, e: &mut Mx<'a, '_, I>| {
-            let span = e.span();
-            e.emit(Rich::custom(
-                span,
-                ParseDiag::Message(
-                    "literal field patterns inside variant braces are not supported yet".into(),
-                ),
-            ));
-            PatternVariantArgTarget::Wildcard
-        }),
-        ident.map_with(|(name, _), e: &mut Mx<'a, '_, I>| {
-            if e.state().pool.str(name) == "_" {
+        // Variant patterns. Paren args bind or skip positionally; brace
+        // args bind by name (pun, `= ident`, `= _`). A `= literal` target
+        // in braces is payload-literal work deferred with nested patterns:
+        // diagnosed and recovered as a wildcard so the arm still parses.
+        let paren_arg = ident.map_with(|(name, _), e: &mut Mx<'a, '_, I>| {
+            let target = if e.state().pool.str(name) == "_" {
                 PatternVariantArgTarget::Wildcard
             } else {
                 PatternVariantArgTarget::Bind(name)
-            }
-        }),
-    ));
-    let brace_arg = ident
-        .then(just(Token::Assign).ignore_then(named_target).or_not())
-        .map(|((name, _), target)| {
-            // A pun binds the field's own name.
-            let target = target.unwrap_or(PatternVariantArgTarget::Bind(name));
-            PatternVariantArg {
-                name: Some(name),
-                target,
-            }
+            };
+            PatternVariantArg { name: None, target }
         });
-    let brace_args = brace_arg
-        .separated_by(just(Token::Comma))
-        .allow_trailing()
-        .collect::<Vec<_>>()
-        .delimited_by(just(Token::LBrace), just(Token::RBrace))
-        .map_with(|args, e: &mut Mx<'a, '_, I>| e.state().variant_pattern_args(false, &args));
+        let paren_args = paren_arg
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LParen), just(Token::RParen))
+            .map_with(|args, e: &mut Mx<'a, '_, I>| e.state().variant_pattern_args(true, &args));
 
-    let args = choice((paren_args, brace_args)).or_not();
+        let named_target = choice((
+            lit_value.map_with(|_, e: &mut Mx<'a, '_, I>| {
+                let span = e.span();
+                e.emit(Rich::custom(
+                    span,
+                    ParseDiag::Message(
+                        "literal field patterns inside variant braces are not supported yet".into(),
+                    ),
+                ));
+                PatternVariantArgTarget::Wildcard
+            }),
+            ident.map_with(|(name, _), e: &mut Mx<'a, '_, I>| {
+                if e.state().pool.str(name) == "_" {
+                    PatternVariantArgTarget::Wildcard
+                } else {
+                    PatternVariantArgTarget::Bind(name)
+                }
+            }),
+        ));
+        let brace_arg = ident
+            .then(just(Token::Assign).ignore_then(named_target).or_not())
+            .map(|((name, _), target)| {
+                // A pun binds the field's own name.
+                let target = target.unwrap_or(PatternVariantArgTarget::Bind(name));
+                PatternVariantArg {
+                    name: Some(name),
+                    target,
+                }
+            });
+        let brace_args = brace_arg
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace))
+            .map_with(|args, e: &mut Mx<'a, '_, I>| e.state().variant_pattern_args(false, &args));
 
-    // `A.B` (qualified) or `B` (unqualified, gate: uppercase-led per
-    // the spec §1 PascalCase convention — a lowercase-led bare
-    // identifier is a bind for nested positions and never reaches
-    // here whole). The gate error rides a discarded alternative.
-    let variant = choice((
-        ident
-            .then_ignore(just(Token::Dot))
-            .then(ident)
-            .map(|((enum_name, _), (variant, _))| (Some(enum_name), variant)),
-        ident.try_map_with(|(name, span), e: &mut Mx<'a, '_, I>| {
-            let is_variant = e
-                .state()
-                .pool
-                .str(name)
-                .as_bytes()
-                .first()
-                .is_some_and(u8::is_ascii_uppercase);
-            if is_variant {
-                Ok((None, name))
-            } else {
-                Err(Rich::custom(span, ParseDiag::ExpectedEnumTypeName))
-            }
-        }),
-    ))
-    .then(args)
-    .map_with(|((enum_name, variant), args), e: &mut Mx<'a, '_, I>| {
-        let span = crate::spans::cspan(e.span());
-        e.state().variant_pattern(enum_name, variant, args, span)
+        let args = choice((paren_args, brace_args)).or_not();
+
+        // `A.B` (qualified) or `B` (unqualified, gate: uppercase-led per
+        // the spec §1 PascalCase convention — a lowercase-led bare
+        // identifier is a bind for nested positions and never reaches
+        // here whole). The gate error rides a discarded alternative.
+        let variant = choice((
+            ident
+                .then_ignore(just(Token::Dot))
+                .then(ident)
+                .map(|((enum_name, _), (variant, _))| (Some(enum_name), variant)),
+            ident.try_map_with(|(name, span), e: &mut Mx<'a, '_, I>| {
+                let is_variant = e
+                    .state()
+                    .pool
+                    .str(name)
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_uppercase);
+                if is_variant {
+                    Ok((None, name))
+                } else {
+                    Err(Rich::custom(span, ParseDiag::ExpectedEnumTypeName))
+                }
+            }),
+        ))
+        .then(args)
+        .map_with(|((enum_name, variant), args), e: &mut Mx<'a, '_, I>| {
+            let span = crate::spans::cspan(e.span());
+            e.state().variant_pattern(enum_name, variant, args, span)
+        });
+
+        // A bare binding — legal in NESTED positions (positional
+        // elements, field targets go through their own sub-parsers), so
+        // the whole-arm rejection lives on the arm line, not here.
+        let bind = ident.map_with(|(name, span), e: &mut Mx<'a, '_, I>| {
+            e.state().pattern_bind(
+                Ident::new(name, crate::spans::cspan(span)),
+                crate::spans::cspan(span),
+            )
+        });
+
+        choice((wildcard, literal, anon, positional, variant, bind)).boxed()
     });
-
-    // A bare binding — legal in NESTED positions (positional
-    // elements, field targets go through their own sub-parsers), so
-    // the whole-arm rejection lives on the arm line, not here.
-    let bind = ident.map_with(|(name, span), e: &mut Mx<'a, '_, I>| {
-        e.state().pattern_bind(
-            Ident::new(name, crate::spans::cspan(span)),
-            crate::spans::cspan(span),
-        )
-    });
-
-    pat.define(choice((wildcard, literal, anon, positional, variant, bind)).boxed());
 
     // ---- Arms ----
     //

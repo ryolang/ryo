@@ -10,10 +10,24 @@
 #   would produce.
 FROM rust:latest
 
-# valgrind: runtime leak detector used by tests/valgrind_smoke.rs.
+# Match the CI Valgrind version; the base image's distribution package is older.
+ARG VALGRIND_VERSION=3.26.0
+ARG VALGRIND_SHA512=80ebf9197be602fdd4aad0e9277e6ef2fd25ede9cecb6e6d159f6f062c13f62ad907c6b6e7000e82b3404d8b4f9e7bf15813f60d9fed414c7b713a4280c82898
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    valgrind \
-    && rm -rf /var/lib/apt/lists/*
+    build-essential \
+    bzip2 \
+    ca-certificates \
+    curl \
+    libc6-dbg \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL "https://sourceware.org/pub/valgrind/valgrind-${VALGRIND_VERSION}.tar.bz2" -o /tmp/valgrind.tar.bz2 \
+    && echo "${VALGRIND_SHA512}  /tmp/valgrind.tar.bz2" | sha512sum -c - \
+    && tar -xjf /tmp/valgrind.tar.bz2 -C /tmp \
+    && cd "/tmp/valgrind-${VALGRIND_VERSION}" \
+    && ./configure --prefix=/usr/local \
+    && make -j"$(nproc)" \
+    && make install \
+    && rm -rf /tmp/valgrind.tar.bz2 "/tmp/valgrind-${VALGRIND_VERSION}"
 
 # Set up the working directory inside the container
 WORKDIR /usr/src/ryo
