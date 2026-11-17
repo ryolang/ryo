@@ -44,7 +44,10 @@ fn analyze(
     let mut sink = ryo_core::diag::DiagSink::new();
     let tokens = ryo_frontend::lexer::lex(src, &mut pool, &mut sink);
     assert!(!sink.has_errors(), "lex should succeed");
-    let token_stream = tokens[..].split_token_span((0..src.len()).into());
+    let token_stream = tokens[..].split_token_span(ryo_frontend::lexer::eoi(
+        ryo_core::source::SourceId::NONE,
+        src.len(),
+    ));
     let mut state = ParseState::new(pool);
     ryo_frontend::grammar::program_parser()
         .parse_with_state(token_stream, &mut state)

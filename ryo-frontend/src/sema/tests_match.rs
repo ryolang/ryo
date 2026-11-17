@@ -552,7 +552,10 @@ pub(super) fn run_with_error_set_param(input: &str) -> (Vec<Tir>, Vec<Diag>, Int
     let mut lex_sink = DiagSink::new();
     let tokens = crate::lexer::lex(input, &mut pool, &mut lex_sink);
     assert!(!lex_sink.has_errors());
-    let token_stream = tokens[..].split_token_span((0..input.len()).into());
+    let token_stream = tokens[..].split_token_span(crate::lexer::eoi(
+        ryo_core::source::SourceId::NONE,
+        input.len(),
+    ));
     let mut state = crate::grammar::ParseState::new(pool);
     crate::grammar::program_parser()
         .parse_with_state(token_stream, &mut state)

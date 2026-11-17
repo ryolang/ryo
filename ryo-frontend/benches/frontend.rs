@@ -8,9 +8,12 @@
 
 use chumsky::Parser;
 use chumsky::input::Input;
+use ryo_core::compilation::CompilationContext;
+use ryo_core::source::{Source, SourceId};
 use ryo_core::types::InternPool;
 use ryo_frontend::grammar::{ParseState, program_parser};
 use ryo_frontend::lexer::{self, Span, Token};
+use std::path::PathBuf;
 
 fn main() {
     divan::main();
@@ -62,23 +65,27 @@ fn large_source(functions: usize) -> String {
     src
 }
 
-/// Lex a source string, returning the interned token stream.
-fn lex(src: &str) -> Vec<(Token, Span)> {
+fn source_for_bench(text: &str) -> (CompilationContext, SourceId) {
+    let mut context = CompilationContext::new();
+    let id = context.register_source(PathBuf::from("bench.ryo"), text.to_owned());
+    (context, id)
+}
+
+fn lex(source: &Source) -> Vec<(Token, Span)> {
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
-    let tokens = lexer::lex(src, &mut pool, &mut sink);
+    let tokens = lexer::lex_with_source(source, &mut pool, &mut sink);
     assert!(!sink.has_errors(), "lex should succeed");
     tokens
 }
 
-/// Full lex + parse of a source string.
-fn parse(src: &str) {
+fn parse(source: &Source) {
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
-    let tokens = lexer::lex(src, &mut pool, &mut sink);
+    let tokens = lexer::lex_with_source(source, &mut pool, &mut sink);
     assert!(!sink.has_errors(), "lex should succeed");
-    let token_stream = tokens[..].split_token_span((0..src.len()).into());
-    let mut state = ParseState::new(pool);
+    let token_stream = tokens[..].split_token_span(lexer::eoi(source.id(), source.text().len()));
+    let mut state = ParseState::with_source(pool, source.id());
     program_parser()
         .parse_with_state(token_stream, &mut state)
         .into_result()
@@ -93,14 +100,16 @@ fn parse(src: &str) {
 
 #[divan::bench(args = [("fizzbuzz", FIZZBUZZ), ("fibonacci", FIBONACCI)])]
 fn lex_snippet(bencher: divan::Bencher, case: (&str, &str)) {
-    let src = case.1;
-    bencher.bench(|| divan::black_box(lex(divan::black_box(src))));
+    let (context, id) = source_for_bench(case.1);
+    let source = context.sources().get(id).unwrap();
+    bencher.bench(|| divan::black_box(lex(divan::black_box(source))));
 }
 
 #[divan::bench(args = [16, 64, 256])]
 fn lex_large(bencher: divan::Bencher, functions: usize) {
-    let src = large_source(functions);
-    bencher.bench(|| divan::black_box(lex(divan::black_box(&src))));
+    let (context, id) = source_for_bench(&large_source(functions));
+    let source = context.sources().get(id).unwrap();
+    bencher.bench(|| divan::black_box(lex(divan::black_box(source))));
 }
 
 // ============================================================================
@@ -109,14 +118,16 @@ fn lex_large(bencher: divan::Bencher, functions: usize) {
 
 #[divan::bench(args = [("fizzbuzz", FIZZBUZZ), ("fibonacci", FIBONACCI)])]
 fn parse_snippet(bencher: divan::Bencher, case: (&str, &str)) {
-    let src = case.1;
-    bencher.bench(|| parse(divan::black_box(src)));
+    let (context, id) = source_for_bench(case.1);
+    let source = context.sources().get(id).unwrap();
+    bencher.bench(|| parse(divan::black_box(source)));
 }
 
 #[divan::bench(args = [16, 64, 256])]
 fn parse_large(bencher: divan::Bencher, functions: usize) {
-    let src = large_source(functions);
-    bencher.bench(|| parse(divan::black_box(&src)));
+    let (context, id) = source_for_bench(&large_source(functions));
+    let source = context.sources().get(id).unwrap();
+    bencher.bench(|| parse(divan::black_box(source)));
 }
 
 // ============================================================================
@@ -129,7 +140,10 @@ fn parse_program(src: &str) -> (ryo_core::ast::Ast, InternPool) {
     let mut sink = ryo_core::diag::DiagSink::new();
     let tokens = lexer::lex(src, &mut pool, &mut sink);
     assert!(!sink.has_errors(), "lex should succeed");
-    let token_stream = tokens[..].split_token_span((0..src.len()).into());
+    let token_stream = tokens[..].split_token_span(ryo_frontend::lexer::eoi(
+        ryo_core::source::SourceId::NONE,
+        src.len(),
+    ));
     let mut state = ParseState::new(pool);
     program_parser()
         .parse_with_state(token_stream, &mut state)

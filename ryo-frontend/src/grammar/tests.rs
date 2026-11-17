@@ -18,13 +18,16 @@ pub(super) fn lex_and_parse(input: &str) -> Result<(Ast, InternPool), Vec<TestEr
             .into_iter()
             .map(|d| {
                 Rich::custom(
-                    SimpleSpan::new((), d.span.start..d.span.end),
+                    SimpleSpan::new(d.span.source, d.span.start..d.span.end),
                     ParseDiag::Message(d.message),
                 )
             })
             .collect());
     }
-    let token_stream = tokens[..].split_token_span((0..input.len()).into());
+    let token_stream = tokens[..].split_token_span(crate::lexer::eoi(
+        ryo_core::source::SourceId::NONE,
+        input.len(),
+    ));
 
     let mut state = ParseState::new(pool);
     program_parser()
@@ -882,7 +885,10 @@ pub(super) fn lex_and_parse_recovering(input: &str) -> (bool, Ast, Vec<TestErr>,
     let mut sink = ryo_core::diag::DiagSink::new();
     let tokens = lex(input, &mut pool, &mut sink);
     assert!(!sink.has_errors(), "test input must lex cleanly");
-    let token_stream = tokens[..].split_token_span((0..input.len()).into());
+    let token_stream = tokens[..].split_token_span(crate::lexer::eoi(
+        ryo_core::source::SourceId::NONE,
+        input.len(),
+    ));
     let mut state = ParseState::new(pool);
     let (out, errs) = program_parser()
         .parse_with_state(token_stream, &mut state)

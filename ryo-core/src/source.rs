@@ -83,7 +83,8 @@ impl SourceDb {
     }
 
     pub(crate) fn register(&mut self, name: PathBuf, text: String) -> SourceId {
-        let revision = u32::try_from(self.revisions.len()).expect("source revision space exhausted");
+        let revision =
+            u32::try_from(self.revisions.len()).expect("source revision space exhausted");
         let id = SourceId {
             context: self.context,
             revision,
@@ -111,8 +112,8 @@ impl SourceDb {
             }
             (source.lineage, source.name.clone())
         };
-        let revision = u32::try_from(self.revisions.len())
-            .map_err(|_| SourceError::RevisionExhausted)?;
+        let revision =
+            u32::try_from(self.revisions.len()).map_err(|_| SourceError::RevisionExhausted)?;
         let id = SourceId {
             context: self.context,
             revision,
@@ -207,7 +208,10 @@ mod tests {
         assert_ne!(old_id, new_id);
         assert_eq!(context.sources().get(old_id).unwrap().text(), "old");
         assert!(context.sources().require_current(old_id).is_err());
-        assert_eq!(context.sources().require_current(new_id).unwrap().text(), "new");
+        assert_eq!(
+            context.sources().require_current(new_id).unwrap().text(),
+            "new"
+        );
     }
 
     #[test]
@@ -216,10 +220,18 @@ mod tests {
         let old_id = context.register_source(PathBuf::from("main.ryo"), "old".into());
         let current_id = context.replace_source(old_id, "current".into()).unwrap();
 
-        assert!(context.replace_source(old_id, "stale write".into()).is_err());
+        assert!(
+            context
+                .replace_source(old_id, "stale write".into())
+                .is_err()
+        );
         assert_eq!(context.sources().get(old_id).unwrap().text(), "old");
         assert_eq!(
-            context.sources().require_current(current_id).unwrap().text(),
+            context
+                .sources()
+                .require_current(current_id)
+                .unwrap()
+                .text(),
             "current"
         );
         assert_eq!(context.sources().get(current_id).unwrap().text(), "current");
@@ -252,7 +264,12 @@ mod tests {
     #[test]
     fn source_less_range_is_rejected() {
         let context = CompilationContext::new();
-        assert!(context.sources().validate_range(SourceId::NONE, 0..0).is_err());
+        assert!(
+            context
+                .sources()
+                .validate_range(SourceId::NONE, 0..0)
+                .is_err()
+        );
     }
 
     #[test]
@@ -285,18 +302,29 @@ mod tests {
         let mut context = CompilationContext::new();
         let id = context.register_source(PathBuf::from("main.ryo"), "😀x".into());
 
-        assert!(context.sources().validate_span(crate::span::Span::EMPTY).is_ok());
-        assert!(context
-            .sources()
-            .validate_span(crate::span::Span::new(0, 1))
-            .is_err());
-        assert!(context
-            .sources()
-            .validate_span(crate::span::Span::in_source(id, 0, 4))
-            .is_ok());
-        assert!(context
-            .sources()
-            .validate_span(crate::span::Span::in_source(id, 1, 4))
-            .is_err());
+        assert!(
+            context
+                .sources()
+                .validate_span(crate::span::Span::EMPTY)
+                .is_ok()
+        );
+        assert!(
+            context
+                .sources()
+                .validate_span(crate::span::Span::new(0, 1))
+                .is_err()
+        );
+        assert!(
+            context
+                .sources()
+                .validate_span(crate::span::Span::in_source(id, 0, 4))
+                .is_ok()
+        );
+        assert!(
+            context
+                .sources()
+                .validate_span(crate::span::Span::in_source(id, 1, 4))
+                .is_err()
+        );
     }
 }

@@ -7,10 +7,11 @@
 //! interning — and `Indent` / `Dedent` markers are inserted at
 //! level transitions.
 
-use chumsky::span::{SimpleSpan, Span};
+use chumsky::span::Span;
 
-use crate::lexer::RawToken;
+use crate::lexer::{RawToken, Span as SimpleSpan};
 use ryo_core::diag::DiagCode;
+use ryo_core::source::SourceId;
 
 type Spanned<'a> = (RawToken<'a>, SimpleSpan);
 
@@ -30,7 +31,10 @@ pub(crate) struct IndentError {
     pub message: String,
 }
 
-pub(crate) fn process<'a>(tokens: Vec<Spanned<'a>>) -> Result<Vec<Spanned<'a>>, IndentError> {
+pub(crate) fn process<'a>(
+    tokens: Vec<Spanned<'a>>,
+    source: SourceId,
+) -> Result<Vec<Spanned<'a>>, IndentError> {
     // The output preserves every input token and only *adds*
     // Indent/Dedent markers, so `tokens.len()` is a tight lower bound.
     // Growing from zero here meant repeatedly reallocating and copying
@@ -119,7 +123,7 @@ pub(crate) fn process<'a>(tokens: Vec<Spanned<'a>>) -> Result<Vec<Spanned<'a>>, 
     let eof_span = tokens
         .last()
         .map(|(_, s)| *s)
-        .unwrap_or(SimpleSpan::new((), 0..0));
+        .unwrap_or(SimpleSpan::new(source, 0..0));
     while indent_stack.len() > 1 {
         indent_stack.pop();
         result.push((RawToken::Dedent, eof_span));
@@ -157,7 +161,7 @@ mod tests {
         RawToken::lexer(input)
             .spanned()
             .filter_map(|result| match result {
-                (Ok(tok), span) => Some((tok, span.into())),
+                (Ok(tok), span) => Some((tok, SimpleSpan::new(SourceId::NONE, span))),
                 _ => None,
             })
             .collect()
@@ -216,7 +220,7 @@ mod tests {
     #[test]
     fn flat_program_is_noop() {
         let raw = lex_raw("x = 42");
-        let processed = process(raw).unwrap();
+        let processed = process(raw, SourceId::NONE).unwrap();
         assert!(!has_token(&processed, |t| matches!(t, RawToken::Indent)));
         assert!(!has_token(&processed, |t| matches!(t, RawToken::Dedent)));
         assert!(!has_token(&processed, |t| matches!(
@@ -228,7 +232,7 @@ mod tests {
     #[test]
     fn flat_multiline_no_indent() {
         let raw = lex_raw("x = 1\ny = 2");
-        let processed = process(raw).unwrap();
+        let processed = process(raw, SourceId::NONE).unwrap();
         assert!(!has_token(&processed, |t| matches!(t, RawToken::Indent)));
         assert!(!has_token(&processed, |t| matches!(t, RawToken::Dedent)));
     }
@@ -236,7 +240,7 @@ mod tests {
     #[test]
     fn single_indent_dedent() {
         let raw = lex_raw("fn foo():\n\treturn 1");
-        let processed = process(raw).unwrap();
+        let processed = process(raw, SourceId::NONE).unwrap();
         assert_eq!(
             count_token(&processed, |t| matches!(t, RawToken::Indent)),
             1
@@ -251,7 +255,7 @@ mod tests {
     fn two_functions() {
         let input = "fn foo():\n\treturn 1\n\nfn bar():\n\treturn 2";
         let raw = lex_raw(input);
-        let processed = process(raw).unwrap();
+        let processed = process(raw, SourceId::NONE).unwrap();
         assert_eq!(
             count_token(&processed, |t| matches!(t, RawToken::Indent)),
             2
@@ -266,7 +270,7 @@ mod tests {
     fn blank_lines_ignored() {
         let input = "fn foo():\n\n\n\treturn 1";
         let raw = lex_raw(input);
-        let processed = process(raw).unwrap();
+        let processed = process(raw, SourceId::NONE).unwrap();
         assert_eq!(
             count_token(&processed, |t| matches!(t, RawToken::Indent)),
             1
@@ -276,7 +280,7 @@ mod tests {
     #[test]
     fn spaces_rejected() {
         let raw = lex_raw("fn foo():\n    return 1");
-        let result = process(raw);
+        let result = process(raw, SourceId::NONE);
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("spaces"));
     }
@@ -292,7 +296,7 @@ mod tests {
             .find(|(t, _)| matches!(t, RawToken::Newline(_)))
             .map(|(_, s)| *s)
             .expect("input has a newline token");
-        let err = process(raw).unwrap_err();
+        let err = process(raw, SourceId::NONE).unwrap_err();
         assert_eq!(err.span, newline_span);
     }
 
@@ -300,7 +304,7 @@ mod tests {
     fn multi_level_indent() {
         let input = "fn foo():\n\tx = 1\n\t\ty = 2\n\tz = 3";
         let raw = lex_raw(input);
-        let processed = process(raw).unwrap();
+        let processed = process(raw, SourceId::NONE).unwrap();
         assert_eq!(
             count_token(&processed, |t| matches!(t, RawToken::Indent)),
             2
@@ -315,7 +319,7 @@ mod tests {
     fn eof_emits_remaining_dedents() {
         let input = "fn foo():\n\tx = 1\n\t\ty = 2";
         let raw = lex_raw(input);
-        let processed = process(raw).unwrap();
+        let processed = process(raw, SourceId::NONE).unwrap();
         assert_eq!(
             count_token(&processed, |t| matches!(t, RawToken::Dedent)),
             2
@@ -326,7 +330,7 @@ mod tests {
     fn newline_tokens_preserved() {
         let input = "fn foo():\n\treturn 1\n\nfn bar():\n\treturn 2";
         let raw = lex_raw(input);
-        let processed = process(raw).unwrap();
+        let processed = process(raw, SourceId::NONE).unwrap();
         assert!(has_token(&processed, |t| matches!(t, RawToken::Newline(_))));
     }
 
@@ -335,7 +339,7 @@ mod tests {
         // CRLF sources: the `\r` must not disturb indent measurement.
         let input = "fn foo():\r\n\tx = 1\r\n\t\ty = 2\r\n\tz = 3\r\n";
         let raw = lex_raw(input);
-        let processed = process(raw).unwrap();
+        let processed = process(raw, SourceId::NONE).unwrap();
         assert_eq!(
             count_token(&processed, |t| matches!(t, RawToken::Indent)),
             2

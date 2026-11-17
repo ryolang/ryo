@@ -51,7 +51,7 @@ where
         .then(enum_tail)
         .validate(
             |(visibility, (name, members)), e: &mut Mx<'a, '_, I>, emitter| {
-                let name_span = SimpleSpan::new((), name.span.start..name.span.end);
+                let name_span = SimpleSpan::new(name.span.source, name.span.start..name.span.end);
                 if !is_uppercase_name(name.name, &e.state().pool) {
                     emitter.emit(Rich::custom(
                         name_span,
@@ -159,7 +159,7 @@ where
 
             reject_hidden_alternative(
                 name.name,
-                SimpleSpan::new((), name.span.start..name.span.end),
+                SimpleSpan::new(name.span.source, name.span.start..name.span.end),
                 e,
             );
             let positional = args
@@ -170,7 +170,7 @@ where
                 .all(|arg| matches!(arg, enums::ParenArg::NamedSyntax { .. }));
             if !positional && !named {
                 e.emit(Rich::custom(
-                    SimpleSpan::new((), span.start..span.end),
+                    SimpleSpan::new(name.span.source, span.start..span.end),
                     ParseDiag::Message(
                         "positional and named error payload fields cannot be mixed".into(),
                     ),
@@ -231,7 +231,7 @@ where
     };
     reject_hidden_alternative(
         name.name,
-        SimpleSpan::new((), name.span.start..name.span.end),
+        SimpleSpan::new(name.span.source, name.span.start..name.span.end),
         e,
     );
     e.state().promote_ident_to_error_construct(expr)

@@ -279,7 +279,10 @@ where
 fn field_access_chain(ast: &mut Ast, root: Ident, fields: &[Ident]) -> ExprId {
     let mut target = ast.ident(root.name, root.span);
     for field in fields {
-        let span = crate::spans::cspan(SimpleSpan::new((), root.span.start..field.span.end));
+        let span = crate::spans::cspan(SimpleSpan::new(
+            root.span.source,
+            root.span.start..field.span.end,
+        ));
         target = ast.field_access(target, *field, span);
     }
     target
