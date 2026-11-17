@@ -8,7 +8,7 @@ use super::diagnostics::fail_with_diags;
 use super::emit::{display_ast, display_flow, display_tir, display_uir};
 use super::lower_and_analyze;
 use super::options::{EmitKind, EmitSet};
-use super::{read_source_file, source_name};
+use super::{compilation_from_source, read_source_file};
 
 /// JIT-compile and run `file`. The default output is exactly what
 /// the compiled program writes to stdout/stderr — no compiler
@@ -27,13 +27,13 @@ pub fn run_file(
     program_args: &[String],
     show_inferred_errors: bool,
 ) -> Result<i32, CompilerError> {
-    let input = read_source_file(file)?;
+    let (context, source_id) = compilation_from_source(file, read_source_file(file)?)?;
+    let source = context.sources().get(source_id)?;
     let mut pool = InternPool::new();
-    let name = source_name(file);
     let want = EmitSet::from_args(emit);
-    let (program, parse_diags) = match ryo_frontend::parse::parse_source(&input, &mut pool) {
+    let (program, parse_diags) = match ryo_frontend::parse::parse_source(source, &mut pool) {
         Ok(v) => v,
-        Err(diags) => return Err(fail_with_diags(diags, &input, &name)),
+        Err(diags) => return Err(fail_with_diags(diags, context.sources())),
     };
 
     if want.ast {
@@ -44,8 +44,8 @@ pub fn run_file(
     let (uir, analyzed) = lower_and_analyze(
         &program,
         &mut pool,
-        &input,
-        &name,
+        &context,
+        source_id,
         file,
         parse_diags,
         show_inferred_errors,
@@ -71,7 +71,7 @@ pub fn run_file(
 
     // Cranelift needs only the analyzed bodies and type pool, not the
     // source text or earlier representations retained by the front end.
-    drop((program, uir, input));
+    drop((program, uir));
 
     let mut codegen = codegen::Codegen::new_jit().map_err(CompilerError::CodegenError)?;
     let (main_id, clif) = codegen
@@ -82,7 +82,7 @@ pub fn run_file(
         write_stdout(format_args!("{clif}"))?;
     }
 
-    drop((analyzed, pool));
+    drop((analyzed, pool, context));
     let mut argv = Vec::with_capacity(program_args.len() + 1);
     argv.push(file.to_string_lossy().into_owned());
     argv.extend_from_slice(program_args);

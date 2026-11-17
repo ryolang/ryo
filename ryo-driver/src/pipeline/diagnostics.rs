@@ -1,7 +1,9 @@
-use ariadne::{Color, Label, Report, ReportKind, Source};
+mod source_diagnostics;
 use ryo_core::diag::{Diag, DiagCode, Severity};
 use ryo_core::errors::CompilerError;
 use ryo_frontend::ownership::OwnershipError;
+#[cfg(test)]
+pub(super) use source_diagnostics::render_diags_with_writer;
 
 pub(super) fn ownership_error_diag(error: OwnershipError) -> Diag {
     match error {
@@ -29,153 +31,16 @@ pub(super) fn ownership_error_diag(error: OwnershipError) -> Diag {
 /// severity (lex / parse failures), where `finalize_diags` therefore
 /// always returns `Err`. Keeps the render-and-wrap shape in one
 /// place while letting callers keep their own error type.
-pub(super) fn fail_with_diags(diags: Vec<Diag>, input: &str, source_name: &str) -> CompilerError {
-    finalize_diags(diags, input, source_name)
+pub(super) fn fail_with_diags(
+    diags: Vec<Diag>,
+    sources: &ryo_core::source::SourceDb,
+) -> CompilerError {
+    finalize_diags(diags, sources)
         .expect_err("fail_with_diags requires an error-severity diagnostic")
 }
 
-/// Render a slice of diagnostics to stderr through Ariadne.
-///
-/// `source_name` is the user-visible identifier the renderer puts
-/// in the report header (e.g. `"examples/hello.ryo"`).
-///
-/// Regular diagnostics are sorted by start span first to keep output
-/// stable regardless of emission order — important once Sema
-/// continues past errors and emits several at once. The
-/// `TooManyDiagnostics` truncation note carries a synthetic 0..0
-/// span and would otherwise sort to the top; it's rendered
-/// out-of-band after the sorted sweep so the suppression marker
-/// always lands at the bottom of the report.
-fn render_diags(diags: &[Diag], input: &str, source_name: &str) -> Result<(), CompilerError> {
-    // Oversized sources have only a synthetic size diagnostic, not a
-    // source-line label; do not allocate an offset table per source byte.
-    let render_input = if input.len() > u32::MAX as usize {
-        &input[..0]
-    } else {
-        input
-    };
-    let source = Source::from(render_input);
-    // Ariadne 0.6 indexes `Source` by CHARACTER offset, but every span
-    // in the compiler is a BYTE offset (logos + `str` slicing). On pure
-    // ASCII the two coincide; with any multi-byte character before the
-    // span, the byte offset overruns the char length and the squiggle
-    // drifts to a later line — or ariadne drops the report entirely
-    // when the offset passes the source's char count. Convert once
-    // here so every diagnostic (and its note labels) renders at its
-    // true position.
-    let byte_to_char = byte_to_char_offsets(render_input);
-    let (truncation, regular): (Vec<&Diag>, Vec<&Diag>) = diags
-        .iter()
-        .partition(|d| d.code == DiagCode::TooManyDiagnostics);
-
-    let mut sorted = regular;
-    sorted.sort_by_key(|d| (d.span.start, d.span.end));
-    for d in sorted {
-        emit_one(d, source_name, &source, &byte_to_char)?;
-    }
-    for d in truncation {
-        emit_one(d, source_name, &source, &byte_to_char)?;
-    }
-    Ok(())
-}
-
-/// Prefix table mapping byte offsets to character offsets: entry `i`
-/// holds the char offset of the char starting at byte `i`. The final
-/// entry holds the total char count. Compiler spans always sit on char
-/// boundaries (the lexer slices tokens on them), so interior bytes of a
-/// multi-byte char — left at their zero-initialized value — are never
-/// queried; out-of-range lookups fall back to the char length.
-fn byte_to_char_offsets(input: &str) -> Vec<usize> {
-    let mut offsets = vec![0; input.len() + 1];
-    let mut chars = 0;
-    for (byte, _) in input.char_indices() {
-        offsets[byte] = chars;
-        chars += 1;
-    }
-    offsets[input.len()] = chars;
-    offsets
-}
-
-/// Convert a byte span to the char span ariadne's `Source` expects.
-fn to_char_span(offsets: &[usize], span: std::ops::Range<usize>) -> std::ops::Range<usize> {
-    let fallback = *offsets
-        .last()
-        .expect("the table always has the len+1 entry");
-    offsets.get(span.start).copied().unwrap_or(fallback)
-        ..offsets.get(span.end).copied().unwrap_or(fallback)
-}
-
-fn emit_one(
-    d: &Diag,
-    source_name: &str,
-    source: &Source<&str>,
-    byte_to_char: &[usize],
-) -> Result<(), CompilerError> {
-    emit_one_with_writer(
-        d,
-        source_name,
-        source,
-        byte_to_char,
-        &mut std::io::stderr().lock(),
-    )
-}
-
-fn emit_one_with_writer<W: std::io::Write>(
-    d: &Diag,
-    source_name: &str,
-    source: &Source<&str>,
-    byte_to_char: &[usize],
-    out: &mut W,
-) -> Result<(), CompilerError> {
-    let kind = match d.severity {
-        Severity::Error => ReportKind::Error,
-        Severity::Warning => ReportKind::Warning,
-        Severity::Note => ReportKind::Advice,
-    };
-    let label_color = color_for_severity(d.severity);
-    let code = diag_code_str(d.code);
-    let span = to_char_span(byte_to_char, d.span.start..d.span.end);
-    // The full message goes in the report header only; the label
-    // carries no text so the message isn't printed twice.
-    let mut report = Report::build(kind, (source_name, span.clone()))
-        .with_code(code)
-        .with_message(&d.message)
-        .with_label(Label::new((source_name, span)).with_color(label_color));
-    for note in &d.notes {
-        if let Some(span) = note.span {
-            report = report.with_label(
-                Label::new((
-                    source_name,
-                    to_char_span(byte_to_char, span.start..span.end),
-                ))
-                .with_message(&note.message)
-                .with_color(Color::Cyan),
-            );
-        } else {
-            report = report.with_note(&note.message);
-        }
-    }
-    match report.finish().write((source_name, source), &mut *out) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        Err(_) => {
-            // Try a plain line for rendering failures. If that write also
-            // fails, preserve the output error unless the pipe has closed.
-            crate::output::write_and_flush(out, format_args!("{}: {}\n", code, d.message))
-        }
-    }
-}
-
-/// Map severity to a label color so the squiggle hue matches the
-/// report-header `ReportKind`. Red has been overloaded onto every
-/// label historically; that made warnings and notes look like
-/// errors.
-fn color_for_severity(s: Severity) -> Color {
-    match s {
-        Severity::Error => Color::Red,
-        Severity::Warning => Color::Yellow,
-        Severity::Note => Color::Blue,
-    }
+fn render_diags(diags: &[Diag], sources: &ryo_core::source::SourceDb) -> Result<(), CompilerError> {
+    source_diagnostics::render_diags(diags, sources)
 }
 
 fn diag_code_str(code: DiagCode) -> &'static str {
@@ -295,12 +160,11 @@ fn diag_code_str(code: DiagCode) -> &'static str {
 /// has `Severity::Error`; warnings/notes alone do not fail the build.
 pub(super) fn finalize_diags(
     diags: Vec<Diag>,
-    input: &str,
-    source_name: &str,
+    sources: &ryo_core::source::SourceDb,
 ) -> Result<(), CompilerError> {
     let has_errors = diags.iter().any(|d| d.severity == Severity::Error);
     if !diags.is_empty() {
-        render_diags(&diags, input, source_name)?;
+        render_diags(&diags, sources)?;
     }
     if has_errors {
         Err(CompilerError::Diagnostics(diags))
@@ -546,26 +410,6 @@ mod tests {
         assert!(notes.contains(&"loop propagation exhausted 0 passes"));
     }
 
-    #[test]
-    fn byte_to_char_offsets_map_boundaries() {
-        // Pure ASCII: byte offset == char offset.
-        let ascii = byte_to_char_offsets("ab\ncd");
-        assert_eq!(ascii, vec![0, 1, 2, 3, 4, 5]);
-
-        // Multi-byte chars: byte offsets of later chars exceed their
-        // char offsets (emoji are 4 bytes each).
-        let emoji = "\u{1F600}x";
-        let table = byte_to_char_offsets(emoji);
-        assert_eq!(table.len(), emoji.len() + 1);
-        assert_eq!(to_char_span(&table, 0..4), 0..1);
-        assert_eq!(to_char_span(&table, 4..5), 1..2);
-        assert_eq!(to_char_span(&table, 0..emoji.len()), 0..2);
-
-        // Out-of-range byte offsets fall back to the char length
-        // instead of panicking.
-        assert_eq!(to_char_span(&table, 5..9), 2..2);
-    }
-
     struct FailFirstWrite {
         kind: std::io::ErrorKind,
         failed: bool,
@@ -600,22 +444,18 @@ mod tests {
 
     #[test]
     fn non_pipe_report_write_failure_uses_plain_fallback() {
-        let input = "print(name)\n";
+        let mut context = ryo_core::compilation::CompilationContext::new();
+        let id =
+            context.register_source(std::path::PathBuf::from("test.ryo"), "print(name)\n".into());
         let diag = Diag::error(
-            ryo_core::span::Span::new(6, 10),
+            ryo_core::span::Span::in_source(id, 6, 10),
             DiagCode::UseAfterMove,
             "use of moved value `name`",
         );
         let mut writer = FailFirstWrite::new(std::io::ErrorKind::Other);
 
-        emit_one_with_writer(
-            &diag,
-            "test.ryo",
-            &Source::from(input),
-            &byte_to_char_offsets(input),
-            &mut writer,
-        )
-        .expect("fallback write should succeed");
+        render_diags_with_writer(&[diag], context.sources(), &mut writer)
+            .expect("fallback write should succeed");
 
         assert_eq!(
             String::from_utf8(writer.output).expect("fallback should be UTF-8"),
@@ -625,22 +465,18 @@ mod tests {
 
     #[test]
     fn closed_pipe_report_write_does_not_use_fallback() {
-        let input = "print(name)\n";
+        let mut context = ryo_core::compilation::CompilationContext::new();
+        let id =
+            context.register_source(std::path::PathBuf::from("test.ryo"), "print(name)\n".into());
         let diag = Diag::error(
-            ryo_core::span::Span::new(6, 10),
+            ryo_core::span::Span::in_source(id, 6, 10),
             DiagCode::UseAfterMove,
             "use of moved value `name`",
         );
         let mut writer = FailFirstWrite::new(std::io::ErrorKind::BrokenPipe);
 
-        emit_one_with_writer(
-            &diag,
-            "test.ryo",
-            &Source::from(input),
-            &byte_to_char_offsets(input),
-            &mut writer,
-        )
-        .expect("closed pipe should be ignored");
+        render_diags_with_writer(&[diag], context.sources(), &mut writer)
+            .expect("closed pipe should be ignored");
 
         assert!(writer.output.is_empty());
     }

@@ -16,14 +16,24 @@ use crate::spans::cspan;
 /// recovered parse still yields a partial AST). `Err` means
 /// unrecoverable and carries the raw diagnostics — rendering is the
 /// caller's job.
+#[cfg(not(test))]
 pub fn parse_source(
+    source: &Source,
+    pool: &mut InternPool,
+) -> Result<(ast::Ast, Vec<Diag>), Vec<Diag>> {
+    parse_source_impl(source.id(), source.text(), pool)
+}
+
+#[cfg(test)]
+pub(crate) fn parse_source(
     input: &str,
     pool: &mut InternPool,
 ) -> Result<(ast::Ast, Vec<Diag>), Vec<Diag>> {
     parse_source_impl(SourceId::NONE, input, pool)
 }
 
-pub fn parse_source_with_source(
+#[cfg(test)]
+pub(crate) fn parse_source_with_source(
     source: &Source,
     pool: &mut InternPool,
 ) -> Result<(ast::Ast, Vec<Diag>), Vec<Diag>> {

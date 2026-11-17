@@ -13,7 +13,7 @@ use target_lexicon::Triple;
 /// inline here because the enum codegen tests are unit tests in this
 /// module, per the M11 plan).
 pub(super) fn clif_of(src: &str) -> String {
-    let (tirs, flows, pool, sidecar) = analyze(src);
+    let (tirs, flows, pool, sidecar, _context) = analyze(src);
     let mut codegen = Codegen::new_jit().expect("JIT codegen should initialize");
     codegen
         .compile_and_dump_ir(&tirs, &flows, &pool, &sidecar)
@@ -24,7 +24,7 @@ pub(super) fn clif_of(src: &str) -> String {
 /// on the emitted symbol/data surface (runtime-callee names and .rodata
 /// strings do not survive in CLIF text).
 fn object_bytes(src: &str) -> Vec<u8> {
-    let (tirs, flows, pool, sidecar) = analyze(src);
+    let (tirs, flows, pool, sidecar, _context) = analyze(src);
     let mut codegen = Codegen::new_aot(Triple::host()).expect("AOT codegen should initialize");
     codegen
         .compile(&tirs, &flows, &pool, &sidecar, false)
@@ -39,16 +39,17 @@ fn analyze(
     Vec<ryo_core::flow::Flow>,
     InternPool,
     ryo_core::ownership::OwnershipSidecar,
+    ryo_core::compilation::CompilationContext,
 ) {
+    let mut context = ryo_core::compilation::CompilationContext::new();
+    let source_id = context.register_source(std::path::PathBuf::from("test.ryo"), src.into());
+    let source = context.sources().get(source_id).unwrap();
     let mut pool = InternPool::new();
     let mut sink = ryo_core::diag::DiagSink::new();
-    let tokens = ryo_frontend::lexer::lex(src, &mut pool, &mut sink);
+    let tokens = ryo_frontend::lexer::lex(source, &mut pool, &mut sink);
     assert!(!sink.has_errors(), "lex should succeed");
-    let token_stream = tokens[..].split_token_span(ryo_frontend::lexer::eoi(
-        ryo_core::source::SourceId::NONE,
-        src.len(),
-    ));
-    let mut state = ParseState::new(pool);
+    let token_stream = tokens[..].split_token_span(ryo_frontend::lexer::eoi(source_id, src.len()));
+    let mut state = ParseState::with_source(pool, source_id);
     ryo_frontend::grammar::program_parser()
         .parse_with_state(token_stream, &mut state)
         .into_result()
@@ -72,7 +73,7 @@ fn analyze(
     let mut ownership_sink = ryo_core::diag::DiagSink::new();
     let sidecar = ryo_frontend::ownership::check(&tirs, &flows, &pool, &mut ownership_sink);
     assert!(!ownership_sink.has_errors(), "ownership should succeed");
-    (tirs, flows, pool, sidecar)
+    (tirs, flows, pool, sidecar, context)
 }
 
 /// (a) `EnumLit` emits an i32 tag store at offset 0 followed by
@@ -83,7 +84,7 @@ fn analyze(
 #[test]
 fn enum_lit_emits_tag_store_and_payload_stores_at_pool_offsets() {
     let src = "enum Shape:\n\tCircle(float)\n\tRectangle(width: float, height: float)\n\nfn main():\n\ts = Shape.Rectangle{width=1.0, height=2.0}\n";
-    let (tirs, _mirs, pool, _sidecar) = analyze(src);
+    let (tirs, _mirs, pool, _sidecar, _context) = analyze(src);
     // Expected offsets straight from the pool layout.
     let main = tirs
         .iter()
@@ -250,8 +251,8 @@ fn value_repr_expect_scalar_panics_on_str() {
 #[test]
 fn backend_rejects_same_shape_artifacts_from_another_body() {
     let source = "fn main():\n\ts = \"heap_012345678901234567890123456789\" + \"!\"\n\tprint(s)\n";
-    let (tirs, flows, pool, cleanup) = analyze(source);
-    let (other_tirs, other_flows, _, other_cleanup) = analyze(source);
+    let (tirs, flows, pool, cleanup, _context) = analyze(source);
+    let (other_tirs, other_flows, _, other_cleanup, _context) = analyze(source);
     let mut codegen = Codegen::new_jit().expect("JIT");
     assert!(
         codegen
@@ -272,7 +273,8 @@ fn backend_rejects_same_shape_artifacts_from_another_body() {
 
 #[test]
 fn backend_rejects_unresolved_cleanup_before_emission() {
-    let (tirs, flows, pool, mut cleanup) = analyze("fn main():\n\ts = \"x\" + \"y\"\n\tprint(s)\n");
+    let (tirs, flows, pool, mut cleanup, _context) =
+        analyze("fn main():\n\ts = \"x\" + \"y\"\n\tprint(s)\n");
     cleanup.functions[0].drops[0].position = ryo_core::flow::DropPosition::BlockStart {
         block: ryo_core::flow::BlockId(u32::MAX),
     };
@@ -289,11 +291,11 @@ fn backend_rejects_unresolved_cleanup_before_emission() {
 #[test]
 fn flow_inspection_uses_stable_arenas_and_resolved_storage() {
     let src = include_str!("../../../ryo/tests/fixtures/shadowed_heap_reassignment.ryo");
-    let (tirs, flows, pool, cleanup) = analyze(src);
+    let (tirs, flows, pool, cleanup, _context) = analyze(src);
     let first = flows[0]
         .dump(&tirs[0], &cleanup.functions[0], &pool)
         .expect("dump");
-    let (tirs, flows, pool, cleanup) = analyze(src);
+    let (tirs, flows, pool, cleanup, _context) = analyze(src);
     let second = flows[0]
         .dump(&tirs[0], &cleanup.functions[0], &pool)
         .expect("dump");
@@ -308,7 +310,7 @@ fn flow_inspection_uses_stable_arenas_and_resolved_storage() {
 
 #[test]
 fn backend_rejects_incomplete_and_skipped_validation() {
-    let (tirs, flows, pool, mut cleanup) = analyze("fn main():\n\tprint(1)\n");
+    let (tirs, flows, pool, mut cleanup, _context) = analyze("fn main():\n\tprint(1)\n");
     for summary in [
         ryo_core::ownership::ValidationSummary::default(),
         ryo_core::ownership::ValidationSummary {
@@ -329,7 +331,7 @@ fn backend_rejects_incomplete_and_skipped_validation() {
 
 #[test]
 fn backend_rejects_validation_mutated_after_publication() {
-    let (tirs, flows, pool, mut cleanup) = analyze("fn main():\n\tprint(1)\n");
+    let (tirs, flows, pool, mut cleanup, _context) = analyze("fn main():\n\tprint(1)\n");
     cleanup.functions[0].validation = Some(ryo_core::ownership::ValidationSummary {
         required_checks_ran: true,
         ..Default::default()
@@ -353,7 +355,7 @@ fn cleanup_executes_without_optional_optimizations() {
         include_str!("../../../ryo/tests/fixtures/nested_heap_byte_shadows.ryo"),
         "fn main():\n\tmut s = \"heap_012345678901234567890123456789\" + \"!\"\n\ts = s + \"?\"\n\tassert(s == \"heap_012345678901234567890123456789!?\", \"concat without reuse\")\n",
     ] {
-        let (tirs, flows, pool, _) = analyze(source);
+        let (tirs, flows, pool, _, _context) = analyze(source);
         let cleanup = ryo_frontend::ownership::check_without_optimizations(
             &tirs,
             &flows,
@@ -397,7 +399,7 @@ fn cleanup_rejects_physical_storage_of_another_binding() {
 
 #[test]
 fn mixed_abi_emits_objects_for_supported_target_layouts() {
-    let (tirs, flows, pool, cleanup) = analyze(include_str!(
+    let (tirs, flows, pool, cleanup, _context) = analyze(include_str!(
         "../../../ryo/tests/fixtures/mixed_call_abi.ryo"
     ));
     for target in [
@@ -417,7 +419,7 @@ fn mixed_abi_emits_objects_for_supported_target_layouts() {
 
 #[test]
 fn backend_rejects_edits_to_cloned_body_and_execution_arenas() {
-    let (tirs, flows, pool, cleanup) = analyze("fn main():\n\tprint(1)\n");
+    let (tirs, flows, pool, cleanup, _context) = analyze("fn main():\n\tprint(1)\n");
     let mut changed_tirs = tirs.clone();
     let instruction = changed_tirs[0]
         .instructions
@@ -446,7 +448,7 @@ fn backend_rejects_edits_to_cloned_body_and_execution_arenas() {
 }
 
 fn assert_jit_succeeds(src: &str) {
-    let (tirs, flows, pool, cleanup) = analyze(src);
+    let (tirs, flows, pool, cleanup, _context) = analyze(src);
     let mut codegen = Codegen::new_jit().expect("JIT");
     let (main, _) = codegen
         .compile(&tirs, &flows, &pool, &cleanup, false)

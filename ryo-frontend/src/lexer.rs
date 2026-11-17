@@ -428,11 +428,18 @@ fn estimated_token_count(input: &str) -> usize {
 /// diagnostics in the same run. Whole-source width overflow, an
 /// over-budget literal, or indentation failure instead returns an
 /// empty vector and the driver skips parsing.
-pub fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Token, Span)> {
+#[cfg(not(test))]
+pub fn lex(source: &Source, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Token, Span)> {
+    lex_impl(source.id(), source.text(), pool, sink)
+}
+
+#[cfg(test)]
+pub(crate) fn lex(input: &str, pool: &mut InternPool, sink: &mut DiagSink) -> Vec<(Token, Span)> {
     lex_impl(SourceId::NONE, input, pool, sink)
 }
 
-pub fn lex_with_source(
+#[cfg(test)]
+pub(crate) fn lex_with_source(
     source: &Source,
     pool: &mut InternPool,
     sink: &mut DiagSink,

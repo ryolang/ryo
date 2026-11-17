@@ -10,23 +10,24 @@ use super::emit::{
     display_ast, display_flow, display_tir, display_tokens, display_uir, generate_and_display_ir,
 };
 use super::options::{EmitKind, EmitSet};
-use super::{read_source_file, source_name};
+use super::{compilation_from_source, read_source_file};
 
 pub fn lex_command(file: &Path) -> Result<(), CompilerError> {
-    let input = read_source_file(file)?;
-    display_tokens(&input, file)
+    let (context, source_id) = compilation_from_source(file, read_source_file(file)?)?;
+    let source = context.sources().get(source_id)?;
+    display_tokens(source, context.sources())
 }
 
 pub fn parse_command(file: &Path) -> Result<(), CompilerError> {
-    let input = read_source_file(file)?;
+    let (context, source_id) = compilation_from_source(file, read_source_file(file)?)?;
+    let source = context.sources().get(source_id)?;
     let mut pool = InternPool::new();
-    let name = source_name(file);
-    let (program, diags) = match ryo_frontend::parse::parse_source(&input, &mut pool) {
+    let (program, diags) = match ryo_frontend::parse::parse_source(source, &mut pool) {
         Ok(v) => v,
-        Err(diags) => return Err(fail_with_diags(diags, &input, &name)),
+        Err(diags) => return Err(fail_with_diags(diags, context.sources())),
     };
     display_ast(&program, &pool)?;
-    finalize_diags(diags, &input, &name)?;
+    finalize_diags(diags, context.sources())?;
     Ok(())
 }
 
@@ -40,8 +41,8 @@ pub fn parse_command(file: &Path) -> Result<(), CompilerError> {
 /// run only as far as the deepest requested section requires; an
 /// `--emit=uir` invocation never reaches sema.
 pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
-    let input = read_source_file(file)?;
-    let name = source_name(file);
+    let (context, source_id) = compilation_from_source(file, read_source_file(file)?)?;
+    let source = context.sources().get(source_id)?;
     let mut pool = InternPool::new();
 
     let want = if emit.is_empty() {
@@ -58,9 +59,9 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     } else {
         EmitSet::from_args(emit)
     };
-    let (program, parse_diags) = match ryo_frontend::parse::parse_source(&input, &mut pool) {
+    let (program, parse_diags) = match ryo_frontend::parse::parse_source(source, &mut pool) {
         Ok(v) => v,
-        Err(diags) => return Err(fail_with_diags(diags, &input, &name)),
+        Err(diags) => return Err(fail_with_diags(diags, context.sources())),
     };
 
     if want.ast {
@@ -80,7 +81,7 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     // if CLIF. Each stage's print is independent.
     let need_uir = want.uir || want.tir || want.flow || want.clif;
     if !need_uir {
-        return finalize_diags(sink.into_diags(), &input, &name);
+        return finalize_diags(sink.into_diags(), context.sources());
     }
 
     let uir = astgen::generate(&program, &mut pool, &mut sink);
@@ -93,20 +94,21 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     if !(want.tir || want.flow || want.clif) {
         // UIR-only run. Surface astgen diagnostics now, with a
         // non-zero exit if anything fired.
-        return finalize_diags(sink.into_diags(), &input, &name);
+        return finalize_diags(sink.into_diags(), context.sources());
     }
 
     // For TIR / CLIF we also run sema. Per the §4.5 design, sema
     // returns a well-formed TIR even with errors (Unreachable
     // slots), and `--emit=tir` deliberately prints that partial
     // TIR — the whole point of the flag is debugging sema.
-    let (tirs, sema_warnings) = sema::analyze_buffered(&uir, &mut pool, &mut sink, &input, file);
+    let (tirs, sema_warnings) =
+        sema::analyze_buffered(&uir, &mut pool, &mut sink, source.text(), file);
     let analyzed =
         match ryo_frontend::pipeline::BuiltProgram::build(tirs, &pool).analyze(&pool, &mut sink) {
             Ok(analyzed) => analyzed,
             Err(error) => {
                 sink.emit(ownership_error_diag(error));
-                return Err(fail_with_diags(sink.into_diags(), &input, &name));
+                return Err(fail_with_diags(sink.into_diags(), context.sources()));
             }
         };
     let tirs = analyzed.tirs();
@@ -133,7 +135,7 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
         // failed, surface the diagnostics and abort — we cannot
         // produce a meaningful CLIF dump from a broken TIR.
         if sink.has_errors() {
-            return finalize_diags(sink.into_diags(), &input, &name);
+            return finalize_diags(sink.into_diags(), context.sources());
         }
         generate_and_display_ir(tirs, flows, &pool, sidecar)?;
     }
@@ -141,5 +143,5 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     // Tail block: drains the sink whether sema/ownership were
     // clean or only emitted warnings. Without this `ryo ir` would
     // silently swallow W0001/W0002 on success.
-    finalize_diags(sink.into_diags(), &input, &name)
+    finalize_diags(sink.into_diags(), context.sources())
 }

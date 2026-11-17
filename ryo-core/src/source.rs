@@ -2,7 +2,7 @@ use crate::artifact::CompilationContextId;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SourceId {
     context: CompilationContextId,
     revision: u32,
@@ -22,6 +22,16 @@ impl SourceId {
         Self {
             context: CompilationContextId::from_raw(context),
             revision,
+        }
+    }
+}
+
+impl std::fmt::Debug for SourceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if *self == Self::NONE {
+            f.write_str("SourceId::NONE")
+        } else {
+            write!(f, "SourceId({})", self.revision)
         }
     }
 }
@@ -180,6 +190,24 @@ impl SourceDb {
     }
 }
 
+impl std::fmt::Display for SourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SourceError::WrongContext { .. } => {
+                f.write_str("source belongs to a different compilation context")
+            }
+            SourceError::UnknownRevision(_) => f.write_str("source revision is not registered"),
+            SourceError::StaleRevision(_) => f.write_str("source revision is stale"),
+            SourceError::InvalidRange { .. } => {
+                f.write_str("span is outside its source or not on UTF-8 character boundaries")
+            }
+            SourceError::RevisionExhausted => f.write_str("source revision space exhausted"),
+        }
+    }
+}
+
+impl std::error::Error for SourceError {}
+
 #[cfg(test)]
 mod tests {
     use super::SourceId;
@@ -324,5 +352,19 @@ mod tests {
                 .validate_span(crate::span::Span::in_source(id, 1, 4))
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+
+    #[test]
+    fn debug_output_omits_process_context() {
+        assert_eq!(
+            format!("{:?}", SourceId::from_raw_parts(41, 7)),
+            "SourceId(7)"
+        );
+        assert_eq!(format!("{:?}", SourceId::NONE), "SourceId::NONE");
     }
 }

@@ -10,7 +10,7 @@ use super::diagnostics::fail_with_diags;
 use super::emit::{display_ast, display_flow, display_tir, display_uir};
 use super::lower_and_analyze;
 use super::options::{EmitKind, EmitSet, LinkMode};
-use super::{read_source_file, source_name};
+use super::{compilation_from_source, read_source_file};
 
 // Helper function to generate output filenames. Artifacts land next
 // to the source file, not in the CWD, so two same-stem sources in
@@ -38,13 +38,13 @@ pub fn build_file(
     link: LinkMode,
     show_inferred_errors: bool,
 ) -> Result<(), CompilerError> {
-    let input = read_source_file(file)?;
+    let (context, source_id) = compilation_from_source(file, read_source_file(file)?)?;
+    let source = context.sources().get(source_id)?;
     let mut pool = InternPool::new();
-    let name = source_name(file);
     let want = EmitSet::from_args(emit);
-    let (program, parse_diags) = match ryo_frontend::parse::parse_source(&input, &mut pool) {
+    let (program, parse_diags) = match ryo_frontend::parse::parse_source(source, &mut pool) {
         Ok(v) => v,
-        Err(diags) => return Err(fail_with_diags(diags, &input, &name)),
+        Err(diags) => return Err(fail_with_diags(diags, context.sources())),
     };
 
     if want.ast {
@@ -55,8 +55,8 @@ pub fn build_file(
     let (uir, analyzed) = lower_and_analyze(
         &program,
         &mut pool,
-        &input,
-        &name,
+        &context,
+        source_id,
         file,
         parse_diags,
         show_inferred_errors,
@@ -81,7 +81,7 @@ pub fn build_file(
     }
 
     // Object emission needs only the analyzed bodies and type pool.
-    drop((program, uir, input));
+    drop((program, uir));
 
     let (obj_filename, exe_filename) = get_output_filenames(file);
 
@@ -96,7 +96,7 @@ pub fn build_file(
     }
 
     // Cranelift's compiled module no longer reads frontend artifacts.
-    drop((analyzed, pool));
+    drop((analyzed, pool, context));
     let obj_bytes = codegen.finish().map_err(CompilerError::CodegenError)?;
 
     fs::write(&obj_filename, obj_bytes).map_err(CompilerError::from)?;

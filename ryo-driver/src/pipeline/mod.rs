@@ -12,8 +12,10 @@ pub use run::run_file;
 
 use crate::output::write_stdout;
 use ryo_core::ast;
+use ryo_core::compilation::CompilationContext;
 use ryo_core::diag::{Diag, DiagSink};
 use ryo_core::errors::CompilerError;
+use ryo_core::source::SourceId;
 use ryo_core::types::InternPool;
 use ryo_core::uir::Uir;
 use ryo_frontend::{astgen, sema};
@@ -23,17 +25,22 @@ use std::path::Path;
 use diagnostics::{fail_with_diags, finalize_diags, ownership_error_diag};
 
 #[cfg(test)]
+mod source_identity_tests;
+#[cfg(test)]
 mod tests;
 
 pub(super) fn read_source_file(file: &Path) -> Result<String, CompilerError> {
     fs::read_to_string(file).map_err(CompilerError::from)
 }
 
-/// Resolve the user-facing source name for diagnostics.
-pub(super) fn source_name(file: &Path) -> String {
-    file.to_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| file.display().to_string())
+fn compilation_from_source(
+    file: &Path,
+    input: String,
+) -> Result<(CompilationContext, SourceId), CompilerError> {
+    let mut context = CompilationContext::new();
+    let id = context.register_source(file.to_path_buf(), input);
+    context.sources().require_current(id)?;
+    Ok((context, id))
 }
 
 /// Run the front-end (astgen + sema), build the canonical Flow IR per body,
@@ -45,12 +52,13 @@ pub(super) fn source_name(file: &Path) -> String {
 pub(super) fn lower_and_analyze(
     program: &ast::Ast,
     pool: &mut InternPool,
-    input: &str,
-    source_name: &str,
+    context: &CompilationContext,
+    source_id: SourceId,
     file_path: &Path,
     parse_diags: Vec<Diag>,
     show_inferred_errors: bool,
 ) -> Result<(Uir, ryo_frontend::pipeline::CleanupProgram), CompilerError> {
+    let source = context.sources().require_current(source_id)?;
     let mut sink = DiagSink::new();
     // Lex/parse diagnostics come first so the final render preserves
     // pipeline order.
@@ -63,7 +71,7 @@ pub(super) fn lower_and_analyze(
     // run is the whole point of the structured-diagnostics phase.
     // Sema warnings are buffered and flushed after ownership so an
     // ownership error suppresses them exactly like a sema error.
-    let report = sema::analyze_buffered_report(&uir, pool, &mut sink, input, file_path);
+    let report = sema::analyze_buffered_report(&uir, pool, &mut sink, source.text(), file_path);
     if show_inferred_errors && !sink.has_errors() {
         for signature in &report.inferred {
             let error_set = pool.error_union_view(signature.return_type).error_set;
@@ -86,7 +94,7 @@ pub(super) fn lower_and_analyze(
         Ok(analyzed) => analyzed,
         Err(error) => {
             sink.emit(ownership_error_diag(error));
-            return Err(fail_with_diags(sink.into_diags(), input, source_name));
+            return Err(fail_with_diags(sink.into_diags(), context.sources()));
         }
     };
     if !sink.has_errors() {
@@ -99,6 +107,6 @@ pub(super) fn lower_and_analyze(
     // `W0002` RedundantMove, …) surface on the success path
     // without a separate render block that could drift from the
     // error path.
-    finalize_diags(sink.into_diags(), input, source_name)?;
+    finalize_diags(sink.into_diags(), context.sources())?;
     Ok((uir, analyzed))
 }
