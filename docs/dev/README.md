@@ -10,9 +10,9 @@ This directory contains implementation notes, architectural decisions, and desig
 
 | File | Content | Next Action |
 |---|---|---|
-| [pipeline_regression_checks.md](pipeline_regression_checks.md) | Differential, memory, diagnostic, and performance checks for the pipeline migration | **Run and record evidence** before migration acceptance |
-| [pipeline_migration.md](pipeline_migration.md) | Current pipeline audit, target Flow IR, and migration steps for ownership, cleanup, generics, comptime, and concurrency | **Implement and verify** the remaining contracts; keep the source audit current |
-| [pipeline_alignment.md](pipeline_alignment.md) | Zig-alignment plan — all phases shipped (UIR/TIR split, InternPool, diagnostics, lazy Sema); tracks pending comptime/generics substrate work, Zig divergence notes, and future considerations | **Implement** the pending features as their own roadmap milestones; **delete** once comptime/generics land |
+| [pipeline_regression_checks.md](architectural_fixes/pipeline_regression_checks.md) | Differential, memory, diagnostic, and performance checks for the pipeline migration | **Run and record evidence** before migration acceptance |
+| [pipeline_migration.md](architectural_fixes/pipeline_migration.md) | Current pipeline audit, target Flow IR, and migration steps for ownership, cleanup, generics, comptime, and concurrency | **Implement and verify** the remaining contracts; keep the source audit current |
+| [pipeline_alignment.md](architectural_fixes/pipeline_alignment.md) | Zig-alignment plan — all phases shipped (UIR/TIR split, InternPool, diagnostics, lazy Sema); tracks pending comptime/generics substrate work, Zig divergence notes, and future considerations | **Implement** the pending features as their own roadmap milestones; **delete** once comptime/generics land |
 | [spec_closure_representation.md](spec_closure_representation.md) | Closure memory layout, capture, and calling-convention/ABI design | **Implement** when closures land (v0.2+) — then keep as reference |
 | [spec_arc_optimizer.md](spec_arc_optimizer.md) | Swift-style ARC retain/release-elision pass design for `shared[T]` | **Implement** post-M11 alongside `shared[T]` — then keep as reference |
 | [spec_copy_elision.md](spec_copy_elision.md) | Copy elision rules: guaranteed (G1-G4), permitted (P1-P4), forbidden cases, algorithm sketch | **Implement** in compiler v0.2+ — then keep as reference |

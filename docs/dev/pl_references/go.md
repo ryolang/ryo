@@ -37,7 +37,7 @@ Go has supported parametric polymorphism via generics (type parameters on functi
 - **Generalized function type inference:** Type inference now applies in all contexts where a generic function is assigned to a variable of (or converted to) a matching function type — previously inference only worked at direct calls.
 - **Struct literal keys as field selectors:** A key in a struct literal may be any valid field selector for the struct type, not just a top-level field name.
 
-Ryo relevance: Ryo's planned generics are monomorphization-based (a fresh TIR per instantiation — see `docs/dev/pipeline_alignment.md`). Go 1.27's generic methods are the design point to study if Ryo later considers parameterizing methods rather than only functions.
+Ryo relevance: Ryo's planned generics are monomorphization-based (a fresh TIR per instantiation — see `docs/dev/architectural_fixes/pipeline_alignment.md`). Go 1.27's generic methods are the design point to study if Ryo later considers parameterizing methods rather than only functions.
 
 ### Repository Structure [Link to this section](https://www.augmentcode.com/open-source/golang/go\#repository-structure)
 

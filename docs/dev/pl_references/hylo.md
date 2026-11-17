@@ -87,6 +87,6 @@ not a reason to add a pipeline stage or change the Cranelift backend.
 
 - Ryo spec: [§4.4 — Slice types](../../specification.md#44-slice-types-scope-locked-views), [§5.7 — Iterators and views](../../specification.md#57-iterators-and-views).
 - Ryo rules: [Projection rules P1–P6](../spec_slicing_and_memory_model.md#32-projection-rules).
-- Ryo architecture: [Pipeline migration](../pipeline_migration.md), [compiler guide](../guide_compiler.md).
+- Ryo architecture: [Pipeline migration](../architectural_fixes/pipeline_migration.md), [compiler guide](../guide_compiler.md).
 - Ryo sequencing: [Implementation roadmap](../implementation_roadmap.md).
 - Hylo primary sources: [Subscripts](https://hylo-lang.org/docs/user/language-tour/subscripts/), [Functions and methods](https://hylo-lang.org/docs/user/language-tour/functions-and-methods/), [Basic types](https://hylo-lang.org/docs/user/language-tour/basic-types/), [Compiler architecture note](https://github.com/hylo-lang/hylo/blob/main/Docs/Compiler/CompilerArchitecture.md).

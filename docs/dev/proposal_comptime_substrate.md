@@ -20,7 +20,7 @@ Comptime is Ryo's only generics substrate — generic functions are functions wi
 - **M25.1:** scope unchanged (enum collections via internal generic bodies); its mechanism note is rewritten as the instance-axis statement — the substrate's first committed slice — not an ad-hoc "compiler-generic builtins" rung.
 - **Phase 5 "Traits & Generics System":** rewritten to comptime form (comptime type parameters, compiler-known bounds promoting to real traits, derives as comptime functions emitting `impl`s); the `fn max[T: Comparable]` / `struct Box[T]` promises become their comptime equivalents. The standalone one-line comptime bullet folds into this section.
 - **"No Generics in v0.1.0":** stays literally true; gains one line — the instance axis exists internally (M25.1) while the evaluator and user surface debut at v0.2.
-- **`pipeline_migration.md`:** records shared-parametric analysis as superseded by per-instantiation analysis (M25.1's monomorphization is already per-instantiation).
+- **`architectural_fixes/pipeline_migration.md`:** records shared-parametric analysis as superseded by per-instantiation analysis (M25.1's monomorphization is already per-instantiation).
 - **The approved design record** (gating programs, `type_info` handle design, checking modes, anti-goals) is committed to `docs/dev/` with milestone numbers remapped to the current schedule and amended inline to this sequencing.
 - **Concurrency measurements memo** (the standing approval condition) lands with this proposal's acceptance.
 
@@ -34,10 +34,10 @@ Comptime is Ryo's only generics substrate — generic functions are functions wi
 
 - Owner approves this sequencing (or records a counter-decision); the design record is committed with remapped numbers and the amendment inline.
 - M25.1's mechanism note and Phase 5's generics surface are edited as above in the same commit.
-- `pipeline_migration.md` carries the supersession note; the concurrency memo lands; the "No Generics" entry states which sequencing it operates under.
+- `architectural_fixes/pipeline_migration.md` carries the supersession note; the concurrency memo lands; the "No Generics" entry states which sequencing it operates under.
 
 ## References
 
 - Spec: [Section 10](../specification.md) (comptime — one-line reserved today), [Section 2](../specification.md) (reserved keywords), [Section 19](../specification.md) (Future Work — comptime entries removed when the surface ships)
 - Roadmap: [implementation_roadmap.md](implementation_roadmap.md) (M25, M25.1, Phase 5 Traits & Generics, "No Generics in v0.1.0")
-- Dev: [pipeline_migration.md](pipeline_migration.md) (step 8; shared-analysis default), [pipeline_alignment.md](pipeline_alignment.md) (comptime hook status), [record_concurrency_poc.md](record_concurrency_poc.md) (proven gate), [alpha_scope.md](alpha_scope.md) (non-goals table — stays true)
+- Dev: [architectural_fixes/pipeline_migration.md](architectural_fixes/pipeline_migration.md) (step 8; shared-analysis default), [architectural_fixes/pipeline_alignment.md](architectural_fixes/pipeline_alignment.md) (comptime hook status), [record_concurrency_poc.md](record_concurrency_poc.md) (proven gate), [alpha_scope.md](alpha_scope.md) (non-goals table — stays true)

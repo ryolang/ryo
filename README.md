@@ -73,7 +73,7 @@ Questions, bugs, and proposals go through the [issue tracker](https://github.com
 
 - [Language Specification](docs/specification.md) — Complete language design and syntax
 - [Implementation Roadmap](docs/dev/implementation_roadmap.md) — Milestones and progress
-- [Compilation Pipeline](docs/dev/pipeline_alignment.md) — How the compiler works
+- [Compilation Pipeline](docs/dev/architectural_fixes/pipeline_alignment.md) — How the compiler works
 - [Proposals](docs/dev/proposals.md) — Future features
 - [Design Issues](docs/dev/design_issues.md) — Open design decisions
 - [AGENTS.md](AGENTS.md) — Project context for AI assistants and contributors

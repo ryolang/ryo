@@ -7,7 +7,7 @@ This guide is for agents and contributors extending the Ryo compiler. Load it wh
 ### Design Inspiration
 
 - **Views and projections:** Hylo is a reference for bounded access to storage — see [pl_references/hylo.md](pl_references/hylo.md). Ryo keeps its own immutable-view, owner-freeze, last-use, and escape rules. Hylo's mutable projections and yielding subscripts are not adopted by this comparison.
-- **Compiler architecture (lexer → parser → UIR → Sema → TIR → Flow → ownership/cleanup → codegen):** takes inspiration from the Zig compiler — see [`/docs/dev/pl_references/zig.md`](pl_references/zig.md). TIR stays Zig AIR-shaped; the Flow IR layer between TIR and codegen (explicit blocks/terminators/places — rustc-MIR-shaped in role, not in name) is Ryo's own addition, documented in [`docs/dev/pipeline_migration.md`](pipeline_migration.md).
+- **Compiler architecture (lexer → parser → UIR → Sema → TIR → Flow → ownership/cleanup → codegen):** takes inspiration from the Zig compiler — see [`/docs/dev/pl_references/zig.md`](pl_references/zig.md). TIR stays Zig AIR-shaped; the Flow IR layer between TIR and codegen (explicit blocks/terminators/places — rustc-MIR-shaped in role, not in name) is Ryo's own addition, documented in [`docs/dev/architectural_fixes/pipeline_migration.md`](architectural_fixes/pipeline_migration.md).
 - **Concurrency:** takes inspiration from Go — see [`/docs/dev/pl_references/go.md`](pl_references/go.md).
 - **Ownership pass (`ryo-frontend/src/ownership/mod.rs` & `ryo-core/src/ownership.rs`):** takes inspiration from Mojo — see [`/docs/dev/pl_references/mojo.md`](pl_references/mojo.md). Zig has no borrow checker, so it is not a useful reference for move semantics. Mojo's MLIR-based lifetime/ASAP-destruction passes are the closest published precedent for what Ryo's spec commits to (no annotated lifetimes, parameters borrow by default, eager destruction at last use). Sema and the IRs themselves remain Zig-shaped.
 - **`shared[T]` refcounting & ARC optimizer (planned; status lives in `docs/dev/implementation_roadmap.md`):** takes inspiration from Swift — see [`/docs/dev/spec_arc_optimizer.md`](spec_arc_optimizer.md). Swift's SIL ARC optimizer (aggressive retain/release elision, stack promotion, copy-on-write for collections) is the model. The performance promise of `shared[T]` in spec 5.6 depends on this pass actually existing and working; without it `shared[T]` benchmarks badly.
@@ -27,7 +27,7 @@ This guide is for agents and contributors extending the Ryo compiler. Load it wh
 Source → Lexer → Indent Preprocessor → Parser → AstGen → UIR → Sema → TIR → Flow → Ownership → Cleanup (DropOps) → Codegen → Linker → Executable
 ```
 
-(**Flow** — `ryo-core/src/flow.rs` — is the canonical control-flow graph built once per function body after sema: indexed blocks with explicit terminators, a place table for storage identity, and per-step read/write/view facts. Both consumers drive from it: the **Ownership** pass analyzes Flow blocks/terminators post-sema (see `docs/dev/pl_references/mojo.md` and `ryo-frontend/src/ownership/mod.rs`), its cleanup decisions are explicit `DropOp`s positioned on Flow blocks, and **Codegen** maps Flow blocks to Cranelift blocks and dispatches terminators — neither pass reconstructs control flow from TIR statement lists. The authoritative design and phase contracts live in `docs/dev/pipeline_migration.md`; see `docs/dev/pattern_matching.md` for the match representation contracts.)
+(**Flow** — `ryo-core/src/flow.rs` — is the canonical control-flow graph built once per function body after sema: indexed blocks with explicit terminators, a place table for storage identity, and per-step read/write/view facts. Both consumers drive from it: the **Ownership** pass analyzes Flow blocks/terminators post-sema (see `docs/dev/pl_references/mojo.md` and `ryo-frontend/src/ownership/mod.rs`), its cleanup decisions are explicit `DropOp`s positioned on Flow blocks, and **Codegen** maps Flow blocks to Cranelift blocks and dispatches terminators — neither pass reconstructs control flow from TIR statement lists. The authoritative design and phase contracts live in `docs/dev/architectural_fixes/pipeline_migration.md`; see `docs/dev/pattern_matching.md` for the match representation contracts.)
 
 The middle-end is split into two flat-arena IRs modeled after Zig's ZIR/AIR:
 
@@ -55,7 +55,7 @@ Ryo does not produce or consume Zig's ZIR/AIR — these are upstream design refe
 
 **Niche-filled refs.** `InstRef` (UIR) and `TirRef` (TIR) wrap `NonZeroU32`, so `Option<InstRef>` / `Option<TirRef>` fit in a single 32-bit slot. Slot 0 of each `instructions` arena is a reserved sentinel that is never emitted — do not hand out `InstRef(0)` / `TirRef(0)`, and do not assume index 0 is a real instruction when iterating.
 
-See `docs/dev/pipeline_alignment.md` for what remains of the Zig-alignment plan (pending features, divergence notes, future considerations); the shipped phase plan lives in git history.
+See `docs/dev/architectural_fixes/pipeline_alignment.md` for what remains of the Zig-alignment plan (pending features, divergence notes, future considerations); the shipped phase plan lives in git history.
 
 **Crate and Module Map** (distributed in workspace packages):
 
@@ -216,8 +216,8 @@ cargo test -- --nocapture       # Show output
 ## References
 
 - Spec: [Section 3, Syntax & Grammar](../specification.md) and [Section 5, Memory Management](../specification.md)
-- Dev: [pipeline_migration.md](pipeline_migration.md) — compiler pipeline + Flow IR design: representation contracts, phase boundaries, migration steps (authoritative for the Flow layer)
-- Dev: [pipeline_alignment.md](pipeline_alignment.md) — UIR/TIR pipeline: remaining work (comptime/generics substrate), Zig divergence notes, future considerations
+- Dev: [architectural_fixes/pipeline_migration.md](architectural_fixes/pipeline_migration.md) — compiler pipeline + Flow IR design: representation contracts, phase boundaries, migration steps (authoritative for the Flow layer)
+- Dev: [architectural_fixes/pipeline_alignment.md](architectural_fixes/pipeline_alignment.md) — UIR/TIR pipeline: remaining work (comptime/generics substrate), Zig divergence notes, future considerations
 - Dev: [implementation_roadmap.md](implementation_roadmap.md) — feature roadmap
 - Dev: [guide_llm_instructions.md](guide_llm_instructions.md) — **normative contributor rules (R1–R21)** for compiler work: data-oriented design, Rust discipline, diagnostics, Cranelift discipline, testing
 - Dev: [spec_slicing_and_memory_model.md](spec_slicing_and_memory_model.md) — slicing/views/memory-model decisions (D1–D11); amends the base spec

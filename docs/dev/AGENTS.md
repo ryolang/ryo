@@ -30,7 +30,7 @@ Example:
 ```markdown
 ## References
 - Spec: [Section 5.9](../specification.md) (copy elision guarantees)
-- Dev: pipeline_alignment.md
+- Dev: architectural_fixes/pipeline_alignment.md
 - Milestone: Copy Elision & NRVO (Phase 5, v0.2+) — see implementation_roadmap.md
 ```
 

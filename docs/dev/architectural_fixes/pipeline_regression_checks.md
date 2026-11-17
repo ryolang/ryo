@@ -5,7 +5,7 @@
 This plan checks the compiler changes described in [pipeline_migration.md](pipeline_migration.md).
 It covers observable behavior, ownership, cleanup, diagnostics, and compilation cost.
 It does not change language semantics or add future pipeline features.
-The [roadmap](implementation_roadmap.md) owns delivery status.
+The [roadmap](../implementation_roadmap.md) owns delivery status.
 
 No check in this plan is complete merely because its command is listed.
 Record evidence for an exact compiler revision and working-tree state.
@@ -285,9 +285,9 @@ exception or improvement is asserted here.
 
 ## References
 
-- Spec: [Section 3](../specification.md#3-syntax--grammar), [Section 5](../specification.md#5-memory-management-ownership-lite), and [Section 7](../specification.md#7-error-handling) for control flow, ownership, and diagnostics.
-- Dev: [Pipeline migration](pipeline_migration.md), [compiler guide](guide_compiler.md), and [compiler instructions](guide_llm_instructions.md).
-- Tests: [Ownership](../../ryo/tests/integration_ownership.rs), [views](../../ryo/tests/integration_views.rs), [match](../../ryo/tests/integration_match.rs), and [AOT](../../ryo/tests/integration_aot.rs).
-- Memory coverage: [Linux test runner](../../scripts/run_linux_tests.sh).
-- Performance: [Benchmark index](../../benchmarks/README.md), [frontend benchmarks](../../ryo-frontend/benches/frontend.rs), and [backend benchmarks](../../ryo-backend/benches/backend.rs).
-- Delivery: [Implementation roadmap](implementation_roadmap.md).
+- Spec: [Section 3](../../specification.md#3-syntax--grammar), [Section 5](../../specification.md#5-memory-management-ownership-lite), and [Section 7](../../specification.md#7-error-handling) for control flow, ownership, and diagnostics.
+- Dev: [Pipeline migration](pipeline_migration.md), [compiler guide](../guide_compiler.md), and [compiler instructions](../guide_llm_instructions.md).
+- Tests: [Ownership](../../../ryo/tests/integration_ownership.rs), [views](../../../ryo/tests/integration_views.rs), [match](../../../ryo/tests/integration_match.rs), and [AOT](../../../ryo/tests/integration_aot.rs).
+- Memory coverage: [Linux test runner](../../../scripts/run_linux_tests.sh).
+- Performance: [Benchmark index](../../../benchmarks/README.md), [frontend benchmarks](../../../ryo-frontend/benches/frontend.rs), and [backend benchmarks](../../../ryo-backend/benches/backend.rs).
+- Delivery: [Implementation roadmap](../implementation_roadmap.md).
