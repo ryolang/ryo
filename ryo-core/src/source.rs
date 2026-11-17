@@ -145,6 +145,13 @@ impl SourceDb {
         }
     }
 
+    pub fn validate_span(&self, span: crate::span::Span) -> Result<(), SourceError> {
+        if span == crate::span::Span::EMPTY {
+            return Ok(());
+        }
+        self.validate_range(span.source, span.range())
+    }
+
     pub fn validate_range(&self, id: SourceId, range: Range<usize>) -> Result<(), SourceError> {
         let source = self.get(id)?;
         let valid = range.start <= range.end
@@ -271,5 +278,25 @@ mod tests {
         assert!(context.sources().validate_range(id, 4..5).is_ok());
         assert!(context.sources().validate_range(id, 1..4).is_err());
         assert!(context.sources().validate_range(id, 0..2).is_err());
+    }
+
+    #[test]
+    fn span_validation_requires_real_source_and_valid_boundaries() {
+        let mut context = CompilationContext::new();
+        let id = context.register_source(PathBuf::from("main.ryo"), "😀x".into());
+
+        assert!(context.sources().validate_span(crate::span::Span::EMPTY).is_ok());
+        assert!(context
+            .sources()
+            .validate_span(crate::span::Span::new(0, 1))
+            .is_err());
+        assert!(context
+            .sources()
+            .validate_span(crate::span::Span::in_source(id, 0, 4))
+            .is_ok());
+        assert!(context
+            .sources()
+            .validate_span(crate::span::Span::in_source(id, 1, 4))
+            .is_err());
     }
 }
