@@ -1748,6 +1748,8 @@ print(f"x = {x}, y = {y}")             # f-string handles formatting
 print(42)                              # "42\n" — primitives print bare; structs print their Debug form (§4.5)
 ```
 
+**Closed output pipes:** Stdout and stderr have the same closed-pipe behavior. On Unix, writing to a closed pipe terminates the program with `SIGPIPE`; shells conventionally report this as status `141`. On Windows, the same condition terminates the program with exit status `141`, without a panic or additional diagnostic. JIT execution and AOT binaries expose the same contract.
+
 ### 6.1.3 Return Checking (Return-Flow Analysis)
 
 A function with a non-`void` return type must return a value on **every** path through its body. If control can reach the end of the body without returning, the compiler rejects the function (error **E0036**, `MissingReturn`).

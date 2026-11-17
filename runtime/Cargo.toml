@@ -9,6 +9,7 @@ crate-type = ["staticlib", "rlib"]
 # rlib is needed for `cargo test` to work (staticlib alone doesn't support test harness)
 
 [dependencies]
+libc = "0.2"
 ryu = "1"
 
 [features]

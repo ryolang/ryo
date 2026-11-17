@@ -1422,3 +1422,345 @@ fn stack_size_from_rlim_cur_finite_values_pass_through() {
         0x7fff_ffff_ffff_fffe
     );
 }
+
+#[cfg(all(not(windows), not(miri)))]
+#[test]
+fn generated_process_policy_restores_host_sigpipe() {
+    type SignalHandler = usize;
+    const SIGPIPE: c_int = 13;
+    const SIG_DFL: SignalHandler = 0;
+    const SIG_IGN: SignalHandler = 1;
+
+    unsafe extern "C" {
+        fn signal(signal: c_int, handler: SignalHandler) -> SignalHandler;
+    }
+
+    if std::env::var_os("RYO_RT_POLICY_CHILD").is_some() {
+        // SAFETY: all handlers are POSIX sentinel values; this child has no
+        // other threads or generated executions changing SIGPIPE.
+        unsafe { signal(SIGPIPE, SIG_IGN) };
+        {
+            let _guard = GeneratedProcessPolicyGuard::enter().expect("enter generated policy");
+            // SAFETY: setting the default is valid; the return reports the
+            // disposition that was active while the guard was entered.
+            let active = unsafe { signal(SIGPIPE, SIG_DFL) };
+            assert_eq!(active, SIG_DFL);
+        }
+        // SAFETY: the guard has dropped, so this reports its restored value.
+        let restored = unsafe { signal(SIGPIPE, SIG_DFL) };
+        assert_eq!(restored, SIG_IGN);
+        return;
+    }
+
+    let output = std::process::Command::new(std::env::current_exe().expect("current_exe"))
+        .arg("tests::generated_process_policy_restores_host_sigpipe")
+        .arg("--exact")
+        .env("RYO_RT_POLICY_CHILD", "1")
+        .output()
+        .expect("spawn process-policy child");
+    assert!(
+        output.status.success(),
+        "policy child failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(all(not(windows), not(miri)))]
+fn policy_sigpipe_set() -> libc::sigset_t {
+    // SAFETY: zero is a valid initial sigset_t representation; the libc
+    // functions initialize and mutate it through valid pointers.
+    let mut set = unsafe { core::mem::zeroed() };
+    unsafe {
+        assert_eq!(libc::sigemptyset(&mut set), 0);
+        assert_eq!(libc::sigaddset(&mut set, libc::SIGPIPE), 0);
+    }
+    set
+}
+
+#[cfg(all(not(windows), not(miri)))]
+fn policy_current_sigaction() -> libc::sigaction {
+    // SAFETY: libc writes the current action to this valid out-pointer.
+    let mut action = unsafe { core::mem::zeroed() };
+    unsafe {
+        assert_eq!(
+            libc::sigaction(libc::SIGPIPE, core::ptr::null(), &mut action),
+            0
+        )
+    };
+    action
+}
+
+#[cfg(all(not(windows), not(miri)))]
+fn policy_sigpipe_is_blocked() -> bool {
+    // SAFETY: a null set pointer queries without changing the thread mask.
+    let mut current = unsafe { core::mem::zeroed() };
+    unsafe {
+        assert_eq!(
+            libc::pthread_sigmask(libc::SIG_SETMASK, core::ptr::null(), &mut current),
+            0
+        );
+        libc::sigismember(&current, libc::SIGPIPE) == 1
+    }
+}
+
+#[cfg(all(not(windows), not(miri)))]
+fn policy_child_output(test_name: &str, child_env: &str) -> std::process::Output {
+    std::process::Command::new(std::env::current_exe().expect("current_exe"))
+        .arg(test_name)
+        .arg("--exact")
+        .env(child_env, "1")
+        .output()
+        .expect("spawn process-policy child")
+}
+
+#[cfg(all(not(windows), not(miri)))]
+extern "C" fn host_sigpipe_handler(
+    _signal: c_int,
+    _info: *mut libc::siginfo_t,
+    _context: *mut c_void,
+) {
+}
+
+#[cfg(all(not(windows), not(miri)))]
+#[test]
+fn generated_process_policy_restores_complete_sigaction() {
+    if std::env::var_os("RYO_RT_POLICY_ACTION_CHILD").is_some() {
+        // SAFETY: this installs a valid three-argument host handler and mask.
+        let mut host_action = unsafe { core::mem::zeroed::<libc::sigaction>() };
+        host_action.sa_sigaction = host_sigpipe_handler as *const () as usize;
+        host_action.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
+        unsafe {
+            assert_eq!(libc::sigemptyset(&mut host_action.sa_mask), 0);
+            assert_eq!(libc::sigaddset(&mut host_action.sa_mask, libc::SIGUSR1), 0);
+            assert_eq!(
+                libc::sigaction(libc::SIGPIPE, &host_action, core::ptr::null_mut()),
+                0
+            );
+        }
+        let installed_action = policy_current_sigaction();
+        {
+            let _guard = GeneratedProcessPolicyGuard::enter().expect("enter generated policy");
+            assert_eq!(policy_current_sigaction().sa_sigaction, libc::SIG_DFL);
+        }
+        let restored = policy_current_sigaction();
+        assert_eq!(restored.sa_sigaction, installed_action.sa_sigaction);
+        assert_eq!(restored.sa_flags, installed_action.sa_flags);
+        // SAFETY: restored.sa_mask is initialized by sigaction.
+        assert_eq!(
+            unsafe { libc::sigismember(&restored.sa_mask, libc::SIGUSR1) },
+            1
+        );
+        return;
+    }
+
+    let output = policy_child_output(
+        "tests::generated_process_policy_restores_complete_sigaction",
+        "RYO_RT_POLICY_ACTION_CHILD",
+    );
+    assert!(
+        output.status.success(),
+        "sigaction child failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(all(not(windows), not(miri)))]
+#[test]
+fn generated_process_policy_unblocks_and_restores_sigpipe_mask() {
+    if std::env::var_os("RYO_RT_POLICY_MASK_CHILD").is_some() {
+        let set = policy_sigpipe_set();
+        // SAFETY: set is initialized and oldset is not needed here.
+        unsafe {
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_BLOCK, &set, core::ptr::null_mut()),
+                0
+            )
+        };
+        assert!(policy_sigpipe_is_blocked());
+        {
+            let _guard = GeneratedProcessPolicyGuard::enter().expect("enter generated policy");
+            assert!(!policy_sigpipe_is_blocked());
+        }
+        assert!(policy_sigpipe_is_blocked());
+        return;
+    }
+
+    let output = policy_child_output(
+        "tests::generated_process_policy_unblocks_and_restores_sigpipe_mask",
+        "RYO_RT_POLICY_MASK_CHILD",
+    );
+    assert!(
+        output.status.success(),
+        "signal-mask child failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(all(not(windows), not(miri)))]
+#[test]
+fn generated_process_policy_blocked_sigpipe_terminates_on_epipe() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::ExitStatusExt;
+
+    if std::env::var_os("RYO_RT_POLICY_BLOCKED_CHILD").is_some() {
+        let set = policy_sigpipe_set();
+        // SAFETY: set is initialized and oldset is not needed here.
+        unsafe {
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_BLOCK, &set, core::ptr::null_mut()),
+                0
+            )
+        };
+        let _guard = GeneratedProcessPolicyGuard::enter().expect("enter generated policy");
+        let (reader, writer) = std::io::pipe().expect("create pipe");
+        drop(reader);
+        // SAFETY: writer remains open while its fd is duplicated onto stdout.
+        unsafe { assert_ne!(libc::dup2(writer.as_raw_fd(), libc::STDOUT_FILENO), -1) };
+        let byte = b'x';
+        // SAFETY: byte is readable for the requested length.
+        unsafe { ryo_print(&byte, 1) };
+        std::process::exit(0);
+    }
+
+    let output = policy_child_output(
+        "tests::generated_process_policy_blocked_sigpipe_terminates_on_epipe",
+        "RYO_RT_POLICY_BLOCKED_CHILD",
+    );
+    assert_eq!(
+        output.status.signal(),
+        Some(13),
+        "status: {:?}",
+        output.status
+    );
+}
+
+#[cfg(all(not(windows), not(miri)))]
+#[test]
+fn generated_process_policy_serializes_overlapping_guards() {
+    use core::time::Duration;
+    use std::sync::mpsc;
+
+    if std::env::var_os("RYO_RT_POLICY_OVERLAP_CHILD").is_some() {
+        // SAFETY: SIG_IGN is the Rust host disposition this guard must restore.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+        let (a_entered_tx, a_entered_rx) = mpsc::channel();
+        let (a_drop_tx, a_drop_rx) = mpsc::channel();
+        let a = std::thread::spawn(move || {
+            let _guard = GeneratedProcessPolicyGuard::enter().expect("enter guard A");
+            a_entered_tx.send(()).expect("report guard A");
+            a_drop_rx.recv().expect("drop guard A");
+        });
+        a_entered_rx.recv().expect("guard A entered");
+
+        let (b_entered_tx, b_entered_rx) = mpsc::channel();
+        let (b_drop_tx, b_drop_rx) = mpsc::channel();
+        let b = std::thread::spawn(move || {
+            let _guard = GeneratedProcessPolicyGuard::enter().expect("enter guard B");
+            b_entered_tx.send(()).expect("report guard B");
+            b_drop_rx.recv().expect("drop guard B");
+        });
+        assert!(
+            b_entered_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "guard B entered while guard A still owned the process policy"
+        );
+        a_drop_tx.send(()).expect("release guard A");
+        a.join().expect("join guard A");
+        b_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("guard B entered after guard A dropped");
+        b_drop_tx.send(()).expect("release guard B");
+        b.join().expect("join guard B");
+        // SAFETY: this queries the restored disposition and leaves it default
+        // only in the short-lived child process.
+        assert_eq!(
+            unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) },
+            libc::SIG_IGN
+        );
+        return;
+    }
+
+    let output = policy_child_output(
+        "tests::generated_process_policy_serializes_overlapping_guards",
+        "RYO_RT_POLICY_OVERLAP_CHILD",
+    );
+    assert!(
+        output.status.success(),
+        "overlap child failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(all(not(windows), not(miri)))]
+#[test]
+fn generated_process_policy_rejects_same_thread_reentry() {
+    use core::time::Duration;
+    use std::sync::mpsc;
+
+    if std::env::var_os("RYO_RT_POLICY_REENTRY_CHILD").is_some() {
+        let (result_tx, result_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _guard = GeneratedProcessPolicyGuard::enter().expect("enter outer guard");
+            let rejected = GeneratedProcessPolicyGuard::enter().is_none();
+            result_tx.send(rejected).expect("report nested entry");
+        });
+        match result_rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(rejected) => assert!(rejected, "nested entry must be rejected"),
+            Err(_) => std::process::exit(1),
+        }
+        return;
+    }
+
+    let output = policy_child_output(
+        "tests::generated_process_policy_rejects_same_thread_reentry",
+        "RYO_RT_POLICY_REENTRY_CHILD",
+    );
+    assert!(
+        output.status.success(),
+        "reentry child failed or deadlocked:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(all(not(windows), not(miri)))]
+#[test]
+fn generated_process_policy_rejects_pending_host_sigpipe() {
+    if std::env::var_os("RYO_RT_POLICY_PENDING_CHILD").is_some() {
+        let set = policy_sigpipe_set();
+        // SAFETY: a real host handler keeps the signal pending while blocked.
+        let mut host_action = unsafe { core::mem::zeroed::<libc::sigaction>() };
+        host_action.sa_sigaction = host_sigpipe_handler as *const () as usize;
+        unsafe {
+            assert_eq!(libc::sigemptyset(&mut host_action.sa_mask), 0);
+            assert_eq!(
+                libc::sigaction(libc::SIGPIPE, &host_action, core::ptr::null_mut()),
+                0
+            );
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_BLOCK, &set, core::ptr::null_mut()),
+                0
+            );
+            assert_eq!(libc::raise(libc::SIGPIPE), 0);
+        }
+        assert!(GeneratedProcessPolicyGuard::enter().is_none());
+        assert!(policy_sigpipe_is_blocked());
+        return;
+    }
+
+    let output = policy_child_output(
+        "tests::generated_process_policy_rejects_pending_host_sigpipe",
+        "RYO_RT_POLICY_PENDING_CHILD",
+    );
+    assert!(
+        output.status.success(),
+        "pending-signal child failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

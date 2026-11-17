@@ -963,12 +963,6 @@ fn multibyte_source_with_paren_fixed_compiles_and_runs() {
     );
 }
 
-fn closed_pipe() -> std::process::Stdio {
-    let (reader, writer) = std::io::pipe().expect("create closed pipe");
-    drop(reader);
-    writer.into()
-}
-
 fn run_with_closed_stderr(args: &[&str], file: &std::path::Path) -> std::process::ExitStatus {
     std::process::Command::new(env!("CARGO_BIN_EXE_ryo"))
         .args(args)
