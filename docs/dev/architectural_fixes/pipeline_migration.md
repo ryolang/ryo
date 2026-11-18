@@ -77,10 +77,22 @@ flowchart TD
     H --> I[JIT execution or AOT object and linking]
 ```
 
-`CompilationContext` owns the source database. Each `SourceId` identifies one immutable
-source revision in one context; `get` resolves retained revisions, while `require_current`
-rejects stale input. Source text and display paths are independent, and wrong-context handles
-are rejected even when their local revision indices match.
+`CompilationContext` owns the source database and the sole declaration table. Each `SourceId`
+identifies one immutable source revision in one context; `get` resolves retained revisions,
+while `require_current` rejects stale input. Source text and display paths are independent,
+and wrong-context handles are rejected even when their local revision indices match.
+
+Sema registers every UIR function body before name resolution. A `DeclId` combines the context
+identity with a declaration-table index. Registration is keyed by source revision and UIR body
+index, so identical registration returns the existing ID even when revisions are revisited.
+Registration changes are staged until every body validates; a conflict leaves the table and all
+returned IDs unchanged. Conflicting metadata for the same source revision emits an internal
+error and prevents executable publication. A new source revision allocates fresh IDs, so new
+semantic artifacts cannot reuse declaration identities from the old revision. Old IDs remain
+associated with their retained source revisions for diagnostics. Duplicate spellings still
+receive distinct IDs, with the existing first-wins lookup and duplicate-definition diagnostic.
+Sema maps those context-global IDs to current-UIR-local slots instead of indexing bodies by the
+declaration-table index.
 
 The frontend owns Flow construction and ownership analysis in
 [`pipeline.rs`](../../../ryo-frontend/src/pipeline.rs).
@@ -92,11 +104,23 @@ with an Ariadne cache and byte-to-character table per referenced revision. Sourc
 diagnostics never borrow the first registered filename, and invalid spans become internal
 compiler errors. Partial artifacts remain inspectable after source errors. Such errors block backend preparation.
 
-Typed bodies, Flow versions, and layout contexts carry process-local identities.
-Cleanup records its Flow identity. Backend preparation checks these associations in every build.
-Equal names, arena lengths, or valid local indices do not establish compatibility.
-Published artifacts expose immutable references. Content stamps also reject edits to cloned
-TIR, Flow, and cleanup arenas. Rebuild an artifact and its analyses after a representation change.
+Typed bodies, Flow versions, and layout contexts carry process-local identities. Every TIR body
+records its `DeclId`. A direct user-call payload starts with the callee's context and local ID,
+then retains the compatibility name, argument count, arguments, and parameter modes. Builtin
+and lowered runtime calls use a separate declaration-free marker; `DeclId::NONE` remains
+synthetic-test-only and invalid in executable artifacts. Backend symbol generation still uses
+the compatibility name in this migration stage.
+
+Cleanup records its Flow identity. Backend preparation checks these associations in every build
+and resolves every TIR body and direct user-call ID through the context's declaration table.
+Each declaration must match its compatibility name. Source-backed declarations must refer to a
+current source revision; source-less synthetic declarations have no revision currency to check.
+Declaration-free calls must name a registered builtin or synthesized runtime callee. Missing,
+unknown, stale, wrong-context, and name-mismatched identities are rejected before Cranelift.
+Equal names, arena lengths, or valid local indices do not establish compatibility. Published
+artifacts expose immutable references. Content stamps also reject edits to cloned TIR, Flow,
+and cleanup arenas, including declaration-only changes. Rebuild an artifact and its analyses
+after a representation change.
 
 [`CleanupPlan`](../../../ryo-core/src/flow/cleanup.rs) selects each release's storage before emission.
 A binding release names a Flow place. A displaced value release names its producer.
