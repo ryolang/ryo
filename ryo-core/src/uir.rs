@@ -488,6 +488,7 @@ pub struct UirErrorFamilyDecl {
 
 #[derive(Debug, Clone)]
 pub struct Uir {
+    layout_context: Option<crate::artifact::ArtifactId>,
     pub instructions: Vec<Inst>,
     pub extra: Vec<u32>,
     pub spans: Vec<Span>,
@@ -519,6 +520,7 @@ impl Uir {
         // 1-based without runtime checks on every read.
         let placeholder_span = Span::EMPTY;
         Uir {
+            layout_context: None,
             instructions: vec![Inst {
                 tag: InstTag::ReturnVoid,
                 data: InstData::None,
@@ -532,6 +534,18 @@ impl Uir {
             error_families: Vec::new(),
             direct_catch_matches: std::collections::HashSet::new(),
         }
+    }
+
+    pub fn with_layout_context(mut self, pool: &InternPool) -> Self {
+        self.layout_context = Some(pool.identity());
+        self
+    }
+
+    pub fn require_layout(&self, pool: &InternPool) -> Result<(), String> {
+        if self.layout_context != Some(pool.identity()) {
+            return Err("UIR belongs to a different type and layout context".into());
+        }
+        Ok(())
     }
 
     pub fn is_direct_catch_match(&self, r: InstRef) -> bool {

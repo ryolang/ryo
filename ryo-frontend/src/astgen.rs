@@ -808,7 +808,7 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
         );
     }
 
-    b.finish()
+    b.finish().with_layout_context(pool)
 }
 
 /// Definition progress for one declared type in the define DFS.

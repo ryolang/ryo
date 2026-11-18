@@ -141,7 +141,9 @@ fn require_current_declaration(
         .declarations()
         .name(id)
         .expect("declaration was just validated");
-    if registered_name != pool.str(name) {
+    if (name.raw() as usize) >= pool.string_count()
+        || registered_name.as_bytes() != pool.bytes_payload(name)
+    {
         return Err(format!("declaration name mismatch for {id:?}"));
     }
     if declaration.span.source != ryo_core::source::SourceId::NONE {
@@ -335,7 +337,7 @@ mod tests {
         names: &[&str],
     ) -> Vec<DeclId> {
         let source = context.register_source(std::path::PathBuf::from("main.ryo"), "source".into());
-        let mut uir = Uir::new();
+        let mut uir = Uir::new().with_layout_context(pool);
         for (index, name) in names.iter().enumerate() {
             let start = index * 10;
             uir.func_bodies.push(FuncBody {
@@ -482,7 +484,7 @@ mod tests {
     fn backend_requires_matching_sourceless_provenance() {
         let mut pool = InternPool::new();
         let mut context = CompilationContext::new();
-        let mut sourceless_uir = Uir::new();
+        let mut sourceless_uir = Uir::new().with_layout_context(&pool);
         sourceless_uir.func_bodies.push(FuncBody {
             name: pool.intern_str("main"),
             params: vec![],
@@ -540,7 +542,7 @@ mod tests {
         second_pool.intern_str("padding");
         let second_name = second_pool.intern_str("main");
         assert_ne!(first_name, second_name);
-        let mut second_uir = Uir::new();
+        let mut second_uir = Uir::new().with_layout_context(&second_pool);
         second_uir.func_bodies.push(FuncBody {
             name: second_name,
             params: vec![],
@@ -631,7 +633,7 @@ mod tests {
         let new_source = context
             .replace_source(old_span.source, "replacement".into())
             .unwrap();
-        let mut new_uir = Uir::new();
+        let mut new_uir = Uir::new().with_layout_context(&pool);
         new_uir.func_bodies.push(FuncBody {
             name: pool.intern_str("main"),
             params: vec![],
@@ -648,6 +650,29 @@ mod tests {
             .require_backend_transition(&context, &pool)
             .expect_err("a current declaration must not validate an old body");
         assert!(error.contains("source revision"), "{error}");
+    }
+
+    #[test]
+    fn backend_rejects_invalid_tir_name_handles() {
+        let mut pool = InternPool::new();
+        let mut context = CompilationContext::new();
+        let local = register_main(&mut context, &mut pool);
+        let mut other = InternPool::new();
+        for index in 0..32 {
+            other.intern_str(&format!("padding{index}"));
+        }
+        let out_of_range = other.intern_str("main");
+        let non_utf8 = pool.intern_bytes(&[0xff]);
+
+        for name in [out_of_range, non_utf8] {
+            let mut tir = body_with_decl(&context, &mut pool, local);
+            tir.name = name;
+            let analyzed = cleanup_program(tir, &pool);
+            let error = analyzed
+                .require_backend_transition(&context, &pool)
+                .expect_err("invalid TIR names must return a declaration error");
+            assert!(error.contains("declaration"), "{error}");
+        }
     }
 
     #[test]

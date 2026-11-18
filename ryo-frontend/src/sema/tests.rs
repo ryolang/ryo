@@ -595,7 +595,7 @@ fn require_decl_reports_cycle_when_in_progress() {
     let zero = b.int_literal(0, sp());
     let ret = b.unary(InstTag::Return, zero, sp());
     b.add_function(main_id, vec![], pool.int(), &[ret], sp());
-    let uir = b.finish();
+    let uir = b.finish().with_layout_context(&pool);
 
     let mut context = CompilationContext::new();
     let mut sema = Sema::new(

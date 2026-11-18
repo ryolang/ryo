@@ -67,6 +67,7 @@ pub enum DeclarationError {
     InvalidName {
         uir_index: usize,
     },
+    InvalidLayout,
 }
 
 impl std::fmt::Display for DeclarationError {
@@ -87,17 +88,33 @@ impl std::fmt::Display for DeclarationError {
             DeclarationError::InvalidName { uir_index } => {
                 write!(f, "declaration name for UIR body {uir_index} is invalid")
             }
+            DeclarationError::InvalidLayout => {
+                f.write_str("UIR belongs to a different type and layout context")
+            }
         }
     }
 }
 
 impl std::error::Error for DeclarationError {}
 
+fn push_name(
+    names: &mut Vec<crate::extra::ExtraRange>,
+    bytes: &mut Vec<u8>,
+    base: usize,
+    name: &str,
+) {
+    let offset = u32::try_from(base + bytes.len()).expect("declaration name arena exhausted");
+    let len = u32::try_from(name.len()).expect("declaration name too large");
+    bytes.extend_from_slice(name.as_bytes());
+    names.push(crate::extra::ExtraRange { offset, len });
+}
+
 #[derive(Debug)]
 pub struct DeclarationTable {
     context: CompilationContextId,
     declarations: Vec<FunctionDecl>,
-    names: Vec<String>,
+    names: Vec<crate::extra::ExtraRange>,
+    name_bytes: Vec<u8>,
     by_source_and_uir_index: HashMap<(crate::source::SourceId, usize), DeclId>,
 }
 
@@ -107,6 +124,7 @@ impl DeclarationTable {
             context,
             declarations: Vec::new(),
             names: Vec::new(),
+            name_bytes: Vec::new(),
             by_source_and_uir_index: HashMap::new(),
         }
     }
@@ -130,7 +148,12 @@ impl DeclarationTable {
                     uir_index,
                     span: body.span,
                 });
-                self.names.push(pool.str(body.name).to_owned());
+                push_name(
+                    &mut self.names,
+                    &mut self.name_bytes,
+                    0,
+                    pool.str(body.name),
+                );
                 self.by_source_and_uir_index
                     .insert((body.span.source, uir_index), id);
                 ids.push(id);
@@ -141,12 +164,15 @@ impl DeclarationTable {
         let mut ids = Vec::with_capacity(uir.func_bodies.len());
         let mut new_declarations = Vec::new();
         let mut new_names = Vec::new();
+        let mut new_name_bytes = Vec::new();
         let mut new_mappings = Vec::new();
+        let name_base = self.name_bytes.len();
         for (uir_index, body) in uir.func_bodies.iter().enumerate() {
             let key = (body.span.source, uir_index);
             if let Some(existing) = self.by_source_and_uir_index.get(&key).copied() {
                 let declaration = &self.declarations[existing.index()];
-                if self.names[existing.index()] == pool.str(body.name)
+                let registered_name = &self.name_bytes[self.names[existing.index()].as_range()];
+                if registered_name == pool.str(body.name).as_bytes()
                     && declaration.span == body.span
                 {
                     ids.push(existing);
@@ -165,12 +191,18 @@ impl DeclarationTable {
                 uir_index,
                 span: body.span,
             });
-            new_names.push(pool.str(body.name).to_owned());
+            push_name(
+                &mut new_names,
+                &mut new_name_bytes,
+                name_base,
+                pool.str(body.name),
+            );
             new_mappings.push((key, id));
             ids.push(id);
         }
         self.declarations.extend(new_declarations);
         self.names.extend(new_names);
+        self.name_bytes.extend(new_name_bytes);
         for (key, id) in new_mappings {
             self.by_source_and_uir_index.insert(key, id);
         }
@@ -192,7 +224,9 @@ impl DeclarationTable {
 
     pub fn name(&self, id: DeclId) -> Result<&str, DeclarationError> {
         self.get(id)?;
-        Ok(&self.names[id.index()])
+        let range = self.names[id.index()].as_range();
+        Ok(std::str::from_utf8(&self.name_bytes[range])
+            .expect("declaration names are validated UTF-8"))
     }
 }
 
@@ -221,7 +255,7 @@ mod tests {
         let mut context = CompilationContext::new();
         let source = context.register_source(PathBuf::from("main.ryo"), "fn main".into());
         let mut pool = InternPool::new();
-        let mut uir = Uir::new();
+        let mut uir = Uir::new().with_layout_context(&pool);
         uir.func_bodies
             .push(function(&mut pool, "main", source, 10));
         uir.func_bodies
@@ -249,7 +283,7 @@ mod tests {
         let mut context = CompilationContext::new();
         let source = context.register_source(PathBuf::from("main.ryo"), "fn main".into());
         let mut pool = InternPool::new();
-        let mut uir = Uir::new();
+        let mut uir = Uir::new().with_layout_context(&pool);
         uir.func_bodies
             .push(function(&mut pool, "main", source, 10));
         let first = context.register_functions(&uir, &pool).unwrap();
@@ -263,14 +297,14 @@ mod tests {
         let mut context = CompilationContext::new();
         let source = context.register_source(PathBuf::from("main.ryo"), "fn main".into());
         let mut first_pool = InternPool::new();
-        let mut first_uir = Uir::new();
+        let mut first_uir = Uir::new().with_layout_context(&first_pool);
         first_uir
             .func_bodies
             .push(function(&mut first_pool, "main", source, 10));
         let first = context.register_functions(&first_uir, &first_pool).unwrap();
         let mut second_pool = InternPool::new();
         second_pool.intern_str("padding");
-        let mut second_uir = Uir::new();
+        let mut second_uir = Uir::new().with_layout_context(&second_pool);
         second_uir
             .func_bodies
             .push(function(&mut second_pool, "main", source, 10));
@@ -293,7 +327,7 @@ mod tests {
         let mut context = CompilationContext::new();
         let local_source = context.register_source(PathBuf::from("main.ryo"), "fn main".into());
         let mut pool = InternPool::new();
-        let mut combined = Uir::new();
+        let mut combined = Uir::new().with_layout_context(&pool);
         combined
             .func_bodies
             .push(function(&mut pool, "main", local_source, 10));
@@ -306,13 +340,35 @@ mod tests {
             .expect_err("a context must reject another context's source");
         assert!(error.to_string().contains("different compilation context"));
 
-        let mut local = Uir::new();
+        let mut local = Uir::new().with_layout_context(&pool);
         local
             .func_bodies
             .push(function(&mut pool, "main", local_source, 10));
         let ids = context.register_functions(&local, &pool).unwrap();
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0].index(), 0);
+        assert_eq!(context.declarations().name(ids[0]).unwrap(), "main");
+    }
+
+    #[test]
+    fn registration_rejects_uir_from_another_pool() {
+        let mut context = CompilationContext::new();
+        let source = context.register_source(PathBuf::from("main.ryo"), "fn main".into());
+        let mut producer = InternPool::new();
+        let mut supplied = InternPool::new();
+        supplied.intern_str("other");
+        let mut uir = Uir::new();
+        uir.func_bodies
+            .push(function(&mut producer, "main", source, 10));
+        let uir = uir.with_layout_context(&producer);
+
+        let error = context
+            .register_functions(&uir, &supplied)
+            .expect_err("UIR must be registered through its producer pool");
+        assert!(error.to_string().contains("layout"), "{error}");
+
+        let ids = context.register_functions(&uir, &producer).unwrap();
+        assert_eq!(ids.len(), 1);
         assert_eq!(context.declarations().name(ids[0]).unwrap(), "main");
     }
 
@@ -324,7 +380,7 @@ mod tests {
         other.intern_str("padding");
         let foreign_name = other.intern_str("main");
         let mut pool = InternPool::new();
-        let mut uir = Uir::new();
+        let mut uir = Uir::new().with_layout_context(&pool);
         uir.func_bodies.push(FuncBody {
             name: foreign_name,
             params: vec![],
@@ -354,7 +410,7 @@ mod tests {
         let mut context = CompilationContext::new();
         let source = context.register_source(PathBuf::from("main.ryo"), "fn main".into());
         let mut pool = InternPool::new();
-        let mut uir = Uir::new();
+        let mut uir = Uir::new().with_layout_context(&pool);
         uir.func_bodies
             .push(function(&mut pool, "main", source, 10));
         let original_uir = uir.clone();
@@ -383,14 +439,14 @@ mod tests {
         let new_source = context.replace_source(old_source, "new".into()).unwrap();
         let mut pool = InternPool::new();
         let old_uir = {
-            let mut uir = Uir::new();
+            let mut uir = Uir::new().with_layout_context(&pool);
             uir.func_bodies
                 .push(function(&mut pool, "main", old_source, 10));
             uir
         };
         let old_id = context.register_functions(&old_uir, &pool).unwrap()[0];
         let new_uir = {
-            let mut uir = Uir::new();
+            let mut uir = Uir::new().with_layout_context(&pool);
             uir.func_bodies
                 .push(function(&mut pool, "main", new_source, 10));
             uir
@@ -418,7 +474,7 @@ mod tests {
         let first_id = first
             .register_functions(
                 &{
-                    let mut uir = Uir::new();
+                    let mut uir = Uir::new().with_layout_context(&pool);
                     uir.func_bodies
                         .push(function(&mut pool, "same", first_source, 10));
                     uir
@@ -429,7 +485,7 @@ mod tests {
         let second_id = second
             .register_functions(
                 &{
-                    let mut uir = Uir::new();
+                    let mut uir = Uir::new().with_layout_context(&pool);
                     uir.func_bodies
                         .push(function(&mut pool, "same", second_source, 10));
                     uir
@@ -456,7 +512,7 @@ mod tests {
         let mut context = CompilationContext::new();
         let source = context.register_source(PathBuf::from("main.ryo"), "fn main".into());
         let mut pool = InternPool::new();
-        let mut uir = Uir::new();
+        let mut uir = Uir::new().with_layout_context(&pool);
         uir.func_bodies
             .push(function(&mut pool, "main", source, 10));
         let id = context.register_functions(&uir, &pool).unwrap()[0];
@@ -476,13 +532,13 @@ mod tests {
         let new_source = context.replace_source(old_source, "new".into()).unwrap();
         let mut pool = InternPool::new();
         let old_uir = {
-            let mut uir = Uir::new();
+            let mut uir = Uir::new().with_layout_context(&pool);
             uir.func_bodies
                 .push(function(&mut pool, "main", old_source, 10));
             uir
         };
         let new_uir = {
-            let mut uir = Uir::new();
+            let mut uir = Uir::new().with_layout_context(&pool);
             uir.func_bodies
                 .push(function(&mut pool, "main", new_source, 10));
             uir
@@ -507,7 +563,7 @@ mod tests {
         let new_source = context.replace_source(old_source, "new".into()).unwrap();
         let mut pool = InternPool::new();
         let original_uir = {
-            let mut uir = Uir::new();
+            let mut uir = Uir::new().with_layout_context(&pool);
             uir.func_bodies
                 .push(function(&mut pool, "main", old_source, 10));
             uir.func_bodies
@@ -515,7 +571,7 @@ mod tests {
             uir
         };
         let original = context.register_functions(&original_uir, &pool).unwrap();
-        let mut conflicting = Uir::new();
+        let mut conflicting = Uir::new().with_layout_context(&pool);
         conflicting
             .func_bodies
             .push(function(&mut pool, "main", new_source, 10));
@@ -523,10 +579,23 @@ mod tests {
             .func_bodies
             .push(function(&mut pool, "other", old_source, 20));
 
+        let table_shape = (
+            context.declarations().declarations.len(),
+            context.declarations().names.len(),
+            context.declarations().name_bytes.len(),
+        );
         assert!(matches!(
             context.register_functions(&conflicting, &pool),
             Err(DeclarationError::ConflictingRegistration { uir_index: 1 })
         ));
+        assert_eq!(
+            table_shape,
+            (
+                context.declarations().declarations.len(),
+                context.declarations().names.len(),
+                context.declarations().name_bytes.len(),
+            )
+        );
         let next_unused = DeclId::from_raw_parts(original[0].raw_parts().0, original.len() as u32);
         assert!(matches!(
             context.declarations().get(next_unused),

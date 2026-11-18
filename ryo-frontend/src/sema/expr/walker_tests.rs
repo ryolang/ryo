@@ -25,7 +25,13 @@ fn shared_binop_dag(tag: InstTag, lhs: i64, rhs: i64) -> (Uir, InternPool, InstR
     let rhs = builder.int_literal(rhs, Span::EMPTY);
     let shared = builder.binary(tag, lhs, rhs, Span::EMPTY);
     let root = builder.binary(InstTag::Add, shared, shared, Span::EMPTY);
-    (builder.finish(), InternPool::new(), root, shared)
+    let pool = InternPool::new();
+    (
+        builder.finish().with_layout_context(&pool),
+        pool,
+        root,
+        shared,
+    )
 }
 
 #[test]
@@ -164,8 +170,8 @@ fn nested_machine_rollback_preserves_outer_early_errors() {
     let shared = builder.binary(InstTag::Div, one, zero, Span::EMPTY);
     let rhs = builder.binary(InstTag::Add, one, shared, Span::EMPTY);
     let root = builder.binary(InstTag::Add, shared, rhs, Span::EMPTY);
-    let uir = builder.finish();
     let mut pool = InternPool::new();
+    let uir = builder.finish().with_layout_context(&pool);
     let int = pool.int();
     let name = pool.intern_str("test");
     let mut fcx = FuncCtx {
@@ -231,8 +237,8 @@ fn nested_machine_early_error_root_is_scoped_to_expression_root() {
     let zero = builder.int_literal(0, Span::EMPTY);
     let nested = builder.binary(InstTag::Div, one, zero, Span::EMPTY);
     let root = builder.binary(InstTag::Add, one, nested, Span::EMPTY);
-    let uir = builder.finish();
     let mut pool = InternPool::new();
+    let uir = builder.finish().with_layout_context(&pool);
     let int = pool.int();
     let name = pool.intern_str("test");
     let mut fcx = FuncCtx {
@@ -298,8 +304,8 @@ fn statement_root_removes_early_error_before_direct_reanalysis() {
     let zero = builder.int_literal(0, Span::EMPTY);
     let expression = builder.binary(InstTag::Div, one, zero, Span::EMPTY);
     let statement = builder.unary(InstTag::Return, expression, Span::EMPTY);
-    let uir = builder.finish();
     let mut pool = InternPool::new();
+    let uir = builder.finish().with_layout_context(&pool);
     let int = pool.int();
     let name = pool.intern_str("test");
     let mut fcx = FuncCtx {
@@ -685,6 +691,16 @@ fn run_differential_with_expr_limit(src: &str, limit: u32) -> Differential {
 fn snapshot((tirs, diags, pool, context): Differential) -> String {
     tirs.iter()
         .map(|tir| {
+            let registered = context
+                .declarations()
+                .name(tir.decl)
+                .expect("body declaration must resolve a registered declaration");
+            assert_eq!(
+                registered,
+                pool.str(tir.name),
+                "body compatibility name does not match its declaration"
+            );
+            let decl_index = tir.decl.index();
             let mut context_neutral_extra = tir.extra.clone();
             for (index, inst) in tir.instructions.iter().enumerate().skip(1) {
                 if inst.tag != TirTag::Call {
@@ -714,8 +730,9 @@ fn snapshot((tirs, diags, pool, context): Differential) -> String {
                 .collect::<Vec<_>>();
             direct_catch_matches.sort_unstable();
             format!(
-                "{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
+                "{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
                 tir.name,
+                decl_index,
                 tir.params,
                 tir.return_type,
                 tir.instructions,
@@ -730,6 +747,15 @@ fn snapshot((tirs, diags, pool, context): Differential) -> String {
         .chain(std::iter::once(format!("{diags:?}")))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[test]
+#[should_panic(expected = "body declaration must resolve a registered declaration")]
+fn snapshot_rejects_unregistered_body_declaration() {
+    let mut differential =
+        run_differential("fn id() -> int:\n\treturn 1\nfn main():\n\tprint(id())\n");
+    differential.0[0].decl = DeclId::NONE;
+    snapshot(differential);
 }
 
 #[test]

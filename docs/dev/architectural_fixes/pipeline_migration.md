@@ -87,11 +87,16 @@ identity with a declaration-table index. Registration is keyed by source revisio
 index, so identical registration returns the existing ID even when revisions are revisited.
 Registration validates every source-backed body's `SourceId` against the compilation context
 before mutating the table. Retained revisions from that context remain valid; foreign and unknown
-sources reject the whole batch, while source-less synthetic bodies remain supported.
-Declaration name handles are bounds-checked and required to contain UTF-8 before registration
-can mutate the table. Names are compared by resolved text, not pool-local `StringId` values,
-so revisiting a revision through another intern pool remains idempotent. Registration changes
-are staged until every body validates; a conflict leaves the table and all returned IDs unchanged.
+sources reject the whole batch, while source-less synthetic bodies remain supported. Each context
+accepts one source-less UIR batch; independent synthetic compilations require fresh contexts
+because source-less keys share the `(SourceId::NONE, UIR index)` namespace.
+AstGen records its producer pool on the UIR. Registration rejects missing or mismatched pool
+identity before source or name validation and before any table mutation. Declaration name handles
+are bounds-checked and required to contain UTF-8 before registration can mutate the table. Names
+are compared by resolved text, not pool-local `StringId` values, so revisiting a revision through
+another intern pool remains idempotent. Canonical name bytes live in one table-owned arena with
+a range per declaration. Name ranges and arena bytes are staged with their declarations until
+every body validates; a conflict leaves the table and all returned IDs unchanged.
 Conflicting metadata for the same source revision emits an internal error and prevents executable
 publication. A new source revision allocates fresh IDs, so new semantic artifacts cannot reuse
 declaration identities from the old revision. Old IDs remain associated with their retained source

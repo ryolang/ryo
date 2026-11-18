@@ -45,6 +45,8 @@ impl CompilationContext {
         uir: &Uir,
         pool: &InternPool,
     ) -> Result<Vec<DeclId>, DeclarationError> {
+        uir.require_layout(pool)
+            .map_err(|_| DeclarationError::InvalidLayout)?;
         for (uir_index, body) in uir.func_bodies.iter().enumerate() {
             if body.span.source != SourceId::NONE {
                 self.sources
