@@ -278,6 +278,36 @@ mod tests {
     }
 
     #[test]
+    fn runtime_callee_catalog_covers_sema_emitted_calls() {
+        let names = [
+            "print",
+            "process_exit",
+            "io_eprint",
+            "process_argc",
+            "process_argv",
+            "process_env",
+            "io_read_line",
+            "int_to_str",
+            "float_to_str",
+            "bool_to_str",
+            "str_push",
+            "bytes_push",
+            "__ryo_panic",
+            "__ryo_str_from_view",
+            "__ryo_bytes_repr",
+            "__ryo_bytes_from_view",
+            "__ryo_bytes_to_str",
+            "__ryo_str_to_bytes",
+        ];
+        let mut pool = InternPool::new();
+
+        for name in names {
+            let id = pool.intern_str(name);
+            assert!(is_runtime_callee(id, &pool), "{name}");
+        }
+    }
+
+    #[test]
     fn runtime_callee_catalog_excludes_source_only_builtins() {
         let mut pool = InternPool::new();
         let assert = pool.intern_str("assert");

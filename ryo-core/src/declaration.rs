@@ -1,7 +1,5 @@
-use crate::artifact::CompilationContextId;
-use crate::source::SourceError;
-#[cfg(test)]
-use crate::source::SourceId;
+use crate::artifact::{ArtifactId, CompilationContextId};
+use crate::source::{SourceError, SourceId};
 use crate::span::Span;
 use crate::types::StringId;
 use crate::uir::Uir;
@@ -115,13 +113,19 @@ fn push_name(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum RegistrationKey {
+    Sourced { source: SourceId, uir_index: usize },
+    SourceLess { uir: ArtifactId, uir_index: usize },
+}
+
 #[derive(Debug)]
 pub struct DeclarationTable {
     context: CompilationContextId,
     declarations: Vec<FunctionDecl>,
     names: Vec<crate::extra::ExtraRange>,
     name_bytes: Vec<u8>,
-    by_source_and_uir_index: HashMap<(crate::source::SourceId, usize), DeclId>,
+    by_registration_key: HashMap<RegistrationKey, DeclId>,
 }
 
 impl DeclarationTable {
@@ -131,7 +135,7 @@ impl DeclarationTable {
             declarations: Vec::new(),
             names: Vec::new(),
             name_bytes: Vec::new(),
-            by_source_and_uir_index: HashMap::new(),
+            by_registration_key: HashMap::new(),
         }
     }
 
@@ -147,8 +151,18 @@ impl DeclarationTable {
         let mut new_mappings = Vec::new();
         let name_base = self.name_bytes.len();
         for (uir_index, body) in uir.func_bodies.iter().enumerate() {
-            let key = (body.span.source, uir_index);
-            if let Some(existing) = self.by_source_and_uir_index.get(&key).copied() {
+            let key = if body.span.source == SourceId::NONE {
+                RegistrationKey::SourceLess {
+                    uir: uir.identity(),
+                    uir_index,
+                }
+            } else {
+                RegistrationKey::Sourced {
+                    source: body.span.source,
+                    uir_index,
+                }
+            };
+            if let Some(existing) = self.by_registration_key.get(&key).copied() {
                 let declaration = &self.declarations[existing.index()];
                 let registered_name = &self.name_bytes[self.names[existing.index()].as_range()];
                 if registered_name == pool.str(body.name).as_bytes()
@@ -183,7 +197,7 @@ impl DeclarationTable {
         self.names.extend(new_names);
         self.name_bytes.extend(new_name_bytes);
         for (key, id) in new_mappings {
-            self.by_source_and_uir_index.insert(key, id);
+            self.by_registration_key.insert(key, id);
         }
         Ok(ids)
     }
@@ -269,6 +283,34 @@ mod tests {
 
         let second = context.register_functions(&uir, &pool).unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn sourceless_registration_distinguishes_uirs_and_replays_identity() {
+        let mut context = CompilationContext::new();
+        let mut pool = InternPool::new();
+        let make_uir = |pool: &mut InternPool| {
+            let mut uir = Uir::new().with_layout_context(pool);
+            uir.func_bodies.push(FuncBody {
+                name: pool.intern_str("main"),
+                params: vec![],
+                return_type: pool.void(),
+                body: ExtraRange { offset: 0, len: 0 },
+                span: Span::EMPTY,
+            });
+            uir
+        };
+        let first_uir = make_uir(&mut pool);
+        let second_uir = make_uir(&mut pool);
+
+        let first = context.register_functions(&first_uir, &pool).unwrap();
+        let second = context.register_functions(&second_uir, &pool).unwrap();
+
+        assert_ne!(first[0], second[0]);
+        assert_eq!(
+            context.register_functions(&first_uir, &pool).unwrap(),
+            first
+        );
     }
 
     #[test]

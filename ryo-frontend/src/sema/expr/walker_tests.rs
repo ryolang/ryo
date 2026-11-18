@@ -807,14 +807,21 @@ fn snapshot_rejects_declaration_free_user_call() {
             let TirData::Extra(range) = tir.instructions[index].data else {
                 unreachable!("calls carry extra payloads")
             };
-            let has_user_callee = tir
-                .call_view(ryo_core::tir::TirRef::from_raw(index as u32))
-                .callee
-                .is_some();
-            if has_user_callee {
-                let start = range.as_range().start;
-                tir.extra[start] = 0;
-                tir.extra[start + 1] = u32::MAX - 1;
+            let call = tir.call_view(ryo_core::tir::TirRef::from_raw(index as u32));
+            if call.callee.is_some() {
+                let mut replacement = Vec::new();
+                let replacement_range = ryo_core::tir::call_extra::encode_builtin(
+                    &mut replacement,
+                    call.name,
+                    &[],
+                    &[],
+                );
+                assert_eq!(
+                    range.len, replacement_range.len,
+                    "fixture must contain a zero-argument call"
+                );
+                tir.extra[range.as_range()]
+                    .copy_from_slice(&replacement[replacement_range.as_range()]);
                 changed = true;
             }
         }

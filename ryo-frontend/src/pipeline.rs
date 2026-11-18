@@ -12,7 +12,7 @@ use ryo_core::types::InternPool;
 pub struct BuiltProgram {
     tirs: Vec<Tir>,
     flows: Vec<Flow>,
-    layout_error: Option<String>,
+    validation_error: Option<String>,
 }
 
 /// Analysis-ready bodies borrow a compatible built artifact.
@@ -74,10 +74,32 @@ impl BackendReady<'_> {
     }
 }
 
+fn require_valid_call_names(tir: &Tir, pool: &InternPool) -> Result<(), String> {
+    for (index, inst) in tir.instructions.iter().enumerate().skip(1) {
+        if inst.tag != ryo_core::tir::TirTag::Call {
+            continue;
+        }
+        let r = ryo_core::tir::TirRef::from_raw(
+            u32::try_from(index).expect("TIR instruction index exceeds u32"),
+        );
+        let name = tir.call_view(r).name;
+        if (name.raw() as usize) >= pool.string_count()
+            || std::str::from_utf8(pool.bytes_payload(name)).is_err()
+        {
+            return Err(format!("invalid call name in declaration {:?}", tir.decl));
+        }
+    }
+    Ok(())
+}
+
 impl BuiltProgram {
     pub fn build(tirs: Vec<Tir>, pool: &InternPool) -> Self {
-        let layout_error = tirs.iter().find_map(|tir| tir.require_layout(pool).err());
-        let flows = if layout_error.is_some() {
+        let validation_error = tirs.iter().find_map(|tir| {
+            tir.require_layout(pool)
+                .err()
+                .or_else(|| require_valid_call_names(tir, pool).err())
+        });
+        let flows = if validation_error.is_some() {
             Vec::new()
         } else {
             tirs.iter().map(|tir| Flow::build(tir, pool)).collect()
@@ -85,12 +107,12 @@ impl BuiltProgram {
         Self {
             tirs,
             flows,
-            layout_error,
+            validation_error,
         }
     }
 
     pub fn analysis_ready<'a>(&'a self, pool: &'a InternPool) -> Result<AnalysisReady<'a>, String> {
-        if let Some(error) = &self.layout_error {
+        if let Some(error) = &self.validation_error {
             return Err(error.clone());
         }
         for (tir, flow) in self.tirs.iter().zip(&self.flows) {
@@ -393,7 +415,7 @@ mod tests {
         let built = BuiltProgram {
             tirs: vec![second],
             flows: vec![flow],
-            layout_error: None,
+            validation_error: None,
         };
 
         let result = built.analyze(&pool, &mut DiagSink::new());
@@ -662,6 +684,37 @@ mod tests {
             .require_backend_transition(&context, &pool)
             .expect_err("a current declaration must not validate an old body");
         assert!(error.contains("source revision"), "{error}");
+    }
+
+    #[test]
+    fn build_rejects_invalid_call_names_before_flow() {
+        let mut pool = InternPool::new();
+        let mut context = CompilationContext::new();
+        let local = register_main(&mut context, &mut pool);
+        let mut other = InternPool::new();
+        for index in 0..32 {
+            other.intern_str(&format!("padding{index}"));
+        }
+        let out_of_range = other.intern_str("invalid");
+        let non_utf8 = pool.intern_bytes(&[0xff]);
+
+        for name in [out_of_range, non_utf8] {
+            let mut tir = body_with_builtin(&context, &mut pool, local);
+            let call_index = tir
+                .instructions
+                .iter()
+                .position(|inst| inst.tag == TirTag::Call)
+                .expect("fixture must contain a call");
+            let ryo_core::tir::TirData::Extra(range) = tir.instructions[call_index].data else {
+                unreachable!("calls carry extra payloads")
+            };
+            tir.extra[range.as_range().start + 2] = name.raw();
+
+            let error = BuiltProgram::build(vec![tir], &pool)
+                .analyze(&pool, &mut DiagSink::new())
+                .expect_err("invalid call names must fail before Flow construction");
+            assert!(format!("{error:?}").contains("call name"), "{error:?}");
+        }
     }
 
     #[test]

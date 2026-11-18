@@ -83,13 +83,13 @@ while `require_current` rejects stale input. Source text and display paths are i
 and wrong-context handles are rejected even when their local revision indices match.
 
 Sema registers every UIR function body before name resolution. A `DeclId` combines the context
-identity with a declaration-table index. Registration is keyed by source revision and UIR body
-index, so identical registration returns the existing ID even when revisions are revisited.
-Registration validates every source-backed body's `SourceId` against the compilation context
-before mutating the table. Retained revisions from that context remain valid; foreign and unknown
-sources reject the whole batch, while source-less synthetic bodies remain supported. Each context
-accepts one source-less UIR batch; independent synthetic compilations require fresh contexts
-because source-less keys share the `(SourceId::NONE, UIR index)` namespace.
+identity with a declaration-table index. Sourced declarations are keyed by source revision and UIR
+body index; source-less declarations are keyed by stable UIR identity and body index. Identical
+registration returns the existing ID even when revisions are revisited. Registration validates
+every source-backed body's `SourceId` against the compilation context before mutating the table.
+Retained revisions from that context remain valid; foreign and unknown sources reject the whole
+batch. Independent source-less UIRs receive distinct declaration identities in one context, while
+replaying the same UIR preserves its IDs.
 AstGen records its producer pool on the UIR. This stamp is a trusted-producer assertion, not
 proof that arbitrarily mutated raw arenas contain handles from that pool. Registration rejects
 missing or mismatched pool identity before source or name validation and before any table
@@ -119,7 +119,9 @@ compiler errors. Partial artifacts remain inspectable after source errors. Such 
 Typed bodies, Flow versions, and layout contexts carry process-local identities. Every TIR body
 records its `DeclId`. Sema-built TIR also records its producer pool identity, included in its
 representation stamp. `BuiltProgram` requires an exact producer-pool match from every body before
-constructing Flow. Unbound synthetic bodies are rejected there and remain usable only in low-level
+constructing Flow. It also validates every call name's pool bounds and UTF-8 before Flow can
+resolve it, returning failures through the analysis error path. Unbound synthetic bodies are
+rejected there and remain usable only in low-level
 tests outside this transition. A direct user-call payload starts with the callee's
 context and local ID, then retains the compatibility name, argument count, arguments, and
 parameter modes. Builtin and lowered runtime calls use a separate declaration-free marker;

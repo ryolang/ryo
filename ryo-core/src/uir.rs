@@ -488,6 +488,7 @@ pub struct UirErrorFamilyDecl {
 
 #[derive(Debug, Clone)]
 pub struct Uir {
+    identity: crate::artifact::ArtifactId,
     layout_context: Option<crate::artifact::ArtifactId>,
     pub instructions: Vec<Inst>,
     pub extra: Vec<u32>,
@@ -520,6 +521,7 @@ impl Uir {
         // 1-based without runtime checks on every read.
         let placeholder_span = Span::EMPTY;
         Uir {
+            identity: crate::artifact::ArtifactId::fresh(),
             layout_context: None,
             instructions: vec![Inst {
                 tag: InstTag::ReturnVoid,
@@ -534,6 +536,11 @@ impl Uir {
             error_families: Vec::new(),
             direct_catch_matches: std::collections::HashSet::new(),
         }
+    }
+
+    /// Identity of this UIR version. Clones retain it; rebuilding creates a fresh identity.
+    pub fn identity(&self) -> crate::artifact::ArtifactId {
+        self.identity
     }
 
     /// Record the trusted producer's pool identity without inspecting existing handles.
