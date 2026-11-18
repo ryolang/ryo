@@ -4,6 +4,7 @@
 
 Compiler architecture: [current pipeline, target Flow IR, and migration steps](architectural_fixes/pipeline_migration.md).
 This design note does not change milestone completion or feature sequencing.
+Temporary declaration-identity PR: [approved design](architectural_fixes/proposal_declaration_identity.md) and [implementation plan](architectural_fixes/declaration_identity_plan.md); remove both artifacts when the slice lands.
 Migration validation: [regression checks and acceptance gates](architectural_fixes/pipeline_regression_checks.md).
 View design reference: [Hylo projections and the differences from Ryo views](pl_references/hylo.md).
 
