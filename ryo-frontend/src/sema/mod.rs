@@ -75,9 +75,9 @@ pub(crate) use stmt::*;
 ///
 /// - `Unresolved` — never visited; lazy.
 /// - `InProgress` — currently being analyzed; the cycle sentinel.
-/// - `Resolved` — TIR landed in `Sema::results[decl.index()]`
-///   (eager state for everything that follows). The slot index
-///   is `DeclId::index()` itself, so the variant carries no payload.
+/// - `Resolved` — TIR landed in `Sema::results[sema.body_index(decl)]`
+///   (eager state for everything that follows). The slot is the declaration's
+///   position in the current UIR, so the variant carries no payload.
 /// - `Failed` — analysis bailed out; downstream callers should
 ///   suppress cascade errors but not stack-overflow trying to
 ///   resolve again.
@@ -643,8 +643,8 @@ impl<'a> Sema<'a> {
             .collect()
     }
 
-    /// Pull every resolved TIR out of the per-decl slots, in source
-    /// (decl-id) order. Decls that ended in `Failed` produce no
+    /// Pull every resolved TIR out of the per-decl slots, in current-UIR
+    /// source order. Decls that ended in `Failed` produce no
     /// `Tir`; their diagnostics already live in the sink.
     fn collect_results(self) -> Vec<Tir> {
         self.results.into_iter().flatten().collect()
@@ -666,9 +666,29 @@ impl<'a> Sema<'a> {
     /// by the `require_decl_reports_cycle_when_in_progress` substrate
     /// test, which the comptime milestones will lean on. Private, so
     /// the lib-target dead-code analysis needs the allow.
+    #[inline]
+    fn body_index(&self, decl: DeclId) -> usize {
+        let index = decl.index();
+        if self.declaration_ids.get(index) == Some(&decl) {
+            index
+        } else {
+            self.body_index_fallback(decl)
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn body_index_fallback(&self, decl: DeclId) -> usize {
+        self.context
+            .declarations()
+            .get(decl)
+            .expect("Sema declaration must be registered")
+            .uir_index
+    }
+
     #[allow(dead_code)]
     fn require_decl(&mut self, callee: DeclId, span: Span, name: StringId) -> bool {
-        match self.decl_state[callee.index()] {
+        match self.decl_state[self.body_index(callee)] {
             DeclState::Unresolved | DeclState::Resolved => true,
             DeclState::Failed => true, // cascade-suppress; the original error is already in the sink
             DeclState::InProgress => {
@@ -686,20 +706,21 @@ impl<'a> Sema<'a> {
     }
 
     fn resolve_decl(&mut self, decl: DeclId) {
-        match self.decl_state[decl.index()] {
+        let index = self.body_index(decl);
+        match self.decl_state[index] {
             DeclState::Resolved | DeclState::Failed | DeclState::InProgress => return,
             DeclState::Unresolved => {}
         }
-        self.decl_state[decl.index()] = DeclState::InProgress;
+        self.decl_state[index] = DeclState::InProgress;
 
-        let body = &self.uir.func_bodies[decl.index()];
+        let body = &self.uir.func_bodies[index];
         let tir = analyze_function(self, decl, body);
 
-        self.results[decl.index()] = Some(tir);
+        self.results[index] = Some(tir);
         if error_inference::is_inferred(self, decl) {
             error_inference::finalize_inferred_function(self, decl);
         }
-        self.decl_state[decl.index()] = DeclState::Resolved;
+        self.decl_state[index] = DeclState::Resolved;
     }
 }
 

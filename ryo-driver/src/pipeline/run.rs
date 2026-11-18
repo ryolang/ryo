@@ -51,7 +51,7 @@ pub fn run_file(
         show_inferred_errors,
     )?;
     analyzed
-        .require_backend_transition(&context)
+        .require_backend_transition(&context, &pool)
         .map_err(CompilerError::CodegenError)?;
     let tirs = analyzed.tirs();
     let flows = analyzed.flows();

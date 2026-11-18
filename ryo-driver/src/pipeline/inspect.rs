@@ -139,7 +139,7 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
             return finalize_diags(sink.into_diags(), context.sources());
         }
         analyzed
-            .require_backend_transition(&context)
+            .require_backend_transition(&context, &pool)
             .map_err(CompilerError::CodegenError)?;
         generate_and_display_ir(tirs, flows, &pool, sidecar)?;
     }

@@ -213,6 +213,11 @@ fn abi_callee(name: &str) -> Option<&'static BuiltinFunction> {
     ABI_CALLEES.iter().find(|b| b.name == name)
 }
 
+pub fn is_runtime_callee(name_id: StringId, pool: &InternPool) -> bool {
+    let name = pool.str(name_id);
+    lookup(name).is_some() || abi_callee(name).is_some()
+}
+
 /// True if callee `name` passes parameter `idx` via the borrowed-scalar
 /// ABI (raw `.rodata` pointer, cap=0, never heap-owned). Consults both the
 /// user-facing `BUILTINS` table and the synthesized `ABI_CALLEES` registry.
@@ -247,6 +252,18 @@ pub fn max_output_len(name: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_callee_catalog_accepts_only_registered_names() {
+        let mut pool = InternPool::new();
+        let print = pool.intern_str("print");
+        let from_view = pool.intern_str("__ryo_str_from_view");
+        let user = pool.intern_str("user_function");
+
+        assert!(is_runtime_callee(print, &pool));
+        assert!(is_runtime_callee(from_view, &pool));
+        assert!(!is_runtime_callee(user, &pool));
+    }
 
     #[test]
     fn lookup_print_exists() {

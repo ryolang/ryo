@@ -86,7 +86,7 @@ impl std::error::Error for DeclarationError {}
 pub struct DeclarationTable {
     context: CompilationContextId,
     declarations: Vec<FunctionDecl>,
-    by_uir_index: HashMap<usize, DeclId>,
+    by_source_and_uir_index: HashMap<(crate::source::SourceId, usize), DeclId>,
 }
 
 impl DeclarationTable {
@@ -94,36 +94,62 @@ impl DeclarationTable {
         Self {
             context,
             declarations: Vec::new(),
-            by_uir_index: HashMap::new(),
+            by_source_and_uir_index: HashMap::new(),
         }
     }
 
     pub fn register_functions(&mut self, uir: &Uir) -> Result<Vec<DeclId>, DeclarationError> {
+        if self.by_source_and_uir_index.is_empty() {
+            let mut ids = Vec::with_capacity(uir.func_bodies.len());
+            for (uir_index, body) in uir.func_bodies.iter().enumerate() {
+                let id = DeclId {
+                    context: self.context,
+                    index: u32::try_from(self.declarations.len())
+                        .expect("declaration index space exhausted"),
+                };
+                self.declarations.push(FunctionDecl {
+                    id,
+                    name: body.name,
+                    uir_index,
+                    span: body.span,
+                });
+                self.by_source_and_uir_index
+                    .insert((body.span.source, uir_index), id);
+                ids.push(id);
+            }
+            return Ok(ids);
+        }
+
         let mut ids = Vec::with_capacity(uir.func_bodies.len());
+        let mut new_declarations = Vec::new();
+        let mut new_mappings = Vec::new();
         for (uir_index, body) in uir.func_bodies.iter().enumerate() {
-            if let Some(existing) = self.by_uir_index.get(&uir_index).copied() {
+            let key = (body.span.source, uir_index);
+            if let Some(existing) = self.by_source_and_uir_index.get(&key).copied() {
                 let declaration = &self.declarations[existing.index()];
                 if declaration.name == body.name && declaration.span == body.span {
                     ids.push(existing);
                     continue;
                 }
-                if declaration.span.source == body.span.source {
-                    return Err(DeclarationError::ConflictingRegistration { uir_index });
-                }
+                return Err(DeclarationError::ConflictingRegistration { uir_index });
             }
             let id = DeclId {
                 context: self.context,
-                index: u32::try_from(self.declarations.len())
+                index: u32::try_from(self.declarations.len() + new_declarations.len())
                     .expect("declaration index space exhausted"),
             };
-            self.declarations.push(FunctionDecl {
+            new_declarations.push(FunctionDecl {
                 id,
                 name: body.name,
                 uir_index,
                 span: body.span,
             });
-            self.by_uir_index.insert(uir_index, id);
+            new_mappings.push((key, id));
             ids.push(id);
+        }
+        self.declarations.extend(new_declarations);
+        for (key, id) in new_mappings {
+            self.by_source_and_uir_index.insert(key, id);
         }
         Ok(ids)
     }
@@ -327,5 +353,87 @@ mod tests {
             Err(DeclarationError::UnknownDeclaration(_))
         ));
         assert!(context.declarations().get(DeclId::NONE).is_err());
+    }
+
+    #[test]
+    fn registration_revisits_source_revisions_without_churn() {
+        let mut context = CompilationContext::new();
+        let old_source = context.register_source(PathBuf::from("main.ryo"), "old".into());
+        let new_source = context.replace_source(old_source, "new".into()).unwrap();
+        let mut pool = InternPool::new();
+        let old_uir = {
+            let mut uir = Uir::new();
+            uir.func_bodies
+                .push(function(&mut pool, "main", old_source, 10));
+            uir
+        };
+        let new_uir = {
+            let mut uir = Uir::new();
+            uir.func_bodies
+                .push(function(&mut pool, "main", new_source, 10));
+            uir
+        };
+        let old_ids = context
+            .declarations_mut()
+            .register_functions(&old_uir)
+            .unwrap();
+        let new_ids = context
+            .declarations_mut()
+            .register_functions(&new_uir)
+            .unwrap();
+
+        assert_eq!(
+            context
+                .declarations_mut()
+                .register_functions(&old_uir)
+                .unwrap(),
+            old_ids
+        );
+        assert_eq!(
+            context
+                .declarations_mut()
+                .register_functions(&new_uir)
+                .unwrap(),
+            new_ids
+        );
+    }
+
+    #[test]
+    fn conflict_after_new_allocation_rolls_back() {
+        let mut context = CompilationContext::new();
+        let old_source = context.register_source(PathBuf::from("main.ryo"), "old".into());
+        let new_source = context.replace_source(old_source, "new".into()).unwrap();
+        let mut pool = InternPool::new();
+        let original_uir = {
+            let mut uir = Uir::new();
+            uir.func_bodies
+                .push(function(&mut pool, "main", old_source, 10));
+            uir.func_bodies
+                .push(function(&mut pool, "helper", old_source, 20));
+            uir
+        };
+        let original = context
+            .declarations_mut()
+            .register_functions(&original_uir)
+            .unwrap();
+        let mut conflicting = Uir::new();
+        conflicting
+            .func_bodies
+            .push(function(&mut pool, "main", new_source, 10));
+        conflicting
+            .func_bodies
+            .push(function(&mut pool, "other", old_source, 20));
+
+        assert!(matches!(
+            context.declarations_mut().register_functions(&conflicting),
+            Err(DeclarationError::ConflictingRegistration { uir_index: 1 })
+        ));
+        assert_eq!(
+            context
+                .declarations_mut()
+                .register_functions(&original_uir)
+                .unwrap(),
+            original
+        );
     }
 }

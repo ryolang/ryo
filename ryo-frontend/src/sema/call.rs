@@ -113,7 +113,7 @@ pub(crate) fn prepare_call(sema: &mut Sema<'_>, view: &CallView<'_>, span: Span)
         return CallPlan::Error;
     }
 
-    let callee_modes: Vec<ParamMode> = sema.uir.func_bodies[callee.index()]
+    let callee_modes: Vec<ParamMode> = sema.uir.func_bodies[sema.body_index(callee)]
         .params
         .iter()
         .map(|p| p.mode)

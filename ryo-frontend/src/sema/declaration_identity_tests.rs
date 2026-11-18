@@ -6,6 +6,13 @@ use std::path::PathBuf;
 
 fn lower(context: &mut CompilationContext, input: &str) -> (Uir, InternPool, DiagSink) {
     let source_id = context.register_source(PathBuf::from("test.ryo"), input.into());
+    lower_source(context, source_id)
+}
+
+fn lower_source(
+    context: &CompilationContext,
+    source_id: ryo_core::source::SourceId,
+) -> (Uir, InternPool, DiagSink) {
     let source = context.sources().get(source_id).unwrap();
     let mut pool = InternPool::new();
     let (program, parse_diags) =
@@ -124,4 +131,123 @@ fn conflicting_registration_emits_internal_error_without_tirs() {
             .iter()
             .any(|diag| diag.code == DiagCode::InternalError)
     );
+}
+
+#[test]
+fn source_revision_recompiles_direct_recursive_and_inferred_calls() {
+    let cases = [
+        (
+            "direct",
+            "fn twice(value: int) -> int:\n\treturn value * 2\nfn main():\n\tprint(twice(2))\n",
+            "fn twice(value: int) -> int:\n\treturn value * 2\nfn main():\n\tprint(twice(3))\n",
+        ),
+        (
+            "recursive",
+            "fn fact(n: int) -> int:\n\tif n <= 1:\n\t\treturn 1\n\treturn n * fact(n - 1)\nfn main():\n\tprint(fact(3))\n",
+            "fn fact(n: int) -> int:\n\tif n <= 1:\n\t\treturn 1\n\treturn n * fact(n - 1)\nfn main():\n\tprint(fact(4))\n",
+        ),
+        (
+            "inferred",
+            "error Failure\nfn fail() -> !int:\n\treturn Failure\nfn forward() -> !int:\n\tvalue = try fail()\n\treturn value\nfn main():\n\tvalue = forward() catch:\n\t\tFailure: 7\n\tprint(value)\n",
+            "error Failure\nfn fail() -> !int:\n\treturn Failure\nfn forward() -> !int:\n\tvalue = try fail()\n\treturn value\nfn main():\n\tvalue = forward() catch:\n\t\tFailure: 8\n\tprint(value)\n",
+        ),
+    ];
+
+    for (name, first_input, second_input) in cases {
+        let mut context = CompilationContext::new();
+        let (first_uir, mut first_pool, mut first_sink) = lower(&mut context, first_input);
+        let first_tirs = analyze(
+            &first_uir,
+            &mut first_pool,
+            &mut first_sink,
+            first_input,
+            Path::new("test.ryo"),
+            &mut context,
+        );
+        assert!(!first_sink.has_errors(), "{name} first revision");
+
+        let old_source = first_uir.func_bodies[0].span.source;
+        let new_source = context
+            .replace_source(old_source, second_input.into())
+            .unwrap();
+        let (second_uir, mut second_pool, mut second_sink) = lower_source(&context, new_source);
+        let second_tirs = analyze(
+            &second_uir,
+            &mut second_pool,
+            &mut second_sink,
+            second_input,
+            Path::new("test.ryo"),
+            &mut context,
+        );
+
+        assert!(!second_sink.has_errors(), "{name} second revision");
+        assert_eq!(second_tirs.len(), first_tirs.len(), "{name}");
+        for (first, second) in first_tirs.iter().zip(&second_tirs) {
+            assert_ne!(first.decl, second.decl, "{name}");
+        }
+    }
+}
+
+#[test]
+fn source_revision_recompiles_implicit_main_for_backend() {
+    let first_input = "print(1)\n";
+    let second_input = "print(2)\n";
+    let mut context = CompilationContext::new();
+    let (first_uir, mut first_pool, mut first_sink) = lower(&mut context, first_input);
+    let old_source = first_uir.func_bodies[0].span.source;
+    let first_tirs = analyze(
+        &first_uir,
+        &mut first_pool,
+        &mut first_sink,
+        first_input,
+        Path::new("test.ryo"),
+        &mut context,
+    );
+    assert!(!first_sink.has_errors());
+    assert!(!first_tirs.is_empty());
+
+    let new_source = context
+        .replace_source(old_source, second_input.into())
+        .unwrap();
+    let (second_uir, mut second_pool, mut second_sink) = lower_source(&context, new_source);
+    assert_eq!(second_uir.func_bodies[0].span.source, new_source);
+    let second_tirs = analyze(
+        &second_uir,
+        &mut second_pool,
+        &mut second_sink,
+        second_input,
+        Path::new("test.ryo"),
+        &mut context,
+    );
+    assert!(!second_sink.has_errors());
+
+    let analyzed = crate::pipeline::BuiltProgram::build(second_tirs, &second_pool)
+        .analyze(&second_pool, &mut second_sink)
+        .expect("implicit main should analyze");
+    assert!(
+        analyzed
+            .require_backend_transition(&context, &second_pool)
+            .is_ok()
+    );
+}
+
+#[test]
+fn empty_sourceless_implicit_main_can_publish() {
+    let input = "";
+    let mut context = CompilationContext::new();
+    let (uir, mut pool, mut sink) = lower(&mut context, input);
+    let tirs = analyze(
+        &uir,
+        &mut pool,
+        &mut sink,
+        input,
+        Path::new("test.ryo"),
+        &mut context,
+    );
+    assert!(!sink.has_errors());
+
+    let analyzed = crate::pipeline::BuiltProgram::build(tirs, &pool)
+        .analyze(&pool, &mut sink)
+        .expect("empty implicit main should analyze");
+    assert!(analyzed.require_backend_transition(&context, &pool).is_ok());
 }
