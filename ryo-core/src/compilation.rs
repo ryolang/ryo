@@ -1,16 +1,20 @@
 use crate::artifact::CompilationContextId;
+use crate::declaration::DeclarationTable;
 use crate::source::{SourceDb, SourceError, SourceId};
 use std::path::PathBuf;
 
 #[derive(Debug)]
 pub struct CompilationContext {
     sources: SourceDb,
+    declarations: DeclarationTable,
 }
 
 impl CompilationContext {
     pub fn new() -> Self {
+        let context_id = CompilationContextId::fresh();
         Self {
-            sources: SourceDb::new(CompilationContextId::fresh()),
+            sources: SourceDb::new(context_id),
+            declarations: DeclarationTable::new(context_id),
         }
     }
 
@@ -28,6 +32,14 @@ impl CompilationContext {
 
     pub fn sources(&self) -> &SourceDb {
         &self.sources
+    }
+
+    pub fn declarations(&self) -> &DeclarationTable {
+        &self.declarations
+    }
+
+    pub fn declarations_mut(&mut self) -> &mut DeclarationTable {
+        &mut self.declarations
     }
 }
 
