@@ -35,7 +35,7 @@ fn shared_division_by_zero_is_scoped_to_analysis_root() {
         let int = pool.int();
         let name = pool.intern_str("test");
         let mut fcx = FuncCtx {
-            decl: DeclId::from_index(0),
+            decl: DeclId::NONE,
             builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
             inst_map: vec![None; uir.instructions.len()],
             chain_local_errors: Vec::new(),
@@ -46,7 +46,15 @@ fn shared_division_by_zero_is_scoped_to_analysis_root() {
         };
         let scope = Scope::new();
         let mut sink = DiagSink::new();
-        let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+        let mut context = ryo_core::compilation::CompilationContext::new();
+        let mut sema = Sema::new(
+            &uir,
+            &mut pool,
+            &mut sink,
+            "",
+            Path::new("<test>"),
+            &mut context,
+        );
         with_expr_limit(limit, || {
             analyze_expr_with(
                 &mut sema,
@@ -91,7 +99,7 @@ fn shared_constant_overflow_is_scoped_to_analysis_root() {
         let int = pool.int();
         let name = pool.intern_str("test");
         let mut fcx = FuncCtx {
-            decl: DeclId::from_index(0),
+            decl: DeclId::NONE,
             builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
             inst_map: vec![None; uir.instructions.len()],
             chain_local_errors: Vec::new(),
@@ -102,7 +110,15 @@ fn shared_constant_overflow_is_scoped_to_analysis_root() {
         };
         let scope = Scope::new();
         let mut sink = DiagSink::new();
-        let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+        let mut context = ryo_core::compilation::CompilationContext::new();
+        let mut sema = Sema::new(
+            &uir,
+            &mut pool,
+            &mut sink,
+            "",
+            Path::new("<test>"),
+            &mut context,
+        );
         with_expr_limit(limit, || {
             analyze_expr_with(
                 &mut sema,
@@ -153,7 +169,7 @@ fn nested_machine_rollback_preserves_outer_early_errors() {
     let int = pool.int();
     let name = pool.intern_str("test");
     let mut fcx = FuncCtx {
-        decl: DeclId::from_index(0),
+        decl: DeclId::NONE,
         builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
         inst_map: vec![None; uir.instructions.len()],
         chain_local_errors: Vec::new(),
@@ -164,7 +180,15 @@ fn nested_machine_rollback_preserves_outer_early_errors() {
     };
     let scope = Scope::new();
     let mut sink = DiagSink::new();
-    let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+    let mut context = ryo_core::compilation::CompilationContext::new();
+    let mut sema = Sema::new(
+        &uir,
+        &mut pool,
+        &mut sink,
+        "",
+        Path::new("<test>"),
+        &mut context,
+    );
     with_expr_limit(1, || {
         super::walker::reset_machine_call_count();
         analyze_expr_with(
@@ -212,7 +236,7 @@ fn nested_machine_early_error_root_is_scoped_to_expression_root() {
     let int = pool.int();
     let name = pool.intern_str("test");
     let mut fcx = FuncCtx {
-        decl: DeclId::from_index(0),
+        decl: DeclId::NONE,
         builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
         inst_map: vec![None; uir.instructions.len()],
         chain_local_errors: Vec::new(),
@@ -223,7 +247,15 @@ fn nested_machine_early_error_root_is_scoped_to_expression_root() {
     };
     let scope = Scope::new();
     let mut sink = DiagSink::new();
-    let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+    let mut context = ryo_core::compilation::CompilationContext::new();
+    let mut sema = Sema::new(
+        &uir,
+        &mut pool,
+        &mut sink,
+        "",
+        Path::new("<test>"),
+        &mut context,
+    );
     with_expr_limit(1, || {
         super::walker::reset_machine_call_count();
         analyze_expr_with(
@@ -271,7 +303,7 @@ fn statement_root_removes_early_error_before_direct_reanalysis() {
     let int = pool.int();
     let name = pool.intern_str("test");
     let mut fcx = FuncCtx {
-        decl: DeclId::from_index(0),
+        decl: DeclId::NONE,
         builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
         inst_map: vec![None; uir.instructions.len()],
         chain_local_errors: Vec::new(),
@@ -282,7 +314,15 @@ fn statement_root_removes_early_error_before_direct_reanalysis() {
     };
     let mut scope = Scope::new();
     let mut sink = DiagSink::new();
-    let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+    let mut context = ryo_core::compilation::CompilationContext::new();
+    let mut sema = Sema::new(
+        &uir,
+        &mut pool,
+        &mut sink,
+        "",
+        Path::new("<test>"),
+        &mut context,
+    );
     super::super::analyze_stmt(&mut sema, &mut fcx, &mut scope, statement);
     assert_eq!(sema.sink.error_count(), 1);
     assert!(fcx.inst_map[expression.index()].is_none());
@@ -314,7 +354,7 @@ fn successful_binop_result_stays_memoized() {
         let int = pool.int();
         let name = pool.intern_str("test");
         let mut fcx = FuncCtx {
-            decl: DeclId::from_index(0),
+            decl: DeclId::NONE,
             builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
             inst_map: vec![None; uir.instructions.len()],
             chain_local_errors: Vec::new(),
@@ -325,7 +365,15 @@ fn successful_binop_result_stays_memoized() {
         };
         let scope = Scope::new();
         let mut sink = DiagSink::new();
-        let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+        let mut context = ryo_core::compilation::CompilationContext::new();
+        let mut sema = Sema::new(
+            &uir,
+            &mut pool,
+            &mut sink,
+            "",
+            Path::new("<test>"),
+            &mut context,
+        );
         let first = with_expr_limit(limit, || {
             let first = analyze_expr_with(
                 &mut sema,

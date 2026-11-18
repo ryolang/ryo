@@ -10,7 +10,8 @@ fn parse_broken_only_return_does_not_cascade_missing_return() {
     // diagnostic may surface; a stacked E0036 would point the user
     // at the wrong place.
     let src = "fn f() -> int:\n\treturn 1 +\n";
-    let (context, source_id) = compilation_from_source(Path::new("<test>"), src.into()).unwrap();
+    let (mut context, source_id) =
+        compilation_from_source(Path::new("<test>"), src.into()).unwrap();
     let source = context.sources().get(source_id).unwrap();
     let mut pool = InternPool::new();
     let (program, parse_diags) = match ryo_frontend::parse::parse_source(source, &mut pool) {
@@ -22,7 +23,14 @@ fn parse_broken_only_return_does_not_cascade_missing_return() {
         sink.emit(d);
     }
     let uir = astgen::generate(&program, &mut pool, &mut sink);
-    let _tirs = sema::analyze(&uir, &mut pool, &mut sink, src, Path::new("<test>"));
+    let _tirs = sema::analyze(
+        &uir,
+        &mut pool,
+        &mut sink,
+        src,
+        Path::new("<test>"),
+        &mut context,
+    );
     let diags = sink.into_diags();
     assert_eq!(
         diags.len(),
@@ -41,7 +49,8 @@ fn sema_warnings_suppressed_by_ownership_errors() {
     // the warning: one failing stage silences warnings unit-wide.
     let src =
         "fn a(move x: int) -> int:\n\treturn x\n\nfn main():\n\ts = \"abc\"\n\tt = s\n\tprint(s)\n";
-    let (context, source_id) = compilation_from_source(Path::new("<test>"), src.into()).unwrap();
+    let (mut context, source_id) =
+        compilation_from_source(Path::new("<test>"), src.into()).unwrap();
     let source = context.sources().get(source_id).unwrap();
     let mut pool = InternPool::new();
     let (program, parse_diags) = match ryo_frontend::parse::parse_source(source, &mut pool) {
@@ -51,8 +60,14 @@ fn sema_warnings_suppressed_by_ownership_errors() {
     assert!(parse_diags.is_empty());
     let mut sink = DiagSink::new();
     let uir = astgen::generate(&program, &mut pool, &mut sink);
-    let (tirs, sema_warnings) =
-        sema::analyze_buffered(&uir, &mut pool, &mut sink, src, Path::new("<test>"));
+    let (tirs, sema_warnings) = sema::analyze_buffered(
+        &uir,
+        &mut pool,
+        &mut sink,
+        src,
+        Path::new("<test>"),
+        &mut context,
+    );
     let flows: Vec<ryo_core::flow::Flow> = tirs
         .iter()
         .map(|t| ryo_core::flow::Flow::build(t, &pool))
@@ -81,7 +96,8 @@ fn parse_and_sema_diagnostics_co_surface() {
     // in a single run.
     let mut pool = InternPool::new();
     let input = "fn main():\n\tx = = 1\n\ty: int = \"hi\"\n";
-    let (context, source_id) = compilation_from_source(Path::new("<test>"), input.into()).unwrap();
+    let (mut context, source_id) =
+        compilation_from_source(Path::new("<test>"), input.into()).unwrap();
     let source = context.sources().get(source_id).unwrap();
     let (program, parse_diags) = match ryo_frontend::parse::parse_source(source, &mut pool) {
         Ok(v) => v,
@@ -90,7 +106,7 @@ fn parse_and_sema_diagnostics_co_surface() {
     let err = lower_and_analyze(
         &program,
         &mut pool,
-        &context,
+        &mut context,
         source_id,
         Path::new("<test>"),
         parse_diags,

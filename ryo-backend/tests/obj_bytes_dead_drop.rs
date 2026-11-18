@@ -50,6 +50,7 @@ fn analyze(
         &mut sema_sink,
         src,
         std::path::Path::new("test.ryo"),
+        &mut context,
     );
     assert!(!sema_sink.has_errors(), "sema should succeed");
     let mut ownership_sink = ryo_core::diag::DiagSink::new();

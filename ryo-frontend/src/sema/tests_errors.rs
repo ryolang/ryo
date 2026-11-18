@@ -894,7 +894,15 @@ fn standalone_error_mixed_fields_emit_only_parser_diagnostic() {
         sink.emit(diag);
     }
     let uir = astgen::generate(&ast, &mut pool, &mut sink);
-    let _ = analyze(&uir, &mut pool, &mut sink, src, Path::new("<test>"));
+    let mut context = CompilationContext::new();
+    let _ = analyze(
+        &uir,
+        &mut pool,
+        &mut sink,
+        src,
+        Path::new("<test>"),
+        &mut context,
+    );
     let diags = sink.into_diags();
     assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
     assert_eq!(diags[0].code, DiagCode::ParseError);

@@ -51,7 +51,15 @@ pub(super) fn run(input: &str) -> Result<RunOk, Vec<Diag>> {
         return Err(diags);
     }
     let mut sink = DiagSink::new();
-    let tirs = analyze(&uir, &mut pool, &mut sink, input, Path::new("<test>"));
+    let mut context = CompilationContext::new();
+    let tirs = analyze(
+        &uir,
+        &mut pool,
+        &mut sink,
+        input,
+        Path::new("<test>"),
+        &mut context,
+    );
     if sink.has_errors() {
         return Err(sink.into_diags());
     }
@@ -66,7 +74,15 @@ pub(super) fn run_with_errors(input: &str) -> (Vec<Tir>, Vec<Diag>, InternPool) 
     for diag in diags {
         sink.emit(diag);
     }
-    let tirs = analyze(&uir, &mut pool, &mut sink, input, Path::new("<test>"));
+    let mut context = CompilationContext::new();
+    let tirs = analyze(
+        &uir,
+        &mut pool,
+        &mut sink,
+        input,
+        Path::new("<test>"),
+        &mut context,
+    );
     (tirs, sink.into_diags(), pool)
 }
 
@@ -574,11 +590,20 @@ fn require_decl_reports_cycle_when_in_progress() {
     b.add_function(main_id, vec![], pool.int(), &[ret], sp());
     let uir = b.finish();
 
-    let mut sema = Sema::new(&uir, &mut pool, &mut sink, "test", Path::new("<test>"));
+    let mut context = CompilationContext::new();
+    let mut sema = Sema::new(
+        &uir,
+        &mut pool,
+        &mut sink,
+        "test",
+        Path::new("<test>"),
+        &mut context,
+    );
     sema.resolve_signatures();
     // Pretend we're mid-resolving `main`.
     sema.decl_state[0] = DeclState::InProgress;
-    let ok = sema.require_decl(DeclId::from_index(0), sp(), main_id);
+    let decl = sema.declaration_ids[0];
+    let ok = sema.require_decl(decl, sp(), main_id);
     assert!(!ok, "require_decl must reject an InProgress decl");
     let diags = sink.into_diags();
     assert!(

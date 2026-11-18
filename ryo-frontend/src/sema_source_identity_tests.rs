@@ -16,7 +16,14 @@ fn direct_catch_widened_span_preserves_source() {
     assert!(parse_diags.is_empty());
     let mut sink = DiagSink::new();
     let uir = astgen::generate(&program, &mut pool, &mut sink);
-    let _tirs = sema::analyze(&uir, &mut pool, &mut sink, input, Path::new("catch.ryo"));
+    let _tirs = sema::analyze(
+        &uir,
+        &mut pool,
+        &mut sink,
+        input,
+        Path::new("catch.ryo"),
+        &mut context,
+    );
     let diags = sink.into_diags();
     let warning = diags
         .iter()

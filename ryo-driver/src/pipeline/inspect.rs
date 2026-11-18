@@ -41,7 +41,7 @@ pub fn parse_command(file: &Path) -> Result<(), CompilerError> {
 /// run only as far as the deepest requested section requires; an
 /// `--emit=uir` invocation never reaches sema.
 pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
-    let (context, source_id) = compilation_from_source(file, read_source_file(file)?)?;
+    let (mut context, source_id) = compilation_from_source(file, read_source_file(file)?)?;
     let source = context.sources().get(source_id)?;
     let mut pool = InternPool::new();
 
@@ -101,8 +101,9 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
     // returns a well-formed TIR even with errors (Unreachable
     // slots), and `--emit=tir` deliberately prints that partial
     // TIR — the whole point of the flag is debugging sema.
+    let source_text = source.text().to_owned();
     let (tirs, sema_warnings) =
-        sema::analyze_buffered(&uir, &mut pool, &mut sink, source.text(), file);
+        sema::analyze_buffered(&uir, &mut pool, &mut sink, &source_text, file, &mut context);
     let analyzed =
         match ryo_frontend::pipeline::BuiltProgram::build(tirs, &pool).analyze(&pool, &mut sink) {
             Ok(analyzed) => analyzed,

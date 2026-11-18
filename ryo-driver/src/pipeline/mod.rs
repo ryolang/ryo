@@ -52,13 +52,14 @@ fn compilation_from_source(
 pub(super) fn lower_and_analyze(
     program: &ast::Ast,
     pool: &mut InternPool,
-    context: &CompilationContext,
+    context: &mut CompilationContext,
     source_id: SourceId,
     file_path: &Path,
     parse_diags: Vec<Diag>,
     show_inferred_errors: bool,
 ) -> Result<(Uir, ryo_frontend::pipeline::CleanupProgram), CompilerError> {
     let source = context.sources().require_current(source_id)?;
+    let source_text = source.text().to_owned();
     let mut sink = DiagSink::new();
     // Lex/parse diagnostics come first so the final render preserves
     // pipeline order.
@@ -71,7 +72,8 @@ pub(super) fn lower_and_analyze(
     // run is the whole point of the structured-diagnostics phase.
     // Sema warnings are buffered and flushed after ownership so an
     // ownership error suppresses them exactly like a sema error.
-    let report = sema::analyze_buffered_report(&uir, pool, &mut sink, source.text(), file_path);
+    let report =
+        sema::analyze_buffered_report(&uir, pool, &mut sink, &source_text, file_path, context);
     if show_inferred_errors && !sink.has_errors() {
         for signature in &report.inferred {
             let error_set = pool.error_union_view(signature.return_type).error_set;

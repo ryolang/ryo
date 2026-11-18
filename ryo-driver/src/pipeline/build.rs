@@ -38,7 +38,7 @@ pub fn build_file(
     link: LinkMode,
     show_inferred_errors: bool,
 ) -> Result<(), CompilerError> {
-    let (context, source_id) = compilation_from_source(file, read_source_file(file)?)?;
+    let (mut context, source_id) = compilation_from_source(file, read_source_file(file)?)?;
     let source = context.sources().get(source_id)?;
     let mut pool = InternPool::new();
     let want = EmitSet::from_args(emit);
@@ -55,7 +55,7 @@ pub fn build_file(
     let (uir, analyzed) = lower_and_analyze(
         &program,
         &mut pool,
-        &context,
+        &mut context,
         source_id,
         file,
         parse_diags,

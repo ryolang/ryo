@@ -96,6 +96,17 @@ pub(crate) fn prepare_call(sema: &mut Sema<'_>, view: &CallView<'_>, span: Span)
             return CallPlan::UndefinedFunction { name_id, carriers };
         }
     };
+    if let Err(error) = sema.context.declarations().get(callee) {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::InternalError,
+            format!(
+                "invalid declaration identity for '{}': {error}",
+                sema.pool.str(name_id)
+            ),
+        ));
+        return CallPlan::Error;
+    }
     if super::error_inference::is_inferred(sema, callee)
         && !super::error_inference::resolve_inferred_callee(sema, callee, span)
     {
@@ -109,7 +120,7 @@ pub(crate) fn prepare_call(sema: &mut Sema<'_>, view: &CallView<'_>, span: Span)
         .collect();
     let sig = sema
         .signatures
-        .get(&name_id)
+        .get(&callee)
         .expect("signature must be present once decl exists");
     let expected: Vec<TypeId> = sig.params.clone();
     let return_type = sig.return_type;

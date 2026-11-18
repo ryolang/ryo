@@ -579,12 +579,14 @@ pub(super) fn run_with_error_set_param(input: &str) -> (Vec<Tir>, Vec<Diag>, Int
     assert_eq!(body.params.len(), 1);
     body.params[0].ty = error_set;
 
+    let mut context = CompilationContext::new();
     let tirs = analyze(
         &uir,
         &mut pool,
         &mut sink,
         input,
         std::path::Path::new("<test>"),
+        &mut context,
     );
     (tirs, sink.into_diags(), pool)
 }
@@ -692,7 +694,7 @@ fn compiler_error_union_dispatch_synthesizes_hidden_alternatives() {
     let int = pool.int();
     let function_name = pool.intern_str("lowered");
     let mut fcx = FuncCtx {
-        decl: DeclId::from_index(0),
+        decl: DeclId::NONE,
         builder: ryo_core::tir::TirBuilder::new(function_name, vec![], int, sp()),
         inst_map: vec![],
         chain_local_errors: Vec::new(),

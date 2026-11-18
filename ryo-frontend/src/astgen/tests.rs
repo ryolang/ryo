@@ -866,12 +866,14 @@ fn qualified_error_mixed_payload_fields_emit_one_targeted_diagnostic() {
         sink.emit(diag);
     }
     let uir = generate(&ast, &mut pool, &mut sink);
+    let mut context = ryo_core::compilation::CompilationContext::new();
     let _ = crate::sema::analyze(
         &uir,
         &mut pool,
         &mut sink,
         src,
         std::path::Path::new("<test>"),
+        &mut context,
     );
 
     let diags = sink.into_diags();

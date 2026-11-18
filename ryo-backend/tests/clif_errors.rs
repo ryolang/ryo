@@ -45,6 +45,7 @@ fn analyze(
         &mut sema_sink,
         src,
         std::path::Path::new("test.ryo"),
+        &mut context,
     );
     assert!(
         !sema_sink.has_errors(),

@@ -101,7 +101,7 @@ pub(super) fn finalize_inferred_function(sema: &mut Sema<'_>, decl: DeclId) -> T
     }
 
     if sema.name_to_decl.get(&body.name) == Some(&decl)
-        && let Some(signature) = sema.signatures.get_mut(&body.name)
+        && let Some(signature) = sema.signatures.get_mut(&decl)
     {
         signature.return_type = final_union;
     }
@@ -118,7 +118,7 @@ pub(super) fn reject_recursive_inferred_components(sema: &mut Sema<'_>) {
         return;
     }
     let graph = direct_named_call_graph(sema);
-    let mut components = strongly_connected_components(&graph);
+    let mut components = strongly_connected_components(&graph, &sema.declaration_ids);
     components.retain(|component| {
         let self_cycle =
             component.len() == 1 && graph[component[0].index()].contains(&component[0]);
@@ -177,9 +177,13 @@ fn direct_named_call_graph(sema: &Sema<'_>) -> Vec<Vec<DeclId>> {
     graph
 }
 
-fn strongly_connected_components(graph: &[Vec<DeclId>]) -> Vec<Vec<DeclId>> {
+fn strongly_connected_components(
+    graph: &[Vec<DeclId>],
+    declaration_ids: &[DeclId],
+) -> Vec<Vec<DeclId>> {
     struct Tarjan<'a> {
         graph: &'a [Vec<DeclId>],
+        declaration_ids: &'a [DeclId],
         next_index: usize,
         indices: Vec<Option<usize>>,
         low: Vec<usize>,
@@ -214,7 +218,7 @@ fn strongly_connected_components(graph: &[Vec<DeclId>]) -> Vec<Vec<DeclId>> {
             loop {
                 let member = self.stack.pop().expect("SCC root has a stack member");
                 self.on_stack[member] = false;
-                component.push(DeclId::from_index(member));
+                component.push(self.declaration_ids[member]);
                 if member == node {
                     break;
                 }
@@ -226,6 +230,7 @@ fn strongly_connected_components(graph: &[Vec<DeclId>]) -> Vec<Vec<DeclId>> {
 
     let mut tarjan = Tarjan {
         graph,
+        declaration_ids,
         next_index: 0,
         indices: vec![None; graph.len()],
         low: vec![0; graph.len()],

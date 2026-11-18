@@ -43,6 +43,8 @@
 //! early decl must not pile onto an error discovered by any later
 //! stage.
 
+use ryo_core::compilation::CompilationContext;
+use ryo_core::declaration::{DeclId, DeclarationError};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{ParamMode, Tir, TirBuilder, TirParam, TirRef};
 use ryo_core::types::{InternPool, StringId, TypeId};
@@ -67,21 +69,6 @@ pub(crate) use stmt::*;
 
 // ---------- Decl table ----------
 
-/// Index into `uir.func_bodies`. One [`DeclId`] per function the
-/// driver may need to resolve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DeclId(u32);
-
-impl DeclId {
-    fn from_index(idx: usize) -> Self {
-        DeclId(u32::try_from(idx).expect("DeclId index out of range"))
-    }
-
-    fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
 /// Tri-state resolution status for a single declaration.
 ///
 /// Mirrors Zig's `Module.semaDecl` state machine:
@@ -90,7 +77,7 @@ impl DeclId {
 /// - `InProgress` — currently being analyzed; the cycle sentinel.
 /// - `Resolved` — TIR landed in `Sema::results[decl.index()]`
 ///   (eager state for everything that follows). The slot index
-///   is `DeclId.0` itself, so the variant carries no payload.
+///   is `DeclId::index()` itself, so the variant carries no payload.
 /// - `Failed` — analysis bailed out; downstream callers should
 ///   suppress cascade errors but not stack-overflow trying to
 ///   resolve again.
@@ -282,8 +269,9 @@ pub fn analyze(
     sink: &mut DiagSink,
     source: &str,
     file_path: &Path,
+    context: &mut CompilationContext,
 ) -> Vec<Tir> {
-    let (tirs, warnings) = analyze_buffered(uir, pool, sink, source, file_path);
+    let (tirs, warnings) = analyze_buffered(uir, pool, sink, source, file_path, context);
     if !sink.has_errors() {
         for d in warnings {
             sink.emit(d);
@@ -302,8 +290,9 @@ pub fn analyze_buffered(
     sink: &mut DiagSink,
     source: &str,
     file_path: &Path,
+    context: &mut CompilationContext,
 ) -> (Vec<Tir>, Vec<Diag>) {
-    let report = analyze_buffered_report(uir, pool, sink, source, file_path);
+    let report = analyze_buffered_report(uir, pool, sink, source, file_path, context);
     (report.tirs, report.warnings)
 }
 
@@ -313,8 +302,9 @@ pub fn analyze_buffered_report(
     sink: &mut DiagSink,
     source: &str,
     file_path: &Path,
+    context: &mut CompilationContext,
 ) -> SemaReport {
-    Sema::run(uir, pool, sink, source, file_path)
+    Sema::run(uir, pool, sink, source, file_path, context)
 }
 
 // ---------- Sema driver ----------
@@ -325,6 +315,7 @@ pub struct Sema<'a> {
     uir: &'a Uir,
     pool: &'a mut InternPool,
     sink: &'a mut DiagSink,
+    context: &'a mut CompilationContext,
     /// Buffered warnings (W0001/W0002/W0003 case A). `Sema::run` returns
     /// them to the caller instead of emitting, so a warning from an
     /// early decl never piles onto an error found by a later stage
@@ -335,18 +326,19 @@ pub struct Sema<'a> {
     file_path: &'a Path,
     /// Resolution status, parallel to `uir.func_bodies`.
     decl_state: Vec<DeclState>,
+    declaration_ids: Vec<DeclId>,
+    registration_error: Option<DeclarationError>,
     /// Decls pending analysis.
     queue: VecDeque<DeclId>,
     /// Function name → decl id. Built once at the top of `run` and
     /// shared with `check_call`. A duplicate definition keeps the
-    /// first one seen; sema doesn't currently report redefinitions
-    /// (handled at a future astgen pass).
+    /// first one seen and emits a hard redefinition error.
     name_to_decl: HashMap<StringId, DeclId>,
-    /// Eagerly-resolved signatures, keyed by name. Out-of-order
-    /// definitions and recursive / mutually-recursive calls
+    /// Eagerly-resolved signatures, keyed by declaration identity.
+    /// Out-of-order definitions and recursive / mutually-recursive calls
     /// type-check because callee signatures land here in a single
     /// pass before any body is analyzed.
-    signatures: HashMap<StringId, FunctionSig>,
+    signatures: HashMap<DeclId, FunctionSig>,
     /// Per-decl emitted TIR slot. Filled as decls transition to
     /// `Resolved`. Result extraction drains this in source order.
     results: Vec<Option<Tir>>,
@@ -424,8 +416,16 @@ impl<'a> Sema<'a> {
         sink: &'a mut DiagSink,
         source: &'a str,
         file_path: &'a Path,
+        context: &'a mut CompilationContext,
     ) -> SemaReport {
-        let mut sema = Sema::new(uir, pool, sink, source, file_path);
+        let mut sema = Sema::new(uir, pool, sink, source, file_path, context);
+        if sema.registration_error.is_some() {
+            return SemaReport {
+                tirs: Vec::new(),
+                warnings: Vec::new(),
+                inferred: Vec::new(),
+            };
+        }
         sema.register_structs();
         sema.register_enums();
         errors::register_errors(&mut sema);
@@ -450,10 +450,23 @@ impl<'a> Sema<'a> {
         sink: &'a mut DiagSink,
         source: &'a str,
         file_path: &'a Path,
+        context: &'a mut CompilationContext,
     ) -> Self {
         let n = uir.func_bodies.len();
+        let (declaration_ids, registration_error) =
+            match context.declarations_mut().register_functions(uir) {
+                Ok(ids) => (ids, None),
+                Err(error) => {
+                    sink.emit(Diag::error(
+                        Span::EMPTY,
+                        DiagCode::InternalError,
+                        format!("declaration registration failed: {error}"),
+                    ));
+                    (Vec::new(), Some(error))
+                }
+            };
         let mut name_to_decl = HashMap::with_capacity(n);
-        for (i, body) in uir.func_bodies.iter().enumerate() {
+        for (body, &decl) in uir.func_bodies.iter().zip(&declaration_ids) {
             // First definition wins on duplicates: calls bind to the
             // first declaration and the duplicate still gets analyzed
             // (so its own errors surface), but the redefinition itself
@@ -470,7 +483,7 @@ impl<'a> Sema<'a> {
                     ));
                 }
                 std::collections::hash_map::Entry::Vacant(v) => {
-                    v.insert(DeclId::from_index(i));
+                    v.insert(decl);
                 }
             }
         }
@@ -488,10 +501,13 @@ impl<'a> Sema<'a> {
             uir,
             pool,
             sink,
+            context,
             warnings: Vec::new(),
             source,
             file_path,
             decl_state: vec![DeclState::Unresolved; n],
+            declaration_ids,
+            registration_error,
             queue: VecDeque::with_capacity(n),
             name_to_decl,
             signatures: HashMap::with_capacity(n),
@@ -584,7 +600,8 @@ impl<'a> Sema<'a> {
             // `Sema::new`: the duplicate body is still analyzed (and
             // its DuplicateDeclaration error already emitted), but it
             // must not overwrite the signature calls bind against.
-            self.signatures.entry(body.name).or_insert(FunctionSig {
+            let decl = self.name_to_decl[&body.name];
+            self.signatures.entry(decl).or_insert(FunctionSig {
                 params: body.params.iter().map(|p| p.ty).collect(),
                 return_type: body.return_type,
             });
@@ -599,8 +616,8 @@ impl<'a> Sema<'a> {
     /// the body's own walk; across bodies, errors come out in
     /// declaration order.
     fn seed_worklist(&mut self) {
-        for i in 0..self.uir.func_bodies.len() {
-            self.queue.push_back(DeclId::from_index(i));
+        for &decl in &self.declaration_ids {
+            self.queue.push_back(decl);
         }
     }
 
@@ -844,6 +861,8 @@ pub(crate) struct FuncCtx {
     inferred_call_dependencies: HashMap<TirRef, DeclId>,
 }
 
+#[cfg(test)]
+mod declaration_identity_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

@@ -182,7 +182,15 @@ fn rejected_inferred_scc_members_stay_failed_in_both_source_orders() {
         let (uir, mut pool, astgen_diags) = lower(src);
         assert!(astgen_diags.is_empty(), "got {astgen_diags:?}");
         let mut sink = DiagSink::new();
-        let mut sema = Sema::new(&uir, &mut pool, &mut sink, src, Path::new("<test>"));
+        let mut context = CompilationContext::new();
+        let mut sema = Sema::new(
+            &uir,
+            &mut pool,
+            &mut sink,
+            src,
+            Path::new("<test>"),
+            &mut context,
+        );
         sema.register_structs();
         sema.register_enums();
         errors::register_errors(&mut sema);

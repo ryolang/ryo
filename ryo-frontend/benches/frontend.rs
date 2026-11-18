@@ -173,7 +173,7 @@ fn sema_snippet(bencher: divan::Bencher, case: (&str, &str)) {
     let src = case.1;
     bencher
         .with_inputs(|| parse_program(src))
-        .bench_values(|(program, mut pool, _context)| {
+        .bench_values(|(program, mut pool, mut context)| {
             let mut sink = ryo_core::diag::DiagSink::new();
             let uir = ryo_frontend::astgen::generate(&program, &mut pool, &mut sink);
             let mut sema_sink = ryo_core::diag::DiagSink::new();
@@ -183,6 +183,7 @@ fn sema_snippet(bencher: divan::Bencher, case: (&str, &str)) {
                 &mut sema_sink,
                 src,
                 std::path::Path::new("bench.ryo"),
+                &mut context,
             );
             divan::black_box(tirs);
         });
@@ -193,7 +194,7 @@ fn sema_large(bencher: divan::Bencher, functions: usize) {
     let src = large_source(functions);
     bencher
         .with_inputs(|| parse_program(&src))
-        .bench_values(|(program, mut pool, _context)| {
+        .bench_values(|(program, mut pool, mut context)| {
             let mut sink = ryo_core::diag::DiagSink::new();
             let uir = ryo_frontend::astgen::generate(&program, &mut pool, &mut sink);
             let mut sema_sink = ryo_core::diag::DiagSink::new();
@@ -203,6 +204,7 @@ fn sema_large(bencher: divan::Bencher, functions: usize) {
                 &mut sema_sink,
                 &src,
                 std::path::Path::new("bench.ryo"),
+                &mut context,
             );
             divan::black_box(tirs);
         });
@@ -264,7 +266,7 @@ fn call_heavy_source(functions: usize) -> String {
 
 /// Parse + astgen + sema a source string, returning the TIRs and pool.
 fn sema_program(src: &str) -> (Vec<ryo_core::tir::Tir>, InternPool, CompilationContext) {
-    let (program, mut pool, context) = parse_program(src);
+    let (program, mut pool, mut context) = parse_program(src);
     let mut sink = ryo_core::diag::DiagSink::new();
     let uir = ryo_frontend::astgen::generate(&program, &mut pool, &mut sink);
     let mut sema_sink = ryo_core::diag::DiagSink::new();
@@ -274,6 +276,7 @@ fn sema_program(src: &str) -> (Vec<ryo_core::tir::Tir>, InternPool, CompilationC
         &mut sema_sink,
         src,
         std::path::Path::new("bench.ryo"),
+        &mut context,
     );
     assert!(!sema_sink.has_errors(), "sema should succeed");
     (tirs, pool, context)
