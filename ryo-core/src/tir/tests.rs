@@ -24,6 +24,31 @@ fn param_ref_predicates() {
 }
 
 #[test]
+fn builder_layout_context_allows_initial_binding_and_same_pool_reuse() {
+    let mut pool = InternPool::new();
+    let main = pool.intern_str("main");
+    let mut builder = TirBuilder::new(main, vec![], pool.void(), sp())
+        .with_layout_context(&pool)
+        .with_layout_context(&pool);
+    let end = builder.return_void(pool.void(), sp());
+    let tir = builder.finish(&[end]);
+
+    assert!(tir.require_layout(&pool).is_ok());
+}
+
+#[test]
+#[should_panic]
+fn builder_layout_context_rejects_rebinding_to_a_different_pool() {
+    let mut producer = InternPool::new();
+    let other = InternPool::new();
+    let main = producer.intern_str("main");
+    let builder =
+        TirBuilder::new(main, vec![], producer.void(), sp()).with_layout_context(&producer);
+
+    let _ = builder.with_layout_context(&other);
+}
+
+#[test]
 fn borrowed_struct_lit_view_iterates_canonical_fields() {
     let mut pool = InternPool::new();
     let int_ty = pool.int();

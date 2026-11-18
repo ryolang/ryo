@@ -224,6 +224,14 @@ fn source_revision_recompiles_direct_recursive_and_inferred_calls() {
                 "{name}: {caller} must call the new {target}"
             );
         }
+        let analyzed = crate::pipeline::BuiltProgram::build(second_tirs, &second_pool)
+            .analyze(&second_pool, &mut DiagSink::new())
+            .expect("second revision must produce compatible artifacts");
+        let _ready = analyzed
+            .require_backend_transition(&context, &second_pool)
+            .unwrap_or_else(|error| {
+                panic!("{name}: second revision must pass backend preparation: {error}")
+            });
     }
 }
 

@@ -32,7 +32,7 @@ pub struct CleanupProgram {
 
 /// Validated artifacts and the inputs they must retain through backend emission.
 ///
-/// ```compile_fail,E0506
+/// ```compile_fail
 /// use ryo_core::compilation::CompilationContext;
 /// use ryo_core::source::SourceId;
 /// use ryo_core::types::InternPool;
@@ -216,6 +216,11 @@ impl CleanupProgram {
                             "direct call to {callee:?} has no corresponding body in the backend batch"
                         ));
                     }
+                    if ryo_core::builtins::is_runtime_callee(view.name, pool) {
+                        return Err(format!(
+                            "direct call to {callee:?} conflicts with backend runtime dispatch"
+                        ));
+                    }
                 } else if !ryo_core::builtins::is_runtime_callee(view.name, pool) {
                     return Err(format!(
                         "declaration-free call {:?} is not a registered runtime callee",
@@ -319,13 +324,20 @@ mod tests {
         body_decl: DeclId,
         call_name: &str,
     ) -> Tir {
+        let is_print = call_name == "print";
         let name = pool.intern_str("main");
         let call_name = pool.intern_str(call_name);
         let span = declaration_span(context, body_decl);
         let mut builder = TirBuilder::new(name, vec![], pool.void(), span)
             .with_decl(body_decl)
             .with_layout_context(pool);
-        let call = builder.builtin_call(call_name, &[], &[], pool.void(), span);
+        let (args, modes) = if is_print {
+            let arg = builder.str_const(pool.intern_str("fixture"), pool.str_(), span);
+            (vec![arg], vec![ryo_core::tir::ParamMode::Borrow])
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let call = builder.builtin_call(call_name, &args, &modes, pool.void(), span);
         let statement = builder.unary(TirTag::ExprStmt, pool.void(), call, span);
         let end = builder.return_void(pool.void(), span);
         builder.finish(&[statement, end])
@@ -700,6 +712,49 @@ mod tests {
                 .expect_err("call name must match its declaration")
                 .contains("declaration")
         );
+    }
+
+    #[test]
+    fn backend_rejects_direct_calls_to_runtime_dispatched_names() {
+        let mut pool = InternPool::new();
+        let mut context = CompilationContext::new();
+        let declarations = register_declarations(&mut context, &mut pool, &["main", "print"]);
+        let tirs = vec![
+            body_with_call_name(
+                &context,
+                &mut pool,
+                declarations[0],
+                declarations[1],
+                "print",
+            ),
+            body_with_decl_name(&context, &mut pool, declarations[1], "print"),
+        ];
+        let analyzed = BuiltProgram::build(tirs, &pool)
+            .analyze(&pool, &mut DiagSink::new())
+            .expect("compatible artifacts");
+
+        let error = analyzed
+            .require_backend_transition(&context, &pool)
+            .expect_err("direct calls must not resolve to a different runtime target");
+        assert!(error.contains("runtime dispatch"), "{error}");
+    }
+
+    #[test]
+    fn backend_rejects_source_only_builtin_calls() {
+        let mut pool = InternPool::new();
+        let mut context = CompilationContext::new();
+        let local = register_main(&mut context, &mut pool);
+
+        for name in ["assert", "panic"] {
+            let analyzed = cleanup_program(
+                body_with_builtin_name(&context, &mut pool, local, name),
+                &pool,
+            );
+            let error = analyzed
+                .require_backend_transition(&context, &pool)
+                .expect_err("source-only builtins have no direct runtime target");
+            assert!(error.contains("runtime callee"), "{name}: {error}");
+        }
     }
 
     #[test]

@@ -213,11 +213,17 @@ fn abi_callee(name: &str) -> Option<&'static BuiltinFunction> {
     ABI_CALLEES.iter().find(|b| b.name == name)
 }
 
+/// Return whether `name_id` is an executable runtime target.
+/// The caller must supply a handle from `pool`; validated IR establishes that pairing through
+/// its layout identity.
 pub fn is_runtime_callee(name_id: StringId, pool: &InternPool) -> bool {
     if name_id.raw() as usize >= pool.string_count() {
         return false;
     }
     let name = pool.bytes_payload(name_id);
+    if name == b"assert" || name == b"panic" {
+        return false;
+    }
     BUILTINS
         .iter()
         .chain(ABI_CALLEES.iter())
@@ -269,6 +275,18 @@ mod tests {
         assert!(is_runtime_callee(print, &pool));
         assert!(is_runtime_callee(from_view, &pool));
         assert!(!is_runtime_callee(user, &pool));
+    }
+
+    #[test]
+    fn runtime_callee_catalog_excludes_source_only_builtins() {
+        let mut pool = InternPool::new();
+        let assert = pool.intern_str("assert");
+        let panic = pool.intern_str("panic");
+        let synthesized_panic = pool.intern_str("__ryo_panic");
+
+        assert!(!is_runtime_callee(assert, &pool));
+        assert!(!is_runtime_callee(panic, &pool));
+        assert!(is_runtime_callee(synthesized_panic, &pool));
     }
 
     #[test]

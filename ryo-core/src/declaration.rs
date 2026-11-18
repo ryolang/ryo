@@ -68,6 +68,7 @@ pub enum DeclarationError {
         uir_index: usize,
     },
     InvalidLayout,
+    NameArenaExhausted,
 }
 
 impl std::fmt::Display for DeclarationError {
@@ -91,6 +92,7 @@ impl std::fmt::Display for DeclarationError {
             DeclarationError::InvalidLayout => {
                 f.write_str("UIR belongs to a different type and layout context")
             }
+            DeclarationError::NameArenaExhausted => f.write_str("declaration name arena exhausted"),
         }
     }
 }
@@ -102,11 +104,15 @@ fn push_name(
     bytes: &mut Vec<u8>,
     base: usize,
     name: &str,
-) {
-    let offset = u32::try_from(base + bytes.len()).expect("declaration name arena exhausted");
-    let len = u32::try_from(name.len()).expect("declaration name too large");
+) -> Result<(), DeclarationError> {
+    let offset = base
+        .checked_add(bytes.len())
+        .and_then(|offset| u32::try_from(offset).ok())
+        .ok_or(DeclarationError::NameArenaExhausted)?;
+    let len = u32::try_from(name.len()).map_err(|_| DeclarationError::NameArenaExhausted)?;
     bytes.extend_from_slice(name.as_bytes());
     names.push(crate::extra::ExtraRange { offset, len });
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -134,33 +140,6 @@ impl DeclarationTable {
         uir: &Uir,
         pool: &crate::types::InternPool,
     ) -> Result<Vec<DeclId>, DeclarationError> {
-        if self.by_source_and_uir_index.is_empty() {
-            let mut ids = Vec::with_capacity(uir.func_bodies.len());
-            for (uir_index, body) in uir.func_bodies.iter().enumerate() {
-                let id = DeclId {
-                    context: self.context,
-                    index: u32::try_from(self.declarations.len())
-                        .expect("declaration index space exhausted"),
-                };
-                self.declarations.push(FunctionDecl {
-                    id,
-                    name: body.name,
-                    uir_index,
-                    span: body.span,
-                });
-                push_name(
-                    &mut self.names,
-                    &mut self.name_bytes,
-                    0,
-                    pool.str(body.name),
-                );
-                self.by_source_and_uir_index
-                    .insert((body.span.source, uir_index), id);
-                ids.push(id);
-            }
-            return Ok(ids);
-        }
-
         let mut ids = Vec::with_capacity(uir.func_bodies.len());
         let mut new_declarations = Vec::new();
         let mut new_names = Vec::new();
@@ -196,7 +175,7 @@ impl DeclarationTable {
                 &mut new_name_bytes,
                 name_base,
                 pool.str(body.name),
-            );
+            )?;
             new_mappings.push((key, id));
             ids.push(id);
         }
@@ -505,6 +484,21 @@ mod tests {
             second.declarations().get(second_id).unwrap().name,
             pool.intern_str("same")
         );
+    }
+
+    #[test]
+    fn name_offset_overflow_returns_error_without_mutation() {
+        for base in [u32::MAX as usize, usize::MAX] {
+            let mut names = Vec::new();
+            let mut bytes = vec![b'x'];
+
+            assert_eq!(
+                push_name(&mut names, &mut bytes, base, "main"),
+                Err(DeclarationError::NameArenaExhausted)
+            );
+            assert!(names.is_empty());
+            assert_eq!(bytes, vec![b'x']);
+        }
     }
 
     #[test]

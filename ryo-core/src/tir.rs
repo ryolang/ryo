@@ -617,8 +617,19 @@ impl TirBuilder {
         self
     }
 
+    /// Record the trusted producer's pool identity without inspecting existing handles.
+    /// The caller must emit every pool-scoped handle through `pool`.
+    /// Reusing the same pool is idempotent; rebinding to another pool panics.
     pub fn with_layout_context(mut self, pool: &InternPool) -> Self {
-        self.layout_context = Some(pool.identity());
+        if let Some(layout_context) = self.layout_context {
+            assert_eq!(
+                layout_context,
+                pool.identity(),
+                "TIR layout context is already bound to a different intern pool"
+            );
+        } else {
+            self.layout_context = Some(pool.identity());
+        }
         self
     }
 

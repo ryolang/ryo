@@ -90,8 +90,10 @@ before mutating the table. Retained revisions from that context remain valid; fo
 sources reject the whole batch, while source-less synthetic bodies remain supported. Each context
 accepts one source-less UIR batch; independent synthetic compilations require fresh contexts
 because source-less keys share the `(SourceId::NONE, UIR index)` namespace.
-AstGen records its producer pool on the UIR. Registration rejects missing or mismatched pool
-identity before source or name validation and before any table mutation. Declaration name handles
+AstGen records its producer pool on the UIR. This stamp is a trusted-producer assertion, not
+proof that arbitrarily mutated raw arenas contain handles from that pool. Registration rejects
+missing or mismatched pool identity before source or name validation and before any table
+mutation. Declaration name handles
 are bounds-checked and required to contain UTF-8 before registration can mutate the table. Names
 are compared by resolved text, not pool-local `StringId` values, so revisiting a revision through
 another intern pool remains idempotent. Canonical name bytes live in one table-owned arena with
@@ -132,8 +134,10 @@ source revision as its declaration. Source-backed declarations must refer to a c
 revision; source-less
 synthetic declarations have no revision currency to check. Every direct callee must have its
 body in the backend batch, and duplicate backend names are rejected while symbol generation
-remains name-based. Declaration-free calls must name a registered builtin or synthesized runtime
-callee. Missing, unknown, stale, wrong-context, and name-mismatched identities are rejected
+remains name-based. Direct calls to names dispatched as runtime callees are rejected so validation
+and emission select the same target. Declaration-free calls must name an executable builtin or
+synthesized runtime callee; source-only `assert` and `panic` are excluded. Missing, unknown,
+stale, wrong-context, and name-mismatched identities are rejected
 before Cranelift. Equal names, arena lengths, or valid local indices do not establish
 compatibility. Published artifacts expose immutable references. Content stamps also reject
 edits to cloned TIR, Flow, and cleanup arenas, including declaration-only changes. Rebuild an

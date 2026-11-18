@@ -717,6 +717,11 @@ fn snapshot((tirs, diags, pool, context): Differential) -> String {
                         pool.str(call.name),
                         "direct call compatibility name does not match its declaration"
                     );
+                } else {
+                    assert!(
+                        ryo_core::builtins::is_runtime_callee(call.name, &pool),
+                        "declaration-free call must name a registered runtime callee"
+                    );
                 }
                 let TirData::Extra(range) = inst.data else {
                     unreachable!("calls carry extra payloads")
@@ -780,6 +785,36 @@ fn snapshot_rejects_unregistered_direct_call() {
                 let start = range.as_range().start;
                 tir.extra[start] = 0;
                 tir.extra[start + 1] = u32::MAX;
+                changed = true;
+            }
+        }
+    }
+    assert!(changed, "fixture must contain a direct call");
+    snapshot(differential);
+}
+
+#[test]
+#[should_panic(expected = "declaration-free call must name a registered runtime callee")]
+fn snapshot_rejects_declaration_free_user_call() {
+    let mut differential =
+        run_differential("fn id() -> int:\n\treturn 1\nfn main():\n\tprint(id())\n");
+    let mut changed = false;
+    for tir in &mut differential.0 {
+        for index in 1..tir.instructions.len() {
+            if tir.instructions[index].tag != TirTag::Call {
+                continue;
+            }
+            let TirData::Extra(range) = tir.instructions[index].data else {
+                unreachable!("calls carry extra payloads")
+            };
+            let has_user_callee = tir
+                .call_view(ryo_core::tir::TirRef::from_raw(index as u32))
+                .callee
+                .is_some();
+            if has_user_callee {
+                let start = range.as_range().start;
+                tir.extra[start] = 0;
+                tir.extra[start + 1] = u32::MAX - 1;
                 changed = true;
             }
         }
