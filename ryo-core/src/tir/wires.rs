@@ -17,10 +17,12 @@ pub(super) fn len_u32(len: usize) -> u32 {
 /// Layout in `extra` for [`crate::tir::TirTag::Call`]:
 ///
 /// ```text
-///   [0]         name:  StringId
-///   [1]         argc:  u32
-///   [2..2+argc] args:  TirRef.raw()
-///   [2+argc..2+2*argc] modes: ParamMode (one u32 per arg)
+///   [0]         context: CompilationContextId raw
+///   [1]         index:   DeclId local index
+///   [2]         name:    StringId
+///   [3]         argc:    u32
+///   [4..4+argc] args:    TirRef.raw()
+///   [4+argc..4+2*argc] modes: ParamMode (one u32 per arg)
 /// ```
 ///
 /// `modes` is stamped by sema from each callee parameter's `mode`
@@ -29,13 +31,16 @@ pub(super) fn len_u32(len: usize) -> u32 {
 /// determine parameter move/borrow conventions.
 pub mod call_extra {
     use super::{extra_offset, len_u32};
+    use crate::declaration::DeclId;
     use crate::extra::{ExtraList, ExtraRange, ExtraValue};
     use crate::tir::{ParamMode, TirRef};
     use crate::types::StringId;
 
-    // MODES occupies 2+argc .. 2+2*argc (one u32 per arg).
+    const BUILTIN_CONTEXT: u32 = 0;
+    const BUILTIN_INDEX: u32 = u32::MAX - 1;
 
     pub struct CallView<'a> {
+        pub callee: Option<DeclId>,
         pub name: StringId,
         pub args: ExtraList<'a, TirRef>,
         /// Per-argument call convention, parallel to `args`. Stamped by
@@ -43,9 +48,31 @@ pub mod call_extra {
         pub modes: ExtraList<'a, ParamMode>,
     }
 
-    /// Encode a `Call` payload into `extra`, returning its range.
+    /// Encode a user `Call` payload into `extra`, returning its range.
     pub fn encode(
         extra: &mut Vec<u32>,
+        callee: DeclId,
+        name: StringId,
+        args: &[TirRef],
+        modes: &[ParamMode],
+    ) -> ExtraRange {
+        let (context, index) = callee.raw_parts();
+        encode_raw(extra, context, index, name, args, modes)
+    }
+
+    pub fn encode_builtin(
+        extra: &mut Vec<u32>,
+        name: StringId,
+        args: &[TirRef],
+        modes: &[ParamMode],
+    ) -> ExtraRange {
+        encode_raw(extra, BUILTIN_CONTEXT, BUILTIN_INDEX, name, args, modes)
+    }
+
+    fn encode_raw(
+        extra: &mut Vec<u32>,
+        context: u32,
+        index: u32,
         name: StringId,
         args: &[TirRef],
         modes: &[ParamMode],
@@ -56,23 +83,32 @@ pub mod call_extra {
             "TirBuilder::call: one ParamMode per arg"
         );
         let offset = extra_offset(extra);
-        extra.push(name.raw());
-        extra.push(len_u32(args.len()));
+        extra.extend([context, index, name.raw(), len_u32(args.len())]);
         extra.extend(args.iter().map(|a| a.to_extra()));
         extra.extend(modes.iter().map(|m| m.to_extra()));
         ExtraRange {
             offset,
-            len: len_u32(2 + 2 * args.len()),
+            len: len_u32(4 + 2 * args.len()),
         }
     }
 
     /// Decode a `Call` payload from its words.
     pub fn decode<'a>(words: &'a [u32]) -> CallView<'a> {
-        let name = StringId::from_raw(words[0]);
-        let argc = words[1] as usize;
-        let args = ExtraList::new(&words[2..2 + argc]);
-        let modes = ExtraList::new(&words[2 + argc..2 + 2 * argc]);
-        CallView { name, args, modes }
+        let callee = if words[0] == BUILTIN_CONTEXT && words[1] == BUILTIN_INDEX {
+            None
+        } else {
+            Some(DeclId::from_raw_parts(words[0], words[1]))
+        };
+        let name = StringId::from_raw(words[2]);
+        let argc = words[3] as usize;
+        let args = ExtraList::new(&words[4..4 + argc]);
+        let modes = ExtraList::new(&words[4 + argc..4 + 2 * argc]);
+        CallView {
+            callee,
+            name,
+            args,
+            modes,
+        }
     }
 }
 

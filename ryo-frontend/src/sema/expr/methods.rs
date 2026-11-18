@@ -191,5 +191,5 @@ pub(super) fn bridge_method_call(
     };
     let callee = sema.pool.intern_str(callee_name);
     fcx.builder
-        .call(callee, &[receiver_tir], &[ParamMode::Borrow], ret_ty, span)
+        .builtin_call(callee, &[receiver_tir], &[ParamMode::Borrow], ret_ty, span)
 }

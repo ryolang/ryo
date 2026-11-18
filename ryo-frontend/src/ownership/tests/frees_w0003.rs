@@ -1,5 +1,6 @@
 use super::super::*;
 use super::common::*;
+use ryo_core::declaration::DeclId;
 
 // ---------- M8.4: projection tracking (final spec §3.2/§3.3) ----------
 
@@ -38,23 +39,44 @@ fn free_schedule_is_deterministic() {
     let sl = tb.slice(base, Some(i0), Some(i1), view_ty, span);
     let vdecl = tb.var_decl(v, false, view_ty, sl, span);
     let vread = tb.var(v, view_ty, span);
-    let pv = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+    let pv = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread],
+        &all_borrow(&[vread]),
+        void,
+        span,
+    );
     let pv_stmt = tb.unary(TirTag::ExprStmt, void, pv, span);
     let r2 = tb.var(s2, str_ty, span);
-    let ps2 = tb.call(print, &[r2], &all_borrow(&[r2]), void, span);
+    let ps2 = tb.call(DeclId::NONE, print, &[r2], &all_borrow(&[r2]), void, span);
     let ps2_stmt = tb.unary(TirTag::ExprStmt, void, ps2, span);
     let lit_c = tb.str_const(pool.intern_str("c"), str_ty, span);
     let decl3 = tb.var_decl(s3, false, str_ty, lit_c, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let r1 = tb.var(s1, str_ty, span);
-    let ps1 = tb.call(print, &[r1], &all_borrow(&[r1]), void, span);
+    let ps1 = tb.call(DeclId::NONE, print, &[r1], &all_borrow(&[r1]), void, span);
     let ps1_stmt = tb.unary(TirTag::ExprStmt, void, ps1, span);
     let xlit = tb.str_const(pool.intern_str("x"), str_ty, span);
-    let px = tb.call(print, &[xlit], &all_borrow(&[xlit]), void, span);
+    let px = tb.call(
+        DeclId::NONE,
+        print,
+        &[xlit],
+        &all_borrow(&[xlit]),
+        void,
+        span,
+    );
     let px_stmt = tb.unary(TirTag::ExprStmt, void, px, span);
     let ifs = tb.if_stmt(cond, &[ps1_stmt], &[], Some(&[px_stmt]), void, span);
     let tlit = tb.str_const(pool.intern_str("tmp"), str_ty, span);
-    let pt = tb.call(print, &[tlit], &all_borrow(&[tlit]), void, span);
+    let pt = tb.call(
+        DeclId::NONE,
+        print,
+        &[tlit],
+        &all_borrow(&[tlit]),
+        void,
+        span,
+    );
     let pt_stmt = tb.unary(TirTag::ExprStmt, void, pt, span);
     let tir = tb.finish(&[decl1, decl2, vdecl, pv_stmt, ps2_stmt, decl3, ifs, pt_stmt]);
 

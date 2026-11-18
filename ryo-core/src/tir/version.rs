@@ -7,6 +7,7 @@ use std::hash::{Hash, Hasher};
 impl Tir {
     pub(crate) fn representation_stamp(&self) -> u64 {
         let mut hash = StampHasher::default();
+        self.decl.hash(&mut hash);
         self.name.hash(&mut hash);
         self.return_type.hash(&mut hash);
         self.body.offset.hash(&mut hash);
@@ -76,6 +77,22 @@ mod tests {
     fn source_identity_changes_tir_representation_stamp() {
         let first = body(Span::in_source(SourceId::from_raw_parts(1, 0), 0, 1));
         let second = body(Span::in_source(SourceId::from_raw_parts(2, 0), 0, 1));
+        assert_ne!(first.representation_stamp(), second.representation_stamp());
+    }
+
+    #[test]
+    fn declaration_identity_changes_tir_representation_stamp() {
+        fn identified_body(decl: crate::declaration::DeclId) -> Tir {
+            let mut pool = InternPool::new();
+            let name = pool.intern_str("main");
+            let mut builder =
+                TirBuilder::new(name, vec![], pool.void(), Span::EMPTY).with_decl(decl);
+            let end = builder.return_void(pool.void(), Span::EMPTY);
+            builder.finish(&[end])
+        }
+
+        let first = identified_body(crate::declaration::DeclId::from_raw_parts(1, 0));
+        let second = identified_body(crate::declaration::DeclId::from_raw_parts(1, 1));
         assert_ne!(first.representation_stamp(), second.representation_stamp());
     }
 }

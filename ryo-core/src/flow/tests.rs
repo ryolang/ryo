@@ -2,6 +2,7 @@
 //! the validator contracts, over programmatically built TIR bodies.
 
 use super::*;
+use crate::declaration::DeclId;
 use crate::tir::{TirBuilder, TirTag, TypedMatchArm, TypedMatchBody};
 use crate::types::InternPool;
 
@@ -278,7 +279,7 @@ fn diverging_call_terminates_block_and_continues_unreachable() {
     let mut cx = Ctx::new();
     let mut b = cx.builder();
     let callee = cx.pool.intern_str("die");
-    let call = b.call(callee, &[], &[], cx.never, sp());
+    let call = b.call(DeclId::NONE, callee, &[], &[], cx.never, sp());
     let expr = b.unary(TirTag::ExprStmt, cx.void, call, sp());
     let one = b.int_const(1, cx.int, sp());
     let dead = b.var_decl(cx.x, false, cx.int, one, sp());
@@ -356,7 +357,7 @@ fn all_diverging_match_has_no_join_and_unreachable_continuation() {
     let mut b = cx.builder();
     let scrut = b.int_const(1, int, sp());
     let die = cx.pool.intern_str("die");
-    let call = b.call(die, &[], &[], cx.never, sp());
+    let call = b.call(DeclId::NONE, die, &[], &[], cx.never, sp());
     let m = b.match_expr(
         scrut,
         cx.never,
@@ -532,7 +533,7 @@ fn bool_and_places_rhs_in_conditional_block() {
     let mut b = cx.builder();
     let probe = cx.pool.intern_str("probe");
     let f = b.bool_const(false, bool_ty, sp());
-    let call = b.call(probe, &[], &[], bool_ty, sp());
+    let call = b.call(DeclId::NONE, probe, &[], &[], bool_ty, sp());
     let and = b.binary(TirTag::BoolAnd, bool_ty, f, call, sp());
     let decl = b.var_decl(cx.x, false, bool_ty, and, sp());
     let tir = b.finish(&[decl]);
@@ -562,7 +563,7 @@ fn bool_or_short_circuits_on_true() {
     let mut b = cx.builder();
     let probe = cx.pool.intern_str("probe");
     let t = b.bool_const(true, bool_ty, sp());
-    let call = b.call(probe, &[], &[], bool_ty, sp());
+    let call = b.call(DeclId::NONE, probe, &[], &[], bool_ty, sp());
     let or = b.binary(TirTag::BoolOr, bool_ty, t, call, sp());
     let decl = b.var_decl(cx.x, false, bool_ty, or, sp());
     let tir = b.finish(&[decl]);
@@ -586,7 +587,7 @@ fn for_bounds_steps_live_in_preheader() {
     let int = cx.int;
     let mut b = cx.builder();
     let start_name = cx.pool.intern_str("start");
-    let start_call = b.call(start_name, &[], &[], int, sp());
+    let start_call = b.call(DeclId::NONE, start_name, &[], &[], int, sp());
     let end = b.int_const(3, int, sp());
     let f = b.for_range(cx.i, start_call, end, &[], cx.void, sp());
     let tir = b.finish(&[f]);
@@ -651,9 +652,9 @@ fn bool_and_chain_split_pins_join_pred_shape() {
     let mut b = cx.builder();
     let probe = cx.pool.intern_str("probe");
     let f = b.bool_const(false, bool_ty, sp());
-    let call1 = b.call(probe, &[], &[], bool_ty, sp());
+    let call1 = b.call(DeclId::NONE, probe, &[], &[], bool_ty, sp());
     let inner = b.binary(TirTag::BoolAnd, bool_ty, f, call1, sp());
-    let call2 = b.call(probe, &[], &[], bool_ty, sp());
+    let call2 = b.call(DeclId::NONE, probe, &[], &[], bool_ty, sp());
     let outer = b.binary(TirTag::BoolAnd, bool_ty, inner, call2, sp());
     let decl = b.var_decl(cx.x, false, bool_ty, outer, sp());
     let tir = b.finish(&[decl]);
@@ -709,6 +710,7 @@ fn deep_chain_through_diverging_calls_stays_iterative() {
     let mut chain = b.int_const(1, int, sp());
     for _ in 0..20_000 {
         let call = b.call(
+            DeclId::NONE,
             die,
             &[chain],
             &[crate::tir::ParamMode::Borrow],
@@ -732,7 +734,7 @@ fn bool_and_if_condition_branches_from_the_merge_join() {
     let mut b = cx.builder();
     let probe = cx.pool.intern_str("probe");
     let f = b.bool_const(false, bool_ty, sp());
-    let call = b.call(probe, &[], &[], bool_ty, sp());
+    let call = b.call(DeclId::NONE, probe, &[], &[], bool_ty, sp());
     let and = b.binary(TirTag::BoolAnd, bool_ty, f, call, sp());
     let one = b.int_const(1, cx.int, sp());
     let then_d = b.var_decl(cx.x, false, cx.int, one, sp());
@@ -862,7 +864,7 @@ fn match_result_place_tracks_value_void_and_never_shapes() {
     // Never match: every arm diverges -> no join, no result place.
     let scrut_n = b.int_const(4, int, sp());
     let die = cx.pool.intern_str("die");
-    let call_n = b.call(die, &[], &[], cx.never, sp());
+    let call_n = b.call(DeclId::NONE, die, &[], &[], cx.never, sp());
     let m_never = b.match_expr(
         scrut_n,
         cx.never,

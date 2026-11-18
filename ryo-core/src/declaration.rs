@@ -22,12 +22,10 @@ impl DeclId {
         self.index as usize
     }
 
-    #[cfg(test)]
     pub(crate) const fn raw_parts(self) -> (u32, u32) {
         (self.context.raw(), self.index)
     }
 
-    #[cfg(test)]
     pub(crate) const fn from_raw_parts(context: u32, index: u32) -> Self {
         Self {
             context: CompilationContextId::from_raw(context),

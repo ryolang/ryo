@@ -802,7 +802,7 @@ fn analyze_function(sema: &mut Sema<'_>, decl: DeclId, body: &FuncBody) -> Tir {
 
     let mut fcx = FuncCtx {
         decl,
-        builder: TirBuilder::new(body.name, params, body.return_type, body.span),
+        builder: TirBuilder::new(body.name, params, body.return_type, body.span).with_decl(decl),
         inst_map: vec![None; sema.uir.instructions.len()],
         chain_local_errors: Vec::new(),
         return_type: body.return_type,

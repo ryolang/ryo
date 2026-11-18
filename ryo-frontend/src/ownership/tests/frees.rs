@@ -1,6 +1,7 @@
 use super::super::*;
 use super::common::*;
 use crate::builtins::is_borrowed_scalar_param;
+use ryo_core::declaration::DeclId;
 
 #[test]
 fn dead_store_schedules_free_after_decl() {
@@ -120,6 +121,7 @@ fn ryo_panic_str_arg_excluded_via_abi_registry() {
     let str_arg = tb.str_const(msg, str_ty, span);
     let len_arg = tb.int_const(4, int_ty, span);
     let call = tb.call(
+        DeclId::NONE,
         panic_name,
         &[str_arg, len_arg],
         &all_borrow(&[str_arg, len_arg]),
@@ -180,6 +182,7 @@ fn last_use_scheduled_for_unmoved_local() {
     let decl = b.var_decl(s_name, false, str_ty, lit, span);
     let var_read = b.var(s_name, str_ty, span);
     let call = b.call(
+        DeclId::NONE,
         print_name,
         &[var_read],
         &all_borrow(&[var_read]),
@@ -228,7 +231,14 @@ fn reassignment_records_free_on_old_owner() {
     let l2 = tb.str_const(world, str_ty, span);
     let assign = tb.assign(s, str_ty, l2, span);
     let var_read = tb.var(s, str_ty, span);
-    let call = tb.call(print, &[var_read], &all_borrow(&[var_read]), void, span);
+    let call = tb.call(
+        DeclId::NONE,
+        print,
+        &[var_read],
+        &all_borrow(&[var_read]),
+        void,
+        span,
+    );
     let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
     let tir = tb.finish(&[decl, assign, stmt]);
 
@@ -287,7 +297,7 @@ fn concat_intermediate_freed_after_consumer() {
     let la = tb.str_const(a, str_ty, span);
     let lb = tb.str_const(b, str_ty, span);
     let cat = tb.binary(TirTag::StrConcat, str_ty, la, lb, span);
-    let call = tb.call(print, &[cat], &all_borrow(&[cat]), void, span);
+    let call = tb.call(DeclId::NONE, print, &[cat], &all_borrow(&[cat]), void, span);
     let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
     let tir = tb.finish(&[stmt]);
 
@@ -334,12 +344,26 @@ fn last_use_uses_pre_rebind_owner_not_post() {
     let alice_lit = tb.str_const(alice, str_ty, span);
     let decl = tb.var_decl(n, true, str_ty, alice_lit, span);
     let read1 = tb.var(n, str_ty, span);
-    let call1 = tb.call(print, &[read1], &all_borrow(&[read1]), void, span);
+    let call1 = tb.call(
+        DeclId::NONE,
+        print,
+        &[read1],
+        &all_borrow(&[read1]),
+        void,
+        span,
+    );
     let stmt1 = tb.unary(TirTag::ExprStmt, void, call1, span);
     let bob_lit = tb.str_const(bob, str_ty, span);
     let assign = tb.assign(n, str_ty, bob_lit, span);
     let read2 = tb.var(n, str_ty, span);
-    let call2 = tb.call(print, &[read2], &all_borrow(&[read2]), void, span);
+    let call2 = tb.call(
+        DeclId::NONE,
+        print,
+        &[read2],
+        &all_borrow(&[read2]),
+        void,
+        span,
+    );
     let stmt2 = tb.unary(TirTag::ExprStmt, void, call2, span);
     let tir = tb.finish(&[decl, stmt1, assign, stmt2]);
 
@@ -451,9 +475,16 @@ fn read_move_param_frees_after_last_read_not_last_stmt() {
         span,
     );
     let s_read = tb.var(s_name, str_ty, span);
-    let call1 = tb.call(print, &[s_read], &all_borrow(&[s_read]), void, span);
+    let call1 = tb.call(
+        DeclId::NONE,
+        print,
+        &[s_read],
+        &all_borrow(&[s_read]),
+        void,
+        span,
+    );
     let n = tb.int_const(42, int_ty, span);
-    let call2 = tb.call(print, &[n], &all_borrow(&[n]), void, span);
+    let call2 = tb.call(DeclId::NONE, print, &[n], &all_borrow(&[n]), void, span);
     let tir = tb.finish(&[call1, call2]);
     let mut sink = DiagSink::new();
     let mut sidecar = check(
@@ -521,7 +552,14 @@ fn param_last_read_inside_loop_frees_after_loop() {
     );
     let cond = tb.var(cond_name, bool_ty, span);
     let s_read = tb.var(s_name, str_ty, span);
-    let call = tb.call(print, &[s_read], &all_borrow(&[s_read]), void, span);
+    let call = tb.call(
+        DeclId::NONE,
+        print,
+        &[s_read],
+        &all_borrow(&[s_read]),
+        void,
+        span,
+    );
     let while_stmt = tb.while_loop(cond, &[call], void, span);
     let tir = tb.finish(&[while_stmt]);
     let mut sink = DiagSink::new();
@@ -579,7 +617,7 @@ fn never_read_move_param_still_freed_once_after_last_stmt() {
         span,
     );
     let n = tb.int_const(42, int_ty, span);
-    let call = tb.call(print, &[n], &all_borrow(&[n]), void, span);
+    let call = tb.call(DeclId::NONE, print, &[n], &all_borrow(&[n]), void, span);
     let tir = tb.finish(&[call]);
     let mut sink = DiagSink::new();
     let mut sidecar = check(
@@ -645,10 +683,24 @@ fn conditional_move_param_schedules_branch_gated_free() {
 
     let cond_val = tb.var(cond_name, bool_ty, span);
     let s_val_then = tb.var(s_name, str_ty, span);
-    let call_then = tb.call(take, &[s_val_then], &[ParamMode::Move], void, span);
+    let call_then = tb.call(
+        DeclId::NONE,
+        take,
+        &[s_val_then],
+        &[ParamMode::Move],
+        void,
+        span,
+    );
 
     let s_val_else = tb.var(s_name, str_ty, span);
-    let call_else = tb.call(take, &[s_val_else], &[ParamMode::Borrow], void, span);
+    let call_else = tb.call(
+        DeclId::NONE,
+        take,
+        &[s_val_else],
+        &[ParamMode::Borrow],
+        void,
+        span,
+    );
 
     let if_stmt = tb.if_stmt(cond_val, &[call_then], &[], Some(&[call_else]), void, span);
 
@@ -755,7 +807,7 @@ fn rebind_then_read_no_double_free() {
     let lit = tb.str_const(a, str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit, span);
     let v = tb.var(s, str_ty, span);
-    let call = tb.call(print, &[v], &all_borrow(&[v]), void, span);
+    let call = tb.call(DeclId::NONE, print, &[v], &all_borrow(&[v]), void, span);
     let tir = tb.finish(&[decl, call]);
     let mut sink = DiagSink::new();
     let mut sc = check(
@@ -856,7 +908,7 @@ fn reassign_inside_if_still_frees_binding_at_last_use() {
     let asg = tb.assign(s, str_ty, lit_b, span);
     let if_s = tb.if_stmt(cond, &[asg], &[], None, void, span);
     let sv = tb.var(s, str_ty, span);
-    let pr = tb.call(print, &[sv], &[ParamMode::Borrow], void, span);
+    let pr = tb.call(DeclId::NONE, print, &[sv], &[ParamMode::Borrow], void, span);
     let tir = tb.finish(&[decl, if_s, pr]);
     let mut sink = DiagSink::new();
     let mut sidecar = check(

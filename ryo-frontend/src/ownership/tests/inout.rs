@@ -1,5 +1,6 @@
 use super::super::*;
 use super::common::*;
+use ryo_core::declaration::DeclId;
 
 #[test]
 fn inout_same_owner_twice_rejected() {
@@ -21,6 +22,7 @@ fn inout_same_owner_twice_rejected() {
     let cv1 = tb.var(c, int_ty, span);
     let cv2 = tb.var(c, int_ty, span);
     let call = tb.call(
+        DeclId::NONE,
         swap,
         &[cv1, cv2],
         &[ParamMode::Inout, ParamMode::Inout],
@@ -65,6 +67,7 @@ fn inout_and_borrow_same_owner_rejected() {
     let cv1 = tb.var(c, int_ty, span);
     let cv2 = tb.var(c, int_ty, span);
     let call = tb.call(
+        DeclId::NONE,
         f,
         &[cv1, cv2],
         &[ParamMode::Inout, ParamMode::Borrow],
@@ -110,6 +113,7 @@ fn inout_and_move_same_owner_rejected() {
     let xv1 = tb.var(x, str_ty, span);
     let xv2 = tb.var(x, str_ty, span);
     let call = tb.call(
+        DeclId::NONE,
         f,
         &[xv1, xv2],
         &[ParamMode::Inout, ParamMode::Move],
@@ -156,6 +160,7 @@ fn e0032_names_local_binding_not_value() {
     let cv1 = tb.var(c, int_ty, span);
     let cv2 = tb.var(c, int_ty, span);
     let call = tb.call(
+        DeclId::NONE,
         swap,
         &[cv1, cv2],
         &[ParamMode::Inout, ParamMode::Inout],
@@ -207,6 +212,7 @@ fn inout_distinct_owners_ok() {
     let av = tb.var(a, int_ty, span);
     let bv = tb.var(b, int_ty, span);
     let call = tb.call(
+        DeclId::NONE,
         swap,
         &[av, bv],
         &[ParamMode::Inout, ParamMode::Inout],
@@ -388,7 +394,7 @@ fn inout_str_param_move_out_after_reassign_rejected() {
     let lit = tb.str_const(pool.intern_str("new"), str_ty, span);
     let asg = tb.assign(s, str_ty, lit, span);
     let sv = tb.var(s, str_ty, span);
-    let call = tb.call(g, &[sv], &[ParamMode::Move], void, span);
+    let call = tb.call(DeclId::NONE, g, &[sv], &[ParamMode::Move], void, span);
     let tir = tb.finish(&[asg, call]);
     let mut sink = DiagSink::new();
     let _sc = check(
@@ -475,9 +481,16 @@ fn inout_call_keeps_owner_and_frees_current_buffer() {
     let lit = tb.str_const(pool.intern_str("hi"), str_ty, span);
     let decl = tb.var_decl(s, false, str_ty, lit, span);
     let sv1 = tb.var(s, str_ty, span);
-    let call = tb.call(set, &[sv1], &[ParamMode::Inout], void, span);
+    let call = tb.call(DeclId::NONE, set, &[sv1], &[ParamMode::Inout], void, span);
     let sv2 = tb.var(s, str_ty, span);
-    let pr = tb.call(print, &[sv2], &[ParamMode::Borrow], void, span);
+    let pr = tb.call(
+        DeclId::NONE,
+        print,
+        &[sv2],
+        &[ParamMode::Borrow],
+        void,
+        span,
+    );
     let tir = tb.finish(&[decl, call, pr]);
     let mut sink = DiagSink::new();
     let mut sidecar = check(
@@ -522,10 +535,17 @@ fn inout_call_inside_if_no_false_dead_store() {
     let decl = tb.var_decl(s, false, str_ty, lit, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let sv1 = tb.var(s, str_ty, span);
-    let call = tb.call(set, &[sv1], &[ParamMode::Inout], void, span);
+    let call = tb.call(DeclId::NONE, set, &[sv1], &[ParamMode::Inout], void, span);
     let if_s = tb.if_stmt(cond, &[call], &[], None, void, span);
     let sv2 = tb.var(s, str_ty, span);
-    let pr = tb.call(print, &[sv2], &[ParamMode::Borrow], void, span);
+    let pr = tb.call(
+        DeclId::NONE,
+        print,
+        &[sv2],
+        &[ParamMode::Borrow],
+        void,
+        span,
+    );
     let tir = tb.finish(&[decl, if_s, pr]);
     let mut sink = DiagSink::new();
     let _sc = check(
@@ -561,10 +581,17 @@ fn inout_call_inside_loop_no_false_dead_store() {
     let decl = tb.var_decl(s, false, str_ty, lit, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let sv1 = tb.var(s, str_ty, span);
-    let call = tb.call(set, &[sv1], &[ParamMode::Inout], void, span);
+    let call = tb.call(DeclId::NONE, set, &[sv1], &[ParamMode::Inout], void, span);
     let wl = tb.while_loop(cond, &[call], void, span);
     let sv2 = tb.var(s, str_ty, span);
-    let pr = tb.call(print, &[sv2], &[ParamMode::Borrow], void, span);
+    let pr = tb.call(
+        DeclId::NONE,
+        print,
+        &[sv2],
+        &[ParamMode::Borrow],
+        void,
+        span,
+    );
     let tir = tb.finish(&[decl, wl, pr]);
     let mut sink = DiagSink::new();
     let mut sidecar = check(

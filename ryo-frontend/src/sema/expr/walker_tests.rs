@@ -11,7 +11,7 @@ use super::super::{DeclId, FuncCtx, Scope, Sema};
 use super::walker::with_expr_limit;
 use super::{NeverMode, SemaExprContext, analyze_expr_with};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
-use ryo_core::tir::{Tir, TirBuilder, TirTag};
+use ryo_core::tir::{Tir, TirBuilder, TirData, TirTag};
 use ryo_core::types::InternPool;
 use ryo_core::uir::{InstRef, InstTag, Span, Uir, UirBuilder};
 use std::path::Path;
@@ -680,6 +680,16 @@ fn run_differential_with_expr_limit(src: &str, limit: u32) -> Differential {
 fn snapshot((tirs, diags, _pool): Differential) -> String {
     tirs.iter()
         .map(|tir| {
+            let mut context_neutral_extra = tir.extra.clone();
+            for inst in &tir.instructions[1..] {
+                if inst.tag != TirTag::Call {
+                    continue;
+                }
+                let TirData::Extra(range) = inst.data else {
+                    unreachable!("calls carry extra payloads")
+                };
+                context_neutral_extra[range.as_range().start] = 0;
+            }
             let mut direct_catch_matches = tir
                 .direct_catch_matches
                 .iter()
@@ -692,7 +702,7 @@ fn snapshot((tirs, diags, _pool): Differential) -> String {
                 tir.params,
                 tir.return_type,
                 tir.instructions,
-                tir.extra,
+                context_neutral_extra,
                 tir.body,
                 tir.spans,
                 tir.span,

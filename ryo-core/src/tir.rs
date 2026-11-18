@@ -480,6 +480,7 @@ pub struct TirParam {
 #[derive(Debug, Clone)]
 pub struct Tir {
     identity: crate::artifact::ArtifactId,
+    pub decl: crate::declaration::DeclId,
     pub name: StringId,
     pub params: Vec<TirParam>,
     pub return_type: TypeId,
@@ -557,6 +558,7 @@ impl Tir {
 /// Mutable handle for emitting one function body's TIR. Sema is its
 /// only caller in production; tests use it directly.
 pub struct TirBuilder {
+    decl: crate::declaration::DeclId,
     name: StringId,
     params: Vec<TirParam>,
     return_type: TypeId,
@@ -586,6 +588,7 @@ impl TirBuilder {
             data: TirData::None,
         };
         TirBuilder {
+            decl: crate::declaration::DeclId::NONE,
             name,
             params,
             return_type,
@@ -596,6 +599,11 @@ impl TirBuilder {
             saw_match: false,
             direct_catch_matches: std::collections::HashSet::new(),
         }
+    }
+
+    pub fn with_decl(mut self, decl: crate::declaration::DeclId) -> Self {
+        self.decl = decl;
+        self
     }
 
     /// Type of an instruction the builder has already emitted.
@@ -792,11 +800,23 @@ impl TirBuilder {
         }
     }
 
-    /// Emit a `Call` with name, arg list, and per-arg call conventions
-    /// packed into `extra`. `ty` is the call's *return* type.
-    /// `modes` carries one [`ParamMode`] per argument (borrow vs move),
-    /// stamped by sema from the callee signature.
+    /// Emit a user `Call` with declaration identity, compatibility name,
+    /// arg list, and per-arg call conventions packed into `extra`.
+    /// `ty` is the call's *return* type.
     pub fn call(
+        &mut self,
+        callee: crate::declaration::DeclId,
+        name: StringId,
+        args: &[TirRef],
+        modes: &[ParamMode],
+        ty: TypeId,
+        span: Span,
+    ) -> TirRef {
+        let range = call_extra::encode(&mut self.extra, callee, name, args, modes);
+        self.push(TirTag::Call, ty, TirData::Extra(range), span)
+    }
+
+    pub fn builtin_call(
         &mut self,
         name: StringId,
         args: &[TirRef],
@@ -804,7 +824,7 @@ impl TirBuilder {
         ty: TypeId,
         span: Span,
     ) -> TirRef {
-        let range = call_extra::encode(&mut self.extra, name, args, modes);
+        let range = call_extra::encode_builtin(&mut self.extra, name, args, modes);
         self.push(TirTag::Call, ty, TirData::Extra(range), span)
     }
 
@@ -974,6 +994,7 @@ impl TirBuilder {
         let len = Self::len_u32(stmts.len());
         let tir = Tir {
             identity: crate::artifact::ArtifactId::fresh(),
+            decl: self.decl,
             name: self.name,
             params: self.params,
             return_type: self.return_type,

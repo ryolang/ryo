@@ -376,7 +376,7 @@ pub(crate) fn finish_call(
     }
     let call = fcx
         .builder
-        .call(name_id, &converted, &modes, return_type, span);
+        .call(callee, name_id, &converted, &modes, return_type, span);
     if super::error_inference::is_inferred(sema, callee) {
         fcx.inferred_call_dependencies.insert(call, callee);
     }

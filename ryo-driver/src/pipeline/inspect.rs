@@ -138,6 +138,9 @@ pub fn ir_command(file: &Path, emit: &[EmitKind]) -> Result<(), CompilerError> {
         if sink.has_errors() {
             return finalize_diags(sink.into_diags(), context.sources());
         }
+        analyzed
+            .require_backend_transition(&context)
+            .map_err(CompilerError::CodegenError)?;
         generate_and_display_ir(tirs, flows, &pool, sidecar)?;
     }
 

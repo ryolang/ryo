@@ -201,12 +201,13 @@ fn writes_out_slot_matches_codegen_inlined_builtins() {
         let arg = builder.bool_const(true, bool_ty, span());
         inlined_calls.push((
             inlined,
-            builder.call(builtin, &[arg], &[ParamMode::Borrow], str_ty, span()),
+            builder.builtin_call(builtin, &[arg], &[ParamMode::Borrow], str_ty, span()),
         ));
     }
     let int_to_str = pool.intern_str("int_to_str");
     let arg = builder.int_const(1, pool.int(), span());
-    let producer_call = builder.call(int_to_str, &[arg], &[ParamMode::Borrow], str_ty, span());
+    let producer_call =
+        builder.builtin_call(int_to_str, &[arg], &[ParamMode::Borrow], str_ty, span());
     let tir = builder.finish(&[]);
 
     for (inlined, call) in inlined_calls {

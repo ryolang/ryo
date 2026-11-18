@@ -1,3 +1,5 @@
+use ryo_core::declaration::DeclId;
+
 #[cfg(debug_assertions)]
 mod cleanup_validation;
 pub(in crate::ownership) mod common;
@@ -140,9 +142,9 @@ fn double_consume_reports_uam_once_via_consume_authority() {
     let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
     let decl = tb.var_decl(x, false, str_ty, lit, span);
     let xv1 = tb.var(x, str_ty, span);
-    let take1 = tb.call(take, &[xv1], &[ParamMode::Move], void, span);
+    let take1 = tb.call(DeclId::NONE, take, &[xv1], &[ParamMode::Move], void, span);
     let xv2 = tb.var(x, str_ty, span);
-    let take2 = tb.call(take, &[xv2], &[ParamMode::Move], void, span);
+    let take2 = tb.call(DeclId::NONE, take, &[xv2], &[ParamMode::Move], void, span);
     let tir = tb.finish(&[decl, take1, take2]);
     let mut sink = DiagSink::new();
     let _sc = check(
@@ -177,9 +179,16 @@ fn borrow_of_moved_value_still_reports_uam() {
     let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
     let decl = tb.var_decl(x, false, str_ty, lit, span);
     let xv = tb.var(x, str_ty, span);
-    let take_call = tb.call(take, &[xv], &[ParamMode::Move], void, span); // moves x
+    let take_call = tb.call(DeclId::NONE, take, &[xv], &[ParamMode::Move], void, span); // moves x
     let xv2 = tb.var(x, str_ty, span);
-    let print_call = tb.call(print, &[xv2], &[ParamMode::Borrow], void, span); // borrow of moved
+    let print_call = tb.call(
+        DeclId::NONE,
+        print,
+        &[xv2],
+        &[ParamMode::Borrow],
+        void,
+        span,
+    ); // borrow of moved
     let tir = tb.finish(&[decl, take_call, print_call]);
     let mut sink = DiagSink::new();
     let _sc = check(
@@ -222,14 +231,35 @@ fn three_arm_if_with_conditional_move_and_loop_rebind() {
 
     let cond_then = tb.bool_const(true, bool_ty, span);
     let read_then = tb.var(x, str_ty, span);
-    let call_then = tb.call(print, &[read_then], &[ParamMode::Borrow], void, span);
+    let call_then = tb.call(
+        DeclId::NONE,
+        print,
+        &[read_then],
+        &[ParamMode::Borrow],
+        void,
+        span,
+    );
 
     let cond_elif = tb.bool_const(false, bool_ty, span);
     let read_elif = tb.var(x, str_ty, span);
-    let call_elif = tb.call(take, &[read_elif], &[ParamMode::Move], void, span);
+    let call_elif = tb.call(
+        DeclId::NONE,
+        take,
+        &[read_elif],
+        &[ParamMode::Move],
+        void,
+        span,
+    );
 
     let read_else = tb.var(x, str_ty, span);
-    let call_else = tb.call(print, &[read_else], &[ParamMode::Borrow], void, span);
+    let call_else = tb.call(
+        DeclId::NONE,
+        print,
+        &[read_else],
+        &[ParamMode::Borrow],
+        void,
+        span,
+    );
 
     let if_stmt = tb.if_stmt(
         cond_then,
@@ -246,7 +276,14 @@ fn three_arm_if_with_conditional_move_and_loop_rebind() {
     let wl = tb.while_loop(cond_w, &[body_assign], void, span);
 
     let read_post = tb.var(x, str_ty, span);
-    let call_post = tb.call(print, &[read_post], &[ParamMode::Borrow], void, span);
+    let call_post = tb.call(
+        DeclId::NONE,
+        print,
+        &[read_post],
+        &[ParamMode::Borrow],
+        void,
+        span,
+    );
 
     let tir = tb.finish(&[decl_x, decl_mut, if_stmt, wl, call_post]);
 
@@ -310,7 +347,7 @@ fn move_and_borrow_of_same_owner_in_one_call_e0023_both_orderings() {
         } else {
             vec![ParamMode::Borrow, ParamMode::Move]
         };
-        let call = tir.call(f, &[xv1, xv2], &modes, void, span);
+        let call = tir.call(DeclId::NONE, f, &[xv1, xv2], &modes, void, span);
         (xv1, xv2, call)
     }
 
@@ -380,7 +417,7 @@ fn two_borrows_of_one_owner_ok() {
     let xv1 = tb.var(x, str_ty, span);
     let xv2 = tb.var(x, str_ty, span);
     let modes = vec![ParamMode::Borrow, ParamMode::Borrow];
-    let call = tb.call(f, &[xv1, xv2], &modes, void, span);
+    let call = tb.call(DeclId::NONE, f, &[xv1, xv2], &modes, void, span);
     let tir = tb.finish(&[decl, call]);
     let mut sink = DiagSink::new();
     let _sc = check(
@@ -418,7 +455,7 @@ fn borrow_and_move_of_distinct_owners_ok() {
     let av = tb.var(a, str_ty, span);
     let bv = tb.var(b, str_ty, span);
     let modes = vec![ParamMode::Borrow, ParamMode::Move];
-    let call = tb.call(f, &[av, bv], &modes, void, span);
+    let call = tb.call(DeclId::NONE, f, &[av, bv], &modes, void, span);
     let tir = tb.finish(&[da, db, call]);
     let mut sink = DiagSink::new();
     let _sc = check(
@@ -451,7 +488,7 @@ fn single_move_arg_no_e0023() {
     let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
     let decl = tb.var_decl(x, false, str_ty, lit, span);
     let xv = tb.var(x, str_ty, span);
-    let call = tb.call(f, &[xv], &[ParamMode::Move], void, span);
+    let call = tb.call(DeclId::NONE, f, &[xv], &[ParamMode::Move], void, span);
     let tir = tb.finish(&[decl, call]);
     let mut sink = DiagSink::new();
     let _sc = check(
@@ -490,7 +527,7 @@ fn copy_args_untracked_no_false_positive() {
     let nv = tb.var(n, int_ty, span);
     let xv = tb.var(x, str_ty, span);
     let modes = vec![ParamMode::Borrow, ParamMode::Move];
-    let call = tb.call(f, &[nv, xv], &modes, void, span);
+    let call = tb.call(DeclId::NONE, f, &[nv, xv], &modes, void, span);
     let tir = tb.finish(&[dn, dx, call]);
     let mut sink = DiagSink::new();
     let _sc = check(
@@ -524,10 +561,10 @@ fn borrow_and_move_in_sequential_statements_ok() {
     let decl = tb.var_decl(x, false, str_ty, lit, span);
     // first statement: f(borrow x)
     let xv1 = tb.var(x, str_ty, span);
-    let call1 = tb.call(f, &[xv1], &[ParamMode::Borrow], void, span);
+    let call1 = tb.call(DeclId::NONE, f, &[xv1], &[ParamMode::Borrow], void, span);
     // second statement: f(move x)
     let xv2 = tb.var(x, str_ty, span);
-    let call2 = tb.call(f, &[xv2], &[ParamMode::Move], void, span);
+    let call2 = tb.call(DeclId::NONE, f, &[xv2], &[ParamMode::Move], void, span);
     let tir = tb.finish(&[decl, call1, call2]);
     let mut sink = DiagSink::new();
     let _sc = check(
@@ -565,6 +602,7 @@ fn two_immutable_borrows_ok() {
     let cv1 = tb.var(c, int_ty, span);
     let cv2 = tb.var(c, int_ty, span);
     let call = tb.call(
+        DeclId::NONE,
         f,
         &[cv1, cv2],
         &[ParamMode::Borrow, ParamMode::Borrow],

@@ -1,4 +1,5 @@
 use super::*;
+use ryo_core::declaration::DeclId;
 
 #[test]
 fn toview_arg_counts_as_borrow_rule7() {
@@ -26,6 +27,7 @@ fn toview_arg_counts_as_borrow_rule7() {
     let view_base = tb.var(s, str_ty, span);
     let view_arg = tb.to_view(view_base, view_ty, span);
     let call = tb.call(
+        DeclId::NONE,
         two,
         &[inout_arg, view_arg],
         &[ParamMode::Inout, ParamMode::Borrow],
@@ -94,7 +96,14 @@ fn toview_read_counts_as_use_dead_store() {
     let vos = tb.to_view(sread, view_ty, span);
     let eq = tb.binary(TirTag::StrCmpEq, bool_ty, vos, sl, span);
     let xlit = tb.str_const(pool.intern_str("x"), str_ty, span);
-    let pcall = tb.call(print, &[xlit], &all_borrow(&[xlit]), void, span);
+    let pcall = tb.call(
+        DeclId::NONE,
+        print,
+        &[xlit],
+        &all_borrow(&[xlit]),
+        void,
+        span,
+    );
     let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
     let ifs = tb.if_stmt(eq, &[pstmt], &[], None, void, span);
     let tir = tb.finish(&[decl_s, decl_o, ifs]);
@@ -142,6 +151,7 @@ fn viewasowner_arg_counts_as_borrow_rule7() {
     let slice = tb.slice(slice_base, Some(zero), Some(one), view_ty, span);
     let reborrow = tb.view_as_owner(slice, str_ty, span);
     let call = tb.call(
+        DeclId::NONE,
         two,
         &[inout_arg, reborrow],
         &[ParamMode::Inout, ParamMode::Borrow],
@@ -204,12 +214,19 @@ fn viewasowner_reborrow_is_call_scoped() {
     let one = tb.int_const(1, int_ty, span);
     let slice = tb.slice(slice_base, Some(zero), Some(one), view_ty, span);
     let reborrow = tb.view_as_owner(slice, str_ty, span);
-    let show_call = tb.call(show, &[reborrow], &[ParamMode::Borrow], void, span);
+    let show_call = tb.call(
+        DeclId::NONE,
+        show,
+        &[reborrow],
+        &[ParamMode::Borrow],
+        void,
+        span,
+    );
     let show_stmt = tb.unary(TirTag::ExprStmt, void, show_call, span);
     // `s` moved later in the caller — fine: the re-borrow ended
     // with the `show` call.
     let moved = tb.var(s, str_ty, span);
-    let eat_call = tb.call(eat, &[moved], &[ParamMode::Move], void, span);
+    let eat_call = tb.call(DeclId::NONE, eat, &[moved], &[ParamMode::Move], void, span);
     let eat_stmt = tb.unary(TirTag::ExprStmt, void, eat_call, span);
     let tir = tb.finish(&[decl, show_stmt, eat_stmt]);
 
@@ -256,7 +273,14 @@ fn str_materialize_result_is_fresh_owner() {
         span,
     );
     let arg = tb.var(text, view_ty, span);
-    let copy = tb.call(materialize, &[arg], &[ParamMode::Borrow], str_ty, span);
+    let copy = tb.call(
+        DeclId::NONE,
+        materialize,
+        &[arg],
+        &[ParamMode::Borrow],
+        str_ty,
+        span,
+    );
     let ret = tb.push_typed(TirTag::Return, TirData::UnOp(copy), str_ty, span);
     let tir = tb.finish(&[ret]);
 
@@ -305,8 +329,16 @@ fn str_materialize_arg_counts_as_borrow_rule7() {
     let zero = tb.int_const(0, int_ty, span);
     let one = tb.int_const(1, int_ty, span);
     let slice = tb.slice(slice_base, Some(zero), Some(one), view_ty, span);
-    let copy = tb.call(materialize, &[slice], &[ParamMode::Borrow], str_ty, span);
+    let copy = tb.call(
+        DeclId::NONE,
+        materialize,
+        &[slice],
+        &[ParamMode::Borrow],
+        str_ty,
+        span,
+    );
     let call = tb.call(
+        DeclId::NONE,
         two,
         &[inout_arg, copy],
         &[ParamMode::Inout, ParamMode::Borrow],
@@ -385,6 +417,7 @@ fn loop_view_created_after_owner_mutation_dies_within_iteration() {
     let sread = tb.var(s, str_ty, span);
     let suffix = tb.str_const(bang, str_ty, span);
     let push = tb.call(
+        DeclId::NONE,
         str_push,
         &[sread, suffix],
         &[ParamMode::Inout, ParamMode::Borrow],
@@ -398,7 +431,14 @@ fn loop_view_created_after_owner_mutation_dies_within_iteration() {
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
     let vdecl = tb.var_decl(v, false, view_ty, sl, span);
     let vread = tb.var(v, view_ty, span);
-    let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+    let pcall = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread],
+        &all_borrow(&[vread]),
+        void,
+        span,
+    );
     let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
     let wl = tb.while_loop(cond, &[push_stmt, vdecl, pstmt], void, span);
     let tir = tb.finish(&[decl, wl]);
@@ -476,6 +516,7 @@ fn loop_view_live_at_back_edge_flags_earlier_mutation_on_rewalk() {
     let sread = tb.var(s, str_ty, span);
     let suffix_read = tb.var(suffix, str_ty, span);
     let push = tb.call(
+        DeclId::NONE,
         str_push,
         &[sread, suffix_read],
         &[ParamMode::Inout, ParamMode::Borrow],
@@ -545,6 +586,7 @@ fn view_and_move_args_same_owner_rejected() {
     let view_arg = tb.slice(base, Some(i0), Some(i1), view_ty, span);
     let move_arg = tb.var(s, str_ty, span);
     let call = tb.call(
+        DeclId::NONE,
         two,
         &[view_arg, move_arg],
         &[ParamMode::Borrow, ParamMode::Move],
@@ -625,7 +667,14 @@ fn p5_view_read_inside_if_arm_anchors_free_at_if_exit() {
     let vdecl = tb.var_decl(v, false, view_ty, sl, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let vread = tb.var(v, view_ty, span);
-    let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+    let pcall = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread],
+        &all_borrow(&[vread]),
+        void,
+        span,
+    );
     let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
     let ifs = tb.if_stmt(cond, &[pstmt], &[], None, void, span);
     let tir = tb.finish(&[decl, vdecl, ifs]);
