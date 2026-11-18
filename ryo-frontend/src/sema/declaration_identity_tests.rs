@@ -55,7 +55,10 @@ fn direct_call_resolution_uses_declaration_identity() {
         CallPlan::User { callee, .. } => assert_eq!(callee, decl),
         _ => panic!("expected user call"),
     }
-    assert_eq!(context.declarations().get(decl).unwrap().name, name);
+    assert_eq!(
+        sema.context.declarations().name(decl).unwrap(),
+        sema.pool.str(name)
+    );
 }
 
 #[test]
@@ -185,7 +188,71 @@ fn source_revision_recompiles_direct_recursive_and_inferred_calls() {
         for (first, second) in first_tirs.iter().zip(&second_tirs) {
             assert_ne!(first.decl, second.decl, "{name}");
         }
+
+        let expected_calls: &[(&str, &str)] = match name {
+            "direct" => &[("main", "twice")],
+            "recursive" => &[("fact", "fact"), ("main", "fact")],
+            "inferred" => &[("forward", "fail"), ("main", "forward")],
+            _ => unreachable!(),
+        };
+        for &(caller, target) in expected_calls {
+            let caller_name = second_pool.find_str(caller).unwrap();
+            let target_name = second_pool.find_str(target).unwrap();
+            let caller_body = second_tirs
+                .iter()
+                .find(|tir| tir.name == caller_name)
+                .expect("expected caller body");
+            let target_body = second_tirs
+                .iter()
+                .find(|tir| tir.name == target_name)
+                .expect("expected callee body");
+            let has_current_call =
+                caller_body
+                    .instructions
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .any(|(index, inst)| {
+                        inst.tag == ryo_core::tir::TirTag::Call
+                            && caller_body
+                                .call_view(ryo_core::tir::TirRef::from_raw(index as u32))
+                                .callee
+                                == Some(target_body.decl)
+                    });
+            assert!(
+                has_current_call,
+                "{name}: {caller} must call the new {target}"
+            );
+        }
     }
+}
+
+#[test]
+fn built_program_rejects_tir_from_another_pool() {
+    let input = "fn main():\n\tprint(\"one\")\n";
+    let mut context = CompilationContext::new();
+    let (uir, mut pool, mut sink) = lower(&mut context, input);
+    let tirs = analyze(
+        &uir,
+        &mut pool,
+        &mut sink,
+        input,
+        Path::new("test.ryo"),
+        &mut context,
+    );
+    assert!(!sink.has_errors());
+    let mut other_pool = InternPool::new();
+    other_pool.intern_str("main");
+    other_pool.intern_str("print");
+    other_pool.intern_str("two");
+    for index in 0..32 {
+        other_pool.intern_str(&format!("padding{index}"));
+    }
+
+    let error = crate::pipeline::BuiltProgram::build(tirs, &other_pool)
+        .analyze(&other_pool, &mut DiagSink::new())
+        .expect_err("TIR must not be interpreted through another pool");
+    assert!(format!("{error:?}").contains("TIR belongs"), "{error:?}");
 }
 
 #[test]
@@ -220,6 +287,8 @@ fn source_revision_recompiles_implicit_main_for_backend() {
         &mut context,
     );
     assert!(!second_sink.has_errors());
+    assert_eq!(second_tirs.len(), 1);
+    assert_eq!(second_tirs[0].name, second_pool.find_str("main").unwrap());
 
     let analyzed = crate::pipeline::BuiltProgram::build(second_tirs, &second_pool)
         .analyze(&second_pool, &mut second_sink)
@@ -232,15 +301,15 @@ fn source_revision_recompiles_implicit_main_for_backend() {
 }
 
 #[test]
-fn empty_sourceless_implicit_main_can_publish() {
-    let input = "";
+fn empty_implicit_main_tracks_source_revisions() {
     let mut context = CompilationContext::new();
-    let (uir, mut pool, mut sink) = lower(&mut context, input);
+    let old_source = context.register_source(PathBuf::from("test.ryo"), String::new());
+    let (uir, mut pool, mut sink) = lower_source(&context, old_source);
     let tirs = analyze(
         &uir,
         &mut pool,
         &mut sink,
-        input,
+        "",
         Path::new("test.ryo"),
         &mut context,
     );
@@ -249,5 +318,39 @@ fn empty_sourceless_implicit_main_can_publish() {
     let analyzed = crate::pipeline::BuiltProgram::build(tirs, &pool)
         .analyze(&pool, &mut sink)
         .expect("empty implicit main should analyze");
+    assert_eq!(analyzed.tirs().len(), 1);
+    assert_eq!(analyzed.tirs()[0].name, pool.find_str("main").unwrap());
     assert!(analyzed.require_backend_transition(&context, &pool).is_ok());
+
+    let new_source = context
+        .replace_source(old_source, "print(1)\n".into())
+        .unwrap();
+    let error = analyzed
+        .require_backend_transition(&context, &pool)
+        .expect_err("the empty old revision must become stale");
+    assert!(error.contains("stale declaration"), "{error}");
+
+    let (new_uir, mut new_pool, mut new_sink) = lower_source(&context, new_source);
+    let new_tirs = analyze(
+        &new_uir,
+        &mut new_pool,
+        &mut new_sink,
+        "print(1)\n",
+        Path::new("test.ryo"),
+        &mut context,
+    );
+    assert!(!new_sink.has_errors());
+    let replacement = crate::pipeline::BuiltProgram::build(new_tirs, &new_pool)
+        .analyze(&new_pool, &mut new_sink)
+        .expect("replacement implicit main should analyze");
+    assert_eq!(replacement.tirs().len(), 1);
+    assert_eq!(
+        replacement.tirs()[0].name,
+        new_pool.find_str("main").unwrap()
+    );
+    assert!(
+        replacement
+            .require_backend_transition(&context, &new_pool)
+            .is_ok()
+    );
 }

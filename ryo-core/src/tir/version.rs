@@ -7,6 +7,7 @@ use std::hash::{Hash, Hasher};
 impl Tir {
     pub(crate) fn representation_stamp(&self) -> u64 {
         let mut hash = StampHasher::default();
+        self.layout_context.hash(&mut hash);
         self.decl.hash(&mut hash);
         self.name.hash(&mut hash);
         self.return_type.hash(&mut hash);

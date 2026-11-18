@@ -30,7 +30,7 @@ impl CompilationContextId {
 
 /// A published representation version. A rebuilt body receives a fresh identity.
 /// Clones retain identity and must remain immutable while analyses refer to them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ArtifactId(u64);
 
 impl ArtifactId {

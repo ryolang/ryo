@@ -1,6 +1,8 @@
 use crate::artifact::CompilationContextId;
-use crate::declaration::DeclarationTable;
+use crate::declaration::{DeclId, DeclarationError, DeclarationTable};
 use crate::source::{SourceDb, SourceError, SourceId};
+use crate::types::InternPool;
+use crate::uir::Uir;
 use std::path::PathBuf;
 
 #[derive(Debug)]
@@ -38,8 +40,24 @@ impl CompilationContext {
         &self.declarations
     }
 
-    pub fn declarations_mut(&mut self) -> &mut DeclarationTable {
-        &mut self.declarations
+    pub fn register_functions(
+        &mut self,
+        uir: &Uir,
+        pool: &InternPool,
+    ) -> Result<Vec<DeclId>, DeclarationError> {
+        for (uir_index, body) in uir.func_bodies.iter().enumerate() {
+            if body.span.source != SourceId::NONE {
+                self.sources
+                    .get(body.span.source)
+                    .map_err(DeclarationError::InvalidSource)?;
+            }
+            let valid_name = (body.name.raw() as usize) < pool.string_count()
+                && std::str::from_utf8(pool.bytes_payload(body.name)).is_ok();
+            if !valid_name {
+                return Err(DeclarationError::InvalidName { uir_index });
+            }
+        }
+        self.declarations.register_functions(uir, pool)
     }
 }
 

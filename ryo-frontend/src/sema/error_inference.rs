@@ -131,7 +131,10 @@ pub(super) fn reject_recursive_inferred_components(sema: &mut Sema<'_>) {
     let graph = direct_named_call_graph(sema);
     let mut components = strongly_connected_components(&graph);
     components.retain(|component| {
-        let self_cycle = component.len() == 1 && graph[component[0]].contains(&component[0]);
+        let self_cycle = component.len() == 1 && {
+            let node = u32::try_from(component[0]).expect("body index out of range");
+            graph[component[0]].contains(&node)
+        };
         (component.len() > 1 || self_cycle)
             && component
                 .iter()
@@ -165,7 +168,7 @@ pub(super) fn reject_recursive_inferred_components(sema: &mut Sema<'_>) {
     }
 }
 
-fn direct_named_call_graph(sema: &Sema<'_>) -> Vec<Vec<usize>> {
+fn direct_named_call_graph(sema: &Sema<'_>) -> Vec<Vec<u32>> {
     let mut graph = vec![Vec::new(); sema.uir.func_bodies.len()];
     let mut start = 1usize;
     for (index, body) in sema.uir.func_bodies.iter().enumerate() {
@@ -181,7 +184,9 @@ fn direct_named_call_graph(sema: &Sema<'_>) -> Vec<Vec<usize>> {
             if sema.uir.inst(inst).tag == InstTag::Call {
                 let name = sema.uir.call_view(inst).name;
                 if let Some(&callee) = sema.name_to_decl.get(&name) {
-                    graph[index].push(sema.body_index(callee));
+                    graph[index].push(
+                        u32::try_from(sema.body_index(callee)).expect("body index out of range"),
+                    );
                 }
             }
         }
@@ -190,9 +195,9 @@ fn direct_named_call_graph(sema: &Sema<'_>) -> Vec<Vec<usize>> {
     graph
 }
 
-fn strongly_connected_components(graph: &[Vec<usize>]) -> Vec<Vec<usize>> {
+fn strongly_connected_components(graph: &[Vec<u32>]) -> Vec<Vec<usize>> {
     struct Tarjan<'a> {
-        graph: &'a [Vec<usize>],
+        graph: &'a [Vec<u32>],
         next_index: usize,
         indices: Vec<Option<usize>>,
         low: Vec<usize>,
@@ -211,7 +216,7 @@ fn strongly_connected_components(graph: &[Vec<usize>]) -> Vec<Vec<usize>> {
             self.on_stack[node] = true;
 
             for edge in 0..self.graph[node].len() {
-                let next = self.graph[node][edge];
+                let next = self.graph[node][edge] as usize;
                 if self.indices[next].is_none() {
                     self.visit(next);
                     self.low[node] = self.low[node].min(self.low[next]);

@@ -453,18 +453,17 @@ impl<'a> Sema<'a> {
         context: &'a mut CompilationContext,
     ) -> Self {
         let n = uir.func_bodies.len();
-        let (declaration_ids, registration_error) =
-            match context.declarations_mut().register_functions(uir) {
-                Ok(ids) => (ids, None),
-                Err(error) => {
-                    sink.emit(Diag::error(
-                        Span::EMPTY,
-                        DiagCode::InternalError,
-                        format!("declaration registration failed: {error}"),
-                    ));
-                    (Vec::new(), Some(error))
-                }
-            };
+        let (declaration_ids, registration_error) = match context.register_functions(uir, pool) {
+            Ok(ids) => (ids, None),
+            Err(error) => {
+                sink.emit(Diag::error(
+                    Span::EMPTY,
+                    DiagCode::InternalError,
+                    format!("declaration registration failed: {error}"),
+                ));
+                (Vec::new(), Some(error))
+            }
+        };
         let mut name_to_decl = HashMap::with_capacity(n);
         for (body, &decl) in uir.func_bodies.iter().zip(&declaration_ids) {
             // First definition wins on duplicates: calls bind to the
@@ -650,22 +649,7 @@ impl<'a> Sema<'a> {
         self.results.into_iter().flatten().collect()
     }
 
-    /// Ensure a callee's analysis state is consistent with its use
-    /// from the currently-analyzing body. Today this only matters
-    /// for cycle detection: callee *signatures* are eagerly
-    /// resolved, so the check is "is this decl currently
-    /// `InProgress`?" — which is the cycle sentinel.
-    ///
-    /// Returns `false` and emits a [`DiagCode::CycleInResolution`]
-    /// diagnostic when a cycle is detected. The caller should fall
-    /// back to the error type for whatever it was trying to
-    /// compute.
-    /// Reserved for the comptime / lazy-resolution era: the cycle
-    /// sentinel for on-demand decl resolution. Production never calls
-    /// it today (signatures resolve eagerly instead); it is exercised
-    /// by the `require_decl_reports_cycle_when_in_progress` substrate
-    /// test, which the comptime milestones will lean on. Private, so
-    /// the lib-target dead-code analysis needs the allow.
+    /// Return the current-UIR body slot for a declaration registered by this Sema.
     #[inline]
     fn body_index(&self, decl: DeclId) -> usize {
         let index = decl.index();
@@ -686,6 +670,22 @@ impl<'a> Sema<'a> {
             .uir_index
     }
 
+    /// Ensure a callee's analysis state is consistent with its use
+    /// from the currently-analyzing body. Today this only matters
+    /// for cycle detection: callee *signatures* are eagerly
+    /// resolved, so the check is "is this decl currently
+    /// `InProgress`?" — which is the cycle sentinel.
+    ///
+    /// Returns `false` and emits a [`DiagCode::CycleInResolution`]
+    /// diagnostic when a cycle is detected. The caller should fall
+    /// back to the error type for whatever it was trying to
+    /// compute.
+    /// Reserved for the comptime / lazy-resolution era: the cycle
+    /// sentinel for on-demand decl resolution. Production never calls
+    /// it today (signatures resolve eagerly instead); it is exercised
+    /// by the `require_decl_reports_cycle_when_in_progress` substrate
+    /// test, which the comptime milestones will lean on. Private, so
+    /// the lib-target dead-code analysis needs the allow.
     #[allow(dead_code)]
     fn require_decl(&mut self, callee: DeclId, span: Span, name: StringId) -> bool {
         match self.decl_state[self.body_index(callee)] {
@@ -823,7 +823,9 @@ fn analyze_function(sema: &mut Sema<'_>, decl: DeclId, body: &FuncBody) -> Tir {
 
     let mut fcx = FuncCtx {
         decl,
-        builder: TirBuilder::new(body.name, params, body.return_type, body.span).with_decl(decl),
+        builder: TirBuilder::new(body.name, params, body.return_type, body.span)
+            .with_decl(decl)
+            .with_layout_context(sema.pool),
         inst_map: vec![None; sema.uir.instructions.len()],
         chain_local_errors: Vec::new(),
         return_type: body.return_type,

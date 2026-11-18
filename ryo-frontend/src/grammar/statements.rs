@@ -236,7 +236,11 @@ where
     // the rest of the file.
     statement_list(statement_parser(), end())
         .then_ignore(end())
-        .map_with(|statements, e: &mut Mx<'a, '_, I>| e.state().set_top_level(statements))
+        .map_with(|statements, e: &mut Mx<'a, '_, I>| {
+            let source = crate::spans::cspan(e.span()).source;
+            let empty_span = ryo_core::span::Span::in_source(source, 0, 0);
+            e.state().set_top_level_with_span(statements, empty_span)
+        })
         .boxed()
 }
 

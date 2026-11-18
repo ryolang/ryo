@@ -69,6 +69,13 @@ pub(super) fn run(input: &str) -> Result<RunOk, Vec<Diag>> {
 /// Variant that returns TIR even when sema reported errors —
 /// used to assert the "Unreachable + diag" invariant from §4.5.
 pub(super) fn run_with_errors(input: &str) -> (Vec<Tir>, Vec<Diag>, InternPool) {
+    let (tirs, diags, pool, _) = run_with_errors_and_context(input);
+    (tirs, diags, pool)
+}
+
+pub(super) fn run_with_errors_and_context(
+    input: &str,
+) -> (Vec<Tir>, Vec<Diag>, InternPool, CompilationContext) {
     let (uir, mut pool, diags) = lower(input);
     let mut sink = DiagSink::new();
     for diag in diags {
@@ -83,7 +90,7 @@ pub(super) fn run_with_errors(input: &str) -> (Vec<Tir>, Vec<Diag>, InternPool) 
         Path::new("<test>"),
         &mut context,
     );
-    (tirs, sink.into_diags(), pool)
+    (tirs, sink.into_diags(), pool, context)
 }
 
 pub(super) fn first_msg(diags: &[Diag]) -> &str {

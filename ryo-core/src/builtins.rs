@@ -214,8 +214,14 @@ fn abi_callee(name: &str) -> Option<&'static BuiltinFunction> {
 }
 
 pub fn is_runtime_callee(name_id: StringId, pool: &InternPool) -> bool {
-    let name = pool.str(name_id);
-    lookup(name).is_some() || abi_callee(name).is_some()
+    if name_id.raw() as usize >= pool.string_count() {
+        return false;
+    }
+    let name = pool.bytes_payload(name_id);
+    BUILTINS
+        .iter()
+        .chain(ABI_CALLEES.iter())
+        .any(|builtin| builtin.name.as_bytes() == name)
 }
 
 /// True if callee `name` passes parameter `idx` via the borrowed-scalar
@@ -263,6 +269,19 @@ mod tests {
         assert!(is_runtime_callee(print, &pool));
         assert!(is_runtime_callee(from_view, &pool));
         assert!(!is_runtime_callee(user, &pool));
+    }
+
+    #[test]
+    fn runtime_callee_rejects_invalid_and_non_utf8_handles() {
+        let mut other = InternPool::new();
+        other.intern_str("padding");
+        let foreign = other.intern_str("print");
+        let empty = InternPool::new();
+        assert!(!is_runtime_callee(foreign, &empty));
+
+        let mut pool = InternPool::new();
+        let non_utf8 = pool.intern_bytes(&[0xff]);
+        assert!(!is_runtime_callee(non_utf8, &pool));
     }
 
     #[test]

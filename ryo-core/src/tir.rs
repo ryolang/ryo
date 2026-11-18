@@ -480,6 +480,7 @@ pub struct TirParam {
 #[derive(Debug, Clone)]
 pub struct Tir {
     identity: crate::artifact::ArtifactId,
+    layout_context: Option<crate::artifact::ArtifactId>,
     pub decl: crate::declaration::DeclId,
     pub name: StringId,
     pub params: Vec<TirParam>,
@@ -508,6 +509,14 @@ impl Tir {
     /// Identity of this immutable typed body version.
     pub fn identity(&self) -> crate::artifact::ArtifactId {
         self.identity
+    }
+
+    /// Require the intern pool that produced this body.
+    pub fn require_layout(&self, pool: &InternPool) -> Result<(), String> {
+        if self.layout_context != Some(pool.identity()) {
+            return Err("TIR belongs to a different type and layout context".into());
+        }
+        Ok(())
     }
 
     /// Look up the instruction for `r`.
@@ -558,6 +567,7 @@ impl Tir {
 /// Mutable handle for emitting one function body's TIR. Sema is its
 /// only caller in production; tests use it directly.
 pub struct TirBuilder {
+    layout_context: Option<crate::artifact::ArtifactId>,
     decl: crate::declaration::DeclId,
     name: StringId,
     params: Vec<TirParam>,
@@ -588,6 +598,7 @@ impl TirBuilder {
             data: TirData::None,
         };
         TirBuilder {
+            layout_context: None,
             decl: crate::declaration::DeclId::NONE,
             name,
             params,
@@ -603,6 +614,11 @@ impl TirBuilder {
 
     pub fn with_decl(mut self, decl: crate::declaration::DeclId) -> Self {
         self.decl = decl;
+        self
+    }
+
+    pub fn with_layout_context(mut self, pool: &InternPool) -> Self {
+        self.layout_context = Some(pool.identity());
         self
     }
 
@@ -994,6 +1010,7 @@ impl TirBuilder {
         let len = Self::len_u32(stmts.len());
         let tir = Tir {
             identity: crate::artifact::ArtifactId::fresh(),
+            layout_context: self.layout_context,
             decl: self.decl,
             name: self.name,
             params: self.params,

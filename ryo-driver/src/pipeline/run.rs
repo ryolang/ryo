@@ -50,12 +50,12 @@ pub fn run_file(
         parse_diags,
         show_inferred_errors,
     )?;
-    analyzed
+    let backend = analyzed
         .require_backend_transition(&context, &pool)
         .map_err(CompilerError::CodegenError)?;
-    let tirs = analyzed.tirs();
-    let flows = analyzed.flows();
-    let sidecar = analyzed.cleanup();
+    let tirs = backend.tirs();
+    let flows = backend.flows();
+    let sidecar = backend.cleanup();
 
     if want.uir {
         display_uir(&uir, &pool)?;
@@ -75,13 +75,14 @@ pub fn run_file(
 
     let mut codegen = codegen::Codegen::new_jit().map_err(CompilerError::CodegenError)?;
     let (main_id, clif) = codegen
-        .compile(tirs, flows, &pool, sidecar, want.clif)
+        .compile(tirs, flows, backend.pool(), sidecar, want.clif)
         .map_err(CompilerError::CodegenError)?;
     if want.clif {
         write_stdout(format_args!("[Cranelift IR]\n"))?;
         write_stdout(format_args!("{clif}"))?;
     }
 
+    drop(backend);
     drop((analyzed, pool, context));
     let mut argv = Vec::with_capacity(program_args.len() + 1);
     argv.push(file.to_string_lossy().into_owned());

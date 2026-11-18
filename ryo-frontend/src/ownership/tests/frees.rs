@@ -120,8 +120,7 @@ fn ryo_panic_str_arg_excluded_via_abi_registry() {
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let str_arg = tb.str_const(msg, str_ty, span);
     let len_arg = tb.int_const(4, int_ty, span);
-    let call = tb.call(
-        DeclId::NONE,
+    let call = tb.builtin_call(
         panic_name,
         &[str_arg, len_arg],
         &all_borrow(&[str_arg, len_arg]),

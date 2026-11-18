@@ -667,23 +667,40 @@ fn run_with_expr_limit(src: &str, limit: u32) -> Result<RunOk, Vec<Diag>> {
     with_expr_limit(limit, || run(src))
 }
 
-type Differential = (Vec<Tir>, Vec<Diag>, InternPool);
+type Differential = (
+    Vec<Tir>,
+    Vec<Diag>,
+    InternPool,
+    ryo_core::compilation::CompilationContext,
+);
 
 fn run_differential(src: &str) -> Differential {
-    run_with_errors(src)
+    super::super::tests::run_with_errors_and_context(src)
 }
 
 fn run_differential_with_expr_limit(src: &str, limit: u32) -> Differential {
     with_expr_limit(limit, || run_differential(src))
 }
 
-fn snapshot((tirs, diags, _pool): Differential) -> String {
+fn snapshot((tirs, diags, pool, context): Differential) -> String {
     tirs.iter()
         .map(|tir| {
             let mut context_neutral_extra = tir.extra.clone();
-            for inst in &tir.instructions[1..] {
+            for (index, inst) in tir.instructions.iter().enumerate().skip(1) {
                 if inst.tag != TirTag::Call {
                     continue;
+                }
+                let call = tir.call_view(ryo_core::tir::TirRef::from_raw(index as u32));
+                if let Some(callee) = call.callee {
+                    let registered = context
+                        .declarations()
+                        .name(callee)
+                        .expect("direct call must resolve a registered declaration");
+                    assert_eq!(
+                        registered,
+                        pool.str(call.name),
+                        "direct call compatibility name does not match its declaration"
+                    );
                 }
                 let TirData::Extra(range) = inst.data else {
                     unreachable!("calls carry extra payloads")
@@ -713,6 +730,36 @@ fn snapshot((tirs, diags, _pool): Differential) -> String {
         .chain(std::iter::once(format!("{diags:?}")))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[test]
+#[should_panic(expected = "direct call must resolve a registered declaration")]
+fn snapshot_rejects_unregistered_direct_call() {
+    let mut differential =
+        run_differential("fn id() -> int:\n\treturn 1\nfn main():\n\tprint(id())\n");
+    let mut changed = false;
+    for tir in &mut differential.0 {
+        for index in 1..tir.instructions.len() {
+            if tir.instructions[index].tag != TirTag::Call {
+                continue;
+            }
+            let TirData::Extra(range) = tir.instructions[index].data else {
+                unreachable!("calls carry extra payloads")
+            };
+            let has_user_callee = tir
+                .call_view(ryo_core::tir::TirRef::from_raw(index as u32))
+                .callee
+                .is_some();
+            if has_user_callee {
+                let start = range.as_range().start;
+                tir.extra[start] = 0;
+                tir.extra[start + 1] = u32::MAX;
+                changed = true;
+            }
+        }
+    }
+    assert!(changed, "fixture must contain a direct call");
+    snapshot(differential);
 }
 
 fn run_deep_repro(test_name: &str, src: String) {
@@ -1233,12 +1280,12 @@ fn non_simple_match_arm_statement_diagnostics_match_at_every_depth_limit() {
 #[test]
 fn statement_arm_dead_store_warnings_match_at_every_depth_limit() {
     let src = "fn main():\n\tmatch 1:\n\t\t1:\n\t\t\tfor i in range(0, 1):\n\t\t\t\tprint(0)\n\t\t_:\n\t\t\tprint(0)\n";
-    let (tirs, diags, pool) = run_differential(src);
+    let (tirs, diags, pool, context) = run_differential(src);
     assert!(!tirs.is_empty(), "warning analysis must retain TIR");
     assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
     assert_eq!(diags[0].severity, ryo_core::diag::Severity::Warning);
     assert_eq!(diags[0].code, ryo_core::diag::DiagCode::DeadStore);
-    let baseline = snapshot((tirs, diags, pool));
+    let baseline = snapshot((tirs, diags, pool, context));
     for limit in [0, 1, 64] {
         assert_eq!(
             snapshot(run_differential_with_expr_limit(src, limit)),
