@@ -1,4 +1,5 @@
 use super::*;
+use ryo_core::declaration::DeclId;
 
 #[test]
 fn param_slice_read_defers_free_to_projection_last_use() {
@@ -35,9 +36,16 @@ fn param_slice_read_defers_free_to_projection_last_use() {
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
     let vdecl = tb.var_decl(v_name, false, view_ty, sl, span);
     let vread = tb.var(v_name, view_ty, span);
-    let call1 = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+    let call1 = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread],
+        &all_borrow(&[vread]),
+        void,
+        span,
+    );
     let n = tb.int_const(42, int_ty, span);
-    let call2 = tb.call(print, &[n], &all_borrow(&[n]), void, span);
+    let call2 = tb.call(DeclId::NONE, print, &[n], &all_borrow(&[n]), void, span);
     let tir = tb.finish(&[vdecl, call1, call2]);
     let mut sink = DiagSink::new();
     let mut sidecar = check(
@@ -98,7 +106,7 @@ fn move_and_viewasowner_borrow_of_one_owner_reports_borrow_note() {
     let sl = tb.slice(sv2, Some(zero), Some(one), view_ty, reborrow_span);
     let reborrow = tb.view_as_owner(sl, str_ty, reborrow_span);
     let modes = vec![ParamMode::Move, ParamMode::Borrow];
-    let call = tb.call(two, &[sv1, reborrow], &modes, void, span);
+    let call = tb.call(DeclId::NONE, two, &[sv1, reborrow], &modes, void, span);
     let tir = tb.finish(&[decl, call]);
     let mut sink = DiagSink::new();
     let _sc = check(
@@ -159,7 +167,14 @@ fn view_creation_registers_projection() {
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
     let vdecl = tb.var_decl(v, false, view_ty, sl, span);
     let vread = tb.var(v, view_ty, span);
-    let call = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+    let call = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread],
+        &all_borrow(&[vread]),
+        void,
+        span,
+    );
     let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
     let tir = tb.finish(&[decl, vdecl, stmt]);
 
@@ -219,7 +234,14 @@ fn freeze_blocks_move_while_view_live() {
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
     let vdecl = tb.var_decl(v, false, view_ty, sl, span);
     let sread = tb.var(s, str_ty, span);
-    let call = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+    let call = tb.call(
+        DeclId::NONE,
+        consume,
+        &[sread],
+        &[ParamMode::Move],
+        void,
+        span,
+    );
     let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
     let tir = tb.finish(&[decl, vdecl, stmt]);
 
@@ -279,6 +301,7 @@ fn freeze_blocks_inout_while_view_live() {
     let sread = tb.var(s, str_ty, span);
     let suffix = tb.str_const(bang, str_ty, span);
     let call = tb.call(
+        DeclId::NONE,
         str_push,
         &[sread, suffix],
         &[ParamMode::Inout, ParamMode::Borrow],
@@ -342,10 +365,24 @@ fn freeze_lifts_after_last_view_use() {
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
     let vdecl = tb.var_decl(v, false, view_ty, sl, span);
     let vread = tb.var(v, view_ty, span);
-    let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+    let pcall = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread],
+        &all_borrow(&[vread]),
+        void,
+        span,
+    );
     let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
     let sread = tb.var(s, str_ty, span);
-    let ccall = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+    let ccall = tb.call(
+        DeclId::NONE,
+        consume,
+        &[sread],
+        &[ParamMode::Move],
+        void,
+        span,
+    );
     let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
     let tir = tb.finish(&[decl, vdecl, pstmt, cstmt]);
 
@@ -396,7 +433,14 @@ fn reslice_projects_root_owner() {
     let sl2 = tb.slice(base2, Some(i1), Some(i2), view_ty, span);
     let wdecl = tb.var_decl(w, false, view_ty, sl2, span);
     let sread = tb.var(s, str_ty, span);
-    let call = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+    let call = tb.call(
+        DeclId::NONE,
+        consume,
+        &[sread],
+        &[ParamMode::Move],
+        void,
+        span,
+    );
     let stmt = tb.unary(TirTag::ExprStmt, void, call, span);
     let tir = tb.finish(&[decl, vdecl, wdecl, stmt]);
 

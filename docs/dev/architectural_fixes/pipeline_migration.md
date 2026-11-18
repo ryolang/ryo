@@ -77,10 +77,34 @@ flowchart TD
     H --> I[JIT execution or AOT object and linking]
 ```
 
-`CompilationContext` owns the source database. Each `SourceId` identifies one immutable
-source revision in one context; `get` resolves retained revisions, while `require_current`
-rejects stale input. Source text and display paths are independent, and wrong-context handles
-are rejected even when their local revision indices match.
+`CompilationContext` owns the source database and the sole declaration table. Each `SourceId`
+identifies one immutable source revision in one context; `get` resolves retained revisions,
+while `require_current` rejects stale input. Source text and display paths are independent,
+and wrong-context handles are rejected even when their local revision indices match.
+
+Sema registers every UIR function body before name resolution. A `DeclId` combines the context
+identity with a declaration-table index. Sourced declarations are keyed by source revision and UIR
+body index; source-less declarations are keyed by stable UIR identity and body index. Identical
+registration returns the existing ID even when revisions are revisited. Registration validates
+every source-backed body's `SourceId` against the compilation context before mutating the table.
+Retained revisions from that context remain valid; foreign and unknown sources reject the whole
+batch. Independent source-less UIRs receive distinct declaration identities in one context, while
+replaying the same UIR preserves its IDs.
+AstGen records its producer pool on the UIR. This stamp is a trusted-producer assertion, not
+proof that arbitrarily mutated raw arenas contain handles from that pool. Registration rejects
+missing or mismatched pool identity before source or name validation and before any table
+mutation. Declaration name handles
+are bounds-checked and required to contain UTF-8 before registration can mutate the table. Names
+are compared by resolved text, not pool-local `StringId` values, so revisiting a revision through
+another intern pool remains idempotent. Canonical name bytes live in one table-owned arena with
+a range per declaration. Name ranges and arena bytes are staged with their declarations until
+every body validates; a conflict leaves the table and all returned IDs unchanged.
+Conflicting metadata for the same source revision emits an internal error and prevents executable
+publication. A new source revision allocates fresh IDs, so new semantic artifacts cannot reuse
+declaration identities from the old revision. Old IDs remain associated with their retained source
+revisions for diagnostics. Duplicate spellings still receive distinct IDs, with the existing
+first-wins lookup and duplicate-definition diagnostic. Sema maps those context-global IDs to
+current-UIR-local slots instead of indexing bodies by the declaration-table index.
 
 The frontend owns Flow construction and ownership analysis in
 [`pipeline.rs`](../../../ryo-frontend/src/pipeline.rs).
@@ -92,11 +116,42 @@ with an Ariadne cache and byte-to-character table per referenced revision. Sourc
 diagnostics never borrow the first registered filename, and invalid spans become internal
 compiler errors. Partial artifacts remain inspectable after source errors. Such errors block backend preparation.
 
-Typed bodies, Flow versions, and layout contexts carry process-local identities.
-Cleanup records its Flow identity. Backend preparation checks these associations in every build.
-Equal names, arena lengths, or valid local indices do not establish compatibility.
-Published artifacts expose immutable references. Content stamps also reject edits to cloned
-TIR, Flow, and cleanup arenas. Rebuild an artifact and its analyses after a representation change.
+Typed bodies, Flow versions, and layout contexts carry process-local identities. Every TIR body
+records its `DeclId`. Sema-built TIR also records its producer pool identity, included in its
+representation stamp. `BuiltProgram` requires an exact producer-pool match from every body before
+constructing Flow. It also validates every call name's pool bounds and UTF-8 before Flow can
+resolve it, returning failures through the analysis error path. Unbound synthetic bodies are
+rejected there and remain usable only in low-level
+tests outside this transition. A direct user-call payload starts with the callee's
+context and local ID, then retains the compatibility name, argument count, arguments, and
+parameter modes. Builtin and lowered runtime calls use a separate declaration-free marker;
+`DeclId::NONE` remains synthetic-test-only and invalid in executable artifacts. Backend symbol
+generation still uses the compatibility name in this migration stage.
+
+Cleanup records its Flow identity. Backend preparation checks these associations in every build
+and resolves every TIR body and direct user-call ID through the context's declaration table.
+Each declaration must match its compatibility name by resolved text. Producer-bound TIR and every
+Flow must match the supplied pool's layout context, and every body span must carry the same
+source revision as its declaration. Source-backed declarations must refer to a current source
+revision; source-less
+synthetic declarations have no revision currency to check. Every direct callee must have its
+body in the backend batch, and duplicate backend names are rejected while symbol generation
+remains name-based. Direct calls to names dispatched as runtime callees are rejected so validation
+and emission select the same target. Declaration-free calls must name an executable builtin or
+synthesized runtime callee; source-only `assert` and `panic` are excluded. Missing, unknown,
+stale, wrong-context, and name-mismatched identities are rejected
+before Cranelift. Equal names, arena lengths, or valid local indices do not establish
+compatibility. Published artifacts expose immutable references. Content stamps also reject
+edits to cloned TIR, Flow, and cleanup arenas, including declaration-only changes. Rebuild an
+artifact and its analyses after a representation change.
+
+`CleanupProgram::require_backend_transition` returns a `BackendReady` handle that borrows the
+program, compilation context, and intern pool through emission. Drivers consume artifacts through
+that handle, so source replacement or pool substitution cannot occur after validation. Direct
+callers that rely on these declaration guarantees must retain the handle the same way; codegen
+does not independently establish declaration identity for arbitrary raw artifacts. Low-level
+backend tests intentionally call `Codegen::compile` with raw artifacts to test mechanical emission,
+bypassing declaration and source-currency validation rather than exercising publication guarantees.
 
 [`CleanupPlan`](../../../ryo-core/src/flow/cleanup.rs) selects each release's storage before emission.
 A binding release names a Flow place. A displaced value release names its producer.

@@ -1,5 +1,6 @@
 use super::super::*;
 use super::common::*;
+use ryo_core::declaration::DeclId;
 
 #[test]
 fn inside_loop_temp_is_freed() {
@@ -21,7 +22,14 @@ fn inside_loop_temp_is_freed() {
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let lit = tb.str_const(inside, str_ty, span);
-    let print_call = tb.call(print_name, &[lit], &all_borrow(&[lit]), void, span);
+    let print_call = tb.call(
+        DeclId::NONE,
+        print_name,
+        &[lit],
+        &all_borrow(&[lit]),
+        void,
+        span,
+    );
     let wl = tb.while_loop(cond, &[print_call], void, span);
     let tir = tb.finish(&[wl]);
 
@@ -74,7 +82,14 @@ fn pre_loop_owner_last_use_in_loop_freed_at_loop_exit() {
     //         print(s)
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let zero = tb.int_const(0, int_ty, span);
-    let alloc = tb.call(int_to_str, &[zero], &all_borrow(&[zero]), str_ty, span);
+    let alloc = tb.call(
+        DeclId::NONE,
+        int_to_str,
+        &[zero],
+        &all_borrow(&[zero]),
+        str_ty,
+        span,
+    );
     let decl = tb.var_decl(s_name, false, str_ty, alloc, span);
 
     let cond_w = tb.bool_const(true, bool_ty, span);
@@ -82,7 +97,14 @@ fn pre_loop_owner_last_use_in_loop_freed_at_loop_exit() {
     let brk = tb.break_stmt(void, span);
     let if_inside = tb.if_stmt(cond_i, &[brk], &[], None, void, span);
     let s_var = tb.var(s_name, str_ty, span);
-    let print_call = tb.call(print, &[s_var], &all_borrow(&[s_var]), void, span);
+    let print_call = tb.call(
+        DeclId::NONE,
+        print,
+        &[s_var],
+        &all_borrow(&[s_var]),
+        void,
+        span,
+    );
     let print_stmt = tb.unary(TirTag::ExprStmt, void, print_call, span);
     let wl = tb.while_loop(cond_w, &[if_inside, print_stmt], void, span);
     let tir = tb.finish(&[decl, wl]);
@@ -142,7 +164,14 @@ fn pre_loop_owner_continue_before_last_use_does_not_free_on_continue() {
     //         print(s)
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let zero = tb.int_const(0, int_ty, span);
-    let alloc = tb.call(int_to_str, &[zero], &all_borrow(&[zero]), str_ty, span);
+    let alloc = tb.call(
+        DeclId::NONE,
+        int_to_str,
+        &[zero],
+        &all_borrow(&[zero]),
+        str_ty,
+        span,
+    );
     let decl = tb.var_decl(s_name, false, str_ty, alloc, span);
 
     let cond_w = tb.bool_const(true, bool_ty, span);
@@ -150,7 +179,14 @@ fn pre_loop_owner_continue_before_last_use_does_not_free_on_continue() {
     let cont = tb.continue_stmt(void, span);
     let if_inside = tb.if_stmt(cond_i, &[cont], &[], None, void, span);
     let s_var = tb.var(s_name, str_ty, span);
-    let print_call = tb.call(print, &[s_var], &all_borrow(&[s_var]), void, span);
+    let print_call = tb.call(
+        DeclId::NONE,
+        print,
+        &[s_var],
+        &all_borrow(&[s_var]),
+        void,
+        span,
+    );
     let print_stmt = tb.unary(TirTag::ExprStmt, void, print_call, span);
     let wl = tb.while_loop(cond_w, &[if_inside, print_stmt], void, span);
     let tir = tb.finish(&[decl, wl]);
@@ -210,6 +246,7 @@ fn continue_jump_does_not_free_pre_loop_owner_uaf_guard() {
     let cont = tb.continue_stmt(void, span);
     let sv = tb.var(s, str_ty, span);
     let pcall = tb.call(
+        DeclId::NONE,
         print,
         &[sv],
         &[ryo_core::tir::ParamMode::Borrow],
@@ -310,13 +347,27 @@ fn break_before_last_use_schedules_jump_free() {
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let cond_w = tb.bool_const(true, bool_ty, span);
     let zero = tb.int_const(0, int_ty, span);
-    let alloc = tb.call(int_to_str, &[zero], &all_borrow(&[zero]), str_ty, span);
+    let alloc = tb.call(
+        DeclId::NONE,
+        int_to_str,
+        &[zero],
+        &all_borrow(&[zero]),
+        str_ty,
+        span,
+    );
     let decl = tb.var_decl(s_name, false, str_ty, alloc, span);
     let cond_i = tb.bool_const(true, bool_ty, span);
     let brk = tb.break_stmt(void, span);
     let if_inside = tb.if_stmt(cond_i, &[brk], &[], None, void, span);
     let s_var = tb.var(s_name, str_ty, span);
-    let print_call = tb.call(print, &[s_var], &all_borrow(&[s_var]), void, span);
+    let print_call = tb.call(
+        DeclId::NONE,
+        print,
+        &[s_var],
+        &all_borrow(&[s_var]),
+        void,
+        span,
+    );
     let print_stmt = tb.unary(TirTag::ExprStmt, void, print_call, span);
     let wl = tb.while_loop(cond_w, &[decl, if_inside, print_stmt], void, span);
     let tir = tb.finish(&[wl]);
@@ -370,10 +421,24 @@ fn break_after_last_use_does_not_double_schedule() {
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let cond_w = tb.bool_const(true, bool_ty, span);
     let zero = tb.int_const(0, int_ty, span);
-    let alloc = tb.call(int_to_str, &[zero], &all_borrow(&[zero]), str_ty, span);
+    let alloc = tb.call(
+        DeclId::NONE,
+        int_to_str,
+        &[zero],
+        &all_borrow(&[zero]),
+        str_ty,
+        span,
+    );
     let decl = tb.var_decl(s_name, false, str_ty, alloc, span);
     let s_var = tb.var(s_name, str_ty, span);
-    let print_call = tb.call(print, &[s_var], &all_borrow(&[s_var]), void, span);
+    let print_call = tb.call(
+        DeclId::NONE,
+        print,
+        &[s_var],
+        &all_borrow(&[s_var]),
+        void,
+        span,
+    );
     let print_stmt = tb.unary(TirTag::ExprStmt, void, print_call, span);
     let cond_i = tb.bool_const(true, bool_ty, span);
     let brk = tb.break_stmt(void, span);
@@ -444,11 +509,25 @@ fn break_in_else_arm_sibling_print_schedules_jump_free() {
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let cond_w = tb.bool_const(true, bool_ty, span);
     let zero = tb.int_const(0, int_ty, span);
-    let alloc = tb.call(int_to_str, &[zero], &all_borrow(&[zero]), str_ty, span);
+    let alloc = tb.call(
+        DeclId::NONE,
+        int_to_str,
+        &[zero],
+        &all_borrow(&[zero]),
+        str_ty,
+        span,
+    );
     let decl = tb.var_decl(s_name, false, str_ty, alloc, span);
     let cond_i = tb.bool_const(true, bool_ty, span);
     let s_var = tb.var(s_name, str_ty, span);
-    let print_call = tb.call(print, &[s_var], &all_borrow(&[s_var]), void, span);
+    let print_call = tb.call(
+        DeclId::NONE,
+        print,
+        &[s_var],
+        &all_borrow(&[s_var]),
+        void,
+        span,
+    );
     let print_stmt = tb.unary(TirTag::ExprStmt, void, print_call, span);
     let brk = tb.break_stmt(void, span);
     let if_inside = tb.if_stmt(cond_i, &[print_stmt], &[], Some(&[brk]), void, span);
@@ -515,13 +594,27 @@ fn continue_before_last_use_schedules_jump_free() {
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let cond_w = tb.bool_const(true, bool_ty, span);
     let zero = tb.int_const(0, int_ty, span);
-    let alloc = tb.call(int_to_str, &[zero], &all_borrow(&[zero]), str_ty, span);
+    let alloc = tb.call(
+        DeclId::NONE,
+        int_to_str,
+        &[zero],
+        &all_borrow(&[zero]),
+        str_ty,
+        span,
+    );
     let decl = tb.var_decl(s_name, false, str_ty, alloc, span);
     let cond_i = tb.bool_const(true, bool_ty, span);
     let cont = tb.continue_stmt(void, span);
     let if_inside = tb.if_stmt(cond_i, &[cont], &[], None, void, span);
     let s_var = tb.var(s_name, str_ty, span);
-    let print_call = tb.call(print, &[s_var], &all_borrow(&[s_var]), void, span);
+    let print_call = tb.call(
+        DeclId::NONE,
+        print,
+        &[s_var],
+        &all_borrow(&[s_var]),
+        void,
+        span,
+    );
     let print_stmt = tb.unary(TirTag::ExprStmt, void, print_call, span);
     let wl = tb.while_loop(cond_w, &[decl, if_inside, print_stmt], void, span);
     let tir = tb.finish(&[wl]);
@@ -569,7 +662,14 @@ fn pre_loop_owner_read_only_in_loop_is_freed() {
     let decl = tb.var_decl(s_name, false, str_ty, lit, span);
     let cond = tb.bool_const(false, bool_ty, span);
     let s_var = tb.var(s_name, str_ty, span);
-    let print_call = tb.call(print_name, &[s_var], &all_borrow(&[s_var]), void, span);
+    let print_call = tb.call(
+        DeclId::NONE,
+        print_name,
+        &[s_var],
+        &all_borrow(&[s_var]),
+        void,
+        span,
+    );
     let wl = tb.while_loop(cond, &[print_call], void, span);
     let tir = tb.finish(&[decl, wl]);
 
@@ -641,14 +741,35 @@ fn diverged_loop_writes_branch_gated_free_exactly_once() {
     let decl_x = tb.var_decl(x, false, str_ty, lit_x, span);
     let cond_i = tb.bool_const(true, bool_ty, span);
     let x_then = tb.var(x, str_ty, span);
-    let consume_then = tb.call(consume, &[x_then], &[ParamMode::Move], void, span);
+    let consume_then = tb.call(
+        DeclId::NONE,
+        consume,
+        &[x_then],
+        &[ParamMode::Move],
+        void,
+        span,
+    );
     let then_stmt = tb.unary(TirTag::ExprStmt, void, consume_then, span);
     let x_else = tb.var(x, str_ty, span);
-    let print_else = tb.call(print, &[x_else], &all_borrow(&[x_else]), void, span);
+    let print_else = tb.call(
+        DeclId::NONE,
+        print,
+        &[x_else],
+        &all_borrow(&[x_else]),
+        void,
+        span,
+    );
     let else_stmt = tb.unary(TirTag::ExprStmt, void, print_else, span);
     let if_inst = tb.if_stmt(cond_i, &[then_stmt], &[], Some(&[else_stmt]), void, span);
     let m_read = tb.var(m, str_ty, span);
-    let consume_m = tb.call(consume, &[m_read], &[ParamMode::Move], void, span);
+    let consume_m = tb.call(
+        DeclId::NONE,
+        consume,
+        &[m_read],
+        &[ParamMode::Move],
+        void,
+        span,
+    );
     let consume_m_stmt = tb.unary(TirTag::ExprStmt, void, consume_m, span);
     let wl = tb.while_loop(cond_w, &[decl_x, if_inst, consume_m_stmt], void, span);
     let tir = tb.finish(&[decl_m, wl]);
@@ -735,7 +856,7 @@ fn loop_nesting_chains_depth_three() {
     let cond_w1 = tb.bool_const(true, bool_ty, span);
     let cond_w2 = tb.bool_const(true, bool_ty, span);
     let lit = tb.str_const(deep, str_ty, span);
-    let print_call = tb.call(print, &[lit], &all_borrow(&[lit]), void, span);
+    let print_call = tb.call(DeclId::NONE, print, &[lit], &all_borrow(&[lit]), void, span);
     let wl_inner = tb.while_loop(cond_w2, &[print_call], void, span);
     let wl_outer = tb.while_loop(cond_w1, &[wl_inner], void, span);
     let fr = tb.for_range(i, start, end, &[wl_outer], void, span);

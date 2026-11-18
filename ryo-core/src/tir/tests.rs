@@ -24,6 +24,31 @@ fn param_ref_predicates() {
 }
 
 #[test]
+fn builder_layout_context_allows_initial_binding_and_same_pool_reuse() {
+    let mut pool = InternPool::new();
+    let main = pool.intern_str("main");
+    let mut builder = TirBuilder::new(main, vec![], pool.void(), sp())
+        .with_layout_context(&pool)
+        .with_layout_context(&pool);
+    let end = builder.return_void(pool.void(), sp());
+    let tir = builder.finish(&[end]);
+
+    assert!(tir.require_layout(&pool).is_ok());
+}
+
+#[test]
+#[should_panic]
+fn builder_layout_context_rejects_rebinding_to_a_different_pool() {
+    let mut producer = InternPool::new();
+    let other = InternPool::new();
+    let main = producer.intern_str("main");
+    let builder =
+        TirBuilder::new(main, vec![], producer.void(), sp()).with_layout_context(&producer);
+
+    let _ = builder.with_layout_context(&other);
+}
+
+#[test]
 fn borrowed_struct_lit_view_iterates_canonical_fields() {
     let mut pool = InternPool::new();
     let int_ty = pool.int();
@@ -102,6 +127,7 @@ fn call_payload_round_trips() {
     let int_ty = pool.int();
     let foo = pool.intern_str("foo");
     let main = pool.intern_str("main");
+    let callee = crate::declaration::DeclId::from_raw_parts(3, 9);
 
     let mut b = TirBuilder::new(main, vec![], int_ty, sp());
     let a = b.int_const(1, int_ty, sp());
@@ -109,11 +135,12 @@ fn call_payload_round_trips() {
     // Mixed modes: first arg borrowed, second moved — exercises both
     // encodings through the extra arena and back through CallView.
     let modes = [ParamMode::Borrow, ParamMode::Move];
-    let call = b.call(foo, &[a, bb], &modes, int_ty, sp());
+    let call = b.call(callee, foo, &[a, bb], &modes, int_ty, sp());
     let ret = b.unary(TirTag::Return, pool.void(), call, sp());
     let tir = b.finish(&[ret]);
 
     let view = tir.call_view(call);
+    assert_eq!(view.callee, Some(callee));
     assert_eq!(view.name, foo);
     assert_eq!(view.args.iter().collect::<Vec<_>>(), vec![a, bb]);
     assert_eq!(
@@ -144,9 +171,10 @@ fn call_view_panics_on_corrupt_mode_word() {
     let foo = pool.intern_str("foo");
     let main = pool.intern_str("main");
 
+    let callee = crate::declaration::DeclId::from_raw_parts(3, 9);
     let mut b = TirBuilder::new(main, vec![], int_ty, sp());
     let a = b.int_const(1, int_ty, sp());
-    let call = b.call(foo, &[a], &[ParamMode::Borrow], int_ty, sp());
+    let call = b.call(callee, foo, &[a], &[ParamMode::Borrow], int_ty, sp());
     let ret = b.unary(TirTag::Return, pool.void(), call, sp());
     let mut tir = b.finish(&[ret]);
 
@@ -155,7 +183,7 @@ fn call_view_panics_on_corrupt_mode_word() {
     let TirData::Extra(rng) = inst.data else {
         panic!("Call must carry TirData::Extra")
     };
-    let mode_idx = rng.as_range().start + 3;
+    let mode_idx = rng.as_range().start + 5;
     tir.extra[mode_idx] = 99;
 
     let _ = tir.call_view(call).modes.iter().next();
@@ -356,20 +384,22 @@ fn call_wire_fixture() {
     let mut pool = InternPool::new();
     let int_ty = pool.int();
     let main = pool.intern_str("main");
+    let callee = crate::declaration::DeclId::from_raw_parts(11, 12);
     let mut b = TirBuilder::new(main, vec![], int_ty, sp());
     b.extra.extend([0xAAAA_AAAA; 5]);
     let name = StringId::from_raw(7);
     let arg1 = TirRef::from_raw(31);
     let arg2 = TirRef::from_raw(32);
 
-    let empty = b.call(name, &[], &[], int_ty, sp());
+    let empty = b.call(callee, name, &[], &[], int_ty, sp());
     let TirData::Extra(range) = b.instructions[empty.index()].data else {
         panic!("Call must carry TirData::Extra");
     };
-    assert_eq!(range, ExtraRange { offset: 5, len: 2 });
-    assert_eq!(&b.extra[5..7], &[7, 0]);
+    assert_eq!(range, ExtraRange { offset: 5, len: 4 });
+    assert_eq!(&b.extra[5..9], &[11, 12, 7, 0]);
 
     let pop = b.call(
+        callee,
         name,
         &[arg1, arg2],
         &[ParamMode::Move, ParamMode::Inout],
@@ -379,18 +409,26 @@ fn call_wire_fixture() {
     let TirData::Extra(range2) = b.instructions[pop.index()].data else {
         panic!("Call must carry TirData::Extra");
     };
-    assert_eq!(range2, ExtraRange { offset: 7, len: 6 });
-    assert_eq!(&b.extra[7..13], &[7, 2, 31, 32, 1, 2]);
+    assert_eq!(range2, ExtraRange { offset: 9, len: 8 });
+    assert_eq!(&b.extra[9..17], &[11, 12, 7, 2, 31, 32, 1, 2]);
 
-    let borrow = b.call(name, &[arg1], &[ParamMode::Borrow], int_ty, sp());
+    let borrow = b.call(callee, name, &[arg1], &[ParamMode::Borrow], int_ty, sp());
     let TirData::Extra(range3) = b.instructions[borrow.index()].data else {
         panic!("Call must carry TirData::Extra");
     };
-    assert_eq!(range3, ExtraRange { offset: 13, len: 4 });
-    assert_eq!(&b.extra[13..17], &[7, 1, 31, 0]);
+    assert_eq!(range3, ExtraRange { offset: 17, len: 6 });
+    assert_eq!(&b.extra[17..23], &[11, 12, 7, 1, 31, 0]);
 
-    let (tir, r) = shell_with(&[7, 2, 31, 32, 1, 2], TirTag::Call, 6);
+    let builtin = b.builtin_call(name, &[arg1], &[ParamMode::Borrow], int_ty, sp());
+    let TirData::Extra(range4) = b.instructions[builtin.index()].data else {
+        panic!("Call must carry TirData::Extra");
+    };
+    assert_eq!(range4, ExtraRange { offset: 23, len: 6 });
+    assert_eq!(&b.extra[23..29], &[0, u32::MAX - 1, 7, 1, 31, 0]);
+
+    let (tir, r) = shell_with(&[11, 12, 7, 2, 31, 32, 1, 2], TirTag::Call, 8);
     let v = tir.call_view(r);
+    assert_eq!(v.callee, Some(callee));
     assert_eq!(v.name, name);
     assert_eq!(v.args.len(), 2);
     assert_eq!(v.args.at(1), arg2);
@@ -398,10 +436,14 @@ fn call_wire_fixture() {
     assert_eq!(v.modes.at(0), ParamMode::Move);
     assert_eq!(v.modes.at(1), ParamMode::Inout);
 
-    let (tir, r) = shell_with(&[7, 0], TirTag::Call, 2);
+    let (tir, r) = shell_with(&[11, 12, 7, 0], TirTag::Call, 4);
     let v = tir.call_view(r);
+    assert_eq!(v.callee, Some(callee));
     assert_eq!(v.args.len(), 0);
     assert_eq!(v.modes.len(), 0);
+
+    let (tir, r) = shell_with(&[0, u32::MAX - 1, 7, 1, 31, 0], TirTag::Call, 6);
+    assert_eq!(tir.call_view(r).callee, None);
 }
 
 #[test]

@@ -1,5 +1,6 @@
 use super::super::*;
 use super::common::*;
+use ryo_core::declaration::DeclId;
 
 #[test]
 fn conditional_dead_reassign_schedules_fallthrough_drop() {
@@ -257,7 +258,7 @@ fn last_use_inside_loop_anchors_after_loop() {
     let zero = tb.int_const(0, int_ty, span);
     let three = tb.int_const(3, int_ty, span);
     let sv = tb.var(s, str_ty, span);
-    let pr = tb.call(print, &[sv], &[ParamMode::Borrow], void, span);
+    let pr = tb.call(DeclId::NONE, print, &[sv], &[ParamMode::Borrow], void, span);
     let fr = tb.for_range(i, zero, three, &[pr], void, span);
     let tir = tb.finish(&[decl, fr]);
     let mut sink = DiagSink::new();
@@ -304,7 +305,7 @@ fn last_use_inside_if_anchors_after_if() {
     let decl = tb.var_decl(s, false, str_ty, lit_a, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let sv = tb.var(s, str_ty, span);
-    let pr = tb.call(print, &[sv], &[ParamMode::Borrow], void, span);
+    let pr = tb.call(DeclId::NONE, print, &[sv], &[ParamMode::Borrow], void, span);
     let if_s = tb.if_stmt(cond, &[pr], &[], None, void, span);
     let tir = tb.finish(&[decl, if_s]);
     let mut sink = DiagSink::new();
@@ -346,7 +347,7 @@ fn return_epilogue_frees_live_local() {
     let decl = tb.var_decl(s, false, str_ty, lit_a, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let sv = tb.var(s, str_ty, span);
-    let pr = tb.call(print, &[sv], &[ParamMode::Borrow], void, span);
+    let pr = tb.call(DeclId::NONE, print, &[sv], &[ParamMode::Borrow], void, span);
     let ret = tb.return_void(void, span);
     let if_s = tb.if_stmt(cond, &[pr], &[], Some(&[ret]), void, span);
     let tir = tb.finish(&[decl, if_s]);
@@ -572,8 +573,22 @@ fn temp_last_use_inside_loop_not_reanchored() {
     let zero = tb.int_const(0, int_ty, span);
     let three = tb.int_const(3, int_ty, span);
     let iv = tb.var(i, int_ty, span);
-    let call = tb.call(int_to_str, &[iv], &[ParamMode::Borrow], str_ty, span);
-    let pr = tb.call(print, &[call], &[ParamMode::Borrow], void, span);
+    let call = tb.call(
+        DeclId::NONE,
+        int_to_str,
+        &[iv],
+        &[ParamMode::Borrow],
+        str_ty,
+        span,
+    );
+    let pr = tb.call(
+        DeclId::NONE,
+        print,
+        &[call],
+        &[ParamMode::Borrow],
+        void,
+        span,
+    );
     let fr = tb.for_range(i, zero, three, &[pr], void, span);
     let tir = tb.finish(&[fr]);
     let mut sink = DiagSink::new();
@@ -621,7 +636,14 @@ fn conditional_dead_reassign_gated_on_real_else() {
     let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
     let asg = tb.assign(s, str_ty, lit_b, span);
     let lit_x = tb.str_const(pool.intern_str("x"), str_ty, span);
-    let pr = tb.call(print, &[lit_x], &[ParamMode::Borrow], void, span);
+    let pr = tb.call(
+        DeclId::NONE,
+        print,
+        &[lit_x],
+        &[ParamMode::Borrow],
+        void,
+        span,
+    );
     let if_s = tb.if_stmt(cond, &[asg], &[], Some(&[pr]), void, span);
     let tir = tb.finish(&[decl, if_s]);
     let mut sink = DiagSink::new();

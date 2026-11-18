@@ -51,7 +51,15 @@ pub(super) fn run(input: &str) -> Result<RunOk, Vec<Diag>> {
         return Err(diags);
     }
     let mut sink = DiagSink::new();
-    let tirs = analyze(&uir, &mut pool, &mut sink, input, Path::new("<test>"));
+    let mut context = CompilationContext::new();
+    let tirs = analyze(
+        &uir,
+        &mut pool,
+        &mut sink,
+        input,
+        Path::new("<test>"),
+        &mut context,
+    );
     if sink.has_errors() {
         return Err(sink.into_diags());
     }
@@ -61,13 +69,28 @@ pub(super) fn run(input: &str) -> Result<RunOk, Vec<Diag>> {
 /// Variant that returns TIR even when sema reported errors —
 /// used to assert the "Unreachable + diag" invariant from §4.5.
 pub(super) fn run_with_errors(input: &str) -> (Vec<Tir>, Vec<Diag>, InternPool) {
+    let (tirs, diags, pool, _) = run_with_errors_and_context(input);
+    (tirs, diags, pool)
+}
+
+pub(super) fn run_with_errors_and_context(
+    input: &str,
+) -> (Vec<Tir>, Vec<Diag>, InternPool, CompilationContext) {
     let (uir, mut pool, diags) = lower(input);
     let mut sink = DiagSink::new();
     for diag in diags {
         sink.emit(diag);
     }
-    let tirs = analyze(&uir, &mut pool, &mut sink, input, Path::new("<test>"));
-    (tirs, sink.into_diags(), pool)
+    let mut context = CompilationContext::new();
+    let tirs = analyze(
+        &uir,
+        &mut pool,
+        &mut sink,
+        input,
+        Path::new("<test>"),
+        &mut context,
+    );
+    (tirs, sink.into_diags(), pool, context)
 }
 
 pub(super) fn first_msg(diags: &[Diag]) -> &str {
@@ -572,13 +595,22 @@ fn require_decl_reports_cycle_when_in_progress() {
     let zero = b.int_literal(0, sp());
     let ret = b.unary(InstTag::Return, zero, sp());
     b.add_function(main_id, vec![], pool.int(), &[ret], sp());
-    let uir = b.finish();
+    let uir = b.finish().with_layout_context(&pool);
 
-    let mut sema = Sema::new(&uir, &mut pool, &mut sink, "test", Path::new("<test>"));
+    let mut context = CompilationContext::new();
+    let mut sema = Sema::new(
+        &uir,
+        &mut pool,
+        &mut sink,
+        "test",
+        Path::new("<test>"),
+        &mut context,
+    );
     sema.resolve_signatures();
     // Pretend we're mid-resolving `main`.
     sema.decl_state[0] = DeclState::InProgress;
-    let ok = sema.require_decl(DeclId::from_index(0), sp(), main_id);
+    let decl = sema.declaration_ids[0];
+    let ok = sema.require_decl(decl, sp(), main_id);
     assert!(!ok, "require_decl must reject an InProgress decl");
     let diags = sink.into_diags();
     assert!(

@@ -480,6 +480,8 @@ pub struct TirParam {
 #[derive(Debug, Clone)]
 pub struct Tir {
     identity: crate::artifact::ArtifactId,
+    layout_context: Option<crate::artifact::ArtifactId>,
+    pub decl: crate::declaration::DeclId,
     pub name: StringId,
     pub params: Vec<TirParam>,
     pub return_type: TypeId,
@@ -507,6 +509,14 @@ impl Tir {
     /// Identity of this immutable typed body version.
     pub fn identity(&self) -> crate::artifact::ArtifactId {
         self.identity
+    }
+
+    /// Require the intern pool that produced this body.
+    pub fn require_layout(&self, pool: &InternPool) -> Result<(), String> {
+        if self.layout_context != Some(pool.identity()) {
+            return Err("TIR belongs to a different type and layout context".into());
+        }
+        Ok(())
     }
 
     /// Look up the instruction for `r`.
@@ -557,6 +567,8 @@ impl Tir {
 /// Mutable handle for emitting one function body's TIR. Sema is its
 /// only caller in production; tests use it directly.
 pub struct TirBuilder {
+    layout_context: Option<crate::artifact::ArtifactId>,
+    decl: crate::declaration::DeclId,
     name: StringId,
     params: Vec<TirParam>,
     return_type: TypeId,
@@ -586,6 +598,8 @@ impl TirBuilder {
             data: TirData::None,
         };
         TirBuilder {
+            layout_context: None,
+            decl: crate::declaration::DeclId::NONE,
             name,
             params,
             return_type,
@@ -596,6 +610,27 @@ impl TirBuilder {
             saw_match: false,
             direct_catch_matches: std::collections::HashSet::new(),
         }
+    }
+
+    pub fn with_decl(mut self, decl: crate::declaration::DeclId) -> Self {
+        self.decl = decl;
+        self
+    }
+
+    /// Record the trusted producer's pool identity without inspecting existing handles.
+    /// The caller must emit every pool-scoped handle through `pool`.
+    /// Reusing the same pool is idempotent; rebinding to another pool panics.
+    pub fn with_layout_context(mut self, pool: &InternPool) -> Self {
+        if let Some(layout_context) = self.layout_context {
+            assert_eq!(
+                layout_context,
+                pool.identity(),
+                "TIR layout context is already bound to a different intern pool"
+            );
+        } else {
+            self.layout_context = Some(pool.identity());
+        }
+        self
     }
 
     /// Type of an instruction the builder has already emitted.
@@ -792,11 +827,23 @@ impl TirBuilder {
         }
     }
 
-    /// Emit a `Call` with name, arg list, and per-arg call conventions
-    /// packed into `extra`. `ty` is the call's *return* type.
-    /// `modes` carries one [`ParamMode`] per argument (borrow vs move),
-    /// stamped by sema from the callee signature.
+    /// Emit a user `Call` with declaration identity, compatibility name,
+    /// arg list, and per-arg call conventions packed into `extra`.
+    /// `ty` is the call's *return* type.
     pub fn call(
+        &mut self,
+        callee: crate::declaration::DeclId,
+        name: StringId,
+        args: &[TirRef],
+        modes: &[ParamMode],
+        ty: TypeId,
+        span: Span,
+    ) -> TirRef {
+        let range = call_extra::encode(&mut self.extra, callee, name, args, modes);
+        self.push(TirTag::Call, ty, TirData::Extra(range), span)
+    }
+
+    pub fn builtin_call(
         &mut self,
         name: StringId,
         args: &[TirRef],
@@ -804,7 +851,7 @@ impl TirBuilder {
         ty: TypeId,
         span: Span,
     ) -> TirRef {
-        let range = call_extra::encode(&mut self.extra, name, args, modes);
+        let range = call_extra::encode_builtin(&mut self.extra, name, args, modes);
         self.push(TirTag::Call, ty, TirData::Extra(range), span)
     }
 
@@ -974,6 +1021,8 @@ impl TirBuilder {
         let len = Self::len_u32(stmts.len());
         let tir = Tir {
             identity: crate::artifact::ArtifactId::fresh(),
+            layout_context: self.layout_context,
+            decl: self.decl,
             name: self.name,
             params: self.params,
             return_type: self.return_type,
@@ -1529,10 +1578,10 @@ pub use match_::{
 };
 
 mod wires;
+pub use wires::call_extra;
 pub(crate) use wires::{
-    assign_extra, call_extra, compound_assign_extra, compound_field_assign_extra,
-    field_assign_extra, for_range_extra, if_stmt_extra, struct_lit_extra, var_decl_extra,
-    while_loop_extra,
+    assign_extra, compound_assign_extra, compound_field_assign_extra, field_assign_extra,
+    for_range_extra, if_stmt_extra, struct_lit_extra, var_decl_extra, while_loop_extra,
 };
 mod views;
 pub use views::{

@@ -1,5 +1,6 @@
 use super::super::*;
 use super::common::*;
+use ryo_core::declaration::DeclId;
 
 #[test]
 fn branch_ids_unique_across_post_loop_if() {
@@ -35,13 +36,27 @@ fn branch_ids_unique_across_post_loop_if() {
     let cond_w = tb.bool_const(false, bool_ty, span);
     let cond_i1 = tb.bool_const(true, bool_ty, span);
     let s_a = tb.str_const(lit_a, str_ty, span);
-    let print_a = tb.call(print_name, &[s_a], &all_borrow(&[s_a]), void, span);
+    let print_a = tb.call(
+        DeclId::NONE,
+        print_name,
+        &[s_a],
+        &all_borrow(&[s_a]),
+        void,
+        span,
+    );
     let if_inside = tb.if_stmt(cond_i1, &[print_a], &[], None, void, span);
     let wl = tb.while_loop(cond_w, &[if_inside], void, span);
 
     let cond_i2 = tb.bool_const(true, bool_ty, span);
     let s_b = tb.str_const(lit_b, str_ty, span);
-    let print_b = tb.call(print_name, &[s_b], &all_borrow(&[s_b]), void, span);
+    let print_b = tb.call(
+        DeclId::NONE,
+        print_name,
+        &[s_b],
+        &all_borrow(&[s_b]),
+        void,
+        span,
+    );
     let if_post = tb.if_stmt(cond_i2, &[print_b], &[], None, void, span);
 
     let tir = tb.finish(&[wl, if_post]);

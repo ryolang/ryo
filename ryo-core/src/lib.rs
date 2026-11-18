@@ -3,6 +3,7 @@ pub mod ast;
 pub mod ast_pretty;
 pub mod builtins;
 pub mod compilation;
+pub mod declaration;
 pub mod diag;
 pub mod errors;
 pub mod extra;

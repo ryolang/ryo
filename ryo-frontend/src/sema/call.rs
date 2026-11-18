@@ -96,20 +96,31 @@ pub(crate) fn prepare_call(sema: &mut Sema<'_>, view: &CallView<'_>, span: Span)
             return CallPlan::UndefinedFunction { name_id, carriers };
         }
     };
+    if let Err(error) = sema.context.declarations().get(callee) {
+        sema.sink.emit(Diag::error(
+            span,
+            DiagCode::InternalError,
+            format!(
+                "invalid declaration identity for '{}': {error}",
+                sema.pool.str(name_id)
+            ),
+        ));
+        return CallPlan::Error;
+    }
     if super::error_inference::is_inferred(sema, callee)
         && !super::error_inference::resolve_inferred_callee(sema, callee, span)
     {
         return CallPlan::Error;
     }
 
-    let callee_modes: Vec<ParamMode> = sema.uir.func_bodies[callee.index()]
+    let callee_modes: Vec<ParamMode> = sema.uir.func_bodies[sema.body_index(callee)]
         .params
         .iter()
         .map(|p| p.mode)
         .collect();
     let sig = sema
         .signatures
-        .get(&name_id)
+        .get(&callee)
         .expect("signature must be present once decl exists");
     let expected: Vec<TypeId> = sig.params.clone();
     let return_type = sig.return_type;
@@ -365,7 +376,7 @@ pub(crate) fn finish_call(
     }
     let call = fcx
         .builder
-        .call(name_id, &converted, &modes, return_type, span);
+        .call(callee, name_id, &converted, &modes, return_type, span);
     if super::error_inference::is_inferred(sema, callee) {
         fcx.inferred_call_dependencies.insert(call, callee);
     }

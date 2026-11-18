@@ -11,7 +11,7 @@ use super::super::{DeclId, FuncCtx, Scope, Sema};
 use super::walker::with_expr_limit;
 use super::{NeverMode, SemaExprContext, analyze_expr_with};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
-use ryo_core::tir::{Tir, TirBuilder, TirTag};
+use ryo_core::tir::{Tir, TirBuilder, TirData, TirTag};
 use ryo_core::types::InternPool;
 use ryo_core::uir::{InstRef, InstTag, Span, Uir, UirBuilder};
 use std::path::Path;
@@ -25,7 +25,13 @@ fn shared_binop_dag(tag: InstTag, lhs: i64, rhs: i64) -> (Uir, InternPool, InstR
     let rhs = builder.int_literal(rhs, Span::EMPTY);
     let shared = builder.binary(tag, lhs, rhs, Span::EMPTY);
     let root = builder.binary(InstTag::Add, shared, shared, Span::EMPTY);
-    (builder.finish(), InternPool::new(), root, shared)
+    let pool = InternPool::new();
+    (
+        builder.finish().with_layout_context(&pool),
+        pool,
+        root,
+        shared,
+    )
 }
 
 #[test]
@@ -35,7 +41,7 @@ fn shared_division_by_zero_is_scoped_to_analysis_root() {
         let int = pool.int();
         let name = pool.intern_str("test");
         let mut fcx = FuncCtx {
-            decl: DeclId::from_index(0),
+            decl: DeclId::NONE,
             builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
             inst_map: vec![None; uir.instructions.len()],
             chain_local_errors: Vec::new(),
@@ -46,7 +52,15 @@ fn shared_division_by_zero_is_scoped_to_analysis_root() {
         };
         let scope = Scope::new();
         let mut sink = DiagSink::new();
-        let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+        let mut context = ryo_core::compilation::CompilationContext::new();
+        let mut sema = Sema::new(
+            &uir,
+            &mut pool,
+            &mut sink,
+            "",
+            Path::new("<test>"),
+            &mut context,
+        );
         with_expr_limit(limit, || {
             analyze_expr_with(
                 &mut sema,
@@ -91,7 +105,7 @@ fn shared_constant_overflow_is_scoped_to_analysis_root() {
         let int = pool.int();
         let name = pool.intern_str("test");
         let mut fcx = FuncCtx {
-            decl: DeclId::from_index(0),
+            decl: DeclId::NONE,
             builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
             inst_map: vec![None; uir.instructions.len()],
             chain_local_errors: Vec::new(),
@@ -102,7 +116,15 @@ fn shared_constant_overflow_is_scoped_to_analysis_root() {
         };
         let scope = Scope::new();
         let mut sink = DiagSink::new();
-        let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+        let mut context = ryo_core::compilation::CompilationContext::new();
+        let mut sema = Sema::new(
+            &uir,
+            &mut pool,
+            &mut sink,
+            "",
+            Path::new("<test>"),
+            &mut context,
+        );
         with_expr_limit(limit, || {
             analyze_expr_with(
                 &mut sema,
@@ -148,12 +170,12 @@ fn nested_machine_rollback_preserves_outer_early_errors() {
     let shared = builder.binary(InstTag::Div, one, zero, Span::EMPTY);
     let rhs = builder.binary(InstTag::Add, one, shared, Span::EMPTY);
     let root = builder.binary(InstTag::Add, shared, rhs, Span::EMPTY);
-    let uir = builder.finish();
     let mut pool = InternPool::new();
+    let uir = builder.finish().with_layout_context(&pool);
     let int = pool.int();
     let name = pool.intern_str("test");
     let mut fcx = FuncCtx {
-        decl: DeclId::from_index(0),
+        decl: DeclId::NONE,
         builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
         inst_map: vec![None; uir.instructions.len()],
         chain_local_errors: Vec::new(),
@@ -164,7 +186,15 @@ fn nested_machine_rollback_preserves_outer_early_errors() {
     };
     let scope = Scope::new();
     let mut sink = DiagSink::new();
-    let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+    let mut context = ryo_core::compilation::CompilationContext::new();
+    let mut sema = Sema::new(
+        &uir,
+        &mut pool,
+        &mut sink,
+        "",
+        Path::new("<test>"),
+        &mut context,
+    );
     with_expr_limit(1, || {
         super::walker::reset_machine_call_count();
         analyze_expr_with(
@@ -207,12 +237,12 @@ fn nested_machine_early_error_root_is_scoped_to_expression_root() {
     let zero = builder.int_literal(0, Span::EMPTY);
     let nested = builder.binary(InstTag::Div, one, zero, Span::EMPTY);
     let root = builder.binary(InstTag::Add, one, nested, Span::EMPTY);
-    let uir = builder.finish();
     let mut pool = InternPool::new();
+    let uir = builder.finish().with_layout_context(&pool);
     let int = pool.int();
     let name = pool.intern_str("test");
     let mut fcx = FuncCtx {
-        decl: DeclId::from_index(0),
+        decl: DeclId::NONE,
         builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
         inst_map: vec![None; uir.instructions.len()],
         chain_local_errors: Vec::new(),
@@ -223,7 +253,15 @@ fn nested_machine_early_error_root_is_scoped_to_expression_root() {
     };
     let scope = Scope::new();
     let mut sink = DiagSink::new();
-    let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+    let mut context = ryo_core::compilation::CompilationContext::new();
+    let mut sema = Sema::new(
+        &uir,
+        &mut pool,
+        &mut sink,
+        "",
+        Path::new("<test>"),
+        &mut context,
+    );
     with_expr_limit(1, || {
         super::walker::reset_machine_call_count();
         analyze_expr_with(
@@ -266,12 +304,12 @@ fn statement_root_removes_early_error_before_direct_reanalysis() {
     let zero = builder.int_literal(0, Span::EMPTY);
     let expression = builder.binary(InstTag::Div, one, zero, Span::EMPTY);
     let statement = builder.unary(InstTag::Return, expression, Span::EMPTY);
-    let uir = builder.finish();
     let mut pool = InternPool::new();
+    let uir = builder.finish().with_layout_context(&pool);
     let int = pool.int();
     let name = pool.intern_str("test");
     let mut fcx = FuncCtx {
-        decl: DeclId::from_index(0),
+        decl: DeclId::NONE,
         builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
         inst_map: vec![None; uir.instructions.len()],
         chain_local_errors: Vec::new(),
@@ -282,7 +320,15 @@ fn statement_root_removes_early_error_before_direct_reanalysis() {
     };
     let mut scope = Scope::new();
     let mut sink = DiagSink::new();
-    let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+    let mut context = ryo_core::compilation::CompilationContext::new();
+    let mut sema = Sema::new(
+        &uir,
+        &mut pool,
+        &mut sink,
+        "",
+        Path::new("<test>"),
+        &mut context,
+    );
     super::super::analyze_stmt(&mut sema, &mut fcx, &mut scope, statement);
     assert_eq!(sema.sink.error_count(), 1);
     assert!(fcx.inst_map[expression.index()].is_none());
@@ -314,7 +360,7 @@ fn successful_binop_result_stays_memoized() {
         let int = pool.int();
         let name = pool.intern_str("test");
         let mut fcx = FuncCtx {
-            decl: DeclId::from_index(0),
+            decl: DeclId::NONE,
             builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
             inst_map: vec![None; uir.instructions.len()],
             chain_local_errors: Vec::new(),
@@ -325,7 +371,15 @@ fn successful_binop_result_stays_memoized() {
         };
         let scope = Scope::new();
         let mut sink = DiagSink::new();
-        let mut sema = Sema::new(&uir, &mut pool, &mut sink, "", Path::new("<test>"));
+        let mut context = ryo_core::compilation::CompilationContext::new();
+        let mut sema = Sema::new(
+            &uir,
+            &mut pool,
+            &mut sink,
+            "",
+            Path::new("<test>"),
+            &mut context,
+        );
         let first = with_expr_limit(limit, || {
             let first = analyze_expr_with(
                 &mut sema,
@@ -619,19 +673,61 @@ fn run_with_expr_limit(src: &str, limit: u32) -> Result<RunOk, Vec<Diag>> {
     with_expr_limit(limit, || run(src))
 }
 
-type Differential = (Vec<Tir>, Vec<Diag>, InternPool);
+type Differential = (
+    Vec<Tir>,
+    Vec<Diag>,
+    InternPool,
+    ryo_core::compilation::CompilationContext,
+);
 
 fn run_differential(src: &str) -> Differential {
-    run_with_errors(src)
+    super::super::tests::run_with_errors_and_context(src)
 }
 
 fn run_differential_with_expr_limit(src: &str, limit: u32) -> Differential {
     with_expr_limit(limit, || run_differential(src))
 }
 
-fn snapshot((tirs, diags, _pool): Differential) -> String {
+fn snapshot((tirs, diags, pool, context): Differential) -> String {
     tirs.iter()
         .map(|tir| {
+            let registered = context
+                .declarations()
+                .name(tir.decl)
+                .expect("body declaration must resolve a registered declaration");
+            assert_eq!(
+                registered,
+                pool.str(tir.name),
+                "body compatibility name does not match its declaration"
+            );
+            let decl_index = tir.decl.index();
+            let mut context_neutral_extra = tir.extra.clone();
+            for (index, inst) in tir.instructions.iter().enumerate().skip(1) {
+                if inst.tag != TirTag::Call {
+                    continue;
+                }
+                let call = tir.call_view(ryo_core::tir::TirRef::from_raw(index as u32));
+                if let Some(callee) = call.callee {
+                    let registered = context
+                        .declarations()
+                        .name(callee)
+                        .expect("direct call must resolve a registered declaration");
+                    assert_eq!(
+                        registered,
+                        pool.str(call.name),
+                        "direct call compatibility name does not match its declaration"
+                    );
+                } else {
+                    assert!(
+                        ryo_core::builtins::is_runtime_callee(call.name, &pool),
+                        "declaration-free call must name a registered runtime callee"
+                    );
+                }
+                let TirData::Extra(range) = inst.data else {
+                    unreachable!("calls carry extra payloads")
+                };
+                context_neutral_extra[range.as_range().start] = 0;
+            }
             let mut direct_catch_matches = tir
                 .direct_catch_matches
                 .iter()
@@ -639,12 +735,13 @@ fn snapshot((tirs, diags, _pool): Differential) -> String {
                 .collect::<Vec<_>>();
             direct_catch_matches.sort_unstable();
             format!(
-                "{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
+                "{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
                 tir.name,
+                decl_index,
                 tir.params,
                 tir.return_type,
                 tir.instructions,
-                tir.extra,
+                context_neutral_extra,
                 tir.body,
                 tir.spans,
                 tir.span,
@@ -655,6 +752,82 @@ fn snapshot((tirs, diags, _pool): Differential) -> String {
         .chain(std::iter::once(format!("{diags:?}")))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[test]
+#[should_panic(expected = "body declaration must resolve a registered declaration")]
+fn snapshot_rejects_unregistered_body_declaration() {
+    let mut differential =
+        run_differential("fn id() -> int:\n\treturn 1\nfn main():\n\tprint(id())\n");
+    differential.0[0].decl = DeclId::NONE;
+    snapshot(differential);
+}
+
+#[test]
+#[should_panic(expected = "direct call must resolve a registered declaration")]
+fn snapshot_rejects_unregistered_direct_call() {
+    let mut differential =
+        run_differential("fn id() -> int:\n\treturn 1\nfn main():\n\tprint(id())\n");
+    let mut changed = false;
+    for tir in &mut differential.0 {
+        for index in 1..tir.instructions.len() {
+            if tir.instructions[index].tag != TirTag::Call {
+                continue;
+            }
+            let TirData::Extra(range) = tir.instructions[index].data else {
+                unreachable!("calls carry extra payloads")
+            };
+            let has_user_callee = tir
+                .call_view(ryo_core::tir::TirRef::from_raw(index as u32))
+                .callee
+                .is_some();
+            if has_user_callee {
+                let start = range.as_range().start;
+                tir.extra[start] = 0;
+                tir.extra[start + 1] = u32::MAX;
+                changed = true;
+            }
+        }
+    }
+    assert!(changed, "fixture must contain a direct call");
+    snapshot(differential);
+}
+
+#[test]
+#[should_panic(expected = "declaration-free call must name a registered runtime callee")]
+fn snapshot_rejects_declaration_free_user_call() {
+    let mut differential =
+        run_differential("fn id() -> int:\n\treturn 1\nfn main():\n\tprint(id())\n");
+    let mut changed = false;
+    for tir in &mut differential.0 {
+        for index in 1..tir.instructions.len() {
+            if tir.instructions[index].tag != TirTag::Call {
+                continue;
+            }
+            let TirData::Extra(range) = tir.instructions[index].data else {
+                unreachable!("calls carry extra payloads")
+            };
+            let call = tir.call_view(ryo_core::tir::TirRef::from_raw(index as u32));
+            if call.callee.is_some() {
+                let mut replacement = Vec::new();
+                let replacement_range = ryo_core::tir::call_extra::encode_builtin(
+                    &mut replacement,
+                    call.name,
+                    &[],
+                    &[],
+                );
+                assert_eq!(
+                    range.len, replacement_range.len,
+                    "fixture must contain a zero-argument call"
+                );
+                tir.extra[range.as_range()]
+                    .copy_from_slice(&replacement[replacement_range.as_range()]);
+                changed = true;
+            }
+        }
+    }
+    assert!(changed, "fixture must contain a direct call");
+    snapshot(differential);
 }
 
 fn run_deep_repro(test_name: &str, src: String) {
@@ -1175,12 +1348,12 @@ fn non_simple_match_arm_statement_diagnostics_match_at_every_depth_limit() {
 #[test]
 fn statement_arm_dead_store_warnings_match_at_every_depth_limit() {
     let src = "fn main():\n\tmatch 1:\n\t\t1:\n\t\t\tfor i in range(0, 1):\n\t\t\t\tprint(0)\n\t\t_:\n\t\t\tprint(0)\n";
-    let (tirs, diags, pool) = run_differential(src);
+    let (tirs, diags, pool, context) = run_differential(src);
     assert!(!tirs.is_empty(), "warning analysis must retain TIR");
     assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
     assert_eq!(diags[0].severity, ryo_core::diag::Severity::Warning);
     assert_eq!(diags[0].code, ryo_core::diag::DiagCode::DeadStore);
-    let baseline = snapshot((tirs, diags, pool));
+    let baseline = snapshot((tirs, diags, pool, context));
     for limit in [0, 1, 64] {
         assert_eq!(
             snapshot(run_differential_with_expr_limit(src, limit)),

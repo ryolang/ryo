@@ -39,14 +39,16 @@ fn parser_and_recovered_ast_nodes_use_registered_source() {
 }
 
 #[test]
-fn empty_program_has_no_origin_span() {
-    let mut context = CompilationContext::new();
-    let id = context.register_source(PathBuf::from("empty.ryo"), String::new());
-    let source = context.sources().get(id).unwrap();
-    let mut pool = InternPool::new();
+fn statement_less_programs_retain_source_with_empty_offsets() {
+    for input in ["", "\n\n", "# comment\n", "# comment"] {
+        let mut context = CompilationContext::new();
+        let id = context.register_source(PathBuf::from("empty.ryo"), input.into());
+        let source = context.sources().get(id).unwrap();
+        let mut pool = InternPool::new();
 
-    let (program, diags) = parse_source_with_source(source, &mut pool).expect("empty parse");
-    assert!(diags.is_empty());
-    assert!(program.top_level_stmts().is_empty());
-    assert_eq!(program.span(), Span::EMPTY);
+        let (program, diags) = parse_source_with_source(source, &mut pool).expect("empty parse");
+        assert!(diags.is_empty(), "{input:?}: {diags:?}");
+        assert!(program.top_level_stmts().is_empty(), "{input:?}");
+        assert_eq!(program.span(), Span::in_source(id, 0, 0), "{input:?}");
+    }
 }

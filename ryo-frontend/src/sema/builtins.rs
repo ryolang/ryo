@@ -60,7 +60,8 @@ pub(crate) fn emit_builtin_call(
         n if n == ids.assert => emit_assert(sema, fcx, view, arg_tirs, span),
         _ => {
             let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+            fcx.builder
+                .builtin_call(view.name, arg_tirs, &modes, ret_ty, span)
         }
     }
 }
@@ -104,7 +105,8 @@ fn emit_process_builtin(
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
             let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+            fcx.builder
+                .builtin_call(view.name, arg_tirs, &modes, ret_ty, span)
         }
         n if n == ids.process_argc => {
             if !view.args.is_empty() {
@@ -119,7 +121,8 @@ fn emit_process_builtin(
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
             let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+            fcx.builder
+                .builtin_call(view.name, arg_tirs, &modes, ret_ty, span)
         }
         // TODO(M28): interim call form — replaced by `process.args`.
         n if n == ids.process_argv => {
@@ -150,7 +153,8 @@ fn emit_process_builtin(
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
             let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+            fcx.builder
+                .builtin_call(view.name, arg_tirs, &modes, ret_ty, span)
         }
         // TODO(M16): interim call form — replaced by `process.env`.
         n if n == ids.process_env => {
@@ -187,7 +191,8 @@ fn emit_process_builtin(
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
             let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+            fcx.builder
+                .builtin_call(view.name, arg_tirs, &modes, ret_ty, span)
         }
         // TODO(M16): interim call form — replaced by
         // `io.read_line() -> IoError!?str`. `io_read_line()` takes no
@@ -206,7 +211,8 @@ fn emit_process_builtin(
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
             let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+            fcx.builder
+                .builtin_call(view.name, arg_tirs, &modes, ret_ty, span)
         }
         _ => unreachable!("builtin routed to the wrong validation group"),
     }
@@ -251,7 +257,8 @@ fn emit_conversion_builtin(
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
             let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+            fcx.builder
+                .builtin_call(view.name, arg_tirs, &modes, ret_ty, span)
         }
         n if n == ids.float_to_str => {
             if view.args.len() != 1 {
@@ -281,7 +288,8 @@ fn emit_conversion_builtin(
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
             let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+            fcx.builder
+                .builtin_call(view.name, arg_tirs, &modes, ret_ty, span)
         }
         n if n == ids.bool_to_str => {
             if view.args.len() != 1 {
@@ -311,7 +319,8 @@ fn emit_conversion_builtin(
                 return fcx.builder.unreachable(sema.pool.error_type(), span);
             }
             let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+            fcx.builder
+                .builtin_call(view.name, arg_tirs, &modes, ret_ty, span)
         }
         _ => unreachable!("builtin routed to the wrong validation group"),
     }
@@ -394,7 +403,8 @@ fn emit_push_builtin(
             );
             let modes = vec![ParamMode::Inout, ParamMode::Borrow];
             let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+            fcx.builder
+                .builtin_call(view.name, arg_tirs, &modes, ret_ty, span)
         }
         n if n == ids.bytes_push => {
             // bytes_push(b: inout bytes, x: int) -> void (M8.4.2
@@ -448,7 +458,8 @@ fn emit_push_builtin(
             }
             let modes = vec![ParamMode::Inout, ParamMode::Borrow];
             let ret_ty = builtin.return_type(sema.pool);
-            fcx.builder.call(view.name, arg_tirs, &modes, ret_ty, span)
+            fcx.builder
+                .builtin_call(view.name, arg_tirs, &modes, ret_ty, span)
         }
         _ => unreachable!("builtin routed to the wrong validation group"),
     }
@@ -586,7 +597,7 @@ pub(crate) fn emit_str_materialize(
     // user-defined `fn str` (which wins in `check_call`) still lowers
     // as an ordinary user call.
     let callee = sema.pool.intern_str("__ryo_str_from_view");
-    fcx.builder.call(
+    fcx.builder.builtin_call(
         callee,
         arg_tirs,
         &[ParamMode::Borrow],
@@ -647,7 +658,7 @@ pub(crate) fn emit_bytes_materialize(
     // The synthesized callee name is unshadowable — user code cannot
     // declare `__ryo_`-prefixed identifiers (ReservedIdentifier).
     let callee = sema.pool.intern_str("__ryo_bytes_from_view");
-    fcx.builder.call(
+    fcx.builder.builtin_call(
         callee,
         arg_tirs,
         &[ParamMode::Borrow],
@@ -770,7 +781,7 @@ pub(crate) fn build_panic_call(
     let str_ref = fcx.builder.str_const(formatted_id, sema.pool.str_(), span);
     let len_ref = fcx.builder.int_const(msg_len, sema.pool.int(), span);
     let panic_name = sema.pool.intern_str("__ryo_panic");
-    fcx.builder.call(
+    fcx.builder.builtin_call(
         panic_name,
         &[str_ref, len_ref],
         &[ParamMode::Borrow, ParamMode::Borrow],
@@ -868,7 +879,7 @@ fn emit_print_like(
     let effective: &[TirRef] = match sema.pool.kind(arg_ty) {
         TypeKind::Bytes | TypeKind::View(ViewKind::Bytes) => {
             let callee = sema.pool.intern_str("__ryo_bytes_repr");
-            let repr = fcx.builder.call(
+            let repr = fcx.builder.builtin_call(
                 callee,
                 &[arg_tirs[0]],
                 &[ParamMode::Borrow],
@@ -902,7 +913,8 @@ fn emit_print_like(
     // type.
     warn_redundant_materialize_builtin_arg(sema, fcx, view.args.at(0), arg_tirs[0], name);
     let ret_ty = builtin.return_type(sema.pool);
-    fcx.builder.call(view.name, effective, modes, ret_ty, span)
+    fcx.builder
+        .builtin_call(view.name, effective, modes, ret_ty, span)
 }
 
 // Column counts unicode codepoints, not bytes — matches editor conventions.

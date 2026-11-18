@@ -27,7 +27,7 @@ pub fn run_file(
     program_args: &[String],
     show_inferred_errors: bool,
 ) -> Result<i32, CompilerError> {
-    let (context, source_id) = compilation_from_source(file, read_source_file(file)?)?;
+    let (mut context, source_id) = compilation_from_source(file, read_source_file(file)?)?;
     let source = context.sources().get(source_id)?;
     let mut pool = InternPool::new();
     let want = EmitSet::from_args(emit);
@@ -44,18 +44,18 @@ pub fn run_file(
     let (uir, analyzed) = lower_and_analyze(
         &program,
         &mut pool,
-        &context,
+        &mut context,
         source_id,
         file,
         parse_diags,
         show_inferred_errors,
     )?;
-    analyzed
-        .require_backend_transition()
+    let backend = analyzed
+        .require_backend_transition(&context, &pool)
         .map_err(CompilerError::CodegenError)?;
-    let tirs = analyzed.tirs();
-    let flows = analyzed.flows();
-    let sidecar = analyzed.cleanup();
+    let tirs = backend.tirs();
+    let flows = backend.flows();
+    let sidecar = backend.cleanup();
 
     if want.uir {
         display_uir(&uir, &pool)?;
@@ -75,13 +75,14 @@ pub fn run_file(
 
     let mut codegen = codegen::Codegen::new_jit().map_err(CompilerError::CodegenError)?;
     let (main_id, clif) = codegen
-        .compile(tirs, flows, &pool, sidecar, want.clif)
+        .compile(tirs, flows, backend.pool(), sidecar, want.clif)
         .map_err(CompilerError::CodegenError)?;
     if want.clif {
         write_stdout(format_args!("[Cranelift IR]\n"))?;
         write_stdout(format_args!("{clif}"))?;
     }
 
+    drop(backend);
     drop((analyzed, pool, context));
     let mut argv = Vec::with_capacity(program_args.len() + 1);
     argv.push(file.to_string_lossy().into_owned());

@@ -213,6 +213,23 @@ fn abi_callee(name: &str) -> Option<&'static BuiltinFunction> {
     ABI_CALLEES.iter().find(|b| b.name == name)
 }
 
+/// Return whether `name_id` is an executable runtime target.
+/// The caller must supply a handle from `pool`; validated IR establishes that pairing through
+/// its layout identity.
+pub fn is_runtime_callee(name_id: StringId, pool: &InternPool) -> bool {
+    if name_id.raw() as usize >= pool.string_count() {
+        return false;
+    }
+    let name = pool.bytes_payload(name_id);
+    if name == b"assert" || name == b"panic" {
+        return false;
+    }
+    BUILTINS
+        .iter()
+        .chain(ABI_CALLEES.iter())
+        .any(|builtin| builtin.name.as_bytes() == name)
+}
+
 /// True if callee `name` passes parameter `idx` via the borrowed-scalar
 /// ABI (raw `.rodata` pointer, cap=0, never heap-owned). Consults both the
 /// user-facing `BUILTINS` table and the synthesized `ABI_CALLEES` registry.
@@ -247,6 +264,73 @@ pub fn max_output_len(name: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_callee_catalog_accepts_only_registered_names() {
+        let mut pool = InternPool::new();
+        let print = pool.intern_str("print");
+        let from_view = pool.intern_str("__ryo_str_from_view");
+        let user = pool.intern_str("user_function");
+
+        assert!(is_runtime_callee(print, &pool));
+        assert!(is_runtime_callee(from_view, &pool));
+        assert!(!is_runtime_callee(user, &pool));
+    }
+
+    #[test]
+    fn runtime_callee_catalog_covers_sema_emitted_calls() {
+        let names = [
+            "print",
+            "process_exit",
+            "io_eprint",
+            "process_argc",
+            "process_argv",
+            "process_env",
+            "io_read_line",
+            "int_to_str",
+            "float_to_str",
+            "bool_to_str",
+            "str_push",
+            "bytes_push",
+            "__ryo_panic",
+            "__ryo_str_from_view",
+            "__ryo_bytes_repr",
+            "__ryo_bytes_from_view",
+            "__ryo_bytes_to_str",
+            "__ryo_str_to_bytes",
+        ];
+        let mut pool = InternPool::new();
+
+        for name in names {
+            let id = pool.intern_str(name);
+            assert!(is_runtime_callee(id, &pool), "{name}");
+        }
+    }
+
+    #[test]
+    fn runtime_callee_catalog_excludes_source_only_builtins() {
+        let mut pool = InternPool::new();
+        let assert = pool.intern_str("assert");
+        let panic = pool.intern_str("panic");
+        let synthesized_panic = pool.intern_str("__ryo_panic");
+
+        assert!(!is_runtime_callee(assert, &pool));
+        assert!(!is_runtime_callee(panic, &pool));
+        assert!(is_runtime_callee(synthesized_panic, &pool));
+    }
+
+    #[test]
+    fn runtime_callee_rejects_invalid_and_non_utf8_handles() {
+        let mut other = InternPool::new();
+        other.intern_str("padding");
+        let foreign = other.intern_str("print");
+        let empty = InternPool::new();
+        assert!(!is_runtime_callee(foreign, &empty));
+
+        let mut pool = InternPool::new();
+        let non_utf8 = pool.intern_bytes(&[0xff]);
+        assert!(!is_runtime_callee(non_utf8, &pool));
+    }
 
     #[test]
     fn lookup_print_exists() {

@@ -488,6 +488,8 @@ pub struct UirErrorFamilyDecl {
 
 #[derive(Debug, Clone)]
 pub struct Uir {
+    identity: crate::artifact::ArtifactId,
+    layout_context: Option<crate::artifact::ArtifactId>,
     pub instructions: Vec<Inst>,
     pub extra: Vec<u32>,
     pub spans: Vec<Span>,
@@ -519,6 +521,8 @@ impl Uir {
         // 1-based without runtime checks on every read.
         let placeholder_span = Span::EMPTY;
         Uir {
+            identity: crate::artifact::ArtifactId::fresh(),
+            layout_context: None,
             instructions: vec![Inst {
                 tag: InstTag::ReturnVoid,
                 data: InstData::None,
@@ -532,6 +536,34 @@ impl Uir {
             error_families: Vec::new(),
             direct_catch_matches: std::collections::HashSet::new(),
         }
+    }
+
+    /// Identity of this UIR version. Clones retain it; rebuilding creates a fresh identity.
+    pub fn identity(&self) -> crate::artifact::ArtifactId {
+        self.identity
+    }
+
+    /// Record the trusted producer's pool identity without inspecting existing handles.
+    /// The caller must guarantee that every pool-scoped handle in the UIR came from `pool`.
+    /// Reusing the same pool is idempotent; rebinding to another pool panics.
+    pub fn with_layout_context(mut self, pool: &InternPool) -> Self {
+        if let Some(layout_context) = self.layout_context {
+            assert_eq!(
+                layout_context,
+                pool.identity(),
+                "UIR layout context is already bound to a different intern pool"
+            );
+        } else {
+            self.layout_context = Some(pool.identity());
+        }
+        self
+    }
+
+    pub fn require_layout(&self, pool: &InternPool) -> Result<(), String> {
+        if self.layout_context != Some(pool.identity()) {
+            return Err("UIR belongs to a different type and layout context".into());
+        }
+        Ok(())
     }
 
     pub fn is_direct_catch_match(&self, r: InstRef) -> bool {
@@ -1008,6 +1040,26 @@ mod tests {
         let uir = Uir::new();
         assert_eq!(uir.instructions.len(), 1);
         assert_eq!(uir.spans.len(), 1);
+    }
+
+    #[test]
+    fn layout_context_allows_initial_binding_and_same_pool_reuse() {
+        let pool = InternPool::new();
+        let uir = Uir::new()
+            .with_layout_context(&pool)
+            .with_layout_context(&pool);
+
+        assert!(uir.require_layout(&pool).is_ok());
+    }
+
+    #[test]
+    #[should_panic]
+    fn layout_context_rejects_rebinding_to_a_different_pool() {
+        let producer = InternPool::new();
+        let other = InternPool::new();
+        let uir = Uir::new().with_layout_context(&producer);
+
+        let _ = uir.with_layout_context(&other);
     }
 
     #[test]

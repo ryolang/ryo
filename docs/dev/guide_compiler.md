@@ -23,8 +23,21 @@ This guide is for agents and contributors extending the Ryo compiler. Load it wh
 
 ### Compilation Pipeline
 
-```text
-CompilationContext (sources and revisions) → Lexer → Indent Preprocessor → Parser → AstGen → UIR → Sema → TIR → Flow → Ownership → Cleanup (DropOps) → Codegen → Linker → Executable
+```mermaid
+flowchart LR
+    A["CompilationContext (sources, revisions, and declarations)"] --> B[Lexer]
+    B --> C["Indent Preprocessor"]
+    C --> D[Parser]
+    D --> E[AstGen]
+    E --> F[UIR]
+    F --> G[Sema]
+    G --> H[TIR]
+    H --> I[Flow]
+    I --> J[Ownership]
+    J --> K["Cleanup (DropOps)"]
+    K --> L[Codegen]
+    L --> M[Linker]
+    M --> N[Executable]
 ```
 
 (**Flow** — `ryo-core/src/flow.rs` — is the canonical control-flow graph built once per function body after sema: indexed blocks with explicit terminators, a place table for storage identity, and per-step read/write/view facts. Both consumers drive from it: the **Ownership** pass analyzes Flow blocks/terminators post-sema (see `docs/dev/pl_references/mojo.md` and `ryo-frontend/src/ownership/mod.rs`), its cleanup decisions are explicit `DropOp`s positioned on Flow blocks, and **Codegen** maps Flow blocks to Cranelift blocks and dispatches terminators — neither pass reconstructs control flow from TIR statement lists. The authoritative design and phase contracts live in `docs/dev/architectural_fixes/pipeline_migration.md`; see `docs/dev/pattern_matching.md` for the match representation contracts.)
@@ -32,7 +45,9 @@ CompilationContext (sources and revisions) → Lexer → Indent Preprocessor →
 The middle-end is split into two flat-arena IRs modeled after Zig's ZIR/AIR:
 
 - **UIR** (`ryo-core/src/uir.rs`) — Untyped IR. Flat `(tag, data)` instruction stream in a program-wide arena, produced by `astgen.rs` from the AST. Sub-expressions are not nested; they live as their own entries reached via `InstRef` indices. Side arenas: `extra: Vec<u32>` for variable-size payloads, `spans` parallel to instructions.
-- **TIR** (`ryo-core/src/tir.rs`) — Typed IR. Same flat shape as UIR but **one arena per function body**, and every instruction carries its resolved `TypeId`. Produced by `sema.rs` from UIR and consumed by `codegen/`. Per-function arenas make generic/inline duplication a `Tir::clone` away.
+- **TIR** (`ryo-core/src/tir.rs`) — Typed IR. Same flat shape as UIR but **one arena per function body**, and every instruction carries its resolved `TypeId`. Produced by `sema.rs` from UIR and consumed by `codegen/`. Per-function arenas make generic/inline duplication a `Tir::clone` away. Each body records its compilation-owned `DeclId`; direct user calls carry the callee ID and a compatibility name, while builtin and lowered runtime calls remain declaration-free.
+
+`CompilationContext` owns the only `DeclarationTable`. Sema registers UIR function bodies before resolution and uses their `DeclId`s for signatures, inference dependencies, bodies, and direct calls. Registration is idempotent when the same source revision and UIR body index are registered again, and atomic on conflict; conflicting metadata for that revision emits an internal diagnostic and withholds executable TIR. Replacing a source revision allocates fresh IDs and retains the old revision's declarations for diagnostics, but publication rejects stale artifacts. `DeclId::NONE` is reserved for synthetic test bodies and is invalid in executable artifacts.
 
 **Wire payloads.** Variable-size instruction payloads (arg lists, body statement lists, call modes) are `u32` words in the `extra: Vec<u32>` arena, referenced by `ExtraRange`. Most layouts are one module in `ryo-core/src/uir/wires.rs` / `tir/wires.rs`, owning `encode`, `decode`, and a view struct together; the remaining payload layouts live beside their consumers — `destructure_extra` in `destructure.rs`, `match_extra` in `match_.rs`. UIR and TIR layouts stay deliberately separate because the two IRs genuinely diverge (call modes, type slots, keying). One exception: `enum_lit_extra` lives in `ryo-core/src/extra.rs` and is shared by both IRs, because its wire is byte-identical on both sides (the module is generic over the ref type, with `EnumLitView<InstRef>` / `EnumLitView<TirRef>` instantiations in each IR's `views.rs`). Literal fixtures pin the exact words against the encoders: `uir/wire_fixtures.rs` (UIR) and `tir/tests.rs` (TIR).
 
@@ -111,7 +126,8 @@ See `docs/dev/architectural_fixes/pipeline_alignment.md` for what remains of the
 | `ryo-core/src/flow/cleanup.rs` | Resolve releases to declaring Flow places or displaced produced values |
 | `ryo-core/src/ownership.rs` | Ownership sidecars, transfer records, promotion lifetimes, and validation outcomes |
 | `ryo-core/src/types.rs` | `InternPool` for types and strings; `TypeId` / `StringId` newtypes |
-| `ryo-core/src/compilation.rs` | Compilation context: owns the source database and its process-unique identity |
+| `ryo-core/src/compilation.rs` | Compilation context: owns the source database, declaration table, and their shared process-unique identity |
+| `ryo-core/src/declaration.rs` | Compilation-owned `DeclId` allocation, declaration metadata, idempotent registration, and handle validation |
 | `ryo-core/src/source.rs` | Immutable source revisions, `SourceId` handles, current/stale lookup, and source/span validation |
 | `ryo-core/src/span.rs` | Byte offsets with explicit source identity or a source-less sentinel; derived spans preserve provenance |
 | `ryo-core/src/diag.rs` | Structured diagnostics: `Diag`, `DiagCode`, `DiagSink` |
@@ -124,7 +140,7 @@ See `docs/dev/architectural_fixes/pipeline_alignment.md` for what remains of the
 
 ---
 
-Dependencies flow unidirectionally from Frontend/Backend/Driver down to Core. The driver-owned `CompilationContext` outlives the artifacts that reference its sources. The `InternPool` from `types.rs` threads through every stage so identifiers and string literals stay as `Copy` `StringId` handles instead of owned `String`s. `sema.rs` drives decls through `Unresolved → InProgress → Resolved/Failed` with cycle detection wired in.
+Dependencies flow unidirectionally from Frontend/Backend/Driver down to Core. The driver-owned `CompilationContext` outlives the artifacts that reference its sources and declarations. The `InternPool` from `types.rs` threads through every stage so identifiers and string literals stay as `Copy` `StringId` handles instead of owned `String`s. `sema.rs` drives decls through `Unresolved → InProgress → Resolved/Failed` with cycle detection wired in.
 
 ## Adding a New Language Feature
 

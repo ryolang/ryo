@@ -1,4 +1,5 @@
 use super::*;
+use ryo_core::declaration::DeclId;
 
 #[test]
 fn view_across_branches() {
@@ -33,14 +34,35 @@ fn view_across_branches() {
     let vdecl = tb.var_decl(v, false, view_ty, sl, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let vread = tb.var(v, view_ty, span);
-    let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+    let pcall = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread],
+        &all_borrow(&[vread]),
+        void,
+        span,
+    );
     let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
     let xlit = tb.str_const(x, str_ty, span);
-    let xcall = tb.call(print, &[xlit], &all_borrow(&[xlit]), void, span);
+    let xcall = tb.call(
+        DeclId::NONE,
+        print,
+        &[xlit],
+        &all_borrow(&[xlit]),
+        void,
+        span,
+    );
     let xstmt = tb.unary(TirTag::ExprStmt, void, xcall, span);
     let ifs = tb.if_stmt(cond, &[pstmt], &[], Some(&[xstmt]), void, span);
     let sread = tb.var(s, str_ty, span);
-    let ccall = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+    let ccall = tb.call(
+        DeclId::NONE,
+        consume,
+        &[sread],
+        &[ParamMode::Move],
+        void,
+        span,
+    );
     let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
     let tir = tb.finish(&[decl, vdecl, ifs, cstmt]);
 
@@ -94,13 +116,34 @@ fn freeze_is_per_arm_precise_across_if_arms() {
     let vdecl = tb.var_decl(v, false, view_ty, sl, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let vread_t = tb.var(v, view_ty, span);
-    let pcall_t = tb.call(print, &[vread_t], &all_borrow(&[vread_t]), void, span);
+    let pcall_t = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread_t],
+        &all_borrow(&[vread_t]),
+        void,
+        span,
+    );
     let pstmt_t = tb.unary(TirTag::ExprStmt, void, pcall_t, span);
     let sread = tb.var(s, str_ty, span);
-    let ccall = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+    let ccall = tb.call(
+        DeclId::NONE,
+        consume,
+        &[sread],
+        &[ParamMode::Move],
+        void,
+        span,
+    );
     let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
     let vread_e = tb.var(v, view_ty, span);
-    let pcall_e = tb.call(print, &[vread_e], &all_borrow(&[vread_e]), void, span);
+    let pcall_e = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread_e],
+        &all_borrow(&[vread_e]),
+        void,
+        span,
+    );
     let pstmt_e = tb.unary(TirTag::ExprStmt, void, pcall_e, span);
     let ifs = tb.if_stmt(cond, &[pstmt_t, cstmt], &[], Some(&[pstmt_e]), void, span);
     let tir = tb.finish(&[decl, vdecl, ifs]);
@@ -165,11 +208,19 @@ fn per_arm_override_respects_loop_deferral() {
     let if_cond = tb.bool_const(true, bool_ty, span);
     let wcond = tb.bool_const(true, bool_ty, span);
     let vread = tb.var(v, view_ty, span);
-    let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+    let pcall = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread],
+        &all_borrow(&[vread]),
+        void,
+        span,
+    );
     let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
     let sread = tb.var(s, str_ty, span);
     let suffix = tb.str_const(x4, str_ty, span);
     let push = tb.call(
+        DeclId::NONE,
         str_push,
         &[sread, suffix],
         &[ParamMode::Inout, ParamMode::Borrow],
@@ -179,7 +230,14 @@ fn per_arm_override_respects_loop_deferral() {
     let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
     let wl = tb.while_loop(wcond, &[pstmt, push_stmt], void, span);
     let vread_e = tb.var(v, view_ty, span);
-    let pcall_e = tb.call(print, &[vread_e], &all_borrow(&[vread_e]), void, span);
+    let pcall_e = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread_e],
+        &all_borrow(&[vread_e]),
+        void,
+        span,
+    );
     let pstmt_e = tb.unary(TirTag::ExprStmt, void, pcall_e, span);
     let ifs = tb.if_stmt(if_cond, &[wl], &[], Some(&[pstmt_e]), void, span);
     let tir = tb.finish(&[decl, vdecl, ifs]);
@@ -252,11 +310,25 @@ fn per_arm_kill_respects_loop_deferral() {
     let vdecl = tb.var_decl(v, false, view_ty, sl, span);
     let if_cond = tb.bool_const(true, bool_ty, span);
     let sread = tb.var(s, str_ty, span);
-    let ccall = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+    let ccall = tb.call(
+        DeclId::NONE,
+        consume,
+        &[sread],
+        &[ParamMode::Move],
+        void,
+        span,
+    );
     let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
     let wcond = tb.bool_const(true, bool_ty, span);
     let vread = tb.var(v, view_ty, span);
-    let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+    let pcall = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread],
+        &all_borrow(&[vread]),
+        void,
+        span,
+    );
     let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
     let wl = tb.while_loop(wcond, &[pstmt], void, span);
     let ifs = tb.if_stmt(if_cond, &[cstmt], &[], Some(&[wl]), void, span);
@@ -334,16 +406,44 @@ fn per_arm_kill_without_deferral_stays_scoped() {
     let cond1 = tb.bool_const(true, bool_ty, span);
     let cond2 = tb.bool_const(true, bool_ty, span);
     let vread_t = tb.var(v, view_ty, span);
-    let pcall_t = tb.call(print, &[vread_t], &all_borrow(&[vread_t]), void, span);
+    let pcall_t = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread_t],
+        &all_borrow(&[vread_t]),
+        void,
+        span,
+    );
     let pstmt_t = tb.unary(TirTag::ExprStmt, void, pcall_t, span);
     let sread_elif = tb.var(s, str_ty, span);
-    let ccall_elif = tb.call(consume, &[sread_elif], &[ParamMode::Move], void, span);
+    let ccall_elif = tb.call(
+        DeclId::NONE,
+        consume,
+        &[sread_elif],
+        &[ParamMode::Move],
+        void,
+        span,
+    );
     let cstmt_elif = tb.unary(TirTag::ExprStmt, void, ccall_elif, span);
     let sread_e = tb.var(s, str_ty, span);
-    let ccall_e = tb.call(consume, &[sread_e], &[ParamMode::Move], void, span);
+    let ccall_e = tb.call(
+        DeclId::NONE,
+        consume,
+        &[sread_e],
+        &[ParamMode::Move],
+        void,
+        span,
+    );
     let cstmt_e = tb.unary(TirTag::ExprStmt, void, ccall_e, span);
     let vread_e = tb.var(v, view_ty, span);
-    let pcall_e = tb.call(print, &[vread_e], &all_borrow(&[vread_e]), void, span);
+    let pcall_e = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread_e],
+        &all_borrow(&[vread_e]),
+        void,
+        span,
+    );
     let pstmt_e = tb.unary(TirTag::ExprStmt, void, pcall_e, span);
     let ifs = tb.if_stmt(
         cond1,
@@ -426,16 +526,44 @@ fn per_arm_override_applies_to_elif_arms() {
     let cond1 = tb.bool_const(true, bool_ty, span);
     let cond2 = tb.bool_const(true, bool_ty, span);
     let tlit = tb.str_const(tee, str_ty, span);
-    let pcall_t = tb.call(print, &[tlit], &all_borrow(&[tlit]), void, span);
+    let pcall_t = tb.call(
+        DeclId::NONE,
+        print,
+        &[tlit],
+        &all_borrow(&[tlit]),
+        void,
+        span,
+    );
     let pstmt_t = tb.unary(TirTag::ExprStmt, void, pcall_t, span);
     let vread_elif = tb.var(v, view_ty, span);
-    let pcall_elif = tb.call(print, &[vread_elif], &all_borrow(&[vread_elif]), void, span);
+    let pcall_elif = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread_elif],
+        &all_borrow(&[vread_elif]),
+        void,
+        span,
+    );
     let pstmt_elif = tb.unary(TirTag::ExprStmt, void, pcall_elif, span);
     let sread = tb.var(s, str_ty, span);
-    let ccall = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+    let ccall = tb.call(
+        DeclId::NONE,
+        consume,
+        &[sread],
+        &[ParamMode::Move],
+        void,
+        span,
+    );
     let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
     let vread_e = tb.var(v, view_ty, span);
-    let pcall_e = tb.call(print, &[vread_e], &all_borrow(&[vread_e]), void, span);
+    let pcall_e = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread_e],
+        &all_borrow(&[vread_e]),
+        void,
+        span,
+    );
     let pstmt_e = tb.unary(TirTag::ExprStmt, void, pcall_e, span);
     let ifs = tb.if_stmt(
         cond1,
@@ -507,6 +635,7 @@ fn view_created_in_loop_body_per_arm_kill_applies() {
     let sread = tb.var(s, str_ty, span);
     let suffix = tb.str_const(bang, str_ty, span);
     let push = tb.call(
+        DeclId::NONE,
         str_push,
         &[sread, suffix],
         &[ParamMode::Inout, ParamMode::Borrow],
@@ -515,7 +644,14 @@ fn view_created_in_loop_body_per_arm_kill_applies() {
     );
     let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
     let vread = tb.var(v, view_ty, span);
-    let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+    let pcall = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread],
+        &all_borrow(&[vread]),
+        void,
+        span,
+    );
     let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
     let ifs = tb.if_stmt(cond, &[push_stmt], &[], Some(&[pstmt]), void, span);
     let wl = tb.while_loop(wcond, &[vdecl, ifs], void, span);
@@ -579,6 +715,7 @@ fn view_created_in_loop_body_freeze_holds_before_read() {
     let sread = tb.var(s, str_ty, span);
     let suffix = tb.str_const(bang, str_ty, span);
     let push = tb.call(
+        DeclId::NONE,
         str_push,
         &[sread, suffix],
         &[ParamMode::Inout, ParamMode::Borrow],
@@ -587,7 +724,14 @@ fn view_created_in_loop_body_freeze_holds_before_read() {
     );
     let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
     let vread = tb.var(v, view_ty, span);
-    let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+    let pcall = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread],
+        &all_borrow(&[vread]),
+        void,
+        span,
+    );
     let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
     let ifs = tb.if_stmt(cond, &[push_stmt, pstmt], &[], None, void, span);
     let wl = tb.while_loop(wcond, &[vdecl, ifs], void, span);
@@ -654,13 +798,34 @@ fn freeze_holds_before_arm_local_last_read() {
     let vdecl = tb.var_decl(v, false, view_ty, sl, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let sread = tb.var(s, str_ty, span);
-    let ccall = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+    let ccall = tb.call(
+        DeclId::NONE,
+        consume,
+        &[sread],
+        &[ParamMode::Move],
+        void,
+        span,
+    );
     let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
     let vread_t = tb.var(v, view_ty, span);
-    let pcall_t = tb.call(print, &[vread_t], &all_borrow(&[vread_t]), void, span);
+    let pcall_t = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread_t],
+        &all_borrow(&[vread_t]),
+        void,
+        span,
+    );
     let pstmt_t = tb.unary(TirTag::ExprStmt, void, pcall_t, span);
     let vread_e = tb.var(v, view_ty, span);
-    let pcall_e = tb.call(print, &[vread_e], &all_borrow(&[vread_e]), void, span);
+    let pcall_e = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread_e],
+        &all_borrow(&[vread_e]),
+        void,
+        span,
+    );
     let pstmt_e = tb.unary(TirTag::ExprStmt, void, pcall_e, span);
     let ifs = tb.if_stmt(cond, &[cstmt, pstmt_t], &[], Some(&[pstmt_e]), void, span);
     let tir = tb.finish(&[decl, vdecl, ifs]);
@@ -727,14 +892,35 @@ fn freeze_holds_in_arm_when_view_read_after_join() {
     let vdecl = tb.var_decl(v, false, view_ty, sl, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let vread_t = tb.var(v, view_ty, span);
-    let pcall_t = tb.call(print, &[vread_t], &all_borrow(&[vread_t]), void, span);
+    let pcall_t = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread_t],
+        &all_borrow(&[vread_t]),
+        void,
+        span,
+    );
     let pstmt_t = tb.unary(TirTag::ExprStmt, void, pcall_t, span);
     let sread = tb.var(s, str_ty, span);
-    let ccall = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+    let ccall = tb.call(
+        DeclId::NONE,
+        consume,
+        &[sread],
+        &[ParamMode::Move],
+        void,
+        span,
+    );
     let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
     let ifs = tb.if_stmt(cond, &[pstmt_t], &[], Some(&[cstmt]), void, span);
     let vread = tb.var(v, view_ty, span);
-    let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+    let pcall = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread],
+        &all_borrow(&[vread]),
+        void,
+        span,
+    );
     let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
     let tir = tb.finish(&[decl, vdecl, ifs, pstmt]);
 
@@ -800,14 +986,35 @@ fn move_in_arm_where_view_is_dead_ok_but_post_join_use_is_uam() {
     let vdecl = tb.var_decl(v, false, view_ty, sl, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let sread = tb.var(s, str_ty, span);
-    let ccall = tb.call(consume, &[sread], &[ParamMode::Move], void, span);
+    let ccall = tb.call(
+        DeclId::NONE,
+        consume,
+        &[sread],
+        &[ParamMode::Move],
+        void,
+        span,
+    );
     let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
     let vread_e = tb.var(v, view_ty, span);
-    let pcall_e = tb.call(print, &[vread_e], &all_borrow(&[vread_e]), void, span);
+    let pcall_e = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread_e],
+        &all_borrow(&[vread_e]),
+        void,
+        span,
+    );
     let pstmt_e = tb.unary(TirTag::ExprStmt, void, pcall_e, span);
     let ifs = tb.if_stmt(cond, &[cstmt], &[], Some(&[pstmt_e]), void, span);
     let sread2 = tb.var(s, str_ty, span);
-    let pcall = tb.call(print, &[sread2], &all_borrow(&[sread2]), void, span);
+    let pcall = tb.call(
+        DeclId::NONE,
+        print,
+        &[sread2],
+        &all_borrow(&[sread2]),
+        void,
+        span,
+    );
     let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
     let tir = tb.finish(&[decl, vdecl, ifs, pstmt]);
 
@@ -872,6 +1079,7 @@ fn loop_deferred_view_stays_frozen_across_arm_without_read() {
     let sread = tb.var(s, str_ty, span);
     let suffix = tb.str_const(bang, str_ty, span);
     let push = tb.call(
+        DeclId::NONE,
         str_push,
         &[sread, suffix],
         &[ParamMode::Inout, ParamMode::Borrow],
@@ -880,7 +1088,14 @@ fn loop_deferred_view_stays_frozen_across_arm_without_read() {
     );
     let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
     let vread = tb.var(v, view_ty, span);
-    let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+    let pcall = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread],
+        &all_borrow(&[vread]),
+        void,
+        span,
+    );
     let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
     let ifs = tb.if_stmt(cond, &[push_stmt], &[], Some(&[pstmt]), void, span);
     let wl = tb.while_loop(wcond, &[ifs], void, span);
@@ -953,6 +1168,7 @@ fn for_range_deferred_view_stays_frozen_across_arm_without_read() {
     let sread = tb.var(s, str_ty, span);
     let suffix = tb.str_const(bang, str_ty, span);
     let push = tb.call(
+        DeclId::NONE,
         str_push,
         &[sread, suffix],
         &[ParamMode::Inout, ParamMode::Borrow],
@@ -961,7 +1177,14 @@ fn for_range_deferred_view_stays_frozen_across_arm_without_read() {
     );
     let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
     let vread = tb.var(v, view_ty, span);
-    let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+    let pcall = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread],
+        &all_borrow(&[vread]),
+        void,
+        span,
+    );
     let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
     let ifs = tb.if_stmt(cond, &[push_stmt], &[], Some(&[pstmt]), void, span);
     let i0b = tb.int_const(0, int_ty, span);
@@ -1026,7 +1249,14 @@ fn view_in_loop_body_converges() {
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
     let vdecl = tb.var_decl(v, false, view_ty, sl, span);
     let vread = tb.var(v, view_ty, span);
-    let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+    let pcall = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread],
+        &all_borrow(&[vread]),
+        void,
+        span,
+    );
     let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
     let wl = tb.while_loop(cond, &[vdecl, pstmt], void, span);
     let tir = tb.finish(&[decl, wl]);
@@ -1088,6 +1318,7 @@ fn loop_rebinding_liveness_tracks_entry_and_back_edge_views() {
 
     let before_rebind = tb.var(v, view_ty, span);
     let before_call = tb.call(
+        DeclId::NONE,
         print,
         &[before_rebind],
         &all_borrow(&[before_rebind]),
@@ -1102,6 +1333,7 @@ fn loop_rebinding_liveness_tracks_entry_and_back_edge_views() {
     let rebind = tb.assign(v, view_ty, rebound_slice, span);
     let after_rebind = tb.var(v, view_ty, span);
     let after_call = tb.call(
+        DeclId::NONE,
         print,
         &[after_rebind],
         &all_borrow(&[after_rebind]),
@@ -1111,7 +1343,14 @@ fn loop_rebinding_liveness_tracks_entry_and_back_edge_views() {
     let after_stmt = tb.unary(TirTag::ExprStmt, void, after_call, span);
     let loop_stmt = tb.while_loop(cond, &[before_stmt, rebind, after_stmt], void, span);
     let exit_read = tb.var(v, view_ty, span);
-    let exit_call = tb.call(print, &[exit_read], &all_borrow(&[exit_read]), void, span);
+    let exit_call = tb.call(
+        DeclId::NONE,
+        print,
+        &[exit_read],
+        &all_borrow(&[exit_read]),
+        void,
+        span,
+    );
     let exit_stmt = tb.unary(TirTag::ExprStmt, void, exit_call, span);
     let tir = tb.finish(&[s_decl, t_decl, v_decl, loop_stmt, exit_stmt]);
     let flow = ryo_core::flow::Flow::build(&tir, &pool);
@@ -1179,6 +1418,7 @@ fn loop_rebind_stays_scoped_to_its_arm() {
     let rebind = tb.assign(v, view_ty, rebound_slice, span);
     let in_loop_read = tb.var(v, view_ty, span);
     let in_loop_call = tb.call(
+        DeclId::NONE,
         print,
         &[in_loop_read],
         &all_borrow(&[in_loop_read]),
@@ -1188,7 +1428,14 @@ fn loop_rebind_stays_scoped_to_its_arm() {
     let in_loop_stmt = tb.unary(TirTag::ExprStmt, void, in_loop_call, span);
     let wl = tb.while_loop(while_cond, &[rebind, in_loop_stmt], void, span);
     let else_read = tb.var(v, view_ty, span);
-    let else_call = tb.call(print, &[else_read], &all_borrow(&[else_read]), void, span);
+    let else_call = tb.call(
+        DeclId::NONE,
+        print,
+        &[else_read],
+        &all_borrow(&[else_read]),
+        void,
+        span,
+    );
     let else_stmt = tb.unary(TirTag::ExprStmt, void, else_call, span);
     let ifs = tb.if_stmt(if_cond, &[wl], &[], Some(&[else_stmt]), void, span);
     let tir = tb.finish(&[s_decl, t_decl, v_decl, ifs]);
@@ -1249,12 +1496,20 @@ fn loop_deferred_view_survives_if_join_prune() {
     let while_cond = tb.bool_const(true, bool_ty, span);
     let if_cond = tb.bool_const(true, bool_ty, span);
     let vread = tb.var(v, view_ty, span);
-    let pcall = tb.call(print, &[vread], &all_borrow(&[vread]), void, span);
+    let pcall = tb.call(
+        DeclId::NONE,
+        print,
+        &[vread],
+        &all_borrow(&[vread]),
+        void,
+        span,
+    );
     let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
     let ifs = tb.if_stmt(if_cond, &[pstmt], &[], None, void, span);
     let sread = tb.var(s, str_ty, span);
     let suffix = tb.str_const(bang, str_ty, span);
     let push = tb.call(
+        DeclId::NONE,
         str_push,
         &[sread, suffix],
         &[ParamMode::Inout, ParamMode::Borrow],

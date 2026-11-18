@@ -843,13 +843,17 @@ impl Ast {
         self.span
     }
 
-    /// Record the top-level statement list (called once by the
-    /// parser at end of input) and stamp the program span from the
-    /// first and last statements.
+    /// Record the top-level statement list and stamp the program span
+    /// from the first and last statements.
     pub fn set_top_level(&mut self, stmts: Vec<StmtId>) {
+        self.set_top_level_with_span(stmts, Span::EMPTY);
+    }
+
+    /// Use the parser's source-aware zero-width span when `stmts` is empty.
+    pub fn set_top_level_with_span(&mut self, stmts: Vec<StmtId>, empty_span: Span) {
         self.span = match (stmts.first(), stmts.last()) {
             (Some(&first), Some(&last)) => self.stmt_span(first).with_end(self.stmt_span(last).end),
-            _ => Span::EMPTY,
+            _ => empty_span,
         };
         self.top_level = stmts;
     }

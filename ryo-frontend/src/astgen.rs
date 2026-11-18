@@ -33,6 +33,7 @@ use std::collections::{HashMap, HashSet};
 
 type Span = ryo_core::span::Span;
 
+#[cfg(test)]
 fn synthetic_span() -> Span {
     Span::EMPTY
 }
@@ -807,7 +808,7 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
         );
     }
 
-    b.finish()
+    b.finish().with_layout_context(pool)
 }
 
 /// Definition progress for one declared type in the define DFS.
@@ -1268,7 +1269,7 @@ fn gen_implicit_main(
     }
 
     let void_ty = pool.void();
-    b.add_function(types.main, vec![], void_ty, &body_stmts, synthetic_span());
+    b.add_function(types.main, vec![], void_ty, &body_stmts, ast.span());
 }
 
 fn gen_function_def(

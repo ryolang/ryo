@@ -45,7 +45,15 @@ fn run_buffered(input: &str) -> (Vec<Tir>, Vec<Diag>, InternPool) {
 
     let mut sink = DiagSink::new();
     let uir = astgen::generate(&ast, &mut pool, &mut sink);
-    let (tirs, warnings) = analyze_buffered(&uir, &mut pool, &mut sink, input, Path::new("<test>"));
+    let mut context = CompilationContext::new();
+    let (tirs, warnings) = analyze_buffered(
+        &uir,
+        &mut pool,
+        &mut sink,
+        input,
+        Path::new("<test>"),
+        &mut context,
+    );
     let mut diags = sink.into_diags();
     diags.extend(warnings);
     (tirs, diags, pool)

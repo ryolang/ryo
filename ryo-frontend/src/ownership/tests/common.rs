@@ -119,12 +119,14 @@ fn check_src_full_with_loop_budget(
     let (ast, mut pool) = state.into_parts();
     let mut sink = DiagSink::new();
     let uir = crate::astgen::generate(&ast, &mut pool, &mut sink);
+    let mut context = ryo_core::compilation::CompilationContext::new();
     let (tirs, sema_warnings) = crate::sema::analyze_buffered(
         &uir,
         &mut pool,
         &mut sink,
         input,
         std::path::Path::new("<test>"),
+        &mut context,
     );
     let flows: Vec<ryo_core::flow::Flow> = tirs
         .iter()
