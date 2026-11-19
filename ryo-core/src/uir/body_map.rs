@@ -1,0 +1,796 @@
+use super::{ExtraRange, InstData, InstRef, InstTag, Uir, match_extra};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodySlot {
+    pub body: u32,
+    pub local: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyMapError {
+    CrossBody {
+        inst: InstRef,
+        first_body: u32,
+        second_body: u32,
+    },
+    InvalidInstRef {
+        body: u32,
+        inst: InstRef,
+    },
+    ReservedInstRef {
+        body: u32,
+    },
+    InvalidExtraRange {
+        body: u32,
+        inst: Option<InstRef>,
+        offset: u32,
+        len: u32,
+    },
+    MalformedWire {
+        body: u32,
+        inst: InstRef,
+    },
+    TooManyBodies,
+    TooManyInstructions {
+        body: u32,
+    },
+}
+
+impl std::fmt::Display for BodyMapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CrossBody {
+                inst,
+                first_body,
+                second_body,
+            } => write!(
+                f,
+                "instruction {} is reachable from bodies {first_body} and {second_body}",
+                inst.raw()
+            ),
+            Self::InvalidInstRef { body, inst } => write!(
+                f,
+                "body {body} references invalid instruction {}",
+                inst.raw()
+            ),
+            Self::ReservedInstRef { body } => {
+                write!(f, "body {body} references reserved instruction zero")
+            }
+            Self::InvalidExtraRange {
+                body,
+                inst,
+                offset,
+                len,
+            } => match inst {
+                Some(inst) => write!(
+                    f,
+                    "instruction {} in body {body} has invalid extra range {offset}..{}",
+                    inst.raw(),
+                    offset.saturating_add(*len)
+                ),
+                None => write!(
+                    f,
+                    "body {body} has invalid extra range {offset}..{}",
+                    offset.saturating_add(*len)
+                ),
+            },
+            Self::MalformedWire { body, inst } => write!(
+                f,
+                "instruction {} in body {body} has a malformed payload",
+                inst.raw()
+            ),
+            Self::TooManyBodies => f.write_str("UIR body index exceeds u32"),
+            Self::TooManyInstructions { body } => {
+                write!(f, "instruction count for body {body} exceeds u32")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BodyMapError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UirBodyMap {
+    slots: Vec<Option<BodySlot>>,
+    bodies: Vec<Vec<InstRef>>,
+}
+
+impl UirBodyMap {
+    pub fn slot(&self, inst: InstRef) -> Option<BodySlot> {
+        self.slots.get(inst.index()).copied().flatten()
+    }
+
+    pub fn instructions(&self, body: usize) -> &[InstRef] {
+        &self.bodies[body]
+    }
+}
+
+impl Uir {
+    pub fn compute_body_map(&self) -> Result<UirBodyMap, BodyMapError> {
+        enum Visit {
+            Enter(InstRef),
+            Exit(InstRef),
+        }
+
+        let mut map = UirBodyMap {
+            slots: vec![None; self.instructions.len()],
+            bodies: Vec::with_capacity(self.func_bodies.len()),
+        };
+        map.bodies.resize_with(self.func_bodies.len(), Vec::new);
+
+        let mut active = vec![false; self.instructions.len()];
+        let mut stack = Vec::new();
+        let mut children = Vec::new();
+        for body_index in 0..self.func_bodies.len() {
+            let body = u32::try_from(body_index).map_err(|_| BodyMapError::TooManyBodies)?;
+            let words = checked_extra(self, self.func_bodies[body_index].body, body, None)?;
+            children.clear();
+            for &raw in words {
+                children.push(checked_ref(raw, body, self.instructions.len())?);
+            }
+            stack.extend(children.iter().rev().map(|&inst| Visit::Enter(inst)));
+
+            while let Some(visit) = stack.pop() {
+                let inst = match visit {
+                    Visit::Exit(inst) => {
+                        active[inst.index()] = false;
+                        continue;
+                    }
+                    Visit::Enter(inst) => inst,
+                };
+                if active[inst.index()] {
+                    return malformed(body, inst);
+                }
+                if let Some(slot) = map.slots[inst.index()] {
+                    if slot.body != body {
+                        return Err(BodyMapError::CrossBody {
+                            inst,
+                            first_body: slot.body,
+                            second_body: body,
+                        });
+                    }
+                    continue;
+                }
+
+                let local = u32::try_from(map.bodies[body_index].len())
+                    .map_err(|_| BodyMapError::TooManyInstructions { body })?;
+                map.slots[inst.index()] = Some(BodySlot { body, local });
+                map.bodies[body_index].push(inst);
+                active[inst.index()] = true;
+
+                children.clear();
+                decode_children(self, inst, body, &mut children)?;
+                stack.push(Visit::Exit(inst));
+                stack.extend(children.iter().rev().map(|&child| Visit::Enter(child)));
+            }
+        }
+        Ok(map)
+    }
+}
+
+fn checked_ref(raw: u32, body: u32, instruction_count: usize) -> Result<InstRef, BodyMapError> {
+    if raw == 0 {
+        return Err(BodyMapError::ReservedInstRef { body });
+    }
+    let inst = InstRef::from_raw(raw);
+    if inst.index() >= instruction_count {
+        return Err(BodyMapError::InvalidInstRef { body, inst });
+    }
+    Ok(inst)
+}
+
+fn push_ref(
+    children: &mut Vec<InstRef>,
+    inst: InstRef,
+    body: u32,
+    instruction_count: usize,
+) -> Result<(), BodyMapError> {
+    children.push(checked_ref(inst.raw(), body, instruction_count)?);
+    Ok(())
+}
+
+fn malformed<T>(body: u32, inst: InstRef) -> Result<T, BodyMapError> {
+    Err(BodyMapError::MalformedWire { body, inst })
+}
+
+fn checked_extra(
+    uir: &Uir,
+    range: ExtraRange,
+    body: u32,
+    inst: Option<InstRef>,
+) -> Result<&[u32], BodyMapError> {
+    let start = range.offset as usize;
+    let end = start.checked_add(range.len as usize);
+    end.and_then(|end| uir.extra.get(start..end))
+        .ok_or(BodyMapError::InvalidExtraRange {
+            body,
+            inst,
+            offset: range.offset,
+            len: range.len,
+        })
+}
+
+fn expect_extra(data: InstData, body: u32, inst: InstRef) -> Result<ExtraRange, BodyMapError> {
+    match data {
+        InstData::Extra(range) => Ok(range),
+        _ => malformed(body, inst),
+    }
+}
+
+struct WireCursor<'a> {
+    words: &'a [u32],
+    pos: usize,
+    body: u32,
+    inst: InstRef,
+    instruction_count: usize,
+}
+
+impl<'a> WireCursor<'a> {
+    fn new(
+        uir: &'a Uir,
+        range: ExtraRange,
+        body: u32,
+        inst: InstRef,
+    ) -> Result<Self, BodyMapError> {
+        Ok(Self {
+            words: checked_extra(uir, range, body, Some(inst))?,
+            pos: 0,
+            body,
+            inst,
+            instruction_count: uir.instructions.len(),
+        })
+    }
+
+    fn word(&mut self) -> Result<u32, BodyMapError> {
+        let word = self.words.get(self.pos).copied();
+        if word.is_some() {
+            self.pos += 1;
+        }
+        word.ok_or(BodyMapError::MalformedWire {
+            body: self.body,
+            inst: self.inst,
+        })
+    }
+
+    fn count(&mut self) -> Result<usize, BodyMapError> {
+        Ok(self.word()? as usize)
+    }
+
+    fn take(&mut self, count: usize) -> Result<&'a [u32], BodyMapError> {
+        let end = self
+            .pos
+            .checked_add(count)
+            .ok_or(BodyMapError::MalformedWire {
+                body: self.body,
+                inst: self.inst,
+            })?;
+        let words = self
+            .words
+            .get(self.pos..end)
+            .ok_or(BodyMapError::MalformedWire {
+                body: self.body,
+                inst: self.inst,
+            })?;
+        self.pos = end;
+        Ok(words)
+    }
+
+    fn skip(&mut self, count: usize) -> Result<(), BodyMapError> {
+        self.take(count).map(|_| ())
+    }
+
+    fn refs(&mut self, count: usize, children: &mut Vec<InstRef>) -> Result<(), BodyMapError> {
+        let body = self.body;
+        let instruction_count = self.instruction_count;
+        for &raw in self.take(count)? {
+            children.push(checked_ref(raw, body, instruction_count)?);
+        }
+        Ok(())
+    }
+
+    fn ref_list(&mut self, children: &mut Vec<InstRef>) -> Result<(), BodyMapError> {
+        let count = self.count()?;
+        self.refs(count, children)
+    }
+
+    fn inst(&mut self, children: &mut Vec<InstRef>) -> Result<(), BodyMapError> {
+        let raw = self.word()?;
+        let inst = checked_ref(raw, self.body, self.instruction_count)?;
+        children.push(inst);
+        Ok(())
+    }
+
+    fn finish(&self) -> Result<(), BodyMapError> {
+        if self.pos == self.words.len() {
+            Ok(())
+        } else {
+            malformed(self.body, self.inst)
+        }
+    }
+}
+
+fn decode_children(
+    uir: &Uir,
+    inst: InstRef,
+    body: u32,
+    children: &mut Vec<InstRef>,
+) -> Result<(), BodyMapError> {
+    let data = uir.instructions[inst.index()].data;
+    let instruction_count = uir.instructions.len();
+    let tag = uir.instructions[inst.index()].tag;
+    match tag {
+        InstTag::IntLiteral
+        | InstTag::FloatLiteral
+        | InstTag::StrLiteral
+        | InstTag::BytesLiteral
+        | InstTag::BoolLiteral
+        | InstTag::Var
+        | InstTag::TempVar
+        | InstTag::ReturnVoid
+        | InstTag::Break
+        | InstTag::Continue
+        | InstTag::Unreachable => {
+            let valid = match tag {
+                InstTag::IntLiteral => matches!(data, InstData::Int(_)),
+                InstTag::FloatLiteral => matches!(data, InstData::Float(_)),
+                InstTag::StrLiteral | InstTag::BytesLiteral => {
+                    matches!(data, InstData::Str(_))
+                }
+                InstTag::BoolLiteral => matches!(data, InstData::Bool(_)),
+                InstTag::Var | InstTag::TempVar => matches!(data, InstData::Var(_)),
+                _ => matches!(data, InstData::None),
+            };
+            if !valid {
+                return malformed(body, inst);
+            }
+        }
+        InstTag::Add
+        | InstTag::Sub
+        | InstTag::Mul
+        | InstTag::Div
+        | InstTag::Mod
+        | InstTag::Eq
+        | InstTag::NotEq
+        | InstTag::Lt
+        | InstTag::Gt
+        | InstTag::LtEq
+        | InstTag::GtEq
+        | InstTag::And
+        | InstTag::Or
+        | InstTag::Index => {
+            let InstData::BinOp { lhs, rhs } = data else {
+                return malformed(body, inst);
+            };
+            push_ref(children, lhs, body, instruction_count)?;
+            push_ref(children, rhs, body, instruction_count)?;
+        }
+        InstTag::Neg | InstTag::Return | InstTag::ExprStmt | InstTag::Not | InstTag::Try => {
+            let InstData::UnOp(operand) = data else {
+                return malformed(body, inst);
+            };
+            push_ref(children, operand, body, instruction_count)?;
+        }
+        InstTag::Borrow => {
+            let InstData::Borrow(operand) = data else {
+                return malformed(body, inst);
+            };
+            push_ref(children, operand, body, instruction_count)?;
+        }
+        InstTag::Call => {
+            let range = expect_extra(data, body, inst)?;
+            let mut cursor = WireCursor::new(uir, range, body, inst)?;
+            cursor.skip(1)?;
+            let argc = cursor.count()?;
+            cursor.refs(argc, children)?;
+            cursor.finish()?;
+        }
+        InstTag::VarDecl => {
+            let range = expect_extra(data, body, inst)?;
+            let mut cursor = WireCursor::new(uir, range, body, inst)?;
+            cursor.skip(3)?;
+            cursor.inst(children)?;
+            cursor.finish()?;
+        }
+        InstTag::IfStmt => {
+            let range = expect_extra(data, body, inst)?;
+            let mut cursor = WireCursor::new(uir, range, body, inst)?;
+            cursor.inst(children)?;
+            cursor.ref_list(children)?;
+            let elif_count = cursor.count()?;
+            for _ in 0..elif_count {
+                cursor.inst(children)?;
+                cursor.ref_list(children)?;
+            }
+            if cursor.word()? != 0 {
+                cursor.ref_list(children)?;
+            }
+            cursor.finish()?;
+        }
+        InstTag::AssignOrDecl => {
+            let range = expect_extra(data, body, inst)?;
+            let mut cursor = WireCursor::new(uir, range, body, inst)?;
+            cursor.skip(1)?;
+            cursor.inst(children)?;
+            cursor.finish()?;
+        }
+        InstTag::CompoundAssign => {
+            let range = expect_extra(data, body, inst)?;
+            let mut cursor = WireCursor::new(uir, range, body, inst)?;
+            cursor.skip(2)?;
+            cursor.inst(children)?;
+            cursor.finish()?;
+        }
+        InstTag::WhileLoop => {
+            let range = expect_extra(data, body, inst)?;
+            let mut cursor = WireCursor::new(uir, range, body, inst)?;
+            cursor.inst(children)?;
+            cursor.ref_list(children)?;
+            cursor.finish()?;
+        }
+        InstTag::ForRange => {
+            let range = expect_extra(data, body, inst)?;
+            let mut cursor = WireCursor::new(uir, range, body, inst)?;
+            cursor.skip(1)?;
+            cursor.inst(children)?;
+            cursor.inst(children)?;
+            cursor.ref_list(children)?;
+            cursor.finish()?;
+        }
+        InstTag::MethodCall => {
+            let range = expect_extra(data, body, inst)?;
+            let mut cursor = WireCursor::new(uir, range, body, inst)?;
+            cursor.inst(children)?;
+            cursor.skip(1)?;
+            let argc = cursor.count()?;
+            cursor.refs(argc, children)?;
+            cursor.finish()?;
+        }
+        InstTag::Slice => {
+            let InstData::Slice { base, start, end } = data else {
+                return malformed(body, inst);
+            };
+            push_ref(children, base, body, instruction_count)?;
+            for bound in [start, end].into_iter().flatten() {
+                push_ref(children, bound, body, instruction_count)?;
+            }
+        }
+        InstTag::StructLit => {
+            let range = expect_extra(data, body, inst)?;
+            let mut cursor = WireCursor::new(uir, range, body, inst)?;
+            cursor.skip(1)?;
+            let field_count = cursor.count()?;
+            for _ in 0..field_count {
+                cursor.skip(1)?;
+                cursor.inst(children)?;
+            }
+            cursor.finish()?;
+        }
+        InstTag::EnumLit => {
+            let range = expect_extra(data, body, inst)?;
+            let mut cursor = WireCursor::new(uir, range, body, inst)?;
+            decode_enum_args(&mut cursor, children)?;
+            cursor.finish()?;
+        }
+        InstTag::ErrorConstruct => {
+            let InstData::ErrorConstruct { args, .. } = data else {
+                return malformed(body, inst);
+            };
+            let mut cursor = WireCursor::new(uir, args, body, inst)?;
+            cursor.skip(2)?;
+            decode_enum_args(&mut cursor, children)?;
+            cursor.finish()?;
+        }
+        InstTag::FieldAccess => {
+            let InstData::FieldAccess { object, .. } = data else {
+                return malformed(body, inst);
+            };
+            push_ref(children, object, body, instruction_count)?;
+        }
+        InstTag::FieldAssign => {
+            let range = expect_extra(data, body, inst)?;
+            let mut cursor = WireCursor::new(uir, range, body, inst)?;
+            cursor.inst(children)?;
+            cursor.inst(children)?;
+            cursor.finish()?;
+        }
+        InstTag::CompoundFieldAssign => {
+            let range = expect_extra(data, body, inst)?;
+            let mut cursor = WireCursor::new(uir, range, body, inst)?;
+            cursor.inst(children)?;
+            cursor.skip(1)?;
+            cursor.inst(children)?;
+            cursor.finish()?;
+        }
+        InstTag::Destructure => {
+            let InstData::Destructure { value, plan, .. } = data else {
+                return malformed(body, inst);
+            };
+            push_ref(children, value, body, instruction_count)?;
+            let mut cursor = WireCursor::new(uir, plan, body, inst)?;
+            let entry_count = cursor.count()?;
+            let words = match entry_count.checked_mul(2) {
+                Some(words) => words,
+                None => return malformed(body, inst),
+            };
+            cursor.skip(words)?;
+            cursor.finish()?;
+        }
+        InstTag::Match | InstTag::Catch => {
+            let (scrutinee, arms, is_catch) = match (tag, data) {
+                (InstTag::Match, InstData::Match { scrutinee, arms }) => (scrutinee, arms, false),
+                (InstTag::Catch, InstData::Catch { scrutinee, arms }) => (scrutinee, arms, true),
+                _ => return malformed(body, inst),
+            };
+            push_ref(children, scrutinee, body, instruction_count)?;
+            let mut cursor = WireCursor::new(uir, arms, body, inst)?;
+            if is_catch {
+                cursor.skip(1)?;
+            }
+            decode_match_arms(&mut cursor, children)?;
+            cursor.finish()?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_enum_args(
+    cursor: &mut WireCursor<'_>,
+    children: &mut Vec<InstRef>,
+) -> Result<(), BodyMapError> {
+    cursor.skip(2)?;
+    let argc = cursor.count()?;
+    cursor.skip(1)?;
+    for _ in 0..argc {
+        cursor.skip(1)?;
+        cursor.inst(children)?;
+    }
+    Ok(())
+}
+
+fn decode_match_arms(
+    cursor: &mut WireCursor<'_>,
+    children: &mut Vec<InstRef>,
+) -> Result<(), BodyMapError> {
+    let arm_count = cursor.count()?;
+    for _ in 0..arm_count {
+        let arm_len = cursor.count()?;
+        let body = cursor.body;
+        let inst = cursor.inst;
+        let instruction_count = cursor.instruction_count;
+        let mut arm = WireCursor {
+            words: cursor.take(arm_len)?,
+            pos: 0,
+            body,
+            inst,
+            instruction_count,
+        };
+        decode_match_arm(&mut arm, children)?;
+        arm.finish()?;
+    }
+    Ok(())
+}
+
+fn decode_match_arm(
+    arm: &mut WireCursor<'_>,
+    children: &mut Vec<InstRef>,
+) -> Result<(), BodyMapError> {
+    arm.skip(match_extra::PATTERN_KIND - 1)?;
+    match arm.word()? {
+        match_extra::PATTERN_WILDCARD => {}
+        match_extra::PATTERN_LITERAL => skip_literal(arm)?,
+        match_extra::PATTERN_ANON => {
+            arm.skip(1)?;
+            let field_count = arm.count()?;
+            for _ in 0..field_count {
+                arm.skip(1)?;
+                match arm.word()? {
+                    match_extra::FIELD_WILDCARD => {}
+                    match_extra::FIELD_BIND => arm.skip(1)?,
+                    match_extra::FIELD_LITERAL => skip_literal(arm)?,
+                    _ => return malformed(arm.body, arm.inst),
+                }
+            }
+        }
+        match_extra::PATTERN_VARIANT => {
+            arm.skip(2)?;
+            let flags = arm.word()?;
+            if flags & match_extra::FLAG_HAS_ARGS != 0 {
+                let argc = arm.count()?;
+                let words = match argc.checked_mul(2) {
+                    Some(words) => words,
+                    None => return malformed(arm.body, arm.inst),
+                };
+                arm.skip(words)?;
+            }
+        }
+        _ => return malformed(arm.body, arm.inst),
+    }
+
+    match arm.word()? {
+        match_extra::BODY_EXPR => arm.inst(children)?,
+        match_extra::BODY_STMTS => arm.ref_list(children)?,
+        _ => return malformed(arm.body, arm.inst),
+    }
+    Ok(())
+}
+
+fn skip_literal(cursor: &mut WireCursor<'_>) -> Result<(), BodyMapError> {
+    match cursor.word()? {
+        match_extra::LIT_INT => cursor.skip(2),
+        match_extra::LIT_STR | match_extra::LIT_BOOL => cursor.skip(1),
+        _ => malformed(cursor.body, cursor.inst),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BodyMapError, BodySlot};
+    use crate::types::InternPool;
+    use crate::uir::{InstData, InstRef, InstTag, Span, UirBuilder};
+
+    #[test]
+    fn body_map_assigns_dense_owner_and_local_slots() {
+        let mut pool = InternPool::new();
+        let mut builder = UirBuilder::new();
+        let lhs = builder.int_literal(1, Span::EMPTY);
+        let rhs = builder.int_literal(2, Span::EMPTY);
+        let add = builder.binary(InstTag::Add, lhs, rhs, Span::EMPTY);
+        let ret = builder.unary(InstTag::Return, add, Span::EMPTY);
+        let first_name = pool.intern_str("first");
+        builder.add_function(first_name, vec![], pool.int(), &[ret], Span::EMPTY);
+
+        let value = builder.int_literal(3, Span::EMPTY);
+        let stmt = builder.unary(InstTag::ExprStmt, value, Span::EMPTY);
+        let second_name = pool.intern_str("second");
+        builder.add_function(second_name, vec![], pool.void(), &[stmt], Span::EMPTY);
+
+        let map = builder.finish().compute_body_map().unwrap();
+        assert_eq!(map.instructions(0), [ret, add, lhs, rhs]);
+        assert_eq!(map.instructions(1), [stmt, value]);
+        for (local, inst) in [ret, add, lhs, rhs].into_iter().enumerate() {
+            assert_eq!(
+                map.slot(inst),
+                Some(BodySlot {
+                    body: 0,
+                    local: local as u32,
+                })
+            );
+        }
+        for (local, inst) in [stmt, value].into_iter().enumerate() {
+            assert_eq!(
+                map.slot(inst),
+                Some(BodySlot {
+                    body: 1,
+                    local: local as u32,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn body_map_rejects_cross_body_references() {
+        let mut pool = InternPool::new();
+        let mut builder = UirBuilder::new();
+        let shared = builder.int_literal(1, Span::EMPTY);
+        let ret = builder.unary(InstTag::Return, shared, Span::EMPTY);
+        let first_name = pool.intern_str("first");
+        builder.add_function(first_name, vec![], pool.int(), &[ret], Span::EMPTY);
+        let stmt = builder.unary(InstTag::ExprStmt, shared, Span::EMPTY);
+        let second_name = pool.intern_str("second");
+        builder.add_function(second_name, vec![], pool.void(), &[stmt], Span::EMPTY);
+
+        assert_eq!(
+            builder.finish().compute_body_map(),
+            Err(BodyMapError::CrossBody {
+                inst: shared,
+                first_body: 0,
+                second_body: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn body_map_rejects_invalid_child_without_panicking() {
+        let mut pool = InternPool::new();
+        let mut builder = UirBuilder::new();
+        let value = builder.int_literal(1, Span::EMPTY);
+        let ret = builder.unary(InstTag::Return, value, Span::EMPTY);
+        let main = pool.intern_str("main");
+        builder.add_function(main, vec![], pool.int(), &[ret], Span::EMPTY);
+        let mut uir = builder.finish();
+        let invalid = InstRef::from_raw(uir.instructions.len() as u32 + 10);
+        uir.instructions[ret.index()].data = InstData::UnOp(invalid);
+
+        assert!(matches!(
+            uir.compute_body_map(),
+            Err(BodyMapError::InvalidInstRef { inst, .. }) if inst == invalid
+        ));
+
+        let mut builder = UirBuilder::new();
+        let arg = builder.int_literal(1, Span::EMPTY);
+        let callee = pool.intern_str("callee");
+        let call = builder.call(callee, &[arg], Span::EMPTY);
+        builder.add_function(main, vec![], pool.void(), &[call], Span::EMPTY);
+        let mut uir = builder.finish();
+        let InstData::Extra(range) = &mut uir.instructions[call.index()].data else {
+            panic!("call must carry an extra range");
+        };
+        range.len -= 1;
+
+        assert!(matches!(
+            uir.compute_body_map(),
+            Err(BodyMapError::MalformedWire { inst, .. }) if inst == call
+        ));
+
+        let mut builder = UirBuilder::new();
+        let leaf = builder.int_literal(1, Span::EMPTY);
+        let first = builder.unary(InstTag::Neg, leaf, Span::EMPTY);
+        let second = builder.unary(InstTag::Neg, first, Span::EMPTY);
+        let root = builder.unary(InstTag::ExprStmt, second, Span::EMPTY);
+        builder.add_function(main, vec![], pool.void(), &[root], Span::EMPTY);
+        let mut uir = builder.finish();
+        uir.instructions[first.index()].data = InstData::UnOp(second);
+
+        assert!(matches!(
+            uir.compute_body_map(),
+            Err(BodyMapError::MalformedWire { .. })
+        ));
+
+        let mut builder = UirBuilder::new();
+        let scrutinee = builder.int_literal(1, Span::EMPTY);
+        let arm_body = builder.int_literal(2, Span::EMPTY);
+        let matched = builder.match_expr(
+            scrutinee,
+            &[crate::uir::UirMatchArm {
+                span: Span::EMPTY,
+                pattern: crate::uir::UirPattern::Wildcard,
+                body: crate::uir::UirArmBody::Expr(arm_body),
+            }],
+            Span::EMPTY,
+        );
+        builder.add_function(main, vec![], pool.void(), &[matched], Span::EMPTY);
+        let mut uir = builder.finish();
+        let InstData::Match { scrutinee, arms } = uir.instructions[matched.index()].data else {
+            panic!("match must carry its inline payload");
+        };
+        uir.instructions[matched.index()].data = InstData::Catch { scrutinee, arms };
+
+        assert!(matches!(
+            uir.compute_body_map(),
+            Err(BodyMapError::MalformedWire { inst, .. }) if inst == matched
+        ));
+    }
+
+    #[test]
+    fn body_map_allows_sharing_orphans_and_deep_chains() {
+        let mut pool = InternPool::new();
+        let mut builder = UirBuilder::new();
+        let lhs = builder.int_literal(1, Span::EMPTY);
+        let rhs = builder.int_literal(2, Span::EMPTY);
+        let shared = builder.binary(InstTag::Add, lhs, rhs, Span::EMPTY);
+        let root = builder.binary(InstTag::Mul, shared, shared, Span::EMPTY);
+        let ret = builder.unary(InstTag::Return, root, Span::EMPTY);
+        let orphan = builder.int_literal(99, Span::EMPTY);
+        let main = pool.intern_str("main");
+        builder.add_function(main, vec![], pool.int(), &[ret], Span::EMPTY);
+
+        let map = builder.finish().compute_body_map().unwrap();
+        assert_eq!(map.instructions(0), [ret, root, shared, lhs, rhs]);
+        assert_eq!(map.slot(shared).unwrap().local, 2);
+        assert_eq!(map.slot(orphan), None);
+
+        let mut builder = UirBuilder::new();
+        let leaf = builder.int_literal(0, Span::EMPTY);
+        let mut cursor = leaf;
+        for _ in 0..10_001 {
+            cursor = builder.unary(InstTag::Neg, cursor, Span::EMPTY);
+        }
+        let root = builder.unary(InstTag::ExprStmt, cursor, Span::EMPTY);
+        builder.add_function(main, vec![], pool.void(), &[root], Span::EMPTY);
+
+        let map = builder.finish().compute_body_map().unwrap();
+        assert_eq!(map.instructions(0).len(), 10_003);
+        assert_eq!(map.slot(root).unwrap().local, 0);
+        assert_eq!(map.slot(leaf).unwrap().local, 10_002);
+    }
+}

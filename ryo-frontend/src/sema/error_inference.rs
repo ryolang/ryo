@@ -2,7 +2,7 @@ use super::{DeclId, DeclState, FuncCtx, Sema};
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::tir::{TirRef, TirTag};
 use ryo_core::types::{TypeId, TypeKind};
-use ryo_core::uir::{InstRef, InstTag, Span};
+use ryo_core::uir::{InstTag, Span};
 
 #[derive(Default)]
 pub(super) struct InferenceState {
@@ -170,27 +170,17 @@ pub(super) fn reject_recursive_inferred_components(sema: &mut Sema<'_>) {
 
 fn direct_named_call_graph(sema: &Sema<'_>) -> Vec<Vec<u32>> {
     let mut graph = vec![Vec::new(); sema.uir.func_bodies.len()];
-    let mut start = 1usize;
-    for (index, body) in sema.uir.func_bodies.iter().enumerate() {
-        let end = sema
-            .uir
-            .body_stmts(body)
-            .into_iter()
-            .map(|stmt| stmt.index())
-            .max()
-            .unwrap_or(start.saturating_sub(1));
-        for raw in start..=end {
-            let inst = InstRef::from_raw(u32::try_from(raw).expect("UIR index out of range"));
+    for (index, edges) in graph.iter_mut().enumerate() {
+        for &inst in sema.body_map().instructions(index) {
             if sema.uir.inst(inst).tag == InstTag::Call {
                 let name = sema.uir.call_view(inst).name;
                 if let Some(&callee) = sema.name_to_decl.get(&name) {
-                    graph[index].push(
+                    edges.push(
                         u32::try_from(sema.body_index(callee)).expect("body index out of range"),
                     );
                 }
             }
         }
-        start = end + 1;
     }
     graph
 }
@@ -257,4 +247,52 @@ fn strongly_connected_components(graph: &[Vec<u32>]) -> Vec<Vec<usize>> {
         }
     }
     tarjan.components
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryo_core::compilation::CompilationContext;
+    use ryo_core::diag::DiagSink;
+    use ryo_core::types::InternPool;
+    use ryo_core::uir::UirBuilder;
+    use std::path::Path;
+
+    #[test]
+    fn inferred_call_graph_uses_exact_body_membership() {
+        let mut pool = InternPool::new();
+        let first = pool.intern_str("first");
+        let second = pool.intern_str("second");
+        let mut builder = UirBuilder::new();
+
+        let call_first = builder.call(first, &[], Span::EMPTY);
+        let nested_first = builder.unary(InstTag::Neg, call_first, Span::EMPTY);
+        let first_stmt = builder.unary(InstTag::ExprStmt, nested_first, Span::EMPTY);
+
+        let call_second = builder.call(second, &[], Span::EMPTY);
+        let nested_second = builder.unary(InstTag::Not, call_second, Span::EMPTY);
+        let second_stmt = builder.unary(InstTag::ExprStmt, nested_second, Span::EMPTY);
+
+        builder.add_function(first, vec![], pool.int(), &[second_stmt], Span::EMPTY);
+        builder.add_function(second, vec![], pool.int(), &[first_stmt], Span::EMPTY);
+        let uir = builder.finish().with_layout_context(&pool);
+        let map = uir.compute_body_map().unwrap();
+        assert_eq!(
+            map.instructions(0),
+            [second_stmt, nested_second, call_second]
+        );
+        assert_eq!(map.instructions(1), [first_stmt, nested_first, call_first]);
+
+        let mut sink = DiagSink::new();
+        let mut context = CompilationContext::new();
+        let sema = Sema::new(
+            &uir,
+            &mut pool,
+            &mut sink,
+            "",
+            Path::new("<test>"),
+            &mut context,
+        );
+        assert_eq!(direct_named_call_graph(&sema), [vec![1], vec![0]]);
+    }
 }

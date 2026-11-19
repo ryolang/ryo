@@ -48,7 +48,7 @@ use ryo_core::declaration::{DeclId, DeclarationError};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{ParamMode, Tir, TirBuilder, TirParam, TirRef};
 use ryo_core::types::{InternPool, StringId, TypeId};
-use ryo_core::uir::{FuncBody, InstRef, InstTag, Span, Uir};
+use ryo_core::uir::{FuncBody, InstRef, InstTag, Span, Uir, UirBodyMap};
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
@@ -328,6 +328,7 @@ pub struct Sema<'a> {
     decl_state: Vec<DeclState>,
     declaration_ids: Vec<DeclId>,
     registration_error: Option<DeclarationError>,
+    body_map: Option<UirBodyMap>,
     /// Decls pending analysis.
     queue: VecDeque<DeclId>,
     /// Function name → decl id. Built once at the top of `run` and
@@ -384,22 +385,23 @@ pub struct Sema<'a> {
 /// Every direct call-argument `InstRef` in the program. Scans
 /// `Call` and `MethodCall` instructions (method-call args count; the
 /// receiver does not — `(&x).len()` is not a valid borrow position).
-fn collect_call_arg_refs(uir: &Uir) -> Vec<bool> {
+fn collect_call_arg_refs(uir: &Uir, map: &UirBodyMap) -> Vec<bool> {
     let mut set = vec![false; uir.instructions.len()];
-    for (i, inst) in uir.instructions.iter().enumerate().skip(1) {
-        let r = InstRef::from_raw(i as u32);
-        match inst.tag {
-            InstTag::Call => {
-                for arg in uir.call_view(r).args {
-                    set[arg.index()] = true;
+    for body in 0..uir.func_bodies.len() {
+        for &r in map.instructions(body) {
+            match uir.inst(r).tag {
+                InstTag::Call => {
+                    for arg in uir.call_view(r).args {
+                        set[arg.index()] = true;
+                    }
                 }
-            }
-            InstTag::MethodCall => {
-                for arg in uir.method_call_view(r).args {
-                    set[arg.index()] = true;
+                InstTag::MethodCall => {
+                    for arg in uir.method_call_view(r).args {
+                        set[arg.index()] = true;
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
     set
@@ -419,7 +421,7 @@ impl<'a> Sema<'a> {
         context: &'a mut CompilationContext,
     ) -> SemaReport {
         let mut sema = Sema::new(uir, pool, sink, source, file_path, context);
-        if sema.registration_error.is_some() {
+        if sema.body_map.is_none() || sema.registration_error.is_some() {
             return SemaReport {
                 tirs: Vec::new(),
                 warnings: Vec::new(),
@@ -453,16 +455,31 @@ impl<'a> Sema<'a> {
         context: &'a mut CompilationContext,
     ) -> Self {
         let n = uir.func_bodies.len();
-        let (declaration_ids, registration_error) = match context.register_functions(uir, pool) {
-            Ok(ids) => (ids, None),
+        let body_map = match uir.compute_body_map() {
+            Ok(map) => Some(map),
             Err(error) => {
                 sink.emit(Diag::error(
                     Span::EMPTY,
                     DiagCode::InternalError,
-                    format!("declaration registration failed: {error}"),
+                    format!("invalid UIR body ownership: {error}"),
                 ));
-                (Vec::new(), Some(error))
+                None
             }
+        };
+        let (declaration_ids, registration_error) = if body_map.is_some() {
+            match context.register_functions(uir, pool) {
+                Ok(ids) => (ids, None),
+                Err(error) => {
+                    sink.emit(Diag::error(
+                        Span::EMPTY,
+                        DiagCode::InternalError,
+                        format!("declaration registration failed: {error}"),
+                    ));
+                    (Vec::new(), Some(error))
+                }
+            }
+        } else {
+            (Vec::new(), None)
         };
         let mut name_to_decl = HashMap::with_capacity(n);
         for (body, &decl) in uir.func_bodies.iter().zip(&declaration_ids) {
@@ -519,7 +536,10 @@ impl<'a> Sema<'a> {
             error_types: HashMap::new(),
             names,
             builtin_by_id,
-            call_arg_refs: collect_call_arg_refs(uir),
+            call_arg_refs: body_map
+                .as_ref()
+                .map_or_else(Vec::new, |map| collect_call_arg_refs(uir, map)),
+            body_map,
         }
     }
 
@@ -647,6 +667,13 @@ impl<'a> Sema<'a> {
     /// `Tir`; their diagnostics already live in the sink.
     fn collect_results(self) -> Vec<Tir> {
         self.results.into_iter().flatten().collect()
+    }
+
+    #[inline]
+    fn body_map(&self) -> &UirBodyMap {
+        self.body_map
+            .as_ref()
+            .expect("validated Sema must have a body map")
     }
 
     /// Return the current-UIR body slot for a declaration registered by this Sema.
@@ -821,18 +848,16 @@ fn analyze_function(sema: &mut Sema<'_>, decl: DeclId, body: &FuncBody) -> Tir {
         })
         .collect();
 
-    let mut fcx = FuncCtx {
+    let body_index = sema.body_index(decl);
+    let instruction_count = sema.body_map().instructions(body_index).len();
+    let mut fcx = FuncCtx::new(
         decl,
-        builder: TirBuilder::new(body.name, params, body.return_type, body.span)
+        u32::try_from(body_index).expect("UIR body index out of range"),
+        TirBuilder::new(body.name, params, body.return_type, body.span)
             .with_decl(decl)
             .with_layout_context(sema.pool),
-        inst_map: vec![None; sema.uir.instructions.len()],
-        chain_local_errors: Vec::new(),
-        return_type: body.return_type,
-        loop_depth: 0,
-        destructure_temps: HashMap::new(),
-        inferred_call_dependencies: HashMap::new(),
-    };
+        instruction_count,
+    );
 
     let uir = sema.uir;
     let body_stmts = uir.body_stmts(body);
@@ -871,6 +896,7 @@ fn analyze_function(sema: &mut Sema<'_>, decl: DeclId, body: &FuncBody) -> Tir {
 /// are scoped to a single body.
 pub(crate) struct FuncCtx {
     decl: DeclId,
+    body: u32,
     builder: TirBuilder,
     inst_map: Vec<Option<TirRef>>,
     chain_local_errors: Vec<InstRef>,
@@ -882,6 +908,50 @@ pub(crate) struct FuncCtx {
     /// reads resolve them before any scope lookup.
     destructure_temps: HashMap<StringId, TypeId>,
     inferred_call_dependencies: HashMap<TirRef, DeclId>,
+}
+
+impl FuncCtx {
+    pub(crate) fn new(
+        decl: DeclId,
+        body: u32,
+        builder: TirBuilder,
+        instruction_count: usize,
+    ) -> Self {
+        let return_type = builder.return_type();
+        Self {
+            decl,
+            body,
+            builder,
+            inst_map: vec![None; instruction_count],
+            chain_local_errors: Vec::new(),
+            return_type,
+            loop_depth: 0,
+            destructure_temps: HashMap::new(),
+            inferred_call_dependencies: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn map_slot(&self, map: &UirBodyMap, inst: InstRef) -> usize {
+        let slot = map
+            .slot(inst)
+            .expect("analyzed instruction must have a body owner");
+        debug_assert_eq!(slot.body, self.body);
+        slot.local as usize
+    }
+
+    fn get(&self, map: &UirBodyMap, inst: InstRef) -> Option<TirRef> {
+        self.inst_map[self.map_slot(map, inst)]
+    }
+
+    fn set(&mut self, map: &UirBodyMap, inst: InstRef, value: TirRef) {
+        let slot = self.map_slot(map, inst);
+        self.inst_map[slot] = Some(value);
+    }
+
+    fn clear(&mut self, map: &UirBodyMap, inst: InstRef) {
+        let slot = self.map_slot(map, inst);
+        self.inst_map[slot] = None;
+    }
 }
 
 #[cfg(test)]

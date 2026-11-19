@@ -32,7 +32,7 @@ pub(crate) fn analyze_stmt_with_context(
     let root_checkpoint = (context.depth == 0).then(|| checkpoint(fcx));
     let result = analyze_stmt_with_context_inner(sema, fcx, scope, r, context);
     if let Some(checkpoint) = root_checkpoint {
-        rollback_to(fcx, checkpoint);
+        rollback_to(sema, fcx, checkpoint);
     }
     result
 }

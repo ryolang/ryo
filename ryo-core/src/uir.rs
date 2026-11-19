@@ -982,6 +982,8 @@ impl UirBuilder {
     }
 }
 
+mod body_map;
+pub use body_map::{BodyMapError, BodySlot, UirBodyMap};
 mod dump;
 pub use dump::UirDump;
 mod destructure;

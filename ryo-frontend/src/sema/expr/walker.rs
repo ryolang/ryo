@@ -295,7 +295,7 @@ fn analyze_machine_inner(
         match task {
             Task::Enter(node, scope_id, mode) => {
                 let scope = match_state.scopes.get(scope_id);
-                if fcx.inst_map[node.index()].is_some() {
+                if fcx.get(sema.body_map(), node).is_some() {
                     let value = analyze_expr_with(sema, fcx, scope, node, mode, context.child());
                     analyzed.insert(node, value);
                     consts.insert(node, const_eval_int(sema.uir, node));
@@ -371,7 +371,7 @@ fn analyze_machine_inner(
                     InstData::BinOp { lhs, .. } if is_chain_binop_tag(inst.tag) => {
                         tasks.push(Task::Exit(node, scope_id, mode));
                         tasks.push(Task::AfterLhs(node, scope_id));
-                        if is_chain(sema, lhs) && fcx.inst_map[lhs.index()].is_none() {
+                        if is_chain(sema, lhs) && fcx.get(sema.body_map(), lhs).is_none() {
                             tasks.push(Task::Enter(lhs, scope_id, NeverMode::Reject));
                         } else {
                             analyzed.insert(
@@ -390,7 +390,7 @@ fn analyze_machine_inner(
                     }
                     InstData::UnOp(operand) if matches!(inst.tag, InstTag::Neg | InstTag::Not) => {
                         tasks.push(Task::Exit(node, scope_id, mode));
-                        if is_chain(sema, operand) && fcx.inst_map[operand.index()].is_none() {
+                        if is_chain(sema, operand) && fcx.get(sema.body_map(), operand).is_none() {
                             tasks.push(Task::Enter(operand, scope_id, NeverMode::Reject));
                         } else {
                             analyzed.insert(
@@ -454,7 +454,7 @@ fn analyze_machine_inner(
                 {
                     struct_state.expect(arg, target);
                     tasks.push(Task::Enter(arg, scope_id, NeverMode::Reject));
-                } else if is_chain(sema, arg) && fcx.inst_map[arg.index()].is_none() {
+                } else if is_chain(sema, arg) && fcx.get(sema.body_map(), arg).is_none() {
                     tasks.push(Task::Enter(arg, scope_id, NeverMode::Reject));
                 } else {
                     let value = analyze_expr_with(
@@ -506,7 +506,7 @@ fn analyze_machine_inner(
                 let InstData::BinOp { rhs, .. } = sema.uir.inst(node).data else {
                     unreachable!("chain tag must carry InstData::BinOp");
                 };
-                if is_chain(sema, rhs) && fcx.inst_map[rhs.index()].is_none() {
+                if is_chain(sema, rhs) && fcx.get(sema.body_map(), rhs).is_none() {
                     tasks.push(Task::Enter(rhs, scope_id, NeverMode::Reject));
                 } else {
                     analyzed.insert(
@@ -580,7 +580,7 @@ fn analyze_machine_inner(
                 if let Some(recovery) = method_recoveries.remove(&node) {
                     analyzed.insert(node, recovery);
                     consts.insert(node, ConstInt::NotConst);
-                    fcx.inst_map[node.index()] = Some(recovery);
+                    fcx.set(sema.body_map(), node, recovery);
                     continue;
                 }
                 if matches!(inst.tag, InstTag::Match | InstTag::Catch) {
@@ -592,7 +592,7 @@ fn analyze_machine_inner(
                     };
                     analyzed.insert(node, next);
                     consts.insert(node, ConstInt::NotConst);
-                    fcx.inst_map[node.index()] = Some(next);
+                    fcx.set(sema.body_map(), node, next);
                     continue;
                 }
                 if inst.tag == InstTag::Call {
@@ -612,7 +612,7 @@ fn analyze_machine_inner(
                     };
                     analyzed.insert(node, next);
                     consts.insert(node, ConstInt::NotConst);
-                    fcx.inst_map[node.index()] = Some(next);
+                    fcx.set(sema.body_map(), node, next);
                     continue;
                 }
                 match inst.data {
@@ -631,7 +631,7 @@ fn analyze_machine_inner(
                         );
                         analyzed.insert(node, next);
                         consts.insert(node, node_const);
-                        fcx.inst_map[node.index()] = Some(next);
+                        fcx.set(sema.body_map(), node, next);
                     }
                     InstData::UnOp(operand) if matches!(inst.tag, InstTag::Neg | InstTag::Not) => {
                         let (next, node_const) = analyze_unary_link(
@@ -648,7 +648,7 @@ fn analyze_machine_inner(
                         );
                         analyzed.insert(node, next);
                         consts.insert(node, node_const);
-                        fcx.inst_map[node.index()] = Some(next);
+                        fcx.set(sema.body_map(), node, next);
                     }
                     _ if is_composite_tag(inst.tag) => {
                         let leaf_context = SemaExprContext {
@@ -669,7 +669,7 @@ fn analyze_machine_inner(
                         };
                         analyzed.insert(node, next);
                         consts.insert(node, const_eval_int(sema.uir, node));
-                        fcx.inst_map[node.index()] = Some(next);
+                        fcx.set(sema.body_map(), node, next);
                     }
                     _ => unreachable!("only scheduled nodes have exit tasks"),
                 }

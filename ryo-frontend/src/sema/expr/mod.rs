@@ -82,9 +82,10 @@ pub(super) fn checkpoint(fcx: &FuncCtx) -> usize {
     fcx.chain_local_errors.len()
 }
 
-pub(super) fn rollback_to(fcx: &mut FuncCtx, checkpoint: usize) {
-    for &node in &fcx.chain_local_errors[checkpoint..] {
-        fcx.inst_map[node.index()] = None;
+pub(super) fn rollback_to(sema: &Sema, fcx: &mut FuncCtx, checkpoint: usize) {
+    for index in checkpoint..fcx.chain_local_errors.len() {
+        let node = fcx.chain_local_errors[index];
+        fcx.clear(sema.body_map(), node);
     }
     fcx.chain_local_errors.truncate(checkpoint);
 }
@@ -108,13 +109,13 @@ pub(crate) fn analyze_expr_with(
     let t = analyze_expr_allow_never_with(sema, fcx, scope, r, context);
     let result = if mode == NeverMode::Reject {
         let rejected = reject_never(sema, fcx, r, t);
-        fcx.inst_map[r.index()] = Some(rejected);
+        fcx.set(sema.body_map(), r, rejected);
         rejected
     } else {
         t
     };
     if let Some(checkpoint) = root_checkpoint {
-        rollback_to(fcx, checkpoint);
+        rollback_to(sema, fcx, checkpoint);
     }
     result
 }
@@ -145,7 +146,7 @@ fn analyze_expr_allow_never_with(
     r: InstRef,
     context: SemaExprContext,
 ) -> TirRef {
-    if let Some(t) = fcx.inst_map[r.index()] {
+    if let Some(t) = fcx.get(sema.body_map(), r) {
         return t;
     }
 
@@ -482,7 +483,7 @@ fn analyze_expr_allow_never_with(
         ),
     };
 
-    fcx.inst_map[r.index()] = Some(emitted);
+    fcx.set(sema.body_map(), r, emitted);
     emitted
 }
 
@@ -605,7 +606,8 @@ fn analyze_binop_d(
     let InstData::BinOp { lhs, rhs } = inst.data else {
         unreachable!("chain tag must carry InstData::BinOp");
     };
-    let l = if is_chain_binop_tag(sema.uir.inst(lhs).tag) && fcx.inst_map[lhs.index()].is_none() {
+    let l = if is_chain_binop_tag(sema.uir.inst(lhs).tag) && fcx.get(sema.body_map(), lhs).is_none()
+    {
         if context.depth < context.limit {
             analyze_binop_d(sema, fcx, scope, lhs, context.child())
         } else {
@@ -626,7 +628,7 @@ fn analyze_binop_d(
         const_eval_int(sema.uir, rhs),
         sema.uir.span(node),
     );
-    fcx.inst_map[node.index()] = Some(emitted);
+    fcx.set(sema.body_map(), node, emitted);
     emitted
 }
 
@@ -657,7 +659,7 @@ fn analyze_unary_d(
     // Analyze the operand chain (the resulting TirRef is not needed
     // here — the operator call below reads the memoized analysis).
     if matches!(sema.uir.inst(operand).tag, InstTag::Neg | InstTag::Not)
-        && fcx.inst_map[operand.index()].is_none()
+        && fcx.get(sema.body_map(), operand).is_none()
     {
         if context.depth < context.limit {
             analyze_unary_d(sema, fcx, scope, operand, context.child());
@@ -687,7 +689,7 @@ fn analyze_unary_d(
             context,
         },
     );
-    fcx.inst_map[node.index()] = Some(emitted);
+    fcx.set(sema.body_map(), node, emitted);
     emitted
 }
 
@@ -756,7 +758,7 @@ pub(crate) fn analyze_struct_lit_with_target_and_context(
     target: TypeId,
     context: SemaExprContext,
 ) -> TirRef {
-    if let Some(t) = fcx.inst_map[r.index()] {
+    if let Some(t) = fcx.get(sema.body_map(), r) {
         return t;
     }
     if context.depth >= context.limit {
@@ -764,7 +766,7 @@ pub(crate) fn analyze_struct_lit_with_target_and_context(
     }
     let span = sema.uir.span(r);
     let emitted = analyze_struct_lit(sema, fcx, scope, r, span, Some(target), context);
-    fcx.inst_map[r.index()] = Some(emitted);
+    fcx.set(sema.body_map(), r, emitted);
     emitted
 }
 
