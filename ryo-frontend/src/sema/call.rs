@@ -108,7 +108,7 @@ pub(crate) fn prepare_call(sema: &mut Sema<'_>, view: &CallView<'_>, span: Span)
         return CallPlan::Error;
     }
     if super::error_inference::is_inferred(sema, callee)
-        && !super::error_inference::resolve_inferred_callee(sema, callee, span)
+        && !super::error_inference::inferred_callee_is_ready(sema, callee, span)
     {
         return CallPlan::Error;
     }

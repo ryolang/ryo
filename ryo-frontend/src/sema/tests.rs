@@ -580,9 +580,9 @@ fn mutual_recursion_does_not_trigger_cycle() {
 
 /// Direct unit test of the cycle sentinel: bypass the public
 /// driver, drive `require_decl` against an `InProgress` slot
-/// directly. This is the substrate the comptime / inferred-
-/// return-type milestones will lean on; today the path is
-/// unreachable through source code.
+/// directly. This is the substrate the comptime / lazy-resolution
+/// milestones will lean on; today the path is unreachable through
+/// source code.
 #[test]
 fn require_decl_reports_cycle_when_in_progress() {
     // Build a minimal valid UIR with one function so Sema::new
@@ -621,10 +621,9 @@ fn require_decl_reports_cycle_when_in_progress() {
 }
 
 /// Source-order stability: when sema emits errors from multiple
-/// functions, the diagnostic order matches the order the decls
-/// appear in source. The risk register flagged worklist
-/// non-determinism; this test pins the seed-in-source-order
-/// invariant.
+/// functions without inferred-signature dependencies, diagnostics
+/// follow declaration order. This pins the scheduler's deterministic
+/// ready ordering.
 ///
 /// Note on what the assertion below actually proves:
 /// `run_with_errors` returns `sink.into_diags()`, which yields
@@ -633,9 +632,9 @@ fn require_decl_reports_cycle_when_in_progress() {
 /// Because `first` and `second` each emit exactly one
 /// `UndefinedVariable` diag, the assertion
 /// `undef[0].span.start < undef[1].span.start` is a proxy for
-/// "`first` was resolved before `second`": the worklist popped
-/// decls in source order, so the diag from the body at the
-/// lower span fired first. If `DiagSink::into_diags` ever
+/// "`first` was resolved before `second`": both are initially ready,
+/// so the scheduler releases them in source order. If
+/// `DiagSink::into_diags` ever
 /// starts sorting by span, this test would silently keep
 /// passing while no longer testing resolution order — update
 /// the assertion to inspect emission-side state if that

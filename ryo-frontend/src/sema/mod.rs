@@ -6,18 +6,17 @@
 //!
 //! ## Phase 5 — worklist driver
 //!
-//! Explicit signatures are registered before body analysis. Inferred error
-//! unions use the same declaration worklist: named calls resolve their
-//! inferred callee on demand, while a call-graph pre-pass rejects recursive
-//! components that would require fixed-point inference.
+//! Explicit signatures are registered before body analysis. A call-graph
+//! pre-pass rejects recursive components that would require fixed-point
+//! inference, and a deterministic scheduler finalizes inferred callees before
+//! any caller body reads their unions.
 //!
 //! - [`Sema`] owns a [`DeclState`] table indexed by [`DeclId`] (one
 //!   id per function body in `uir.func_bodies`).
-//! - The queue is seeded with every decl in source order. Popping
-//!   transitions a decl from `Unresolved` → `InProgress` → either
-//!   `Resolved` (TIR landed in the corresponding slot of
-//!   `Sema::results`, which is parallel to `uir.func_bodies`) or
-//!   `Failed`.
+//! - Ready declarations transition from `Unresolved` → `InProgress` →
+//!   `Resolved` in source order, with TIR landed in the corresponding slot of
+//!   `Sema::results`. Rejected inferred components transition directly to
+//!   `Failed` and release their callers for diagnostic recovery.
 //! - An inferred body records its concrete error members and deferred
 //!   coercions. Finalization patches the concrete union into that body's
 //!   signature and TIR before the result is published.
@@ -49,7 +48,7 @@ use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{ParamMode, Tir, TirBuilder, TirParam, TirRef};
 use ryo_core::types::{InternPool, StringId, TypeId};
 use ryo_core::uir::{FuncBody, InstRef, InstTag, Span, Uir, UirBodyMap};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::Path;
 
 mod builtins;
@@ -64,6 +63,7 @@ mod expr;
 pub(crate) use expr::*;
 mod match_;
 pub(crate) use match_::*;
+mod scheduler;
 mod stmt;
 pub(crate) use stmt::*;
 
@@ -89,6 +89,11 @@ enum DeclState {
     /// Recursive inferred signatures are rejected before body analysis;
     /// callers recover through the error sentinel without cascading.
     Failed,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_ACTIVE_BODY: std::cell::Cell<Option<DeclId>> = const { std::cell::Cell::new(None) };
 }
 
 struct FunctionSig {
@@ -329,8 +334,6 @@ pub struct Sema<'a> {
     declaration_ids: Vec<DeclId>,
     registration_error: Option<DeclarationError>,
     body_map: Option<UirBodyMap>,
-    /// Decls pending analysis.
-    queue: VecDeque<DeclId>,
     /// Function name → decl id. Built once at the top of `run` and
     /// shared with `check_call`. A duplicate definition keeps the
     /// first one seen and emits a hard redefinition error.
@@ -432,8 +435,6 @@ impl<'a> Sema<'a> {
         sema.register_enums();
         errors::register_errors(&mut sema);
         sema.resolve_signatures();
-        error_inference::reject_recursive_inferred_components(&mut sema);
-        sema.seed_worklist();
         sema.drive();
         let inferred = sema.inferred_signatures();
         // Take the warnings before `collect_results`, which consumes
@@ -524,7 +525,6 @@ impl<'a> Sema<'a> {
             decl_state: vec![DeclState::Unresolved; n],
             declaration_ids,
             registration_error,
-            queue: VecDeque::with_capacity(n),
             name_to_decl,
             signatures: HashMap::with_capacity(n),
             results,
@@ -627,22 +627,43 @@ impl<'a> Sema<'a> {
         }
     }
 
-    /// Seed the worklist with every decl in source order.
-    ///
-    /// Source order is the stable visit order called for in the risk
-    /// register ("Worklist driver introduces non-determinism in
-    /// error order"). Diagnostics within one body remain ordered by
-    /// the body's own walk; across bodies, errors come out in
-    /// declaration order.
-    fn seed_worklist(&mut self) {
-        for &decl in &self.declaration_ids {
-            self.queue.push_back(decl);
-        }
-    }
-
     fn drive(&mut self) {
-        while let Some(decl) = self.queue.pop_front() {
+        let has_inferred = self
+            .declaration_ids
+            .iter()
+            .copied()
+            .any(|decl| error_inference::is_inferred(self, decl));
+        let dependencies = if has_inferred {
+            let graph = error_inference::direct_named_call_graph(self);
+            error_inference::reject_recursive_inferred_components(self, &graph);
+            error_inference::inferred_dependencies(self, &graph)
+        } else {
+            vec![Vec::new(); self.uir.func_bodies.len()]
+        };
+        let failed: Vec<bool> = self
+            .decl_state
+            .iter()
+            .map(|&state| state == DeclState::Failed)
+            .collect();
+        let mut scheduler = scheduler::DeclarationScheduler::new(&dependencies, &failed);
+        while let Some(body) = scheduler.next() {
+            let decl = self.declaration_ids[body as usize];
             self.resolve_decl(decl);
+            scheduler.complete(body);
+        }
+
+        for index in 0..self.uir.func_bodies.len() {
+            if self.decl_state[index] == DeclState::Unresolved {
+                self.sink.emit(Diag::error(
+                    self.uir.func_bodies[index].span,
+                    DiagCode::InternalError,
+                    format!(
+                        "declaration scheduler stalled before analyzing '{}'",
+                        self.pool.str(self.uir.func_bodies[index].name)
+                    ),
+                ));
+                self.decl_state[index] = DeclState::Failed;
+            }
         }
     }
 
@@ -738,6 +759,15 @@ impl<'a> Sema<'a> {
             DeclState::Resolved | DeclState::Failed | DeclState::InProgress => return,
             DeclState::Unresolved => {}
         }
+        #[cfg(test)]
+        TEST_ACTIVE_BODY.with(|active| {
+            assert_eq!(
+                active.get(),
+                None,
+                "body analysis entered a second declaration"
+            );
+            active.set(Some(decl));
+        });
         self.decl_state[index] = DeclState::InProgress;
 
         let body = &self.uir.func_bodies[index];
@@ -748,6 +778,8 @@ impl<'a> Sema<'a> {
             error_inference::finalize_inferred_function(self, decl);
         }
         self.decl_state[index] = DeclState::Resolved;
+        #[cfg(test)]
+        TEST_ACTIVE_BODY.with(|active| active.set(None));
     }
 }
 
