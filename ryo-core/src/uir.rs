@@ -13,7 +13,7 @@
 //!
 //! ## Storage shape
 //!
-//! Three parallel arenas:
+//! The instruction stream uses three parallel arenas:
 //!
 //! - `instructions: Vec<Inst>` — fixed-size `(tag, data)` pairs. One
 //!   entry per instruction; sub-expressions are *not* nested, they
@@ -34,6 +34,10 @@
 //!   (the tagged-enum payload already costs more than a `u32`; piling
 //!   a start/end span pair on top would double the per-inst footprint
 //!   for no reason — only diagnostics ever read spans).
+//!
+//! Unresolved annotations use separate flat side arenas: `type_exprs`
+//! stores source-spanned nodes, while `type_expr_lists` and
+//! `type_field_lists` hold their typed children behind `u32` ranges.
 //!
 //! Function-level metadata lives in `func_bodies`. A function's body
 //! is a range into `extra` listing the [`InstRef`]s of the top-level
@@ -123,6 +127,83 @@ impl InstRef {
     pub fn from_raw(raw: u32) -> Self {
         InstRef(NonZeroU32::new(raw).expect("InstRef raw must be non-zero"))
     }
+}
+
+// ---------- Unresolved type expressions ----------
+
+/// Index into [`Uir::type_exprs`]. Slot zero is reserved, giving
+/// `Option<TypeExprId>` the same one-word representation as `TypeExprId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypeExprId(NonZeroU32);
+
+impl TypeExprId {
+    fn from_index(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("TypeExprId index out of range (>= 2^32)");
+        TypeExprId(NonZeroU32::new(raw).expect("TypeExprId index must be >= 1"))
+    }
+
+    pub fn index(self) -> usize {
+        self.0.get() as usize
+    }
+
+    pub fn raw(self) -> u32 {
+        self.0.get()
+    }
+
+    pub fn from_raw(raw: u32) -> Self {
+        TypeExprId(NonZeroU32::new(raw).expect("TypeExprId raw must be non-zero"))
+    }
+}
+
+/// A typed range in [`Uir::type_expr_lists`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypeExprList {
+    offset: u32,
+    len: u32,
+}
+
+impl TypeExprList {
+    fn as_range(self) -> std::ops::Range<usize> {
+        let start = self.offset as usize;
+        start..start + self.len as usize
+    }
+}
+
+/// A typed range in [`Uir::type_field_lists`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypeFieldList {
+    offset: u32,
+    len: u32,
+}
+
+impl TypeFieldList {
+    fn as_range(self) -> std::ops::Range<usize> {
+        let start = self.offset as usize;
+        start..start + self.len as usize
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UirTypeExpr {
+    pub kind: UirTypeExprKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UirTypeExprKind {
+    Name {
+        name: StringId,
+        is_view: bool,
+    },
+    Anon {
+        fields: TypeFieldList,
+    },
+    Positional(TypeExprList),
+    ErrorUnion {
+        error_set: TypeExprList,
+        success: TypeExprId,
+        inferred: bool,
+    },
 }
 
 // ---------- ExtraRange ----------
@@ -388,7 +469,7 @@ pub struct Inst {
 #[derive(Debug, Clone)]
 pub struct UirParam {
     pub name: StringId,
-    pub ty: TypeId,
+    pub type_expr: TypeExprId,
     pub mode: ParamMode,
     pub span: Span,
 }
@@ -397,7 +478,9 @@ pub struct UirParam {
 pub struct FuncBody {
     pub name: StringId,
     pub params: Vec<UirParam>,
-    pub return_type: TypeId,
+    /// `None` means the source omitted a return annotation and therefore
+    /// denotes `void`.
+    pub return_type: Option<TypeExprId>,
     /// Range into `extra` of [`InstRef::raw`] handles for the
     /// function's top-level statements, in execution order.
     pub body: ExtraRange,
@@ -479,6 +562,8 @@ pub struct UirErrorDecl {
 #[derive(Debug, Clone)]
 pub struct UirErrorFamilyDecl {
     pub name: StringId,
+    /// Source member names, including duplicates rejected during declaration.
+    pub member_names: Vec<StringId>,
     pub members: Vec<TypeId>,
     pub visibility: DeclVisibility,
     pub span: Span,
@@ -493,6 +578,9 @@ pub struct Uir {
     pub instructions: Vec<Inst>,
     pub extra: Vec<u32>,
     pub spans: Vec<Span>,
+    pub type_exprs: Vec<UirTypeExpr>,
+    pub type_expr_lists: Vec<TypeExprId>,
+    pub type_field_lists: Vec<(StringId, TypeExprId)>,
     pub func_bodies: Vec<FuncBody>,
     /// Struct declarations in source order (M9). Side table — struct
     /// decls lower to no instructions.
@@ -529,6 +617,12 @@ impl Uir {
             }],
             extra: Vec::new(),
             spans: vec![placeholder_span],
+            type_exprs: vec![UirTypeExpr {
+                kind: UirTypeExprKind::Positional(TypeExprList { offset: 0, len: 0 }),
+                span: placeholder_span,
+            }],
+            type_expr_lists: Vec::new(),
+            type_field_lists: Vec::new(),
             func_bodies: Vec::new(),
             struct_decls: Vec::new(),
             enum_decls: Vec::new(),
@@ -580,6 +674,18 @@ impl Uir {
         self.spans[r.index()]
     }
 
+    pub fn type_expr(&self, id: TypeExprId) -> UirTypeExpr {
+        self.type_exprs[id.index()]
+    }
+
+    pub fn type_expr_list(&self, list: TypeExprList) -> &[TypeExprId] {
+        &self.type_expr_lists[list.as_range()]
+    }
+
+    pub fn type_field_list(&self, list: TypeFieldList) -> &[(StringId, TypeExprId)] {
+        &self.type_field_lists[list.as_range()]
+    }
+
     /// Borrow the top-level statement references from the extra arena.
     /// The view decodes each reference as it is read and does not allocate.
     pub fn body_stmts(&self, body: &FuncBody) -> ExtraList<'_, InstRef> {
@@ -621,6 +727,60 @@ impl UirBuilder {
         self.uir.instructions.push(Inst { tag, data });
         self.uir.spans.push(span);
         InstRef::from_index(idx)
+    }
+
+    fn push_type_expr(&mut self, kind: UirTypeExprKind, span: Span) -> TypeExprId {
+        let idx = self.uir.type_exprs.len();
+        self.uir.type_exprs.push(UirTypeExpr { kind, span });
+        TypeExprId::from_index(idx)
+    }
+
+    fn push_type_expr_list(&mut self, items: &[TypeExprId]) -> TypeExprList {
+        let offset = u32::try_from(self.uir.type_expr_lists.len())
+            .expect("UIR type-expression list arena exceeded u32::MAX");
+        self.uir.type_expr_lists.extend_from_slice(items);
+        TypeExprList {
+            offset,
+            len: Self::len_u32(items.len()),
+        }
+    }
+
+    pub fn type_name(&mut self, name: StringId, is_view: bool, span: Span) -> TypeExprId {
+        self.push_type_expr(UirTypeExprKind::Name { name, is_view }, span)
+    }
+
+    pub fn type_anon(&mut self, fields: &[(StringId, TypeExprId)], span: Span) -> TypeExprId {
+        let offset = u32::try_from(self.uir.type_field_lists.len())
+            .expect("UIR type-field list arena exceeded u32::MAX");
+        self.uir.type_field_lists.extend_from_slice(fields);
+        let fields = TypeFieldList {
+            offset,
+            len: Self::len_u32(fields.len()),
+        };
+        self.push_type_expr(UirTypeExprKind::Anon { fields }, span)
+    }
+
+    pub fn type_positional(&mut self, elements: &[TypeExprId], span: Span) -> TypeExprId {
+        let elements = self.push_type_expr_list(elements);
+        self.push_type_expr(UirTypeExprKind::Positional(elements), span)
+    }
+
+    pub fn type_error_union(
+        &mut self,
+        error_set: &[TypeExprId],
+        success: TypeExprId,
+        inferred: bool,
+        span: Span,
+    ) -> TypeExprId {
+        let error_set = self.push_type_expr_list(error_set);
+        self.push_type_expr(
+            UirTypeExprKind::ErrorUnion {
+                error_set,
+                success,
+                inferred,
+            },
+            span,
+        )
     }
 
     pub fn int_literal(&mut self, value: i64, span: Span) -> InstRef {
@@ -741,16 +901,16 @@ impl UirBuilder {
     }
 
     /// Emits a `VarDecl` with the header packed into `extra`.
-    /// `ty` of `None` is encoded as `var_decl_extra::TY_NONE_SENTINEL`.
     pub fn var_decl(
         &mut self,
         name: StringId,
         mutable: bool,
-        ty: Option<TypeId>,
+        type_expr: Option<TypeExprId>,
         initializer: InstRef,
         span: Span,
     ) -> InstRef {
-        let range = var_decl_extra::encode(&mut self.uir.extra, name, mutable, ty, initializer);
+        let range =
+            var_decl_extra::encode(&mut self.uir.extra, name, mutable, type_expr, initializer);
         self.push(InstTag::VarDecl, InstData::Extra(range), span)
     }
 
@@ -760,7 +920,7 @@ impl UirBuilder {
         &mut self,
         name: StringId,
         params: Vec<UirParam>,
-        return_type: TypeId,
+        return_type: Option<TypeExprId>,
         stmts: &[InstRef],
         span: Span,
     ) {
@@ -1026,6 +1186,10 @@ mod tests {
             std::mem::size_of::<Option<InstRef>>(),
             std::mem::size_of::<u32>()
         );
+        assert_eq!(
+            std::mem::size_of::<Option<TypeExprId>>(),
+            std::mem::size_of::<u32>()
+        );
     }
 
     #[test]
@@ -1042,6 +1206,7 @@ mod tests {
         let uir = Uir::new();
         assert_eq!(uir.instructions.len(), 1);
         assert_eq!(uir.spans.len(), 1);
+        assert_eq!(uir.type_exprs.len(), 1);
     }
 
     #[test]
@@ -1075,7 +1240,8 @@ mod tests {
         let lit2 = b.int_literal(2, sp());
         let add = b.binary(InstTag::Add, lit1, lit2, sp());
         let ret = b.unary(InstTag::Return, add, sp());
-        b.add_function(main, vec![], pool.int(), &[ret], sp());
+        let return_type = b.type_name(pool.intern_str("int"), false, sp());
+        b.add_function(main, vec![], Some(return_type), &[ret], sp());
 
         let uir = b.finish();
         assert_eq!(uir.func_bodies.len(), 1);
@@ -1133,9 +1299,10 @@ mod tests {
     fn var_decl_round_trips_with_and_without_annotation() {
         let mut pool = InternPool::new();
         let x = pool.intern_str("x");
-        let int_ty = pool.int();
+        let int_name = pool.intern_str("int");
 
         let mut b = UirBuilder::new();
+        let int_ty = b.type_name(int_name, false, sp());
         let init = b.int_literal(42, sp());
         let annotated = b.var_decl(x, false, Some(int_ty), init, sp());
         let inferred = b.var_decl(x, true, None, init, sp());
@@ -1144,12 +1311,12 @@ mod tests {
         let v1 = uir.var_decl_view(annotated);
         assert_eq!(v1.name, x);
         assert!(!v1.mutable);
-        assert_eq!(v1.ty, Some(int_ty));
+        assert_eq!(v1.type_expr, Some(int_ty));
         assert_eq!(v1.initializer, init);
 
         let v2 = uir.var_decl_view(inferred);
         assert!(v2.mutable);
-        assert_eq!(v2.ty, None);
+        assert_eq!(v2.type_expr, None);
     }
 
     #[test]
@@ -1367,7 +1534,8 @@ mod tests {
         let e2 = b.unary(InstTag::ExprStmt, s2, sp());
         let s3 = b.int_literal(3, sp());
         let r = b.unary(InstTag::Return, s3, sp());
-        b.add_function(main, vec![], pool.int(), &[e1, e2, r], sp());
+        let return_type = b.type_name(pool.intern_str("int"), false, sp());
+        b.add_function(main, vec![], Some(return_type), &[e1, e2, r], sp());
         let uir = b.finish();
         assert_eq!(
             uir.body_stmts(&uir.func_bodies[0])

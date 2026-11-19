@@ -237,7 +237,7 @@ mod tests {
         FuncBody {
             name: pool.intern_str(name),
             params: vec![],
-            return_type: pool.void(),
+            return_type: None,
             body: ExtraRange { offset: 0, len: 0 },
             span: Span::in_source(source, start, start + 4),
         }
@@ -294,7 +294,7 @@ mod tests {
             uir.func_bodies.push(FuncBody {
                 name: pool.intern_str("main"),
                 params: vec![],
-                return_type: pool.void(),
+                return_type: None,
                 body: ExtraRange { offset: 0, len: 0 },
                 span: Span::EMPTY,
             });
@@ -405,7 +405,7 @@ mod tests {
         uir.func_bodies.push(FuncBody {
             name: foreign_name,
             params: vec![],
-            return_type: pool.void(),
+            return_type: None,
             body: ExtraRange { offset: 0, len: 0 },
             span: Span::in_source(source, 0, 4),
         });

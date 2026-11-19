@@ -10,7 +10,7 @@ use crate::grammar::{ParseState, program_parser};
 use crate::lexer::lex;
 use chumsky::Parser;
 use chumsky::input::Input;
-use ryo_core::uir::InstData;
+use ryo_core::uir::{InstData, UirTypeExprKind};
 
 pub(super) fn parse_and_lower(input: &str) -> Result<(Uir, InternPool), Vec<Diag>> {
     // Lex pipeline: logos + indent + intern in one
@@ -131,14 +131,15 @@ fn nested_destructure_reads_temp_as_tempvar() {
 #[test]
 fn lower_float_type_annotation() {
     let (uir, pool) = parse_and_lower("x: float = 1.5")
-        .expect("`: float` annotation should resolve without diagnostics");
+        .expect("`: float` annotation should lower without diagnostics");
     let main = body_named(&uir, &pool, "main");
     let v = uir.var_decl_view(uir.body_stmts(main).at(0));
-    assert_eq!(
-        v.ty,
-        Some(pool.float()),
-        "`: float` annotation must resolve to pool.float()"
-    );
+    let annotation = uir.type_expr(v.type_expr.expect("float annotation"));
+    let UirTypeExprKind::Name { name, is_view } = annotation.kind else {
+        panic!("primitive annotation must remain a source name");
+    };
+    assert_eq!(pool.str(name), "float");
+    assert!(!is_view);
 }
 
 #[test]
@@ -180,7 +181,7 @@ fn structural_shape_flat_integer_variable() {
     // Implicit-main is now void; codegen falls through to an
     // implicit `return 0` for the C-ABI shim, so the synthetic
     // Return is no longer materialised in the UIR body.
-    assert_eq!(main.return_type, pool.void());
+    assert_eq!(main.return_type, None);
 
     let stmts = uir.body_stmts(main);
     assert_eq!(stmts.len(), 1);
@@ -228,7 +229,7 @@ fn explicit_main_structural() {
     let (uir, pool) = parse_and_lower("fn main():\n\tprint(\"hi\")\n").unwrap();
     assert_eq!(uir.func_bodies.len(), 1);
     let main = body_named(&uir, &pool, "main");
-    assert_eq!(main.return_type, pool.void());
+    assert_eq!(main.return_type, None);
     let stmts = uir.body_stmts(main);
     assert_eq!(stmts.len(), 1);
     assert!(matches!(uir.inst(stmts.at(0)).tag, InstTag::ExprStmt));
@@ -244,12 +245,6 @@ fn main_with_return_type_emits_diag() {
 fn main_with_params_emits_diag() {
     let diags = parse_and_lower("fn main(x: int):\n\tprint(\"hi\")\n").unwrap_err();
     assert!(diags.iter().any(|d| d.code == DiagCode::MainSignature));
-}
-
-#[test]
-fn unknown_type_annotation_rejected() {
-    let diags = parse_and_lower("x: nope = 1").unwrap_err();
-    assert!(diags.iter().any(|d| d.code == DiagCode::UnknownType));
 }
 
 #[test]
@@ -406,29 +401,14 @@ fn lower_slice_expression() {
 }
 
 #[test]
-fn strview_param_resolves_to_view() {
+fn strview_param_preserves_unresolved_name() {
     let (uir, pool) = parse_and_lower("fn f(text: strview):\n\tprint(text)\n").unwrap();
-    assert_eq!(uir.func_bodies[0].params[0].ty, pool.str_view());
-}
-
-#[test]
-fn legacy_amp_str_is_a_migration_error() {
-    let diags = parse_and_lower("fn f(text: &str):\n\tprint(text)\n").unwrap_err();
-    assert!(
-        diags
-            .iter()
-            .any(|d| d.message.contains("`&str` was renamed to `strview`"))
-    );
-}
-
-#[test]
-fn lower_view_of_non_str_rejected() {
-    // Legacy `&name` view syntax (M8.4 pre-Q5): only `&str` was ever
-    // valid, and it is now a targeted rename error (final spec Q5);
-    // `&int` must be an unknown-view-type diagnostic, not a silent
-    // fallthrough to `int`.
-    let diags = parse_and_lower("fn f(x: &int):\n\tprint(\"\")\n").unwrap_err();
-    assert!(diags.iter().any(|d| d.code == DiagCode::UnknownType));
+    let param = uir.type_expr(uir.func_bodies[0].params[0].type_expr);
+    let UirTypeExprKind::Name { name, is_view } = param.kind else {
+        panic!("view parameter must retain its source name");
+    };
+    assert_eq!(pool.str(name), "strview");
+    assert!(!is_view);
 }
 
 #[test]
@@ -677,62 +657,6 @@ fn error_family_members_have_independent_layouts() {
 }
 
 #[test]
-fn error_family_alias_expands_in_error_union() {
-    let declarations =
-        "errors IoError:\n\tEof\n\tReadFailed(str)\n\tInvalidUtf8(code: int, message: str)\n";
-    let alias = "fn alias_order() -> IoError!str:\n\treturn \"ok\"\n";
-    let explicit = "fn explicit_order() -> (IoError.Eof | IoError.ReadFailed | IoError.InvalidUtf8)!str:\n\treturn \"ok\"\n";
-
-    for (src, first, second) in [
-        (
-            format!("{declarations}{alias}{explicit}"),
-            "alias_order",
-            "explicit_order",
-        ),
-        (
-            format!("{declarations}{explicit}{alias}"),
-            "explicit_order",
-            "alias_order",
-        ),
-    ] {
-        let (uir, pool) = parse_and_lower(&src).expect("alias and explicit set should lower");
-        let first = body_named(&uir, &pool, first).return_type;
-        let second = body_named(&uir, &pool, second).return_type;
-        assert_eq!(pool.kind(first), TypeKind::ErrorUnion);
-        assert_eq!(first, second);
-
-        let union = pool.error_union_view(first);
-        assert_eq!(union.success, pool.str_());
-        let members = pool.error_set_view(union.error_set).members;
-        let names: Vec<_> = members
-            .iter()
-            .map(|&member| pool.display(member).to_string())
-            .collect();
-        assert_eq!(
-            names,
-            ["IoError.Eof", "IoError.ReadFailed", "IoError.InvalidUtf8"]
-        );
-    }
-}
-
-#[test]
-fn error_family_alias_is_error_set_type() {
-    let src = "errors IoError:\n\tEof\n\tReadFailed(str)\n\tInvalidUtf8(code: int, message: str)\nfn report(err: IoError):\n\treturn\n";
-    let (uir, pool) = parse_and_lower(src).expect("error-set parameter should lower");
-    let report = body_named(&uir, &pool, "report");
-    let ty = report.params[0].ty;
-
-    assert_eq!(pool.kind(ty), TypeKind::ErrorSet);
-    assert_eq!(
-        pool.display(ty).to_string(),
-        "IoError.Eof | IoError.ReadFailed | IoError.InvalidUtf8"
-    );
-    let members = pool.error_set_view(ty).members;
-    let decl_types: Vec<_> = uir.error_decls.iter().map(|decl| decl.ty).collect();
-    assert_eq!(members, decl_types);
-}
-
-#[test]
 fn error_family_duplicate_member_is_rejected() {
     let err = parse_and_lower("errors IoError:\n\tEof\n\tEof\n").unwrap_err();
     assert!(
@@ -773,16 +697,6 @@ fn error_family_redeclaration_does_not_extend_family() {
     assert!(
         err.iter()
             .any(|diag| diag.code == DiagCode::DuplicateDeclaration),
-        "unexpected diagnostics: {err:?}"
-    );
-}
-
-#[test]
-fn error_family_member_short_name_is_not_a_type() {
-    let src = "errors IoError:\n\tEof\nfn report(err: Eof):\n\treturn\n";
-    let err = parse_and_lower(src).unwrap_err();
-    assert!(
-        err.iter().any(|diag| diag.code == DiagCode::UnknownType),
         "unexpected diagnostics: {err:?}"
     );
 }

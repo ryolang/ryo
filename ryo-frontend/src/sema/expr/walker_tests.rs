@@ -21,8 +21,8 @@ const DEEP_REPRO_CHILD: &str = "RYO_DEEP_EXPR_REPRO_CHILD";
 
 fn finish_body(mut builder: UirBuilder, pool: &mut InternPool, root: InstRef) -> Uir {
     let name = pool.intern_str("test");
-    let return_type = pool.int();
-    builder.add_function(name, vec![], return_type, &[root], Span::EMPTY);
+    let return_type = builder.type_name(pool.intern_str("int"), false, Span::EMPTY);
+    builder.add_function(name, vec![], Some(return_type), &[root], Span::EMPTY);
     builder.finish().with_layout_context(pool)
 }
 
@@ -113,9 +113,10 @@ fn later_body_rollback_clears_only_mapped_error() {
         let root = builder.binary(InstTag::Add, shared, shared, Span::EMPTY);
         let mut pool = InternPool::new();
         let first = pool.intern_str("first");
-        builder.add_function(first, vec![], pool.void(), &[first_stmt], Span::EMPTY);
+        builder.add_function(first, vec![], None, &[first_stmt], Span::EMPTY);
         let second = pool.intern_str("second");
-        builder.add_function(second, vec![], pool.int(), &[root], Span::EMPTY);
+        let return_type = builder.type_name(pool.intern_str("int"), false, Span::EMPTY);
+        builder.add_function(second, vec![], Some(return_type), &[root], Span::EMPTY);
         let uir = builder.finish().with_layout_context(&pool);
         let map = uir.compute_body_map().unwrap();
         assert!(shared.index() >= map.instructions(1).len());

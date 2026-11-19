@@ -2,12 +2,10 @@
 //!
 //! Named for symmetry with Zig's `AstGen.zig` — the responsibility
 //! (lowering an AST into the first IR) is the same. Pure
-//! structural translation: resolves syntactic type annotations
-//! (`int`/`bool`/`str`) to `TypeId` because those come from
-//! `TypeExpr` nodes and have no useful "no types yet"
-//! representation. No types are attached to instructions — those
-//! are filled in by sema in a later pass (the per-`InstRef`
-//! `TypeTable`; Phase 4 will emit TIR instead).
+//! structural translation. Function and variable type annotations are
+//! copied into UIR-owned unresolved type-expression arenas; Sema resolves
+//! them later. Nominal declaration side tables still carry resolved types.
+//! No types are attached to instructions — those are filled in by Sema.
 //!
 //! Identifier names come pre-interned as `StringId` from the parser,
 //! so this stage is allocation-light: it copies handles around.
@@ -32,11 +30,6 @@ use ryo_core::uir::{
 use std::collections::{HashMap, HashSet};
 
 type Span = ryo_core::span::Span;
-
-#[cfg(test)]
-fn synthetic_span() -> Span {
-    Span::EMPTY
-}
 
 fn define_utf8_error(pool: &mut InternPool) -> (StringId, TypeId) {
     let name = pool.intern_str("Utf8Error");
@@ -128,17 +121,6 @@ impl TypeResolver {
         defined_layouts: &HashSet<TypeId>,
     ) -> TypeId {
         self.resolve_type_inner(texpr, ast, pool, sink, defined_layouts, false)
-    }
-
-    fn resolve_return_type(
-        &self,
-        texpr: &ast::TypeExpr,
-        ast: &ast::Ast,
-        pool: &mut InternPool,
-        sink: &mut DiagSink,
-        defined_layouts: &HashSet<TypeId>,
-    ) -> TypeId {
-        self.resolve_type_inner(texpr, ast, pool, sink, defined_layouts, true)
     }
 
     fn resolve_type_inner(
@@ -463,11 +445,51 @@ fn type_has_layout(pool: &InternPool, ty: TypeId, defined_layouts: &HashSet<Type
     }
 }
 
+fn copy_type_expr(
+    b: &mut UirBuilder,
+    ast: &ast::Ast,
+    expr: &ast::TypeExpr,
+) -> ryo_core::uir::TypeExprId {
+    match expr.kind {
+        ast::TypeExprKind::Name { name, is_view } => b.type_name(name, is_view, expr.span),
+        ast::TypeExprKind::Anon { fields } => {
+            let fields = ast
+                .type_field_list(fields)
+                .iter()
+                .map(|&(name, ref field)| (name, copy_type_expr(b, ast, field)))
+                .collect::<Vec<_>>();
+            b.type_anon(&fields, expr.span)
+        }
+        ast::TypeExprKind::Positional(elements) => {
+            let elements = ast
+                .type_expr_list(elements)
+                .iter()
+                .map(|element| copy_type_expr(b, ast, element))
+                .collect::<Vec<_>>();
+            b.type_positional(&elements, expr.span)
+        }
+        ast::TypeExprKind::ErrorUnion {
+            error_set,
+            success,
+            inferred,
+        } => {
+            let error_set = ast
+                .type_expr_list(error_set)
+                .iter()
+                .map(|member| copy_type_expr(b, ast, member))
+                .collect::<Vec<_>>();
+            let success = copy_type_expr(b, ast, &ast.type_expr(success));
+            b.type_error_union(&error_set, success, inferred, expr.span)
+        }
+    }
+}
+
 /// Lower an [`ast::Ast`] to UIR, accumulating diagnostics in `sink`.
 ///
-/// Returns the lowered UIR even on error (using `pool.error_type()`
-/// for any annotation that failed to resolve) so subsequent passes
-/// can keep type-checking and surface their own diagnostics. The
+/// Returns the lowered UIR even on error so subsequent passes can keep
+/// type-checking and surface their own diagnostics. Failed nominal
+/// declarations retain their existing error-typed side-table recovery;
+/// function and variable annotations remain unresolved for Sema. The
 /// driver decides whether to proceed based on `sink.has_errors()`.
 pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) -> Uir {
     let mut func_defs: Vec<&ast::FunctionDef> = Vec::new();
@@ -1268,8 +1290,7 @@ fn gen_implicit_main(
         );
     }
 
-    let void_ty = pool.void();
-    b.add_function(types.main, vec![], void_ty, &body_stmts, ast.span());
+    b.add_function(types.main, vec![], None, &body_stmts, ast.span());
 }
 
 fn gen_function_def(
@@ -1286,16 +1307,16 @@ fn gen_function_def(
         .iter()
         .map(|p| UirParam {
             name: p.name.name,
-            ty: types.resolve_type(&p.type_annotation, ast, pool, sink, defined_layouts),
+            type_expr: copy_type_expr(b, ast, &p.type_annotation),
             mode: p.mode,
             span: p.span,
         })
         .collect();
 
-    let return_type = match &func.return_type {
-        Some(ty) => types.resolve_return_type(ty, ast, pool, sink, defined_layouts),
-        None => pool.void(),
-    };
+    let return_type = func
+        .return_type
+        .as_ref()
+        .map(|ty| copy_type_expr(b, ast, ty));
 
     // `fn main()` must be `fn main():` — no args, no return type.
     // Non-zero exit codes go through the future `exit(code)`
@@ -1476,11 +1497,11 @@ fn gen_stmt_d(
                 sink,
                 depth + 1,
             );
-            let ty = decl
+            let type_expr = decl
                 .type_annotation
                 .as_ref()
-                .map(|ann| types.resolve_type(ann, ast, pool, sink, defined_layouts));
-            let r = b.var_decl(decl.name.name, decl.mutable, ty, initializer, span);
+                .map(|annotation| copy_type_expr(b, ast, annotation));
+            let r = b.var_decl(decl.name.name, decl.mutable, type_expr, initializer, span);
             out.push(r);
         }
         ast::StmtKind::Return(value) => match value {
@@ -1762,61 +1783,137 @@ mod match_tests;
 mod type_literal_tests {
     use super::tests::{body_named, parse_and_lower};
     use super::*;
-    use ryo_core::types::TypeKind;
 
-    #[test]
-    fn positional_type_expr_resolves_to_same_type_as_anon_fields() {
-        // `TypeExprKind::Positional` resolution must intern the
-        // "0"/"1" names and dedup against the spelled-out
-        // `{0: int, 1: str}` form — tuple sugar and brace spelling
-        // are one structural TypeId.
-        let mut pool = InternPool::new();
-        let f = pool.intern_str("f");
-        let g = pool.intern_str("g");
-        let int = pool.intern_str("int");
-        let str_ = pool.intern_str("str");
-        let zero = pool.intern_str("0");
-        let one = pool.intern_str("1");
-        let mut ast = ast::Ast::new();
-        let int_ty = ast::TypeExpr::new(int, synthetic_span());
-        let str_ty = ast::TypeExpr::new(str_, synthetic_span());
-        let positional = ast.type_expr_positional(&[int_ty, str_ty], synthetic_span());
-        let anon = ast.type_expr_anon(&[(zero, int_ty), (one, str_ty)], synthetic_span());
-        let body = ast.return_stmt(None, synthetic_span());
-        let f_ident = ast::Ident::new(f, synthetic_span());
-        let g_ident = ast::Ident::new(g, synthetic_span());
-        let f_def = ast.function_def(f_ident, &[], Some(positional), &[body], synthetic_span());
-        let g_def = ast.function_def(g_ident, &[], Some(anon), &[body], synthetic_span());
-        ast.set_top_level(vec![f_def, g_def]);
-
-        let mut sink = DiagSink::new();
-        let uir = generate(&ast, &mut pool, &mut sink);
-        assert!(!sink.has_errors(), "diags: {:?}", sink.into_diags());
-
-        let positional_ret = body_named(&uir, &pool, "f").return_type;
-        let anon_ret = body_named(&uir, &pool, "g").return_type;
-        assert_eq!(
-            positional_ret, anon_ret,
-            "positional and brace spellings are one TypeId"
-        );
-        assert!(matches!(pool.kind(positional_ret), TypeKind::AnonStruct));
-        let view = pool.struct_view(positional_ret);
-        let names: Vec<&str> = view.fields.iter().map(|f| pool.str(f.name)).collect();
-        assert_eq!(names, ["0", "1"]);
-        assert_eq!(view.fields[0].ty, pool.int());
-        assert_eq!(view.fields[1].ty, pool.str_());
+    fn source_span(src: &str, text: &str) -> Span {
+        let start = src.find(text).expect("source fragment must exist");
+        Span::new(start, start + text.len())
     }
 
     #[test]
-    fn anon_type_literal_annotation_lowers_to_structural_type() {
-        // `dm: {q: int, r: int} = ...` resolves the annotation to the
-        // same anon TypeId the equivalent literal would infer.
-        let (uir, pool) = parse_and_lower("fn main():\n\tdm: {q: int, r: int} = {q=1, r=2}\n")
-            .expect("type literal annotation should resolve");
-        let main = body_named(&uir, &pool, "main");
-        let v = uir.var_decl_view(uir.body_stmts(main).at(0));
-        let ty = v.ty.expect("annotation must produce a declared type");
-        assert!(matches!(pool.kind(ty), TypeKind::AnonStruct));
-        assert_eq!(pool.display(ty).to_string(), "{q: int, r: int}");
+    fn astgen_preserves_parameter_return_and_variable_type_expressions() {
+        use ryo_core::uir::UirTypeExprKind;
+
+        let src = "fn inspect(input: Later, shape: {item: (int, str)}) -> Failure!{result: (bool, bytes)}:\n\tlocal: {nested: (Later, int)} = input\n\
+                   fn infer() -> !{value: (int, str)}:\n\treturn {value=(1, \"x\")}\n\
+                   struct Later:\n\tvalue: int\n\
+                   error Failure\n";
+        let (uir, pool) = parse_and_lower(src).expect("annotations stay unresolved in AstGen");
+        let inspect = body_named(&uir, &pool, "inspect");
+
+        let input = uir.type_expr(inspect.params[0].type_expr);
+        let UirTypeExprKind::Name { name, is_view } = input.kind else {
+            panic!("parameter must retain its source name");
+        };
+        assert_eq!(pool.str(name), "Later");
+        assert!(!is_view);
+        assert_eq!(input.span, source_span(src, "Later"));
+
+        let shape = uir.type_expr(inspect.params[1].type_expr);
+        assert_eq!(shape.span, source_span(src, "{item: (int, str)}"));
+        let UirTypeExprKind::Anon { fields } = shape.kind else {
+            panic!("parameter must retain its anonymous shape");
+        };
+        let fields = uir.type_field_list(fields);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(pool.str(fields[0].0), "item");
+        let item = uir.type_expr(fields[0].1);
+        assert_eq!(item.span, source_span(src, "(int, str)"));
+        let UirTypeExprKind::Positional(elements) = item.kind else {
+            panic!("anonymous field must retain positional elements");
+        };
+        let elements = uir.type_expr_list(elements);
+        assert_eq!(elements.len(), 2);
+        for (&element, expected) in elements.iter().zip(["int", "str"]) {
+            let element = uir.type_expr(element);
+            assert_eq!(element.span, source_span(src, expected));
+            let UirTypeExprKind::Name { name, is_view } = element.kind else {
+                panic!("positional element must retain its source name");
+            };
+            assert_eq!(pool.str(name), expected);
+            assert!(!is_view);
+        }
+
+        let return_expr = uir.type_expr(inspect.return_type.expect("return annotation"));
+        assert_eq!(
+            return_expr.span,
+            source_span(src, "Failure!{result: (bool, bytes)}")
+        );
+        let UirTypeExprKind::ErrorUnion {
+            error_set,
+            success,
+            inferred,
+        } = return_expr.kind
+        else {
+            panic!("return must retain its error union");
+        };
+        assert!(!inferred);
+        let error_set = uir.type_expr_list(error_set);
+        assert_eq!(error_set.len(), 1);
+        let UirTypeExprKind::Name { name, .. } = uir.type_expr(error_set[0]).kind else {
+            panic!("error member must retain its source name");
+        };
+        assert_eq!(pool.str(name), "Failure");
+        let UirTypeExprKind::Anon { fields } = uir.type_expr(success).kind else {
+            panic!("union success must retain its anonymous shape");
+        };
+        let result_fields = uir.type_field_list(fields);
+        assert_eq!(pool.str(result_fields[0].0), "result");
+        let UirTypeExprKind::Positional(result) = uir.type_expr(result_fields[0].1).kind else {
+            panic!("union success field must retain positional elements");
+        };
+        assert_eq!(uir.type_expr_list(result).len(), 2);
+
+        let variable = uir.var_decl_view(uir.body_stmts(inspect).at(0));
+        let local = uir.type_expr(variable.type_expr.expect("variable annotation"));
+        assert_eq!(local.span, source_span(src, "{nested: (Later, int)}"));
+        let UirTypeExprKind::Anon { fields } = local.kind else {
+            panic!("variable must retain its anonymous shape");
+        };
+        let nested_fields = uir.type_field_list(fields);
+        assert_eq!(pool.str(nested_fields[0].0), "nested");
+        let UirTypeExprKind::Positional(nested) = uir.type_expr(nested_fields[0].1).kind else {
+            panic!("variable field must retain positional elements");
+        };
+        let nested = uir.type_expr_list(nested);
+        assert_eq!(nested.len(), 2);
+        let UirTypeExprKind::Name { name, .. } = uir.type_expr(nested[0]).kind else {
+            panic!("variable child must retain its forward nominal name");
+        };
+        assert_eq!(pool.str(name), "Later");
+
+        let infer = body_named(&uir, &pool, "infer");
+        let inferred_expr = uir.type_expr(infer.return_type.expect("inferred return annotation"));
+        assert_eq!(inferred_expr.span, source_span(src, "!{value: (int, str)}"));
+        let UirTypeExprKind::ErrorUnion {
+            error_set,
+            success,
+            inferred,
+        } = inferred_expr.kind
+        else {
+            panic!("inferred return must retain its error union");
+        };
+        assert!(inferred);
+        assert!(uir.type_expr_list(error_set).is_empty());
+        let UirTypeExprKind::Anon { fields } = uir.type_expr(success).kind else {
+            panic!("inferred success must retain its anonymous shape");
+        };
+        let fields = uir.type_field_list(fields);
+        assert_eq!(pool.str(fields[0].0), "value");
+        let UirTypeExprKind::Positional(elements) = uir.type_expr(fields[0].1).kind else {
+            panic!("inferred success field must retain positional elements");
+        };
+        assert_eq!(uir.type_expr_list(elements).len(), 2);
+    }
+
+    #[test]
+    fn uir_dump_shows_unresolved_type_expressions() {
+        let (uir, pool) = parse_and_lower(
+            "fn convert(value: Later) -> Failure!{pair: (int, str)}:\n\tlocal: (Later, int) = value\n",
+        )
+        .expect("AstGen must not resolve annotation names");
+        assert_eq!(
+            uir.dump(&pool).to_string(),
+            "fn convert(value: Later) -> Failure!{pair: (int, str)}\n  body: %2\nfn main() -> void\n  body:\n\ninstructions:\n  %1 = var value\n  %2 = var_decl local: (Later, int) = %1\n"
+        );
     }
 }

@@ -76,7 +76,8 @@ fn analyze_stmt_with_context_inner(
     match inst.tag {
         InstTag::VarDecl => {
             let view = sema.uir.var_decl_view(r);
-            let mut init_tir = if let Some(target) = view.ty
+            let annotated = view.type_expr.map(|id| sema.resolve_type_expr(id, false));
+            let mut init_tir = if let Some(target) = annotated
                 && sema.uir.inst(view.initializer).tag == InstTag::StructLit
             {
                 analyze_struct_lit_with_target_and_context(
@@ -107,7 +108,7 @@ fn analyze_stmt_with_context_inner(
                 } else {
                     inferred
                 };
-            if let Some(target) = view.ty
+            if let Some(target) = annotated
                 && super::errors::is_error_union(sema, target)
             {
                 init_tir = super::errors::coerce_to_error_union(
@@ -119,7 +120,7 @@ fn analyze_stmt_with_context_inner(
                 );
                 inferred = fcx.builder.ty_of(init_tir);
             }
-            let resolved = resolve_var_decl_type(&view, inferred, sema);
+            let resolved = resolve_var_decl_type(&view, annotated, inferred, sema);
 
             if scope.contains_in_current(view.name) {
                 sema.sink.emit(Diag::error(
@@ -1445,10 +1446,11 @@ pub(crate) fn check_condition_bool(
 
 pub(crate) fn resolve_var_decl_type(
     view: &VarDeclView,
+    annotated: Option<TypeId>,
     inferred: TypeId,
     sema: &mut Sema<'_>,
 ) -> TypeId {
-    match view.ty {
+    match annotated {
         Some(annotated) if super::errors::is_error_union(sema, annotated) => annotated,
         Some(annotated) if !sema.pool.compatible(annotated, inferred) => {
             // Anchor the squiggle on the offending value (the

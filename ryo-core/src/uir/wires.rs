@@ -57,31 +57,30 @@ pub mod call_extra {
 /// Layout in `extra` for [`crate::uir::InstTag::VarDecl`]:
 ///
 /// ```text
-///   [0]  name:  StringId
-///   [1]  flags: u32  (bit 0 = mutable)
-///   [2]  ty:    u32  (TypeId, or `TY_NONE_SENTINEL` if no annotation)
-///   [3]  init:  InstRef.raw()
+///   [0]  name:      StringId
+///   [1]  flags:     u32  (bit 0 = mutable)
+///   [2]  type_expr: u32  (TypeExprId, or `TYPE_EXPR_NONE_SENTINEL`)
+///   [3]  init:      InstRef.raw()
 /// ```
 ///
-/// `TY_NONE_SENTINEL` is `u32::MAX`, which is outside any plausible
-/// `TypeId` range. Sema replaces it with the inferred type (and emits
-/// a TIR instruction whose `ty` slot is real), so codegen never sees
-/// `TY_NONE_SENTINEL`.
+/// `TYPE_EXPR_NONE_SENTINEL` is `u32::MAX`, which cannot be a nonzero
+/// type-expression handle. Sema resolves the annotation or infers the
+/// initializer's type before emitting TIR.
 pub mod var_decl_extra {
     use super::{extra_offset, len_u32};
     use crate::extra::ExtraRange;
-    use crate::types::{StringId, TypeId};
-    use crate::uir::InstRef;
+    use crate::types::StringId;
+    use crate::uir::{InstRef, TypeExprId};
 
     pub const FLAG_MUTABLE: u32 = 1 << 0;
-    pub const TY_NONE_SENTINEL: u32 = u32::MAX;
+    pub const TYPE_EXPR_NONE_SENTINEL: u32 = u32::MAX;
 
-    /// Decoded view of an [`crate::uir::InstTag::VarDecl`] payload. `ty` is `None`
-    /// when the source had no annotation.
+    /// Decoded view of an [`crate::uir::InstTag::VarDecl`] payload.
+    /// `type_expr` is `None` when the source had no annotation.
     pub struct VarDeclView {
         pub name: StringId,
         pub mutable: bool,
-        pub ty: Option<TypeId>,
+        pub type_expr: Option<TypeExprId>,
         pub initializer: InstRef,
     }
 
@@ -90,13 +89,13 @@ pub mod var_decl_extra {
         extra: &mut Vec<u32>,
         name: StringId,
         mutable: bool,
-        ty: Option<TypeId>,
+        type_expr: Option<TypeExprId>,
         init: InstRef,
     ) -> ExtraRange {
         let offset = extra_offset(extra);
         extra.push(name.raw());
         extra.push(if mutable { FLAG_MUTABLE } else { 0 });
-        extra.push(ty.map_or(TY_NONE_SENTINEL, |t| t.raw()));
+        extra.push(type_expr.map_or(TYPE_EXPR_NONE_SENTINEL, TypeExprId::raw));
         extra.push(init.raw());
         ExtraRange {
             offset,
@@ -108,17 +107,17 @@ pub mod var_decl_extra {
     pub fn decode(words: &[u32]) -> VarDeclView {
         let name = StringId::from_raw(words[0]);
         let mutable = words[1] & FLAG_MUTABLE != 0;
-        let ty_raw = words[2];
-        let ty = if ty_raw == TY_NONE_SENTINEL {
+        let type_expr_raw = words[2];
+        let type_expr = if type_expr_raw == TYPE_EXPR_NONE_SENTINEL {
             None
         } else {
-            Some(TypeId::from_raw(ty_raw))
+            Some(TypeExprId::from_raw(type_expr_raw))
         };
         let initializer = InstRef::from_raw(words[3]);
         VarDeclView {
             name,
             mutable,
-            ty,
+            type_expr,
             initializer,
         }
     }
@@ -367,7 +366,7 @@ pub mod struct_lit_extra {
     use crate::uir::InstRef;
 
     /// Anonymous-literal marker for the `0` slot (M10), mirroring
-    /// [`var_decl_extra::TY_NONE_SENTINEL`]: `u32::MAX` is outside any
+    /// [`var_decl_extra::TYPE_EXPR_NONE_SENTINEL`]: `u32::MAX` is outside any
     /// plausible `StringId` range, so it can never collide with a real
     /// (or user-interned) name. Sema infers the structural type from
     /// the field values instead of looking the name up.

@@ -1049,11 +1049,12 @@ fn gen_machine(
                 let span = ast.stmt_span(state.stmt);
                 match &ast.stmt(state.stmt).kind {
                     ast::StmtKind::VarDecl(decl) => {
-                        let ty = decl
+                        let type_expr = decl
                             .type_annotation
                             .as_ref()
-                            .map(|ann| types.resolve_type(ann, ast, pool, sink, defined_layouts));
-                        let result = b.var_decl(decl.name.name, decl.mutable, ty, value, span);
+                            .map(|annotation| super::copy_type_expr(b, ast, annotation));
+                        let result =
+                            b.var_decl(decl.name.name, decl.mutable, type_expr, value, span);
                         statement_done(&mut stack, state, Some(result), depth);
                     }
                     ast::StmtKind::Return(Some(_)) => {

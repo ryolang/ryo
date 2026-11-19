@@ -13,9 +13,10 @@ pub(super) struct InferenceState {
 }
 
 pub(super) fn is_inferred(sema: &Sema<'_>, decl: DeclId) -> bool {
-    sema.pool
-        .kind(sema.uir.func_bodies[sema.body_index(decl)].return_type)
-        == TypeKind::InferredErrorUnion
+    sema.signatures.get(&decl).is_some_and(|signature| {
+        sema.pool.kind(signature.return_type) == TypeKind::InferredErrorUnion
+            || sema.inference[sema.body_index(decl)].final_union.is_some()
+    })
 }
 
 pub(super) fn record_members(sema: &mut Sema<'_>, decl: DeclId, members: &[TypeId]) {
@@ -85,8 +86,10 @@ pub(super) fn finalize_inferred_function(sema: &mut Sema<'_>, decl: DeclId) -> T
         record_members(sema, decl, &members);
     }
 
-    let body = &sema.uir.func_bodies[index];
-    let success = sema.pool.error_union_view(body.return_type).success;
+    let success = sema
+        .pool
+        .error_union_view(sema.signatures[&decl].return_type)
+        .success;
     let members = sema.inference[index].members.clone();
     let error_set = sema.pool.error_set(&members);
     let final_union = sema.pool.error_union(error_set, success);
@@ -102,11 +105,10 @@ pub(super) fn finalize_inferred_function(sema: &mut Sema<'_>, decl: DeclId) -> T
         tir.instructions[coercion.index()].ty = final_union;
     }
 
-    if sema.name_to_decl.get(&body.name) == Some(&decl)
-        && let Some(signature) = sema.signatures.get_mut(&decl)
-    {
-        signature.return_type = final_union;
-    }
+    sema.signatures
+        .get_mut(&decl)
+        .expect("resolved signature")
+        .return_type = final_union;
     final_union
 }
 
@@ -275,8 +277,23 @@ mod tests {
         let nested_second = builder.unary(InstTag::Not, call_second, Span::EMPTY);
         let second_stmt = builder.unary(InstTag::ExprStmt, nested_second, Span::EMPTY);
 
-        builder.add_function(first, vec![], pool.int(), &[second_stmt], Span::EMPTY);
-        builder.add_function(second, vec![], pool.int(), &[first_stmt], Span::EMPTY);
+        let int_name = pool.intern_str("int");
+        let first_return = builder.type_name(int_name, false, Span::EMPTY);
+        builder.add_function(
+            first,
+            vec![],
+            Some(first_return),
+            &[second_stmt],
+            Span::EMPTY,
+        );
+        let second_return = builder.type_name(int_name, false, Span::EMPTY);
+        builder.add_function(
+            second,
+            vec![],
+            Some(second_return),
+            &[first_stmt],
+            Span::EMPTY,
+        );
         let uir = builder.finish().with_layout_context(&pool);
         let map = uir.compute_body_map().unwrap();
         assert_eq!(

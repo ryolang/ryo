@@ -262,7 +262,11 @@ impl<'a> MatchState<'a> {
             if sema.uir.inst(expression).tag == InstTag::StructLit {
                 let target = match tag {
                     InstTag::Return => Some(fcx.return_type),
-                    InstTag::VarDecl => sema.uir.var_decl_view(stmt).ty,
+                    InstTag::VarDecl => sema
+                        .uir
+                        .var_decl_view(stmt)
+                        .type_expr
+                        .map(|id| sema.resolve_type_expr(id, false)),
                     InstTag::AssignOrDecl => {
                         let name = sema.uir.assign_or_decl_view(stmt).name;
                         match self.scopes.get(scope_id).lookup_full(name) {

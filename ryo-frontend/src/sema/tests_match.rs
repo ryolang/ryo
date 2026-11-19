@@ -568,16 +568,28 @@ pub(super) fn run_with_error_set_param(input: &str) -> (Vec<Tir>, Vec<Diag>, Int
 
     // Model the error-set binding that compiler-generated catch lowering
     // will expose to a nested source match; standalone set syntax is not
-    // part of the language.
-    let members: Vec<_> = uir.error_decls.iter().map(|decl| decl.ty).collect();
-    let error_set = pool.error_set(&members);
+    // part of the language. Sema resolves this unresolved alias.
     let body = uir
         .func_bodies
         .iter_mut()
         .find(|body| pool.str(body.name) == "inspect")
         .expect("inspect function");
     assert_eq!(body.params.len(), 1);
-    body.params[0].ty = error_set;
+    let id = body.params[0].type_expr;
+    let name = pool.intern_str("IoError");
+    uir.type_exprs[id.index()].kind = ryo_core::uir::UirTypeExprKind::Name {
+        name,
+        is_view: false,
+    };
+    let member_names = uir.error_decls.iter().map(|decl| decl.name).collect();
+    let members = uir.error_decls.iter().map(|decl| decl.ty).collect();
+    uir.error_families.push(ryo_core::uir::UirErrorFamilyDecl {
+        name,
+        member_names,
+        members,
+        visibility: ryo_core::ast::DeclVisibility::Module,
+        span: Span::EMPTY,
+    });
 
     let mut context = CompilationContext::new();
     let tirs = analyze(

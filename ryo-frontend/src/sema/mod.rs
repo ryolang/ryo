@@ -46,8 +46,10 @@ use ryo_core::compilation::CompilationContext;
 use ryo_core::declaration::{DeclId, DeclarationError};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{ParamMode, Tir, TirBuilder, TirParam, TirRef};
-use ryo_core::types::{InternPool, StringId, TypeId};
-use ryo_core::uir::{FuncBody, InstRef, InstTag, Span, Uir, UirBodyMap};
+use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
+use ryo_core::uir::{
+    FuncBody, InstRef, InstTag, Span, TypeExprId, Uir, UirBodyMap, UirTypeExprKind,
+};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -96,9 +98,40 @@ std::thread_local! {
     static TEST_ACTIVE_BODY: std::cell::Cell<Option<DeclId>> = const { std::cell::Cell::new(None) };
 }
 
+#[derive(Clone)]
 struct FunctionSig {
     params: Vec<TypeId>,
     return_type: TypeId,
+}
+
+struct TypeNames {
+    int: StringId,
+    str_: StringId,
+    strview: StringId,
+    bytes: StringId,
+    bytesview: StringId,
+    bool_: StringId,
+    float: StringId,
+    void: StringId,
+    never: StringId,
+    utf8_error: StringId,
+}
+
+impl TypeNames {
+    fn intern(pool: &mut InternPool) -> Self {
+        Self {
+            int: pool.intern_str("int"),
+            str_: pool.intern_str("str"),
+            strview: pool.intern_str("strview"),
+            bytes: pool.intern_str("bytes"),
+            bytesview: pool.intern_str("bytesview"),
+            bool_: pool.intern_str("bool"),
+            float: pool.intern_str("float"),
+            void: pool.intern_str("void"),
+            never: pool.intern_str("never"),
+            utf8_error: pool.intern_str("Utf8Error"),
+        }
+    }
 }
 
 struct Binding {
@@ -343,6 +376,10 @@ pub struct Sema<'a> {
     /// type-check because callee signatures land here in a single
     /// pass before any body is analyzed.
     signatures: HashMap<DeclId, FunctionSig>,
+    type_names: TypeNames,
+    /// Dense resolution cache indexed by `TypeExprId`; the two slots
+    /// distinguish ordinary annotations from function-return position.
+    type_expr_cache: Vec<[Option<TypeId>; 2]>,
     /// Per-decl emitted TIR slot. Filled as decls transition to
     /// `Resolved`. Result extraction drains this in source order.
     results: Vec<Option<Tir>>,
@@ -509,6 +546,7 @@ impl<'a> Sema<'a> {
             results.push(None);
         }
         let names = crate::builtins::BuiltinNameIds::intern(pool);
+        let type_names = TypeNames::intern(pool);
         let builtin_by_id: Vec<(StringId, &'static crate::builtins::BuiltinFunction)> =
             crate::builtins::BUILTINS
                 .iter()
@@ -527,6 +565,8 @@ impl<'a> Sema<'a> {
             registration_error,
             name_to_decl,
             signatures: HashMap::with_capacity(n),
+            type_names,
+            type_expr_cache: vec![[None, None]; uir.type_exprs.len()],
             results,
             inference: (0..n)
                 .map(|_| error_inference::InferenceState::default())
@@ -601,29 +641,314 @@ impl<'a> Sema<'a> {
         }
     }
 
+    fn resolve_type_expr(&mut self, id: TypeExprId, allow_inferred: bool) -> TypeId {
+        let cache_slot = usize::from(allow_inferred);
+        if let Some(resolved) = self.type_expr_cache[id.index()][cache_slot] {
+            return resolved;
+        }
+        let expr = self.uir.type_expr(id);
+        let resolved = match expr.kind {
+            UirTypeExprKind::Name { name, is_view } => {
+                self.resolve_type_name(name, is_view, expr.span)
+            }
+            UirTypeExprKind::Anon { fields } => {
+                let fields = self.uir.type_field_list(fields).to_vec();
+                self.resolve_anon_fields(&fields)
+            }
+            UirTypeExprKind::Positional(elements) => {
+                let fields = self
+                    .uir
+                    .type_expr_list(elements)
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &element)| (self.pool.intern_str(&index.to_string()), element))
+                    .collect::<Vec<_>>();
+                self.resolve_anon_fields(&fields)
+            }
+            UirTypeExprKind::ErrorUnion {
+                error_set,
+                success,
+                inferred,
+            } => {
+                let error_set = self.uir.type_expr_list(error_set).to_vec();
+                self.resolve_error_union(&error_set, success, inferred, expr.span, allow_inferred)
+            }
+        };
+        self.type_expr_cache[id.index()][cache_slot] = Some(resolved);
+        resolved
+    }
+
+    fn resolve_type_name(&mut self, name: StringId, is_view: bool, span: Span) -> TypeId {
+        if is_view {
+            let message = if name == self.type_names.str_ {
+                "`&str` was renamed to `strview` (final spec Q5)".to_string()
+            } else {
+                format!(
+                    "unknown view type: '&{}' (view types are named: `strview`)",
+                    self.pool.str(name)
+                )
+            };
+            self.sink
+                .emit(Diag::error(span, DiagCode::UnknownType, message));
+            return self.pool.error_type();
+        }
+        let names = &self.type_names;
+        if name == names.int {
+            self.pool.int()
+        } else if name == names.str_ {
+            self.pool.str_()
+        } else if name == names.strview {
+            self.pool.str_view()
+        } else if name == names.bytes {
+            self.pool.bytes()
+        } else if name == names.bytesview {
+            self.pool.bytes_view()
+        } else if name == names.bool_ {
+            self.pool.bool_()
+        } else if name == names.float {
+            self.pool.float()
+        } else if let Some(&ty) = self.struct_types.get(&name) {
+            ty
+        } else if let Some(&ty) = self.enum_types.get(&name) {
+            ty
+        } else if let Some(&ty) = self.error_types.get(&name) {
+            ty
+        } else if let Some(members) = self
+            .uir
+            .error_families
+            .iter()
+            .find(|family| family.name == name)
+            .map(|family| family.members.clone())
+        {
+            if members.iter().all(|&member| self.type_has_layout(member)) {
+                self.pool.error_set(&members)
+            } else {
+                self.pool.error_type()
+            }
+        } else {
+            let qualified = self.pool.str(name).to_string();
+            if let Some((root, member)) = qualified.split_once('.')
+                && let Some(source_members) = self
+                    .uir
+                    .error_families
+                    .iter()
+                    .find(|family| self.pool.str(family.name) == root)
+                    .map(|family| family.member_names.clone())
+            {
+                let available = source_members
+                    .iter()
+                    .map(|name| format!("'{}'", self.pool.str(*name)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.sink.emit(Diag::error(
+                    span,
+                    DiagCode::UnknownVariant,
+                    format!(
+                        "error family '{root}' has no member '{member}' (members: {available})"
+                    ),
+                ));
+                return self.pool.error_type();
+            }
+            self.sink.emit(Diag::error(
+                span,
+                DiagCode::UnknownType,
+                format!("unknown type: '{}'", self.pool.str(name)),
+            ));
+            self.pool.error_type()
+        }
+    }
+
+    fn resolve_anon_fields(&mut self, fields: &[(StringId, TypeExprId)]) -> TypeId {
+        let mut pairs = Vec::with_capacity(fields.len());
+        for &(name, field) in fields {
+            let ty = self.resolve_type_expr(field, false);
+            if self.pool.is_view(ty) {
+                self.sink.emit(Diag::error(
+                    self.uir.type_expr(field).span,
+                    DiagCode::ViewFieldType,
+                    format!(
+                        "struct fields must be owned values; '{}' is a projection (Rule 6)",
+                        self.pool.display(ty)
+                    ),
+                ));
+            }
+            pairs.push((name, ty));
+        }
+
+        let mut seen = Vec::with_capacity(fields.len());
+        let mut duplicate = false;
+        for &(name, field) in fields {
+            if seen.contains(&name) {
+                self.sink.emit(Diag::error(
+                    self.uir.type_expr(field).span,
+                    DiagCode::DuplicateStructField,
+                    format!(
+                        "field '{}' is specified more than once",
+                        self.pool.str(name)
+                    ),
+                ));
+                duplicate = true;
+            } else {
+                seen.push(name);
+            }
+        }
+        if duplicate || pairs.iter().any(|&(_, ty)| !self.type_has_layout(ty)) {
+            return self.pool.error_type();
+        }
+        self.pool.anon_struct(&pairs)
+    }
+
+    fn resolve_error_union(
+        &mut self,
+        error_set: &[TypeExprId],
+        success: TypeExprId,
+        inferred: bool,
+        span: Span,
+        allow_inferred: bool,
+    ) -> TypeId {
+        if inferred && !allow_inferred {
+            self.sink.emit(Diag::error(
+                span,
+                DiagCode::TypeMismatch,
+                "inferred error unions are only valid in function-return position",
+            ));
+            return self.pool.error_type();
+        }
+        if !inferred && error_set.is_empty() {
+            self.sink.emit(Diag::error(
+                span,
+                DiagCode::TypeMismatch,
+                "an explicit error union must contain at least one error",
+            ));
+            return self.pool.error_type();
+        }
+        if inferred {
+            let success = self.resolve_error_union_success(success);
+            if self.pool.is_error(success) {
+                return self.pool.error_type();
+            }
+            return self.pool.inferred_error_union(success);
+        }
+
+        let mut members = Vec::with_capacity(error_set.len());
+        let mut failed = false;
+        for &member in error_set {
+            let ty = self.resolve_type_expr(member, false);
+            if self.pool.is_error(ty) {
+                failed = true;
+                continue;
+            }
+            match self.pool.kind(ty) {
+                TypeKind::DeclaredError | TypeKind::ErrorSet => {
+                    let expanded = self.pool.error_set_view(ty).members;
+                    if expanded.iter().any(|&member| !self.type_has_layout(member)) {
+                        failed = true;
+                    }
+                    members.extend(expanded);
+                }
+                _ => {
+                    self.sink.emit(Diag::error(
+                        self.uir.type_expr(member).span,
+                        DiagCode::TypeMismatch,
+                        "error union members must be declared errors or error sets",
+                    ));
+                    failed = true;
+                }
+            }
+        }
+        let success = self.resolve_error_union_success(success);
+        if failed || self.pool.is_error(success) {
+            return self.pool.error_type();
+        }
+        let error_set = self.pool.error_set(&members);
+        self.pool.error_union(error_set, success)
+    }
+
+    fn resolve_error_union_success(&mut self, id: TypeExprId) -> TypeId {
+        let expr = self.uir.type_expr(id);
+        let success = match expr.kind {
+            UirTypeExprKind::Name {
+                name,
+                is_view: false,
+            } if name == self.type_names.void => self.pool.void(),
+            UirTypeExprKind::Name {
+                name,
+                is_view: false,
+            } if name == self.type_names.never => self.pool.never(),
+            _ => self.resolve_type_expr(id, false),
+        };
+        if self.pool.is_error(success) {
+            return success;
+        }
+        let invalid = match self.pool.kind(success) {
+            TypeKind::Never => Some("error union success type cannot be 'never'"),
+            TypeKind::View(_) => Some("error union success type must be owned, not a view"),
+            TypeKind::DeclaredError
+            | TypeKind::ErrorSet
+            | TypeKind::ErrorUnion
+            | TypeKind::InferredErrorUnion => {
+                Some("error types, error sets, and error unions cannot be success types")
+            }
+            _ => None,
+        };
+        if let Some(message) = invalid {
+            self.sink
+                .emit(Diag::error(expr.span, DiagCode::TypeMismatch, message));
+            return self.pool.error_type();
+        }
+        if !self.type_has_layout(success) {
+            return self.pool.error_type();
+        }
+        success
+    }
+
+    fn type_has_layout(&self, ty: TypeId) -> bool {
+        match self.pool.kind(ty) {
+            TypeKind::Error | TypeKind::Never | TypeKind::InferredErrorUnion => false,
+            TypeKind::Struct => self.pool.is_defined_struct(ty),
+            TypeKind::Enum => self.uir.enum_decls.iter().any(|decl| decl.ty == ty),
+            TypeKind::DeclaredError => {
+                self.uir.error_decls.iter().any(|decl| decl.ty == ty)
+                    || self.error_types.get(&self.type_names.utf8_error) == Some(&ty)
+            }
+            _ => true,
+        }
+    }
+
     /// Populate parameter metadata and explicit return types up front.
     /// Inferred returns start as placeholders and are replaced when their
     /// declaration finalizes; calls never clone the unresolved placeholder.
     fn resolve_signatures(&mut self) {
-        for body in &self.uir.func_bodies {
-            // check_reserved_name rejects the '__ryo_' prefix alongside
-            // "range" — the standalone prefix block that lived here is
-            // folded into that one reservation.
+        for index in 0..self.uir.func_bodies.len() {
+            let body = &self.uir.func_bodies[index];
+            let name = body.name;
+            let span = body.span;
+            let param_exprs = body
+                .params
+                .iter()
+                .map(|param| param.type_expr)
+                .collect::<Vec<_>>();
+            let return_expr = body.return_type;
             check_reserved_name(
                 self,
-                body.name,
-                body.span,
+                name,
+                span,
                 "is a reserved builtin and cannot be used as a function name",
             );
-            // First definition wins, matching `name_to_decl` in
-            // `Sema::new`: the duplicate body is still analyzed (and
-            // its DuplicateDeclaration error already emitted), but it
-            // must not overwrite the signature calls bind against.
-            let decl = self.name_to_decl[&body.name];
-            self.signatures.entry(decl).or_insert(FunctionSig {
-                params: body.params.iter().map(|p| p.ty).collect(),
-                return_type: body.return_type,
-            });
+            let params = param_exprs
+                .into_iter()
+                .map(|id| self.resolve_type_expr(id, false))
+                .collect();
+            let return_type =
+                return_expr.map_or(self.pool.void(), |id| self.resolve_type_expr(id, true));
+            let decl = self.declaration_ids[index];
+            self.signatures.insert(
+                decl,
+                FunctionSig {
+                    params,
+                    return_type,
+                },
+            );
         }
     }
 
@@ -771,7 +1096,8 @@ impl<'a> Sema<'a> {
         self.decl_state[index] = DeclState::InProgress;
 
         let body = &self.uir.func_bodies[index];
-        let tir = analyze_function(self, decl, body);
+        let signature = self.signatures[&decl].clone();
+        let tir = analyze_function(self, decl, body, &signature);
 
         self.results[index] = Some(tir);
         if error_inference::is_inferred(self, decl) {
@@ -785,9 +1111,14 @@ impl<'a> Sema<'a> {
 
 // ---------- Per-function analysis ----------
 
-fn analyze_function(sema: &mut Sema<'_>, decl: DeclId, body: &FuncBody) -> Tir {
+fn analyze_function(
+    sema: &mut Sema<'_>,
+    decl: DeclId,
+    body: &FuncBody,
+    signature: &FunctionSig,
+) -> Tir {
     let mut scope = Scope::new();
-    for param in &body.params {
+    for (param, &param_type) in body.params.iter().zip(&signature.params) {
         // An `inout` parameter is mutable inside the callee body (like a
         // `mut` local); `move` and borrowed params are immutable.
         let is_mutable = param.mode == ParamMode::Inout;
@@ -808,7 +1139,7 @@ fn analyze_function(sema: &mut Sema<'_>, decl: DeclId, body: &FuncBody) -> Tir {
         // `Scope::lookup_borrowed` (E0133's borrowed-scrutinee gate).
         scope.insert_binding(
             param.name,
-            param.ty,
+            param_type,
             is_mutable,
             param.mode == ParamMode::Borrow,
         );
@@ -821,13 +1152,13 @@ fn analyze_function(sema: &mut Sema<'_>, decl: DeclId, body: &FuncBody) -> Tir {
     // silent — that's the whole reason the keyword exists. `strview`
     // views are excluded here: `move`/`inout` on a view is an
     // *error* (see below), and the warning would only cascade.
-    for param in &body.params {
+    for (param, &param_type) in body.params.iter().zip(&signature.params) {
         if param.mode == ParamMode::Move
-            && sema.pool.is_copy(param.ty)
-            && !sema.pool.is_view(param.ty)
+            && sema.pool.is_copy(param_type)
+            && !sema.pool.is_view(param_type)
         {
             let name = sema.pool.str(param.name).to_string();
-            let ty_str = sema.pool.display(param.ty).to_string();
+            let ty_str = sema.pool.display(param_type).to_string();
             sema.warnings.push(Diag::warning(
                 param.span,
                 DiagCode::RedundantMove,
@@ -842,8 +1173,8 @@ fn analyze_function(sema: &mut Sema<'_>, decl: DeclId, body: &FuncBody) -> Tir {
     // M8.4: `strview` is already a borrow, so `move` / `inout` on a view
     // parameter is meaningless (final spec §3.3 E2, §3.4); views
     // cannot be returned either (§3.3 E1 / Rule 5).
-    for param in &body.params {
-        if param.mode != ParamMode::Borrow && sema.pool.is_view(param.ty) {
+    for (param, &param_type) in body.params.iter().zip(&signature.params) {
+        if param.mode != ParamMode::Borrow && sema.pool.is_view(param_type) {
             let mode_str = match param.mode {
                 ParamMode::Move => "move",
                 _ => "inout",
@@ -858,13 +1189,13 @@ fn analyze_function(sema: &mut Sema<'_>, decl: DeclId, body: &FuncBody) -> Tir {
             ));
         }
     }
-    if sema.pool.is_view(body.return_type) {
+    if sema.pool.is_view(signature.return_type) {
         sema.sink.emit(Diag::error(
             body.span,
             DiagCode::ReturnBorrowedValue,
             format!(
                 "functions cannot return views (`{}`) — return an owned value instead (Rule 5)",
-                sema.pool.display(body.return_type)
+                sema.pool.display(signature.return_type)
             ),
         ));
     }
@@ -872,11 +1203,12 @@ fn analyze_function(sema: &mut Sema<'_>, decl: DeclId, body: &FuncBody) -> Tir {
     let params: Vec<TirParam> = body
         .params
         .iter()
-        .map(|p| TirParam {
-            name: p.name,
-            ty: p.ty,
-            mode: p.mode,
-            span: p.span,
+        .zip(&signature.params)
+        .map(|(param, &ty)| TirParam {
+            name: param.name,
+            ty,
+            mode: param.mode,
+            span: param.span,
         })
         .collect();
 
@@ -885,7 +1217,7 @@ fn analyze_function(sema: &mut Sema<'_>, decl: DeclId, body: &FuncBody) -> Tir {
     let mut fcx = FuncCtx::new(
         decl,
         u32::try_from(body_index).expect("UIR body index out of range"),
-        TirBuilder::new(body.name, params, body.return_type, body.span)
+        TirBuilder::new(body.name, params, signature.return_type, body.span)
             .with_decl(decl)
             .with_layout_context(sema.pool),
         instruction_count,

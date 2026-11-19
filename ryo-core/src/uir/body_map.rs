@@ -637,12 +637,13 @@ mod tests {
         let add = builder.binary(InstTag::Add, lhs, rhs, Span::EMPTY);
         let ret = builder.unary(InstTag::Return, add, Span::EMPTY);
         let first_name = pool.intern_str("first");
-        builder.add_function(first_name, vec![], pool.int(), &[ret], Span::EMPTY);
+        let return_type = builder.type_name(pool.intern_str("int"), false, Span::EMPTY);
+        builder.add_function(first_name, vec![], Some(return_type), &[ret], Span::EMPTY);
 
         let value = builder.int_literal(3, Span::EMPTY);
         let stmt = builder.unary(InstTag::ExprStmt, value, Span::EMPTY);
         let second_name = pool.intern_str("second");
-        builder.add_function(second_name, vec![], pool.void(), &[stmt], Span::EMPTY);
+        builder.add_function(second_name, vec![], None, &[stmt], Span::EMPTY);
 
         let map = builder.finish().compute_body_map().unwrap();
         assert_eq!(map.instructions(0), [ret, add, lhs, rhs]);
@@ -674,10 +675,11 @@ mod tests {
         let shared = builder.int_literal(1, Span::EMPTY);
         let ret = builder.unary(InstTag::Return, shared, Span::EMPTY);
         let first_name = pool.intern_str("first");
-        builder.add_function(first_name, vec![], pool.int(), &[ret], Span::EMPTY);
+        let return_type = builder.type_name(pool.intern_str("int"), false, Span::EMPTY);
+        builder.add_function(first_name, vec![], Some(return_type), &[ret], Span::EMPTY);
         let stmt = builder.unary(InstTag::ExprStmt, shared, Span::EMPTY);
         let second_name = pool.intern_str("second");
-        builder.add_function(second_name, vec![], pool.void(), &[stmt], Span::EMPTY);
+        builder.add_function(second_name, vec![], None, &[stmt], Span::EMPTY);
 
         assert_eq!(
             builder.finish().compute_body_map(),
@@ -696,7 +698,8 @@ mod tests {
         let value = builder.int_literal(1, Span::EMPTY);
         let ret = builder.unary(InstTag::Return, value, Span::EMPTY);
         let main = pool.intern_str("main");
-        builder.add_function(main, vec![], pool.int(), &[ret], Span::EMPTY);
+        let return_type = builder.type_name(pool.intern_str("int"), false, Span::EMPTY);
+        builder.add_function(main, vec![], Some(return_type), &[ret], Span::EMPTY);
         let mut uir = builder.finish();
         let invalid = InstRef::from_raw(uir.instructions.len() as u32 + 10);
         uir.instructions[ret.index()].data = InstData::UnOp(invalid);
@@ -710,7 +713,7 @@ mod tests {
         let arg = builder.int_literal(1, Span::EMPTY);
         let callee = pool.intern_str("callee");
         let call = builder.call(callee, &[arg], Span::EMPTY);
-        builder.add_function(main, vec![], pool.void(), &[call], Span::EMPTY);
+        builder.add_function(main, vec![], None, &[call], Span::EMPTY);
         let mut uir = builder.finish();
         let InstData::Extra(range) = &mut uir.instructions[call.index()].data else {
             panic!("call must carry an extra range");
@@ -727,7 +730,7 @@ mod tests {
         let first = builder.unary(InstTag::Neg, leaf, Span::EMPTY);
         let second = builder.unary(InstTag::Neg, first, Span::EMPTY);
         let root = builder.unary(InstTag::ExprStmt, second, Span::EMPTY);
-        builder.add_function(main, vec![], pool.void(), &[root], Span::EMPTY);
+        builder.add_function(main, vec![], None, &[root], Span::EMPTY);
         let mut uir = builder.finish();
         uir.instructions[first.index()].data = InstData::UnOp(second);
 
@@ -748,7 +751,7 @@ mod tests {
             }],
             Span::EMPTY,
         );
-        builder.add_function(main, vec![], pool.void(), &[matched], Span::EMPTY);
+        builder.add_function(main, vec![], None, &[matched], Span::EMPTY);
         let mut uir = builder.finish();
         let InstData::Match { scrutinee, arms } = uir.instructions[matched.index()].data else {
             panic!("match must carry its inline payload");
@@ -772,7 +775,8 @@ mod tests {
         let ret = builder.unary(InstTag::Return, root, Span::EMPTY);
         let orphan = builder.int_literal(99, Span::EMPTY);
         let main = pool.intern_str("main");
-        builder.add_function(main, vec![], pool.int(), &[ret], Span::EMPTY);
+        let return_type = builder.type_name(pool.intern_str("int"), false, Span::EMPTY);
+        builder.add_function(main, vec![], Some(return_type), &[ret], Span::EMPTY);
 
         let map = builder.finish().compute_body_map().unwrap();
         assert_eq!(map.instructions(0), [ret, root, shared, lhs, rhs]);
@@ -786,7 +790,7 @@ mod tests {
             cursor = builder.unary(InstTag::Neg, cursor, Span::EMPTY);
         }
         let root = builder.unary(InstTag::ExprStmt, cursor, Span::EMPTY);
-        builder.add_function(main, vec![], pool.void(), &[root], Span::EMPTY);
+        builder.add_function(main, vec![], None, &[root], Span::EMPTY);
 
         let map = builder.finish().compute_body_map().unwrap();
         assert_eq!(map.instructions(0).len(), 10_003);

@@ -110,6 +110,7 @@ impl ErrorRegistry {
         );
         self.family_decls.push(UirErrorFamilyDecl {
             name: family,
+            member_names: members.iter().map(|member| member.name.name).collect(),
             members: member_types,
             visibility: def.visibility,
             span,

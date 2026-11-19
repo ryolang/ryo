@@ -146,7 +146,7 @@ fn inferred_error_union_is_rejected_outside_function_return_position() {
 }
 
 #[test]
-fn explicit_empty_error_set_is_rejected_during_lowering() {
+fn explicit_empty_error_set_is_rejected_during_sema() {
     let mut pool = InternPool::new();
     let function_name = pool.intern_str("f");
     let int_name = pool.intern_str("int");
@@ -164,7 +164,17 @@ fn explicit_empty_error_set_is_rejected_during_lowering() {
     ast.set_top_level(vec![function]);
 
     let mut sink = DiagSink::new();
-    let _uir = astgen::generate(&ast, &mut pool, &mut sink);
+    let uir = astgen::generate(&ast, &mut pool, &mut sink);
+    assert!(!sink.has_errors(), "AstGen preserves the invalid union");
+    let mut context = CompilationContext::new();
+    let _ = analyze(
+        &uir,
+        &mut pool,
+        &mut sink,
+        "",
+        std::path::Path::new("<test>"),
+        &mut context,
+    );
     let diags = sink.into_diags();
     assert!(any_code(&diags, DiagCode::TypeMismatch));
     assert!(diags[0].message.contains("at least one error"));
@@ -1169,5 +1179,90 @@ fn duplicate_short_member_constructions_list_all_qualifications() {
     assert!(
         diags[0].message.contains("ParseError.NotFound"),
         "{diags:?}"
+    );
+}
+
+#[test]
+fn error_family_alias_expands_in_error_union() {
+    let declarations =
+        "errors IoError:\n\tEof\n\tReadFailed(str)\n\tInvalidUtf8(code: int, message: str)\n";
+    let alias = "fn alias_order() -> IoError!str:\n\treturn \"ok\"\n";
+    let explicit = "fn explicit_order() -> (IoError.Eof | IoError.ReadFailed | IoError.InvalidUtf8)!str:\n\treturn \"ok\"\n";
+
+    for (src, first, second) in [
+        (
+            format!("{declarations}{alias}{explicit}"),
+            "alias_order",
+            "explicit_order",
+        ),
+        (
+            format!("{declarations}{explicit}{alias}"),
+            "explicit_order",
+            "alias_order",
+        ),
+    ] {
+        let (tirs, pool) = run(&src).expect("alias and explicit set should resolve");
+        let first = tir_named(&tirs, &pool, first).return_type;
+        let second = tir_named(&tirs, &pool, second).return_type;
+        assert_eq!(pool.kind(first), TypeKind::ErrorUnion);
+        assert_eq!(first, second);
+
+        let union = pool.error_union_view(first);
+        assert_eq!(union.success, pool.str_());
+        let members = pool.error_set_view(union.error_set).members;
+        let names: Vec<_> = members
+            .iter()
+            .map(|&member| pool.display(member).to_string())
+            .collect();
+        assert_eq!(
+            names,
+            ["IoError.Eof", "IoError.ReadFailed", "IoError.InvalidUtf8"]
+        );
+    }
+}
+
+#[test]
+fn error_family_alias_is_error_set_type() {
+    let src = "errors IoError:\n\tEof\n\tReadFailed(str)\n\tInvalidUtf8(code: int, message: str)\nfn report(err: IoError):\n\treturn\n";
+    let (tirs, pool) = run(src).expect("error-set parameter should resolve");
+    let ty = tir_named(&tirs, &pool, "report").params[0].ty;
+
+    assert_eq!(pool.kind(ty), TypeKind::ErrorSet);
+    assert_eq!(
+        pool.display(ty).to_string(),
+        "IoError.Eof | IoError.ReadFailed | IoError.InvalidUtf8"
+    );
+    let members = pool.error_set_view(ty).members;
+    let names: Vec<_> = members
+        .iter()
+        .map(|&member| pool.display(member).to_string())
+        .collect();
+    assert_eq!(
+        names,
+        ["IoError.Eof", "IoError.ReadFailed", "IoError.InvalidUtf8"]
+    );
+}
+
+#[test]
+fn error_family_member_short_name_is_not_a_type() {
+    let src = "errors IoError:\n\tEof\nfn report(err: Eof):\n\treturn\n";
+    let diags = run(src).expect_err("short family member names are not types");
+    assert!(
+        diags.iter().any(|diag| diag.code == DiagCode::UnknownType),
+        "unexpected diagnostics: {diags:?}"
+    );
+}
+
+#[test]
+fn unknown_error_member_after_duplicate_lists_all_source_members() {
+    let src = "errors IoError:\n\tEof\n\tEof\nfn take(value: IoError.Missing):\n\treturn\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    let diag = diags
+        .iter()
+        .find(|diag| diag.code == DiagCode::UnknownVariant)
+        .expect("unknown family member diagnostic");
+    assert_eq!(
+        diag.message,
+        "error family 'IoError' has no member 'Missing' (members: 'Eof', 'Eof')"
     );
 }

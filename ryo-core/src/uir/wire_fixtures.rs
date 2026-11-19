@@ -17,9 +17,9 @@ fn var_decl_wire_fixture() {
     b.uir.extra.extend([0xAAAA_AAAA; 5]);
     let name = StringId::from_raw(7);
     let init = InstRef::from_raw(11);
-    let ty = TypeId::from_raw(3);
+    let type_expr = TypeExprId::from_raw(3);
 
-    let annotated = b.var_decl(name, true, Some(ty), init, sp());
+    let annotated = b.var_decl(name, true, Some(type_expr), init, sp());
     let InstData::Extra(range) = b.uir.inst(annotated).data else {
         panic!("VarDecl must carry InstData::Extra");
     };
@@ -54,18 +54,18 @@ fn var_decl_decode_fixture() {
 
     let name = StringId::from_raw(7);
     let init = InstRef::from_raw(11);
-    let ty = TypeId::from_raw(3);
+    let type_expr = TypeExprId::from_raw(3);
 
     let v1 = uir.var_decl_view(InstRef::from_index(1));
     assert_eq!(v1.name, name);
     assert!(v1.mutable);
-    assert_eq!(v1.ty, Some(ty));
+    assert_eq!(v1.type_expr, Some(type_expr));
     assert_eq!(v1.initializer, init);
 
     let v2 = uir.var_decl_view(InstRef::from_index(2));
     assert_eq!(v2.name, name);
     assert!(!v2.mutable);
-    assert_eq!(v2.ty, None);
+    assert_eq!(v2.type_expr, None);
     assert_eq!(v2.initializer, init);
 }
 

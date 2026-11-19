@@ -594,7 +594,8 @@ fn require_decl_reports_cycle_when_in_progress() {
     let mut b = ryo_core::uir::UirBuilder::new();
     let zero = b.int_literal(0, sp());
     let ret = b.unary(InstTag::Return, zero, sp());
-    b.add_function(main_id, vec![], pool.int(), &[ret], sp());
+    let return_type = b.type_name(pool.intern_str("int"), false, sp());
+    b.add_function(main_id, vec![], Some(return_type), &[ret], sp());
     let uir = b.finish().with_layout_context(&pool);
 
     let mut context = CompilationContext::new();
@@ -1639,21 +1640,27 @@ fn sema_inst_maps_use_body_local_slots() {
     let add = builder.binary(InstTag::Add, lhs, rhs, Span::EMPTY);
     let ret = builder.unary(InstTag::Return, add, Span::EMPTY);
     let first = pool.intern_str("first");
-    builder.add_function(first, vec![], pool.int(), &[ret], Span::EMPTY);
+    let return_type = builder.type_name(pool.intern_str("int"), false, Span::EMPTY);
+    builder.add_function(first, vec![], Some(return_type), &[ret], Span::EMPTY);
 
     let value = builder.int_literal(3, Span::EMPTY);
     let stmt = builder.unary(InstTag::ExprStmt, value, Span::EMPTY);
     let second = pool.intern_str("second");
-    builder.add_function(second, vec![], pool.void(), &[stmt], Span::EMPTY);
+    builder.add_function(second, vec![], None, &[stmt], Span::EMPTY);
     let uir = builder.finish();
     let map = uir.compute_body_map().unwrap();
 
     for body_index in 0..uir.func_bodies.len() {
         let body = &uir.func_bodies[body_index];
+        let return_type = if body_index == 0 {
+            pool.int()
+        } else {
+            pool.void()
+        };
         let fcx = FuncCtx::new(
             DeclId::NONE,
             body_index as u32,
-            TirBuilder::new(body.name, vec![], body.return_type, body.span),
+            TirBuilder::new(body.name, vec![], return_type, body.span),
             map.instructions(body_index).len(),
         );
         assert_eq!(fcx.inst_map.len(), map.instructions(body_index).len());
@@ -1672,10 +1679,11 @@ fn invalid_body_map_blocks_declaration_registration() {
     let shared = builder.int_literal(1, Span::EMPTY);
     let ret = builder.unary(InstTag::Return, shared, Span::EMPTY);
     let first = pool.intern_str("first");
-    builder.add_function(first, vec![], pool.int(), &[ret], Span::EMPTY);
+    let return_type = builder.type_name(pool.intern_str("int"), false, Span::EMPTY);
+    builder.add_function(first, vec![], Some(return_type), &[ret], Span::EMPTY);
     let stmt = builder.unary(InstTag::ExprStmt, shared, Span::EMPTY);
     let second = pool.intern_str("second");
-    builder.add_function(second, vec![], pool.void(), &[stmt], Span::EMPTY);
+    builder.add_function(second, vec![], None, &[stmt], Span::EMPTY);
     let invalid = builder.finish().with_layout_context(&pool);
     let mut sink = DiagSink::new();
 
@@ -1695,7 +1703,7 @@ fn invalid_body_map_blocks_declaration_registration() {
     let mut builder = ryo_core::uir::UirBuilder::new();
     let ret = builder.return_void(Span::EMPTY);
     let main = pool.intern_str("main");
-    builder.add_function(main, vec![], pool.void(), &[ret], Span::EMPTY);
+    builder.add_function(main, vec![], None, &[ret], Span::EMPTY);
     let valid = builder.finish().with_layout_context(&pool);
     let mut sink = DiagSink::new();
     let sema = Sema::new(
@@ -1708,4 +1716,20 @@ fn invalid_body_map_blocks_declaration_registration() {
     );
     assert_eq!(sema.declaration_ids.len(), 1);
     assert_eq!(sema.declaration_ids[0].index(), 0);
+}
+
+#[test]
+fn legacy_amp_str_is_a_migration_error() {
+    let diags = run("fn f(text: &str):\n\tprint(text)\n").unwrap_err();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.message.contains("`&str` was renamed to `strview`"))
+    );
+}
+
+#[test]
+fn lower_view_of_non_str_rejected() {
+    let diags = run("fn f(x: &int):\n\tprint(\"\")\n").unwrap_err();
+    assert!(diags.iter().any(|d| d.code == DiagCode::UnknownType));
 }

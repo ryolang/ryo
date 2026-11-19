@@ -2,7 +2,7 @@
 //! the 2000-line CI gate (`scripts/check_file_length.sh`); the listing
 //! format is documented there.
 
-use super::{InstData, InstRef, InstTag, InternPool, StringId, Uir};
+use super::{InstData, InstRef, InstTag, InternPool, StringId, TypeExprId, Uir, UirTypeExprKind};
 use super::{UirArgTarget, UirArmBodyView, UirFieldTarget, UirPatternView};
 use crate::ast::LitPattern;
 use std::fmt;
@@ -62,9 +62,16 @@ impl<'a> fmt::Display for UirDump<'a> {
                 if i > 0 {
                     write!(f, ", ")?;
                 }
-                write!(f, "{}: {}", pool.str(p.name), pool.display(p.ty))?;
+                write!(f, "{}: ", pool.str(p.name))?;
+                write_type_expr(f, uir, pool, p.type_expr)?;
             }
-            writeln!(f, ") -> {}", pool.display(body.return_type))?;
+            write!(f, ") -> ")?;
+            if let Some(return_type) = body.return_type {
+                write_type_expr(f, uir, pool, return_type)?;
+            } else {
+                write!(f, "void")?;
+            }
+            writeln!(f)?;
 
             write!(f, "  body:")?;
             for r in uir.body_stmts(body) {
@@ -83,6 +90,70 @@ impl<'a> fmt::Display for UirDump<'a> {
             }
         }
         Ok(())
+    }
+}
+
+fn write_type_expr(
+    f: &mut fmt::Formatter<'_>,
+    uir: &Uir,
+    pool: &InternPool,
+    id: TypeExprId,
+) -> fmt::Result {
+    match uir.type_expr(id).kind {
+        UirTypeExprKind::Name { name, is_view } => {
+            if is_view {
+                write!(f, "&")?;
+            }
+            write!(f, "{}", pool.str(name))
+        }
+        UirTypeExprKind::Anon { fields } => {
+            write!(f, "{{")?;
+            for (index, (name, field)) in uir.type_field_list(fields).iter().enumerate() {
+                if index > 0 {
+                    write!(f, ", ")?;
+                }
+                write!(f, "{}: ", pool.str(*name))?;
+                write_type_expr(f, uir, pool, *field)?;
+            }
+            write!(f, "}}")
+        }
+        UirTypeExprKind::Positional(elements) => {
+            let elements = uir.type_expr_list(elements);
+            write!(f, "(")?;
+            for (index, element) in elements.iter().enumerate() {
+                if index > 0 {
+                    write!(f, ", ")?;
+                }
+                write_type_expr(f, uir, pool, *element)?;
+            }
+            if elements.len() == 1 {
+                write!(f, ",")?;
+            }
+            write!(f, ")")
+        }
+        UirTypeExprKind::ErrorUnion {
+            error_set,
+            success,
+            inferred,
+        } => {
+            let error_set = uir.type_expr_list(error_set);
+            if !inferred {
+                if error_set.len() > 1 {
+                    write!(f, "(")?;
+                }
+                for (index, member) in error_set.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, " | ")?;
+                    }
+                    write_type_expr(f, uir, pool, *member)?;
+                }
+                if error_set.len() > 1 {
+                    write!(f, ")")?;
+                }
+            }
+            write!(f, "!")?;
+            write_type_expr(f, uir, pool, success)
+        }
     }
 }
 
@@ -128,23 +199,12 @@ fn write_inst(
         (InstTag::VarDecl, InstData::Extra(_)) => {
             let view = uir.var_decl_view(r);
             let kw = if view.mutable { "mut " } else { "" };
-            match view.ty {
-                Some(t) => writeln!(
-                    f,
-                    "var_decl {}{}: {} = %{}",
-                    kw,
-                    pool.str(view.name),
-                    pool.display(t),
-                    view.initializer.index()
-                ),
-                None => writeln!(
-                    f,
-                    "var_decl {}{} = %{}",
-                    kw,
-                    pool.str(view.name),
-                    view.initializer.index()
-                ),
+            write!(f, "var_decl {}{}", kw, pool.str(view.name))?;
+            if let Some(type_expr) = view.type_expr {
+                write!(f, ": ")?;
+                write_type_expr(f, uir, pool, type_expr)?;
             }
+            writeln!(f, " = %{}", view.initializer.index())
         }
         (InstTag::IfStmt, InstData::Extra(_)) => {
             let view = uir.if_stmt_view(r);

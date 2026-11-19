@@ -264,3 +264,75 @@ fn positional_access_on_non_struct_points_at_the_comma() {
         "named-key access must not get the comma note, got {diags:?}",
     );
 }
+
+#[test]
+fn sema_resolves_annotations_and_inferred_unions_from_uir() {
+    let src = "fn forward(value: Later) -> Later:\n\treturn value\n\
+               fn structural(value: {item: (int, str)}) -> {result: (bool, bytes)}:\n\tlocal: {nested: (Later, int)} = {nested=(Later{value=1}, 2)}\n\treturn {result=(true, b\"x\")}\n\
+               fn positional(value: (int, str)) -> (int, str):\n\treturn value\n\
+               fn explicit() -> Failure!int:\n\treturn 1\n\
+               fn inferred() -> !int:\n\treturn 1\n\
+               struct Later:\n\tvalue: int\n\
+               error Failure\n";
+    let (tirs, pool) = run(src).expect("Sema resolves every unresolved annotation form");
+
+    let forward = tir_named(&tirs, &pool, "forward");
+    assert_eq!(forward.params[0].ty, forward.return_type);
+    assert_eq!(pool.display(forward.return_type).to_string(), "Later");
+
+    let structural = tir_named(&tirs, &pool, "structural");
+    let parameter = pool.struct_view(structural.params[0].ty);
+    assert_eq!(pool.str(parameter.fields[0].name), "item");
+    let item = pool.struct_view(parameter.fields[0].ty);
+    assert_eq!(item.fields[0].ty, pool.int());
+    assert_eq!(item.fields[1].ty, pool.str_());
+    let result = pool.struct_view(structural.return_type);
+    assert_eq!(pool.str(result.fields[0].name), "result");
+    let result = pool.struct_view(result.fields[0].ty);
+    assert_eq!(result.fields[0].ty, pool.bool_());
+    assert_eq!(result.fields[1].ty, pool.bytes());
+    let local = structural.inst(stmt_at(structural, 0)).ty;
+    let local = pool.struct_view(local);
+    assert_eq!(pool.str(local.fields[0].name), "nested");
+    let nested = pool.struct_view(local.fields[0].ty);
+    assert_eq!(pool.display(nested.fields[0].ty).to_string(), "Later");
+    assert_eq!(nested.fields[1].ty, pool.int());
+
+    let positional = tir_named(&tirs, &pool, "positional");
+    assert_eq!(positional.params[0].ty, positional.return_type);
+    let positional_type = pool.struct_view(positional.return_type);
+    let names: Vec<_> = positional_type
+        .fields
+        .iter()
+        .map(|field| pool.str(field.name))
+        .collect();
+    assert_eq!(names, ["0", "1"]);
+    assert_eq!(positional_type.fields[0].ty, pool.int());
+    assert_eq!(positional_type.fields[1].ty, pool.str_());
+
+    let explicit = tir_named(&tirs, &pool, "explicit");
+    assert_eq!(pool.kind(explicit.return_type), TypeKind::ErrorUnion);
+    assert_eq!(
+        pool.display(explicit.return_type).to_string(),
+        "Failure!int"
+    );
+    let inferred = tir_named(&tirs, &pool, "inferred");
+    assert_eq!(pool.kind(inferred.return_type), TypeKind::ErrorUnion);
+    assert_eq!(pool.display(inferred.return_type).to_string(), "!int");
+}
+
+#[test]
+fn positional_type_expr_resolves_to_same_type_as_anon_fields() {
+    let src = "fn positional() -> (int, str):\n\treturn (1, \"a\")\n\
+               fn anon() -> {0: int, 1: str}:\n\treturn (1, \"a\")\n";
+    let (tirs, pool) = run(src).expect("both structural spellings resolve");
+    let positional = tir_named(&tirs, &pool, "positional").return_type;
+    let anon = tir_named(&tirs, &pool, "anon").return_type;
+    assert_eq!(positional, anon);
+    assert!(matches!(pool.kind(positional), TypeKind::AnonStruct));
+    let view = pool.struct_view(positional);
+    let names: Vec<&str> = view.fields.iter().map(|f| pool.str(f.name)).collect();
+    assert_eq!(names, ["0", "1"]);
+    assert_eq!(view.fields[0].ty, pool.int());
+    assert_eq!(view.fields[1].ty, pool.str_());
+}
