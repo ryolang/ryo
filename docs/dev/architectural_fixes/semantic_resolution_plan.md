@@ -199,10 +199,10 @@ git commit -m "refactor: preserve unresolved type annotations in UIR"
 ### Task 4: Resolve Variant, Error, and Match Declarations in Sema
 
 **Files:**
-- Modify: `ryo-core/src/uir.rs`, `ryo-core/src/uir/wires.rs`, `ryo-core/src/uir/views.rs`, `ryo-core/src/uir/dump.rs`, `ryo-core/src/uir/wire_fixtures.rs`, `ryo-core/src/extra.rs`
+- Modify: `ryo-core/src/uir.rs`, `ryo-core/src/uir/body_map.rs`, `ryo-core/src/uir/wires.rs`, `ryo-core/src/uir/views.rs`, `ryo-core/src/uir/dump.rs`, `ryo-core/src/uir/wire_fixtures.rs`, `ryo-core/src/extra.rs`
 - Modify: `ryo-frontend/src/astgen/errors.rs`, `ryo-frontend/src/astgen/variants.rs`, `ryo-frontend/src/astgen/match_.rs`, `ryo-frontend/src/astgen/expr.rs`
-- Modify: `ryo-frontend/src/sema/errors.rs`, `ryo-frontend/src/sema/expr/walker/variant_tasks.rs`, `ryo-frontend/src/sema/match_/`
-- Test: `ryo-frontend/src/astgen/enum_tests.rs`, `ryo-frontend/src/sema/tests_enums.rs`, `ryo-frontend/src/sema/tests_errors.rs`, `ryo-frontend/src/sema/tests_match.rs`, `ryo-frontend/src/sema/tests_match_typing.rs`, `ryo-frontend/src/sema/tests_match_exhaustiveness.rs`, `ryo-frontend/src/sema/tests_match_arm_guards.rs`
+- Modify: `ryo-frontend/src/sema/errors.rs`, `ryo-frontend/src/sema/error_inference.rs`, `ryo-frontend/src/sema/expr/walker/variant_tasks.rs`, `ryo-frontend/src/sema/match_/`
+- Test: `ryo-frontend/src/astgen/enum_tests.rs`, `ryo-frontend/src/sema/tests_enums.rs`, `ryo-frontend/src/sema/tests_errors.rs`, `ryo-frontend/src/sema/tests_error_inference.rs`, `ryo-frontend/src/sema/tests_match.rs`, `ryo-frontend/src/sema/tests_match_typing.rs`, `ryo-frontend/src/sema/tests_match_exhaustiveness.rs`, `ryo-frontend/src/sema/tests_match_arm_guards.rs`
 
 **Interfaces:**
 - Produces UIR `UirVariantForm { positional, named_parens, mixed_fields }`; enum literals retain `enum_name`/`variant`; error candidates retain `name`/optional family root/member. Argument selectors are positional indices or named `StringId` words according to the form.
@@ -216,21 +216,22 @@ Add:
 - `sema_resolves_variant_and_error_field_identities`: named arguments in reversed declaration order emit the same resolved TIR indices.
 - `unknown_named_argument_preserves_expression_diagnostics`: an unknown named argument whose expression references a missing variable yields exactly one field diagnostic plus one variable diagnostic, never field zero or derived missing-field noise.
 - `uppercase_method_and_unknown_call_fallbacks_stay_compatible`: parenthesized uppercase method calls, unknown function calls, bare variables, shadowing, and error-family source forms preserve existing diagnostics/TIR.
+- `inferred_dependencies_include_unresolved_call_candidates`: an unqualified positional error-construction candidate that Sema resolves to a named function creates the same inferred-signature dependency edge as an ordinary `InstTag::Call`.
 
-Run: `cargo test -p ryo-frontend astgen_preserves_enum_error_and_match_declaration_names && cargo test -p ryo-frontend unknown_named_argument_preserves_expression_diagnostics && cargo test -p ryo-frontend uppercase_method_and_unknown_call_fallbacks_stay_compatible`
-Expected: FAIL because AstGen still resolves these candidates.
+Run: `cargo test -p ryo-frontend astgen_preserves_enum_error_and_match_declaration_names && cargo test -p ryo-frontend unknown_named_argument_preserves_expression_diagnostics && cargo test -p ryo-frontend uppercase_method_and_unknown_call_fallbacks_stay_compatible && cargo test -p ryo-frontend inferred_dependencies_include_unresolved_call_candidates`
+Expected: FAIL because AstGen still resolves these candidates and the graph sees only ordinary calls.
 
 - [ ] **Step 2: Introduce unresolved UIR variant wires and structural lowering**
 
-Keep the resolved enum wire for TIR only. Add UIR-specific argument/form encoding with literal fixtures. AstGen lowers child expressions exactly once and preserves names/forms for enum, nominal-error, error-family, and match candidates. Remove AstGen declaration-directory lookups, variant/field index assignment, error-family qualification, and type-based method/call fallback decisions. Move semantic diagnostic assertions to Sema tests.
+Keep the resolved enum wire for TIR only. Add UIR-specific argument/form encoding with literal fixtures and update `body_map.rs`'s checked traversal to decode the new payloads without losing argument ownership. AstGen lowers child expressions exactly once and preserves names/forms for enum, nominal-error, error-family, and match candidates. Remove AstGen declaration-directory lookups, variant/field index assignment, error-family qualification, and type-based method/call fallback decisions. Move semantic diagnostic assertions to Sema tests.
 
 - [ ] **Step 3: Implement Sema candidate resolution**
 
-Resolve enum/error/family names against Sema tables and lexical scope. Select enum/error construction, value/field access, method call, function call, or error recovery as before. Convert named fields to declaration indices in Sema and emit existing TIR. Preserve unknown-argument reachability, Brace Law/source-form checks, mixed-field recovery, and match pattern diagnostics.
+Resolve enum/error/family names against Sema tables and lexical scope. Select enum/error construction, value/field access, method call, function call, or error recovery as before. Convert named fields to declaration indices in Sema and emit existing TIR. Extend the exact direct-call graph to include unqualified positional error candidates whose names bind to functions, so Task 2 schedules their inferred dependencies before callers. Preserve unknown-argument reachability, Brace Law/source-form checks, mixed-field recovery, and match pattern diagnostics.
 
 - [ ] **Step 4: Run all variant, error, and match suites**
 
-Run: `cargo test -p ryo-core uir::wire_fixtures && cargo test -p ryo-frontend enums && cargo test -p ryo-frontend errors && cargo test -p ryo-frontend match && cargo test -p ryo-frontend unknown_named_argument_preserves_expression_diagnostics && cargo test -p ryo-frontend uppercase_method_and_unknown_call_fallbacks_stay_compatible`
+Run: `cargo test -p ryo-core uir::wire_fixtures && cargo test -p ryo-core body_map && cargo test -p ryo-frontend enums && cargo test -p ryo-frontend errors && cargo test -p ryo-frontend match && cargo test -p ryo-frontend error_inference && cargo test -p ryo-frontend unknown_named_argument_preserves_expression_diagnostics && cargo test -p ryo-frontend uppercase_method_and_unknown_call_fallbacks_stay_compatible && cargo test -p ryo-frontend inferred_dependencies_include_unresolved_call_candidates`
 Expected: PASS with unchanged normalized diagnostics and resolved TIR.
 
 - [ ] **Step 5: Commit Task 4**
