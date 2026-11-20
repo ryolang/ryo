@@ -1472,3 +1472,44 @@ fn nested_call_fors_use_one_machine_at_default_limit() {
         nested_statements(NestedStatement::For, 128, true),
     );
 }
+
+#[test]
+fn uppercase_call_uses_expected_struct_argument_at_every_depth_limit() {
+    let src = r#"error A
+fn Make(value: {value: A!int}) -> int:
+	return 0
+fn main():
+	print(Make({value=1}))
+"#;
+    let (_tirs, diags, _pool, _context) = run_differential(src);
+    assert!(diags.is_empty(), "{diags:?}");
+    let baseline = snapshot(run_differential(src));
+    for limit in [0, 1, 64] {
+        assert_eq!(
+            snapshot(run_differential_with_expr_limit(src, limit)),
+            baseline,
+            "uppercase call lost its expected struct argument at limit {limit}"
+        );
+    }
+}
+
+#[test]
+fn uppercase_method_receiver_precedes_arguments_at_every_depth_limit() {
+    let src = "fn main():\n\tprint(Missing.Method(also_missing))\n";
+    let (_tirs, diags, _pool, _context) = run_differential(src);
+    assert_eq!(diags.len(), 2, "{diags:?}");
+    assert!(diags[0].message.contains("undefined variable: 'Missing'"));
+    assert!(
+        diags[1]
+            .message
+            .contains("undefined variable: 'also_missing'")
+    );
+    let baseline = snapshot(run_differential(src));
+    for limit in [0, 1, 64] {
+        assert_eq!(
+            snapshot(run_differential_with_expr_limit(src, limit)),
+            baseline,
+            "receiver and argument order differed at limit {limit}"
+        );
+    }
+}

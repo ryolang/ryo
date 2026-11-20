@@ -752,3 +752,106 @@ fn compiler_error_union_dispatch_synthesizes_hidden_alternatives() {
     assert_eq!(view.arm(1).discriminant, Discriminant::Variant(1));
     assert_eq!(view.arm(1).bindings().next().unwrap().ty, error);
 }
+
+fn analyze_qualified_union_catch(member: &str) -> (Vec<Tir>, Vec<Diag>, InternPool) {
+    let (declarations, mut pool, diags) = lower("errors IoError:\n\tEof\n\tReadFailed(str)\n");
+    assert!(diags.is_empty(), "{diags:?}");
+    let family = pool.find_str("IoError").expect("family name");
+    let member = pool.intern_str(member);
+    let result = pool.intern_str("result");
+    let value = pool.intern_str("value");
+    let main = pool.intern_str("main");
+    let outcome = pool.intern_str("outcome");
+    let mut builder = ryo_core::uir::UirBuilder::new();
+    for decl in declarations.error_decls {
+        builder.add_error_decl(decl);
+    }
+    for family in declarations.error_families {
+        builder.add_error_family_decl(family);
+    }
+
+    let alias = builder.type_name(family, false, Span::EMPTY);
+    let success = builder.type_name(pool.find_str("str").expect("str name"), false, Span::EMPTY);
+    let union = builder.type_error_union(&[alias], success, false, Span::EMPTY);
+    let scrutinee = builder.var_ref(result, Span::EMPTY);
+    let qualified_body = builder.str_literal(outcome, Span::EMPTY);
+    let wildcard_body = builder.str_literal(outcome, Span::EMPTY);
+    let qualified = ryo_core::uir::UirMatchArm {
+        span: Span::EMPTY,
+        pattern: ryo_core::uir::UirPattern::Variant {
+            enum_name: Some(family),
+            variant: member,
+            args: None,
+        },
+        body: ryo_core::uir::UirArmBody::Expr(qualified_body),
+    };
+    let wildcard = ryo_core::uir::UirMatchArm {
+        span: Span::EMPTY,
+        pattern: ryo_core::uir::UirPattern::Wildcard,
+        body: ryo_core::uir::UirArmBody::Expr(wildcard_body),
+    };
+    let caught = builder.catch(scrutinee, None, &[qualified, wildcard], Span::EMPTY);
+    let declaration = builder.var_decl(value, false, None, caught, Span::EMPTY);
+    let result_read = builder.var_ref(value, Span::EMPTY);
+    let returned = builder.unary(InstTag::Return, result_read, Span::EMPTY);
+    let return_type =
+        builder.type_name(pool.find_str("str").expect("str name"), false, Span::EMPTY);
+    builder.add_function(
+        main,
+        vec![ryo_core::uir::UirParam {
+            name: result,
+            type_expr: union,
+            mode: ryo_core::tir::ParamMode::Borrow,
+            span: Span::EMPTY,
+        }],
+        Some(return_type),
+        &[declaration, returned],
+        Span::EMPTY,
+    );
+
+    let uir = builder.finish().with_layout_context(&pool);
+    let mut sink = DiagSink::new();
+    let mut context = CompilationContext::new();
+    let tirs = analyze(
+        &uir,
+        &mut pool,
+        &mut sink,
+        "synthetic qualified catch",
+        std::path::Path::new("<test>"),
+        &mut context,
+    );
+    (tirs, sink.into_diags(), pool)
+}
+
+#[test]
+fn qualified_error_family_catch_patterns_resolve_members() {
+    let (tirs, diags, pool) = analyze_qualified_union_catch("Eof");
+    assert!(diags.is_empty(), "{diags:?}");
+    let main = tir_named(&tirs, &pool, "main");
+    let init = main.var_decl_view(stmt_at(main, 0)).initializer;
+    assert_eq!(main.inst(init).tag, TirTag::Match);
+}
+
+#[test]
+fn unknown_error_family_catch_pattern_reports_member_not_unknown_type() {
+    let (_tirs, diags, _pool) = analyze_qualified_union_catch("Missing");
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, DiagCode::UnknownMatchVariant);
+    assert!(diags[0].message.contains("has no member 'Missing'"));
+    assert!(diags[0].message.contains("'Eof', 'ReadFailed'"));
+}
+
+#[test]
+fn unknown_error_family_pattern_precedes_scrutinee_type_rejection() {
+    let src = r#"errors IoError:
+	Eof
+fn main():
+	match 1:
+		IoError.Missing: 0
+		_: 1
+"#;
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, DiagCode::UnknownMatchVariant);
+    assert!(diags[0].message.contains("has no member 'Missing'"));
+}

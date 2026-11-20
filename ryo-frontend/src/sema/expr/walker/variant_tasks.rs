@@ -1,3 +1,4 @@
+use super::super::super::call::{CallPlan, finish_call, prepare_call};
 use super::super::super::errors::{
     analyze_error_candidate_with_skips, is_rejected_error_declaration,
 };
@@ -9,13 +10,14 @@ use ryo_core::extra::enum_lit_extra;
 use ryo_core::spine::ChainSpine;
 use ryo_core::tir::TirRef;
 use ryo_core::types::{StringId, StructField, TypeKind, VariantKind};
-use ryo_core::uir::{InstRef, InstTag};
+use ryo_core::uir::{CallView, ExtraList, InstRef, InstTag};
 use std::collections::{HashMap, HashSet};
 
 pub(super) struct VariantState {
     diagnosed: HashMap<InstRef, HashSet<usize>>,
     candidates: Vec<Option<Candidate>>,
     method_recoveries: Vec<Option<TirRef>>,
+    method_receivers: Vec<Option<TirRef>>,
 }
 
 impl VariantState {
@@ -24,6 +26,7 @@ impl VariantState {
             diagnosed: HashMap::new(),
             candidates: vec![None; instruction_count],
             method_recoveries: vec![None; instruction_count],
+            method_receivers: vec![None; instruction_count],
         }
     }
 
@@ -33,6 +36,7 @@ impl VariantState {
         tasks: &mut ChainSpine<Task>,
         sema: &mut Sema<'_>,
         fcx: &mut FuncCtx,
+        calls: &mut HashMap<InstRef, CallPlan>,
         scope: &Scope,
         node: InstRef,
         scope_id: ScopeId,
@@ -44,6 +48,23 @@ impl VariantState {
             _ => return false,
         };
         let slot = fcx.map_slot(sema.body_map(), node);
+        if matches!(candidate, Candidate::Call) {
+            let (name, _, _, view) = sema.uir.error_construct_view(node);
+            let args: Vec<_> = view.fields().map(|(_, value)| value).collect();
+            let words: Vec<_> = args.iter().map(|arg| arg.raw()).collect();
+            let view = CallView {
+                name,
+                args: ExtraList::new(&words),
+            };
+            let plan = prepare_call(sema, &view, sema.uir.span(node));
+            calls.insert(node, plan);
+            self.candidates[slot] = Some(candidate);
+            tasks.push(Task::Exit(node, scope_id, mode));
+            for index in (0..args.len()).rev() {
+                tasks.push(Task::CallArg(node, index, scope_id));
+            }
+            return true;
+        }
         if matches!(candidate, Candidate::Method) {
             let view = sema.uir.enum_lit_view(node);
             if let Some(recovery) = super::super::methods::type_method_receiver_recovery(
@@ -55,6 +76,14 @@ impl VariantState {
                 sema.uir.span(node),
             ) {
                 self.method_recoveries[slot] = Some(recovery);
+            } else {
+                self.method_receivers[slot] = Some(super::super::resolve_var_read(
+                    sema,
+                    fcx,
+                    scope,
+                    view.enum_name,
+                    view.enum_span,
+                ));
             }
         }
         let schedule_args = match &candidate {
@@ -343,10 +372,13 @@ impl VariantState {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn finish(
         &mut self,
         sema: &mut Sema<'_>,
         fcx: &mut FuncCtx,
+        analyzed: &HashMap<InstRef, TirRef>,
+        calls: &mut HashMap<InstRef, CallPlan>,
         scope: &Scope,
         node: InstRef,
         context: SemaExprContext,
@@ -356,13 +388,36 @@ impl VariantState {
         let candidate = self.candidates[slot]
             .take()
             .expect("variant candidate resolved before scheduling");
+        if matches!(candidate, Candidate::Call) {
+            let (name, _, _, view) = sema.uir.error_construct_view(node);
+            let args: Vec<_> = view.fields().map(|(_, value)| value).collect();
+            let words: Vec<_> = args.iter().map(|arg| arg.raw()).collect();
+            let view = CallView {
+                name,
+                args: ExtraList::new(&words),
+            };
+            let plan = calls
+                .remove(&node)
+                .expect("candidate call prepared before argument scheduling");
+            let arg_tirs = args.iter().map(|arg| analyzed[arg]).collect();
+            return finish_call(sema, fcx, scope, &view, sema.uir.span(node), plan, arg_tirs);
+        }
         if let Some(recovery) = self.method_recoveries[slot].take() {
             return recovery;
         }
         let span = sema.uir.span(node);
+        let method_receiver = self.method_receivers[slot].take();
         match sema.uir.inst(node).tag {
             InstTag::EnumLit => analyze_variant_candidate_with_skips(
-                sema, fcx, scope, node, span, context, candidate, diagnosed,
+                sema,
+                fcx,
+                scope,
+                node,
+                span,
+                context,
+                candidate,
+                method_receiver,
+                diagnosed,
             ),
             InstTag::ErrorConstruct => analyze_error_candidate_with_skips(
                 sema, fcx, scope, node, span, context, candidate, diagnosed,

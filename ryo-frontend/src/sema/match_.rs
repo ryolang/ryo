@@ -1,10 +1,6 @@
 //! `match` expression analysis: pattern resolution, exhaustiveness, and TIR emission.
-//!
-//! Resolution validates the scrutinee and arms into [`MatchAnalysis`].
-//! Exhaustiveness uses compact variant/literal coverage and emits E0129/W0005.
-//! Arm typing binds payloads, joins types, and rejects invalid moves and results.
+//! Arm typing binds payloads and joins results; broken arms recover independently.
 //! Sema resolves qualified error-family patterns to canonical member names.
-//! Broken arms recover without blocking their siblings.
 
 use super::{
     FuncCtx, NeverMode, Scope, ScopeParent, Sema, SemaExprContext, analyze_block_with_context,
@@ -1158,6 +1154,24 @@ fn resolve_arm(
         anon_literals: Vec::new(),
         had_error: false,
     };
+    let family_member = match &arm.pattern {
+        UirPatternView::Variant {
+            enum_name, variant, ..
+        } => match super::expr::candidates::resolve_optional_match_error_path(
+            sema,
+            *enum_name,
+            *variant,
+            analysis.span,
+        ) {
+            Some(Ok(qualified)) => Some(qualified),
+            Some(Err(())) => {
+                analysis.had_error = true;
+                return analysis;
+            }
+            None => None,
+        },
+        _ => None,
+    };
     // An error-typed scrutinee (E0136 recovery or an already-errored
     // expression) makes every check uninformative — the arm is excluded
     // from exhaustiveness and binds nothing.
@@ -1165,6 +1179,7 @@ fn resolve_arm(
         analysis.had_error = true;
         return analysis;
     }
+    let family_pattern = family_member.is_some();
     match &arm.pattern {
         UirPatternView::Wildcard => {
             analysis.discriminant = Some(Discriminant::Wildcard);
@@ -1181,10 +1196,11 @@ fn resolve_arm(
                 sema,
                 scrutinee_ty,
                 *enum_name,
-                *variant,
+                family_member.unwrap_or(*variant),
                 *args,
                 &mut analysis,
                 catch,
+                family_pattern,
             );
         }
         UirPatternView::Anon { fields } => {
@@ -1243,6 +1259,7 @@ fn resolve_literal(
 
 /// Resolve an enum variant or a nominal error member against the
 /// scrutinee, then reuse the M12 payload-shape checks.
+#[allow(clippy::too_many_arguments)]
 fn resolve_variant(
     sema: &mut Sema<'_>,
     scrutinee_ty: ryo_core::types::TypeId,
@@ -1251,8 +1268,8 @@ fn resolve_variant(
     args: Option<UirVariantArgsView<'_>>,
     analysis: &mut MatchArmAnalysis,
     catch: bool,
+    family_pattern: bool,
 ) {
-    let mut variant = variant;
     let scrutinee_kind = sema.pool.kind(scrutinee_ty);
     let error_pattern = matches!(scrutinee_kind, TypeKind::DeclaredError | TypeKind::ErrorSet);
     let union_pattern = catch
@@ -1275,27 +1292,7 @@ fn resolve_variant(
     }
     if let Some(name) = enum_name {
         if error_pattern {
-            if super::expr::candidates::error_family_member_names(sema, name).is_some() {
-                match super::expr::candidates::resolve_match_error_path(
-                    sema,
-                    name,
-                    variant,
-                    analysis.span,
-                ) {
-                    Ok(qualified) => {
-                        variant = qualified;
-                    }
-                    Err(()) => {
-                        analysis.had_error = true;
-                        return;
-                    }
-                }
-            }
-            let name = if super::expr::candidates::error_family_member_names(sema, name).is_some() {
-                variant
-            } else {
-                name
-            };
+            let name = if family_pattern { variant } else { name };
             match sema.error_types.get(&name).copied() {
                 Some(error_ty)
                     if sema
@@ -1328,7 +1325,7 @@ fn resolve_variant(
                     return;
                 }
             }
-        } else {
+        } else if !family_pattern {
             match sema.enum_types.get(&name) {
                 Some(&ety) if ety == scrutinee_ty => {}
                 Some(&ety) => {
@@ -1370,10 +1367,15 @@ fn resolve_variant(
         }
     }
 
-    let (ename, variants) = if error_pattern {
+    let (ename, variants) = if error_pattern || (union_pattern && family_pattern) {
+        let error_set = if union_pattern {
+            sema.pool.error_union_view(scrutinee_ty).error_set
+        } else {
+            scrutinee_ty
+        };
         let variants = sema
             .pool
-            .error_set_view(scrutinee_ty)
+            .error_set_view(error_set)
             .members
             .into_iter()
             .map(|member| {
@@ -1401,7 +1403,7 @@ fn resolve_variant(
     };
     let (vname, kind, fields) = &variants[vidx];
     let vname = sema.pool.str(*vname).to_string();
-    let (pattern, description) = if error_pattern {
+    let (pattern, description) = if error_pattern || (union_pattern && family_pattern) {
         (vname.clone(), format!("error '{vname}'"))
     } else {
         let ename = sema.pool.str(ename.expect("enum name")).to_string();
@@ -1414,7 +1416,11 @@ fn resolve_variant(
     let payload_ok = match kind {
         VariantKind::Unit => {
             if args.is_some() {
-                let nominal_kind = if error_pattern { "error" } else { "variant" };
+                let nominal_kind = if error_pattern || (union_pattern && family_pattern) {
+                    "error"
+                } else {
+                    "variant"
+                };
                 sema.sink.emit(Diag::error(
                     analysis.span,
                     DiagCode::UnitVariantConstructed,

@@ -42,9 +42,7 @@ pub(crate) fn resolve_variant(sema: &mut Sema<'_>, scope: &Scope, node: InstRef)
     let view = sema.uir.enum_lit_view(node);
     if let Some(&ty) = sema.enum_types.get(&view.enum_name) {
         if sema.pool.is_error(ty) {
-            return Candidate::Recovery {
-                analyze_args: false,
-            };
+            return Candidate::Recovery { analyze_args: true };
         }
         if view.form.named_parens {
             sema.sink.emit(Diag::error(
@@ -73,16 +71,12 @@ pub(crate) fn resolve_variant(sema: &mut Sema<'_>, scope: &Scope, node: InstRef)
                         sema.pool.str(view.variant),
                     ),
                 ));
-                return Candidate::Recovery {
-                    analyze_args: false,
-                };
+                return Candidate::Recovery { analyze_args: true };
             };
             (variant_index as u32, variant.kind, variant.fields.to_vec())
         };
         if view.form.mixed_fields {
-            return Candidate::Recovery {
-                analyze_args: false,
-            };
+            return Candidate::Recovery { analyze_args: true };
         }
         let mut resolved = Vec::with_capacity(view.fields().count());
         for (argument_index, (selector, value)) in view.fields().enumerate() {
@@ -127,9 +121,7 @@ pub(crate) fn resolve_variant(sema: &mut Sema<'_>, scope: &Scope, node: InstRef)
 
     if error_family_member_names(sema, view.enum_name).is_some() {
         if view.form.mixed_fields {
-            return Candidate::Recovery {
-                analyze_args: false,
-            };
+            return Candidate::Recovery { analyze_args: true };
         }
         let form = UirVariantForm {
             positional: view.form.positional && !view.form.named_parens,
@@ -167,17 +159,13 @@ pub(crate) fn resolve_variant(sema: &mut Sema<'_>, scope: &Scope, node: InstRef)
         DiagCode::UnknownType,
         format!("unknown type: '{}'", sema.pool.str(view.enum_name)),
     ));
-    Candidate::Recovery {
-        analyze_args: false,
-    }
+    Candidate::Recovery { analyze_args: true }
 }
 
 pub(crate) fn resolve_error(sema: &mut Sema<'_>, scope: &Scope, node: InstRef) -> Candidate {
     let (name, family_root, family_member, view) = sema.uir.error_construct_view(node);
     if view.form.mixed_fields {
-        return Candidate::Recovery {
-            analyze_args: false,
-        };
+        return Candidate::Recovery { analyze_args: true };
     }
 
     if family_root.is_none() && family_member.is_none() {
@@ -307,9 +295,7 @@ fn resolve_qualified_error(
                 sema.pool.str(name),
             ),
         ));
-        return Candidate::Recovery {
-            analyze_args: false,
-        };
+        return Candidate::Recovery { analyze_args: true };
     }
     resolved_error(
         sema,
@@ -412,4 +398,15 @@ pub(crate) fn unqualified_call_candidate_name(sema: &Sema<'_>, node: InstRef) ->
         return None;
     }
     Some(name)
+}
+
+pub(crate) fn resolve_optional_match_error_path(
+    sema: &mut Sema<'_>,
+    root: Option<StringId>,
+    member: StringId,
+    span: Span,
+) -> Option<Result<StringId, ()>> {
+    let root = root?;
+    error_family_member_names(sema, root)?;
+    Some(resolve_match_error_path(sema, root, member, span))
 }

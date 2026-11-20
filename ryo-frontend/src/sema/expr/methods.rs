@@ -205,16 +205,19 @@ pub(super) fn analyze_uppercase_candidate(
     args: &[InstRef],
     span: Span,
     context: SemaExprContext,
+    precomputed_receiver: Option<TirRef>,
 ) -> TirRef {
-    if let Some(recovery) =
-        type_method_receiver_recovery(sema, fcx, scope, receiver_name, method, span)
+    if precomputed_receiver.is_none()
+        && let Some(recovery) =
+            type_method_receiver_recovery(sema, fcx, scope, receiver_name, method, span)
     {
         for &arg in args {
             analyze_expr_with(sema, fcx, scope, arg, NeverMode::Reject, context.child());
         }
         return recovery;
     }
-    let receiver = super::resolve_var_read(sema, fcx, scope, receiver_name, receiver_span);
+    let receiver = precomputed_receiver
+        .unwrap_or_else(|| super::resolve_var_read(sema, fcx, scope, receiver_name, receiver_span));
     analyze_method_values(sema, fcx, scope, receiver, method, args, span, context)
 }
 

@@ -638,3 +638,64 @@ fn named_arg_in_parens_enum_flavor_message_is_targeted() {
     );
     assert!(!errors[0].message.contains("expected '('"));
 }
+
+#[test]
+fn unknown_variant_payload_diagnostics_still_surface() {
+    let src = "enum Shape:\n\tCircle(float)\nfn main():\n\tvalue = Shape.Hexagon(missing)\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(count_code(&diags, DiagCode::UnknownVariant), 1, "{diags:?}");
+    assert_eq!(
+        count_code(&diags, DiagCode::UndefinedVariable),
+        1,
+        "{diags:?}"
+    );
+    assert_eq!(
+        count_code(&diags, DiagCode::MissingVariantFields),
+        0,
+        "{diags:?}"
+    );
+    assert_eq!(diags.len(), 2, "{diags:?}");
+}
+
+#[test]
+fn unknown_type_named_payload_diagnostics_still_surface() {
+    let src = "fn main():\n\tvalue = Missing.Create{value=missing}\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(count_code(&diags, DiagCode::UnknownType), 1, "{diags:?}");
+    assert_eq!(
+        count_code(&diags, DiagCode::UndefinedVariable),
+        1,
+        "{diags:?}"
+    );
+    assert_eq!(diags.len(), 2, "{diags:?}");
+}
+
+#[test]
+fn mixed_variant_fields_analyze_recovery_arguments_once() {
+    let src =
+        "enum Shape:\n\tCircle(float)\nfn main():\n\tvalue = Shape.Circle(1, radius=missing)\n";
+    let mut pool = InternPool::new();
+    let (ast, parse_diags) = crate::parse::parse_source(src, &mut pool).expect("parse recovers");
+    let mut sink = DiagSink::new();
+    for diag in parse_diags {
+        sink.emit(diag);
+    }
+    let uir = crate::astgen::generate(&ast, &mut pool, &mut sink);
+    let mut context = CompilationContext::new();
+    let _ = analyze(
+        &uir,
+        &mut pool,
+        &mut sink,
+        src,
+        std::path::Path::new("<test>"),
+        &mut context,
+    );
+    let diags = sink.into_diags();
+    assert_eq!(count_code(&diags, DiagCode::ParseError), 1, "{diags:?}");
+    assert_eq!(
+        count_code(&diags, DiagCode::UndefinedVariable),
+        1,
+        "{diags:?}"
+    );
+    assert_eq!(diags.len(), 2, "{diags:?}");
+}

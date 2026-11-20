@@ -355,7 +355,9 @@ fn analyze_machine_inner(
                     continue;
                 }
                 if !composite_has_leaf_recovery(sema, scope, node)
-                    && variant_state.enter(&mut tasks, sema, fcx, scope, node, scope_id, mode)
+                    && variant_state.enter(
+                        &mut tasks, sema, fcx, &mut calls, scope, node, scope_id, mode,
+                    )
                 {
                     continue;
                 }
@@ -443,8 +445,19 @@ fn analyze_machine_inner(
             }
             Task::CallArg(node, index, scope_id) => {
                 let scope = match_state.scopes.get(scope_id);
-                let view = sema.uir.call_view(node);
-                let arg = view.args.at(index);
+                let arg = match sema.uir.inst(node).tag {
+                    InstTag::Call => sema.uir.call_view(node).args.at(index),
+                    InstTag::ErrorConstruct => {
+                        sema.uir
+                            .error_construct_view(node)
+                            .3
+                            .fields()
+                            .nth(index)
+                            .expect("scheduled candidate call argument")
+                            .1
+                    }
+                    other => unreachable!("call argument scheduled for {other:?}"),
+                };
                 let target = calls[&node]
                     .expected()
                     .and_then(|types| types.get(index))
@@ -658,7 +671,15 @@ fn analyze_machine_inner(
                         let next = if inst.tag == InstTag::StructLit {
                             struct_state.finish(sema, fcx, scope, node, leaf_context)
                         } else if matches!(inst.tag, InstTag::EnumLit | InstTag::ErrorConstruct) {
-                            variant_state.finish(sema, fcx, scope, node, leaf_context)
+                            variant_state.finish(
+                                sema,
+                                fcx,
+                                &analyzed,
+                                &mut calls,
+                                scope,
+                                node,
+                                leaf_context,
+                            )
                         } else {
                             analyze_expr_allow_never_with(sema, fcx, scope, node, leaf_context)
                         };

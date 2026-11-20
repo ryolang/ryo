@@ -18,7 +18,7 @@ pub(super) fn analyze_variant_construct(
     context: SemaExprContext,
 ) -> TirRef {
     let candidate = resolve_variant(sema, scope, r);
-    analyze_variant_candidate_with_skips(sema, fcx, scope, r, span, context, candidate, None)
+    analyze_variant_candidate_with_skips(sema, fcx, scope, r, span, context, candidate, None, None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -30,6 +30,7 @@ pub(crate) fn analyze_variant_candidate_with_skips(
     span: Span,
     context: SemaExprContext,
     candidate: Candidate,
+    method_receiver: Option<TirRef>,
     diagnosed: Option<std::collections::HashSet<usize>>,
 ) -> TirRef {
     match candidate {
@@ -52,6 +53,7 @@ pub(crate) fn analyze_variant_candidate_with_skips(
                 &args,
                 span,
                 context,
+                method_receiver,
             )
         }
         Candidate::Recovery { analyze_args } => {

@@ -1307,3 +1307,16 @@ fn uppercase_method_and_unknown_call_fallbacks_stay_compatible() {
     assert_eq!(main.inst(value).tag, TirTag::EnumLit);
     assert_eq!(pool.display(main.inst(value).ty).to_string(), "IoError.Eof");
 }
+
+#[test]
+fn rejected_error_family_braces_analyze_payload_once() {
+    let src = "errors IoError:\n\tInvalid(code: int)\nfn main():\n\tvalue = IoError.Invalid{code=missing}\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(count_code(&diags, DiagCode::TypeMismatch), 1, "{diags:?}");
+    assert_eq!(
+        count_code(&diags, DiagCode::UndefinedVariable),
+        1,
+        "{diags:?}"
+    );
+    assert_eq!(diags.len(), 2, "{diags:?}");
+}
