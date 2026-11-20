@@ -83,11 +83,6 @@ impl Primitives {
 }
 
 /// Type-annotation resolution over primitives and nominal declarations.
-///
-/// `enum_variant_fields` is the variant directory `EnumLit` lowering
-/// consults — variants in declaration order with each payload's field
-/// names in declaration order. Built from the AST alone: ready before
-/// the define DFS and covers enums that later fail.
 struct TypeResolver {
     prims: Primitives,
     struct_types: HashMap<StringId, TypeId>,
@@ -95,7 +90,6 @@ struct TypeResolver {
     error_types: HashMap<StringId, TypeId>,
     error_families: HashMap<StringId, Vec<TypeId>>,
     error_family_members: HashMap<StringId, Vec<StringId>>,
-    enum_variant_fields: HashMap<TypeId, Vec<(StringId, VariantKind, Vec<StringId>)>>,
     main: StringId,
     range: StringId,
 }
@@ -630,26 +624,6 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
         }
     }
 
-    // Variant directory for `EnumLit` lowering (see `TypeResolver`).
-    let enum_variant_fields: HashMap<TypeId, Vec<(StringId, VariantKind, Vec<StringId>)>> =
-        enum_entries
-            .iter()
-            .map(|(_, &(ety, def, _))| {
-                let variants = program
-                    .enum_variants(def.variants)
-                    .iter()
-                    .map(|v| {
-                        let names = program
-                            .struct_field_decls(v.payload.fields)
-                            .iter()
-                            .map(|&(fname, _)| fname)
-                            .collect();
-                        (v.name.name, v.payload.kind, names)
-                    })
-                    .collect();
-                (ety, variants)
-            })
-            .collect();
     let ErrorRegistry {
         types: mut error_types,
         entries: error_entries,
@@ -667,7 +641,6 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
         error_types,
         error_families,
         error_family_members,
-        enum_variant_fields,
         main: main_id,
         range: range_id,
     };

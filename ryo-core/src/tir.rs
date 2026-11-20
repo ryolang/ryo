@@ -35,8 +35,8 @@
 //!   the sidecar arena from UIR / `InternPool`. Per-payload layouts
 //!   (`*_extra` modules owning `encode`/`decode`/views) mostly live in
 //!   `wires`; the exceptions are `destructure_extra` (in `destructure`),
-//!   `match_extra` (in `match_`), and `enum_lit_extra`, which is shared
-//!   with UIR and lives in `crate::extra`.
+//!   `match_extra` (in `match_`), and the resolved TIR-only
+//!   `enum_lit_extra` in `crate::extra`.
 //! - `spans: Vec<Span>` — parallel to `instructions`, one span per
 //!   `TirRef`. Out-of-band so `TypedInst` itself stays compact.
 //!
@@ -937,8 +937,7 @@ impl TirBuilder {
     /// `"0"`, `"1"`, … names). `ty` is the enum type; `variant` is
     /// the declaration-order variant index. Unit variants pass `&[]`.
     /// `positional` records the construction's source form for
-    /// diagnostics; codegen ignores it (wire parity with UIR's
-    /// [`enum_lit_extra::FLAG_POSITIONAL`]).
+    /// diagnostics; codegen ignores it.
     pub fn enum_lit(
         &mut self,
         ty: TypeId,

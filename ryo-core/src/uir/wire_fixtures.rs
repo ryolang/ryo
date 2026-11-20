@@ -368,46 +368,114 @@ fn struct_lit_wire_fixture() {
 fn enum_lit_wire_fixture() {
     let mut b = UirBuilder::new();
     b.uir.extra.extend([0xAAAA_AAAA; 5]);
-    let ty = TypeId::from_raw(3);
+    let enum_name = StringId::from_raw(3);
+    let variant = StringId::from_raw(4);
+    let width = StringId::from_raw(5);
+    let height = StringId::from_raw(6);
+    let enum_span = Span::in_source(crate::source::SourceId::from_raw_parts(7, 9), 10, 11);
+    let variant_span = Span::in_source(crate::source::SourceId::from_raw_parts(8, 10), 12, 13);
     let w = InstRef::from_raw(21);
     let h = InstRef::from_raw(22);
+    let form = UirVariantForm::default();
 
-    let two = b.enum_lit(ty, 1, false, &[(0, w), (1, h)], sp());
+    let two = b.enum_lit(
+        enum_name,
+        variant,
+        enum_span,
+        variant_span,
+        form,
+        &[(width.raw(), w), (height.raw(), h)],
+        sp(),
+    );
     let InstData::Extra(range) = b.uir.inst(two).data else {
         panic!("EnumLit must carry InstData::Extra");
     };
-    assert_eq!(range, ExtraRange { offset: 5, len: 8 });
-    assert_eq!(&b.uir.extra[5..13], &[3, 1, 2, 0, 0, 21, 1, 22]);
+    assert_eq!(range, ExtraRange { offset: 5, len: 16 });
+    assert_eq!(
+        &b.uir.extra[5..21],
+        &[3, 4, 0, 2, 7, 9, 10, 11, 8, 10, 12, 13, 5, 21, 6, 22]
+    );
 
-    let unit = b.enum_lit(ty, 1, false, &[], sp());
-    let InstData::Extra(range2) = b.uir.inst(unit).data else {
-        panic!("EnumLit must carry InstData::Extra");
+    let uir = shell_view(
+        &[3, 4, 0, 2, 7, 9, 10, 11, 8, 10, 12, 13, 5, 21, 6, 22],
+        InstTag::EnumLit,
+        16,
+    );
+    let v = uir.enum_lit_view(shell_ref(&uir));
+    assert_eq!(v.enum_name, enum_name);
+    assert_eq!(v.variant, variant);
+    assert_eq!(v.enum_span, enum_span);
+    assert_eq!(v.variant_span, variant_span);
+    assert_eq!(v.form, form);
+    assert_eq!(
+        v.fields().collect::<Vec<_>>(),
+        vec![(width.raw(), w), (height.raw(), h)]
+    );
+
+    let positional = UirVariantForm {
+        positional: true,
+        named_parens: false,
+        mixed_fields: false,
     };
-    assert_eq!(range2, ExtraRange { offset: 13, len: 4 });
-    assert_eq!(&b.uir.extra[13..17], &[3, 1, 0, 0]);
-
-    let pos = b.enum_lit(ty, 1, true, &[(0, w)], sp());
-    let InstData::Extra(range3) = b.uir.inst(pos).data else {
-        panic!("EnumLit must carry InstData::Extra");
-    };
-    assert_eq!(range3, ExtraRange { offset: 17, len: 6 });
-    assert_eq!(&b.uir.extra[17..23], &[3, 1, 1, 1, 0, 21]);
-
-    let uir = shell_view(&[3, 1, 2, 0, 0, 21, 1, 22], InstTag::EnumLit, 8);
+    let uir = shell_view(
+        &[3, 4, 1, 1, 7, 9, 10, 11, 8, 10, 12, 13, 0, 21],
+        InstTag::EnumLit,
+        14,
+    );
     let v = uir.enum_lit_view(shell_ref(&uir));
-    assert_eq!(v.ty, ty);
-    assert_eq!(v.variant_index, 1);
-    assert!(!v.positional);
-    assert_eq!(v.fields().collect::<Vec<_>>(), vec![(0, w), (1, h)]);
-
-    let uir = shell_view(&[3, 1, 0, 0], InstTag::EnumLit, 4);
-    let v = uir.enum_lit_view(shell_ref(&uir));
-    assert_eq!(v.fields().count(), 0);
-
-    let uir = shell_view(&[3, 1, 1, 1, 0, 21], InstTag::EnumLit, 6);
-    let v = uir.enum_lit_view(shell_ref(&uir));
-    assert!(v.positional);
+    assert_eq!(v.form, positional);
     assert_eq!(v.fields().collect::<Vec<_>>(), vec![(0, w)]);
+}
+
+#[test]
+fn error_construct_wire_fixture() {
+    let mut b = UirBuilder::new();
+    b.uir.extra.extend([0xAAAA_AAAA; 5]);
+    let name = StringId::from_raw(3);
+    let code = StringId::from_raw(5);
+    let message = StringId::from_raw(6);
+    let value = InstRef::from_raw(21);
+    let text = InstRef::from_raw(22);
+    let form = UirVariantForm {
+        positional: false,
+        named_parens: true,
+        mixed_fields: false,
+    };
+    let error = b.error_construct(
+        name,
+        None,
+        None,
+        form,
+        &[(code.raw(), value), (message.raw(), text)],
+        sp(),
+    );
+    let InstData::ErrorConstruct { args, .. } = b.uir.inst(error).data else {
+        panic!("ErrorConstruct must carry its name and argument range");
+    };
+    assert_eq!(args, ExtraRange { offset: 5, len: 8 });
+    assert_eq!(
+        &b.uir.extra[5..13],
+        &[u32::MAX, u32::MAX, 2, 2, 5, 21, 6, 22]
+    );
+
+    let mut uir = Uir::new();
+    uir.extra.extend([u32::MAX, u32::MAX, 2, 2, 5, 21, 6, 22]);
+    uir.instructions.push(Inst {
+        tag: InstTag::ErrorConstruct,
+        data: InstData::ErrorConstruct {
+            name,
+            args: ExtraRange { offset: 0, len: 8 },
+        },
+    });
+    uir.spans.push(sp());
+    let (decoded_name, root, member, view) = uir.error_construct_view(InstRef::from_index(1));
+    assert_eq!(decoded_name, name);
+    assert_eq!((root, member), (None, None));
+    assert_eq!(view.form, form);
+    assert_eq!(
+        view.fields().collect::<Vec<_>>(),
+        vec![(code.raw(), value), (message.raw(), text)]
+    );
 }
 
 #[test]

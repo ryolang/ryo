@@ -342,3 +342,17 @@ fn forward(value: IoError) -> !str:
     );
     assert_no_placeholders(&tirs, &pool);
 }
+
+#[test]
+fn inferred_dependencies_include_unresolved_call_candidates() {
+    let src = r#"error A
+fn outer() -> !int:
+	return Inner()
+fn Inner() -> !int:
+	return A
+"#;
+    let (tirs, pool) = run(src).expect("uppercase inferred call should schedule its callee");
+    assert_final_type(&tirs, &pool, "outer", "A!int");
+    assert_final_type(&tirs, &pool, "Inner", "A!int");
+    assert_no_placeholders(&tirs, &pool);
+}

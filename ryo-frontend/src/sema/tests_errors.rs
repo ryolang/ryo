@@ -1266,3 +1266,44 @@ fn unknown_error_member_after_duplicate_lists_all_source_members() {
         "error family 'IoError' has no member 'Missing' (members: 'Eof', 'Eof')"
     );
 }
+
+#[test]
+fn uppercase_method_and_unknown_call_fallbacks_stay_compatible() {
+    let (tirs, pool) = run("fn main():\n\tS = \"hi\"\n\tlength = S.len()\n")
+        .expect("uppercase values retain method calls");
+    let main = tir_named(&tirs, &pool, "main");
+    let length = main.var_decl_view(stmt_at(main, 1)).initializer;
+    assert_eq!(main.inst(length).tag, TirTag::StrLen);
+
+    for (source, expected_code, expected_message) in [
+        (
+            "fn main():\n\tvalue = Missing(1)\n",
+            DiagCode::UndefinedFunction,
+            "undefined function: 'Missing'",
+        ),
+        (
+            "fn main():\n\tvalue = Missing\n",
+            DiagCode::UndefinedVariable,
+            "undefined variable: 'Missing'",
+        ),
+    ] {
+        let (_tirs, diags, _pool) = run_with_errors(source);
+        assert_eq!(diags.len(), 1, "{source}: {diags:?}");
+        assert_eq!(diags[0].code, expected_code);
+        assert_eq!(diags[0].message, expected_message);
+    }
+
+    let (tirs, pool) = run("error E\nfn main():\n\tE = 7\n\tvalue = E\n")
+        .expect("bound values shadow error constructors");
+    let main = tir_named(&tirs, &pool, "main");
+    let value = main.var_decl_view(stmt_at(main, 1)).initializer;
+    assert_eq!(main.inst(value).tag, TirTag::Var);
+    assert_eq!(main.inst(value).ty, pool.int());
+
+    let (tirs, pool) = run("errors IoError:\n\tEof\nfn main():\n\tvalue = IoError.Eof\n")
+        .expect("qualified error-family source forms stay resolved");
+    let main = tir_named(&tirs, &pool, "main");
+    let value = main.var_decl_view(stmt_at(main, 0)).initializer;
+    assert_eq!(main.inst(value).tag, TirTag::EnumLit);
+    assert_eq!(pool.display(main.inst(value).ty).to_string(), "IoError.Eof");
+}

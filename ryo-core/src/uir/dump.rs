@@ -317,28 +317,59 @@ fn write_inst(
         }
         (InstTag::EnumLit, InstData::Extra(_)) => {
             let view = uir.enum_lit_view(r);
+            let form = if view.form.mixed_fields {
+                "mixed"
+            } else if view.form.named_parens {
+                "named_parens"
+            } else if view.form.positional {
+                "positional"
+            } else {
+                "named"
+            };
             write!(
                 f,
-                "enum_lit {} variant={} {{",
-                pool.display(view.ty),
-                view.variant_index
+                "enum_lit {}.{} {form} {{",
+                pool.str(view.enum_name),
+                pool.str(view.variant),
             )?;
-            for (i, (field_index, value)) in view.fields().enumerate() {
+            for (i, (selector, value)) in view.fields().enumerate() {
                 if i > 0 {
                     write!(f, ", ")?;
                 }
-                write!(f, "{field_index}: %{}", value.index())?;
+                if view.form.positional {
+                    write!(f, "{selector}: %{}", value.index())?;
+                } else {
+                    write!(
+                        f,
+                        "{}: %{}",
+                        pool.str(StringId::from_raw(selector)),
+                        value.index()
+                    )?;
+                }
             }
             writeln!(f, "}}")
         }
         (InstTag::ErrorConstruct, InstData::ErrorConstruct { .. }) => {
-            let (name, family_root, _, view) = uir.error_construct_view(r);
+            let (name, family_root, family_member, view) = uir.error_construct_view(r);
             write!(f, "error_construct {}", pool.str(name))?;
             if let Some(root) = family_root {
                 write!(f, " family_root={}", pool.str(root))?;
             }
+            if let Some(member) = family_member {
+                write!(f, " family_member={}", pool.str(member))?;
+            }
+            let form = if view.form.mixed_fields {
+                "mixed"
+            } else if view.form.named_parens {
+                "named_parens"
+            } else if view.form.positional {
+                "positional"
+            } else {
+                "named"
+            };
+            write!(f, " {form}")?;
             for (field, value) in view.fields() {
-                if view.positional {
+                if view.form.positional {
                     write!(f, " {field}:")?;
                 } else {
                     write!(f, " {}:", pool.str(StringId::from_raw(field)))?;

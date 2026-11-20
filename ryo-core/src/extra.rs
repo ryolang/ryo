@@ -123,42 +123,37 @@ impl ExtraRange {
     }
 }
 
-/// Layout in `extra` for [`crate::uir::InstTag::EnumLit`] and
-/// [`crate::tir::TirTag::EnumLit`] (M11) — both IRs share the wire
-/// (UIR stores `InstRef.raw()` in the value slots, TIR stores
-/// `TirRef.raw()`):
+/// Resolved layout in `extra` for [`crate::tir::TirTag::EnumLit`].
+/// UIR has a separate name-keyed candidate wire in `uir::variant_extra`.
 ///
 /// ```text
 ///   [0]  ty:      u32  (TypeId.raw())
 ///   [1]  variant: u32  (declaration-order variant index)
 ///   [2]  argc:    u32
 ///   [3]  flags:   u32  (FLAG_* bits)
-///   [4..4+2*argc] per arg: [field_idx: u32, value: ref raw()]
+///   [4..4+2*argc] per arg: [field_idx: u32, value: TirRef.raw()]
 /// ```
 ///
-/// Unlike the name-keyed `struct_lit` layout, enum args are keyed by
+/// Unlike the name-keyed `struct_lit` layout, resolved enum args are keyed by
 /// declaration-order payload-field index: tuple variants carry the
 /// synthesized `"0"`, `"1"`, … names, so an index keeps the wire
 /// format name-free and uniform across unit/tuple/named variants. A
-/// `field_idx` of [`enum_lit_extra::ORPHANED_FIELD`] marks a braced arg whose name
-/// astgen did not recognize (E0038 already emitted); it binds nothing.
+/// `field_idx` of [`enum_lit_extra::ORPHANED_FIELD`] marks a source arg whose
+/// name Sema did not recognize; it binds nothing.
 /// Unit variants encode `argc = 0` (no trailing pairs).
 pub mod enum_lit_extra {
     use super::{ExtraRange, ExtraValue};
     use crate::types::TypeId;
     use std::marker::PhantomData;
 
-    /// Source used the parenthesized positional form `Variant(args)`,
-    /// set by astgen; the braced named form clears it. Sema reads it
-    /// to enforce the Brace Law on named payloads (D11: named variants
-    /// construct with braces only); downstream TIR consumers ignore it.
+    /// Source used the parenthesized positional form `Variant(args)`;
+    /// the braced named form clears it. Sema preserves this bit when
+    /// emitting TIR; downstream consumers ignore it.
     pub const FLAG_POSITIONAL: u32 = 1;
 
-    /// `field_idx` sentinel for a braced named argument whose field
-    /// astgen does not recognize: the pair's value is lowered (so sema
-    /// analyzes it and its own diagnostics surface), but it binds no
-    /// declared field — sema suppresses the derived missing-fields
-    /// error the dropped binding would otherwise trigger.
+    /// Resolved-field sentinel used while analyzing a named argument
+    /// whose declaration field Sema did not recognize. It never appears
+    /// in published TIR field pairs.
     pub const ORPHANED_FIELD: u32 = u32::MAX;
 
     /// Current `extra.len()` as a checked `u32` — the same overflow
@@ -173,12 +168,9 @@ pub mod enum_lit_extra {
         u32::try_from(len).expect("extra list length exceeded u32::MAX")
     }
 
-    /// Decoded view of an enum literal payload (M11) — shared by UIR
-    /// (`InstRef` values) and TIR (`TirRef` values); the wires are
-    /// byte-identical (each stores `Ref::raw()` in the value slots).
-    /// Borrows the `extra` arena directly — decoding allocates nothing;
-    /// `fields()` yields `(field_index, value)` pairs keyed by
-    /// declaration-order payload-field index.
+    /// Decoded resolved enum literal payload. Borrows the `extra` arena
+    /// directly — decoding allocates nothing; `fields()` yields
+    /// `(field_index, value)` pairs keyed by declaration-order field index.
     pub struct EnumLitView<'a, R: ExtraValue> {
         pub ty: TypeId,
         pub variant_index: u32,

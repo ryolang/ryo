@@ -469,38 +469,6 @@ mod tests {
     }
 
     #[test]
-    fn named_arg_in_parens_enum_flavor_message_is_targeted() {
-        // AstGen emits E0124 once name resolution proves this is an
-        // enum rather than an error-family member.
-        let mut pool = InternPool::new();
-        let input = "enum Shape:\n\tCircle(float)\n\tRectangle(width: float, height: float)\n\nfn main():\n\tprint(Shape.Circle(radius=5.0))\n";
-        let (program, parse_diags) =
-            parse_source(input, &mut pool).expect("recovery should yield a partial program");
-        assert!(parse_diags.is_empty(), "{parse_diags:?}");
-        let mut sink = ryo_core::diag::DiagSink::new();
-        let _uir = crate::astgen::generate(&program, &mut pool, &mut sink);
-        let diags = sink.into_diags();
-        let errors = diags
-            .iter()
-            .filter(|d| d.severity == Severity::Error)
-            .collect::<Vec<_>>();
-        assert_eq!(errors.len(), 1, "expected exactly one error: {diags:?}");
-        let diag = errors[0];
-        assert_eq!(diag.code, DiagCode::NamedArgInParens);
-        assert_eq!(
-            diag.message,
-            "unexpected '=' — 'Circle' takes positional arguments: \
-             Shape.Circle(...); named fields use braces on named variants: \
-             Shape.Variant{field=value}"
-        );
-        assert!(
-            !diag.message.contains("expected '('"),
-            "message must not be a token dump: {}",
-            diag.message
-        );
-    }
-
-    #[test]
     fn named_arg_in_parens_method_flavor_message() {
         // The plain-call mirror: `f(a=b)` names no variant and points
         // at the positional spelling.

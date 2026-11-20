@@ -122,7 +122,7 @@ fn unit_variant_access_unknown_variant_is_diag() {
 #[test]
 fn unknown_variant_construct_reports_exactly_one_diag() {
     // `Shape.Hexagon(1.0)` — the parenthesized unknown-variant path
-    // (I-206): astgen's UnknownVariant stands alone. The recovery
+    // (I-206): sema's UnknownVariant stands alone. The recovery
     // EnumLit is error-typed, so sema adds no phantom missing-fields
     // error naming variant 0 ('Circle'), which the user never wrote.
     let src = "enum Shape:\n\tCircle(float)\n\nfn main():\n\ts = Shape.Hexagon(1.0)\n";
@@ -164,8 +164,8 @@ fn named_construct_missing_field_names_variant_and_enum() {
 
 #[test]
 fn named_construct_duplicate_field_is_caught_by_sema() {
-    // Duplicate named args lower to two idx-0 pairs with no astgen
-    // diagnostic — sema must catch the repeated field.
+    // Duplicate named args retain their repeated source names in UIR;
+    // Sema canonicalizes both to the same declaration field and rejects it.
     let src = "enum Shape:\n\tRectangle(width: float, height: float)\n\nfn main():\n\ts = Shape.Rectangle{width=1.0, width=2.0}\n";
     let (_t, diags, _p) = run_with_errors(src);
     let diag = diags
@@ -183,11 +183,11 @@ fn named_construct_duplicate_field_is_caught_by_sema() {
 }
 
 #[test]
-fn named_construct_unknown_field_is_frontlined_by_astgen() {
-    // A typo'd named field is diagnosed at astgen (UnknownField, E0038)
-    // — and stands alone: the dropped pair rides the wire as an
-    // ORPHANED_FIELD arg so sema analyzes it but binds nothing, and
-    // the derived missing-fields error for `width` is suppressed (the
+fn named_construct_unknown_field_is_diagnosed_by_sema() {
+    // A typo'd named field is diagnosed at Sema (UnknownField, E0038)
+    // — and stands alone: its source argument remains reachable under
+    // ORPHANED_FIELD so Sema analyzes it but binds nothing, and the
+    // derived missing-fields error for `width` is suppressed (the
     // construct's shape is untrustworthy, matching the duplicate-field
     // recovery). One diagnostic, naming the typo.
     let src = "enum Shape:\n\tRectangle(width: float, height: float)\n\nfn main():\n\ts = Shape.Rectangle{widht=1.0, height=2.0}\n";
@@ -195,7 +195,7 @@ fn named_construct_unknown_field_is_frontlined_by_astgen() {
     let diag = diags
         .iter()
         .find(|d| d.code == DiagCode::UnknownField)
-        .expect("astgen frontlines the unknown field name");
+        .expect("Sema diagnoses the unknown field name");
     assert!(
         diag.message.contains("'widht'"),
         "message should name the typo, got {:?}",
@@ -232,12 +232,10 @@ fn named_construct_unknown_field_arg_diagnostics_still_surface() {
 
 #[test]
 fn positional_construct_overflow_is_unknown_variant_field() {
-    // `Circle(5.0, 3.0)` on a one-field tuple variant: astgen pairs
-    // positional args against declaration-order indices without an
-    // arity check, so sema rejects the out-of-range index — the
-    // UnknownVariantField shape astgen cannot see (named typos are
-    // frontlined before this point). The message words the extra
-    // argument by position, not the synthesized "1" field index.
+    // `Circle(5.0, 3.0)` on a one-field tuple variant: source argument
+    // positions stay unresolved in UIR, then Sema rejects the out-of-range
+    // index with UnknownVariantField. The message words the extra argument
+    // by position, not the synthesized "1" field index.
     let src = "enum Shape:\n\tCircle(float)\n\nfn main():\n\ts = Shape.Circle(5.0, 3.0)\n";
     let (_t, diags, _p) = run_with_errors(src);
     let diag = diags
@@ -342,7 +340,7 @@ fn construct_of_failed_enum_recovers_quietly() {
 fn construct_of_undeclared_name_recovers_as_undefined_variable() {
     // `Shape.Circle(5.0)` where Shape is not a declared enum: the
     // parser promotes every uppercase-led `Name.variant(args)`, and
-    // astgen restores the pre-M11 method-call lowering for the paren
+    // sema restores the pre-M11 method-call lowering for the paren
     // form. With no value named Shape to bind, sema's ordinary
     // undefined-variable diagnostic is the accurate one — and the
     // only one.
@@ -546,4 +544,97 @@ fn unknown_field_on_tuple_variant_hints_the_paren_form() {
         diag.message,
         "variant 'Some' of enum 'Opt' has no field 'v'; 'Some' is a tuple variant: Opt.Some(...)"
     );
+}
+
+#[test]
+fn sema_resolves_variant_and_error_field_identities() {
+    let src = "enum Shape:\n\tRectangle(width: float, height: float)\nerror Named(code: int, message: str)\nerrors IoError:\n\tInvalid(code: int, message: str)\nfn main():\n\trect = Shape.Rectangle{height=2.0, width=1.0}\n\tnominal = Named(message=\"bad\", code=1)\n\tqualified = IoError.Invalid(message=\"bad\", code=1)\n";
+    let (tirs, pool) = run(src).expect("named fields should resolve in Sema");
+    let main = tir_named(&tirs, &pool, "main");
+
+    for (index, expected_ty) in ["Shape", "Named", "IoError.Invalid"]
+        .into_iter()
+        .enumerate()
+    {
+        let decl = main.var_decl_view(stmt_at(main, index));
+        let view = main.enum_lit_view(decl.initializer);
+        assert_eq!(pool.display(view.ty).to_string(), expected_ty);
+        assert_eq!(view.variant_index, 0);
+        let fields: Vec<_> = view.fields().collect();
+        assert_eq!(
+            fields.iter().map(|&(field, _)| field).collect::<Vec<_>>(),
+            [0, 1],
+            "{expected_ty} must use declaration-order fields"
+        );
+        match main.inst(fields[0].1).data {
+            ryo_core::tir::TirData::Float(value) if index == 0 => assert_eq!(value, 1.0),
+            ryo_core::tir::TirData::Int(value) if index != 0 => assert_eq!(value, 1),
+            ref other => panic!("wrong first payload value for {expected_ty}: {other:?}"),
+        }
+        match main.inst(fields[1].1).data {
+            ryo_core::tir::TirData::Float(value) if index == 0 => assert_eq!(value, 2.0),
+            ryo_core::tir::TirData::Str(value) if index != 0 => {
+                assert_eq!(pool.str(value), "bad")
+            }
+            ref other => panic!("wrong second payload value for {expected_ty}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn unknown_named_argument_preserves_expression_diagnostics() {
+    let src = "enum Shape:\n\tRectangle(width: float, height: float)\nfn main():\n\trect = Shape.Rectangle{widht=missing, height=2.0}\n";
+    let (tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(count_code(&diags, DiagCode::UnknownField), 1, "{diags:?}");
+    assert_eq!(
+        count_code(&diags, DiagCode::UndefinedVariable),
+        1,
+        "{diags:?}"
+    );
+    assert_eq!(
+        count_code(&diags, DiagCode::MissingVariantFields),
+        0,
+        "{diags:?}"
+    );
+    assert_eq!(diags.len(), 2, "{diags:?}");
+
+    let main = tir_named(&tirs, &_pool, "main");
+    let decl = main.var_decl_view(stmt_at(main, 0));
+    let fields: Vec<_> = main.enum_lit_view(decl.initializer).fields().collect();
+    let width = fields
+        .iter()
+        .find(|&&(field, _)| field == 0)
+        .expect("width recovery");
+    assert_eq!(main.inst(width.1).tag, TirTag::Unreachable);
+    assert!(matches!(
+        main.inst(width.1).data,
+        ryo_core::tir::TirData::None
+    ));
+    let height = fields
+        .iter()
+        .find(|&&(field, _)| field == 1)
+        .expect("height value");
+    assert!(matches!(
+        main.inst(height.1).data,
+        ryo_core::tir::TirData::Float(2.0)
+    ));
+}
+
+#[test]
+fn named_arg_in_parens_enum_flavor_message_is_targeted() {
+    let input = "enum Shape:\n\tCircle(float)\n\tRectangle(width: float, height: float)\n\nfn main():\n\tprint(Shape.Circle(radius=5.0))\n";
+    let (_tirs, diags, _pool) = run_with_errors(input);
+    let errors = diags
+        .iter()
+        .filter(|diag| diag.severity == ryo_core::diag::Severity::Error)
+        .collect::<Vec<_>>();
+    assert_eq!(errors.len(), 1, "expected exactly one error: {diags:?}");
+    assert_eq!(errors[0].code, DiagCode::NamedArgInParens);
+    assert_eq!(
+        errors[0].message,
+        "unexpected '=' — 'Circle' takes positional arguments: \
+         Shape.Circle(...); named fields use braces on named variants: \
+         Shape.Variant{field=value}"
+    );
+    assert!(!errors[0].message.contains("expected '('"));
 }

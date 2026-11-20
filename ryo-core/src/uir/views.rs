@@ -8,19 +8,16 @@ pub use super::wires::if_stmt_extra::{ElifBranches, ElifView, IfStmtView};
 pub use super::wires::method_call_extra::MethodCallView;
 pub use super::wires::struct_lit_extra::StructLitView;
 pub use super::wires::var_decl_extra::VarDeclView;
+pub use super::wires::variant_extra::{EnumLitView, VariantArgsView};
 pub use super::wires::while_loop_extra::WhileLoopView;
 use super::{
     InstData, InstRef, InstTag, StringId, Uir, assign_or_decl_extra, call_extra,
-    compound_assign_extra, compound_field_assign_extra, enum_lit_extra, field_assign_extra,
-    for_range_extra, if_stmt_extra, method_call_extra, struct_lit_extra, var_decl_extra,
+    compound_assign_extra, compound_field_assign_extra, field_assign_extra, for_range_extra,
+    if_stmt_extra, method_call_extra, struct_lit_extra, var_decl_extra, variant_extra,
     while_loop_extra,
 };
 
 // ---------- Read-side helpers ----------
-
-/// Decoded view of an [`InstTag::EnumLit`] payload (M11) — the wire is
-/// shared with TIR; see [`crate::extra::enum_lit_extra`].
-pub type EnumLitView<'a> = crate::extra::enum_lit_extra::EnumLitView<'a, InstRef>;
 
 impl Uir {
     pub fn call_view(&self, r: InstRef) -> CallView<'_> {
@@ -130,7 +127,7 @@ impl Uir {
             InstData::Extra(rng) => rng,
             _ => unreachable!("EnumLit must carry InstData::Extra"),
         };
-        enum_lit_extra::decode(&self.extra[range.as_range()])
+        variant_extra::decode_enum(&self.extra[range.as_range()])
     }
 
     pub fn error_construct_view(
@@ -140,17 +137,15 @@ impl Uir {
         StringId,
         Option<StringId>,
         Option<StringId>,
-        EnumLitView<'_>,
+        VariantArgsView<'_>,
     ) {
         let inst = self.inst(r);
         debug_assert!(matches!(inst.tag, InstTag::ErrorConstruct));
         let InstData::ErrorConstruct { name, args } = inst.data else {
             unreachable!("ErrorConstruct must carry its name and argument range")
         };
-        let words = &self.extra[args.as_range()];
-        let family_root = (words[0] != u32::MAX).then(|| StringId::from_raw(words[0]));
-        let family_member = (words[1] != u32::MAX).then(|| StringId::from_raw(words[1]));
-        let view = enum_lit_extra::decode(&words[2..]);
+        let (family_root, family_member, view) =
+            variant_extra::decode_error(&self.extra[args.as_range()]);
         (name, family_root, family_member, view)
     }
 

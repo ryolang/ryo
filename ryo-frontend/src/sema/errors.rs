@@ -1,10 +1,11 @@
-use super::{FuncCtx, NeverMode, Scope, Sema, SemaExprContext, analyze_expr_with};
+use super::expr::candidates::{Candidate, ResolvedErrorConstruct};
+use super::{FuncCtx, NeverMode, Scope, Sema, SemaExprContext, analyze_expr_with, check_call};
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::tir::{
     Discriminant, MatchBinding, TirData, TirRef, TirTag, TypedMatchArm, TypedMatchBody,
 };
 use ryo_core::types::{StringId, TypeId, TypeKind, VariantKind};
-use ryo_core::uir::{InstData, InstRef, Span};
+use ryo_core::uir::{CallView, ExtraList, InstData, InstRef, Span};
 
 pub(super) fn register_errors(sema: &mut Sema<'_>) {
     for decl in &sema.uir.error_decls {
@@ -282,13 +283,74 @@ pub(super) fn analyze_error_construct_with_skips(
     context: SemaExprContext,
     diagnosed: Option<std::collections::HashSet<usize>>,
 ) -> TirRef {
-    let (name, family_root, family_member, view) = sema.uir.error_construct_view(r);
-    let shadowed = match (family_root, family_member) {
-        (Some(root), Some(_)) => scope.lookup(root).map(|bound| (root, bound)),
-        _ => scope.lookup(name).map(|bound| (name, bound)),
-    };
+    let candidate = super::expr::candidates::resolve_error(sema, scope, r);
+    analyze_error_candidate_with_skips(sema, fcx, scope, r, span, context, candidate, diagnosed)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn analyze_error_candidate_with_skips(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    r: InstRef,
+    span: Span,
+    context: SemaExprContext,
+    candidate: Candidate,
+    diagnosed: Option<std::collections::HashSet<usize>>,
+) -> TirRef {
+    match candidate {
+        Candidate::Error(error) => {
+            analyze_resolved_error_construct(sema, fcx, scope, span, context, error, diagnosed)
+        }
+        Candidate::Call => {
+            let (name, _, _, view) = sema.uir.error_construct_view(r);
+            let args: Vec<_> = view.fields().map(|(_, value)| value).collect();
+            let words: Vec<_> = args.iter().map(|arg| arg.raw()).collect();
+            let view = CallView {
+                name,
+                args: ExtraList::new(&words),
+            };
+            check_call(sema, fcx, scope, &view, span, context)
+        }
+        Candidate::Variable(name) => super::expr::resolve_var_read(sema, fcx, scope, name, span),
+        Candidate::Recovery { analyze_args } => {
+            if analyze_args {
+                let values: Vec<_> = sema
+                    .uir
+                    .error_construct_view(r)
+                    .3
+                    .fields()
+                    .map(|(_, value)| value)
+                    .collect();
+                for value in values {
+                    analyze_expr_with(sema, fcx, scope, value, NeverMode::Reject, context.child());
+                }
+            }
+            fcx.builder.unreachable(sema.pool.error_type(), span)
+        }
+        Candidate::Enum(_) | Candidate::Method => {
+            unreachable!("unqualified candidates do not use qualified fallbacks")
+        }
+    }
+}
+
+pub(super) fn analyze_resolved_error_construct(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    span: Span,
+    context: SemaExprContext,
+    error: ResolvedErrorConstruct,
+    diagnosed: Option<std::collections::HashSet<usize>>,
+) -> TirRef {
+    let view = error;
+    let name = view.name;
+    let family_root = view.family_root;
+    let family_member = view.family_member;
+    let ty = view.ty;
+    let shadowed = view.shadowed;
     if let Some((bound_name, bound)) = shadowed {
-        if !view.positional && view.fields().count() == 0 {
+        if !view.form.positional && view.fields().count() == 0 {
             if let Some(member) = family_member {
                 let object = fcx.builder.var(bound_name, bound, span);
                 return super::expr::analyze_value_field_access(sema, fcx, object, member, span);
@@ -308,7 +370,7 @@ pub(super) fn analyze_error_construct_with_skips(
         ));
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
-    if family_root.is_some() && sema.pool.is_error(view.ty) {
+    if family_root.is_some() && sema.pool.is_error(ty) {
         if let (Some(root), Some(member)) = (family_root, family_member)
             && !sema.error_types.contains_key(&name)
         {
@@ -376,7 +438,7 @@ pub(super) fn analyze_error_construct_with_skips(
                     .map(|family| format!("{}.{}", sema.pool.str(*family), sema.pool.str(name)))
                     .collect::<Vec<_>>()
                     .join(" or ");
-                let code = if !view.positional && view.fields().count() == 0 {
+                let code = if !view.form.positional && view.fields().count() == 0 {
                     DiagCode::UndefinedVariable
                 } else {
                     DiagCode::UndefinedFunction
@@ -394,7 +456,7 @@ pub(super) fn analyze_error_construct_with_skips(
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
 
-    if sema.pool.is_error(view.ty) {
+    if sema.pool.is_error(ty) {
         for (_, value) in view.fields() {
             analyze_expr_with(sema, fcx, scope, value, NeverMode::Reject, context.child());
         }
@@ -406,14 +468,12 @@ pub(super) fn analyze_error_construct_with_skips(
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
 
-    if is_rejected_error_declaration(sema, name)
-        || sema.pool.kind(view.ty) != TypeKind::DeclaredError
-    {
+    if is_rejected_error_declaration(sema, name) || sema.pool.kind(ty) != TypeKind::DeclaredError {
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
 
     let (error_name, kind, fields) = {
-        let errors = sema.pool.enum_view(view.ty);
+        let errors = sema.pool.enum_view(ty);
         let variant = errors
             .variants()
             .next()
@@ -421,7 +481,7 @@ pub(super) fn analyze_error_construct_with_skips(
         (errors.name(), variant.kind, variant.fields.to_vec())
     };
     if kind == VariantKind::Unit {
-        if view.positional || view.fields().count() != 0 {
+        if view.form.positional || view.fields().count() != 0 {
             sema.sink.emit(Diag::error(
                 span,
                 DiagCode::UnitVariantConstructed,
@@ -433,7 +493,7 @@ pub(super) fn analyze_error_construct_with_skips(
             ));
             return fcx.builder.unreachable(sema.pool.error_type(), span);
         }
-        return fcx.builder.enum_lit(view.ty, 0, false, &[], span);
+        return fcx.builder.enum_lit(ty, 0, false, &[], span);
     }
 
     let mut by_index: Vec<Option<TirRef>> = vec![None; fields.len()];
@@ -450,7 +510,7 @@ pub(super) fn analyze_error_construct_with_skips(
             NeverMode::Reject,
             context.child(),
         );
-        let field = if view.positional {
+        let field = if view.form.positional {
             fields.get(selector as usize)
         } else {
             let field_name = StringId::from_raw(selector);
@@ -458,7 +518,7 @@ pub(super) fn analyze_error_construct_with_skips(
         };
         let Some(field) = field else {
             field_errored = true;
-            let message = if view.positional {
+            let message = if view.form.positional {
                 format!(
                     "'{}' takes {} positional argument{}; found an extra argument",
                     sema.pool.str(error_name),
@@ -541,7 +601,7 @@ pub(super) fn analyze_error_construct_with_skips(
         })
         .collect();
     fcx.builder
-        .enum_lit(view.ty, 0, view.positional, &args, span)
+        .enum_lit(ty, 0, view.form.positional, &args, span)
 }
 
 pub(super) fn coerce_to_error_union(
@@ -602,4 +662,26 @@ pub(super) fn coerce_to_error_union(
         ),
     ));
     operand
+}
+
+pub(super) fn analyze_bare_qualified_error(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    root: StringId,
+    member: StringId,
+    span: Span,
+    context: SemaExprContext,
+) -> Option<TirRef> {
+    let candidate =
+        super::expr::candidates::resolve_bare_qualified_error(sema, scope, root, member, span)?;
+    Some(match candidate {
+        Candidate::Error(error) => {
+            analyze_resolved_error_construct(sema, fcx, scope, span, context, error, None)
+        }
+        Candidate::Recovery { .. } => fcx.builder.unreachable(sema.pool.error_type(), span),
+        Candidate::Enum(_) | Candidate::Method | Candidate::Call | Candidate::Variable(_) => {
+            unreachable!("qualified bare candidate")
+        }
+    })
 }

@@ -7,7 +7,7 @@ use super::{
 };
 use ryo_core::spine::ChainSpine;
 use ryo_core::tir::TirRef;
-use ryo_core::types::{TypeId, TypeKind, VariantKind, ViewKind};
+use ryo_core::types::{TypeId, TypeKind, ViewKind};
 use ryo_core::uir::{InstData, InstRef, InstTag};
 use std::collections::HashMap;
 
@@ -284,7 +284,7 @@ fn analyze_machine_inner(
         Some(node) => StructState::new(node, root_target),
         None => StructState::empty(),
     };
-    let mut variant_state = VariantState::default();
+    let mut variant_state = VariantState::new(fcx.inst_map.len());
     match root {
         MachineRoot::Expr(node) => tasks.push(Task::Enter(node, root_scope, NeverMode::Reject)),
         MachineRoot::Block(stmts) => {
@@ -355,7 +355,7 @@ fn analyze_machine_inner(
                     continue;
                 }
                 if !composite_has_leaf_recovery(sema, scope, node)
-                    && variant_state.enter(&mut tasks, sema, node, scope_id, mode)
+                    && variant_state.enter(&mut tasks, sema, fcx, scope, node, scope_id, mode)
                 {
                     continue;
                 }
@@ -436,7 +436,7 @@ fn analyze_machine_inner(
                 struct_state.after_field(sema, fcx, &analyzed, node, index);
             }
             Task::VariantField(node, index, scope_id) => {
-                variant_state.before_field(&mut tasks, sema, node, index, scope_id);
+                variant_state.before_field(&mut tasks, sema, fcx, node, index, scope_id);
             }
             Task::AfterVariantField(node, index, _scope_id) => {
                 variant_state.after_field(sema, fcx, &analyzed, node, index);
@@ -767,7 +767,13 @@ fn field_access_has_type_recovery(sema: &Sema<'_>, scope: &Scope, node: InstRef)
         return false;
     };
     scope.lookup(name).is_none()
-        && (sema.enum_types.contains_key(&name) || sema.struct_types.contains_key(&name))
+        && (sema.enum_types.contains_key(&name)
+            || sema.struct_types.contains_key(&name)
+            || sema
+                .uir
+                .error_families
+                .iter()
+                .any(|family| family.name == name))
 }
 
 fn composite_has_leaf_recovery(sema: &Sema<'_>, scope: &Scope, node: InstRef) -> bool {
@@ -784,41 +790,5 @@ fn composite_has_leaf_recovery(sema: &Sema<'_>, scope: &Scope, node: InstRef) ->
                 .is_none_or(|&sty| sema.pool.is_error(sty));
         }
     }
-    if tag == InstTag::ErrorConstruct {
-        let (name, family_root, family_member, view) = sema.uir.error_construct_view(node);
-        if family_root.is_some()
-            && family_member.is_some()
-            && sema.pool.is_error(view.ty)
-            && !sema.error_types.contains_key(&name)
-        {
-            return true;
-        }
-        if sema.pool.kind(view.ty) == TypeKind::DeclaredError {
-            let kind = sema
-                .pool
-                .enum_view(view.ty)
-                .variants()
-                .next()
-                .expect("declared errors have one variant")
-                .kind;
-            return kind == VariantKind::Unit
-                && (view.positional || view.fields().next().is_some());
-        }
-    }
-    if tag != InstTag::EnumLit {
-        return false;
-    }
-    let view = sema.uir.enum_lit_view(node);
-    if sema.pool.is_error(view.ty) {
-        return true;
-    }
-    let Some(variant) = sema
-        .pool
-        .enum_view(view.ty)
-        .variants()
-        .nth(view.variant_index as usize)
-    else {
-        return true;
-    };
-    view.positional && matches!(variant.kind, VariantKind::Named | VariantKind::Unit)
+    false
 }

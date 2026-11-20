@@ -1,22 +1,10 @@
-//! `match` expression analysis: pattern resolution, E0129-E0137 diagnostics,
-//! exhaustiveness, and typed TIR `Match` emission.
+//! `match` expression analysis: pattern resolution, exhaustiveness, and TIR emission.
 //!
-//! Resolution validates the scrutinee and each arm's literal, variant, payload,
-//! or anonymous-struct shape, collecting the results in [`MatchAnalysis`].
-//!
-//! Exhaustiveness tracks enum and error-set variant indices with a `u128`
-//! bitset or `Vec<bool>` fallback. Bool tracks both literals; int, str, and
-//! anonymous structs require a wildcard. Missing coverage emits E0129, while
-//! duplicate discriminants and arms after a wildcard emit buffered W0005.
-//!
-//! Arm typing seeds child scopes with payload bindings, joins arm types, and
-//! rejects invalid moves, mismatches, falling statement arms, and view results.
-//! Anon arms retain literal guards; errored matches recover as `Unreachable`.
-//!
-//! Pattern diagnostics use pattern spans; scrutinee diagnostics use its span.
-//! Qualified error-family patterns carry full canonical member names.
-//! Broken arms are excluded from coverage and typing while their siblings
-//! continue through both passes.
+//! Resolution validates the scrutinee and arms into [`MatchAnalysis`].
+//! Exhaustiveness uses compact variant/literal coverage and emits E0129/W0005.
+//! Arm typing binds payloads, joins types, and rejects invalid moves and results.
+//! Sema resolves qualified error-family patterns to canonical member names.
+//! Broken arms recover without blocking their siblings.
 
 use super::{
     FuncCtx, NeverMode, Scope, ScopeParent, Sema, SemaExprContext, analyze_block_with_context,
@@ -1264,6 +1252,7 @@ fn resolve_variant(
     analysis: &mut MatchArmAnalysis,
     catch: bool,
 ) {
+    let mut variant = variant;
     let scrutinee_kind = sema.pool.kind(scrutinee_ty);
     let error_pattern = matches!(scrutinee_kind, TypeKind::DeclaredError | TypeKind::ErrorSet);
     let union_pattern = catch
@@ -1286,6 +1275,27 @@ fn resolve_variant(
     }
     if let Some(name) = enum_name {
         if error_pattern {
+            if super::expr::candidates::error_family_member_names(sema, name).is_some() {
+                match super::expr::candidates::resolve_match_error_path(
+                    sema,
+                    name,
+                    variant,
+                    analysis.span,
+                ) {
+                    Ok(qualified) => {
+                        variant = qualified;
+                    }
+                    Err(()) => {
+                        analysis.had_error = true;
+                        return;
+                    }
+                }
+            }
+            let name = if super::expr::candidates::error_family_member_names(sema, name).is_some() {
+                variant
+            } else {
+                name
+            };
             match sema.error_types.get(&name).copied() {
                 Some(error_ty)
                     if sema

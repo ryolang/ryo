@@ -546,8 +546,8 @@ fn lower_stmt_body(
 fn lower_match_pattern(
     ast: &ast::Ast,
     pattern: ast::PatternId,
-    types: &TypeResolver,
-    pool: &mut InternPool,
+    _types: &TypeResolver,
+    _pool: &mut InternPool,
     sink: &mut DiagSink,
 ) -> OwnedPattern {
     let pat = ast.pattern(pattern);
@@ -622,30 +622,7 @@ fn lower_match_pattern(
             variant,
             args,
         } => {
-            let (enum_name, variant) = if let Some(root) = enum_name
-                && let Some(members) = types.error_family_members.get(root)
-            {
-                if !members.contains(variant) {
-                    let available = members
-                        .iter()
-                        .map(|member| format!("'{}'", pool.str(*member)))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    sink.emit(Diag::error(
-                        pat.span,
-                        DiagCode::UnknownMatchVariant,
-                        format!(
-                            "error family '{}' has no member '{}' (members: {available})",
-                            pool.str(*root),
-                            pool.str(*variant),
-                        ),
-                    ));
-                    return OwnedPattern::Wildcard;
-                }
-                (None, errors::qualified_error_name(pool, *root, *variant))
-            } else {
-                (*enum_name, *variant)
-            };
+            let (enum_name, variant) = (*enum_name, *variant);
             let args = args.map(|a| {
                 let args = ast
                     .variant_arg_list(a.list)

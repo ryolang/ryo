@@ -746,27 +746,28 @@ fn nested_error_family_lowering_is_rejected() {
 }
 
 #[test]
-fn qualified_error_construction_lowers_to_error_construct() {
+fn qualified_error_construction_preserves_source_candidates() {
     let src = "errors IoError:\n\tEof\n\tReadFailed(str)\n\tInvalidUtf8(code: int, message: str)\nfn main():\n\tunit = IoError.Eof\n\tpositional = IoError.ReadFailed(\"bad\")\n\tnamed = IoError.InvalidUtf8(code=1, message=\"bad\")\n";
     let (uir, pool) = parse_and_lower(src).expect("qualified members should lower");
     let main = body_named(&uir, &pool, "main");
-
-    for (index, expected) in ["IoError.Eof", "IoError.ReadFailed", "IoError.InvalidUtf8"]
-        .into_iter()
-        .enumerate()
-    {
+    let initializer = |index| {
         let statement = uir.body_stmts(main).at(index);
-        let initializer = match uir.inst(statement).tag {
+        match uir.inst(statement).tag {
             InstTag::VarDecl => uir.var_decl_view(statement).initializer,
             InstTag::AssignOrDecl => uir.assign_or_decl_view(statement).value,
             other => panic!("expected a binding statement, got {other:?}"),
-        };
-        let inst = uir.inst(initializer);
-        assert_eq!(inst.tag, InstTag::ErrorConstruct);
-        let InstData::ErrorConstruct { name, .. } = inst.data else {
-            unreachable!()
-        };
-        assert_eq!(pool.str(name), expected);
+        }
+    };
+
+    let unit = initializer(0);
+    let InstData::FieldAccess { field, .. } = uir.inst(unit).data else {
+        panic!("bare family member remains a field-access candidate")
+    };
+    assert_eq!(pool.str(field), "Eof");
+    for (index, expected) in ["ReadFailed", "InvalidUtf8"].into_iter().enumerate() {
+        let view = uir.enum_lit_view(initializer(index + 1));
+        assert_eq!(pool.str(view.enum_name), "IoError");
+        assert_eq!(pool.str(view.variant), expected);
     }
 }
 

@@ -200,66 +200,30 @@ pub(super) fn gen_expr_d(
         // Field access `object.field` (M9); chains fold left in the
         // AST, so each access lowers against its own object.
         ast::ExprKind::FieldAccess { object, field } => {
-            if let ast::ExprKind::Ident(root) = ast.expr(object).kind
-                && types.error_family_members.contains_key(&root)
-            {
-                errors::lower_qualified_error_construct(
-                    b,
-                    ast,
-                    ast::Ident::new(root, ast.expr_span(object)),
-                    field,
-                    None,
-                    types,
-                    defined_layouts,
-                    pool,
-                    sink,
-                    span,
-                    depth,
-                )
-            } else {
-                let obj = gen_expr_d(
-                    b,
-                    ast,
-                    object,
-                    types,
-                    defined_layouts,
-                    pool,
-                    sink,
-                    depth + 1,
-                );
-                b.field_access(obj, field.name, span)
-            }
+            let obj = gen_expr_d(
+                b,
+                ast,
+                object,
+                types,
+                defined_layouts,
+                pool,
+                sink,
+                depth + 1,
+            );
+            b.field_access(obj, field.name, span)
         }
-        // Variant construction (M11) lowers to `EnumLit`.
-        ast::ExprKind::VariantConstruct(c) => {
-            if types.error_family_members.contains_key(&c.enum_name.name) {
-                errors::lower_qualified_error_construct(
-                    b,
-                    ast,
-                    c.enum_name,
-                    c.variant,
-                    c.args,
-                    types,
-                    defined_layouts,
-                    pool,
-                    sink,
-                    span,
-                    depth,
-                )
-            } else {
-                variants::lower_variant_construct(
-                    b,
-                    ast,
-                    c,
-                    types,
-                    defined_layouts,
-                    pool,
-                    sink,
-                    span,
-                    depth,
-                )
-            }
-        }
+        // Qualified enum/error-family candidates retain their source names.
+        ast::ExprKind::VariantConstruct(c) => variants::lower_variant_construct(
+            b,
+            ast,
+            c,
+            types,
+            defined_layouts,
+            pool,
+            sink,
+            span,
+            depth,
+        ),
         // Match expressions (M12) lower to the UIR `Match` wire; see
         // `astgen/match_.rs` for the pattern/body mapping.
         ast::ExprKind::Match { scrutinee, arms } => {
@@ -723,71 +687,27 @@ fn gen_machine(
                     }
                     // Field access `object.field` (M9); chains fold left in the
                     // AST, so each access lowers against its own object.
-                    ast::ExprKind::FieldAccess { object, field } => {
-                        if let ast::ExprKind::Ident(root) = ast.expr(object).kind
-                            && types.error_family_members.contains_key(&root)
-                        {
-                            let step = errors::prepare_qualified_error_construct(
-                                b,
-                                ast,
-                                ast::Ident::new(root, ast.expr_span(object)),
-                                field,
-                                None,
-                                types,
-                                pool,
-                                sink,
-                                span,
-                            );
-                            match step {
-                                errors::ErrorStep::Complete(result) => results.push(result),
-                                errors::ErrorStep::Child(state, arg) => {
-                                    stack.push(ExprTask::Error(state).at(depth));
-                                    stack.push(ExprTask::Enter(arg).at(depth + 1));
-                                }
-                            }
-                        } else {
-                            stack.push(ExprTask::Exit(e).at(depth));
-                            stack.push(ExprTask::Enter(object).at(depth + 1));
-                        }
+                    ast::ExprKind::FieldAccess { object, .. } => {
+                        stack.push(ExprTask::Exit(e).at(depth));
+                        stack.push(ExprTask::Enter(object).at(depth + 1));
                     }
-                    // Variant construction (M11) lowers to `EnumLit`.
+                    // Qualified enum/error-family candidates retain their source names.
                     ast::ExprKind::VariantConstruct(c) => {
-                        if types.error_family_members.contains_key(&c.enum_name.name) {
-                            let step = errors::prepare_qualified_error_construct(
-                                b,
-                                ast,
-                                c.enum_name,
-                                c.variant,
-                                c.args,
-                                types,
-                                pool,
-                                sink,
-                                span,
-                            );
-                            match step {
-                                errors::ErrorStep::Complete(result) => results.push(result),
-                                errors::ErrorStep::Child(state, arg) => {
-                                    stack.push(ExprTask::Error(state).at(depth));
-                                    stack.push(ExprTask::Enter(arg).at(depth + 1));
-                                }
-                            }
-                        } else {
-                            let step = variants::prepare_variant_construct(
-                                b,
-                                ast,
-                                c,
-                                types,
-                                defined_layouts,
-                                pool,
-                                sink,
-                                span,
-                            );
-                            match step {
-                                variants::VariantStep::Complete(result) => results.push(result),
-                                variants::VariantStep::Child(state, arg) => {
-                                    stack.push(ExprTask::Variant(*state).at(depth));
-                                    stack.push(ExprTask::Enter(arg).at(depth + 1));
-                                }
+                        let step = variants::prepare_variant_construct(
+                            b,
+                            ast,
+                            c,
+                            types,
+                            defined_layouts,
+                            pool,
+                            sink,
+                            span,
+                        );
+                        match step {
+                            variants::VariantStep::Complete(result) => results.push(result),
+                            variants::VariantStep::Child(state, arg) => {
+                                stack.push(ExprTask::Variant(*state).at(depth));
+                                stack.push(ExprTask::Enter(arg).at(depth + 1));
                             }
                         }
                     }

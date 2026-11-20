@@ -176,13 +176,18 @@ pub(super) fn direct_named_call_graph(sema: &Sema<'_>) -> Vec<Vec<u32>> {
     let mut graph = vec![Vec::new(); sema.uir.func_bodies.len()];
     for (index, edges) in graph.iter_mut().enumerate() {
         for &inst in sema.body_map().instructions(index) {
-            if sema.uir.inst(inst).tag == InstTag::Call {
-                let name = sema.uir.call_view(inst).name;
-                if let Some(&callee) = sema.name_to_decl.get(&name) {
-                    edges.push(
-                        u32::try_from(sema.body_index(callee)).expect("body index out of range"),
-                    );
+            let name = match sema.uir.inst(inst).tag {
+                InstTag::Call => Some(sema.uir.call_view(inst).name),
+                InstTag::ErrorConstruct => {
+                    super::expr::candidates::unqualified_call_candidate_name(sema, inst)
                 }
+                _ => None,
+            };
+            if let Some(name) = name
+                && let Some(&callee) = sema.name_to_decl.get(&name)
+            {
+                edges
+                    .push(u32::try_from(sema.body_index(callee)).expect("body index out of range"));
             }
         }
     }

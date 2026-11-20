@@ -468,7 +468,8 @@ fn decode_children(
         InstTag::EnumLit => {
             let range = expect_extra(data, body, inst)?;
             let mut cursor = WireCursor::new(uir, range, body, inst)?;
-            decode_enum_args(&mut cursor, children)?;
+            cursor.skip(2)?;
+            decode_variant_args(&mut cursor, 8, children)?;
             cursor.finish()?;
         }
         InstTag::ErrorConstruct => {
@@ -477,7 +478,7 @@ fn decode_children(
             };
             let mut cursor = WireCursor::new(uir, args, body, inst)?;
             cursor.skip(2)?;
-            decode_enum_args(&mut cursor, children)?;
+            decode_variant_args(&mut cursor, 0, children)?;
             cursor.finish()?;
         }
         InstTag::FieldAccess => {
@@ -533,13 +534,14 @@ fn decode_children(
     Ok(())
 }
 
-fn decode_enum_args(
+fn decode_variant_args(
     cursor: &mut WireCursor<'_>,
+    span_words: usize,
     children: &mut Vec<InstRef>,
 ) -> Result<(), BodyMapError> {
-    cursor.skip(2)?;
-    let argc = cursor.count()?;
     cursor.skip(1)?;
+    let argc = cursor.count()?;
+    cursor.skip(span_words)?;
     for _ in 0..argc {
         cursor.skip(1)?;
         cursor.inst(children)?;
@@ -796,5 +798,77 @@ mod tests {
         assert_eq!(map.instructions(0).len(), 10_003);
         assert_eq!(map.slot(root).unwrap().local, 0);
         assert_eq!(map.slot(leaf).unwrap().local, 10_002);
+    }
+}
+
+#[cfg(test)]
+mod unresolved_variant_tests {
+    use super::BodyMapError;
+    use crate::types::InternPool;
+    use crate::uir::{InstData, InstTag, Span, UirBuilder, UirVariantForm};
+
+    #[test]
+    fn body_map_owns_unresolved_variant_arguments() {
+        let mut pool = InternPool::new();
+        let shape = pool.intern_str("Shape");
+        let rectangle = pool.intern_str("Rectangle");
+        let height = pool.intern_str("height");
+        let named = pool.intern_str("Named");
+        let code = pool.intern_str("code");
+        let main = pool.intern_str("main");
+        let mut builder = UirBuilder::new();
+        let height_value = builder.float_literal(2.0, Span::EMPTY);
+        let variant = builder.enum_lit(
+            shape,
+            rectangle,
+            Span::EMPTY,
+            Span::EMPTY,
+            UirVariantForm {
+                positional: false,
+                named_parens: false,
+                mixed_fields: false,
+            },
+            &[(height.raw(), height_value)],
+            Span::EMPTY,
+        );
+        let variant_stmt = builder.unary(InstTag::ExprStmt, variant, Span::EMPTY);
+        let code_value = builder.int_literal(1, Span::EMPTY);
+        let error = builder.error_construct(
+            named,
+            None,
+            None,
+            UirVariantForm {
+                positional: false,
+                named_parens: true,
+                mixed_fields: false,
+            },
+            &[(code.raw(), code_value)],
+            Span::EMPTY,
+        );
+        let error_stmt = builder.unary(InstTag::ExprStmt, error, Span::EMPTY);
+        builder.add_function(main, vec![], None, &[variant_stmt, error_stmt], Span::EMPTY);
+        let mut uir = builder.finish();
+
+        let map = uir.compute_body_map().expect("valid unresolved wires");
+        assert_eq!(
+            map.instructions(0),
+            [
+                variant_stmt,
+                variant,
+                height_value,
+                error_stmt,
+                error,
+                code_value,
+            ]
+        );
+
+        let InstData::Extra(range) = &mut uir.instructions[variant.index()].data else {
+            panic!("variant must carry an extra range");
+        };
+        range.len -= 1;
+        assert!(matches!(
+            uir.compute_body_map(),
+            Err(BodyMapError::MalformedWire { inst, .. }) if inst == variant
+        ));
     }
 }

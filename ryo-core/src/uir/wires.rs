@@ -646,3 +646,176 @@ pub mod if_stmt_extra {
         refs
     }
 }
+
+/// Unresolved enum-variant and error-construction candidates. Selectors are
+/// source positions or named `StringId` words; declaration indices and types
+/// are resolved by Sema and belong only to the TIR enum-literal wire.
+pub mod variant_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::ExtraRange;
+    use crate::source::SourceId;
+    use crate::types::StringId;
+    use crate::uir::{InstRef, Span};
+
+    pub const FLAG_POSITIONAL: u32 = 1 << 0;
+    pub const FLAG_NAMED_PARENS: u32 = 1 << 1;
+    pub const FLAG_MIXED_FIELDS: u32 = 1 << 2;
+    pub const ENUM_HEADER_LEN: usize = 12;
+    pub const ERROR_HEADER_LEN: usize = 4;
+
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct UirVariantForm {
+        pub positional: bool,
+        pub named_parens: bool,
+        pub mixed_fields: bool,
+    }
+
+    impl UirVariantForm {
+        fn flags(self) -> u32 {
+            (u32::from(self.positional) * FLAG_POSITIONAL)
+                | (u32::from(self.named_parens) * FLAG_NAMED_PARENS)
+                | (u32::from(self.mixed_fields) * FLAG_MIXED_FIELDS)
+        }
+
+        fn from_flags(flags: u32) -> Self {
+            Self {
+                positional: flags & FLAG_POSITIONAL != 0,
+                named_parens: flags & FLAG_NAMED_PARENS != 0,
+                mixed_fields: flags & FLAG_MIXED_FIELDS != 0,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct VariantArgsView<'a> {
+        pub form: UirVariantForm,
+        args: &'a [u32],
+    }
+
+    impl VariantArgsView<'_> {
+        pub fn fields(&self) -> impl Iterator<Item = (u32, InstRef)> + '_ {
+            self.args
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&[selector, value]| (selector, InstRef::from_raw(value)))
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct EnumLitView<'a> {
+        pub enum_name: StringId,
+        pub variant: StringId,
+        pub enum_span: Span,
+        pub variant_span: Span,
+        pub form: UirVariantForm,
+        args: &'a [u32],
+    }
+
+    impl EnumLitView<'_> {
+        pub fn fields(&self) -> impl Iterator<Item = (u32, InstRef)> + '_ {
+            self.args
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&[selector, value]| (selector, InstRef::from_raw(value)))
+        }
+    }
+
+    pub fn encode_enum(
+        extra: &mut Vec<u32>,
+        enum_name: StringId,
+        variant: StringId,
+        enum_span: Span,
+        variant_span: Span,
+        form: UirVariantForm,
+        args: &[(u32, InstRef)],
+    ) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.extend([
+            enum_name.raw(),
+            variant.raw(),
+            form.flags(),
+            len_u32(args.len()),
+        ]);
+        push_span(extra, enum_span);
+        push_span(extra, variant_span);
+        push_args(extra, args);
+        ExtraRange {
+            offset,
+            len: len_u32(ENUM_HEADER_LEN + 2 * args.len()),
+        }
+    }
+
+    pub fn decode_enum(words: &[u32]) -> EnumLitView<'_> {
+        let form = UirVariantForm::from_flags(words[2]);
+        let argc = words[3] as usize;
+        EnumLitView {
+            enum_name: StringId::from_raw(words[0]),
+            variant: StringId::from_raw(words[1]),
+            enum_span: decode_span(&words[4..8]),
+            variant_span: decode_span(&words[8..12]),
+            form,
+            args: &words[ENUM_HEADER_LEN..ENUM_HEADER_LEN + 2 * argc],
+        }
+    }
+
+    pub fn encode_error(
+        extra: &mut Vec<u32>,
+        family_root: Option<StringId>,
+        family_member: Option<StringId>,
+        form: UirVariantForm,
+        args: &[(u32, InstRef)],
+    ) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.extend([
+            family_root.map_or(u32::MAX, StringId::raw),
+            family_member.map_or(u32::MAX, StringId::raw),
+            form.flags(),
+            len_u32(args.len()),
+        ]);
+        push_args(extra, args);
+        ExtraRange {
+            offset,
+            len: len_u32(ERROR_HEADER_LEN + 2 * args.len()),
+        }
+    }
+
+    pub fn decode_error(
+        words: &[u32],
+    ) -> (Option<StringId>, Option<StringId>, VariantArgsView<'_>) {
+        let argc = words[3] as usize;
+        (
+            (words[0] != u32::MAX).then(|| StringId::from_raw(words[0])),
+            (words[1] != u32::MAX).then(|| StringId::from_raw(words[1])),
+            VariantArgsView {
+                form: UirVariantForm::from_flags(words[2]),
+                args: &words[ERROR_HEADER_LEN..ERROR_HEADER_LEN + 2 * argc],
+            },
+        )
+    }
+
+    fn push_args(extra: &mut Vec<u32>, args: &[(u32, InstRef)]) {
+        for &(selector, value) in args {
+            extra.extend([selector, value.raw()]);
+        }
+    }
+
+    fn push_span(extra: &mut Vec<u32>, span: Span) {
+        let (context, revision) = span.source.raw_parts();
+        extra.extend([
+            context,
+            revision,
+            u32::try_from(span.start).expect("variant span start exceeds UIR wire range"),
+            u32::try_from(span.end).expect("variant span end exceeds UIR wire range"),
+        ]);
+    }
+
+    fn decode_span(words: &[u32]) -> Span {
+        Span::in_source(
+            SourceId::from_raw_parts(words[0], words[1]),
+            words[2] as usize,
+            words[3] as usize,
+        )
+    }
+}

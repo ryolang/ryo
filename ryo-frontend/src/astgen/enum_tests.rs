@@ -1,17 +1,13 @@
 //! Enum astgen tests (M11): enum declarations lower to `UirEnumDecl`
 //! with resolved payload types; cross-kind forward references resolve;
 //! by-value cycles, empty enums, and duplicate variants are diagnosed;
-//! variant construction lowers to `EnumLit` with declaration-order
-//! field indices. Split out of `astgen.rs`'s inline tests: astgen.rs
+//! variant construction lowers to `EnumLit` with unresolved source names
+//! and selectors. Split out of `astgen.rs`'s inline tests: astgen.rs
 //! sits at the 2000-line CI cap, so new enum tests live here; the
 //! shared lowering helpers remain there as `pub(super)`.
 
 use super::tests::{body_named, parse_and_lower};
 use super::*;
-use crate::grammar::{ParseState, program_parser};
-use crate::lexer::lex;
-use chumsky::Parser;
-use chumsky::input::Input;
 use ryo_core::types::VariantKind;
 use ryo_core::uir::InstData;
 
@@ -120,12 +116,12 @@ fn variant_construct_positional_lowers_to_enum_lit() {
     let v = uir.var_decl_view(uir.body_stmts(main).at(0));
     assert!(matches!(uir.inst(v.initializer).tag, InstTag::EnumLit));
     let lit = uir.enum_lit_view(v.initializer);
-    assert_eq!(lit.ty, uir.enum_decls[0].ty);
-    assert_eq!(lit.variant_index, 0, "Circle is the first declared variant");
-    assert!(lit.positional, "parens form records the positional flag");
+    assert_eq!(pool.str(lit.enum_name), "Shape");
+    assert_eq!(pool.str(lit.variant), "Circle");
+    assert!(lit.form.positional, "parens form records the source form");
     let args: Vec<_> = lit.fields().collect();
     assert_eq!(args.len(), 1);
-    assert_eq!(args[0].0, 0, "positional arg 0 maps to field idx 0");
+    assert_eq!(args[0].0, 0, "the source argument keeps its position");
     match uir.inst(args[0].1).data {
         InstData::Float(f) => assert_eq!(f, 5.0),
         other => panic!("expected Float arg, got {other:?}"),
@@ -133,25 +129,25 @@ fn variant_construct_positional_lowers_to_enum_lit() {
 }
 
 #[test]
-fn variant_construct_named_canonicalizes_against_decl_order() {
-    // Source order (height, width) is reversed against the payload
-    // declaration (width, height): the EnumLit pairs stay in source
-    // order but each carries its declaration-order field index.
+fn variant_construct_named_preserves_source_order_and_names() {
     let src = "enum Shape:\n\tRectangle(width: float, height: float)\n\n\
                r = Shape.Rectangle{height=2.0, width=1.0}\n";
     let (uir, pool) = parse_and_lower(src).unwrap();
     let main = body_named(&uir, &pool, "main");
     let v = uir.var_decl_view(uir.body_stmts(main).at(0));
     let lit = uir.enum_lit_view(v.initializer);
-    assert_eq!(lit.variant_index, 0);
-    assert!(
-        !lit.positional,
-        "braces form leaves the positional flag clear"
-    );
+    assert_eq!(pool.str(lit.variant), "Rectangle");
+    assert!(!lit.form.positional);
     let args: Vec<_> = lit.fields().collect();
     assert_eq!(args.len(), 2);
-    assert_eq!(args[0].0, 1, "height is payload field 1");
-    assert_eq!(args[1].0, 0, "width is payload field 0");
+    assert_eq!(
+        pool.str(ryo_core::types::StringId::from_raw(args[0].0)),
+        "height"
+    );
+    assert_eq!(
+        pool.str(ryo_core::types::StringId::from_raw(args[1].0)),
+        "width"
+    );
     match (uir.inst(args[0].1).data, uir.inst(args[1].1).data) {
         (InstData::Float(h), InstData::Float(w)) => {
             assert_eq!(h, 2.0);
@@ -162,65 +158,113 @@ fn variant_construct_named_canonicalizes_against_decl_order() {
 }
 
 #[test]
-fn unknown_variant_construct_lowers_recovery_to_error_type() {
-    // `Shape.Hexagon(1.0)` — UnknownVariant fires at astgen, and the
-    // recovery EnumLit is poisoned with the error type so sema cannot
-    // derive a phantom missing-fields error for variant 0 (I-206).
-    // Mirrors `parse_and_lower` but keeps the UIR alongside the diags
-    // (that helper returns Err and discards it).
+fn unknown_variant_construct_preserves_candidate_for_sema() {
     let input = "enum Shape:\n\tCircle(float)\n\ns = Shape.Hexagon(1.0)\n";
-    let mut pool = InternPool::new();
-    let mut lex_sink = DiagSink::new();
-    let tokens = lex(input, &mut pool, &mut lex_sink);
-    assert!(
-        !lex_sink.has_errors(),
-        "lex errors: {:?}",
-        lex_sink.into_diags()
-    );
-    let token_stream = tokens[..].split_token_span(crate::lexer::eoi(
-        ryo_core::source::SourceId::NONE,
-        input.len(),
-    ));
-    let mut state = ParseState::new(pool);
-    program_parser()
-        .parse_with_state(token_stream, &mut state)
-        .into_result()
-        .expect("parse ok");
-    let (ast, mut pool) = state.into_parts();
-
-    let mut sink = DiagSink::new();
-    let uir = generate(&ast, &mut pool, &mut sink);
-    let diags = sink.into_diags();
-    assert!(
-        diags.iter().any(|d| d.code == DiagCode::UnknownVariant),
-        "UnknownVariant must fire: {diags:?}"
-    );
+    let (uir, pool) = parse_and_lower(input).expect("AstGen performs no variant lookup");
     let main = body_named(&uir, &pool, "main");
     let v = uir.var_decl_view(uir.body_stmts(main).at(0));
     let lit = uir.enum_lit_view(v.initializer);
-    assert_eq!(lit.ty, pool.error_type(), "recovery node is poisoned");
+    assert_eq!(pool.str(lit.enum_name), "Shape");
+    assert_eq!(pool.str(lit.variant), "Hexagon");
+    assert_eq!(lit.fields().count(), 1);
 }
 
 #[test]
-fn non_enum_uppercase_paren_receiver_lowers_to_method_call() {
-    // `S.len()` — the parser promotes every uppercase-led
-    // `Name.name(args)` to VariantConstruct; with no enum named S,
-    // astgen restores the pre-M11 method-call lowering instead of
-    // failing with UnknownType (an uppercase-led value keeps its
-    // method call).
+fn non_enum_uppercase_paren_receiver_preserves_candidate() {
     let src = "S = \"hi\"\nprint(S.len())\n";
     let (uir, pool) = parse_and_lower(src).unwrap();
     let idx = uir
         .instructions
         .iter()
-        .position(|i| i.tag == InstTag::MethodCall)
-        .expect("paren form on a non-enum receiver lowers to MethodCall");
-    let view = uir.method_call_view(InstRef::from_raw(idx as u32));
-    let recv = match uir.inst(view.receiver).data {
-        InstData::Var(name) => name,
-        other => panic!("expected Var receiver, got {other:?}"),
+        .position(|i| i.tag == InstTag::EnumLit)
+        .expect("uppercase-led source remains an unresolved candidate");
+    let view = uir.enum_lit_view(InstRef::from_raw(idx as u32));
+    assert_eq!(pool.str(view.enum_name), "S");
+    assert_eq!(pool.str(view.variant), "len");
+    assert!(view.form.positional);
+    assert!(view.fields().next().is_none());
+}
+
+#[test]
+fn astgen_preserves_enum_error_and_match_declaration_names() {
+    let src = "enum Shape:\n\tRectangle(width: float, height: float)\nerror Named(code: int, message: str)\nerrors IoError:\n\tEof\n\tReadFailed(str)\nfn main():\n\trect = Shape.Rectangle{height=2.0, width=1.0}\n\tnominal = Named(message=\"bad\", code=1)\n\tqualified = IoError.ReadFailed(\"bad\")\n\tmatch qualified:\n\t\tIoError.Eof: 0\n\t\t_: 1\n";
+    let (uir, pool) = parse_and_lower(src).expect("structural lowering should succeed");
+    let main = body_named(&uir, &pool, "main");
+    let statements = uir.body_stmts(main);
+    let initializer = |index| {
+        let statement = statements.at(index);
+        match uir.inst(statement).tag {
+            InstTag::VarDecl => uir.var_decl_view(statement).initializer,
+            InstTag::AssignOrDecl => uir.assign_or_decl_view(statement).value,
+            other => panic!("expected a binding statement, got {other:?}"),
+        }
     };
-    assert_eq!(pool.str(recv), "S");
-    assert_eq!(pool.str(view.name), "len");
-    assert!(view.args.is_empty());
+
+    let rect = uir.enum_lit_view(initializer(0));
+    assert_eq!(pool.str(rect.enum_name), "Shape");
+    assert_eq!(pool.str(rect.variant), "Rectangle");
+    let form: ryo_core::uir::UirVariantForm = rect.form;
+    assert!(!form.positional);
+    assert!(!form.named_parens);
+    assert!(!form.mixed_fields);
+    let fields: Vec<_> = rect.fields().collect();
+    assert_eq!(fields.len(), 2);
+    assert_eq!(
+        pool.str(ryo_core::types::StringId::from_raw(fields[0].0)),
+        "height"
+    );
+    assert_eq!(
+        pool.str(ryo_core::types::StringId::from_raw(fields[1].0)),
+        "width"
+    );
+
+    let nominal = initializer(1);
+    let (name, family_root, family_member, nominal_view) = uir.error_construct_view(nominal);
+    assert_eq!(pool.str(name), "Named");
+    assert_eq!(family_root, None);
+    assert_eq!(family_member, None);
+    assert!(nominal_view.form.named_parens);
+    assert!(!nominal_view.form.positional);
+    let fields: Vec<_> = nominal_view.fields().collect();
+    assert_eq!(
+        pool.str(ryo_core::types::StringId::from_raw(fields[0].0)),
+        "message"
+    );
+    assert_eq!(
+        pool.str(ryo_core::types::StringId::from_raw(fields[1].0)),
+        "code"
+    );
+
+    let qualified_view = uir.enum_lit_view(initializer(2));
+    assert_eq!(pool.str(qualified_view.enum_name), "IoError");
+    assert_eq!(pool.str(qualified_view.variant), "ReadFailed");
+    assert!(qualified_view.form.positional);
+
+    let matched = match uir.inst(statements.at(3)).data {
+        InstData::UnOp(operand) => operand,
+        other => panic!("match statement should wrap its expression, got {other:?}"),
+    };
+    let matched = uir.match_view(matched);
+    assert_eq!(
+        matched.arms[0].pattern,
+        ryo_core::uir::UirPatternView::Variant {
+            enum_name: pool.find_str("IoError"),
+            variant: pool.find_str("Eof").expect("member name"),
+            args: None,
+        }
+    );
+
+    let map = uir.compute_body_map().expect("argument ownership");
+    for value in rect
+        .fields()
+        .map(|(_, value)| value)
+        .chain(nominal_view.fields().map(|(_, value)| value))
+        .chain(qualified_view.fields().map(|(_, value)| value))
+    {
+        assert!(
+            map.slot(value).is_some(),
+            "argument %{} is orphaned",
+            value.raw()
+        );
+    }
 }

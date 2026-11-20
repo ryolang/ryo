@@ -26,9 +26,9 @@
 //!   `InstData` lives here, indexed by an [`ExtraRange`]. Per-payload
 //!   layouts (`*_extra` modules owning `encode`/`decode`/views) mostly
 //!   live in `wires`; the exceptions are `destructure_extra` (in
-//!   `destructure`), `match_extra` (in `match_`), and `enum_lit_extra`,
-//!   which is shared with TIR and lives in `crate::extra`. The
-//!   `wire_fixtures` module (test-only) pins each layout's exact words.
+//!   `destructure`) and `match_extra` (in `match_`). TIR's resolved
+//!   `enum_lit_extra` lives in `crate::extra`; UIR uses `variant_extra`
+//!   for unresolved candidates. `wire_fixtures` pins each layout's words.
 //! - `spans: Vec<Span>` — parallel to `instructions`, one span per
 //!   `InstRef`. Storing spans out-of-band keeps `Inst` itself small
 //!   (the tagged-enum payload already costs more than a `u32`; piling
@@ -208,7 +208,6 @@ pub enum UirTypeExprKind {
 
 // ---------- ExtraRange ----------
 
-pub use crate::extra::enum_lit_extra;
 pub use crate::extra::{ExtraList, ExtraRange, ExtraValue};
 
 // ---------- Instruction tags ----------
@@ -328,18 +327,13 @@ pub enum InstTag {
     /// declaration.
     StructLit,
 
-    /// Enum variant construction `Name::Variant(args...)` (M11).
-    /// Variable payload in `extra` — see [`enum_lit_extra`]. The
-    /// enum type and declaration-order variant index head the
-    /// payload; args are `(field_idx, value)` pairs keyed by
-    /// declaration-order payload-field index (tuple variants use the
-    /// synthesized `"0"`, `"1"`, … names). Unit variants encode
-    /// `argc = 0`.
+    /// Unresolved enum/error-family candidate. The wire retains source
+    /// names, source forms, and positional or named argument selectors.
     EnumLit,
 
-    /// Declared-error construction candidate. The inline data preserves
-    /// the source name for shadowing; the shared enum-literal wire holds
-    /// positional field indices or named-field `StringId`s.
+    /// Unresolved unqualified error-construction candidate. The inline
+    /// data preserves the source name for lexical shadowing; the wire
+    /// retains optional family source names and source-order arguments.
     ErrorConstruct,
 
     /// Field access `object.field` (M9); see [`InstData::FieldAccess`].
@@ -1038,48 +1032,48 @@ impl UirBuilder {
         self.push(InstTag::StructLit, InstData::Extra(range), span)
     }
 
-    /// Emits an `EnumLit` `Name::Variant(args...)` (M11) with the
-    /// enum type, declaration-order variant index, and
-    /// `(field_idx, value)` arg pairs packed into `extra`. `field_idx`
-    /// selects the payload field within the variant; unit variants
-    /// pass `&[]`. `positional` records the source form: astgen sets it
-    /// for the parenthesized form so sema can enforce the Brace Law on
-    /// named payloads (see [`enum_lit_extra::FLAG_POSITIONAL`]).
+    /// Emits an unresolved `EnumLit` candidate with source names, source
+    /// spans, and source-order arguments. Sema resolves declaration and
+    /// field identities before emitting the unchanged TIR enum wire.
+    #[allow(clippy::too_many_arguments)]
     pub fn enum_lit(
         &mut self,
-        ty: TypeId,
-        variant: u32,
-        positional: bool,
+        enum_name: StringId,
+        variant: StringId,
+        enum_span: Span,
+        variant_span: Span,
+        form: UirVariantForm,
         args: &[(u32, InstRef)],
         span: Span,
     ) -> InstRef {
-        let range = enum_lit_extra::encode(&mut self.uir.extra, ty, variant, args, positional);
+        let range = variant_extra::encode_enum(
+            &mut self.uir.extra,
+            enum_name,
+            variant,
+            enum_span,
+            variant_span,
+            form,
+            args,
+        );
         self.push(InstTag::EnumLit, InstData::Extra(range), span)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn error_construct(
         &mut self,
         name: StringId,
         family_root: Option<StringId>,
         family_member: Option<StringId>,
-        ty: TypeId,
-        positional: bool,
+        form: UirVariantForm,
         args: &[(u32, InstRef)],
         span: Span,
     ) -> InstRef {
-        let root = family_root.map_or(u32::MAX, StringId::raw);
-        let member = family_member.map_or(u32::MAX, StringId::raw);
-        let offset = u32::try_from(self.uir.extra.len()).expect("UIR extra arena exceeds u32");
-        self.uir.extra.extend([root, member]);
-        let payload = enum_lit_extra::encode(&mut self.uir.extra, ty, 0, args, positional);
-        let range = ExtraRange {
-            offset,
-            len: payload
-                .len
-                .checked_add(2)
-                .expect("UIR wire length overflow"),
-        };
+        let range = variant_extra::encode_error(
+            &mut self.uir.extra,
+            family_root,
+            family_member,
+            form,
+            args,
+        );
         self.push(
             InstTag::ErrorConstruct,
             InstData::ErrorConstruct { name, args: range },
@@ -1156,16 +1150,17 @@ pub use match_::{
     UirVariantArgs, UirVariantArgsView, match_extra,
 };
 mod wires;
+pub use wires::variant_extra::UirVariantForm;
 pub(crate) use wires::{
     assign_or_decl_extra, call_extra, compound_assign_extra, compound_field_assign_extra,
     field_assign_extra, for_range_extra, if_stmt_extra, method_call_extra, struct_lit_extra,
-    var_decl_extra, while_loop_extra,
+    var_decl_extra, variant_extra, while_loop_extra,
 };
 mod views;
 pub use views::{
     AssignOrDeclView, CallView, CompoundAssignView, CompoundFieldAssignView, ElifBranches,
     ElifView, EnumLitView, FieldAssignView, ForRangeView, IfStmtView, MethodCallView,
-    StructLitView, VarDeclView, WhileLoopView,
+    StructLitView, VarDeclView, VariantArgsView, WhileLoopView,
 };
 
 #[cfg(test)]
@@ -1686,35 +1681,32 @@ mod tests {
     fn enum_lit_round_trips_through_extra() {
         let mut pool = InternPool::new();
         let shape = pool.intern_str("Shape");
-        let enum_ty = pool.declare_enum(shape);
+        let rectangle = pool.intern_str("Rectangle");
+        let width = pool.intern_str("width");
+        let height = pool.intern_str("height");
 
         let mut b = UirBuilder::new();
         let w = b.float_literal(3.0, sp());
         let h = b.float_literal(4.0, sp());
-        let lit = b.enum_lit(enum_ty, 1, false, &[(0, w), (1, h)], sp());
+        let lit = b.enum_lit(
+            shape,
+            rectangle,
+            sp(),
+            sp(),
+            UirVariantForm::default(),
+            &[(width.raw(), w), (height.raw(), h)],
+            sp(),
+        );
 
         let uir = b.finish();
         let view = uir.enum_lit_view(lit);
-        assert_eq!(view.ty, enum_ty);
-        assert_eq!(view.variant_index, 1);
-        assert!(!view.positional, "braced named form clears the flag");
-        assert_eq!(view.fields().collect::<Vec<_>>(), vec![(0, w), (1, h)]);
-
-        // Wire layout is pinned: [TY, VARIANT, ARGC, FLAGS, (FIELD_IDX, REF) x ARGC].
-        let inst = uir.inst(lit);
-        let range = match inst.data {
-            InstData::Extra(rng) => rng,
-            other => panic!("expected InstData::Extra, got {:?}", other),
-        };
-        let slice = &uir.extra[range.as_range()];
-        assert_eq!(slice[0], enum_ty.raw());
-        assert_eq!(slice[1], 1);
-        assert_eq!(slice[2], 2);
-        assert_eq!(slice[3], 0);
-        assert_eq!(slice[4], 0);
-        assert_eq!(slice[5], w.raw());
-        assert_eq!(slice[6], 1);
-        assert_eq!(slice[7], h.raw());
+        assert_eq!(view.enum_name, shape);
+        assert_eq!(view.variant, rectangle);
+        assert_eq!(view.form, UirVariantForm::default());
+        assert_eq!(
+            view.fields().collect::<Vec<_>>(),
+            vec![(width.raw(), w), (height.raw(), h)]
+        );
     }
 
     #[test]
@@ -1722,28 +1714,28 @@ mod tests {
         let mut pool = InternPool::new();
         let shape = pool.intern_str("Shape");
         let pair = pool.intern_str("Pair");
-        let float_ty = pool.float();
-        let enum_ty = pool.declare_enum(shape);
-        pool.define_enum(
-            enum_ty,
-            shape,
-            &[crate::types::EnumVariantDef {
-                name: pair,
-                kind: crate::types::VariantKind::Tuple,
-                fields: vec![(pair, float_ty), (pair, float_ty)],
-            }],
-            crate::types::StructFlags::default(),
-        );
 
         let mut b = UirBuilder::new();
         let w = b.float_literal(3.0, sp());
         let h = b.float_literal(4.0, sp());
-        b.enum_lit(enum_ty, 0, false, &[(0, w), (1, h)], sp());
+        b.enum_lit(
+            shape,
+            pair,
+            sp(),
+            sp(),
+            UirVariantForm {
+                positional: true,
+                named_parens: false,
+                mixed_fields: false,
+            },
+            &[(0, w), (1, h)],
+            sp(),
+        );
         let uir = b.finish();
 
         let out = format!("{}", uir.dump(&pool));
         assert!(
-            out.contains("= enum_lit Shape variant=0 {0: %1, 1: %2}"),
+            out.contains("= enum_lit Shape.Pair positional {0: %1, 1: %2}"),
             "got:\n{out}"
         );
         assert!(!out.contains("<malformed"), "got:\n{out}");
@@ -1753,15 +1745,27 @@ mod tests {
     fn enum_lit_positional_flag_round_trips() {
         let mut pool = InternPool::new();
         let shape = pool.intern_str("Shape");
-        let enum_ty = pool.declare_enum(shape);
+        let pair = pool.intern_str("Pair");
 
         let mut b = UirBuilder::new();
         let v = b.float_literal(5.0, sp());
-        let lit = b.enum_lit(enum_ty, 0, true, &[(0, v)], sp());
+        let lit = b.enum_lit(
+            shape,
+            pair,
+            sp(),
+            sp(),
+            UirVariantForm {
+                positional: true,
+                named_parens: false,
+                mixed_fields: false,
+            },
+            &[(0, v)],
+            sp(),
+        );
 
         let uir = b.finish();
         let view = uir.enum_lit_view(lit);
-        assert!(view.positional, "parenthesized form sets the flag");
+        assert!(view.form.positional, "parenthesized form sets the flag");
         assert_eq!(view.fields().collect::<Vec<_>>(), vec![(0, v)]);
     }
 
@@ -1769,16 +1773,16 @@ mod tests {
     fn enum_lit_unit_variant_round_trips_empty_args() {
         let mut pool = InternPool::new();
         let shape = pool.intern_str("Shape");
-        let enum_ty = pool.declare_enum(shape);
+        let red = pool.intern_str("Red");
 
         let mut b = UirBuilder::new();
-        let lit = b.enum_lit(enum_ty, 0, false, &[], sp());
+        let lit = b.enum_lit(shape, red, sp(), sp(), UirVariantForm::default(), &[], sp());
 
         let uir = b.finish();
         let view = uir.enum_lit_view(lit);
-        assert_eq!(view.ty, enum_ty);
-        assert_eq!(view.variant_index, 0);
-        assert!(!view.positional);
+        assert_eq!(view.enum_name, shape);
+        assert_eq!(view.variant, red);
+        assert!(!view.form.positional);
         assert_eq!(view.fields().count(), 0);
     }
 
