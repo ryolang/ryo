@@ -188,15 +188,15 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-092 — Sema per-function and per-call allocation churn
+### I-092 — Sema per-call allocation churn
 
 **Severity:** Cleanup
 **Area:** sema
 
-**Files:** `ryo-frontend/src/sema/` (`FuncCtx` `mod.rs:704`, `check_call` `call.rs:82-97`, method-call dispatch `expr/mod.rs:283`)
-**Summary:** (a) `inst_map` is `vec![None; uir.instructions.len()]` — the program-wide UIR size — allocated per function; (b) `check_call` clones `callee_modes`, `sig.params`, and builds `modes`/`arg_tirs` per call (3-4 allocations); (c) method dispatch does `pool.str(..).to_string()` per method call site, allocated even before the receiver-type check.
-**Resolution:** (a) `HashMap<InstRef, TirRef>` or per-function UIR slice (the expr memo is the only consumer that needs random access); (b) borrow from the signatures table instead of cloning; (c) match on pre-interned `StringId`s for `len`/`is_empty` instead of a `String`.
-**Update (2026-10-19, post-M12 review):** (c) is resolved in code — the method dispatch in `sema/expr/mod.rs` now compares pre-interned `StringId`s before any string materialization (`ids.len` at `:321`, `ids.is_empty` at `:340`, `ids.to_str`/`ids.to_bytes` at `:362`, `ids.as_bytes` at `:375`); the remaining `to_string()`s on that path (`sema/expr/methods.rs:69`, `:77`) sit on the cold lowercase-enum-receiver diagnostic path, not the dispatch hot path. (a) and (b) remain open as written; current refs: `inst_map` at `sema/mod.rs:664`, `check_call` clones at `sema/call.rs:113-141`.
+**Files:** `ryo-frontend/src/sema/call.rs:116-150`
+**Summary:** `prepare_call` collects `callee_modes` and clones `sig.params`, while call analysis builds `modes` and `arg_tirs` vectors per call.
+**Resolution:** Borrow parameter modes and signature types where the call-plan representation permits, and avoid per-call vector construction that is not required by the typed call wire.
+**Update (2026-11-20):** `FuncCtx.inst_map` is now allocated at each body's exact instruction count and indexed through `UirBodyMap`'s dense local slots; the former program-wide allocation item is resolved. Method dispatch also compares pre-interned `StringId`s before string materialization. Only the call-site allocation item remains open.
 
 ---
 
@@ -208,17 +208,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Files:** `ryo-backend/src/runtime_lib.rs` (:5), `runtime/` (build profile)
 **Summary:** `include_bytes!` bakes the full staticlib into the compiler binary. The archive has been `no_std` since the runtime migration (std, and the `_Unwind_*` link wart with it, is gone), but it still bundles all of core's precompiled objects, which is what keeps it large. Measured 2026-08-24 (aarch64-apple-darwin): 6.06 MB debug / 5.81 MB release.
 **Resolution:** Build the embedded archive with a slim profile (`opt-level="z"`, strip, LTO — the build scripts control that invocation). The `no_std` migration already landed and did not shrink the archive on its own.
-
----
-
-### I-109 — No instruction→function reverse mapping in UIR
-
-**Severity:** Cleanup
-**Area:** core-ir
-
-**Files:** `ryo-core/src/uir.rs` (`func_bodies` :445)
-**Summary:** `func_bodies` lists only top-level statement refs; given an arbitrary `InstRef` you cannot tell which function owns it without walking every body. Any pass wanting per-function slices of the shared arena (diagnostics, per-function codegen, future incremental sema) re-derives this by traversal.
-**Resolution:** Add a computed inst→body index map (built lazily or at `finish()`), or move to per-function UIR arenas mirroring TIR when Phase 5 lands.
 
 ---
 
@@ -695,11 +684,13 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 **Severity:** Correctness / Hygiene
 **Area:** sema
 
-**Files:** ryo-frontend/src/astgen.rs, ryo-frontend/src/sema/mod.rs, ryo-frontend/benches/frontend.rs
+**Files:** ryo-frontend/src/astgen.rs, ryo-frontend/src/sema/mod.rs, ryo-core/src/uir/body_map.rs, ryo-frontend/benches/frontend.rs
 
 **Summary:** Small semantic benchmarks show a fixed per-compile cost after error-union support, while larger semantic benchmarks are mostly unchanged. Eager Utf8Error layout registration and per-function inference state are candidates, but hardware differences make the exact regression uncertain.
 
 **Resolution:** Compare base and head on the same runner type, then measure lazy Utf8Error registration/layout and inference-state allocation independently. Preserve compiler-known type behavior and add small and large benchmarks so the fixed-cost fix does not penalize error-using programs.
+
+**Update (2026-11-20):** Same-runner base/head repetitions after exact body ownership and centralized semantic resolution show median regressions of roughly 20–25% at 16 functions, 20–30% at 64, and 13–18% on the two snippets; the aggregated 256-function regression remains below 10%. Benchmarking the ownership-map commit in isolation reproduced most of the large-input delta, with later resolution work adding a smaller snippet cost. Preserve the exact ownership and nonrecursive scheduling contracts. Keep optimization work here, and use CodSpeed as the final compile-time gate rather than weakening validation to hide the cost.
 
 ---
 
@@ -820,30 +811,11 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **State machine:** The compilation context owns identity allocation. Separate signature resolution from body resolution so recursive function signatures do not require completed bodies. Each resolution progresses through Unresolved -> Resolving -> Resolved or Failed. Publish only complete results. Guard reentrant resolution with dependency-kind checks and cycle diagnostics. Failed resolution returns an error result without publishing an executable body. Reject cross-context handles and invalidate dependent analysis when a body changes.
 
-**Migration:** Architectural priority 1. Coordinate source ownership with I-288 and semantic resolution with I-285. Establish identities before the Flow redesign in I-286. Then separate ownership passes in I-287 and physical lowering in I-293. Complete execution contexts in I-290 before task integration. Keep existing crate boundaries during this migration.
+**Migration:** Architectural priority 1. Coordinate source ownership with I-288 and Sema-owned centralized semantic resolution. Establish identities before the Flow redesign in I-286. Then separate ownership passes in I-287 and physical lowering in I-293. Complete execution contexts in I-290 before task integration. Keep existing crate boundaries during this migration.
 
 **Validation:** Test shadowed bindings, duplicate spellings in separate declaration environments, recursive signatures, failed dependencies, reentrant resolution, and cross-context rejection. Preserve current diagnostics and execution behavior. Future generic instantiation must distinguish argument sets without renaming source identifiers.
 
 **Gate:** This proposal changes compiler identity and ownership of compiler data. It does not authorize new module syntax, generic syntax, or language semantics.
-
----
-
-### I-285 — Make UIR unresolved and consolidate semantic resolution in Sema
-
-**Severity:** Correctness / Hygiene
-**Area:** sema
-
-**Files:** ryo-frontend/src/astgen.rs:97,471,829; ryo-core/src/uir.rs:389; ryo-frontend/src/sema/mod.rs:354
-
-**Summary:** AST lowering resolves annotation names, defines nominal layouts, checks cycles, and rejects view fields before UIR reaches sema. UIR parameters and returns already contain concrete TypeIds. Generic parameters, imported declarations, and delayed layout would require AST lowering to acquire semantic environments already owned by sema.
-
-**Resolution:** Keep AST lowering structural. Preserve unresolved type-expression and declaration references in UIR, including parameter and return annotations. Move annotation resolution, nominal definition, dependency checking, and error-union type resolution into Sema. Sema owns resolution, typing, inference, and future instantiation. Publish target-independent TIR with resolved identities and concrete executable types. Delegate target layout to I-293. Move the final missing-return reachability check to Flow while retaining divergence queries needed for expression typing.
-
-**State machine:** Use the declaration states from I-284. Resolve signatures before dependent bodies where recursion permits. Finalize inferred error unions before publishing executable TIR. Failed definitions and unresolved placeholders can remain available for diagnostic inspection, but cannot enter executable Flow. Discard provisional body results on failure and retain diagnostics. Use an explicit dependency worklist so nested requests do not require recursive body analysis.
-
-**Dependencies:** Coordinate with I-284 and I-293. During migration, keep existing layout computation behind the semantic resolver until the target layout boundary is ready. Address per-body UIR ownership and map sizing through I-109.
-
-**Validation:** Compare UIR, TIR, diagnostics, and execution before and after migration. Cover forward references, legal recursion, invalid type cycles, inferred error dependencies, failed annotations, recovery, and missing returns. Preserve accepted programs and current ownership restrictions.
 
 ---
 
@@ -860,7 +832,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **State machine:** A mutable builder produces an unverified body. Verification checks operand availability, types, place projections, edge arguments, and exactly one terminator per block. Publish an immutable verified body only on success. A transformation creates a new body version, invalidates affected analyses, and must pass verification before publication. A failed transformation leaves the previous body usable. Synthetic return and loop-exit edges must carry complete execution effects.
 
-**Dependencies:** Architectural priority 2, after resolved identities in I-284 and coordinated with I-285. Coordinate ownership consumers with I-287. Complete the execution contract before general CFG rewrites or the inlining work in I-217 depend on it.
+**Dependencies:** Architectural priority 2, after resolved identities in I-284 and coordinated with Sema-owned centralized semantic resolution. Coordinate ownership consumers with I-287. Complete the execution contract before general CFG rewrites or the inlining work in I-217 depend on it.
 
 **Validation:** Test equivalent execution after block renumbering, edge splitting, and supported CFG simplification. Cover nested loops, short-circuit expressions, match joins, early returns, try propagation, break, and continue. Reject unavailable operands and incompatible join arguments. No executable branch or storage scope may depend on source-region visitation order.
 
@@ -970,7 +942,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Contract tests:** Exercise failed publication, stale artifact versions, wrong target contexts, unavailable operands, incompatible edge arguments, and incomplete cleanup. Add transformation tests for block renumbering and edge splitting. Cover nested loops, early returns, error propagation, break, continue, projections, and replacement. Test tiny inputs and scaling inputs on the same runner type to detect fixed setup and growth costs.
 
-**Dependencies:** Acceptance coverage for I-284 through I-290 and I-293. Add tests alongside each migrated boundary rather than waiting for the complete architecture. Test-harness changes do not alter compiler execution states.
+**Dependencies:** Acceptance coverage for declaration and source identities, Sema-owned resolution, self-contained Flow, separated ownership and cleanup, physical ABI lowering, and execution/task contexts. Add tests alongside each migrated boundary rather than waiting for the complete architecture. Test-harness changes do not alter compiler execution states.
 
 ---
 
@@ -987,7 +959,7 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **State machine:** Semantic types resolve independently of target layout. Layout requests progress through Uncomputed -> Computing -> Complete or Failed within one target context. Guard recursive layout requests and publish no partial layouts. ABI preparation accepts only concrete types and verified Flow with complete cleanup. Publish immutable physical bodies tagged with the target, layout context, and source body version. Reject reuse after those inputs change. Failed lowering leaves the semantic body available for diagnostics or another target.
 
-**Dependencies:** Architectural priority 4. Coordinate semantic type ownership with I-285, executable Flow with I-286, cleanup with I-287, and runtime operations with I-289. Preserve and extend the shared user-function ABI logic. I-076 remains the concrete fat-layout compatibility check, and I-237 owns approval of language-visible FFI contracts.
+**Dependencies:** Architectural priority 4. Coordinate semantic type ownership with Sema-owned centralized resolution, executable Flow with I-286, cleanup with I-287, and runtime operations with I-289. Preserve and extend the shared user-function ABI logic. I-076 remains the concrete fat-layout compatibility check, and I-237 owns approval of language-visible FFI contracts.
 
 **Validation:** Test sizes, alignment, offsets, argument passing, and return mechanisms against runtime storage on supported targets. Cover nested aggregates, every error-union alternative, borrowed and moved arguments, inout writeback, and hidden return pointers. Reject mismatched target contexts. Compare JIT and AOT execution and snapshot physical lowering independently of Cranelift emission.
 
