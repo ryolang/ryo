@@ -105,13 +105,15 @@ impl FlowBuilder<'_> {
             self.emit_stmt(stmt);
         }
 
-        // Void functions (and `main`) fall off the end; sema's E0036
-        // guarantees non-void bodies end in an explicit return.
-        if !self.terminated(self.cur) {
-            self.set_term(self.cur, Terminator::ReturnVoid, None);
-        }
+        let implicit_fallthrough = if self.terminated(self.cur) {
+            None
+        } else {
+            let block = self.cur;
+            self.set_term(block, Terminator::ReturnVoid, None);
+            Some(block)
+        };
 
-        self.finish(entry)
+        self.finish(entry, implicit_fallthrough)
     }
 
     // ---------- block plumbing ----------
@@ -1222,7 +1224,7 @@ impl FlowBuilder<'_> {
             .collect()
     }
 
-    fn finish(mut self, entry: BlockId) -> Flow {
+    fn finish(mut self, entry: BlockId, implicit_fallthrough: Option<BlockId>) -> Flow {
         // Computed before the struct is consumed by moves below.
         let branch_if = self.branch_if_map();
         // Single-block bodies (no control flow — the common case) need
@@ -1240,6 +1242,7 @@ impl FlowBuilder<'_> {
                 content_stamp: 0,
                 layout_context: self.pool.identity(),
                 entry,
+                implicit_fallthrough,
                 blocks: self.blocks,
                 steps: self.steps,
                 terms: self
@@ -1363,6 +1366,7 @@ impl FlowBuilder<'_> {
             content_stamp: 0,
             layout_context: self.pool.identity(),
             entry,
+            implicit_fallthrough,
             blocks: self.blocks,
             steps: self.steps,
             terms: self

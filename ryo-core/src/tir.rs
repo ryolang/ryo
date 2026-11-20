@@ -1408,9 +1408,7 @@ impl Tir {
 
     /// Return `true` iff every execution path through `stmts` returns
     /// or diverges — i.e. control can never reach past the end of the
-    /// block. Backs sema's return-flow analysis: a non-void function
-    /// whose body block does not definitely return is rejected with
-    /// `DiagCode::MissingReturn`.
+    /// block. Expression typing uses this to classify diverging bodies.
     ///
     /// A block definitely returns when ANY of its statements does —
     /// everything after that point is unreachable.
@@ -1419,17 +1417,6 @@ impl Tir {
             &self.instructions,
             &self.extra,
             stmts.iter().copied(),
-            pool,
-            false,
-        )
-    }
-
-    /// Return whether the function body returns on every execution path.
-    pub fn body_definitely_returns(&self, pool: &InternPool) -> bool {
-        terminates::block_terminates(
-            &self.instructions,
-            &self.extra,
-            self.body_stmts(),
             pool,
             false,
         )

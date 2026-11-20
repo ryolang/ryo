@@ -896,28 +896,7 @@ fn analyze_function(
     }
     scope.drain_dead_stores(sema);
 
-    let tir = fcx.builder.finish(&stmt_refs);
-
-    // Return-flow analysis: a non-void function must return (or
-    // diverge via `never`) on every path through its body. Error-
-    // typed returns already produced their diagnostic — skip to
-    // avoid a cascade.
-    if fcx.return_type != sema.pool.void()
-        && !sema.pool.is_error(fcx.return_type)
-        && !tir.body_definitely_returns(sema.pool)
-    {
-        sema.sink.emit(Diag::error(
-            body.span,
-            DiagCode::MissingReturn,
-            format!(
-                "missing return: function '{}' expects '{}' but can reach the end of its body without returning",
-                sema.pool.str(body.name),
-                sema.pool.display(fcx.return_type),
-            ),
-        ));
-    }
-
-    tir
+    fcx.builder.finish(&stmt_refs)
 }
 
 /// Per-function emission state. Lives only for the duration of one

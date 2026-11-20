@@ -131,7 +131,24 @@ impl BuiltProgram {
         pool: &InternPool,
         sink: &mut DiagSink,
     ) -> Result<CleanupProgram, crate::ownership::OwnershipError> {
-        let cleanup = self.analysis_ready(pool)?.analyze(sink)?;
+        let ready = self.analysis_ready(pool)?;
+        for (tir, flow) in ready.tirs.iter().zip(ready.flows) {
+            if tir.return_type != pool.void()
+                && !pool.is_error(tir.return_type)
+                && flow.has_implicit_fallthrough()
+            {
+                sink.emit(ryo_core::diag::Diag::error(
+                    tir.span,
+                    ryo_core::diag::DiagCode::MissingReturn,
+                    format!(
+                        "missing return: function '{}' expects '{}' but can reach the end of its body without returning",
+                        pool.str(tir.name),
+                        pool.display(tir.return_type),
+                    ),
+                ));
+            }
+        }
+        let cleanup = ready.analyze(sink)?;
         Ok(CleanupProgram {
             built: self,
             cleanup,
@@ -265,6 +282,7 @@ mod tests {
     use ryo_core::compilation::CompilationContext;
     use ryo_core::declaration::DeclId;
     use ryo_core::extra::ExtraRange;
+    use ryo_core::flow::Terminator;
     use ryo_core::tir::{TirBuilder, TirTag};
     use ryo_core::uir::{FuncBody, Uir};
 
@@ -393,6 +411,157 @@ mod tests {
         BuiltProgram::build(vec![tir], pool)
             .analyze(pool, &mut DiagSink::new())
             .expect("compatible artifacts")
+    }
+
+    fn analyze_diags(tir: Tir, pool: &InternPool) -> Vec<ryo_core::diag::Diag> {
+        let mut sink = DiagSink::new();
+        BuiltProgram::build(vec![tir], pool)
+            .analyze(pool, &mut sink)
+            .expect("compatible artifacts");
+        sink.into_diags()
+    }
+
+    #[test]
+    fn nonvoid_fallthrough_reports_missing_return_at_flow_boundary() {
+        let mut pool = InternPool::new();
+        let span = ryo_core::span::Span::EMPTY;
+        let name = pool.intern_str("f");
+        let tir = TirBuilder::new(name, vec![], pool.int(), span)
+            .with_layout_context(&pool)
+            .finish(&[]);
+
+        let mut sink = DiagSink::new();
+        let analyzed = BuiltProgram::build(vec![tir], &pool)
+            .analyze(&pool, &mut sink)
+            .expect("compatible artifacts");
+        let diags = sink.into_diags();
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, ryo_core::diag::DiagCode::MissingReturn);
+        assert_eq!(diags[0].span, span);
+        assert_eq!(
+            diags[0].message,
+            "missing return: function 'f' expects 'int' but can reach the end of its body without returning"
+        );
+        let error = analyzed
+            .require_backend_transition(&CompilationContext::new(), &pool)
+            .expect_err("the new diagnostic must block backend publication");
+        assert!(error.contains("source without errors"), "{error}");
+
+        let name = pool.intern_str("explicit");
+        let mut builder =
+            TirBuilder::new(name, vec![], pool.int(), span).with_layout_context(&pool);
+        let one = builder.int_const(1, pool.int(), span);
+        let ret = builder.unary(TirTag::Return, pool.void(), one, span);
+        let explicit = builder.finish(&[ret]);
+        assert!(
+            !analyze_diags(explicit, &pool)
+                .iter()
+                .any(|diag| { diag.code == ryo_core::diag::DiagCode::MissingReturn })
+        );
+
+        let name = pool.intern_str("diverging");
+        let callee = pool.intern_str("die");
+        let mut builder =
+            TirBuilder::new(name, vec![], pool.int(), span).with_layout_context(&pool);
+        let call = builder.call(DeclId::NONE, callee, &[], &[], pool.never(), span);
+        let statement = builder.unary(TirTag::ExprStmt, pool.void(), call, span);
+        let diverging = builder.finish(&[statement]);
+        assert!(
+            !analyze_diags(diverging, &pool)
+                .iter()
+                .any(|diag| { diag.code == ryo_core::diag::DiagCode::MissingReturn })
+        );
+    }
+
+    #[test]
+    fn flow_fallthrough_ignores_divergence_loops_and_recovery() {
+        let mut pool = InternPool::new();
+        let span = ryo_core::span::Span::EMPTY;
+        let int = pool.int();
+        let void = pool.void();
+        let never = pool.never();
+        let bool_ty = pool.bool_();
+        let mut fixtures = Vec::new();
+
+        let name = pool.intern_str("diverging");
+        let callee = pool.intern_str("die");
+        let mut builder = TirBuilder::new(name, vec![], int, span).with_layout_context(&pool);
+        let call = builder.call(DeclId::NONE, callee, &[], &[], never, span);
+        let statement = builder.unary(TirTag::ExprStmt, void, call, span);
+        fixtures.push(("diverging call", builder.finish(&[statement]), false));
+
+        let name = pool.intern_str("loop_backedge");
+        let mut builder = TirBuilder::new(name, vec![], int, span).with_layout_context(&pool);
+        let cond = builder.bool_const(true, bool_ty, span);
+        let loop_ = builder.while_loop(cond, &[], void, span);
+        let zero = builder.int_const(0, int, span);
+        let ret = builder.unary(TirTag::Return, void, zero, span);
+        fixtures.push(("loop backedge", builder.finish(&[loop_, ret]), false));
+
+        let name = pool.intern_str("break_continue");
+        let mut builder = TirBuilder::new(name, vec![], int, span).with_layout_context(&pool);
+        let loop_cond = builder.bool_const(true, bool_ty, span);
+        let branch_cond = builder.bool_const(true, bool_ty, span);
+        let break_ = builder.break_stmt(never, span);
+        let continue_ = builder.continue_stmt(never, span);
+        let if_ = builder.if_stmt(branch_cond, &[break_], &[], Some(&[continue_]), void, span);
+        let loop_ = builder.while_loop(loop_cond, &[if_], void, span);
+        let zero = builder.int_const(0, int, span);
+        let ret = builder.unary(TirTag::Return, void, zero, span);
+        fixtures.push(("break/continue", builder.finish(&[loop_, ret]), false));
+
+        let name = pool.intern_str("unreachable");
+        let mut builder = TirBuilder::new(name, vec![], int, span).with_layout_context(&pool);
+        let unreachable = builder.unreachable(never, span);
+        fixtures.push((
+            "explicit Unreachable",
+            builder.finish(&[unreachable]),
+            false,
+        ));
+
+        let name = pool.intern_str("void");
+        let builder = TirBuilder::new(name, vec![], void, span).with_layout_context(&pool);
+        fixtures.push(("void return", builder.finish(&[]), true));
+
+        let name = pool.intern_str("recovery");
+        let error = pool.error_type();
+        let builder = TirBuilder::new(name, vec![], error, span).with_layout_context(&pool);
+        fixtures.push(("error return recovery", builder.finish(&[]), true));
+
+        for (case, tir, implicit_fallthrough) in fixtures {
+            let flow = Flow::build(&tir, &pool);
+            assert_eq!(
+                flow.has_implicit_fallthrough(),
+                implicit_fallthrough,
+                "{case}"
+            );
+            match case {
+                "loop backedge" => assert!(
+                    flow.forward_order()
+                        .any(|block| matches!(flow.term(block), Terminator::Backedge { .. })),
+                    "fixture must contain a backedge"
+                ),
+                "break/continue" => {
+                    assert!(
+                        flow.forward_order()
+                            .any(|block| { matches!(flow.term(block), Terminator::Break { .. }) })
+                    );
+                    assert!(
+                        flow.forward_order().any(|block| {
+                            matches!(flow.term(block), Terminator::Continue { .. })
+                        })
+                    );
+                }
+                _ => {}
+            }
+            let diags = analyze_diags(tir, &pool);
+            assert!(
+                !diags
+                    .iter()
+                    .any(|diag| diag.code == ryo_core::diag::DiagCode::MissingReturn),
+                "{case}: {diags:?}"
+            );
+        }
     }
 
     #[test]
