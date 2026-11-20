@@ -310,7 +310,7 @@ fn print_enum_rewrites_to_debug_repr() {
 #[test]
 fn view_typed_payload_field_rejected() {
     // (f) Rule 6: enum payload fields must be owned values, exactly
-    // like struct fields — register_enums emits ViewFieldType.
+    // like struct fields — nominal resolution emits ViewFieldType.
     let cases = [
         "enum E:\n\tV(v: strview)\n",
         "enum E:\n\tV(v: bytesview)\n",
@@ -698,4 +698,21 @@ fn mixed_variant_fields_analyze_recovery_arguments_once() {
         "{diags:?}"
     );
     assert_eq!(diags.len(), 2, "{diags:?}");
+}
+
+#[test]
+fn sema_defines_forward_and_cross_kind_nominals() {
+    let src = "struct Holder:\n\tvalue: LaterEnum\n\nenum LaterEnum:\n\tEmpty\n\nerror LaterError(holder: Holder, encoding: Utf8Error)\n\nfn recurse(n: int) -> LaterEnum:\n\tif n == 0:\n\t\treturn LaterEnum.Empty\n\treturn recurse(n - 1)\n\nfn main():\n\tvalue = LaterError(holder=Holder{value=recurse(1)}, encoding=Utf8Error(\"bad\"))\n";
+    let (tirs, pool) = run(src).expect("forward nominal shells and explicit recursion resolve");
+    let recurse = tir_named(&tirs, &pool, "recurse");
+    assert_eq!(pool.display(recurse.return_type).to_string(), "LaterEnum");
+    let main = tir_named(&tirs, &pool, "main");
+    let value = main.var_decl_view(stmt_at(main, 0)).initializer;
+    assert_eq!(pool.display(main.inst(value).ty).to_string(), "LaterError");
+    assert!(
+        pool.enum_view(main.inst(value).ty)
+            .variants()
+            .next()
+            .is_some()
+    );
 }

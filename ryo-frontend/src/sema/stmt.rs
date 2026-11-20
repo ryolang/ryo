@@ -1254,7 +1254,7 @@ fn analyze_destructure(
     }
     if matches!(kind, ryo_core::types::TypeKind::Struct) && !sema.pool.is_defined_struct(value_ty) {
         // Declared but never defined (cycle / unknown field type) —
-        // astgen already diagnosed it. Recover without touching
+        // nominal resolution already diagnosed it. Recover without touching
         // `struct_view`, which panics on undefined structs. (Anon
         // structs are interned whole; they are always defined.)
         return fail_destructure_registered(sema, fcx, scope, &view.plan, span);

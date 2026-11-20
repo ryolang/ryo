@@ -9,29 +9,19 @@ pub(super) fn lower_variant_construct(
     b: &mut UirBuilder,
     ast: &ast::Ast,
     c: ast::VariantConstruct,
-    types: &TypeResolver,
-    defined_enums: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     span: Span,
     depth: u32,
 ) -> InstRef {
-    let mut step = prepare_variant_construct(b, ast, c, types, defined_enums, pool, sink, span);
+    let mut step = prepare_variant_construct(b, ast, c, names, pool, sink, span);
     loop {
         match step {
             VariantStep::Complete(result) => return result,
             VariantStep::Child(state, arg) => {
-                let value = super::expr::gen_expr_d(
-                    b,
-                    ast,
-                    arg,
-                    types,
-                    defined_enums,
-                    pool,
-                    sink,
-                    depth + 1,
-                );
-                step = resume_variant_construct(*state, value, b, ast, types, pool, sink);
+                let value = super::expr::gen_expr_d(b, ast, arg, names, pool, sink, depth + 1);
+                step = resume_variant_construct(*state, value, b, ast, names, pool, sink);
             }
         }
     }
@@ -55,8 +45,7 @@ pub(super) fn prepare_variant_construct(
     b: &mut UirBuilder,
     ast: &ast::Ast,
     c: ast::VariantConstruct,
-    _types: &TypeResolver,
-    _defined_enums: &HashSet<TypeId>,
+    _types: &Names,
     _pool: &mut InternPool,
     _sink: &mut DiagSink,
     span: Span,
@@ -81,7 +70,7 @@ pub(super) fn resume_variant_construct(
     value: InstRef,
     b: &mut UirBuilder,
     ast: &ast::Ast,
-    _types: &TypeResolver,
+    _types: &Names,
     _pool: &mut InternPool,
     _sink: &mut DiagSink,
 ) -> VariantStep {

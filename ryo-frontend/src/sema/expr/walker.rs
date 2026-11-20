@@ -790,11 +790,7 @@ fn field_access_has_type_recovery(sema: &Sema<'_>, scope: &Scope, node: InstRef)
     scope.lookup(name).is_none()
         && (sema.enum_types.contains_key(&name)
             || sema.struct_types.contains_key(&name)
-            || sema
-                .uir
-                .error_families
-                .iter()
-                .any(|family| family.name == name))
+            || sema.error_families.contains_key(&name))
 }
 
 fn composite_has_leaf_recovery(sema: &Sema<'_>, scope: &Scope, node: InstRef) -> bool {

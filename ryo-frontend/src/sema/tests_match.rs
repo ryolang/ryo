@@ -582,13 +582,15 @@ pub(super) fn run_with_error_set_param(input: &str) -> (Vec<Tir>, Vec<Diag>, Int
         is_view: false,
     };
     let member_names = uir.error_decls.iter().map(|decl| decl.name).collect();
-    let members = uir.error_decls.iter().map(|decl| decl.ty).collect();
+    let members = uir.error_decls.iter().map(|decl| decl.name).collect();
     uir.error_families.push(ryo_core::uir::UirErrorFamilyDecl {
         name,
+        name_span: Span::EMPTY,
         member_names,
         members,
         visibility: ryo_core::ast::DeclVisibility::Module,
         span: Span::EMPTY,
+        source_index: u32::MAX,
     });
 
     let mut context = CompilationContext::new();
@@ -763,7 +765,14 @@ fn analyze_qualified_union_catch(member: &str) -> (Vec<Tir>, Vec<Diag>, InternPo
     let main = pool.intern_str("main");
     let outcome = pool.intern_str("outcome");
     let mut builder = ryo_core::uir::UirBuilder::new();
-    for decl in declarations.error_decls {
+    for mut decl in declarations.error_decls.iter().cloned() {
+        for field in &mut decl.payload.fields {
+            let old_expr = declarations.type_expr(field.type_expr);
+            let ryo_core::uir::UirTypeExprKind::Name { name, is_view } = old_expr.kind else {
+                panic!("this synthetic fixture uses only named error payload types");
+            };
+            field.type_expr = builder.type_name(name, is_view, old_expr.span);
+        }
         builder.add_error_decl(decl);
     }
     for family in declarations.error_families {

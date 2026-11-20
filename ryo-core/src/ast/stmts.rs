@@ -158,7 +158,7 @@ pub struct EnumAttrs {
 /// An `enum` declaration (M11). All fields are `Copy` handles; the
 /// variant list lives in the `enum_variants` side arena, in
 /// declaration order. An empty body parses (the empty-enum diagnostic
-/// is astgen's, not the parser's).
+/// is Sema's, not the parser's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnumDef {
     pub name: Ident,

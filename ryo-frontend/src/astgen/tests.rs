@@ -10,6 +10,7 @@ use crate::grammar::{ParseState, program_parser};
 use crate::lexer::lex;
 use chumsky::Parser;
 use chumsky::input::Input;
+use ryo_core::types::VariantKind;
 use ryo_core::uir::{InstData, UirTypeExprKind};
 
 pub(super) fn parse_and_lower(input: &str) -> Result<(Uir, InternPool), Vec<Diag>> {
@@ -432,15 +433,79 @@ fn bytes_literal_lowers_to_uir() {
 }
 
 #[test]
-fn struct_decl_registered_with_resolved_fields() {
+fn astgen_preserves_unresolved_nominal_declarations() {
+    let src = "#[derive(Eq)]\n#[repr(C)]\nstruct Point:\n\tnext: Later\n\tprojection: strview\n\n#[derive(Eq)]\nenum Later:\n\tWrap(value: Missing)\n\nerror Failure(detail: Missing)\n\npub errors IoError:\n\tEof\n\tReadFailed(Missing)\n";
+    let (uir, pool) = parse_and_lower(src).expect("AstGen preserves semantic failures for Sema");
+
+    let structure = &uir.struct_decls[0];
+    assert!(structure.attrs.derive_eq);
+    assert!(structure.attrs.repr_c);
+    let next = uir.type_expr(structure.fields[0].type_expr);
+    assert!(matches!(next.kind, UirTypeExprKind::Name { name, .. } if pool.str(name) == "Later"));
+    let projection = uir.type_expr(structure.fields[1].type_expr);
+    assert!(
+        matches!(projection.kind, UirTypeExprKind::Name { name, .. } if pool.str(name) == "strview")
+    );
+
+    let enumeration = &uir.enum_decls[0];
+    assert!(enumeration.attrs.derive_eq);
+    let payload = uir.type_expr(enumeration.variants[0].fields[0].type_expr);
+    assert!(
+        matches!(payload.kind, UirTypeExprKind::Name { name, .. } if pool.str(name) == "Missing")
+    );
+
+    let error = &uir.error_decls[0];
+    let detail = uir.type_expr(error.payload.fields[0].type_expr);
+    assert!(
+        matches!(detail.kind, UirTypeExprKind::Name { name, .. } if pool.str(name) == "Missing")
+    );
+
+    let family = &uir.error_families[0];
+    assert_eq!(family.visibility, ast::DeclVisibility::Public);
+    assert_eq!(
+        family
+            .members
+            .iter()
+            .map(|&name| pool.str(name))
+            .collect::<Vec<_>>(),
+        ["IoError.Eof", "IoError.ReadFailed"]
+    );
+    assert_eq!(
+        family
+            .member_names
+            .iter()
+            .map(|&name| pool.str(name))
+            .collect::<Vec<_>>(),
+        ["Eof", "ReadFailed"]
+    );
+
+    let (uir, pool) = parse_and_lower("struct Node:\n\tnext: Node\n\nstruct Node:\n\tvalue: int\n")
+        .expect("cycles and duplicate declarations remain unresolved in UIR");
+    assert_eq!(uir.struct_decls.len(), 2);
+    assert!(
+        uir.struct_decls
+            .iter()
+            .all(|decl| pool.str(decl.name) == "Node")
+    );
+    assert!(matches!(
+        uir.type_expr(uir.struct_decls[0].fields[0].type_expr).kind,
+        UirTypeExprKind::Name { name, .. } if pool.str(name) == "Node"
+    ));
+}
+
+#[test]
+fn struct_decl_preserves_unresolved_fields() {
     let src = "struct Point:\n\tx: float\n\ty: float\n\nfn main():\n\tp = Point{x=1.0, y=2.0}\n";
     let (uir, pool) = parse_and_lower(src).unwrap();
-    assert_eq!(uir.struct_decls.len(), 1);
     let decl = &uir.struct_decls[0];
     assert_eq!(pool.str(decl.name), "Point");
     assert_eq!(decl.fields.len(), 2);
-    assert_eq!(decl.fields[0].ty, pool.float());
-    assert!(pool.is_defined_struct(decl.ty));
+    for field in &decl.fields {
+        assert!(matches!(
+            uir.type_expr(field.type_expr).kind,
+            UirTypeExprKind::Name { name, .. } if pool.str(name) == "float"
+        ));
+    }
 }
 
 #[test]
@@ -460,102 +525,101 @@ fn struct_literal_and_field_access_lower() {
 }
 
 #[test]
-fn struct_value_cycle_is_diagnosed() {
-    let err = parse_and_lower("struct Node:\n\tnext: Node\n").unwrap_err();
-    assert!(err.iter().any(|d| d.code == DiagCode::InfiniteSize));
+fn struct_value_cycle_is_preserved_for_sema() {
+    let (uir, pool) =
+        parse_and_lower("struct Node:\n\tnext: Node\n").expect("AstGen does not check type cycles");
+    assert!(matches!(
+        uir.type_expr(uir.struct_decls[0].fields[0].type_expr).kind,
+        UirTypeExprKind::Name { name, .. } if pool.str(name) == "Node"
+    ));
 }
 
 #[test]
-fn mutual_struct_value_cycle_is_diagnosed() {
-    let err = parse_and_lower("struct A:\n\tb: B\n\nstruct B:\n\ta: A\n").unwrap_err();
-    assert!(err.iter().any(|d| d.code == DiagCode::InfiniteSize));
+fn mutual_struct_value_cycle_is_preserved_for_sema() {
+    let (uir, _pool) = parse_and_lower("struct A:\n\tb: B\n\nstruct B:\n\ta: A\n")
+        .expect("AstGen does not check type cycles");
+    assert_eq!(uir.struct_decls.len(), 2);
 }
 
 #[test]
-fn value_cycle_through_anon_field_type_is_diagnosed() {
-    // A self-reference hidden inside an anonymous field type is
-    // still by-value and still infinite-size: `data: {next: Node,
-    // v: int}` must trip the same E0005 as a plain `next: Node`.
-    let err = parse_and_lower("struct Node:\n\tdata: {next: Node, v: int}\n").unwrap_err();
-    assert!(err.iter().any(|d| d.code == DiagCode::InfiniteSize));
+fn value_cycle_through_anon_field_type_is_preserved_for_sema() {
+    let (uir, _pool) = parse_and_lower("struct Node:\n\tdata: {next: Node, v: int}\n")
+        .expect("AstGen does not inspect nominal references");
+    let UirTypeExprKind::Anon { fields } =
+        uir.type_expr(uir.struct_decls[0].fields[0].type_expr).kind
+    else {
+        panic!("anonymous field type must be preserved");
+    };
+    assert_eq!(uir.type_field_list(fields).len(), 2);
 }
 
 #[test]
-fn anon_field_type_in_struct_decl_resolves() {
-    // Struct fields take full type expressions; the declaration's
-    // resolved field type is the structural anonymous struct.
+fn anon_field_type_in_struct_decl_is_preserved() {
     let src = "struct Line:\n\tstart: (int, int)\n\nfn main():\n\tl = Line{start=(0, 0)}\n";
-    let (uir, pool) = parse_and_lower(src).unwrap();
+    let (uir, _pool) = parse_and_lower(src).unwrap();
     let decl = &uir.struct_decls[0];
-    assert_eq!(decl.fields.len(), 1);
-    assert!(
-        matches!(pool.kind(decl.fields[0].ty), TypeKind::AnonStruct),
-        "field type must be the anonymous struct, got {:?}",
-        pool.kind(decl.fields[0].ty)
-    );
+    assert!(matches!(
+        uir.type_expr(decl.fields[0].type_expr).kind,
+        UirTypeExprKind::Positional(_)
+    ));
 }
 
 #[test]
-fn forward_struct_reference_resolves() {
-    // Field types may name structs declared later in the file:
-    // the pre-scan declares every struct before any is defined.
+fn forward_struct_reference_is_preserved() {
     let src = "struct Line:\n\tstart: Point\n\nstruct Point:\n\tx: float\n";
     let (uir, pool) = parse_and_lower(src).unwrap();
     assert_eq!(uir.struct_decls.len(), 2);
-    let line = &uir.struct_decls[0];
-    let point = &uir.struct_decls[1];
-    assert_eq!(line.fields[0].ty, point.ty);
-    assert!(pool.is_defined_struct(line.ty));
-    assert!(pool.is_defined_struct(point.ty));
+    assert!(matches!(
+        uir.type_expr(uir.struct_decls[0].fields[0].type_expr).kind,
+        UirTypeExprKind::Name { name, .. } if pool.str(name) == "Point"
+    ));
 }
 
 #[test]
-fn utf8_error_struct_field_uses_compiler_known_layout() {
+fn utf8_error_struct_field_is_unresolved() {
     let (uir, pool) = parse_and_lower("struct Holder:\n\tvalue: Utf8Error\n")
-        .expect("compiler-known Utf8Error should be a valid struct field");
-    assert_eq!(
-        pool.display(uir.struct_decls[0].fields[0].ty).to_string(),
-        "Utf8Error"
-    );
+        .expect("compiler-known names remain unresolved in AstGen");
+    assert!(matches!(
+        uir.type_expr(uir.struct_decls[0].fields[0].type_expr).kind,
+        UirTypeExprKind::Name { name, .. } if pool.str(name) == "Utf8Error"
+    ));
 }
 
 #[test]
-fn utf8_error_enum_payload_uses_compiler_known_layout() {
+fn utf8_error_enum_payload_is_unresolved() {
     let (uir, pool) = parse_and_lower("enum Wrapper:\n\tCase(Utf8Error)\n")
-        .expect("compiler-known Utf8Error should be a valid enum payload");
-    let variant = pool
-        .enum_view(uir.enum_decls[0].ty)
-        .variants()
-        .next()
-        .unwrap();
-    assert_eq!(pool.display(variant.fields[0].ty).to_string(), "Utf8Error");
+        .expect("compiler-known names remain unresolved in AstGen");
+    assert!(matches!(
+        uir.type_expr(uir.enum_decls[0].variants[0].fields[0].type_expr).kind,
+        UirTypeExprKind::Name { name, .. } if pool.str(name) == "Utf8Error"
+    ));
 }
 
 #[test]
-fn utf8_error_error_payload_uses_compiler_known_layout() {
+fn utf8_error_error_payload_is_unresolved() {
     let (uir, pool) = parse_and_lower("error Wrapper(Utf8Error)\n")
-        .expect("compiler-known Utf8Error should be a valid error payload");
-    let variant = pool
-        .enum_view(uir.error_decls[0].ty)
-        .variants()
-        .next()
-        .unwrap();
-    assert_eq!(pool.display(variant.fields[0].ty).to_string(), "Utf8Error");
+        .expect("compiler-known names remain unresolved in AstGen");
+    assert!(matches!(
+        uir.type_expr(uir.error_decls[0].payload.fields[0].type_expr).kind,
+        UirTypeExprKind::Name { name, .. } if pool.str(name) == "Utf8Error"
+    ));
 }
 
 #[test]
-fn duplicate_struct_declaration_is_diagnosed() {
-    let err = parse_and_lower("struct P:\n\tx: int\n\nstruct P:\n\ty: int\n").unwrap_err();
-    assert!(err.iter().any(|d| d.code == DiagCode::DuplicateDeclaration));
+fn duplicate_struct_declarations_are_preserved() {
+    let (uir, _pool) = parse_and_lower("struct P:\n\tx: int\n\nstruct P:\n\ty: int\n")
+        .expect("duplicates remain available for Sema diagnostics");
+    assert_eq!(uir.struct_decls.len(), 2);
 }
 
 #[test]
-fn unknown_struct_field_type_is_diagnosed_without_defining() {
-    // An unresolvable field type must not reach
-    // `pool.define_struct` (its layout computation has no
-    // answer for the error type).
-    let err = parse_and_lower("struct Bad:\n\tx: nope\n").unwrap_err();
-    assert!(err.iter().any(|d| d.code == DiagCode::UnknownType));
+fn unknown_struct_field_type_is_preserved_without_defining() {
+    let (uir, pool) = parse_and_lower("struct Bad:\n\tx: nope\n")
+        .expect("unknown names remain unresolved in UIR");
+    assert!(matches!(
+        uir.type_expr(uir.struct_decls[0].fields[0].type_expr).kind,
+        UirTypeExprKind::Name { name, .. } if pool.str(name) == "nope"
+    ));
 }
 
 #[test]
@@ -601,104 +665,94 @@ fn bytes_index_lowers_to_uir() {
 }
 
 #[test]
-fn error_family_members_have_independent_layouts() {
+fn error_family_members_preserve_unresolved_payloads() {
     let src =
         "pub errors IoError:\n\tEof\n\tReadFailed(str)\n\tInvalidUtf8(code: int, message: str)\n";
     let (uir, pool) = parse_and_lower(src).expect("error family should lower");
-
     assert_eq!(uir.error_decls.len(), 3);
-    assert_eq!(uir.error_families.len(), 1);
     let family = &uir.error_families[0];
-    assert_eq!(pool.str(family.name), "IoError");
     assert_eq!(family.visibility, ast::DeclVisibility::Public);
-    let member_types: Vec<_> = uir.error_decls.iter().map(|decl| decl.ty).collect();
-    assert_eq!(family.members, member_types);
-
-    let names: Vec<_> = uir
-        .error_decls
-        .iter()
-        .map(|decl| pool.str(decl.name))
-        .collect();
     assert_eq!(
-        names,
+        family
+            .members
+            .iter()
+            .map(|&name| pool.str(name))
+            .collect::<Vec<_>>(),
         ["IoError.Eof", "IoError.ReadFailed", "IoError.InvalidUtf8"]
     );
-    let distinct: std::collections::HashSet<_> =
-        uir.error_decls.iter().map(|decl| decl.ty).collect();
-    assert_eq!(distinct.len(), 3);
-    for decl in &uir.error_decls {
-        assert_eq!(pool.kind(decl.ty), TypeKind::DeclaredError);
-        assert_eq!(pool.enum_view(decl.ty).len(), 1);
+    assert!(matches!(uir.error_decls[0].payload.kind, VariantKind::Unit));
+    assert!(matches!(
+        uir.error_decls[1].payload.kind,
+        VariantKind::Tuple
+    ));
+    assert!(matches!(
+        uir.error_decls[2].payload.kind,
+        VariantKind::Named
+    ));
+    assert!(matches!(
+        uir.type_expr(uir.error_decls[1].payload.fields[0].type_expr).kind,
+        UirTypeExprKind::Name { name, .. } if pool.str(name) == "str"
+    ));
+    for field in &uir.error_decls[2].payload.fields {
+        assert!(matches!(
+            uir.type_expr(field.type_expr).kind,
+            UirTypeExprKind::Name { name, .. } if matches!(pool.str(name), "int" | "str")
+        ));
     }
-
-    let eof = pool.enum_view(uir.error_decls[0].ty);
-    let eof_variant = eof.variants().next().unwrap();
-    assert_eq!(pool.str(eof_variant.name), "IoError.Eof");
-    assert_eq!(eof_variant.kind, VariantKind::Unit);
-    assert!(eof_variant.fields.is_empty());
-
-    let read_failed = pool.enum_view(uir.error_decls[1].ty);
-    let read_variant = read_failed.variants().next().unwrap();
-    assert_eq!(pool.str(read_variant.name), "IoError.ReadFailed");
-    assert_eq!(read_variant.kind, VariantKind::Tuple);
-    assert_eq!(read_variant.fields.len(), 1);
-    assert_eq!(pool.str(read_variant.fields[0].name), "0");
-    assert_eq!(read_variant.fields[0].ty, pool.str_());
-
-    let invalid_utf8 = pool.enum_view(uir.error_decls[2].ty);
-    let invalid_variant = invalid_utf8.variants().next().unwrap();
-    assert_eq!(pool.str(invalid_variant.name), "IoError.InvalidUtf8");
-    assert_eq!(invalid_variant.kind, VariantKind::Named);
-    assert_eq!(invalid_variant.fields.len(), 2);
-    assert_eq!(pool.str(invalid_variant.fields[0].name), "code");
-    assert_eq!(invalid_variant.fields[0].ty, pool.int());
-    assert_eq!(pool.str(invalid_variant.fields[1].name), "message");
-    assert_eq!(invalid_variant.fields[1].ty, pool.str_());
 }
 
 #[test]
-fn error_family_duplicate_member_is_rejected() {
-    let err = parse_and_lower("errors IoError:\n\tEof\n\tEof\n").unwrap_err();
-    assert!(
-        err.iter()
-            .any(|diag| diag.code == DiagCode::DuplicateVariant),
-        "unexpected diagnostics: {err:?}"
+fn error_family_duplicate_members_are_preserved() {
+    let (uir, pool) = parse_and_lower("errors IoError:\n\tEof\n\tEof\n")
+        .expect("duplicates remain available for Sema");
+    assert_eq!(uir.error_decls.len(), 2);
+    assert_eq!(
+        uir.error_families[0]
+            .member_names
+            .iter()
+            .map(|&name| pool.str(name))
+            .collect::<Vec<_>>(),
+        ["Eof", "Eof"]
     );
 }
 
 #[test]
-fn error_family_alias_value_cycle_is_diagnosed() {
-    let err = parse_and_lower("errors IoError:\n\tEof\n\tBad(IoError)\n").unwrap_err();
-    assert!(
-        err.iter().any(|diag| diag.code == DiagCode::InfiniteSize),
-        "unexpected diagnostics: {err:?}"
-    );
+fn error_family_alias_value_cycle_is_preserved() {
+    let (uir, pool) = parse_and_lower("errors IoError:\n\tEof\n\tBad(IoError)\n")
+        .expect("cycles remain available for Sema");
+    assert!(matches!(
+        uir.type_expr(uir.error_decls[1].payload.fields[0].type_expr).kind,
+        UirTypeExprKind::Name { name, .. } if pool.str(name) == "IoError"
+    ));
 }
 
 #[test]
-fn error_family_nominal_type_collision_is_rejected() {
+fn error_family_nominal_type_collisions_are_preserved() {
     for src in [
         "errors IoError:\n\tEof\nstruct IoError:\n\tvalue: int\n",
         "error IoError\nerrors IoError:\n\tEof\n",
     ] {
-        let err = parse_and_lower(src).unwrap_err();
-        assert!(
-            err.iter()
-                .any(|diag| diag.code == DiagCode::DuplicateDeclaration),
-            "unexpected diagnostics: {err:?}"
+        let (uir, _pool) = parse_and_lower(src).expect("collisions remain available for Sema");
+        assert_eq!(uir.error_families.len(), 1);
+        assert_eq!(
+            uir.struct_decls.len()
+                + uir
+                    .error_decls
+                    .iter()
+                    .filter(|decl| decl.family.is_none())
+                    .count(),
+            1
         );
     }
 }
 
 #[test]
-fn error_family_redeclaration_does_not_extend_family() {
-    let err = parse_and_lower("errors IoError:\n\tEof\nerrors IoError:\n\tReadFailed(str)\n")
-        .unwrap_err();
-    assert!(
-        err.iter()
-            .any(|diag| diag.code == DiagCode::DuplicateDeclaration),
-        "unexpected diagnostics: {err:?}"
-    );
+fn error_family_redeclarations_are_preserved() {
+    let (uir, _pool) =
+        parse_and_lower("errors IoError:\n\tEof\nerrors IoError:\n\tReadFailed(str)\n")
+            .expect("redeclarations remain available for Sema");
+    assert_eq!(uir.error_families.len(), 2);
+    assert_eq!(uir.error_decls.len(), 2);
 }
 
 #[test]

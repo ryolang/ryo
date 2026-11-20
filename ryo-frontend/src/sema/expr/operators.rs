@@ -288,7 +288,7 @@ pub(super) fn emit_equality_operator(
         }
         // M11: enum equality is opt-in via `#[derive(Eq)]`, exactly
         // like M9.1 structs — the same EqDeriveRequired gate and
-        // fix-it note. The derive flag is sufficient: astgen's
+        // fix-it note. The derive flag is sufficient: nominal resolution's
         // DeriveFieldNotEq check already rejected any payload field
         // that is not Eq-capable (per variant) before the enum was
         // defined, so a defined enum with the flag compares safely.

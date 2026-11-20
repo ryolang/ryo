@@ -6,7 +6,8 @@
 //!
 //! ## Phase 5 — worklist driver
 //!
-//! Explicit signatures are registered before body analysis. A call-graph
+//! Nominal declarations and layouts resolve before explicit signatures.
+//! Signatures are registered before body analysis. A call-graph
 //! pre-pass rejects recursive components that would require fixed-point
 //! inference, and a deterministic scheduler finalizes inferred callees before
 //! any caller body reads their unions.
@@ -46,11 +47,9 @@ use ryo_core::compilation::CompilationContext;
 use ryo_core::declaration::{DeclId, DeclarationError};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::tir::{ParamMode, Tir, TirBuilder, TirParam, TirRef};
-use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
-use ryo_core::uir::{
-    FuncBody, InstRef, InstTag, Span, TypeExprId, Uir, UirBodyMap, UirTypeExprKind,
-};
-use std::collections::HashMap;
+use ryo_core::types::{InternPool, StringId, TypeId};
+use ryo_core::uir::{FuncBody, InstRef, InstTag, Span, Uir, UirBodyMap};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 mod builtins;
@@ -65,6 +64,7 @@ mod expr;
 pub(crate) use expr::*;
 mod match_;
 pub(crate) use match_::*;
+mod resolution;
 mod scheduler;
 mod stmt;
 pub(crate) use stmt::*;
@@ -384,22 +384,17 @@ pub struct Sema<'a> {
     /// `Resolved`. Result extraction drains this in source order.
     results: Vec<Option<Tir>>,
     inference: Vec<error_inference::InferenceState>,
-    /// Struct name → interned struct type (M9), populated from
-    /// `uir.struct_decls` (which carries only fully-defined structs;
-    /// astgen already diagnosed duplicates / cycles / unknown field
-    /// types). Struct literals and field accesses resolve against
-    /// this table.
+    /// Struct name → interned struct type, declared and defined by `resolution`.
     struct_types: HashMap<StringId, TypeId>,
-    /// Enum name → interned enum type (M11), populated from
-    /// `uir.enum_decls` (which carries failed enums as error-typed,
-    /// variant-less decls, exactly like structs — astgen already
-    /// diagnosed duplicates / cycles / bad payloads). Variant
-    /// constructions and bare `EnumName.Variant` unit accesses resolve
-    /// against this table.
+    /// Enum name → interned enum type, declared and defined by `resolution`.
     enum_types: HashMap<StringId, TypeId>,
     /// Nominal error name → declared error type, used by constructor
     /// and match resolution.
     pub(crate) error_types: HashMap<StringId, TypeId>,
+    error_families: HashMap<StringId, Vec<TypeId>>,
+    error_family_members: HashMap<StringId, Vec<StringId>>,
+    error_family_member_decls: HashMap<StringId, Vec<StringId>>,
+    defined_layouts: HashSet<TypeId>,
     /// Interned ids for the names compared on hot paths (builtin
     /// dispatch, materialize intercepts, reserved names). Built once
     /// in `Sema::new`.
@@ -468,9 +463,7 @@ impl<'a> Sema<'a> {
                 inferred: Vec::new(),
             };
         }
-        sema.register_structs();
-        sema.register_enums();
-        errors::register_errors(&mut sema);
+        resolution::declare_and_define(&mut sema);
         sema.resolve_signatures();
         sema.drive();
         let inferred = sema.inferred_signatures();
@@ -574,344 +567,16 @@ impl<'a> Sema<'a> {
             struct_types: HashMap::new(),
             enum_types: HashMap::new(),
             error_types: HashMap::new(),
+            error_families: HashMap::new(),
+            error_family_members: HashMap::new(),
+            error_family_member_decls: HashMap::new(),
+            defined_layouts: HashSet::new(),
             names,
             builtin_by_id,
             call_arg_refs: body_map
                 .as_ref()
                 .map_or_else(Vec::new, |map| collect_call_arg_refs(uir, map)),
             body_map,
-        }
-    }
-
-    /// Populate `struct_types` from `uir.struct_decls` (M9) and
-    /// validate field types. First-wins on a duplicate name — astgen
-    /// already emitted `DuplicateDeclaration` for it and kept the
-    /// first decl's `TypeId` in the pool.
-    ///
-    /// Rule 6 / E3: struct fields must be owned values — a view-typed
-    /// field (`strview`, `bytesview`) is a projection and is rejected
-    /// at its own span (`uir.struct_decls` carries per-field spans
-    /// for exactly this).
-    fn register_structs(&mut self) {
-        for decl in &self.uir.struct_decls {
-            for field in &decl.fields {
-                if self.pool.is_view(field.ty) {
-                    self.sink.emit(Diag::error(
-                        field.span,
-                        DiagCode::ViewFieldType,
-                        format!(
-                            "struct fields must be owned values; '{}' is a projection (Rule 6)",
-                            self.pool.display(field.ty),
-                        ),
-                    ));
-                }
-            }
-            self.struct_types.entry(decl.name).or_insert(decl.ty);
-        }
-    }
-
-    /// Populate `enum_types` from `uir.enum_decls` (M11) and validate
-    /// payload field types. First-wins on a duplicate name — astgen
-    /// already emitted `DuplicateDeclaration` and kept the first decl's
-    /// `TypeId`. Failed enums ride along error-typed and variant-less
-    /// (their own diagnostic is already in the sink), so the field
-    /// check only runs on defined enums.
-    ///
-    /// Rule 6 / E3 applies verbatim to payload fields (spec §2): they
-    /// must be owned values — a view-typed field (`strview`,
-    /// `bytesview`) is rejected at its own span, exactly like struct
-    /// fields in [`Sema::register_structs`].
-    fn register_enums(&mut self) {
-        for decl in &self.uir.enum_decls {
-            for variant in &decl.variants {
-                for field in &variant.fields {
-                    if self.pool.is_view(field.ty) {
-                        self.sink.emit(Diag::error(
-                            field.span,
-                            DiagCode::ViewFieldType,
-                            format!(
-                                "enum payload fields must be owned values; '{}' is a projection (Rule 6)",
-                                self.pool.display(field.ty),
-                            ),
-                        ));
-                    }
-                }
-            }
-            self.enum_types.entry(decl.name).or_insert(decl.ty);
-        }
-    }
-
-    fn resolve_type_expr(&mut self, id: TypeExprId, allow_inferred: bool) -> TypeId {
-        let cache_slot = usize::from(allow_inferred);
-        if let Some(resolved) = self.type_expr_cache[id.index()][cache_slot] {
-            return resolved;
-        }
-        let expr = self.uir.type_expr(id);
-        let resolved = match expr.kind {
-            UirTypeExprKind::Name { name, is_view } => {
-                self.resolve_type_name(name, is_view, expr.span)
-            }
-            UirTypeExprKind::Anon { fields } => {
-                let fields = self.uir.type_field_list(fields).to_vec();
-                self.resolve_anon_fields(&fields)
-            }
-            UirTypeExprKind::Positional(elements) => {
-                let fields = self
-                    .uir
-                    .type_expr_list(elements)
-                    .iter()
-                    .enumerate()
-                    .map(|(index, &element)| (self.pool.intern_str(&index.to_string()), element))
-                    .collect::<Vec<_>>();
-                self.resolve_anon_fields(&fields)
-            }
-            UirTypeExprKind::ErrorUnion {
-                error_set,
-                success,
-                inferred,
-            } => {
-                let error_set = self.uir.type_expr_list(error_set).to_vec();
-                self.resolve_error_union(&error_set, success, inferred, expr.span, allow_inferred)
-            }
-        };
-        self.type_expr_cache[id.index()][cache_slot] = Some(resolved);
-        resolved
-    }
-
-    fn resolve_type_name(&mut self, name: StringId, is_view: bool, span: Span) -> TypeId {
-        if is_view {
-            let message = if name == self.type_names.str_ {
-                "`&str` was renamed to `strview` (final spec Q5)".to_string()
-            } else {
-                format!(
-                    "unknown view type: '&{}' (view types are named: `strview`)",
-                    self.pool.str(name)
-                )
-            };
-            self.sink
-                .emit(Diag::error(span, DiagCode::UnknownType, message));
-            return self.pool.error_type();
-        }
-        let names = &self.type_names;
-        if name == names.int {
-            self.pool.int()
-        } else if name == names.str_ {
-            self.pool.str_()
-        } else if name == names.strview {
-            self.pool.str_view()
-        } else if name == names.bytes {
-            self.pool.bytes()
-        } else if name == names.bytesview {
-            self.pool.bytes_view()
-        } else if name == names.bool_ {
-            self.pool.bool_()
-        } else if name == names.float {
-            self.pool.float()
-        } else if let Some(&ty) = self.struct_types.get(&name) {
-            ty
-        } else if let Some(&ty) = self.enum_types.get(&name) {
-            ty
-        } else if let Some(&ty) = self.error_types.get(&name) {
-            ty
-        } else if let Some(members) = self
-            .uir
-            .error_families
-            .iter()
-            .find(|family| family.name == name)
-            .map(|family| family.members.clone())
-        {
-            if members.iter().all(|&member| self.type_has_layout(member)) {
-                self.pool.error_set(&members)
-            } else {
-                self.pool.error_type()
-            }
-        } else {
-            let qualified = self.pool.str(name).to_string();
-            if let Some((root, member)) = qualified.split_once('.')
-                && let Some(source_members) = self
-                    .uir
-                    .error_families
-                    .iter()
-                    .find(|family| self.pool.str(family.name) == root)
-                    .map(|family| family.member_names.clone())
-            {
-                let available = source_members
-                    .iter()
-                    .map(|name| format!("'{}'", self.pool.str(*name)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                self.sink.emit(Diag::error(
-                    span,
-                    DiagCode::UnknownVariant,
-                    format!(
-                        "error family '{root}' has no member '{member}' (members: {available})"
-                    ),
-                ));
-                return self.pool.error_type();
-            }
-            self.sink.emit(Diag::error(
-                span,
-                DiagCode::UnknownType,
-                format!("unknown type: '{}'", self.pool.str(name)),
-            ));
-            self.pool.error_type()
-        }
-    }
-
-    fn resolve_anon_fields(&mut self, fields: &[(StringId, TypeExprId)]) -> TypeId {
-        let mut pairs = Vec::with_capacity(fields.len());
-        for &(name, field) in fields {
-            let ty = self.resolve_type_expr(field, false);
-            if self.pool.is_view(ty) {
-                self.sink.emit(Diag::error(
-                    self.uir.type_expr(field).span,
-                    DiagCode::ViewFieldType,
-                    format!(
-                        "struct fields must be owned values; '{}' is a projection (Rule 6)",
-                        self.pool.display(ty)
-                    ),
-                ));
-            }
-            pairs.push((name, ty));
-        }
-
-        let mut seen = Vec::with_capacity(fields.len());
-        let mut duplicate = false;
-        for &(name, field) in fields {
-            if seen.contains(&name) {
-                self.sink.emit(Diag::error(
-                    self.uir.type_expr(field).span,
-                    DiagCode::DuplicateStructField,
-                    format!(
-                        "field '{}' is specified more than once",
-                        self.pool.str(name)
-                    ),
-                ));
-                duplicate = true;
-            } else {
-                seen.push(name);
-            }
-        }
-        if duplicate || pairs.iter().any(|&(_, ty)| !self.type_has_layout(ty)) {
-            return self.pool.error_type();
-        }
-        self.pool.anon_struct(&pairs)
-    }
-
-    fn resolve_error_union(
-        &mut self,
-        error_set: &[TypeExprId],
-        success: TypeExprId,
-        inferred: bool,
-        span: Span,
-        allow_inferred: bool,
-    ) -> TypeId {
-        if inferred && !allow_inferred {
-            self.sink.emit(Diag::error(
-                span,
-                DiagCode::TypeMismatch,
-                "inferred error unions are only valid in function-return position",
-            ));
-            return self.pool.error_type();
-        }
-        if !inferred && error_set.is_empty() {
-            self.sink.emit(Diag::error(
-                span,
-                DiagCode::TypeMismatch,
-                "an explicit error union must contain at least one error",
-            ));
-            return self.pool.error_type();
-        }
-        if inferred {
-            let success = self.resolve_error_union_success(success);
-            if self.pool.is_error(success) {
-                return self.pool.error_type();
-            }
-            return self.pool.inferred_error_union(success);
-        }
-
-        let mut members = Vec::with_capacity(error_set.len());
-        let mut failed = false;
-        for &member in error_set {
-            let ty = self.resolve_type_expr(member, false);
-            if self.pool.is_error(ty) {
-                failed = true;
-                continue;
-            }
-            match self.pool.kind(ty) {
-                TypeKind::DeclaredError | TypeKind::ErrorSet => {
-                    let expanded = self.pool.error_set_view(ty).members;
-                    if expanded.iter().any(|&member| !self.type_has_layout(member)) {
-                        failed = true;
-                    }
-                    members.extend(expanded);
-                }
-                _ => {
-                    self.sink.emit(Diag::error(
-                        self.uir.type_expr(member).span,
-                        DiagCode::TypeMismatch,
-                        "error union members must be declared errors or error sets",
-                    ));
-                    failed = true;
-                }
-            }
-        }
-        let success = self.resolve_error_union_success(success);
-        if failed || self.pool.is_error(success) {
-            return self.pool.error_type();
-        }
-        let error_set = self.pool.error_set(&members);
-        self.pool.error_union(error_set, success)
-    }
-
-    fn resolve_error_union_success(&mut self, id: TypeExprId) -> TypeId {
-        let expr = self.uir.type_expr(id);
-        let success = match expr.kind {
-            UirTypeExprKind::Name {
-                name,
-                is_view: false,
-            } if name == self.type_names.void => self.pool.void(),
-            UirTypeExprKind::Name {
-                name,
-                is_view: false,
-            } if name == self.type_names.never => self.pool.never(),
-            _ => self.resolve_type_expr(id, false),
-        };
-        if self.pool.is_error(success) {
-            return success;
-        }
-        let invalid = match self.pool.kind(success) {
-            TypeKind::Never => Some("error union success type cannot be 'never'"),
-            TypeKind::View(_) => Some("error union success type must be owned, not a view"),
-            TypeKind::DeclaredError
-            | TypeKind::ErrorSet
-            | TypeKind::ErrorUnion
-            | TypeKind::InferredErrorUnion => {
-                Some("error types, error sets, and error unions cannot be success types")
-            }
-            _ => None,
-        };
-        if let Some(message) = invalid {
-            self.sink
-                .emit(Diag::error(expr.span, DiagCode::TypeMismatch, message));
-            return self.pool.error_type();
-        }
-        if !self.type_has_layout(success) {
-            return self.pool.error_type();
-        }
-        success
-    }
-
-    fn type_has_layout(&self, ty: TypeId) -> bool {
-        match self.pool.kind(ty) {
-            TypeKind::Error | TypeKind::Never | TypeKind::InferredErrorUnion => false,
-            TypeKind::Struct => self.pool.is_defined_struct(ty),
-            TypeKind::Enum => self.uir.enum_decls.iter().any(|decl| decl.ty == ty),
-            TypeKind::DeclaredError => {
-                self.uir.error_decls.iter().any(|decl| decl.ty == ty)
-                    || self.error_types.get(&self.type_names.utf8_error) == Some(&ty)
-            }
-            _ => true,
         }
     }
 

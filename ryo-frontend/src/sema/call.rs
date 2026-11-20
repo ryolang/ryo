@@ -459,8 +459,8 @@ pub(crate) fn check_reserved_name(
 /// "did you forget the enum?" recovery can render the construction
 /// form that actually applies (braces for named payloads, parens for
 /// tuple payloads, no argument list for unit variants). Failed enums
-/// ride along error-typed in `enum_types` (see
-/// [`Sema::register_enums`]); `enum_view` would trip its Enum-tag
+/// ride along error-typed in `enum_types` after nominal resolution;
+/// `enum_view` would trip its Enum-tag
 /// assert on one, so error types are skipped — their own diagnostic
 /// is already in the sink.
 fn enum_variant_carriers(sema: &Sema<'_>, variant: StringId) -> Vec<(StringId, VariantKind)> {

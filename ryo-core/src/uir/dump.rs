@@ -31,7 +31,8 @@ impl<'a> fmt::Display for UirDump<'a> {
         for decl in &uir.struct_decls {
             write!(f, "struct {}:", pool.str(decl.name))?;
             for field in &decl.fields {
-                write!(f, " {}: {}", pool.str(field.name), pool.display(field.ty))?;
+                write!(f, " {}: ", pool.str(field.name))?;
+                write_type_expr(f, uir, pool, field.type_expr)?;
             }
             writeln!(f)?;
         }
@@ -46,7 +47,7 @@ impl<'a> fmt::Display for UirDump<'a> {
                     if decl.payload.kind == crate::types::VariantKind::Named {
                         write!(f, "{}: ", pool.str(field.name))?;
                     }
-                    write!(f, "{}", pool.display(field.ty))?;
+                    write_type_expr(f, uir, pool, field.type_expr)?;
                 }
                 write!(f, ")")?;
             }

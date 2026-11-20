@@ -183,11 +183,10 @@ pub(crate) fn resolve_error(sema: &mut Sema<'_>, scope: &Scope, node: InstRef) -
         }
         if !sema.error_types.contains_key(&name) {
             let mut owners: Vec<_> = sema
-                .uir
-                .error_families
+                .error_family_members
                 .iter()
-                .filter(|family| family.member_names.contains(&name))
-                .map(|family| family.name)
+                .filter(|(_, members)| members.contains(&name))
+                .map(|(&family, _)| family)
                 .collect();
             owners.sort_by(|&a, &b| sema.pool.str(a).cmp(sema.pool.str(b)));
             if let Some(&family) = owners.first() {
@@ -336,11 +335,7 @@ fn resolved_error(
 }
 
 pub(crate) fn error_family_member_names(sema: &Sema<'_>, root: StringId) -> Option<Vec<StringId>> {
-    sema.uir
-        .error_families
-        .iter()
-        .find(|family| family.name == root)
-        .map(|family| family.member_names.clone())
+    sema.error_family_members.get(&root).cloned()
 }
 
 pub(crate) fn qualified_error_name(
@@ -390,10 +385,9 @@ pub(crate) fn unqualified_call_candidate_name(sema: &Sema<'_>, node: InstRef) ->
         || sema.error_types.contains_key(&name)
         || error_family_member_names(sema, name).is_some()
         || sema
-            .uir
-            .error_families
-            .iter()
-            .any(|family| family.member_names.contains(&name))
+            .error_family_members
+            .values()
+            .any(|members| members.contains(&name))
     {
         return None;
     }

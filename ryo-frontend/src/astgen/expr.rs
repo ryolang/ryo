@@ -6,13 +6,12 @@
 //! Split out of `astgen.rs` to keep that file under the line-count
 //! gate; see the module docs there for the lowering pipeline.
 
-use super::{TypeResolver, errors, lower_destructure_pattern, match_, variants};
+use super::{Names, errors, lower_destructure_pattern, match_, variants};
 use ryo_core::ast;
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::spine::ChainSpine;
-use ryo_core::types::{InternPool, StringId, TypeId};
+use ryo_core::types::{InternPool, StringId};
 use ryo_core::uir::{InstRef, InstTag, UirBuilder};
-use std::collections::HashSet;
 
 /// Expression nesting depth the recursive lowering may consume before
 /// handing the remaining subtree to the iterative machine. Far below
@@ -64,8 +63,7 @@ pub(super) fn gen_expr_d(
     b: &mut UirBuilder,
     ast: &ast::Ast,
     expr: ast::ExprId,
-    types: &TypeResolver,
-    defined_layouts: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     depth: u32,
@@ -73,7 +71,7 @@ pub(super) fn gen_expr_d(
     if depth == expr_depth_limit() {
         // Deep enough to threaten the stack — finish the subtree
         // iteratively (see `gen_expr_machine`).
-        return gen_expr_machine(b, ast, expr, types, defined_layouts, pool, sink, depth);
+        return gen_expr_machine(b, ast, expr, names, pool, sink, depth);
     }
     let span = ast.expr_span(expr);
     match ast.expr(expr).kind {
@@ -86,8 +84,8 @@ pub(super) fn gen_expr_d(
         },
         ast::ExprKind::Ident(name) => b.var_ref(name, span),
         ast::ExprKind::BinaryOp(lhs, op, rhs) => {
-            let l = gen_expr_d(b, ast, lhs, types, defined_layouts, pool, sink, depth + 1);
-            let r = gen_expr_d(b, ast, rhs, types, defined_layouts, pool, sink, depth + 1);
+            let l = gen_expr_d(b, ast, lhs, names, pool, sink, depth + 1);
+            let r = gen_expr_d(b, ast, rhs, names, pool, sink, depth + 1);
             let tag = match op {
                 ast::BinaryOperator::Add => InstTag::Add,
                 ast::BinaryOperator::Sub => InstTag::Sub,
@@ -106,16 +104,7 @@ pub(super) fn gen_expr_d(
             b.binary(tag, l, r, span)
         }
         ast::ExprKind::UnaryOp(op, operand) => {
-            let s = gen_expr_d(
-                b,
-                ast,
-                operand,
-                types,
-                defined_layouts,
-                pool,
-                sink,
-                depth + 1,
-            );
+            let s = gen_expr_d(b, ast, operand, names, pool, sink, depth + 1);
             let tag = match op {
                 ast::UnaryOperator::Neg => InstTag::Neg,
                 ast::UnaryOperator::Not => InstTag::Not,
@@ -126,7 +115,7 @@ pub(super) fn gen_expr_d(
             let arg_refs: Vec<InstRef> = ast
                 .expr_list(args)
                 .iter()
-                .map(|&a| gen_expr_d(b, ast, a, types, defined_layouts, pool, sink, depth + 1))
+                .map(|&a| gen_expr_d(b, ast, a, names, pool, sink, depth + 1))
                 .collect();
             b.call(name, &arg_refs, span)
         }
@@ -135,45 +124,32 @@ pub(super) fn gen_expr_d(
             method,
             args,
         } => {
-            let receiver_ref = gen_expr_d(
-                b,
-                ast,
-                receiver,
-                types,
-                defined_layouts,
-                pool,
-                sink,
-                depth + 1,
-            );
+            let receiver_ref = gen_expr_d(b, ast, receiver, names, pool, sink, depth + 1);
             let arg_refs: Vec<InstRef> = ast
                 .expr_list(args)
                 .iter()
-                .map(|&a| gen_expr_d(b, ast, a, types, defined_layouts, pool, sink, depth + 1))
+                .map(|&a| gen_expr_d(b, ast, a, names, pool, sink, depth + 1))
                 .collect();
             b.method_call(receiver_ref, method, &arg_refs, span)
         }
         ast::ExprKind::Borrow(inner) => {
-            let inner_ref =
-                gen_expr_d(b, ast, inner, types, defined_layouts, pool, sink, depth + 1);
+            let inner_ref = gen_expr_d(b, ast, inner, names, pool, sink, depth + 1);
             b.borrow(inner_ref, span)
         }
         ast::ExprKind::Slice { base, start, end } => {
             // Slice projection `base[start:end]` (final spec §3);
             // bounds are optional shorthands. Sema type-checks the
             // base and yields `strview`.
-            let base_ref = gen_expr_d(b, ast, base, types, defined_layouts, pool, sink, depth + 1);
-            let start_ref =
-                start.map(|e| gen_expr_d(b, ast, e, types, defined_layouts, pool, sink, depth + 1));
-            let end_ref =
-                end.map(|e| gen_expr_d(b, ast, e, types, defined_layouts, pool, sink, depth + 1));
+            let base_ref = gen_expr_d(b, ast, base, names, pool, sink, depth + 1);
+            let start_ref = start.map(|e| gen_expr_d(b, ast, e, names, pool, sink, depth + 1));
+            let end_ref = end.map(|e| gen_expr_d(b, ast, e, names, pool, sink, depth + 1));
             b.slice(base_ref, start_ref, end_ref, span)
         }
         ast::ExprKind::Index { base, index } => {
             // Scalar indexing `base[index]` (M8.4.2). Sema gates the
             // base to bytes/bytesview.
-            let base_ref = gen_expr_d(b, ast, base, types, defined_layouts, pool, sink, depth + 1);
-            let index_ref =
-                gen_expr_d(b, ast, index, types, defined_layouts, pool, sink, depth + 1);
+            let base_ref = gen_expr_d(b, ast, base, names, pool, sink, depth + 1);
+            let index_ref = gen_expr_d(b, ast, index, names, pool, sink, depth + 1);
             b.index(base_ref, index_ref, span)
         }
         // Struct literal `Name{field=value, ...}` (M9) or the
@@ -187,12 +163,7 @@ pub(super) fn gen_expr_d(
             let fields: Vec<(StringId, InstRef)> = ast
                 .struct_field_inits(lit.fields)
                 .iter()
-                .map(|&(fname, e)| {
-                    (
-                        fname,
-                        gen_expr_d(b, ast, e, types, defined_layouts, pool, sink, depth + 1),
-                    )
-                })
+                .map(|&(fname, e)| (fname, gen_expr_d(b, ast, e, names, pool, sink, depth + 1)))
                 .collect();
             let name = lit.name.map(|ident| ident.name);
             b.struct_lit(name, &fields, span)
@@ -200,99 +171,34 @@ pub(super) fn gen_expr_d(
         // Field access `object.field` (M9); chains fold left in the
         // AST, so each access lowers against its own object.
         ast::ExprKind::FieldAccess { object, field } => {
-            let obj = gen_expr_d(
-                b,
-                ast,
-                object,
-                types,
-                defined_layouts,
-                pool,
-                sink,
-                depth + 1,
-            );
+            let obj = gen_expr_d(b, ast, object, names, pool, sink, depth + 1);
             b.field_access(obj, field.name, span)
         }
         // Qualified enum/error-family candidates retain their source names.
-        ast::ExprKind::VariantConstruct(c) => variants::lower_variant_construct(
-            b,
-            ast,
-            c,
-            types,
-            defined_layouts,
-            pool,
-            sink,
-            span,
-            depth,
-        ),
+        ast::ExprKind::VariantConstruct(c) => {
+            variants::lower_variant_construct(b, ast, c, names, pool, sink, span, depth)
+        }
         // Match expressions (M12) lower to the UIR `Match` wire; see
         // `astgen/match_.rs` for the pattern/body mapping.
         ast::ExprKind::Match { scrutinee, arms } => {
             if depth == 0 {
-                match_::gen_match(
-                    b,
-                    ast,
-                    scrutinee,
-                    arms,
-                    types,
-                    defined_layouts,
-                    pool,
-                    sink,
-                    span,
-                )
+                match_::gen_match(b, ast, scrutinee, arms, names, pool, sink, span)
             } else {
-                match_::gen_match_d(
-                    b,
-                    ast,
-                    scrutinee,
-                    arms,
-                    types,
-                    defined_layouts,
-                    pool,
-                    sink,
-                    span,
-                    depth,
-                )
+                match_::gen_match_d(b, ast, scrutinee, arms, names, pool, sink, span, depth)
             }
         }
-        ast::ExprKind::ErrorConstruct(c) => errors::lower_error_construct(
-            b,
-            ast,
-            c,
-            types,
-            defined_layouts,
-            pool,
-            sink,
-            span,
-            depth,
-        ),
+        ast::ExprKind::ErrorConstruct(c) => {
+            errors::lower_error_construct(b, ast, c, names, pool, sink, span, depth)
+        }
         ast::ExprKind::Try(operand) => {
-            let operand = gen_expr_d(
-                b,
-                ast,
-                operand,
-                types,
-                defined_layouts,
-                pool,
-                sink,
-                depth + 1,
-            );
+            let operand = gen_expr_d(b, ast, operand, names, pool, sink, depth + 1);
             b.unary(InstTag::Try, operand, span)
         }
         ast::ExprKind::Catch(catch) => {
             if depth == 0 {
-                match_::gen_catch(b, ast, catch, types, defined_layouts, pool, sink, span)
+                match_::gen_catch(b, ast, catch, names, pool, sink, span)
             } else {
-                match_::gen_catch_d(
-                    b,
-                    ast,
-                    catch,
-                    types,
-                    defined_layouts,
-                    pool,
-                    sink,
-                    span,
-                    depth,
-                )
+                match_::gen_catch_d(b, ast, catch, names, pool, sink, span, depth)
             }
         }
     }
@@ -489,22 +395,12 @@ fn gen_expr_machine(
     b: &mut UirBuilder,
     ast: &ast::Ast,
     expr: ast::ExprId,
-    types: &TypeResolver,
-    defined_layouts: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     depth: u32,
 ) -> InstRef {
-    match gen_machine(
-        b,
-        ast,
-        MachineRoot::Expr(expr),
-        depth,
-        types,
-        defined_layouts,
-        pool,
-        sink,
-    ) {
+    match gen_machine(b, ast, MachineRoot::Expr(expr), depth, names, pool, sink) {
         MachineResult::Expr(result) => result,
         MachineResult::Stmts(_) => unreachable!("expression root returned statements"),
     }
@@ -515,22 +411,12 @@ pub(super) fn gen_stmt_machine(
     b: &mut UirBuilder,
     ast: &ast::Ast,
     stmt: ast::StmtId,
-    types: &TypeResolver,
-    defined_layouts: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     depth: u32,
 ) -> Vec<InstRef> {
-    match gen_machine(
-        b,
-        ast,
-        MachineRoot::Stmt(stmt),
-        depth,
-        types,
-        defined_layouts,
-        pool,
-        sink,
-    ) {
+    match gen_machine(b, ast, MachineRoot::Stmt(stmt), depth, names, pool, sink) {
         MachineResult::Stmts(result) => result,
         MachineResult::Expr(_) => unreachable!("statement root returned an expression"),
     }
@@ -541,22 +427,12 @@ pub(super) fn gen_block_machine(
     b: &mut UirBuilder,
     ast: &ast::Ast,
     list: ast::StmtList,
-    types: &TypeResolver,
-    defined_layouts: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     depth: u32,
 ) -> Vec<InstRef> {
-    match gen_machine(
-        b,
-        ast,
-        MachineRoot::Block(list),
-        depth,
-        types,
-        defined_layouts,
-        pool,
-        sink,
-    ) {
+    match gen_machine(b, ast, MachineRoot::Block(list), depth, names, pool, sink) {
         MachineResult::Stmts(result) => result,
         MachineResult::Expr(_) => unreachable!("block root returned an expression"),
     }
@@ -590,8 +466,7 @@ fn gen_machine(
     ast: &ast::Ast,
     root: MachineRoot,
     depth: u32,
-    types: &TypeResolver,
-    defined_layouts: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) -> MachineResult {
@@ -693,16 +568,8 @@ fn gen_machine(
                     }
                     // Qualified enum/error-family candidates retain their source names.
                     ast::ExprKind::VariantConstruct(c) => {
-                        let step = variants::prepare_variant_construct(
-                            b,
-                            ast,
-                            c,
-                            types,
-                            defined_layouts,
-                            pool,
-                            sink,
-                            span,
-                        );
+                        let step =
+                            variants::prepare_variant_construct(b, ast, c, names, pool, sink, span);
                         match step {
                             variants::VariantStep::Complete(result) => results.push(result),
                             variants::VariantStep::Child(state, arg) => {
@@ -721,7 +588,7 @@ fn gen_machine(
                     }
                     ast::ExprKind::ErrorConstruct(c) => {
                         let step =
-                            errors::prepare_error_construct(b, ast, c, types, pool, sink, span);
+                            errors::prepare_error_construct(b, ast, c, names, pool, sink, span);
                         match step {
                             errors::ErrorStep::Complete(result) => results.push(result),
                             errors::ErrorStep::Child(state, arg) => {
@@ -745,7 +612,7 @@ fn gen_machine(
             ExprTask::Variant(state) => {
                 let value = results.pop().expect("variant argument lowered");
                 let step =
-                    variants::resume_variant_construct(state, value, b, ast, types, pool, sink);
+                    variants::resume_variant_construct(state, value, b, ast, names, pool, sink);
                 match step {
                     variants::VariantStep::Complete(result) => results.push(result),
                     variants::VariantStep::Child(state, arg) => {
@@ -767,58 +634,23 @@ fn gen_machine(
             }
             ExprTask::MatchScrutinee(state) => {
                 let scrutinee = results.pop().expect("match scrutinee lowered");
-                let step = match_::resume_match_scrutinee(
-                    state,
-                    scrutinee,
-                    b,
-                    ast,
-                    types,
-                    defined_layouts,
-                    pool,
-                    sink,
-                );
+                let step =
+                    match_::resume_match_scrutinee(state, scrutinee, b, ast, names, pool, sink);
                 push_match_step(&mut stack, &mut results, step, depth);
             }
             ExprTask::MatchBody(state) => {
                 let body = results.pop().expect("match body lowered");
-                let step = match_::resume_match_body(
-                    state,
-                    body,
-                    b,
-                    ast,
-                    types,
-                    defined_layouts,
-                    pool,
-                    sink,
-                );
+                let step = match_::resume_match_body(state, body, b, ast, names, pool, sink);
                 push_match_step(&mut stack, &mut results, step, depth);
             }
             ExprTask::MatchStmts(state) => {
                 let body = block_results.pop().expect("match statement body lowered");
-                let step = match_::resume_match_stmts(
-                    state,
-                    body,
-                    b,
-                    ast,
-                    types,
-                    defined_layouts,
-                    pool,
-                    sink,
-                );
+                let step = match_::resume_match_stmts(state, body, b, ast, names, pool, sink);
                 push_match_step(&mut stack, &mut results, step, depth);
             }
             ExprTask::CatchOperand(state) => {
                 let operand = results.pop().expect("catch operand lowered");
-                let step = match_::resume_catch_operand(
-                    state,
-                    operand,
-                    b,
-                    ast,
-                    types,
-                    defined_layouts,
-                    pool,
-                    sink,
-                );
+                let step = match_::resume_catch_operand(state, operand, b, ast, names, pool, sink);
                 match step {
                     match_::CatchStep::Body(state, expr) => {
                         stack.push(ExprTask::CatchBody(state).at(depth));
@@ -924,7 +756,7 @@ fn gen_machine(
                     ast::StmtKind::ForRange {
                         iterator, start, ..
                     } => {
-                        if iterator.name != types.range {
+                        if iterator.name != names.range {
                             sink.emit(Diag::error(
                                 iterator.span,
                                 DiagCode::ParseError,

@@ -1,6 +1,6 @@
 //! Enum astgen tests (M11): enum declarations lower to `UirEnumDecl`
-//! with resolved payload types; cross-kind forward references resolve;
-//! by-value cycles, empty enums, and duplicate variants are diagnosed;
+//! with unresolved payloads; cross-kind references, cycles, empty enums,
+//! and duplicate variants remain available for Sema;
 //! variant construction lowers to `EnumLit` with unresolved source names
 //! and selectors. Split out of `astgen.rs`'s inline tests: astgen.rs
 //! sits at the 2000-line CI cap, so new enum tests live here; the
@@ -12,98 +12,88 @@ use ryo_core::types::VariantKind;
 use ryo_core::uir::InstData;
 
 #[test]
-fn enum_decl_lowers_with_resolved_payload_types() {
+fn enum_decl_lowers_with_unresolved_payload_types() {
     let src = "enum Shape:\n\tCircle(float)\n\tRectangle(width: float, height: float)\n";
     let (uir, pool) = parse_and_lower(src).unwrap();
-    assert_eq!(uir.enum_decls.len(), 1);
     let decl = &uir.enum_decls[0];
     assert_eq!(pool.str(decl.name), "Shape");
     assert_eq!(decl.variants.len(), 2);
-
     let circle = &decl.variants[0];
     assert_eq!(pool.str(circle.name), "Circle");
     assert_eq!(circle.kind, VariantKind::Tuple);
-    assert_eq!(circle.fields.len(), 1);
-    // Tuple payloads carry the synthesized "0" name (M10 convention).
     assert_eq!(pool.str(circle.fields[0].name), "0");
-    assert_eq!(circle.fields[0].ty, pool.float());
-
-    let rect = &decl.variants[1];
-    assert_eq!(pool.str(rect.name), "Rectangle");
-    assert_eq!(rect.kind, VariantKind::Named);
-    assert_eq!(rect.fields.len(), 2);
-    assert_eq!(rect.fields[0].ty, pool.float());
-    assert_eq!(rect.fields[1].ty, pool.float());
-
-    // The nominal enum type is fully defined in the pool.
-    assert_eq!(pool.enum_view(decl.ty).len(), 2);
+    for variant in &decl.variants {
+        for field in &variant.fields {
+            assert!(matches!(
+                uir.type_expr(field.type_expr).kind,
+                ryo_core::uir::UirTypeExprKind::Name { name, .. } if pool.str(name) == "float"
+            ));
+        }
+    }
+    assert_eq!(decl.variants[1].kind, VariantKind::Named);
 }
 
 #[test]
-fn enum_payload_forward_struct_reference_resolves() {
-    // Cross-kind forward reference: the pre-scan declares both kinds
-    // before either is defined, so an enum payload may name a struct
-    // declared below it.
+fn enum_payload_forward_struct_reference_is_preserved() {
     let src = "enum Wrapper:\n\tBox(p: Point)\n\nstruct Point:\n\tx: float\n";
     let (uir, pool) = parse_and_lower(src).unwrap();
-    let wrapper = &uir.enum_decls[0];
-    assert_eq!(wrapper.variants[0].fields[0].ty, uir.struct_decls[0].ty);
-    assert!(pool.is_defined_struct(uir.struct_decls[0].ty));
-    assert_eq!(pool.enum_view(wrapper.ty).len(), 1);
+    assert!(matches!(
+        uir.type_expr(uir.enum_decls[0].variants[0].fields[0].type_expr).kind,
+        ryo_core::uir::UirTypeExprKind::Name { name, .. } if pool.str(name) == "Point"
+    ));
 }
 
 #[test]
-fn struct_field_forward_enum_reference_resolves() {
-    // The mirror direction: a struct field may name an enum declared
-    // below it; one DFS orders the cross-kind definitions.
+fn struct_field_forward_enum_reference_is_preserved() {
     let src = "struct Holder:\n\tc: Color\n\nenum Color:\n\tRed\n\tGreen\n";
     let (uir, pool) = parse_and_lower(src).unwrap();
-    let holder = &uir.struct_decls[0];
-    assert_eq!(holder.fields[0].ty, uir.enum_decls[0].ty);
-    assert!(pool.is_defined_struct(holder.ty));
-    assert_eq!(pool.enum_view(uir.enum_decls[0].ty).len(), 2);
+    assert!(matches!(
+        uir.type_expr(uir.struct_decls[0].fields[0].type_expr).kind,
+        ryo_core::uir::UirTypeExprKind::Name { name, .. } if pool.str(name) == "Color"
+    ));
 }
 
 #[test]
-fn enum_value_cycle_is_diagnosed() {
-    // `next: L` inside Cons is a by-value self-reference: declaring L
-    // before defining it lets the reference resolve far enough to be
-    // rejected, and the define DFS must reject it (InfiniteSize).
-    let err = parse_and_lower("enum L:\n\tCons(v: int, next: L)\n\tNil\n").unwrap_err();
-    assert!(err.iter().any(|d| d.code == DiagCode::InfiniteSize));
+fn enum_value_cycle_is_preserved_for_sema() {
+    let (uir, _pool) = parse_and_lower("enum L:\n\tCons(v: int, next: L)\n\tNil\n")
+        .expect("AstGen does not check type cycles");
+    assert_eq!(uir.enum_decls[0].variants.len(), 2);
 }
 
 #[test]
-fn cross_kind_value_cycle_is_diagnosed() {
-    let err = parse_and_lower("struct A:\n\te: E\n\nenum E:\n\tAa(a: A)\n").unwrap_err();
+fn cross_kind_value_cycle_is_preserved_for_sema() {
+    let (uir, _pool) = parse_and_lower("struct A:\n\te: E\n\nenum E:\n\tAa(a: A)\n")
+        .expect("AstGen does not check cross-kind cycles");
+    assert_eq!(uir.struct_decls.len(), 1);
+    assert_eq!(uir.enum_decls.len(), 1);
+}
+
+#[test]
+fn recursive_enum_inside_anon_field_type_is_preserved() {
+    let (uir, _pool) =
+        parse_and_lower("enum L:\n\tCons(next: L)\n\tNil\n\nstruct S:\n\tx: {e: L}\n")
+            .expect("AstGen preserves all nominal declarations");
+    assert_eq!(uir.enum_decls.len(), 1);
+    assert_eq!(uir.struct_decls.len(), 1);
+}
+
+#[test]
+fn empty_enum_is_preserved_for_sema() {
+    let (uir, _pool) =
+        parse_and_lower("enum Empty:\n").expect("AstGen does not diagnose empty enums");
+    assert!(uir.enum_decls[0].variants.is_empty());
+}
+
+#[test]
+fn duplicate_variants_are_preserved_for_sema() {
+    let (uir, pool) = parse_and_lower("enum Color:\n\tRed\n\tRed\n")
+        .expect("duplicates remain available for Sema");
+    assert_eq!(uir.enum_decls[0].variants.len(), 2);
     assert!(
-        err.iter().any(|d| d.code == DiagCode::InfiniteSize),
-        "struct↔enum by-value cycle must be InfiniteSize, got {err:?}"
-    );
-}
-
-#[test]
-fn failed_enum_inside_anon_field_type_is_absorbed() {
-    // A failed enum referenced inside an anonymous struct field type
-    // must absorb to the error type (the anon type's layout cannot
-    // name the undefined enum) instead of crashing the interner.
-    let err =
-        parse_and_lower("enum L:\n\tCons(next: L)\n\tNil\n\nstruct S:\n\tx: {e: L}\n").unwrap_err();
-    assert!(err.iter().any(|d| d.code == DiagCode::InfiniteSize));
-}
-
-#[test]
-fn empty_enum_is_diagnosed() {
-    let err = parse_and_lower("enum Empty:\n").unwrap_err();
-    assert!(err.iter().any(|d| d.code == DiagCode::EmptyEnum));
-}
-
-#[test]
-fn duplicate_variant_is_diagnosed() {
-    let err = parse_and_lower("enum Color:\n\tRed\n\tRed\n").unwrap_err();
-    assert!(
-        err.iter().any(|d| d.code == DiagCode::DuplicateVariant),
-        "expected DuplicateVariant, got {err:?}"
+        uir.enum_decls[0]
+            .variants
+            .iter()
+            .all(|variant| pool.str(variant.name) == "Red")
     );
 }
 

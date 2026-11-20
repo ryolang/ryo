@@ -1124,7 +1124,7 @@ impl InternPool {
     ///
     /// Trusted-producer contract: panics on an undefined or
     /// already-defined id, zero variants, or duplicate variant names
-    /// (astgen pre-validates all three).
+    /// (Sema pre-validates all three).
     pub fn define_enum(
         &mut self,
         id: TypeId,

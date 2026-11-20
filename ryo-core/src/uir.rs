@@ -64,7 +64,7 @@
 
 use crate::ast::{CompoundOp, DeclVisibility};
 use crate::tir::ParamMode;
-use crate::types::{InternPool, StringId, TypeId, VariantKind};
+use crate::types::{InternPool, StringId, VariantKind};
 use std::num::NonZeroU32;
 
 pub use crate::span::Span;
@@ -483,50 +483,48 @@ pub struct FuncBody {
 
 // ---------- Struct declarations (M9) ----------
 
-/// A struct declaration registered by astgen, with field types
-/// already resolved through the `InternPool`. Metadata, not an
-/// instruction: sema reads this table to type-check
-/// [`InstTag::StructLit`] / [`InstTag::FieldAccess`].
+/// An unresolved struct declaration. Sema declares its nominal identity
+/// and resolves its fields before any function signature is analyzed.
 #[derive(Debug, Clone)]
 pub struct UirStructDecl {
     pub name: StringId,
-    /// The struct's nominal type, declared and defined in the pool
-    /// by astgen's two-phase pass.
-    pub ty: TypeId,
+    pub name_span: Span,
+    pub attrs: crate::ast::StructAttrs,
     /// Fields in declaration order.
     pub fields: Vec<UirStructField>,
     pub span: Span,
+    /// Top-level source position, used to reproduce first-wins lookup
+    /// across the separate per-kind side tables.
+    pub source_index: u32,
 }
 
 /// One field of a [`UirStructDecl`].
 #[derive(Debug, Clone, Copy)]
 pub struct UirStructField {
     pub name: StringId,
-    pub ty: TypeId,
+    pub type_expr: TypeExprId,
     pub span: Span,
 }
 
 // ---------- Enum declarations (M11) ----------
 
-/// An enum declaration registered by astgen, with variant payload
-/// field types already resolved through the `InternPool`. Metadata,
-/// not an instruction: sema reads this table to type-check
-/// [`InstTag::EnumLit`].
+/// An unresolved enum declaration with source variants and payloads.
 #[derive(Debug, Clone)]
 pub struct UirEnumDecl {
     pub name: StringId,
-    /// The enum's nominal type, declared and defined in the pool
-    /// by astgen's two-phase pass.
-    pub ty: TypeId,
+    pub name_span: Span,
+    pub attrs: crate::ast::EnumAttrs,
     /// Variants in declaration order.
     pub variants: Vec<UirEnumVariant>,
     pub span: Span,
+    pub source_index: u32,
 }
 
 /// One variant of a [`UirEnumDecl`].
 #[derive(Debug, Clone)]
 pub struct UirEnumVariant {
     pub name: StringId,
+    pub name_span: Span,
     pub kind: VariantKind,
     /// Payload fields in declaration order. Tuple-variant fields
     /// carry the synthesized `"0"`, `"1"`, … names (astgen interns
@@ -539,28 +537,34 @@ pub struct UirEnumVariant {
 #[derive(Debug, Clone, Copy)]
 pub struct UirEnumField {
     pub name: StringId,
-    pub ty: TypeId,
+    pub type_expr: TypeExprId,
     pub span: Span,
 }
 
-/// A nominal error declaration with its single variant payload.
+/// An unresolved nominal error declaration with its source payload.
 #[derive(Debug, Clone)]
 pub struct UirErrorDecl {
     pub name: StringId,
-    pub ty: TypeId,
+    /// Error-family root when this declaration came from a family member.
+    pub family: Option<StringId>,
     pub payload: UirEnumVariant,
     pub span: Span,
+    pub source_index: u32,
 }
 
-/// A closed error family and its ordered independent member types.
+/// A closed error family and its unresolved qualified member names.
 #[derive(Debug, Clone)]
 pub struct UirErrorFamilyDecl {
     pub name: StringId,
-    /// Source member names, including duplicates rejected during declaration.
+    pub name_span: Span,
+    /// Every short source member name, including duplicates rejected by Sema.
     pub member_names: Vec<StringId>,
-    pub members: Vec<TypeId>,
+    /// Qualified names parallel to `member_names` and to the corresponding
+    /// unresolved entries in `Uir::error_decls`.
+    pub members: Vec<StringId>,
     pub visibility: DeclVisibility,
     pub span: Span,
+    pub source_index: u32,
 }
 
 // ---------- Top-level UIR ----------
@@ -1597,32 +1601,37 @@ mod tests {
         let (n0, n1) = (pool.intern_str("0"), pool.intern_str("1"));
         let rect = pool.intern_str("Rect");
         let (w, h) = (pool.intern_str("w"), pool.intern_str("h"));
-        let (int_ty, float_ty) = (pool.int(), pool.float());
-        let enum_ty = pool.declare_enum(shape);
+        let int_name = pool.intern_str("int");
+        let float_name = pool.intern_str("float");
 
         let mut b = UirBuilder::new();
+        let int_ty = b.type_name(int_name, false, sp());
+        let float_ty = b.type_name(float_name, false, sp());
         b.add_enum_decl(UirEnumDecl {
             name: shape,
-            ty: enum_ty,
+            name_span: sp(),
+            attrs: crate::ast::EnumAttrs::default(),
             variants: vec![
                 UirEnumVariant {
                     name: circle,
+                    name_span: sp(),
                     kind: VariantKind::Unit,
                     fields: vec![],
                     span: sp(),
                 },
                 UirEnumVariant {
                     name: pair,
+                    name_span: sp(),
                     kind: VariantKind::Tuple,
                     fields: vec![
                         UirEnumField {
                             name: n0,
-                            ty: int_ty,
+                            type_expr: int_ty,
                             span: sp(),
                         },
                         UirEnumField {
                             name: n1,
-                            ty: float_ty,
+                            type_expr: float_ty,
                             span: sp(),
                         },
                     ],
@@ -1630,16 +1639,17 @@ mod tests {
                 },
                 UirEnumVariant {
                     name: rect,
+                    name_span: sp(),
                     kind: VariantKind::Named,
                     fields: vec![
                         UirEnumField {
                             name: w,
-                            ty: float_ty,
+                            type_expr: float_ty,
                             span: sp(),
                         },
                         UirEnumField {
                             name: h,
-                            ty: float_ty,
+                            type_expr: float_ty,
                             span: sp(),
                         },
                     ],
@@ -1647,13 +1657,13 @@ mod tests {
                 },
             ],
             span: sp(),
+            source_index: 0,
         });
 
         let uir = b.finish();
         assert_eq!(uir.enum_decls.len(), 1);
         let decl = &uir.enum_decls[0];
         assert_eq!(decl.name, shape);
-        assert_eq!(decl.ty, enum_ty);
         assert_eq!(decl.variants.len(), 3);
 
         assert_eq!(decl.variants[0].name, circle);
@@ -1664,17 +1674,17 @@ mod tests {
         assert_eq!(decl.variants[1].kind, VariantKind::Tuple);
         assert_eq!(decl.variants[1].fields.len(), 2);
         assert_eq!(decl.variants[1].fields[0].name, n0);
-        assert_eq!(decl.variants[1].fields[0].ty, int_ty);
+        assert_eq!(decl.variants[1].fields[0].type_expr, int_ty);
         assert_eq!(decl.variants[1].fields[1].name, n1);
-        assert_eq!(decl.variants[1].fields[1].ty, float_ty);
+        assert_eq!(decl.variants[1].fields[1].type_expr, float_ty);
 
         assert_eq!(decl.variants[2].name, rect);
         assert_eq!(decl.variants[2].kind, VariantKind::Named);
         assert_eq!(decl.variants[2].fields.len(), 2);
         assert_eq!(decl.variants[2].fields[0].name, w);
-        assert_eq!(decl.variants[2].fields[0].ty, float_ty);
+        assert_eq!(decl.variants[2].fields[0].type_expr, float_ty);
         assert_eq!(decl.variants[2].fields[1].name, h);
-        assert_eq!(decl.variants[2].fields[1].ty, float_ty);
+        assert_eq!(decl.variants[2].fields[1].type_expr, float_ty);
     }
 
     #[test]

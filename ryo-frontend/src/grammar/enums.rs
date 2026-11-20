@@ -202,7 +202,7 @@ where
 /// The tail of an `enum` declaration after the `enum` keyword:
 /// `Name:` plus an indented block of variant lines (M11). Yields the
 /// name and the sealed variant list. An empty body parses; the
-/// empty-enum diagnostic is astgen's, not the parser's.
+/// empty-enum diagnostic is Sema's, not the parser's.
 pub(super) fn enum_tail_parser<'a, I>()
 -> impl Parser<'a, I, (Ident, EnumVariantDeclList), PExtra<'a>> + Clone + 'a
 where

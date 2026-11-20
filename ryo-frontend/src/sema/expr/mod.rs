@@ -1061,7 +1061,7 @@ pub(super) fn analyze_value_field_access(
     }
     if matches!(sema.pool.kind(oty), TypeKind::Struct) && !sema.pool.is_defined_struct(oty) {
         // Declared but never defined (cycle / unknown field type) —
-        // astgen already diagnosed it. Recover without touching
+        // nominal resolution already diagnosed it. Recover without touching
         // `struct_view`, which panics on undefined structs. (Anon
         // structs are interned whole; they are always defined.)
         return fcx.builder.unreachable(sema.pool.error_type(), span);
@@ -1141,7 +1141,7 @@ fn analyze_unit_variant_access(
     span: Span,
 ) -> TirRef {
     if sema.pool.is_error(ety) {
-        // Declared but its definition failed — astgen already
+        // Declared but its definition failed — nominal resolution already
         // diagnosed it. Quiet recovery, matching failed struct types.
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }

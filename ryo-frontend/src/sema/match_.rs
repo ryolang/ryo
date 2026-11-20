@@ -1457,18 +1457,12 @@ fn emit_unknown_variant(
         TypeKind::DeclaredError | TypeKind::ErrorSet
     );
     if error_pattern {
-        if sema
-            .uir
-            .error_families
-            .iter()
-            .any(|family| family.name == variant)
-        {
+        if sema.error_families.contains_key(&variant) {
             let example = sema
-                .uir
-                .error_decls
-                .iter()
-                .map(|decl| sema.pool.str(decl.name))
-                .find(|name| name.starts_with(&format!("{}.", sema.pool.str(variant))))
+                .error_family_member_decls
+                .get(&variant)
+                .and_then(|members| members.first())
+                .map(|&name| sema.pool.str(name))
                 .unwrap_or("Family.Member")
                 .to_string();
             sema.sink.emit(Diag::error(
@@ -1484,17 +1478,14 @@ fn emit_unknown_variant(
         }
         let suffix = format!(".{}", sema.pool.str(variant));
         let mut owners: Vec<_> = sema
-            .uir
-            .error_families
+            .error_family_member_decls
             .iter()
-            .filter(|family| {
-                let qualified = format!("{}{suffix}", sema.pool.str(family.name));
-                sema.uir
-                    .error_decls
+            .filter(|(_, members)| {
+                members
                     .iter()
-                    .any(|decl| sema.pool.str(decl.name) == qualified)
+                    .any(|&decl| sema.pool.str(decl).ends_with(&suffix))
             })
-            .map(|family| family.name)
+            .map(|(&family, _)| family)
             .collect();
         owners.sort_by(|&a, &b| sema.pool.str(a).cmp(sema.pool.str(b)));
         if !owners.is_empty() {

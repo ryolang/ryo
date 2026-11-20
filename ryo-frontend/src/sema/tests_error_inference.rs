@@ -205,9 +205,7 @@ fn failed_inferred_component_preserves_caller_recovery() {
             Path::new("<test>"),
             &mut context,
         );
-        sema.register_structs();
-        sema.register_enums();
-        errors::register_errors(&mut sema);
+        resolution::declare_and_define(&mut sema);
         sema.resolve_signatures();
         sema.drive();
 

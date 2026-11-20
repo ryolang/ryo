@@ -1320,3 +1320,25 @@ fn rejected_error_family_braces_analyze_payload_once() {
     );
     assert_eq!(diags.len(), 2, "{diags:?}");
 }
+
+#[test]
+fn sema_error_families_resolve_members_and_signatures() {
+    let src = "pub errors IoError:\n\tEof\n\tReadFailed(str)\n\nfn explicit() -> IoError!str:\n\treturn \"ok\"\n\nfn inferred() -> !str:\n\treturn IoError.Eof\n";
+    let (uir, _pool, astgen_diags) = lower(src);
+    assert!(astgen_diags.is_empty(), "{astgen_diags:?}");
+    assert_eq!(
+        uir.error_families[0].visibility,
+        ast::DeclVisibility::Public
+    );
+
+    let (tirs, pool) = run(src).expect("family members and signatures resolve");
+    let explicit = tir_named(&tirs, &pool, "explicit").return_type;
+    let inferred = tir_named(&tirs, &pool, "inferred").return_type;
+    assert_eq!(pool.kind(explicit), TypeKind::ErrorUnion);
+    assert_eq!(
+        pool.display(pool.error_union_view(explicit).error_set)
+            .to_string(),
+        "IoError.Eof | IoError.ReadFailed"
+    );
+    assert_eq!(pool.display(inferred).to_string(), "IoError.Eof!str");
+}

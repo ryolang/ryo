@@ -1,122 +1,5 @@
 use super::*;
-use ryo_core::uir::{UirErrorFamilyDecl, UirVariantForm};
-
-pub(super) struct ErrorRegistry {
-    pub types: HashMap<StringId, TypeId>,
-    pub entries: HashMap<StringId, (TypeId, ast::ErrorDef, Span)>,
-    pub order: Vec<StringId>,
-    pub families: HashMap<StringId, Vec<TypeId>>,
-    pub family_members: HashMap<StringId, Vec<StringId>>,
-    pub family_decls: Vec<UirErrorFamilyDecl>,
-}
-
-impl ErrorRegistry {
-    pub fn new() -> Self {
-        Self {
-            types: HashMap::new(),
-            entries: HashMap::new(),
-            order: Vec::new(),
-            families: HashMap::new(),
-            family_members: HashMap::new(),
-            family_decls: Vec::new(),
-        }
-    }
-
-    pub fn declare_family(
-        &mut self,
-        program: &ast::Ast,
-        def: &ast::ErrorFamilyDef,
-        span: Span,
-        occupied_names: &mut HashSet<StringId>,
-        pool: &mut InternPool,
-        sink: &mut DiagSink,
-    ) {
-        let family = def.name.name;
-        let members = program.enum_variants(def.members);
-        if members.is_empty() {
-            return;
-        }
-        if self.families.contains_key(&family) {
-            sink.emit(Diag::error(
-                def.name.span,
-                DiagCode::DuplicateDeclaration,
-                format!(
-                    "error family '{}' cannot be extended or redeclared",
-                    pool.str(family)
-                ),
-            ));
-            return;
-        }
-        if occupied_names.contains(&family) {
-            sink.emit(Diag::error(
-                def.name.span,
-                DiagCode::DuplicateDeclaration,
-                format!(
-                    "type '{}' is declared with more than one kind",
-                    pool.str(family)
-                ),
-            ));
-            return;
-        }
-
-        let mut seen = HashSet::new();
-        let mut qualified_members = Vec::with_capacity(members.len());
-        for member in members {
-            if !seen.insert(member.name.name) {
-                sink.emit(Diag::error(
-                    member.name.span,
-                    DiagCode::DuplicateVariant,
-                    format!(
-                        "duplicate member '{}' in error family '{}'",
-                        pool.str(member.name.name),
-                        pool.str(family)
-                    ),
-                ));
-                continue;
-            }
-            let qualified = qualified_error_name(pool, family, member.name.name);
-            if occupied_names.contains(&qualified) {
-                sink.emit(Diag::error(
-                    member.name.span,
-                    DiagCode::DuplicateDeclaration,
-                    format!(
-                        "type '{}' is declared with more than one kind",
-                        pool.str(qualified)
-                    ),
-                ));
-                continue;
-            }
-            qualified_members.push((qualified, *member));
-        }
-
-        occupied_names.insert(family);
-        let mut member_types = Vec::with_capacity(qualified_members.len());
-        for (qualified, member) in qualified_members {
-            let ty = pool.declare_error(qualified);
-            let error_def = ast::ErrorDef {
-                name: ast::Ident::new(qualified, member.name.span),
-                payload: member.payload,
-            };
-            self.types.insert(qualified, ty);
-            self.entries.insert(qualified, (ty, error_def, member.span));
-            self.order.push(qualified);
-            occupied_names.insert(qualified);
-            member_types.push(ty);
-        }
-        self.families.insert(family, member_types.clone());
-        self.family_members.insert(
-            family,
-            members.iter().map(|member| member.name.name).collect(),
-        );
-        self.family_decls.push(UirErrorFamilyDecl {
-            name: family,
-            member_names: members.iter().map(|member| member.name.name).collect(),
-            members: member_types,
-            visibility: def.visibility,
-            span,
-        });
-    }
-}
+use ryo_core::uir::UirVariantForm;
 
 pub(super) fn qualified_error_name(
     pool: &mut InternPool,
@@ -132,15 +15,14 @@ pub(super) fn lower_error_construct(
     b: &mut UirBuilder,
     ast: &ast::Ast,
     c: ast::ErrorConstruct,
-    types: &TypeResolver,
-    defined_layouts: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     span: Span,
     depth: u32,
 ) -> InstRef {
-    let step = prepare_error_construct(b, ast, c, types, pool, sink, span);
-    drive_error_construct(step, b, ast, types, defined_layouts, pool, sink, depth)
+    let step = prepare_error_construct(b, ast, c, names, pool, sink, span);
+    drive_error_construct(step, b, ast, names, pool, sink, depth)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -148,8 +30,7 @@ fn drive_error_construct(
     mut step: ErrorStep,
     b: &mut UirBuilder,
     ast: &ast::Ast,
-    types: &TypeResolver,
-    defined_layouts: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     depth: u32,
@@ -158,16 +39,7 @@ fn drive_error_construct(
         match step {
             ErrorStep::Complete(result) => return result,
             ErrorStep::Child(state, arg) => {
-                let value = super::expr::gen_expr_d(
-                    b,
-                    ast,
-                    arg,
-                    types,
-                    defined_layouts,
-                    pool,
-                    sink,
-                    depth + 1,
-                );
+                let value = super::expr::gen_expr_d(b, ast, arg, names, pool, sink, depth + 1);
                 step = resume_error_construct(state, value, b, ast, pool);
             }
         }
@@ -192,7 +64,7 @@ pub(super) fn prepare_error_construct(
     b: &mut UirBuilder,
     ast: &ast::Ast,
     c: ast::ErrorConstruct,
-    _types: &TypeResolver,
+    _types: &Names,
     _pool: &mut InternPool,
     _sink: &mut DiagSink,
     span: Span,

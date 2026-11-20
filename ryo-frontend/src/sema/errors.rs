@@ -7,25 +7,6 @@ use ryo_core::tir::{
 use ryo_core::types::{StringId, TypeId, TypeKind, VariantKind};
 use ryo_core::uir::{CallView, ExtraList, InstData, InstRef, Span};
 
-pub(super) fn register_errors(sema: &mut Sema<'_>) {
-    for decl in &sema.uir.error_decls {
-        for field in &decl.payload.fields {
-            if sema.pool.is_view(field.ty) {
-                sema.sink.emit(Diag::error(
-                    field.span,
-                    DiagCode::ViewFieldType,
-                    format!(
-                        "error payload fields must be owned values; '{}' is a projection (Rule 6)",
-                        sema.pool.display(field.ty),
-                    ),
-                ));
-            }
-        }
-        sema.error_types.entry(decl.name).or_insert(decl.ty);
-    }
-    super::builtins::register_utf8_error(sema);
-}
-
 pub(super) fn is_error_union(sema: &Sema<'_>, ty: TypeId) -> bool {
     matches!(
         sema.pool.kind(ty),
@@ -376,16 +357,19 @@ pub(super) fn analyze_resolved_error_construct(
         {
             let prefix = format!("{}.", sema.pool.str(root));
             let available = sema
-                .uir
-                .error_decls
-                .iter()
-                .filter(|decl| sema.pool.str(decl.name).starts_with(&prefix))
-                .map(|decl| {
-                    let qualified = sema.pool.str(decl.name);
-                    format!("'{}'", &qualified[prefix.len()..])
+                .error_family_member_decls
+                .get(&root)
+                .map(|members| {
+                    members
+                        .iter()
+                        .map(|&decl| {
+                            let qualified = sema.pool.str(decl);
+                            format!("'{}'", &qualified[prefix.len()..])
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 })
-                .collect::<Vec<_>>()
-                .join(", ");
+                .unwrap_or_default();
             sema.sink.emit(Diag::error(
                 span,
                 DiagCode::UnknownVariant,
@@ -400,13 +384,11 @@ pub(super) fn analyze_resolved_error_construct(
                 analyze_expr_with(sema, fcx, scope, value, NeverMode::Reject, context.child());
             }
             if root == name {
-                let prefix = format!("{}.", sema.pool.str(root));
                 let example = sema
-                    .uir
-                    .error_decls
-                    .iter()
-                    .map(|decl| sema.pool.str(decl.name))
-                    .find(|qualified| qualified.starts_with(&prefix))
+                    .error_family_member_decls
+                    .get(&root)
+                    .and_then(|members| members.first())
+                    .map(|&name| sema.pool.str(name))
                     .unwrap_or("Family.Member")
                     .to_string();
                 sema.sink.emit(Diag::error(
@@ -420,17 +402,14 @@ pub(super) fn analyze_resolved_error_construct(
             } else {
                 let suffix = format!(".{}", sema.pool.str(name));
                 let mut owners: Vec<_> = sema
-                    .uir
-                    .error_families
+                    .error_family_member_decls
                     .iter()
-                    .filter(|family| {
-                        let qualified = format!("{}{suffix}", sema.pool.str(family.name));
-                        sema.uir
-                            .error_decls
+                    .filter(|(_, members)| {
+                        members
                             .iter()
-                            .any(|decl| sema.pool.str(decl.name) == qualified)
+                            .any(|&decl| sema.pool.str(decl).ends_with(&suffix))
                     })
-                    .map(|family| family.name)
+                    .map(|(&family, _)| family)
                     .collect();
                 owners.sort_by(|&a, &b| sema.pool.str(a).cmp(sema.pool.str(b)));
                 let qualifications = owners
