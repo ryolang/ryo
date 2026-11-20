@@ -28,6 +28,8 @@ struct NominalResolver<'a, 'b> {
     family_names: HashSet<StringId>,
     family_accepted: Vec<bool>,
     family_seen: Vec<HashSet<StringId>>,
+    accepted_family_members: Vec<Vec<StringId>>,
+    family_has_linked_decls: Vec<bool>,
 }
 
 pub(super) fn declare_and_define(sema: &mut Sema<'_>) {
@@ -70,11 +72,14 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
             family_names: HashSet::new(),
             family_accepted: vec![false; family_count],
             family_seen: vec![HashSet::new(); family_count],
+            accepted_family_members: vec![Vec::new(); family_count],
+            family_has_linked_decls: vec![false; family_count],
         }
     }
 
     fn declare_all(&mut self) {
         let mut declarations = Vec::new();
+        let mut family_error_decls = vec![Vec::new(); self.sema.uir.error_families.len()];
         for (index, decl) in self.sema.uir.struct_decls.iter().enumerate() {
             declarations.push((decl.source_index, NominalEntry::Struct(index)));
         }
@@ -85,7 +90,16 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
             declarations.push((decl.source_index, NominalEntry::Family(index)));
         }
         for (index, decl) in self.sema.uir.error_decls.iter().enumerate() {
-            declarations.push((decl.source_index, NominalEntry::Error(index)));
+            let Some(link) = decl.family else {
+                declarations.push((decl.source_index, NominalEntry::Error(index)));
+                continue;
+            };
+            let Ok(family_index) = usize::try_from(link.family) else {
+                continue;
+            };
+            if let Some(members) = family_error_decls.get_mut(family_index) {
+                members.push(index);
+            }
         }
         declarations.sort_by_key(|&(source_index, _)| source_index);
         for (_, entry) in declarations {
@@ -93,20 +107,48 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
                 NominalEntry::Struct(index) => self.declare_struct(index),
                 NominalEntry::Enum(index) => self.declare_enum(index),
                 NominalEntry::Error(index) => self.declare_error(index),
-                NominalEntry::Family(index) => self.declare_family(index),
+                NominalEntry::Family(index) => {
+                    self.declare_family(index);
+                    for &error_index in &family_error_decls[index] {
+                        let link = self.sema.uir.error_decls[error_index]
+                            .family
+                            .expect("indexed family member must retain its link");
+                        self.declare_family_member(error_index, link);
+                    }
+                }
             }
         }
         for index in 0..self.sema.uir.error_families.len() {
             if !self.family_accepted[index] {
                 continue;
             }
+            if self.accepted_family_members[index].is_empty()
+                && !self.family_has_linked_decls[index]
+            {
+                let family = &self.sema.uir.error_families[index];
+                let mut seen = HashSet::new();
+                let members = family
+                    .members
+                    .iter()
+                    .copied()
+                    .filter(|member| seen.insert(*member))
+                    .filter(|member| {
+                        let Some(NominalEntry::Error(error_index)) = self.entries.get(member)
+                        else {
+                            return false;
+                        };
+                        self.sema.uir.error_decls[*error_index].family.is_none()
+                    })
+                    .collect();
+                self.accepted_family_members[index] = members;
+            }
             let name = self.sema.uir.error_families[index].name;
-            let members = self.accepted_family_member_names(index);
-            let member_types = members
+            let member_types = self.accepted_family_members[index]
                 .iter()
                 .map(|member| self.sema.error_types[member])
                 .collect();
             self.sema.error_families.insert(name, member_types);
+            let members = self.accepted_family_members[index].clone();
             self.sema.error_family_member_decls.insert(name, members);
         }
     }
@@ -163,17 +205,19 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
     }
 
     fn declare_family(&mut self, index: usize) {
-        let decl = self.sema.uir.error_families[index].clone();
+        let decl = &self.sema.uir.error_families[index];
         let name = decl.name;
-        if self.reject_utf8_name(name, decl.name_span) {
+        let name_span = decl.name_span;
+        let has_members = !decl.members.is_empty();
+        if self.reject_utf8_name(name, name_span) {
             return;
         }
-        if decl.members.is_empty() {
+        if !has_members {
             return;
         }
         if self.family_names.contains(&name) {
             self.sema.sink.emit(Diag::error(
-                decl.name_span,
+                name_span,
                 DiagCode::DuplicateDeclaration,
                 format!(
                     "error family '{}' cannot be extended or redeclared",
@@ -182,7 +226,7 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
             ));
             return;
         }
-        if self.reject_cross_kind(name, decl.name_span) {
+        if self.reject_cross_kind(name, name_span) {
             return;
         }
 
@@ -192,24 +236,24 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
         self.entries.insert(name, NominalEntry::Family(index));
         self.states.insert(name, DefState::Pending);
         self.sema.error_families.insert(name, Vec::new());
-        self.sema
-            .error_family_members
-            .insert(name, decl.member_names.clone());
+        let member_names = self.sema.uir.error_families[index].member_names.clone();
+        self.sema.error_family_members.insert(name, member_names);
     }
 
     fn declare_error(&mut self, index: usize) {
-        let decl = self.sema.uir.error_decls[index].clone();
-        if let Some(root) = decl.family {
-            self.declare_family_member(index, root);
+        if let Some(link) = self.sema.uir.error_decls[index].family {
+            self.declare_family_member(index, link);
             return;
         }
+        let decl = &self.sema.uir.error_decls[index];
         let name = decl.name;
-        if self.reject_utf8_name(name, decl.payload.span) {
+        let name_span = decl.payload.span;
+        if self.reject_utf8_name(name, name_span) {
             return;
         }
         if matches!(self.entries.get(&name), Some(NominalEntry::Error(_))) {
             self.sema.sink.emit(Diag::error(
-                decl.payload.span,
+                name_span,
                 DiagCode::DuplicateDeclaration,
                 format!(
                     "duplicate error declaration: '{}'",
@@ -218,39 +262,38 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
             ));
             return;
         }
-        if self.reject_cross_kind(name, decl.payload.span) {
+        if self.reject_cross_kind(name, name_span) {
             return;
         }
         self.insert_error(index, name);
     }
 
-    fn declare_family_member(&mut self, index: usize, root: StringId) {
-        let decl = self.sema.uir.error_decls[index].clone();
-        let Some(family_index) = self
-            .sema
-            .uir
-            .error_families
-            .iter()
-            .position(|family| family.name == root && family.source_index == decl.source_index)
+    fn declare_family_member(&mut self, index: usize, link: ryo_core::uir::UirErrorMemberLink) {
+        let family_index = usize::try_from(link.family).expect("family index fits usize");
+        let member_index = usize::try_from(link.member).expect("member index fits usize");
+        let Some(family) = self.sema.uir.error_families.get(family_index) else {
+            return;
+        };
+        let Some((&short_name, &qualified)) = family
+            .member_names
+            .get(member_index)
+            .zip(family.members.get(member_index))
         else {
             return;
         };
+        let name = self.sema.uir.error_decls[index].name;
+        if qualified != name {
+            return;
+        }
+        let root = family.name;
+        self.family_has_linked_decls[family_index] = true;
         if !self.family_accepted[family_index] {
             return;
         }
-        let family = self.sema.uir.error_families[family_index].clone();
-        let prefix = format!("{}.", self.sema.pool.str(root));
-        let short_name = self.sema.pool.str(decl.name);
-        let short_name = short_name.strip_prefix(&prefix).unwrap_or(short_name);
-        let short_name = family
-            .member_names
-            .iter()
-            .copied()
-            .find(|&name| self.sema.pool.str(name) == short_name)
-            .unwrap_or(decl.name);
+        let name_span = self.sema.uir.error_decls[index].payload.span;
         if !self.family_seen[family_index].insert(short_name) {
             self.sema.sink.emit(Diag::error(
-                decl.payload.span,
+                name_span,
                 DiagCode::DuplicateVariant,
                 format!(
                     "duplicate member '{}' in error family '{}'",
@@ -260,38 +303,11 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
             ));
             return;
         }
-        let name = decl.name;
-        if self.reject_utf8_name(name, decl.payload.span)
-            || self.reject_cross_kind(name, decl.payload.span)
-        {
+        if self.reject_utf8_name(name, name_span) || self.reject_cross_kind(name, name_span) {
             return;
         }
         self.insert_error(index, name);
-    }
-
-    fn accepted_family_member_names(&self, index: usize) -> Vec<StringId> {
-        let family = &self.sema.uir.error_families[index];
-        let has_linked_decls = self.sema.uir.error_decls.iter().any(|decl| {
-            decl.family == Some(family.name) && decl.source_index == family.source_index
-        });
-        let mut seen = HashSet::new();
-        family
-            .members
-            .iter()
-            .copied()
-            .filter(|member| seen.insert(*member))
-            .filter(|member| {
-                let Some(NominalEntry::Error(error_index)) = self.entries.get(member) else {
-                    return false;
-                };
-                let decl = &self.sema.uir.error_decls[*error_index];
-                if has_linked_decls {
-                    decl.family == Some(family.name) && decl.source_index == family.source_index
-                } else {
-                    decl.family.is_none()
-                }
-            })
-            .collect()
+        self.accepted_family_members[family_index].push(name);
     }
 
     fn insert_error(&mut self, index: usize, name: StringId) -> TypeId {
@@ -663,7 +679,8 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
     fn define_error_family(&mut self, index: usize) {
         let name = self.sema.uir.error_families[index].name;
         let mut defined = true;
-        for member in self.accepted_family_member_names(index) {
+        for member_index in 0..self.accepted_family_members[index].len() {
+            let member = self.accepted_family_members[index][member_index];
             self.define(member);
             defined &= self.states[&member] == DefState::Defined;
         }

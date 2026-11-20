@@ -21,7 +21,7 @@ use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::types::{InternPool, StringId};
 use ryo_core::uir::{
     InstRef, InstTag, Uir, UirBuilder, UirEnumDecl, UirEnumField, UirEnumVariant, UirErrorDecl,
-    UirErrorFamilyDecl, UirParam, UirStructDecl, UirStructField,
+    UirErrorFamilyDecl, UirErrorMemberLink, UirParam, UirStructDecl, UirStructField,
 };
 
 type Span = ryo_core::span::Span;
@@ -80,6 +80,7 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
         range: pool.intern_str("range"),
     };
     let mut b = UirBuilder::new();
+    let mut error_family_count = 0usize;
 
     for (source_index, &stmt) in program.top_level_stmts().iter().enumerate() {
         let source_index = u32::try_from(source_index).expect("top-level source index fits u32");
@@ -128,26 +129,32 @@ pub fn generate(program: &ast::Ast, pool: &mut InternPool, sink: &mut DiagSink) 
                 });
             }
             ast::StmtKind::ErrorFamilyDef(def) => {
+                let family =
+                    u32::try_from(error_family_count).expect("error family index fits u32");
+                error_family_count = error_family_count
+                    .checked_add(1)
+                    .expect("error family count overflow");
                 let source_members = program.enum_variants(def.members);
                 let mut member_names = Vec::with_capacity(source_members.len());
                 let mut members = Vec::with_capacity(source_members.len());
-                for member in source_members {
+                for (member_index, source_member) in source_members.iter().enumerate() {
+                    let member = u32::try_from(member_index).expect("error member index fits u32");
                     let qualified =
-                        errors::qualified_error_name(pool, def.name.name, member.name.name);
-                    member_names.push(member.name.name);
+                        errors::qualified_error_name(pool, def.name.name, source_member.name.name);
+                    member_names.push(source_member.name.name);
                     members.push(qualified);
-                    let fields = copy_payload_fields(&mut b, program, member.payload);
+                    let fields = copy_payload_fields(&mut b, program, source_member.payload);
                     b.add_error_decl(UirErrorDecl {
                         name: qualified,
                         payload: UirEnumVariant {
                             name: qualified,
-                            name_span: member.name.span,
-                            kind: member.payload.kind,
+                            name_span: source_member.name.span,
+                            kind: source_member.payload.kind,
                             fields,
-                            span: member.name.span,
+                            span: source_member.name.span,
                         },
-                        family: Some(def.name.name),
-                        span: member.span,
+                        family: Some(UirErrorMemberLink { family, member }),
+                        span: source_member.span,
                         source_index,
                     });
                 }

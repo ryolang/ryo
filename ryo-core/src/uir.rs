@@ -541,12 +541,21 @@ pub struct UirEnumField {
     pub span: Span,
 }
 
+/// Direct indices from an error declaration to its family and source member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UirErrorMemberLink {
+    /// Index into `Uir::error_families`.
+    pub family: u32,
+    /// Index into the family's parallel `members` and `member_names` vectors.
+    pub member: u32,
+}
+
 /// An unresolved nominal error declaration with its source payload.
 #[derive(Debug, Clone)]
 pub struct UirErrorDecl {
     pub name: StringId,
-    /// Error-family root when this declaration came from a family member.
-    pub family: Option<StringId>,
+    /// Direct family and member indices when this declaration came from a family.
+    pub family: Option<UirErrorMemberLink>,
     pub payload: UirEnumVariant,
     pub span: Span,
     pub source_index: u32,

@@ -1342,3 +1342,56 @@ fn sema_error_families_resolve_members_and_signatures() {
     );
     assert_eq!(pool.display(inferred).to_string(), "IoError.Eof!str");
 }
+
+#[test]
+fn large_error_family_uses_indexed_member_links() {
+    const MEMBER_COUNT: usize = 512;
+    let mut src = String::from("errors IoError:\n");
+    for index in 0..MEMBER_COUNT {
+        src.push_str(&format!("\tMember{index:03}\n"));
+    }
+    src.push_str(
+        "fn alias(value: IoError):\n\treturn\nfn take(value: IoError.Missing):\n\treturn\nfn main():\n\tvalue = IoError.Member511\n",
+    );
+
+    let (uir, mut pool, astgen_diags) = lower(&src);
+    assert!(astgen_diags.is_empty(), "{astgen_diags:?}");
+    assert_eq!(uir.error_decls.len(), MEMBER_COUNT);
+    for (index, decl) in uir.error_decls.iter().enumerate() {
+        let member = u32::try_from(index).expect("member index fits u32");
+        assert_eq!(
+            decl.family,
+            Some(ryo_core::uir::UirErrorMemberLink { family: 0, member })
+        );
+    }
+
+    let mut sink = DiagSink::new();
+    let mut context = CompilationContext::new();
+    let tirs = analyze(
+        &uir,
+        &mut pool,
+        &mut sink,
+        &src,
+        std::path::Path::new("<test>"),
+        &mut context,
+    );
+    let diags = sink.into_diags();
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, DiagCode::UnknownVariant);
+    assert!(diags[0].message.contains("has no member 'Missing'"));
+    assert!(diags[0].message.contains("'Member000'"));
+    assert!(diags[0].message.contains("'Member511'"));
+
+    let alias = tir_named(&tirs, &pool, "alias");
+    assert_eq!(
+        pool.error_set_view(alias.params[0].ty).members.len(),
+        MEMBER_COUNT
+    );
+    let main = tir_named(&tirs, &pool, "main");
+    let value = main.var_decl_view(stmt_at(main, 0)).initializer;
+    assert_eq!(main.inst(value).tag, TirTag::EnumLit);
+    assert_eq!(
+        pool.display(main.inst(value).ty).to_string(),
+        "IoError.Member511"
+    );
+}
