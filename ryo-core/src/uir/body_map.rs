@@ -143,15 +143,20 @@ impl Uir {
             Exit(InstRef),
         }
 
+        let body_capacity = self
+            .instructions
+            .len()
+            .div_ceil(self.func_bodies.len().max(1));
         let mut map = UirBodyMap {
             slots: vec![None; self.instructions.len()],
             bodies: Vec::with_capacity(self.func_bodies.len()),
         };
-        map.bodies.resize_with(self.func_bodies.len(), Vec::new);
+        map.bodies
+            .resize_with(self.func_bodies.len(), || Vec::with_capacity(body_capacity));
 
         let mut active = vec![false; self.instructions.len()];
-        let mut stack = Vec::new();
-        let mut children = Vec::new();
+        let mut stack = Vec::with_capacity(self.instructions.len());
+        let mut children = Vec::with_capacity(body_capacity);
         for body_index in 0..self.func_bodies.len() {
             let body = u32::try_from(body_index).map_err(|_| BodyMapError::TooManyBodies)?;
             let words = checked_extra(self, self.func_bodies[body_index].body, body, None)?;
