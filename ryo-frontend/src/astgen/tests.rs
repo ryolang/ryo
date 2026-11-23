@@ -693,10 +693,17 @@ fn error_family_members_preserve_unresolved_payloads() {
         uir.type_expr(uir.error_decls[1].payload.fields[0].type_expr).kind,
         UirTypeExprKind::Name { name, .. } if pool.str(name) == "str"
     ));
-    for field in &uir.error_decls[2].payload.fields {
+    assert_eq!(uir.error_decls[2].payload.fields.len(), 2);
+    for (field_name, type_name) in [("code", "int"), ("message", "str")] {
+        let field = uir.error_decls[2]
+            .payload
+            .fields
+            .iter()
+            .find(|field| pool.str(field.name) == field_name)
+            .unwrap_or_else(|| panic!("missing {field_name} field"));
         assert!(matches!(
             uir.type_expr(field.type_expr).kind,
-            UirTypeExprKind::Name { name, .. } if matches!(pool.str(name), "int" | "str")
+            UirTypeExprKind::Name { name, .. } if pool.str(name) == type_name
         ));
     }
 }

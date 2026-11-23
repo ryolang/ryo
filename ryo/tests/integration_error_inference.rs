@@ -123,3 +123,22 @@ fn show_inferred_errors_marks_a_finalized_empty_error_set() {
         "succeed() -> !int (no errors)\n"
     );
 }
+
+#[test]
+fn show_inferred_errors_does_not_print_when_flow_rejects_program() {
+    let src = "fn fail() -> !int:\n\tmut value = 0\nfn main():\n\treturn\n";
+    let temp_dir = TempDir::new().expect("temp");
+    let test_file = create_test_file(temp_dir.path(), "inspect_flow_error.ryo", src);
+    let output = run_ryo_command(
+        &["run", "--show-inferred-errors", "inspect_flow_error.ryo"],
+        &test_file,
+    )
+    .expect("run inferred-signature inspection with a Flow error");
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "inferred signatures must not print before Flow validation: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("missing return"));
+}

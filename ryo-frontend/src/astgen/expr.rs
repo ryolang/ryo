@@ -587,8 +587,7 @@ fn gen_machine(
                         stack.push(ExprTask::Enter(scrutinee).at(depth + 1));
                     }
                     ast::ExprKind::ErrorConstruct(c) => {
-                        let step =
-                            errors::prepare_error_construct(b, ast, c, names, pool, sink, span);
+                        let step = errors::prepare_error_construct(b, ast, c, span);
                         match step {
                             errors::ErrorStep::Complete(result) => results.push(result),
                             errors::ErrorStep::Child(state, arg) => {
@@ -623,7 +622,7 @@ fn gen_machine(
             }
             ExprTask::Error(state) => {
                 let value = results.pop().expect("error argument lowered");
-                let step = errors::resume_error_construct(state, value, b, ast, pool);
+                let step = errors::resume_error_construct(state, value, b, ast);
                 match step {
                     errors::ErrorStep::Complete(result) => results.push(result),
                     errors::ErrorStep::Child(state, arg) => {

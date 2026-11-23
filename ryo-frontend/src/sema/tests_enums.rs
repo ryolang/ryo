@@ -716,3 +716,22 @@ fn sema_defines_forward_and_cross_kind_nominals() {
             .is_some()
     );
 }
+
+#[test]
+fn duplicate_enum_payload_field_fails_declaration_before_layout() {
+    let (_tirs, diags, _pool) = run_with_errors(
+        "enum Shape:\n\tRectangle(width: int, width: str)\n\tCircle(int)\nfn main():\n\treturn\n",
+    );
+    assert_eq!(
+        count_code(&diags, DiagCode::DuplicateStructField),
+        1,
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn enum_payload_field_names_are_scoped_per_variant() {
+    let src = "enum Choice:\n\tFirst(value: int)\n\tSecond(value: int)\nfn main():\n\tresult = Choice.First{value=1}\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert!(diags.is_empty(), "{diags:?}");
+}

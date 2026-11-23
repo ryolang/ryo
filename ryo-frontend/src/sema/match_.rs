@@ -1306,9 +1306,8 @@ fn resolve_variant(
                         analysis.span,
                         DiagCode::UnknownMatchVariant,
                         format!(
-                            "error pattern '{}.{}' does not name a member of error set '{}'",
-                            sema.pool.str(name),
-                            sema.pool.str(variant),
+                            "error pattern '{}' does not name a member of error set '{}'",
+                            analysis.pattern_text,
                             sema.pool.display(scrutinee_ty),
                         ),
                     ));
@@ -1398,7 +1397,12 @@ fn resolve_variant(
         )
     };
     let Some(vidx) = variants.iter().position(|&(n, _, _)| n == variant) else {
-        emit_unknown_variant(sema, scrutinee_ty, variant, &variants, analysis);
+        let effective_ty = if union_pattern {
+            sema.pool.error_union_view(scrutinee_ty).error_set
+        } else {
+            scrutinee_ty
+        };
+        emit_unknown_variant(sema, effective_ty, variant, &variants, analysis);
         return;
     };
     let (vname, kind, fields) = &variants[vidx];

@@ -370,6 +370,9 @@ pub(super) fn analyze_resolved_error_construct(
                         .join(", ")
                 })
                 .unwrap_or_default();
+            for (_, value) in view.fields() {
+                analyze_expr_with(sema, fcx, scope, value, NeverMode::Reject, context.child());
+            }
             sema.sink.emit(Diag::error(
                 span,
                 DiagCode::UnknownVariant,

@@ -393,6 +393,7 @@ pub struct Sema<'a> {
     pub(crate) error_types: HashMap<StringId, TypeId>,
     error_families: HashMap<StringId, Vec<TypeId>>,
     error_family_members: HashMap<StringId, Vec<StringId>>,
+    error_family_owners: HashMap<StringId, Vec<StringId>>,
     error_family_member_decls: HashMap<StringId, Vec<StringId>>,
     defined_layouts: HashSet<TypeId>,
     /// Interned ids for the names compared on hot paths (builtin
@@ -569,6 +570,7 @@ impl<'a> Sema<'a> {
             error_types: HashMap::new(),
             error_families: HashMap::new(),
             error_family_members: HashMap::new(),
+            error_family_owners: HashMap::new(),
             error_family_member_decls: HashMap::new(),
             defined_layouts: HashSet::new(),
             names,
@@ -916,6 +918,7 @@ pub(crate) struct FuncCtx {
     /// reads resolve them before any scope lookup.
     destructure_temps: HashMap<StringId, TypeId>,
     inferred_call_dependencies: HashMap<TirRef, DeclId>,
+    variant_states: Vec<expr::walker::VariantState>,
 }
 
 impl FuncCtx {
@@ -936,6 +939,7 @@ impl FuncCtx {
             loop_depth: 0,
             destructure_temps: HashMap::new(),
             inferred_call_dependencies: HashMap::new(),
+            variant_states: Vec::new(),
         }
     }
 

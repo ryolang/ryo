@@ -232,7 +232,25 @@ fn error_family_source(members: usize) -> String {
 fn error_family_resolution(bencher: divan::Bencher, members: usize) {
     let src = error_family_source(members);
     bencher
-        .with_inputs(|| parse_program(&src))
+        .with_inputs(|| {
+            let (program, mut pool, mut context) = parse_program(&src);
+            let mut sink = ryo_core::diag::DiagSink::new();
+            let uir = ryo_frontend::astgen::generate(&program, &mut pool, &mut sink);
+            let mut sema_sink = ryo_core::diag::DiagSink::new();
+            let tirs = ryo_frontend::sema::analyze(
+                &uir,
+                &mut pool,
+                &mut sema_sink,
+                &src,
+                std::path::Path::new("bench.ryo"),
+                &mut context,
+            );
+            assert!(!sink.has_errors() && !sema_sink.has_errors());
+            let main = pool.find_str("main");
+            assert!(tirs.iter().any(|tir| Some(tir.name) == main));
+            divan::black_box(tirs);
+            (program, pool, context)
+        })
         .bench_values(|(program, mut pool, mut context)| {
             let mut sink = ryo_core::diag::DiagSink::new();
             let uir = ryo_frontend::astgen::generate(&program, &mut pool, &mut sink);

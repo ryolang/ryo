@@ -57,27 +57,9 @@ pub(super) fn lowercase_enum_method_receiver_recovery(
             return Some(fcx.builder.unreachable(sema.pool.error_type(), span));
         }
         if scope.lookup(name).is_none()
-            && let Some(&sty) = sema.struct_types.get(&name)
+            && let Some(recovery) = nominal_struct_receiver_recovery(sema, fcx, name, span)
         {
-            let raw = sema.pool.str(name).to_string();
-            let example = {
-                let fields = sema.pool.struct_view(sty).fields;
-                let names = fields
-                    .iter()
-                    .map(|f| format!("{}=...", sema.pool.str(f.name)))
-                    .collect::<Vec<_>>();
-                if names.is_empty() {
-                    "{}".to_string()
-                } else {
-                    format!("{{{}}}", names.join(", "))
-                }
-            };
-            sema.sink.emit(Diag::error(
-                span,
-                DiagCode::NotAStruct,
-                format!("'{raw}' is a struct, not an enum — construct it as {raw}{example}"),
-            ));
-            return Some(fcx.builder.unreachable(sema.pool.error_type(), span));
+            return Some(recovery);
         }
     }
     None
@@ -404,7 +386,19 @@ pub(super) fn type_method_receiver_recovery(
         );
         return Some(fcx.builder.unreachable(sema.pool.error_type(), span));
     }
+    nominal_struct_receiver_recovery(sema, fcx, name, span)
+}
+
+fn nominal_struct_receiver_recovery(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    name: StringId,
+    span: Span,
+) -> Option<TirRef> {
     let &sty = sema.struct_types.get(&name)?;
+    if sema.pool.is_error(sty) {
+        return Some(fcx.builder.unreachable(sema.pool.error_type(), span));
+    }
     let raw = sema.pool.str(name).to_string();
     let example = {
         let fields = sema.pool.struct_view(sty).fields;

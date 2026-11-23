@@ -608,3 +608,46 @@ fn sema_rejects_nominal_cycles_duplicates_and_view_fields() {
         pool.int()
     );
 }
+
+#[test]
+fn duplicate_struct_field_fails_declaration_before_layout() {
+    let (_tirs, diags, _pool) =
+        run_with_errors("struct Point:\n\tx: int\n\tx: str\nfn main():\n\treturn\n");
+    assert_eq!(
+        count_code(&diags, DiagCode::DuplicateStructField),
+        1,
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn failed_struct_uppercase_method_receiver_recovers_without_layout() {
+    let (_tirs, diags, _pool) =
+        run_with_errors("struct Broken:\n\tchild: Broken\nfn main():\n\tvalue = Broken.foo()\n");
+    assert_eq!(count_code(&diags, DiagCode::InfiniteSize), 1, "{diags:?}");
+    assert_eq!(count_code(&diags, DiagCode::NotAStruct), 0, "{diags:?}");
+}
+
+#[test]
+fn failed_struct_lowercase_method_receiver_recovers_without_layout() {
+    let (_tirs, diags, _pool) =
+        run_with_errors("struct broken:\n\tchild: broken\nfn main():\n\tvalue = broken.foo()\n");
+    assert_eq!(count_code(&diags, DiagCode::InfiniteSize), 1, "{diags:?}");
+    assert_eq!(count_code(&diags, DiagCode::NotAStruct), 0, "{diags:?}");
+}
+
+#[test]
+fn long_forward_struct_chain_resolves_without_recursive_define() {
+    let mut src = String::new();
+    for index in 0..50_000 {
+        src.push_str(&format!(
+            "struct Type{index}:\n\tvalue: Type{}\n",
+            index + 1
+        ));
+    }
+    src.push_str("struct Type50000:\n\tvalue: int\nfn main():\n\treturn\n");
+    super::resolution::DefineDepth::reset_max();
+    let (_tirs, diags, _pool) = run_with_errors(&src);
+    assert!(diags.is_empty(), "{diags:?}");
+    assert_eq!(super::resolution::DefineDepth::max(), 1);
+}

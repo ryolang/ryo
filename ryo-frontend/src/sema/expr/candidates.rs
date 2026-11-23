@@ -182,14 +182,12 @@ pub(crate) fn resolve_error(sema: &mut Sema<'_>, scope: &Scope, node: InstRef) -
             );
         }
         if !sema.error_types.contains_key(&name) {
-            let mut owners: Vec<_> = sema
-                .error_family_members
-                .iter()
-                .filter(|(_, members)| members.contains(&name))
-                .map(|(&family, _)| family)
-                .collect();
-            owners.sort_by(|&a, &b| sema.pool.str(a).cmp(sema.pool.str(b)));
-            if let Some(&family) = owners.first() {
+            let family = sema
+                .error_family_owners
+                .get(&name)
+                .and_then(|owners| owners.first())
+                .copied();
+            if let Some(family) = family {
                 return resolved_error(
                     sema,
                     scope,
@@ -398,10 +396,7 @@ pub(crate) fn unqualified_call_candidate_name(sema: &Sema<'_>, node: InstRef) ->
         || view.form.mixed_fields
         || sema.error_types.contains_key(&name)
         || error_family_member_names(sema, name).is_some()
-        || sema
-            .error_family_members
-            .values()
-            .any(|members| members.contains(&name))
+        || sema.error_family_owners.contains_key(&name)
     {
         return None;
     }

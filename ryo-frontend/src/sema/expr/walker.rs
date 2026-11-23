@@ -157,7 +157,7 @@ mod struct_tasks;
 mod variant_tasks;
 use match_tasks::{BlockState, MatchState, StmtState, match_scrutinee};
 use struct_tasks::StructState;
-use variant_tasks::VariantState;
+pub(crate) use variant_tasks::VariantState;
 
 enum Task {
     Enter(InstRef, ScopeId, NeverMode),
@@ -284,7 +284,10 @@ fn analyze_machine_inner(
         Some(node) => StructState::new(node, root_target),
         None => StructState::empty(),
     };
-    let mut variant_state = VariantState::new(fcx.inst_map.len());
+    let mut variant_state = fcx
+        .variant_states
+        .pop()
+        .unwrap_or_else(|| VariantState::new(fcx.inst_map.len()));
     match root {
         MachineRoot::Expr(node) => tasks.push(Task::Enter(node, root_scope, NeverMode::Reject)),
         MachineRoot::Block(stmts) => {
@@ -697,6 +700,8 @@ fn analyze_machine_inner(
             }
         }
     }
+    variant_state.reset();
+    fcx.variant_states.push(variant_state);
     match expression_root {
         Some(node) => MachineResult::Expr(analyzed[&node]),
         None => MachineResult::Stmts(block_results.pop().expect("one root block remains")),

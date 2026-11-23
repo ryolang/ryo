@@ -229,6 +229,13 @@ fn astgen_preserves_enum_error_and_match_declaration_names() {
     assert_eq!(pool.str(qualified_view.enum_name), "IoError");
     assert_eq!(pool.str(qualified_view.variant), "ReadFailed");
     assert!(qualified_view.form.positional);
+    let qualified_fields: Vec<_> = qualified_view.fields().collect();
+    assert_eq!(qualified_fields.len(), 1);
+    let (_, payload) = qualified_fields[0];
+    assert!(matches!(
+        uir.inst(payload).data,
+        InstData::Str(text) if pool.str(text) == "bad"
+    ));
 
     let matched = match uir.inst(statements.at(3)).data {
         InstData::UnOp(operand) => operand,

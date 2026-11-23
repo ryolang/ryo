@@ -1,6 +1,6 @@
 use super::{
     ExtraRange, InstData, InstRef, InstTag, TypeExprId, TypeExprList, TypeFieldList, Uir,
-    UirTypeExprKind, match_extra, var_decl_extra,
+    UirTypeExprKind, match_extra, var_decl_extra, variant_extra,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -619,7 +619,7 @@ fn decode_children(
             let range = expect_extra(data, body, inst)?;
             let mut cursor = WireCursor::new(uir, range, body, inst)?;
             cursor.skip(2)?;
-            decode_variant_args(&mut cursor, 8, children)?;
+            decode_variant_args(&mut cursor, variant_extra::ENUM_HEADER_LEN, children)?;
             cursor.finish()?;
         }
         InstTag::ErrorConstruct => {
@@ -628,7 +628,7 @@ fn decode_children(
             };
             let mut cursor = WireCursor::new(uir, args, body, inst)?;
             cursor.skip(2)?;
-            decode_variant_args(&mut cursor, 0, children)?;
+            decode_variant_args(&mut cursor, variant_extra::ERROR_HEADER_LEN, children)?;
             cursor.finish()?;
         }
         InstTag::FieldAccess => {
@@ -686,12 +686,12 @@ fn decode_children(
 
 fn decode_variant_args(
     cursor: &mut WireCursor<'_>,
-    span_words: usize,
+    header_len: usize,
     children: &mut Vec<InstRef>,
 ) -> Result<(), BodyMapError> {
     cursor.skip(1)?;
     let argc = cursor.count()?;
-    cursor.skip(span_words)?;
+    cursor.skip(header_len - 4)?;
     for _ in 0..argc {
         cursor.skip(1)?;
         cursor.inst(children)?;

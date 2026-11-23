@@ -21,7 +21,7 @@ pub(super) fn lower_error_construct(
     span: Span,
     depth: u32,
 ) -> InstRef {
-    let step = prepare_error_construct(b, ast, c, names, pool, sink, span);
+    let step = prepare_error_construct(b, ast, c, span);
     drive_error_construct(step, b, ast, names, pool, sink, depth)
 }
 
@@ -40,7 +40,7 @@ fn drive_error_construct(
             ErrorStep::Complete(result) => return result,
             ErrorStep::Child(state, arg) => {
                 let value = super::expr::gen_expr_d(b, ast, arg, names, pool, sink, depth + 1);
-                step = resume_error_construct(state, value, b, ast, pool);
+                step = resume_error_construct(state, value, b, ast);
             }
         }
     }
@@ -59,14 +59,10 @@ pub(super) struct ErrorState {
     arg_refs: Vec<(u32, InstRef)>,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_error_construct(
     b: &mut UirBuilder,
     ast: &ast::Ast,
     c: ast::ErrorConstruct,
-    _types: &Names,
-    _pool: &mut InternPool,
-    _sink: &mut DiagSink,
     span: Span,
 ) -> ErrorStep {
     let name = c.name.name;
@@ -98,7 +94,6 @@ pub(super) fn resume_error_construct(
     value: InstRef,
     b: &mut UirBuilder,
     ast: &ast::Ast,
-    _pool: &mut InternPool,
 ) -> ErrorStep {
     let selector = if state.args.positional.is_some() {
         state.next as u32

@@ -1513,3 +1513,44 @@ fn uppercase_method_receiver_precedes_arguments_at_every_depth_limit() {
         );
     }
 }
+
+#[test]
+fn variant_state_pool_reuses_body_storage_across_walks() {
+    let (uir, mut pool, root, _shared) = shared_binop_dag(InstTag::Add, 1, 2);
+    let mut fcx = test_func_ctx(&uir, &mut pool);
+    let scope = Scope::new();
+    let mut sink = DiagSink::new();
+    let mut context = ryo_core::compilation::CompilationContext::new();
+    let mut sema = Sema::new(
+        &uir,
+        &mut pool,
+        &mut sink,
+        "",
+        Path::new("<test>"),
+        &mut context,
+    );
+
+    with_expr_limit(0, || {
+        analyze_expr_with(
+            &mut sema,
+            &mut fcx,
+            &scope,
+            root,
+            NeverMode::Reject,
+            SemaExprContext::root(),
+        );
+        assert_eq!(fcx.variant_states.len(), 1);
+        let capacities = fcx.variant_states[0].storage_capacities();
+
+        analyze_expr_with(
+            &mut sema,
+            &mut fcx,
+            &scope,
+            root,
+            NeverMode::Reject,
+            SemaExprContext::root(),
+        );
+        assert_eq!(fcx.variant_states.len(), 1);
+        assert_eq!(fcx.variant_states[0].storage_capacities(), capacities);
+    });
+}

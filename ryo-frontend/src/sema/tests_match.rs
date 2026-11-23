@@ -785,12 +785,19 @@ fn analyze_qualified_union_catch(member: &str) -> (Vec<Tir>, Vec<Diag>, InternPo
     let scrutinee = builder.var_ref(result, Span::EMPTY);
     let qualified_body = builder.str_literal(outcome, Span::EMPTY);
     let wildcard_body = builder.str_literal(outcome, Span::EMPTY);
+    let payload = pool.intern_str("payload");
+    let payload_args_storage = [(None, ryo_core::uir::UirArgTarget::Bind(payload))];
+    let payload_args =
+        (pool.str(member) == "ReadFailed").then_some(ryo_core::uir::UirVariantArgs {
+            by_position: true,
+            args: &payload_args_storage,
+        });
     let qualified = ryo_core::uir::UirMatchArm {
         span: Span::EMPTY,
         pattern: ryo_core::uir::UirPattern::Variant {
             enum_name: Some(family),
             variant: member,
-            args: None,
+            args: payload_args,
         },
         body: ryo_core::uir::UirArmBody::Expr(qualified_body),
     };
@@ -832,6 +839,18 @@ fn analyze_qualified_union_catch(member: &str) -> (Vec<Tir>, Vec<Diag>, InternPo
     (tirs, sink.into_diags(), pool)
 }
 
+fn assert_match_discriminant(tir: &Tir, expected: Discriminant) {
+    let found = (1..tir.instructions.len()).any(|index| {
+        let reference = TirRef::from_raw(index as u32);
+        if tir.inst(reference).tag != TirTag::Match {
+            return false;
+        }
+        let view = tir.match_view(reference);
+        (0..view.len()).any(|arm| view.arm(arm).discriminant == expected)
+    });
+    assert!(found, "missing match discriminant {expected:?}");
+}
+
 #[test]
 fn qualified_error_family_catch_patterns_resolve_members() {
     let (tirs, diags, pool) = analyze_qualified_union_catch("Eof");
@@ -839,6 +858,31 @@ fn qualified_error_family_catch_patterns_resolve_members() {
     let main = tir_named(&tirs, &pool, "main");
     let init = main.var_decl_view(stmt_at(main, 0)).initializer;
     assert_eq!(main.inst(init).tag, TirTag::Match);
+    assert_match_discriminant(main, Discriminant::Variant(0));
+}
+
+#[test]
+fn qualified_error_family_catch_binds_str_payload() {
+    let (tirs, diags, pool) = analyze_qualified_union_catch("ReadFailed");
+    assert!(diags.is_empty(), "{diags:?}");
+    let main = tir_named(&tirs, &pool, "main");
+    let init = main.var_decl_view(stmt_at(main, 0)).initializer;
+    assert_eq!(main.inst(init).tag, TirTag::Match);
+    assert_match_discriminant(main, Discriminant::Variant(0));
+    let payload = pool.find_str("payload").expect("payload binding");
+    let found = (1..main.instructions.len()).any(|index| {
+        let reference = TirRef::from_raw(index as u32);
+        if main.inst(reference).tag != TirTag::Match {
+            return false;
+        }
+        let view = main.match_view(reference);
+        (0..view.len()).any(|arm| {
+            view.arm(arm)
+                .bindings()
+                .any(|binding| binding.name == payload && binding.ty == pool.str_())
+        })
+    });
+    assert!(found, "missing str payload binding");
 }
 
 #[test]
@@ -848,6 +892,31 @@ fn unknown_error_family_catch_pattern_reports_member_not_unknown_type() {
     assert_eq!(diags[0].code, DiagCode::UnknownMatchVariant);
     assert!(diags[0].message.contains("has no member 'Missing'"));
     assert!(diags[0].message.contains("'Eof', 'ReadFailed'"));
+}
+
+#[test]
+fn wrong_qualified_error_member_uses_original_pattern_text() {
+    let src = "errors First:\n\tMember\nerrors Second:\n\tMember\nfn main():\n\tmatch First.Member:\n\t\tSecond.Member: 0\n\t\t_: 1\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, DiagCode::UnknownMatchVariant);
+    assert!(diags[0].message.contains("error pattern 'Second.Member'"));
+    assert!(!diags[0].message.contains("Second.Member.Second.Member"));
+}
+
+#[test]
+fn unknown_union_member_reports_effective_error_set() {
+    let src = "errors IoError:\n\tEof\nfn fail() -> IoError!int:\n\treturn 1\nfn main():\n\tresult = fail() catch:\n\t\tMissing: 0\n\t\t_: 1\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert!(
+        diags[0].message.contains("error set 'IoError.Eof'"),
+        "{diags:?}"
+    );
+    assert!(
+        !diags[0].message.contains("error set 'IoError!int'"),
+        "{diags:?}"
+    );
 }
 
 #[test]

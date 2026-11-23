@@ -74,6 +74,15 @@ pub(super) fn lower_and_analyze(
     // ownership error suppresses them exactly like a sema error.
     let report =
         sema::analyze_buffered_report(&uir, pool, &mut sink, &source_text, file_path, context);
+    let analyzed = match ryo_frontend::pipeline::BuiltProgram::build(report.tirs, pool)
+        .analyze(pool, &mut sink)
+    {
+        Ok(analyzed) => analyzed,
+        Err(error) => {
+            sink.emit(ownership_error_diag(error));
+            return Err(fail_with_diags(sink.into_diags(), context.sources()));
+        }
+    };
     if show_inferred_errors && !sink.has_errors() {
         for signature in &report.inferred {
             let error_set = pool.error_union_view(signature.return_type).error_set;
@@ -90,15 +99,6 @@ pub(super) fn lower_and_analyze(
             ))?;
         }
     }
-    let analyzed = match ryo_frontend::pipeline::BuiltProgram::build(report.tirs, pool)
-        .analyze(pool, &mut sink)
-    {
-        Ok(analyzed) => analyzed,
-        Err(error) => {
-            sink.emit(ownership_error_diag(error));
-            return Err(fail_with_diags(sink.into_diags(), context.sources()));
-        }
-    };
     if !sink.has_errors() {
         for d in report.warnings {
             sink.emit(d);

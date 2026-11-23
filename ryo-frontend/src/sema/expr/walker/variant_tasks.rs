@@ -13,21 +13,41 @@ use ryo_core::types::{StringId, StructField, TypeKind, VariantKind};
 use ryo_core::uir::{CallView, ExtraList, InstRef, InstTag};
 use std::collections::{HashMap, HashSet};
 
-pub(super) struct VariantState {
+pub(crate) struct VariantState {
     diagnosed: HashMap<InstRef, HashSet<usize>>,
     candidates: Vec<Option<Candidate>>,
     method_recoveries: Vec<Option<TirRef>>,
     method_receivers: Vec<Option<TirRef>>,
+    used_slots: Vec<usize>,
 }
 
 impl VariantState {
-    pub(super) fn new(instruction_count: usize) -> Self {
+    pub(crate) fn new(instruction_count: usize) -> Self {
         Self {
             diagnosed: HashMap::new(),
             candidates: vec![None; instruction_count],
             method_recoveries: vec![None; instruction_count],
             method_receivers: vec![None; instruction_count],
+            used_slots: Vec::new(),
         }
+    }
+
+    pub(crate) fn reset(&mut self) {
+        for slot in self.used_slots.drain(..) {
+            self.candidates[slot] = None;
+            self.method_recoveries[slot] = None;
+            self.method_receivers[slot] = None;
+        }
+        self.diagnosed.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn storage_capacities(&self) -> (usize, usize, usize) {
+        (
+            self.candidates.capacity(),
+            self.method_recoveries.capacity(),
+            self.method_receivers.capacity(),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -48,6 +68,8 @@ impl VariantState {
             _ => return false,
         };
         let slot = fcx.map_slot(sema.body_map(), node);
+        debug_assert!(!self.used_slots.contains(&slot));
+        self.used_slots.push(slot);
         if matches!(candidate, Candidate::Call) {
             let (name, _, _, view) = sema.uir.error_construct_view(node);
             let args: Vec<_> = view.fields().map(|(_, value)| value).collect();
@@ -91,12 +113,6 @@ impl VariantState {
             Candidate::Error(error) => {
                 if error.shadowed.is_some() {
                     true
-                } else if error.family_root.is_some()
-                    && error.family_member.is_some()
-                    && sema.pool.is_error(error.ty)
-                    && !sema.error_types.contains_key(&error.name)
-                {
-                    false
                 } else if sema.pool.kind(error.ty) == TypeKind::DeclaredError
                     && !is_rejected_error_declaration(sema, error.name)
                 {

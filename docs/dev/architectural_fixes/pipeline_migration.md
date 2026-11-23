@@ -130,8 +130,11 @@ first-wins lookup and duplicate-definition diagnostic. Sema maps those context-g
 current-UIR-local slots instead of indexing bodies by the declaration-table index.
 
 `sema/resolution.rs` declares nominal shells and resolves their fields and layouts with explicit
-pending/in-progress/defined/failed states, including error-family member links and first-wins
-duplicate handling. Sema resolves every parameter and return signature before body scheduling.
+pending/in-progress/defined/failed states and an explicit work stack that resumes definitions
+after dependencies finish rather than recursing through Rust calls. Real cycles retain
+`InfiniteSize` diagnostics, duplicate nominal fields fail before layout installation, and
+error-family member links preserve first-wins lookup and a lexically ordered owner index. Sema
+resolves every parameter and return signature before body scheduling.
 For inferred error unions, the exact direct-call graph supplies dependency edges and recursive
 components containing inferred unions are rejected before body analysis. `DeclarationScheduler`
 tracks pending counts and dependents, releases ready bodies in deterministic source order, and
@@ -164,11 +167,13 @@ parameter modes. Builtin and lowered runtime calls use a separate declaration-fr
 generation still uses the compatibility name in this migration stage.
 
 Flow construction records the block only when it needs the builder-supplied final `ReturnVoid`.
-`Flow::has_implicit_fallthrough` is true only when that block is reachable; an explicit return,
-diverging call, unreachable continuation, or loop backedge does not establish a successful exit.
-After `AnalysisReady` validates the body and before ownership analysis, `BuiltProgram::analyze`
-emits `MissingReturn` for a non-void, non-error-returning TIR body with reachable implicit
-fallthrough. The diagnostic retains the TIR body span and established message. The source-clean
+`Flow::has_implicit_fallthrough` is true only when that block is reachable. An explicit return is an
+exit, not implicit fallthrough; a diverging call, unreachable continuation, or loop backedge also
+does not establish a successful exit. After `AnalysisReady` validates the body and before ownership
+analysis, `BuiltProgram::analyze` emits `MissingReturn` when the return type is neither `void` nor
+the internal error sentinel and the body has reachable implicit fallthrough. Declared errors and
+error unions still undergo this check. The diagnostic retains the TIR body span and established
+message. The source-clean
 flag is computed after this check and the ownership diagnostics, and `require_backend_transition`
 rejects artifacts when it is false. Sema retains divergence queries used during expression typing,
 but final return validation uses this Flow fact rather than another TIR traversal.

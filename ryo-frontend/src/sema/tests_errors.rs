@@ -1395,3 +1395,16 @@ fn large_error_family_uses_indexed_member_links() {
         "IoError.Member511"
     );
 }
+
+#[test]
+fn unknown_family_member_payload_errors_still_surface() {
+    let (_tirs, diags, _pool) = run_with_errors(
+        "errors IoError:\n\tEof\nfn main():\n\tvalue = IoError.Missing(missing_name)\n",
+    );
+    assert_eq!(count_code(&diags, DiagCode::UnknownVariant), 1, "{diags:?}");
+    assert_eq!(
+        count_code(&diags, DiagCode::UndefinedVariable),
+        1,
+        "the payload must be analyzed before the unknown-member recovery: {diags:?}"
+    );
+}

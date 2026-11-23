@@ -4,6 +4,42 @@ use ryo_core::types::{EnumVariantDef, StringId, StructFlags, TypeId, TypeKind};
 use ryo_core::uir::{Span, TypeExprId, UirTypeExprKind};
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+thread_local! {
+    static DEFINE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MAX_DEFINE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) struct DefineDepth;
+
+#[cfg(test)]
+impl DefineDepth {
+    fn enter() -> Self {
+        DEFINE_DEPTH.with(|depth| {
+            let next = depth.get() + 1;
+            depth.set(next);
+            MAX_DEFINE_DEPTH.with(|max| max.set(max.get().max(next)));
+        });
+        Self
+    }
+
+    pub(super) fn reset_max() {
+        MAX_DEFINE_DEPTH.with(|max| max.set(0));
+    }
+
+    pub(super) fn max() -> usize {
+        MAX_DEFINE_DEPTH.with(|max| max.get())
+    }
+}
+
+#[cfg(test)]
+impl Drop for DefineDepth {
+    fn drop(&mut self) {
+        DEFINE_DEPTH.with(|depth| depth.set(depth.get() - 1));
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DefState {
     Pending,
@@ -19,6 +55,8 @@ enum NominalEntry {
     Error(usize),
     Family(usize),
 }
+
+type ResolvedFields = (Vec<(StringId, TypeId, Span)>, bool);
 
 struct NominalResolver<'a, 'b> {
     sema: &'a mut Sema<'b>,
@@ -237,7 +275,17 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
         self.states.insert(name, DefState::Pending);
         self.sema.error_families.insert(name, Vec::new());
         let member_names = self.sema.uir.error_families[index].member_names.clone();
-        self.sema.error_family_members.insert(name, member_names);
+        self.sema
+            .error_family_members
+            .insert(name, member_names.clone());
+        for member in member_names {
+            let owners = self.sema.error_family_owners.entry(member).or_default();
+            if !owners.contains(&name) {
+                owners.push(name);
+                let pool = &self.sema.pool;
+                owners.sort_by(|a, b| pool.str(*a).cmp(pool.str(*b)));
+            }
+        }
     }
 
     fn declare_error(&mut self, index: usize) {
@@ -397,16 +445,39 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
         if self.states.get(&name) != Some(&DefState::Pending) {
             return;
         }
-        self.states.insert(name, DefState::InProgress);
-        match self.entries[&name] {
-            NominalEntry::Struct(index) => self.define_struct(index),
-            NominalEntry::Enum(index) => self.define_enum(index),
-            NominalEntry::Error(index) => self.define_error(index),
-            NominalEntry::Family(index) => self.define_error_family(index),
+        #[cfg(test)]
+        let _depth = DefineDepth::enter();
+        let mut work = vec![name];
+        while let Some(current) = work.last().copied() {
+            match self.states[&current] {
+                DefState::Pending => {
+                    self.states.insert(current, DefState::InProgress);
+                }
+                DefState::InProgress => {}
+                DefState::Defined | DefState::Failed => {
+                    work.pop();
+                    continue;
+                }
+            }
+            let completed = match self.entries[&current] {
+                NominalEntry::Struct(index) => self.define_struct(index, &mut work),
+                NominalEntry::Enum(index) => self.define_enum(index, &mut work),
+                NominalEntry::Error(index) => self.define_error(index, &mut work),
+                NominalEntry::Family(index) => self.define_error_family(index, &mut work),
+            };
+            if completed.is_some() {
+                work.pop();
+            }
         }
     }
 
-    fn order_ref(&mut self, name: StringId, span: Span, field: StringId) -> bool {
+    fn order_ref(
+        &mut self,
+        name: StringId,
+        span: Span,
+        field: StringId,
+        work: &mut Vec<StringId>,
+    ) -> Option<bool> {
         let noun = if self.sema.struct_types.contains_key(&name) {
             "struct"
         } else if self.sema.enum_types.contains_key(&name) {
@@ -416,7 +487,7 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
         } else if self.sema.error_families.contains_key(&name) {
             "error set"
         } else {
-            return false;
+            return Some(false);
         };
         match self.states[&name] {
             DefState::InProgress => {
@@ -430,31 +501,33 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
                         self.sema.pool.str(name),
                     ),
                 ));
-                true
+                Some(true)
             }
             DefState::Pending => {
-                self.define(name);
-                self.states[&name] != DefState::Defined
+                work.push(name);
+                None
             }
-            DefState::Defined => false,
-            DefState::Failed => true,
+            DefState::Defined => Some(false),
+            DefState::Failed => Some(true),
         }
     }
 
     fn resolve_fields(
         &mut self,
         fields: &[(StringId, TypeExprId, Span)],
-    ) -> (Vec<(StringId, TypeId, Span)>, bool) {
+        work: &mut Vec<StringId>,
+    ) -> Option<ResolvedFields> {
         let mut resolved = Vec::with_capacity(fields.len());
         let mut failed = false;
+        let mut refs = Vec::new();
         for &(field_name, type_expr, span) in fields {
-            let mut refs = Vec::new();
+            refs.clear();
             named_refs_in(self.sema, type_expr, &mut refs);
             for &(name, is_view, ref_span) in &refs {
                 if is_view || self.sema.is_primitive(name) {
                     continue;
                 }
-                if self.order_ref(name, ref_span, field_name) {
+                if self.order_ref(name, ref_span, field_name, work)? {
                     failed = true;
                 }
             }
@@ -464,7 +537,7 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
             }
             resolved.push((field_name, ty, span));
         }
-        (resolved, failed)
+        Some((resolved, failed))
     }
 
     fn check_derive_eq(
@@ -489,7 +562,34 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
         }
     }
 
-    fn define_struct(&mut self, index: usize) {
+    fn reject_duplicate_fields(
+        &mut self,
+        name: StringId,
+        kind: &str,
+        fields: &[(StringId, TypeExprId, Span)],
+    ) -> bool {
+        let mut seen = Vec::with_capacity(fields.len());
+        let mut failed = false;
+        for &(field, _, span) in fields {
+            if seen.contains(&field) {
+                self.sema.sink.emit(Diag::error(
+                    span,
+                    DiagCode::DuplicateStructField,
+                    format!(
+                        "field '{}' is specified more than once in {kind} '{}'",
+                        self.sema.pool.str(field),
+                        self.sema.pool.str(name),
+                    ),
+                ));
+                failed = true;
+            } else {
+                seen.push(field);
+            }
+        }
+        failed
+    }
+
+    fn define_struct(&mut self, index: usize, work: &mut Vec<StringId>) -> Option<()> {
         let decl = self.sema.uir.struct_decls[index].clone();
         let name = decl.name;
         let source_fields = decl
@@ -497,10 +597,14 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
             .iter()
             .map(|field| (field.name, field.type_expr, field.span))
             .collect::<Vec<_>>();
-        let (fields, failed) = self.resolve_fields(&source_fields);
+        if self.reject_duplicate_fields(name, "struct", &source_fields) {
+            self.states.insert(name, DefState::Failed);
+            return Some(());
+        }
+        let (fields, failed) = self.resolve_fields(&source_fields, work)?;
         if failed {
             self.states.insert(name, DefState::Failed);
-            return;
+            return Some(());
         }
         if decl.attrs.derive_eq {
             self.check_derive_eq(name, fields.iter().copied());
@@ -532,9 +636,10 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
                 ));
             }
         }
+        Some(())
     }
 
-    fn define_enum(&mut self, index: usize) {
+    fn define_enum(&mut self, index: usize, work: &mut Vec<StringId>) -> Option<()> {
         let decl = self.sema.uir.enum_decls[index].clone();
         let name = decl.name;
         if decl.variants.is_empty() {
@@ -547,7 +652,7 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
                 ),
             ));
             self.states.insert(name, DefState::Failed);
-            return;
+            return Some(());
         }
         let mut variants = Vec::with_capacity(decl.variants.len());
         let mut fields = Vec::new();
@@ -573,8 +678,13 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
                 .iter()
                 .map(|field| (field.name, field.type_expr, field.span))
                 .collect::<Vec<_>>();
-            let (resolved, payload_failed) = self.resolve_fields(&source_fields);
-            failed |= payload_failed;
+            let duplicate = self.reject_duplicate_fields(name, "enum", &source_fields);
+            let (resolved, payload_failed) = if duplicate {
+                (Vec::new(), false)
+            } else {
+                self.resolve_fields(&source_fields, work)?
+            };
+            failed |= duplicate | payload_failed;
             fields.extend(resolved.iter().copied());
             variants.push(EnumVariantDef {
                 name: variant.name,
@@ -587,7 +697,7 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
         }
         if failed {
             self.states.insert(name, DefState::Failed);
-            return;
+            return Some(());
         }
         if decl.attrs.derive_eq {
             self.check_derive_eq(name, fields.iter().copied());
@@ -616,9 +726,10 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
                 ));
             }
         }
+        Some(())
     }
 
-    fn define_error(&mut self, index: usize) {
+    fn define_error(&mut self, index: usize, work: &mut Vec<StringId>) -> Option<()> {
         let decl = self.sema.uir.error_decls[index].clone();
         let name = decl.name;
         let mut seen = Vec::with_capacity(decl.payload.fields.len());
@@ -645,11 +756,11 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
             .iter()
             .map(|field| (field.name, field.type_expr, field.span))
             .collect::<Vec<_>>();
-        let (fields, payload_failed) = self.resolve_fields(&source_fields);
+        let (fields, payload_failed) = self.resolve_fields(&source_fields, work)?;
         failed |= payload_failed;
         if failed {
             self.states.insert(name, DefState::Failed);
-            return;
+            return Some(());
         }
         let ty = self.sema.error_types[&name];
         self.sema.pool.define_error(
@@ -674,14 +785,18 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
                 ));
             }
         }
+        Some(())
     }
 
-    fn define_error_family(&mut self, index: usize) {
+    fn define_error_family(&mut self, index: usize, work: &mut Vec<StringId>) -> Option<()> {
         let name = self.sema.uir.error_families[index].name;
         let mut defined = true;
         for member_index in 0..self.accepted_family_members[index].len() {
             let member = self.accepted_family_members[index][member_index];
-            self.define(member);
+            if self.states[&member] == DefState::Pending {
+                work.push(member);
+                return None;
+            }
             defined &= self.states[&member] == DefState::Defined;
         }
         self.states.insert(
@@ -692,6 +807,7 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
                 DefState::Failed
             },
         );
+        Some(())
     }
 }
 
