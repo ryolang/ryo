@@ -700,6 +700,8 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Update (2026-11-23, type-expression validation):** The new boundary checks every type-expression handle and child range, rejects cycles, and validates annotations before declaration registration. Two alternating same-runner pairs against the preceding implementation show median overhead of 3.6% at 16 functions, 2.7% at 64, 4.1% at 256, and less than 1% on both snippets. The validation boundary therefore does not materially change the existing ownership-map regression; its performance results remain governed by the CodSpeed decision.
 
+**Update (2026-11-23, lazy setup and explicit scheduling):** CodSpeed on `e8c0d01` regressed `sema_large[16]` by 18.59%, fibonacci by 10.95%, and fizzbuzz by 13.55%, while `sema_large[256]` improved by 77.32% with hardware-change warnings. The follow-up makes `Utf8Error` layout lazy, skips empty nominal resolution, and analyzes explicit-only programs directly without inference or scheduler allocation. Compiler-known constructor precedence, direct annotations and patterns, inferred SCC behavior, and error-family fallback retain regression coverage. Local 16-function median walltime fell from 45.72 µs to 38.49–39.04 µs, although alternating post-warmup `main` medians were 28.85–29.54 µs. This reduces but does not resolve the regression; the next CodSpeed result is still required, and no performance exception has been accepted.
+
 ---
 
 ### I-252 — Extract the structural fuzzing harness into scripts
