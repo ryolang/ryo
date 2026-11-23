@@ -686,3 +686,11 @@ fn duplicate_nominal_field_diagnostic_precedes_dependency_errors() {
         );
     }
 }
+
+#[test]
+fn failed_forward_reference_diagnostic_is_not_repeated_after_resume() {
+    let src = "struct Holder:\n\tfirst: Missing\n\tsecond: Later\nstruct Later:\n\tvalue: int\nstruct A:\n\tb: B\nstruct B:\n\ta: A\nfn main():\n\treturn\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(count_code(&diags, DiagCode::UnknownType), 1, "{diags:?}");
+    assert_eq!(count_code(&diags, DiagCode::InfiniteSize), 1, "{diags:?}");
+}

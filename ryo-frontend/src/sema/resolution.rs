@@ -1064,6 +1064,9 @@ impl Sema<'_> {
             } else {
                 self.resolve_type_name(name, is_view, expr.span)
             };
+            if self.pool.is_error(resolved) {
+                self.ensure_type_expr_cache();
+            }
             self.cache_type_expr(id, cache_slot, resolved);
             return resolved;
         }
