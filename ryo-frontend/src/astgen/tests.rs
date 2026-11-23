@@ -857,3 +857,33 @@ fn qualified_error_mixed_payload_fields_emit_one_targeted_diagnostic() {
     assert_eq!(diags[0].code, DiagCode::ParseError);
     assert!(diags[0].message.contains("cannot be mixed"));
 }
+
+#[test]
+fn deeply_nested_type_annotations_copy_without_stack_overflow() {
+    let mut ast = ast::Ast::new();
+    let mut pool = InternPool::new();
+    let int = pool.intern_str("int");
+    let field = pool.intern_str("value");
+    let mut annotation = ast::TypeExpr::new(int, Span::EMPTY);
+    for _ in 0..50_000 {
+        annotation = ast.type_expr_anon(&[(field, annotation)], Span::EMPTY);
+    }
+    let param_name = ast::Ident::new(pool.intern_str("value"), Span::EMPTY);
+    let function_name = ast::Ident::new(pool.intern_str("f"), Span::EMPTY);
+    let function = ast.function_def(
+        function_name,
+        &[ast::Param {
+            name: param_name,
+            type_annotation: annotation,
+            mode: ryo_core::tir::ParamMode::Borrow,
+            span: Span::EMPTY,
+        }],
+        None,
+        &[],
+        Span::EMPTY,
+    );
+    ast.set_top_level(vec![function]);
+    let mut sink = DiagSink::new();
+
+    let _uir = generate(&ast, &mut pool, &mut sink);
+}

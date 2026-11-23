@@ -336,3 +336,9 @@ fn positional_type_expr_resolves_to_same_type_as_anon_fields() {
     assert_eq!(view.fields[0].ty, pool.int());
     assert_eq!(view.fields[1].ty, pool.str_());
 }
+
+#[test]
+fn anonymous_field_unknown_type_does_not_compute_layout() {
+    let (_tirs, diags, _pool) = run_with_errors("fn f(value: {x: Missing}):\n\treturn\n");
+    assert_eq!(count_code(&diags, DiagCode::UnknownType), 1, "{diags:?}");
+}

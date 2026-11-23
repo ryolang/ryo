@@ -714,8 +714,11 @@ fn jit_run_uppercase_inout_borrow_argument_at_every_depth_limit() {
             &format!("uppercase_inout_{depth}.ryo"),
             &uppercase_inout_source(depth),
         );
-        let output = run_ryo_command(&["run", "uppercase_inout.ryo"], &test_file)
-            .expect("Failed to run uppercase inout example");
+        let output = run_ryo_command(
+            &["run", &format!("uppercase_inout_{depth}.ryo")],
+            &test_file,
+        )
+        .expect("Failed to run uppercase inout example");
         assert!(
             output.status.success(),
             "uppercase inout failed at depth {depth}: {}",

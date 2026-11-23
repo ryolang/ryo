@@ -793,11 +793,27 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
         let mut defined = true;
         for member_index in 0..self.accepted_family_members[index].len() {
             let member = self.accepted_family_members[index][member_index];
-            if self.states[&member] == DefState::Pending {
-                work.push(member);
-                return None;
+            match self.states[&member] {
+                DefState::Pending => {
+                    work.push(member);
+                    return None;
+                }
+                DefState::InProgress => {
+                    self.sema.sink.emit(Diag::error(
+                        self.sema.uir.error_families[index].name_span,
+                        DiagCode::InfiniteSize,
+                        format!(
+                            "error set '{}' cannot contain itself by value: member '{}' has type '{}', which would make its size infinite",
+                            self.sema.pool.str(name),
+                            self.sema.pool.str(member),
+                            self.sema.pool.str(member),
+                        ),
+                    ));
+                    defined = false;
+                }
+                DefState::Defined => {}
+                DefState::Failed => defined = false,
             }
-            defined &= self.states[&member] == DefState::Defined;
         }
         self.states.insert(
             name,

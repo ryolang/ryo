@@ -1380,3 +1380,19 @@ fn test_str_shadowed_by_int_assignment_does_not_panic() {
     // prints "2", then the outer str prints "hello".
     assert_eq!(stdout, "2hello");
 }
+
+#[test]
+fn while_true_continue_traps_instead_of_returning_wrong_type() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn f() -> float:\n\twhile true:\n\t\tcontinue\nfn main():\n\tprint(f())\n";
+    let test_file = create_test_file(temp_dir.path(), "infinite_float.ryo", code);
+    let output = run_ryo_command(&["build", "--emit=clif", "infinite_float.ryo"], &test_file)
+        .expect("Failed to build infinite-loop example");
+
+    assert!(output.status.success());
+    let clif = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        clif.contains("trap user3"),
+        "missing non-void fall-off trap: {clif}"
+    );
+}

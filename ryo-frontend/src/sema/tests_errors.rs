@@ -1408,3 +1408,11 @@ fn unknown_family_member_payload_errors_still_surface() {
         "the payload must be analyzed before the unknown-member recovery: {diags:?}"
     );
 }
+
+#[test]
+fn active_error_family_member_cycle_is_diagnosed() {
+    let (_tirs, diags, _pool) = run_with_errors(
+        "errors Io:\n\tEof(Io!int)\nstruct Holder:\n\tvalue: Io.Eof\nfn main():\n\treturn\n",
+    );
+    assert_eq!(count_code(&diags, DiagCode::InfiniteSize), 1, "{diags:?}");
+}

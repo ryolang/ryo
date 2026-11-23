@@ -730,3 +730,14 @@ fn diverging_inner_match_makes_the_statement_arm_never() {
         "every arm diverges (inner all-return match included)"
     );
 }
+
+#[test]
+fn bare_uppercase_scrutinee_preserves_borrowed_parameter_check() {
+    let src = "enum Opt:\n\tSome(str)\n\tNone\nfn inspect(Value: Opt):\n\tmatch Value:\n\t\tOpt.Some(text): print(text)\n\t\tOpt.None: print(\"\")\nfn main():\n\tValue = Opt.Some(\"x\")\n\tinspect(Value)\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(
+        count_code(&diags, DiagCode::MoveOutOfBorrowedScrutinee),
+        1,
+        "default-borrow parameter must reject by-move payload binding: {diags:?}"
+    );
+}

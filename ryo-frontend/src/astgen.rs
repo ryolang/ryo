@@ -36,38 +36,96 @@ fn copy_type_expr(
     ast: &ast::Ast,
     expr: &ast::TypeExpr,
 ) -> ryo_core::uir::TypeExprId {
-    match expr.kind {
-        ast::TypeExprKind::Name { name, is_view } => b.type_name(name, is_view, expr.span),
-        ast::TypeExprKind::Anon { fields } => {
-            let fields = ast
-                .type_field_list(fields)
-                .iter()
-                .map(|&(name, ref field)| (name, copy_type_expr(b, ast, field)))
-                .collect::<Vec<_>>();
-            b.type_anon(&fields, expr.span)
-        }
-        ast::TypeExprKind::Positional(elements) => {
-            let elements = ast
-                .type_expr_list(elements)
-                .iter()
-                .map(|element| copy_type_expr(b, ast, element))
-                .collect::<Vec<_>>();
-            b.type_positional(&elements, expr.span)
-        }
-        ast::TypeExprKind::ErrorUnion {
-            error_set,
-            success,
-            inferred,
-        } => {
-            let error_set = ast
-                .type_expr_list(error_set)
-                .iter()
-                .map(|member| copy_type_expr(b, ast, member))
-                .collect::<Vec<_>>();
-            let success = copy_type_expr(b, ast, &ast.type_expr(success));
-            b.type_error_union(&error_set, success, inferred, expr.span)
+    enum Task {
+        Enter(ast::TypeExpr),
+        Anon {
+            fields: ast::TypeFieldList,
+            span: Span,
+        },
+        Positional {
+            elements: ast::TypeExprList,
+            span: Span,
+        },
+        ErrorUnion {
+            error_set: ast::TypeExprList,
+            inferred: bool,
+            span: Span,
+        },
+    }
+
+    let mut tasks = vec![Task::Enter(*expr)];
+    let mut results = Vec::new();
+    while let Some(task) = tasks.pop() {
+        match task {
+            Task::Enter(expr) => match expr.kind {
+                ast::TypeExprKind::Name { name, is_view } => {
+                    results.push(b.type_name(name, is_view, expr.span));
+                }
+                ast::TypeExprKind::Anon { fields } => {
+                    tasks.push(Task::Anon {
+                        fields,
+                        span: expr.span,
+                    });
+                    for (_, field) in ast.type_field_list(fields).iter().rev() {
+                        tasks.push(Task::Enter(*field));
+                    }
+                }
+                ast::TypeExprKind::Positional(elements) => {
+                    tasks.push(Task::Positional {
+                        elements,
+                        span: expr.span,
+                    });
+                    for element in ast.type_expr_list(elements).iter().rev() {
+                        tasks.push(Task::Enter(*element));
+                    }
+                }
+                ast::TypeExprKind::ErrorUnion {
+                    error_set,
+                    success,
+                    inferred,
+                } => {
+                    tasks.push(Task::ErrorUnion {
+                        error_set,
+                        inferred,
+                        span: expr.span,
+                    });
+                    tasks.push(Task::Enter(ast.type_expr(success)));
+                    for member in ast.type_expr_list(error_set).iter().rev() {
+                        tasks.push(Task::Enter(*member));
+                    }
+                }
+            },
+            Task::Anon { fields, span } => {
+                let field_values =
+                    results.split_off(results.len() - ast.type_field_list(fields).len());
+                let fields = ast
+                    .type_field_list(fields)
+                    .iter()
+                    .zip(field_values)
+                    .map(|(&(name, _), value)| (name, value))
+                    .collect::<Vec<_>>();
+                results.push(b.type_anon(&fields, span));
+            }
+            Task::Positional { elements, span } => {
+                let element_values =
+                    results.split_off(results.len() - ast.type_expr_list(elements).len());
+                results.push(b.type_positional(&element_values, span));
+            }
+            Task::ErrorUnion {
+                error_set,
+                inferred,
+                span,
+            } => {
+                let success = results
+                    .pop()
+                    .expect("error-union success must be copied first");
+                let error_set_len = ast.type_expr_list(error_set).len();
+                let error_set = results.split_off(results.len() - error_set_len);
+                results.push(b.type_error_union(&error_set, success, inferred, span));
+            }
         }
     }
+    results.pop().expect("root type expression must be copied")
 }
 
 /// Lower an [`ast::Ast`] to unresolved UIR, accumulating only structural

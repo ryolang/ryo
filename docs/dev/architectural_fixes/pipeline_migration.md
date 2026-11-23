@@ -173,7 +173,8 @@ does not establish a successful exit. After `AnalysisReady` validates the body a
 analysis, `BuiltProgram::analyze` emits `MissingReturn` when the return type is neither `void` nor
 the internal error sentinel and the body has reachable implicit fallthrough. Declared errors and
 error unions still undergo this check. The diagnostic retains the TIR body span and established
-message. The source-clean
+message. A synthetic fall-off in a non-void function traps instead of fabricating a scalar zero
+that would violate the return ABI. The source-clean
 flag is computed after this check and the ownership diagnostics, and `require_backend_transition`
 rejects artifacts when it is false. Sema retains divergence queries used during expression typing,
 but final return validation uses this Flow fact rather than another TIR traversal.

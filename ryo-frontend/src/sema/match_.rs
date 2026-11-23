@@ -182,15 +182,19 @@ pub(crate) fn analyze_scrutinee(
     }
     let borrowed = match inst.data {
         InstData::Var(name) => scope.lookup_borrowed(name),
-        // Walk `a.b.c` down to its root: a field projection of a
-        // borrowed parameter (`match w.inner:`) is borrowed exactly
-        // like a bare `w` read — a by-move bind out of it is E0133.
+        // Field projections of a borrowed parameter are also borrowed (E0133).
         InstData::FieldAccess { .. } => {
             let mut root = scrutinee;
             while let InstData::FieldAccess { object, .. } = sema.uir.inst(root).data {
                 root = object;
             }
             matches!(sema.uir.inst(root).data, InstData::Var(name) if scope.lookup_borrowed(name))
+        }
+        InstData::ErrorConstruct { .. } => {
+            let (name, family_root, family_member, view) = sema.uir.error_construct_view(scrutinee);
+            matches!((family_root, family_member), (None, None))
+                && view.fields().next().is_none()
+                && scope.lookup_borrowed(name)
         }
         _ => false,
     };
