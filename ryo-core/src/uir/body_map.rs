@@ -268,6 +268,14 @@ impl Uir {
                 checked_type_expr_ref(self, field.type_expr)?;
             }
         }
+        if self
+            .type_exprs
+            .iter()
+            .skip(1)
+            .all(|expr| matches!(expr.kind, UirTypeExprKind::Name { .. }))
+        {
+            return Ok(());
+        }
 
         let mut states = vec![0u8; self.type_exprs.len()];
         let mut stack = Vec::new();
