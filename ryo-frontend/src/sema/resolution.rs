@@ -467,7 +467,9 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
                 NominalEntry::Family(_) => {}
             }
         }
-        self.sema.type_expr_cache.fill([None, None]);
+        if let Some(cache) = &mut self.sema.type_expr_cache {
+            cache.fill([None, None]);
+        }
     }
 
     fn dependency_order(&self, source_order: &[StringId]) -> Vec<StringId> {
@@ -1026,10 +1028,31 @@ impl Sema<'_> {
             || name == names.float
     }
 
+    fn cached_type_expr(&self, id: TypeExprId, cache_slot: usize) -> Option<TypeId> {
+        self.type_expr_cache
+            .as_ref()?
+            .get(id.index())?
+            .get(cache_slot)
+            .copied()
+            .flatten()
+    }
+
+    fn cache_type_expr(&mut self, id: TypeExprId, cache_slot: usize, resolved: TypeId) {
+        if let Some(cache) = &mut self.type_expr_cache {
+            cache[id.index()][cache_slot] = Some(resolved);
+        }
+    }
+
+    fn ensure_type_expr_cache(&mut self) {
+        if self.type_expr_cache.is_none() {
+            self.type_expr_cache = Some(vec![[None, None]; self.uir.type_exprs.len()]);
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(super) fn resolve_type_expr(&mut self, id: TypeExprId, allow_inferred: bool) -> TypeId {
         let cache_slot = usize::from(allow_inferred);
-        if let Some(resolved) = self.type_expr_cache[id.index()][cache_slot] {
+        if let Some(resolved) = self.cached_type_expr(id, cache_slot) {
             return resolved;
         }
         let expr = self.uir.type_expr(id);
@@ -1041,9 +1064,10 @@ impl Sema<'_> {
             } else {
                 self.resolve_type_name(name, is_view, expr.span)
             };
-            self.type_expr_cache[id.index()][cache_slot] = Some(resolved);
+            self.cache_type_expr(id, cache_slot, resolved);
             return resolved;
         }
+        self.ensure_type_expr_cache();
 
         enum Task {
             Enter(TypeExprId, bool),
@@ -1060,7 +1084,7 @@ impl Sema<'_> {
             match task {
                 Task::Enter(id, allow_inferred) => {
                     let cache_slot = usize::from(allow_inferred);
-                    if let Some(resolved) = self.type_expr_cache[id.index()][cache_slot] {
+                    if let Some(resolved) = self.cached_type_expr(id, cache_slot) {
                         results.push(resolved);
                         continue;
                     }
@@ -1074,7 +1098,7 @@ impl Sema<'_> {
                             } else {
                                 self.resolve_type_name(name, is_view, expr.span)
                             };
-                            self.type_expr_cache[id.index()][cache_slot] = Some(resolved);
+                            self.cache_type_expr(id, cache_slot, resolved);
                             results.push(resolved);
                         }
                         UirTypeExprKind::Anon { fields } => {
@@ -1099,14 +1123,14 @@ impl Sema<'_> {
                             if inferred && !allow_inferred {
                                 self.emit_inferred_type(expr.span);
                                 let resolved = self.pool.error_type();
-                                self.type_expr_cache[id.index()][cache_slot] = Some(resolved);
+                                self.cache_type_expr(id, cache_slot, resolved);
                                 results.push(resolved);
                                 continue;
                             }
                             if !inferred && self.uir.type_expr_list(error_set).is_empty() {
                                 self.emit_empty_union(expr.span);
                                 let resolved = self.pool.error_type();
-                                self.type_expr_cache[id.index()][cache_slot] = Some(resolved);
+                                self.cache_type_expr(id, cache_slot, resolved);
                                 results.push(resolved);
                                 continue;
                             }
@@ -1217,7 +1241,7 @@ impl Sema<'_> {
                         }
                         UirTypeExprKind::Name { .. } => unreachable!("names finish during entry"),
                     };
-                    self.type_expr_cache[id.index()][cache_slot] = Some(resolved);
+                    self.cache_type_expr(id, cache_slot, resolved);
                     results.push(resolved);
                 }
             }

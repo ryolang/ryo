@@ -379,7 +379,7 @@ pub struct Sema<'a> {
     type_names: TypeNames,
     /// Dense resolution cache indexed by `TypeExprId`; the two slots
     /// distinguish ordinary annotations from function-return position.
-    type_expr_cache: Vec<[Option<TypeId>; 2]>,
+    type_expr_cache: Option<Vec<[Option<TypeId>; 2]>>,
     /// Per-decl emitted TIR slot. Filled as decls transition to
     /// `Resolved`. Result extraction drains this in source order.
     results: Vec<Option<Tir>>,
@@ -560,7 +560,7 @@ impl<'a> Sema<'a> {
             name_to_decl,
             signatures: HashMap::with_capacity(n),
             type_names,
-            type_expr_cache: vec![[None, None]; uir.type_exprs.len()],
+            type_expr_cache: None,
             results,
             inference: Vec::new(),
             struct_types: HashMap::new(),
