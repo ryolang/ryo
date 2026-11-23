@@ -36,6 +36,10 @@ fn copy_type_expr(
     ast: &ast::Ast,
     expr: &ast::TypeExpr,
 ) -> ryo_core::uir::TypeExprId {
+    if let ast::TypeExprKind::Name { name, is_view } = expr.kind {
+        return b.type_name(name, is_view, expr.span);
+    }
+
     enum Task {
         Enter(ast::TypeExpr),
         Anon {
