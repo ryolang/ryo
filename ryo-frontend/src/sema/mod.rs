@@ -562,9 +562,7 @@ impl<'a> Sema<'a> {
             type_names,
             type_expr_cache: vec![[None, None]; uir.type_exprs.len()],
             results,
-            inference: (0..n)
-                .map(|_| error_inference::InferenceState::default())
-                .collect(),
+            inference: Vec::new(),
             struct_types: HashMap::new(),
             enum_types: HashMap::new(),
             error_types: HashMap::new(),
@@ -625,13 +623,20 @@ impl<'a> Sema<'a> {
             .iter()
             .copied()
             .any(|decl| error_inference::is_inferred(self, decl));
-        let dependencies = if has_inferred {
-            let graph = error_inference::direct_named_call_graph(self);
-            error_inference::reject_recursive_inferred_components(self, &graph);
-            error_inference::inferred_dependencies(self, &graph)
-        } else {
-            vec![Vec::new(); self.uir.func_bodies.len()]
-        };
+        if !has_inferred {
+            for index in 0..self.uir.func_bodies.len() {
+                let decl = self.declaration_ids[index];
+                self.resolve_decl(decl);
+            }
+            return;
+        }
+
+        self.inference = (0..self.uir.func_bodies.len())
+            .map(|_| error_inference::InferenceState::default())
+            .collect();
+        let graph = error_inference::direct_named_call_graph(self);
+        error_inference::reject_recursive_inferred_components(self, &graph);
+        let dependencies = error_inference::inferred_dependencies(self, &graph);
         let failed: Vec<bool> = self
             .decl_state
             .iter()
@@ -665,8 +670,9 @@ impl<'a> Sema<'a> {
             .iter()
             .enumerate()
             .filter_map(|(index, body)| {
-                self.inference[index]
-                    .final_union
+                self.inference
+                    .get(index)
+                    .and_then(|state| state.final_union)
                     .map(|return_type| InferredSignature {
                         name: body.name,
                         return_type,

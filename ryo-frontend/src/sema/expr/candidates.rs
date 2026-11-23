@@ -216,7 +216,7 @@ pub(crate) fn resolve_error(sema: &mut Sema<'_>, scope: &Scope, node: InstRef) -
         }
     }
 
-    if let Some(&ty) = sema.error_types.get(&name) {
+    if let Some(ty) = super::super::resolution::error_type(sema, name) {
         if family_root.is_none()
             && !view.form.positional
             && !view.form.named_parens

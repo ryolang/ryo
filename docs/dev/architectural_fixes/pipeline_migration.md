@@ -130,19 +130,21 @@ first-wins lookup and duplicate-definition diagnostic. Sema maps those context-g
 current-UIR-local slots instead of indexing bodies by the declaration-table index.
 
 `sema/resolution.rs` declares nominal shells and resolves their fields and layouts with explicit
-pending/in-progress/defined/failed states and an explicit work stack that resumes definitions
-after dependencies finish rather than recursing through Rust calls. Real cycles retain
-`InfiniteSize` diagnostics, duplicate nominal fields fail before layout installation, and
-error-family member links preserve first-wins lookup and a lexically ordered owner index. Sema
-resolves every parameter and return signature before body scheduling.
-For inferred error unions, the exact direct-call graph supplies dependency edges and recursive
-components containing inferred unions are rejected before body analysis. `DeclarationScheduler`
-tracks pending counts and dependents, releases ready bodies in deterministic source order, and
-releases dependents of failed components into ordinary diagnostic-only recovery. A body is marked
-resolved only after its TIR and any inferred union and deferred coercions are complete. Reading an
-inferred callee requires its final union or failed state; body analysis never recursively enters
-another declaration. Completed results return in current-UIR source order, and unresolved or failed
-artifacts cannot reach backend publication.
+pending/in-progress/defined/failed states. Empty nominal programs skip resolver allocation, and
+`Utf8Error` is laid out on first name resolution. Acyclic declarations use dependency post-order so
+valid layouts are constructed once; cycles and duplicate-field units return to the source-order
+work-stack resolver, preserving diagnostic order and `InfiniteSize` behavior. Type-expression
+collection and resolution use explicit stacks rather than the Rust call stack. Error-family member
+links preserve first-wins lookup and a lexically ordered owner index. Sema resolves every parameter
+and return signature before body scheduling. Programs without inferred unions analyze directly in
+source order without inference or scheduler allocation. Inferred programs build the exact
+direct-call graph and reject recursive components containing inferred unions before body analysis.
+`DeclarationScheduler` tracks pending counts and dependents, releases ready bodies in deterministic
+source order, and releases dependents of failed components into ordinary diagnostic-only recovery.
+A body is marked resolved only after its TIR and any inferred union and deferred coercions are
+complete. Reading an inferred callee requires its final union or failed state; body analysis never
+recursively enters another declaration. Completed results return in current-UIR source order, and
+unresolved or failed artifacts cannot reach backend publication.
 
 The frontend owns Flow construction and ownership analysis in
 [`pipeline.rs`](../../../ryo-frontend/src/pipeline.rs).

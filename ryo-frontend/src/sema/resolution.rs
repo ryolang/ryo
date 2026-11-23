@@ -84,7 +84,13 @@ struct NominalResolver<'a, 'b> {
 }
 
 pub(super) fn declare_and_define(sema: &mut Sema<'_>) {
-    utf8_error(sema);
+    if sema.uir.struct_decls.is_empty()
+        && sema.uir.enum_decls.is_empty()
+        && sema.uir.error_decls.is_empty()
+        && sema.uir.error_families.is_empty()
+    {
+        return;
+    }
     let mut resolver = NominalResolver::new(sema);
     resolver.declare_all();
     resolver.define_all();
@@ -109,6 +115,14 @@ pub(super) fn utf8_error(sema: &mut Sema<'_>) -> TypeId {
     sema.error_types.insert(name, ty);
     sema.defined_layouts.insert(ty);
     ty
+}
+
+pub(super) fn error_type(sema: &mut Sema<'_>, name: StringId) -> Option<TypeId> {
+    if name == sema.type_names.utf8_error {
+        Some(utf8_error(sema))
+    } else {
+        sema.error_types.get(&name).copied()
+    }
 }
 
 impl<'a, 'b> NominalResolver<'a, 'b> {
@@ -1216,7 +1230,7 @@ impl Sema<'_> {
             ty
         } else if let Some(&ty) = self.enum_types.get(&name) {
             ty
-        } else if let Some(&ty) = self.error_types.get(&name) {
+        } else if let Some(ty) = error_type(self, name) {
             ty
         } else if let Some(members) = self.error_families.get(&name).cloned() {
             if members.iter().all(|&member| self.type_has_layout(member)) {

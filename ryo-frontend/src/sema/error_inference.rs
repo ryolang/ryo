@@ -15,7 +15,10 @@ pub(super) struct InferenceState {
 pub(super) fn is_inferred(sema: &Sema<'_>, decl: DeclId) -> bool {
     sema.signatures.get(&decl).is_some_and(|signature| {
         sema.pool.kind(signature.return_type) == TypeKind::InferredErrorUnion
-            || sema.inference[sema.body_index(decl)].final_union.is_some()
+            || sema
+                .inference
+                .get(sema.body_index(decl))
+                .is_some_and(|state| state.final_union.is_some())
     })
 }
 

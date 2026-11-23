@@ -1298,7 +1298,7 @@ fn resolve_variant(
     if let Some(name) = enum_name {
         if error_pattern {
             let name = if family_pattern { variant } else { name };
-            match sema.error_types.get(&name).copied() {
+            match super::resolution::error_type(sema, name) {
                 Some(error_ty)
                     if sema
                         .pool
