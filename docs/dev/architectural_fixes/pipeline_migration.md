@@ -92,15 +92,18 @@ order, and named selectors. AstGen does not define nominal layouts, check type c
 variant or error identities, or select method/call fallbacks. Sema owns all of those decisions and
 produces resolved TIR.
 
-Before declaration registration, `Uir::compute_body_map` performs a checked iterative traversal
-from every function body's roots through every inline and wire-encoded child. `UirBodyMap` records
-an optional `BodySlot { body, local }` per global instruction and a deterministic dense instruction
-list per body. Same-body revisits reuse their original slot, orphans remain unowned, and cross-body
-references or malformed children return an error. Invalid ownership emits an internal diagnostic
-and prevents declaration registration and TIR emission. Sema sizes each `FuncCtx` instruction map
-to its body and indexes it by the dense local slot. The direct named-call graph and call-argument
-collection scan exact body membership, not arena-order ranges. Adding a UIR child shape requires
-extending this checked traversal and its regression coverage.
+Before declaration registration, UIR validation checks every type-expression handle and child
+range, rejects type-expression cycles, and verifies variable, parameter, return, and nominal-field
+annotations. `Uir::compute_body_map` then performs a checked iterative traversal from every function
+body's roots through every inline and wire-encoded child. `UirBodyMap` records an optional
+`BodySlot { body, local }` per global instruction and a deterministic dense instruction list per
+body. Same-body revisits reuse their original slot, orphans remain unowned, and cross-body
+references or malformed children return an error. Any invalid type expression or instruction
+ownership emits an internal diagnostic and prevents declaration registration and TIR emission.
+Sema sizes each `FuncCtx` instruction map to its body and indexes it by the dense local slot. The
+direct named-call graph and call-argument collection scan exact body membership, not arena-order
+ranges. Adding a UIR child shape requires extending this checked traversal and its regression
+coverage.
 
 Sema registers every UIR function body before name resolution. A `DeclId` combines the context
 identity with a declaration-table index. Sourced declarations are keyed by source revision and UIR

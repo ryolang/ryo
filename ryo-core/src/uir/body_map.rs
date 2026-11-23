@@ -1,4 +1,7 @@
-use super::{ExtraRange, InstData, InstRef, InstTag, Uir, match_extra};
+use super::{
+    ExtraRange, InstData, InstRef, InstTag, TypeExprId, TypeExprList, TypeFieldList, Uir,
+    UirTypeExprKind, match_extra, var_decl_extra,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BodySlot {
@@ -29,6 +32,17 @@ pub enum BodyMapError {
     MalformedWire {
         body: u32,
         inst: InstRef,
+    },
+    InvalidTypeExprRef {
+        raw: u32,
+    },
+    InvalidTypeExprRange {
+        id: super::TypeExprId,
+        offset: u32,
+        len: u32,
+    },
+    TypeExprCycle {
+        id: super::TypeExprId,
     },
     TooManyBodies,
     TooManyInstructions {
@@ -79,6 +93,22 @@ impl std::fmt::Display for BodyMapError {
                 "instruction {} in body {body} has a malformed payload",
                 inst.raw()
             ),
+            Self::InvalidTypeExprRef { raw } => {
+                write!(f, "invalid type-expression handle {raw}")
+            }
+            Self::InvalidTypeExprRange { id, offset, len } => write!(
+                f,
+                "type-expression {} has invalid child range {offset}..{}",
+                id.raw(),
+                offset.saturating_add(*len)
+            ),
+            Self::TypeExprCycle { id } => {
+                write!(
+                    f,
+                    "type-expression {} contains a dependency cycle",
+                    id.raw()
+                )
+            }
             Self::TooManyBodies => f.write_str("UIR body index exceeds u32"),
             Self::TooManyInstructions { body } => {
                 write!(f, "instruction count for body {body} exceeds u32")
@@ -107,6 +137,7 @@ impl UirBodyMap {
 
 impl Uir {
     pub fn compute_body_map(&self) -> Result<UirBodyMap, BodyMapError> {
+        self.validate_type_exprs()?;
         enum Visit {
             Enter(InstRef),
             Exit(InstRef),
@@ -165,6 +196,121 @@ impl Uir {
             }
         }
         Ok(map)
+    }
+}
+
+fn checked_type_expr_ref(uir: &Uir, id: TypeExprId) -> Result<TypeExprId, BodyMapError> {
+    if id.index() >= uir.type_exprs.len() {
+        return Err(BodyMapError::InvalidTypeExprRef { raw: id.raw() });
+    }
+    Ok(id)
+}
+
+fn checked_type_expr_list(
+    uir: &Uir,
+    id: TypeExprId,
+    list: TypeExprList,
+) -> Result<&[TypeExprId], BodyMapError> {
+    let start = list.offset as usize;
+    let end = start.checked_add(list.len as usize);
+    end.and_then(|end| uir.type_expr_lists.get(start..end))
+        .ok_or(BodyMapError::InvalidTypeExprRange {
+            id,
+            offset: list.offset,
+            len: list.len,
+        })
+}
+
+fn checked_type_field_list(
+    uir: &Uir,
+    id: TypeExprId,
+    list: TypeFieldList,
+) -> Result<&[(super::StringId, TypeExprId)], BodyMapError> {
+    let start = list.offset as usize;
+    let end = start.checked_add(list.len as usize);
+    end.and_then(|end| uir.type_field_lists.get(start..end))
+        .ok_or(BodyMapError::InvalidTypeExprRange {
+            id,
+            offset: list.offset,
+            len: list.len,
+        })
+}
+
+impl Uir {
+    fn validate_type_exprs(&self) -> Result<(), BodyMapError> {
+        for body in &self.func_bodies {
+            for param in &body.params {
+                checked_type_expr_ref(self, param.type_expr)?;
+            }
+            if let Some(return_type) = body.return_type {
+                checked_type_expr_ref(self, return_type)?;
+            }
+        }
+        for decl in &self.struct_decls {
+            for field in &decl.fields {
+                checked_type_expr_ref(self, field.type_expr)?;
+            }
+        }
+        for decl in &self.enum_decls {
+            for variant in &decl.variants {
+                for field in &variant.fields {
+                    checked_type_expr_ref(self, field.type_expr)?;
+                }
+            }
+        }
+        for decl in &self.error_decls {
+            for field in &decl.payload.fields {
+                checked_type_expr_ref(self, field.type_expr)?;
+            }
+        }
+
+        let mut states = vec![0u8; self.type_exprs.len()];
+        let mut stack = Vec::new();
+        let mut children = Vec::new();
+        for index in 1..self.type_exprs.len() {
+            if states[index] != 0 {
+                continue;
+            }
+            let root = TypeExprId::from_raw(index as u32);
+            stack.push((root, false));
+            while let Some((id, exit)) = stack.pop() {
+                if exit {
+                    states[id.index()] = 2;
+                    continue;
+                }
+                match states[id.index()] {
+                    1 => return Err(BodyMapError::TypeExprCycle { id }),
+                    2 => continue,
+                    _ => {}
+                }
+                states[id.index()] = 1;
+                children.clear();
+                match self.type_exprs[id.index()].kind {
+                    UirTypeExprKind::Name { .. } => {}
+                    UirTypeExprKind::Anon { fields } => {
+                        for &(_, child) in checked_type_field_list(self, id, fields)? {
+                            children.push(checked_type_expr_ref(self, child)?);
+                        }
+                    }
+                    UirTypeExprKind::Positional(elements) => {
+                        for &child in checked_type_expr_list(self, id, elements)? {
+                            children.push(checked_type_expr_ref(self, child)?);
+                        }
+                    }
+                    UirTypeExprKind::ErrorUnion {
+                        error_set, success, ..
+                    } => {
+                        for &child in checked_type_expr_list(self, id, error_set)? {
+                            children.push(checked_type_expr_ref(self, child)?);
+                        }
+                        children.push(checked_type_expr_ref(self, success)?);
+                    }
+                }
+                stack.push((id, true));
+                stack.extend(children.iter().rev().map(|&child| (child, false)));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -387,7 +533,11 @@ fn decode_children(
         InstTag::VarDecl => {
             let range = expect_extra(data, body, inst)?;
             let mut cursor = WireCursor::new(uir, range, body, inst)?;
-            cursor.skip(3)?;
+            cursor.skip(2)?;
+            let type_expr = cursor.word()?;
+            if type_expr != var_decl_extra::TYPE_EXPR_NONE_SENTINEL {
+                checked_type_expr_ref(uir, TypeExprId::from_raw(type_expr))?;
+            }
             cursor.inst(children)?;
             cursor.finish()?;
         }
@@ -888,5 +1038,153 @@ mod unresolved_variant_tests {
             uir.compute_body_map(),
             Err(BodyMapError::MalformedWire { inst, .. }) if inst == error
         ));
+    }
+}
+
+#[cfg(test)]
+mod type_expr_tests {
+    use super::BodyMapError;
+    use crate::types::InternPool;
+    use crate::uir::{
+        Span, TypeExprId, TypeExprList, Uir, UirBuilder, UirStructDecl, UirStructField,
+        UirTypeExpr, UirTypeExprKind,
+    };
+
+    #[test]
+    fn type_expr_validation_rejects_out_of_range_return_annotation() {
+        let mut pool = InternPool::new();
+        let main = pool.intern_str("main");
+        let mut builder = UirBuilder::new();
+        builder.add_function(
+            main,
+            vec![],
+            Some(TypeExprId::from_raw(99)),
+            &[],
+            Span::EMPTY,
+        );
+
+        assert_eq!(
+            builder.finish().compute_body_map(),
+            Err(BodyMapError::InvalidTypeExprRef { raw: 99 })
+        );
+    }
+
+    #[test]
+    fn type_expr_validation_rejects_out_of_range_variable_annotation() {
+        let mut pool = InternPool::new();
+        let main = pool.intern_str("main");
+        let value_name = pool.intern_str("value");
+        let mut builder = UirBuilder::new();
+        let value = builder.int_literal(1, Span::EMPTY);
+        let declaration = builder.var_decl(
+            value_name,
+            false,
+            Some(TypeExprId::from_raw(99)),
+            value,
+            Span::EMPTY,
+        );
+        builder.add_function(main, vec![], None, &[declaration], Span::EMPTY);
+
+        assert_eq!(
+            builder.finish().compute_body_map(),
+            Err(BodyMapError::InvalidTypeExprRef { raw: 99 })
+        );
+    }
+
+    #[test]
+    fn type_expr_validation_rejects_out_of_range_nominal_field() {
+        let mut pool = InternPool::new();
+        let name = pool.intern_str("Point");
+        let field = pool.intern_str("x");
+        let mut builder = UirBuilder::new();
+        builder.add_struct_decl(UirStructDecl {
+            name,
+            name_span: Span::EMPTY,
+            attrs: crate::ast::StructAttrs::default(),
+            fields: vec![UirStructField {
+                name: field,
+                type_expr: TypeExprId::from_raw(99),
+                span: Span::EMPTY,
+            }],
+            span: Span::EMPTY,
+            source_index: 0,
+        });
+
+        assert_eq!(
+            builder.finish().compute_body_map(),
+            Err(BodyMapError::InvalidTypeExprRef { raw: 99 })
+        );
+    }
+
+    #[test]
+    fn type_expr_validation_rejects_out_of_range_list_range() {
+        let mut uir = Uir::new();
+        uir.type_exprs.push(UirTypeExpr {
+            kind: UirTypeExprKind::Positional(TypeExprList { offset: 0, len: 1 }),
+            span: Span::EMPTY,
+        });
+
+        assert_eq!(
+            uir.compute_body_map(),
+            Err(BodyMapError::InvalidTypeExprRange {
+                id: TypeExprId::from_raw(1),
+                offset: 0,
+                len: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn type_expr_validation_rejects_out_of_range_child() {
+        let mut uir = Uir::new();
+        uir.type_expr_lists.push(TypeExprId::from_raw(99));
+        uir.type_exprs.push(UirTypeExpr {
+            kind: UirTypeExprKind::Positional(TypeExprList { offset: 0, len: 1 }),
+            span: Span::EMPTY,
+        });
+
+        assert_eq!(
+            uir.compute_body_map(),
+            Err(BodyMapError::InvalidTypeExprRef { raw: 99 })
+        );
+    }
+
+    #[test]
+    fn type_expr_validation_rejects_cycles() {
+        let mut uir = Uir::new();
+        let first = TypeExprId::from_raw(1);
+        let second = TypeExprId::from_raw(2);
+        uir.type_expr_lists.extend([first, second]);
+        uir.type_exprs.extend([
+            UirTypeExpr {
+                kind: UirTypeExprKind::Positional(TypeExprList { offset: 0, len: 2 }),
+                span: Span::EMPTY,
+            },
+            UirTypeExpr {
+                kind: UirTypeExprKind::Positional(TypeExprList { offset: 0, len: 2 }),
+                span: Span::EMPTY,
+            },
+        ]);
+
+        assert_eq!(
+            uir.compute_body_map(),
+            Err(BodyMapError::TypeExprCycle { id: first })
+        );
+    }
+
+    #[test]
+    fn type_expr_validation_accepts_shared_and_deep_graphs() {
+        let mut pool = InternPool::new();
+        let shared_name = pool.intern_str("int");
+        let field_name = pool.intern_str("value");
+        let mut builder = UirBuilder::new();
+        let shared = builder.type_name(shared_name, false, Span::EMPTY);
+        let mut cursor = shared;
+        for _ in 0..10_000 {
+            cursor = builder.type_positional(&[cursor], Span::EMPTY);
+        }
+        builder.type_anon(&[(field_name, cursor), (field_name, shared)], Span::EMPTY);
+
+        builder.finish().compute_body_map().unwrap();
     }
 }

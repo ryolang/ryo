@@ -492,7 +492,7 @@ impl<'a> Sema<'a> {
                 sink.emit(Diag::error(
                     Span::EMPTY,
                     DiagCode::InternalError,
-                    format!("invalid UIR body ownership: {error}"),
+                    format!("invalid UIR: {error}"),
                 ));
                 None
             }

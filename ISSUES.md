@@ -698,6 +698,8 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Update (2026-11-20, rejected direct-decoding experiment):** Whole-payload validation followed by direct slice reads preserved all tested ownership and error behavior. Differential fixtures covered every payload family, unresolved variant/error forms, one-word truncations, bad ranges, invalid refs, cycles, and cross-body sharing. The candidate passed 8 body-map tests, 264 core tests, and 1,368 frontend tests. Two alternating benchmark pairs still showed regressions of 15.30% at 16 functions, 20.06% at 64, 10.40% at 256, 16.16% on fibonacci, 19.44% on fizzbuzz, and 22.96% on the error-using pipeline. The experiment was reverted with no production commit. This third optimization attempt did not meet the performance gate.
 
+**Update (2026-11-23, type-expression validation):** The new boundary checks every type-expression handle and child range, rejects cycles, and validates annotations before declaration registration. Two alternating same-runner pairs against the preceding implementation show median overhead of 3.6% at 16 functions, 2.7% at 64, 4.1% at 256, and less than 1% on both snippets. The validation boundary therefore does not materially change the existing ownership-map regression; its performance results remain governed by the CodSpeed decision.
+
 ---
 
 ### I-252 — Extract the structural fuzzing harness into scripts

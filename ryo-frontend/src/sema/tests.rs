@@ -1768,3 +1768,49 @@ fn lower_view_of_non_str_rejected() {
     let diags = run("fn f(x: &int):\n\tprint(\"\")\n").unwrap_err();
     assert!(diags.iter().any(|d| d.code == DiagCode::UnknownType));
 }
+
+#[test]
+fn invalid_type_expr_blocks_declaration_registration() {
+    let mut pool = InternPool::new();
+    let mut context = CompilationContext::new();
+    let main = pool.intern_str("main");
+    let mut builder = ryo_core::uir::UirBuilder::new();
+    builder.add_function(
+        main,
+        vec![],
+        Some(ryo_core::uir::TypeExprId::from_raw(99)),
+        &[],
+        Span::EMPTY,
+    );
+    let invalid = builder.finish().with_layout_context(&pool);
+    let mut sink = DiagSink::new();
+
+    let report = Sema::run(
+        &invalid,
+        &mut pool,
+        &mut sink,
+        "",
+        Path::new("<test>"),
+        &mut context,
+    );
+    assert!(report.tirs.is_empty());
+    let diags = sink.into_diags();
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, DiagCode::InternalError);
+    assert!(diags[0].message.contains("invalid UIR"), "{diags:?}");
+
+    let mut builder = ryo_core::uir::UirBuilder::new();
+    builder.add_function(main, vec![], None, &[], Span::EMPTY);
+    let valid = builder.finish().with_layout_context(&pool);
+    let mut sink = DiagSink::new();
+    let sema = Sema::new(
+        &valid,
+        &mut pool,
+        &mut sink,
+        "",
+        Path::new("<test>"),
+        &mut context,
+    );
+    assert_eq!(sema.declaration_ids.len(), 1);
+    assert_eq!(sema.declaration_ids[0].index(), 0);
+}
