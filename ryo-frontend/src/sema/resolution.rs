@@ -505,7 +505,12 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
         let mut refs = Vec::new();
         match self.entries[&name] {
             NominalEntry::Struct(index) => {
-                for field in &self.sema.uir.struct_decls[index].fields {
+                let fields = &self.sema.uir.struct_decls[index].fields;
+                let mut seen = HashSet::with_capacity(fields.len());
+                if fields.iter().any(|field| !seen.insert(field.name)) {
+                    return Vec::new();
+                }
+                for field in fields {
                     named_refs_in(self.sema, field.type_expr, &mut refs);
                 }
             }

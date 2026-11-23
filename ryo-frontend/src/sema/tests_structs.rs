@@ -668,3 +668,16 @@ fn forward_struct_fields_construct_layout_once() {
     assert!(diags.is_empty(), "{diags:?}");
     assert_eq!(super::resolution::DefineDepth::struct_define_calls(), 1);
 }
+
+#[test]
+fn duplicate_struct_field_diagnostic_precedes_dependency_errors() {
+    let (_tirs, diags, _pool) = run_with_errors(
+        "struct Holder:\n\tvalue: Dep\n\tvalue: Dep\nstruct Dep:\n\tvalue: Missing\nfn main():\n\treturn\n",
+    );
+    let codes = diags.iter().map(|diag| diag.code).collect::<Vec<_>>();
+    assert_eq!(
+        codes,
+        [DiagCode::DuplicateStructField, DiagCode::UnknownType],
+        "{diags:?}"
+    );
+}
