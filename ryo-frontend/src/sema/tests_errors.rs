@@ -1416,3 +1416,9 @@ fn active_error_family_member_cycle_is_diagnosed() {
     );
     assert_eq!(count_code(&diags, DiagCode::InfiniteSize), 1, "{diags:?}");
 }
+
+#[test]
+fn direct_error_self_cycle_does_not_access_undefined_layout() {
+    let (_tirs, diags, _pool) = run_with_errors("error A(A!int)\nfn main():\n\treturn\n");
+    assert_eq!(count_code(&diags, DiagCode::InfiniteSize), 1, "{diags:?}");
+}
