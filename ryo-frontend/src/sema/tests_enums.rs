@@ -742,6 +742,14 @@ fn duplicate_enum_payload_is_not_repeated_after_dependency_resolution() {
 }
 
 #[test]
+fn failed_enum_equality_recovers_without_layout() {
+    let (_tirs, diags, _pool) = run_with_errors(
+        "enum Bad:\n\tCase(Missing)\nfn equal(a: Bad, b: Bad) -> bool:\n\treturn a == b\nfn main():\n\treturn\n",
+    );
+    assert_eq!(count_code(&diags, DiagCode::UnknownType), 1, "{diags:?}");
+}
+
+#[test]
 fn enum_payload_field_names_are_scoped_per_variant() {
     let src = "enum Choice:\n\tFirst(value: int)\n\tSecond(value: int)\nfn main():\n\tresult = Choice.First{value=1}\n";
     let (_tirs, diags, _pool) = run_with_errors(src);
