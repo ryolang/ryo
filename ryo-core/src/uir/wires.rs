@@ -63,9 +63,9 @@ pub mod call_extra {
 ///   [3]  init:      InstRef.raw()
 /// ```
 ///
-/// `TYPE_EXPR_NONE_SENTINEL` is `u32::MAX`, which cannot be a nonzero
-/// type-expression handle. Sema resolves the annotation or infers the
-/// initializer's type before emitting TIR.
+/// `TYPE_EXPR_NONE_SENTINEL` is zero, which is reserved because every
+/// type-expression handle is nonzero. Sema resolves the annotation or infers
+/// the initializer's type before emitting TIR.
 pub mod var_decl_extra {
     use super::{extra_offset, len_u32};
     use crate::extra::ExtraRange;
@@ -73,7 +73,7 @@ pub mod var_decl_extra {
     use crate::uir::{InstRef, TypeExprId};
 
     pub const FLAG_MUTABLE: u32 = 1 << 0;
-    pub const TYPE_EXPR_NONE_SENTINEL: u32 = u32::MAX;
+    pub const TYPE_EXPR_NONE_SENTINEL: u32 = 0;
 
     /// Decoded view of an [`crate::uir::InstTag::VarDecl`] payload.
     /// `type_expr` is `None` when the source had no annotation.

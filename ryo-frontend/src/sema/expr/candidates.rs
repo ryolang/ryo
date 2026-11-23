@@ -226,6 +226,9 @@ pub(crate) fn resolve_error(sema: &mut Sema<'_>, scope: &Scope, node: InstRef) -
     }
 
     if family_root.is_none() && view.form.positional {
+        for (_, value) in view.fields() {
+            sema.call_arg_refs[value.index()] = true;
+        }
         return Candidate::Call;
     }
     if family_root.is_none() && view.fields().next().is_none() && !view.form.named_parens {
@@ -250,8 +253,8 @@ pub(crate) fn resolve_bare_qualified_error(
     member: StringId,
     span: Span,
 ) -> Option<Candidate> {
-    error_family_member_names(sema, root).map(|_| {
-        resolve_qualified_error(
+    if error_family_member_names(sema, root).is_some() {
+        Some(resolve_qualified_error(
             sema,
             scope,
             root,
@@ -260,8 +263,10 @@ pub(crate) fn resolve_bare_qualified_error(
             Vec::new(),
             false,
             span,
-        )
-    })
+        ))
+    } else {
+        None
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -334,8 +339,11 @@ fn resolved_error(
     })
 }
 
-pub(crate) fn error_family_member_names(sema: &Sema<'_>, root: StringId) -> Option<Vec<StringId>> {
-    sema.error_family_members.get(&root).cloned()
+pub(crate) fn error_family_member_names<'a>(
+    sema: &'a Sema<'a>,
+    root: StringId,
+) -> Option<&'a [StringId]> {
+    sema.error_family_members.get(&root).map(Vec::as_slice)
 }
 
 pub(crate) fn qualified_error_name(
@@ -347,33 +355,39 @@ pub(crate) fn qualified_error_name(
     pool.intern_str(&qualified)
 }
 
-pub(crate) fn resolve_match_error_path(
+pub(crate) fn resolve_optional_match_error_path(
     sema: &mut Sema<'_>,
-    root: StringId,
+    root: Option<StringId>,
     member: StringId,
     span: Span,
-) -> Result<StringId, ()> {
-    let Some(members) = error_family_member_names(sema, root) else {
-        return Ok(member);
+) -> Option<Result<StringId, ()>> {
+    let root = root?;
+    let (known, available) = {
+        let members = error_family_member_names(sema, root)?;
+        let known = members.contains(&member);
+        let available = (!known).then(|| {
+            members
+                .iter()
+                .map(|member| format!("'{}'", sema.pool.str(*member)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        });
+        (known, available)
     };
-    if members.contains(&member) {
-        return Ok(qualified_error_name(sema.pool, root, member));
+    if known {
+        return Some(Ok(qualified_error_name(sema.pool, root, member)));
     }
-    let available = members
-        .iter()
-        .map(|member| format!("'{}'", sema.pool.str(*member)))
-        .collect::<Vec<_>>()
-        .join(", ");
     sema.sink.emit(Diag::error(
         span,
         DiagCode::UnknownMatchVariant,
         format!(
-            "error family '{}' has no member '{}' (members: {available})",
+            "error family '{}' has no member '{}' (members: {})",
             sema.pool.str(root),
             sema.pool.str(member),
+            available.expect("unknown member diagnostic members")
         ),
     ));
-    Err(())
+    Some(Err(()))
 }
 
 pub(crate) fn unqualified_call_candidate_name(sema: &Sema<'_>, node: InstRef) -> Option<StringId> {
@@ -392,15 +406,4 @@ pub(crate) fn unqualified_call_candidate_name(sema: &Sema<'_>, node: InstRef) ->
         return None;
     }
     Some(name)
-}
-
-pub(crate) fn resolve_optional_match_error_path(
-    sema: &mut Sema<'_>,
-    root: Option<StringId>,
-    member: StringId,
-    span: Span,
-) -> Option<Result<StringId, ()>> {
-    let root = root?;
-    error_family_member_names(sema, root)?;
-    Some(resolve_match_error_path(sema, root, member, span))
 }

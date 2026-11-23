@@ -994,4 +994,76 @@ mod tests {
             .expect_err("a user function is not a declaration-free runtime callee");
         assert!(error.contains("declaration"), "{error}");
     }
+
+    #[test]
+    fn flow_backedge_without_trailing_return_has_no_implicit_fallthrough() {
+        let mut pool = InternPool::new();
+        let span = ryo_core::span::Span::EMPTY;
+        let int = pool.int();
+        let void = pool.void();
+        let bool_ty = pool.bool_();
+        let name = pool.intern_str("loop_only");
+        let mut builder = TirBuilder::new(name, vec![], int, span).with_layout_context(&pool);
+        let cond = builder.bool_const(true, bool_ty, span);
+        let loop_ = builder.while_loop(cond, &[], void, span);
+        let tir = builder.finish(&[loop_]);
+
+        let flow = Flow::build(&tir, &pool);
+        assert!(!flow.has_implicit_fallthrough());
+        assert!(
+            flow.forward_order()
+                .any(|block| matches!(flow.term(block), Terminator::Backedge { .. }))
+        );
+        assert!(
+            !analyze_diags(tir, &pool)
+                .iter()
+                .any(|diag| diag.code == ryo_core::diag::DiagCode::MissingReturn)
+        );
+    }
+
+    #[test]
+    fn flow_break_without_trailing_return_reports_missing_return() {
+        let mut pool = InternPool::new();
+        let span = ryo_core::span::Span::EMPTY;
+        let int = pool.int();
+        let void = pool.void();
+        let never = pool.never();
+        let bool_ty = pool.bool_();
+        let name = pool.intern_str("break_only");
+        let mut builder = TirBuilder::new(name, vec![], int, span).with_layout_context(&pool);
+        let cond = builder.bool_const(true, bool_ty, span);
+        let break_ = builder.break_stmt(never, span);
+        let loop_ = builder.while_loop(cond, &[break_], void, span);
+        let tir = builder.finish(&[loop_]);
+
+        let flow = Flow::build(&tir, &pool);
+        assert!(flow.has_implicit_fallthrough());
+        let diags = analyze_diags(tir, &pool);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, ryo_core::diag::DiagCode::MissingReturn);
+    }
+
+    #[test]
+    fn flow_continue_without_trailing_return_has_no_successful_exit() {
+        let mut pool = InternPool::new();
+        let span = ryo_core::span::Span::EMPTY;
+        let int = pool.int();
+        let void = pool.void();
+        let never = pool.never();
+        let bool_ty = pool.bool_();
+        let name = pool.intern_str("continue_only");
+        let mut builder = TirBuilder::new(name, vec![], int, span).with_layout_context(&pool);
+        let cond = builder.bool_const(true, bool_ty, span);
+        let continue_ = builder.continue_stmt(never, span);
+        let loop_ = builder.while_loop(cond, &[continue_], void, span);
+        let tir = builder.finish(&[loop_]);
+
+        let flow = Flow::build(&tir, &pool);
+        assert!(!flow.has_implicit_fallthrough());
+        assert!(
+            !analyze_diags(tir, &pool)
+                .iter()
+                .any(|diag| diag.code == ryo_core::diag::DiagCode::MissingReturn)
+        );
+    }
 }

@@ -862,13 +862,31 @@ mod unresolved_variant_tests {
             ]
         );
 
-        let InstData::Extra(range) = &mut uir.instructions[variant.index()].data else {
-            panic!("variant must carry an extra range");
+        let original_len = {
+            let InstData::Extra(range) = &mut uir.instructions[variant.index()].data else {
+                panic!("variant must carry an extra range");
+            };
+            let original_len = range.len;
+            range.len -= 1;
+            original_len
         };
-        range.len -= 1;
         assert!(matches!(
             uir.compute_body_map(),
             Err(BodyMapError::MalformedWire { inst, .. }) if inst == variant
+        ));
+        let InstData::Extra(range) = &mut uir.instructions[variant.index()].data else {
+            panic!("variant must carry an extra range");
+        };
+        range.len = original_len;
+
+        let InstData::ErrorConstruct { args, .. } = &mut uir.instructions[error.index()].data
+        else {
+            panic!("error candidate must carry its name and argument range");
+        };
+        args.len -= 1;
+        assert!(matches!(
+            uir.compute_body_map(),
+            Err(BodyMapError::MalformedWire { inst, .. }) if inst == error
         ));
     }
 }

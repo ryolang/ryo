@@ -32,7 +32,31 @@ fn var_decl_wire_fixture() {
         panic!("VarDecl must carry InstData::Extra");
     };
     assert_eq!(range2, ExtraRange { offset: 9, len: 4 });
-    assert_eq!(&b.uir.extra[9..13], &[7, 0, u32::MAX, 11]);
+    assert_eq!(&b.uir.extra[9..13], &[7, 0, 0, 11]);
+}
+
+#[test]
+fn var_decl_optional_type_expr_sentinel_round_trip() {
+    let name = StringId::from_raw(7);
+    let init = InstRef::from_raw(11);
+    let max_type_expr = TypeExprId::from_raw(u32::MAX);
+    let mut builder = UirBuilder::new();
+    let annotated_ref = builder.var_decl(name, false, Some(max_type_expr), init, sp());
+    let inferred_ref = builder.var_decl(name, false, None, init, sp());
+    let uir = builder.finish();
+
+    let annotated = uir.var_decl_view(annotated_ref);
+    assert_eq!(annotated.type_expr, Some(max_type_expr));
+    let inferred = uir.var_decl_view(inferred_ref);
+    assert_eq!(inferred.type_expr, None);
+    let InstData::Extra(annotated_range) = uir.inst(annotated_ref).data else {
+        panic!("annotated declaration must carry an extra range");
+    };
+    assert_eq!(uir.extra[annotated_range.as_range()][2], u32::MAX);
+    let InstData::Extra(inferred_range) = uir.inst(inferred_ref).data else {
+        panic!("inferred declaration must carry an extra range");
+    };
+    assert_eq!(uir.extra[inferred_range.as_range()][2], 0);
 }
 
 #[test]
@@ -40,7 +64,7 @@ fn var_decl_decode_fixture() {
     // Literal words, never encoder output: payloads and ranges are
     // supplied independently of any builder push sequence.
     let mut uir = Uir::new();
-    uir.extra.extend([7, 1, 3, 11, 7, 0, u32::MAX, 11]);
+    uir.extra.extend([7, 1, 3, 11, 7, 0, 0, 11]);
     uir.instructions.push(Inst {
         tag: InstTag::VarDecl,
         data: InstData::Extra(ExtraRange { offset: 0, len: 4 }),
