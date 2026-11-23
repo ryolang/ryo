@@ -670,14 +670,19 @@ fn forward_struct_fields_construct_layout_once() {
 }
 
 #[test]
-fn duplicate_struct_field_diagnostic_precedes_dependency_errors() {
-    let (_tirs, diags, _pool) = run_with_errors(
+fn duplicate_nominal_field_diagnostic_precedes_dependency_errors() {
+    let cases = [
         "struct Holder:\n\tvalue: Dep\n\tvalue: Dep\nstruct Dep:\n\tvalue: Missing\nfn main():\n\treturn\n",
-    );
-    let codes = diags.iter().map(|diag| diag.code).collect::<Vec<_>>();
-    assert_eq!(
-        codes,
-        [DiagCode::DuplicateStructField, DiagCode::UnknownType],
-        "{diags:?}"
-    );
+        "enum Holder:\n\tA(value: Dep, value: Dep)\nenum Dep:\n\tA(value: Missing)\nfn main():\n\treturn\n",
+        "error Holder(value: Dep, value: Dep)\nerror Dep(value: Missing)\nfn main():\n\treturn\n",
+    ];
+    for src in cases {
+        let (_tirs, diags, _pool) = run_with_errors(src);
+        let codes = diags.iter().map(|diag| diag.code).collect::<Vec<_>>();
+        assert_eq!(
+            codes,
+            [DiagCode::DuplicateStructField, DiagCode::UnknownType],
+            "{diags:?}"
+        );
+    }
 }

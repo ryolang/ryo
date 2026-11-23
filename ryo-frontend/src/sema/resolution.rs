@@ -461,6 +461,13 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
             Done,
         }
 
+        if source_order
+            .iter()
+            .any(|&name| self.has_duplicate_nominal_fields(name))
+        {
+            return source_order.to_vec();
+        }
+
         let mut states = HashMap::new();
         let mut ordered = Vec::with_capacity(source_order.len());
         let mut has_cycle = false;
@@ -501,16 +508,36 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
         }
     }
 
-    fn nominal_dependencies(&self, name: StringId) -> Vec<StringId> {
-        let mut refs = Vec::new();
+    fn has_duplicate_nominal_fields(&self, name: StringId) -> bool {
         match self.entries[&name] {
             NominalEntry::Struct(index) => {
                 let fields = &self.sema.uir.struct_decls[index].fields;
                 let mut seen = HashSet::with_capacity(fields.len());
-                if fields.iter().any(|field| !seen.insert(field.name)) {
-                    return Vec::new();
-                }
-                for field in fields {
+                fields.iter().any(|field| !seen.insert(field.name))
+            }
+            NominalEntry::Enum(index) => {
+                self.sema.uir.enum_decls[index]
+                    .variants
+                    .iter()
+                    .any(|variant| {
+                        let mut seen = HashSet::with_capacity(variant.fields.len());
+                        variant.fields.iter().any(|field| !seen.insert(field.name))
+                    })
+            }
+            NominalEntry::Error(index) => {
+                let fields = &self.sema.uir.error_decls[index].payload.fields;
+                let mut seen = HashSet::with_capacity(fields.len());
+                fields.iter().any(|field| !seen.insert(field.name))
+            }
+            NominalEntry::Family(_) => false,
+        }
+    }
+
+    fn nominal_dependencies(&self, name: StringId) -> Vec<StringId> {
+        let mut refs = Vec::new();
+        match self.entries[&name] {
+            NominalEntry::Struct(index) => {
+                for field in &self.sema.uir.struct_decls[index].fields {
                     named_refs_in(self.sema, field.type_expr, &mut refs);
                 }
             }
@@ -859,8 +886,11 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
             .iter()
             .map(|field| (field.name, field.type_expr, field.span))
             .collect::<Vec<_>>();
-        let (fields, payload_failed) = self.resolve_fields(&source_fields, work)?;
-        failed |= payload_failed;
+        if failed {
+            self.states.insert(name, DefState::Failed);
+            return Some(());
+        }
+        let (fields, failed) = self.resolve_fields(&source_fields, work)?;
         if failed {
             self.states.insert(name, DefState::Failed);
             return Some(());
