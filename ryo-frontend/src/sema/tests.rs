@@ -247,6 +247,19 @@ fn void_function_signature() {
 }
 
 #[test]
+fn explicit_void_return_annotation_resolves() {
+    let (tirs, pool) = run("fn greet() -> void:\n\treturn\nfn main():\n\tgreet()\n").unwrap();
+    assert_eq!(tir_named(&tirs, &pool, "greet").return_type, pool.void());
+}
+
+#[test]
+fn explicit_never_return_annotation_resolves() {
+    let (tirs, pool) =
+        run("fn stop() -> never:\n\tpanic(\"stop\")\nfn main():\n\treturn\n").unwrap();
+    assert_eq!(tir_named(&tirs, &pool, "stop").return_type, pool.never());
+}
+
+#[test]
 fn print_call_has_void_type() {
     // `print(...)` as a bare expression statement is the
     // canonical M8a form. The Call instruction itself is

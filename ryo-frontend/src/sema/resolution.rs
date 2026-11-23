@@ -916,7 +916,11 @@ impl Sema<'_> {
             return self.pool.error_type();
         }
         let names = &self.type_names;
-        if name == names.int {
+        if name == names.void {
+            self.pool.void()
+        } else if name == names.never {
+            self.pool.never()
+        } else if name == names.int {
             self.pool.int()
         } else if name == names.str_ {
             self.pool.str_()

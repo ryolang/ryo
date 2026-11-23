@@ -19,6 +19,7 @@ pub(crate) struct VariantState {
     method_recoveries: Vec<Option<TirRef>>,
     method_receivers: Vec<Option<TirRef>>,
     used_slots: Vec<usize>,
+    visited_slots: Vec<bool>,
 }
 
 impl VariantState {
@@ -29,6 +30,7 @@ impl VariantState {
             method_recoveries: vec![None; instruction_count],
             method_receivers: vec![None; instruction_count],
             used_slots: Vec::new(),
+            visited_slots: vec![false; instruction_count],
         }
     }
 
@@ -37,6 +39,7 @@ impl VariantState {
             self.candidates[slot] = None;
             self.method_recoveries[slot] = None;
             self.method_receivers[slot] = None;
+            self.visited_slots[slot] = false;
         }
         self.diagnosed.clear();
     }
@@ -68,7 +71,8 @@ impl VariantState {
             _ => return false,
         };
         let slot = fcx.map_slot(sema.body_map(), node);
-        debug_assert!(!self.used_slots.contains(&slot));
+        debug_assert!(!self.visited_slots[slot]);
+        self.visited_slots[slot] = true;
         self.used_slots.push(slot);
         if matches!(candidate, Candidate::Call) {
             let (name, _, _, view) = sema.uir.error_construct_view(node);
