@@ -1028,6 +1028,23 @@ impl Sema<'_> {
 
     #[allow(clippy::too_many_lines)]
     pub(super) fn resolve_type_expr(&mut self, id: TypeExprId, allow_inferred: bool) -> TypeId {
+        let cache_slot = usize::from(allow_inferred);
+        if let Some(resolved) = self.type_expr_cache[id.index()][cache_slot] {
+            return resolved;
+        }
+        let expr = self.uir.type_expr(id);
+        if let UirTypeExprKind::Name { name, is_view } = expr.kind {
+            let resolved = if allow_inferred && name == self.type_names.void {
+                self.pool.void()
+            } else if allow_inferred && name == self.type_names.never {
+                self.pool.never()
+            } else {
+                self.resolve_type_name(name, is_view, expr.span)
+            };
+            self.type_expr_cache[id.index()][cache_slot] = Some(resolved);
+            return resolved;
+        }
+
         enum Task {
             Enter(TypeExprId, bool),
             EnterSuccess(TypeExprId),

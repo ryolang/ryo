@@ -584,15 +584,11 @@ impl<'a> Sema<'a> {
     /// Inferred returns start as placeholders and are replaced when their
     /// declaration finalizes; calls never clone the unresolved placeholder.
     fn resolve_signatures(&mut self) {
-        for index in 0..self.uir.func_bodies.len() {
-            let body = &self.uir.func_bodies[index];
+        let uir = self.uir;
+        for index in 0..uir.func_bodies.len() {
+            let body = &uir.func_bodies[index];
             let name = body.name;
             let span = body.span;
-            let param_exprs = body
-                .params
-                .iter()
-                .map(|param| param.type_expr)
-                .collect::<Vec<_>>();
             let return_expr = body.return_type;
             check_reserved_name(
                 self,
@@ -600,9 +596,10 @@ impl<'a> Sema<'a> {
                 span,
                 "is a reserved builtin and cannot be used as a function name",
             );
-            let params = param_exprs
-                .into_iter()
-                .map(|id| self.resolve_type_expr(id, false))
+            let params = body
+                .params
+                .iter()
+                .map(|param| self.resolve_type_expr(param.type_expr, false))
                 .collect();
             let return_type =
                 return_expr.map_or(self.pool.void(), |id| self.resolve_type_expr(id, true));
