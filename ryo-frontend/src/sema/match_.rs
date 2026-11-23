@@ -159,9 +159,8 @@ fn analyze_match_impl(
 /// (`match &o:`, M8.2 — a legal borrow position; the match inspects the
 /// value without consuming it), a bare read of a parameter declared in
 /// the default borrow mode, and a field projection chain rooted at such
-/// a parameter (`match w.inner:` — the projection borrows with its
-/// root). The `&` marker lowers away, exactly like `&` at an `inout`
-/// call argument: the TIR operand is the inner value.
+/// a parameter (`match w.inner:`). The `&` marker lowers away, exactly
+/// like `&` at an `inout` call argument: the TIR operand is the inner value.
 pub(crate) fn analyze_scrutinee(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -193,6 +192,8 @@ pub(crate) fn analyze_scrutinee(
         InstData::ErrorConstruct { .. } => {
             let (name, family_root, family_member, view) = sema.uir.error_construct_view(scrutinee);
             matches!((family_root, family_member), (None, None))
+                && !view.form.positional
+                && !view.form.named_parens
                 && view.fields().next().is_none()
                 && scope.lookup_borrowed(name)
         }

@@ -342,3 +342,54 @@ fn anonymous_field_unknown_type_does_not_compute_layout() {
     let (_tirs, diags, _pool) = run_with_errors("fn f(value: {x: Missing}):\n\treturn\n");
     assert_eq!(count_code(&diags, DiagCode::UnknownType), 1, "{diags:?}");
 }
+
+#[test]
+fn return_only_types_in_nominal_fields_are_diagnosed() {
+    for ty in ["void", "never"] {
+        let src = format!("struct Holder:\n\tvalue: {ty}\nfn main():\n\treturn\n");
+        let (_tirs, diags, _pool) = run_with_errors(&src);
+        assert_eq!(
+            count_code(&diags, DiagCode::UnknownType),
+            1,
+            "{ty}: {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn deeply_nested_nominal_field_type_resolves_without_stack_overflow() {
+    let mut pool = InternPool::new();
+    let int = pool.intern_str("int");
+    let field = pool.intern_str("value");
+    let mut builder = ryo_core::uir::UirBuilder::new();
+    let mut annotation = builder.type_name(int, false, Span::EMPTY);
+    for _ in 0..50_000 {
+        annotation = builder.type_anon(&[(field, annotation)], Span::EMPTY);
+    }
+    builder.add_struct_decl(ryo_core::uir::UirStructDecl {
+        name: pool.intern_str("Holder"),
+        name_span: Span::EMPTY,
+        attrs: ryo_core::ast::StructAttrs::default(),
+        fields: vec![ryo_core::uir::UirStructField {
+            name: field,
+            type_expr: annotation,
+            span: Span::EMPTY,
+        }],
+        span: Span::EMPTY,
+        source_index: 0,
+    });
+    builder.add_function(pool.intern_str("main"), vec![], None, &[], Span::EMPTY);
+    let uir = builder.finish().with_layout_context(&pool);
+    let mut sink = DiagSink::new();
+    let mut context = ryo_core::compilation::CompilationContext::new();
+
+    let _tirs = analyze(
+        &uir,
+        &mut pool,
+        &mut sink,
+        "deeply nested nominal field",
+        std::path::Path::new("<test>"),
+        &mut context,
+    );
+    assert!(!sink.has_errors(), "{:?}", sink.into_diags());
+}

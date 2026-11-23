@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 thread_local! {
     static DEFINE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static MAX_DEFINE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static STRUCT_DEFINE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -30,6 +31,18 @@ impl DefineDepth {
 
     pub(super) fn max() -> usize {
         MAX_DEFINE_DEPTH.with(|max| max.get())
+    }
+
+    fn note_struct_define() {
+        STRUCT_DEFINE_CALLS.with(|calls| calls.set(calls.get() + 1));
+    }
+
+    pub(super) fn reset_struct_define_calls() {
+        STRUCT_DEFINE_CALLS.with(|calls| calls.set(0));
+    }
+
+    pub(super) fn struct_define_calls() -> usize {
+        STRUCT_DEFINE_CALLS.with(|calls| calls.get())
     }
 }
 
@@ -416,7 +429,7 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
                 order.push(decl.name);
             }
         }
-        for name in order {
+        for name in self.dependency_order(&order) {
             self.define(name);
         }
 
@@ -439,6 +452,89 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
             }
         }
         self.sema.type_expr_cache.fill([None, None]);
+    }
+
+    fn dependency_order(&self, source_order: &[StringId]) -> Vec<StringId> {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum VisitState {
+            InProgress,
+            Done,
+        }
+
+        let mut states = HashMap::new();
+        let mut ordered = Vec::with_capacity(source_order.len());
+        let mut has_cycle = false;
+        for &root in source_order {
+            if states.get(&root) == Some(&VisitState::Done) {
+                continue;
+            }
+            let mut work = vec![(root, false)];
+            while let Some((name, finish)) = work.pop() {
+                if finish {
+                    if states.get(&name) == Some(&VisitState::InProgress) {
+                        states.insert(name, VisitState::Done);
+                        ordered.push(name);
+                    }
+                    continue;
+                }
+                match states.get(&name) {
+                    Some(VisitState::InProgress) => {
+                        has_cycle = true;
+                        continue;
+                    }
+                    Some(VisitState::Done) => continue,
+                    None => {}
+                }
+                states.insert(name, VisitState::InProgress);
+                work.push((name, true));
+                for dependency in self.nominal_dependencies(name).into_iter().rev() {
+                    if states.get(&dependency) != Some(&VisitState::Done) {
+                        work.push((dependency, false));
+                    }
+                }
+            }
+        }
+        if has_cycle {
+            source_order.to_vec()
+        } else {
+            ordered
+        }
+    }
+
+    fn nominal_dependencies(&self, name: StringId) -> Vec<StringId> {
+        let mut refs = Vec::new();
+        match self.entries[&name] {
+            NominalEntry::Struct(index) => {
+                for field in &self.sema.uir.struct_decls[index].fields {
+                    named_refs_in(self.sema, field.type_expr, &mut refs);
+                }
+            }
+            NominalEntry::Enum(index) => {
+                for variant in &self.sema.uir.enum_decls[index].variants {
+                    for field in &variant.fields {
+                        named_refs_in(self.sema, field.type_expr, &mut refs);
+                    }
+                }
+            }
+            NominalEntry::Error(index) => {
+                for field in &self.sema.uir.error_decls[index].payload.fields {
+                    named_refs_in(self.sema, field.type_expr, &mut refs);
+                }
+            }
+            NominalEntry::Family(index) => {
+                refs.extend(
+                    self.accepted_family_members[index]
+                        .iter()
+                        .map(|&member| (member, false, Span::EMPTY)),
+                );
+            }
+        }
+        refs.into_iter()
+            .filter(|&(name, is_view, _)| {
+                !is_view && !self.sema.is_primitive(name) && self.entries.contains_key(&name)
+            })
+            .map(|(name, _, _)| name)
+            .collect()
     }
 
     fn define(&mut self, name: StringId) {
@@ -590,6 +686,8 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
     }
 
     fn define_struct(&mut self, index: usize, work: &mut Vec<StringId>) -> Option<()> {
+        #[cfg(test)]
+        DefineDepth::note_struct_define();
         let decl = self.sema.uir.struct_decls[index].clone();
         let name = decl.name;
         let source_fields = decl
@@ -809,7 +907,8 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
                             self.sema.pool.str(member),
                         ),
                     ));
-                    defined = false;
+                    self.states.insert(name, DefState::Failed);
+                    return Some(());
                 }
                 DefState::Defined => {}
                 DefState::Failed => defined = false,
@@ -828,26 +927,29 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
 }
 
 fn named_refs_in(sema: &Sema<'_>, id: TypeExprId, out: &mut Vec<(StringId, bool, Span)>) {
-    let expr = sema.uir.type_expr(id);
-    match expr.kind {
-        UirTypeExprKind::Name { name, is_view } => out.push((name, is_view, expr.span)),
-        UirTypeExprKind::Anon { fields } => {
-            for &(_, field) in sema.uir.type_field_list(fields) {
-                named_refs_in(sema, field, out);
+    let mut pending = vec![id];
+    while let Some(id) = pending.pop() {
+        let expr = sema.uir.type_expr(id);
+        match expr.kind {
+            UirTypeExprKind::Name { name, is_view } => out.push((name, is_view, expr.span)),
+            UirTypeExprKind::Anon { fields } => {
+                for &(_, field) in sema.uir.type_field_list(fields).iter().rev() {
+                    pending.push(field);
+                }
             }
-        }
-        UirTypeExprKind::Positional(elements) => {
-            for &element in sema.uir.type_expr_list(elements) {
-                named_refs_in(sema, element, out);
+            UirTypeExprKind::Positional(elements) => {
+                for &element in sema.uir.type_expr_list(elements).iter().rev() {
+                    pending.push(element);
+                }
             }
-        }
-        UirTypeExprKind::ErrorUnion {
-            error_set, success, ..
-        } => {
-            for &member in sema.uir.type_expr_list(error_set) {
-                named_refs_in(sema, member, out);
+            UirTypeExprKind::ErrorUnion {
+                error_set, success, ..
+            } => {
+                pending.push(success);
+                for &member in sema.uir.type_expr_list(error_set).iter().rev() {
+                    pending.push(member);
+                }
             }
-            named_refs_in(sema, success, out);
         }
     }
 }
@@ -864,41 +966,186 @@ impl Sema<'_> {
             || name == names.float
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(super) fn resolve_type_expr(&mut self, id: TypeExprId, allow_inferred: bool) -> TypeId {
-        let cache_slot = usize::from(allow_inferred);
-        if let Some(resolved) = self.type_expr_cache[id.index()][cache_slot] {
-            return resolved;
+        enum Task {
+            Enter(TypeExprId, bool),
+            EnterSuccess(TypeExprId),
+            CheckField(TypeExprId),
+            CheckErrorMember(TypeExprId),
+            FinishSuccess(TypeExprId),
+            Finish(TypeExprId, bool),
         }
-        let expr = self.uir.type_expr(id);
-        let resolved = match expr.kind {
-            UirTypeExprKind::Name { name, is_view } => {
-                self.resolve_type_name(name, is_view, expr.span)
+
+        let mut tasks = vec![Task::Enter(id, allow_inferred)];
+        let mut results = Vec::new();
+        while let Some(task) = tasks.pop() {
+            match task {
+                Task::Enter(id, allow_inferred) => {
+                    let cache_slot = usize::from(allow_inferred);
+                    if let Some(resolved) = self.type_expr_cache[id.index()][cache_slot] {
+                        results.push(resolved);
+                        continue;
+                    }
+                    let expr = self.uir.type_expr(id);
+                    match expr.kind {
+                        UirTypeExprKind::Name { name, is_view } => {
+                            let resolved = if allow_inferred && name == self.type_names.void {
+                                self.pool.void()
+                            } else if allow_inferred && name == self.type_names.never {
+                                self.pool.never()
+                            } else {
+                                self.resolve_type_name(name, is_view, expr.span)
+                            };
+                            self.type_expr_cache[id.index()][cache_slot] = Some(resolved);
+                            results.push(resolved);
+                        }
+                        UirTypeExprKind::Anon { fields } => {
+                            tasks.push(Task::Finish(id, allow_inferred));
+                            for &(_, field) in self.uir.type_field_list(fields).iter().rev() {
+                                tasks.push(Task::CheckField(field));
+                                tasks.push(Task::Enter(field, false));
+                            }
+                        }
+                        UirTypeExprKind::Positional(elements) => {
+                            tasks.push(Task::Finish(id, allow_inferred));
+                            for &element in self.uir.type_expr_list(elements).iter().rev() {
+                                tasks.push(Task::CheckField(element));
+                                tasks.push(Task::Enter(element, false));
+                            }
+                        }
+                        UirTypeExprKind::ErrorUnion {
+                            error_set,
+                            success,
+                            inferred,
+                        } => {
+                            if inferred && !allow_inferred {
+                                self.emit_inferred_type(expr.span);
+                                let resolved = self.pool.error_type();
+                                self.type_expr_cache[id.index()][cache_slot] = Some(resolved);
+                                results.push(resolved);
+                                continue;
+                            }
+                            if !inferred && self.uir.type_expr_list(error_set).is_empty() {
+                                self.emit_empty_union(expr.span);
+                                let resolved = self.pool.error_type();
+                                self.type_expr_cache[id.index()][cache_slot] = Some(resolved);
+                                results.push(resolved);
+                                continue;
+                            }
+                            tasks.push(Task::Finish(id, allow_inferred));
+                            tasks.push(Task::EnterSuccess(success));
+                            if !inferred {
+                                for &member in self.uir.type_expr_list(error_set).iter().rev() {
+                                    tasks.push(Task::CheckErrorMember(member));
+                                    tasks.push(Task::Enter(member, false));
+                                }
+                            }
+                        }
+                    }
+                }
+                Task::EnterSuccess(id) => {
+                    let expr = self.uir.type_expr(id);
+                    match expr.kind {
+                        UirTypeExprKind::Name {
+                            name,
+                            is_view: false,
+                        } if name == self.type_names.void => results.push(self.pool.void()),
+                        UirTypeExprKind::Name {
+                            name,
+                            is_view: false,
+                        } if name == self.type_names.never => {
+                            self.emit_never_success(expr.span);
+                            results.push(self.pool.error_type());
+                        }
+                        _ => {
+                            tasks.push(Task::FinishSuccess(id));
+                            tasks.push(Task::Enter(id, false));
+                        }
+                    }
+                }
+                Task::CheckField(id) => {
+                    let ty = *results.last().expect("field type resolved before checking");
+                    if self.pool.is_view(ty) {
+                        self.emit_view_field(self.uir.type_expr(id).span, ty);
+                    }
+                }
+                Task::CheckErrorMember(id) => {
+                    let ty = *results
+                        .last()
+                        .expect("error member resolved before checking");
+                    if !self.pool.is_error(ty)
+                        && !matches!(
+                            self.pool.kind(ty),
+                            TypeKind::DeclaredError | TypeKind::ErrorSet
+                        )
+                    {
+                        self.emit_error_member(self.uir.type_expr(id).span);
+                    }
+                }
+                Task::FinishSuccess(id) => {
+                    let success = results
+                        .pop()
+                        .expect("success type resolved before checking");
+                    let resolved = self.validate_error_union_success(id, success);
+                    results.push(resolved);
+                }
+                Task::Finish(id, allow_inferred) => {
+                    let cache_slot = usize::from(allow_inferred);
+                    let expr = self.uir.type_expr(id);
+                    let resolved = match expr.kind {
+                        UirTypeExprKind::Anon { fields } => {
+                            let values = results
+                                .split_off(results.len() - self.uir.type_field_list(fields).len());
+                            let fields = self
+                                .uir
+                                .type_field_list(fields)
+                                .iter()
+                                .zip(values)
+                                .map(|(&(name, id), ty)| (name, id, ty))
+                                .collect::<Vec<_>>();
+                            self.resolve_anon_fields(&fields)
+                        }
+                        UirTypeExprKind::Positional(elements) => {
+                            let values = results
+                                .split_off(results.len() - self.uir.type_expr_list(elements).len());
+                            let fields = self
+                                .uir
+                                .type_expr_list(elements)
+                                .iter()
+                                .copied()
+                                .zip(values)
+                                .enumerate()
+                                .map(|(index, (id, ty))| {
+                                    (self.pool.intern_str(&index.to_string()), id, ty)
+                                })
+                                .collect::<Vec<_>>();
+                            self.resolve_anon_fields(&fields)
+                        }
+                        UirTypeExprKind::ErrorUnion {
+                            error_set,
+                            inferred,
+                            ..
+                        } => {
+                            let success = results.pop().expect("union success resolved last");
+                            let members = if inferred {
+                                Vec::new()
+                            } else {
+                                results.split_off(
+                                    results.len() - self.uir.type_expr_list(error_set).len(),
+                                )
+                            };
+                            let error_set = self.uir.type_expr_list(error_set).to_vec();
+                            self.resolve_error_union(&error_set, members, success, inferred)
+                        }
+                        UirTypeExprKind::Name { .. } => unreachable!("names finish during entry"),
+                    };
+                    self.type_expr_cache[id.index()][cache_slot] = Some(resolved);
+                    results.push(resolved);
+                }
             }
-            UirTypeExprKind::Anon { fields } => {
-                let fields = self.uir.type_field_list(fields).to_vec();
-                self.resolve_anon_fields(&fields)
-            }
-            UirTypeExprKind::Positional(elements) => {
-                let fields = self
-                    .uir
-                    .type_expr_list(elements)
-                    .iter()
-                    .enumerate()
-                    .map(|(index, &element)| (self.pool.intern_str(&index.to_string()), element))
-                    .collect::<Vec<_>>();
-                self.resolve_anon_fields(&fields)
-            }
-            UirTypeExprKind::ErrorUnion {
-                error_set,
-                success,
-                inferred,
-            } => {
-                let error_set = self.uir.type_expr_list(error_set).to_vec();
-                self.resolve_error_union(&error_set, success, inferred, expr.span, allow_inferred)
-            }
-        };
-        self.type_expr_cache[id.index()][cache_slot] = Some(resolved);
-        resolved
+        }
+        results.pop().expect("root type expression must resolve")
     }
 
     fn resolve_type_name(&mut self, name: StringId, is_view: bool, span: Span) -> TypeId {
@@ -916,11 +1163,7 @@ impl Sema<'_> {
             return self.pool.error_type();
         }
         let names = &self.type_names;
-        if name == names.void {
-            self.pool.void()
-        } else if name == names.never {
-            self.pool.never()
-        } else if name == names.int {
+        if name == names.int {
             self.pool.int()
         } else if name == names.str_ {
             self.pool.str_()
@@ -975,26 +1218,53 @@ impl Sema<'_> {
         }
     }
 
-    fn resolve_anon_fields(&mut self, fields: &[(StringId, TypeExprId)]) -> TypeId {
-        let mut pairs = Vec::with_capacity(fields.len());
-        for &(name, field) in fields {
-            let ty = self.resolve_type_expr(field, false);
-            if self.pool.is_view(ty) {
-                self.sink.emit(Diag::error(
-                    self.uir.type_expr(field).span,
-                    DiagCode::ViewFieldType,
-                    format!(
-                        "struct fields must be owned values; '{}' is a projection (Rule 6)",
-                        self.pool.display(ty)
-                    ),
-                ));
-            }
-            pairs.push((name, ty));
-        }
+    fn emit_inferred_type(&mut self, span: Span) {
+        self.sink.emit(Diag::error(
+            span,
+            DiagCode::TypeMismatch,
+            "inferred error unions are only valid in function-return position",
+        ));
+    }
 
+    fn emit_empty_union(&mut self, span: Span) {
+        self.sink.emit(Diag::error(
+            span,
+            DiagCode::TypeMismatch,
+            "an explicit error union must contain at least one error",
+        ));
+    }
+
+    fn emit_never_success(&mut self, span: Span) {
+        self.sink.emit(Diag::error(
+            span,
+            DiagCode::TypeMismatch,
+            "error union success type cannot be 'never'",
+        ));
+    }
+
+    fn emit_view_field(&mut self, span: Span, ty: TypeId) {
+        self.sink.emit(Diag::error(
+            span,
+            DiagCode::ViewFieldType,
+            format!(
+                "struct fields must be owned values; '{}' is a projection (Rule 6)",
+                self.pool.display(ty)
+            ),
+        ));
+    }
+
+    fn emit_error_member(&mut self, span: Span) {
+        self.sink.emit(Diag::error(
+            span,
+            DiagCode::TypeMismatch,
+            "error union members must be declared errors or error sets",
+        ));
+    }
+
+    fn resolve_anon_fields(&mut self, fields: &[(StringId, TypeExprId, TypeId)]) -> TypeId {
         let mut seen = Vec::with_capacity(fields.len());
         let mut duplicate = false;
-        for &(name, field) in fields {
+        for &(name, field, _) in fields {
             if seen.contains(&name) {
                 self.sink.emit(Diag::error(
                     self.uir.type_expr(field).span,
@@ -1009,38 +1279,24 @@ impl Sema<'_> {
                 seen.push(name);
             }
         }
-        if duplicate || pairs.iter().any(|&(_, ty)| !self.type_has_layout(ty)) {
+        if duplicate || fields.iter().any(|&(_, _, ty)| !self.type_has_layout(ty)) {
             return self.pool.error_type();
         }
+        let pairs = fields
+            .iter()
+            .map(|&(name, _, ty)| (name, ty))
+            .collect::<Vec<_>>();
         self.pool.anon_struct(&pairs)
     }
 
     fn resolve_error_union(
         &mut self,
         error_set: &[TypeExprId],
-        success: TypeExprId,
+        resolved_members: Vec<TypeId>,
+        success: TypeId,
         inferred: bool,
-        span: Span,
-        allow_inferred: bool,
     ) -> TypeId {
-        if inferred && !allow_inferred {
-            self.sink.emit(Diag::error(
-                span,
-                DiagCode::TypeMismatch,
-                "inferred error unions are only valid in function-return position",
-            ));
-            return self.pool.error_type();
-        }
-        if !inferred && error_set.is_empty() {
-            self.sink.emit(Diag::error(
-                span,
-                DiagCode::TypeMismatch,
-                "an explicit error union must contain at least one error",
-            ));
-            return self.pool.error_type();
-        }
         if inferred {
-            let success = self.resolve_error_union_success(success);
             if self.pool.is_error(success) {
                 return self.pool.error_type();
             }
@@ -1049,8 +1305,7 @@ impl Sema<'_> {
 
         let mut members = Vec::with_capacity(error_set.len());
         let mut failed = false;
-        for &member in error_set {
-            let ty = self.resolve_type_expr(member, false);
+        for ty in resolved_members {
             if self.pool.is_error(ty) {
                 failed = true;
                 continue;
@@ -1063,17 +1318,9 @@ impl Sema<'_> {
                     }
                     members.extend(expanded);
                 }
-                _ => {
-                    self.sink.emit(Diag::error(
-                        self.uir.type_expr(member).span,
-                        DiagCode::TypeMismatch,
-                        "error union members must be declared errors or error sets",
-                    ));
-                    failed = true;
-                }
+                _ => failed = true,
             }
         }
-        let success = self.resolve_error_union_success(success);
         if failed || self.pool.is_error(success) {
             return self.pool.error_type();
         }
@@ -1081,19 +1328,7 @@ impl Sema<'_> {
         self.pool.error_union(error_set, success)
     }
 
-    fn resolve_error_union_success(&mut self, id: TypeExprId) -> TypeId {
-        let expr = self.uir.type_expr(id);
-        let success = match expr.kind {
-            UirTypeExprKind::Name {
-                name,
-                is_view: false,
-            } if name == self.type_names.void => self.pool.void(),
-            UirTypeExprKind::Name {
-                name,
-                is_view: false,
-            } if name == self.type_names.never => self.pool.never(),
-            _ => self.resolve_type_expr(id, false),
-        };
+    fn validate_error_union_success(&mut self, id: TypeExprId, success: TypeId) -> TypeId {
         if self.pool.is_error(success) {
             return success;
         }
@@ -1109,8 +1344,11 @@ impl Sema<'_> {
             _ => None,
         };
         if let Some(message) = invalid {
-            self.sink
-                .emit(Diag::error(expr.span, DiagCode::TypeMismatch, message));
+            self.sink.emit(Diag::error(
+                self.uir.type_expr(id).span,
+                DiagCode::TypeMismatch,
+                message,
+            ));
             return self.pool.error_type();
         }
         if !self.type_has_layout(success) {

@@ -651,3 +651,20 @@ fn long_forward_struct_chain_resolves_without_recursive_define() {
     assert!(diags.is_empty(), "{diags:?}");
     assert_eq!(super::resolution::DefineDepth::max(), 1);
 }
+
+#[test]
+fn forward_struct_fields_construct_layout_once() {
+    let mut src = String::from("struct Holder:\n");
+    for index in 0..8 {
+        src.push_str(&format!("\tfield{index}: Enum{index}\n"));
+    }
+    for index in 0..8 {
+        src.push_str(&format!("enum Enum{index}:\n\tValue\n"));
+    }
+    src.push_str("fn main():\n\treturn\n");
+    super::resolution::DefineDepth::reset_struct_define_calls();
+
+    let (_tirs, diags, _pool) = run_with_errors(&src);
+    assert!(diags.is_empty(), "{diags:?}");
+    assert_eq!(super::resolution::DefineDepth::struct_define_calls(), 1);
+}

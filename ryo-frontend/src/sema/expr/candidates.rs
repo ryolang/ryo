@@ -41,6 +41,20 @@ pub(crate) enum Candidate {
 pub(crate) fn resolve_variant(sema: &mut Sema<'_>, scope: &Scope, node: InstRef) -> Candidate {
     let view = sema.uir.enum_lit_view(node);
     if let Some(&ty) = sema.enum_types.get(&view.enum_name) {
+        if view.form.positional && scope.lookup_full(view.enum_name).is_some() {
+            if view.form.named_parens {
+                sema.sink.emit(Diag::error(
+                    view.variant_span,
+                    DiagCode::NamedArgInParens,
+                    ParseDiag::NamedArgInParens {
+                        enum_name: None,
+                        variant: None,
+                    }
+                    .message(sema.pool),
+                ));
+            }
+            return Candidate::Method;
+        }
         if sema.pool.is_error(ty) {
             return Candidate::Recovery { analyze_args: true };
         }
