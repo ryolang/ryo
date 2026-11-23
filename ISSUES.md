@@ -702,6 +702,8 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 **Update (2026-11-23, lazy setup and explicit scheduling):** CodSpeed on `e8c0d01` regressed `sema_large[16]` by 18.59%, fibonacci by 10.95%, and fizzbuzz by 13.55%, while `sema_large[256]` improved by 77.32% with hardware-change warnings. The follow-up makes `Utf8Error` layout lazy, skips empty nominal resolution, and analyzes explicit-only programs directly without inference or scheduler allocation. Compiler-known constructor precedence, direct annotations and patterns, inferred SCC behavior, and error-family fallback retain regression coverage. Local 16-function median walltime fell from 45.72 µs to 38.49–39.04 µs, although alternating post-warmup `main` medians were 28.85–29.54 µs. This reduces but does not resolve the regression; the next CodSpeed result is still required, and no performance exception has been accepted.
 
+**Update (2026-11-24, allocation fast paths):** Name-only annotation lowering, lazy type-cache allocation, bounded body-map preallocation, name-only type-cycle bypass, and declaration-registration reservation reduced the remaining CodSpeed regression to 11.70% at 16 functions and removed the snippet regressions. Three alternating 1,000-sample host comparisons then measured 30.74 µs at 16 functions against 28.08–28.29 µs on `main`, with all correctness gates green. A stamped ownership-metadata experiment increased body-map time from 5.08 µs to 6.00 µs and was reverted; combining declaration staging vectors also regressed and was reverted. The latest registration-reservation change still requires its CodSpeed result before the issue can close.
+
 ---
 
 ### I-252 — Extract the structural fuzzing harness into scripts
