@@ -195,7 +195,7 @@ pub(crate) fn resolve_error(sema: &mut Sema<'_>, scope: &Scope, node: InstRef) -
                 view.fields().collect(),
             );
         }
-        if !sema.error_types.contains_key(&name) {
+        if name != sema.type_names.utf8_error && !sema.error_types.contains_key(&name) {
             let family = sema
                 .error_family_owners
                 .get(&name)
@@ -408,6 +408,7 @@ pub(crate) fn unqualified_call_candidate_name(sema: &Sema<'_>, node: InstRef) ->
         || family_member.is_some()
         || !view.form.positional
         || view.form.mixed_fields
+        || name == sema.type_names.utf8_error
         || sema.error_types.contains_key(&name)
         || error_family_member_names(sema, name).is_some()
         || sema.error_family_owners.contains_key(&name)

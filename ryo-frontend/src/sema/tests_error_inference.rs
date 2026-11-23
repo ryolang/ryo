@@ -354,3 +354,18 @@ fn Inner() -> !int:
     assert_final_type(&tirs, &pool, "Inner", "A!int");
     assert_no_placeholders(&tirs, &pool);
 }
+
+#[test]
+fn utf8_constructor_does_not_create_inferred_call_edge() {
+    let src = r#"fn Utf8Error() -> !int:
+	return other()
+fn other() -> !int:
+	return Utf8Error("bad")
+fn main():
+	return
+"#;
+    let (tirs, pool) = run(src).expect("constructor must not close a call cycle");
+    assert_final_type(&tirs, &pool, "Utf8Error", "Utf8Error!int");
+    assert_final_type(&tirs, &pool, "other", "Utf8Error!int");
+    assert_no_placeholders(&tirs, &pool);
+}

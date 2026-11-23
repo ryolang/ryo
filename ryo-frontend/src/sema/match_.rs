@@ -1332,8 +1332,8 @@ fn resolve_variant(
         } else if !family_pattern {
             match sema.enum_types.get(&name) {
                 Some(&ety) if ety == scrutinee_ty => {}
-                Some(&ety) => {
-                    let pattern_en = sema.pool.str(sema.pool.enum_view(ety).name()).to_string();
+                Some(_) => {
+                    let pattern_en = sema.pool.str(name).to_string();
                     let scrutinee_en = sema
                         .pool
                         .str(sema.pool.enum_view(scrutinee_ty).name())

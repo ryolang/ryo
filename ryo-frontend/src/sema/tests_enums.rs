@@ -730,6 +730,18 @@ fn duplicate_enum_payload_field_fails_declaration_before_layout() {
 }
 
 #[test]
+fn duplicate_enum_payload_is_not_repeated_after_dependency_resolution() {
+    let (_tirs, diags, _pool) = run_with_errors(
+        "enum Shape:\n\tBad(x: int, x: str)\n\tGood(Later)\nenum Later:\n\tValue\nfn main():\n\treturn\n",
+    );
+    assert_eq!(
+        count_code(&diags, DiagCode::DuplicateStructField),
+        1,
+        "{diags:?}"
+    );
+}
+
+#[test]
 fn enum_payload_field_names_are_scoped_per_variant() {
     let src = "enum Choice:\n\tFirst(value: int)\n\tSecond(value: int)\nfn main():\n\tresult = Choice.First{value=1}\n";
     let (_tirs, diags, _pool) = run_with_errors(src);

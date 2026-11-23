@@ -287,6 +287,22 @@ fn qualified_pattern_with_unknown_enum_name_is_unknown_type() {
 }
 
 #[test]
+fn failed_enum_qualified_pattern_recovers_without_layout() {
+    let src = "enum Broken:\n\tReady(x: int, x: str)\nenum Good:\n\tReady\nfn main():\n\tvalue = Good.Ready\n\tmatch value:\n\t\tBroken.Ready: 0\n\t\t_: 0\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(
+        count_code(&diags, DiagCode::DuplicateStructField),
+        1,
+        "{diags:?}"
+    );
+    assert_eq!(
+        count_code(&diags, DiagCode::UnknownMatchVariant),
+        1,
+        "{diags:?}"
+    );
+}
+
+#[test]
 fn payload_positional_overflow_is_e0122() {
     // `Circle(radius, extra):` on a one-field tuple variant — the arity
     // error reuses the construction-side UnknownVariantField wording.
@@ -756,99 +772,42 @@ fn compiler_error_union_dispatch_synthesizes_hidden_alternatives() {
 }
 
 fn analyze_qualified_union_catch(member: &str) -> (Vec<Tir>, Vec<Diag>, InternPool) {
-    let (declarations, mut pool, diags) = lower("errors IoError:\n\tEof\n\tReadFailed(str)\n");
-    assert!(diags.is_empty(), "{diags:?}");
-    let family = pool.find_str("IoError").expect("family name");
-    let member = pool.intern_str(member);
-    let result = pool.intern_str("result");
-    let value = pool.intern_str("value");
-    let main = pool.intern_str("main");
-    let outcome = pool.intern_str("outcome");
-    let mut builder = ryo_core::uir::UirBuilder::new();
-    for mut decl in declarations.error_decls.iter().cloned() {
-        for field in &mut decl.payload.fields {
-            let old_expr = declarations.type_expr(field.type_expr);
-            let ryo_core::uir::UirTypeExprKind::Name { name, is_view } = old_expr.kind else {
-                panic!("this synthetic fixture uses only named error payload types");
-            };
-            field.type_expr = builder.type_name(name, is_view, old_expr.span);
-        }
-        builder.add_error_decl(decl);
-    }
-    for family in declarations.error_families {
-        builder.add_error_family_decl(family);
-    }
-
-    let alias = builder.type_name(family, false, Span::EMPTY);
-    let success = builder.type_name(pool.find_str("str").expect("str name"), false, Span::EMPTY);
-    let union = builder.type_error_union(&[alias], success, false, Span::EMPTY);
-    let scrutinee = builder.var_ref(result, Span::EMPTY);
-    let qualified_body = builder.str_literal(outcome, Span::EMPTY);
-    let wildcard_body = builder.str_literal(outcome, Span::EMPTY);
-    let payload = pool.intern_str("payload");
-    let payload_args_storage = [(None, ryo_core::uir::UirArgTarget::Bind(payload))];
-    let payload_args =
-        (pool.str(member) == "ReadFailed").then_some(ryo_core::uir::UirVariantArgs {
-            by_position: true,
-            args: &payload_args_storage,
-        });
-    let qualified = ryo_core::uir::UirMatchArm {
-        span: Span::EMPTY,
-        pattern: ryo_core::uir::UirPattern::Variant {
-            enum_name: Some(family),
-            variant: member,
-            args: payload_args,
-        },
-        body: ryo_core::uir::UirArmBody::Expr(qualified_body),
+    let args = if member == "ReadFailed" {
+        "(payload)"
+    } else {
+        ""
     };
-    let wildcard = ryo_core::uir::UirMatchArm {
-        span: Span::EMPTY,
-        pattern: ryo_core::uir::UirPattern::Wildcard,
-        body: ryo_core::uir::UirArmBody::Expr(wildcard_body),
-    };
-    let caught = builder.catch(scrutinee, None, &[qualified, wildcard], Span::EMPTY);
-    let declaration = builder.var_decl(value, false, None, caught, Span::EMPTY);
-    let result_read = builder.var_ref(value, Span::EMPTY);
-    let returned = builder.unary(InstTag::Return, result_read, Span::EMPTY);
-    let return_type =
-        builder.type_name(pool.find_str("str").expect("str name"), false, Span::EMPTY);
-    builder.add_function(
-        main,
-        vec![ryo_core::uir::UirParam {
-            name: result,
-            type_expr: union,
-            mode: ryo_core::tir::ParamMode::Borrow,
-            span: Span::EMPTY,
-        }],
-        Some(return_type),
-        &[declaration, returned],
-        Span::EMPTY,
+    let src = format!(
+        "errors IoError:\n\tEof\n\tReadFailed(str)\nfn read() -> IoError!str:\n\treturn \"ok\"\nfn main():\n\tvalue = read() catch:\n\t\tIoError.{member}{args}: \"ok\"\n\t\t_: \"other\"\n\tprint(value)\n"
     );
-
-    let uir = builder.finish().with_layout_context(&pool);
-    let mut sink = DiagSink::new();
-    let mut context = CompilationContext::new();
-    let tirs = analyze(
-        &uir,
-        &mut pool,
-        &mut sink,
-        "synthetic qualified catch",
-        std::path::Path::new("<test>"),
-        &mut context,
-    );
-    (tirs, sink.into_diags(), pool)
+    run_with_errors(&src)
 }
 
-fn assert_match_discriminant(tir: &Tir, expected: Discriminant) {
+fn assert_error_member_arm(
+    tir: &Tir,
+    pool: &InternPool,
+    expected: Discriminant,
+    payload: Option<(StringId, TypeId)>,
+) {
     let found = (1..tir.instructions.len()).any(|index| {
         let reference = TirRef::from_raw(index as u32);
         if tir.inst(reference).tag != TirTag::Match {
             return false;
         }
         let view = tir.match_view(reference);
-        (0..view.len()).any(|arm| view.arm(arm).discriminant == expected)
+        if pool.kind(tir.inst(view.scrutinee).ty) != ryo_core::types::TypeKind::ErrorSet {
+            return false;
+        }
+        (0..view.len()).any(|index| {
+            let arm = view.arm(index);
+            arm.discriminant == expected
+                && payload.is_none_or(|(name, ty)| {
+                    arm.bindings()
+                        .any(|binding| binding.name == name && binding.ty == ty)
+                })
+        })
     });
-    assert!(found, "missing match discriminant {expected:?}");
+    assert!(found, "missing nested error-member arm {expected:?}");
 }
 
 #[test]
@@ -858,7 +817,7 @@ fn qualified_error_family_catch_patterns_resolve_members() {
     let main = tir_named(&tirs, &pool, "main");
     let init = main.var_decl_view(stmt_at(main, 0)).initializer;
     assert_eq!(main.inst(init).tag, TirTag::Match);
-    assert_match_discriminant(main, Discriminant::Variant(0));
+    assert_error_member_arm(main, &pool, Discriminant::Variant(0), None);
 }
 
 #[test]
@@ -868,21 +827,13 @@ fn qualified_error_family_catch_binds_str_payload() {
     let main = tir_named(&tirs, &pool, "main");
     let init = main.var_decl_view(stmt_at(main, 0)).initializer;
     assert_eq!(main.inst(init).tag, TirTag::Match);
-    assert_match_discriminant(main, Discriminant::Variant(0));
     let payload = pool.find_str("payload").expect("payload binding");
-    let found = (1..main.instructions.len()).any(|index| {
-        let reference = TirRef::from_raw(index as u32);
-        if main.inst(reference).tag != TirTag::Match {
-            return false;
-        }
-        let view = main.match_view(reference);
-        (0..view.len()).any(|arm| {
-            view.arm(arm)
-                .bindings()
-                .any(|binding| binding.name == payload && binding.ty == pool.str_())
-        })
-    });
-    assert!(found, "missing str payload binding");
+    assert_error_member_arm(
+        main,
+        &pool,
+        Discriminant::Variant(1),
+        Some((payload, pool.str_())),
+    );
 }
 
 #[test]

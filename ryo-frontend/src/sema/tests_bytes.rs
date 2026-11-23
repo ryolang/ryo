@@ -380,6 +380,15 @@ fn to_str_types_on_bytes_and_bytesview() {
 }
 
 #[test]
+fn compiler_known_error_precedes_family_member_fallback() {
+    let src = "errors Io:\n\tUtf8Error\nfn main():\n\tvalue = Utf8Error(\"bad\")\n";
+    let (tirs, pool) = run(src).expect("compiler-known constructor should win");
+    let main = tir_named(&tirs, &pool, "main");
+    let value = main.var_decl_view(stmt_at(main, 0)).initializer;
+    assert_eq!(pool.display(main.inst(value).ty).to_string(), "Utf8Error");
+}
+
+#[test]
 fn to_bytes_types_on_str_and_strview() {
     let (tirs, pool) =
         run("fn main():\n\ts = \"ab\"\n\tb = s.to_bytes()\n\tv = s[0:1]\n\tc = v.to_bytes()\n")

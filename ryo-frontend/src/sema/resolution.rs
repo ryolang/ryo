@@ -81,6 +81,7 @@ struct NominalResolver<'a, 'b> {
     family_seen: Vec<HashSet<StringId>>,
     accepted_family_members: Vec<Vec<StringId>>,
     family_has_linked_decls: Vec<bool>,
+    validated_enum_variants: HashSet<(StringId, usize)>,
 }
 
 pub(super) fn declare_and_define(sema: &mut Sema<'_>) {
@@ -139,6 +140,7 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
             family_seen: vec![HashSet::new(); family_count],
             accepted_family_members: vec![Vec::new(); family_count],
             family_has_linked_decls: vec![false; family_count],
+            validated_enum_variants: HashSet::new(),
         }
     }
 
@@ -709,20 +711,23 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
         name: StringId,
         kind: &str,
         fields: &[(StringId, TypeExprId, Span)],
+        emit_diags: bool,
     ) -> bool {
         let mut seen = Vec::with_capacity(fields.len());
         let mut failed = false;
         for &(field, _, span) in fields {
             if seen.contains(&field) {
-                self.sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::DuplicateStructField,
-                    format!(
-                        "field '{}' is specified more than once in {kind} '{}'",
-                        self.sema.pool.str(field),
-                        self.sema.pool.str(name),
-                    ),
-                ));
+                if emit_diags {
+                    self.sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::DuplicateStructField,
+                        format!(
+                            "field '{}' is specified more than once in {kind} '{}'",
+                            self.sema.pool.str(field),
+                            self.sema.pool.str(name),
+                        ),
+                    ));
+                }
                 failed = true;
             } else {
                 seen.push(field);
@@ -741,7 +746,7 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
             .iter()
             .map(|field| (field.name, field.type_expr, field.span))
             .collect::<Vec<_>>();
-        if self.reject_duplicate_fields(name, "struct", &source_fields) {
+        if self.reject_duplicate_fields(name, "struct", &source_fields, true) {
             self.states.insert(name, DefState::Failed);
             return Some(());
         }
@@ -802,17 +807,22 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
         let mut fields = Vec::new();
         let mut seen = Vec::with_capacity(decl.variants.len());
         let mut failed = false;
-        for variant in &decl.variants {
+        for (variant_index, variant) in decl.variants.iter().enumerate() {
+            let validated = self
+                .validated_enum_variants
+                .contains(&(name, variant_index));
             if seen.contains(&variant.name) {
-                self.sema.sink.emit(Diag::error(
-                    variant.name_span,
-                    DiagCode::DuplicateVariant,
-                    format!(
-                        "duplicate variant '{}' in enum '{}'",
-                        self.sema.pool.str(variant.name),
-                        self.sema.pool.str(name),
-                    ),
-                ));
+                if !validated {
+                    self.sema.sink.emit(Diag::error(
+                        variant.name_span,
+                        DiagCode::DuplicateVariant,
+                        format!(
+                            "duplicate variant '{}' in enum '{}'",
+                            self.sema.pool.str(variant.name),
+                            self.sema.pool.str(name),
+                        ),
+                    ));
+                }
                 failed = true;
             } else {
                 seen.push(variant.name);
@@ -822,7 +832,8 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
                 .iter()
                 .map(|field| (field.name, field.type_expr, field.span))
                 .collect::<Vec<_>>();
-            let duplicate = self.reject_duplicate_fields(name, "enum", &source_fields);
+            let duplicate = self.reject_duplicate_fields(name, "enum", &source_fields, !validated);
+            self.validated_enum_variants.insert((name, variant_index));
             let (resolved, payload_failed) = if duplicate {
                 (Vec::new(), false)
             } else {
