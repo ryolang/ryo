@@ -372,8 +372,8 @@ fn chain_outlives_loop_iteration(
         return true;
     }
     let name = match tir.inst(decl).tag {
-        TirTag::VarDecl => tir.var_decl_view(decl).name,
-        TirTag::Assign => tir.assign_view(decl).name,
+        TirTag::VarDecl => tir.binding_name(tir.var_decl_view(decl).id),
+        TirTag::Assign => tir.binding_name(tir.assign_view(decl).id),
         _ => return true,
     };
     let copy_rank = rank(call);
@@ -386,7 +386,7 @@ fn chain_outlives_loop_iteration(
         // anchored on a chain owner (covers move-chain targets).
         match tir.inst(r).data {
             TirData::Var(n) => {
-                n == name
+                tir.binding_name(n) == name
                     || Ownership::dense_get(&own.owner_at_read, r)
                         .is_some_and(|o| chain.contains(&o))
             }

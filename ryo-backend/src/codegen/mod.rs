@@ -1441,23 +1441,25 @@ impl<M: Module> Codegen<M> {
             TirTag::CompoundAssign => {
                 let view = ctx.tir.compound_assign_view(r);
                 let rhs = Self::eval_inst(builder, ctx, view.value)?;
-                let var = Self::read_slot(&ctx.locals, view.name).ok_or_else(|| {
-                    format!(
-                        "Undefined variable in compound assign: '{}'",
-                        ctx.pool.str(view.name)
-                    )
-                })?;
+                let var = Self::read_slot(&ctx.locals, ctx.tir.binding_name(view.id)).ok_or_else(
+                    || {
+                        format!(
+                            "Undefined variable in compound assign: '{}'",
+                            ctx.pool.str(ctx.tir.binding_name(view.id))
+                        )
+                    },
+                )?;
                 let current = builder.use_var(var);
 
                 let is_float = inst.ty == ctx.pool.float();
-                let lhs_range = Self::read_slot(&ctx.range_facts, view.name);
+                let lhs_range = Self::read_slot(&ctx.range_facts, ctx.tir.binding_name(view.id));
                 let rhs_range = ranges::int_range_of(ctx.tir, &ctx.range_facts, view.value);
                 // Same spec §18 checked arithmetic as the binop arm.
                 let result = Self::emit_compound_op(
                     builder, ctx, view.op, is_float, lhs_range, rhs_range, current, rhs,
                 )?;
 
-                Self::kill_fact(ctx, view.name);
+                Self::kill_fact(ctx, ctx.tir.binding_name(view.id));
                 builder.def_var(var, result);
             }
             // M9 struct field assignment — lowered in codegen/structs.rs.

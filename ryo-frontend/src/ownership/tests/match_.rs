@@ -134,7 +134,7 @@ fn copy_payload_binding_shadow_keeps_outer_owner() {
         .find_map(|r| {
             if tir.inst(r).tag == ryo_core::tir::TirTag::VarDecl {
                 let decl = tir.var_decl_view(r);
-                (decl.name == value_name).then_some(decl.initializer)
+                (tir.binding_name(decl.id) == value_name).then_some(decl.initializer)
             } else {
                 None
             }
@@ -427,7 +427,7 @@ fn local_before_returning_match_is_freed_once() {
         .find_map(|r| {
             if tir.inst(r).tag == ryo_core::tir::TirTag::VarDecl {
                 let decl = tir.var_decl_view(r);
-                (decl.name == owned_name).then_some(decl.initializer)
+                (tir.binding_name(decl.id) == owned_name).then_some(decl.initializer)
             } else {
                 None
             }
@@ -467,7 +467,7 @@ fn local_before_all_returning_match_arms_is_freed_once() {
         .find_map(|r| {
             if tir.inst(r).tag == ryo_core::tir::TirTag::VarDecl {
                 let decl = tir.var_decl_view(r);
-                (decl.name == owned_name).then_some(decl.initializer)
+                (tir.binding_name(decl.id) == owned_name).then_some(decl.initializer)
             } else {
                 None
             }
@@ -604,11 +604,11 @@ fn moving_payload_field_out_of_enum_rejected() {
     let x = pool.intern_str("x");
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
-    let ov = tb.var(o, opt_ty, span);
+    let ov = test_var(&mut tb, o, opt_ty, span);
     // A payload field read off the enum value, consumed by a VarDecl —
     // the guard's enum arm must reject it.
     let fa = tb.field_access(ov, 0, str_ty, span);
-    let decl = tb.var_decl(x, false, str_ty, fa, span);
+    let decl = test_var_decl(&mut tb, x, false, str_ty, fa, span);
     let tir = tb.finish(&[decl]);
     let mut sink = DiagSink::new();
     let _sc = check(
@@ -651,7 +651,7 @@ fn break_in_stmt_match_arm_gets_loop_exit_free() {
         .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
         .find(|&r| {
             tirs[0].inst(r).tag == ryo_core::tir::TirTag::VarDecl
-                && tirs[0].var_decl_view(r).name == s
+                && tirs[0].binding_name(tirs[0].var_decl_view(r).id) == s
         })
         .map(|r| tirs[0].var_decl_view(r).initializer)
         .expect("the loop-local `s` VarDecl");
@@ -691,7 +691,7 @@ fn prune_match_arms_covers_expression_arm_siblings() {
         .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
         .find(|&r| {
             tirs[0].inst(r).tag == ryo_core::tir::TirTag::VarDecl
-                && tirs[0].var_decl_view(r).name == s
+                && tirs[0].binding_name(tirs[0].var_decl_view(r).id) == s
         })
         .map(|r| tirs[0].var_decl_view(r).initializer)
         .expect("the loop-local `s` VarDecl");
@@ -730,7 +730,7 @@ fn named_vardecl_in_stmt_match_arm_freed_exactly_once() {
         .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
         .find(|&r| {
             tirs[0].inst(r).tag == ryo_core::tir::TirTag::VarDecl
-                && tirs[0].var_decl_view(r).name == s
+                && tirs[0].binding_name(tirs[0].var_decl_view(r).id) == s
         })
         .map(|r| tirs[0].var_decl_view(r).initializer)
         .expect("the arm-local `s` VarDecl");
@@ -764,7 +764,7 @@ fn break_in_value_position_match_arm_gets_loop_exit_free() {
         .map(|i| ryo_core::tir::TirRef::from_raw(i as u32))
         .find(|&r| {
             tirs[0].inst(r).tag == ryo_core::tir::TirTag::VarDecl
-                && tirs[0].var_decl_view(r).name == s
+                && tirs[0].binding_name(tirs[0].var_decl_view(r).id) == s
         })
         .map(|r| tirs[0].var_decl_view(r).initializer)
         .expect("the loop-local `s` VarDecl");
@@ -923,7 +923,7 @@ fn dead_payload_in_continue_arm_is_freed_before_continue() {
         .find_map(|r| {
             if tirs[0].inst(r).tag == ryo_core::tir::TirTag::VarDecl {
                 let decl = tirs[0].var_decl_view(r);
-                (pool.str(decl.name) == "item").then_some(decl.initializer)
+                (pool.str(tirs[0].binding_name(decl.id)) == "item").then_some(decl.initializer)
             } else {
                 None
             }

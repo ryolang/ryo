@@ -554,7 +554,7 @@ fn liveness_step(
     if inst.tag == TirTag::Var
         && pool.is_view(inst.ty)
         && let TirData::Var(name) = inst.data
-        && let Some(view_insts) = bindings.map.get(&name)
+        && let Some(view_insts) = bindings.map.get(&tir.binding_name(name))
     {
         // Latest DOCUMENT-order read wins — emission order, not visit
         // order: dead continuation blocks walk late but emitted in
@@ -576,7 +576,7 @@ fn liveness_step(
             if pool.is_view(inst.ty)
                 && let Some(targets) = view_binding_targets(tir, &bindings.map, view.initializer)
             {
-                bindings.insert_all(view.name, targets);
+                bindings.insert_all(tir.binding_name(view.id), targets);
             }
         }
         TirTag::Assign => {
@@ -584,10 +584,10 @@ fn liveness_step(
             if pool.is_view(inst.ty) {
                 match view_binding_targets(tir, &bindings.map, view.value) {
                     Some(targets) => {
-                        bindings.insert_all(view.name, targets);
+                        bindings.insert_all(tir.binding_name(view.id), targets);
                     }
                     None => {
-                        bindings.insert_all(view.name, HashSet::from([None]));
+                        bindings.insert_all(tir.binding_name(view.id), HashSet::from([None]));
                     }
                 }
             }
@@ -871,7 +871,7 @@ pub(crate) fn view_binding_targets(
     match tir.inst(init).data {
         TirData::Var(name) => Some(
             bindings
-                .get(&name)
+                .get(&tir.binding_name(name))
                 .cloned()
                 .unwrap_or_else(|| HashSet::from([None])),
         ),

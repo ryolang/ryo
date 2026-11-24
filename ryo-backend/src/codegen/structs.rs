@@ -92,7 +92,7 @@ impl<M: Module> Codegen<M> {
             TirTag::StructLit => Self::emit_struct_lit(builder, ctx, r, context)?,
             TirTag::Var => {
                 let name = match inst.data {
-                    TirData::Var(name) => name,
+                    TirData::Var(name) => ctx.tir.binding_name(name),
                     _ => unreachable!("Var must carry TirData::Var"),
                 };
                 let var = Self::read_slot(&ctx.struct_locals, name).ok_or_else(|| {
@@ -646,7 +646,7 @@ impl<M: Module> Codegen<M> {
         Self::write_slot(
             &mut ctx.struct_locals,
             &mut ctx.struct_locals_undo,
-            view.name,
+            ctx.tir.binding_name(view.id),
             Some(var),
         );
         ctx.aggregate_binding_storage.insert(r, var);
@@ -664,10 +664,11 @@ impl<M: Module> Codegen<M> {
     ) -> Result<Terminator, String> {
         let inst = ctx.tir.inst(r);
         let view = ctx.tir.assign_view(r);
-        let var = Self::read_slot(&ctx.struct_locals, view.name).ok_or_else(|| {
+        let name = ctx.tir.binding_name(view.id);
+        let var = Self::read_slot(&ctx.struct_locals, name).ok_or_else(|| {
             format!(
                 "Undefined struct variable in assign: '{}'",
-                ctx.pool.str(view.name)
+                ctx.pool.str(name)
             )
         })?;
         let dst = builder.use_var(var);
@@ -1295,9 +1296,10 @@ impl<M: Module> Codegen<M> {
                         Self::emit_field_drop(builder, ctx, field_addr, 0, sf.ty)?;
                     }
                 }
-                Some(name) => {
+                Some(id) => {
                     let token = owners[owner_idx];
                     owner_idx += 1;
+                    let name = ctx.tir.binding_name(id);
                     Self::bind_field_move(builder, ctx, name, field_addr, sf.ty, Some(token))?;
                 }
             }

@@ -193,6 +193,61 @@ fn variable_reference_type_resolved() {
 }
 
 #[test]
+fn shadowed_bindings_have_distinct_ids_and_initializer_cannot_resolve_early() {
+    let src = "fn main():\n\tvalue = 1\n\tif true:\n\t\tmut value = value + 1\n\tprint(value)\n";
+    let (tirs, pool) = run(src).unwrap();
+    let main = tir_named(&tirs, &pool, "main");
+    let declarations = (1..main.instructions.len())
+        .filter_map(|index| {
+            let reference = TirRef::from_raw(index as u32);
+            (main.inst(reference).tag == TirTag::VarDecl).then(|| main.var_decl_view(reference))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(declarations.len(), 2);
+    let outer = &declarations[0];
+    let inner = &declarations[1];
+    assert_ne!(outer.id, inner.id);
+    assert_eq!(
+        pool.str(main.bindings().get(outer.id).expect("outer binding").name),
+        "value"
+    );
+    assert_eq!(
+        pool.str(main.bindings().get(inner.id).expect("inner binding").name),
+        "value"
+    );
+    assert_ne!(
+        main.bindings().get(outer.id).expect("outer binding").scope,
+        main.bindings().get(inner.id).expect("inner binding").scope
+    );
+    let TirData::BinOp { lhs, .. } = main.inst(inner.initializer).data else {
+        panic!("shadowing initializer must read and increment the outer value")
+    };
+    let TirData::Var(initializer_binding) = main.inst(lhs).data else {
+        panic!("shadowing initializer lhs must be a variable read")
+    };
+    assert_eq!(initializer_binding, outer.id);
+    assert_ne!(initializer_binding, inner.id);
+}
+
+#[test]
+fn binding_ids_continue_after_builder_params() {
+    let mut pool = InternPool::new();
+    let function = pool.intern_str("f");
+    let param = pool.intern_str("value");
+    let params = vec![TirParam::new(
+        BindingId::from_index(0),
+        param,
+        pool.int(),
+        ParamMode::Borrow,
+        sp(),
+    )];
+    let builder = TirBuilder::new(function, params, pool.void(), sp());
+    let mut fcx = FuncCtx::new(DeclId::NONE, 0, builder, 0);
+
+    assert_eq!(fcx.next_binding(), BindingId::from_index(1));
+}
+
+#[test]
 fn undefined_variable_rejected() {
     let diags = run("x = y").unwrap_err();
     assert!(any_code(&diags, DiagCode::UndefinedVariable));

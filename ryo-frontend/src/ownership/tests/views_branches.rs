@@ -26,14 +26,14 @@ fn view_across_branches() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let base = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i2 = tb.int_const(2, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
     let cond = tb.bool_const(true, bool_ty, span);
-    let vread = tb.var(v, view_ty, span);
+    let vread = test_var(&mut tb, v, view_ty, span);
     let pcall = tb.call(
         DeclId::NONE,
         print,
@@ -54,7 +54,7 @@ fn view_across_branches() {
     );
     let xstmt = tb.unary(TirTag::ExprStmt, void, xcall, span);
     let ifs = tb.if_stmt(cond, &[pstmt], &[], Some(&[xstmt]), void, span);
-    let sread = tb.var(s, str_ty, span);
+    let sread = test_var(&mut tb, s, str_ty, span);
     let ccall = tb.call(
         DeclId::NONE,
         consume,
@@ -108,14 +108,14 @@ fn freeze_is_per_arm_precise_across_if_arms() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let base = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i2 = tb.int_const(2, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
     let cond = tb.bool_const(true, bool_ty, span);
-    let vread_t = tb.var(v, view_ty, span);
+    let vread_t = test_var(&mut tb, v, view_ty, span);
     let pcall_t = tb.call(
         DeclId::NONE,
         print,
@@ -125,7 +125,7 @@ fn freeze_is_per_arm_precise_across_if_arms() {
         span,
     );
     let pstmt_t = tb.unary(TirTag::ExprStmt, void, pcall_t, span);
-    let sread = tb.var(s, str_ty, span);
+    let sread = test_var(&mut tb, s, str_ty, span);
     let ccall = tb.call(
         DeclId::NONE,
         consume,
@@ -135,7 +135,7 @@ fn freeze_is_per_arm_precise_across_if_arms() {
         span,
     );
     let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
-    let vread_e = tb.var(v, view_ty, span);
+    let vread_e = test_var(&mut tb, v, view_ty, span);
     let pcall_e = tb.call(
         DeclId::NONE,
         print,
@@ -199,15 +199,15 @@ fn per_arm_override_respects_loop_deferral() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let base = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i2 = tb.int_const(2, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
     let if_cond = tb.bool_const(true, bool_ty, span);
     let wcond = tb.bool_const(true, bool_ty, span);
-    let vread = tb.var(v, view_ty, span);
+    let vread = test_var(&mut tb, v, view_ty, span);
     let pcall = tb.call(
         DeclId::NONE,
         print,
@@ -217,7 +217,7 @@ fn per_arm_override_respects_loop_deferral() {
         span,
     );
     let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
-    let sread = tb.var(s, str_ty, span);
+    let sread = test_var(&mut tb, s, str_ty, span);
     let suffix = tb.str_const(x4, str_ty, span);
     let push = tb.call(
         DeclId::NONE,
@@ -229,7 +229,7 @@ fn per_arm_override_respects_loop_deferral() {
     );
     let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
     let wl = tb.while_loop(wcond, &[pstmt, push_stmt], void, span);
-    let vread_e = tb.var(v, view_ty, span);
+    let vread_e = test_var(&mut tb, v, view_ty, span);
     let pcall_e = tb.call(
         DeclId::NONE,
         print,
@@ -302,14 +302,14 @@ fn per_arm_kill_respects_loop_deferral() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let base = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i2 = tb.int_const(2, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
     let if_cond = tb.bool_const(true, bool_ty, span);
-    let sread = tb.var(s, str_ty, span);
+    let sread = test_var(&mut tb, s, str_ty, span);
     let ccall = tb.call(
         DeclId::NONE,
         consume,
@@ -320,7 +320,7 @@ fn per_arm_kill_respects_loop_deferral() {
     );
     let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
     let wcond = tb.bool_const(true, bool_ty, span);
-    let vread = tb.var(v, view_ty, span);
+    let vread = test_var(&mut tb, v, view_ty, span);
     let pcall = tb.call(
         DeclId::NONE,
         print,
@@ -397,15 +397,15 @@ fn per_arm_kill_without_deferral_stays_scoped() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let base = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i2 = tb.int_const(2, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
     let cond1 = tb.bool_const(true, bool_ty, span);
     let cond2 = tb.bool_const(true, bool_ty, span);
-    let vread_t = tb.var(v, view_ty, span);
+    let vread_t = test_var(&mut tb, v, view_ty, span);
     let pcall_t = tb.call(
         DeclId::NONE,
         print,
@@ -415,7 +415,7 @@ fn per_arm_kill_without_deferral_stays_scoped() {
         span,
     );
     let pstmt_t = tb.unary(TirTag::ExprStmt, void, pcall_t, span);
-    let sread_elif = tb.var(s, str_ty, span);
+    let sread_elif = test_var(&mut tb, s, str_ty, span);
     let ccall_elif = tb.call(
         DeclId::NONE,
         consume,
@@ -425,7 +425,7 @@ fn per_arm_kill_without_deferral_stays_scoped() {
         span,
     );
     let cstmt_elif = tb.unary(TirTag::ExprStmt, void, ccall_elif, span);
-    let sread_e = tb.var(s, str_ty, span);
+    let sread_e = test_var(&mut tb, s, str_ty, span);
     let ccall_e = tb.call(
         DeclId::NONE,
         consume,
@@ -435,7 +435,7 @@ fn per_arm_kill_without_deferral_stays_scoped() {
         span,
     );
     let cstmt_e = tb.unary(TirTag::ExprStmt, void, ccall_e, span);
-    let vread_e = tb.var(v, view_ty, span);
+    let vread_e = test_var(&mut tb, v, view_ty, span);
     let pcall_e = tb.call(
         DeclId::NONE,
         print,
@@ -517,12 +517,12 @@ fn per_arm_override_applies_to_elif_arms() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let base = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i2 = tb.int_const(2, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
     let cond1 = tb.bool_const(true, bool_ty, span);
     let cond2 = tb.bool_const(true, bool_ty, span);
     let tlit = tb.str_const(tee, str_ty, span);
@@ -535,7 +535,7 @@ fn per_arm_override_applies_to_elif_arms() {
         span,
     );
     let pstmt_t = tb.unary(TirTag::ExprStmt, void, pcall_t, span);
-    let vread_elif = tb.var(v, view_ty, span);
+    let vread_elif = test_var(&mut tb, v, view_ty, span);
     let pcall_elif = tb.call(
         DeclId::NONE,
         print,
@@ -545,7 +545,7 @@ fn per_arm_override_applies_to_elif_arms() {
         span,
     );
     let pstmt_elif = tb.unary(TirTag::ExprStmt, void, pcall_elif, span);
-    let sread = tb.var(s, str_ty, span);
+    let sread = test_var(&mut tb, s, str_ty, span);
     let ccall = tb.call(
         DeclId::NONE,
         consume,
@@ -555,7 +555,7 @@ fn per_arm_override_applies_to_elif_arms() {
         span,
     );
     let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
-    let vread_e = tb.var(v, view_ty, span);
+    let vread_e = test_var(&mut tb, v, view_ty, span);
     let pcall_e = tb.call(
         DeclId::NONE,
         print,
@@ -624,15 +624,15 @@ fn view_created_in_loop_body_per_arm_kill_applies() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
     let wcond = tb.bool_const(true, bool_ty, span);
-    let base = tb.var(s, str_ty, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i2 = tb.int_const(2, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
     let cond = tb.bool_const(true, bool_ty, span);
-    let sread = tb.var(s, str_ty, span);
+    let sread = test_var(&mut tb, s, str_ty, span);
     let suffix = tb.str_const(bang, str_ty, span);
     let push = tb.call(
         DeclId::NONE,
@@ -643,7 +643,7 @@ fn view_created_in_loop_body_per_arm_kill_applies() {
         span,
     );
     let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
-    let vread = tb.var(v, view_ty, span);
+    let vread = test_var(&mut tb, v, view_ty, span);
     let pcall = tb.call(
         DeclId::NONE,
         print,
@@ -704,15 +704,15 @@ fn view_created_in_loop_body_freeze_holds_before_read() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
     let wcond = tb.bool_const(true, bool_ty, span);
-    let base = tb.var(s, str_ty, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i2 = tb.int_const(2, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
     let cond = tb.bool_const(true, bool_ty, span);
-    let sread = tb.var(s, str_ty, span);
+    let sread = test_var(&mut tb, s, str_ty, span);
     let suffix = tb.str_const(bang, str_ty, span);
     let push = tb.call(
         DeclId::NONE,
@@ -723,7 +723,7 @@ fn view_created_in_loop_body_freeze_holds_before_read() {
         span,
     );
     let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
-    let vread = tb.var(v, view_ty, span);
+    let vread = test_var(&mut tb, v, view_ty, span);
     let pcall = tb.call(
         DeclId::NONE,
         print,
@@ -790,14 +790,14 @@ fn freeze_holds_before_arm_local_last_read() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let base = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i2 = tb.int_const(2, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
     let cond = tb.bool_const(true, bool_ty, span);
-    let sread = tb.var(s, str_ty, span);
+    let sread = test_var(&mut tb, s, str_ty, span);
     let ccall = tb.call(
         DeclId::NONE,
         consume,
@@ -807,7 +807,7 @@ fn freeze_holds_before_arm_local_last_read() {
         span,
     );
     let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
-    let vread_t = tb.var(v, view_ty, span);
+    let vread_t = test_var(&mut tb, v, view_ty, span);
     let pcall_t = tb.call(
         DeclId::NONE,
         print,
@@ -817,7 +817,7 @@ fn freeze_holds_before_arm_local_last_read() {
         span,
     );
     let pstmt_t = tb.unary(TirTag::ExprStmt, void, pcall_t, span);
-    let vread_e = tb.var(v, view_ty, span);
+    let vread_e = test_var(&mut tb, v, view_ty, span);
     let pcall_e = tb.call(
         DeclId::NONE,
         print,
@@ -884,14 +884,14 @@ fn freeze_holds_in_arm_when_view_read_after_join() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let base = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i2 = tb.int_const(2, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
     let cond = tb.bool_const(true, bool_ty, span);
-    let vread_t = tb.var(v, view_ty, span);
+    let vread_t = test_var(&mut tb, v, view_ty, span);
     let pcall_t = tb.call(
         DeclId::NONE,
         print,
@@ -901,7 +901,7 @@ fn freeze_holds_in_arm_when_view_read_after_join() {
         span,
     );
     let pstmt_t = tb.unary(TirTag::ExprStmt, void, pcall_t, span);
-    let sread = tb.var(s, str_ty, span);
+    let sread = test_var(&mut tb, s, str_ty, span);
     let ccall = tb.call(
         DeclId::NONE,
         consume,
@@ -912,7 +912,7 @@ fn freeze_holds_in_arm_when_view_read_after_join() {
     );
     let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
     let ifs = tb.if_stmt(cond, &[pstmt_t], &[], Some(&[cstmt]), void, span);
-    let vread = tb.var(v, view_ty, span);
+    let vread = test_var(&mut tb, v, view_ty, span);
     let pcall = tb.call(
         DeclId::NONE,
         print,
@@ -978,14 +978,14 @@ fn move_in_arm_where_view_is_dead_ok_but_post_join_use_is_uam() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let base = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i2 = tb.int_const(2, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
     let cond = tb.bool_const(true, bool_ty, span);
-    let sread = tb.var(s, str_ty, span);
+    let sread = test_var(&mut tb, s, str_ty, span);
     let ccall = tb.call(
         DeclId::NONE,
         consume,
@@ -995,7 +995,7 @@ fn move_in_arm_where_view_is_dead_ok_but_post_join_use_is_uam() {
         span,
     );
     let cstmt = tb.unary(TirTag::ExprStmt, void, ccall, span);
-    let vread_e = tb.var(v, view_ty, span);
+    let vread_e = test_var(&mut tb, v, view_ty, span);
     let pcall_e = tb.call(
         DeclId::NONE,
         print,
@@ -1006,7 +1006,7 @@ fn move_in_arm_where_view_is_dead_ok_but_post_join_use_is_uam() {
     );
     let pstmt_e = tb.unary(TirTag::ExprStmt, void, pcall_e, span);
     let ifs = tb.if_stmt(cond, &[cstmt], &[], Some(&[pstmt_e]), void, span);
-    let sread2 = tb.var(s, str_ty, span);
+    let sread2 = test_var(&mut tb, s, str_ty, span);
     let pcall = tb.call(
         DeclId::NONE,
         print,
@@ -1068,15 +1068,15 @@ fn loop_deferred_view_stays_frozen_across_arm_without_read() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let base = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i2 = tb.int_const(2, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
     let wcond = tb.bool_const(true, bool_ty, span);
     let cond = tb.bool_const(true, bool_ty, span);
-    let sread = tb.var(s, str_ty, span);
+    let sread = test_var(&mut tb, s, str_ty, span);
     let suffix = tb.str_const(bang, str_ty, span);
     let push = tb.call(
         DeclId::NONE,
@@ -1087,7 +1087,7 @@ fn loop_deferred_view_stays_frozen_across_arm_without_read() {
         span,
     );
     let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
-    let vread = tb.var(v, view_ty, span);
+    let vread = test_var(&mut tb, v, view_ty, span);
     let pcall = tb.call(
         DeclId::NONE,
         print,
@@ -1158,14 +1158,14 @@ fn for_range_deferred_view_stays_frozen_across_arm_without_read() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let base = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i2 = tb.int_const(2, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
     let cond = tb.bool_const(true, bool_ty, span);
-    let sread = tb.var(s, str_ty, span);
+    let sread = test_var(&mut tb, s, str_ty, span);
     let suffix = tb.str_const(bang, str_ty, span);
     let push = tb.call(
         DeclId::NONE,
@@ -1176,7 +1176,7 @@ fn for_range_deferred_view_stays_frozen_across_arm_without_read() {
         span,
     );
     let push_stmt = tb.unary(TirTag::ExprStmt, void, push, span);
-    let vread = tb.var(v, view_ty, span);
+    let vread = test_var(&mut tb, v, view_ty, span);
     let pcall = tb.call(
         DeclId::NONE,
         print,
@@ -1189,7 +1189,7 @@ fn for_range_deferred_view_stays_frozen_across_arm_without_read() {
     let ifs = tb.if_stmt(cond, &[push_stmt], &[], Some(&[pstmt]), void, span);
     let i0b = tb.int_const(0, int_ty, span);
     let i3 = tb.int_const(3, int_ty, span);
-    let fr = tb.for_range(i, i0b, i3, &[ifs], void, span);
+    let fr = test_for_range(&mut tb, i, i0b, i3, &[ifs], void, span);
     let tir = tb.finish(&[decl, vdecl, fr]);
 
     let mut sink = DiagSink::new();
@@ -1241,14 +1241,14 @@ fn view_in_loop_body_converges() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
     let cond = tb.bool_const(true, bool_ty, span);
-    let base = tb.var(s, str_ty, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i2 = tb.int_const(2, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
-    let vread = tb.var(v, view_ty, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
+    let vread = test_var(&mut tb, v, view_ty, span);
     let pcall = tb.call(
         DeclId::NONE,
         print,
@@ -1306,17 +1306,17 @@ fn loop_rebinding_liveness_tracks_entry_and_back_edge_views() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let s_lit = tb.str_const(pool.intern_str("source"), str_ty, span);
-    let s_decl = tb.var_decl(s, false, str_ty, s_lit, span);
+    let s_decl = test_var_decl(&mut tb, s, false, str_ty, s_lit, span);
     let t_lit = tb.str_const(pool.intern_str("replacement"), str_ty, span);
-    let t_decl = tb.var_decl(t, false, str_ty, t_lit, span);
-    let s_read = tb.var(s, str_ty, span);
+    let t_decl = test_var_decl(&mut tb, t, false, str_ty, t_lit, span);
+    let s_read = test_var(&mut tb, s, str_ty, span);
     let zero = tb.int_const(0, int_ty, span);
     let one = tb.int_const(1, int_ty, span);
     let entry_slice = tb.slice(s_read, Some(zero), Some(one), view_ty, span);
-    let v_decl = tb.var_decl(v, false, view_ty, entry_slice, span);
+    let v_decl = test_var_decl(&mut tb, v, false, view_ty, entry_slice, span);
     let cond = tb.bool_const(true, bool_ty, span);
 
-    let before_rebind = tb.var(v, view_ty, span);
+    let before_rebind = test_var(&mut tb, v, view_ty, span);
     let before_call = tb.call(
         DeclId::NONE,
         print,
@@ -1326,12 +1326,12 @@ fn loop_rebinding_liveness_tracks_entry_and_back_edge_views() {
         span,
     );
     let before_stmt = tb.unary(TirTag::ExprStmt, void, before_call, span);
-    let t_read = tb.var(t, str_ty, span);
+    let t_read = test_var(&mut tb, t, str_ty, span);
     let loop_zero = tb.int_const(0, int_ty, span);
     let loop_one = tb.int_const(1, int_ty, span);
     let rebound_slice = tb.slice(t_read, Some(loop_zero), Some(loop_one), view_ty, span);
-    let rebind = tb.assign(v, view_ty, rebound_slice, span);
-    let after_rebind = tb.var(v, view_ty, span);
+    let rebind = test_assign(&mut tb, v, view_ty, rebound_slice, span);
+    let after_rebind = test_var(&mut tb, v, view_ty, span);
     let after_call = tb.call(
         DeclId::NONE,
         print,
@@ -1342,7 +1342,7 @@ fn loop_rebinding_liveness_tracks_entry_and_back_edge_views() {
     );
     let after_stmt = tb.unary(TirTag::ExprStmt, void, after_call, span);
     let loop_stmt = tb.while_loop(cond, &[before_stmt, rebind, after_stmt], void, span);
-    let exit_read = tb.var(v, view_ty, span);
+    let exit_read = test_var(&mut tb, v, view_ty, span);
     let exit_call = tb.call(
         DeclId::NONE,
         print,
@@ -1401,22 +1401,22 @@ fn loop_rebind_stays_scoped_to_its_arm() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let s_lit = tb.str_const(pool.intern_str("source"), str_ty, span);
-    let s_decl = tb.var_decl(s, false, str_ty, s_lit, span);
+    let s_decl = test_var_decl(&mut tb, s, false, str_ty, s_lit, span);
     let t_lit = tb.str_const(pool.intern_str("replacement"), str_ty, span);
-    let t_decl = tb.var_decl(t, false, str_ty, t_lit, span);
-    let s_read = tb.var(s, str_ty, span);
+    let t_decl = test_var_decl(&mut tb, t, false, str_ty, t_lit, span);
+    let s_read = test_var(&mut tb, s, str_ty, span);
     let zero = tb.int_const(0, int_ty, span);
     let one = tb.int_const(1, int_ty, span);
     let entry_slice = tb.slice(s_read, Some(zero), Some(one), view_ty, span);
-    let v_decl = tb.var_decl(v, false, view_ty, entry_slice, span);
+    let v_decl = test_var_decl(&mut tb, v, false, view_ty, entry_slice, span);
     let if_cond = tb.bool_const(true, bool_ty, span);
     let while_cond = tb.bool_const(true, bool_ty, span);
-    let t_read = tb.var(t, str_ty, span);
+    let t_read = test_var(&mut tb, t, str_ty, span);
     let loop_zero = tb.int_const(0, int_ty, span);
     let loop_one = tb.int_const(1, int_ty, span);
     let rebound_slice = tb.slice(t_read, Some(loop_zero), Some(loop_one), view_ty, span);
-    let rebind = tb.assign(v, view_ty, rebound_slice, span);
-    let in_loop_read = tb.var(v, view_ty, span);
+    let rebind = test_assign(&mut tb, v, view_ty, rebound_slice, span);
+    let in_loop_read = test_var(&mut tb, v, view_ty, span);
     let in_loop_call = tb.call(
         DeclId::NONE,
         print,
@@ -1427,7 +1427,7 @@ fn loop_rebind_stays_scoped_to_its_arm() {
     );
     let in_loop_stmt = tb.unary(TirTag::ExprStmt, void, in_loop_call, span);
     let wl = tb.while_loop(while_cond, &[rebind, in_loop_stmt], void, span);
-    let else_read = tb.var(v, view_ty, span);
+    let else_read = test_var(&mut tb, v, view_ty, span);
     let else_call = tb.call(
         DeclId::NONE,
         print,
@@ -1487,15 +1487,15 @@ fn loop_deferred_view_survives_if_join_prune() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let base = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let base = test_var(&mut tb, s, str_ty, span);
     let i0 = tb.int_const(0, int_ty, span);
     let i2 = tb.int_const(2, int_ty, span);
     let sl = tb.slice(base, Some(i0), Some(i2), view_ty, span);
-    let vdecl = tb.var_decl(v, false, view_ty, sl, span);
+    let vdecl = test_var_decl(&mut tb, v, false, view_ty, sl, span);
     let while_cond = tb.bool_const(true, bool_ty, span);
     let if_cond = tb.bool_const(true, bool_ty, span);
-    let vread = tb.var(v, view_ty, span);
+    let vread = test_var(&mut tb, v, view_ty, span);
     let pcall = tb.call(
         DeclId::NONE,
         print,
@@ -1506,7 +1506,7 @@ fn loop_deferred_view_survives_if_join_prune() {
     );
     let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
     let ifs = tb.if_stmt(if_cond, &[pstmt], &[], None, void, span);
-    let sread = tb.var(s, str_ty, span);
+    let sread = test_var(&mut tb, s, str_ty, span);
     let suffix = tb.str_const(bang, str_ty, span);
     let push = tb.call(
         DeclId::NONE,

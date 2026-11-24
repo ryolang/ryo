@@ -1,4 +1,5 @@
 use super::*;
+use crate::tir::test_bindings::*;
 use crate::types::{EnumVariantDef, StructFlags, VariantKind};
 
 fn sp() -> Span {
@@ -68,6 +69,19 @@ fn binding_table_retrieves_metadata() {
     assert_eq!(info.scope, scope);
     assert_eq!(info.span, Span::EMPTY);
     assert!(table.get(BindingId::from_index(1)).is_none());
+}
+
+#[test]
+fn tir_binding_wire_rejects_unregistered_id() {
+    let mut pool = InternPool::new();
+    let main = pool.intern_str("main");
+    let mut builder = TirBuilder::new(main, vec![], pool.void(), sp()).with_layout_context(&pool);
+    let read = builder.var(BindingId::from_index(99), pool.int(), sp());
+    let statement = builder.unary(TirTag::ExprStmt, pool.void(), read, sp());
+    let tir = builder.finish(&[statement]);
+
+    let error = tir.require_bindings().expect_err("invalid ID must fail");
+    assert!(error.contains("unregistered binding 99"), "{error}");
 }
 
 #[test]
@@ -263,13 +277,13 @@ fn var_decl_round_trips() {
 
     let mut b = TirBuilder::new(main, vec![], int_ty, sp());
     let init = b.int_const(42, int_ty, sp());
-    let decl = b.var_decl(x, true, int_ty, init, sp());
+    let decl = var_decl(&mut b, x, true, int_ty, init, sp());
     let zero = b.int_const(0, int_ty, sp());
     let ret = b.unary(TirTag::Return, pool.void(), zero, sp());
     let tir = b.finish(&[decl, ret]);
 
     let v = tir.var_decl_view(decl);
-    assert_eq!(v.name, x);
+    assert_eq!(tir.binding_name(v.id), x);
     assert!(v.mutable);
     assert_eq!(v.initializer, init);
     assert_eq!(tir.inst(decl).ty, int_ty);
@@ -285,20 +299,20 @@ fn var_decl_wire_fixture() {
     let name = StringId::from_raw(7);
     let init = TirRef::from_raw(13);
 
-    let decl = b.var_decl(name, true, int_ty, init, sp());
+    let decl = var_decl(&mut b, name, true, int_ty, init, sp());
     let TirData::Extra(range) = b.instructions[decl.index()].data else {
         panic!("VarDecl must carry TirData::Extra");
     };
     assert_eq!(range, ExtraRange { offset: 5, len: 3 });
-    assert_eq!(&b.extra[5..8], &[7, 1, 13]);
+    assert_eq!(&b.extra[5..8], &[0, 1, 13]);
     assert_eq!(b.extra.len(), 8);
 
-    let decl2 = b.var_decl(name, false, int_ty, init, sp());
+    let decl2 = var_decl(&mut b, name, false, int_ty, init, sp());
     let TirData::Extra(range2) = b.instructions[decl2.index()].data else {
         panic!("VarDecl must carry TirData::Extra");
     };
     assert_eq!(range2, ExtraRange { offset: 8, len: 3 });
-    assert_eq!(&b.extra[8..11], &[7, 0, 13]);
+    assert_eq!(&b.extra[8..11], &[1, 0, 13]);
 }
 
 #[test]
@@ -311,19 +325,19 @@ fn var_decl_decode_fixture() {
     let mut b = TirBuilder::new(main, vec![], int_ty, sp());
     let dummy = b.int_const(0, int_ty, sp());
     let x = pool.intern_str("x");
-    let decl = b.var_decl(x, false, int_ty, dummy, sp());
+    let decl = var_decl(&mut b, x, false, int_ty, dummy, sp());
     let mut tir = b.finish(&[decl]);
 
     let TirData::Extra(range) = tir.inst(decl).data else {
         panic!("VarDecl must carry TirData::Extra");
     };
     let start = range.as_range().start;
-    tir.extra[start] = 7; // name
+    tir.extra[start] = 7; // binding ID
     tir.extra[start + 1] = 1; // mutable
     tir.extra[start + 2] = 13; // initializer
 
     let v = tir.var_decl_view(decl);
-    assert_eq!(v.name, StringId::from_raw(7));
+    assert_eq!(v.id, BindingId::from_index(7));
     assert!(v.mutable);
     assert_eq!(v.initializer, TirRef::from_raw(13));
 }
@@ -359,17 +373,17 @@ fn assign_wire_fixture() {
     let name = StringId::from_raw(7);
     let value = TirRef::from_raw(13);
 
-    let r = b.assign(name, int_ty, value, sp());
+    let r = assign(&mut b, name, int_ty, value, sp());
     let TirData::Extra(range) = b.instructions[r.index()].data else {
         panic!("Assign must carry TirData::Extra");
     };
     assert_eq!(range, ExtraRange { offset: 5, len: 2 });
-    assert_eq!(&b.extra[5..7], &[7, 13]);
+    assert_eq!(&b.extra[5..7], &[0, 13]);
     assert_eq!(b.instructions[r.index()].ty, int_ty);
 
     let (tir, r) = shell_with(&[7, 13], TirTag::Assign, 2);
     let v = tir.assign_view(r);
-    assert_eq!(v.name, name);
+    assert_eq!(v.id, BindingId::from_index(7));
     assert_eq!(v.value, value);
 }
 
@@ -383,16 +397,16 @@ fn compound_assign_wire_fixture() {
     let name = StringId::from_raw(7);
     let value = TirRef::from_raw(13);
 
-    let r = b.compound_assign(name, CompoundOp::Sub, int_ty, value, sp());
+    let r = compound_assign(&mut b, name, CompoundOp::Sub, int_ty, value, sp());
     let TirData::Extra(range) = b.instructions[r.index()].data else {
         panic!("CompoundAssign must carry TirData::Extra");
     };
     assert_eq!(range, ExtraRange { offset: 5, len: 3 });
-    assert_eq!(&b.extra[5..8], &[7, 1, 13]);
+    assert_eq!(&b.extra[5..8], &[0, 1, 13]);
 
     let (tir, r) = shell_with(&[7, 1, 13], TirTag::CompoundAssign, 3);
     let v = tir.compound_assign_view(r);
-    assert_eq!(v.name, name);
+    assert_eq!(v.id, BindingId::from_index(7));
     assert!(matches!(v.op, CompoundOp::Sub));
     assert_eq!(v.value, value);
 }
@@ -562,23 +576,23 @@ fn for_range_wire_fixture() {
     let s1 = TirRef::from_raw(21);
     let s2 = TirRef::from_raw(22);
 
-    let empty = b.for_range(var_name, start, end, &[], int_ty, sp());
+    let empty = for_range(&mut b, var_name, start, end, &[], int_ty, sp());
     let TirData::Extra(range) = b.instructions[empty.index()].data else {
         panic!("ForRange must carry TirData::Extra");
     };
     assert_eq!(range, ExtraRange { offset: 5, len: 4 });
-    assert_eq!(&b.extra[5..9], &[7, 5, 9, 0]);
+    assert_eq!(&b.extra[5..9], &[0, 5, 9, 0]);
 
-    let pop = b.for_range(var_name, start, end, &[s1, s2], int_ty, sp());
+    let pop = for_range(&mut b, var_name, start, end, &[s1, s2], int_ty, sp());
     let TirData::Extra(range2) = b.instructions[pop.index()].data else {
         panic!("ForRange must carry TirData::Extra");
     };
     assert_eq!(range2, ExtraRange { offset: 9, len: 6 });
-    assert_eq!(&b.extra[9..15], &[7, 5, 9, 2, 21, 22]);
+    assert_eq!(&b.extra[9..15], &[1, 5, 9, 2, 21, 22]);
 
     let (tir, r) = shell_with(&[7, 5, 9, 2, 21, 22], TirTag::ForRange, 6);
     let v = tir.for_range_view(r);
-    assert_eq!(v.var_name, var_name);
+    assert_eq!(v.id, BindingId::from_index(7));
     assert_eq!(v.start, start);
     assert_eq!(v.end, end);
     assert_eq!(v.body.len(), 2);
@@ -685,7 +699,7 @@ fn destructure_wire_fixture() {
     let fty2 = TypeId::from_raw(4);
     let fields = [(0u32, None, fty1), (1, Some(StringId::from_raw(0)), fty2)];
 
-    let r = b.destructure(rhs, &fields, sp());
+    let r = destructure(&mut b, rhs, &fields, sp());
     let TirData::Extra(range) = b.instructions[r.index()].data else {
         panic!("Destructure must carry TirData::Extra");
     };
@@ -705,7 +719,7 @@ fn destructure_wire_fixture() {
             },
             DestructureField {
                 field_index: 1,
-                bind: Some(StringId::from_raw(0)),
+                bind: Some(BindingId::from_index(0)),
                 ty: fty2,
             },
         ]
@@ -870,25 +884,25 @@ fn terminates_parity_through_builder_and_tir() {
 
     let vd_never = case(|b, i, n, _v, _i2, name| {
         let d = b.unreachable(n, sp());
-        b.var_decl(name, false, i, d, sp())
+        var_decl(b, name, false, i, d, sp())
     });
     assert_eq!(vd_never, (true, true, true, true));
 
     let vd_plain = case(|b, i, _n, _v, _i2, name| {
         let z = b.int_const(0, i, sp());
-        b.var_decl(name, false, i, z, sp())
+        var_decl(b, name, false, i, z, sp())
     });
     assert_eq!(vd_plain, (false, false, false, false));
 
     let as_never = case(|b, i, n, _v, _i2, name| {
         let d = b.unreachable(n, sp());
-        b.assign(name, i, d, sp())
+        assign(b, name, i, d, sp())
     });
     assert_eq!(as_never, (true, true, true, true));
 
     let ca_never = case(|b, i, n, _v, _i2, name| {
         let d = b.unreachable(n, sp());
-        b.compound_assign(name, CompoundOp::Add, i, d, sp())
+        compound_assign(b, name, CompoundOp::Add, i, d, sp())
     });
     assert_eq!(ca_never, (true, true, true, true));
 
@@ -1015,14 +1029,14 @@ fn borrowed_loop_views_preserve_headers_and_bodies() {
     let end = b.int_const(4, int_ty, sp());
     let for_stmt = b.int_const(2, int_ty, sp());
     let while_loop = b.while_loop(cond, &[while_stmt], void_ty, sp());
-    let for_loop = b.for_range(name, start, end, &[for_stmt], void_ty, sp());
+    let for_loop = for_range(&mut b, name, start, end, &[for_stmt], void_ty, sp());
     let tir = b.finish(&[while_loop, for_loop]);
 
     let view = tir.while_loop_view(while_loop);
     assert_eq!(view.cond, cond);
     assert_eq!(view.body.into_iter().collect::<Vec<_>>(), vec![while_stmt]);
     let view = tir.for_range_view(for_loop);
-    assert_eq!(view.var_name, name);
+    assert_eq!(tir.binding_name(view.id), name);
     assert_eq!(view.start, start);
     assert_eq!(view.end, end);
     assert_eq!(view.body.into_iter().collect::<Vec<_>>(), vec![for_stmt]);
@@ -1037,15 +1051,15 @@ fn assign_round_trips() {
 
     let mut b = TirBuilder::new(main, vec![], int_ty, sp());
     let init = b.int_const(42, int_ty, sp());
-    let decl = b.var_decl(x, true, int_ty, init, sp());
+    let decl = var_decl(&mut b, x, true, int_ty, init, sp());
     let new_val = b.int_const(99, int_ty, sp());
-    let asgn = b.assign(x, int_ty, new_val, sp());
+    let asgn = assign(&mut b, x, int_ty, new_val, sp());
     let zero = b.int_const(0, int_ty, sp());
     let ret = b.unary(TirTag::Return, pool.void(), zero, sp());
     let tir = b.finish(&[decl, asgn, ret]);
 
     let v = tir.assign_view(asgn);
-    assert_eq!(v.name, x);
+    assert_eq!(tir.binding_name(v.id), x);
     assert_eq!(v.value, new_val);
     assert_eq!(tir.inst(asgn).ty, int_ty);
 }
@@ -1059,15 +1073,15 @@ fn compound_assign_round_trips() {
 
     let mut b = TirBuilder::new(main, vec![], int_ty, sp());
     let init = b.int_const(10, int_ty, sp());
-    let decl = b.var_decl(x, true, int_ty, init, sp());
+    let decl = var_decl(&mut b, x, true, int_ty, init, sp());
     let delta = b.int_const(5, int_ty, sp());
-    let ca = b.compound_assign(x, CompoundOp::Add, int_ty, delta, sp());
+    let ca = compound_assign(&mut b, x, CompoundOp::Add, int_ty, delta, sp());
     let zero = b.int_const(0, int_ty, sp());
     let ret = b.unary(TirTag::Return, pool.void(), zero, sp());
     let tir = b.finish(&[decl, ca, ret]);
 
     let v = tir.compound_assign_view(ca);
-    assert_eq!(v.name, x);
+    assert_eq!(tir.binding_name(v.id), x);
     assert_eq!(v.op, CompoundOp::Add);
     assert_eq!(v.value, delta);
     assert_eq!(tir.inst(ca).ty, int_ty);
@@ -1095,14 +1109,14 @@ fn slice_and_to_view_round_trip_and_dump() {
     let s = pool.intern_str("s");
 
     let mut b = TirBuilder::new(main, vec![], pool.void(), sp());
-    let base = b.var(s, str_ty, sp());
+    let base = var(&mut b, s, str_ty, sp());
     let lo = b.int_const(0, pool.int(), sp());
     // `s[0:]` — end omitted, exercising the `None` bound.
     let slice = b.slice(base, Some(lo), None, view_ty, sp());
     // `str → strview` conversion of the same variable — a fresh
     // read: each use of a binding emits its own `Var` instruction,
     // so the body stays tree-shaped.
-    let base2 = b.var(s, str_ty, sp());
+    let base2 = var(&mut b, s, str_ty, sp());
     let view = b.to_view(base2, view_ty, sp());
     let tir = b.finish(&[slice, view]);
 
@@ -1140,11 +1154,16 @@ fn destructure_round_trips_and_owner_tokens() {
     let mut b = TirBuilder::new(main, vec![], pool.void(), sp());
     // A struct-typed value: simulate the call result with a Var read
     // (the builder does not enforce producer shapes).
-    let rhs = b.var(main, pair_ty, sp());
+    let rhs = var(&mut b, main, pair_ty, sp());
     // Owner tokens: one FieldAccess per BOUND field, immediately before
     // the Destructure, plan order (field 1 is a wildcard here).
     let owner0 = b.field_access(rhs, 0, int_ty, sp());
-    let destr = b.destructure(rhs, &[(0, Some(q), int_ty), (1, None, str_ty)], sp());
+    let destr = destructure(
+        &mut b,
+        rhs,
+        &[(0, Some(q), int_ty), (1, None, str_ty)],
+        sp(),
+    );
     assert_eq!(owner0.index(), destr.index() - 1);
     let tir = b.finish(&[destr]);
 
@@ -1154,29 +1173,32 @@ fn destructure_round_trips_and_owner_tokens() {
     assert_eq!(view.rhs, rhs);
     assert_eq!(view.fields.len(), 2);
     assert_eq!(view.fields[0].field_index, 0);
-    assert_eq!(view.fields[0].bind, Some(q));
+    assert_eq!(view.fields[0].bind.map(|id| tir.binding_name(id)), Some(q));
     assert_eq!(view.fields[0].ty, int_ty);
     assert_eq!(view.fields[1].field_index, 1);
     assert_eq!(view.fields[1].bind, None);
     assert_eq!(view.fields[1].ty, str_ty);
 
-    // The +1 bind encoding must survive a raw-0 string id: "derive" is
-    // pre-interned at raw 0 and is a legal (if unconventional) binding.
+    // The +1 bind encoding must preserve BindingId 0 as distinct from a wildcard.
     let derive = pool.intern_str("derive");
-    assert_eq!(derive.raw(), 0);
     let mut b = TirBuilder::new(main, vec![], pool.void(), sp());
-    let rhs = b.var(main, pair_ty, sp());
+    let rhs = b.int_const(0, pair_ty, sp());
     let _owner0 = b.field_access(rhs, 0, int_ty, sp());
     let _owner1 = b.field_access(rhs, 1, str_ty, sp());
-    let destr = b.destructure(
+    let destr = destructure(
+        &mut b,
         rhs,
         &[(0, Some(derive), int_ty), (1, Some(q), str_ty)],
         sp(),
     );
     let tir = b.finish(&[destr]);
     let view = tir.destructure_view(destr);
-    assert_eq!(view.fields[0].bind, Some(derive));
-    assert_eq!(view.fields[1].bind, Some(q));
+    assert_eq!(view.fields[0].bind, Some(BindingId::from_index(0)));
+    assert_eq!(
+        view.fields[0].bind.map(|id| tir.binding_name(id)),
+        Some(derive)
+    );
+    assert_eq!(view.fields[1].bind.map(|id| tir.binding_name(id)), Some(q));
 
     let owners = tir.destructure_bound_owner_refs(destr);
     assert_eq!(owners.len(), 2);
@@ -1332,7 +1354,7 @@ fn walk_operands_visits_if_and_loop_payloads_in_order() {
         sp(),
     );
     let while_loop = b.while_loop(while_cond, &[while_a, while_b], void_ty, sp());
-    let for_loop = b.for_range(name, start, end, &[for_stmt], void_ty, sp());
+    let for_loop = for_range(&mut b, name, start, end, &[for_stmt], void_ty, sp());
     let tir = b.finish(&[if_stmt, while_loop, for_loop]);
 
     assert_eq!(
@@ -1438,7 +1460,8 @@ fn collect_jump_path_iter_borrows_nested_loop_bodies() {
     let for_before = b.int_const(5, int_ty, sp());
     let for_target = b.int_const(6, int_ty, sp());
     let for_after = b.int_const(7, int_ty, sp());
-    let for_loop = b.for_range(
+    let for_loop = for_range(
+        &mut b,
         loop_var,
         start,
         end,
@@ -1472,10 +1495,10 @@ fn destructure_dump_lists_fields() {
     let pair_ty = pool.anon_struct(&[(q, int_ty)]);
 
     let mut b = TirBuilder::new(main, vec![], pool.void(), sp());
-    let rhs = b.var(main, pair_ty, sp());
+    let rhs = var(&mut b, main, pair_ty, sp());
     let owner = b.field_access(rhs, 0, int_ty, sp());
     let _ = owner;
-    let destr = b.destructure(rhs, &[(0, Some(q), int_ty)], sp());
+    let destr = destructure(&mut b, rhs, &[(0, Some(q), int_ty)], sp());
     let tir = b.finish(&[destr]);
 
     let out = format!("{}", dump(std::slice::from_ref(&tir), &pool));

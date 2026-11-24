@@ -66,7 +66,9 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
                 pool.bytes_payload(s).escape_ascii()
             )
         }
-        (TirTag::Var, TirData::Var(s)) => writeln!(f, "var {}", pool.str(s)),
+        (TirTag::Var, TirData::Var(id)) => {
+            writeln!(f, "var {}", pool.str(tir.binding_name(id)))
+        }
         (TirTag::Slice, TirData::Slice { base, start, end }) => {
             let bound = |b: Option<TirRef>| match b {
                 Some(b) => format!("%{}", b.index()),
@@ -104,20 +106,25 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
                 f,
                 "var_decl {}{} = %{}",
                 kw,
-                pool.str(view.name),
+                pool.str(tir.binding_name(view.id)),
                 view.initializer.index()
             )
         }
         (TirTag::Assign, TirData::Extra(_)) => {
             let v = tir.assign_view(r);
-            writeln!(f, "assign {} = %{}", pool.str(v.name), v.value.index())
+            writeln!(
+                f,
+                "assign {} = %{}",
+                pool.str(tir.binding_name(v.id)),
+                v.value.index()
+            )
         }
         (TirTag::CompoundAssign, TirData::Extra(_)) => {
             let v = tir.compound_assign_view(r);
             writeln!(
                 f,
                 "compound_assign {} {} %{}",
-                pool.str(v.name),
+                pool.str(tir.binding_name(v.id)),
                 v.op,
                 v.value.index()
             )
@@ -174,7 +181,7 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
             writeln!(
                 f,
                 "for_range {} in range(%{}, %{}) body=[{}]",
-                pool.str(v.var_name),
+                pool.str(tir.binding_name(v.id)),
                 v.start.index(),
                 v.end.index(),
                 body_refs.join(", ")
@@ -224,11 +231,11 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
                     write!(f, ", ")?;
                 }
                 match field.bind {
-                    Some(name) => write!(
+                    Some(id) => write!(
                         f,
                         "{}: {}: {}",
                         field.field_index,
-                        pool.str(name),
+                        pool.str(tir.binding_name(id)),
                         pool.display(field.ty)
                     )?,
                     None => write!(f, "{}: _", field.field_index)?,
@@ -260,7 +267,7 @@ fn write_inst(f: &mut fmt::Formatter<'_>, tir: &Tir, pool: &InternPool, r: TirRe
                             f,
                             "{}: {}: {}",
                             binding.field_index,
-                            pool.str(binding.name),
+                            pool.str(tir.binding_name(binding.id)),
                             pool.display(binding.ty)
                         )?;
                     }

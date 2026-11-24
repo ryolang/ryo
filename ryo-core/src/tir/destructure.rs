@@ -4,7 +4,8 @@
 //! and the ownership pass are the consumers.
 
 use super::{Span, Tir, TirBuilder, TirData, TirRef, TirTag};
-use crate::types::{StringId, TypeId};
+use crate::tir::BindingId;
+use crate::types::TypeId;
 
 /// Layout in `extra` for [`TirTag::Destructure`]:
 ///
@@ -12,9 +13,8 @@ use crate::types::{StringId, TypeId};
 ///   [0]          rhs:      TirRef.raw()
 ///   [1]          n_fields: u32
 ///   [2 + 3i]     field:    field_index: u32,
-///                         bind: u32 (0 = wildcard; else StringId.raw() + 1
-///                              — the +1 keeps 0 free, since raw 0 is a
-///                              real interned string, "derive"),
+///                         bind: u32 (0 = wildcard; else BindingId.raw() + 1
+///                              — the +1 keeps 0 free for the wildcard),
 ///                         ty: TypeId raw
 /// ```
 ///
@@ -23,18 +23,19 @@ use crate::types::{StringId, TypeId};
 pub mod destructure_extra {
     use super::{DestructureField, DestructureView};
     use crate::extra::ExtraRange;
+    use crate::tir::BindingId;
     use crate::tir::TirRef;
     use crate::tir::wires::{extra_offset, len_u32};
-    use crate::types::{StringId, TypeId};
+    use crate::types::TypeId;
 
-    /// Encode a bind name: 0 for a wildcard, else `raw + 1`.
-    pub fn encode_bind(bind: Option<StringId>) -> u32 {
+    /// Encode a binding ID: 0 for a wildcard, else `raw + 1`.
+    pub fn encode_bind(bind: Option<BindingId>) -> u32 {
         bind.map_or(0, |s| s.raw() + 1)
     }
 
     /// Decode a bind word produced by [`Self::encode_bind`].
-    pub fn decode_bind(word: u32) -> Option<StringId> {
-        (word > 0).then(|| StringId::from_raw(word - 1))
+    pub fn decode_bind(word: u32) -> Option<BindingId> {
+        (word > 0).then(|| BindingId::from_index((word - 1) as usize))
     }
 
     /// Encode a `Destructure` payload into `extra`, returning its
@@ -44,7 +45,7 @@ pub mod destructure_extra {
     pub fn encode(
         extra: &mut Vec<u32>,
         rhs: TirRef,
-        fields: &[(u32, Option<StringId>, TypeId)],
+        fields: &[(u32, Option<BindingId>, TypeId)],
     ) -> ExtraRange {
         debug_assert!(
             !fields.is_empty(),
@@ -96,7 +97,7 @@ pub mod destructure_extra {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DestructureField {
     pub field_index: u32,
-    pub bind: Option<StringId>,
+    pub bind: Option<BindingId>,
     pub ty: TypeId,
 }
 
@@ -121,7 +122,7 @@ impl TirBuilder {
     pub fn destructure(
         &mut self,
         rhs: TirRef,
-        fields: &[(u32, Option<StringId>, TypeId)],
+        fields: &[(u32, Option<BindingId>, TypeId)],
         span: Span,
     ) -> TirRef {
         let range = destructure_extra::encode(&mut self.extra, rhs, fields);

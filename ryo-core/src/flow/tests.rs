@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::declaration::DeclId;
+use crate::tir::test_bindings::*;
 use crate::tir::{TirBuilder, TirTag, TypedMatchArm, TypedMatchBody};
 use crate::types::InternPool;
 
@@ -60,7 +61,7 @@ fn flow_records_only_reachable_implicit_fallthrough() {
 
     let mut b = cx.builder();
     let one = b.int_const(1, cx.int, sp());
-    let decl = b.var_decl(cx.x, false, cx.int, one, sp());
+    let decl = var_decl(&mut b, cx.x, false, cx.int, one, sp());
     let fallthrough = b.finish(&[decl]);
     assert!(Flow::build(&fallthrough, &cx.pool).has_implicit_fallthrough());
 
@@ -87,7 +88,7 @@ fn flow_records_only_reachable_implicit_fallthrough() {
     let call = b.call(DeclId::NONE, callee, &[], &[], cx.never, sp());
     let expr = b.unary(TirTag::ExprStmt, cx.void, call, sp());
     let one = b.int_const(1, cx.int, sp());
-    let dead = b.var_decl(cx.x, false, cx.int, one, sp());
+    let dead = var_decl(&mut b, cx.x, false, cx.int, one, sp());
     let dead_continuation = b.finish(&[expr, dead]);
     let flow = Flow::build(&dead_continuation, &cx.pool);
     assert!(flow.blocks.iter().any(|block| block.unreachable));
@@ -102,7 +103,7 @@ fn linear_body_is_one_block_in_evaluation_order() {
     let one = b.int_const(1, int, sp());
     let two = b.int_const(2, int, sp());
     let sum = b.binary(TirTag::IAdd, int, one, two, sp());
-    let decl = b.var_decl(cx.x, false, int, sum, sp());
+    let decl = var_decl(&mut b, cx.x, false, int, sum, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -126,12 +127,12 @@ fn if_else_cascades_with_explicit_join_preds() {
     let int = cx.int;
     let mut b = cx.builder();
     let zero = b.int_const(0, int, sp());
-    let decl = b.var_decl(cx.x, true, int, zero, sp());
-    let cond = b.var(cx.x, int, sp());
+    let decl = var_decl(&mut b, cx.x, true, int, zero, sp());
+    let cond = var(&mut b, cx.x, int, sp());
     let one = b.int_const(1, int, sp());
-    let then_a = b.assign(cx.x, int, one, sp());
+    let then_a = assign(&mut b, cx.x, int, one, sp());
     let two = b.int_const(2, int, sp());
-    let else_a = b.assign(cx.x, int, two, sp());
+    let else_a = assign(&mut b, cx.x, int, two, sp());
     let ifs = b.if_stmt(cond, &[then_a], &[], Some(&[else_a]), cx.void, sp());
     let tir = b.finish(&[decl, ifs]);
 
@@ -165,8 +166,8 @@ fn while_loop_backedge_and_break_continue_targets() {
     let bool_ty = cx.pool.bool_();
     let mut b = cx.builder();
     let t = cx.pool.intern_str("t");
-    let cond_if = b.var(t, bool_ty, sp());
-    let cond_while = b.var(t, bool_ty, sp());
+    let cond_if = var(&mut b, t, bool_ty, sp());
+    let cond_while = var(&mut b, t, bool_ty, sp());
     let brk = b.break_stmt(cx.never, sp());
     let cont = b.continue_stmt(cx.never, sp());
     let body_stmt = b.if_stmt(cond_if, &[brk], &[], Some(&[cont]), cx.void, sp());
@@ -215,13 +216,13 @@ fn for_loop_dead_join_does_not_emit_backedge() {
     let bool_ty = cx.pool.bool_();
     let mut b = cx.builder();
     let t = cx.pool.intern_str("t");
-    let cond_if = b.var(t, bool_ty, sp());
+    let cond_if = var(&mut b, t, bool_ty, sp());
     let zero = b.int_const(0, cx.int, sp());
     let ten = b.int_const(10, cx.int, sp());
     let brk = b.break_stmt(cx.never, sp());
     let cont = b.continue_stmt(cx.never, sp());
     let body_stmt = b.if_stmt(cond_if, &[brk], &[], Some(&[cont]), cx.void, sp());
-    let for_stmt = b.for_range(cx.i, zero, ten, &[body_stmt], cx.void, sp());
+    let for_stmt = for_range(&mut b, cx.i, zero, ten, &[body_stmt], cx.void, sp());
     let tir = b.finish(&[for_stmt]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -247,9 +248,9 @@ fn for_loop_binds_induction_place_in_body_scope() {
     let mut b = cx.builder();
     let zero = b.int_const(0, int, sp());
     let ten = b.int_const(10, int, sp());
-    let read_i = b.var(cx.i, int, sp());
+    let read_i = var(&mut b, cx.i, int, sp());
     let expr = b.unary(TirTag::ExprStmt, cx.void, read_i, sp());
-    let f = b.for_range(cx.i, zero, ten, &[expr], cx.void, sp());
+    let f = for_range(&mut b, cx.i, zero, ten, &[expr], cx.void, sp());
     let tir = b.finish(&[f]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -275,11 +276,11 @@ fn shadowing_mints_distinct_places() {
     let int = cx.int;
     let mut b = cx.builder();
     let one = b.int_const(1, int, sp());
-    let outer = b.var_decl(cx.x, false, int, one, sp());
+    let outer = var_decl(&mut b, cx.x, false, int, one, sp());
     let cond = b.bool_const(true, cx.pool.bool_(), sp());
     let two = b.int_const(2, int, sp());
-    let inner = b.var_decl(cx.x, false, int, two, sp());
-    let then_read = b.var(cx.x, int, sp());
+    let inner = var_decl(&mut b, cx.x, false, int, two, sp());
+    let then_read = var(&mut b, cx.x, int, sp());
     let then_e = b.unary(TirTag::ExprStmt, cx.void, then_read, sp());
     let ifs = b.if_stmt(cond, &[inner, then_e], &[], None, cx.void, sp());
     let tir = b.finish(&[outer, ifs]);
@@ -304,12 +305,12 @@ fn view_place_protects_owner_place() {
     let s_name = cx.pool.intern_str("s");
     let mut b = cx.builder();
     let lit = b.str_const(cx.pool.intern_str("hello"), str_ty, sp());
-    let decl = b.var_decl(s_name, false, str_ty, lit, sp());
+    let decl = var_decl(&mut b, s_name, false, str_ty, lit, sp());
     let zero = b.int_const(0, cx.int, sp());
     let three = b.int_const(3, cx.int, sp());
-    let base = b.var(s_name, str_ty, sp());
+    let base = var(&mut b, s_name, str_ty, sp());
     let sl = b.slice(base, Some(zero), Some(three), view_ty, sp());
-    let vdecl = b.var_decl(v_name, false, view_ty, sl, sp());
+    let vdecl = var_decl(&mut b, v_name, false, view_ty, sl, sp());
     let tir = b.finish(&[decl, vdecl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -327,7 +328,7 @@ fn diverging_call_terminates_block_and_continues_unreachable() {
     let call = b.call(DeclId::NONE, callee, &[], &[], cx.never, sp());
     let expr = b.unary(TirTag::ExprStmt, cx.void, call, sp());
     let one = b.int_const(1, cx.int, sp());
-    let dead = b.var_decl(cx.x, false, cx.int, one, sp());
+    let dead = var_decl(&mut b, cx.x, false, cx.int, one, sp());
     let tir = b.finish(&[expr, dead]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -366,7 +367,7 @@ fn value_match_switch_with_join_and_result_place() {
     );
     let two = b.int_const(2, int, sp());
     let use_m = b.binary(TirTag::IAdd, int, m, two, sp());
-    let decl = b.var_decl(cx.x, false, int, use_m, sp());
+    let decl = var_decl(&mut b, cx.x, false, int, use_m, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -417,7 +418,7 @@ fn all_diverging_match_has_no_join_and_unreachable_continuation() {
     );
     let expr = b.unary(TirTag::ExprStmt, cx.void, m, sp());
     let one = b.int_const(1, int, sp());
-    let dead = b.var_decl(cx.x, false, int, one, sp());
+    let dead = var_decl(&mut b, cx.x, false, int, one, sp());
     let tir = b.finish(&[expr, dead]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -450,11 +451,12 @@ fn match_by_move_token_places_are_named_and_arm_scoped() {
     let lit = b.str_const(cx.pool.intern_str("payload"), str_ty, sp());
     let c2 = b.str_const(cx.pool.intern_str("other"), str_ty, sp());
     let scrut = b.struct_lit(pair_ty, &[(0, lit), (1, c2)], sp());
-    let body_read = b.var(v, str_ty, sp());
+    let body_read = var(&mut b, v, str_ty, sp());
     let body_expr = b.unary(TirTag::ExprStmt, cx.void, body_read, sp());
     let body = [body_expr];
     // Owner token: FieldAccess immediately before the match.
     let token = b.field_access(scrut, 0, str_ty, sp());
+    let binding_id = binding(&mut b, v, str_ty);
     let m = b.match_expr(
         scrut,
         cx.void,
@@ -463,7 +465,7 @@ fn match_by_move_token_places_are_named_and_arm_scoped() {
             discriminant: crate::tir::Discriminant::Wildcard,
             bindings: &[crate::tir::MatchBinding {
                 field_index: 0,
-                name: v,
+                id: binding_id,
                 ty: str_ty,
             }],
             guards: &[],
@@ -580,7 +582,7 @@ fn bool_and_places_rhs_in_conditional_block() {
     let f = b.bool_const(false, bool_ty, sp());
     let call = b.call(DeclId::NONE, probe, &[], &[], bool_ty, sp());
     let and = b.binary(TirTag::BoolAnd, bool_ty, f, call, sp());
-    let decl = b.var_decl(cx.x, false, bool_ty, and, sp());
+    let decl = var_decl(&mut b, cx.x, false, bool_ty, and, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -610,7 +612,7 @@ fn bool_or_short_circuits_on_true() {
     let t = b.bool_const(true, bool_ty, sp());
     let call = b.call(DeclId::NONE, probe, &[], &[], bool_ty, sp());
     let or = b.binary(TirTag::BoolOr, bool_ty, t, call, sp());
-    let decl = b.var_decl(cx.x, false, bool_ty, or, sp());
+    let decl = var_decl(&mut b, cx.x, false, bool_ty, or, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -634,7 +636,7 @@ fn for_bounds_steps_live_in_preheader() {
     let start_name = cx.pool.intern_str("start");
     let start_call = b.call(DeclId::NONE, start_name, &[], &[], int, sp());
     let end = b.int_const(3, int, sp());
-    let f = b.for_range(cx.i, start_call, end, &[], cx.void, sp());
+    let f = for_range(&mut b, cx.i, start_call, end, &[], cx.void, sp());
     let tir = b.finish(&[f]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -675,8 +677,8 @@ fn field_assign_records_field_replace_fact() {
     let a = b.str_const(cx.pool.intern_str("a"), str_ty, sp());
     let c = b.str_const(cx.pool.intern_str("c"), str_ty, sp());
     let lit = b.struct_lit(pair_ty, &[(0, a), (1, c)], sp());
-    let decl = b.var_decl(cx.x, true, pair_ty, lit, sp());
-    let base = b.var(cx.x, pair_ty, sp());
+    let decl = var_decl(&mut b, cx.x, true, pair_ty, lit, sp());
+    let base = var(&mut b, cx.x, pair_ty, sp());
     let target = b.field_access(base, 1, str_ty, sp());
     let newv = b.str_const(cx.pool.intern_str("d"), str_ty, sp());
     let fa = b.field_assign(target, newv, cx.void, sp());
@@ -701,7 +703,7 @@ fn bool_and_chain_split_pins_join_pred_shape() {
     let inner = b.binary(TirTag::BoolAnd, bool_ty, f, call1, sp());
     let call2 = b.call(DeclId::NONE, probe, &[], &[], bool_ty, sp());
     let outer = b.binary(TirTag::BoolAnd, bool_ty, inner, call2, sp());
-    let decl = b.var_decl(cx.x, false, bool_ty, outer, sp());
+    let decl = var_decl(&mut b, cx.x, false, bool_ty, outer, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -739,7 +741,7 @@ fn deep_bool_and_chain_stays_on_the_iterative_flow_builder() {
         let rhs = b.bool_const(true, bool_ty, sp());
         chain = b.binary(TirTag::BoolAnd, bool_ty, chain, rhs, sp());
     }
-    let decl = b.var_decl(cx.x, false, bool_ty, chain, sp());
+    let decl = var_decl(&mut b, cx.x, false, bool_ty, chain, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -765,7 +767,7 @@ fn deep_chain_through_diverging_calls_stays_iterative() {
         let lhs = b.int_const(1, int, sp());
         chain = b.binary(TirTag::IAdd, int, lhs, call, sp());
     }
-    let decl = b.var_decl(cx.x, false, int, chain, sp());
+    let decl = var_decl(&mut b, cx.x, false, int, chain, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -782,9 +784,9 @@ fn bool_and_if_condition_branches_from_the_merge_join() {
     let call = b.call(DeclId::NONE, probe, &[], &[], bool_ty, sp());
     let and = b.binary(TirTag::BoolAnd, bool_ty, f, call, sp());
     let one = b.int_const(1, cx.int, sp());
-    let then_d = b.var_decl(cx.x, false, cx.int, one, sp());
+    let then_d = var_decl(&mut b, cx.x, false, cx.int, one, sp());
     let two = b.int_const(2, cx.int, sp());
-    let else_d = b.var_decl(cx.x, false, cx.int, two, sp());
+    let else_d = var_decl(&mut b, cx.x, false, cx.int, two, sp());
     let ifs = b.if_stmt(and, &[then_d], &[], Some(&[else_d]), cx.void, sp());
     let tir = b.finish(&[ifs]);
 
@@ -815,10 +817,10 @@ fn for_and_while_backedges_resolve_to_their_test_headers() {
     let bool_ty = cx.pool.bool_();
     let mut b = cx.builder();
     let t = cx.pool.intern_str("t");
-    let cond = b.var(t, bool_ty, sp());
+    let cond = var(&mut b, t, bool_ty, sp());
     let zero = b.int_const(0, int, sp());
     let three = b.int_const(3, int, sp());
-    let f = b.for_range(cx.i, zero, three, &[], cx.void, sp());
+    let f = for_range(&mut b, cx.i, zero, three, &[], cx.void, sp());
     let whl = b.while_loop(cond, &[f], cx.void, sp());
     let tir = b.finish(&[whl]);
 
@@ -888,10 +890,10 @@ fn match_result_place_tracks_value_void_and_never_shapes() {
     );
     let two = b.int_const(2, int, sp());
     let use_m = b.binary(TirTag::IAdd, int, m_value, two, sp());
-    let decl = b.var_decl(cx.x, false, int, use_m, sp());
+    let decl = var_decl(&mut b, cx.x, false, int, use_m, sp());
     // Void statement match: a join, but no result place.
     let scrut_s = b.int_const(3, int, sp());
-    let read_s = b.var(cx.x, int, sp());
+    let read_s = var(&mut b, cx.x, int, sp());
     let stmt_s = b.unary(TirTag::ExprStmt, cx.void, read_s, sp());
     let stmts_s = [stmt_s];
     let m_void = b.match_expr(
@@ -967,18 +969,18 @@ fn bool_or_with_nested_and_rhs_reaches_join_through_nested_blocks() {
     // nested and-join, and the or's rhs block reaches the or-join
     // through the nested construct's blocks (the rhs block itself does
     // NOT jump to the or-join).
-    let cval1 = b.var(cx.x, int, sp());
+    let cval1 = var(&mut b, cx.x, int, sp());
     let c45 = b.int_const(45, int, sp());
     let eq45 = b.binary(TirTag::ICmpEq, bool_ty, cval1, c45, sp());
-    let cval2 = b.var(cx.x, int, sp());
+    let cval2 = var(&mut b, cx.x, int, sp());
     let c48 = b.int_const(48, int, sp());
     let ge = b.binary(TirTag::ICmpGe, bool_ty, cval2, c48, sp());
-    let cval3 = b.var(cx.x, int, sp());
+    let cval3 = var(&mut b, cx.x, int, sp());
     let c57 = b.int_const(57, int, sp());
     let le = b.binary(TirTag::ICmpLe, bool_ty, cval3, c57, sp());
     let and = b.binary(TirTag::BoolAnd, bool_ty, ge, le, sp());
     let or = b.binary(TirTag::BoolOr, bool_ty, eq45, and, sp());
-    let decl = b.var_decl(cx.i, false, bool_ty, or, sp());
+    let decl = var_decl(&mut b, cx.i, false, bool_ty, or, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -1038,7 +1040,7 @@ fn fire_points_basic_positions_resolve_exactly() {
     let one = b.int_const(1, int, sp());
     let two = b.int_const(2, int, sp());
     let sum = b.binary(TirTag::IAdd, int, one, two, sp());
-    let decl = b.var_decl(cx.x, false, int, sum, sp());
+    let decl = var_decl(&mut b, cx.x, false, int, sum, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -1067,7 +1069,7 @@ fn fire_points_after_step_inside_expression_reanchors_to_statement_root() {
     let one = b.int_const(1, int, sp());
     let two = b.int_const(2, int, sp());
     let sum = b.binary(TirTag::IAdd, int, one, two, sp());
-    let decl = b.var_decl(cx.x, false, int, sum, sp());
+    let decl = var_decl(&mut b, cx.x, false, int, sum, sp());
     let tir = b.finish(&[decl]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -1103,11 +1105,11 @@ fn fire_points_after_step_uses_first_root_at_or_after_anchor() {
     // Two statements: the anchor lives in the SECOND statement's
     // operand tree — the boundary is after statement 2, not statement 1.
     let a = b.int_const(1, int, sp());
-    let decl_a = b.var_decl(cx.x, false, int, a, sp());
+    let decl_a = var_decl(&mut b, cx.x, false, int, a, sp());
     let c = b.int_const(3, int, sp());
     let d = b.int_const(4, int, sp());
     let sum2 = b.binary(TirTag::IAdd, int, c, d, sp());
-    let decl_b = b.var_decl(cx.i, false, int, sum2, sp());
+    let decl_b = var_decl(&mut b, cx.i, false, int, sum2, sp());
     let tir = b.finish(&[decl_a, decl_b]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -1134,8 +1136,8 @@ fn fire_points_after_step_without_following_root_is_block_terminator() {
     let mut b = cx.builder();
     // A while condition block holds only operand steps (the condition
     // tree's parent is the loop payload): no root at/after the anchor.
-    let cond = b.var(t, bool_ty, sp());
-    let body_read = b.var(t, bool_ty, sp());
+    let cond = var(&mut b, t, bool_ty, sp());
+    let body_read = var(&mut b, t, bool_ty, sp());
     let body_expr = b.unary(TirTag::ExprStmt, cx.void, body_read, sp());
     let whl = b.while_loop(cond, &[body_expr], cx.void, sp());
     let tir = b.finish(&[whl]);
@@ -1164,12 +1166,12 @@ fn fire_points_if_payload_resolves_every_arm_continuation() {
     let int = cx.int;
     let mut b = cx.builder();
     let zero = b.int_const(0, int, sp());
-    let decl = b.var_decl(cx.x, true, int, zero, sp());
-    let cond = b.var(cx.x, int, sp());
+    let decl = var_decl(&mut b, cx.x, true, int, zero, sp());
+    let cond = var(&mut b, cx.x, int, sp());
     let one = b.int_const(1, int, sp());
-    let then_a = b.assign(cx.x, int, one, sp());
+    let then_a = assign(&mut b, cx.x, int, one, sp());
     let two = b.int_const(2, int, sp());
-    let else_a = b.assign(cx.x, int, two, sp());
+    let else_a = assign(&mut b, cx.x, int, two, sp());
     let ifs = b.if_stmt(cond, &[then_a], &[], Some(&[else_a]), cx.void, sp());
     let tir = b.finish(&[decl, ifs]);
 
@@ -1193,12 +1195,12 @@ fn fire_points_if_payload_partial_divergence_skips_diverging_arms() {
     let int = cx.int;
     let mut b = cx.builder();
     let zero = b.int_const(0, int, sp());
-    let decl = b.var_decl(cx.x, true, int, zero, sp());
+    let decl = var_decl(&mut b, cx.x, true, int, zero, sp());
     let cond = b.bool_const(true, cx.pool.bool_(), sp());
     // Then arm diverges (returns); else arm falls through.
     let ret = b.return_void(cx.void, sp());
     let one = b.int_const(1, int, sp());
-    let else_a = b.assign(cx.x, int, one, sp());
+    let else_a = assign(&mut b, cx.x, int, one, sp());
     let ifs = b.if_stmt(cond, &[ret], &[], Some(&[else_a]), cx.void, sp());
     let tir = b.finish(&[decl, ifs]);
 
@@ -1279,8 +1281,8 @@ fn fire_points_loop_payload_resolves_the_exit_block() {
     let bool_ty = cx.pool.bool_();
     let t = cx.pool.intern_str("t");
     let mut b = cx.builder();
-    let cond = b.var(t, bool_ty, sp());
-    let body_read = b.var(t, bool_ty, sp());
+    let cond = var(&mut b, t, bool_ty, sp());
+    let body_read = var(&mut b, t, bool_ty, sp());
     let body_expr = b.unary(TirTag::ExprStmt, cx.void, body_read, sp());
     let whl = b.while_loop(cond, &[body_expr], cx.void, sp());
     let tir = b.finish(&[whl]);
@@ -1306,9 +1308,9 @@ fn fire_points_loop_payload_resolves_the_exit_block() {
     let mut b = cx.builder();
     let zero = b.int_const(0, int, sp());
     let ten = b.int_const(10, int, sp());
-    let read_i = b.var(cx.i, int, sp());
+    let read_i = var(&mut b, cx.i, int, sp());
     let expr = b.unary(TirTag::ExprStmt, cx.void, read_i, sp());
-    let f = b.for_range(cx.i, zero, ten, &[expr], cx.void, sp());
+    let f = for_range(&mut b, cx.i, zero, ten, &[expr], cx.void, sp());
     let tir = b.finish(&[f]);
     let flow = Flow::build(&tir, &cx.pool);
     let fp = FirePoints::new(&flow);
@@ -1337,15 +1339,15 @@ fn fire_points_while_compound_condition_resolves_the_loop_exit() {
     // through the condition's blocks and the completion point resolves
     // EXACTLY to the exit block's entry point (the same bucket the
     // simple-condition shape resolves to).
-    let lhs = b.var(t, bool_ty, sp());
-    let rhs = b.var(t, bool_ty, sp());
+    let lhs = var(&mut b, t, bool_ty, sp());
+    let rhs = var(&mut b, t, bool_ty, sp());
     let cond = b.binary(TirTag::BoolAnd, bool_ty, lhs, rhs, sp());
-    let body_read = b.var(t, bool_ty, sp());
+    let body_read = var(&mut b, t, bool_ty, sp());
     let body_expr = b.unary(TirTag::ExprStmt, cx.void, body_read, sp());
     let whl = b.while_loop(cond, &[body_expr], cx.void, sp());
     // A post-loop statement lands in the exit block after its prologue,
     // so the resolution must land before that statement.
-    let tail_read = b.var(t, bool_ty, sp());
+    let tail_read = var(&mut b, t, bool_ty, sp());
     let tail_expr = b.unary(TirTag::ExprStmt, cx.void, tail_read, sp());
     let tir = b.finish(&[whl, tail_expr]);
 
@@ -1438,7 +1440,7 @@ fn fire_points_unresolved_never_guesses() {
     let int = cx.int;
     let mut b = cx.builder();
     let one = b.int_const(1, int, sp());
-    let decl = b.var_decl(cx.x, false, int, one, sp());
+    let decl = var_decl(&mut b, cx.x, false, int, one, sp());
     // A stray instruction never emitted into the Flow: neither a step
     // nor a terminator payload.
     let stray = b.int_const(99, int, sp());

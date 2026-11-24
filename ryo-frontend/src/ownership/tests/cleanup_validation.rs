@@ -262,6 +262,7 @@ fn validator_accepts_same_target_double_anchor_by_design() {
     let mut tb = TirBuilder::new(
         consume,
         vec![TirParam {
+            id: ryo_core::tir::BindingId::from_index(0),
             name: s_name,
             ty: str_ty,
             mode: ParamMode::Move,
@@ -933,6 +934,7 @@ fn path_checks_accept_by_design_double_anchor() {
     let mut tb = TirBuilder::new(
         consume,
         vec![TirParam {
+            id: ryo_core::tir::BindingId::from_index(0),
             name: s_name,
             ty: str_ty,
             mode: ParamMode::Move,

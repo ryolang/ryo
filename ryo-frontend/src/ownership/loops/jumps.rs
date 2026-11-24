@@ -51,7 +51,7 @@ fn collect_assign_writes<S: TirStmtList + ?Sized>(
         match tir.inst(r).tag {
             TirTag::Assign => {
                 let view = tir.assign_view(r);
-                out.push((r, view.name, view.value));
+                out.push((r, tir.binding_name(view.id), view.value));
             }
             TirTag::IfStmt => {
                 let view = tir.if_stmt_view(r);

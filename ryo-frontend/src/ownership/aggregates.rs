@@ -46,7 +46,7 @@ pub(crate) fn struct_base_name(tir: &Tir, mut r: TirRef) -> Option<StringId> {
     loop {
         match tir.inst(r).data {
             TirData::FieldAccess { object, .. } => r = object,
-            TirData::Var(name) => return Some(name),
+            TirData::Var(id) => return Some(tir.binding_name(id)),
             _ => return None,
         }
     }
@@ -307,7 +307,7 @@ pub(crate) fn analyze_destructure(
         let _owner_ref = owners[owner_idx];
         let owner_place = owner_places[owner_idx];
         owner_idx += 1;
-        own.binding_of_name.insert(bind, stmt);
+        own.binding_of_name.insert(w.tir.binding_name(bind), stmt);
         if !needs_tracking(field.ty, w.pool) {
             continue;
         }

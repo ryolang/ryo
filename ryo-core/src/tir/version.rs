@@ -11,6 +11,26 @@ impl Tir {
         self.decl.hash(&mut hash);
         self.name.hash(&mut hash);
         self.return_type.hash(&mut hash);
+        for info in self.bindings.iter() {
+            info.name.hash(&mut hash);
+            info.ty.hash(&mut hash);
+            info.scope.raw().hash(&mut hash);
+            info.span.source.hash(&mut hash);
+            info.span.start.hash(&mut hash);
+            info.span.end.hash(&mut hash);
+            match &info.kind {
+                crate::tir::BindingKind::Param(mode) => {
+                    0u8.hash(&mut hash);
+                    (*mode as u8).hash(&mut hash);
+                }
+                crate::tir::BindingKind::Local { mutable, borrowed } => {
+                    1u8.hash(&mut hash);
+                    mutable.hash(&mut hash);
+                    borrowed.hash(&mut hash);
+                }
+                crate::tir::BindingKind::Temporary => 2u8.hash(&mut hash),
+            }
+        }
         self.body.offset.hash(&mut hash);
         self.body.len.hash(&mut hash);
         self.contains_match.hash(&mut hash);
@@ -19,6 +39,7 @@ impl Tir {
         direct_catch.hash(&mut hash);
         self.extra.hash(&mut hash);
         for param in &self.params {
+            param.id.hash(&mut hash);
             param.name.hash(&mut hash);
             param.ty.hash(&mut hash);
             (param.mode as u8).hash(&mut hash);
@@ -34,7 +55,8 @@ impl Tir {
                 TirData::None => {}
                 TirData::Int(value) => value.hash(&mut hash),
                 TirData::Float(value) => value.to_bits().hash(&mut hash),
-                TirData::Str(id) | TirData::Var(id) => id.hash(&mut hash),
+                TirData::Str(id) => id.hash(&mut hash),
+                TirData::Var(id) => id.hash(&mut hash),
                 TirData::Bool(value) => value.hash(&mut hash),
                 TirData::UnOp(value) => value.hash(&mut hash),
                 TirData::BinOp { lhs, rhs } => (lhs, rhs).hash(&mut hash),

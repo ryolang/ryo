@@ -602,11 +602,11 @@ impl<M: Module> Codegen<M> {
             let (name, value) = match (tir.inst(step.inst).tag, write.kind) {
                 (TirTag::VarDecl, ryo_core::flow::WriteKind::Init) => {
                     let view = tir.var_decl_view(step.inst);
-                    (view.name, view.initializer)
+                    (tir.binding_name(view.id), view.initializer)
                 }
                 (TirTag::Assign, ryo_core::flow::WriteKind::Replace) => {
                     let view = tir.assign_view(step.inst);
-                    (view.name, view.value)
+                    (tir.binding_name(view.id), view.value)
                 }
                 _ => continue,
             };

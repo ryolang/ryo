@@ -44,14 +44,14 @@ impl ScopeId {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum BindingKind {
     Param(ParamMode),
     Local { mutable: bool, borrowed: bool },
     Temporary,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct BindingInfo {
     pub name: StringId,
     pub ty: TypeId,
@@ -72,6 +72,7 @@ impl BindingInfo {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct BindingTable {
     bindings: Vec<BindingInfo>,
 }
@@ -79,6 +80,16 @@ pub struct BindingTable {
 impl BindingTable {
     pub fn new(bindings: Vec<BindingInfo>) -> Self {
         Self { bindings }
+    }
+
+    pub fn push(&mut self, binding: BindingInfo) -> BindingId {
+        let id = BindingId::from_index(self.bindings.len());
+        self.bindings.push(binding);
+        id
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, BindingInfo> {
+        self.bindings.iter()
     }
 
     #[allow(clippy::len_without_is_empty)]

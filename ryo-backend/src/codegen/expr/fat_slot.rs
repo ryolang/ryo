@@ -71,7 +71,7 @@ impl<M: Module> Codegen<M> {
             }
             TirTag::Var => {
                 let name = match inst.data {
-                    TirData::Var(name) => name,
+                    TirData::Var(name) => ctx.tir.binding_name(name),
                     _ => unreachable!(),
                 };
                 if Self::read_slot(&ctx.fat_locals, name).is_some() {

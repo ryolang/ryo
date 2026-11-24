@@ -995,12 +995,12 @@ impl<M: Module> Codegen<M> {
                 // Variable. Body writes to OTHER bindings persist past
                 // the loop (the legacy shape) — only this one slot is
                 // restored, by hand at the exit.
-                let shadowed_var = Self::read_slot(&ctx.locals, view.var_name);
-                let shadowed_fact = Self::read_slot(&ctx.range_facts, view.var_name);
+                let shadowed_var = Self::read_slot(&ctx.locals, tir.binding_name(view.id));
+                let shadowed_fact = Self::read_slot(&ctx.range_facts, tir.binding_name(view.id));
                 Self::write_slot(
                     &mut ctx.locals,
                     &mut ctx.locals_undo,
-                    view.var_name,
+                    tir.binding_name(view.id),
                     Some(counter),
                 );
                 // The loop variable is a different quantity than any
@@ -1009,7 +1009,7 @@ impl<M: Module> Codegen<M> {
                 Self::write_slot(
                     &mut ctx.range_facts,
                     &mut ctx.range_facts_undo,
-                    view.var_name,
+                    tir.binding_name(view.id),
                     None,
                 );
                 match ctx.loop_records.get_mut(&loop_inst) {
@@ -1316,7 +1316,7 @@ impl<M: Module> Codegen<M> {
             loop_inst,
             LoopRecord::For(ForRecord {
                 counter,
-                var_name: view.var_name,
+                var_name: tir.binding_name(view.id),
                 saved_local: None,
                 saved_fact: None,
             }),

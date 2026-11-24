@@ -716,11 +716,12 @@ impl<'a> Walk<'a> {
         dead: bool,
     ) {
         let view = self.tir.var_decl_view(r);
+        let name = self.tir.binding_name(view.id);
         let init = view.initializer;
         let init_ty = self.tir.inst(init).ty;
         // The declaration's write fact names the binding's home place.
         let home = self.step_facts(r).write.expect("VarDecl writes").place;
-        own.binding_of_name.insert(view.name, r);
+        own.binding_of_name.insert(name, r);
         if needs_tracking(init_ty, self.pool) {
             let span = self.tir.span(r);
             let consumed_name = consumed_binding_name(self.tir, init);
@@ -755,15 +756,15 @@ impl<'a> Walk<'a> {
         // is order-aware.
         if dead {
             let order = self.order(r);
-            match self.decl_rank.get(&view.name) {
+            match self.decl_rank.get(&name) {
                 Some(&cur) if cur <= order => {}
                 _ => {
-                    self.decl_rank.insert(view.name, order);
+                    self.decl_rank.insert(name, order);
                 }
             }
         } else {
             let order = self.order(r);
-            self.decl_rank.entry(view.name).or_insert(order);
+            self.decl_rank.entry(name).or_insert(order);
         }
     }
 
@@ -829,7 +830,7 @@ impl<'a> Walk<'a> {
                         old_owner,
                         self.tir.span(r),
                         "mutate",
-                        Some(view.name),
+                        Some(self.tir.binding_name(view.id)),
                     );
                     // `tirref` (not `inst_tirref`): an inout param's old
                     // owner is a `Param`, resolved here to its virtual
@@ -1409,7 +1410,7 @@ impl<'a> Walk<'a> {
     fn analyze_var_read(&mut self, own: &mut Ownership, r: TirRef, dead: bool) {
         let inst = *self.tir.inst(r);
         let name = match inst.data {
-            TirData::Var(n) => n,
+            TirData::Var(n) => self.tir.binding_name(n),
             _ => unreachable!("Var must carry TirData::Var"),
         };
         // Error-shaped TIR can leave a `Var` unresolved (no read

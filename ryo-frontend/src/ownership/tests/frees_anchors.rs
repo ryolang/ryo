@@ -19,10 +19,10 @@ fn conditional_dead_reassign_schedules_fallthrough_drop() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit_a, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
-    let asg = tb.assign(s, str_ty, lit_b, span);
+    let asg = test_assign(&mut tb, s, str_ty, lit_b, span);
     let if_s = tb.if_stmt(cond, &[asg], &[], None, void, span);
     let tir = tb.finish(&[decl, if_s]);
     let mut sink = DiagSink::new();
@@ -69,12 +69,12 @@ fn conditional_reassign_all_arms_reseated_no_drop() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit_a, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
-    let asg_then = tb.assign(s, str_ty, lit_b, span);
+    let asg_then = test_assign(&mut tb, s, str_ty, lit_b, span);
     let lit_d = tb.str_const(pool.intern_str("d"), str_ty, span);
-    let asg_else = tb.assign(s, str_ty, lit_d, span);
+    let asg_else = test_assign(&mut tb, s, str_ty, lit_d, span);
     let if_s = tb.if_stmt(cond, &[asg_then], &[], Some(&[asg_else]), void, span);
     let tir = tb.finish(&[decl, if_s]);
     let mut sink = DiagSink::new();
@@ -111,10 +111,10 @@ fn loop_dead_reassign_anchors_after_loop() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit_a, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
-    let asg = tb.assign(s, str_ty, lit_b, span);
+    let asg = test_assign(&mut tb, s, str_ty, lit_b, span);
     let wl = tb.while_loop(cond, &[asg], void, span);
     let tir = tb.finish(&[decl, wl]);
     let mut sink = DiagSink::new();
@@ -157,10 +157,10 @@ fn loop_dead_reassign_with_return_keeps_in_body_free() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit_a, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
-    let asg = tb.assign(s, str_ty, lit_b, span);
+    let asg = test_assign(&mut tb, s, str_ty, lit_b, span);
     let ret = tb.return_void(void, span);
     let wl = tb.while_loop(cond, &[asg, ret], void, span);
     let tir = tb.finish(&[decl, wl]);
@@ -206,7 +206,7 @@ fn loop_local_dead_value_keeps_in_body_anchor() {
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let lit_x = tb.str_const(pool.intern_str("x"), str_ty, span);
-    let decl = tb.var_decl(t, false, str_ty, lit_x, span);
+    let decl = test_var_decl(&mut tb, t, false, str_ty, lit_x, span);
     let wl = tb.while_loop(cond, &[decl], void, span);
     let tir = tb.finish(&[wl]);
     let mut sink = DiagSink::new();
@@ -254,12 +254,12 @@ fn last_use_inside_loop_anchors_after_loop() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit_a, span);
     let zero = tb.int_const(0, int_ty, span);
     let three = tb.int_const(3, int_ty, span);
-    let sv = tb.var(s, str_ty, span);
+    let sv = test_var(&mut tb, s, str_ty, span);
     let pr = tb.call(DeclId::NONE, print, &[sv], &[ParamMode::Borrow], void, span);
-    let fr = tb.for_range(i, zero, three, &[pr], void, span);
+    let fr = test_for_range(&mut tb, i, zero, three, &[pr], void, span);
     let tir = tb.finish(&[decl, fr]);
     let mut sink = DiagSink::new();
     let mut sidecar = check(
@@ -302,9 +302,9 @@ fn last_use_inside_if_anchors_after_if() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit_a, span);
     let cond = tb.bool_const(true, bool_ty, span);
-    let sv = tb.var(s, str_ty, span);
+    let sv = test_var(&mut tb, s, str_ty, span);
     let pr = tb.call(DeclId::NONE, print, &[sv], &[ParamMode::Borrow], void, span);
     let if_s = tb.if_stmt(cond, &[pr], &[], None, void, span);
     let tir = tb.finish(&[decl, if_s]);
@@ -344,9 +344,9 @@ fn return_epilogue_frees_live_local() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit_a, span);
     let cond = tb.bool_const(true, bool_ty, span);
-    let sv = tb.var(s, str_ty, span);
+    let sv = test_var(&mut tb, s, str_ty, span);
     let pr = tb.call(DeclId::NONE, print, &[sv], &[ParamMode::Borrow], void, span);
     let ret = tb.return_void(void, span);
     let if_s = tb.if_stmt(cond, &[pr], &[], Some(&[ret]), void, span);
@@ -382,8 +382,8 @@ fn return_epilogue_skips_consumed_return_value() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(f, vec![], str_ty, span);
     let lit = tb.str_const(pool.intern_str("a"), str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let sv = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let sv = test_var(&mut tb, s, str_ty, span);
     let ret = tb.push_typed(TirTag::Return, TirData::UnOp(sv), str_ty, span);
     let tir = tb.finish(&[decl, ret]);
     let mut sink = DiagSink::new();
@@ -419,7 +419,7 @@ fn return_epilogue_skips_dead_store_owned() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit_a, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let ret = tb.return_void(void, span);
     let if_s = tb.if_stmt(cond, &[ret], &[], None, void, span);
@@ -459,6 +459,7 @@ fn return_epilogue_covers_move_param() {
     let mut tb = TirBuilder::new(
         f,
         vec![TirParam {
+            id: ryo_core::tir::BindingId::from_index(0),
             name: s,
             ty: str_ty,
             mode: ParamMode::Move,
@@ -572,7 +573,7 @@ fn temp_last_use_inside_loop_not_reanchored() {
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let zero = tb.int_const(0, int_ty, span);
     let three = tb.int_const(3, int_ty, span);
-    let iv = tb.var(i, int_ty, span);
+    let iv = test_var(&mut tb, i, int_ty, span);
     let call = tb.call(
         DeclId::NONE,
         int_to_str,
@@ -589,7 +590,7 @@ fn temp_last_use_inside_loop_not_reanchored() {
         void,
         span,
     );
-    let fr = tb.for_range(i, zero, three, &[pr], void, span);
+    let fr = test_for_range(&mut tb, i, zero, three, &[pr], void, span);
     let tir = tb.finish(&[fr]);
     let mut sink = DiagSink::new();
     let mut sidecar = check(
@@ -631,10 +632,10 @@ fn conditional_dead_reassign_gated_on_real_else() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit_a, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
-    let asg = tb.assign(s, str_ty, lit_b, span);
+    let asg = test_assign(&mut tb, s, str_ty, lit_b, span);
     let lit_x = tb.str_const(pool.intern_str("x"), str_ty, span);
     let pr = tb.call(
         DeclId::NONE,

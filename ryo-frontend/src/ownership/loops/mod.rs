@@ -521,7 +521,10 @@ pub(crate) fn collect_loop_carried_owners(tir: &Tir, flow: &Flow, w: &Walk<'_>) 
                     continue;
                 }
                 let view = tir.assign_view(step.inst);
-                if w.decl_rank.get(&view.name).is_some_and(|r| *r < loop_rank) {
+                if w.decl_rank
+                    .get(&tir.binding_name(view.id))
+                    .is_some_and(|r| *r < loop_rank)
+                {
                     out.insert(view.value);
                     if tir.inst(view.value).tag == TirTag::Match
                         && let Some(write) = step.facts.write
@@ -691,7 +694,7 @@ pub(crate) fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> b
             let r = stmt_match(tir, r).unwrap_or(r);
             match tir.inst(r).tag {
                 TirTag::VarDecl => {
-                    if tir.var_decl_view(r).name == name {
+                    if tir.binding_name(tir.var_decl_view(r).id) == name {
                         *found = true;
                         return;
                     }
@@ -1447,13 +1450,13 @@ pub(crate) fn owner_binding_decl(
                 TirTag::VarDecl => {
                     let view = tir.var_decl_view(r);
                     if view.initializer == owner || r == owner {
-                        return Some((r, view.name));
+                        return Some((r, tir.binding_name(view.id)));
                     }
                 }
                 TirTag::Assign => {
                     let view = tir.assign_view(r);
                     if view.value == owner {
-                        return Some((r, view.name));
+                        return Some((r, tir.binding_name(view.id)));
                     }
                 }
                 TirTag::IfStmt => {
@@ -1489,7 +1492,7 @@ pub(crate) fn owner_binding_decl(
                             let token = token_refs[token_cursor];
                             token_cursor += 1;
                             if token == owner {
-                                return Some((r, binding.name));
+                                return Some((r, tir.binding_name(binding.id)));
                             }
                         }
                         let body: Vec<TirRef> = arm.body.stmts().collect();

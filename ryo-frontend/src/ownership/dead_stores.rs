@@ -241,7 +241,12 @@ fn collect_stores(
                         &mut stores,
                         &mut by_home,
                         Owner(home),
-                        (binding.name, tir.span(match_inst), match_inst, home),
+                        (
+                            tir.binding_name(binding.id),
+                            tir.span(match_inst),
+                            match_inst,
+                            home,
+                        ),
                         Some(arm_block),
                         Some((match_inst, arm_index)),
                     );
@@ -256,7 +261,7 @@ fn collect_stores(
                 let token_places = flow.token_places(r);
                 let mut token_cursor = 0;
                 for field in &view.fields {
-                    let Some(name) = field.bind else {
+                    let Some(id) = field.bind else {
                         continue;
                     };
                     let home = token_places[token_cursor];
@@ -266,7 +271,7 @@ fn collect_stores(
                             &mut stores,
                             &mut by_home,
                             Owner(home),
-                            (name, tir.span(r), r, home),
+                            (tir.binding_name(id), tir.span(r), r, home),
                             Some(block),
                             None,
                         );

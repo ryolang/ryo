@@ -124,7 +124,8 @@ impl<M: Module> Codegen<M> {
                 ))?
             }
             TirTag::Var => match inst.data {
-                TirData::Var(name) => {
+                TirData::Var(id) => {
+                    let name = ctx.tir.binding_name(id);
                     let var = Self::read_slot(&ctx.locals, name)
                         .ok_or_else(|| format!("Undefined variable: '{}'", ctx.pool.str(name)))?;
                     builder.use_var(var)
@@ -932,7 +933,7 @@ impl<M: Module> Codegen<M> {
             }
             TirTag::Var => {
                 let name = match inst.data {
-                    TirData::Var(name) => name,
+                    TirData::Var(name) => ctx.tir.binding_name(name),
                     _ => unreachable!("Var must carry TirData::Var"),
                 };
                 let locals = Self::read_slot(&ctx.view_locals, name).ok_or_else(|| {
@@ -1708,9 +1709,10 @@ impl<M: Module> Codegen<M> {
             _ => unreachable!("sidecar guarantees a Var lhs"),
         };
         debug_assert_eq!(
-            lhs_name, view.name,
+            lhs_name, view.id,
             "consuming concat must target the reassigned binding itself"
         );
+        let lhs_name = ctx.tir.binding_name(lhs_name);
         // The rhs bytes are consumed by the push call — transient
         // extraction is sound (eval_str_or_view_parts contract).
         let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
@@ -1796,7 +1798,7 @@ impl<M: Module> Codegen<M> {
             }
         };
         Self::cache_repr(ctx, concat_ref, repr);
-        Self::kill_fact(ctx, view.name);
+        Self::kill_fact(ctx, ctx.tir.binding_name(view.id));
         Ok(Terminator::None)
     }
 
@@ -1856,7 +1858,7 @@ impl<M: Module> Codegen<M> {
         let inst = ctx.tir.inst(r);
         match inst.tag {
             TirTag::Var => match inst.data {
-                TirData::Var(name) => Some(name),
+                TirData::Var(name) => Some(ctx.tir.binding_name(name)),
                 _ => None,
             },
             _ => None,

@@ -36,7 +36,7 @@ fn shadow_scope_dead_reseat_mints_no_outer_dead_drop() {
     for (r, inst) in tir.instructions.iter().enumerate().skip(1) {
         if inst.tag == TirTag::VarDecl {
             let v = tir.var_decl_view(TirRef::from_raw(r as u32));
-            if v.name == x && outer_init.is_none() {
+            if tir.binding_name(v.id) == x && outer_init.is_none() {
                 outer_init = Some(v.initializer);
             }
         }
@@ -88,7 +88,7 @@ fn arm_reseat_then_shadow_keeps_fallthrough_drop() {
     for (r, inst) in tir.instructions.iter().enumerate().skip(1) {
         if inst.tag == TirTag::VarDecl {
             let v = tir.var_decl_view(TirRef::from_raw(r as u32));
-            if v.name == x && outer_init.is_none() {
+            if tir.binding_name(v.id) == x && outer_init.is_none() {
                 outer_init = Some(v.initializer);
             }
         }
@@ -135,7 +135,7 @@ fn nested_reseat_then_shadow_keeps_fallthrough_drop() {
     for (r, inst) in tir.instructions.iter().enumerate().skip(1) {
         if inst.tag == TirTag::VarDecl {
             let v = tir.var_decl_view(TirRef::from_raw(r as u32));
-            if v.name == x && outer_init.is_none() {
+            if tir.binding_name(v.id) == x && outer_init.is_none() {
                 outer_init = Some(v.initializer);
             }
         }
@@ -174,7 +174,7 @@ fn conditional_dead_reassign_still_minted_for_same_binding() {
     for (r, inst) in tir.instructions.iter().enumerate().skip(1) {
         if inst.tag == TirTag::VarDecl {
             let v = tir.var_decl_view(TirRef::from_raw(r as u32));
-            if v.name == x && outer_init.is_none() {
+            if tir.binding_name(v.id) == x && outer_init.is_none() {
                 outer_init = Some(v.initializer);
             }
         }
@@ -209,7 +209,8 @@ fn copy_shadow_reassign_preserves_outer_owned_dead_store() {
     let outer_init = (1..tirs[0].instructions.len())
         .map(|i| TirRef::from_raw(i as u32))
         .find(|&r| {
-            tirs[0].inst(r).tag == TirTag::VarDecl && tirs[0].var_decl_view(r).name == s_name
+            tirs[0].inst(r).tag == TirTag::VarDecl
+                && tirs[0].binding_name(tirs[0].var_decl_view(r).id) == s_name
         })
         .map(|r| tirs[0].var_decl_view(r).initializer)
         .expect("outer declaration");

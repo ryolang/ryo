@@ -19,7 +19,7 @@ fn dead_store_schedules_free_after_decl() {
     // fn main() -> void: s: str = "hello"   # never read
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s_name, false, str_ty, lit, span);
+    let decl = test_var_decl(&mut tb, s_name, false, str_ty, lit, span);
     let tir = tb.finish(&[decl]);
 
     let mut sink = DiagSink::new();
@@ -178,8 +178,8 @@ fn last_use_scheduled_for_unmoved_local() {
     //     print(s)
     let mut b = TirBuilder::new(main, vec![], void, span);
     let lit = b.str_const(hello, str_ty, span);
-    let decl = b.var_decl(s_name, false, str_ty, lit, span);
-    let var_read = b.var(s_name, str_ty, span);
+    let decl = test_var_decl(&mut b, s_name, false, str_ty, lit, span);
+    let var_read = test_var(&mut b, s_name, str_ty, span);
     let call = b.call(
         DeclId::NONE,
         print_name,
@@ -226,10 +226,10 @@ fn reassignment_records_free_on_old_owner() {
     //     print(s)
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let l1 = tb.str_const(hello, str_ty, span);
-    let decl = tb.var_decl(s, /* mutable = */ true, str_ty, l1, span);
+    let decl = test_var_decl(&mut tb, s, /* mutable = */ true, str_ty, l1, span);
     let l2 = tb.str_const(world, str_ty, span);
-    let assign = tb.assign(s, str_ty, l2, span);
-    let var_read = tb.var(s, str_ty, span);
+    let assign = test_assign(&mut tb, s, str_ty, l2, span);
+    let var_read = test_var(&mut tb, s, str_ty, span);
     let call = tb.call(
         DeclId::NONE,
         print,
@@ -341,8 +341,8 @@ fn last_use_uses_pre_rebind_owner_not_post() {
     //     print(n)        # last-use of "Bob"
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let alice_lit = tb.str_const(alice, str_ty, span);
-    let decl = tb.var_decl(n, true, str_ty, alice_lit, span);
-    let read1 = tb.var(n, str_ty, span);
+    let decl = test_var_decl(&mut tb, n, true, str_ty, alice_lit, span);
+    let read1 = test_var(&mut tb, n, str_ty, span);
     let call1 = tb.call(
         DeclId::NONE,
         print,
@@ -353,8 +353,8 @@ fn last_use_uses_pre_rebind_owner_not_post() {
     );
     let stmt1 = tb.unary(TirTag::ExprStmt, void, call1, span);
     let bob_lit = tb.str_const(bob, str_ty, span);
-    let assign = tb.assign(n, str_ty, bob_lit, span);
-    let read2 = tb.var(n, str_ty, span);
+    let assign = test_assign(&mut tb, n, str_ty, bob_lit, span);
+    let read2 = test_var(&mut tb, n, str_ty, span);
     let call2 = tb.call(
         DeclId::NONE,
         print,
@@ -418,6 +418,7 @@ fn unconsumed_move_param_schedules_free_at_function_end() {
     let mut tb = TirBuilder::new(
         consume,
         vec![TirParam {
+            id: ryo_core::tir::BindingId::from_index(0),
             name: s_name,
             ty: str_ty,
             mode: ParamMode::Move,
@@ -465,6 +466,7 @@ fn read_move_param_frees_after_last_read_not_last_stmt() {
     let mut tb = TirBuilder::new(
         f,
         vec![TirParam {
+            id: ryo_core::tir::BindingId::from_index(0),
             name: s_name,
             ty: str_ty,
             mode: ParamMode::Move,
@@ -473,7 +475,7 @@ fn read_move_param_frees_after_last_read_not_last_stmt() {
         void,
         span,
     );
-    let s_read = tb.var(s_name, str_ty, span);
+    let s_read = test_var(&mut tb, s_name, str_ty, span);
     let call1 = tb.call(
         DeclId::NONE,
         print,
@@ -534,12 +536,14 @@ fn param_last_read_inside_loop_frees_after_loop() {
         f,
         vec![
             TirParam {
+                id: ryo_core::tir::BindingId::from_index(0),
                 name: s_name,
                 ty: str_ty,
                 mode: ParamMode::Move,
                 span,
             },
             TirParam {
+                id: ryo_core::tir::BindingId::from_index(1),
                 name: cond_name,
                 ty: bool_ty,
                 mode: ParamMode::Borrow,
@@ -549,8 +553,8 @@ fn param_last_read_inside_loop_frees_after_loop() {
         void,
         span,
     );
-    let cond = tb.var(cond_name, bool_ty, span);
-    let s_read = tb.var(s_name, str_ty, span);
+    let cond = test_var(&mut tb, cond_name, bool_ty, span);
+    let s_read = test_var(&mut tb, s_name, str_ty, span);
     let call = tb.call(
         DeclId::NONE,
         print,
@@ -607,6 +611,7 @@ fn never_read_move_param_still_freed_once_after_last_stmt() {
     let mut tb = TirBuilder::new(
         f,
         vec![TirParam {
+            id: ryo_core::tir::BindingId::from_index(0),
             name: s_name,
             ty: str_ty,
             mode: ParamMode::Move,
@@ -664,12 +669,14 @@ fn conditional_move_param_schedules_branch_gated_free() {
         consume_cond,
         vec![
             TirParam {
+                id: ryo_core::tir::BindingId::from_index(0),
                 name: s_name,
                 ty: str_ty,
                 mode: ParamMode::Move,
                 span,
             },
             TirParam {
+                id: ryo_core::tir::BindingId::from_index(1),
                 name: cond_name,
                 ty: bool_ty,
                 mode: ParamMode::Borrow,
@@ -680,8 +687,8 @@ fn conditional_move_param_schedules_branch_gated_free() {
         span,
     );
 
-    let cond_val = tb.var(cond_name, bool_ty, span);
-    let s_val_then = tb.var(s_name, str_ty, span);
+    let cond_val = test_var(&mut tb, cond_name, bool_ty, span);
+    let s_val_then = test_var(&mut tb, s_name, str_ty, span);
     let call_then = tb.call(
         DeclId::NONE,
         take,
@@ -691,7 +698,7 @@ fn conditional_move_param_schedules_branch_gated_free() {
         span,
     );
 
-    let s_val_else = tb.var(s_name, str_ty, span);
+    let s_val_else = test_var(&mut tb, s_name, str_ty, span);
     let call_else = tb.call(
         DeclId::NONE,
         take,
@@ -745,9 +752,9 @@ fn rebind_then_reassign_does_not_double_free() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(a, str_ty, span);
-    let decl = tb.var_decl(s_name, true, str_ty, lit_a, span);
+    let decl = test_var_decl(&mut tb, s_name, true, str_ty, lit_a, span);
     let lit_b = tb.str_const(b, str_ty, span);
-    let assign = tb.assign(s_name, str_ty, lit_b, span);
+    let assign = test_assign(&mut tb, s_name, str_ty, lit_b, span);
     let tir = tb.finish(&[decl, assign]);
 
     let mut sink = DiagSink::new();
@@ -804,8 +811,8 @@ fn rebind_then_read_no_double_free() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(a, str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let v = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let v = test_var(&mut tb, s, str_ty, span);
     let call = tb.call(DeclId::NONE, print, &[v], &all_borrow(&[v]), void, span);
     let tir = tb.finish(&[decl, call]);
     let mut sink = DiagSink::new();
@@ -849,10 +856,10 @@ fn rebind_in_loop_converges_no_spurious_free() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(a, str_ty, span);
-    let decl = tb.var_decl(s, true, str_ty, lit, span);
-    let cond = tb.var(c, bool_ty, span);
+    let decl = test_var_decl(&mut tb, s, true, str_ty, lit, span);
+    let cond = test_var(&mut tb, c, bool_ty, span);
     let body_lit = tb.str_const(a, str_ty, span);
-    let body_assign = tb.assign(s, str_ty, body_lit, span);
+    let body_assign = test_assign(&mut tb, s, str_ty, body_lit, span);
     let lp = tb.while_loop(cond, &[body_assign], void, span);
     let tir = tb.finish(&[decl, lp]);
     let mut sink = DiagSink::new();
@@ -901,12 +908,12 @@ fn reassign_inside_if_still_frees_binding_at_last_use() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_a = tb.str_const(pool.intern_str("a"), str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit_a, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit_a, span);
     let cond = tb.bool_const(true, bool_ty, span);
     let lit_b = tb.str_const(pool.intern_str("b"), str_ty, span);
-    let asg = tb.assign(s, str_ty, lit_b, span);
+    let asg = test_assign(&mut tb, s, str_ty, lit_b, span);
     let if_s = tb.if_stmt(cond, &[asg], &[], None, void, span);
-    let sv = tb.var(s, str_ty, span);
+    let sv = test_var(&mut tb, s, str_ty, span);
     let pr = tb.call(DeclId::NONE, print, &[sv], &[ParamMode::Borrow], void, span);
     let tir = tb.finish(&[decl, if_s, pr]);
     let mut sink = DiagSink::new();

@@ -21,7 +21,7 @@ pub(crate) fn format_binding(name: Option<StringId>, pool: &InternPool) -> Strin
 /// (StrConst, StrConcat, Call), where there's no source binding.
 pub(crate) fn consumed_binding_name(tir: &Tir, r: TirRef) -> Option<StringId> {
     match tir.inst(r).data {
-        TirData::Var(n) => Some(n),
+        TirData::Var(n) => Some(tir.binding_name(n)),
         _ => None,
     }
 }
@@ -57,7 +57,7 @@ pub(crate) fn rule7_owner_name(
 ) -> String {
     for arg in args {
         let name = match tir.inst(arg).data {
-            TirData::Var(name) => Some(name),
+            TirData::Var(name) => Some(tir.binding_name(name)),
             TirData::FieldAccess { .. } => struct_base_name(tir, arg),
             _ => None,
         };

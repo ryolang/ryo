@@ -63,6 +63,8 @@ use crate::types::{InternPool, StringId, TypeId};
 use std::collections::HashSet;
 use std::num::NonZeroU32;
 
+#[cfg(test)]
+pub(crate) mod test_bindings;
 mod version;
 
 pub use crate::binding::{BindingId, BindingInfo, BindingKind, BindingTable, ScopeId};
@@ -170,8 +172,8 @@ pub enum TirTag {
     /// `b"..."` literal (M8.4.2). Payload in `TirData::Str`.
     BytesConst,
 
-    /// Read of a local (parameter or `let`-bound), resolved to a
-    /// `StringId` for codegen's `HashMap<StringId, Variable>` lookup.
+    /// Read of a local (parameter or `let`-bound), resolved to its
+    /// body-local `BindingId`; source labels live in the binding table.
     Var,
 
     // Integer arithmetic / comparison. Both operands in
@@ -425,7 +427,7 @@ pub enum TirData {
     Float(f64),
     Str(StringId),
     Bool(bool),
-    Var(StringId),
+    Var(BindingId),
     UnOp(TirRef),
     BinOp {
         lhs: TirRef,
@@ -458,10 +460,23 @@ pub struct TypedInst {
 
 #[derive(Debug, Clone)]
 pub struct TirParam {
+    pub id: BindingId,
     pub name: StringId,
     pub ty: TypeId,
     pub mode: ParamMode,
     pub span: Span,
+}
+
+impl TirParam {
+    pub fn new(id: BindingId, name: StringId, ty: TypeId, mode: ParamMode, span: Span) -> Self {
+        Self {
+            id,
+            name,
+            ty,
+            mode,
+            span,
+        }
+    }
 }
 
 /// One function body's typed instruction stream.
@@ -485,6 +500,7 @@ pub struct Tir {
     pub decl: crate::declaration::DeclId,
     pub name: StringId,
     pub params: Vec<TirParam>,
+    bindings: BindingTable,
     pub return_type: TypeId,
     pub instructions: Vec<TypedInst>,
     pub extra: Vec<u32>,
@@ -516,6 +532,60 @@ impl Tir {
     pub fn require_layout(&self, pool: &InternPool) -> Result<(), String> {
         if self.layout_context != Some(pool.identity()) {
             return Err("TIR belongs to a different type and layout context".into());
+        }
+        Ok(())
+    }
+
+    pub fn bindings(&self) -> &BindingTable {
+        &self.bindings
+    }
+
+    pub fn binding_name(&self, id: BindingId) -> StringId {
+        self.bindings
+            .get(id)
+            .expect("TIR variable operation must reference a registered binding")
+            .name
+    }
+
+    pub fn require_bindings(&self) -> Result<(), String> {
+        for param in &self.params {
+            self.bindings.require(param.id)?;
+        }
+        for (index, inst) in self.instructions.iter().enumerate().skip(1) {
+            let r = TirRef::from_index(index);
+            if let TirData::Var(id) = inst.data {
+                self.bindings.require(id)?;
+            }
+            match inst.tag {
+                TirTag::VarDecl => {
+                    self.bindings.require(self.var_decl_view(r).id)?;
+                }
+                TirTag::Assign => {
+                    self.bindings.require(self.assign_view(r).id)?;
+                }
+                TirTag::CompoundAssign => {
+                    self.bindings.require(self.compound_assign_view(r).id)?;
+                }
+                TirTag::ForRange => {
+                    self.bindings.require(self.for_range_view(r).id)?;
+                }
+                TirTag::Destructure => {
+                    for id in self
+                        .destructure_view(r)
+                        .fields
+                        .iter()
+                        .filter_map(|f| f.bind)
+                    {
+                        self.bindings.require(id)?;
+                    }
+                }
+                TirTag::Match => {
+                    for binding in self.match_view(r).arms().flat_map(|arm| arm.bindings()) {
+                        self.bindings.require(binding.id)?;
+                    }
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -572,6 +642,7 @@ pub struct TirBuilder {
     decl: crate::declaration::DeclId,
     name: StringId,
     params: Vec<TirParam>,
+    bindings: BindingTable,
     return_type: TypeId,
     span: Span,
     instructions: Vec<TypedInst>,
@@ -592,6 +663,18 @@ impl TirBuilder {
         self.return_type
     }
 
+    pub fn bindings(&self) -> &BindingTable {
+        &self.bindings
+    }
+
+    pub fn register_binding(&mut self, binding: BindingInfo) -> BindingId {
+        self.bindings.push(binding)
+    }
+
+    pub fn push_param(&mut self, param: TirParam) {
+        self.params.push(param);
+    }
+
     pub fn new(name: StringId, params: Vec<TirParam>, return_type: TypeId, span: Span) -> Self {
         // Slot 0 is the reserved sentinel — never read, never
         // referenced. Pushing a placeholder keeps `TirRef` indices
@@ -602,11 +685,28 @@ impl TirBuilder {
             ty: TypeId::from_raw(u32::MAX),
             data: TirData::None,
         };
+        let bindings = BindingTable::new(
+            params
+                .iter()
+                .enumerate()
+                .map(|(index, param)| {
+                    assert_eq!(param.id.index(), index, "parameters must be ID-dense");
+                    BindingInfo::new(
+                        param.name,
+                        param.ty,
+                        BindingKind::Param(param.mode),
+                        ScopeId::from_index(0),
+                        param.span,
+                    )
+                })
+                .collect(),
+        );
         TirBuilder {
             layout_context: None,
             decl: crate::declaration::DeclId::NONE,
             name,
             params,
+            bindings,
             return_type,
             span,
             instructions: vec![placeholder],
@@ -704,8 +804,8 @@ impl TirBuilder {
         self.push(TirTag::BytesConst, ty, TirData::Str(value), span)
     }
 
-    pub fn var(&mut self, name: StringId, ty: TypeId, span: Span) -> TirRef {
-        self.push(TirTag::Var, ty, TirData::Var(name), span)
+    pub fn var(&mut self, id: BindingId, ty: TypeId, span: Span) -> TirRef {
+        self.push(TirTag::Var, ty, TirData::Var(id), span)
     }
 
     pub fn unary(&mut self, tag: TirTag, ty: TypeId, operand: TirRef, span: Span) -> TirRef {
@@ -865,30 +965,30 @@ impl TirBuilder {
     /// slot directly — there is no `None` shape here.
     pub fn var_decl(
         &mut self,
-        name: StringId,
+        id: BindingId,
         mutable: bool,
         var_ty: TypeId,
         initializer: TirRef,
         span: Span,
     ) -> TirRef {
-        let range = var_decl_extra::encode(&mut self.extra, name, mutable, initializer);
+        let range = var_decl_extra::encode(&mut self.extra, id, mutable, initializer);
         self.push(TirTag::VarDecl, var_ty, TirData::Extra(range), span)
     }
 
-    pub fn assign(&mut self, name: StringId, var_ty: TypeId, value: TirRef, span: Span) -> TirRef {
-        let range = assign_extra::encode(&mut self.extra, name, value);
+    pub fn assign(&mut self, id: BindingId, var_ty: TypeId, value: TirRef, span: Span) -> TirRef {
+        let range = assign_extra::encode(&mut self.extra, id, value);
         self.push(TirTag::Assign, var_ty, TirData::Extra(range), span)
     }
 
     pub fn compound_assign(
         &mut self,
-        name: StringId,
+        id: BindingId,
         op: CompoundOp,
         var_ty: TypeId,
         value: TirRef,
         span: Span,
     ) -> TirRef {
-        let range = compound_assign_extra::encode(&mut self.extra, name, op, value);
+        let range = compound_assign_extra::encode(&mut self.extra, id, op, value);
         self.push(TirTag::CompoundAssign, var_ty, TirData::Extra(range), span)
     }
 
@@ -913,14 +1013,14 @@ impl TirBuilder {
 
     pub fn for_range(
         &mut self,
-        var_name: StringId,
+        id: BindingId,
         start: TirRef,
         end: TirRef,
         body: &[TirRef],
         ty: TypeId,
         span: Span,
     ) -> TirRef {
-        let range = for_range_extra::encode(&mut self.extra, var_name, start, end, body);
+        let range = for_range_extra::encode(&mut self.extra, id, start, end, body);
         self.push(TirTag::ForRange, ty, TirData::Extra(range), span)
     }
 
@@ -1029,6 +1129,7 @@ impl TirBuilder {
             decl: self.decl,
             name: self.name,
             params: self.params,
+            bindings: self.bindings,
             return_type: self.return_type,
             instructions: self.instructions,
             extra: self.extra,

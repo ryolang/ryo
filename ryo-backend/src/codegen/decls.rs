@@ -91,7 +91,7 @@ impl<M: Module> Codegen<M> {
                     Self::write_slot(
                         &mut ctx.fat_locals,
                         &mut ctx.fat_locals_undo,
-                        view.name,
+                        ctx.tir.binding_name(view.id),
                         Some(FatLocals {
                             binding: Some(r),
                             ptr: var_ptr,
@@ -101,7 +101,7 @@ impl<M: Module> Codegen<M> {
                             home_inline,
                         }),
                     );
-                    let storage = Self::read_slot(&ctx.fat_locals, view.name)
+                    let storage = Self::read_slot(&ctx.fat_locals, ctx.tir.binding_name(view.id))
                         .expect("declaration registered fat storage");
                     ctx.fat_binding_storage.insert(r, storage);
                 }
@@ -120,7 +120,7 @@ impl<M: Module> Codegen<M> {
                     Self::write_slot(
                         &mut ctx.view_locals,
                         &mut ctx.view_locals_undo,
-                        view.name,
+                        ctx.tir.binding_name(view.id),
                         Some(ViewLocals {
                             ptr: var_ptr,
                             len: var_len,
@@ -135,7 +135,7 @@ impl<M: Module> Codegen<M> {
             Self::write_slot(
                 &mut ctx.range_facts,
                 &mut ctx.range_facts_undo,
-                view.name,
+                ctx.tir.binding_name(view.id),
                 None,
             );
             return Ok(Terminator::None);
@@ -158,10 +158,15 @@ impl<M: Module> Codegen<M> {
         Self::write_slot(
             &mut ctx.range_facts,
             &mut ctx.range_facts_undo,
-            view.name,
+            ctx.tir.binding_name(view.id),
             None,
         );
-        Self::write_slot(&mut ctx.locals, &mut ctx.locals_undo, view.name, Some(var));
+        Self::write_slot(
+            &mut ctx.locals,
+            &mut ctx.locals_undo,
+            ctx.tir.binding_name(view.id),
+            Some(var),
+        );
         Ok(Terminator::None)
     }
 
@@ -184,17 +189,18 @@ impl<M: Module> Codegen<M> {
             let ValueRepr::View { ptr, len } = repr else {
                 unreachable!("view-typed assign should produce ValueRepr::View");
             };
-            let locals = Self::read_slot(&ctx.view_locals, view.name).ok_or_else(|| {
-                format!(
-                    "Undefined strview variable in assign: '{}'",
-                    ctx.pool.str(view.name)
-                )
-            })?;
+            let locals = Self::read_slot(&ctx.view_locals, ctx.tir.binding_name(view.id))
+                .ok_or_else(|| {
+                    format!(
+                        "Undefined strview variable in assign: '{}'",
+                        ctx.pool.str(ctx.tir.binding_name(view.id))
+                    )
+                })?;
             // Views are borrows — no free-on-reassign; just
             // reseat the pair.
             builder.def_var(locals.ptr, ptr);
             builder.def_var(locals.len, len);
-            Self::kill_fact(ctx, view.name);
+            Self::kill_fact(ctx, ctx.tir.binding_name(view.id));
             return Ok(Terminator::None);
         }
         if is_struct_type(inst.ty, ctx.pool) {
@@ -206,11 +212,11 @@ impl<M: Module> Codegen<M> {
         let val = Self::eval_inst(builder, ctx, view.value)?;
         // Kill AFTER evaluating the RHS: `x = x + 1` must still
         // see the old fact while its right-hand side is emitted.
-        Self::kill_fact(ctx, view.name);
-        let var = Self::read_slot(&ctx.locals, view.name).ok_or_else(|| {
+        Self::kill_fact(ctx, ctx.tir.binding_name(view.id));
+        let var = Self::read_slot(&ctx.locals, ctx.tir.binding_name(view.id)).ok_or_else(|| {
             format!(
                 "Undefined variable in assign: '{}'",
-                ctx.pool.str(view.name)
+                ctx.pool.str(ctx.tir.binding_name(view.id))
             )
         })?;
         builder.def_var(var, val);
@@ -243,12 +249,13 @@ impl<M: Module> Codegen<M> {
         // `Variable` newtypes + home), so no table borrow
         // survives into the free declaration below, which
         // needs &mut ctx.module.
-        let locals = Self::read_slot(&ctx.fat_locals, view.name).ok_or_else(|| {
-            format!(
-                "Undefined fat variable in assign: '{}'",
-                ctx.pool.str(view.name)
-            )
-        })?;
+        let locals =
+            Self::read_slot(&ctx.fat_locals, ctx.tir.binding_name(view.id)).ok_or_else(|| {
+                format!(
+                    "Undefined fat variable in assign: '{}'",
+                    ctx.pool.str(ctx.tir.binding_name(view.id))
+                )
+            })?;
         let binding = ctx.sidecar.assign_binding[r.index()]
             .ok_or_else(|| "fat assignment has no declaring binding".to_string())?;
         Self::require_fat_storage_binding(locals, binding)?;
@@ -269,8 +276,9 @@ impl<M: Module> Codegen<M> {
         // provably free-noop (`locals.home_inline`), the
         // old-value free is a guaranteed no-op either way.
         if direct && !locals.home_inline && ctx.sidecar.free_on_reassign[r.index()].is_some() {
-            let (old_ptr, old_cap) = Self::emit_fat_load_ptr_cap(builder, ctx, view.name)
-                .expect("fat_locals entry read above");
+            let (old_ptr, old_cap) =
+                Self::emit_fat_load_ptr_cap(builder, ctx, ctx.tir.binding_name(view.id))
+                    .expect("fat_locals entry read above");
             if !Self::is_static_cap_zero(builder.func, old_cap) {
                 let free_ref = if is_bytes {
                     Self::declare_bytes_free(ctx, builder)?
@@ -305,8 +313,9 @@ impl<M: Module> Codegen<M> {
             && ctx.sidecar.free_on_reassign[r.index()].is_some()
             && !(locals.home.is_some() && locals.home_inline)
         {
-            let (old_ptr, old_cap) = Self::emit_fat_load_ptr_cap(builder, ctx, view.name)
-                .expect("fat_locals entry read above");
+            let (old_ptr, old_cap) =
+                Self::emit_fat_load_ptr_cap(builder, ctx, ctx.tir.binding_name(view.id))
+                    .expect("fat_locals entry read above");
             if !Self::is_static_cap_zero(builder.func, old_cap) {
                 let free_ref = if is_bytes {
                     Self::declare_bytes_free(ctx, builder)?
@@ -334,9 +343,9 @@ impl<M: Module> Codegen<M> {
         }
         if locals.home.is_some() {
             let inline = Self::home_value_provably_inline(ctx, builder.func, view.value, cap);
-            Self::set_home_inline(ctx, view.name, inline);
+            Self::set_home_inline(ctx, ctx.tir.binding_name(view.id), inline);
         }
-        Self::kill_fact(ctx, view.name);
+        Self::kill_fact(ctx, ctx.tir.binding_name(view.id));
         Ok(Terminator::None)
     }
 }

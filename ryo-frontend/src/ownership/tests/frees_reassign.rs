@@ -99,10 +99,10 @@ fn run(flag: bool):
     for (index, inst) in tir.instructions.iter().enumerate().skip(1) {
         let r = TirRef::from_raw(index as u32);
         match inst.tag {
-            TirTag::VarDecl if tir.var_decl_view(r).name == s => {
+            TirTag::VarDecl if tir.binding_name(tir.var_decl_view(r).id) == s => {
                 pre_owner = Some(tir.var_decl_view(r).initializer);
             }
-            TirTag::Assign if tir.assign_view(r).name == s => reseat = Some(r),
+            TirTag::Assign if tir.binding_name(tir.assign_view(r).id) == s => reseat = Some(r),
             TirTag::IfStmt => if_stmt = Some(r),
             _ => {}
         }
@@ -184,13 +184,13 @@ fn main():
         match inst.tag {
             TirTag::VarDecl => {
                 let v = tir.var_decl_view(rr);
-                if v.name == child {
+                if tir.binding_name(v.id) == child {
                     pre_owner = Some(v.initializer);
                 }
             }
             TirTag::Assign => {
                 let v = tir.assign_view(rr);
-                if v.name == child {
+                if tir.binding_name(v.id) == child {
                     assign_ref = Some(rr);
                     in_loop_value = Some(v.value);
                 }
@@ -260,7 +260,7 @@ fn shadowed_binding_reassign_does_not_suppress_outer_owner_free() {
     for (r, inst) in tir.instructions.iter().enumerate().skip(1) {
         if inst.tag == TirTag::VarDecl {
             let v = tir.var_decl_view(TirRef::from_raw(r as u32));
-            if v.name == x && outer_init.is_none() {
+            if tir.binding_name(v.id) == x && outer_init.is_none() {
                 outer_init = Some(v.initializer);
             }
         }
@@ -305,7 +305,7 @@ fn sibling_scope_bindings_do_not_share_reassign_sets() {
     for (r, inst) in tir.instructions.iter().enumerate().skip(1) {
         if inst.tag == TirTag::VarDecl {
             let v = tir.var_decl_view(TirRef::from_raw(r as u32));
-            if v.name == x {
+            if tir.binding_name(v.id) == x {
                 values.push(v.initializer);
             }
         }
@@ -386,13 +386,13 @@ fn main():
                     match inst.tag {
                         TirTag::VarDecl => {
                             let v = tir.var_decl_view(t2);
-                            if v.name == s && v.initializer == fp.target {
+                            if tir.binding_name(v.id) == s && v.initializer == fp.target {
                                 found = true;
                             }
                         }
                         TirTag::Assign => {
                             let v = tir.assign_view(t2);
-                            if v.name == s && v.value == fp.target {
+                            if tir.binding_name(v.id) == s && v.value == fp.target {
                                 found = true;
                             }
                         }

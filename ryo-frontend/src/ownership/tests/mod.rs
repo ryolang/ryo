@@ -95,6 +95,7 @@ fn borrowed_param_resolves_under_owner_param_as_borrowed() {
     let mut tb = TirBuilder::new(
         read,
         vec![TirParam {
+            id: ryo_core::tir::BindingId::from_index(0),
             name: s_name,
             ty: str_ty,
             mode: ParamMode::Borrow,
@@ -103,7 +104,7 @@ fn borrowed_param_resolves_under_owner_param_as_borrowed() {
         void,
         span,
     );
-    let v = tb.var(s_name, str_ty, span);
+    let v = test_var(&mut tb, s_name, str_ty, span);
     let tir = tb.finish(&[v]);
     let mut sink = DiagSink::new();
     // check() initialises the param lattice under Owner::Param(s_name) as
@@ -140,10 +141,10 @@ fn double_consume_reports_uam_once_via_consume_authority() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
-    let decl = tb.var_decl(x, false, str_ty, lit, span);
-    let xv1 = tb.var(x, str_ty, span);
+    let decl = test_var_decl(&mut tb, x, false, str_ty, lit, span);
+    let xv1 = test_var(&mut tb, x, str_ty, span);
     let take1 = tb.call(DeclId::NONE, take, &[xv1], &[ParamMode::Move], void, span);
-    let xv2 = tb.var(x, str_ty, span);
+    let xv2 = test_var(&mut tb, x, str_ty, span);
     let take2 = tb.call(DeclId::NONE, take, &[xv2], &[ParamMode::Move], void, span);
     let tir = tb.finish(&[decl, take1, take2]);
     let mut sink = DiagSink::new();
@@ -177,10 +178,10 @@ fn borrow_of_moved_value_still_reports_uam() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
-    let decl = tb.var_decl(x, false, str_ty, lit, span);
-    let xv = tb.var(x, str_ty, span);
+    let decl = test_var_decl(&mut tb, x, false, str_ty, lit, span);
+    let xv = test_var(&mut tb, x, str_ty, span);
     let take_call = tb.call(DeclId::NONE, take, &[xv], &[ParamMode::Move], void, span); // moves x
-    let xv2 = tb.var(x, str_ty, span);
+    let xv2 = test_var(&mut tb, x, str_ty, span);
     let print_call = tb.call(
         DeclId::NONE,
         print,
@@ -224,13 +225,13 @@ fn three_arm_if_with_conditional_move_and_loop_rebind() {
 
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit_v = tb.str_const(pool.intern_str("v"), str_ty, span);
-    let decl_x = tb.var_decl(x, false, str_ty, lit_v, span);
+    let decl_x = test_var_decl(&mut tb, x, false, str_ty, lit_v, span);
 
     let lit_mut = tb.str_const(pool.intern_str("initial"), str_ty, span);
-    let decl_mut = tb.var_decl(s, true, str_ty, lit_mut, span);
+    let decl_mut = test_var_decl(&mut tb, s, true, str_ty, lit_mut, span);
 
     let cond_then = tb.bool_const(true, bool_ty, span);
-    let read_then = tb.var(x, str_ty, span);
+    let read_then = test_var(&mut tb, x, str_ty, span);
     let call_then = tb.call(
         DeclId::NONE,
         print,
@@ -241,7 +242,7 @@ fn three_arm_if_with_conditional_move_and_loop_rebind() {
     );
 
     let cond_elif = tb.bool_const(false, bool_ty, span);
-    let read_elif = tb.var(x, str_ty, span);
+    let read_elif = test_var(&mut tb, x, str_ty, span);
     let call_elif = tb.call(
         DeclId::NONE,
         take,
@@ -251,7 +252,7 @@ fn three_arm_if_with_conditional_move_and_loop_rebind() {
         span,
     );
 
-    let read_else = tb.var(x, str_ty, span);
+    let read_else = test_var(&mut tb, x, str_ty, span);
     let call_else = tb.call(
         DeclId::NONE,
         print,
@@ -272,10 +273,10 @@ fn three_arm_if_with_conditional_move_and_loop_rebind() {
 
     let cond_w = tb.bool_const(false, bool_ty, span);
     let body_lit = tb.str_const(pool.intern_str("new_val"), str_ty, span);
-    let body_assign = tb.assign(s, str_ty, body_lit, span);
+    let body_assign = test_assign(&mut tb, s, str_ty, body_lit, span);
     let wl = tb.while_loop(cond_w, &[body_assign], void, span);
 
-    let read_post = tb.var(x, str_ty, span);
+    let read_post = test_var(&mut tb, x, str_ty, span);
     let call_post = tb.call(
         DeclId::NONE,
         print,
@@ -340,8 +341,8 @@ fn move_and_borrow_of_same_owner_in_one_call_e0023_both_orderings() {
         first_move: bool,
         span: Span,
     ) -> (TirRef, TirRef, TirRef) {
-        let xv1 = tir.var(x, str_ty, span);
-        let xv2 = tir.var(x, str_ty, span);
+        let xv1 = test_var(tir, x, str_ty, span);
+        let xv2 = test_var(tir, x, str_ty, span);
         let modes = if first_move {
             vec![ParamMode::Move, ParamMode::Borrow]
         } else {
@@ -354,7 +355,7 @@ fn move_and_borrow_of_same_owner_in_one_call_e0023_both_orderings() {
     // Ordering 1: Move first, then Borrow
     let mut tb1 = TirBuilder::new(main, vec![], void, span);
     let lit1 = tb1.str_const(pool.intern_str("v"), str_ty, span);
-    let decl1 = tb1.var_decl(x, false, str_ty, lit1, span);
+    let decl1 = test_var_decl(&mut tb1, x, false, str_ty, lit1, span);
     let (_xv1, _xv2, call1) = build(&mut tb1, x, str_ty, void, f, true, span);
     let tir1 = tb1.finish(&[decl1, call1]);
 
@@ -378,7 +379,7 @@ fn move_and_borrow_of_same_owner_in_one_call_e0023_both_orderings() {
     // Ordering 2: Borrow first, then Move
     let mut tb2 = TirBuilder::new(main, vec![], void, span);
     let lit2 = tb2.str_const(pool.intern_str("v"), str_ty, span);
-    let decl2 = tb2.var_decl(x, false, str_ty, lit2, span);
+    let decl2 = test_var_decl(&mut tb2, x, false, str_ty, lit2, span);
     let (_xv3, _xv4, call2) = build(&mut tb2, x, str_ty, void, f, false, span);
     let tir2 = tb2.finish(&[decl2, call2]);
 
@@ -413,9 +414,9 @@ fn two_borrows_of_one_owner_ok() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
-    let decl = tb.var_decl(x, false, str_ty, lit, span);
-    let xv1 = tb.var(x, str_ty, span);
-    let xv2 = tb.var(x, str_ty, span);
+    let decl = test_var_decl(&mut tb, x, false, str_ty, lit, span);
+    let xv1 = test_var(&mut tb, x, str_ty, span);
+    let xv2 = test_var(&mut tb, x, str_ty, span);
     let modes = vec![ParamMode::Borrow, ParamMode::Borrow];
     let call = tb.call(DeclId::NONE, f, &[xv1, xv2], &modes, void, span);
     let tir = tb.finish(&[decl, call]);
@@ -450,10 +451,10 @@ fn borrow_and_move_of_distinct_owners_ok() {
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let la = tb.str_const(pool.intern_str("va"), str_ty, span);
     let lb = tb.str_const(pool.intern_str("vb"), str_ty, span);
-    let da = tb.var_decl(a, false, str_ty, la, span);
-    let db = tb.var_decl(b, false, str_ty, lb, span);
-    let av = tb.var(a, str_ty, span);
-    let bv = tb.var(b, str_ty, span);
+    let da = test_var_decl(&mut tb, a, false, str_ty, la, span);
+    let db = test_var_decl(&mut tb, b, false, str_ty, lb, span);
+    let av = test_var(&mut tb, a, str_ty, span);
+    let bv = test_var(&mut tb, b, str_ty, span);
     let modes = vec![ParamMode::Borrow, ParamMode::Move];
     let call = tb.call(DeclId::NONE, f, &[av, bv], &modes, void, span);
     let tir = tb.finish(&[da, db, call]);
@@ -486,8 +487,8 @@ fn single_move_arg_no_e0023() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
-    let decl = tb.var_decl(x, false, str_ty, lit, span);
-    let xv = tb.var(x, str_ty, span);
+    let decl = test_var_decl(&mut tb, x, false, str_ty, lit, span);
+    let xv = test_var(&mut tb, x, str_ty, span);
     let call = tb.call(DeclId::NONE, f, &[xv], &[ParamMode::Move], void, span);
     let tir = tb.finish(&[decl, call]);
     let mut sink = DiagSink::new();
@@ -521,11 +522,11 @@ fn copy_args_untracked_no_false_positive() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let ic = tb.int_const(1, int_ty, span);
-    let dn = tb.var_decl(n, false, int_ty, ic, span);
+    let dn = test_var_decl(&mut tb, n, false, int_ty, ic, span);
     let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
-    let dx = tb.var_decl(x, false, str_ty, lit, span);
-    let nv = tb.var(n, int_ty, span);
-    let xv = tb.var(x, str_ty, span);
+    let dx = test_var_decl(&mut tb, x, false, str_ty, lit, span);
+    let nv = test_var(&mut tb, n, int_ty, span);
+    let xv = test_var(&mut tb, x, str_ty, span);
     let modes = vec![ParamMode::Borrow, ParamMode::Move];
     let call = tb.call(DeclId::NONE, f, &[nv, xv], &modes, void, span);
     let tir = tb.finish(&[dn, dx, call]);
@@ -558,12 +559,12 @@ fn borrow_and_move_in_sequential_statements_ok() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
-    let decl = tb.var_decl(x, false, str_ty, lit, span);
+    let decl = test_var_decl(&mut tb, x, false, str_ty, lit, span);
     // first statement: f(borrow x)
-    let xv1 = tb.var(x, str_ty, span);
+    let xv1 = test_var(&mut tb, x, str_ty, span);
     let call1 = tb.call(DeclId::NONE, f, &[xv1], &[ParamMode::Borrow], void, span);
     // second statement: f(move x)
-    let xv2 = tb.var(x, str_ty, span);
+    let xv2 = test_var(&mut tb, x, str_ty, span);
     let call2 = tb.call(DeclId::NONE, f, &[xv2], &[ParamMode::Move], void, span);
     let tir = tb.finish(&[decl, call1, call2]);
     let mut sink = DiagSink::new();
@@ -598,9 +599,9 @@ fn two_immutable_borrows_ok() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let ic = tb.int_const(1, int_ty, span);
-    let decl = tb.var_decl(c, false, int_ty, ic, span);
-    let cv1 = tb.var(c, int_ty, span);
-    let cv2 = tb.var(c, int_ty, span);
+    let decl = test_var_decl(&mut tb, c, false, int_ty, ic, span);
+    let cv1 = test_var(&mut tb, c, int_ty, span);
+    let cv2 = test_var(&mut tb, c, int_ty, span);
     let call = tb.call(
         DeclId::NONE,
         f,

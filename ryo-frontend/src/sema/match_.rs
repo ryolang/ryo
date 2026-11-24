@@ -56,6 +56,13 @@ pub(crate) struct MatchAnalysis {
     has_wildcard: bool,
 }
 
+#[derive(Clone, Copy)]
+struct ResolvedMatchBinding {
+    field_index: u32,
+    name: StringId,
+    ty: TypeId,
+}
+
 /// Resolution results for one arm.
 pub(crate) struct MatchArmAnalysis {
     /// Source span of the arm pattern, carried through UIR.
@@ -71,10 +78,8 @@ pub(crate) struct MatchArmAnalysis {
     /// Source-faithful rendering of the pattern (see [`render_pattern`])
     /// — quoted in W0005's message when it describes a redundant arm.
     pattern_text: String,
-    /// Payload bindings in arm-written order: canonical field index,
-    /// bound name, field type. Literal and wildcard targets bind
-    /// nothing. Arm typing inserts these into the arm scope.
-    bindings: Vec<MatchBinding>,
+    /// Source-named payload bindings, resolved to IDs during arm typing.
+    bindings: Vec<ResolvedMatchBinding>,
     /// Anonymous-shape literal constraints (`{x=0}`, `(0, _)`):
     /// (canonical field index, literal) in written order. Only
     /// meaningful for anon arms; field-equality lowering (and the wire
@@ -249,6 +254,7 @@ pub(crate) struct TypedArm {
 
 pub(crate) struct MatchArmPreparation<'a> {
     pub(crate) scope: Scope<'a>,
+    pub(crate) bindings: Vec<MatchBinding>,
     pub(crate) owners: Vec<(u32, TypeId)>,
     pub(crate) binding_error: bool,
 }
@@ -271,6 +277,7 @@ pub(crate) fn prepare_match_arm<'a>(
         MatchMode::CatchDirect(name) => (true, Some(name)),
     };
     let mut scope = Scope {
+        id: fcx.next_scope(),
         parent: Some(parent),
         bindings: HashMap::new(),
     };
@@ -285,7 +292,7 @@ pub(crate) fn prepare_match_arm<'a>(
     } else {
         MatchMode::Catch(catch_binding)
     };
-    let (owners, binding_error) = seed_arm_bindings(
+    let (bindings, owners, binding_error) = seed_arm_bindings(
         sema,
         fcx,
         &mut scope,
@@ -296,6 +303,7 @@ pub(crate) fn prepare_match_arm<'a>(
     );
     Some(MatchArmPreparation {
         scope,
+        bindings,
         owners,
         binding_error,
     })
@@ -328,52 +336,34 @@ pub(crate) fn finish_match_arm(
             }
         }
     };
-    preparation.scope.drain_dead_stores(sema);
+    let MatchArmPreparation {
+        scope,
+        bindings,
+        owners,
+        binding_error,
+    } = preparation;
+    scope.drain_dead_stores(sema);
     (
         TypedArm {
             discriminant: match arm.discriminant {
                 Some(d) => d,
                 None => Discriminant::Wildcard,
             },
-            bindings: arm.bindings.clone(),
+            bindings,
             guards: arm.anon_literals.clone(),
             body,
             span: arm.body_span,
             class,
         },
-        preparation.owners,
-        preparation.binding_error,
+        owners,
+        binding_error,
     )
 }
 
-/// Type every cleanly-resolved arm in its own child `Scope`
-/// seeded with the payload bindings, join the arm types, and emit the
-/// typed `TirTag::Match`. On any error — resolution, E0133-E0135, or
-/// the scrutinee's own diagnostic — the match recovers with the
-/// error-typed `Unreachable` sentinel (§4.5), so no partially-typed
-/// `Match` ever reaches codegen.
-///
-/// Join rule (spec §4.6 "all arms must have same return type"): every
-/// value arm must carry the identical `TypeId` — the first value arm's
-/// type is the candidate, and every later arm whose type differs
-/// (including a void-producing expression arm in a value match) is one
-/// E0134, primary span on the FIRST offending arm body, a note per
-/// other offender. `never` and error-typed arms join freely. A
-/// statement arm that falls through is legal only when NO arm produces
-/// a value (the match is `void`) — against a value candidate it is
-/// E0135 at that arm. The match type is the candidate, `never` when
-/// every arm is `never`/errored, and `void` otherwise.
-///
-/// Emission (clean path): one `FieldAccess` owner token per BY-MOVE
-/// binding (`!pool.is_copy(binding.ty)`), in arm order then binding
-/// order, immediately before the `Match` — the convention documented
-/// on `TirBuilder::match_expr` and recovered by
-/// [`Tir::match_by_move_owner_refs`]. Copy bindings copy out of the
-/// scrutinee and skip the token. Anon-pattern arms encode
-/// `Discriminant::Wildcard` as a coverage placeholder (structural
-/// lowering is M12.5) and carry their literal field constraints as the
-/// per-arm GUARD list, in written order — empty for every other arm;
-/// the two encodings are orthogonal by design.
+/// Type cleanly resolved arms in child scopes and emit `Match`, or recover with `Unreachable`.
+/// Value arms share one `TypeId`; `never` and error arms join freely.
+/// Non-`Copy` bindings emit ordered owner tokens immediately before the `Match`.
+/// Anonymous-shape arms use a wildcard discriminant plus their literal guard list.
 fn type_and_emit_match(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -629,41 +619,31 @@ fn emit_match_with_owner_tokens(
     fcx.builder.match_expr(scrutinee, ty, arms, span)
 }
 
-/// Insert one arm's payload bindings into its child scope, mirroring
-/// `analyze_destructure`'s insertion checks — the same-name collision
-/// (DuplicateDeclaration) and reserved-name rejection — plus the E0133
-/// gate: a non-`Copy` bind out of a BORROWED scrutinee would move out of
-/// the borrow, so it is refused and bound error-typed instead (the arm
-/// body still checks against the error type). Returns the by-move owner
-/// tokens `(field_index, ty)` in binding order — Copy binds copy out of
-/// the scrutinee and need no token.
+/// Seed payload bindings, returning their IDs and by-move owner tokens.
 fn seed_arm_bindings(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     child_scope: &mut Scope,
-    bindings: &[MatchBinding],
+    bindings: &[ResolvedMatchBinding],
     borrowed: bool,
     span: Span,
     mode: MatchMode,
-) -> (Vec<(u32, TypeId)>, bool) {
+) -> (Vec<MatchBinding>, Vec<(u32, TypeId)>, bool) {
     let (warn_binding, temp_binding, direct_catch) = match mode {
         MatchMode::Source => (None, false, false),
         MatchMode::Catch(None) => (None, true, false),
         MatchMode::Catch(Some(name)) => (Some(name), false, false),
         MatchMode::CatchDirect(name) => (Some(name), false, true),
     };
+    let mut typed = Vec::with_capacity(bindings.len());
     let mut owners = Vec::new();
     let mut had_error = false;
     for binding in bindings {
         let name = binding.name;
-        if temp_binding {
-            fcx.destructure_temps.insert(name, binding.ty);
-            if !sema.pool.is_copy(binding.ty) {
-                owners.push((binding.field_index, binding.ty));
-            }
-            continue;
-        }
-        if child_scope.contains_in_current(name) {
+        let mut owner = !sema.pool.is_copy(binding.ty);
+        let id = if temp_binding {
+            fcx.insert_temp(name, binding.ty, child_scope.id, span)
+        } else if child_scope.contains_in_current(name) {
             sema.sink.emit(Diag::error(
                 span,
                 DiagCode::DuplicateDeclaration,
@@ -672,21 +652,19 @@ fn seed_arm_bindings(
                     sema.pool.str(name),
                 ),
             ));
-            child_scope.insert_binding(name, sema.pool.error_type(), false, false);
             had_error = true;
-            continue;
-        }
-        if check_reserved_name(
+            owner = false;
+            child_scope.insert_binding(fcx, name, sema.pool.error_type(), false, false, span)
+        } else if check_reserved_name(
             sema,
             name,
             span,
             "is a reserved builtin and cannot be redefined",
         ) {
-            child_scope.insert_binding(name, sema.pool.error_type(), false, false);
             had_error = true;
-            continue;
-        }
-        if borrowed && !sema.pool.is_copy(binding.ty) {
+            owner = false;
+            child_scope.insert_binding(fcx, name, sema.pool.error_type(), false, false, span)
+        } else if borrowed && !sema.pool.is_copy(binding.ty) {
             sema.sink.emit(
                 Diag::error(
                     span,
@@ -703,36 +681,43 @@ fn seed_arm_bindings(
                      the field through a helper",
                 ),
             );
-            child_scope.insert_binding(name, sema.pool.error_type(), false, false);
             had_error = true;
-            continue;
-        }
-        if warn_binding == Some(name) {
-            fcx.destructure_temps.insert(name, binding.ty);
-        }
-        if direct_catch && warn_binding == Some(name) {
-            let as_start = span.start.saturating_sub(3);
-            let span = if sema
-                .source
-                .as_bytes()
-                .get(as_start..span.start)
-                .is_some_and(|prefix| prefix == b"as ")
-            {
-                span.with_start(as_start)
-            } else {
-                span
-            };
-            child_scope.insert_direct_catch_binding(name, binding.ty, span);
-        } else if sema.pool.is_copy(binding.ty) || warn_binding == Some(name) {
-            child_scope.insert_dead_store_binding(name, binding.ty, false, false, span);
+            owner = false;
+            child_scope.insert_binding(fcx, name, sema.pool.error_type(), false, false, span)
         } else {
-            child_scope.insert_binding(name, binding.ty, false, false);
-        }
-        if !sema.pool.is_copy(binding.ty) {
+            let id = if direct_catch && warn_binding == Some(name) {
+                let as_start = span.start.saturating_sub(3);
+                let catch_span = if sema
+                    .source
+                    .as_bytes()
+                    .get(as_start..span.start)
+                    .is_some_and(|prefix| prefix == b"as ")
+                {
+                    span.with_start(as_start)
+                } else {
+                    span
+                };
+                child_scope.insert_direct_catch_binding(fcx, name, binding.ty, catch_span)
+            } else if sema.pool.is_copy(binding.ty) || warn_binding == Some(name) {
+                child_scope.insert_dead_store_binding(fcx, name, binding.ty, false, false, span)
+            } else {
+                child_scope.insert_binding(fcx, name, binding.ty, false, false, span)
+            };
+            if warn_binding == Some(name) {
+                fcx.insert_temp_with_id(id, name, binding.ty);
+            }
+            id
+        };
+        typed.push(MatchBinding {
+            field_index: binding.field_index,
+            id,
+            ty: binding.ty,
+        });
+        if owner {
             owners.push((binding.field_index, binding.ty));
         }
     }
-    (owners, had_error)
+    (typed, owners, had_error)
 }
 
 // ---------- Exhaustiveness + redundancy ----------
@@ -1611,7 +1596,7 @@ fn resolve_tuple_payload(
         }
         for (i, (_, target)) in args.args().enumerate() {
             if let UirArgTarget::Bind(name) = target {
-                analysis.bindings.push(MatchBinding {
+                analysis.bindings.push(ResolvedMatchBinding {
                     field_index: fields[i].idx,
                     name,
                     ty: fields[i].ty,
@@ -1721,7 +1706,7 @@ fn resolve_named_payload(
         }
         for (i, (_, target)) in args.args().enumerate() {
             if let UirArgTarget::Bind(name) = target {
-                analysis.bindings.push(MatchBinding {
+                analysis.bindings.push(ResolvedMatchBinding {
                     field_index: fields[i].idx,
                     name,
                     ty: fields[i].ty,
@@ -1765,7 +1750,7 @@ fn resolve_named_payload(
         }
         covered[field.idx as usize] = true;
         if let UirArgTarget::Bind(bind) = target {
-            analysis.bindings.push(MatchBinding {
+            analysis.bindings.push(ResolvedMatchBinding {
                 field_index: field.idx,
                 name: bind,
                 ty: field.ty,
@@ -1943,7 +1928,7 @@ fn resolve_anon_target(
     analysis: &mut MatchArmAnalysis,
 ) {
     match target {
-        UirFieldTarget::Bind(name) => analysis.bindings.push(MatchBinding {
+        UirFieldTarget::Bind(name) => analysis.bindings.push(ResolvedMatchBinding {
             field_index: field.idx,
             name,
             ty: field.ty,

@@ -96,7 +96,10 @@ pub(crate) fn int_range_of(tir: &Tir, facts: &[Option<IntRange>], r: TirRef) -> 
     let inst = tir.inst(r);
     match (inst.tag, inst.data) {
         (TirTag::IntConst, TirData::Int(v)) => Some(IntRange::point(v)),
-        (TirTag::Var, TirData::Var(name)) => facts.get(name.raw() as usize).copied().flatten(),
+        (TirTag::Var, TirData::Var(id)) => facts
+            .get(tir.binding_name(id).raw() as usize)
+            .copied()
+            .flatten(),
         _ => None,
     }
 }
@@ -149,7 +152,9 @@ pub(crate) fn cond_facts(tir: &Tir, cond: TirRef, polarity: bool) -> Vec<(String
         (TirTag::ICmpEq, true) | (TirTag::ICmpNe, false) => Some(IntRange::point(k)),
         _ => None,
     };
-    range.map(|r| vec![(name, r)]).unwrap_or_default()
+    range
+        .map(|r| vec![(tir.binding_name(name), r)])
+        .unwrap_or_default()
 }
 
 /// The relation with its operands swapped (`a < b` ≡ `b > a`).
@@ -245,8 +250,8 @@ impl<M: Module> Codegen<M> {
     fn collect_writes_in(tir: &Tir, r: TirRef, out: &mut Vec<StringId>) {
         let inst = tir.inst(r);
         match inst.tag {
-            TirTag::Assign => out.push(tir.assign_view(r).name),
-            TirTag::CompoundAssign => out.push(tir.compound_assign_view(r).name),
+            TirTag::Assign => out.push(tir.binding_name(tir.assign_view(r).id)),
+            TirTag::CompoundAssign => out.push(tir.binding_name(tir.compound_assign_view(r).id)),
             TirTag::Call => {
                 let view = tir.call_view(r);
                 for (arg, mode) in view.args.iter().zip(view.modes.iter()) {
@@ -259,7 +264,7 @@ impl<M: Module> Codegen<M> {
                     // ignore it conservatively.
                     let arg_inst = tir.inst(arg);
                     if let (TirTag::Var, TirData::Var(name)) = (arg_inst.tag, arg_inst.data) {
-                        out.push(name);
+                        out.push(tir.binding_name(name));
                     }
                 }
             }

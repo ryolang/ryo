@@ -54,7 +54,7 @@ fn shared_division_by_zero_is_scoped_to_analysis_root() {
     for limit in [64, 0] {
         let (uir, mut pool, root, shared) = shared_binop_dag(InstTag::Div, 1, 0);
         let mut fcx = test_func_ctx(&uir, &mut pool);
-        let scope = Scope::new();
+        let scope = Scope::new(fcx.next_scope());
         let mut sink = DiagSink::new();
         let mut context = ryo_core::compilation::CompilationContext::new();
         let mut sema = Sema::new(
@@ -127,7 +127,7 @@ fn later_body_rollback_clears_only_mapped_error() {
             TirBuilder::new(second, vec![], pool.int(), Span::EMPTY),
             map.instructions(1).len(),
         );
-        let scope = Scope::new();
+        let scope = Scope::new(fcx.next_scope());
         let mut sink = DiagSink::new();
         let mut context = ryo_core::compilation::CompilationContext::new();
         let mut sema = Sema::new(
@@ -167,7 +167,7 @@ fn shared_constant_overflow_is_scoped_to_analysis_root() {
     for limit in [64, 0] {
         let (uir, mut pool, root, shared) = shared_binop_dag(InstTag::Add, i64::MAX, 1);
         let mut fcx = test_func_ctx(&uir, &mut pool);
-        let scope = Scope::new();
+        let scope = Scope::new(fcx.next_scope());
         let mut sink = DiagSink::new();
         let mut context = ryo_core::compilation::CompilationContext::new();
         let mut sema = Sema::new(
@@ -226,7 +226,7 @@ fn nested_machine_rollback_preserves_outer_early_errors() {
     let mut pool = InternPool::new();
     let uir = finish_body(builder, &mut pool, root);
     let mut fcx = test_func_ctx(&uir, &mut pool);
-    let scope = Scope::new();
+    let scope = Scope::new(fcx.next_scope());
     let mut sink = DiagSink::new();
     let mut context = ryo_core::compilation::CompilationContext::new();
     let mut sema = Sema::new(
@@ -282,7 +282,7 @@ fn nested_machine_early_error_root_is_scoped_to_expression_root() {
     let mut pool = InternPool::new();
     let uir = finish_body(builder, &mut pool, root);
     let mut fcx = test_func_ctx(&uir, &mut pool);
-    let scope = Scope::new();
+    let scope = Scope::new(fcx.next_scope());
     let mut sink = DiagSink::new();
     let mut context = ryo_core::compilation::CompilationContext::new();
     let mut sema = Sema::new(
@@ -338,7 +338,7 @@ fn statement_root_removes_early_error_before_direct_reanalysis() {
     let mut pool = InternPool::new();
     let uir = finish_body(builder, &mut pool, statement);
     let mut fcx = test_func_ctx(&uir, &mut pool);
-    let mut scope = Scope::new();
+    let mut scope = Scope::new(fcx.next_scope());
     let mut sink = DiagSink::new();
     let mut context = ryo_core::compilation::CompilationContext::new();
     let mut sema = Sema::new(
@@ -378,7 +378,7 @@ fn successful_binop_result_stays_memoized() {
     for limit in [64, 0] {
         let (uir, mut pool, _root, shared) = shared_binop_dag(InstTag::Add, 1, 2);
         let mut fcx = test_func_ctx(&uir, &mut pool);
-        let scope = Scope::new();
+        let scope = Scope::new(fcx.next_scope());
         let mut sink = DiagSink::new();
         let mut context = ryo_core::compilation::CompilationContext::new();
         let mut sema = Sema::new(
@@ -1518,7 +1518,7 @@ fn uppercase_method_receiver_precedes_arguments_at_every_depth_limit() {
 fn variant_state_pool_reuses_body_storage_across_walks() {
     let (uir, mut pool, root, _shared) = shared_binop_dag(InstTag::Add, 1, 2);
     let mut fcx = test_func_ctx(&uir, &mut pool);
-    let scope = Scope::new();
+    let scope = Scope::new(fcx.next_scope());
     let mut sink = DiagSink::new();
     let mut context = ryo_core::compilation::CompilationContext::new();
     let mut sema = Sema::new(

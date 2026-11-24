@@ -18,9 +18,9 @@ fn inout_same_owner_twice_rejected() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let ic = tb.int_const(1, int_ty, span);
-    let decl = tb.var_decl(c, false, int_ty, ic, span);
-    let cv1 = tb.var(c, int_ty, span);
-    let cv2 = tb.var(c, int_ty, span);
+    let decl = test_var_decl(&mut tb, c, false, int_ty, ic, span);
+    let cv1 = test_var(&mut tb, c, int_ty, span);
+    let cv2 = test_var(&mut tb, c, int_ty, span);
     let call = tb.call(
         DeclId::NONE,
         swap,
@@ -63,9 +63,9 @@ fn inout_and_borrow_same_owner_rejected() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let ic = tb.int_const(1, int_ty, span);
-    let decl = tb.var_decl(c, false, int_ty, ic, span);
-    let cv1 = tb.var(c, int_ty, span);
-    let cv2 = tb.var(c, int_ty, span);
+    let decl = test_var_decl(&mut tb, c, false, int_ty, ic, span);
+    let cv1 = test_var(&mut tb, c, int_ty, span);
+    let cv2 = test_var(&mut tb, c, int_ty, span);
     let call = tb.call(
         DeclId::NONE,
         f,
@@ -109,9 +109,9 @@ fn inout_and_move_same_owner_rejected() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("v"), str_ty, span);
-    let decl = tb.var_decl(x, false, str_ty, lit, span);
-    let xv1 = tb.var(x, str_ty, span);
-    let xv2 = tb.var(x, str_ty, span);
+    let decl = test_var_decl(&mut tb, x, false, str_ty, lit, span);
+    let xv1 = test_var(&mut tb, x, str_ty, span);
+    let xv2 = test_var(&mut tb, x, str_ty, span);
     let call = tb.call(
         DeclId::NONE,
         f,
@@ -156,9 +156,9 @@ fn e0032_names_local_binding_not_value() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let ic = tb.int_const(1, int_ty, span);
-    let decl = tb.var_decl(c, false, int_ty, ic, span);
-    let cv1 = tb.var(c, int_ty, span);
-    let cv2 = tb.var(c, int_ty, span);
+    let decl = test_var_decl(&mut tb, c, false, int_ty, ic, span);
+    let cv1 = test_var(&mut tb, c, int_ty, span);
+    let cv2 = test_var(&mut tb, c, int_ty, span);
     let call = tb.call(
         DeclId::NONE,
         swap,
@@ -207,10 +207,10 @@ fn inout_distinct_owners_ok() {
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let ia = tb.int_const(1, int_ty, span);
     let ib = tb.int_const(2, int_ty, span);
-    let da = tb.var_decl(a, false, int_ty, ia, span);
-    let db = tb.var_decl(b, false, int_ty, ib, span);
-    let av = tb.var(a, int_ty, span);
-    let bv = tb.var(b, int_ty, span);
+    let da = test_var_decl(&mut tb, a, false, int_ty, ia, span);
+    let db = test_var_decl(&mut tb, b, false, int_ty, ib, span);
+    let av = test_var(&mut tb, a, int_ty, span);
+    let bv = test_var(&mut tb, b, int_ty, span);
     let call = tb.call(
         DeclId::NONE,
         swap,
@@ -266,6 +266,7 @@ fn inout_str_param_reassign_escapes_no_dead_store_no_free() {
     let mut tb = TirBuilder::new(
         set,
         vec![TirParam {
+            id: ryo_core::tir::BindingId::from_index(0),
             name: s,
             ty: str_ty,
             mode: ParamMode::Inout,
@@ -275,7 +276,7 @@ fn inout_str_param_reassign_escapes_no_dead_store_no_free() {
         span,
     );
     let lit = tb.str_const(pool.intern_str("new"), str_ty, span);
-    let asg = tb.assign(s, str_ty, lit, span);
+    let asg = test_assign(&mut tb, s, str_ty, lit, span);
     let tir = tb.finish(&[asg]);
     let mut sink = DiagSink::new();
     let mut sidecar = check(
@@ -323,6 +324,7 @@ fn inout_str_param_reassign_inside_if_escapes() {
     let mut tb = TirBuilder::new(
         g,
         vec![TirParam {
+            id: ryo_core::tir::BindingId::from_index(0),
             name: s,
             ty: str_ty,
             mode: ParamMode::Inout,
@@ -333,7 +335,7 @@ fn inout_str_param_reassign_inside_if_escapes() {
     );
     let cond = tb.bool_const(true, bool_ty, span);
     let lit = tb.str_const(pool.intern_str("b"), str_ty, span);
-    let asg = tb.assign(s, str_ty, lit, span);
+    let asg = test_assign(&mut tb, s, str_ty, lit, span);
     let if_s = tb.if_stmt(cond, &[asg], &[], None, void, span);
     let tir = tb.finish(&[if_s]);
     let mut sink = DiagSink::new();
@@ -383,6 +385,7 @@ fn inout_str_param_move_out_after_reassign_rejected() {
     let mut tb = TirBuilder::new(
         f,
         vec![TirParam {
+            id: ryo_core::tir::BindingId::from_index(0),
             name: s,
             ty: str_ty,
             mode: ParamMode::Inout,
@@ -392,8 +395,8 @@ fn inout_str_param_move_out_after_reassign_rejected() {
         span,
     );
     let lit = tb.str_const(pool.intern_str("new"), str_ty, span);
-    let asg = tb.assign(s, str_ty, lit, span);
-    let sv = tb.var(s, str_ty, span);
+    let asg = test_assign(&mut tb, s, str_ty, lit, span);
+    let sv = test_var(&mut tb, s, str_ty, span);
     let call = tb.call(DeclId::NONE, g, &[sv], &[ParamMode::Move], void, span);
     let tir = tb.finish(&[asg, call]);
     let mut sink = DiagSink::new();
@@ -427,6 +430,7 @@ fn inout_str_param_return_after_reassign_rejected() {
     let mut tb = TirBuilder::new(
         f,
         vec![TirParam {
+            id: ryo_core::tir::BindingId::from_index(0),
             name: s,
             ty: str_ty,
             mode: ParamMode::Inout,
@@ -436,8 +440,8 @@ fn inout_str_param_return_after_reassign_rejected() {
         span,
     );
     let lit = tb.str_const(pool.intern_str("new"), str_ty, span);
-    let asg = tb.assign(s, str_ty, lit, span);
-    let sv = tb.var(s, str_ty, span);
+    let asg = test_assign(&mut tb, s, str_ty, lit, span);
+    let sv = test_var(&mut tb, s, str_ty, span);
     let ret = tb.push_typed(TirTag::Return, TirData::UnOp(sv), str_ty, span);
     let _ = void;
     let tir = tb.finish(&[asg, ret]);
@@ -479,10 +483,10 @@ fn inout_call_keeps_owner_and_frees_current_buffer() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("hi"), str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
-    let sv1 = tb.var(s, str_ty, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let sv1 = test_var(&mut tb, s, str_ty, span);
     let call = tb.call(DeclId::NONE, set, &[sv1], &[ParamMode::Inout], void, span);
-    let sv2 = tb.var(s, str_ty, span);
+    let sv2 = test_var(&mut tb, s, str_ty, span);
     let pr = tb.call(
         DeclId::NONE,
         print,
@@ -532,12 +536,12 @@ fn inout_call_inside_if_no_false_dead_store() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("a"), str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
     let cond = tb.bool_const(true, bool_ty, span);
-    let sv1 = tb.var(s, str_ty, span);
+    let sv1 = test_var(&mut tb, s, str_ty, span);
     let call = tb.call(DeclId::NONE, set, &[sv1], &[ParamMode::Inout], void, span);
     let if_s = tb.if_stmt(cond, &[call], &[], None, void, span);
-    let sv2 = tb.var(s, str_ty, span);
+    let sv2 = test_var(&mut tb, s, str_ty, span);
     let pr = tb.call(
         DeclId::NONE,
         print,
@@ -578,12 +582,12 @@ fn inout_call_inside_loop_no_false_dead_store() {
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str(""), str_ty, span);
-    let decl = tb.var_decl(s, false, str_ty, lit, span);
+    let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
     let cond = tb.bool_const(true, bool_ty, span);
-    let sv1 = tb.var(s, str_ty, span);
+    let sv1 = test_var(&mut tb, s, str_ty, span);
     let call = tb.call(DeclId::NONE, set, &[sv1], &[ParamMode::Inout], void, span);
     let wl = tb.while_loop(cond, &[call], void, span);
-    let sv2 = tb.var(s, str_ty, span);
+    let sv2 = test_var(&mut tb, s, str_ty, span);
     let pr = tb.call(
         DeclId::NONE,
         print,

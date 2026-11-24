@@ -149,26 +149,29 @@ pub(super) fn analyze_try(
     let error_name = sema
         .pool
         .intern_str(&format!("__ryo_try_error_{}", r.index()));
-    let success_bindings = if source.success == sema.pool.void() {
-        Vec::new()
-    } else {
+    let success_id = (source.success != sema.pool.void())
+        .then(|| fcx.insert_temp(success_name, source.success, scope.id, span));
+    let error_id = fcx.insert_temp(error_name, source.error_set, scope.id, span);
+    let success_bindings = if let Some(id) = success_id {
         vec![MatchBinding {
             field_index: 0,
-            name: success_name,
+            id,
             ty: source.success,
         }]
+    } else {
+        Vec::new()
     };
     let error_bindings = [MatchBinding {
         field_index: 0,
-        name: error_name,
+        id: error_id,
         ty: source.error_set,
     }];
-    let success = if source.success == sema.pool.void() {
-        fcx.builder.int_const(0, source.success, span)
+    let success = if let Some(id) = success_id {
+        fcx.builder.var(id, source.success, span)
     } else {
-        fcx.builder.var(success_name, source.success, span)
+        fcx.builder.int_const(0, source.success, span)
     };
-    let error = fcx.builder.var(error_name, source.error_set, span);
+    let error = fcx.builder.var(error_id, source.error_set, span);
     let returned = coerce_to_error_union(sema, fcx, error, fcx.return_type, span);
     let early_return = fcx
         .builder
@@ -331,12 +334,16 @@ pub(super) fn analyze_resolved_error_construct(
     let ty = view.ty;
     let shadowed = view.shadowed;
     if let Some((bound_name, bound)) = shadowed {
+        let binding_id = scope
+            .lookup_full(bound_name)
+            .expect("shadowed error constructor binding must remain in scope")
+            .id;
         if !view.form.positional && view.fields().count() == 0 {
             if let Some(member) = family_member {
-                let object = fcx.builder.var(bound_name, bound, span);
+                let object = fcx.builder.var(binding_id, bound, span);
                 return super::expr::analyze_value_field_access(sema, fcx, object, member, span);
             }
-            return fcx.builder.var(bound_name, bound, span);
+            return fcx.builder.var(binding_id, bound, span);
         }
         for (_, value) in view.fields() {
             analyze_expr_with(sema, fcx, scope, value, NeverMode::Reject, context.child());

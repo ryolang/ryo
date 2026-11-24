@@ -46,7 +46,7 @@ pub(super) fn resolve_var_read(
         return fcx.builder.unreachable(sema.pool.error_type(), span);
     }
     match scope.lookup(name) {
-        Some(t) => fcx.builder.var(name, t, span),
+        Some(binding) => fcx.builder.var(binding.id, binding.ty, span),
         None => {
             if !super::errors::is_rejected_error_declaration(sema, name) {
                 sema.sink.emit(Diag::error(
@@ -66,7 +66,7 @@ pub(super) fn resolve_var_read(
 /// panicked.
 fn resolve_temp_read(sema: &mut Sema<'_>, fcx: &mut FuncCtx, name: StringId, span: Span) -> TirRef {
     match fcx.destructure_temps.get(&name).copied() {
-        Some(t) => fcx.builder.var(name, t, span),
+        Some(binding) => fcx.builder.var(binding.id, binding.ty, span),
         None => {
             sema.sink.emit(Diag::error(
                 span,

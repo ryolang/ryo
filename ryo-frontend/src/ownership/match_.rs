@@ -141,7 +141,8 @@ pub(crate) fn analyze_match_switch(
         // their owner tokens — arm-local. Copy binds need no owner.
         let mut arm_binds: Vec<(TirRef, PlaceId)> = Vec::new();
         for b in arm.bindings() {
-            own.binding_of_name.insert(b.name, match_inst);
+            own.binding_of_name
+                .insert(w.tir.binding_name(b.id), match_inst);
             if w.pool.is_copy(b.ty) {
                 continue;
             }

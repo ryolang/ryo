@@ -98,6 +98,7 @@ impl BuiltProgram {
             tir.require_layout(pool)
                 .err()
                 .or_else(|| require_valid_call_names(tir, pool).err())
+                .or_else(|| tir.require_bindings().err())
         });
         let flows = if validation_error.is_some() {
             Vec::new()
@@ -884,6 +885,26 @@ mod tests {
                 .expect_err("invalid call names must fail before Flow construction");
             assert!(format!("{error:?}").contains("call name"), "{error:?}");
         }
+    }
+
+    #[test]
+    fn build_rejects_unregistered_binding_before_flow() {
+        let mut pool = InternPool::new();
+        let name = pool.intern_str("main");
+        let span = ryo_core::span::Span::EMPTY;
+        let mut builder =
+            TirBuilder::new(name, vec![], pool.void(), span).with_layout_context(&pool);
+        let read = builder.var(ryo_core::tir::BindingId::from_index(99), pool.int(), span);
+        let statement = builder.unary(TirTag::ExprStmt, pool.void(), read, span);
+        let tir = builder.finish(&[statement]);
+
+        let error = BuiltProgram::build(vec![tir], &pool)
+            .analyze(&pool, &mut DiagSink::new())
+            .expect_err("unregistered binding IDs must fail before Flow construction");
+        assert!(
+            format!("{error:?}").contains("unregistered binding 99"),
+            "{error:?}"
+        );
     }
 
     #[test]

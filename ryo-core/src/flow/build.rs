@@ -284,10 +284,11 @@ impl FlowBuilder<'_> {
         match inst.tag {
             TirTag::VarDecl => {
                 let v = self.tir.var_decl_view(stmt);
+                let name = self.tir.binding_name(v.id);
                 self.emit_expr(v.initializer);
                 let place = self.push_place(Place::Local {
                     decl: stmt,
-                    name: v.name,
+                    name,
                     ty: inst.ty,
                     mutable: v.mutable,
                 });
@@ -303,13 +304,13 @@ impl FlowBuilder<'_> {
                         ..StepFacts::default()
                     },
                 );
-                self.bind(v.name, place);
+                self.bind(name, place);
             }
             TirTag::Assign => {
                 let v = self.tir.assign_view(stmt);
                 self.emit_expr(v.value);
                 let place = self
-                    .resolve(v.name)
+                    .resolve(self.tir.binding_name(v.id))
                     .expect("assign to unresolved binding (post-sema TIR)");
                 self.record_write(place, stmt);
                 self.push_step(
@@ -327,7 +328,7 @@ impl FlowBuilder<'_> {
                 let v = self.tir.compound_assign_view(stmt);
                 self.emit_expr(v.value);
                 let place = self
-                    .resolve(v.name)
+                    .resolve(self.tir.binding_name(v.id))
                     .expect("compound-assign to unresolved binding (post-sema TIR)");
                 self.push_step(
                     stmt,
@@ -376,7 +377,11 @@ impl FlowBuilder<'_> {
                 let v = self.tir.destructure_view(stmt);
                 self.emit_expr(v.rhs);
                 let refs = self.tir.destructure_bound_owner_refs(stmt);
-                let names: Vec<StringId> = v.fields.iter().filter_map(|f| f.bind).collect();
+                let names: Vec<StringId> = v
+                    .fields
+                    .iter()
+                    .filter_map(|f| f.bind.map(|id| self.tir.binding_name(id)))
+                    .collect();
                 debug_assert_eq!(refs.len(), names.len(), "token/binding mismatch");
                 self.register_tokens(stmt, &refs, &names);
                 // Destructure bindings persist in the current scope.
@@ -712,7 +717,7 @@ impl FlowBuilder<'_> {
         let mut facts = StepFacts::default();
         match inst.data {
             crate::tir::TirData::Var(name) => {
-                facts.read = self.resolve(name);
+                facts.read = self.resolve(self.tir.binding_name(name));
             }
             crate::tir::TirData::FieldAccess { object, .. } => {
                 facts.read = self.resolve_view_base(object);
@@ -803,7 +808,7 @@ impl FlowBuilder<'_> {
     fn resolve_view_base(&self, r: TirRef) -> Option<PlaceId> {
         let inst = self.tir.inst(r);
         match inst.data {
-            crate::tir::TirData::Var(name) => self.resolve(name),
+            crate::tir::TirData::Var(name) => self.resolve(self.tir.binding_name(name)),
             crate::tir::TirData::FieldAccess { object, .. } => self.resolve_view_base(object),
             crate::tir::TirData::UnOp(operand)
                 if matches!(inst.tag, TirTag::ViewAsOwner | TirTag::ToView) =>
@@ -977,7 +982,7 @@ impl FlowBuilder<'_> {
         let ty = self.tir.inst(stmt).ty;
         let var = self.push_place(Place::LoopVar {
             loop_inst: stmt,
-            name: view.var_name,
+            name: tir.binding_name(view.id),
             ty,
         });
         self.inst_meta[stmt.index()].loop_var = Some(var);
@@ -1013,7 +1018,7 @@ impl FlowBuilder<'_> {
         self.loops.push(LoopFrame { header, exit });
         self.cur = body;
         self.push_scope();
-        self.bind(view.var_name, var);
+        self.bind(tir.binding_name(view.id), var);
         self.emit_stmts_iter(view.body);
         self.pop_scope();
         self.loops.pop();
@@ -1049,7 +1054,7 @@ impl FlowBuilder<'_> {
             .arms()
             .flat_map(|arm| arm.bindings())
             .filter(|b| !self.pool.is_copy(b.ty))
-            .map(|b| b.name)
+            .map(|b| self.tir.binding_name(b.id))
             .collect();
         debug_assert_eq!(tokens.len(), names.len(), "token/binding mismatch");
         self.register_tokens(stmt, &tokens, &names);
@@ -1107,7 +1112,8 @@ impl FlowBuilder<'_> {
                     let place = token_iter
                         .next()
                         .expect("token count mismatch with by-move bindings");
-                    self.bind(binding.name, place);
+                    let name = self.tir.binding_name(binding.id);
+                    self.bind(name, place);
                 }
             }
             match arm.body {
