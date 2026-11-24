@@ -1424,8 +1424,8 @@ fn analyze_destructure(
 
 /// Register destructuring names after failed validation and declare recovery
 /// places for newly minted IDs over an `Unreachable` rhs. Existing IDs keep
-/// their original places. Later uses resolve without cascaded diagnostics,
-/// and the placeholder keeps the body out of codegen.
+/// their original places. Recovery fields use sequential numeric indices,
+/// never raw named selectors; an empty plan remains a plain `Unreachable`.
 fn fail_destructure_registered(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -1437,7 +1437,7 @@ fn fail_destructure_registered(
 ) -> TirRef {
     let error_ty = sema.pool.error_type();
     let mut recovery_plan = Vec::new();
-    for (field_index, bind) in plan {
+    for (_, bind) in plan {
         let Some(name) = bind else { continue };
         if sema.pool.str(*name) == "_" {
             continue;
@@ -1463,9 +1463,13 @@ fn fail_destructure_registered(
         {
             continue;
         }
-        recovery_plan.push((*field_index, Some(id), ty));
+        let field_index = recovery_plan.len() as u32;
+        recovery_plan.push((field_index, Some(id), ty));
     }
     let value_ty = fcx.builder.ty_of(value_tir);
+    if recovery_plan.is_empty() {
+        return fcx.builder.unreachable(value_ty, span);
+    }
     let recovery_value = fcx.builder.unreachable(value_ty, span);
     for &(field_index, _, ty) in &recovery_plan {
         fcx.builder.field_access(value_tir, field_index, ty, span);

@@ -6,6 +6,7 @@
 
 use super::tests::*;
 use super::*;
+use ryo_core::tir::TirTag;
 
 #[test]
 fn rename_typo_does_not_also_report_coverage() {
@@ -90,4 +91,27 @@ fn arity_error_never_leaks_compiler_temp_names() {
         "got: {}",
         d.message
     );
+}
+
+#[test]
+fn named_recovery_uses_canonical_sequential_field_indices() {
+    let src = "struct P:\n\tx: int\n\nfn main():\n\tp = P{x=1}\n\t{z = a} = p\n\tprint(a)\n";
+    let (tirs, diags, pool) = run_with_errors(src);
+    assert_eq!(count_code(&diags, DiagCode::DestructureUnknownField), 1);
+    assert_eq!(diags.len(), 1, "diagnostics: {diags:?}");
+    let main = tir_named(&tirs, &pool, "main");
+    let recovery = (1..main.instructions.len())
+        .map(|index| TirRef::from_raw(index as u32))
+        .rfind(|reference| main.inst(*reference).tag == TirTag::Destructure)
+        .expect("recovery destructure");
+    let view = main.destructure_view(recovery);
+    assert_eq!(view.fields.len(), 1);
+    assert_eq!(
+        view.fields[0].field_index, 0,
+        "raw StringId selector leaked"
+    );
+    let binding = view.fields[0].bind.expect("recovery binding");
+    assert_eq!(main.destructure_bound_owner_refs(recovery).len(), 1);
+    let flow = ryo_core::flow::Flow::build(main, &pool);
+    assert!(flow.resolve(binding).is_some(), "recovery token place");
 }
