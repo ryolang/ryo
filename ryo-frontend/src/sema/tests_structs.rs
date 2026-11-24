@@ -694,3 +694,27 @@ fn failed_forward_reference_diagnostic_is_not_repeated_after_resume() {
     assert_eq!(count_code(&diags, DiagCode::UnknownType), 1, "{diags:?}");
     assert_eq!(count_code(&diags, DiagCode::InfiniteSize), 1, "{diags:?}");
 }
+
+#[test]
+fn cycle_in_multi_reference_field_is_diagnosed_once() {
+    let (_tirs, diags, _pool) = run_with_errors(
+        "struct Node:\n\tnext: (Node | Later)!int\nstruct Later:\n\tvalue: int\nfn main():\n\treturn\n",
+    );
+    assert_eq!(count_code(&diags, DiagCode::InfiniteSize), 1, "{diags:?}");
+}
+
+#[test]
+fn resuming_after_a_cycle_does_not_exhaust_diagnostics() {
+    let mut src = String::from("struct Node:\n\tnext: Node\n");
+    for index in 0..120 {
+        src.push_str(&format!("\tlater{index}: Later{index}\n"));
+    }
+    for index in 0..120 {
+        src.push_str(&format!("struct Later{index}:\n\tvalue: int\n"));
+    }
+    src.push_str("struct Other:\n\tvalue: Missing\nfn main():\n\treturn\n");
+
+    let (_tirs, diags, _pool) = run_with_errors(&src);
+    assert_eq!(count_code(&diags, DiagCode::InfiniteSize), 1, "{diags:?}");
+    assert_eq!(count_code(&diags, DiagCode::UnknownType), 1, "{diags:?}");
+}

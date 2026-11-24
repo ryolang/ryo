@@ -71,6 +71,12 @@ enum NominalEntry {
 
 type ResolvedFields = (Vec<(StringId, TypeId, Span)>, bool);
 
+struct FieldProgress {
+    next_field: usize,
+    resolved: Vec<(StringId, TypeId, Span)>,
+    failed: bool,
+}
+
 struct NominalResolver<'a, 'b> {
     sema: &'a mut Sema<'b>,
     entries: HashMap<StringId, NominalEntry>,
@@ -82,6 +88,8 @@ struct NominalResolver<'a, 'b> {
     accepted_family_members: Vec<Vec<StringId>>,
     family_has_linked_decls: Vec<bool>,
     validated_enum_variants: HashSet<(StringId, usize)>,
+    field_progress: HashMap<(StringId, usize), FieldProgress>,
+    cycle_diagnostics: HashSet<(StringId, usize, StringId, StringId)>,
 }
 
 pub(super) fn declare_and_define(sema: &mut Sema<'_>) {
@@ -141,6 +149,8 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
             accepted_family_members: vec![Vec::new(); family_count],
             family_has_linked_decls: vec![false; family_count],
             validated_enum_variants: HashSet::new(),
+            field_progress: HashMap::new(),
+            cycle_diagnostics: HashSet::new(),
         }
     }
 
@@ -619,6 +629,7 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
 
     fn order_ref(
         &mut self,
+        owner: (StringId, usize),
         name: StringId,
         span: Span,
         field: StringId,
@@ -637,16 +648,21 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
         };
         match self.states[&name] {
             DefState::InProgress => {
-                self.sema.sink.emit(Diag::error(
-                    span,
-                    DiagCode::InfiniteSize,
-                    format!(
-                        "{noun} '{}' cannot contain itself by value: field '{}' has type '{}', which would make its size infinite",
-                        self.sema.pool.str(name),
-                        self.sema.pool.str(field),
-                        self.sema.pool.str(name),
-                    ),
-                ));
+                if self
+                    .cycle_diagnostics
+                    .insert((owner.0, owner.1, field, name))
+                {
+                    self.sema.sink.emit(Diag::error(
+                        span,
+                        DiagCode::InfiniteSize,
+                        format!(
+                            "{noun} '{}' cannot contain itself by value: field '{}' has type '{}', which would make its size infinite",
+                            self.sema.pool.str(name),
+                            self.sema.pool.str(field),
+                            self.sema.pool.str(name),
+                        ),
+                    ));
+                }
                 Some(true)
             }
             DefState::Pending => {
@@ -660,30 +676,42 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
 
     fn resolve_fields(
         &mut self,
+        owner: (StringId, usize),
         fields: &[(StringId, TypeExprId, Span)],
         work: &mut Vec<StringId>,
     ) -> Option<ResolvedFields> {
-        let mut resolved = Vec::with_capacity(fields.len());
-        let mut failed = false;
+        let mut progress = self
+            .field_progress
+            .remove(&owner)
+            .unwrap_or_else(|| FieldProgress {
+                next_field: 0,
+                resolved: Vec::with_capacity(fields.len()),
+                failed: false,
+            });
         let mut refs = Vec::new();
-        for &(field_name, type_expr, span) in fields {
+        for (field_index, &(field_name, type_expr, span)) in
+            fields.iter().enumerate().skip(progress.next_field)
+        {
             refs.clear();
             named_refs_in(self.sema, type_expr, &mut refs);
             for &(name, is_view, ref_span) in &refs {
                 if is_view || self.sema.is_primitive(name) {
                     continue;
                 }
-                if self.order_ref(name, ref_span, field_name, work)? {
-                    failed = true;
-                }
+                let Some(failed_dependency) =
+                    self.order_ref(owner, name, ref_span, field_name, work)
+                else {
+                    self.field_progress.insert(owner, progress);
+                    return None;
+                };
+                progress.failed |= failed_dependency;
             }
             let ty = self.sema.resolve_type_expr(type_expr, false);
-            if self.sema.pool.is_error(ty) {
-                failed = true;
-            }
-            resolved.push((field_name, ty, span));
+            progress.failed |= self.sema.pool.is_error(ty);
+            progress.resolved.push((field_name, ty, span));
+            progress.next_field = field_index + 1;
         }
-        Some((resolved, failed))
+        Some((progress.resolved, progress.failed))
     }
 
     fn check_derive_eq(
@@ -752,7 +780,7 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
             self.states.insert(name, DefState::Failed);
             return Some(());
         }
-        let (fields, failed) = self.resolve_fields(&source_fields, work)?;
+        let (fields, failed) = self.resolve_fields((name, 0), &source_fields, work)?;
         if failed {
             self.states.insert(name, DefState::Failed);
             return Some(());
@@ -839,7 +867,7 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
             let (resolved, payload_failed) = if duplicate {
                 (Vec::new(), false)
             } else {
-                self.resolve_fields(&source_fields, work)?
+                self.resolve_fields((name, variant_index), &source_fields, work)?
             };
             failed |= duplicate | payload_failed;
             fields.extend(resolved.iter().copied());
@@ -917,7 +945,7 @@ impl<'a, 'b> NominalResolver<'a, 'b> {
             self.states.insert(name, DefState::Failed);
             return Some(());
         }
-        let (fields, failed) = self.resolve_fields(&source_fields, work)?;
+        let (fields, failed) = self.resolve_fields((name, 0), &source_fields, work)?;
         if failed {
             self.states.insert(name, DefState::Failed);
             return Some(());
@@ -1049,6 +1077,25 @@ impl Sema<'_> {
         }
     }
 
+    fn resolve_named_type_expr(
+        &mut self,
+        name: StringId,
+        is_view: bool,
+        span: Span,
+        allow_inferred: bool,
+    ) -> TypeId {
+        if is_view {
+            return self.resolve_type_name(name, true, span);
+        }
+        if allow_inferred && name == self.type_names.void {
+            self.pool.void()
+        } else if allow_inferred && name == self.type_names.never {
+            self.pool.never()
+        } else {
+            self.resolve_type_name(name, false, span)
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(super) fn resolve_type_expr(&mut self, id: TypeExprId, allow_inferred: bool) -> TypeId {
         let cache_slot = usize::from(allow_inferred);
@@ -1057,13 +1104,7 @@ impl Sema<'_> {
         }
         let expr = self.uir.type_expr(id);
         if let UirTypeExprKind::Name { name, is_view } = expr.kind {
-            let resolved = if allow_inferred && name == self.type_names.void {
-                self.pool.void()
-            } else if allow_inferred && name == self.type_names.never {
-                self.pool.never()
-            } else {
-                self.resolve_type_name(name, is_view, expr.span)
-            };
+            let resolved = self.resolve_named_type_expr(name, is_view, expr.span, allow_inferred);
             if self.pool.is_error(resolved) {
                 self.ensure_type_expr_cache();
             }
@@ -1094,13 +1135,12 @@ impl Sema<'_> {
                     let expr = self.uir.type_expr(id);
                     match expr.kind {
                         UirTypeExprKind::Name { name, is_view } => {
-                            let resolved = if allow_inferred && name == self.type_names.void {
-                                self.pool.void()
-                            } else if allow_inferred && name == self.type_names.never {
-                                self.pool.never()
-                            } else {
-                                self.resolve_type_name(name, is_view, expr.span)
-                            };
+                            let resolved = self.resolve_named_type_expr(
+                                name,
+                                is_view,
+                                expr.span,
+                                allow_inferred,
+                            );
                             self.cache_type_expr(id, cache_slot, resolved);
                             results.push(resolved);
                         }

@@ -260,6 +260,16 @@ fn explicit_never_return_annotation_resolves() {
 }
 
 #[test]
+fn view_syntax_is_rejected_in_return_annotations() {
+    for annotation in ["&void", "&never"] {
+        let src = format!("fn bad() -> {annotation}:\n\treturn\n");
+        let (_tirs, diags, _pool) = run_with_errors(&src);
+        assert_eq!(count_code(&diags, DiagCode::UnknownType), 1, "{diags:?}");
+        assert!(diags[0].message.contains("unknown view type"), "{diags:?}");
+    }
+}
+
+#[test]
 fn print_call_has_void_type() {
     // `print(...)` as a bare expression statement is the
     // canonical M8a form. The Call instruction itself is

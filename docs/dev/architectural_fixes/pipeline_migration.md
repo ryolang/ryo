@@ -133,7 +133,9 @@ current-UIR-local slots instead of indexing bodies by the declaration-table inde
 pending/in-progress/defined/failed states. Empty nominal programs skip resolver allocation, and
 `Utf8Error` is laid out on first name resolution. Acyclic declarations use dependency post-order so
 valid layouts are constructed once; cycles and duplicate-field units return to the source-order
-work-stack resolver, preserving diagnostic order and `InfiniteSize` behavior. Type-expression
+work-stack resolver, preserving diagnostic order and `InfiniteSize` behavior. Resumable declarations
+retain per-field progress and accumulated failure state, and each cycle is diagnosed at most once
+per declaration field and dependency. Type-expression
 collection and resolution use explicit stacks rather than the Rust call stack. Error-family member
 links preserve first-wins lookup and a lexically ordered owner index. Sema resolves every parameter
 and return signature before body scheduling. Programs without inferred unions analyze directly in
