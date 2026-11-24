@@ -257,9 +257,10 @@ fn last_use_inside_loop_anchors_after_loop() {
     let decl = test_var_decl(&mut tb, s, false, str_ty, lit_a, span);
     let zero = tb.int_const(0, int_ty, span);
     let three = tb.int_const(3, int_ty, span);
+    let induction = test_declare(&mut tb, i, int_ty, false);
     let sv = test_var(&mut tb, s, str_ty, span);
     let pr = tb.call(DeclId::NONE, print, &[sv], &[ParamMode::Borrow], void, span);
-    let fr = test_for_range(&mut tb, i, zero, three, &[pr], void, span);
+    let fr = test_for_range(&mut tb, induction, zero, three, &[pr], void, span);
     let tir = tb.finish(&[decl, fr]);
     let mut sink = DiagSink::new();
     let mut sidecar = check(
@@ -573,6 +574,7 @@ fn temp_last_use_inside_loop_not_reanchored() {
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let zero = tb.int_const(0, int_ty, span);
     let three = tb.int_const(3, int_ty, span);
+    let induction = test_declare(&mut tb, i, int_ty, false);
     let iv = test_var(&mut tb, i, int_ty, span);
     let call = tb.call(
         DeclId::NONE,
@@ -590,7 +592,7 @@ fn temp_last_use_inside_loop_not_reanchored() {
         void,
         span,
     );
-    let fr = test_for_range(&mut tb, i, zero, three, &[pr], void, span);
+    let fr = test_for_range(&mut tb, induction, zero, three, &[pr], void, span);
     let tir = tb.finish(&[fr]);
     let mut sink = DiagSink::new();
     let mut sidecar = check(

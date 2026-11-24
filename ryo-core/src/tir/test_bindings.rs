@@ -75,14 +75,13 @@ pub(crate) fn compound_assign(
 
 pub(crate) fn for_range(
     builder: &mut TirBuilder,
-    name: StringId,
+    id: BindingId,
     start: TirRef,
     end: TirRef,
     body: &[TirRef],
     ty: TypeId,
     span: Span,
 ) -> TirRef {
-    let id = declare(builder, name, ty, false);
     builder.for_range(id, start, end, body, ty, span)
 }
 

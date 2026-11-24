@@ -576,14 +576,16 @@ fn for_range_wire_fixture() {
     let s1 = TirRef::from_raw(21);
     let s2 = TirRef::from_raw(22);
 
-    let empty = for_range(&mut b, var_name, start, end, &[], int_ty, sp());
+    let empty_id = declare(&mut b, var_name, int_ty, false);
+    let empty = for_range(&mut b, empty_id, start, end, &[], int_ty, sp());
     let TirData::Extra(range) = b.instructions[empty.index()].data else {
         panic!("ForRange must carry TirData::Extra");
     };
     assert_eq!(range, ExtraRange { offset: 5, len: 4 });
     assert_eq!(&b.extra[5..9], &[0, 5, 9, 0]);
 
-    let pop = for_range(&mut b, var_name, start, end, &[s1, s2], int_ty, sp());
+    let pop_id = declare(&mut b, var_name, int_ty, false);
+    let pop = for_range(&mut b, pop_id, start, end, &[s1, s2], int_ty, sp());
     let TirData::Extra(range2) = b.instructions[pop.index()].data else {
         panic!("ForRange must carry TirData::Extra");
     };
@@ -1027,9 +1029,10 @@ fn borrowed_loop_views_preserve_headers_and_bodies() {
     let while_stmt = b.int_const(1, int_ty, sp());
     let start = b.int_const(0, int_ty, sp());
     let end = b.int_const(4, int_ty, sp());
+    let induction = declare(&mut b, name, int_ty, false);
     let for_stmt = b.int_const(2, int_ty, sp());
     let while_loop = b.while_loop(cond, &[while_stmt], void_ty, sp());
-    let for_loop = for_range(&mut b, name, start, end, &[for_stmt], void_ty, sp());
+    let for_loop = for_range(&mut b, induction, start, end, &[for_stmt], void_ty, sp());
     let tir = b.finish(&[while_loop, for_loop]);
 
     let view = tir.while_loop_view(while_loop);
@@ -1354,7 +1357,8 @@ fn walk_operands_visits_if_and_loop_payloads_in_order() {
         sp(),
     );
     let while_loop = b.while_loop(while_cond, &[while_a, while_b], void_ty, sp());
-    let for_loop = for_range(&mut b, name, start, end, &[for_stmt], void_ty, sp());
+    let induction = declare(&mut b, name, int_ty, false);
+    let for_loop = for_range(&mut b, induction, start, end, &[for_stmt], void_ty, sp());
     let tir = b.finish(&[if_stmt, while_loop, for_loop]);
 
     assert_eq!(
@@ -1457,12 +1461,13 @@ fn collect_jump_path_iter_borrows_nested_loop_bodies() {
 
     let start = b.int_const(0, int_ty, sp());
     let end = b.int_const(4, int_ty, sp());
+    let induction = declare(&mut b, loop_var, int_ty, false);
     let for_before = b.int_const(5, int_ty, sp());
     let for_target = b.int_const(6, int_ty, sp());
     let for_after = b.int_const(7, int_ty, sp());
     let for_loop = for_range(
         &mut b,
-        loop_var,
+        induction,
         start,
         end,
         &[for_before, for_target, for_after],

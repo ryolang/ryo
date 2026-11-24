@@ -221,8 +221,9 @@ fn for_loop_dead_join_does_not_emit_backedge() {
     let ten = b.int_const(10, cx.int, sp());
     let brk = b.break_stmt(cx.never, sp());
     let cont = b.continue_stmt(cx.never, sp());
+    let induction = declare(&mut b, cx.i, cx.int, false);
     let body_stmt = b.if_stmt(cond_if, &[brk], &[], Some(&[cont]), cx.void, sp());
-    let for_stmt = for_range(&mut b, cx.i, zero, ten, &[body_stmt], cx.void, sp());
+    let for_stmt = for_range(&mut b, induction, zero, ten, &[body_stmt], cx.void, sp());
     let tir = b.finish(&[for_stmt]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -248,10 +249,24 @@ fn for_loop_binds_induction_place_in_body_scope() {
     let mut b = cx.builder();
     let zero = b.int_const(0, int, sp());
     let ten = b.int_const(10, int, sp());
+    let induction = declare(&mut b, cx.i, int, false);
     let read_i = var(&mut b, cx.i, int, sp());
     let expr = b.unary(TirTag::ExprStmt, cx.void, read_i, sp());
-    let f = for_range(&mut b, cx.i, zero, ten, &[expr], cx.void, sp());
+    let f = for_range(&mut b, induction, zero, ten, &[expr], cx.void, sp());
     let tir = b.finish(&[f]);
+
+    let loop_view = tir.for_range_view(f);
+    let crate::tir::TirData::Var(read_id) = tir.inst(read_i).data else {
+        panic!("body instruction must remain a variable read")
+    };
+    assert_eq!(read_id, loop_view.id);
+    assert_eq!(
+        tir.bindings()
+            .get(loop_view.id)
+            .expect("induction metadata")
+            .ty,
+        int
+    );
 
     let flow = Flow::build(&tir, &cx.pool);
     let var_place = flow.loop_var(f).expect("loop var place");
@@ -636,7 +651,8 @@ fn for_bounds_steps_live_in_preheader() {
     let start_name = cx.pool.intern_str("start");
     let start_call = b.call(DeclId::NONE, start_name, &[], &[], int, sp());
     let end = b.int_const(3, int, sp());
-    let f = for_range(&mut b, cx.i, start_call, end, &[], cx.void, sp());
+    let induction = declare(&mut b, cx.i, int, false);
+    let f = for_range(&mut b, induction, start_call, end, &[], cx.void, sp());
     let tir = b.finish(&[f]);
 
     let flow = Flow::build(&tir, &cx.pool);
@@ -820,7 +836,8 @@ fn for_and_while_backedges_resolve_to_their_test_headers() {
     let cond = var(&mut b, t, bool_ty, sp());
     let zero = b.int_const(0, int, sp());
     let three = b.int_const(3, int, sp());
-    let f = for_range(&mut b, cx.i, zero, three, &[], cx.void, sp());
+    let induction = declare(&mut b, cx.i, int, false);
+    let f = for_range(&mut b, induction, zero, three, &[], cx.void, sp());
     let whl = b.while_loop(cond, &[f], cx.void, sp());
     let tir = b.finish(&[whl]);
 
@@ -1308,9 +1325,10 @@ fn fire_points_loop_payload_resolves_the_exit_block() {
     let mut b = cx.builder();
     let zero = b.int_const(0, int, sp());
     let ten = b.int_const(10, int, sp());
+    let induction = declare(&mut b, cx.i, int, false);
     let read_i = var(&mut b, cx.i, int, sp());
     let expr = b.unary(TirTag::ExprStmt, cx.void, read_i, sp());
-    let f = for_range(&mut b, cx.i, zero, ten, &[expr], cx.void, sp());
+    let f = for_range(&mut b, induction, zero, ten, &[expr], cx.void, sp());
     let tir = b.finish(&[f]);
     let flow = Flow::build(&tir, &cx.pool);
     let fp = FirePoints::new(&flow);

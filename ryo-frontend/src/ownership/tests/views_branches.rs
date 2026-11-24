@@ -1185,11 +1185,12 @@ fn for_range_deferred_view_stays_frozen_across_arm_without_read() {
         void,
         span,
     );
+    let induction = test_declare(&mut tb, i, int_ty, false);
     let pstmt = tb.unary(TirTag::ExprStmt, void, pcall, span);
     let ifs = tb.if_stmt(cond, &[push_stmt], &[], Some(&[pstmt]), void, span);
     let i0b = tb.int_const(0, int_ty, span);
     let i3 = tb.int_const(3, int_ty, span);
-    let fr = test_for_range(&mut tb, i, i0b, i3, &[ifs], void, span);
+    let fr = test_for_range(&mut tb, induction, i0b, i3, &[ifs], void, span);
     let tir = tb.finish(&[decl, vdecl, fr]);
 
     let mut sink = DiagSink::new();

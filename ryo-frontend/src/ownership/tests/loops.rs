@@ -856,10 +856,11 @@ fn loop_nesting_chains_depth_three() {
     let cond_w1 = tb.bool_const(true, bool_ty, span);
     let cond_w2 = tb.bool_const(true, bool_ty, span);
     let lit = tb.str_const(deep, str_ty, span);
+    let induction = test_declare(&mut tb, i, int_ty, false);
     let print_call = tb.call(DeclId::NONE, print, &[lit], &all_borrow(&[lit]), void, span);
     let wl_inner = tb.while_loop(cond_w2, &[print_call], void, span);
     let wl_outer = tb.while_loop(cond_w1, &[wl_inner], void, span);
-    let fr = test_for_range(&mut tb, i, start, end, &[wl_outer], void, span);
+    let fr = test_for_range(&mut tb, induction, start, end, &[wl_outer], void, span);
     let tir = tb.finish(&[fr]);
 
     let flow = ryo_core::flow::Flow::build(&tir, &pool);

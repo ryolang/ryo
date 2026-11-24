@@ -78,14 +78,13 @@ pub(super) fn test_assign(
 
 pub(super) fn test_for_range(
     builder: &mut ryo_core::tir::TirBuilder,
-    name: ryo_core::types::StringId,
+    id: ryo_core::tir::BindingId,
     start: TirRef,
     end: TirRef,
     body: &[TirRef],
     ty: ryo_core::types::TypeId,
     span: ryo_core::span::Span,
 ) -> TirRef {
-    let id = test_declare(builder, name, ty, false);
     builder.for_range(id, start, end, body, ty, span)
 }
 
