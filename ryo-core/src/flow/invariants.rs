@@ -11,7 +11,7 @@ use crate::tir::{ChildKind, Tir, TirRef, TirTag};
 use crate::types::InternPool;
 
 pub(super) fn validate_flow(flow: &Flow, tir: &Tir, pool: &InternPool) {
-    if let Err(error) = flow.require_bindings(tir) {
+    if let Err(error) = flow.require_bindings(tir, pool) {
         debug_assert!(false, "{error}");
     }
     check_termination_and_reachability(flow);

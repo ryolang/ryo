@@ -126,7 +126,7 @@ impl BuiltProgram {
         }
         for (tir, flow) in self.tirs.iter().zip(&self.flows) {
             flow.require_layout(pool)?;
-            flow.require_bindings(tir)?;
+            flow.require_bindings(tir, pool)?;
         }
         Ok(AnalysisReady {
             tirs: &self.tirs,
@@ -225,7 +225,7 @@ impl CleanupProgram {
         }
         for (tir, flow) in self.built.tirs.iter().zip(&self.built.flows) {
             flow.require_layout(pool)?;
-            flow.require_bindings(tir)?;
+            flow.require_bindings(tir, pool)?;
         }
         let mut body_ids = std::collections::HashSet::with_capacity(self.built.tirs.len());
         let mut body_names = std::collections::HashSet::with_capacity(self.built.tirs.len());

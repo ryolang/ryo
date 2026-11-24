@@ -1253,9 +1253,132 @@ fn flow_rejects_cross_body_binding_id() {
     ));
 
     let error = flow
-        .require_bindings(&bodies[1])
+        .require_bindings(&bodies[1], &cx.pool)
         .expect_err("an in-range ID from another body is not provenance");
     assert!(error.contains("different typed body"), "{error}");
+}
+
+fn restamp_malformed_artifact(flow: &mut Flow, tir: &crate::tir::Tir) {
+    flow.content_stamp = flow.representation_stamp();
+    flow.require_body(tir)
+        .expect("malformed identity data must reach require_bindings");
+}
+
+#[test]
+fn flow_rejects_invalid_dense_binding_entries() {
+    let mut cx = Ctx::new();
+    let int = cx.int;
+    let mut b = cx.builder();
+    let root_id = scoped_binding(&mut b, cx.x, int, 0);
+    let one = b.int_const(1, int, sp());
+    let root = b.var_decl(root_id, false, int, one, sp());
+    let field = cx.pool.intern_str("field");
+    let pair_ty = cx.pool.anon_struct(&[(field, int)]);
+    let value = b.int_const(2, int, sp());
+    let scrutinee = b.struct_lit(pair_ty, &[(0, value)], sp());
+    let copy_id = scoped_binding(&mut b, cx.i, int, 1);
+    let match_ = b.match_expr(
+        scrutinee,
+        cx.void,
+        &[TypedMatchArm {
+            span: sp(),
+            discriminant: crate::tir::Discriminant::Wildcard,
+            bindings: &[crate::tir::MatchBinding {
+                field_index: 0,
+                id: copy_id,
+                ty: int,
+            }],
+            guards: &[],
+            body: TypedMatchBody::Stmts(&[]),
+        }],
+        sp(),
+    );
+    let tir = b.finish(&[root, match_]);
+    let flow = Flow::build(&tir, &cx.pool);
+    let root_place = flow.local_of_decl(root).expect("root place");
+    assert_eq!(flow.resolve(copy_id), None);
+
+    for (label, entry) in [
+        ("aliased dense entry", Some(root_place)),
+        ("out-of-bounds dense entry", Some(PlaceId(u32::MAX))),
+    ] {
+        let mut malformed = flow.clone();
+        malformed.binding_places[copy_id.index()] = entry;
+        restamp_malformed_artifact(&mut malformed, &tir);
+        malformed.require_bindings(&tir, &cx.pool).expect_err(label);
+    }
+
+    let mut malformed = flow.clone();
+    malformed.binding_places.push(None);
+    restamp_malformed_artifact(&mut malformed, &tir);
+    malformed
+        .require_bindings(&tir, &cx.pool)
+        .expect_err("dense table length must match the TIR binding table");
+}
+
+#[test]
+fn flow_rejects_token_with_wrong_owner_instruction() {
+    let mut cx = Ctx::new();
+    let str_ty = cx.pool.str_();
+    let first_field = cx.pool.intern_str("first");
+    let second_field = cx.pool.intern_str("second");
+    let pair_ty = cx
+        .pool
+        .anon_struct(&[(first_field, str_ty), (second_field, str_ty)]);
+    let mut b = cx.builder();
+    let first_value = b.str_const(cx.pool.intern_str("first value"), str_ty, sp());
+    let second_value = b.str_const(cx.pool.intern_str("second value"), str_ty, sp());
+    let scrutinee = b.struct_lit(pair_ty, &[(0, first_value), (1, second_value)], sp());
+    let first_id = scoped_binding(&mut b, cx.x, str_ty, 1);
+    let second_id = scoped_binding(&mut b, cx.x, str_ty, 1);
+    let first_owner = b.field_access(scrutinee, 0, str_ty, sp());
+    let second_owner = b.field_access(scrutinee, 1, str_ty, sp());
+    let match_ = b.match_expr(
+        scrutinee,
+        cx.void,
+        &[
+            TypedMatchArm {
+                span: sp(),
+                discriminant: crate::tir::Discriminant::Wildcard,
+                bindings: &[crate::tir::MatchBinding {
+                    field_index: 0,
+                    id: first_id,
+                    ty: str_ty,
+                }],
+                guards: &[],
+                body: TypedMatchBody::Stmts(&[]),
+            },
+            TypedMatchArm {
+                span: sp(),
+                discriminant: crate::tir::Discriminant::Wildcard,
+                bindings: &[crate::tir::MatchBinding {
+                    field_index: 1,
+                    id: second_id,
+                    ty: str_ty,
+                }],
+                guards: &[],
+                body: TypedMatchBody::Stmts(&[]),
+            },
+        ],
+        sp(),
+    );
+    let tir = b.finish(&[match_]);
+    let flow = Flow::build(&tir, &cx.pool);
+    let token_place = flow.token_places(match_)[0];
+    assert!(matches!(
+        flow.place(token_place),
+        Place::Token { inst, .. } if *inst == first_owner
+    ));
+
+    let mut malformed = flow.clone();
+    let Place::Token { inst, .. } = &mut malformed.places[token_place.0 as usize] else {
+        panic!("fixture must contain a token")
+    };
+    *inst = second_owner;
+    restamp_malformed_artifact(&mut malformed, &tir);
+    malformed
+        .require_bindings(&tir, &cx.pool)
+        .expect_err("same-name/same-type token must retain its TIR owner-token association");
 }
 
 // ---------- fire_points (shared firing-point resolver) ----------

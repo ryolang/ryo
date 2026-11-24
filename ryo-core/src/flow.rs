@@ -466,8 +466,79 @@ impl Flow {
     }
 
     /// Validate semantic storage identities against their originating body.
-    pub fn require_bindings(&self, tir: &Tir) -> Result<(), String> {
+    pub fn require_bindings(&self, tir: &Tir, pool: &InternPool) -> Result<(), String> {
         self.require_body(tir)?;
+        if self.binding_places.len() != tir.bindings().len() {
+            return Err("Flow binding lookup length does not match its typed body".into());
+        }
+        for (index, entry) in self.binding_places.iter().enumerate() {
+            let Some(place_id) = entry else {
+                continue;
+            };
+            let binding = BindingId::from_index(index);
+            let Some(place) = self.places.get(place_id.0 as usize) else {
+                return Err(format!(
+                    "Flow binding {} lookup has an out-of-bounds place",
+                    binding.raw()
+                ));
+            };
+            if place.binding_id() != Some(binding) {
+                return Err(format!(
+                    "Flow binding {} lookup points to a different binding",
+                    binding.raw()
+                ));
+            }
+        }
+        let token_owners = if self
+            .places
+            .iter()
+            .any(|place| matches!(place, Place::Token { .. }))
+        {
+            let mut owners = vec![None; tir.bindings().len()];
+            for (index, inst) in tir.instructions.iter().enumerate().skip(1) {
+                let r = TirRef::from_raw(
+                    u32::try_from(index).expect("TIR instruction index exceeds u32"),
+                );
+                match inst.tag {
+                    crate::tir::TirTag::Match => {
+                        let refs = tir.match_by_move_owner_refs(r, pool);
+                        let bindings = tir
+                            .match_view(r)
+                            .arms()
+                            .flat_map(|arm| arm.bindings())
+                            .filter(|binding| !pool.is_copy(binding.ty))
+                            .map(|binding| binding.id);
+                        for (binding, owner) in bindings.zip(refs) {
+                            let Some(slot) = owners.get_mut(binding.index()) else {
+                                return Err(format!(
+                                    "TIR references unregistered owner binding {}",
+                                    binding.raw()
+                                ));
+                            };
+                            *slot = Some(owner);
+                        }
+                    }
+                    crate::tir::TirTag::Destructure => {
+                        let refs = tir.destructure_bound_owner_refs(r);
+                        let view = tir.destructure_view(r);
+                        let bindings = view.fields.iter().filter_map(|field| field.bind);
+                        for (binding, owner) in bindings.zip(refs) {
+                            let Some(slot) = owners.get_mut(binding.index()) else {
+                                return Err(format!(
+                                    "TIR references unregistered owner binding {}",
+                                    binding.raw()
+                                ));
+                            };
+                            *slot = Some(owner);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some(owners)
+        } else {
+            None
+        };
         for (index, place) in self.places.iter().enumerate() {
             let place_id = PlaceId(index as u32);
             let Some(binding) = place.binding_id() else {
@@ -501,7 +572,12 @@ impl Flow {
                     view.id == binding && view.mutable == *mutable
                 }
                 Place::LoopVar { loop_inst, .. } => tir.for_range_view(*loop_inst).id == binding,
-                Place::Token { .. } => true,
+                Place::Token { inst, .. } => {
+                    token_owners
+                        .as_ref()
+                        .and_then(|owners| owners.get(binding.index()).copied().flatten())
+                        == Some(*inst)
+                }
                 Place::Temp { .. } | Place::View { .. } | Place::MatchResult { .. } => {
                     unreachable!("non-binding place filtered above")
                 }
