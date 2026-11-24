@@ -7,7 +7,7 @@ use super::{
 };
 use ryo_core::spine::ChainSpine;
 use ryo_core::tir::TirRef;
-use ryo_core::types::{TypeId, TypeKind, VariantKind, ViewKind};
+use ryo_core::types::{TypeId, TypeKind, ViewKind};
 use ryo_core::uir::{InstData, InstRef, InstTag};
 use std::collections::HashMap;
 
@@ -157,7 +157,7 @@ mod struct_tasks;
 mod variant_tasks;
 use match_tasks::{BlockState, MatchState, StmtState, match_scrutinee};
 use struct_tasks::StructState;
-use variant_tasks::VariantState;
+pub(crate) use variant_tasks::VariantState;
 
 enum Task {
     Enter(InstRef, ScopeId, NeverMode),
@@ -284,7 +284,10 @@ fn analyze_machine_inner(
         Some(node) => StructState::new(node, root_target),
         None => StructState::empty(),
     };
-    let mut variant_state = VariantState::default();
+    let mut variant_state = fcx
+        .variant_states
+        .pop()
+        .unwrap_or_else(|| VariantState::new(fcx.inst_map.len()));
     match root {
         MachineRoot::Expr(node) => tasks.push(Task::Enter(node, root_scope, NeverMode::Reject)),
         MachineRoot::Block(stmts) => {
@@ -295,7 +298,7 @@ fn analyze_machine_inner(
         match task {
             Task::Enter(node, scope_id, mode) => {
                 let scope = match_state.scopes.get(scope_id);
-                if fcx.inst_map[node.index()].is_some() {
+                if fcx.get(sema.body_map(), node).is_some() {
                     let value = analyze_expr_with(sema, fcx, scope, node, mode, context.child());
                     analyzed.insert(node, value);
                     consts.insert(node, const_eval_int(sema.uir, node));
@@ -355,7 +358,9 @@ fn analyze_machine_inner(
                     continue;
                 }
                 if !composite_has_leaf_recovery(sema, scope, node)
-                    && variant_state.enter(&mut tasks, sema, node, scope_id, mode)
+                    && variant_state.enter(
+                        &mut tasks, sema, fcx, &mut calls, scope, node, scope_id, mode,
+                    )
                 {
                     continue;
                 }
@@ -371,7 +376,7 @@ fn analyze_machine_inner(
                     InstData::BinOp { lhs, .. } if is_chain_binop_tag(inst.tag) => {
                         tasks.push(Task::Exit(node, scope_id, mode));
                         tasks.push(Task::AfterLhs(node, scope_id));
-                        if is_chain(sema, lhs) && fcx.inst_map[lhs.index()].is_none() {
+                        if is_chain(sema, lhs) && fcx.get(sema.body_map(), lhs).is_none() {
                             tasks.push(Task::Enter(lhs, scope_id, NeverMode::Reject));
                         } else {
                             analyzed.insert(
@@ -390,7 +395,7 @@ fn analyze_machine_inner(
                     }
                     InstData::UnOp(operand) if matches!(inst.tag, InstTag::Neg | InstTag::Not) => {
                         tasks.push(Task::Exit(node, scope_id, mode));
-                        if is_chain(sema, operand) && fcx.inst_map[operand.index()].is_none() {
+                        if is_chain(sema, operand) && fcx.get(sema.body_map(), operand).is_none() {
                             tasks.push(Task::Enter(operand, scope_id, NeverMode::Reject));
                         } else {
                             analyzed.insert(
@@ -436,15 +441,26 @@ fn analyze_machine_inner(
                 struct_state.after_field(sema, fcx, &analyzed, node, index);
             }
             Task::VariantField(node, index, scope_id) => {
-                variant_state.before_field(&mut tasks, sema, node, index, scope_id);
+                variant_state.before_field(&mut tasks, sema, fcx, node, index, scope_id);
             }
             Task::AfterVariantField(node, index, _scope_id) => {
                 variant_state.after_field(sema, fcx, &analyzed, node, index);
             }
             Task::CallArg(node, index, scope_id) => {
                 let scope = match_state.scopes.get(scope_id);
-                let view = sema.uir.call_view(node);
-                let arg = view.args.at(index);
+                let arg = match sema.uir.inst(node).tag {
+                    InstTag::Call => sema.uir.call_view(node).args.at(index),
+                    InstTag::ErrorConstruct => {
+                        sema.uir
+                            .error_construct_view(node)
+                            .3
+                            .fields()
+                            .nth(index)
+                            .expect("scheduled candidate call argument")
+                            .1
+                    }
+                    other => unreachable!("call argument scheduled for {other:?}"),
+                };
                 let target = calls[&node]
                     .expected()
                     .and_then(|types| types.get(index))
@@ -454,7 +470,7 @@ fn analyze_machine_inner(
                 {
                     struct_state.expect(arg, target);
                     tasks.push(Task::Enter(arg, scope_id, NeverMode::Reject));
-                } else if is_chain(sema, arg) && fcx.inst_map[arg.index()].is_none() {
+                } else if is_chain(sema, arg) && fcx.get(sema.body_map(), arg).is_none() {
                     tasks.push(Task::Enter(arg, scope_id, NeverMode::Reject));
                 } else {
                     let value = analyze_expr_with(
@@ -506,7 +522,7 @@ fn analyze_machine_inner(
                 let InstData::BinOp { rhs, .. } = sema.uir.inst(node).data else {
                     unreachable!("chain tag must carry InstData::BinOp");
                 };
-                if is_chain(sema, rhs) && fcx.inst_map[rhs.index()].is_none() {
+                if is_chain(sema, rhs) && fcx.get(sema.body_map(), rhs).is_none() {
                     tasks.push(Task::Enter(rhs, scope_id, NeverMode::Reject));
                 } else {
                     analyzed.insert(
@@ -580,7 +596,7 @@ fn analyze_machine_inner(
                 if let Some(recovery) = method_recoveries.remove(&node) {
                     analyzed.insert(node, recovery);
                     consts.insert(node, ConstInt::NotConst);
-                    fcx.inst_map[node.index()] = Some(recovery);
+                    fcx.set(sema.body_map(), node, recovery);
                     continue;
                 }
                 if matches!(inst.tag, InstTag::Match | InstTag::Catch) {
@@ -592,7 +608,7 @@ fn analyze_machine_inner(
                     };
                     analyzed.insert(node, next);
                     consts.insert(node, ConstInt::NotConst);
-                    fcx.inst_map[node.index()] = Some(next);
+                    fcx.set(sema.body_map(), node, next);
                     continue;
                 }
                 if inst.tag == InstTag::Call {
@@ -612,7 +628,7 @@ fn analyze_machine_inner(
                     };
                     analyzed.insert(node, next);
                     consts.insert(node, ConstInt::NotConst);
-                    fcx.inst_map[node.index()] = Some(next);
+                    fcx.set(sema.body_map(), node, next);
                     continue;
                 }
                 match inst.data {
@@ -631,7 +647,7 @@ fn analyze_machine_inner(
                         );
                         analyzed.insert(node, next);
                         consts.insert(node, node_const);
-                        fcx.inst_map[node.index()] = Some(next);
+                        fcx.set(sema.body_map(), node, next);
                     }
                     InstData::UnOp(operand) if matches!(inst.tag, InstTag::Neg | InstTag::Not) => {
                         let (next, node_const) = analyze_unary_link(
@@ -648,7 +664,7 @@ fn analyze_machine_inner(
                         );
                         analyzed.insert(node, next);
                         consts.insert(node, node_const);
-                        fcx.inst_map[node.index()] = Some(next);
+                        fcx.set(sema.body_map(), node, next);
                     }
                     _ if is_composite_tag(inst.tag) => {
                         let leaf_context = SemaExprContext {
@@ -658,7 +674,15 @@ fn analyze_machine_inner(
                         let next = if inst.tag == InstTag::StructLit {
                             struct_state.finish(sema, fcx, scope, node, leaf_context)
                         } else if matches!(inst.tag, InstTag::EnumLit | InstTag::ErrorConstruct) {
-                            variant_state.finish(sema, fcx, scope, node, leaf_context)
+                            variant_state.finish(
+                                sema,
+                                fcx,
+                                &analyzed,
+                                &mut calls,
+                                scope,
+                                node,
+                                leaf_context,
+                            )
                         } else {
                             analyze_expr_allow_never_with(sema, fcx, scope, node, leaf_context)
                         };
@@ -669,13 +693,15 @@ fn analyze_machine_inner(
                         };
                         analyzed.insert(node, next);
                         consts.insert(node, const_eval_int(sema.uir, node));
-                        fcx.inst_map[node.index()] = Some(next);
+                        fcx.set(sema.body_map(), node, next);
                     }
                     _ => unreachable!("only scheduled nodes have exit tasks"),
                 }
             }
         }
     }
+    variant_state.reset();
+    fcx.variant_states.push(variant_state);
     match expression_root {
         Some(node) => MachineResult::Expr(analyzed[&node]),
         None => MachineResult::Stmts(block_results.pop().expect("one root block remains")),
@@ -767,7 +793,9 @@ fn field_access_has_type_recovery(sema: &Sema<'_>, scope: &Scope, node: InstRef)
         return false;
     };
     scope.lookup(name).is_none()
-        && (sema.enum_types.contains_key(&name) || sema.struct_types.contains_key(&name))
+        && (sema.enum_types.contains_key(&name)
+            || sema.struct_types.contains_key(&name)
+            || sema.error_families.contains_key(&name))
 }
 
 fn composite_has_leaf_recovery(sema: &Sema<'_>, scope: &Scope, node: InstRef) -> bool {
@@ -784,41 +812,5 @@ fn composite_has_leaf_recovery(sema: &Sema<'_>, scope: &Scope, node: InstRef) ->
                 .is_none_or(|&sty| sema.pool.is_error(sty));
         }
     }
-    if tag == InstTag::ErrorConstruct {
-        let (name, family_root, family_member, view) = sema.uir.error_construct_view(node);
-        if family_root.is_some()
-            && family_member.is_some()
-            && sema.pool.is_error(view.ty)
-            && !sema.error_types.contains_key(&name)
-        {
-            return true;
-        }
-        if sema.pool.kind(view.ty) == TypeKind::DeclaredError {
-            let kind = sema
-                .pool
-                .enum_view(view.ty)
-                .variants()
-                .next()
-                .expect("declared errors have one variant")
-                .kind;
-            return kind == VariantKind::Unit
-                && (view.positional || view.fields().next().is_some());
-        }
-    }
-    if tag != InstTag::EnumLit {
-        return false;
-    }
-    let view = sema.uir.enum_lit_view(node);
-    if sema.pool.is_error(view.ty) {
-        return true;
-    }
-    let Some(variant) = sema
-        .pool
-        .enum_view(view.ty)
-        .variants()
-        .nth(view.variant_index as usize)
-    else {
-        return true;
-    };
-    view.positional && matches!(variant.kind, VariantKind::Named | VariantKind::Unit)
+    false
 }

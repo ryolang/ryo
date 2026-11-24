@@ -77,6 +77,15 @@ fn test_uppercase_value_method_call() {
     );
 }
 
+#[test]
+fn test_uppercase_value_method_call_shadows_enum() {
+    assert_ryo_output(
+        "uppercase_value_method_call_shadows_enum",
+        "enum Shade:\n\tRed\nfn main():\n\tShade = \"hi\"\n\tprint(Shade.len())\n\tprint(\"\\n\")\n",
+        "2\n",
+    );
+}
+
 // ============================================================================
 // Milestone 4: Functions & Calls
 // ============================================================================
@@ -1379,4 +1388,25 @@ fn test_str_shadowed_by_int_assignment_does_not_panic() {
     // stdout is exactly the program's own output: the shadowed int
     // prints "2", then the outer str prints "hello".
     assert_eq!(stdout, "2hello");
+}
+
+#[test]
+fn while_true_continue_traps_instead_of_returning_wrong_type() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    for return_type in ["float", "str"] {
+        let code = format!(
+            "fn f() -> {return_type}:\n\twhile true:\n\t\tcontinue\nfn main():\n\tprint(f())\n"
+        );
+        let filename = format!("infinite_{return_type}.ryo");
+        let test_file = create_test_file(temp_dir.path(), &filename, &code);
+        let output = run_ryo_command(&["build", "--emit=clif", &filename], &test_file)
+            .expect("Failed to build infinite-loop example");
+
+        assert!(output.status.success());
+        let clif = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            clif.contains("trap user3"),
+            "missing {return_type} fall-off trap: {clif}"
+        );
+    }
 }

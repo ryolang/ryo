@@ -264,3 +264,132 @@ fn positional_access_on_non_struct_points_at_the_comma() {
         "named-key access must not get the comma note, got {diags:?}",
     );
 }
+
+#[test]
+fn sema_resolves_annotations_and_inferred_unions_from_uir() {
+    let src = "fn forward(value: Later) -> Later:\n\treturn value\n\
+               fn structural(value: {item: (int, str)}) -> {result: (bool, bytes)}:\n\tlocal: {nested: (Later, int)} = {nested=(Later{value=1}, 2)}\n\treturn {result=(true, b\"x\")}\n\
+               fn positional(value: (int, str)) -> (int, str):\n\treturn value\n\
+               fn explicit() -> Failure!int:\n\treturn 1\n\
+               fn inferred() -> !int:\n\treturn 1\n\
+               struct Later:\n\tvalue: int\n\
+               error Failure\n";
+    let (tirs, pool) = run(src).expect("Sema resolves every unresolved annotation form");
+
+    let forward = tir_named(&tirs, &pool, "forward");
+    assert_eq!(forward.params[0].ty, forward.return_type);
+    assert_eq!(pool.display(forward.return_type).to_string(), "Later");
+
+    let structural = tir_named(&tirs, &pool, "structural");
+    let parameter = pool.struct_view(structural.params[0].ty);
+    assert_eq!(pool.str(parameter.fields[0].name), "item");
+    let item = pool.struct_view(parameter.fields[0].ty);
+    assert_eq!(item.fields[0].ty, pool.int());
+    assert_eq!(item.fields[1].ty, pool.str_());
+    let result = pool.struct_view(structural.return_type);
+    assert_eq!(pool.str(result.fields[0].name), "result");
+    let result = pool.struct_view(result.fields[0].ty);
+    assert_eq!(result.fields[0].ty, pool.bool_());
+    assert_eq!(result.fields[1].ty, pool.bytes());
+    let local = structural.inst(stmt_at(structural, 0)).ty;
+    let local = pool.struct_view(local);
+    assert_eq!(pool.str(local.fields[0].name), "nested");
+    let nested = pool.struct_view(local.fields[0].ty);
+    assert_eq!(pool.display(nested.fields[0].ty).to_string(), "Later");
+    assert_eq!(nested.fields[1].ty, pool.int());
+
+    let positional = tir_named(&tirs, &pool, "positional");
+    assert_eq!(positional.params[0].ty, positional.return_type);
+    let positional_type = pool.struct_view(positional.return_type);
+    let names: Vec<_> = positional_type
+        .fields
+        .iter()
+        .map(|field| pool.str(field.name))
+        .collect();
+    assert_eq!(names, ["0", "1"]);
+    assert_eq!(positional_type.fields[0].ty, pool.int());
+    assert_eq!(positional_type.fields[1].ty, pool.str_());
+
+    let explicit = tir_named(&tirs, &pool, "explicit");
+    assert_eq!(pool.kind(explicit.return_type), TypeKind::ErrorUnion);
+    assert_eq!(
+        pool.display(explicit.return_type).to_string(),
+        "Failure!int"
+    );
+    let inferred = tir_named(&tirs, &pool, "inferred");
+    assert_eq!(pool.kind(inferred.return_type), TypeKind::ErrorUnion);
+    assert_eq!(pool.display(inferred.return_type).to_string(), "!int");
+}
+
+#[test]
+fn positional_type_expr_resolves_to_same_type_as_anon_fields() {
+    let src = "fn positional() -> (int, str):\n\treturn (1, \"a\")\n\
+               fn anon() -> {0: int, 1: str}:\n\treturn (1, \"a\")\n";
+    let (tirs, pool) = run(src).expect("both structural spellings resolve");
+    let positional = tir_named(&tirs, &pool, "positional").return_type;
+    let anon = tir_named(&tirs, &pool, "anon").return_type;
+    assert_eq!(positional, anon);
+    assert!(matches!(pool.kind(positional), TypeKind::AnonStruct));
+    let view = pool.struct_view(positional);
+    let names: Vec<&str> = view.fields.iter().map(|f| pool.str(f.name)).collect();
+    assert_eq!(names, ["0", "1"]);
+    assert_eq!(view.fields[0].ty, pool.int());
+    assert_eq!(view.fields[1].ty, pool.str_());
+}
+
+#[test]
+fn anonymous_field_unknown_type_does_not_compute_layout() {
+    let (_tirs, diags, _pool) = run_with_errors("fn f(value: {x: Missing}):\n\treturn\n");
+    assert_eq!(count_code(&diags, DiagCode::UnknownType), 1, "{diags:?}");
+}
+
+#[test]
+fn return_only_types_in_nominal_fields_are_diagnosed() {
+    for ty in ["void", "never"] {
+        let src = format!("struct Holder:\n\tvalue: {ty}\nfn main():\n\treturn\n");
+        let (_tirs, diags, _pool) = run_with_errors(&src);
+        assert_eq!(
+            count_code(&diags, DiagCode::UnknownType),
+            1,
+            "{ty}: {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn deeply_nested_nominal_field_type_resolves_without_stack_overflow() {
+    let mut pool = InternPool::new();
+    let int = pool.intern_str("int");
+    let field = pool.intern_str("value");
+    let mut builder = ryo_core::uir::UirBuilder::new();
+    let mut annotation = builder.type_name(int, false, Span::EMPTY);
+    for _ in 0..50_000 {
+        annotation = builder.type_anon(&[(field, annotation)], Span::EMPTY);
+    }
+    builder.add_struct_decl(ryo_core::uir::UirStructDecl {
+        name: pool.intern_str("Holder"),
+        name_span: Span::EMPTY,
+        attrs: ryo_core::ast::StructAttrs::default(),
+        fields: vec![ryo_core::uir::UirStructField {
+            name: field,
+            type_expr: annotation,
+            span: Span::EMPTY,
+        }],
+        span: Span::EMPTY,
+        source_index: 0,
+    });
+    builder.add_function(pool.intern_str("main"), vec![], None, &[], Span::EMPTY);
+    let uir = builder.finish().with_layout_context(&pool);
+    let mut sink = DiagSink::new();
+    let mut context = ryo_core::compilation::CompilationContext::new();
+
+    let _tirs = analyze(
+        &uir,
+        &mut pool,
+        &mut sink,
+        "deeply nested nominal field",
+        std::path::Path::new("<test>"),
+        &mut context,
+    );
+    assert!(!sink.has_errors(), "{:?}", sink.into_diags());
+}

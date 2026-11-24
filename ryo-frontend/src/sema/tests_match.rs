@@ -287,6 +287,22 @@ fn qualified_pattern_with_unknown_enum_name_is_unknown_type() {
 }
 
 #[test]
+fn failed_enum_qualified_pattern_recovers_without_layout() {
+    let src = "enum Broken:\n\tReady(x: int, x: str)\nenum Good:\n\tReady\nfn main():\n\tvalue = Good.Ready\n\tmatch value:\n\t\tBroken.Ready: 0\n\t\t_: 0\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(
+        count_code(&diags, DiagCode::DuplicateStructField),
+        1,
+        "{diags:?}"
+    );
+    assert_eq!(
+        count_code(&diags, DiagCode::UnknownMatchVariant),
+        1,
+        "{diags:?}"
+    );
+}
+
+#[test]
 fn payload_positional_overflow_is_e0122() {
     // `Circle(radius, extra):` on a one-field tuple variant — the arity
     // error reuses the construction-side UnknownVariantField wording.
@@ -568,16 +584,30 @@ pub(super) fn run_with_error_set_param(input: &str) -> (Vec<Tir>, Vec<Diag>, Int
 
     // Model the error-set binding that compiler-generated catch lowering
     // will expose to a nested source match; standalone set syntax is not
-    // part of the language.
-    let members: Vec<_> = uir.error_decls.iter().map(|decl| decl.ty).collect();
-    let error_set = pool.error_set(&members);
+    // part of the language. Sema resolves this unresolved alias.
     let body = uir
         .func_bodies
         .iter_mut()
         .find(|body| pool.str(body.name) == "inspect")
         .expect("inspect function");
     assert_eq!(body.params.len(), 1);
-    body.params[0].ty = error_set;
+    let id = body.params[0].type_expr;
+    let name = pool.intern_str("IoError");
+    uir.type_exprs[id.index()].kind = ryo_core::uir::UirTypeExprKind::Name {
+        name,
+        is_view: false,
+    };
+    let member_names = uir.error_decls.iter().map(|decl| decl.name).collect();
+    let members = uir.error_decls.iter().map(|decl| decl.name).collect();
+    uir.error_families.push(ryo_core::uir::UirErrorFamilyDecl {
+        name,
+        name_span: Span::EMPTY,
+        member_names,
+        members,
+        visibility: ryo_core::ast::DeclVisibility::Module,
+        span: Span::EMPTY,
+        source_index: u32::MAX,
+    });
 
     let mut context = CompilationContext::new();
     let tirs = analyze(
@@ -693,16 +723,12 @@ fn compiler_error_union_dispatch_synthesizes_hidden_alternatives() {
     assert_eq!(pool.error_union_view(union).success, void);
     let int = pool.int();
     let function_name = pool.intern_str("lowered");
-    let mut fcx = FuncCtx {
-        decl: DeclId::NONE,
-        builder: ryo_core::tir::TirBuilder::new(function_name, vec![], int, sp()),
-        inst_map: vec![],
-        chain_local_errors: Vec::new(),
-        return_type: int,
-        loop_depth: 0,
-        destructure_temps: Default::default(),
-        inferred_call_dependencies: Default::default(),
-    };
+    let mut fcx = FuncCtx::new(
+        DeclId::NONE,
+        0,
+        ryo_core::tir::TirBuilder::new(function_name, vec![], int, sp()),
+        0,
+    );
     let error_value = fcx.builder.enum_lit(error, 0, false, &[], sp());
     let union_value = fcx.builder.error_union_coerce(error_value, union, sp());
     let ok_body = fcx.builder.int_const(0, int, sp());
@@ -743,4 +769,118 @@ fn compiler_error_union_dispatch_synthesizes_hidden_alternatives() {
     assert_eq!(view.arm(0).discriminant, Discriminant::Variant(0));
     assert_eq!(view.arm(1).discriminant, Discriminant::Variant(1));
     assert_eq!(view.arm(1).bindings().next().unwrap().ty, error);
+}
+
+fn analyze_qualified_union_catch(member: &str) -> (Vec<Tir>, Vec<Diag>, InternPool) {
+    let args = if member == "ReadFailed" {
+        "(payload)"
+    } else {
+        ""
+    };
+    let src = format!(
+        "errors IoError:\n\tEof\n\tReadFailed(str)\nfn read() -> IoError!str:\n\treturn \"ok\"\nfn main():\n\tvalue = read() catch:\n\t\tIoError.{member}{args}: \"ok\"\n\t\t_: \"other\"\n\tprint(value)\n"
+    );
+    run_with_errors(&src)
+}
+
+fn assert_error_member_arm(
+    tir: &Tir,
+    pool: &InternPool,
+    expected: Discriminant,
+    payload: Option<(StringId, TypeId)>,
+) {
+    let found = (1..tir.instructions.len()).any(|index| {
+        let reference = TirRef::from_raw(index as u32);
+        if tir.inst(reference).tag != TirTag::Match {
+            return false;
+        }
+        let view = tir.match_view(reference);
+        if pool.kind(tir.inst(view.scrutinee).ty) != ryo_core::types::TypeKind::ErrorSet {
+            return false;
+        }
+        (0..view.len()).any(|index| {
+            let arm = view.arm(index);
+            arm.discriminant == expected
+                && payload.is_none_or(|(name, ty)| {
+                    arm.bindings()
+                        .any(|binding| binding.name == name && binding.ty == ty)
+                })
+        })
+    });
+    assert!(found, "missing nested error-member arm {expected:?}");
+}
+
+#[test]
+fn qualified_error_family_catch_patterns_resolve_members() {
+    let (tirs, diags, pool) = analyze_qualified_union_catch("Eof");
+    assert!(diags.is_empty(), "{diags:?}");
+    let main = tir_named(&tirs, &pool, "main");
+    let init = main.var_decl_view(stmt_at(main, 0)).initializer;
+    assert_eq!(main.inst(init).tag, TirTag::Match);
+    assert_error_member_arm(main, &pool, Discriminant::Variant(0), None);
+}
+
+#[test]
+fn qualified_error_family_catch_binds_str_payload() {
+    let (tirs, diags, pool) = analyze_qualified_union_catch("ReadFailed");
+    assert!(diags.is_empty(), "{diags:?}");
+    let main = tir_named(&tirs, &pool, "main");
+    let init = main.var_decl_view(stmt_at(main, 0)).initializer;
+    assert_eq!(main.inst(init).tag, TirTag::Match);
+    let payload = pool.find_str("payload").expect("payload binding");
+    assert_error_member_arm(
+        main,
+        &pool,
+        Discriminant::Variant(1),
+        Some((payload, pool.str_())),
+    );
+}
+
+#[test]
+fn unknown_error_family_catch_pattern_reports_member_not_unknown_type() {
+    let (_tirs, diags, _pool) = analyze_qualified_union_catch("Missing");
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, DiagCode::UnknownMatchVariant);
+    assert!(diags[0].message.contains("has no member 'Missing'"));
+    assert!(diags[0].message.contains("'Eof', 'ReadFailed'"));
+}
+
+#[test]
+fn wrong_qualified_error_member_uses_original_pattern_text() {
+    let src = "errors First:\n\tMember\nerrors Second:\n\tMember\nfn main():\n\tmatch First.Member:\n\t\tSecond.Member: 0\n\t\t_: 1\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, DiagCode::UnknownMatchVariant);
+    assert!(diags[0].message.contains("error pattern 'Second.Member'"));
+    assert!(!diags[0].message.contains("Second.Member.Second.Member"));
+}
+
+#[test]
+fn unknown_union_member_reports_effective_error_set() {
+    let src = "errors IoError:\n\tEof\nfn fail() -> IoError!int:\n\treturn 1\nfn main():\n\tresult = fail() catch:\n\t\tMissing: 0\n\t\t_: 1\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert!(
+        diags[0].message.contains("error set 'IoError.Eof'"),
+        "{diags:?}"
+    );
+    assert!(
+        !diags[0].message.contains("error set 'IoError!int'"),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn unknown_error_family_pattern_precedes_scrutinee_type_rejection() {
+    let src = r#"errors IoError:
+	Eof
+fn main():
+	match 1:
+		IoError.Missing: 0
+		_: 1
+"#;
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, DiagCode::UnknownMatchVariant);
+    assert!(diags[0].message.contains("has no member 'Missing'"));
 }

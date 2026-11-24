@@ -873,7 +873,7 @@ where
         // syntax error, exactly as before this form existed). Mirrors
         // the value atom: one parse, no speculation — the first
         // element parses once, then the comma decides. Yields
-        // `TypeExprKind::Positional`; astgen's resolve path interns
+        // `TypeExprKind::Positional`; Sema's resolve path interns
         // the "0"/"1" names pre-dedup.
         let positional = ty
             .clone()

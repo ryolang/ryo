@@ -210,6 +210,69 @@ fn sema_large(bencher: divan::Bencher, functions: usize) {
         });
 }
 
+fn error_family_source(members: usize) -> String {
+    let last = members - 1;
+    let mut src = String::from("errors IoError:\n");
+    for index in 0..members {
+        src.push_str(&format!("\tMember{index:03}\n"));
+    }
+    src.push_str("fn main():\n");
+    for index in 0..64 {
+        src.push_str(&format!(
+            "\tvalue{index} = IoError.Member{last:03}\n\
+             \tmatch value{index}:\n\
+             \t\tIoError.Member{last:03}: 1\n\
+             \t\t_: 0\n"
+        ));
+    }
+    src
+}
+
+#[divan::bench(args = [512])]
+fn error_family_resolution(bencher: divan::Bencher, members: usize) {
+    let src = error_family_source(members);
+    bencher
+        .with_inputs(|| {
+            let (program, pool, context) = parse_program(&src);
+            let (validation_program, mut validation_pool, mut validation_context) =
+                parse_program(&src);
+            let mut sink = ryo_core::diag::DiagSink::new();
+            let uir = ryo_frontend::astgen::generate(
+                &validation_program,
+                &mut validation_pool,
+                &mut sink,
+            );
+            let mut sema_sink = ryo_core::diag::DiagSink::new();
+            let tirs = ryo_frontend::sema::analyze(
+                &uir,
+                &mut validation_pool,
+                &mut sema_sink,
+                &src,
+                std::path::Path::new("bench.ryo"),
+                &mut validation_context,
+            );
+            assert!(!sink.has_errors() && !sema_sink.has_errors());
+            let main = validation_pool.find_str("main");
+            assert!(tirs.iter().any(|tir| Some(tir.name) == main));
+            divan::black_box(tirs);
+            (program, pool, context)
+        })
+        .bench_values(|(program, mut pool, mut context)| {
+            let mut sink = ryo_core::diag::DiagSink::new();
+            let uir = ryo_frontend::astgen::generate(&program, &mut pool, &mut sink);
+            let mut sema_sink = ryo_core::diag::DiagSink::new();
+            let tirs = ryo_frontend::sema::analyze(
+                &uir,
+                &mut pool,
+                &mut sema_sink,
+                &src,
+                std::path::Path::new("bench.ryo"),
+                &mut context,
+            );
+            divan::black_box(tirs);
+        });
+}
+
 // ============================================================================
 // Ownership benchmarks (AstGen + Sema + Ownership pipeline)
 // ============================================================================

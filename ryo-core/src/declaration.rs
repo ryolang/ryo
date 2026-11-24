@@ -145,10 +145,10 @@ impl DeclarationTable {
         pool: &crate::types::InternPool,
     ) -> Result<Vec<DeclId>, DeclarationError> {
         let mut ids = Vec::with_capacity(uir.func_bodies.len());
-        let mut new_declarations = Vec::new();
-        let mut new_names = Vec::new();
-        let mut new_name_bytes = Vec::new();
-        let mut new_mappings = Vec::new();
+        let mut new_declarations = Vec::with_capacity(uir.func_bodies.len());
+        let mut new_names = Vec::with_capacity(uir.func_bodies.len());
+        let mut new_name_bytes = Vec::with_capacity(uir.func_bodies.len().saturating_mul(16));
+        let mut new_mappings = Vec::with_capacity(uir.func_bodies.len());
         let name_base = self.name_bytes.len();
         for (uir_index, body) in uir.func_bodies.iter().enumerate() {
             let key = if body.span.source == SourceId::NONE {
@@ -193,6 +193,10 @@ impl DeclarationTable {
             new_mappings.push((key, id));
             ids.push(id);
         }
+        self.declarations.reserve(new_declarations.len());
+        self.names.reserve(new_names.len());
+        self.name_bytes.reserve(new_name_bytes.len());
+        self.by_registration_key.reserve(new_mappings.len());
         self.declarations.extend(new_declarations);
         self.names.extend(new_names);
         self.name_bytes.extend(new_name_bytes);
@@ -237,7 +241,7 @@ mod tests {
         FuncBody {
             name: pool.intern_str(name),
             params: vec![],
-            return_type: pool.void(),
+            return_type: None,
             body: ExtraRange { offset: 0, len: 0 },
             span: Span::in_source(source, start, start + 4),
         }
@@ -294,7 +298,7 @@ mod tests {
             uir.func_bodies.push(FuncBody {
                 name: pool.intern_str("main"),
                 params: vec![],
-                return_type: pool.void(),
+                return_type: None,
                 body: ExtraRange { offset: 0, len: 0 },
                 span: Span::EMPTY,
             });
@@ -405,7 +409,7 @@ mod tests {
         uir.func_bodies.push(FuncBody {
             name: foreign_name,
             params: vec![],
-            return_type: pool.void(),
+            return_type: None,
             body: ExtraRange { offset: 0, len: 0 },
             span: Span::in_source(source, 0, 4),
         });

@@ -6,14 +6,8 @@ use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, TypeId, TypeKind, ViewKind};
 use ryo_core::uir::{CallView, ExtraList, InstData, InstRef, InstTag, Span};
 
-pub(crate) fn register_utf8_error(sema: &mut Sema<'_>) -> TypeId {
-    let name = sema.pool.intern_str("Utf8Error");
-    let error = sema.pool.declare_error(name);
-    *sema.error_types.entry(name).or_insert(error)
-}
-
 pub(crate) fn utf8_error_union(sema: &mut Sema<'_>) -> TypeId {
-    let error = register_utf8_error(sema);
+    let error = super::resolution::utf8_error(sema);
     sema.pool.error_union(error, sema.pool.str_())
 }
 

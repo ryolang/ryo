@@ -693,3 +693,41 @@ fn jit_run_source_larger_than_u32_max() {
 fn jit_run_nested_catches_above_depth_limit() {
     assert_jit_nesting_rejected("nested_catches_above_depth_limit.ryo", nested_catches(255));
 }
+
+fn uppercase_inout_source(zeros: usize) -> String {
+    let mut src = String::from(
+        "fn Bump(inout value: int) -> int:\n\tvalue += 1\n\treturn value\nfn main():\n\tmut value = 0\n\tprint(",
+    );
+    for _ in 0..zeros {
+        src.push_str("0 + ");
+    }
+    src.push_str("Bump(&value))\n\tprint(value)\n");
+    src
+}
+
+#[test]
+fn jit_run_uppercase_inout_borrow_argument_at_every_depth_limit() {
+    for depth in [0, 1, 64] {
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
+        let test_file = create_test_file(
+            temp_dir.path(),
+            &format!("uppercase_inout_{depth}.ryo"),
+            &uppercase_inout_source(depth),
+        );
+        let output = run_ryo_command(
+            &["run", &format!("uppercase_inout_{depth}.ryo")],
+            &test_file,
+        )
+        .expect("Failed to run uppercase inout example");
+        assert!(
+            output.status.success(),
+            "uppercase inout failed at depth {depth}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "11",
+            "depth {depth}"
+        );
+    }
+}

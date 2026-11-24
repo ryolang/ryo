@@ -1,22 +1,6 @@
-//! `match` expression analysis: pattern resolution, E0129-E0137 diagnostics,
-//! exhaustiveness, and typed TIR `Match` emission.
-//!
-//! Resolution validates the scrutinee and each arm's literal, variant, payload,
-//! or anonymous-struct shape, collecting the results in [`MatchAnalysis`].
-//!
-//! Exhaustiveness tracks enum and error-set variant indices with a `u128`
-//! bitset or `Vec<bool>` fallback. Bool tracks both literals; int, str, and
-//! anonymous structs require a wildcard. Missing coverage emits E0129, while
-//! duplicate discriminants and arms after a wildcard emit buffered W0005.
-//!
-//! Arm typing seeds child scopes with payload bindings, joins arm types, and
-//! rejects invalid moves, mismatches, falling statement arms, and view results.
-//! Anon arms retain literal guards; errored matches recover as `Unreachable`.
-//!
-//! Pattern diagnostics use pattern spans; scrutinee diagnostics use its span.
-//! Qualified error-family patterns carry full canonical member names.
-//! Broken arms are excluded from coverage and typing while their siblings
-//! continue through both passes.
+//! `match` expression analysis: pattern resolution, exhaustiveness, and TIR emission.
+//! Arm typing binds payloads and joins results; broken arms recover independently.
+//! Sema resolves qualified error-family patterns to canonical member names.
 
 use super::{
     FuncCtx, NeverMode, Scope, ScopeParent, Sema, SemaExprContext, analyze_block_with_context,
@@ -175,9 +159,8 @@ fn analyze_match_impl(
 /// (`match &o:`, M8.2 — a legal borrow position; the match inspects the
 /// value without consuming it), a bare read of a parameter declared in
 /// the default borrow mode, and a field projection chain rooted at such
-/// a parameter (`match w.inner:` — the projection borrows with its
-/// root). The `&` marker lowers away, exactly like `&` at an `inout`
-/// call argument: the TIR operand is the inner value.
+/// a parameter (`match w.inner:`). The `&` marker lowers away, exactly
+/// like `&` at an `inout` call argument: the TIR operand is the inner value.
 pub(crate) fn analyze_scrutinee(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -198,15 +181,21 @@ pub(crate) fn analyze_scrutinee(
     }
     let borrowed = match inst.data {
         InstData::Var(name) => scope.lookup_borrowed(name),
-        // Walk `a.b.c` down to its root: a field projection of a
-        // borrowed parameter (`match w.inner:`) is borrowed exactly
-        // like a bare `w` read — a by-move bind out of it is E0133.
+        // Field projections of a borrowed parameter are also borrowed (E0133).
         InstData::FieldAccess { .. } => {
             let mut root = scrutinee;
             while let InstData::FieldAccess { object, .. } = sema.uir.inst(root).data {
                 root = object;
             }
             matches!(sema.uir.inst(root).data, InstData::Var(name) if scope.lookup_borrowed(name))
+        }
+        InstData::ErrorConstruct { .. } => {
+            let (name, family_root, family_member, view) = sema.uir.error_construct_view(scrutinee);
+            matches!((family_root, family_member), (None, None))
+                && !view.form.positional
+                && !view.form.named_parens
+                && view.fields().next().is_none()
+                && scope.lookup_borrowed(name)
         }
         _ => false,
     };
@@ -1170,6 +1159,24 @@ fn resolve_arm(
         anon_literals: Vec::new(),
         had_error: false,
     };
+    let family_member = match &arm.pattern {
+        UirPatternView::Variant {
+            enum_name, variant, ..
+        } => match super::expr::candidates::resolve_optional_match_error_path(
+            sema,
+            *enum_name,
+            *variant,
+            analysis.span,
+        ) {
+            Some(Ok(qualified)) => Some(qualified),
+            Some(Err(())) => {
+                analysis.had_error = true;
+                return analysis;
+            }
+            None => None,
+        },
+        _ => None,
+    };
     // An error-typed scrutinee (E0136 recovery or an already-errored
     // expression) makes every check uninformative — the arm is excluded
     // from exhaustiveness and binds nothing.
@@ -1177,6 +1184,7 @@ fn resolve_arm(
         analysis.had_error = true;
         return analysis;
     }
+    let family_pattern = family_member.is_some();
     match &arm.pattern {
         UirPatternView::Wildcard => {
             analysis.discriminant = Some(Discriminant::Wildcard);
@@ -1193,10 +1201,11 @@ fn resolve_arm(
                 sema,
                 scrutinee_ty,
                 *enum_name,
-                *variant,
+                family_member.unwrap_or(*variant),
                 *args,
                 &mut analysis,
                 catch,
+                family_pattern,
             );
         }
         UirPatternView::Anon { fields } => {
@@ -1255,6 +1264,7 @@ fn resolve_literal(
 
 /// Resolve an enum variant or a nominal error member against the
 /// scrutinee, then reuse the M12 payload-shape checks.
+#[allow(clippy::too_many_arguments)]
 fn resolve_variant(
     sema: &mut Sema<'_>,
     scrutinee_ty: ryo_core::types::TypeId,
@@ -1263,6 +1273,7 @@ fn resolve_variant(
     args: Option<UirVariantArgsView<'_>>,
     analysis: &mut MatchArmAnalysis,
     catch: bool,
+    family_pattern: bool,
 ) {
     let scrutinee_kind = sema.pool.kind(scrutinee_ty);
     let error_pattern = matches!(scrutinee_kind, TypeKind::DeclaredError | TypeKind::ErrorSet);
@@ -1286,7 +1297,8 @@ fn resolve_variant(
     }
     if let Some(name) = enum_name {
         if error_pattern {
-            match sema.error_types.get(&name).copied() {
+            let name = if family_pattern { variant } else { name };
+            match super::resolution::error_type(sema, name) {
                 Some(error_ty)
                     if sema
                         .pool
@@ -1299,9 +1311,8 @@ fn resolve_variant(
                         analysis.span,
                         DiagCode::UnknownMatchVariant,
                         format!(
-                            "error pattern '{}.{}' does not name a member of error set '{}'",
-                            sema.pool.str(name),
-                            sema.pool.str(variant),
+                            "error pattern '{}' does not name a member of error set '{}'",
+                            analysis.pattern_text,
                             sema.pool.display(scrutinee_ty),
                         ),
                     ));
@@ -1318,11 +1329,11 @@ fn resolve_variant(
                     return;
                 }
             }
-        } else {
+        } else if !family_pattern {
             match sema.enum_types.get(&name) {
                 Some(&ety) if ety == scrutinee_ty => {}
-                Some(&ety) => {
-                    let pattern_en = sema.pool.str(sema.pool.enum_view(ety).name()).to_string();
+                Some(_) => {
+                    let pattern_en = sema.pool.str(name).to_string();
                     let scrutinee_en = sema
                         .pool
                         .str(sema.pool.enum_view(scrutinee_ty).name())
@@ -1360,10 +1371,15 @@ fn resolve_variant(
         }
     }
 
-    let (ename, variants) = if error_pattern {
+    let (ename, variants) = if error_pattern || (union_pattern && family_pattern) {
+        let error_set = if union_pattern {
+            sema.pool.error_union_view(scrutinee_ty).error_set
+        } else {
+            scrutinee_ty
+        };
         let variants = sema
             .pool
-            .error_set_view(scrutinee_ty)
+            .error_set_view(error_set)
             .members
             .into_iter()
             .map(|member| {
@@ -1386,12 +1402,17 @@ fn resolve_variant(
         )
     };
     let Some(vidx) = variants.iter().position(|&(n, _, _)| n == variant) else {
-        emit_unknown_variant(sema, scrutinee_ty, variant, &variants, analysis);
+        let effective_ty = if union_pattern {
+            sema.pool.error_union_view(scrutinee_ty).error_set
+        } else {
+            scrutinee_ty
+        };
+        emit_unknown_variant(sema, effective_ty, variant, &variants, analysis);
         return;
     };
     let (vname, kind, fields) = &variants[vidx];
     let vname = sema.pool.str(*vname).to_string();
-    let (pattern, description) = if error_pattern {
+    let (pattern, description) = if error_pattern || (union_pattern && family_pattern) {
         (vname.clone(), format!("error '{vname}'"))
     } else {
         let ename = sema.pool.str(ename.expect("enum name")).to_string();
@@ -1404,7 +1425,11 @@ fn resolve_variant(
     let payload_ok = match kind {
         VariantKind::Unit => {
             if args.is_some() {
-                let nominal_kind = if error_pattern { "error" } else { "variant" };
+                let nominal_kind = if error_pattern || (union_pattern && family_pattern) {
+                    "error"
+                } else {
+                    "variant"
+                };
                 sema.sink.emit(Diag::error(
                     analysis.span,
                     DiagCode::UnitVariantConstructed,
@@ -1441,18 +1466,12 @@ fn emit_unknown_variant(
         TypeKind::DeclaredError | TypeKind::ErrorSet
     );
     if error_pattern {
-        if sema
-            .uir
-            .error_families
-            .iter()
-            .any(|family| family.name == variant)
-        {
+        if sema.error_families.contains_key(&variant) {
             let example = sema
-                .uir
-                .error_decls
-                .iter()
-                .map(|decl| sema.pool.str(decl.name))
-                .find(|name| name.starts_with(&format!("{}.", sema.pool.str(variant))))
+                .error_family_member_decls
+                .get(&variant)
+                .and_then(|members| members.first())
+                .map(|&name| sema.pool.str(name))
                 .unwrap_or("Family.Member")
                 .to_string();
             sema.sink.emit(Diag::error(
@@ -1468,17 +1487,14 @@ fn emit_unknown_variant(
         }
         let suffix = format!(".{}", sema.pool.str(variant));
         let mut owners: Vec<_> = sema
-            .uir
-            .error_families
+            .error_family_member_decls
             .iter()
-            .filter(|family| {
-                let qualified = format!("{}{suffix}", sema.pool.str(family.name));
-                sema.uir
-                    .error_decls
+            .filter(|(_, members)| {
+                members
                     .iter()
-                    .any(|decl| sema.pool.str(decl.name) == qualified)
+                    .any(|&decl| sema.pool.str(decl).ends_with(&suffix))
             })
-            .map(|family| family.name)
+            .map(|(&family, _)| family)
             .collect();
         owners.sort_by(|&a, &b| sema.pool.str(a).cmp(sema.pool.str(b)));
         if !owners.is_empty() {

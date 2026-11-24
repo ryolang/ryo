@@ -558,7 +558,7 @@ fn comma_separated_variants_recover_the_line() {
 fn comma_variant_single_name_keeps_historical_parse() {
     // `enum Color: Red` — a single variant name on the header line
     // (no comma) is NOT the comma form; it keeps its historical
-    // failing parse (empty body + astgen's empty-enum diagnostic).
+    // failing parse (empty body + Sema's empty-enum diagnostic).
     let (ok, _ast, errs, _pool) = lex_and_parse_recovering("enum Color: Red\n");
     assert!(ok, "recovery should still produce a partial program");
     assert!(

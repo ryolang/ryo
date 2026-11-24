@@ -189,9 +189,9 @@ fn empty_parens_unit_error() {
 #[test]
 fn positional_type_sugar_parses() {
     // `(int, str)` in a return type is TypeExprKind::Positional —
-    // sugar over the anonymous `{0: int, 1: str}`. astgen's resolve
+    // sugar over the anonymous `{0: int, 1: str}`. Sema's resolve
     // path interns the "0"/"1" names so every spelling of the shape
-    // lands on one TypeId (pinned in astgen's type-literal tests).
+    // lands on one TypeId (pinned in Sema's type-literal tests).
     let (ast, pool) =
         lex_and_parse("fn pair() -> (int, str):\n\treturn (17, \"alice\")\n").unwrap();
     let f = fn_def(&ast, only_stmt(&ast));

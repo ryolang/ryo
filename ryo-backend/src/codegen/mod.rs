@@ -1161,7 +1161,6 @@ impl<M: Module> Codegen<M> {
                 if_records: HashMap::new(),
                 loop_records: HashMap::new(),
                 match_records: HashMap::new(),
-                has_sret,
                 cleanup_plan,
                 assignment_aliases,
                 fat_binding_storage: tir

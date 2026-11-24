@@ -57,31 +57,30 @@ pub mod call_extra {
 /// Layout in `extra` for [`crate::uir::InstTag::VarDecl`]:
 ///
 /// ```text
-///   [0]  name:  StringId
-///   [1]  flags: u32  (bit 0 = mutable)
-///   [2]  ty:    u32  (TypeId, or `TY_NONE_SENTINEL` if no annotation)
-///   [3]  init:  InstRef.raw()
+///   [0]  name:      StringId
+///   [1]  flags:     u32  (bit 0 = mutable)
+///   [2]  type_expr: u32  (TypeExprId, or `TYPE_EXPR_NONE_SENTINEL`)
+///   [3]  init:      InstRef.raw()
 /// ```
 ///
-/// `TY_NONE_SENTINEL` is `u32::MAX`, which is outside any plausible
-/// `TypeId` range. Sema replaces it with the inferred type (and emits
-/// a TIR instruction whose `ty` slot is real), so codegen never sees
-/// `TY_NONE_SENTINEL`.
+/// `TYPE_EXPR_NONE_SENTINEL` is zero, which is reserved because every
+/// type-expression handle is nonzero. Sema resolves the annotation or infers
+/// the initializer's type before emitting TIR.
 pub mod var_decl_extra {
     use super::{extra_offset, len_u32};
     use crate::extra::ExtraRange;
-    use crate::types::{StringId, TypeId};
-    use crate::uir::InstRef;
+    use crate::types::StringId;
+    use crate::uir::{InstRef, TypeExprId};
 
     pub const FLAG_MUTABLE: u32 = 1 << 0;
-    pub const TY_NONE_SENTINEL: u32 = u32::MAX;
+    pub const TYPE_EXPR_NONE_SENTINEL: u32 = 0;
 
-    /// Decoded view of an [`crate::uir::InstTag::VarDecl`] payload. `ty` is `None`
-    /// when the source had no annotation.
+    /// Decoded view of an [`crate::uir::InstTag::VarDecl`] payload.
+    /// `type_expr` is `None` when the source had no annotation.
     pub struct VarDeclView {
         pub name: StringId,
         pub mutable: bool,
-        pub ty: Option<TypeId>,
+        pub type_expr: Option<TypeExprId>,
         pub initializer: InstRef,
     }
 
@@ -90,13 +89,13 @@ pub mod var_decl_extra {
         extra: &mut Vec<u32>,
         name: StringId,
         mutable: bool,
-        ty: Option<TypeId>,
+        type_expr: Option<TypeExprId>,
         init: InstRef,
     ) -> ExtraRange {
         let offset = extra_offset(extra);
         extra.push(name.raw());
         extra.push(if mutable { FLAG_MUTABLE } else { 0 });
-        extra.push(ty.map_or(TY_NONE_SENTINEL, |t| t.raw()));
+        extra.push(type_expr.map_or(TYPE_EXPR_NONE_SENTINEL, TypeExprId::raw));
         extra.push(init.raw());
         ExtraRange {
             offset,
@@ -108,17 +107,17 @@ pub mod var_decl_extra {
     pub fn decode(words: &[u32]) -> VarDeclView {
         let name = StringId::from_raw(words[0]);
         let mutable = words[1] & FLAG_MUTABLE != 0;
-        let ty_raw = words[2];
-        let ty = if ty_raw == TY_NONE_SENTINEL {
+        let type_expr_raw = words[2];
+        let type_expr = if type_expr_raw == TYPE_EXPR_NONE_SENTINEL {
             None
         } else {
-            Some(TypeId::from_raw(ty_raw))
+            Some(TypeExprId::from_raw(type_expr_raw))
         };
         let initializer = InstRef::from_raw(words[3]);
         VarDeclView {
             name,
             mutable,
-            ty,
+            type_expr,
             initializer,
         }
     }
@@ -367,7 +366,7 @@ pub mod struct_lit_extra {
     use crate::uir::InstRef;
 
     /// Anonymous-literal marker for the `0` slot (M10), mirroring
-    /// [`var_decl_extra::TY_NONE_SENTINEL`]: `u32::MAX` is outside any
+    /// [`var_decl_extra::TYPE_EXPR_NONE_SENTINEL`]: `u32::MAX` is outside any
     /// plausible `StringId` range, so it can never collide with a real
     /// (or user-interned) name. Sema infers the structural type from
     /// the field values instead of looking the name up.
@@ -645,5 +644,178 @@ pub mod if_stmt_extra {
         let refs = ExtraList::new(&slice[*pos..*pos + count]);
         *pos += count;
         refs
+    }
+}
+
+/// Unresolved enum-variant and error-construction candidates. Selectors are
+/// source positions or named `StringId` words; declaration indices and types
+/// are resolved by Sema and belong only to the TIR enum-literal wire.
+pub mod variant_extra {
+    use super::{extra_offset, len_u32};
+    use crate::extra::ExtraRange;
+    use crate::source::SourceId;
+    use crate::types::StringId;
+    use crate::uir::{InstRef, Span};
+
+    pub const FLAG_POSITIONAL: u32 = 1 << 0;
+    pub const FLAG_NAMED_PARENS: u32 = 1 << 1;
+    pub const FLAG_MIXED_FIELDS: u32 = 1 << 2;
+    pub const ENUM_HEADER_LEN: usize = 12;
+    pub const ERROR_HEADER_LEN: usize = 4;
+
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct UirVariantForm {
+        pub positional: bool,
+        pub named_parens: bool,
+        pub mixed_fields: bool,
+    }
+
+    impl UirVariantForm {
+        fn flags(self) -> u32 {
+            (u32::from(self.positional) * FLAG_POSITIONAL)
+                | (u32::from(self.named_parens) * FLAG_NAMED_PARENS)
+                | (u32::from(self.mixed_fields) * FLAG_MIXED_FIELDS)
+        }
+
+        fn from_flags(flags: u32) -> Self {
+            Self {
+                positional: flags & FLAG_POSITIONAL != 0,
+                named_parens: flags & FLAG_NAMED_PARENS != 0,
+                mixed_fields: flags & FLAG_MIXED_FIELDS != 0,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct VariantArgsView<'a> {
+        pub form: UirVariantForm,
+        args: &'a [u32],
+    }
+
+    impl VariantArgsView<'_> {
+        pub fn fields(&self) -> impl Iterator<Item = (u32, InstRef)> + '_ {
+            self.args
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&[selector, value]| (selector, InstRef::from_raw(value)))
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct EnumLitView<'a> {
+        pub enum_name: StringId,
+        pub variant: StringId,
+        pub enum_span: Span,
+        pub variant_span: Span,
+        pub form: UirVariantForm,
+        args: &'a [u32],
+    }
+
+    impl EnumLitView<'_> {
+        pub fn fields(&self) -> impl Iterator<Item = (u32, InstRef)> + '_ {
+            self.args
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&[selector, value]| (selector, InstRef::from_raw(value)))
+        }
+    }
+
+    pub fn encode_enum(
+        extra: &mut Vec<u32>,
+        enum_name: StringId,
+        variant: StringId,
+        enum_span: Span,
+        variant_span: Span,
+        form: UirVariantForm,
+        args: &[(u32, InstRef)],
+    ) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.extend([
+            enum_name.raw(),
+            variant.raw(),
+            form.flags(),
+            len_u32(args.len()),
+        ]);
+        push_span(extra, enum_span);
+        push_span(extra, variant_span);
+        push_args(extra, args);
+        ExtraRange {
+            offset,
+            len: len_u32(ENUM_HEADER_LEN + 2 * args.len()),
+        }
+    }
+
+    pub fn decode_enum(words: &[u32]) -> EnumLitView<'_> {
+        let form = UirVariantForm::from_flags(words[2]);
+        let argc = words[3] as usize;
+        EnumLitView {
+            enum_name: StringId::from_raw(words[0]),
+            variant: StringId::from_raw(words[1]),
+            enum_span: decode_span(&words[4..8]),
+            variant_span: decode_span(&words[8..12]),
+            form,
+            args: &words[ENUM_HEADER_LEN..ENUM_HEADER_LEN + 2 * argc],
+        }
+    }
+
+    pub fn encode_error(
+        extra: &mut Vec<u32>,
+        family_root: Option<StringId>,
+        family_member: Option<StringId>,
+        form: UirVariantForm,
+        args: &[(u32, InstRef)],
+    ) -> ExtraRange {
+        let offset = extra_offset(extra);
+        extra.extend([
+            family_root.map_or(u32::MAX, StringId::raw),
+            family_member.map_or(u32::MAX, StringId::raw),
+            form.flags(),
+            len_u32(args.len()),
+        ]);
+        push_args(extra, args);
+        ExtraRange {
+            offset,
+            len: len_u32(ERROR_HEADER_LEN + 2 * args.len()),
+        }
+    }
+
+    pub fn decode_error(
+        words: &[u32],
+    ) -> (Option<StringId>, Option<StringId>, VariantArgsView<'_>) {
+        let argc = words[3] as usize;
+        (
+            (words[0] != u32::MAX).then(|| StringId::from_raw(words[0])),
+            (words[1] != u32::MAX).then(|| StringId::from_raw(words[1])),
+            VariantArgsView {
+                form: UirVariantForm::from_flags(words[2]),
+                args: &words[ERROR_HEADER_LEN..ERROR_HEADER_LEN + 2 * argc],
+            },
+        )
+    }
+
+    fn push_args(extra: &mut Vec<u32>, args: &[(u32, InstRef)]) {
+        for &(selector, value) in args {
+            extra.extend([selector, value.raw()]);
+        }
+    }
+
+    fn push_span(extra: &mut Vec<u32>, span: Span) {
+        let (context, revision) = span.source.raw_parts();
+        extra.extend([
+            context,
+            revision,
+            u32::try_from(span.start).expect("variant span start exceeds UIR wire range"),
+            u32::try_from(span.end).expect("variant span end exceeds UIR wire range"),
+        ]);
+    }
+
+    fn decode_span(words: &[u32]) -> Span {
+        Span::in_source(
+            SourceId::from_raw_parts(words[0], words[1]),
+            words[2] as usize,
+            words[3] as usize,
+        )
     }
 }

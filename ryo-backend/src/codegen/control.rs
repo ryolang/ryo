@@ -1519,9 +1519,9 @@ impl<M: Module> Codegen<M> {
     }
 
     /// `return` (void) and the synthesized fall-off. The explicit form
-    /// fires its anchored frees; the fall-off is the function-end
-    /// return the old emitter synthesized when the body did not
-    /// terminate (sema E0036 guarantees it only arises for void/main).
+    /// fires its anchored frees; the fall-off returns normally only for
+    /// void/main. A non-void fall-off traps instead of fabricating a
+    /// scalar zero that would violate the function's return ABI.
     fn term_return_void(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
@@ -1546,11 +1546,13 @@ impl<M: Module> Codegen<M> {
                 if ctx.is_main {
                     let zero = builder.ins().iconst(ctx.int_type, 0);
                     Self::emit_return(builder, ctx, &[zero])?;
-                } else if ctx.has_sret || ctx.tir.return_type == ctx.pool.void() {
+                } else if ctx.tir.return_type == ctx.pool.void() {
                     Self::emit_return(builder, ctx, &[])?;
                 } else {
-                    let zero = builder.ins().iconst(ctx.int_type, 0);
-                    Self::emit_return(builder, ctx, &[zero])?;
+                    builder.ins().trap(
+                        TrapCode::user(3)
+                            .expect("user trap code 3 is within Cranelift's encodable range"),
+                    );
                 }
             }
         }

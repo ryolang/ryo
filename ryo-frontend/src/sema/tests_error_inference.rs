@@ -125,6 +125,20 @@ fn inner() -> !str:
 }
 
 #[test]
+fn explicit_caller_reads_finalized_inferred_signature() {
+    let src = r#"error A
+fn caller() -> A!int:
+	return inner()
+fn inner() -> !int:
+	return A
+"#;
+    let (tirs, pool) = run(src).expect("explicit caller should wait for inference");
+    assert_final_type(&tirs, &pool, "caller", "A!int");
+    assert_final_type(&tirs, &pool, "inner", "A!int");
+    assert_no_placeholders(&tirs, &pool);
+}
+
+#[test]
 fn inference_resolves_chains() {
     let src = r#"error A
 fn first() -> !str:
@@ -177,8 +191,8 @@ fn mutual_inferred_recursion_requires_explicit_unions() {
 }
 
 #[test]
-fn rejected_inferred_scc_members_stay_failed_in_both_source_orders() {
-    fn assert_failed_members(src: &str, first: &str, second: &str) {
+fn failed_inferred_component_preserves_caller_recovery() {
+    fn assert_recovery(src: &str) {
         let (uir, mut pool, astgen_diags) = lower(src);
         assert!(astgen_diags.is_empty(), "got {astgen_diags:?}");
         let mut sink = DiagSink::new();
@@ -191,15 +205,11 @@ fn rejected_inferred_scc_members_stay_failed_in_both_source_orders() {
             Path::new("<test>"),
             &mut context,
         );
-        sema.register_structs();
-        sema.register_enums();
-        errors::register_errors(&mut sema);
+        resolution::declare_and_define(&mut sema);
         sema.resolve_signatures();
-        error_inference::reject_recursive_inferred_components(&mut sema);
-        sema.seed_worklist();
         sema.drive();
 
-        for name in [first, second] {
+        for name in ["a", "b"] {
             let name_id = sema.pool.find_str(name).expect("SCC member name");
             let decl = sema.name_to_decl[&name_id];
             assert_eq!(sema.decl_state[decl.index()], DeclState::Failed, "{name}");
@@ -207,34 +217,59 @@ fn rejected_inferred_scc_members_stay_failed_in_both_source_orders() {
             assert!(sema.inference[decl.index()].final_union.is_none(), "{name}");
         }
 
-        let main_name = sema.pool.find_str("main").expect("main name");
-        let main_decl = sema.name_to_decl[&main_name];
-        assert_eq!(sema.decl_state[main_decl.index()], DeclState::Resolved);
-        let main_tir = sema.results[main_decl.index()]
-            .as_ref()
-            .expect("caller recovery TIR");
-        assert!(
-            main_tir
-                .instructions
-                .iter()
-                .any(|inst| inst.tag == TirTag::Unreachable)
-        );
+        for name in ["explicit", "main"] {
+            let name_id = sema.pool.find_str(name).expect("caller name");
+            let decl = sema.name_to_decl[&name_id];
+            assert_eq!(sema.decl_state[decl.index()], DeclState::Resolved, "{name}");
+            let tir = sema.results[decl.index()]
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} recovery TIR"));
+            assert!(
+                tir.instructions
+                    .iter()
+                    .any(|inst| inst.tag == TirTag::Unreachable),
+                "{name} should retain diagnostic-only recovery TIR"
+            );
+        }
         drop(sema);
         let diags = sink.into_diags();
         assert_eq!(diags.len(), 1, "unexpected cascading errors: {diags:?}");
         assert_eq!(count_code(&diags, DiagCode::CycleInResolution), 1);
     }
 
-    assert_failed_members(
-        "fn a() -> !int:\n\treturn b()\n\nfn b() -> !int:\n\treturn a()\n\nfn main():\n\tx = a()\n",
-        "a",
-        "b",
+    assert_recovery(
+        "fn a() -> !int:\n\treturn b()\n\nfn b() -> !int:\n\treturn explicit()\n\nfn explicit() -> int:\n\treturn a()\n\nfn main():\n\tx = a()\n\ty = explicit()\n",
     );
-    assert_failed_members(
-        "fn b() -> !int:\n\treturn a()\n\nfn a() -> !int:\n\treturn b()\n\nfn main():\n\tx = b()\n",
-        "b",
-        "a",
+    assert_recovery(
+        "fn explicit() -> int:\n\treturn a()\n\nfn b() -> !int:\n\treturn explicit()\n\nfn a() -> !int:\n\treturn b()\n\nfn main():\n\tx = b()\n\ty = explicit()\n",
     );
+}
+
+#[test]
+fn body_analysis_never_enters_a_second_declaration() {
+    const BODY_COUNT: usize = 128;
+    let mut src = String::from("error A\n");
+    for index in (0..BODY_COUNT).rev() {
+        if index == 0 {
+            src.push_str("fn f0() -> !int:\n\treturn A\n");
+        } else {
+            src.push_str(&format!(
+                "fn f{index}() -> !int:\n\treturn f{}()\n",
+                index - 1
+            ));
+        }
+    }
+
+    let (tirs, pool) = run(&src).expect("deep inferred chain should resolve iteratively");
+    assert_eq!(
+        tirs.iter()
+            .filter(|tir| pool.str(tir.name).starts_with('f'))
+            .count(),
+        BODY_COUNT
+    );
+    assert_final_type(&tirs, &pool, "f0", "A!int");
+    assert_final_type(&tirs, &pool, "f127", "A!int");
+    assert_no_placeholders(&tirs, &pool);
 }
 
 #[test]
@@ -303,5 +338,34 @@ fn forward(value: IoError) -> !str:
         "forward",
         "(IoError.Eof | IoError.ReadFailed | IoError.InvalidUtf8)!str",
     );
+    assert_no_placeholders(&tirs, &pool);
+}
+
+#[test]
+fn inferred_dependencies_include_unresolved_call_candidates() {
+    let src = r#"error A
+fn outer() -> !int:
+	return Inner()
+fn Inner() -> !int:
+	return A
+"#;
+    let (tirs, pool) = run(src).expect("uppercase inferred call should schedule its callee");
+    assert_final_type(&tirs, &pool, "outer", "A!int");
+    assert_final_type(&tirs, &pool, "Inner", "A!int");
+    assert_no_placeholders(&tirs, &pool);
+}
+
+#[test]
+fn utf8_constructor_does_not_create_inferred_call_edge() {
+    let src = r#"fn Utf8Error() -> !int:
+	return other()
+fn other() -> !int:
+	return Utf8Error("bad")
+fn main():
+	return
+"#;
+    let (tirs, pool) = run(src).expect("constructor must not close a call cycle");
+    assert_final_type(&tirs, &pool, "Utf8Error", "Utf8Error!int");
+    assert_final_type(&tirs, &pool, "other", "Utf8Error!int");
     assert_no_placeholders(&tirs, &pool);
 }

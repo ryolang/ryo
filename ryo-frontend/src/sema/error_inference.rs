@@ -2,7 +2,7 @@ use super::{DeclId, DeclState, FuncCtx, Sema};
 use ryo_core::diag::{Diag, DiagCode};
 use ryo_core::tir::{TirRef, TirTag};
 use ryo_core::types::{TypeId, TypeKind};
-use ryo_core::uir::{InstRef, InstTag, Span};
+use ryo_core::uir::{InstTag, Span};
 
 #[derive(Default)]
 pub(super) struct InferenceState {
@@ -13,9 +13,13 @@ pub(super) struct InferenceState {
 }
 
 pub(super) fn is_inferred(sema: &Sema<'_>, decl: DeclId) -> bool {
-    sema.pool
-        .kind(sema.uir.func_bodies[sema.body_index(decl)].return_type)
-        == TypeKind::InferredErrorUnion
+    sema.signatures.get(&decl).is_some_and(|signature| {
+        sema.pool.kind(signature.return_type) == TypeKind::InferredErrorUnion
+            || sema
+                .inference
+                .get(sema.body_index(decl))
+                .is_some_and(|state| state.final_union.is_some())
+    })
 }
 
 pub(super) fn record_members(sema: &mut Sema<'_>, decl: DeclId, members: &[TypeId]) {
@@ -50,34 +54,26 @@ pub(super) fn defer_coercion(sema: &mut Sema<'_>, decl: DeclId, coercion: TirRef
     sema.inference[index].deferred.push(coercion);
 }
 
-pub(super) fn resolve_inferred_callee(sema: &mut Sema<'_>, callee: DeclId, span: Span) -> bool {
+pub(super) fn inferred_callee_is_ready(sema: &mut Sema<'_>, callee: DeclId, span: Span) -> bool {
     if !is_inferred(sema, callee) {
         return true;
     }
-    match sema.decl_state[sema.body_index(callee)] {
-        DeclState::Resolved => {
-            return sema.inference[sema.body_index(callee)]
-                .final_union
-                .is_some();
-        }
-        DeclState::Failed => return false,
-        DeclState::InProgress => {
+    let index = sema.body_index(callee);
+    match sema.decl_state[index] {
+        DeclState::Resolved => sema.inference[index].final_union.is_some(),
+        DeclState::Failed => false,
+        DeclState::Unresolved | DeclState::InProgress => {
             sema.sink.emit(Diag::error(
                 span,
-                DiagCode::CycleInResolution,
+                DiagCode::InternalError,
                 format!(
-                    "recursive inference of '{}'; declare an explicit error union for every inferred function in the cycle",
-                    sema.pool.str(sema.uir.func_bodies[sema.body_index(callee)].name)
+                    "inferred callee '{}' was not finalized before its caller",
+                    sema.pool.str(sema.uir.func_bodies[index].name)
                 ),
             ));
-            return false;
+            false
         }
-        DeclState::Unresolved => {}
     }
-    sema.resolve_decl(callee);
-    sema.inference[sema.body_index(callee)]
-        .final_union
-        .is_some()
 }
 
 pub(super) fn finalize_inferred_function(sema: &mut Sema<'_>, decl: DeclId) -> TypeId {
@@ -85,17 +81,18 @@ pub(super) fn finalize_inferred_function(sema: &mut Sema<'_>, decl: DeclId) -> T
     let dependencies = sema.inference[index].dependencies.clone();
     for dependency in dependencies {
         let dependency_index = sema.body_index(dependency);
-        if sema.inference[dependency_index].final_union.is_none()
-            && sema.decl_state[dependency_index] == DeclState::Unresolved
-        {
-            sema.resolve_decl(dependency);
-        }
+        debug_assert!(matches!(
+            sema.decl_state[dependency_index],
+            DeclState::Resolved | DeclState::Failed
+        ));
         let members = sema.inference[dependency_index].members.clone();
         record_members(sema, decl, &members);
     }
 
-    let body = &sema.uir.func_bodies[index];
-    let success = sema.pool.error_union_view(body.return_type).success;
+    let success = sema
+        .pool
+        .error_union_view(sema.signatures[&decl].return_type)
+        .success;
     let members = sema.inference[index].members.clone();
     let error_set = sema.pool.error_set(&members);
     let final_union = sema.pool.error_union(error_set, success);
@@ -111,25 +108,15 @@ pub(super) fn finalize_inferred_function(sema: &mut Sema<'_>, decl: DeclId) -> T
         tir.instructions[coercion.index()].ty = final_union;
     }
 
-    if sema.name_to_decl.get(&body.name) == Some(&decl)
-        && let Some(signature) = sema.signatures.get_mut(&decl)
-    {
-        signature.return_type = final_union;
-    }
+    sema.signatures
+        .get_mut(&decl)
+        .expect("resolved signature")
+        .return_type = final_union;
     final_union
 }
 
-pub(super) fn reject_recursive_inferred_components(sema: &mut Sema<'_>) {
-    if !sema
-        .uir
-        .func_bodies
-        .iter()
-        .any(|body| sema.pool.kind(body.return_type) == TypeKind::InferredErrorUnion)
-    {
-        return;
-    }
-    let graph = direct_named_call_graph(sema);
-    let mut components = strongly_connected_components(&graph);
+pub(super) fn reject_recursive_inferred_components(sema: &mut Sema<'_>, graph: &[Vec<u32>]) {
+    let mut components = strongly_connected_components(graph);
     components.retain(|component| {
         let self_cycle = component.len() == 1 && {
             let node = u32::try_from(component[0]).expect("body index out of range");
@@ -168,29 +155,44 @@ pub(super) fn reject_recursive_inferred_components(sema: &mut Sema<'_>) {
     }
 }
 
-fn direct_named_call_graph(sema: &Sema<'_>) -> Vec<Vec<u32>> {
+pub(super) fn inferred_dependencies(sema: &Sema<'_>, graph: &[Vec<u32>]) -> Vec<Vec<u32>> {
+    graph
+        .iter()
+        .enumerate()
+        .map(|(caller, edges)| {
+            let mut dependencies: Vec<u32> = edges
+                .iter()
+                .copied()
+                .filter(|&callee| {
+                    callee as usize != caller
+                        && is_inferred(sema, sema.declaration_ids[callee as usize])
+                })
+                .collect();
+            dependencies.sort_unstable();
+            dependencies.dedup();
+            dependencies
+        })
+        .collect()
+}
+
+pub(super) fn direct_named_call_graph(sema: &Sema<'_>) -> Vec<Vec<u32>> {
     let mut graph = vec![Vec::new(); sema.uir.func_bodies.len()];
-    let mut start = 1usize;
-    for (index, body) in sema.uir.func_bodies.iter().enumerate() {
-        let end = sema
-            .uir
-            .body_stmts(body)
-            .into_iter()
-            .map(|stmt| stmt.index())
-            .max()
-            .unwrap_or(start.saturating_sub(1));
-        for raw in start..=end {
-            let inst = InstRef::from_raw(u32::try_from(raw).expect("UIR index out of range"));
-            if sema.uir.inst(inst).tag == InstTag::Call {
-                let name = sema.uir.call_view(inst).name;
-                if let Some(&callee) = sema.name_to_decl.get(&name) {
-                    graph[index].push(
-                        u32::try_from(sema.body_index(callee)).expect("body index out of range"),
-                    );
+    for (index, edges) in graph.iter_mut().enumerate() {
+        for &inst in sema.body_map().instructions(index) {
+            let name = match sema.uir.inst(inst).tag {
+                InstTag::Call => Some(sema.uir.call_view(inst).name),
+                InstTag::ErrorConstruct => {
+                    super::expr::candidates::unqualified_call_candidate_name(sema, inst)
                 }
+                _ => None,
+            };
+            if let Some(name) = name
+                && let Some(&callee) = sema.name_to_decl.get(&name)
+            {
+                edges
+                    .push(u32::try_from(sema.body_index(callee)).expect("body index out of range"));
             }
         }
-        start = end + 1;
     }
     graph
 }
@@ -257,4 +259,67 @@ fn strongly_connected_components(graph: &[Vec<u32>]) -> Vec<Vec<usize>> {
         }
     }
     tarjan.components
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryo_core::compilation::CompilationContext;
+    use ryo_core::diag::DiagSink;
+    use ryo_core::types::InternPool;
+    use ryo_core::uir::UirBuilder;
+    use std::path::Path;
+
+    #[test]
+    fn inferred_call_graph_uses_exact_body_membership() {
+        let mut pool = InternPool::new();
+        let first = pool.intern_str("first");
+        let second = pool.intern_str("second");
+        let mut builder = UirBuilder::new();
+
+        let call_first = builder.call(first, &[], Span::EMPTY);
+        let nested_first = builder.unary(InstTag::Neg, call_first, Span::EMPTY);
+        let first_stmt = builder.unary(InstTag::ExprStmt, nested_first, Span::EMPTY);
+
+        let call_second = builder.call(second, &[], Span::EMPTY);
+        let nested_second = builder.unary(InstTag::Not, call_second, Span::EMPTY);
+        let second_stmt = builder.unary(InstTag::ExprStmt, nested_second, Span::EMPTY);
+
+        let int_name = pool.intern_str("int");
+        let first_return = builder.type_name(int_name, false, Span::EMPTY);
+        builder.add_function(
+            first,
+            vec![],
+            Some(first_return),
+            &[second_stmt],
+            Span::EMPTY,
+        );
+        let second_return = builder.type_name(int_name, false, Span::EMPTY);
+        builder.add_function(
+            second,
+            vec![],
+            Some(second_return),
+            &[first_stmt],
+            Span::EMPTY,
+        );
+        let uir = builder.finish().with_layout_context(&pool);
+        let map = uir.compute_body_map().unwrap();
+        assert_eq!(
+            map.instructions(0),
+            [second_stmt, nested_second, call_second]
+        );
+        assert_eq!(map.instructions(1), [first_stmt, nested_first, call_first]);
+
+        let mut sink = DiagSink::new();
+        let mut context = CompilationContext::new();
+        let sema = Sema::new(
+            &uir,
+            &mut pool,
+            &mut sink,
+            "",
+            Path::new("<test>"),
+            &mut context,
+        );
+        assert_eq!(direct_named_call_graph(&sema), [vec![1], vec![0]]);
+    }
 }

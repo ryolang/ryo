@@ -59,7 +59,7 @@ Update side payloads, source provenance, and analysis tables with those referenc
 Never apply an old side table to a new body merely because its indices fit.
 Cached published artifacts remain immutable or explicitly versioned as described below.
 
-## Current pipeline: source audit on 2026-10-15
+## Current pipeline
 
 The current migration implements the supported single-instance pipeline.
 Future features in the target pipeline below retain their separate boundaries.
@@ -67,10 +67,11 @@ Verification evidence belongs in [pipeline_regression_checks.md](pipeline_regres
 
 ```mermaid
 flowchart TD
-    A[Source, AST, UIR] --> B[Sema and typed bodies]
+    A[Source, AST, unresolved UIR] --> B[Sema resolution and typed bodies]
     B --> C[Frontend BuiltProgram: TIR and Flow]
     C --> D[AnalysisReady: compatible bodies and layouts]
-    D --> E[CleanupProgram: ownership, drops, transfers, promotion lifetimes]
+    D --> R[Flow return validation]
+    R --> E[CleanupProgram: ownership, drops, transfers, promotion lifetimes]
     E --> F[BackendReadyBody: resolved cleanup storage]
     F --> G[Target ABI and firing maps]
     G --> H[Cranelift emission]
@@ -81,6 +82,28 @@ flowchart TD
 identifies one immutable source revision in one context; `get` resolves retained revisions,
 while `require_current` rejects stale input. Source text and display paths are independent,
 and wrong-context handles are rejected even when their local revision indices match.
+
+AstGen performs structural AST-to-UIR lowering only. Unresolved UIR keeps the program-wide
+instruction, extra, and span arenas, and adds flat side arenas for spanned `TypeExprId` nodes and
+their children. Parameter, return, variable, and nominal-field annotations refer to those nodes.
+Nominal declarations contain source names, attributes, forms, and unresolved fields rather than
+resolved `TypeId`s. Variant, error, and match candidates retain source names and forms, argument
+order, and named selectors. AstGen does not define nominal layouts, check type cycles, resolve
+variant or error identities, or select method/call fallbacks. Sema owns all of those decisions and
+produces resolved TIR.
+
+Before declaration registration, UIR validation checks every type-expression handle and child
+range, rejects type-expression cycles, and verifies variable, parameter, return, and nominal-field
+annotations. `Uir::compute_body_map` then performs a checked iterative traversal from every function
+body's roots through every inline and wire-encoded child. `UirBodyMap` records an optional
+`BodySlot { body, local }` per global instruction and a deterministic dense instruction list per
+body. Same-body revisits reuse their original slot, orphans remain unowned, and cross-body
+references or malformed children return an error. Any invalid type expression or instruction
+ownership emits an internal diagnostic and prevents declaration registration and TIR emission.
+Sema sizes each `FuncCtx` instruction map to its body and indexes it by the dense local slot. The
+direct named-call graph and call-argument collection scan exact body membership, not arena-order
+ranges. Adding a UIR child shape requires extending this checked traversal and its regression
+coverage.
 
 Sema registers every UIR function body before name resolution. A `DeclId` combines the context
 identity with a declaration-table index. Sourced declarations are keyed by source revision and UIR
@@ -106,6 +129,25 @@ revisions for diagnostics. Duplicate spellings still receive distinct IDs, with 
 first-wins lookup and duplicate-definition diagnostic. Sema maps those context-global IDs to
 current-UIR-local slots instead of indexing bodies by the declaration-table index.
 
+`sema/resolution.rs` declares nominal shells and resolves their fields and layouts with explicit
+pending/in-progress/defined/failed states. Empty nominal programs skip resolver allocation, and
+`Utf8Error` is laid out on first name resolution. Acyclic declarations use dependency post-order so
+valid layouts are constructed once; cycles and duplicate-field units return to the source-order
+work-stack resolver, preserving diagnostic order and `InfiniteSize` behavior. Resumable declarations
+retain per-field progress and accumulated failure state, and each cycle is diagnosed at most once
+per declaration field and dependency. Type-expression
+collection and resolution use explicit stacks rather than the Rust call stack. Error-family member
+links preserve first-wins lookup and a lexically ordered owner index. Sema resolves every parameter
+and return signature before body scheduling. Programs without inferred unions analyze directly in
+source order without inference or scheduler allocation. Inferred programs build the exact
+direct-call graph and reject recursive components containing inferred unions before body analysis.
+`DeclarationScheduler` tracks pending counts and dependents, releases ready bodies in deterministic
+source order, and releases dependents of failed components into ordinary diagnostic-only recovery.
+A body is marked resolved only after its TIR and any inferred union and deferred coercions are
+complete. Reading an inferred callee requires its final union or failed state; body analysis never
+recursively enters another declaration. Completed results return in current-UIR source order, and
+unresolved or failed artifacts cannot reach backend publication.
+
 The frontend owns Flow construction and ownership analysis in
 [`pipeline.rs`](../../../ryo-frontend/src/pipeline.rs).
 The driver shares these transitions across JIT, AOT, and IR inspection.
@@ -127,6 +169,19 @@ context and local ID, then retains the compatibility name, argument count, argum
 parameter modes. Builtin and lowered runtime calls use a separate declaration-free marker;
 `DeclId::NONE` remains synthetic-test-only and invalid in executable artifacts. Backend symbol
 generation still uses the compatibility name in this migration stage.
+
+Flow construction records the block only when it needs the builder-supplied final `ReturnVoid`.
+`Flow::has_implicit_fallthrough` is true only when that block is reachable. An explicit return is an
+exit, not implicit fallthrough; a diverging call, unreachable continuation, or loop backedge also
+does not establish a successful exit. After `AnalysisReady` validates the body and before ownership
+analysis, `BuiltProgram::analyze` emits `MissingReturn` when the return type is neither `void` nor
+the internal error sentinel and the body has reachable implicit fallthrough. Declared errors and
+error unions still undergo this check. The diagnostic retains the TIR body span and established
+message. A synthetic fall-off in a non-void function traps instead of fabricating a scalar zero
+that would violate the return ABI. The source-clean
+flag is computed after this check and the ownership diagnostics, and `require_backend_transition`
+rejects artifacts when it is false. Sema retains divergence queries used during expression typing,
+but final return validation uses this Flow fact rather than another TIR traversal.
 
 Cleanup records its Flow identity. Backend preparation checks these associations in every build
 and resolves every TIR body and direct user-call ID through the context's declaration table.

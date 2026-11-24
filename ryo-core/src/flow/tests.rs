@@ -50,6 +50,51 @@ fn step_insts(flow: &Flow, b: BlockId) -> Vec<crate::tir::TirRef> {
 }
 
 #[test]
+fn flow_records_only_reachable_implicit_fallthrough() {
+    let mut cx = Ctx::new();
+
+    let empty = cx.builder().finish(&[]);
+    let empty_flow = Flow::build(&empty, &cx.pool);
+    assert!(empty_flow.has_implicit_fallthrough());
+    empty_flow.require_body(&empty).unwrap();
+
+    let mut b = cx.builder();
+    let one = b.int_const(1, cx.int, sp());
+    let decl = b.var_decl(cx.x, false, cx.int, one, sp());
+    let fallthrough = b.finish(&[decl]);
+    assert!(Flow::build(&fallthrough, &cx.pool).has_implicit_fallthrough());
+
+    let mut b = TirBuilder::new(cx.main, vec![], cx.int, sp());
+    let one = b.int_const(1, cx.int, sp());
+    let ret = b.unary(TirTag::Return, cx.void, one, sp());
+    let explicit_return = b.finish(&[ret]);
+    assert!(!Flow::build(&explicit_return, &cx.pool).has_implicit_fallthrough());
+
+    let mut b = cx.builder();
+    let ret = b.return_void(cx.void, sp());
+    let explicit_void_return = b.finish(&[ret]);
+    assert!(!Flow::build(&explicit_void_return, &cx.pool).has_implicit_fallthrough());
+
+    let mut b = cx.builder();
+    let callee = cx.pool.intern_str("die");
+    let call = b.call(DeclId::NONE, callee, &[], &[], cx.never, sp());
+    let expr = b.unary(TirTag::ExprStmt, cx.void, call, sp());
+    let diverging = b.finish(&[expr]);
+    assert!(!Flow::build(&diverging, &cx.pool).has_implicit_fallthrough());
+
+    let mut b = cx.builder();
+    let callee = cx.pool.intern_str("die");
+    let call = b.call(DeclId::NONE, callee, &[], &[], cx.never, sp());
+    let expr = b.unary(TirTag::ExprStmt, cx.void, call, sp());
+    let one = b.int_const(1, cx.int, sp());
+    let dead = b.var_decl(cx.x, false, cx.int, one, sp());
+    let dead_continuation = b.finish(&[expr, dead]);
+    let flow = Flow::build(&dead_continuation, &cx.pool);
+    assert!(flow.blocks.iter().any(|block| block.unreachable));
+    assert!(!flow.has_implicit_fallthrough());
+}
+
+#[test]
 fn linear_body_is_one_block_in_evaluation_order() {
     let mut cx = Ctx::new();
     let int = cx.int;

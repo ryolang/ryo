@@ -35,8 +35,8 @@
 //!   the sidecar arena from UIR / `InternPool`. Per-payload layouts
 //!   (`*_extra` modules owning `encode`/`decode`/views) mostly live in
 //!   `wires`; the exceptions are `destructure_extra` (in `destructure`),
-//!   `match_extra` (in `match_`), and `enum_lit_extra`, which is shared
-//!   with UIR and lives in `crate::extra`.
+//!   `match_extra` (in `match_`), and the resolved TIR-only
+//!   `enum_lit_extra` in `crate::extra`.
 //! - `spans: Vec<Span>` — parallel to `instructions`, one span per
 //!   `TirRef`. Out-of-band so `TypedInst` itself stays compact.
 //!
@@ -587,6 +587,10 @@ impl TirBuilder {
         self.name
     }
 
+    pub fn return_type(&self) -> TypeId {
+        self.return_type
+    }
+
     pub fn new(name: StringId, params: Vec<TirParam>, return_type: TypeId, span: Span) -> Self {
         // Slot 0 is the reserved sentinel — never read, never
         // referenced. Pushing a placeholder keeps `TirRef` indices
@@ -933,8 +937,7 @@ impl TirBuilder {
     /// `"0"`, `"1"`, … names). `ty` is the enum type; `variant` is
     /// the declaration-order variant index. Unit variants pass `&[]`.
     /// `positional` records the construction's source form for
-    /// diagnostics; codegen ignores it (wire parity with UIR's
-    /// [`enum_lit_extra::FLAG_POSITIONAL`]).
+    /// diagnostics; codegen ignores it.
     pub fn enum_lit(
         &mut self,
         ty: TypeId,
@@ -1405,9 +1408,7 @@ impl Tir {
 
     /// Return `true` iff every execution path through `stmts` returns
     /// or diverges — i.e. control can never reach past the end of the
-    /// block. Backs sema's return-flow analysis: a non-void function
-    /// whose body block does not definitely return is rejected with
-    /// `DiagCode::MissingReturn`.
+    /// block. Expression typing uses this to classify diverging bodies.
     ///
     /// A block definitely returns when ANY of its statements does —
     /// everything after that point is unreachable.
@@ -1416,17 +1417,6 @@ impl Tir {
             &self.instructions,
             &self.extra,
             stmts.iter().copied(),
-            pool,
-            false,
-        )
-    }
-
-    /// Return whether the function body returns on every execution path.
-    pub fn body_definitely_returns(&self, pool: &InternPool) -> bool {
-        terminates::block_terminates(
-            &self.instructions,
-            &self.extra,
-            self.body_stmts(),
             pool,
             false,
         )

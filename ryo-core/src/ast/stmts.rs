@@ -158,7 +158,7 @@ pub struct EnumAttrs {
 /// An `enum` declaration (M11). All fields are `Copy` handles; the
 /// variant list lives in the `enum_variants` side arena, in
 /// declaration order. An empty body parses (the empty-enum diagnostic
-/// is astgen's, not the parser's).
+/// is Sema's, not the parser's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnumDef {
     pub name: Ident,
@@ -236,7 +236,7 @@ pub struct VariantConstruct {
 /// The argument payload of a [`VariantConstruct`]: a parenthesized
 /// positional list or a named-init list. Exactly one of the two is
 /// `Some`. `named_parens` distinguishes error-style `Member(field=value)`
-/// from enum-style `Variant{field=value}`; AstGen rejects the former for
+/// from enum-style `Variant{field=value}`; Sema rejects the former for
 /// enums after name resolution distinguishes them from error families.
 /// `mixed_fields` marks an already-diagnosed positional recovery whose
 /// payload must not be validated again.

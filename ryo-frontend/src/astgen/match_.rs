@@ -114,13 +114,12 @@ pub(super) fn resume_match_scrutinee(
     scrutinee: InstRef,
     b: &mut UirBuilder,
     ast: &ast::Ast,
-    types: &TypeResolver,
-    defined_enums: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) -> MatchStep {
     state.scrutinee = Some(scrutinee);
-    resume_match_arm(state, b, ast, types, defined_enums, pool, sink)
+    resume_match_arm(state, b, ast, names, pool, sink)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -129,14 +128,13 @@ pub(super) fn resume_match_body(
     body: InstRef,
     b: &mut UirBuilder,
     ast: &ast::Ast,
-    types: &TypeResolver,
-    defined_enums: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) -> MatchStep {
     let pattern = state.pending_pattern.take().expect("match arm prepared");
     state.owned.push((pattern, OwnedBody::Expr(body)));
-    resume_match_arm(state, b, ast, types, defined_enums, pool, sink)
+    resume_match_arm(state, b, ast, names, pool, sink)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -145,14 +143,13 @@ pub(super) fn resume_match_stmts(
     body: Vec<InstRef>,
     b: &mut UirBuilder,
     ast: &ast::Ast,
-    types: &TypeResolver,
-    defined_enums: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) -> MatchStep {
     let pattern = state.pending_pattern.take().expect("match arm prepared");
     state.owned.push((pattern, OwnedBody::Stmts(body)));
-    resume_match_arm(state, b, ast, types, defined_enums, pool, sink)
+    resume_match_arm(state, b, ast, names, pool, sink)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -160,8 +157,7 @@ fn resume_match_arm(
     mut state: MatchState,
     b: &mut UirBuilder,
     ast: &ast::Ast,
-    types: &TypeResolver,
-    _defined_enums: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) -> MatchStep {
@@ -169,7 +165,7 @@ fn resume_match_arm(
     if state.next_arm < source_arms.len() {
         let arm = source_arms[state.next_arm];
         state.next_arm += 1;
-        let pattern = lower_match_pattern(ast, arm.pattern, types, pool, sink);
+        let pattern = lower_match_pattern(ast, arm.pattern, names, pool, sink);
         match arm.body {
             ast::MatchArmBody::Expr(expr) => {
                 state.pending_pattern = Some(pattern);
@@ -214,24 +210,12 @@ pub(super) fn gen_match(
     ast: &ast::Ast,
     scrutinee: ast::ExprId,
     arms: ast::MatchArmList,
-    types: &TypeResolver,
-    defined_enums: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     span: Span,
 ) -> InstRef {
-    gen_match_d(
-        b,
-        ast,
-        scrutinee,
-        arms,
-        types,
-        defined_enums,
-        pool,
-        sink,
-        span,
-        0,
-    )
+    gen_match_d(b, ast, scrutinee, arms, names, pool, sink, span, 0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -240,34 +224,23 @@ pub(super) fn gen_match_d(
     ast: &ast::Ast,
     scrutinee: ast::ExprId,
     arms: ast::MatchArmList,
-    types: &TypeResolver,
-    defined_enums: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     span: Span,
     depth: u32,
 ) -> InstRef {
-    let scrutinee_ref = super::expr::gen_expr_d(
-        b,
-        ast,
-        scrutinee,
-        types,
-        defined_enums,
-        pool,
-        sink,
-        depth + 1,
-    );
+    let scrutinee_ref = super::expr::gen_expr_d(b, ast, scrutinee, names, pool, sink, depth + 1);
     let step = resume_match_scrutinee(
         prepare_match(arms, span),
         scrutinee_ref,
         b,
         ast,
-        types,
-        defined_enums,
+        names,
         pool,
         sink,
     );
-    gen_match_step(step, b, ast, types, defined_enums, pool, sink, depth)
+    gen_match_step(step, b, ast, names, pool, sink, depth)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -275,8 +248,7 @@ fn gen_match_step(
     mut step: MatchStep,
     b: &mut UirBuilder,
     ast: &ast::Ast,
-    types: &TypeResolver,
-    defined_enums: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     depth: u32,
@@ -285,22 +257,12 @@ fn gen_match_step(
         match step {
             MatchStep::Complete(result) => return result,
             MatchStep::Body(state, expr) => {
-                let body = super::expr::gen_expr_d(
-                    b,
-                    ast,
-                    expr,
-                    types,
-                    defined_enums,
-                    pool,
-                    sink,
-                    depth + 1,
-                );
-                step = resume_match_body(state, body, b, ast, types, defined_enums, pool, sink);
+                let body = super::expr::gen_expr_d(b, ast, expr, names, pool, sink, depth + 1);
+                step = resume_match_body(state, body, b, ast, names, pool, sink);
             }
             MatchStep::Stmts(state, list) => {
-                let body =
-                    lower_stmt_body(b, ast, list, types, defined_enums, pool, sink, depth + 1);
-                step = resume_match_stmts(state, body, b, ast, types, defined_enums, pool, sink);
+                let body = lower_stmt_body(b, ast, list, names, pool, sink, depth + 1);
+                step = resume_match_stmts(state, body, b, ast, names, pool, sink);
             }
         }
     }
@@ -342,8 +304,7 @@ pub(super) fn resume_catch_operand(
     operand: InstRef,
     b: &mut UirBuilder,
     ast: &ast::Ast,
-    types: &TypeResolver,
-    defined_enums: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
 ) -> CatchStep {
@@ -372,8 +333,7 @@ pub(super) fn resume_catch_operand(
                 error_ref,
                 b,
                 ast,
-                types,
-                defined_enums,
+                names,
                 pool,
                 sink,
             );
@@ -465,13 +425,12 @@ pub(super) fn gen_catch(
     b: &mut UirBuilder,
     ast: &ast::Ast,
     catch: ast::CatchExpr,
-    types: &TypeResolver,
-    defined_enums: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     span: Span,
 ) -> InstRef {
-    gen_catch_d(b, ast, catch, types, defined_enums, pool, sink, span, 0)
+    gen_catch_d(b, ast, catch, names, pool, sink, span, 0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -479,45 +438,33 @@ pub(super) fn gen_catch_d(
     b: &mut UirBuilder,
     ast: &ast::Ast,
     catch: ast::CatchExpr,
-    types: &TypeResolver,
-    defined_enums: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     span: Span,
     depth: u32,
 ) -> InstRef {
-    let operand = super::expr::gen_expr_d(
-        b,
-        ast,
-        catch.operand,
-        types,
-        defined_enums,
-        pool,
-        sink,
-        depth + 1,
-    );
+    let operand = super::expr::gen_expr_d(b, ast, catch.operand, names, pool, sink, depth + 1);
     let step = resume_catch_operand(
         prepare_catch(catch, span),
         operand,
         b,
         ast,
-        types,
-        defined_enums,
+        names,
         pool,
         sink,
     );
     match step {
         CatchStep::Body(state, expr) => {
-            let body =
-                super::expr::gen_expr_d(b, ast, expr, types, defined_enums, pool, sink, depth + 1);
+            let body = super::expr::gen_expr_d(b, ast, expr, names, pool, sink, depth + 1);
             resume_catch_body(state, body, b)
         }
         CatchStep::Stmts(state, list) => {
-            let body = lower_stmt_body(b, ast, list, types, defined_enums, pool, sink, depth + 1);
+            let body = lower_stmt_body(b, ast, list, names, pool, sink, depth + 1);
             resume_catch_stmts(state, body, b)
         }
         CatchStep::Match(state, step) => {
-            let direct = gen_match_step(step, b, ast, types, defined_enums, pool, sink, depth);
+            let direct = gen_match_step(step, b, ast, names, pool, sink, depth);
             resume_catch_match(state, direct, b)
         }
     }
@@ -528,13 +475,12 @@ fn lower_stmt_body(
     b: &mut UirBuilder,
     ast: &ast::Ast,
     list: ast::StmtList,
-    types: &TypeResolver,
-    defined_enums: &HashSet<TypeId>,
+    names: &Names,
     pool: &mut InternPool,
     sink: &mut DiagSink,
     depth: u32,
 ) -> Vec<InstRef> {
-    lower_block_d(b, ast, list, types, defined_enums, pool, sink, depth)
+    lower_block_d(b, ast, list, names, pool, sink, depth)
 }
 
 /// Lower one arm pattern to its [`UirPattern`] builder-input shape.
@@ -546,8 +492,8 @@ fn lower_stmt_body(
 fn lower_match_pattern(
     ast: &ast::Ast,
     pattern: ast::PatternId,
-    types: &TypeResolver,
-    pool: &mut InternPool,
+    _types: &Names,
+    _pool: &mut InternPool,
     sink: &mut DiagSink,
 ) -> OwnedPattern {
     let pat = ast.pattern(pattern);
@@ -622,30 +568,7 @@ fn lower_match_pattern(
             variant,
             args,
         } => {
-            let (enum_name, variant) = if let Some(root) = enum_name
-                && let Some(members) = types.error_family_members.get(root)
-            {
-                if !members.contains(variant) {
-                    let available = members
-                        .iter()
-                        .map(|member| format!("'{}'", pool.str(*member)))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    sink.emit(Diag::error(
-                        pat.span,
-                        DiagCode::UnknownMatchVariant,
-                        format!(
-                            "error family '{}' has no member '{}' (members: {available})",
-                            pool.str(*root),
-                            pool.str(*variant),
-                        ),
-                    ));
-                    return OwnedPattern::Wildcard;
-                }
-                (None, errors::qualified_error_name(pool, *root, *variant))
-            } else {
-                (*enum_name, *variant)
-            };
+            let (enum_name, variant) = (*enum_name, *variant);
             let args = args.map(|a| {
                 let args = ast
                     .variant_arg_list(a.list)

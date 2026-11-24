@@ -2,7 +2,7 @@
 //! the 2000-line CI gate (`scripts/check_file_length.sh`); the listing
 //! format is documented there.
 
-use super::{InstData, InstRef, InstTag, InternPool, StringId, Uir};
+use super::{InstData, InstRef, InstTag, InternPool, StringId, TypeExprId, Uir, UirTypeExprKind};
 use super::{UirArgTarget, UirArmBodyView, UirFieldTarget, UirPatternView};
 use crate::ast::LitPattern;
 use std::fmt;
@@ -31,7 +31,8 @@ impl<'a> fmt::Display for UirDump<'a> {
         for decl in &uir.struct_decls {
             write!(f, "struct {}:", pool.str(decl.name))?;
             for field in &decl.fields {
-                write!(f, " {}: {}", pool.str(field.name), pool.display(field.ty))?;
+                write!(f, " {}: ", pool.str(field.name))?;
+                write_type_expr(f, uir, pool, field.type_expr)?;
             }
             writeln!(f)?;
         }
@@ -46,7 +47,7 @@ impl<'a> fmt::Display for UirDump<'a> {
                     if decl.payload.kind == crate::types::VariantKind::Named {
                         write!(f, "{}: ", pool.str(field.name))?;
                     }
-                    write!(f, "{}", pool.display(field.ty))?;
+                    write_type_expr(f, uir, pool, field.type_expr)?;
                 }
                 write!(f, ")")?;
             }
@@ -62,9 +63,16 @@ impl<'a> fmt::Display for UirDump<'a> {
                 if i > 0 {
                     write!(f, ", ")?;
                 }
-                write!(f, "{}: {}", pool.str(p.name), pool.display(p.ty))?;
+                write!(f, "{}: ", pool.str(p.name))?;
+                write_type_expr(f, uir, pool, p.type_expr)?;
             }
-            writeln!(f, ") -> {}", pool.display(body.return_type))?;
+            write!(f, ") -> ")?;
+            if let Some(return_type) = body.return_type {
+                write_type_expr(f, uir, pool, return_type)?;
+            } else {
+                write!(f, "void")?;
+            }
+            writeln!(f)?;
 
             write!(f, "  body:")?;
             for r in uir.body_stmts(body) {
@@ -84,6 +92,134 @@ impl<'a> fmt::Display for UirDump<'a> {
         }
         Ok(())
     }
+}
+
+fn write_type_expr(
+    f: &mut fmt::Formatter<'_>,
+    uir: &Uir,
+    pool: &InternPool,
+    id: TypeExprId,
+) -> fmt::Result {
+    enum Task<'a> {
+        Expr(TypeExprId),
+        AnonFields {
+            fields: &'a [(StringId, TypeExprId)],
+            index: usize,
+        },
+        Positional {
+            elements: &'a [TypeExprId],
+            index: usize,
+        },
+        ErrorMembers {
+            members: &'a [TypeExprId],
+            success: TypeExprId,
+            index: usize,
+        },
+    }
+
+    let mut tasks = vec![Task::Expr(id)];
+    while let Some(task) = tasks.pop() {
+        match task {
+            Task::Expr(id) => match uir.type_expr(id).kind {
+                UirTypeExprKind::Name { name, is_view } => {
+                    if is_view {
+                        write!(f, "&")?;
+                    }
+                    write!(f, "{}", pool.str(name))?;
+                }
+                UirTypeExprKind::Anon { fields } => {
+                    let fields = uir.type_field_list(fields);
+                    if fields.is_empty() {
+                        write!(f, "{{}}")?;
+                    } else {
+                        write!(f, "{{")?;
+                        tasks.push(Task::AnonFields { fields, index: 0 });
+                    }
+                }
+                UirTypeExprKind::Positional(elements) => {
+                    let elements = uir.type_expr_list(elements);
+                    write!(f, "(")?;
+                    tasks.push(Task::Positional { elements, index: 0 });
+                }
+                UirTypeExprKind::ErrorUnion {
+                    error_set,
+                    success,
+                    inferred,
+                } => {
+                    let members = uir.type_expr_list(error_set);
+                    if inferred {
+                        write!(f, "!")?;
+                        tasks.push(Task::Expr(success));
+                    } else {
+                        if members.len() > 1 {
+                            write!(f, "(")?;
+                        }
+                        tasks.push(Task::ErrorMembers {
+                            members,
+                            success,
+                            index: 0,
+                        });
+                    }
+                }
+            },
+            Task::AnonFields { fields, index } => {
+                if let Some((name, field)) = fields.get(index) {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: ", pool.str(*name))?;
+                    tasks.push(Task::AnonFields {
+                        fields,
+                        index: index + 1,
+                    });
+                    tasks.push(Task::Expr(*field));
+                } else {
+                    write!(f, "}}")?;
+                }
+            }
+            Task::Positional { elements, index } => {
+                if let Some(element) = elements.get(index) {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    tasks.push(Task::Positional {
+                        elements,
+                        index: index + 1,
+                    });
+                    tasks.push(Task::Expr(*element));
+                } else {
+                    if elements.len() == 1 {
+                        write!(f, ",")?;
+                    }
+                    write!(f, ")")?;
+                }
+            }
+            Task::ErrorMembers {
+                members,
+                success,
+                index,
+            } => {
+                if let Some(member) = members.get(index) {
+                    if index > 0 {
+                        write!(f, " | ")?;
+                    }
+                    tasks.push(Task::ErrorMembers {
+                        members,
+                        success,
+                        index: index + 1,
+                    });
+                    tasks.push(Task::Expr(*member));
+                } else {
+                    if members.len() > 1 {
+                        write!(f, ")")?;
+                    }
+                    write!(f, "!")?;
+                    tasks.push(Task::Expr(success));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn write_inst(
@@ -128,23 +264,12 @@ fn write_inst(
         (InstTag::VarDecl, InstData::Extra(_)) => {
             let view = uir.var_decl_view(r);
             let kw = if view.mutable { "mut " } else { "" };
-            match view.ty {
-                Some(t) => writeln!(
-                    f,
-                    "var_decl {}{}: {} = %{}",
-                    kw,
-                    pool.str(view.name),
-                    pool.display(t),
-                    view.initializer.index()
-                ),
-                None => writeln!(
-                    f,
-                    "var_decl {}{} = %{}",
-                    kw,
-                    pool.str(view.name),
-                    view.initializer.index()
-                ),
+            write!(f, "var_decl {}{}", kw, pool.str(view.name))?;
+            if let Some(type_expr) = view.type_expr {
+                write!(f, ": ")?;
+                write_type_expr(f, uir, pool, type_expr)?;
             }
+            writeln!(f, " = %{}", view.initializer.index())
         }
         (InstTag::IfStmt, InstData::Extra(_)) => {
             let view = uir.if_stmt_view(r);
@@ -257,28 +382,59 @@ fn write_inst(
         }
         (InstTag::EnumLit, InstData::Extra(_)) => {
             let view = uir.enum_lit_view(r);
+            let form = if view.form.mixed_fields {
+                "mixed"
+            } else if view.form.named_parens {
+                "named_parens"
+            } else if view.form.positional {
+                "positional"
+            } else {
+                "named"
+            };
             write!(
                 f,
-                "enum_lit {} variant={} {{",
-                pool.display(view.ty),
-                view.variant_index
+                "enum_lit {}.{} {form} {{",
+                pool.str(view.enum_name),
+                pool.str(view.variant),
             )?;
-            for (i, (field_index, value)) in view.fields().enumerate() {
+            for (i, (selector, value)) in view.fields().enumerate() {
                 if i > 0 {
                     write!(f, ", ")?;
                 }
-                write!(f, "{field_index}: %{}", value.index())?;
+                if view.form.positional {
+                    write!(f, "{selector}: %{}", value.index())?;
+                } else {
+                    write!(
+                        f,
+                        "{}: %{}",
+                        pool.str(StringId::from_raw(selector)),
+                        value.index()
+                    )?;
+                }
             }
             writeln!(f, "}}")
         }
         (InstTag::ErrorConstruct, InstData::ErrorConstruct { .. }) => {
-            let (name, family_root, _, view) = uir.error_construct_view(r);
+            let (name, family_root, family_member, view) = uir.error_construct_view(r);
             write!(f, "error_construct {}", pool.str(name))?;
             if let Some(root) = family_root {
                 write!(f, " family_root={}", pool.str(root))?;
             }
+            if let Some(member) = family_member {
+                write!(f, " family_member={}", pool.str(member))?;
+            }
+            let form = if view.form.mixed_fields {
+                "mixed"
+            } else if view.form.named_parens {
+                "named_parens"
+            } else if view.form.positional {
+                "positional"
+            } else {
+                "named"
+            };
+            write!(f, " {form}")?;
             for (field, value) in view.fields() {
-                if view.positional {
+                if view.form.positional {
                     write!(f, " {field}:")?;
                 } else {
                     write!(f, " {}:", pool.str(StringId::from_raw(field)))?;
@@ -482,5 +638,34 @@ fn un_op_name(t: InstTag) -> &'static str {
         InstTag::ExprStmt => "expr_stmt",
         InstTag::Try => "try",
         _ => "?un",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::uir::{Span, UirBuilder};
+
+    #[test]
+    fn deeply_nested_signature_type_formats_without_stack_overflow() {
+        let mut pool = InternPool::new();
+        let int = pool.intern_str("int");
+        let mut builder = UirBuilder::new();
+        let mut annotation = builder.type_name(int, false, Span::EMPTY);
+        for _ in 0..50_000 {
+            annotation = builder.type_positional(&[annotation], Span::EMPTY);
+        }
+        builder.add_function(
+            pool.intern_str("f"),
+            vec![],
+            Some(annotation),
+            &[],
+            Span::EMPTY,
+        );
+        let uir = builder.finish();
+
+        let dump = uir.dump(&pool).to_string();
+        assert!(dump.starts_with("fn f() -> "));
+        assert_eq!(dump.matches('(').count(), 50_001);
     }
 }

@@ -255,10 +255,6 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// Switch terminator handler, consumed by arm prologues, the join
     /// prologue, and arm fallthroughs.
     pub(super) match_records: HashMap<TirRef, match_::MatchRecord>,
-    /// Whether the current function returns through a hidden sret
-    /// pointer (fat/struct/enum) — the synthesized fall-off return
-    /// needs it, recomputed from the signature per function.
-    pub(super) has_sret: bool,
     /// Owned fat (str/bytes) bindings: three SSA `Variable`s (ptr, len,
     /// cap) per binding name. Dense `StringId::raw()`-indexed table with
     /// an undo log, same scoping discipline as `locals`.

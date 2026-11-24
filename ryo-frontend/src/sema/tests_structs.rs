@@ -503,3 +503,218 @@ fn positional_key_on_named_struct_gets_a_teaching_note() {
         "expected the field-name note, got: {diags:?}"
     );
 }
+
+#[test]
+fn sema_rejects_nominal_cycles_duplicates_and_view_fields() {
+    fn assert_one_diag(src: &str, code: DiagCode, message: &str, needle: &str, span_len: usize) {
+        let (uir, mut pool, astgen_diags) = lower(src);
+        assert!(
+            astgen_diags.is_empty(),
+            "AstGen must preserve nominal failures: {astgen_diags:?}"
+        );
+        let mut sink = DiagSink::new();
+        let mut context = CompilationContext::new();
+        let _ = analyze(
+            &uir,
+            &mut pool,
+            &mut sink,
+            src,
+            std::path::Path::new("<test>"),
+            &mut context,
+        );
+        let diags = sink.into_diags();
+        assert_eq!(diags.len(), 1, "{src}: {diags:?}");
+        assert_eq!(diags[0].code, code, "{diags:?}");
+        assert_eq!(diags[0].message, message, "{diags:?}");
+        let start = src.rfind(needle).expect("diagnostic needle in source");
+        assert_eq!(diags[0].span, Span::new(start, start + span_len));
+    }
+
+    assert_one_diag(
+        "struct A:\n\te: E\n\nenum E:\n\tAa(a: A)\n",
+        DiagCode::InfiniteSize,
+        "struct 'A' cannot contain itself by value: field 'a' has type 'A', which would make its size infinite",
+        "A)",
+        1,
+    );
+    assert_one_diag(
+        "struct P:\n\tx: int\n\nstruct P:\n\ty: str\n",
+        DiagCode::DuplicateDeclaration,
+        "duplicate struct declaration: 'P'",
+        "P:",
+        1,
+    );
+    assert_one_diag(
+        "enum Kind:\n\tV\n\nstruct Kind:\n\tvalue: int\n",
+        DiagCode::DuplicateDeclaration,
+        "type 'Kind' is declared with more than one kind",
+        "Kind:",
+        4,
+    );
+    assert_one_diag(
+        "struct Parser:\n\tsource: strview\n",
+        DiagCode::ViewFieldType,
+        "struct fields must be owned values; 'strview' is a projection (Rule 6)",
+        "strview",
+        7,
+    );
+    assert_one_diag(
+        "enum Parser:\n\tSource(value: bytesview)\n",
+        DiagCode::ViewFieldType,
+        "enum payload fields must be owned values; 'bytesview' is a projection (Rule 6)",
+        "bytesview",
+        9,
+    );
+    assert_one_diag(
+        "error Parser(strview)\n",
+        DiagCode::ViewFieldType,
+        "error payload fields must be owned values; 'strview' is a projection (Rule 6)",
+        "strview",
+        7,
+    );
+    assert_one_diag(
+        "enum E:\n\tV(int)\n\tV(str)\n",
+        DiagCode::DuplicateVariant,
+        "duplicate variant 'V' in enum 'E'",
+        "V(str)",
+        1,
+    );
+    assert_one_diag(
+        "struct Utf8Error:\n\tvalue: int\n",
+        DiagCode::DuplicateDeclaration,
+        "duplicate declaration of compiler-known type 'Utf8Error'",
+        "Utf8Error:",
+        9,
+    );
+    assert_one_diag(
+        "errors Utf8Error:\n\tEof\n",
+        DiagCode::DuplicateDeclaration,
+        "duplicate declaration of compiler-known type 'Utf8Error'",
+        "Utf8Error:",
+        9,
+    );
+
+    let src = "struct P:\n\tx: int\n\nstruct P:\n\tx: str\n\nfn main():\n\tvalue = P{x=1}\n";
+    let (tirs, diags, mut pool) = run_with_errors(src);
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, DiagCode::DuplicateDeclaration);
+    let main = tir_named(&tirs, &pool, "main");
+    let ty = main
+        .inst(main.var_decl_view(stmt_at(main, 0)).initializer)
+        .ty;
+    let field = pool.intern_str("x");
+    assert_eq!(
+        pool.struct_field(ty, field).expect("first field").ty,
+        pool.int()
+    );
+}
+
+#[test]
+fn duplicate_struct_field_fails_declaration_before_layout() {
+    let (_tirs, diags, _pool) =
+        run_with_errors("struct Point:\n\tx: int\n\tx: str\nfn main():\n\treturn\n");
+    assert_eq!(
+        count_code(&diags, DiagCode::DuplicateStructField),
+        1,
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn failed_struct_uppercase_method_receiver_recovers_without_layout() {
+    let (_tirs, diags, _pool) =
+        run_with_errors("struct Broken:\n\tchild: Broken\nfn main():\n\tvalue = Broken.foo()\n");
+    assert_eq!(count_code(&diags, DiagCode::InfiniteSize), 1, "{diags:?}");
+    assert_eq!(count_code(&diags, DiagCode::NotAStruct), 0, "{diags:?}");
+}
+
+#[test]
+fn failed_struct_lowercase_method_receiver_recovers_without_layout() {
+    let (_tirs, diags, _pool) =
+        run_with_errors("struct broken:\n\tchild: broken\nfn main():\n\tvalue = broken.foo()\n");
+    assert_eq!(count_code(&diags, DiagCode::InfiniteSize), 1, "{diags:?}");
+    assert_eq!(count_code(&diags, DiagCode::NotAStruct), 0, "{diags:?}");
+}
+
+#[test]
+fn long_forward_struct_chain_resolves_without_recursive_define() {
+    let mut src = String::new();
+    for index in 0..50_000 {
+        src.push_str(&format!(
+            "struct Type{index}:\n\tvalue: Type{}\n",
+            index + 1
+        ));
+    }
+    src.push_str("struct Type50000:\n\tvalue: int\nfn main():\n\treturn\n");
+    super::resolution::DefineDepth::reset_max();
+    let (_tirs, diags, _pool) = run_with_errors(&src);
+    assert!(diags.is_empty(), "{diags:?}");
+    assert_eq!(super::resolution::DefineDepth::max(), 1);
+}
+
+#[test]
+fn forward_struct_fields_construct_layout_once() {
+    let mut src = String::from("struct Holder:\n");
+    for index in 0..8 {
+        src.push_str(&format!("\tfield{index}: Enum{index}\n"));
+    }
+    for index in 0..8 {
+        src.push_str(&format!("enum Enum{index}:\n\tValue\n"));
+    }
+    src.push_str("fn main():\n\treturn\n");
+    super::resolution::DefineDepth::reset_struct_define_calls();
+
+    let (_tirs, diags, _pool) = run_with_errors(&src);
+    assert!(diags.is_empty(), "{diags:?}");
+    assert_eq!(super::resolution::DefineDepth::struct_define_calls(), 1);
+}
+
+#[test]
+fn duplicate_nominal_field_diagnostic_precedes_dependency_errors() {
+    let cases = [
+        "struct Holder:\n\tvalue: Dep\n\tvalue: Dep\nstruct Dep:\n\tvalue: Missing\nfn main():\n\treturn\n",
+        "enum Holder:\n\tA(value: Dep, value: Dep)\nenum Dep:\n\tA(value: Missing)\nfn main():\n\treturn\n",
+        "error Holder(value: Dep, value: Dep)\nerror Dep(value: Missing)\nfn main():\n\treturn\n",
+    ];
+    for src in cases {
+        let (_tirs, diags, _pool) = run_with_errors(src);
+        let codes = diags.iter().map(|diag| diag.code).collect::<Vec<_>>();
+        assert_eq!(
+            codes,
+            [DiagCode::DuplicateStructField, DiagCode::UnknownType],
+            "{diags:?}"
+        );
+    }
+}
+
+#[test]
+fn failed_forward_reference_diagnostic_is_not_repeated_after_resume() {
+    let src = "struct Holder:\n\tfirst: Missing\n\tsecond: Later\nstruct Later:\n\tvalue: int\nstruct A:\n\tb: B\nstruct B:\n\ta: A\nfn main():\n\treturn\n";
+    let (_tirs, diags, _pool) = run_with_errors(src);
+    assert_eq!(count_code(&diags, DiagCode::UnknownType), 1, "{diags:?}");
+    assert_eq!(count_code(&diags, DiagCode::InfiniteSize), 1, "{diags:?}");
+}
+
+#[test]
+fn cycle_in_multi_reference_field_is_diagnosed_once() {
+    let (_tirs, diags, _pool) = run_with_errors(
+        "struct Node:\n\tnext: (Node | Later)!int\nstruct Later:\n\tvalue: int\nfn main():\n\treturn\n",
+    );
+    assert_eq!(count_code(&diags, DiagCode::InfiniteSize), 1, "{diags:?}");
+}
+
+#[test]
+fn resuming_after_a_cycle_does_not_exhaust_diagnostics() {
+    let mut src = String::from("struct Node:\n\tnext: Node\n");
+    for index in 0..120 {
+        src.push_str(&format!("\tlater{index}: Later{index}\n"));
+    }
+    for index in 0..120 {
+        src.push_str(&format!("struct Later{index}:\n\tvalue: int\n"));
+    }
+    src.push_str("struct Other:\n\tvalue: Missing\nfn main():\n\treturn\n");
+
+    let (_tirs, diags, _pool) = run_with_errors(&src);
+    assert_eq!(count_code(&diags, DiagCode::InfiniteSize), 1, "{diags:?}");
+    assert_eq!(count_code(&diags, DiagCode::UnknownType), 1, "{diags:?}");
+}

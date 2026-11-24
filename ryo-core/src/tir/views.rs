@@ -16,8 +16,8 @@ use super::{
 
 // ---------- Read-side helpers ----------
 
-/// Decoded view of a [`TirTag::EnumLit`] payload (M11) — the wire is
-/// shared with UIR; see [`crate::extra::enum_lit_extra`].
+/// Decoded view of a resolved [`TirTag::EnumLit`] payload (M11); see
+/// [`crate::extra::enum_lit_extra`]. UIR has a separate candidate wire.
 pub type EnumLitView<'a> = crate::extra::enum_lit_extra::EnumLitView<'a, TirRef>;
 
 impl Tir {

@@ -360,6 +360,7 @@ pub struct Flow {
     content_stamp: u64,
     layout_context: crate::artifact::ArtifactId,
     pub entry: BlockId,
+    implicit_fallthrough: Option<BlockId>,
     pub blocks: Vec<FlowBlock>,
     /// Steps in global evaluation order; each block's range is its
     /// header's `steps_start`/`steps_len`.
@@ -452,6 +453,12 @@ impl Flow {
     /// passes.
     pub fn build(tir: &Tir, pool: &InternPool) -> Flow {
         build::build_flow(tir, pool)
+    }
+
+    /// Whether execution reaches the builder-supplied final `ReturnVoid`.
+    pub fn has_implicit_fallthrough(&self) -> bool {
+        self.implicit_fallthrough
+            .is_some_and(|block| !self.blocks[block.0 as usize].unreachable)
     }
 
     /// Mutation places recorded by a call step.

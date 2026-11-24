@@ -3,9 +3,8 @@
 //!
 //! One implementation over the raw `(instructions, extra)` arenas both
 //! [`Tir`][super::Tir] and [`TirBuilder`][super::TirBuilder] hold, so
-//! mid-sema queries (match arm typing) and post-build queries (the
-//! E0036 missing-return check) can never drift. `jumps` selects the
-//! sense: `false` — only `return`/`never` count (E0036); `true` —
+//! mid-sema and finished-body typing queries can never drift. `jumps`
+//! selects the sense: `false` — only `return`/`never` count; `true` —
 //! `break`/`continue` also count (the M12 match-arm sense: a statement
 //! arm ending in a jump out of the match is `never` at the join, never
 //! an E0135 fallthrough).

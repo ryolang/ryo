@@ -29,10 +29,10 @@ flowchart LR
     B --> C["Indent Preprocessor"]
     C --> D[Parser]
     D --> E[AstGen]
-    E --> F[UIR]
-    F --> G[Sema]
+    E --> F["Unresolved UIR"]
+    F --> G["Sema: resolution and typing"]
     G --> H[TIR]
-    H --> I[Flow]
+    H --> I["Flow + return validation"]
     I --> J[Ownership]
     J --> K["Cleanup (DropOps)"]
     K --> L[Codegen]
@@ -44,12 +44,18 @@ flowchart LR
 
 The middle-end is split into two flat-arena IRs modeled after Zig's ZIR/AIR:
 
-- **UIR** (`ryo-core/src/uir.rs`) — Untyped IR. Flat `(tag, data)` instruction stream in a program-wide arena, produced by `astgen.rs` from the AST. Sub-expressions are not nested; they live as their own entries reached via `InstRef` indices. Side arenas: `extra: Vec<u32>` for variable-size payloads, `spans` parallel to instructions.
+- **UIR** (`ryo-core/src/uir.rs`) — Untyped, unresolved IR. Flat `(tag, data)` instruction stream in a program-wide arena, produced structurally by `astgen.rs` from the AST. Sub-expressions are not nested; they live as their own entries reached via `InstRef` indices. Side arenas include `extra: Vec<u32>` for variable-size payloads, `spans` parallel to instructions, and flat type-expression nodes and child lists indexed by `TypeExprId`. Parameters, returns, variables, and nominal fields retain these unresolved, spanned type expressions. Enum, error, and match candidates retain source names, source forms, and argument order rather than resolved `TypeId`s or declaration indices. AstGen does not declare or define types, resolve names to types, check nominal cycles, or select semantic variant/error/method fallbacks.
 - **TIR** (`ryo-core/src/tir.rs`) — Typed IR. Same flat shape as UIR but **one arena per function body**, and every instruction carries its resolved `TypeId`. Produced by `sema.rs` from UIR and consumed by `codegen/`. Per-function arenas make generic/inline duplication a `Tir::clone` away. Each body records its compilation-owned `DeclId`; direct user calls carry the callee ID and a compatibility name, while builtin and lowered runtime calls remain declaration-free.
 
 `CompilationContext` owns the only `DeclarationTable`. Sema registers UIR function bodies before resolution and uses their `DeclId`s for signatures, inference dependencies, bodies, and direct calls. Registration is idempotent when the same source revision and UIR body index are registered again, and atomic on conflict; conflicting metadata for that revision emits an internal diagnostic and withholds executable TIR. Replacing a source revision allocates fresh IDs and retains the old revision's declarations for diagnostics, but publication rejects stale artifacts. `DeclId::NONE` is reserved for synthetic test bodies and is invalid in executable artifacts.
 
-**Wire payloads.** Variable-size instruction payloads (arg lists, body statement lists, call modes) are `u32` words in the `extra: Vec<u32>` arena, referenced by `ExtraRange`. Most layouts are one module in `ryo-core/src/uir/wires.rs` / `tir/wires.rs`, owning `encode`, `decode`, and a view struct together; the remaining payload layouts live beside their consumers — `destructure_extra` in `destructure.rs`, `match_extra` in `match_.rs`. UIR and TIR layouts stay deliberately separate because the two IRs genuinely diverge (call modes, type slots, keying). One exception: `enum_lit_extra` lives in `ryo-core/src/extra.rs` and is shared by both IRs, because its wire is byte-identical on both sides (the module is generic over the ref type, with `EnumLitView<InstRef>` / `EnumLitView<TirRef>` instantiations in each IR's `views.rs`). Literal fixtures pin the exact words against the encoders: `uir/wire_fixtures.rs` (UIR) and `tir/tests.rs` (TIR).
+Before declaration registration, Sema validates the current UIR and computes `UirBodyMap` (`ryo-core/src/uir/body_map.rs`). Validation checks every type-expression handle and child range, rejects type-expression cycles, and verifies variable, parameter, return, and nominal-field annotations. The checked iterative instruction traversal then covers every inline and wire-encoded child, rejects malformed references and cross-body sharing, leaves orphan instructions unowned, and permits repeated references within one body. Each reachable instruction receives `BodySlot { body, local }`; each body also has a deterministic dense instruction list. Any invalid type expression or instruction ownership emits an internal diagnostic with no declaration registration or TIR. `FuncCtx` sizes instruction side tables to the current body and indexes them by `local`, never by the program-wide `InstRef`; direct-call graph construction scans the exact per-body lists instead of inferring ownership from arena ranges.
+
+`sema/resolution.rs` declares nominal shells and defines their fields and layouts with explicit pending/in-progress/defined/failed states. Programs with no nominal declarations skip resolver allocation, and the compiler-known `Utf8Error` layout is created on first name resolution. Acyclic nominal dependencies are ordered iteratively so each layout is constructed once; any detected cycle returns to the explicit work-stack resolver, preserving its `InfiniteSize` diagnostics. Resumable declarations retain per-field progress and accumulated failure state, and each cycle is diagnosed at most once per declaration field and dependency. Duplicate nominal fields fail before layout installation and retain source-order diagnostics. Type-expression dependency collection and resolution use explicit stacks, including per-child checks and post-order layout construction, so deep annotations do not consume the Rust call stack. Error-family member owners are indexed once in lexical order for candidate and dependency lookup. Sema then resolves every function signature from UIR type expressions. Programs without inferred unions analyze directly in source order without allocating inference state or scheduler machinery. Inferred programs build the direct named-call graph, reject recursive components containing inferred unions, and use `DeclarationScheduler` to finalize callees before callers without recursive body analysis. Deferred coercions are patched before a declaration is marked resolved, and callers of failed components enter the existing diagnostic-only recovery path. Completed TIR slots are collected in current-UIR source order. `FuncCtx` retains a small pool of body-wide variant-state vectors and clears only the slots each walk used, so iterative analysis does not allocate fresh full-body vectors for every walk.
+
+Flow records the block that needs the builder-supplied final `ReturnVoid` and reports implicit fallthrough only when that block is reachable. At the frontend boundary, `BuiltProgram::analyze` emits `MissingReturn` when the return type is neither `void` nor the internal error sentinel and the body has that fact, including declared errors and error unions. Explicit returns are exits rather than implicit fallthrough; diverging calls, unreachable continuations, and loop backedges do not create a false successful exit. Literal-`true` loop tests refine only this analysis fact without removing canonical CFG edges needed by codegen. A synthetic fall-off in a non-void function traps instead of fabricating a scalar zero that would violate the return ABI. Sema retains TIR divergence queries needed during expression typing, but no longer performs a final TIR return walk.
+
+**Wire payloads.** Variable-size instruction payloads (arg lists, body statement lists, call modes) are `u32` words in the `extra: Vec<u32>` arena, referenced by `ExtraRange`. Most layouts are one module in `ryo-core/src/uir/wires.rs` / `tir/wires.rs`, owning `encode`, `decode`, and a view struct together; the remaining payload layouts live beside their consumers — `destructure_extra` in `destructure.rs`, `match_extra` in `match_.rs`. UIR and TIR layouts stay deliberately separate because the two IRs genuinely diverge (call modes, type slots, keying, and declaration resolution). UIR's `variant_extra` preserves source names and selectors for enum/error candidates; Sema resolves them and emits TIR's separate resolved `enum_lit_extra` from `ryo-core/src/extra.rs`. Literal fixtures pin the exact words against the encoders: `uir/wire_fixtures.rs` (UIR) and `tir/tests.rs` (TIR).
 
 A declarative macro DSL (one declaration per layout generating all three members) was spike-tested and not adopted at the current ~10 low-churn layouts. Revisit only when at least two of these hold:
 
@@ -98,9 +104,11 @@ See `docs/dev/architectural_fixes/pipeline_alignment.md` for what remains of the
 | `ryo-frontend/src/indent.rs` | CPython-style Indent/Dedent token insertion over raw lexer output |
 | `ryo-frontend/src/grammar.rs` | Chumsky-based grammar over `Token` (produces AST) |
 | `ryo-frontend/src/parse.rs` | Source text → AST + diagnostics: lexing, `parse_with_state`, and the `Rich` → `Diag` conversion; the driver's parse entry point |
-| `ryo-frontend/src/astgen.rs` | AST → UIR structural lowering |
-| `ryo-frontend/src/sema.rs` | Semantic analysis: type-checks UIR, emits one TIR per function body |
-| `ryo-frontend/src/pipeline.rs` | BuiltProgram, AnalysisReady, and CleanupProgram transitions; immutable published bodies and cleanup |
+| `ryo-frontend/src/astgen.rs` | AST → unresolved UIR structural lowering; preserves type expressions and declaration candidates without semantic resolution |
+| `ryo-frontend/src/sema.rs` | Semantic analysis facade: validates body ownership, resolves signatures, schedules bodies, and emits TIR |
+| `ryo-frontend/src/sema/resolution.rs` | Sema-owned annotation, nominal declaration/definition, and error-family resolution |
+| `ryo-frontend/src/sema/scheduler.rs` | Deterministic nonrecursive inferred-dependency scheduling and dependent release |
+| `ryo-frontend/src/pipeline.rs` | BuiltProgram, AnalysisReady, and CleanupProgram transitions; Flow return validation, immutable published bodies, and cleanup |
 | `ryo-frontend/src/ownership/mod.rs` | Post-sema, pre-codegen ownership flow analysis |
 | `ryo-frontend/src/builtins.rs` | Frontend-only interned builtin names and reserved-name handling |
 
@@ -118,8 +126,9 @@ See `docs/dev/architectural_fixes/pipeline_alignment.md` for what remains of the
 |------|------|
 | `ryo-core/src/builtins.rs` | Canonical builtin function and runtime ABI callee registry shared by frontend and backend |
 | `ryo-core/src/ast.rs` | Surface-syntax AST: typed arenas (`Vec<Expr>` / `Vec<Stmt>` indexed by `ExprId` / `StmtId`, with `ExprKind` / `StmtKind` payload enums, list side arenas, and inline spans); identifiers/types/strings stored as `StringId` |
-| `ryo-core/src/uir.rs` | Untyped IR data structures (flat, program-wide arena) |
-| `ryo-core/src/tir.rs` | Typed IR data structures (flat, per-function arena) |
+| `ryo-core/src/uir.rs` | Unresolved UIR data structures (flat, program-wide instruction arena plus unresolved type-expression side arenas) |
+| `ryo-core/src/uir/body_map.rs` | Type-expression and instruction-wire validation, exact instruction ownership, deterministic per-body instruction lists, and dense body-local slots |
+| `ryo-core/src/tir.rs` | Resolved typed IR data structures (flat, per-function arena) |
 | `ryo-core/src/uir/wires.rs` / `tir/wires.rs` | Wire payload layouts: one `encode`/`decode`/view module per variable-size payload, deliberately separate per IR (see "Wire payloads" above) |
 | `ryo-core/src/uir/wire_fixtures.rs` | Literal word fixtures pinning each UIR payload layout against its encoder |
 | `ryo-core/src/flow.rs` | Canonical control flow per function body: indexed blocks + exhaustive terminators (branch/switch/loop-backedge/return/diverging call), the place table (binding identity never keyed by name), per-step read/write/view facts, and `DropOp` positions — the shared execution-structure + storage-identity model for ownership analysis and codegen |
@@ -140,7 +149,7 @@ See `docs/dev/architectural_fixes/pipeline_alignment.md` for what remains of the
 
 ---
 
-Dependencies flow unidirectionally from Frontend/Backend/Driver down to Core. The driver-owned `CompilationContext` outlives the artifacts that reference its sources and declarations. The `InternPool` from `types.rs` threads through every stage so identifiers and string literals stay as `Copy` `StringId` handles instead of owned `String`s. `sema.rs` drives decls through `Unresolved → InProgress → Resolved/Failed` with cycle detection wired in.
+Dependencies flow unidirectionally from Frontend/Backend/Driver down to Core. The driver-owned `CompilationContext` outlives the artifacts that reference its sources and declarations. The `InternPool` from `types.rs` threads through every stage so identifiers and string literals stay as `Copy` `StringId` handles instead of owned `String`s. Sema resolves all signatures before its scheduler drives bodies through `Unresolved → InProgress → Resolved/Failed`; recursive inferred components fail before body scheduling, while legal recursion with explicit signatures needs no nested body analysis.
 
 ## Adding a New Language Feature
 
@@ -175,10 +184,10 @@ let my_feature = just(Token::Keyword).ignore_then(expr.clone())
 ⚠️ Never call `expression_parser()` inside a statement rule — take the shared parser as a parameter (see "Parser Grammar Construction").
 
 ### 4. Add UIR Instruction (ryo-core/src/uir.rs)
-UIR is **untyped**. Add a tag to the `Inst` tag enum (and a payload in `InstData` if needed). For variable-size payloads (arg lists, body statement lists), encode them into the `extra: Vec<u32>` arena and reference them via `ExtraRange`: reuse an existing `*_extra` module in `ryo-core/src/uir/wires.rs` if the shape fits, otherwise add a module there owning `encode`, `decode`, and the view struct together, plus a literal fixture in `uir/wire_fixtures.rs`. Add a span entry parallel to the instruction. Avoid nesting: each sub-expression is its own `InstRef`.
+UIR is **untyped and unresolved**. Add a tag to the `Inst` tag enum (and a payload in `InstData` if needed). For variable-size payloads (arg lists, body statement lists), encode them into the `extra: Vec<u32>` arena and reference them via `ExtraRange`: reuse an existing `*_extra` module in `ryo-core/src/uir/wires.rs` if the shape fits, otherwise add a module there owning `encode`, `decode`, and the view struct together, plus a literal fixture in `uir/wire_fixtures.rs`. Add a span entry parallel to the instruction. Avoid nesting: each sub-expression is its own `InstRef`. Preserve annotations as `TypeExprId`s and declaration uses as source names/forms. Every new inline or wire-encoded child shape must also extend `uir/body_map.rs`'s checked traversal and its ownership tests.
 
 ### 5. Add AstGen Case (ryo-frontend/src/astgen.rs)
-In `astgen::generate` (and the per-stmt/per-expr helpers), match the new variant and translate it into UIR instructions, following child ids via `ast.expr(id)` / `ast.stmt(id)` / `ast.stmt_list(range)`. AstGen does *no* type checking — it only flattens the AST into UIR, interns identifiers via `InternPool`, and emits diagnostics through the `DiagSink` for structural issues.
+In `astgen::generate` (and the per-stmt/per-expr helpers), match the new variant and translate it into UIR instructions, following child ids via `ast.expr(id)` / `ast.stmt(id)` / `ast.stmt_list(range)`. AstGen does *no* type checking or semantic resolution — it flattens the AST into unresolved UIR, copies type-expression graphs, preserves declaration candidates, interns source identifiers via `InternPool`, and emits diagnostics through the `DiagSink` only for structural issues. Do not resolve a type, declare a nominal layout, assign a variant/field index, or choose a semantic call fallback here.
 ```rust
 ast::StmtKind::MyFeature(expr) => {
     let expr_ref = gen_expr(b, ast, *expr);
@@ -188,10 +197,10 @@ ast::StmtKind::MyFeature(expr) => {
 ```
 
 ### 6. Add Sema Case (ryo-frontend/src/sema.rs) → emits TIR
-In `sema::analyze`, type-check the UIR instruction and emit the typed equivalent into the per-function `Tir`. Resolve types via `InternPool`, look up names in the active scope, and push `Diag` values into the `DiagSink` on type errors (analysis continues — do not bail). Every emitted `TypedInst` carries its resolved `TypeId`.
+In `sema::analyze`, type-check the UIR instruction and emit the typed equivalent into the per-function `Tir`. Resolve type expressions and declaration identities through Sema's resolution tables, look up source names in the active scope, and push `Diag` values into the `DiagSink` on type errors (analysis continues — do not bail). Every emitted `TypedInst` carries its resolved `TypeId`. Keep annotation and nominal resolution in `sema/resolution.rs`, and represent inferred-signature dependencies in the exact-body call graph so `DeclarationScheduler` finalizes callees before callers without recursive body analysis.
 
 ### 7. Add Codegen (ryo-backend/src/codegen/)
-Statement steps dispatch in `emit_step` (`codegen/mod.rs`). Value instructions go through the `eval_inst` family (`eval_inst`, `eval_inst_fat`, `eval_inst_view`, `eval_inst_struct`, `eval_inst_enum`). Flow terminators go through `emit_terminator` (`codegen/control.rs`). Common patterns: `builder.ins().iconst()` for ints, `.f64const()` for floats, `.iadd()`/`.fadd()` for add, `.call()` for calls.
+Statement steps dispatch in `emit_step` (`codegen/mod.rs`). Value instructions go through the `eval_inst` family (`eval_inst`, `eval_inst_fat`, `eval_inst_view`, `eval_inst_struct`, `eval_inst_enum`). Flow terminators go through `emit_terminator` (`codegen/control.rs`). Common patterns: `builder.ins().iconst()` for ints, `.f64const()` for floats, `.iadd()`/`.fadd()` for add, `.call()` for calls. Final missing-return validation belongs to the frontend Flow boundary, not Sema or codegen; backend publication receives only source-clean, validated artifacts.
 
 ### 8. Run All Tests
 ```bash

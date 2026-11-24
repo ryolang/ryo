@@ -93,6 +93,39 @@ pub(super) fn run_with_errors_and_context(
     (tirs, sink.into_diags(), pool, context)
 }
 
+fn analyze_return_flow(input: &str) -> Vec<Diag> {
+    let (uir, mut pool, diags) = lower(input);
+    let mut sink = DiagSink::new();
+    for diag in diags {
+        sink.emit(diag);
+    }
+    let mut context = CompilationContext::new();
+    let tirs = analyze(
+        &uir,
+        &mut pool,
+        &mut sink,
+        input,
+        Path::new("<test>"),
+        &mut context,
+    );
+    crate::pipeline::BuiltProgram::build(tirs, &pool)
+        .analyze(&pool, &mut sink)
+        .expect("compatible test artifacts");
+    sink.into_diags()
+}
+
+fn run_return_flow(input: &str) -> Result<(), Vec<Diag>> {
+    let diags = analyze_return_flow(input);
+    if diags
+        .iter()
+        .any(|diag| diag.severity == ryo_core::diag::Severity::Error)
+    {
+        Err(diags)
+    } else {
+        Ok(())
+    }
+}
+
 pub(super) fn first_msg(diags: &[Diag]) -> &str {
     &diags[0].message
 }
@@ -211,6 +244,29 @@ fn void_function_signature() {
     assert_eq!(greet.return_type, pool.void());
     let main = tir_named(&tirs, &pool, "main");
     assert_eq!(main.return_type, pool.void());
+}
+
+#[test]
+fn explicit_void_return_annotation_resolves() {
+    let (tirs, pool) = run("fn greet() -> void:\n\treturn\nfn main():\n\tgreet()\n").unwrap();
+    assert_eq!(tir_named(&tirs, &pool, "greet").return_type, pool.void());
+}
+
+#[test]
+fn explicit_never_return_annotation_resolves() {
+    let (tirs, pool) =
+        run("fn stop() -> never:\n\tpanic(\"stop\")\nfn main():\n\treturn\n").unwrap();
+    assert_eq!(tir_named(&tirs, &pool, "stop").return_type, pool.never());
+}
+
+#[test]
+fn view_syntax_is_rejected_in_return_annotations() {
+    for annotation in ["&void", "&never"] {
+        let src = format!("fn bad() -> {annotation}:\n\treturn\n");
+        let (_tirs, diags, _pool) = run_with_errors(&src);
+        assert_eq!(count_code(&diags, DiagCode::UnknownType), 1, "{diags:?}");
+        assert!(diags[0].message.contains("unknown view type"), "{diags:?}");
+    }
 }
 
 #[test]
@@ -344,7 +400,7 @@ fn void_function_without_explicit_return_accepted() {
 
 #[test]
 fn nonvoid_falloff_reports_missing_return() {
-    let diags = run("fn f() -> int:\n\tx = 1\n").unwrap_err();
+    let diags = run_return_flow("fn f() -> int:\n\tx = 1\n").unwrap_err();
     assert_eq!(
         count_code(&diags, DiagCode::MissingReturn),
         1,
@@ -356,19 +412,19 @@ fn nonvoid_falloff_reports_missing_return() {
 #[test]
 fn exhaustive_if_else_returns_accepted() {
     let code = "fn f(x: int) -> int:\n\tif x > 0:\n\t\treturn 1\n\telse:\n\t\treturn 2\n";
-    let (_tirs, _pool) = run(code).unwrap();
+    run_return_flow(code).unwrap();
 }
 
 #[test]
 fn exhaustive_elif_chain_returns_accepted() {
     let code = "fn f(x: int) -> int:\n\tif x > 0:\n\t\treturn 1\n\telif x < 0:\n\t\treturn 0 - 1\n\telse:\n\t\treturn 0\n";
-    let (_tirs, _pool) = run(code).unwrap();
+    run_return_flow(code).unwrap();
 }
 
 #[test]
 fn if_without_else_still_reports_missing_return() {
     let code = "fn f(x: int) -> int:\n\tif x > 0:\n\t\treturn 1\n";
-    let diags = run(code).unwrap_err();
+    let diags = run_return_flow(code).unwrap_err();
     assert!(any_code(&diags, DiagCode::MissingReturn));
 }
 
@@ -377,14 +433,14 @@ fn return_inside_while_does_not_count() {
     // Conservative: a loop body can execute zero times, so a
     // return inside `while` never satisfies return-flow.
     let code = "fn f(x: int) -> int:\n\twhile x > 0:\n\t\treturn 1\n";
-    let diags = run(code).unwrap_err();
+    let diags = run_return_flow(code).unwrap_err();
     assert!(any_code(&diags, DiagCode::MissingReturn));
 }
 
 #[test]
 fn trailing_return_after_if_accepted() {
     let code = "fn f(x: int) -> int:\n\tif x > 0:\n\t\treturn 1\n\treturn 0\n";
-    let (_tirs, _pool) = run(code).unwrap();
+    run_return_flow(code).unwrap();
 }
 
 #[test]
@@ -392,7 +448,7 @@ fn panic_tail_counts_as_diverging() {
     // `panic` returns `never` — a function ending in it cannot
     // fall through, so no MissingReturn.
     let code = "fn f() -> int:\n\tpanic(\"boom\")\n";
-    let (_tirs, _pool) = run(code).unwrap();
+    run_return_flow(code).unwrap();
 }
 
 #[test]
@@ -400,7 +456,7 @@ fn never_var_decl_rejected() {
     // Binding a `never` value is an error — `panic` diverges and
     // produces no value to bind. No MissingReturn cascade: the
     // user's intent was to diverge.
-    let diags = run("fn f() -> int:\n\tx = panic(\"boom\")\n").unwrap_err();
+    let diags = run_return_flow("fn f() -> int:\n\tx = panic(\"boom\")\n").unwrap_err();
     assert!(any_code(&diags, DiagCode::VoidValueInExpression));
     assert!(
         !any_code(&diags, DiagCode::MissingReturn),
@@ -411,7 +467,8 @@ fn never_var_decl_rejected() {
 
 #[test]
 fn never_assign_rejected() {
-    let diags = run("fn f() -> int:\n\tmut x = 1\n\tx = panic(\"boom\")\n").unwrap_err();
+    let diags =
+        run_return_flow("fn f() -> int:\n\tmut x = 1\n\tx = panic(\"boom\")\n").unwrap_err();
     assert!(any_code(&diags, DiagCode::VoidValueInExpression));
     assert!(
         !any_code(&diags, DiagCode::MissingReturn),
@@ -422,7 +479,8 @@ fn never_assign_rejected() {
 
 #[test]
 fn never_compound_assign_rejected() {
-    let diags = run("fn f() -> int:\n\tmut x = 1\n\tx += panic(\"boom\")\n").unwrap_err();
+    let diags =
+        run_return_flow("fn f() -> int:\n\tmut x = 1\n\tx += panic(\"boom\")\n").unwrap_err();
     assert!(any_code(&diags, DiagCode::VoidValueInExpression));
     assert!(
         !any_code(&diags, DiagCode::MissingReturn),
@@ -456,7 +514,7 @@ fn never_call_arg_rejected() {
 fn genuine_missing_return_reported_alongside_other_errors() {
     // An unrelated error doesn't mask return-flow: this function
     // genuinely lacks a return, so both diags fire.
-    let (_tirs, diags, _pool) = run_with_errors("fn f() -> int:\n\tx = missing_var + 1\n");
+    let diags = analyze_return_flow("fn f() -> int:\n\tx = missing_var + 1\n");
     assert!(any_code(&diags, DiagCode::UndefinedVariable));
     assert!(any_code(&diags, DiagCode::MissingReturn));
 }
@@ -466,7 +524,7 @@ fn stmt_error_sentinel_suppresses_missing_return() {
     // A statement that failed analysis lowers to the Unreachable
     // sentinel; its structure is unknown, so return-flow must not
     // cascade a MissingReturn on top of the real error.
-    let (_tirs, diags, _pool) = run_with_errors("fn f() -> int:\n\tx += 1\n");
+    let diags = analyze_return_flow("fn f() -> int:\n\tx += 1\n");
     assert!(any_code(&diags, DiagCode::UndefinedAssignTarget));
     assert!(
         !any_code(&diags, DiagCode::MissingReturn),
@@ -580,9 +638,9 @@ fn mutual_recursion_does_not_trigger_cycle() {
 
 /// Direct unit test of the cycle sentinel: bypass the public
 /// driver, drive `require_decl` against an `InProgress` slot
-/// directly. This is the substrate the comptime / inferred-
-/// return-type milestones will lean on; today the path is
-/// unreachable through source code.
+/// directly. This is the substrate the comptime / lazy-resolution
+/// milestones will lean on; today the path is unreachable through
+/// source code.
 #[test]
 fn require_decl_reports_cycle_when_in_progress() {
     // Build a minimal valid UIR with one function so Sema::new
@@ -594,7 +652,8 @@ fn require_decl_reports_cycle_when_in_progress() {
     let mut b = ryo_core::uir::UirBuilder::new();
     let zero = b.int_literal(0, sp());
     let ret = b.unary(InstTag::Return, zero, sp());
-    b.add_function(main_id, vec![], pool.int(), &[ret], sp());
+    let return_type = b.type_name(pool.intern_str("int"), false, sp());
+    b.add_function(main_id, vec![], Some(return_type), &[ret], sp());
     let uir = b.finish().with_layout_context(&pool);
 
     let mut context = CompilationContext::new();
@@ -621,10 +680,9 @@ fn require_decl_reports_cycle_when_in_progress() {
 }
 
 /// Source-order stability: when sema emits errors from multiple
-/// functions, the diagnostic order matches the order the decls
-/// appear in source. The risk register flagged worklist
-/// non-determinism; this test pins the seed-in-source-order
-/// invariant.
+/// functions without inferred-signature dependencies, diagnostics
+/// follow declaration order. This pins the scheduler's deterministic
+/// ready ordering.
 ///
 /// Note on what the assertion below actually proves:
 /// `run_with_errors` returns `sink.into_diags()`, which yields
@@ -633,9 +691,9 @@ fn require_decl_reports_cycle_when_in_progress() {
 /// Because `first` and `second` each emit exactly one
 /// `UndefinedVariable` diag, the assertion
 /// `undef[0].span.start < undef[1].span.start` is a proxy for
-/// "`first` was resolved before `second`": the worklist popped
-/// decls in source order, so the diag from the body at the
-/// lower span fired first. If `DiagSink::into_diags` ever
+/// "`first` was resolved before `second`": both are initially ready,
+/// so the scheduler releases them in source order. If
+/// `DiagSink::into_diags` ever
 /// starts sorting by span, this test would silently keep
 /// passing while no longer testing resolution order — update
 /// the assertion to inspect emission-side state if that
@@ -1629,4 +1687,153 @@ fn deep_chain_const_eval_reports_division_by_zero() {
         any_code(&diags, DiagCode::DivisionByZero),
         "expected division-by-zero, got: {diags:?}"
     );
+}
+
+#[test]
+fn sema_inst_maps_use_body_local_slots() {
+    let mut pool = InternPool::new();
+    let mut builder = ryo_core::uir::UirBuilder::new();
+    let lhs = builder.int_literal(1, Span::EMPTY);
+    let rhs = builder.int_literal(2, Span::EMPTY);
+    let add = builder.binary(InstTag::Add, lhs, rhs, Span::EMPTY);
+    let ret = builder.unary(InstTag::Return, add, Span::EMPTY);
+    let first = pool.intern_str("first");
+    let return_type = builder.type_name(pool.intern_str("int"), false, Span::EMPTY);
+    builder.add_function(first, vec![], Some(return_type), &[ret], Span::EMPTY);
+
+    let value = builder.int_literal(3, Span::EMPTY);
+    let stmt = builder.unary(InstTag::ExprStmt, value, Span::EMPTY);
+    let second = pool.intern_str("second");
+    builder.add_function(second, vec![], None, &[stmt], Span::EMPTY);
+    let uir = builder.finish();
+    let map = uir.compute_body_map().unwrap();
+
+    for body_index in 0..uir.func_bodies.len() {
+        let body = &uir.func_bodies[body_index];
+        let return_type = if body_index == 0 {
+            pool.int()
+        } else {
+            pool.void()
+        };
+        let fcx = FuncCtx::new(
+            DeclId::NONE,
+            body_index as u32,
+            TirBuilder::new(body.name, vec![], return_type, body.span),
+            map.instructions(body_index).len(),
+        );
+        assert_eq!(fcx.inst_map.len(), map.instructions(body_index).len());
+        assert_ne!(fcx.inst_map.len(), uir.instructions.len());
+        for (local, &inst) in map.instructions(body_index).iter().enumerate() {
+            assert_eq!(fcx.map_slot(&map, inst), local);
+        }
+    }
+}
+
+#[test]
+fn invalid_body_map_blocks_declaration_registration() {
+    let mut pool = InternPool::new();
+    let mut context = CompilationContext::new();
+    let mut builder = ryo_core::uir::UirBuilder::new();
+    let shared = builder.int_literal(1, Span::EMPTY);
+    let ret = builder.unary(InstTag::Return, shared, Span::EMPTY);
+    let first = pool.intern_str("first");
+    let return_type = builder.type_name(pool.intern_str("int"), false, Span::EMPTY);
+    builder.add_function(first, vec![], Some(return_type), &[ret], Span::EMPTY);
+    let stmt = builder.unary(InstTag::ExprStmt, shared, Span::EMPTY);
+    let second = pool.intern_str("second");
+    builder.add_function(second, vec![], None, &[stmt], Span::EMPTY);
+    let invalid = builder.finish().with_layout_context(&pool);
+    let mut sink = DiagSink::new();
+
+    let report = Sema::run(
+        &invalid,
+        &mut pool,
+        &mut sink,
+        "",
+        Path::new("<test>"),
+        &mut context,
+    );
+    assert!(report.tirs.is_empty());
+    let diags = sink.into_diags();
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, DiagCode::InternalError);
+
+    let mut builder = ryo_core::uir::UirBuilder::new();
+    let ret = builder.return_void(Span::EMPTY);
+    let main = pool.intern_str("main");
+    builder.add_function(main, vec![], None, &[ret], Span::EMPTY);
+    let valid = builder.finish().with_layout_context(&pool);
+    let mut sink = DiagSink::new();
+    let sema = Sema::new(
+        &valid,
+        &mut pool,
+        &mut sink,
+        "",
+        Path::new("<test>"),
+        &mut context,
+    );
+    assert_eq!(sema.declaration_ids.len(), 1);
+    assert_eq!(sema.declaration_ids[0].index(), 0);
+}
+
+#[test]
+fn legacy_amp_str_is_a_migration_error() {
+    let diags = run("fn f(text: &str):\n\tprint(text)\n").unwrap_err();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.message.contains("`&str` was renamed to `strview`"))
+    );
+}
+
+#[test]
+fn lower_view_of_non_str_rejected() {
+    let diags = run("fn f(x: &int):\n\tprint(\"\")\n").unwrap_err();
+    assert!(diags.iter().any(|d| d.code == DiagCode::UnknownType));
+}
+
+#[test]
+fn invalid_type_expr_blocks_declaration_registration() {
+    let mut pool = InternPool::new();
+    let mut context = CompilationContext::new();
+    let main = pool.intern_str("main");
+    let mut builder = ryo_core::uir::UirBuilder::new();
+    builder.add_function(
+        main,
+        vec![],
+        Some(ryo_core::uir::TypeExprId::from_raw(99)),
+        &[],
+        Span::EMPTY,
+    );
+    let invalid = builder.finish().with_layout_context(&pool);
+    let mut sink = DiagSink::new();
+
+    let report = Sema::run(
+        &invalid,
+        &mut pool,
+        &mut sink,
+        "",
+        Path::new("<test>"),
+        &mut context,
+    );
+    assert!(report.tirs.is_empty());
+    let diags = sink.into_diags();
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].code, DiagCode::InternalError);
+    assert!(diags[0].message.contains("invalid UIR"), "{diags:?}");
+
+    let mut builder = ryo_core::uir::UirBuilder::new();
+    builder.add_function(main, vec![], None, &[], Span::EMPTY);
+    let valid = builder.finish().with_layout_context(&pool);
+    let mut sink = DiagSink::new();
+    let sema = Sema::new(
+        &valid,
+        &mut pool,
+        &mut sink,
+        "",
+        Path::new("<test>"),
+        &mut context,
+    );
+    assert_eq!(sema.declaration_ids.len(), 1);
+    assert_eq!(sema.declaration_ids[0].index(), 0);
 }

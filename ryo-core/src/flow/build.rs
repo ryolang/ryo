@@ -105,13 +105,15 @@ impl FlowBuilder<'_> {
             self.emit_stmt(stmt);
         }
 
-        // Void functions (and `main`) fall off the end; sema's E0036
-        // guarantees non-void bodies end in an explicit return.
-        if !self.terminated(self.cur) {
-            self.set_term(self.cur, Terminator::ReturnVoid, None);
-        }
+        let implicit_fallthrough = if self.terminated(self.cur) {
+            None
+        } else {
+            let block = self.cur;
+            self.set_term(block, Terminator::ReturnVoid, None);
+            Some(block)
+        };
 
-        self.finish(entry)
+        self.finish(entry, implicit_fallthrough)
     }
 
     // ---------- block plumbing ----------
@@ -1222,7 +1224,7 @@ impl FlowBuilder<'_> {
             .collect()
     }
 
-    fn finish(mut self, entry: BlockId) -> Flow {
+    fn finish(mut self, entry: BlockId, implicit_fallthrough: Option<BlockId>) -> Flow {
         // Computed before the struct is consumed by moves below.
         let branch_if = self.branch_if_map();
         // Single-block bodies (no control flow — the common case) need
@@ -1240,6 +1242,7 @@ impl FlowBuilder<'_> {
                 content_stamp: 0,
                 layout_context: self.pool.identity(),
                 entry,
+                implicit_fallthrough,
                 blocks: self.blocks,
                 steps: self.steps,
                 terms: self
@@ -1268,6 +1271,7 @@ impl FlowBuilder<'_> {
         // CFG edges.
         let mut edges: Vec<BlockId> = Vec::new();
         let mut succs: Vec<Range<u32>> = Vec::with_capacity(self.blocks.len());
+        let mut has_literal_true_loop = false;
         for t in &self.terms {
             let start = edges.len() as u32;
             match t.expect("every block terminated in Flow::build") {
@@ -1286,8 +1290,21 @@ impl FlowBuilder<'_> {
                 Terminator::While { header, .. } | Terminator::For { header, .. } => {
                     edges.push(header)
                 }
-                Terminator::WhileTest { body, exit, .. }
-                | Terminator::ForTest { body, exit, .. } => {
+                Terminator::WhileTest {
+                    cond, body, exit, ..
+                } => {
+                    edges.push(body);
+                    edges.push(exit);
+                    has_literal_true_loop |= matches!(
+                        self.tir.inst(cond),
+                        crate::tir::TypedInst {
+                            tag: TirTag::BoolConst,
+                            data: crate::tir::TirData::Bool(true),
+                            ..
+                        }
+                    );
+                }
+                Terminator::ForTest { body, exit, .. } => {
                     edges.push(body);
                     edges.push(exit);
                 }
@@ -1363,6 +1380,7 @@ impl FlowBuilder<'_> {
             content_stamp: 0,
             layout_context: self.pool.identity(),
             entry,
+            implicit_fallthrough,
             blocks: self.blocks,
             steps: self.steps,
             terms: self
@@ -1384,9 +1402,51 @@ impl FlowBuilder<'_> {
             place_write_ranges,
             place_write_list,
         };
+        if has_literal_true_loop {
+            refine_implicit_fallthrough(&mut flow, self.tir);
+        }
         flow.content_stamp = flow.representation_stamp();
         flow.validate(self.tir, self.pool);
         flow
+    }
+}
+
+/// Exclude the untaken false edge of `while true` only from return-fallthrough
+/// reachability. The canonical CFG keeps it for backend block sealing.
+fn refine_implicit_fallthrough(flow: &mut Flow, tir: &Tir) {
+    let Some(target) = flow.implicit_fallthrough else {
+        return;
+    };
+    if flow.blocks[target.0 as usize].unreachable {
+        return;
+    }
+
+    let mut visited = vec![false; flow.blocks.len()];
+    let mut stack = vec![flow.entry];
+    while let Some(block) = stack.pop() {
+        if std::mem::replace(&mut visited[block.0 as usize], true) {
+            continue;
+        }
+        for &successor in flow.successors(block) {
+            if matches!(
+                flow.term(block),
+                Terminator::WhileTest { cond, exit, .. }
+                    if *exit == successor && matches!(
+                        tir.inst(*cond),
+                        crate::tir::TypedInst {
+                            tag: TirTag::BoolConst,
+                            data: crate::tir::TirData::Bool(true),
+                            ..
+                        }
+                    )
+            ) {
+                continue;
+            }
+            stack.push(successor);
+        }
+    }
+    if !visited[target.0 as usize] {
+        flow.implicit_fallthrough = None;
     }
 }
 

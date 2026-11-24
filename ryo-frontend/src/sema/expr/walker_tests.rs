@@ -19,37 +19,41 @@ use std::process::Command;
 
 const DEEP_REPRO_CHILD: &str = "RYO_DEEP_EXPR_REPRO_CHILD";
 
+fn finish_body(mut builder: UirBuilder, pool: &mut InternPool, root: InstRef) -> Uir {
+    let name = pool.intern_str("test");
+    let return_type = builder.type_name(pool.intern_str("int"), false, Span::EMPTY);
+    builder.add_function(name, vec![], Some(return_type), &[root], Span::EMPTY);
+    builder.finish().with_layout_context(pool)
+}
+
+fn test_func_ctx(uir: &Uir, pool: &mut InternPool) -> FuncCtx {
+    let return_type = pool.int();
+    let name = pool.intern_str("test");
+    let instruction_count = uir.compute_body_map().unwrap().instructions(0).len();
+    FuncCtx::new(
+        DeclId::NONE,
+        0,
+        TirBuilder::new(name, vec![], return_type, Span::EMPTY),
+        instruction_count,
+    )
+}
+
 fn shared_binop_dag(tag: InstTag, lhs: i64, rhs: i64) -> (Uir, InternPool, InstRef, InstRef) {
     let mut builder = UirBuilder::new();
     let lhs = builder.int_literal(lhs, Span::EMPTY);
     let rhs = builder.int_literal(rhs, Span::EMPTY);
     let shared = builder.binary(tag, lhs, rhs, Span::EMPTY);
     let root = builder.binary(InstTag::Add, shared, shared, Span::EMPTY);
-    let pool = InternPool::new();
-    (
-        builder.finish().with_layout_context(&pool),
-        pool,
-        root,
-        shared,
-    )
+    let mut pool = InternPool::new();
+    let uir = finish_body(builder, &mut pool, root);
+    (uir, pool, root, shared)
 }
 
 #[test]
 fn shared_division_by_zero_is_scoped_to_analysis_root() {
     for limit in [64, 0] {
         let (uir, mut pool, root, shared) = shared_binop_dag(InstTag::Div, 1, 0);
-        let int = pool.int();
-        let name = pool.intern_str("test");
-        let mut fcx = FuncCtx {
-            decl: DeclId::NONE,
-            builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
-            inst_map: vec![None; uir.instructions.len()],
-            chain_local_errors: Vec::new(),
-            return_type: int,
-            loop_depth: 0,
-            destructure_temps: Default::default(),
-            inferred_call_dependencies: Default::default(),
-        };
+        let mut fcx = test_func_ctx(&uir, &mut pool);
         let scope = Scope::new();
         let mut sink = DiagSink::new();
         let mut context = ryo_core::compilation::CompilationContext::new();
@@ -72,7 +76,7 @@ fn shared_division_by_zero_is_scoped_to_analysis_root() {
             );
             assert_eq!(sema.sink.error_count(), 1, "limit {limit}");
             assert!(
-                fcx.inst_map[shared.index()].is_none(),
+                fcx.get(sema.body_map(), shared).is_none(),
                 "shared early error remained cached at limit {limit}"
             );
             analyze_expr_with(
@@ -84,7 +88,7 @@ fn shared_division_by_zero_is_scoped_to_analysis_root() {
                 SemaExprContext::root(),
             );
             assert_eq!(sema.sink.error_count(), 2, "limit {limit}");
-            assert!(fcx.inst_map[shared.index()].is_none(), "limit {limit}");
+            assert!(fcx.get(sema.body_map(), shared).is_none(), "limit {limit}");
         });
         drop(sema);
         let diags = sink.into_diags();
@@ -99,21 +103,70 @@ fn shared_division_by_zero_is_scoped_to_analysis_root() {
 }
 
 #[test]
+fn later_body_rollback_clears_only_mapped_error() {
+    for limit in [64, 0] {
+        let mut builder = UirBuilder::new();
+        let first_stmt = builder.return_void(Span::EMPTY);
+        let lhs = builder.int_literal(1, Span::EMPTY);
+        let rhs = builder.int_literal(0, Span::EMPTY);
+        let shared = builder.binary(InstTag::Div, lhs, rhs, Span::EMPTY);
+        let root = builder.binary(InstTag::Add, shared, shared, Span::EMPTY);
+        let mut pool = InternPool::new();
+        let first = pool.intern_str("first");
+        builder.add_function(first, vec![], None, &[first_stmt], Span::EMPTY);
+        let second = pool.intern_str("second");
+        let return_type = builder.type_name(pool.intern_str("int"), false, Span::EMPTY);
+        builder.add_function(second, vec![], Some(return_type), &[root], Span::EMPTY);
+        let uir = builder.finish().with_layout_context(&pool);
+        let map = uir.compute_body_map().unwrap();
+        assert!(shared.index() >= map.instructions(1).len());
+
+        let mut fcx = FuncCtx::new(
+            DeclId::NONE,
+            1,
+            TirBuilder::new(second, vec![], pool.int(), Span::EMPTY),
+            map.instructions(1).len(),
+        );
+        let scope = Scope::new();
+        let mut sink = DiagSink::new();
+        let mut context = ryo_core::compilation::CompilationContext::new();
+        let mut sema = Sema::new(
+            &uir,
+            &mut pool,
+            &mut sink,
+            "",
+            Path::new("<test>"),
+            &mut context,
+        );
+        with_expr_limit(limit, || {
+            let result = analyze_expr_with(
+                &mut sema,
+                &mut fcx,
+                &scope,
+                root,
+                NeverMode::Reject,
+                SemaExprContext::root(),
+            );
+            assert_eq!(sema.sink.error_count(), 1, "limit {limit}");
+            assert!(fcx.get(sema.body_map(), shared).is_none(), "limit {limit}");
+            assert_eq!(
+                fcx.get(sema.body_map(), root),
+                Some(result),
+                "limit {limit}"
+            );
+        });
+        drop(sema);
+        let diags = sink.into_diags();
+        assert_eq!(diags.len(), 1, "limit {limit}: {diags:?}");
+        assert_eq!(diags[0].code, DiagCode::DivisionByZero, "limit {limit}");
+    }
+}
+
+#[test]
 fn shared_constant_overflow_is_scoped_to_analysis_root() {
     for limit in [64, 0] {
         let (uir, mut pool, root, shared) = shared_binop_dag(InstTag::Add, i64::MAX, 1);
-        let int = pool.int();
-        let name = pool.intern_str("test");
-        let mut fcx = FuncCtx {
-            decl: DeclId::NONE,
-            builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
-            inst_map: vec![None; uir.instructions.len()],
-            chain_local_errors: Vec::new(),
-            return_type: int,
-            loop_depth: 0,
-            destructure_temps: Default::default(),
-            inferred_call_dependencies: Default::default(),
-        };
+        let mut fcx = test_func_ctx(&uir, &mut pool);
         let scope = Scope::new();
         let mut sink = DiagSink::new();
         let mut context = ryo_core::compilation::CompilationContext::new();
@@ -136,7 +189,7 @@ fn shared_constant_overflow_is_scoped_to_analysis_root() {
             );
             assert_eq!(sema.sink.error_count(), 1, "limit {limit}");
             assert!(
-                fcx.inst_map[shared.index()].is_none(),
+                fcx.get(sema.body_map(), shared).is_none(),
                 "shared early error remained cached at limit {limit}"
             );
             analyze_expr_with(
@@ -148,7 +201,7 @@ fn shared_constant_overflow_is_scoped_to_analysis_root() {
                 SemaExprContext::root(),
             );
             assert_eq!(sema.sink.error_count(), 2, "limit {limit}");
-            assert!(fcx.inst_map[shared.index()].is_none(), "limit {limit}");
+            assert!(fcx.get(sema.body_map(), shared).is_none(), "limit {limit}");
         });
         drop(sema);
         let diags = sink.into_diags();
@@ -171,19 +224,8 @@ fn nested_machine_rollback_preserves_outer_early_errors() {
     let rhs = builder.binary(InstTag::Add, one, shared, Span::EMPTY);
     let root = builder.binary(InstTag::Add, shared, rhs, Span::EMPTY);
     let mut pool = InternPool::new();
-    let uir = builder.finish().with_layout_context(&pool);
-    let int = pool.int();
-    let name = pool.intern_str("test");
-    let mut fcx = FuncCtx {
-        decl: DeclId::NONE,
-        builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
-        inst_map: vec![None; uir.instructions.len()],
-        chain_local_errors: Vec::new(),
-        return_type: int,
-        loop_depth: 0,
-        destructure_temps: Default::default(),
-        inferred_call_dependencies: Default::default(),
-    };
+    let uir = finish_body(builder, &mut pool, root);
+    let mut fcx = test_func_ctx(&uir, &mut pool);
     let scope = Scope::new();
     let mut sink = DiagSink::new();
     let mut context = ryo_core::compilation::CompilationContext::new();
@@ -207,7 +249,7 @@ fn nested_machine_rollback_preserves_outer_early_errors() {
         );
         assert_eq!(super::walker::machine_call_count(), 1);
         assert_eq!(sema.sink.error_count(), 1);
-        assert!(fcx.inst_map[shared.index()].is_none());
+        assert!(fcx.get(sema.body_map(), shared).is_none());
         analyze_expr_with(
             &mut sema,
             &mut fcx,
@@ -217,7 +259,7 @@ fn nested_machine_rollback_preserves_outer_early_errors() {
             SemaExprContext::root(),
         );
         assert_eq!(sema.sink.error_count(), 2);
-        assert!(fcx.inst_map[shared.index()].is_none());
+        assert!(fcx.get(sema.body_map(), shared).is_none());
     });
     drop(sema);
     let diags = sink.into_diags();
@@ -238,19 +280,8 @@ fn nested_machine_early_error_root_is_scoped_to_expression_root() {
     let nested = builder.binary(InstTag::Div, one, zero, Span::EMPTY);
     let root = builder.binary(InstTag::Add, one, nested, Span::EMPTY);
     let mut pool = InternPool::new();
-    let uir = builder.finish().with_layout_context(&pool);
-    let int = pool.int();
-    let name = pool.intern_str("test");
-    let mut fcx = FuncCtx {
-        decl: DeclId::NONE,
-        builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
-        inst_map: vec![None; uir.instructions.len()],
-        chain_local_errors: Vec::new(),
-        return_type: int,
-        loop_depth: 0,
-        destructure_temps: Default::default(),
-        inferred_call_dependencies: Default::default(),
-    };
+    let uir = finish_body(builder, &mut pool, root);
+    let mut fcx = test_func_ctx(&uir, &mut pool);
     let scope = Scope::new();
     let mut sink = DiagSink::new();
     let mut context = ryo_core::compilation::CompilationContext::new();
@@ -274,7 +305,7 @@ fn nested_machine_early_error_root_is_scoped_to_expression_root() {
         );
         assert_eq!(super::walker::machine_call_count(), 1);
         assert_eq!(sema.sink.error_count(), 1);
-        assert!(fcx.inst_map[nested.index()].is_none());
+        assert!(fcx.get(sema.body_map(), nested).is_none());
         analyze_expr_with(
             &mut sema,
             &mut fcx,
@@ -284,7 +315,7 @@ fn nested_machine_early_error_root_is_scoped_to_expression_root() {
             SemaExprContext::root(),
         );
         assert_eq!(sema.sink.error_count(), 2);
-        assert!(fcx.inst_map[nested.index()].is_none());
+        assert!(fcx.get(sema.body_map(), nested).is_none());
     });
     drop(sema);
     let diags = sink.into_diags();
@@ -305,19 +336,8 @@ fn statement_root_removes_early_error_before_direct_reanalysis() {
     let expression = builder.binary(InstTag::Div, one, zero, Span::EMPTY);
     let statement = builder.unary(InstTag::Return, expression, Span::EMPTY);
     let mut pool = InternPool::new();
-    let uir = builder.finish().with_layout_context(&pool);
-    let int = pool.int();
-    let name = pool.intern_str("test");
-    let mut fcx = FuncCtx {
-        decl: DeclId::NONE,
-        builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
-        inst_map: vec![None; uir.instructions.len()],
-        chain_local_errors: Vec::new(),
-        return_type: int,
-        loop_depth: 0,
-        destructure_temps: Default::default(),
-        inferred_call_dependencies: Default::default(),
-    };
+    let uir = finish_body(builder, &mut pool, statement);
+    let mut fcx = test_func_ctx(&uir, &mut pool);
     let mut scope = Scope::new();
     let mut sink = DiagSink::new();
     let mut context = ryo_core::compilation::CompilationContext::new();
@@ -331,7 +351,7 @@ fn statement_root_removes_early_error_before_direct_reanalysis() {
     );
     super::super::analyze_stmt(&mut sema, &mut fcx, &mut scope, statement);
     assert_eq!(sema.sink.error_count(), 1);
-    assert!(fcx.inst_map[expression.index()].is_none());
+    assert!(fcx.get(sema.body_map(), expression).is_none());
     analyze_expr_with(
         &mut sema,
         &mut fcx,
@@ -341,7 +361,7 @@ fn statement_root_removes_early_error_before_direct_reanalysis() {
         SemaExprContext::root(),
     );
     assert_eq!(sema.sink.error_count(), 2);
-    assert!(fcx.inst_map[expression.index()].is_none());
+    assert!(fcx.get(sema.body_map(), expression).is_none());
     drop(sema);
     let diags = sink.into_diags();
     assert_eq!(diags.len(), 2, "{diags:?}");
@@ -357,18 +377,7 @@ fn statement_root_removes_early_error_before_direct_reanalysis() {
 fn successful_binop_result_stays_memoized() {
     for limit in [64, 0] {
         let (uir, mut pool, _root, shared) = shared_binop_dag(InstTag::Add, 1, 2);
-        let int = pool.int();
-        let name = pool.intern_str("test");
-        let mut fcx = FuncCtx {
-            decl: DeclId::NONE,
-            builder: TirBuilder::new(name, vec![], int, Span::EMPTY),
-            inst_map: vec![None; uir.instructions.len()],
-            chain_local_errors: Vec::new(),
-            return_type: int,
-            loop_depth: 0,
-            destructure_temps: Default::default(),
-            inferred_call_dependencies: Default::default(),
-        };
+        let mut fcx = test_func_ctx(&uir, &mut pool);
         let scope = Scope::new();
         let mut sink = DiagSink::new();
         let mut context = ryo_core::compilation::CompilationContext::new();
@@ -398,7 +407,7 @@ fn successful_binop_result_stays_memoized() {
                 SemaExprContext::root(),
             );
             assert_eq!(first, second, "limit {limit}");
-            assert!(fcx.inst_map[shared.index()].is_some(), "limit {limit}");
+            assert!(fcx.get(sema.body_map(), shared).is_some(), "limit {limit}");
             first
         });
         assert_eq!(sema.sink.error_count(), 0, "limit {limit}");
@@ -1462,4 +1471,86 @@ fn nested_call_fors_use_one_machine_at_default_limit() {
         "sema::expr::walker_tests::nested_call_fors_use_one_machine_at_default_limit",
         nested_statements(NestedStatement::For, 128, true),
     );
+}
+
+#[test]
+fn uppercase_call_uses_expected_struct_argument_at_every_depth_limit() {
+    let src = r#"error A
+fn Make(value: {value: A!int}) -> int:
+	return 0
+fn main():
+	print(Make({value=1}))
+"#;
+    let (_tirs, diags, _pool, _context) = run_differential(src);
+    assert!(diags.is_empty(), "{diags:?}");
+    let baseline = snapshot(run_differential(src));
+    for limit in [0, 1, 64] {
+        assert_eq!(
+            snapshot(run_differential_with_expr_limit(src, limit)),
+            baseline,
+            "uppercase call lost its expected struct argument at limit {limit}"
+        );
+    }
+}
+
+#[test]
+fn uppercase_method_receiver_precedes_arguments_at_every_depth_limit() {
+    let src = "fn main():\n\tprint(Missing.Method(also_missing))\n";
+    let (_tirs, diags, _pool, _context) = run_differential(src);
+    assert_eq!(diags.len(), 2, "{diags:?}");
+    assert!(diags[0].message.contains("undefined variable: 'Missing'"));
+    assert!(
+        diags[1]
+            .message
+            .contains("undefined variable: 'also_missing'")
+    );
+    let baseline = snapshot(run_differential(src));
+    for limit in [0, 1, 64] {
+        assert_eq!(
+            snapshot(run_differential_with_expr_limit(src, limit)),
+            baseline,
+            "receiver and argument order differed at limit {limit}"
+        );
+    }
+}
+
+#[test]
+fn variant_state_pool_reuses_body_storage_across_walks() {
+    let (uir, mut pool, root, _shared) = shared_binop_dag(InstTag::Add, 1, 2);
+    let mut fcx = test_func_ctx(&uir, &mut pool);
+    let scope = Scope::new();
+    let mut sink = DiagSink::new();
+    let mut context = ryo_core::compilation::CompilationContext::new();
+    let mut sema = Sema::new(
+        &uir,
+        &mut pool,
+        &mut sink,
+        "",
+        Path::new("<test>"),
+        &mut context,
+    );
+
+    with_expr_limit(0, || {
+        analyze_expr_with(
+            &mut sema,
+            &mut fcx,
+            &scope,
+            root,
+            NeverMode::Reject,
+            SemaExprContext::root(),
+        );
+        assert_eq!(fcx.variant_states.len(), 1);
+        let capacities = fcx.variant_states[0].storage_capacities();
+
+        analyze_expr_with(
+            &mut sema,
+            &mut fcx,
+            &scope,
+            root,
+            NeverMode::Reject,
+            SemaExprContext::root(),
+        );
+        assert_eq!(fcx.variant_states.len(), 1);
+        assert_eq!(fcx.variant_states[0].storage_capacities(), capacities);
+    });
 }

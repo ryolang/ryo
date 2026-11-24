@@ -603,7 +603,7 @@ pub enum ParseDiag {
     /// variant names and shows both correct spellings; a plain call
     /// carries neither and says named arguments are unsupported.
     /// Ordinary calls recover in the parser; uppercase-led receivers
-    /// recover in AstGen after enum-versus-error-family resolution.
+    /// recover in Sema after enum-versus-error-family resolution.
     /// The value becomes positional in either recovery.
     NamedArgInParens {
         enum_name: Option<crate::types::StringId>,

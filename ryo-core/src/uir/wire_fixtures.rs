@@ -17,9 +17,9 @@ fn var_decl_wire_fixture() {
     b.uir.extra.extend([0xAAAA_AAAA; 5]);
     let name = StringId::from_raw(7);
     let init = InstRef::from_raw(11);
-    let ty = TypeId::from_raw(3);
+    let type_expr = TypeExprId::from_raw(3);
 
-    let annotated = b.var_decl(name, true, Some(ty), init, sp());
+    let annotated = b.var_decl(name, true, Some(type_expr), init, sp());
     let InstData::Extra(range) = b.uir.inst(annotated).data else {
         panic!("VarDecl must carry InstData::Extra");
     };
@@ -32,7 +32,31 @@ fn var_decl_wire_fixture() {
         panic!("VarDecl must carry InstData::Extra");
     };
     assert_eq!(range2, ExtraRange { offset: 9, len: 4 });
-    assert_eq!(&b.uir.extra[9..13], &[7, 0, u32::MAX, 11]);
+    assert_eq!(&b.uir.extra[9..13], &[7, 0, 0, 11]);
+}
+
+#[test]
+fn var_decl_optional_type_expr_sentinel_round_trip() {
+    let name = StringId::from_raw(7);
+    let init = InstRef::from_raw(11);
+    let max_type_expr = TypeExprId::from_raw(u32::MAX);
+    let mut builder = UirBuilder::new();
+    let annotated_ref = builder.var_decl(name, false, Some(max_type_expr), init, sp());
+    let inferred_ref = builder.var_decl(name, false, None, init, sp());
+    let uir = builder.finish();
+
+    let annotated = uir.var_decl_view(annotated_ref);
+    assert_eq!(annotated.type_expr, Some(max_type_expr));
+    let inferred = uir.var_decl_view(inferred_ref);
+    assert_eq!(inferred.type_expr, None);
+    let InstData::Extra(annotated_range) = uir.inst(annotated_ref).data else {
+        panic!("annotated declaration must carry an extra range");
+    };
+    assert_eq!(uir.extra[annotated_range.as_range()][2], u32::MAX);
+    let InstData::Extra(inferred_range) = uir.inst(inferred_ref).data else {
+        panic!("inferred declaration must carry an extra range");
+    };
+    assert_eq!(uir.extra[inferred_range.as_range()][2], 0);
 }
 
 #[test]
@@ -40,7 +64,7 @@ fn var_decl_decode_fixture() {
     // Literal words, never encoder output: payloads and ranges are
     // supplied independently of any builder push sequence.
     let mut uir = Uir::new();
-    uir.extra.extend([7, 1, 3, 11, 7, 0, u32::MAX, 11]);
+    uir.extra.extend([7, 1, 3, 11, 7, 0, 0, 11]);
     uir.instructions.push(Inst {
         tag: InstTag::VarDecl,
         data: InstData::Extra(ExtraRange { offset: 0, len: 4 }),
@@ -54,18 +78,18 @@ fn var_decl_decode_fixture() {
 
     let name = StringId::from_raw(7);
     let init = InstRef::from_raw(11);
-    let ty = TypeId::from_raw(3);
+    let type_expr = TypeExprId::from_raw(3);
 
     let v1 = uir.var_decl_view(InstRef::from_index(1));
     assert_eq!(v1.name, name);
     assert!(v1.mutable);
-    assert_eq!(v1.ty, Some(ty));
+    assert_eq!(v1.type_expr, Some(type_expr));
     assert_eq!(v1.initializer, init);
 
     let v2 = uir.var_decl_view(InstRef::from_index(2));
     assert_eq!(v2.name, name);
     assert!(!v2.mutable);
-    assert_eq!(v2.ty, None);
+    assert_eq!(v2.type_expr, None);
     assert_eq!(v2.initializer, init);
 }
 
@@ -368,46 +392,114 @@ fn struct_lit_wire_fixture() {
 fn enum_lit_wire_fixture() {
     let mut b = UirBuilder::new();
     b.uir.extra.extend([0xAAAA_AAAA; 5]);
-    let ty = TypeId::from_raw(3);
+    let enum_name = StringId::from_raw(3);
+    let variant = StringId::from_raw(4);
+    let width = StringId::from_raw(5);
+    let height = StringId::from_raw(6);
+    let enum_span = Span::in_source(crate::source::SourceId::from_raw_parts(7, 9), 10, 11);
+    let variant_span = Span::in_source(crate::source::SourceId::from_raw_parts(8, 10), 12, 13);
     let w = InstRef::from_raw(21);
     let h = InstRef::from_raw(22);
+    let form = UirVariantForm::default();
 
-    let two = b.enum_lit(ty, 1, false, &[(0, w), (1, h)], sp());
+    let two = b.enum_lit(
+        enum_name,
+        variant,
+        enum_span,
+        variant_span,
+        form,
+        &[(width.raw(), w), (height.raw(), h)],
+        sp(),
+    );
     let InstData::Extra(range) = b.uir.inst(two).data else {
         panic!("EnumLit must carry InstData::Extra");
     };
-    assert_eq!(range, ExtraRange { offset: 5, len: 8 });
-    assert_eq!(&b.uir.extra[5..13], &[3, 1, 2, 0, 0, 21, 1, 22]);
+    assert_eq!(range, ExtraRange { offset: 5, len: 16 });
+    assert_eq!(
+        &b.uir.extra[5..21],
+        &[3, 4, 0, 2, 7, 9, 10, 11, 8, 10, 12, 13, 5, 21, 6, 22]
+    );
 
-    let unit = b.enum_lit(ty, 1, false, &[], sp());
-    let InstData::Extra(range2) = b.uir.inst(unit).data else {
-        panic!("EnumLit must carry InstData::Extra");
+    let uir = shell_view(
+        &[3, 4, 0, 2, 7, 9, 10, 11, 8, 10, 12, 13, 5, 21, 6, 22],
+        InstTag::EnumLit,
+        16,
+    );
+    let v = uir.enum_lit_view(shell_ref(&uir));
+    assert_eq!(v.enum_name, enum_name);
+    assert_eq!(v.variant, variant);
+    assert_eq!(v.enum_span, enum_span);
+    assert_eq!(v.variant_span, variant_span);
+    assert_eq!(v.form, form);
+    assert_eq!(
+        v.fields().collect::<Vec<_>>(),
+        vec![(width.raw(), w), (height.raw(), h)]
+    );
+
+    let positional = UirVariantForm {
+        positional: true,
+        named_parens: false,
+        mixed_fields: false,
     };
-    assert_eq!(range2, ExtraRange { offset: 13, len: 4 });
-    assert_eq!(&b.uir.extra[13..17], &[3, 1, 0, 0]);
-
-    let pos = b.enum_lit(ty, 1, true, &[(0, w)], sp());
-    let InstData::Extra(range3) = b.uir.inst(pos).data else {
-        panic!("EnumLit must carry InstData::Extra");
-    };
-    assert_eq!(range3, ExtraRange { offset: 17, len: 6 });
-    assert_eq!(&b.uir.extra[17..23], &[3, 1, 1, 1, 0, 21]);
-
-    let uir = shell_view(&[3, 1, 2, 0, 0, 21, 1, 22], InstTag::EnumLit, 8);
+    let uir = shell_view(
+        &[3, 4, 1, 1, 7, 9, 10, 11, 8, 10, 12, 13, 0, 21],
+        InstTag::EnumLit,
+        14,
+    );
     let v = uir.enum_lit_view(shell_ref(&uir));
-    assert_eq!(v.ty, ty);
-    assert_eq!(v.variant_index, 1);
-    assert!(!v.positional);
-    assert_eq!(v.fields().collect::<Vec<_>>(), vec![(0, w), (1, h)]);
-
-    let uir = shell_view(&[3, 1, 0, 0], InstTag::EnumLit, 4);
-    let v = uir.enum_lit_view(shell_ref(&uir));
-    assert_eq!(v.fields().count(), 0);
-
-    let uir = shell_view(&[3, 1, 1, 1, 0, 21], InstTag::EnumLit, 6);
-    let v = uir.enum_lit_view(shell_ref(&uir));
-    assert!(v.positional);
+    assert_eq!(v.form, positional);
     assert_eq!(v.fields().collect::<Vec<_>>(), vec![(0, w)]);
+}
+
+#[test]
+fn error_construct_wire_fixture() {
+    let mut b = UirBuilder::new();
+    b.uir.extra.extend([0xAAAA_AAAA; 5]);
+    let name = StringId::from_raw(3);
+    let code = StringId::from_raw(5);
+    let message = StringId::from_raw(6);
+    let value = InstRef::from_raw(21);
+    let text = InstRef::from_raw(22);
+    let form = UirVariantForm {
+        positional: false,
+        named_parens: true,
+        mixed_fields: false,
+    };
+    let error = b.error_construct(
+        name,
+        None,
+        None,
+        form,
+        &[(code.raw(), value), (message.raw(), text)],
+        sp(),
+    );
+    let InstData::ErrorConstruct { args, .. } = b.uir.inst(error).data else {
+        panic!("ErrorConstruct must carry its name and argument range");
+    };
+    assert_eq!(args, ExtraRange { offset: 5, len: 8 });
+    assert_eq!(
+        &b.uir.extra[5..13],
+        &[u32::MAX, u32::MAX, 2, 2, 5, 21, 6, 22]
+    );
+
+    let mut uir = Uir::new();
+    uir.extra.extend([u32::MAX, u32::MAX, 2, 2, 5, 21, 6, 22]);
+    uir.instructions.push(Inst {
+        tag: InstTag::ErrorConstruct,
+        data: InstData::ErrorConstruct {
+            name,
+            args: ExtraRange { offset: 0, len: 8 },
+        },
+    });
+    uir.spans.push(sp());
+    let (decoded_name, root, member, view) = uir.error_construct_view(InstRef::from_index(1));
+    assert_eq!(decoded_name, name);
+    assert_eq!((root, member), (None, None));
+    assert_eq!(view.form, form);
+    assert_eq!(
+        view.fields().collect::<Vec<_>>(),
+        vec![(code.raw(), value), (message.raw(), text)]
+    );
 }
 
 #[test]

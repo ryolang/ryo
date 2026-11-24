@@ -13,7 +13,7 @@
 //!
 //! ## Storage shape
 //!
-//! Three parallel arenas:
+//! The instruction stream uses three parallel arenas:
 //!
 //! - `instructions: Vec<Inst>` — fixed-size `(tag, data)` pairs. One
 //!   entry per instruction; sub-expressions are *not* nested, they
@@ -26,14 +26,18 @@
 //!   `InstData` lives here, indexed by an [`ExtraRange`]. Per-payload
 //!   layouts (`*_extra` modules owning `encode`/`decode`/views) mostly
 //!   live in `wires`; the exceptions are `destructure_extra` (in
-//!   `destructure`), `match_extra` (in `match_`), and `enum_lit_extra`,
-//!   which is shared with TIR and lives in `crate::extra`. The
-//!   `wire_fixtures` module (test-only) pins each layout's exact words.
+//!   `destructure`) and `match_extra` (in `match_`). TIR's resolved
+//!   `enum_lit_extra` lives in `crate::extra`; UIR uses `variant_extra`
+//!   for unresolved candidates. `wire_fixtures` pins each layout's words.
 //! - `spans: Vec<Span>` — parallel to `instructions`, one span per
 //!   `InstRef`. Storing spans out-of-band keeps `Inst` itself small
 //!   (the tagged-enum payload already costs more than a `u32`; piling
 //!   a start/end span pair on top would double the per-inst footprint
 //!   for no reason — only diagnostics ever read spans).
+//!
+//! Unresolved annotations use separate flat side arenas: `type_exprs`
+//! stores source-spanned nodes, while `type_expr_lists` and
+//! `type_field_lists` hold their typed children behind `u32` ranges.
 //!
 //! Function-level metadata lives in `func_bodies`. A function's body
 //! is a range into `extra` listing the [`InstRef`]s of the top-level
@@ -60,7 +64,7 @@
 
 use crate::ast::{CompoundOp, DeclVisibility};
 use crate::tir::ParamMode;
-use crate::types::{InternPool, StringId, TypeId, VariantKind};
+use crate::types::{InternPool, StringId, VariantKind};
 use std::num::NonZeroU32;
 
 pub use crate::span::Span;
@@ -125,9 +129,85 @@ impl InstRef {
     }
 }
 
+// ---------- Unresolved type expressions ----------
+
+/// Index into [`Uir::type_exprs`]. Slot zero is reserved, giving
+/// `Option<TypeExprId>` the same one-word representation as `TypeExprId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypeExprId(NonZeroU32);
+
+impl TypeExprId {
+    fn from_index(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("TypeExprId index out of range (>= 2^32)");
+        TypeExprId(NonZeroU32::new(raw).expect("TypeExprId index must be >= 1"))
+    }
+
+    pub fn index(self) -> usize {
+        self.0.get() as usize
+    }
+
+    pub fn raw(self) -> u32 {
+        self.0.get()
+    }
+
+    pub fn from_raw(raw: u32) -> Self {
+        TypeExprId(NonZeroU32::new(raw).expect("TypeExprId raw must be non-zero"))
+    }
+}
+
+/// A typed range in [`Uir::type_expr_lists`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypeExprList {
+    offset: u32,
+    len: u32,
+}
+
+impl TypeExprList {
+    fn as_range(self) -> std::ops::Range<usize> {
+        let start = self.offset as usize;
+        start..start + self.len as usize
+    }
+}
+
+/// A typed range in [`Uir::type_field_lists`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypeFieldList {
+    offset: u32,
+    len: u32,
+}
+
+impl TypeFieldList {
+    fn as_range(self) -> std::ops::Range<usize> {
+        let start = self.offset as usize;
+        start..start + self.len as usize
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UirTypeExpr {
+    pub kind: UirTypeExprKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UirTypeExprKind {
+    Name {
+        name: StringId,
+        is_view: bool,
+    },
+    Anon {
+        fields: TypeFieldList,
+    },
+    Positional(TypeExprList),
+    ErrorUnion {
+        error_set: TypeExprList,
+        success: TypeExprId,
+        inferred: bool,
+    },
+}
+
 // ---------- ExtraRange ----------
 
-pub use crate::extra::enum_lit_extra;
 pub use crate::extra::{ExtraList, ExtraRange, ExtraValue};
 
 // ---------- Instruction tags ----------
@@ -247,18 +327,13 @@ pub enum InstTag {
     /// declaration.
     StructLit,
 
-    /// Enum variant construction `Name::Variant(args...)` (M11).
-    /// Variable payload in `extra` — see [`enum_lit_extra`]. The
-    /// enum type and declaration-order variant index head the
-    /// payload; args are `(field_idx, value)` pairs keyed by
-    /// declaration-order payload-field index (tuple variants use the
-    /// synthesized `"0"`, `"1"`, … names). Unit variants encode
-    /// `argc = 0`.
+    /// Unresolved enum/error-family candidate. The wire retains source
+    /// names, source forms, and positional or named argument selectors.
     EnumLit,
 
-    /// Declared-error construction candidate. The inline data preserves
-    /// the source name for shadowing; the shared enum-literal wire holds
-    /// positional field indices or named-field `StringId`s.
+    /// Unresolved unqualified error-construction candidate. The inline
+    /// data preserves the source name for lexical shadowing; the wire
+    /// retains optional family source names and source-order arguments.
     ErrorConstruct,
 
     /// Field access `object.field` (M9); see [`InstData::FieldAccess`].
@@ -388,7 +463,7 @@ pub struct Inst {
 #[derive(Debug, Clone)]
 pub struct UirParam {
     pub name: StringId,
-    pub ty: TypeId,
+    pub type_expr: TypeExprId,
     pub mode: ParamMode,
     pub span: Span,
 }
@@ -397,7 +472,9 @@ pub struct UirParam {
 pub struct FuncBody {
     pub name: StringId,
     pub params: Vec<UirParam>,
-    pub return_type: TypeId,
+    /// `None` means the source omitted a return annotation and therefore
+    /// denotes `void`.
+    pub return_type: Option<TypeExprId>,
     /// Range into `extra` of [`InstRef::raw`] handles for the
     /// function's top-level statements, in execution order.
     pub body: ExtraRange,
@@ -406,50 +483,48 @@ pub struct FuncBody {
 
 // ---------- Struct declarations (M9) ----------
 
-/// A struct declaration registered by astgen, with field types
-/// already resolved through the `InternPool`. Metadata, not an
-/// instruction: sema reads this table to type-check
-/// [`InstTag::StructLit`] / [`InstTag::FieldAccess`].
+/// An unresolved struct declaration. Sema declares its nominal identity
+/// and resolves its fields before any function signature is analyzed.
 #[derive(Debug, Clone)]
 pub struct UirStructDecl {
     pub name: StringId,
-    /// The struct's nominal type, declared and defined in the pool
-    /// by astgen's two-phase pass.
-    pub ty: TypeId,
+    pub name_span: Span,
+    pub attrs: crate::ast::StructAttrs,
     /// Fields in declaration order.
     pub fields: Vec<UirStructField>,
     pub span: Span,
+    /// Top-level source position, used to reproduce first-wins lookup
+    /// across the separate per-kind side tables.
+    pub source_index: u32,
 }
 
 /// One field of a [`UirStructDecl`].
 #[derive(Debug, Clone, Copy)]
 pub struct UirStructField {
     pub name: StringId,
-    pub ty: TypeId,
+    pub type_expr: TypeExprId,
     pub span: Span,
 }
 
 // ---------- Enum declarations (M11) ----------
 
-/// An enum declaration registered by astgen, with variant payload
-/// field types already resolved through the `InternPool`. Metadata,
-/// not an instruction: sema reads this table to type-check
-/// [`InstTag::EnumLit`].
+/// An unresolved enum declaration with source variants and payloads.
 #[derive(Debug, Clone)]
 pub struct UirEnumDecl {
     pub name: StringId,
-    /// The enum's nominal type, declared and defined in the pool
-    /// by astgen's two-phase pass.
-    pub ty: TypeId,
+    pub name_span: Span,
+    pub attrs: crate::ast::EnumAttrs,
     /// Variants in declaration order.
     pub variants: Vec<UirEnumVariant>,
     pub span: Span,
+    pub source_index: u32,
 }
 
 /// One variant of a [`UirEnumDecl`].
 #[derive(Debug, Clone)]
 pub struct UirEnumVariant {
     pub name: StringId,
+    pub name_span: Span,
     pub kind: VariantKind,
     /// Payload fields in declaration order. Tuple-variant fields
     /// carry the synthesized `"0"`, `"1"`, … names (astgen interns
@@ -462,26 +537,43 @@ pub struct UirEnumVariant {
 #[derive(Debug, Clone, Copy)]
 pub struct UirEnumField {
     pub name: StringId,
-    pub ty: TypeId,
+    pub type_expr: TypeExprId,
     pub span: Span,
 }
 
-/// A nominal error declaration with its single variant payload.
+/// Direct indices from an error declaration to its family and source member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UirErrorMemberLink {
+    /// Index into `Uir::error_families`.
+    pub family: u32,
+    /// Index into the family's parallel `members` and `member_names` vectors.
+    pub member: u32,
+}
+
+/// An unresolved nominal error declaration with its source payload.
 #[derive(Debug, Clone)]
 pub struct UirErrorDecl {
     pub name: StringId,
-    pub ty: TypeId,
+    /// Direct family and member indices when this declaration came from a family.
+    pub family: Option<UirErrorMemberLink>,
     pub payload: UirEnumVariant,
     pub span: Span,
+    pub source_index: u32,
 }
 
-/// A closed error family and its ordered independent member types.
+/// A closed error family and its unresolved qualified member names.
 #[derive(Debug, Clone)]
 pub struct UirErrorFamilyDecl {
     pub name: StringId,
-    pub members: Vec<TypeId>,
+    pub name_span: Span,
+    /// Every short source member name, including duplicates rejected by Sema.
+    pub member_names: Vec<StringId>,
+    /// Qualified names parallel to `member_names` and to the corresponding
+    /// unresolved entries in `Uir::error_decls`.
+    pub members: Vec<StringId>,
     pub visibility: DeclVisibility,
     pub span: Span,
+    pub source_index: u32,
 }
 
 // ---------- Top-level UIR ----------
@@ -493,6 +585,9 @@ pub struct Uir {
     pub instructions: Vec<Inst>,
     pub extra: Vec<u32>,
     pub spans: Vec<Span>,
+    pub type_exprs: Vec<UirTypeExpr>,
+    pub type_expr_lists: Vec<TypeExprId>,
+    pub type_field_lists: Vec<(StringId, TypeExprId)>,
     pub func_bodies: Vec<FuncBody>,
     /// Struct declarations in source order (M9). Side table — struct
     /// decls lower to no instructions.
@@ -529,6 +624,12 @@ impl Uir {
             }],
             extra: Vec::new(),
             spans: vec![placeholder_span],
+            type_exprs: vec![UirTypeExpr {
+                kind: UirTypeExprKind::Positional(TypeExprList { offset: 0, len: 0 }),
+                span: placeholder_span,
+            }],
+            type_expr_lists: Vec::new(),
+            type_field_lists: Vec::new(),
             func_bodies: Vec::new(),
             struct_decls: Vec::new(),
             enum_decls: Vec::new(),
@@ -580,6 +681,18 @@ impl Uir {
         self.spans[r.index()]
     }
 
+    pub fn type_expr(&self, id: TypeExprId) -> UirTypeExpr {
+        self.type_exprs[id.index()]
+    }
+
+    pub fn type_expr_list(&self, list: TypeExprList) -> &[TypeExprId] {
+        &self.type_expr_lists[list.as_range()]
+    }
+
+    pub fn type_field_list(&self, list: TypeFieldList) -> &[(StringId, TypeExprId)] {
+        &self.type_field_lists[list.as_range()]
+    }
+
     /// Borrow the top-level statement references from the extra arena.
     /// The view decodes each reference as it is read and does not allocate.
     pub fn body_stmts(&self, body: &FuncBody) -> ExtraList<'_, InstRef> {
@@ -621,6 +734,60 @@ impl UirBuilder {
         self.uir.instructions.push(Inst { tag, data });
         self.uir.spans.push(span);
         InstRef::from_index(idx)
+    }
+
+    fn push_type_expr(&mut self, kind: UirTypeExprKind, span: Span) -> TypeExprId {
+        let idx = self.uir.type_exprs.len();
+        self.uir.type_exprs.push(UirTypeExpr { kind, span });
+        TypeExprId::from_index(idx)
+    }
+
+    fn push_type_expr_list(&mut self, items: &[TypeExprId]) -> TypeExprList {
+        let offset = u32::try_from(self.uir.type_expr_lists.len())
+            .expect("UIR type-expression list arena exceeded u32::MAX");
+        self.uir.type_expr_lists.extend_from_slice(items);
+        TypeExprList {
+            offset,
+            len: Self::len_u32(items.len()),
+        }
+    }
+
+    pub fn type_name(&mut self, name: StringId, is_view: bool, span: Span) -> TypeExprId {
+        self.push_type_expr(UirTypeExprKind::Name { name, is_view }, span)
+    }
+
+    pub fn type_anon(&mut self, fields: &[(StringId, TypeExprId)], span: Span) -> TypeExprId {
+        let offset = u32::try_from(self.uir.type_field_lists.len())
+            .expect("UIR type-field list arena exceeded u32::MAX");
+        self.uir.type_field_lists.extend_from_slice(fields);
+        let fields = TypeFieldList {
+            offset,
+            len: Self::len_u32(fields.len()),
+        };
+        self.push_type_expr(UirTypeExprKind::Anon { fields }, span)
+    }
+
+    pub fn type_positional(&mut self, elements: &[TypeExprId], span: Span) -> TypeExprId {
+        let elements = self.push_type_expr_list(elements);
+        self.push_type_expr(UirTypeExprKind::Positional(elements), span)
+    }
+
+    pub fn type_error_union(
+        &mut self,
+        error_set: &[TypeExprId],
+        success: TypeExprId,
+        inferred: bool,
+        span: Span,
+    ) -> TypeExprId {
+        let error_set = self.push_type_expr_list(error_set);
+        self.push_type_expr(
+            UirTypeExprKind::ErrorUnion {
+                error_set,
+                success,
+                inferred,
+            },
+            span,
+        )
     }
 
     pub fn int_literal(&mut self, value: i64, span: Span) -> InstRef {
@@ -741,16 +908,16 @@ impl UirBuilder {
     }
 
     /// Emits a `VarDecl` with the header packed into `extra`.
-    /// `ty` of `None` is encoded as `var_decl_extra::TY_NONE_SENTINEL`.
     pub fn var_decl(
         &mut self,
         name: StringId,
         mutable: bool,
-        ty: Option<TypeId>,
+        type_expr: Option<TypeExprId>,
         initializer: InstRef,
         span: Span,
     ) -> InstRef {
-        let range = var_decl_extra::encode(&mut self.uir.extra, name, mutable, ty, initializer);
+        let range =
+            var_decl_extra::encode(&mut self.uir.extra, name, mutable, type_expr, initializer);
         self.push(InstTag::VarDecl, InstData::Extra(range), span)
     }
 
@@ -760,7 +927,7 @@ impl UirBuilder {
         &mut self,
         name: StringId,
         params: Vec<UirParam>,
-        return_type: TypeId,
+        return_type: Option<TypeExprId>,
         stmts: &[InstRef],
         span: Span,
     ) {
@@ -878,48 +1045,48 @@ impl UirBuilder {
         self.push(InstTag::StructLit, InstData::Extra(range), span)
     }
 
-    /// Emits an `EnumLit` `Name::Variant(args...)` (M11) with the
-    /// enum type, declaration-order variant index, and
-    /// `(field_idx, value)` arg pairs packed into `extra`. `field_idx`
-    /// selects the payload field within the variant; unit variants
-    /// pass `&[]`. `positional` records the source form: astgen sets it
-    /// for the parenthesized form so sema can enforce the Brace Law on
-    /// named payloads (see [`enum_lit_extra::FLAG_POSITIONAL`]).
+    /// Emits an unresolved `EnumLit` candidate with source names, source
+    /// spans, and source-order arguments. Sema resolves declaration and
+    /// field identities before emitting the unchanged TIR enum wire.
+    #[allow(clippy::too_many_arguments)]
     pub fn enum_lit(
         &mut self,
-        ty: TypeId,
-        variant: u32,
-        positional: bool,
+        enum_name: StringId,
+        variant: StringId,
+        enum_span: Span,
+        variant_span: Span,
+        form: UirVariantForm,
         args: &[(u32, InstRef)],
         span: Span,
     ) -> InstRef {
-        let range = enum_lit_extra::encode(&mut self.uir.extra, ty, variant, args, positional);
+        let range = variant_extra::encode_enum(
+            &mut self.uir.extra,
+            enum_name,
+            variant,
+            enum_span,
+            variant_span,
+            form,
+            args,
+        );
         self.push(InstTag::EnumLit, InstData::Extra(range), span)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn error_construct(
         &mut self,
         name: StringId,
         family_root: Option<StringId>,
         family_member: Option<StringId>,
-        ty: TypeId,
-        positional: bool,
+        form: UirVariantForm,
         args: &[(u32, InstRef)],
         span: Span,
     ) -> InstRef {
-        let root = family_root.map_or(u32::MAX, StringId::raw);
-        let member = family_member.map_or(u32::MAX, StringId::raw);
-        let offset = u32::try_from(self.uir.extra.len()).expect("UIR extra arena exceeds u32");
-        self.uir.extra.extend([root, member]);
-        let payload = enum_lit_extra::encode(&mut self.uir.extra, ty, 0, args, positional);
-        let range = ExtraRange {
-            offset,
-            len: payload
-                .len
-                .checked_add(2)
-                .expect("UIR wire length overflow"),
-        };
+        let range = variant_extra::encode_error(
+            &mut self.uir.extra,
+            family_root,
+            family_member,
+            form,
+            args,
+        );
         self.push(
             InstTag::ErrorConstruct,
             InstData::ErrorConstruct { name, args: range },
@@ -982,6 +1149,8 @@ impl UirBuilder {
     }
 }
 
+mod body_map;
+pub use body_map::{BodyMapError, BodySlot, UirBodyMap};
 mod dump;
 pub use dump::UirDump;
 mod destructure;
@@ -994,16 +1163,17 @@ pub use match_::{
     UirVariantArgs, UirVariantArgsView, match_extra,
 };
 mod wires;
+pub use wires::variant_extra::UirVariantForm;
 pub(crate) use wires::{
     assign_or_decl_extra, call_extra, compound_assign_extra, compound_field_assign_extra,
     field_assign_extra, for_range_extra, if_stmt_extra, method_call_extra, struct_lit_extra,
-    var_decl_extra, while_loop_extra,
+    var_decl_extra, variant_extra, while_loop_extra,
 };
 mod views;
 pub use views::{
     AssignOrDeclView, CallView, CompoundAssignView, CompoundFieldAssignView, ElifBranches,
     ElifView, EnumLitView, FieldAssignView, ForRangeView, IfStmtView, MethodCallView,
-    StructLitView, VarDeclView, WhileLoopView,
+    StructLitView, VarDeclView, VariantArgsView, WhileLoopView,
 };
 
 #[cfg(test)]
@@ -1024,6 +1194,10 @@ mod tests {
             std::mem::size_of::<Option<InstRef>>(),
             std::mem::size_of::<u32>()
         );
+        assert_eq!(
+            std::mem::size_of::<Option<TypeExprId>>(),
+            std::mem::size_of::<u32>()
+        );
     }
 
     #[test]
@@ -1040,6 +1214,7 @@ mod tests {
         let uir = Uir::new();
         assert_eq!(uir.instructions.len(), 1);
         assert_eq!(uir.spans.len(), 1);
+        assert_eq!(uir.type_exprs.len(), 1);
     }
 
     #[test]
@@ -1073,7 +1248,8 @@ mod tests {
         let lit2 = b.int_literal(2, sp());
         let add = b.binary(InstTag::Add, lit1, lit2, sp());
         let ret = b.unary(InstTag::Return, add, sp());
-        b.add_function(main, vec![], pool.int(), &[ret], sp());
+        let return_type = b.type_name(pool.intern_str("int"), false, sp());
+        b.add_function(main, vec![], Some(return_type), &[ret], sp());
 
         let uir = b.finish();
         assert_eq!(uir.func_bodies.len(), 1);
@@ -1131,9 +1307,10 @@ mod tests {
     fn var_decl_round_trips_with_and_without_annotation() {
         let mut pool = InternPool::new();
         let x = pool.intern_str("x");
-        let int_ty = pool.int();
+        let int_name = pool.intern_str("int");
 
         let mut b = UirBuilder::new();
+        let int_ty = b.type_name(int_name, false, sp());
         let init = b.int_literal(42, sp());
         let annotated = b.var_decl(x, false, Some(int_ty), init, sp());
         let inferred = b.var_decl(x, true, None, init, sp());
@@ -1142,12 +1319,12 @@ mod tests {
         let v1 = uir.var_decl_view(annotated);
         assert_eq!(v1.name, x);
         assert!(!v1.mutable);
-        assert_eq!(v1.ty, Some(int_ty));
+        assert_eq!(v1.type_expr, Some(int_ty));
         assert_eq!(v1.initializer, init);
 
         let v2 = uir.var_decl_view(inferred);
         assert!(v2.mutable);
-        assert_eq!(v2.ty, None);
+        assert_eq!(v2.type_expr, None);
     }
 
     #[test]
@@ -1365,7 +1542,8 @@ mod tests {
         let e2 = b.unary(InstTag::ExprStmt, s2, sp());
         let s3 = b.int_literal(3, sp());
         let r = b.unary(InstTag::Return, s3, sp());
-        b.add_function(main, vec![], pool.int(), &[e1, e2, r], sp());
+        let return_type = b.type_name(pool.intern_str("int"), false, sp());
+        b.add_function(main, vec![], Some(return_type), &[e1, e2, r], sp());
         let uir = b.finish();
         assert_eq!(
             uir.body_stmts(&uir.func_bodies[0])
@@ -1432,32 +1610,37 @@ mod tests {
         let (n0, n1) = (pool.intern_str("0"), pool.intern_str("1"));
         let rect = pool.intern_str("Rect");
         let (w, h) = (pool.intern_str("w"), pool.intern_str("h"));
-        let (int_ty, float_ty) = (pool.int(), pool.float());
-        let enum_ty = pool.declare_enum(shape);
+        let int_name = pool.intern_str("int");
+        let float_name = pool.intern_str("float");
 
         let mut b = UirBuilder::new();
+        let int_ty = b.type_name(int_name, false, sp());
+        let float_ty = b.type_name(float_name, false, sp());
         b.add_enum_decl(UirEnumDecl {
             name: shape,
-            ty: enum_ty,
+            name_span: sp(),
+            attrs: crate::ast::EnumAttrs::default(),
             variants: vec![
                 UirEnumVariant {
                     name: circle,
+                    name_span: sp(),
                     kind: VariantKind::Unit,
                     fields: vec![],
                     span: sp(),
                 },
                 UirEnumVariant {
                     name: pair,
+                    name_span: sp(),
                     kind: VariantKind::Tuple,
                     fields: vec![
                         UirEnumField {
                             name: n0,
-                            ty: int_ty,
+                            type_expr: int_ty,
                             span: sp(),
                         },
                         UirEnumField {
                             name: n1,
-                            ty: float_ty,
+                            type_expr: float_ty,
                             span: sp(),
                         },
                     ],
@@ -1465,16 +1648,17 @@ mod tests {
                 },
                 UirEnumVariant {
                     name: rect,
+                    name_span: sp(),
                     kind: VariantKind::Named,
                     fields: vec![
                         UirEnumField {
                             name: w,
-                            ty: float_ty,
+                            type_expr: float_ty,
                             span: sp(),
                         },
                         UirEnumField {
                             name: h,
-                            ty: float_ty,
+                            type_expr: float_ty,
                             span: sp(),
                         },
                     ],
@@ -1482,13 +1666,13 @@ mod tests {
                 },
             ],
             span: sp(),
+            source_index: 0,
         });
 
         let uir = b.finish();
         assert_eq!(uir.enum_decls.len(), 1);
         let decl = &uir.enum_decls[0];
         assert_eq!(decl.name, shape);
-        assert_eq!(decl.ty, enum_ty);
         assert_eq!(decl.variants.len(), 3);
 
         assert_eq!(decl.variants[0].name, circle);
@@ -1499,52 +1683,49 @@ mod tests {
         assert_eq!(decl.variants[1].kind, VariantKind::Tuple);
         assert_eq!(decl.variants[1].fields.len(), 2);
         assert_eq!(decl.variants[1].fields[0].name, n0);
-        assert_eq!(decl.variants[1].fields[0].ty, int_ty);
+        assert_eq!(decl.variants[1].fields[0].type_expr, int_ty);
         assert_eq!(decl.variants[1].fields[1].name, n1);
-        assert_eq!(decl.variants[1].fields[1].ty, float_ty);
+        assert_eq!(decl.variants[1].fields[1].type_expr, float_ty);
 
         assert_eq!(decl.variants[2].name, rect);
         assert_eq!(decl.variants[2].kind, VariantKind::Named);
         assert_eq!(decl.variants[2].fields.len(), 2);
         assert_eq!(decl.variants[2].fields[0].name, w);
-        assert_eq!(decl.variants[2].fields[0].ty, float_ty);
+        assert_eq!(decl.variants[2].fields[0].type_expr, float_ty);
         assert_eq!(decl.variants[2].fields[1].name, h);
-        assert_eq!(decl.variants[2].fields[1].ty, float_ty);
+        assert_eq!(decl.variants[2].fields[1].type_expr, float_ty);
     }
 
     #[test]
     fn enum_lit_round_trips_through_extra() {
         let mut pool = InternPool::new();
         let shape = pool.intern_str("Shape");
-        let enum_ty = pool.declare_enum(shape);
+        let rectangle = pool.intern_str("Rectangle");
+        let width = pool.intern_str("width");
+        let height = pool.intern_str("height");
 
         let mut b = UirBuilder::new();
         let w = b.float_literal(3.0, sp());
         let h = b.float_literal(4.0, sp());
-        let lit = b.enum_lit(enum_ty, 1, false, &[(0, w), (1, h)], sp());
+        let lit = b.enum_lit(
+            shape,
+            rectangle,
+            sp(),
+            sp(),
+            UirVariantForm::default(),
+            &[(width.raw(), w), (height.raw(), h)],
+            sp(),
+        );
 
         let uir = b.finish();
         let view = uir.enum_lit_view(lit);
-        assert_eq!(view.ty, enum_ty);
-        assert_eq!(view.variant_index, 1);
-        assert!(!view.positional, "braced named form clears the flag");
-        assert_eq!(view.fields().collect::<Vec<_>>(), vec![(0, w), (1, h)]);
-
-        // Wire layout is pinned: [TY, VARIANT, ARGC, FLAGS, (FIELD_IDX, REF) x ARGC].
-        let inst = uir.inst(lit);
-        let range = match inst.data {
-            InstData::Extra(rng) => rng,
-            other => panic!("expected InstData::Extra, got {:?}", other),
-        };
-        let slice = &uir.extra[range.as_range()];
-        assert_eq!(slice[0], enum_ty.raw());
-        assert_eq!(slice[1], 1);
-        assert_eq!(slice[2], 2);
-        assert_eq!(slice[3], 0);
-        assert_eq!(slice[4], 0);
-        assert_eq!(slice[5], w.raw());
-        assert_eq!(slice[6], 1);
-        assert_eq!(slice[7], h.raw());
+        assert_eq!(view.enum_name, shape);
+        assert_eq!(view.variant, rectangle);
+        assert_eq!(view.form, UirVariantForm::default());
+        assert_eq!(
+            view.fields().collect::<Vec<_>>(),
+            vec![(width.raw(), w), (height.raw(), h)]
+        );
     }
 
     #[test]
@@ -1552,28 +1733,28 @@ mod tests {
         let mut pool = InternPool::new();
         let shape = pool.intern_str("Shape");
         let pair = pool.intern_str("Pair");
-        let float_ty = pool.float();
-        let enum_ty = pool.declare_enum(shape);
-        pool.define_enum(
-            enum_ty,
-            shape,
-            &[crate::types::EnumVariantDef {
-                name: pair,
-                kind: crate::types::VariantKind::Tuple,
-                fields: vec![(pair, float_ty), (pair, float_ty)],
-            }],
-            crate::types::StructFlags::default(),
-        );
 
         let mut b = UirBuilder::new();
         let w = b.float_literal(3.0, sp());
         let h = b.float_literal(4.0, sp());
-        b.enum_lit(enum_ty, 0, false, &[(0, w), (1, h)], sp());
+        b.enum_lit(
+            shape,
+            pair,
+            sp(),
+            sp(),
+            UirVariantForm {
+                positional: true,
+                named_parens: false,
+                mixed_fields: false,
+            },
+            &[(0, w), (1, h)],
+            sp(),
+        );
         let uir = b.finish();
 
         let out = format!("{}", uir.dump(&pool));
         assert!(
-            out.contains("= enum_lit Shape variant=0 {0: %1, 1: %2}"),
+            out.contains("= enum_lit Shape.Pair positional {0: %1, 1: %2}"),
             "got:\n{out}"
         );
         assert!(!out.contains("<malformed"), "got:\n{out}");
@@ -1583,15 +1764,27 @@ mod tests {
     fn enum_lit_positional_flag_round_trips() {
         let mut pool = InternPool::new();
         let shape = pool.intern_str("Shape");
-        let enum_ty = pool.declare_enum(shape);
+        let pair = pool.intern_str("Pair");
 
         let mut b = UirBuilder::new();
         let v = b.float_literal(5.0, sp());
-        let lit = b.enum_lit(enum_ty, 0, true, &[(0, v)], sp());
+        let lit = b.enum_lit(
+            shape,
+            pair,
+            sp(),
+            sp(),
+            UirVariantForm {
+                positional: true,
+                named_parens: false,
+                mixed_fields: false,
+            },
+            &[(0, v)],
+            sp(),
+        );
 
         let uir = b.finish();
         let view = uir.enum_lit_view(lit);
-        assert!(view.positional, "parenthesized form sets the flag");
+        assert!(view.form.positional, "parenthesized form sets the flag");
         assert_eq!(view.fields().collect::<Vec<_>>(), vec![(0, v)]);
     }
 
@@ -1599,16 +1792,16 @@ mod tests {
     fn enum_lit_unit_variant_round_trips_empty_args() {
         let mut pool = InternPool::new();
         let shape = pool.intern_str("Shape");
-        let enum_ty = pool.declare_enum(shape);
+        let red = pool.intern_str("Red");
 
         let mut b = UirBuilder::new();
-        let lit = b.enum_lit(enum_ty, 0, false, &[], sp());
+        let lit = b.enum_lit(shape, red, sp(), sp(), UirVariantForm::default(), &[], sp());
 
         let uir = b.finish();
         let view = uir.enum_lit_view(lit);
-        assert_eq!(view.ty, enum_ty);
-        assert_eq!(view.variant_index, 0);
-        assert!(!view.positional);
+        assert_eq!(view.enum_name, shape);
+        assert_eq!(view.variant, red);
+        assert!(!view.form.positional);
         assert_eq!(view.fields().count(), 0);
     }
 
