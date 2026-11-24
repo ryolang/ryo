@@ -13,6 +13,7 @@ impl Flow {
         self.steps.hash(&mut hash);
         self.terms.hash(&mut hash);
         self.places.hash(&mut hash);
+        self.binding_places.hash(&mut hash);
         self.extra.hash(&mut hash);
         hash.finish()
     }

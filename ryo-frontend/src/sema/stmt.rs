@@ -122,7 +122,7 @@ fn analyze_stmt_with_context_inner(
             }
             let resolved = resolve_var_decl_type(&view, annotated, inferred, sema);
 
-            let id = if scope.contains_in_current(view.name) {
+            let (id, binding_ty) = if scope.contains_in_current(view.name) {
                 sema.sink.emit(Diag::error(
                     span,
                     DiagCode::DuplicateDeclaration,
@@ -131,7 +131,7 @@ fn analyze_stmt_with_context_inner(
                         sema.pool.str(view.name),
                     ),
                 ));
-                fcx.register_binding(
+                let id = fcx.register_binding(
                     view.name,
                     resolved,
                     ryo_core::tir::BindingKind::Local {
@@ -140,26 +140,25 @@ fn analyze_stmt_with_context_inner(
                     },
                     scope.id,
                     span,
-                )
+                );
+                (id, resolved)
             } else if check_reserved_name(
                 sema,
                 view.name,
                 span,
                 "is a reserved builtin and cannot be redefined",
             ) {
-                scope.insert_binding(
-                    fcx,
-                    view.name,
-                    sema.pool.error_type(),
-                    view.mutable,
-                    false,
-                    span,
-                )
+                let error_ty = sema.pool.error_type();
+                let id = scope.insert_binding(fcx, view.name, error_ty, view.mutable, false, span);
+                (id, error_ty)
             } else {
-                scope.insert_binding(fcx, view.name, resolved, view.mutable, false, span)
+                (
+                    scope.insert_binding(fcx, view.name, resolved, view.mutable, false, span),
+                    resolved,
+                )
             };
             fcx.builder
-                .var_decl(id, view.mutable, resolved, init_tir, span)
+                .var_decl(id, view.mutable, binding_ty, init_tir, span)
         }
         InstTag::Return => {
             let operand = match inst.data {
@@ -342,25 +341,22 @@ fn analyze_stmt_with_context_inner(
                         value_ty
                     };
 
-                    let id = if check_reserved_name(
+                    let (id, binding_ty) = if check_reserved_name(
                         sema,
                         view.name,
                         span,
                         "is a reserved builtin and cannot be redefined",
                     ) {
-                        scope.insert_binding(
-                            fcx,
-                            view.name,
-                            sema.pool.error_type(),
-                            false,
-                            false,
-                            span,
-                        )
+                        let error_ty = sema.pool.error_type();
+                        let id = scope.insert_binding(fcx, view.name, error_ty, false, false, span);
+                        (id, error_ty)
                     } else {
-                        scope.insert_binding(fcx, view.name, resolved_ty, false, false, span)
+                        (
+                            scope.insert_binding(fcx, view.name, resolved_ty, false, false, span),
+                            resolved_ty,
+                        )
                     };
-                    fcx.builder
-                        .var_decl(id, false, resolved_ty, value_tir, span)
+                    fcx.builder.var_decl(id, false, binding_ty, value_tir, span)
                 }
             }
         }

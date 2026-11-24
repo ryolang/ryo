@@ -857,11 +857,13 @@ fn rebind_in_loop_converges_no_spurious_free() {
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(a, str_ty, span);
     let decl = test_var_decl(&mut tb, s, true, str_ty, lit, span);
+    let c_value = tb.bool_const(true, bool_ty, span);
+    let c_decl = test_var_decl(&mut tb, c, false, bool_ty, c_value, span);
     let cond = test_var(&mut tb, c, bool_ty, span);
     let body_lit = tb.str_const(a, str_ty, span);
     let body_assign = test_assign(&mut tb, s, str_ty, body_lit, span);
     let lp = tb.while_loop(cond, &[body_assign], void, span);
-    let tir = tb.finish(&[decl, lp]);
+    let tir = tb.finish(&[decl, c_decl, lp]);
     let mut sink = DiagSink::new();
     let mut sc = check(
         std::slice::from_ref(&tir),

@@ -242,6 +242,8 @@ fn continue_jump_does_not_free_pre_loop_owner_uaf_guard() {
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit = tb.str_const(pool.intern_str("x"), str_ty, span);
     let decl = test_var_decl(&mut tb, s, false, str_ty, lit, span);
+    let c_value = tb.bool_const(true, bool_ty, span);
+    let c_decl = test_var_decl(&mut tb, c, false, bool_ty, c_value, span);
     let cond = test_var(&mut tb, c, bool_ty, span);
     let cont = tb.continue_stmt(void, span);
     let sv = test_var(&mut tb, s, str_ty, span);
@@ -253,10 +255,12 @@ fn continue_jump_does_not_free_pre_loop_owner_uaf_guard() {
         void,
         span,
     );
+    let d_value = tb.bool_const(true, bool_ty, span);
+    let d_decl = test_var_decl(&mut tb, d, false, bool_ty, d_value, span);
     let ifcond = test_var(&mut tb, d, bool_ty, span);
     let ifstmt = tb.if_stmt(ifcond, &[cont], &[], Some(&[pcall]), void, span);
     let lp = tb.while_loop(cond, &[ifstmt], void, span);
-    let tir = tb.finish(&[decl, lp]);
+    let tir = tb.finish(&[decl, c_decl, d_decl, lp]);
     let mut sink = DiagSink::new();
     let mut sc = check(
         std::slice::from_ref(&tir),
@@ -291,14 +295,18 @@ fn continue_jump_does_not_free_pre_loop_owner_uaf_guard_reassigned() {
     let mut tb = TirBuilder::new(main, vec![], void, span);
     let lit1 = tb.str_const(pool.intern_str("x"), str_ty, span);
     let decl = test_var_decl(&mut tb, s, false, str_ty, lit1, span);
+    let c_value = tb.bool_const(true, bool_ty, span);
+    let c_decl = test_var_decl(&mut tb, c, false, bool_ty, c_value, span);
     let cond = test_var(&mut tb, c, bool_ty, span);
     let cont = tb.continue_stmt(void, span);
+    let d_value = tb.bool_const(true, bool_ty, span);
+    let d_decl = test_var_decl(&mut tb, d, false, bool_ty, d_value, span);
     let ifcond = test_var(&mut tb, d, bool_ty, span);
     let ifstmt = tb.if_stmt(ifcond, &[cont], &[], None, void, span);
     let lit2 = tb.str_const(pool.intern_str("y"), str_ty, span);
     let assign = test_assign(&mut tb, s, str_ty, lit2, span);
     let lp = tb.while_loop(cond, &[ifstmt, assign], void, span);
-    let tir = tb.finish(&[decl, lp]);
+    let tir = tb.finish(&[decl, c_decl, d_decl, lp]);
     let mut sink = DiagSink::new();
     let mut sc = check(
         std::slice::from_ref(&tir),

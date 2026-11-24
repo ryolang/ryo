@@ -16,8 +16,8 @@ use super::{
 };
 use crate::extra::ExtraRange;
 use crate::spine::ChainSpine;
-use crate::tir::{MatchBodyView, Tir, TirRef, TirTag};
-use crate::types::{InternPool, StringId, TypeId};
+use crate::tir::{BindingId, MatchBodyView, ScopeId, Tir, TirRef, TirTag};
+use crate::types::{InternPool, TypeId};
 
 pub(super) struct FlowBuilder<'a> {
     tir: &'a Tir,
@@ -31,9 +31,10 @@ pub(super) struct FlowBuilder<'a> {
     has_pred: Vec<bool>,
     steps: Vec<Step>,
     places: Vec<Place>,
+    binding_places: Vec<Option<PlaceId>>,
     /// Variable-length payloads (switch arm block lists).
     extra: Vec<u32>,
-    scopes: Vec<Vec<(StringId, PlaceId)>>,
+    scopes: Vec<LexicalScope>,
     loops: Vec<LoopFrame>,
     /// Dense per-instruction metadata (single arena alloc, R3).
     inst_meta: Vec<InstMeta>,
@@ -51,6 +52,13 @@ pub(super) struct FlowBuilder<'a> {
     /// no step but still consume an order.
     next_order: u32,
     cur: BlockId,
+    error: Option<String>,
+}
+
+#[derive(Default)]
+struct LexicalScope {
+    id: Option<ScopeId>,
+    bindings: Vec<BindingId>,
 }
 
 struct LoopFrame {
@@ -58,7 +66,8 @@ struct LoopFrame {
     exit: BlockId,
 }
 
-pub(super) fn build_flow(tir: &Tir, pool: &InternPool) -> Flow {
+pub(super) fn build_flow(tir: &Tir, pool: &InternPool) -> Result<Flow, String> {
+    tir.require_bindings()?;
     let arena_len = tir.instructions.len();
     let fb = FlowBuilder {
         tir,
@@ -71,8 +80,9 @@ pub(super) fn build_flow(tir: &Tir, pool: &InternPool) -> Flow {
         // upfront so the small-function case pays no growth reallocs.
         steps: Vec::with_capacity(arena_len),
         places: Vec::with_capacity(arena_len),
+        binding_places: vec![None; tir.bindings().len()],
         extra: Vec::new(),
-        scopes: vec![Vec::new()],
+        scopes: vec![LexicalScope::default()],
         loops: Vec::new(),
         inst_meta: vec![InstMeta::default(); arena_len],
         token_places: HashMap::new(),
@@ -81,28 +91,42 @@ pub(super) fn build_flow(tir: &Tir, pool: &InternPool) -> Flow {
         writes_flat: Vec::new(),
         next_order: 0,
         cur: BlockId::NONE,
+        error: None,
     };
     fb.run()
 }
 
 impl FlowBuilder<'_> {
-    fn run(mut self) -> Flow {
+    fn run(mut self) -> Result<Flow, String> {
         let entry = self.new_block(false);
         self.cur = entry;
 
         // Params are the outermost scope, identified by index.
         for (i, p) in self.tir.params.iter().enumerate() {
-            let place = self.push_place(Place::Param {
-                index: i as u32,
-                name: p.name,
-                ty: p.ty,
-            });
-            self.scopes[0].push((p.name, place));
+            let place = self.push_binding_place(
+                p.id,
+                Place::Param {
+                    index: i as u32,
+                    binding: p.id,
+                    name: p.name,
+                    ty: p.ty,
+                },
+            );
+            self.bind(p.id, place);
+        }
+        if let Some(error) = self.error.take() {
+            return Err(error);
         }
 
         let tir = self.tir;
         for stmt in tir.body_stmts() {
             self.emit_stmt(stmt);
+            if self.error.is_some() {
+                break;
+            }
+        }
+        if let Some(error) = self.error.take() {
+            return Err(error);
         }
 
         let implicit_fallthrough = if self.terminated(self.cur) {
@@ -113,7 +137,7 @@ impl FlowBuilder<'_> {
             Some(block)
         };
 
-        self.finish(entry, implicit_fallthrough)
+        Ok(self.finish(entry, implicit_fallthrough))
     }
 
     // ---------- block plumbing ----------
@@ -229,6 +253,25 @@ impl FlowBuilder<'_> {
         id
     }
 
+    fn push_binding_place(&mut self, binding: BindingId, place: Place) -> PlaceId {
+        let id = self.push_place(place);
+        match self.binding_places.get_mut(binding.index()) {
+            Some(slot @ None) => *slot = Some(id),
+            Some(Some(_)) => self.fail(format!(
+                "binding {} has multiple Flow places",
+                binding.raw()
+            )),
+            None => self.fail(format!("unregistered binding {}", binding.raw())),
+        }
+        id
+    }
+
+    fn fail(&mut self, error: String) {
+        if self.error.is_none() {
+            self.error = Some(error);
+        }
+    }
+
     fn record_write(&mut self, place: PlaceId, inst: TirRef) {
         self.writes_flat.push((place, inst));
     }
@@ -236,27 +279,81 @@ impl FlowBuilder<'_> {
     // ---------- scopes ----------
 
     fn push_scope(&mut self) {
-        self.scopes.push(Vec::new());
+        self.scopes.push(LexicalScope::default());
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
     }
 
-    fn bind(&mut self, name: StringId, place: PlaceId) {
-        self.scopes
-            .last_mut()
-            .expect("scope stack")
-            .push((name, place));
+    fn bind(&mut self, binding: BindingId, place: PlaceId) {
+        self.bind_in_current_scope(binding, Some(place));
     }
 
-    fn resolve(&self, name: StringId) -> Option<PlaceId> {
-        self.scopes
-            .iter()
-            .rev()
-            .flat_map(|s| s.iter().rev())
-            .find(|(n, _)| *n == name)
-            .map(|(_, p)| *p)
+    fn bind_without_place(&mut self, binding: BindingId) {
+        self.bind_in_current_scope(binding, None);
+    }
+
+    fn bind_in_current_scope(&mut self, binding: BindingId, place: Option<PlaceId>) {
+        let Some(info) = self.tir.bindings().get(binding) else {
+            self.fail(format!("unregistered binding {}", binding.raw()));
+            return;
+        };
+        let binding_scope = info.scope;
+        let Some(scope) = self.scopes.last_mut() else {
+            self.fail("missing root binding scope".into());
+            return;
+        };
+        if scope.id.is_some_and(|id| id != binding_scope) {
+            self.fail(format!(
+                "binding {} declared outside binding scope {:?}",
+                binding.raw(),
+                binding_scope
+            ));
+            return;
+        }
+        scope.id = Some(binding_scope);
+        if scope.bindings.contains(&binding) {
+            self.fail(format!("binding {} declared twice", binding.raw()));
+        } else {
+            scope.bindings.push(binding);
+        }
+        if self.binding_places.get(binding.index()).copied().flatten() != place {
+            self.fail(format!(
+                "binding {} has no matching Flow place",
+                binding.raw()
+            ));
+        }
+    }
+
+    fn resolve(&mut self, binding: BindingId) -> Option<PlaceId> {
+        if self.tir.bindings().get(binding).is_none() {
+            self.fail(format!("unregistered binding {}", binding.raw()));
+            return None;
+        }
+        for scope in self.scopes.iter().rev() {
+            if scope.bindings.contains(&binding) {
+                return self.binding_places.get(binding.index()).copied().flatten();
+            }
+        }
+        if self
+            .binding_places
+            .get(binding.index())
+            .copied()
+            .flatten()
+            .is_some()
+        {
+            self.fail(format!(
+                "binding {} used outside binding scope",
+                binding.raw()
+            ));
+        } else {
+            self.fail(format!(
+                "binding {} has no Flow place in the current lexical scope",
+                binding.raw()
+            ));
+        }
+        None
     }
 
     // ---------- statements ----------
@@ -286,12 +383,16 @@ impl FlowBuilder<'_> {
                 let v = self.tir.var_decl_view(stmt);
                 let name = self.tir.binding_name(v.id);
                 self.emit_expr(v.initializer);
-                let place = self.push_place(Place::Local {
-                    decl: stmt,
-                    name,
-                    ty: inst.ty,
-                    mutable: v.mutable,
-                });
+                let place = self.push_binding_place(
+                    v.id,
+                    Place::Local {
+                        decl: stmt,
+                        binding: v.id,
+                        name,
+                        ty: inst.ty,
+                        mutable: v.mutable,
+                    },
+                );
                 self.inst_meta[stmt.index()].local = Some(place);
                 self.record_write(place, stmt);
                 self.push_step(
@@ -304,14 +405,14 @@ impl FlowBuilder<'_> {
                         ..StepFacts::default()
                     },
                 );
-                self.bind(name, place);
+                self.bind(v.id, place);
             }
             TirTag::Assign => {
                 let v = self.tir.assign_view(stmt);
                 self.emit_expr(v.value);
-                let place = self
-                    .resolve(self.tir.binding_name(v.id))
-                    .expect("assign to unresolved binding (post-sema TIR)");
+                let Some(place) = self.resolve(v.id) else {
+                    return;
+                };
                 self.record_write(place, stmt);
                 self.push_step(
                     stmt,
@@ -327,9 +428,9 @@ impl FlowBuilder<'_> {
             TirTag::CompoundAssign => {
                 let v = self.tir.compound_assign_view(stmt);
                 self.emit_expr(v.value);
-                let place = self
-                    .resolve(self.tir.binding_name(v.id))
-                    .expect("compound-assign to unresolved binding (post-sema TIR)");
+                let Some(place) = self.resolve(v.id) else {
+                    return;
+                };
                 self.push_step(
                     stmt,
                     StepFacts {
@@ -355,9 +456,12 @@ impl FlowBuilder<'_> {
                 };
                 self.emit_expr(target);
                 self.emit_expr(value);
-                let (base, field) = self
-                    .resolve_field_target(target)
-                    .expect("field-assign target is not a place projection");
+                let Some((base, field)) = self.resolve_field_target(target) else {
+                    if self.error.is_none() {
+                        self.fail("field-assign target is not a place projection".into());
+                    }
+                    return;
+                };
                 self.push_step(
                     stmt,
                     StepFacts {
@@ -377,18 +481,15 @@ impl FlowBuilder<'_> {
                 let v = self.tir.destructure_view(stmt);
                 self.emit_expr(v.rhs);
                 let refs = self.tir.destructure_bound_owner_refs(stmt);
-                let names: Vec<StringId> = v
-                    .fields
-                    .iter()
-                    .filter_map(|f| f.bind.map(|id| self.tir.binding_name(id)))
-                    .collect();
-                debug_assert_eq!(refs.len(), names.len(), "token/binding mismatch");
-                self.register_tokens(stmt, &refs, &names);
+                let bindings: Vec<BindingId> =
+                    v.fields.iter().filter_map(|field| field.bind).collect();
+                debug_assert_eq!(refs.len(), bindings.len(), "token/binding mismatch");
+                self.register_tokens(stmt, &refs, &bindings);
                 // Destructure bindings persist in the current scope.
                 let places = self.token_places_of(stmt).to_vec();
                 for place in places {
-                    if let Place::Token { name, .. } = self.places[place.0 as usize] {
-                        self.bind(name, place);
+                    if let Place::Token { binding, .. } = self.places[place.0 as usize] {
+                        self.bind(binding, place);
                     }
                 }
                 self.push_step(stmt, StepFacts::default());
@@ -716,8 +817,8 @@ impl FlowBuilder<'_> {
         let inst = *self.tir.inst(r);
         let mut facts = StepFacts::default();
         match inst.data {
-            crate::tir::TirData::Var(name) => {
-                facts.read = self.resolve(self.tir.binding_name(name));
+            crate::tir::TirData::Var(binding) => {
+                facts.read = self.resolve(binding);
             }
             crate::tir::TirData::FieldAccess { object, .. } => {
                 facts.read = self.resolve_view_base(object);
@@ -805,10 +906,10 @@ impl FlowBuilder<'_> {
     /// Resolve an operand to the place it reads, through projections,
     /// view conversions, and anonymous temporaries. The explicit
     /// analogue of the ownership pass's `projection_root`.
-    fn resolve_view_base(&self, r: TirRef) -> Option<PlaceId> {
-        let inst = self.tir.inst(r);
+    fn resolve_view_base(&mut self, r: TirRef) -> Option<PlaceId> {
+        let inst = *self.tir.inst(r);
         match inst.data {
-            crate::tir::TirData::Var(name) => self.resolve(self.tir.binding_name(name)),
+            crate::tir::TirData::Var(binding) => self.resolve(binding),
             crate::tir::TirData::FieldAccess { object, .. } => self.resolve_view_base(object),
             crate::tir::TirData::UnOp(operand)
                 if matches!(inst.tag, TirTag::ViewAsOwner | TirTag::ToView) =>
@@ -821,7 +922,7 @@ impl FlowBuilder<'_> {
     }
 
     /// Resolve a `FieldAssign` target chain to (base place, field).
-    fn resolve_field_target(&self, r: TirRef) -> Option<(PlaceId, u32)> {
+    fn resolve_field_target(&mut self, r: TirRef) -> Option<(PlaceId, u32)> {
         match self.tir.inst(r).data {
             crate::tir::TirData::FieldAccess {
                 object,
@@ -979,12 +1080,21 @@ impl FlowBuilder<'_> {
         let header = self.new_block(false);
         let body = self.new_block(false);
         let exit = self.new_block(false);
-        let ty = self.tir.inst(stmt).ty;
-        let var = self.push_place(Place::LoopVar {
-            loop_inst: stmt,
-            name: tir.binding_name(view.id),
-            ty,
-        });
+        let (name, ty) = if let Some(info) = self.tir.bindings().get(view.id) {
+            (info.name, info.ty)
+        } else {
+            self.fail(format!("unregistered binding {}", view.id.raw()));
+            return;
+        };
+        let var = self.push_binding_place(
+            view.id,
+            Place::LoopVar {
+                loop_inst: stmt,
+                binding: view.id,
+                name,
+                ty,
+            },
+        );
         self.inst_meta[stmt.index()].loop_var = Some(var);
 
         // Bounds evaluate ONCE, in the pre-header: the backedge targets
@@ -1018,7 +1128,7 @@ impl FlowBuilder<'_> {
         self.loops.push(LoopFrame { header, exit });
         self.cur = body;
         self.push_scope();
-        self.bind(tir.binding_name(view.id), var);
+        self.bind(view.id, var);
         self.emit_stmts_iter(view.body);
         self.pop_scope();
         self.loops.pop();
@@ -1047,17 +1157,16 @@ impl FlowBuilder<'_> {
         self.emit_expr(view.scrutinee);
 
         // By-move owner tokens (arm order, binding order, non-Copy),
-        // named from the arm bindings — minted up front so arm scopes
-        // can bind them while building.
+        // minted up front so arm scopes can bind them while building.
         let tokens = self.tir.match_by_move_owner_refs(stmt, self.pool);
-        let names: Vec<StringId> = view
+        let bindings: Vec<BindingId> = view
             .arms()
             .flat_map(|arm| arm.bindings())
-            .filter(|b| !self.pool.is_copy(b.ty))
-            .map(|b| self.tir.binding_name(b.id))
+            .filter(|binding| !self.pool.is_copy(binding.ty))
+            .map(|binding| binding.id)
             .collect();
-        debug_assert_eq!(tokens.len(), names.len(), "token/binding mismatch");
-        self.register_tokens(stmt, &tokens, &names);
+        debug_assert_eq!(tokens.len(), bindings.len(), "token/binding mismatch");
+        self.register_tokens(stmt, &tokens, &bindings);
 
         // Arm block ids up front (the Switch terminator references them).
         let arm_start = self.extra.len() as u32;
@@ -1108,12 +1217,13 @@ impl FlowBuilder<'_> {
             self.cur = arm_blocks[i];
             self.push_scope();
             for binding in arm.bindings() {
-                if !self.pool.is_copy(binding.ty) {
+                if self.pool.is_copy(binding.ty) {
+                    self.bind_without_place(binding.id);
+                } else {
                     let place = token_iter
                         .next()
                         .expect("token count mismatch with by-move bindings");
-                    let name = self.tir.binding_name(binding.id);
-                    self.bind(name, place);
+                    self.bind(binding.id, place);
                 }
             }
             match arm.body {
@@ -1159,15 +1269,24 @@ impl FlowBuilder<'_> {
     // ---------- tokens ----------
 
     /// Mint token places for a match/destructure instruction and record
-    /// the inst → places mapping. `refs`/`names` are in arm/binding
+    /// the inst → places mapping. `refs`/`bindings` are in arm/binding
     /// order, non-`Copy` only (the sema owner-token convention).
-    fn register_tokens(&mut self, inst: TirRef, refs: &[TirRef], names: &[StringId]) {
+    fn register_tokens(&mut self, inst: TirRef, refs: &[TirRef], bindings: &[BindingId]) {
         let places: Vec<PlaceId> = refs
             .iter()
-            .zip(names)
-            .map(|(&r, &name)| {
+            .zip(bindings)
+            .map(|(&r, &binding)| {
+                let name = self.tir.binding_name(binding);
                 let ty = self.tir.inst(r).ty;
-                self.push_place(Place::Token { inst: r, name, ty })
+                self.push_binding_place(
+                    binding,
+                    Place::Token {
+                        inst: r,
+                        binding,
+                        name,
+                        ty,
+                    },
+                )
             })
             .collect();
         self.token_places.insert(inst, places.into_boxed_slice());
@@ -1257,6 +1376,7 @@ impl FlowBuilder<'_> {
                     .map(|t| t.expect("validated above"))
                     .collect(),
                 places: self.places,
+                binding_places: self.binding_places,
                 extra: self.extra,
                 succs: one_empty_range(),
                 edges: Vec::new(),
@@ -1395,6 +1515,7 @@ impl FlowBuilder<'_> {
                 .map(|t| t.expect("validated above"))
                 .collect(),
             places: self.places,
+            binding_places: self.binding_places,
             extra: self.extra,
             succs,
             edges,

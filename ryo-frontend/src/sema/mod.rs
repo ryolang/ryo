@@ -874,7 +874,11 @@ fn analyze_function(
         );
         scope.insert_binding_with_id(id, param.name, binding_type, is_mutable, borrowed);
         fcx.builder.push_param(TirParam::new(
-            id, param.name, param_type, param.mode, param.span,
+            id,
+            param.name,
+            binding_type,
+            param.mode,
+            param.span,
         ));
     }
 

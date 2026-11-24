@@ -94,17 +94,25 @@ fn require_valid_call_names(tir: &Tir, pool: &InternPool) -> Result<(), String> 
 
 impl BuiltProgram {
     pub fn build(tirs: Vec<Tir>, pool: &InternPool) -> Self {
-        let validation_error = tirs.iter().find_map(|tir| {
+        let mut validation_error = tirs.iter().find_map(|tir| {
             tir.require_layout(pool)
                 .err()
                 .or_else(|| require_valid_call_names(tir, pool).err())
                 .or_else(|| tir.require_bindings().err())
         });
-        let flows = if validation_error.is_some() {
-            Vec::new()
-        } else {
-            tirs.iter().map(|tir| Flow::build(tir, pool)).collect()
-        };
+        let mut flows = Vec::with_capacity(tirs.len());
+        if validation_error.is_none() {
+            for tir in &tirs {
+                match Flow::try_build(tir, pool) {
+                    Ok(flow) => flows.push(flow),
+                    Err(error) => {
+                        validation_error = Some(error);
+                        flows.clear();
+                        break;
+                    }
+                }
+            }
+        }
         Self {
             tirs,
             flows,
@@ -117,8 +125,8 @@ impl BuiltProgram {
             return Err(error.clone());
         }
         for (tir, flow) in self.tirs.iter().zip(&self.flows) {
-            flow.require_body(tir)?;
             flow.require_layout(pool)?;
+            flow.require_bindings(tir)?;
         }
         Ok(AnalysisReady {
             tirs: &self.tirs,
@@ -215,8 +223,9 @@ impl CleanupProgram {
         if !self.source_clean {
             return Err("backend preparation requires source without errors".into());
         }
-        for flow in &self.built.flows {
+        for (tir, flow) in self.built.tirs.iter().zip(&self.built.flows) {
             flow.require_layout(pool)?;
+            flow.require_bindings(tir)?;
         }
         let mut body_ids = std::collections::HashSet::with_capacity(self.built.tirs.len());
         let mut body_names = std::collections::HashSet::with_capacity(self.built.tirs.len());

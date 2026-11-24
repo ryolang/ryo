@@ -1,5 +1,5 @@
 //! Debug-only structural validation of [`Flow`] invariants, run once
-//! per function body at the end of [`Flow::build`]. These checks are
+//! per function body at the end of [`Flow::try_build`]. These checks are
 //! the contract validators named by the Flow IR design: every consumer
 //! (ownership analysis, cleanup lowering, backend emission) may assume
 //! them, so a violation fails loudly here instead of miscompiling.
@@ -11,6 +11,9 @@ use crate::tir::{ChildKind, Tir, TirRef, TirTag};
 use crate::types::InternPool;
 
 pub(super) fn validate_flow(flow: &Flow, tir: &Tir, pool: &InternPool) {
+    if let Err(error) = flow.require_bindings(tir) {
+        debug_assert!(false, "{error}");
+    }
     check_termination_and_reachability(flow);
     check_instruction_coverage(flow, tir);
     check_def_before_use(flow, tir);

@@ -22,15 +22,16 @@
 //!    returns, diverging calls, and plain jumps. A `match` in an
 //!    initializer and a statement-level `match` are *both* a `Switch`;
 //!    source position is never an execution property.
-//! 2. **Storage identity** — [`PlaceId`] distinguishes a binding's
-//!    identity ([`Place::Local`], keyed by the declaring `VarDecl` ref,
-//!    never by interned name), params (by index), anonymous temporaries
+//! 2. **Storage identity** — [`PlaceId`] indexes distinct storage places.
+//!    Parameters, locals, loop variables, and owner tokens carry their
+//!    body-local [`BindingId`]; declaration and producer refs retain TIR
+//!    provenance, never name-based identity. Anonymous temporaries
 //!    ([`Place::Temp`]), match/destructure by-move owner tokens
 //!    ([`Place::Token`]), views with their protected owner
-//!    ([`Place::View`]), match results ([`Place::MatchResult`]), and
-//!    loop variables. Per-step [`StepFacts`] record reads, writes
-//!    ([`WriteKind`]: init / replace / mutate / field-replace), and view
-//!    creation explicitly.
+//!    ([`Place::View`]), and match results ([`Place::MatchResult`]) remain
+//!    distinct from that semantic ID. Per-step [`StepFacts`] record reads,
+//!    writes ([`WriteKind`]: init / replace / mutate / field-replace), and
+//!    view creation explicitly.
 //! 3. **Analysis results** — [`Analysis`] is tri-state: unavailable
 //!    information is never conflated with proven absence.
 //! 4. **Cleanup lowering** — [`DropOp`] positions destruction explicitly
@@ -42,7 +43,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::extra::ExtraRange;
-use crate::tir::{Span, Tir, TirRef};
+use crate::tir::{BindingId, Span, Tir, TirRef};
 use crate::types::{InternPool, StringId, TypeId};
 
 /// Indexed basic block. Blocks are single-entry; steps are listed in
@@ -117,6 +118,7 @@ pub enum Place {
     /// params shadow and are shadowed like locals).
     Param {
         index: u32,
+        binding: BindingId,
         name: StringId,
         ty: TypeId,
     },
@@ -125,6 +127,7 @@ pub enum Place {
     /// `Local`.
     Local {
         decl: TirRef,
+        binding: BindingId,
         name: StringId,
         ty: TypeId,
         mutable: bool,
@@ -132,6 +135,7 @@ pub enum Place {
     /// A `for` loop induction variable, owned by the loop instruction.
     LoopVar {
         loop_inst: TirRef,
+        binding: BindingId,
         name: StringId,
         ty: TypeId,
     },
@@ -144,6 +148,7 @@ pub enum Place {
     /// the place table is their identity.
     Token {
         inst: TirRef,
+        binding: BindingId,
         name: StringId,
         ty: TypeId,
     },
@@ -169,6 +174,17 @@ impl Place {
             | Place::Token { ty, .. }
             | Place::View { ty, .. }
             | Place::MatchResult { ty, .. } => ty,
+        }
+    }
+
+    /// The body-local semantic binding, when this is declared storage.
+    pub fn binding_id(&self) -> Option<BindingId> {
+        match *self {
+            Place::Param { binding, .. }
+            | Place::Local { binding, .. }
+            | Place::LoopVar { binding, .. }
+            | Place::Token { binding, .. } => Some(binding),
+            Place::Temp { .. } | Place::View { .. } | Place::MatchResult { .. } => None,
         }
     }
 
@@ -369,6 +385,8 @@ pub struct Flow {
     pub terms: Vec<Terminator>,
     /// The storage-identity table.
     pub places: Vec<Place>,
+    /// Body-local binding identity to storage index; distinct from `places`.
+    binding_places: Vec<Option<PlaceId>>,
     /// Variable-length payloads (switch arm block lists).
     pub extra: Vec<u32>,
     succs: Vec<Range<u32>>,
@@ -447,12 +465,70 @@ impl Flow {
         Ok(())
     }
 
-    /// Build the canonical Flow IR for one function body. Panics (debug
-    /// builds only, via [`Flow::validate`]) on TIR that violates the
-    /// invariants Flow IR depends on; well-formed post-sema TIR always
-    /// passes.
-    pub fn build(tir: &Tir, pool: &InternPool) -> Flow {
+    /// Validate semantic storage identities against their originating body.
+    pub fn require_bindings(&self, tir: &Tir) -> Result<(), String> {
+        self.require_body(tir)?;
+        for (index, place) in self.places.iter().enumerate() {
+            let place_id = PlaceId(index as u32);
+            let Some(binding) = place.binding_id() else {
+                continue;
+            };
+            let Some(info) = tir.bindings().get(binding) else {
+                return Err(format!(
+                    "Flow references unregistered binding {}",
+                    binding.raw()
+                ));
+            };
+            if place.ty() != info.ty || place.name() != info.name {
+                return Err(format!(
+                    "Flow binding {} metadata does not match its typed body",
+                    binding.raw()
+                ));
+            }
+            if self.resolve(binding) != Some(place_id) {
+                return Err(format!(
+                    "Flow binding {} lookup does not match its place",
+                    binding.raw()
+                ));
+            }
+            let declaration_matches = match place {
+                Place::Param { index, .. } => tir
+                    .params
+                    .get(*index as usize)
+                    .is_some_and(|param| param.id == binding),
+                Place::Local { decl, mutable, .. } => {
+                    let view = tir.var_decl_view(*decl);
+                    view.id == binding && view.mutable == *mutable
+                }
+                Place::LoopVar { loop_inst, .. } => tir.for_range_view(*loop_inst).id == binding,
+                Place::Token { .. } => true,
+                Place::Temp { .. } | Place::View { .. } | Place::MatchResult { .. } => {
+                    unreachable!("non-binding place filtered above")
+                }
+            };
+            if !declaration_matches {
+                return Err(format!(
+                    "Flow binding {} does not match its typed body declaration",
+                    binding.raw()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve a body-local binding to its distinct storage index.
+    pub fn resolve(&self, binding: BindingId) -> Option<PlaceId> {
+        self.binding_places.get(binding.index()).copied().flatten()
+    }
+
+    /// Build Flow, rejecting invalid binding identities and lexical uses.
+    pub fn try_build(tir: &Tir, pool: &InternPool) -> Result<Flow, String> {
         build::build_flow(tir, pool)
+    }
+
+    /// Build canonical Flow for trusted, well-formed post-sema TIR.
+    pub fn build(tir: &Tir, pool: &InternPool) -> Flow {
+        Self::try_build(tir, pool).expect("Flow requires valid binding identities and scopes")
     }
 
     /// Whether execution reaches the builder-supplied final `ReturnVoid`.
@@ -643,7 +719,7 @@ impl Flow {
     }
 
     /// Debug-only structural validation of every Flow IR invariant; called
-    /// once at the end of [`Flow::build`].
+    /// once at the end of [`Flow::try_build`].
     #[cfg(debug_assertions)]
     fn validate(&self, tir: &Tir, pool: &InternPool) {
         invariants::validate_flow(self, tir, pool);

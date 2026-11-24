@@ -604,12 +604,14 @@ fn moving_payload_field_out_of_enum_rejected() {
     let x = pool.intern_str("x");
     let span = Span::EMPTY;
     let mut tb = TirBuilder::new(main, vec![], void, span);
+    let empty_lit = tb.enum_lit(opt_ty, 1, false, &[], span);
+    let o_decl = test_var_decl(&mut tb, o, false, opt_ty, empty_lit, span);
     let ov = test_var(&mut tb, o, opt_ty, span);
     // A payload field read off the enum value, consumed by a VarDecl —
     // the guard's enum arm must reject it.
     let fa = tb.field_access(ov, 0, str_ty, span);
     let decl = test_var_decl(&mut tb, x, false, str_ty, fa, span);
-    let tir = tb.finish(&[decl]);
+    let tir = tb.finish(&[o_decl, decl]);
     let mut sink = DiagSink::new();
     let _sc = check(
         std::slice::from_ref(&tir),
