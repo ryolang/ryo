@@ -679,33 +679,6 @@ Resolved entries are **removed** from this file. Language-visible decisions behi
 
 ---
 
-### I-251 — Measure and remove fixed frontend setup overhead
-
-**Severity:** Correctness / Hygiene
-**Area:** sema
-
-**Files:** ryo-frontend/src/astgen.rs, ryo-frontend/src/sema/mod.rs, ryo-core/src/uir/body_map.rs, ryo-frontend/benches/frontend.rs
-
-**Summary:** Small semantic benchmarks show a fixed per-compile cost after error-union support, while larger semantic benchmarks are mostly unchanged. Eager Utf8Error layout registration and per-function inference state are candidates, but hardware differences make the exact regression uncertain.
-
-**Resolution:** Compare base and head on the same runner type, then measure lazy Utf8Error registration/layout and inference-state allocation independently. Preserve compiler-known type behavior and add small and large benchmarks so the fixed-cost fix does not penalize error-using programs.
-
-**Update (2026-11-20):** Same-runner base/head repetitions after exact body ownership and centralized semantic resolution show median regressions of roughly 20–25% at 16 functions, 20–30% at 64, and 13–18% on the two snippets; the aggregated 256-function regression remains below 10%. Benchmarking the ownership-map commit in isolation reproduced most of the large-input delta, with later resolution work adding a smaller snippet cost. Preserve the exact ownership and nonrecursive scheduling contracts. Keep optimization work here, and use CodSpeed as the final compile-time gate rather than weakening validation to hide the cost.
-
-**Update (2026-11-20, rejected enter-only traversal experiment):** An enter-only backward-reference traversal with full checked fallback reduced map-only time by 12–17% (15.4% on the snippet, 16.8% at 16 functions, 11.9% at 64, and 11.5% at 256), but persistent end-to-end regressions remained double-digit at 16 functions (42.47 µs against 33.235 µs base), 64 functions (126.9 µs against 111.6 µs), fibonacci (7.040 µs against 6.3745 µs), and fizzbuzz (7.332 µs against 6.5615 µs). The experiment was rejected and reverted with no production commit. Reference and wire checks, exact owner/local slots, same-body sharing and orphan handling, cross-body and cycle rejection, declaration-registration gating, nonrecursive scheduling, and Flow return validation remained unchanged. This first optimization attempt did not meet the performance gate.
-
-**Update (2026-11-20, rejected precomputation experiment):** Trusted-builder child metadata plus a full-content fingerprint preserved checked fallback, exact slots, synthetic-UIR behavior, length-preserving mutation detection, and the declaration-registration gate in tests. It did not improve total compile time. Across two alternating base/candidate pairs (the second using the existing optimized stamp hasher), 16-function candidate medians were 51.68–51.70 µs against 30.81–36.20 µs base medians, 64-function medians were 144.40–146.20 µs against 108.20 µs, and 256-function medians were 536.20–540.70 µs against 448.70–494.20 µs; both snippets also regressed by more than 20%. Phase timing showed only about 5% Sema savings at large inputs while builder emission/precomputation added about 6, 20, and 80 µs at 16, 64, and 256 functions. The experiment was reverted with no production commit. A future fix must reduce total emission plus validation cost without narrowing the fingerprint or weakening current-arena checks.
-
-**Update (2026-11-20, rejected direct-decoding experiment):** Whole-payload validation followed by direct slice reads preserved all tested ownership and error behavior. Differential fixtures covered every payload family, unresolved variant/error forms, one-word truncations, bad ranges, invalid refs, cycles, and cross-body sharing. The candidate passed 8 body-map tests, 264 core tests, and 1,368 frontend tests. Two alternating benchmark pairs still showed regressions of 15.30% at 16 functions, 20.06% at 64, 10.40% at 256, 16.16% on fibonacci, 19.44% on fizzbuzz, and 22.96% on the error-using pipeline. The experiment was reverted with no production commit. This third optimization attempt did not meet the performance gate.
-
-**Update (2026-11-23, type-expression validation):** The new boundary checks every type-expression handle and child range, rejects cycles, and validates annotations before declaration registration. Two alternating same-runner pairs against the preceding implementation show median overhead of 3.6% at 16 functions, 2.7% at 64, 4.1% at 256, and less than 1% on both snippets. The validation boundary therefore does not materially change the existing ownership-map regression; its performance results remain governed by the CodSpeed decision.
-
-**Update (2026-11-23, lazy setup and explicit scheduling):** CodSpeed on `e8c0d01` regressed `sema_large[16]` by 18.59%, fibonacci by 10.95%, and fizzbuzz by 13.55%, while `sema_large[256]` improved by 77.32% with hardware-change warnings. The follow-up makes `Utf8Error` layout lazy, skips empty nominal resolution, and analyzes explicit-only programs directly without inference or scheduler allocation. Compiler-known constructor precedence, direct annotations and patterns, inferred SCC behavior, and error-family fallback retain regression coverage. Local 16-function median walltime fell from 45.72 µs to 38.49–39.04 µs, although alternating post-warmup `main` medians were 28.85–29.54 µs. This reduces but does not resolve the regression; the next CodSpeed result is still required, and no performance exception has been accepted.
-
-**Update (2026-11-24, allocation fast paths):** Name-only annotation lowering, lazy type-cache allocation, bounded body-map preallocation, name-only type-cycle bypass, and declaration-registration reservation reduced the remaining CodSpeed regression to 11.70% at 16 functions and removed the snippet regressions. Three alternating 1,000-sample host comparisons then measured 30.74 µs at 16 functions against 28.08–28.29 µs on `main`, with all correctness gates green. A stamped ownership-metadata experiment increased body-map time from 5.08 µs to 6.00 µs and was reverted; combining declaration staging vectors also regressed and was reverted. The latest registration-reservation change still requires its CodSpeed result before the issue can close.
-
----
-
 ### I-252 — Extract the structural fuzzing harness into scripts
 
 **Severity:** Cleanup
