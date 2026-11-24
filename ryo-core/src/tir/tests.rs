@@ -6,6 +6,71 @@ fn sp() -> Span {
 }
 
 #[test]
+fn binding_ids_have_body_local_dense_indices() {
+    let first = BindingId::from_index(0);
+    let second = BindingId::from_index(1);
+    assert_eq!(first.raw(), 0);
+    assert_eq!(second.raw(), 1);
+    assert_eq!(first.index(), 0);
+    assert_eq!(second.index(), 1);
+    let scope = ScopeId::from_index(2);
+    assert_eq!(scope.raw(), 2);
+    assert_eq!(scope.index(), 2);
+}
+
+#[test]
+fn binding_table_rejects_out_of_range_id() {
+    let mut pool = InternPool::new();
+    let table = BindingTable::new(vec![BindingInfo::new(
+        pool.intern_str("value"),
+        pool.int(),
+        BindingKind::Local {
+            mutable: false,
+            borrowed: false,
+        },
+        ScopeId::from_index(0),
+        Span::EMPTY,
+    )]);
+    let error = table.require(BindingId::from_index(1)).unwrap_err();
+    assert!(error.contains("unregistered binding"));
+}
+
+#[test]
+fn binding_table_retrieves_metadata() {
+    let mut pool = InternPool::new();
+    let name = pool.intern_str("value");
+    let ty = pool.int();
+    let scope = ScopeId::from_index(0);
+    let table = BindingTable::new(vec![BindingInfo::new(
+        name,
+        ty,
+        BindingKind::Local {
+            mutable: false,
+            borrowed: false,
+        },
+        scope,
+        Span::EMPTY,
+    )]);
+
+    assert_eq!(table.len(), 1);
+    let info = table
+        .get(BindingId::from_index(0))
+        .expect("binding must be registered");
+    assert_eq!(info.name, name);
+    assert_eq!(info.ty, ty);
+    assert!(matches!(
+        &info.kind,
+        BindingKind::Local {
+            mutable: false,
+            borrowed: false
+        }
+    ));
+    assert_eq!(info.scope, scope);
+    assert_eq!(info.span, Span::EMPTY);
+    assert!(table.get(BindingId::from_index(1)).is_none());
+}
+
+#[test]
 fn tirref_option_is_one_word() {
     assert_eq!(
         std::mem::size_of::<Option<TirRef>>(),

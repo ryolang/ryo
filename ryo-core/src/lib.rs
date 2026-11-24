@@ -1,6 +1,7 @@
 pub mod artifact;
 pub mod ast;
 pub mod ast_pretty;
+pub mod binding;
 pub mod builtins;
 pub mod compilation;
 pub mod declaration;

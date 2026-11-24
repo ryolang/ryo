@@ -65,6 +65,7 @@ use std::num::NonZeroU32;
 
 mod version;
 
+pub use crate::binding::{BindingId, BindingInfo, BindingKind, BindingTable, ScopeId};
 pub use crate::span::Span;
 
 // ---------- TirRef ----------
