@@ -1,7 +1,7 @@
 //! Value-range facts for spec §18 guard elision (Phase 1).
 //!
-//! A per-function dense table (indexed by `StringId::raw()`) from
-//! binding name to inclusive `[lo, hi]` bounds,
+//! A per-function dense table (indexed by `BindingId`) from semantic
+//! binding to inclusive `[lo, hi]` bounds,
 //! seeded from dominating `if`/`while` comparisons against constants and
 //! killed on assignment, `inout` passing, and joins whose predecessors
 //! disagree. When both operands of `+`/`-`/`*` (or the operand of unary
@@ -15,8 +15,7 @@
 //! Scoped binding tables live in `binding_storage`.
 
 use cranelift_module::Module;
-use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
-use ryo_core::types::StringId;
+use ryo_core::tir::{BindingId, ParamMode, Tir, TirData, TirRef, TirTag};
 
 use super::{Codegen, FunctionContext};
 
@@ -96,10 +95,7 @@ pub(crate) fn int_range_of(tir: &Tir, facts: &[Option<IntRange>], r: TirRef) -> 
     let inst = tir.inst(r);
     match (inst.tag, inst.data) {
         (TirTag::IntConst, TirData::Int(v)) => Some(IntRange::point(v)),
-        (TirTag::Var, TirData::Var(id)) => facts
-            .get(tir.binding_name(id).raw() as usize)
-            .copied()
-            .flatten(),
+        (TirTag::Var, TirData::Var(id)) => facts.get(id.index()).copied().flatten(),
         _ => None,
     }
 }
@@ -110,7 +106,7 @@ pub(crate) fn int_range_of(tir: &Tir, facts: &[Option<IntRange>], r: TirRef) -> 
 /// non-informative polarity of `==`/`!=`, yield nothing. `ICmp*`
 /// operands are always `int` (strings compare through `StrCmp*`), so
 /// the `Var` side is always a scalar binding.
-pub(crate) fn cond_facts(tir: &Tir, cond: TirRef, polarity: bool) -> Vec<(StringId, IntRange)> {
+pub(crate) fn cond_facts(tir: &Tir, cond: TirRef, polarity: bool) -> Vec<(BindingId, IntRange)> {
     let inst = tir.inst(cond);
     let TirData::BinOp { lhs, rhs } = inst.data else {
         return Vec::new();
@@ -152,9 +148,7 @@ pub(crate) fn cond_facts(tir: &Tir, cond: TirRef, polarity: bool) -> Vec<(String
         (TirTag::ICmpEq, true) | (TirTag::ICmpNe, false) => Some(IntRange::point(k)),
         _ => None,
     };
-    range
-        .map(|r| vec![(tir.binding_name(name), r)])
-        .unwrap_or_default()
+    range.map(|r| vec![(name, r)]).unwrap_or_default()
 }
 
 /// The relation with its operands swapped (`a < b` ≡ `b > a`).
@@ -172,7 +166,7 @@ impl<M: Module> Codegen<M> {
     /// Record an assignment: the binding's range fact dies here, and
     /// enclosing scopes learn (via `assigned_log`) to kill it at their
     /// join. Cheap enough to call on every assignment path.
-    pub(crate) fn kill_fact(ctx: &mut FunctionContext<'_, M>, name: StringId) {
+    pub(crate) fn kill_fact(ctx: &mut FunctionContext<'_, M>, name: BindingId) {
         Self::write_slot(&mut ctx.range_facts, &mut ctx.range_facts_undo, name, None);
         ctx.assigned_log.push(name);
     }
@@ -240,18 +234,18 @@ impl<M: Module> Codegen<M> {
     fn collect_loop_writes(
         tir: &Tir,
         stmts: impl IntoIterator<Item = TirRef>,
-        out: &mut Vec<StringId>,
+        out: &mut Vec<BindingId>,
     ) {
         for stmt in stmts {
             Self::collect_writes_in(tir, stmt, out);
         }
     }
 
-    fn collect_writes_in(tir: &Tir, r: TirRef, out: &mut Vec<StringId>) {
+    fn collect_writes_in(tir: &Tir, r: TirRef, out: &mut Vec<BindingId>) {
         let inst = tir.inst(r);
         match inst.tag {
-            TirTag::Assign => out.push(tir.binding_name(tir.assign_view(r).id)),
-            TirTag::CompoundAssign => out.push(tir.binding_name(tir.compound_assign_view(r).id)),
+            TirTag::Assign => out.push(tir.assign_view(r).id),
+            TirTag::CompoundAssign => out.push(tir.compound_assign_view(r).id),
             TirTag::Call => {
                 let view = tir.call_view(r);
                 for (arg, mode) in view.args.iter().zip(view.modes.iter()) {
@@ -264,7 +258,7 @@ impl<M: Module> Codegen<M> {
                     // ignore it conservatively.
                     let arg_inst = tir.inst(arg);
                     if let (TirTag::Var, TirData::Var(name)) = (arg_inst.tag, arg_inst.data) {
-                        out.push(tir.binding_name(name));
+                        out.push(name);
                     }
                 }
             }

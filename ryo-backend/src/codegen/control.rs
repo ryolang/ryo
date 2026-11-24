@@ -991,16 +991,15 @@ impl<M: Module> Codegen<M> {
                     LoopRecord::For(rec) => rec.counter,
                     LoopRecord::While(_) => unreachable!("for body of a while loop"),
                 };
-                // Scope the loop variable: bind var_name to the counter
-                // Variable. Body writes to OTHER bindings persist past
-                // the loop (the legacy shape) — only this one slot is
-                // restored, by hand at the exit.
-                let shadowed_var = Self::read_slot(&ctx.locals, tir.binding_name(view.id));
-                let shadowed_fact = Self::read_slot(&ctx.range_facts, tir.binding_name(view.id));
+                // Bind the induction binding to the counter Variable.
+                // Body writes to other bindings persist past the loop;
+                // this binding's representation and fact restore at exit.
+                let previous_local = Self::read_slot(&ctx.locals, view.id);
+                let previous_fact = Self::read_slot(&ctx.range_facts, view.id);
                 Self::write_slot(
                     &mut ctx.locals,
                     &mut ctx.locals_undo,
-                    tir.binding_name(view.id),
+                    view.id,
                     Some(counter),
                 );
                 // The loop variable is a different quantity than any
@@ -1009,13 +1008,13 @@ impl<M: Module> Codegen<M> {
                 Self::write_slot(
                     &mut ctx.range_facts,
                     &mut ctx.range_facts_undo,
-                    tir.binding_name(view.id),
+                    view.id,
                     None,
                 );
                 match ctx.loop_records.get_mut(&loop_inst) {
                     Some(LoopRecord::For(rec)) => {
-                        rec.saved_local = shadowed_var;
-                        rec.saved_fact = shadowed_fact;
+                        rec.saved_local = previous_local;
+                        rec.saved_fact = previous_fact;
                     }
                     _ => unreachable!("for record checked above"),
                 }
@@ -1029,22 +1028,21 @@ impl<M: Module> Codegen<M> {
                 Ok(())
             }
             BlockPrologue::ForExit { loop_inst } => {
-                let (var_name, saved_local, saved_fact) = match ctx
+                let (var_id, saved_local, saved_fact) = match ctx
                     .loop_records
                     .get(&loop_inst)
                     .expect("for record created at the pre-header")
                 {
-                    LoopRecord::For(rec) => (rec.var_name, rec.saved_local, rec.saved_fact),
+                    LoopRecord::For(rec) => (rec.var_id, rec.saved_local, rec.saved_fact),
                     LoopRecord::While(_) => unreachable!("for exit of a while loop"),
                 };
-                // The loop variable goes out of scope; restore the
-                // shadowed binding (write the saved slot back
-                // unconditionally — None clears it).
-                Self::write_slot(&mut ctx.locals, &mut ctx.locals_undo, var_name, saved_local);
+                // The induction binding goes out of scope; restore its
+                // saved representation and range state (None clears them).
+                Self::write_slot(&mut ctx.locals, &mut ctx.locals_undo, var_id, saved_local);
                 Self::write_slot(
                     &mut ctx.range_facts,
                     &mut ctx.range_facts_undo,
-                    var_name,
+                    var_id,
                     saved_fact,
                 );
                 // The exit is reached from the header on EVERY path
@@ -1316,7 +1314,7 @@ impl<M: Module> Codegen<M> {
             loop_inst,
             LoopRecord::For(ForRecord {
                 counter,
-                var_name: tir.binding_name(view.id),
+                var_id: view.id,
                 saved_local: None,
                 saved_fact: None,
             }),

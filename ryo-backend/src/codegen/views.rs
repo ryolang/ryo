@@ -226,7 +226,7 @@ impl<M: Module> Codegen<M> {
         }
         // Home-backed binding: promote the home slot in place — no
         // spill, and no write-back below (the home IS the storage).
-        let local_name = Self::local_name_of(ctx, r);
+        let local_name = Self::local_binding_of(ctx, r);
         let home_addr = local_name.and_then(|n| Self::fat_home_addr(builder, ctx, n));
         let addr = match home_addr {
             Some(addr) => addr,

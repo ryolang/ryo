@@ -2,17 +2,16 @@
 
 use super::Codegen;
 use cranelift_module::Module;
-use ryo_core::types::StringId;
+use ryo_core::tir::BindingId;
 
 impl<M: Module> Codegen<M> {
-    /// Read a dense `StringId`-indexed slot table. Out-of-range ids
-    /// read as absent — codegen never interns, so every name in the
-    /// TIR is in bounds, but stay tolerant like `free_binding_name`.
-    pub(crate) fn read_slot<T: Copy>(table: &[Option<T>], name: StringId) -> Option<T> {
-        table.get(name.raw() as usize).copied().flatten()
+    /// Read a dense `BindingId`-indexed slot table. Validated backend
+    /// input keeps every ID in bounds; an absent entry reads as `None`.
+    pub(crate) fn read_slot<T: Copy>(table: &[Option<T>], binding: BindingId) -> Option<T> {
+        table.get(binding.index()).copied().flatten()
     }
 
-    /// Write a dense `StringId`-indexed slot table, pushing the
+    /// Write a dense `BindingId`-indexed slot table, pushing the
     /// previous slot value onto the table's undo log so scoped
     /// emitters (`take_slot_marks`/`restore_slot_marks` in
     /// `control.rs`, the if/while join handling) can restore it via
@@ -20,17 +19,16 @@ impl<M: Module> Codegen<M> {
     pub(crate) fn write_slot<T: Copy>(
         table: &mut [Option<T>],
         undo: &mut Vec<(u32, Option<T>)>,
-        name: StringId,
+        binding: BindingId,
         value: Option<T>,
     ) {
-        let raw = name.raw();
-        // Invariant: every name in the TIR comes from the pool the
-        // tables were sized from (codegen never interns), so a miss
-        // here is a compiler bug — a dropped write would also
-        // desynchronize the undo log.
+        let raw = binding.raw();
+        // The direct-input boundary validates every binding against the
+        // current TIR table used to size these slots. A miss here is a
+        // compiler bug; a dropped write would desynchronize the undo log.
         let slot = table
             .get_mut(raw as usize)
-            .expect("binding name within slot-table range");
+            .expect("binding within slot-table range");
         undo.push((raw, *slot));
         *slot = value;
     }

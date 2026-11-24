@@ -15,6 +15,9 @@ build-support = { path = "../build-support" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ryo-backend = { workspace = true }
+ryo-frontend = { workspace = true }
+target-lexicon = { workspace = true }
 
 [lints]
 workspace = true

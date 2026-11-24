@@ -31,6 +31,18 @@ pub(super) fn require_backend_input<'a>(
         return Err("backend requires typed bodies without error placeholders".into());
     }
     for ((tir, flow), cleanup) in tirs.iter().zip(flows).zip(&sidecar.functions) {
+        tir.require_bindings()
+            .map_err(|error| format!("backend binding validation: {error}"))?;
+        if let Err(error) = flow.require_bindings(tir, pool) {
+            // A malformed TIR body cannot have a matching published Flow.
+            // Rebuild only on this error path to expose lexical scope
+            // violations; valid inputs pay no second Flow construction.
+            let error = match ryo_core::flow::Flow::try_build(tir, pool) {
+                Err(scope_error) => scope_error,
+                Ok(_) => error,
+            };
+            return Err(format!("backend binding validation: {error}"));
+        }
         cleanup.require_flow(tir, flow)?;
         flow.require_layout(pool)?;
         if cleanup

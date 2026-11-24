@@ -15,7 +15,7 @@
 use cranelift::codegen::ir::{MemFlagsData, StackSlot, StackSlotData, StackSlotKind};
 use cranelift::prelude::*;
 use cranelift_module::{DataId, Module};
-use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
+use ryo_core::tir::{BindingId, ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, StructField, TypeId, TypeKind};
 
 use super::enums::is_enum_type;
@@ -92,11 +92,14 @@ impl<M: Module> Codegen<M> {
             TirTag::StructLit => Self::emit_struct_lit(builder, ctx, r, context)?,
             TirTag::Var => {
                 let name = match inst.data {
-                    TirData::Var(name) => ctx.tir.binding_name(name),
+                    TirData::Var(name) => name,
                     _ => unreachable!("Var must carry TirData::Var"),
                 };
                 let var = Self::read_slot(&ctx.struct_locals, name).ok_or_else(|| {
-                    format!("Undefined struct variable: '{}'", ctx.pool.str(name))
+                    format!(
+                        "Undefined struct variable: '{}'",
+                        ctx.pool.str(ctx.tir.binding_name(name))
+                    )
                 })?;
                 builder.use_var(var)
             }
@@ -646,10 +649,10 @@ impl<M: Module> Codegen<M> {
         Self::write_slot(
             &mut ctx.struct_locals,
             &mut ctx.struct_locals_undo,
-            ctx.tir.binding_name(view.id),
+            view.id,
             Some(var),
         );
-        ctx.aggregate_binding_storage.insert(r, var);
+        ctx.aggregate_binding_storage[view.id.index()] = Some(var);
         Ok(Terminator::None)
     }
 
@@ -664,11 +667,11 @@ impl<M: Module> Codegen<M> {
     ) -> Result<Terminator, String> {
         let inst = ctx.tir.inst(r);
         let view = ctx.tir.assign_view(r);
-        let name = ctx.tir.binding_name(view.id);
+        let name = view.id;
         let var = Self::read_slot(&ctx.struct_locals, name).ok_or_else(|| {
             format!(
                 "Undefined struct variable in assign: '{}'",
-                ctx.pool.str(name)
+                ctx.pool.str(ctx.tir.binding_name(name))
             )
         })?;
         let dst = builder.use_var(var);
@@ -800,7 +803,7 @@ impl<M: Module> Codegen<M> {
 
     /// Whole-struct scheduled Free (M9): when `target` is struct-typed,
     /// resolve its slot address — the binding's CURRENT `struct_locals`
-    /// entry (same reasoning as the fat `free_binding_names` path) or
+    /// entry (same reasoning as the fat `free_binding_ids` path) or
     /// the producing inst's cached `ValueRepr::Struct` — and run the
     /// recursive field drop. Returns `Ok(true)` when the target was a
     /// struct (handled), so the caller skips the fat path.
@@ -808,7 +811,7 @@ impl<M: Module> Codegen<M> {
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
         target: TirRef,
-        binding: Option<TirRef>,
+        binding: Option<BindingId>,
     ) -> Result<bool, String> {
         let ty = if let Some(idx) = target.as_param_index() {
             ctx.tir.params[idx as usize].ty
@@ -819,10 +822,7 @@ impl<M: Module> Codegen<M> {
             return Ok(false);
         }
         let addr = if let Some(binding) = binding {
-            let var = ctx
-                .aggregate_binding_storage
-                .get(&binding)
-                .copied()
+            let var = Self::read_slot(&ctx.aggregate_binding_storage, binding)
                 .ok_or_else(|| format!("aggregate release has no storage for {binding:?}"))?;
             builder.use_var(var)
         } else {
@@ -1299,7 +1299,7 @@ impl<M: Module> Codegen<M> {
                 Some(id) => {
                     let token = owners[owner_idx];
                     owner_idx += 1;
-                    let name = ctx.tir.binding_name(id);
+                    let name = id;
                     Self::bind_field_move(builder, ctx, name, field_addr, sf.ty, Some(token))?;
                 }
             }
@@ -1326,7 +1326,7 @@ impl<M: Module> Codegen<M> {
     pub(crate) fn bind_field_move(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
-        name: StringId,
+        name: BindingId,
         field_addr: Value,
         field_ty: TypeId,
         token: Option<TirRef>,
@@ -1337,7 +1337,7 @@ impl<M: Module> Codegen<M> {
     pub(crate) fn bind_field_deep_copy(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
-        name: StringId,
+        name: BindingId,
         field_addr: Value,
         field_ty: TypeId,
         token: Option<TirRef>,
@@ -1348,7 +1348,7 @@ impl<M: Module> Codegen<M> {
     fn bind_field(
         builder: &mut FunctionBuilder,
         ctx: &mut FunctionContext<'_, M>,
-        name: StringId,
+        name: BindingId,
         field_addr: Value,
         field_ty: TypeId,
         token: Option<TirRef>,
@@ -1381,7 +1381,7 @@ impl<M: Module> Codegen<M> {
                     &mut ctx.fat_locals_undo,
                     name,
                     Some(super::FatLocals {
-                        binding: token,
+                        binding: Some(name),
                         ptr: var_ptr,
                         len: var_len,
                         cap: var_cap,
@@ -1392,7 +1392,7 @@ impl<M: Module> Codegen<M> {
                 if let Some(token) = token {
                     let storage =
                         Self::read_slot(&ctx.fat_locals, name).expect("bound payload storage");
-                    ctx.fat_binding_storage.insert(token, storage);
+                    ctx.fat_binding_storage[name.index()] = Some(storage);
                     Self::cache_repr(
                         ctx,
                         token,
@@ -1425,7 +1425,7 @@ impl<M: Module> Codegen<M> {
                     Some(var),
                 );
                 if let Some(token) = token {
-                    ctx.aggregate_binding_storage.insert(token, var);
+                    ctx.aggregate_binding_storage[name.index()] = Some(var);
                     Self::cache_repr(ctx, token, ValueRepr::Struct { addr: dst });
                 }
                 Ok(())
@@ -1450,7 +1450,7 @@ impl<M: Module> Codegen<M> {
                     Some(var),
                 );
                 if let Some(token) = token {
-                    ctx.aggregate_binding_storage.insert(token, var);
+                    ctx.aggregate_binding_storage[name.index()] = Some(var);
                     Self::cache_repr(ctx, token, ValueRepr::Enum { addr: dst });
                 }
                 Ok(())
@@ -1467,7 +1467,7 @@ impl<M: Module> Codegen<M> {
                 Self::write_slot(&mut ctx.range_facts, &mut ctx.range_facts_undo, name, None);
                 Self::write_slot(&mut ctx.locals, &mut ctx.locals_undo, name, Some(var));
                 if let Some(token) = token {
-                    ctx.aggregate_binding_storage.insert(token, var);
+                    ctx.aggregate_binding_storage[name.index()] = Some(var);
                     Self::cache_repr(ctx, token, ValueRepr::Scalar(val));
                 }
                 Ok(())

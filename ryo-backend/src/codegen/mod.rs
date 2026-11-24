@@ -36,7 +36,7 @@ use cranelift::codegen::settings::{self, Configurable};
 use cranelift::prelude::*;
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use ryo_core::tir::{ParamMode, Tir, TirData, TirRef, TirTag};
+use ryo_core::tir::{BindingId, ParamMode, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeId, TypeKind};
 use std::collections::{HashMap, HashSet};
 use target_lexicon::Triple;
@@ -343,11 +343,11 @@ pub(crate) struct WhileRecord {
     pub(crate) slot_marks: SlotMarks,
 }
 
-/// Per-`for range` state: the induction counter plus the shadowed
-/// binding the loop variable replaced (restored at the exit block).
+/// Per-`for range` state: the induction counter plus the loop binding's
+/// saved representation and range state, restored at the exit block.
 pub(crate) struct ForRecord {
     pub(crate) counter: Variable,
-    pub(crate) var_name: StringId,
+    pub(crate) var_id: BindingId,
     pub(crate) saved_local: Option<Variable>,
     pub(crate) saved_fact: Option<ranges::IntRange>,
 }
@@ -470,7 +470,7 @@ impl ValueRepr {
 /// memory, so no block-param phis are needed.
 #[derive(Clone, Copy)]
 struct FatLocals {
-    binding: Option<TirRef>,
+    binding: Option<BindingId>,
     ptr: Variable,
     len: Variable,
     cap: Variable,
@@ -910,8 +910,8 @@ impl<M: Module> Codegen<M> {
             .ok_or_else(|| format!("Function '{}' not declared", pool.str(tir.name)))?;
         let func_id = *func_id;
 
-        let (free_binding_names, free_binding_param_names) =
-            Self::build_free_binding_names(tir, flow, pool);
+        let (free_binding_ids, free_binding_param_ids) =
+            Self::build_free_binding_ids(tir, flow, pool);
         let (fat_mutated, view_base_insts) = Self::build_fat_mutation_tables(tir, flow, pool);
         let DropFireMap(
             fire_before_step,
@@ -950,7 +950,7 @@ impl<M: Module> Codegen<M> {
             // entry param and the `ryo_rt_init` call. Read before the
             // `ctx` borrow of `self.module` below.
             let pointer_type = self.module.target_config().pointer_type();
-            let mut locals: Vec<Option<Variable>> = vec![None; pool.string_count()];
+            let mut locals: Vec<Option<Variable>> = vec![None; tir.bindings().len()];
             let mut locals_undo: Vec<(u32, Option<Variable>)> = Vec::new();
 
             let is_main = abi.hosted_main;
@@ -962,15 +962,15 @@ impl<M: Module> Codegen<M> {
                 None
             };
 
-            let mut fat_param_locals: Vec<Option<FatLocals>> = vec![None; pool.string_count()];
+            let mut fat_param_locals: Vec<Option<FatLocals>> = vec![None; tir.bindings().len()];
             let mut fat_locals_undo: Vec<(u32, Option<FatLocals>)> = Vec::new();
-            let mut view_param_locals: Vec<Option<ViewLocals>> = vec![None; pool.string_count()];
+            let mut view_param_locals: Vec<Option<ViewLocals>> = vec![None; tir.bindings().len()];
             let mut view_locals_undo: Vec<(u32, Option<ViewLocals>)> = Vec::new();
-            let mut struct_param_locals: Vec<Option<Variable>> = vec![None; pool.string_count()];
+            let mut struct_param_locals: Vec<Option<Variable>> = vec![None; tir.bindings().len()];
             let mut struct_locals_undo: Vec<(u32, Option<Variable>)> = Vec::new();
-            let mut inout_ptrs: Vec<Option<(Value, TypeId)>> = vec![None; pool.string_count()];
+            let mut inout_ptrs: Vec<Option<(Value, TypeId)>> = vec![None; tir.bindings().len()];
 
-            for (param_index, (param, lowered)) in tir.params.iter().zip(&abi.params).enumerate() {
+            for (param, lowered) in tir.params.iter().zip(&abi.params) {
                 if lowered.mode == ParamMode::Inout {
                     // inout param: a single pointer to the caller's slot,
                     // regardless of pointee type. Load the current value
@@ -1002,9 +1002,9 @@ impl<M: Module> Codegen<M> {
                         Self::write_slot(
                             &mut fat_param_locals,
                             &mut fat_locals_undo,
-                            param.name,
+                            param.id,
                             Some(FatLocals {
-                                binding: Some(TirRef::param(param_index)),
+                                binding: Some(param.id),
                                 ptr: var_ptr,
                                 len: var_len,
                                 cap: var_cap,
@@ -1023,7 +1023,7 @@ impl<M: Module> Codegen<M> {
                         Self::write_slot(
                             &mut struct_param_locals,
                             &mut struct_locals_undo,
-                            param.name,
+                            param.id,
                             Some(var),
                         );
                         continue;
@@ -1032,9 +1032,9 @@ impl<M: Module> Codegen<M> {
                         let cur = builder.ins().load(cl_ty, MemFlagsData::trusted(), ptr, 0);
                         let var = builder.declare_var(cl_ty);
                         builder.def_var(var, cur);
-                        Self::write_slot(&mut locals, &mut locals_undo, param.name, Some(var));
+                        Self::write_slot(&mut locals, &mut locals_undo, param.id, Some(var));
                     }
-                    inout_ptrs[param.name.raw() as usize] = Some((ptr, param.ty));
+                    inout_ptrs[param.id.index()] = Some((ptr, param.ty));
                     continue;
                 }
                 if lowered.value == ValueAbi::Fat {
@@ -1047,9 +1047,9 @@ impl<M: Module> Codegen<M> {
                     Self::write_slot(
                         &mut fat_param_locals,
                         &mut fat_locals_undo,
-                        param.name,
+                        param.id,
                         Some(FatLocals {
-                            binding: Some(TirRef::param(param_index)),
+                            binding: Some(param.id),
                             ptr: var_ptr,
                             len: var_len,
                             cap: var_cap,
@@ -1068,7 +1068,7 @@ impl<M: Module> Codegen<M> {
                     Self::write_slot(
                         &mut view_param_locals,
                         &mut view_locals_undo,
-                        param.name,
+                        param.id,
                         Some(ViewLocals {
                             ptr: var_ptr,
                             len: var_len,
@@ -1086,7 +1086,7 @@ impl<M: Module> Codegen<M> {
                     Self::write_slot(
                         &mut struct_param_locals,
                         &mut struct_locals_undo,
-                        param.name,
+                        param.id,
                         Some(var),
                     );
                     block_idx += 1;
@@ -1094,7 +1094,7 @@ impl<M: Module> Codegen<M> {
                     let cl_ty = cranelift_type_for(param.ty, pool, int_type);
                     let var = builder.declare_var(cl_ty);
                     builder.def_var(var, builder.block_params(entry_block)[block_idx]);
-                    Self::write_slot(&mut locals, &mut locals_undo, param.name, Some(var));
+                    Self::write_slot(&mut locals, &mut locals_undo, param.id, Some(var));
                     block_idx += 1;
                 }
             }
@@ -1113,6 +1113,17 @@ impl<M: Module> Codegen<M> {
                 });
             }
 
+            let mut scalar_param_storage = vec![None; tir.bindings().len()];
+            let mut fat_binding_storage = vec![None; tir.bindings().len()];
+            let mut aggregate_binding_storage = vec![None; tir.bindings().len()];
+            for param in &tir.params {
+                scalar_param_storage[param.id.index()] = Self::read_slot(&locals, param.id);
+                fat_binding_storage[param.id.index()] =
+                    Self::read_slot(&fat_param_locals, param.id);
+                aggregate_binding_storage[param.id.index()] =
+                    Self::read_slot(&struct_param_locals, param.id);
+            }
+
             let mut ctx: FunctionContext<'_, M> = FunctionContext {
                 optional_optimizations: self.optional_optimizations,
                 module: &mut self.module,
@@ -1124,14 +1135,10 @@ impl<M: Module> Codegen<M> {
                 is_main,
                 tail_conv_candidate: self.tail_candidates.contains(&tir.name),
                 name_ids: ids,
-                scalar_param_storage: tir
-                    .params
-                    .iter()
-                    .map(|param| Self::read_slot(&locals, param.name))
-                    .collect(),
+                scalar_param_storage,
                 locals,
                 locals_undo,
-                range_facts: vec![None; pool.string_count()],
+                range_facts: vec![None; tir.bindings().len()],
                 range_facts_undo: Vec::new(),
                 assigned_log: Vec::new(),
                 func_ids,
@@ -1163,34 +1170,18 @@ impl<M: Module> Codegen<M> {
                 match_records: HashMap::new(),
                 cleanup_plan,
                 assignment_aliases,
-                fat_binding_storage: tir
-                    .params
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, param)| {
-                        Self::read_slot(&fat_param_locals, param.name)
-                            .map(|storage| (TirRef::param(index), storage))
-                    })
-                    .collect(),
+                fat_binding_storage,
                 fat_locals: fat_param_locals,
                 fat_locals_undo,
                 promo_slots,
                 promo_freed_at: vec![false; func_sidecar.promotion_frees.len()],
                 view_locals: view_param_locals,
                 view_locals_undo,
-                aggregate_binding_storage: tir
-                    .params
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, param)| {
-                        Self::read_slot(&struct_param_locals, param.name)
-                            .map(|storage| (TirRef::param(index), storage))
-                    })
-                    .collect(),
+                aggregate_binding_storage,
                 struct_locals: struct_param_locals,
                 struct_locals_undo,
-                free_binding_names,
-                free_binding_param_names,
+                free_binding_ids,
+                free_binding_param_ids,
                 inout_ptrs,
                 sret_ptr,
                 sidecar: func_sidecar,
@@ -1205,7 +1196,7 @@ impl<M: Module> Codegen<M> {
 
             for (idx, param) in tir.params.iter().enumerate() {
                 if is_fat_type(param.ty, pool) {
-                    let locals = Self::read_slot(&ctx.fat_locals, param.name)
+                    let locals = Self::read_slot(&ctx.fat_locals, param.id)
                         .expect("every fat param gets FatLocals in the param preamble above");
                     let ptr = builder.use_var(locals.ptr);
                     let len = builder.use_var(locals.len);
@@ -1217,7 +1208,7 @@ impl<M: Module> Codegen<M> {
                     };
                     ctx.param_values[idx] = Some(repr);
                 } else if pool.is_view(param.ty) {
-                    let locals = Self::read_slot(&ctx.view_locals, param.name)
+                    let locals = Self::read_slot(&ctx.view_locals, param.id)
                         .expect("every view param gets ViewLocals in the param preamble above");
                     let repr = ValueRepr::View {
                         ptr: builder.use_var(locals.ptr),
@@ -1225,13 +1216,13 @@ impl<M: Module> Codegen<M> {
                     };
                     ctx.param_values[idx] = Some(repr);
                 } else if is_struct_type(param.ty, pool) {
-                    let var = Self::read_slot(&ctx.struct_locals, param.name)
+                    let var = Self::read_slot(&ctx.struct_locals, param.id)
                         .expect("every struct param gets a struct_locals entry above");
                     ctx.param_values[idx] = Some(ValueRepr::Struct {
                         addr: builder.use_var(var),
                     });
                 } else if is_enum_type(param.ty, pool) {
-                    let var = Self::read_slot(&ctx.struct_locals, param.name)
+                    let var = Self::read_slot(&ctx.struct_locals, param.id)
                         .expect("every enum param gets a struct_locals entry above");
                     ctx.param_values[idx] = Some(ValueRepr::Enum {
                         addr: builder.use_var(var),
@@ -1351,20 +1342,16 @@ impl<M: Module> Codegen<M> {
         // Iterate by index ascending: identical input must emit
         // identical instruction order (a HashMap's iteration order is
         // randomized per run).
-        for (index, param) in ctx.tir.params.iter().enumerate() {
-            let name = param.name;
-            let Some((ptr, ty)) = ctx.inout_ptrs[name.raw() as usize] else {
+        for param in &ctx.tir.params {
+            let binding = param.id;
+            let Some((ptr, ty)) = ctx.inout_ptrs[binding.index()] else {
                 continue;
             };
             if is_fat_type(ty, ctx.pool) {
                 // fat pointee: store all three fat-pointer fields.
-                let sl = ctx
-                    .fat_binding_storage
-                    .get(&TirRef::param(index))
-                    .copied()
-                    .ok_or_else(|| {
-                        format!("inout fat '{}' has no FatLocals", ctx.pool.str(name))
-                    })?;
+                let sl = Self::read_slot(&ctx.fat_binding_storage, binding).ok_or_else(|| {
+                    format!("inout fat '{}' has no FatLocals", ctx.pool.str(param.name))
+                })?;
                 let p = builder.use_var(sl.ptr);
                 let l = builder.use_var(sl.len);
                 let c = builder.use_var(sl.cap);
@@ -1373,10 +1360,10 @@ impl<M: Module> Codegen<M> {
                 builder.ins().store(MemFlagsData::trusted(), c, ptr, 16);
             } else {
                 // Scalar pointee: a single store at offset 0.
-                let var = ctx.scalar_param_storage[index].ok_or_else(|| {
+                let var = ctx.scalar_param_storage[binding.index()].ok_or_else(|| {
                     format!(
                         "inout scalar '{}' has no local Variable",
-                        ctx.pool.str(name)
+                        ctx.pool.str(param.name)
                     )
                 })?;
                 let val = builder.use_var(var);
@@ -1441,25 +1428,23 @@ impl<M: Module> Codegen<M> {
             TirTag::CompoundAssign => {
                 let view = ctx.tir.compound_assign_view(r);
                 let rhs = Self::eval_inst(builder, ctx, view.value)?;
-                let var = Self::read_slot(&ctx.locals, ctx.tir.binding_name(view.id)).ok_or_else(
-                    || {
-                        format!(
-                            "Undefined variable in compound assign: '{}'",
-                            ctx.pool.str(ctx.tir.binding_name(view.id))
-                        )
-                    },
-                )?;
+                let var = Self::read_slot(&ctx.locals, view.id).ok_or_else(|| {
+                    format!(
+                        "Undefined variable in compound assign: '{}'",
+                        ctx.pool.str(ctx.tir.binding_name(view.id))
+                    )
+                })?;
                 let current = builder.use_var(var);
 
                 let is_float = inst.ty == ctx.pool.float();
-                let lhs_range = Self::read_slot(&ctx.range_facts, ctx.tir.binding_name(view.id));
+                let lhs_range = Self::read_slot(&ctx.range_facts, view.id);
                 let rhs_range = ranges::int_range_of(ctx.tir, &ctx.range_facts, view.value);
                 // Same spec §18 checked arithmetic as the binop arm.
                 let result = Self::emit_compound_op(
                     builder, ctx, view.op, is_float, lhs_range, rhs_range, current, rhs,
                 )?;
 
-                Self::kill_fact(ctx, ctx.tir.binding_name(view.id));
+                Self::kill_fact(ctx, view.id);
                 builder.def_var(var, result);
             }
             // M9 struct field assignment — lowered in codegen/structs.rs.

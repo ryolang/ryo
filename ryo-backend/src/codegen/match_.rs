@@ -417,20 +417,10 @@ impl<M: Module> Codegen<M> {
                 let val = builder.ins().iconst(ctx.int_type, 0);
                 let var = builder.declare_var(ctx.int_type);
                 builder.def_var(var, val);
-                Self::write_slot(
-                    &mut ctx.range_facts,
-                    &mut ctx.range_facts_undo,
-                    ctx.tir.binding_name(b.id),
-                    None,
-                );
-                Self::write_slot(
-                    &mut ctx.locals,
-                    &mut ctx.locals_undo,
-                    ctx.tir.binding_name(b.id),
-                    Some(var),
-                );
+                Self::write_slot(&mut ctx.range_facts, &mut ctx.range_facts_undo, b.id, None);
+                Self::write_slot(&mut ctx.locals, &mut ctx.locals_undo, b.id, Some(var));
                 if let Some(token) = token {
-                    ctx.aggregate_binding_storage.insert(token, var);
+                    ctx.aggregate_binding_storage[b.id.index()] = Some(var);
                     Self::cache_repr(ctx, token, ValueRepr::Scalar(val));
                 }
                 continue;
@@ -442,27 +432,13 @@ impl<M: Module> Codegen<M> {
                 Self::write_slot(
                     &mut ctx.struct_locals,
                     &mut ctx.struct_locals_undo,
-                    ctx.tir.binding_name(b.id),
+                    b.id,
                     Some(var),
                 );
             } else if token.is_some() && ctx.tir.is_direct_catch_match(r) {
-                Self::bind_field_deep_copy(
-                    builder,
-                    ctx,
-                    ctx.tir.binding_name(b.id),
-                    field_addr,
-                    b.ty,
-                    token,
-                )?;
+                Self::bind_field_deep_copy(builder, ctx, b.id, field_addr, b.ty, token)?;
             } else {
-                Self::bind_field_move(
-                    builder,
-                    ctx,
-                    ctx.tir.binding_name(b.id),
-                    field_addr,
-                    b.ty,
-                    token,
-                )?;
+                Self::bind_field_move(builder, ctx, b.id, field_addr, b.ty, token)?;
             }
         }
         Ok(())

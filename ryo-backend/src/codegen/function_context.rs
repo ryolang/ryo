@@ -11,7 +11,7 @@ use super::{
 use cranelift::codegen::ir::StackSlot;
 use cranelift::prelude::*;
 use cranelift_module::{DataDescription, DataId, FuncId, Module};
-use ryo_core::tir::{Tir, TirRef};
+use ryo_core::tir::{BindingId, Tir, TirRef};
 use ryo_core::types::{InternPool, StringId, TypeId};
 use std::collections::HashMap;
 
@@ -43,34 +43,30 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// and the slot-out exclusion all compare `StringId` equality
     /// against these.
     pub(super) name_ids: CodegenNameIds,
-    /// Scalar binding name → Cranelift `Variable`. Dense table indexed
-    /// by `StringId::raw()`, sized once per function from
-    /// `pool.string_count()` (codegen never interns, so every name in
-    /// the TIR is in bounds). Binding names are not unique per
-    /// function — a nested VarDecl shadows the outer slot — so every
-    /// write goes through `write_slot`, which records the previous
-    /// slot value on `locals_undo`; the Flow-block driver's region
-    /// prologues replay the log down to each construct's marks
-    /// so sibling regions never observe each other's bindings.
+    /// Semantic binding → Cranelift `Variable`. Dense table indexed by
+    /// body-local `BindingId` and sized from the current TIR binding table.
+    /// Writes record the previous representation on `locals_undo`; the
+    /// Flow-block driver's region prologues replay the log down to each
+    /// construct's marks so control-flow state restores correctly.
     pub(super) locals: Vec<Option<Variable>>,
     pub(super) locals_undo: Vec<(u32, Option<Variable>)>,
-    /// Value-range facts for spec §18 guard elision: binding name →
+    /// Value-range facts for spec §18 guard elision: semantic binding →
     /// inclusive `[lo, hi]` bounds proven by dominating comparisons
     /// (see `codegen/ranges.rs` for the seeding rules). Dense
-    /// `StringId::raw()`-indexed table with an undo log, scoped like
-    /// `locals`: the driver's join/exit prologues restore it via
-    /// `restore_slots`, and any binding assigned inside a restored
-    /// scope is killed at the join via `assigned_log`.
+    /// `BindingId`-indexed table with an undo log, scoped like `locals`:
+    /// the driver's join/exit prologues restore it via `restore_slots`,
+    /// and any binding assigned inside a restored scope is killed at the
+    /// join via `assigned_log`.
     pub(super) range_facts: Vec<Option<ranges::IntRange>>,
     pub(super) range_facts_undo: Vec<(u32, Option<ranges::IntRange>)>,
     /// Flat log of every binding assigned (or passed as `inout`) since
     /// function entry. Branch/loop emitters snapshot the length before
-    /// a scoped body and kill those names from `range_facts` after the
+    /// a scoped body and kill those IDs from `range_facts` after the
     /// restore, so a join whose predecessors disagree invalidates the
     /// fact instead of resurrecting the pre-scope one. Distinct from
     /// the slot-table undo logs: those restore pre-scope slot values,
     /// while this drives the resurrect-then-re-kill join invalidation.
-    pub(super) assigned_log: Vec<StringId>,
+    pub(super) assigned_log: Vec<BindingId>,
     pub(super) func_ids: &'a DeclaredFunctions,
     pub(super) abi: &'a LoweredAbi,
     /// `TirRef → ValueRepr` memo. Materializing the same instruction
@@ -256,12 +252,12 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     /// prologue, and arm fallthroughs.
     pub(super) match_records: HashMap<TirRef, match_::MatchRecord>,
     /// Owned fat (str/bytes) bindings: three SSA `Variable`s (ptr, len,
-    /// cap) per binding name. Dense `StringId::raw()`-indexed table with
+    /// cap) per semantic binding. Dense `BindingId`-indexed table with
     /// an undo log, same scoping discipline as `locals`.
     pub(super) fat_locals: Vec<Option<FatLocals>>,
-    /// Storage survives lexical name restoration until its resolved cleanup fires.
-    /// Entries identify representation only; Flow establishes ownership.
-    pub(super) fat_binding_storage: HashMap<TirRef, FatLocals>,
+    /// Dense per-binding storage remains available until resolved cleanup
+    /// fires. Entries identify representation only; Flow establishes ownership.
+    pub(super) fat_binding_storage: Vec<Option<FatLocals>>,
     pub(super) assignment_aliases: Vec<bool>,
     pub(super) cleanup_plan: ryo_core::flow::cleanup::CleanupPlan,
     pub(super) fat_locals_undo: Vec<(u32, Option<FatLocals>)>,
@@ -279,35 +275,32 @@ pub(crate) struct FunctionContext<'a, M: Module> {
     pub(super) view_locals_undo: Vec<(u32, Option<ViewLocals>)>,
     /// Struct-typed bindings (M9): one address-holding `Variable` per
     /// binding — the value itself lives in a stack slot (see
-    /// `codegen/structs.rs`). Dense `StringId::raw()`-indexed table
-    /// with an undo log, same scoping discipline as `locals`.
+    /// `codegen/structs.rs`). Dense `BindingId`-indexed table with an
+    /// undo log, same scoping discipline as `locals`.
     pub(super) struct_locals: Vec<Option<Variable>>,
-    pub(super) aggregate_binding_storage: HashMap<TirRef, Variable>,
+    pub(super) aggregate_binding_storage: Vec<Option<Variable>>,
     pub(super) struct_locals_undo: Vec<(u32, Option<Variable>)>,
     /// Free-target (initializer / Assign value / fat-param virtual ref)
-    /// → binding-name map, built once per function by
-    /// `build_free_binding_names`. `emit_frees` uses it to release a
-    /// named binding's CURRENT `FatLocals` rather than the producing
-    /// init's possibly-stale cached repr.
+    /// → semantic binding labels, built once per function by
+    /// `build_free_binding_ids`. These labels select only representation
+    /// provenance for elision; resolved Flow places select cleanup storage.
     ///
     /// Split into two dense tables dispatched on `TirRef::is_param()`
-    /// (same shape as `cached_repr`): `free_binding_names` is indexed
-    /// by `TirRef::index()` for real instruction refs (slot 0 unused),
-    /// `free_binding_param_names` by `TirRef::as_param_index()` for
+    /// (same shape as `cached_repr`): `free_binding_ids` is indexed by
+    /// `TirRef::index()` for real instruction refs (slot 0 unused),
+    /// `free_binding_param_ids` by `TirRef::as_param_index()` for
     /// fat-param sentinel refs.
-    pub(super) free_binding_names: Vec<Option<StringId>>,
-    pub(super) free_binding_param_names: Vec<Option<StringId>>,
-    /// M8.3 inout parameters: for each inout param's name, the
-    /// caller-provided slot address (a function-entry block param)
+    pub(super) free_binding_ids: Vec<Option<BindingId>>,
+    pub(super) free_binding_param_ids: Vec<Option<BindingId>>,
+    /// M8.3 inout parameters: for each inout param's semantic binding,
+    /// the caller-provided slot address (a function-entry block param)
     /// and its pointee `TypeId`. The write-back chokepoint stores each
     /// param's current `Variable` back through this pointer before
     /// every `return_`. Scalars store one field at offset 0; fat
     /// (str/bytes) pointees store three fields.
     ///
-    /// Dense table indexed by `StringId::raw()`, sized once per
-    /// function from `pool.string_count()` (codegen never interns, so
-    /// every name in the TIR is in bounds). Never scoped — params are
-    /// bound at function entry — so it has no undo log.
+    /// Dense `BindingId`-indexed tables sized from the current TIR
+    /// binding table. They are never scoped because params bind at entry.
     pub(super) inout_ptrs: Vec<Option<(Value, TypeId)>>,
     pub(super) scalar_param_storage: Vec<Option<Variable>>,
     /// For fat-returning functions: the hidden sret pointer (first block param)

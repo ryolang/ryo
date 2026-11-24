@@ -382,8 +382,8 @@ fn cleanup_executes_without_optional_optimizations() {
 
 #[test]
 fn cleanup_rejects_physical_storage_of_another_binding() {
-    let expected = TirRef::from_raw(1);
-    let wrong = TirRef::from_raw(2);
+    let expected = BindingId::from_index(0);
+    let wrong = BindingId::from_index(1);
     let var = Variable::from_u32(0);
     let storage = FatLocals {
         binding: Some(wrong),
@@ -420,6 +420,87 @@ fn mixed_abi_emits_objects_for_supported_target_layouts() {
             .expect("target ABI emission");
         assert!(!codegen.finish().expect("object").is_empty());
     }
+}
+
+#[test]
+fn backend_rejects_cross_body_binding_id() {
+    let source = "fn main():\n\tvalue = 1\n\tprint(value)\n";
+    let (tirs, flows, pool, cleanup, _context) = analyze(source);
+    let (other_tirs, other_flows, _, _, _other_context) = analyze(source);
+    let binding = tirs[0]
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, inst)| inst.tag == TirTag::VarDecl)
+        .map(|(index, _)| tirs[0].var_decl_view(TirRef::from_raw(index as u32)).id)
+        .expect("source binding");
+    let other_binding = other_tirs[0]
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, inst)| inst.tag == TirTag::VarDecl)
+        .map(|(index, _)| {
+            other_tirs[0]
+                .var_decl_view(TirRef::from_raw(index as u32))
+                .id
+        })
+        .expect("other source binding");
+    assert_eq!(binding, other_binding, "body-local IDs have the same shape");
+    assert_ne!(tirs[0].identity(), other_tirs[0].identity());
+
+    let error = Codegen::new_jit()
+        .expect("JIT")
+        .compile(&tirs, &other_flows, &pool, &cleanup, false)
+        .expect_err("an in-range ID from another body must fail publication");
+    assert!(
+        error.contains("backend binding validation") && error.contains("different typed body"),
+        "{error}"
+    );
+    drop(flows);
+}
+
+#[test]
+fn backend_rejects_out_of_scope_binding_use() {
+    let source =
+        "fn main():\n\tif true:\n\t\tvalue = 1\n\t\tprint(value)\n\tvalue = 2\n\tprint(value)\n";
+    let (mut tirs, flows, pool, cleanup, _context) = analyze(source);
+    let declarations: Vec<_> = tirs[0]
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, inst)| inst.tag == TirTag::VarDecl)
+        .map(|(index, _)| tirs[0].var_decl_view(TirRef::from_raw(index as u32)).id)
+        .collect();
+    assert_eq!(declarations.len(), 2);
+    assert_ne!(declarations[0], declarations[1]);
+    assert_eq!(
+        tirs[0].binding_name(declarations[0]),
+        tirs[0].binding_name(declarations[1]),
+        "source spelling must not distinguish the fixture bindings"
+    );
+    let outer_read = tirs[0]
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(index, inst)| match inst.data {
+            TirData::Var(id) if id == declarations[1] => Some(index),
+            _ => None,
+        })
+        .expect("outer binding read");
+    tirs[0].instructions[outer_read].data = TirData::Var(declarations[0]);
+
+    let error = Codegen::new_jit()
+        .expect("JIT")
+        .compile(&tirs, &flows, &pool, &cleanup, false)
+        .expect_err("an out-of-scope binding must fail before emission");
+    assert!(
+        error.contains("backend binding validation") && error.contains("outside binding scope"),
+        "{error}"
+    );
 }
 
 #[test]

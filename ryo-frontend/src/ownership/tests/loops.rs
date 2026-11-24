@@ -1515,3 +1515,72 @@ fn loop_fixed_point_inner_failure_during_outer_check_propagates() {
         "inner failure must abort the outer check before final-merge diagnostics escape: {diags:?}"
     );
 }
+
+#[test]
+fn loop_carried_decl_rank_distinguishes_binding_identity() {
+    let src = "fn main():\n\tmut value = \"outer_012345678901234567890123456789\"\n\tmut i = 0\n\twhile i < 1:\n\t\tvalue = value + \"!\"\n\t\tmut value = \"inner_012345678901234567890123456789\" + int_to_str(i)\n\t\tvalue = value + \"?\"\n\t\tprint(value)\n\t\ti += 1\n\tprint(value)\n";
+    let (diags, _sidecar, tirs, mut pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|diag| diag.severity != ryo_core::diag::Severity::Error),
+        "diagnostics: {diags:?}"
+    );
+    let tir = &tirs[0];
+    let value_name = pool.intern_str("value");
+    let declarations: Vec<_> = tir
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, inst)| inst.tag == TirTag::VarDecl)
+        .map(|(index, _)| tir.var_decl_view(TirRef::from_raw(index as u32)))
+        .filter(|view| tir.binding_name(view.id) == value_name)
+        .collect();
+    assert_eq!(declarations.len(), 2);
+    let outer_id = declarations[0].id;
+    let inner_id = declarations[1].id;
+    assert_ne!(outer_id, inner_id);
+    let assignment_value = |binding| {
+        tir.instructions
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, inst)| inst.tag == TirTag::Assign)
+            .map(|(index, _)| tir.assign_view(TirRef::from_raw(index as u32)))
+            .find(|view| view.id == binding)
+            .expect("same-spelled assignment")
+            .value
+    };
+    let outer_value = assignment_value(outer_id);
+    let inner_value = assignment_value(inner_id);
+    let loop_inst = tir
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, inst)| inst.tag == TirTag::WhileLoop)
+        .map(|(index, _)| TirRef::from_raw(index as u32))
+        .expect("while loop");
+    let flow = build_flow(tir, &pool);
+    let dead_stores = DeadStoreAnalysis::default();
+    let mut walk = Walk::new(tir, &flow, &pool, &dead_stores, None);
+    for (index, inst) in tir.instructions.iter().enumerate().skip(1) {
+        if inst.tag != TirTag::VarDecl {
+            continue;
+        }
+        let declaration = TirRef::from_raw(index as u32);
+        let view = tir.var_decl_view(declaration);
+        let rank = flow.order_of(declaration).expect("declaration order");
+        walk.decl_rank.entry(view.id).or_insert(rank);
+    }
+    walk.loop_regions
+        .push((loop_inst, flow.forward_order().collect()));
+
+    let owners = collect_loop_carried_owners(tir, &flow, &walk);
+    assert!(owners.contains(&outer_value), "genuine carried owner");
+    assert!(
+        !owners.contains(&inner_value),
+        "same-spelled inner declaration must not inherit the outer rank"
+    );
+}

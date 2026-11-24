@@ -26,7 +26,7 @@ use crate::builtins::{is_borrowed_scalar_param, view_borrow_params};
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::flow::{BlockId, Flow, PlaceId, Step, Terminator};
 use ryo_core::ownership::FunctionSidecar;
-use ryo_core::tir::{ChildKind, ParamMode, Span, Tir, TirData, TirRef, TirTag};
+use ryo_core::tir::{BindingId, ChildKind, ParamMode, Span, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId, TypeKind};
 use std::collections::{HashMap, HashSet};
 
@@ -167,10 +167,10 @@ pub(crate) struct Walk<'a> {
     /// enclosing generation's epoch (see `analyze_loop`).
     pub(crate) epoch: Vec<u32>,
     epoch_next: u32,
-    /// First-VarDecl emission rank per binding name (the "declared
+    /// First-VarDecl emission rank per resolved binding (the "declared
     /// before" test of the loop-carried scan) — keyed on the build's
     /// emission order, which is document order even for dead code.
-    pub(crate) decl_rank: HashMap<StringId, u32>,
+    pub(crate) decl_rank: HashMap<BindingId, u32>,
     /// The last instruction processed within the current region (steps
     /// and terminator payloads) — the Flow IR replacement for "the
     /// arm's last statement".
@@ -756,15 +756,15 @@ impl<'a> Walk<'a> {
         // is order-aware.
         if dead {
             let order = self.order(r);
-            match self.decl_rank.get(&name) {
+            match self.decl_rank.get(&view.id) {
                 Some(&cur) if cur <= order => {}
                 _ => {
-                    self.decl_rank.insert(name, order);
+                    self.decl_rank.insert(view.id, order);
                 }
             }
         } else {
             let order = self.order(r);
-            self.decl_rank.entry(name).or_insert(order);
+            self.decl_rank.entry(view.id).or_insert(order);
         }
     }
 

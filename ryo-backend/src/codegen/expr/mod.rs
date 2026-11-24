@@ -15,7 +15,7 @@ use super::{
 use cranelift::codegen::ir::{FuncRef, MemFlagsData, StackSlot};
 use cranelift::prelude::*;
 use cranelift_module::{Linkage, Module};
-use ryo_core::tir::{ParamMode, TirData, TirRef, TirTag};
+use ryo_core::tir::{BindingId, ParamMode, TirData, TirRef, TirTag};
 use ryo_core::types::{StringId, TypeKind, ViewKind};
 use std::collections::HashMap;
 
@@ -125,9 +125,12 @@ impl<M: Module> Codegen<M> {
             }
             TirTag::Var => match inst.data {
                 TirData::Var(id) => {
-                    let name = ctx.tir.binding_name(id);
-                    let var = Self::read_slot(&ctx.locals, name)
-                        .ok_or_else(|| format!("Undefined variable: '{}'", ctx.pool.str(name)))?;
+                    let var = Self::read_slot(&ctx.locals, id).ok_or_else(|| {
+                        format!(
+                            "Undefined variable: '{}'",
+                            ctx.pool.str(ctx.tir.binding_name(id))
+                        )
+                    })?;
                     builder.use_var(var)
                 }
                 _ => unreachable!("Var must carry TirData::Var"),
@@ -594,9 +597,9 @@ impl<M: Module> Codegen<M> {
     pub(crate) fn emit_fat_load(
         builder: &mut FunctionBuilder,
         ctx: &FunctionContext<'_, M>,
-        name: StringId,
+        binding: BindingId,
     ) -> Option<(Value, Value, Value)> {
-        let sl = Self::read_slot(&ctx.fat_locals, name)?;
+        let sl = Self::read_slot(&ctx.fat_locals, binding)?;
         if let Some(home) = sl.home {
             let addr = builder.ins().stack_addr(ctx.int_type, home, 0);
             let ptr = builder
@@ -623,9 +626,9 @@ impl<M: Module> Codegen<M> {
     pub(crate) fn emit_fat_load_ptr_cap(
         builder: &mut FunctionBuilder,
         ctx: &FunctionContext<'_, M>,
-        name: StringId,
+        binding: BindingId,
     ) -> Option<(Value, Value)> {
-        let sl = Self::read_slot(&ctx.fat_locals, name)?;
+        let sl = Self::read_slot(&ctx.fat_locals, binding)?;
         Some(Self::load_fat_storage_ptr_cap(builder, ctx.int_type, sl))
     }
 
@@ -655,9 +658,9 @@ impl<M: Module> Codegen<M> {
     pub(crate) fn fat_home_addr(
         builder: &mut FunctionBuilder,
         ctx: &FunctionContext<'_, M>,
-        name: StringId,
+        binding: BindingId,
     ) -> Option<Value> {
-        let home = Self::read_slot(&ctx.fat_locals, name)?.home?;
+        let home = Self::read_slot(&ctx.fat_locals, binding)?.home?;
         Some(builder.ins().stack_addr(ctx.int_type, home, 0))
     }
 
@@ -932,12 +935,15 @@ impl<M: Module> Codegen<M> {
                 ValueRepr::View { ptr, len }
             }
             TirTag::Var => {
-                let name = match inst.data {
-                    TirData::Var(name) => ctx.tir.binding_name(name),
+                let id = match inst.data {
+                    TirData::Var(id) => id,
                     _ => unreachable!("Var must carry TirData::Var"),
                 };
-                let locals = Self::read_slot(&ctx.view_locals, name).ok_or_else(|| {
-                    format!("Undefined strview variable: '{}'", ctx.pool.str(name))
+                let locals = Self::read_slot(&ctx.view_locals, id).ok_or_else(|| {
+                    format!(
+                        "Undefined strview variable: '{}'",
+                        ctx.pool.str(ctx.tir.binding_name(id))
+                    )
                 })?;
                 ValueRepr::View {
                     ptr: builder.use_var(locals.ptr),
@@ -1206,8 +1212,8 @@ impl<M: Module> Codegen<M> {
                 builder.ins().call(func_ref, &[addr, suf_ptr, suf_len]);
                 return Ok(builder.ins().iconst(ctx.int_type, 0));
             }
-            let home_addr =
-                Self::local_name_of(ctx, s_ref).and_then(|n| Self::fat_home_addr(builder, ctx, n));
+            let home_addr = Self::local_binding_of(ctx, s_ref)
+                .and_then(|n| Self::fat_home_addr(builder, ctx, n));
             let s_repr =
                 Self::eval_inst_with(builder, ctx, s_ref, EvalRequest::Fat, context.child())?;
             let ValueRepr::Str { ptr, len, cap } = s_repr else {
@@ -1244,7 +1250,7 @@ impl<M: Module> Codegen<M> {
             builder.ins().call(func_ref, &[s_addr, suf_ptr, suf_len]);
             // The push may have heap-promoted the buffer in place —
             // the home's provenance no longer holds.
-            if let Some(name) = Self::local_name_of(ctx, s_ref) {
+            if let Some(name) = Self::local_binding_of(ctx, s_ref) {
                 Self::set_home_inline(ctx, name, false);
             }
             // Reload the mutated fat pointer back into the caller's
@@ -1260,7 +1266,7 @@ impl<M: Module> Codegen<M> {
                 let nc = builder
                     .ins()
                     .load(types::I64, MemFlagsData::trusted(), s_addr, 16);
-                if let Some(name) = Self::local_name_of(ctx, s_ref)
+                if let Some(name) = Self::local_binding_of(ctx, s_ref)
                     && let Some(sl) = Self::read_slot(&ctx.fat_locals, name)
                 {
                     builder.def_var(sl.ptr, np);
@@ -1297,8 +1303,8 @@ impl<M: Module> Codegen<M> {
                 builder.ins().call(func_ref, &[addr, x_val]);
                 return Ok(builder.ins().iconst(ctx.int_type, 0));
             }
-            let home_addr =
-                Self::local_name_of(ctx, b_ref).and_then(|n| Self::fat_home_addr(builder, ctx, n));
+            let home_addr = Self::local_binding_of(ctx, b_ref)
+                .and_then(|n| Self::fat_home_addr(builder, ctx, n));
             let b_repr =
                 Self::eval_inst_with(builder, ctx, b_ref, EvalRequest::Fat, context.child())?;
             let ValueRepr::Bytes { ptr, len, cap } = b_repr else {
@@ -1330,7 +1336,7 @@ impl<M: Module> Codegen<M> {
             builder.ins().call(func_ref, &[b_addr, x_val]);
             // The push may have heap-promoted the buffer in place —
             // the home's provenance no longer holds.
-            if let Some(name) = Self::local_name_of(ctx, b_ref) {
+            if let Some(name) = Self::local_binding_of(ctx, b_ref) {
                 Self::set_home_inline(ctx, name, false);
             }
             // Reload the mutated fat pointer back into the caller's
@@ -1345,7 +1351,7 @@ impl<M: Module> Codegen<M> {
                 let nc = builder
                     .ins()
                     .load(types::I64, MemFlagsData::trusted(), b_addr, 16);
-                if let Some(name) = Self::local_name_of(ctx, b_ref)
+                if let Some(name) = Self::local_binding_of(ctx, b_ref)
                     && let Some(sl) = Self::read_slot(&ctx.fat_locals, name)
                 {
                     builder.def_var(sl.ptr, np);
@@ -1559,7 +1565,7 @@ impl<M: Module> Codegen<M> {
                     };
                     // Home-backed binding: the callee mutates the home
                     // slot in place — no spill, no reload.
-                    let arg_name = Self::local_name_of(ctx, arg);
+                    let arg_name = Self::local_binding_of(ctx, arg);
                     let home_addr = arg_name.and_then(|n| Self::fat_home_addr(builder, ctx, n));
                     match home_addr {
                         Some(addr) => {
@@ -1712,19 +1718,16 @@ impl<M: Module> Codegen<M> {
             lhs_name, view.id,
             "consuming concat must target the reassigned binding itself"
         );
-        let lhs_name = ctx.tir.binding_name(lhs_name);
         // The rhs bytes are consumed by the push call — transient
         // extraction is sound (eval_str_or_view_parts contract).
         let (r_ptr, r_len) = Self::eval_str_or_view_parts(builder, ctx, rhs)?;
         let locals = Self::read_slot(&ctx.fat_locals, lhs_name).ok_or_else(|| {
             format!(
                 "Undefined fat variable in consuming concat: '{}'",
-                ctx.pool.str(lhs_name)
+                ctx.pool.str(ctx.tir.binding_name(lhs_name))
             )
         })?;
-        let binding = ctx.sidecar.assign_binding[assign_ref.index()]
-            .ok_or_else(|| "fat assignment has no declaring binding".to_string())?;
-        Self::require_fat_storage_binding(locals, binding)?;
+        Self::require_fat_storage_binding(locals, view.id)?;
         // Home-backed binding: push mutates the home in place — no
         // spill, and the "reload" loads below only feed the cached
         // representation that later consumers read.
@@ -1798,14 +1801,14 @@ impl<M: Module> Codegen<M> {
             }
         };
         Self::cache_repr(ctx, concat_ref, repr);
-        Self::kill_fact(ctx, ctx.tir.binding_name(view.id));
+        Self::kill_fact(ctx, view.id);
         Ok(Terminator::None)
     }
 
     /// Reload each inout slot after a call and write the updated value
     /// back into the caller's local. The inout arg was sema-lowered to
-    /// its inner `Var(name)` ref, so `*arg_ref` is that `Var` inst —
-    /// read its binding name to find the local. Scalar args reload one
+    /// its inner `Var` ref, so `*arg_ref` is that `Var` inst — read its
+    /// `BindingId` to find the local. Scalar args reload one
     /// field into `locals`; fat args reload the fat-pointer triple into
     /// `fat_locals`.
     fn reload_inout_args(
@@ -1826,7 +1829,7 @@ impl<M: Module> Codegen<M> {
                 let nc = builder
                     .ins()
                     .load(types::I64, MemFlagsData::trusted(), addr, 16);
-                if let Some(name) = Self::local_name_of(ctx, *arg_ref) {
+                if let Some(name) = Self::local_binding_of(ctx, *arg_ref) {
                     // The callee may have written anything through the
                     // pointer — the binding's range fact dies here.
                     Self::kill_fact(ctx, name);
@@ -1839,7 +1842,7 @@ impl<M: Module> Codegen<M> {
             } else {
                 let cl_ty = cranelift_type_for(arg_ty, ctx.pool, ctx.int_type);
                 let updated = builder.ins().load(cl_ty, MemFlagsData::trusted(), addr, 0);
-                if let Some(name) = Self::local_name_of(ctx, *arg_ref) {
+                if let Some(name) = Self::local_binding_of(ctx, *arg_ref) {
                     Self::kill_fact(ctx, name);
                     if let Some(var) = Self::read_slot(&ctx.locals, name) {
                         builder.def_var(var, updated);
@@ -1850,15 +1853,14 @@ impl<M: Module> Codegen<M> {
         Ok(())
     }
 
-    /// Returns the binding name when `r` is a `TirTag::Var` inst, else
-    /// `None`. Used to resolve an inout arg (lowered to its inner
-    /// `Var(name)`) back to the caller local that must receive the
-    /// reloaded value.
-    pub(crate) fn local_name_of(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<StringId> {
+    /// Returns the semantic binding when `r` is a `TirTag::Var` inst,
+    /// else `None`. Used to resolve an inout arg back to the caller
+    /// local that must receive the reloaded value.
+    pub(crate) fn local_binding_of(ctx: &FunctionContext<'_, M>, r: TirRef) -> Option<BindingId> {
         let inst = ctx.tir.inst(r);
         match inst.tag {
             TirTag::Var => match inst.data {
-                TirData::Var(name) => Some(ctx.tir.binding_name(name)),
+                TirData::Var(id) => Some(id),
                 _ => None,
             },
             _ => None,

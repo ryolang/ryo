@@ -508,7 +508,7 @@ pub(crate) fn collect_loop_nesting(tir: &Tir, flow: &Flow) -> LoopNesting {
 /// enclosing loop — loop-carried owners. Driven by the walk-recorded
 /// body regions and document-order ranks (replaces the old
 /// `collect_assign_writes` + `declared_before_stmt` recursion; the
-/// predicate is identical: a `VarDecl` of the name anywhere earlier).
+/// predicate now compares the resolved binding's declaration rank).
 pub(crate) fn collect_loop_carried_owners(tir: &Tir, flow: &Flow, w: &Walk<'_>) -> HashSet<TirRef> {
     let mut out = HashSet::new();
     for &(loop_inst, ref region) in &w.loop_regions {
@@ -521,10 +521,7 @@ pub(crate) fn collect_loop_carried_owners(tir: &Tir, flow: &Flow, w: &Walk<'_>) 
                     continue;
                 }
                 let view = tir.assign_view(step.inst);
-                if w.decl_rank
-                    .get(&tir.binding_name(view.id))
-                    .is_some_and(|r| *r < loop_rank)
-                {
+                if w.decl_rank.get(&view.id).is_some_and(|r| *r < loop_rank) {
                     out.insert(view.value);
                     if tir.inst(view.value).tag == TirTag::Match
                         && let Some(write) = step.facts.write
