@@ -17,7 +17,7 @@ use super::{
 };
 use ryo_core::diag::{Diag, DiagCode, DiagSink};
 use ryo_core::flow::{Analysis, BlockId, Flow, PlaceId, Terminator};
-use ryo_core::tir::{Span, Tir, TirData, TirRef, TirTag};
+use ryo_core::tir::{BindingId, Span, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
 use std::collections::{HashMap, HashSet};
 
@@ -187,10 +187,11 @@ pub(crate) fn remove_loop_deferred_views(own: &mut Ownership, loop_ref: TirRef) 
 }
 
 /// Branch-merge liveness (P4, final spec §3.2): a view whose last read
-/// is inside this branch construct (block membership) has no reads
-/// after the join on ANY path, so it is dead at the join even though
-/// the union rule in `merge_branches` kept it live. Loop-deferred views
-/// are exempt (their death is owned by the enclosing loop's exit).
+/// is inside this branch construct (block membership), or an unread view
+/// created inside it, has no reads after the join on ANY path. It is dead
+/// at the join even though the union rule in `merge_branches` kept it live.
+/// Loop-deferred views are exempt (their death is owned by the enclosing
+/// loop's exit).
 pub(crate) fn prune_branch_dead_projections(
     own: &mut Ownership,
     flow: &Flow,
@@ -208,8 +209,10 @@ pub(crate) fn prune_branch_dead_projections(
             if Ownership::dense_get(&own.view_defer_loop, vi).is_some() {
                 return false;
             }
-            Ownership::dense_get(&own.view_last_use, vi)
-                .is_some_and(|lu| flow.step_block_of(lu).is_some_and(|b| blocks.contains(&b)))
+            match Ownership::dense_get(&own.view_last_use, vi) {
+                Some(lu) => flow.step_block_of(lu).is_some_and(|b| blocks.contains(&b)),
+                None => flow.step_block_of(vi).is_some_and(|b| blocks.contains(&b)),
+            }
         })
         .copied()
         .collect();
@@ -345,24 +348,24 @@ pub(crate) struct ViewLiveness {
     pub(crate) arm_last_reads: HashMap<BlockId, Analysis<HashMap<TirRef, TirRef>>>,
 }
 
-/// View-binding tracker for the liveness pre-walk: a `StringId → TirRef`
+/// View-binding tracker for the liveness pre-walk: a `BindingId → TirRef`
 /// map plus an undo log, so branch arms and loop bodies restore the
 /// pre-branch state by replaying the log instead of cloning the whole
 /// map per arm.
 type UndoEntry = (
-    StringId,
+    BindingId,
     Option<HashSet<Option<TirRef>>>,
     Option<HashSet<Option<TirRef>>>,
 );
 
 #[derive(Default)]
 pub(crate) struct Bindings {
-    map: HashMap<StringId, HashSet<Option<TirRef>>>,
+    map: HashMap<BindingId, HashSet<Option<TirRef>>>,
     log: Vec<UndoEntry>,
 }
 
 impl Bindings {
-    fn insert_all(&mut self, k: StringId, values: HashSet<Option<TirRef>>) {
+    fn insert_all(&mut self, k: BindingId, values: HashSet<Option<TirRef>>) {
         let old = self.map.insert(k, values.clone());
         self.log.push((k, old, Some(values)));
     }
@@ -372,8 +375,8 @@ impl Bindings {
     }
 
     /// Restore the map to `mark` and return the segment's write set.
-    fn rollback(&mut self, mark: usize) -> HashMap<StringId, Option<HashSet<Option<TirRef>>>> {
-        let mut writes: HashMap<StringId, Option<HashSet<Option<TirRef>>>> = HashMap::new();
+    fn rollback(&mut self, mark: usize) -> HashMap<BindingId, Option<HashSet<Option<TirRef>>>> {
+        let mut writes: HashMap<BindingId, Option<HashSet<Option<TirRef>>>> = HashMap::new();
         for (k, _, new) in &self.log[mark..] {
             writes.insert(*k, new.clone());
         }
@@ -554,7 +557,7 @@ fn liveness_step(
     if inst.tag == TirTag::Var
         && pool.is_view(inst.ty)
         && let TirData::Var(name) = inst.data
-        && let Some(view_insts) = bindings.map.get(&tir.binding_name(name))
+        && let Some(view_insts) = bindings.map.get(&name)
     {
         // Latest DOCUMENT-order read wins — emission order, not visit
         // order: dead continuation blocks walk late but emitted in
@@ -576,7 +579,7 @@ fn liveness_step(
             if pool.is_view(inst.ty)
                 && let Some(targets) = view_binding_targets(tir, &bindings.map, view.initializer)
             {
-                bindings.insert_all(tir.binding_name(view.id), targets);
+                bindings.insert_all(view.id, targets);
             }
         }
         TirTag::Assign => {
@@ -584,10 +587,10 @@ fn liveness_step(
             if pool.is_view(inst.ty) {
                 match view_binding_targets(tir, &bindings.map, view.value) {
                     Some(targets) => {
-                        bindings.insert_all(tir.binding_name(view.id), targets);
+                        bindings.insert_all(view.id, targets);
                     }
                     None => {
-                        bindings.insert_all(tir.binding_name(view.id), HashSet::from([None]));
+                        bindings.insert_all(view.id, HashSet::from([None]));
                     }
                 }
             }
@@ -623,9 +626,9 @@ fn merge_reads(target: &mut HashMap<TirRef, TirRef>, reads: HashMap<TirRef, TirR
 }
 
 fn union_binding_states(
-    base: &HashMap<StringId, HashSet<Option<TirRef>>>,
-    additional: &HashMap<StringId, HashSet<Option<TirRef>>>,
-) -> HashMap<StringId, HashSet<Option<TirRef>>> {
+    base: &HashMap<BindingId, HashSet<Option<TirRef>>>,
+    additional: &HashMap<BindingId, HashSet<Option<TirRef>>>,
+) -> HashMap<BindingId, HashSet<Option<TirRef>>> {
     let mut merged = base.clone();
     for (&name, targets) in additional {
         merged.entry(name).or_default().extend(targets);
@@ -671,7 +674,7 @@ fn liveness_if(
         .collect();
 
     let mark = lw.bindings.mark();
-    let mut arm_maps: Vec<HashMap<StringId, Option<HashSet<Option<TirRef>>>>> = Vec::new();
+    let mut arm_maps: Vec<HashMap<BindingId, Option<HashSet<Option<TirRef>>>>> = Vec::new();
     // Then arm.
     let mut then_reads = HashMap::new();
     lw.walk_list(tir, flow, pool, &arm_regions[0], epoch, &mut then_reads);
@@ -712,7 +715,7 @@ fn liveness_if(
     // Keep every possible incoming view binding. The enclosing state is
     // one possible path when an arm does not write the binding.
     let entry = lw.bindings.map.clone();
-    let names: HashSet<StringId> = arm_maps.iter().flat_map(|m| m.keys().copied()).collect();
+    let names: HashSet<BindingId> = arm_maps.iter().flat_map(|m| m.keys().copied()).collect();
     for name in names {
         let mut values = HashSet::new();
         for arm in &arm_maps {
@@ -756,7 +759,7 @@ fn liveness_match(
         None => super::RegionStop::At(BlockId::NONE),
     };
     let mark = lw.bindings.mark();
-    let mut arm_maps: Vec<HashMap<StringId, Option<HashSet<Option<TirRef>>>>> =
+    let mut arm_maps: Vec<HashMap<BindingId, Option<HashSet<Option<TirRef>>>>> =
         Vec::with_capacity(arm_blocks.len());
     for (i, _arm) in view.arms().enumerate() {
         let (region, _) = collect_region(flow, &mut lw.region_scratch, arm_blocks[i], |b| {
@@ -769,7 +772,7 @@ fn liveness_match(
         arm_maps.push(lw.bindings.rollback(mark));
     }
     let entry = lw.bindings.map.clone();
-    let names: HashSet<StringId> = arm_maps.iter().flat_map(|m| m.keys().copied()).collect();
+    let names: HashSet<BindingId> = arm_maps.iter().flat_map(|m| m.keys().copied()).collect();
     for name in names {
         let mut values = HashSet::new();
         for arm in &arm_maps {
@@ -865,13 +868,13 @@ fn liveness_loop(
 /// `strview` parameter) and is ignored when recording local last uses.
 pub(crate) fn view_binding_targets(
     tir: &Tir,
-    bindings: &HashMap<StringId, HashSet<Option<TirRef>>>,
+    bindings: &HashMap<BindingId, HashSet<Option<TirRef>>>,
     init: TirRef,
 ) -> Option<HashSet<Option<TirRef>>> {
     match tir.inst(init).data {
         TirData::Var(name) => Some(
             bindings
-                .get(&tir.binding_name(name))
+                .get(&name)
                 .cloned()
                 .unwrap_or_else(|| HashSet::from([None])),
         ),
@@ -979,9 +982,9 @@ mod tests {
     fn bindings_nested_rollback_picks_up_inner_merge_writes() {
         let mut bindings = Bindings::default();
         let (a, b, c) = (
-            StringId::from_raw(1),
-            StringId::from_raw(2),
-            StringId::from_raw(3),
+            BindingId::from_index(1),
+            BindingId::from_index(2),
+            BindingId::from_index(3),
         );
         let (va, vb, vc) = (
             TirRef::from_raw(10),

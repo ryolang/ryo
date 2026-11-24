@@ -251,6 +251,10 @@ fn destructure_unknown_field_error() {
         "error should name the unknown field, got: {}",
         stderr
     );
+    assert!(
+        !stderr.contains("internal compiler error"),
+        "named-selector recovery must not emit an internal error: {stderr}"
+    );
 }
 
 #[test]
@@ -271,6 +275,10 @@ fn destructure_non_struct() {
         stderr.contains("cannot destructure `int` — destructuring works on structs and tuples"),
         "error should pin the non-struct message bar, got: {}",
         stderr
+    );
+    assert!(
+        !stderr.contains("internal compiler error"),
+        "scalar recovery must not emit invalid field accesses: {stderr}"
     );
 }
 
@@ -304,6 +312,52 @@ fn destructure_rebind_error() {
         stderr.contains("assign"),
         "error should suggest individual assignment, got: {}",
         stderr
+    );
+}
+
+#[test]
+fn partial_destructure_rebind_preserves_single_source_diagnostic() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tb = 0\n\t(a, b) = (1, 2)\n\tprint(a)\n";
+    let test_file = create_test_file(temp_dir.path(), "partial_rebind.ryo", code);
+
+    let output = run_ryo_command(&["run", "partial_rebind.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.matches("E0029").count(), 1, "stderr: {stderr}");
+    assert_eq!(stderr.matches("] Error:").count(), 1, "stderr: {stderr}");
+    assert!(
+        stderr.contains("'b' is already declared"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("internal compiler error")
+            && !stderr.contains("incompatible artifacts")
+            && !stderr.contains("has no Flow place"),
+        "recovery must not add an internal error: {stderr}"
+    );
+}
+
+#[test]
+fn early_destructure_recovery_does_not_redeclare_existing_binding() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let code = "fn main():\n\tx = 1\n\t(x, y) = 0\n\tprint(x)\n";
+    let test_file = create_test_file(temp_dir.path(), "early_rebind.ryo", code);
+
+    let output = run_ryo_command(&["run", "early_rebind.ryo"], &test_file)
+        .expect("Failed to run ryo command");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.matches("E0041").count(), 1, "stderr: {stderr}");
+    assert_eq!(stderr.matches("] Error:").count(), 1, "stderr: {stderr}");
+    assert!(
+        !stderr.contains("internal compiler error")
+            && !stderr.contains("incompatible artifacts")
+            && !stderr.contains("multiple Flow places"),
+        "recovery must not redefine the original binding: {stderr}"
     );
 }
 

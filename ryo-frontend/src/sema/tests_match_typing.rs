@@ -499,13 +499,27 @@ fn same_binding_name_in_different_arms_is_allowed() {
     let m = match_in_var_init(main, 1);
     let view = main.match_view(m);
     let v = pool.find_str("v").expect("`v` interned");
+    let mut ids = Vec::new();
     for arm in view.arms() {
-        assert_bindings(
-            main,
-            arm.bindings().collect::<Vec<_>>(),
-            &[(0, v, pool.int())],
-        );
+        let bindings = arm.bindings().collect::<Vec<_>>();
+        assert_bindings(main, bindings.clone(), &[(0, v, pool.int())]);
+        let binding = bindings[0];
+        ids.push(binding.id);
+        let MatchBodyView::Expr(body) = arm.body else {
+            panic!("fixture arms must be expressions")
+        };
+        let body_read = match main.inst(body).data {
+            TirData::Var(id) => id,
+            TirData::BinOp { lhs, .. } => match main.inst(lhs).data {
+                TirData::Var(id) => id,
+                other => panic!("arm lhs must read its own binding, got {other:?}"),
+            },
+            other => panic!("arm body must read its own binding, got {other:?}"),
+        };
+        assert_eq!(body_read, binding.id, "arm body read must use its own ID");
     }
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1], "same-spelled arm IDs must be distinct");
 }
 
 #[test]

@@ -230,6 +230,29 @@ fn shadowed_bindings_have_distinct_ids_and_initializer_cannot_resolve_early() {
 }
 
 #[test]
+fn compound_assignment_uses_each_shadows_resolved_binding_id() {
+    let src = "fn main():\n\tmut value = 1\n\tif true:\n\t\tmut value = 2\n\t\tvalue += 3\n\tvalue += 4\n";
+    let (tirs, pool) = run(src).unwrap();
+    let main = tir_named(&tirs, &pool, "main");
+    let declarations = (1..main.instructions.len())
+        .filter_map(|index| {
+            let reference = TirRef::from_raw(index as u32);
+            (main.inst(reference).tag == TirTag::VarDecl).then(|| main.var_decl_view(reference))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(declarations.len(), 2);
+    let assignments = (1..main.instructions.len())
+        .filter_map(|index| {
+            let reference = TirRef::from_raw(index as u32);
+            (main.inst(reference).tag == TirTag::CompoundAssign)
+                .then(|| main.compound_assign_view(reference).id)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(assignments, vec![declarations[1].id, declarations[0].id]);
+    assert_ne!(declarations[0].id, declarations[1].id);
+}
+
+#[test]
 fn binding_ids_continue_after_builder_params() {
     let mut pool = InternPool::new();
     let function = pool.intern_str("f");

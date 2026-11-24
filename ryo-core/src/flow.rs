@@ -597,14 +597,15 @@ impl Flow {
         self.binding_places.get(binding.index()).copied().flatten()
     }
 
-    /// Build Flow, rejecting invalid binding identities and lexical uses.
+    /// Build Flow, rejecting foreign layouts, invalid binding identities, and lexical uses.
     pub fn try_build(tir: &Tir, pool: &InternPool) -> Result<Flow, String> {
+        tir.require_layout(pool)?;
         build::build_flow(tir, pool)
     }
 
-    /// Build canonical Flow for trusted, well-formed post-sema TIR.
+    /// Build canonical Flow for trusted, well-formed post-sema TIR and its originating pool.
     pub fn build(tir: &Tir, pool: &InternPool) -> Flow {
-        Self::try_build(tir, pool).expect("Flow requires valid binding identities and scopes")
+        build::build_flow(tir, pool).expect("Flow requires valid binding identities and scopes")
     }
 
     /// Whether execution reaches the builder-supplied final `ReturnVoid`.

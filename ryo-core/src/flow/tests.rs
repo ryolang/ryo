@@ -1201,7 +1201,9 @@ fn flow_scope_ancestry_is_structural_not_numeric() {
     let sibling_stmt = b.unary(TirTag::ExprStmt, cx.void, sibling_outer_read, sp());
     let second_cond = b.bool_const(true, cx.pool.bool_(), sp());
     let second = b.if_stmt(second_cond, &[sibling_stmt], &[], None, cx.void, sp());
-    let tir = b.finish(&[outer, nested, first, second]);
+    let tir = b
+        .with_layout_context(&cx.pool)
+        .finish(&[outer, nested, first, second]);
 
     let flow = Flow::try_build(&tir, &cx.pool).expect("structural ancestors remain visible");
     let outer_place = flow.resolve(outer_id).expect("outer binding");
@@ -1226,7 +1228,7 @@ fn flow_rejects_sibling_scope_binding_id() {
     let stmt = b.unary(TirTag::ExprStmt, cx.void, read, sp());
     let second_cond = b.bool_const(true, cx.pool.bool_(), sp());
     let second = b.if_stmt(second_cond, &[stmt], &[], None, cx.void, sp());
-    let tir = b.finish(&[first, second]);
+    let tir = b.with_layout_context(&cx.pool).finish(&[first, second]);
 
     let error = Flow::try_build(&tir, &cx.pool)
         .expect_err("a sibling scope must not inherit the first sibling's bindings");
@@ -1379,6 +1381,118 @@ fn flow_rejects_token_with_wrong_owner_instruction() {
     malformed
         .require_bindings(&tir, &cx.pool)
         .expect_err("same-name/same-type token must retain its TIR owner-token association");
+}
+
+#[test]
+fn flow_copy_match_binding_after_close_reports_scope() {
+    let mut cx = Ctx::new();
+    let int = cx.int;
+    let field = cx.pool.intern_str("field");
+    let pair_ty = cx.pool.anon_struct(&[(field, int)]);
+    let mut b = cx.builder();
+    let value = b.int_const(1, int, sp());
+    let scrutinee = b.struct_lit(pair_ty, &[(0, value)], sp());
+    let copy_id = scoped_binding(&mut b, cx.x, int, 1);
+    let match_ = b.match_expr(
+        scrutinee,
+        cx.void,
+        &[TypedMatchArm {
+            span: sp(),
+            discriminant: crate::tir::Discriminant::Wildcard,
+            bindings: &[crate::tir::MatchBinding {
+                field_index: 0,
+                id: copy_id,
+                ty: int,
+            }],
+            guards: &[],
+            body: TypedMatchBody::Stmts(&[]),
+        }],
+        sp(),
+    );
+    let read = b.var(copy_id, int, sp());
+    let stmt = b.unary(TirTag::ExprStmt, cx.void, read, sp());
+    let tir = b.with_layout_context(&cx.pool).finish(&[match_, stmt]);
+
+    let error = Flow::try_build(&tir, &cx.pool).expect_err("closed copy binding");
+    assert!(error.contains("outside binding scope"), "{error}");
+}
+
+#[test]
+fn flow_rejects_duplicate_copy_binding_declaration() {
+    let mut cx = Ctx::new();
+    let int = cx.int;
+    let field = cx.pool.intern_str("field");
+    let pair_ty = cx.pool.anon_struct(&[(field, int)]);
+    let mut b = cx.builder();
+    let value = b.int_const(1, int, sp());
+    let scrutinee = b.struct_lit(pair_ty, &[(0, value)], sp());
+    let copy_id = scoped_binding(&mut b, cx.x, int, 1);
+    let binding = crate::tir::MatchBinding {
+        field_index: 0,
+        id: copy_id,
+        ty: int,
+    };
+    let match_ = b.match_expr(
+        scrutinee,
+        cx.void,
+        &[TypedMatchArm {
+            span: sp(),
+            discriminant: crate::tir::Discriminant::Wildcard,
+            bindings: &[binding, binding],
+            guards: &[],
+            body: TypedMatchBody::Stmts(&[]),
+        }],
+        sp(),
+    );
+    let tir = b.with_layout_context(&cx.pool).finish(&[match_]);
+
+    let error = Flow::try_build(&tir, &cx.pool).expect_err("duplicate copy binding");
+    assert!(error.contains("declared twice"), "{error}");
+}
+
+#[test]
+fn flow_declaration_and_lookup_scaling_is_not_quadratic() {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    fn median_build_time(cx: &mut Ctx, count: usize) -> std::time::Duration {
+        let int = cx.int;
+        let mut b = cx.builder();
+        let mut statements = Vec::with_capacity(count);
+        for index in 0..count {
+            let name = cx.pool.intern_str(&format!("binding_{index}"));
+            let id = scoped_binding(&mut b, name, int, 0);
+            let value = b.int_const(index as i64, int, sp());
+            statements.push(b.var_decl(id, false, int, value, sp()));
+        }
+        let tir = b.with_layout_context(&cx.pool).finish(&statements);
+        drop(Flow::try_build(&tir, &cx.pool).expect("warmup Flow"));
+        let mut samples = Vec::new();
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            let flow = Flow::try_build(&tir, &cx.pool).expect("declaration-heavy Flow");
+            std::hint::black_box(&flow);
+            samples.push(start.elapsed());
+        }
+        samples.sort_unstable();
+        samples[2]
+    }
+
+    let mut cx = Ctx::new();
+    let small = median_build_time(&mut cx, 1_000);
+    let large = median_build_time(&mut cx, 16_000);
+    println!(
+        "Flow scaling: N=1000 {:?}; N=16000 {:?}; ratio {:.2}",
+        small,
+        large,
+        large.as_secs_f64() / small.as_secs_f64()
+    );
+    assert!(
+        large.as_secs_f64() <= small.as_secs_f64() * 24.0,
+        "16x declarations took {:.3?} -> {:.3?}; quadratic membership scans regressed",
+        small,
+        large
+    );
 }
 
 // ---------- fire_points (shared firing-point resolver) ----------

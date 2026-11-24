@@ -32,6 +32,8 @@ pub(super) struct FlowBuilder<'a> {
     steps: Vec<Step>,
     places: Vec<Place>,
     binding_places: Vec<Option<PlaceId>>,
+    /// Dense declaration and structural-activity state for each binding.
+    binding_scopes: Vec<BindingScopeState>,
     /// Variable-length payloads (switch arm block lists).
     extra: Vec<u32>,
     scopes: Vec<LexicalScope>,
@@ -55,10 +57,19 @@ pub(super) struct FlowBuilder<'a> {
     error: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum BindingScopeState {
+    #[default]
+    Undeclared,
+    Active,
+    Closed,
+}
+
 #[derive(Default)]
 struct LexicalScope {
     id: Option<ScopeId>,
-    bindings: Vec<BindingId>,
+    /// Declarations to close on pop; dense state handles all membership tests.
+    declarations: Vec<BindingId>,
 }
 
 struct LoopFrame {
@@ -81,6 +92,7 @@ pub(super) fn build_flow(tir: &Tir, pool: &InternPool) -> Result<Flow, String> {
         steps: Vec::with_capacity(arena_len),
         places: Vec::with_capacity(arena_len),
         binding_places: vec![None; tir.bindings().len()],
+        binding_scopes: vec![BindingScopeState::default(); tir.bindings().len()],
         extra: Vec::new(),
         scopes: vec![LexicalScope::default()],
         loops: Vec::new(),
@@ -283,7 +295,17 @@ impl FlowBuilder<'_> {
     }
 
     fn pop_scope(&mut self) {
-        self.scopes.pop();
+        let Some(scope) = self.scopes.pop() else {
+            self.fail("missing root binding scope".into());
+            return;
+        };
+        for binding in scope.declarations {
+            debug_assert_eq!(
+                self.binding_scopes[binding.index()],
+                BindingScopeState::Active
+            );
+            self.binding_scopes[binding.index()] = BindingScopeState::Closed;
+        }
     }
 
     fn bind(&mut self, binding: BindingId, place: PlaceId) {
@@ -313,11 +335,12 @@ impl FlowBuilder<'_> {
             return;
         }
         scope.id = Some(binding_scope);
-        if scope.bindings.contains(&binding) {
+        if self.binding_scopes[binding.index()] != BindingScopeState::Undeclared {
             self.fail(format!("binding {} declared twice", binding.raw()));
-        } else {
-            scope.bindings.push(binding);
+            return;
         }
+        scope.declarations.push(binding);
+        self.binding_scopes[binding.index()] = BindingScopeState::Active;
         if self.binding_places.get(binding.index()).copied().flatten() != place {
             self.fail(format!(
                 "binding {} has no matching Flow place",
@@ -331,27 +354,22 @@ impl FlowBuilder<'_> {
             self.fail(format!("unregistered binding {}", binding.raw()));
             return None;
         }
-        for scope in self.scopes.iter().rev() {
-            if scope.bindings.contains(&binding) {
+        match self.binding_scopes[binding.index()] {
+            BindingScopeState::Active => {
                 return self.binding_places.get(binding.index()).copied().flatten();
             }
-        }
-        if self
-            .binding_places
-            .get(binding.index())
-            .copied()
-            .flatten()
-            .is_some()
-        {
-            self.fail(format!(
-                "binding {} used outside binding scope",
-                binding.raw()
-            ));
-        } else {
-            self.fail(format!(
-                "binding {} has no Flow place in the current lexical scope",
-                binding.raw()
-            ));
+            BindingScopeState::Closed => {
+                self.fail(format!(
+                    "binding {} used outside binding scope",
+                    binding.raw()
+                ));
+            }
+            BindingScopeState::Undeclared => {
+                self.fail(format!(
+                    "binding {} has no Flow place in the current lexical scope",
+                    binding.raw()
+                ));
+            }
         }
         None
     }

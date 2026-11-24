@@ -15,8 +15,8 @@ use super::super::{
 use super::{TirStmtList, declared_before_stmt};
 use ryo_core::flow::{DropOp, DropPosition};
 use ryo_core::ownership::FunctionSidecar;
-use ryo_core::tir::{ExtraList, MatchBodyView, Tir, TirRef, TirTag};
-use ryo_core::types::{InternPool, StringId};
+use ryo_core::tir::{BindingId, ExtraList, MatchBodyView, Tir, TirRef, TirTag};
+use ryo_core::types::InternPool;
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 
@@ -39,19 +39,19 @@ pub(crate) struct LoopExitCtx<'a> {
     doms: &'a OnceCell<Dominators>,
 }
 
-/// Collect every `Assign` (site, name, value) reachable from `stmts`,
+/// Collect every `Assign` (site, binding, value) reachable from `stmts`,
 /// descending through if/loop bodies. Kept for `LoopExitCtx`.
 fn collect_assign_writes<S: TirStmtList + ?Sized>(
     tir: &Tir,
     stmts: &S,
-    out: &mut Vec<(TirRef, StringId, TirRef)>,
+    out: &mut Vec<(TirRef, BindingId, TirRef)>,
 ) {
     for r in stmts.iter_refs() {
         let r = stmt_match(tir, r).unwrap_or(r);
         match tir.inst(r).tag {
             TirTag::Assign => {
                 let view = tir.assign_view(r);
-                out.push((r, tir.binding_name(view.id), view.value));
+                out.push((r, view.id, view.value));
             }
             TirTag::IfStmt => {
                 let view = tir.if_stmt_view(r);
@@ -167,7 +167,7 @@ impl<'a> LoopExitCtx<'a> {
         collect_assign_writes(tir, &body, &mut writes);
         let loop_carried_owners: HashSet<TirRef> = writes
             .into_iter()
-            .filter(|(_, name, _)| declared_before_stmt(tir, *name, loop_inst))
+            .filter(|(_, binding, _)| declared_before_stmt(tir, *binding, loop_inst))
             .map(|(_, _, value)| value)
             .collect();
         let mut following_assignments = Vec::new();

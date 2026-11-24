@@ -22,7 +22,7 @@ use ryo_core::diag::DiagSink;
 use ryo_core::flow::fire_points::{FirePoint, FirePoints, FireVerdict};
 use ryo_core::flow::{BlockId, DropPosition, Flow, Place, Terminator, WriteKind};
 use ryo_core::ownership::FunctionSidecar;
-use ryo_core::tir::{ExtraList, Tir, TirData, TirRef, TirTag};
+use ryo_core::tir::{BindingId, ExtraList, Tir, TirData, TirRef, TirTag};
 use ryo_core::types::{InternPool, StringId};
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
@@ -668,14 +668,14 @@ pub(crate) fn outermost_loop_of(tir: &Tir, target: TirRef) -> Option<TirRef> {
     walk(tir, &body, target, &mut Vec::new())
 }
 
-/// True if `name` is declared by a `VarDecl` anywhere before `stop` in
+/// True if `binding` is declared by a `VarDecl` anywhere before `stop` in
 /// program order (any nesting depth). Guards the dead-store re-anchor.
 /// Kept for the post-walk passes (see the module header).
-pub(crate) fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> bool {
+pub(crate) fn declared_before_stmt(tir: &Tir, binding: BindingId, stop: TirRef) -> bool {
     fn walk<S: TirStmtList + ?Sized>(
         tir: &Tir,
         stmts: &S,
-        name: StringId,
+        binding: BindingId,
         stop: TirRef,
         found: &mut bool,
         stopped: &mut bool,
@@ -691,39 +691,39 @@ pub(crate) fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> b
             let r = stmt_match(tir, r).unwrap_or(r);
             match tir.inst(r).tag {
                 TirTag::VarDecl => {
-                    if tir.binding_name(tir.var_decl_view(r).id) == name {
+                    if tir.var_decl_view(r).id == binding {
                         *found = true;
                         return;
                     }
                 }
                 TirTag::IfStmt => {
                     let view = tir.if_stmt_view(r);
-                    walk(tir, &view.then_stmts, name, stop, found, stopped);
+                    walk(tir, &view.then_stmts, binding, stop, found, stopped);
                     for elif in &view.elif_branches {
-                        walk(tir, &elif.body, name, stop, found, stopped);
+                        walk(tir, &elif.body, binding, stop, found, stopped);
                     }
                     if let Some(else_stmts) = &view.else_stmts {
-                        walk(tir, else_stmts, name, stop, found, stopped);
+                        walk(tir, else_stmts, binding, stop, found, stopped);
                     }
                 }
                 TirTag::WhileLoop => {
                     let body = tir.while_loop_body_view(r);
-                    walk(tir, &body, name, stop, found, stopped);
+                    walk(tir, &body, binding, stop, found, stopped);
                 }
                 TirTag::ForRange => {
                     let body = tir.for_range_body_view(r);
-                    walk(tir, &body, name, stop, found, stopped);
+                    walk(tir, &body, binding, stop, found, stopped);
                 }
                 TirTag::Match => {
                     for body in match_arm_bodies(tir, r) {
-                        walk(tir, &body, name, stop, found, stopped);
+                        walk(tir, &body, binding, stop, found, stopped);
                     }
                 }
                 _ => {}
             }
             visit_operand_matches(tir, r, &mut |m| {
                 for body in match_arm_bodies(tir, m) {
-                    walk(tir, &body, name, stop, found, stopped);
+                    walk(tir, &body, binding, stop, found, stopped);
                 }
             });
         }
@@ -731,7 +731,7 @@ pub(crate) fn declared_before_stmt(tir: &Tir, name: StringId, stop: TirRef) -> b
     let mut found = false;
     let mut stopped = false;
     let body = tir.body_stmts();
-    walk(tir, &body, name, stop, &mut found, &mut stopped);
+    walk(tir, &body, binding, stop, &mut found, &mut stopped);
     found
 }
 

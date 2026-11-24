@@ -253,8 +253,8 @@ impl<M: Module> Codegen<M> {
                         continue;
                     }
                     // The inout arg was sema-lowered to its inner
-                    // `Var(name)` ref — the same rule `local_name_of`
-                    // uses. Anything else is not a plain binding write;
+                    // `Var(BindingId)` ref, so its resolved ID is the write
+                    // identity. Anything else is not a plain binding write;
                     // ignore it conservatively.
                     let arg_inst = tir.inst(arg);
                     if let (TirTag::Var, TirData::Var(name)) = (arg_inst.tag, arg_inst.data) {

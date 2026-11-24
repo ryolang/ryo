@@ -3,8 +3,9 @@
 //! Sema resolves qualified error-family patterns to canonical member names.
 
 use super::{
-    FuncCtx, NeverMode, Scope, ScopeParent, Sema, SemaExprContext, analyze_block_with_context,
-    analyze_expr_with, check_reserved_name, field_list, ordinal, with_struct_shape_notes,
+    FuncCtx, NeverMode, Scope, ScopeParent, Sema, SemaExprContext,
+    analyze_block_with_context_in_scope, analyze_expr_with, check_reserved_name, field_list,
+    ordinal, with_struct_shape_notes,
 };
 use ryo_core::ast::LitPattern;
 use ryo_core::diag::{Diag, DiagCode};
@@ -405,7 +406,7 @@ fn type_and_emit_match(
             )),
             UirArmBodyView::Stmts(_) => {
                 let stmt_refs: Vec<InstRef> = uir_arm.body.stmts().collect();
-                TypedArmBody::Stmts(analyze_block_with_context(
+                TypedArmBody::Stmts(analyze_block_with_context_in_scope(
                     sema,
                     fcx,
                     &preparation.scope,

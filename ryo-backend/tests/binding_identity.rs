@@ -2,13 +2,14 @@ use ryo_backend::codegen::Codegen;
 use ryo_core::compilation::CompilationContext;
 use ryo_core::diag::{DiagSink, Severity};
 use ryo_core::flow::cleanup::{CleanupPlan, ReleaseStorage};
+use ryo_core::flow::fire_points::{FirePoints, FireVerdict};
 use ryo_core::flow::{DropPosition, Flow};
 use ryo_core::ownership::OwnershipSidecar;
 use ryo_core::tir::{Tir, TirRef, TirTag};
 use ryo_core::types::InternPool;
 use tempfile::TempDir;
 
-const LOOP_INOUT_BINDING_CLEANUP: &str = "fn bump(inout value: int):\n\tvalue += 1\n\nfn main():\n\tmut i = 40\n\tmut counter = 0\n\tvalue = \"outer\"\n\tfor i in range(0, 2):\n\t\tmut value = \"inner_012345678901234567890123456789\" + int_to_str(i)\n\t\tmut j = 0\n\t\twhile j < 1:\n\t\t\tprint(value)\n\t\t\tprint(\"\\n\")\n\t\t\tj += 1\n\t\tbump(&counter)\n\tbump(&i)\n\tprint(i)\n\tprint(\"\\n\")\n\tprint(counter)\n\tprint(\"\\n\")\n\tprint(value)\n\tprint(\"\\n\")\n";
+const LOOP_INOUT_BINDING_CLEANUP: &str = "fn bump(inout value: int):\n\tvalue += 1\n\nfn main():\n\tmut i = 40\n\tmut counter = 0\n\tvalue = \"outer_012345678901234567890123456789\" + \"!\"\n\tfor i in range(0, 2):\n\t\tmut value = \"inner_012345678901234567890123456789\" + int_to_str(i)\n\t\tmut j = 0\n\t\twhile j < 1:\n\t\t\tprint(value)\n\t\t\tprint(\"\\n\")\n\t\t\tj += 1\n\t\tbump(&counter)\n\tbump(&i)\n\tprint(i)\n\tprint(\"\\n\")\n\tprint(counter)\n\tprint(\"\\n\")\n\tprint(value)\n\tprint(\"\\n\")\n";
 
 type BindingArtifacts = (
     Vec<Tir>,
@@ -145,6 +146,54 @@ fn require_inner_loop_exit_cleanup(
     if plan.releases.get(outer_drop) != Some(&ReleaseStorage::Binding(outer_place)) {
         return Err("outer later release resolves to the wrong binding".into());
     }
+    let final_read = tir
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(1)
+        .rev()
+        .find_map(|(index, inst)| match inst.data {
+            ryo_core::tir::TirData::Var(id) if id == outer_id => {
+                Some(TirRef::from_raw(index as u32))
+            }
+            _ => None,
+        })
+        .ok_or_else(|| "outer binding has no final read".to_string())?;
+    let read_block = flow
+        .step_block_of(final_read)
+        .ok_or_else(|| "final outer read has no Flow step".to_string())?;
+    let read_step = flow
+        .step_index_of(final_read)
+        .ok_or_else(|| "final outer read has no Flow ordinal".to_string())?;
+    let read_ordinal = read_step - flow.blocks[read_block.0 as usize].steps_start;
+    let read_rank = flow
+        .forward_order()
+        .position(|block| block == read_block)
+        .ok_or_else(|| "final outer read block is not in forward order".to_string())?;
+    let release_points = match FirePoints::new(flow).resolve(cleanup.drops[outer_drop].position) {
+        FireVerdict::Resolved(point) => vec![point],
+        FireVerdict::ResolvedPerArm(points) if !points.is_empty() => points,
+        verdict => {
+            return Err(format!(
+                "outer release has no exact resolved fire point after final outer read: {verdict:?}"
+            ));
+        }
+    };
+    for point in release_points {
+        let follows_read = if point.block == read_block {
+            point.ordinal > read_ordinal
+        } else {
+            flow.forward_order()
+                .position(|block| block == point.block)
+                .is_some_and(|release_rank| release_rank > read_rank)
+        };
+        if !follows_read {
+            return Err(format!(
+                "outer release must resolve after final outer read {final_read:?}; read=({read_block:?}, {read_ordinal}), release=({:?}, {})",
+                point.block, point.ordinal
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -155,6 +204,53 @@ fn loop_exit_cleanup_releases_inner_binding_at_loop_exit() {
             binding_execution_artifacts(LOOP_INOUT_BINDING_CLEANUP, optimized);
         require_inner_loop_exit_cleanup(&tirs, &flows, &mut pool, &cleanup)
             .unwrap_or_else(|error| panic!("optimized={optimized}: {error}"));
+    }
+}
+
+#[test]
+fn outer_cleanup_assertion_rejects_release_before_final_read() {
+    for optimized in [true, false] {
+        let (tirs, flows, mut pool, mut cleanup, _context) =
+            binding_execution_artifacts(LOOP_INOUT_BINDING_CLEANUP, optimized);
+        let main = tirs
+            .iter()
+            .position(|tir| pool.str(tir.name) == "main")
+            .expect("main body");
+        let tir = &tirs[main];
+        let value_name = pool.intern_str("value");
+        let (outer_id, outer_initializer) = tir
+            .instructions
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, inst)| inst.tag == TirTag::VarDecl)
+            .map(|(index, _)| tir.var_decl_view(TirRef::from_raw(index as u32)))
+            .filter(|view| tir.binding_name(view.id) == value_name)
+            .map(|view| (view.id, view.initializer))
+            .next()
+            .expect("outer declaration");
+        let final_read = tir
+            .instructions
+            .iter()
+            .enumerate()
+            .skip(1)
+            .rev()
+            .find_map(|(index, inst)| match inst.data {
+                ryo_core::tir::TirData::Var(id) if id == outer_id => {
+                    Some(TirRef::from_raw(index as u32))
+                }
+                _ => None,
+            })
+            .expect("final outer read");
+        cleanup.functions[main]
+            .drops
+            .iter_mut()
+            .find(|drop| drop.target == outer_initializer)
+            .expect("outer release")
+            .position = DropPosition::BeforeStep { inst: final_read };
+        let error = require_inner_loop_exit_cleanup(&tirs, &flows, &mut pool, &cleanup)
+            .expect_err("predicate accepted a release before the final outer read");
+        assert!(error.contains("after final outer read"), "{error}");
     }
 }
 
@@ -229,6 +325,64 @@ fn run_binding_execution_child(case: usize) -> bool {
     true
 }
 
+fn libtest_success_trailer_len(trailer: &str) -> Option<usize> {
+    let rest =
+        trailer.strip_prefix("\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ")?;
+    let (result, remainder) = rest.split_once("s\n\n")?;
+    let (filtered, seconds) = result.split_once(" filtered out; finished in ")?;
+    if filtered.parse::<usize>().is_err() || seconds.parse::<f64>().is_err() {
+        return None;
+    }
+    Some(trailer.len() - remainder.len())
+}
+
+fn binding_program_output<'a>(captured: &'a str, test_name: &str) -> Result<&'a str, String> {
+    let output = captured
+        .trim_start_matches(['\r', '\n'])
+        .strip_prefix("running 1 test\n")
+        .ok_or_else(|| "missing single-test libtest header".to_string())?;
+    let success_marker = format!("test {test_name} ... ok");
+    let mut wrappers = output.match_indices(&success_marker).filter(|(index, _)| {
+        libtest_success_trailer_len(&output[index + success_marker.len()..]).is_some()
+    });
+    let (wrapper, _) = wrappers
+        .next()
+        .ok_or_else(|| "missing valid libtest success wrapper".to_string())?;
+    if wrappers.next().is_some() {
+        return Err("multiple valid libtest success wrappers".into());
+    }
+    let trailer = &output[wrapper + success_marker.len()..];
+    if libtest_success_trailer_len(trailer) != Some(trailer.len()) {
+        return Err("output follows the libtest success trailer".into());
+    }
+    Ok(&output[..wrapper])
+}
+
+#[test]
+fn stdout_parser_preserves_marker_like_program_output() {
+    let marker = "test sample ... ok";
+    let trailer = "\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s\n\n";
+    let program = format!("{marker}\nactual\n");
+    let captured = format!("running 1 test\n{program}{marker}{trailer}");
+    assert_eq!(
+        binding_program_output(&captured, "sample"),
+        Ok(program.as_str())
+    );
+}
+
+#[test]
+fn stdout_parser_rejects_missing_duplicate_and_invalid_wrappers() {
+    let marker = "test sample ... ok";
+    let trailer = "\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s\n\n";
+    assert!(binding_program_output("running 1 test\nactual\n", "sample").is_err());
+    let duplicate = format!("running 1 test\n{marker}{trailer}actual\n{marker}{trailer}");
+    assert!(binding_program_output(&duplicate, "sample").is_err());
+    let invalid = format!("running 1 test\nactual\n{marker}\n\nnot a result trailer\n");
+    assert!(binding_program_output(&invalid, "sample").is_err());
+    let trailing = format!("running 1 test\nactual\n{marker}{trailer}extra\n");
+    assert!(binding_program_output(&trailing, "sample").is_err());
+}
+
 fn assert_binding_execution_matrix(test_name: &str, case: usize, expected: &str) {
     for mode in ["jit-opt", "jit-unopt", "aot-opt", "aot-unopt"] {
         let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
@@ -244,11 +398,7 @@ fn assert_binding_execution_matrix(test_name: &str, case: usize, expected: &str)
             String::from_utf8_lossy(&output.stderr)
         );
         let captured = String::from_utf8_lossy(&output.stdout);
-        let success_marker = format!("test {test_name} ... ok");
-        let program_output = captured
-            .trim_start_matches(['\r', '\n'])
-            .strip_prefix("running 1 test\n")
-            .and_then(|output| output.split(&success_marker).next())
+        let program_output = binding_program_output(&captured, test_name)
             .expect("successful libtest wrapper around program output");
         assert_eq!(program_output, expected, "{mode} case {case} stdout");
     }
@@ -279,6 +429,6 @@ fn loop_exit_and_inout_writeback_preserve_binding_identity() {
     assert_binding_execution_matrix(
         "loop_exit_and_inout_writeback_preserve_binding_identity",
         2,
-        "inner_0123456789012345678901234567890\ninner_0123456789012345678901234567891\n41\n2\nouter\n",
+        "inner_0123456789012345678901234567890\ninner_0123456789012345678901234567891\n41\n2\nouter_012345678901234567890123456789!\n",
     );
 }

@@ -1631,3 +1631,60 @@ fn inout_loop_deferred_view_freezes_until_exit() {
         "unexpected E0035 after loop exit: {accepted:?}"
     );
 }
+
+#[test]
+fn outer_view_read_is_not_credited_to_expired_inner_shadow() {
+    let src = "fn consume(move value: str):\n\tprint(value)\n\nfn main():\n\ts = \"outer\"\n\tt = \"inner\"\n\tv = s[0:1]\n\tif true:\n\t\tmut v = t[0:1]\n\tconsume(t)\n\tprint(v)\n";
+    let (diags, _sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|diag| diag.code == DiagCode::SourceProjected),
+        "consuming t must be legal after its inner view expires: {diags:?}"
+    );
+
+    let tir = tirs
+        .iter()
+        .find(|tir| pool.str(tir.name) == "main")
+        .expect("main body");
+    let name = pool.find_str("v").expect("view name");
+    let declarations: Vec<_> = tir
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, inst)| inst.tag == TirTag::VarDecl)
+        .map(|(index, _)| tir.var_decl_view(TirRef::from_raw(index as u32)))
+        .filter(|view| tir.binding_name(view.id) == name)
+        .collect();
+    assert_eq!(declarations.len(), 2);
+    assert_ne!(declarations[0].id, declarations[1].id);
+    let outer_id = declarations[0].id;
+    let outer_slice = declarations[0].initializer;
+    let inner_slice = declarations[1].initializer;
+    let outer_read = tir
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(1)
+        .rev()
+        .find_map(|(index, inst)| match inst.data {
+            ryo_core::tir::TirData::Var(id) if id == outer_id => {
+                Some(TirRef::from_raw(index as u32))
+            }
+            _ => None,
+        })
+        .expect("final outer view read");
+    let flow = ryo_core::flow::Flow::build(tir, &pool);
+    let liveness = collect_view_liveness(tir, &flow, &pool, &LoopNesting::default());
+    assert_eq!(
+        liveness.last_use[outer_slice.index()],
+        Some(outer_read),
+        "the final read must extend the outer slice"
+    );
+    assert_eq!(
+        liveness.last_use[inner_slice.index()],
+        None,
+        "the expired inner slice must not acquire the outer read"
+    );
+}

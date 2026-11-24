@@ -530,17 +530,22 @@ pub(crate) fn drain_dead_stores(
         // value on taken paths, the pre-loop value on zero iterations.
         // When the body may `return`, keep the in-loop Free too — the
         // after-loop anchor is unreachable on the return path.
-        let (anchor, also_in_body) = match outermost_loop_of(ctx.tir, *decl_inst) {
-            Some(loop_stmt) if declared_before_stmt(ctx.tir, *name, loop_stmt) => {
-                let body = ctx
-                    .tir
-                    .loop_body_view(loop_stmt)
-                    .expect("outermost_loop_of returns loops");
-                let may_return = body_may_return(ctx.tir, &body);
-                (loop_stmt, may_return)
-            }
-            _ => (*decl_inst, false),
-        };
+        let (anchor, also_in_body) =
+            match outermost_loop_of(ctx.tir, *decl_inst) {
+                Some(loop_stmt)
+                    if ctx.flow.place(*home).binding_id().is_some_and(|binding| {
+                        declared_before_stmt(ctx.tir, binding, loop_stmt)
+                    }) =>
+                {
+                    let body = ctx
+                        .tir
+                        .loop_body_view(loop_stmt)
+                        .expect("outermost_loop_of returns loops");
+                    let may_return = body_may_return(ctx.tir, &body);
+                    (loop_stmt, may_return)
+                }
+                _ => (*decl_inst, false),
+            };
         sidecar.drops.push(DropOp {
             position: DropPosition::AfterStep { inst: anchor },
             target: owner.tirref(ctx.flow),

@@ -593,7 +593,7 @@ impl<M: Module> Codegen<M> {
 
     /// Read a fat binding's current `(ptr, len, cap)`: three loads
     /// from its stack-slot home when it has one, else `use_var` on the
-    /// SSA `Variable`s. Returns `None` when the name has no fat binding.
+    /// SSA `Variable`s. Returns `None` when the binding has no fat local storage.
     pub(crate) fn emit_fat_load(
         builder: &mut FunctionBuilder,
         ctx: &FunctionContext<'_, M>,

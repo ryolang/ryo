@@ -1584,3 +1584,67 @@ fn loop_carried_decl_rank_distinguishes_binding_identity() {
         "same-spelled inner declaration must not inherit the outer rank"
     );
 }
+
+#[test]
+fn break_releases_reassigned_inner_shadow_without_touching_outer() {
+    let src = "fn main():\n\tmut s = \"outer_012345678901234567890123456789\" + \"!\"\n\twhile true:\n\t\tmut s = \"inner_012345678901234567890123456789\" + \"?\"\n\t\ts = s + \"!\"\n\t\tif true:\n\t\t\tbreak\n\t\tprint(s)\n\tprint(s)\n";
+    let (diags, sidecar, tirs, mut pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|diag| diag.severity != ryo_core::diag::Severity::Error),
+        "diagnostics: {diags:?}"
+    );
+    let tir = &tirs[0];
+    let name = pool.intern_str("s");
+    let declarations: Vec<_> = tir
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, inst)| inst.tag == TirTag::VarDecl)
+        .map(|(index, _)| tir.var_decl_view(TirRef::from_raw(index as u32)))
+        .filter(|view| tir.binding_name(view.id) == name)
+        .collect();
+    assert_eq!(declarations.len(), 2);
+    assert_ne!(declarations[0].id, declarations[1].id);
+    let inner_id = declarations[1].id;
+    let inner_assignment = tir
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, inst)| inst.tag == TirTag::Assign)
+        .map(|(index, _)| tir.assign_view(TirRef::from_raw(index as u32)))
+        .find(|view| view.id == inner_id)
+        .expect("inner assignment");
+    let break_inst = tir
+        .instructions
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, inst)| inst.tag == TirTag::Break)
+        .map(|(index, _)| TirRef::from_raw(index as u32))
+        .expect("break");
+    let drops = &sidecar.functions[0].drops;
+    assert!(
+        drops.iter().any(|drop| {
+            drop.target == inner_assignment.value
+                && matches!(
+                    drop.position,
+                    ryo_core::flow::DropPosition::AfterStep { inst } if inst == break_inst
+                )
+        }),
+        "inner reassignment must be released on the break path: {drops:?}"
+    );
+    assert!(
+        !drops.iter().any(|drop| {
+            drop.target == declarations[0].initializer
+                && matches!(
+                    drop.position,
+                    ryo_core::flow::DropPosition::AfterStep { inst } if inst == break_inst
+                )
+        }),
+        "the outer owner must not be released by the inner shadow's break: {drops:?}"
+    );
+}

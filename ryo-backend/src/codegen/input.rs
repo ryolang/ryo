@@ -31,6 +31,8 @@ pub(super) fn require_backend_input<'a>(
         return Err("backend requires typed bodies without error placeholders".into());
     }
     for ((tir, flow), cleanup) in tirs.iter().zip(flows).zip(&sidecar.functions) {
+        tir.require_layout(pool)?;
+        flow.require_layout(pool)?;
         tir.require_bindings()
             .map_err(|error| format!("backend binding validation: {error}"))?;
         if let Err(error) = flow.require_bindings(tir, pool) {
@@ -44,7 +46,6 @@ pub(super) fn require_backend_input<'a>(
             return Err(format!("backend binding validation: {error}"));
         }
         cleanup.require_flow(tir, flow)?;
-        flow.require_layout(pool)?;
         if cleanup
             .validation
             .as_ref()

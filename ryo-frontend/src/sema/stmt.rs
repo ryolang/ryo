@@ -626,14 +626,24 @@ pub(crate) fn finish_if_stmt(
     )
 }
 
-pub(crate) fn analyze_block_with_context(
+/// Analyze a block with a nested lookup frame that shares the enclosing
+/// structural scope ID for TIR storage.
+pub(crate) fn analyze_block_with_context_in_scope(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &Scope,
     stmts: &[InstRef],
     context: SemaExprContext,
 ) -> Vec<TirRef> {
-    analyze_block_seeded_with_context(sema, fcx, scope, stmts, context, |_, _| {})
+    analyze_block_seeded_iter_with_id(
+        sema,
+        fcx,
+        scope,
+        stmts.iter().copied(),
+        context,
+        Some(scope.id),
+        |_, _| {},
+    )
 }
 
 fn analyze_block_iter_with_context(
@@ -1233,10 +1243,11 @@ fn resolve_named_destructure(
 /// convention documented on `TirBuilder::destructure`); the ownership
 /// pass adopts those as the moved-out fields' fresh owners.
 ///
-/// On any validation error the statement recovers with
-/// `TirTag::Unreachable`: no partial `Destructure` reaches codegen,
-/// and (mirroring `VarDecl`'s collision path) bindings insert with the
-/// error type so later uses don't cascade.
+/// On any validation error the statement recovers with a `Destructure`
+/// whose rhs is `Unreachable`: retained bindings get analysis places,
+/// while the error placeholder still prevents the recovery from reaching
+/// codegen. Missing bindings insert with the error type so later uses
+/// don't cascade.
 fn analyze_destructure(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -1255,8 +1266,17 @@ fn analyze_destructure(
         context.child(),
     );
     let value_ty = fcx.builder.ty_of(value_tir);
+    let recovery_start = ryo_core::tir::BindingId::from_index(fcx.binding_table().len());
     if sema.pool.is_error(value_ty) {
-        return fail_destructure_registered(sema, fcx, scope, &view.plan, span);
+        return fail_destructure_registered(
+            sema,
+            fcx,
+            scope,
+            &view.plan,
+            value_tir,
+            recovery_start,
+            span,
+        );
     }
     // Name the void/never diagnostic after the first USER binding —
     // leading with a compiler temp would leak `__ryo_destructure_N`
@@ -1267,7 +1287,15 @@ fn analyze_destructure(
         .find_map(|(_, bind)| bind.filter(|b| !fcx_temp_name(sema, *b)))
         .unwrap_or_else(|| sema.pool.intern_str("_"));
     if check_bindable_value(sema, first_bind, value_ty, sema.uir.span(view.value)) {
-        return fail_destructure_registered(sema, fcx, scope, &view.plan, span);
+        return fail_destructure_registered(
+            sema,
+            fcx,
+            scope,
+            &view.plan,
+            value_tir,
+            recovery_start,
+            span,
+        );
     }
     let kind = sema.pool.kind(value_ty);
     if !matches!(
@@ -1282,14 +1310,30 @@ fn analyze_destructure(
                 sema.pool.display(value_ty),
             ),
         ));
-        return fail_destructure_registered(sema, fcx, scope, &view.plan, span);
+        return fail_destructure_registered(
+            sema,
+            fcx,
+            scope,
+            &view.plan,
+            value_tir,
+            recovery_start,
+            span,
+        );
     }
     if matches!(kind, ryo_core::types::TypeKind::Struct) && !sema.pool.is_defined_struct(value_ty) {
         // Declared but never defined (cycle / unknown field type) —
         // nominal resolution already diagnosed it. Recover without touching
         // `struct_view`, which panics on undefined structs. (Anon
         // structs are interned whole; they are always defined.)
-        return fail_destructure_registered(sema, fcx, scope, &view.plan, span);
+        return fail_destructure_registered(
+            sema,
+            fcx,
+            scope,
+            &view.plan,
+            value_tir,
+            recovery_start,
+            span,
+        );
     }
     let shape = sema.pool.struct_view(value_ty);
     let resolved = if view.by_position {
@@ -1361,7 +1405,15 @@ fn analyze_destructure(
     }
 
     if had_error {
-        return fail_destructure_registered(sema, fcx, scope, &view.plan, span);
+        return fail_destructure_registered(
+            sema,
+            fcx,
+            scope,
+            &view.plan,
+            value_tir,
+            recovery_start,
+            span,
+        );
     }
 
     for &(ty, field_index) in &owners {
@@ -1370,30 +1422,56 @@ fn analyze_destructure(
     fcx.builder.destructure(value_tir, &plan, span)
 }
 
-/// Register destructuring names after failed validation so later uses
-/// resolve to this error instead of producing cascaded diagnostics.
+/// Register destructuring names after failed validation and declare recovery
+/// places for newly minted IDs over an `Unreachable` rhs. Existing IDs keep
+/// their original places. Later uses resolve without cascaded diagnostics,
+/// and the placeholder keeps the body out of codegen.
 fn fail_destructure_registered(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
     scope: &mut Scope,
     plan: &[(u32, Option<StringId>)],
+    value_tir: TirRef,
+    recovery_start: ryo_core::tir::BindingId,
     span: Span,
 ) -> TirRef {
-    for (_, bind) in plan {
+    let error_ty = sema.pool.error_type();
+    let mut recovery_plan = Vec::new();
+    for (field_index, bind) in plan {
         let Some(name) = bind else { continue };
         if sema.pool.str(*name) == "_" {
             continue;
         }
-        let error_ty = sema.pool.error_type();
-        if fcx_temp_name(sema, *name) {
+        let (id, ty) = if fcx_temp_name(sema, *name) {
             if !fcx.destructure_temps.contains_key(name) {
                 fcx.insert_temp(*name, error_ty, scope.id, span);
             }
-        } else if !scope.contains_in_current(*name) {
-            scope.insert_binding(fcx, *name, error_ty, false, false, span);
+            let binding = fcx.destructure_temps[name];
+            (binding.id, binding.ty)
+        } else {
+            if !scope.contains_in_current(*name) {
+                scope.insert_binding(fcx, *name, error_ty, false, false, span);
+            }
+            let binding = scope
+                .bindings
+                .get(name)
+                .expect("registered destructure binding");
+            (binding.id, binding.ty)
+        };
+        if id.index() < recovery_start.index()
+            || recovery_plan.iter().any(|(_, bound, _)| *bound == Some(id))
+        {
+            continue;
         }
+        recovery_plan.push((*field_index, Some(id), ty));
     }
-    fcx.builder.unreachable(sema.pool.error_type(), span)
+    let value_ty = fcx.builder.ty_of(value_tir);
+    let recovery_value = fcx.builder.unreachable(value_ty, span);
+    for &(field_index, _, ty) in &recovery_plan {
+        fcx.builder.field_access(value_tir, field_index, ty, span);
+    }
+    fcx.builder
+        .destructure(recovery_value, &recovery_plan, span)
 }
 
 /// True for the compiler-temp names astgen mints for nested
@@ -1406,17 +1484,6 @@ fn fcx_temp_name(sema: &Sema<'_>, name: StringId) -> bool {
 /// Variant of [`analyze_block`] that accepts a closure to seed the
 /// child scope before analyzing body statements. Used by for-range
 /// to inject the loop variable into scope.
-pub(crate) fn analyze_block_seeded_with_context(
-    sema: &mut Sema<'_>,
-    fcx: &mut FuncCtx,
-    scope: &Scope,
-    stmts: &[InstRef],
-    context: SemaExprContext,
-    seed: impl FnOnce(&mut FuncCtx, &mut Scope),
-) -> Vec<TirRef> {
-    analyze_block_seeded_iter(sema, fcx, scope, stmts.iter().copied(), context, seed)
-}
-
 fn analyze_block_seeded_iter(
     sema: &mut Sema<'_>,
     fcx: &mut FuncCtx,
@@ -1425,8 +1492,20 @@ fn analyze_block_seeded_iter(
     context: SemaExprContext,
     seed: impl FnOnce(&mut FuncCtx, &mut Scope),
 ) -> Vec<TirRef> {
+    analyze_block_seeded_iter_with_id(sema, fcx, scope, stmts, context, None, seed)
+}
+
+fn analyze_block_seeded_iter_with_id(
+    sema: &mut Sema<'_>,
+    fcx: &mut FuncCtx,
+    scope: &Scope,
+    stmts: impl ExactSizeIterator<Item = InstRef>,
+    context: SemaExprContext,
+    structural_id: Option<ryo_core::tir::ScopeId>,
+    seed: impl FnOnce(&mut FuncCtx, &mut Scope),
+) -> Vec<TirRef> {
     let mut child_scope = Scope {
-        id: fcx.next_scope(),
+        id: structural_id.unwrap_or_else(|| fcx.next_scope()),
         parent: Some(scope.into()),
         bindings: HashMap::new(),
     };
