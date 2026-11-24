@@ -148,6 +148,17 @@ complete. Reading an inferred callee requires its final union or failed state; b
 recursively enters another declaration. Completed results return in current-UIR source order, and
 unresolved or failed artifacts cannot reach backend publication.
 
+Each TIR body owns a `BindingTable` (`ryo-core/src/binding.rs`). `BindingId` and semantic `ScopeId`
+are dense body-local `u32` handles. The enclosing body, its `DeclId`, and the artifact boundary give
+those handles provenance; a raw ID is not a compilation-wide identity. Each entry records name, type,
+kind, scope, and span.
+
+Sema allocates parameter IDs first in declaration order. It resolves an initializer before introducing
+the new binding, mints fresh IDs for shadowing, and reuses IDs for assignment and `inout`. Generated
+temporaries and pattern, match, and destructure bindings receive the same metadata. TIR operations
+and wires carry `BindingId`; within TIR, names remain resolution inputs and diagnostic metadata
+rather than identity keys.
+
 The frontend owns Flow construction and ownership analysis in
 [`pipeline.rs`](../../../ryo-frontend/src/pipeline.rs).
 The driver shares these transitions across JIT, AOT, and IR inspection.
@@ -168,7 +179,20 @@ tests outside this transition. A direct user-call payload starts with the callee
 context and local ID, then retains the compatibility name, argument count, arguments, and
 parameter modes. Builtin and lowered runtime calls use a separate declaration-free marker;
 `DeclId::NONE` remains synthetic-test-only and invalid in executable artifacts. Backend symbol
-generation still uses the compatibility name in this migration stage.
+generation still uses the compatibility name in this migration stage. Nominal identity and
+declaration-derived backend symbols remain separate I-284 work.
+
+Declared Flow places carry their `BindingId`, but `PlaceId` remains distinct storage identity for
+temporaries, views, match results, and bindings. Flow publishes a dense `BindingId -> PlaceId` lookup
+sized from the current binding table. Construction uses structural lexical scope ancestry rather than
+numeric `ScopeId` ordering. `Flow::try_build` reports invalid IDs, declarations, and scope uses as
+errors, preventing analysis-ready publication.
+
+`Flow::require_bindings` checks each lookup entry against its place and each binding place against
+the lookup. It also validates place name/type metadata, declaration and token-owner provenance, and
+the originating body version. The analysis and backend transitions combine this validation with
+layout and content-staleness checks, so equal local indices cannot validate a foreign or edited
+artifact.
 
 Flow construction records the block only when it needs the builder-supplied final `ReturnVoid`.
 `Flow::has_implicit_fallthrough` is true only when that block is reachable. An explicit return is an
@@ -217,6 +241,16 @@ Promotion scratch allocations have separate identities for each base-expression 
 They share the ordinary cleanup firing maps and the
 [shared resolver](../../../ryo-core/src/flow/fire_points.rs); no promotion sweep reads representation caches.
 Flow records call mutations and view bases. RHS aliasing uses resolved reads and parent metadata.
+
+Backend scalar, fat, view, struct, range, and `inout` slot tables use dense `BindingId` indices sized
+from the current TIR binding table. Free-target tables carry `BindingId` labels from Flow places in
+dense arrays sized from current TIR instruction or parameter metadata. Cleanup resolves releases
+through Flow places and binding identities rather than active names. Required join restoration for
+scoped slots and range facts remains. Direct backend input validation repeats TIR/Flow binding and
+artifact checks before Cranelift emission.
+
+The concrete loop-carried declaration-rank scan is keyed by `BindingId`. The broader ownership-pass
+split remains I-287. This body-local slice does not complete I-286 self-contained Flow.
 
 [`LoweredAbi`](../../../ryo-backend/src/codegen/abi.rs) records parameter modes and expansions,
 hidden result storage, result convention, target triple, pointer type, and layout context.
