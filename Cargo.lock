@@ -1217,12 +1217,9 @@ version = "0.1.0"
 dependencies = [
  "build-support",
  "clap",
- "ryo-backend",
  "ryo-core",
  "ryo-driver",
- "ryo-frontend",
  "sha2",
- "target-lexicon",
  "tempfile",
 ]
 
