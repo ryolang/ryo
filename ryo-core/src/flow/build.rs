@@ -78,7 +78,6 @@ struct LoopFrame {
 }
 
 pub(super) fn build_flow(tir: &Tir, pool: &InternPool) -> Result<Flow, String> {
-    tir.require_bindings()?;
     let arena_len = tir.instructions.len();
     let fb = FlowBuilder {
         tir,

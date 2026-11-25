@@ -13,7 +13,15 @@ impl Flow {
         self.steps.hash(&mut hash);
         self.terms.hash(&mut hash);
         self.places.hash(&mut hash);
-        self.binding_places.hash(&mut hash);
+        for entry in &self.binding_places {
+            match entry {
+                Some(place) => place.0.hash(&mut hash),
+                None => {
+                    u32::MAX.hash(&mut hash);
+                    u32::MAX.hash(&mut hash);
+                }
+            }
+        }
         self.extra.hash(&mut hash);
         hash.finish()
     }

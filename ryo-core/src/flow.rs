@@ -600,6 +600,7 @@ impl Flow {
     /// Build Flow, rejecting foreign layouts, invalid binding identities, and lexical uses.
     pub fn try_build(tir: &Tir, pool: &InternPool) -> Result<Flow, String> {
         tir.require_layout(pool)?;
+        tir.require_bindings()?;
         build::build_flow(tir, pool)
     }
 

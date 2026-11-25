@@ -12,24 +12,26 @@ impl Tir {
         self.name.hash(&mut hash);
         self.return_type.hash(&mut hash);
         for info in self.bindings.iter() {
-            info.name.hash(&mut hash);
-            info.ty.hash(&mut hash);
-            info.scope.raw().hash(&mut hash);
-            info.span.source.hash(&mut hash);
-            info.span.start.hash(&mut hash);
-            info.span.end.hash(&mut hash);
-            match &info.kind {
-                crate::tir::BindingKind::Param(mode) => {
-                    0u8.hash(&mut hash);
-                    (*mode as u8).hash(&mut hash);
-                }
+            let (source_context, source_revision) = info.span.source.raw_parts();
+            let (kind, mode) = match &info.kind {
+                crate::tir::BindingKind::Param(mode) => (0u64, *mode as u64),
                 crate::tir::BindingKind::Local { mutable, borrowed } => {
-                    1u8.hash(&mut hash);
-                    mutable.hash(&mut hash);
-                    borrowed.hash(&mut hash);
+                    (1u64, u64::from(*mutable) | (u64::from(*borrowed) << 1))
                 }
-                crate::tir::BindingKind::Temporary => 2u8.hash(&mut hash),
-            }
+                crate::tir::BindingKind::Temporary => (2u64, 0),
+            };
+            [
+                u64::from(info.name.raw()),
+                u64::from(info.ty.raw()),
+                u64::from(info.scope.raw()),
+                u64::from(source_context),
+                u64::from(source_revision),
+                info.span.start as u64,
+                info.span.end as u64,
+                kind,
+                mode,
+            ]
+            .hash(&mut hash);
         }
         self.body.offset.hash(&mut hash);
         self.body.len.hash(&mut hash);

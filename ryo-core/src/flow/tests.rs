@@ -1306,6 +1306,10 @@ fn flow_rejects_invalid_dense_binding_entries() {
     ] {
         let mut malformed = flow.clone();
         malformed.binding_places[copy_id.index()] = entry;
+        assert_ne!(
+            flow.representation_stamp(),
+            malformed.representation_stamp()
+        );
         restamp_malformed_artifact(&mut malformed, &tir);
         malformed.require_bindings(&tir, &cx.pool).expect_err(label);
     }
