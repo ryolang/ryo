@@ -813,3 +813,5 @@ pub mod fire_points;
 mod invariants;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod version_tests;
