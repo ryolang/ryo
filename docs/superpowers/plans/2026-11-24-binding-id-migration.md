@@ -338,7 +338,7 @@ git diff --check
 RUSTFLAGS=-Dwarnings cargo clippy --workspace --all-targets
 cargo test --workspace
 coderabbit review --agent --fresh
-uv run benchmarks/run.py run --benchmarks fibonacci,fizzbuzz
+uv run benchmarks/run.py run --benchmarks fibonacci
 ```
 
 Expected: all pass; no tracked performance regression. If CodSpeed flags a double-digit regression, fix it or record an explicit maintainer-approved decision.

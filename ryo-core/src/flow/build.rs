@@ -373,6 +373,17 @@ impl FlowBuilder<'_> {
         None
     }
 
+    fn resolve_write(&mut self, binding: BindingId) -> Option<PlaceId> {
+        let place = self.resolve(binding);
+        if place.is_none() && self.error.is_none() {
+            self.fail(format!(
+                "binding {} has no Flow place for write",
+                binding.raw()
+            ));
+        }
+        place
+    }
+
     // ---------- statements ----------
 
     fn emit_stmts(&mut self, stmts: &[TirRef]) {
@@ -427,7 +438,7 @@ impl FlowBuilder<'_> {
             TirTag::Assign => {
                 let v = self.tir.assign_view(stmt);
                 self.emit_expr(v.value);
-                let Some(place) = self.resolve(v.id) else {
+                let Some(place) = self.resolve_write(v.id) else {
                     return;
                 };
                 self.record_write(place, stmt);
@@ -445,7 +456,7 @@ impl FlowBuilder<'_> {
             TirTag::CompoundAssign => {
                 let v = self.tir.compound_assign_view(stmt);
                 self.emit_expr(v.value);
-                let Some(place) = self.resolve(v.id) else {
+                let Some(place) = self.resolve_write(v.id) else {
                     return;
                 };
                 self.push_step(
@@ -498,8 +509,11 @@ impl FlowBuilder<'_> {
                 let v = self.tir.destructure_view(stmt);
                 self.emit_expr(v.rhs);
                 let refs = self.tir.destructure_bound_owner_refs(stmt);
-                let bindings: Vec<BindingId> =
-                    v.fields.iter().filter_map(|field| field.bind).collect();
+                let bindings: Vec<(u32, BindingId)> = v
+                    .fields
+                    .iter()
+                    .filter_map(|field| Some((field.field_index, field.bind?)))
+                    .collect();
                 debug_assert_eq!(refs.len(), bindings.len(), "token/binding mismatch");
                 self.register_tokens(stmt, &refs, &bindings);
                 // Destructure bindings persist in the current scope.
@@ -1176,11 +1190,11 @@ impl FlowBuilder<'_> {
         // By-move owner tokens (arm order, binding order, non-Copy),
         // minted up front so arm scopes can bind them while building.
         let tokens = self.tir.match_by_move_owner_refs(stmt, self.pool);
-        let bindings: Vec<BindingId> = view
+        let bindings: Vec<(u32, BindingId)> = view
             .arms()
             .flat_map(|arm| arm.bindings())
             .filter(|binding| !self.pool.is_copy(binding.ty))
-            .map(|binding| binding.id)
+            .map(|binding| (binding.field_index, binding.id))
             .collect();
         debug_assert_eq!(tokens.len(), bindings.len(), "token/binding mismatch");
         self.register_tokens(stmt, &tokens, &bindings);
@@ -1288,11 +1302,23 @@ impl FlowBuilder<'_> {
     /// Mint token places for a match/destructure instruction and record
     /// the inst → places mapping. `refs`/`bindings` are in arm/binding
     /// order, non-`Copy` only (the sema owner-token convention).
-    fn register_tokens(&mut self, inst: TirRef, refs: &[TirRef], bindings: &[BindingId]) {
+    fn register_tokens(&mut self, inst: TirRef, refs: &[TirRef], bindings: &[(u32, BindingId)]) {
         let places: Vec<PlaceId> = refs
             .iter()
             .zip(bindings)
-            .map(|(&r, &binding)| {
+            .map(|(&r, &(expected_field, binding))| {
+                let actual_field = match self.tir.inst(r).data {
+                    crate::tir::TirData::FieldAccess { field_index, .. } => field_index,
+                    _ => {
+                        self.fail(format!("owner token {r:?} is not a field access"));
+                        expected_field
+                    }
+                };
+                if actual_field != expected_field {
+                    self.fail(format!(
+                        "owner token field index {actual_field} does not match binding field index {expected_field}"
+                    ));
+                }
                 let name = self.tir.binding_name(binding);
                 let ty = self.tir.inst(r).ty;
                 self.push_binding_place(

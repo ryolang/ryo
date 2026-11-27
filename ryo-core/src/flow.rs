@@ -467,6 +467,7 @@ impl Flow {
 
     /// Validate semantic storage identities against their originating body.
     pub fn require_bindings(&self, tir: &Tir, pool: &InternPool) -> Result<(), String> {
+        self.require_layout(pool)?;
         self.require_body(tir)?;
         if self.binding_places.len() != tir.bindings().len() {
             return Err("Flow binding lookup length does not match its typed body".into());
@@ -507,29 +508,32 @@ impl Flow {
                             .arms()
                             .flat_map(|arm| arm.bindings())
                             .filter(|binding| !pool.is_copy(binding.ty))
-                            .map(|binding| binding.id);
-                        for (binding, owner) in bindings.zip(refs) {
+                            .map(|binding| (binding.field_index, binding.id));
+                        for ((expected_field, binding), owner) in bindings.zip(refs) {
                             let Some(slot) = owners.get_mut(binding.index()) else {
                                 return Err(format!(
                                     "TIR references unregistered owner binding {}",
                                     binding.raw()
                                 ));
                             };
-                            *slot = Some(owner);
+                            *slot = Some((owner, expected_field));
                         }
                     }
                     crate::tir::TirTag::Destructure => {
                         let refs = tir.destructure_bound_owner_refs(r);
                         let view = tir.destructure_view(r);
-                        let bindings = view.fields.iter().filter_map(|field| field.bind);
-                        for (binding, owner) in bindings.zip(refs) {
+                        let bindings = view
+                            .fields
+                            .iter()
+                            .filter_map(|field| Some((field.field_index, field.bind?)));
+                        for ((expected_field, binding), owner) in bindings.zip(refs) {
                             let Some(slot) = owners.get_mut(binding.index()) else {
                                 return Err(format!(
                                     "TIR references unregistered owner binding {}",
                                     binding.raw()
                                 ));
                             };
-                            *slot = Some(owner);
+                            *slot = Some((owner, expected_field));
                         }
                     }
                     _ => {}
@@ -573,10 +577,20 @@ impl Flow {
                 }
                 Place::LoopVar { loop_inst, .. } => tir.for_range_view(*loop_inst).id == binding,
                 Place::Token { inst, .. } => {
-                    token_owners
+                    let Some((owner, expected_field)) = token_owners
                         .as_ref()
                         .and_then(|owners| owners.get(binding.index()).copied().flatten())
-                        == Some(*inst)
+                    else {
+                        return Err(format!(
+                            "Flow binding {} does not match its typed body declaration",
+                            binding.raw()
+                        ));
+                    };
+                    let actual_field = match tir.inst(*inst).data {
+                        crate::tir::TirData::FieldAccess { field_index, .. } => field_index,
+                        _ => return Err("TIR owner token is not a field access".into()),
+                    };
+                    (owner, expected_field) == (*inst, actual_field)
                 }
                 Place::Temp { .. } | Place::View { .. } | Place::MatchResult { .. } => {
                     unreachable!("non-binding place filtered above")

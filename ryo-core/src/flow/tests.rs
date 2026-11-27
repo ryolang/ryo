@@ -1466,7 +1466,11 @@ fn flow_declaration_and_lookup_scaling_is_not_quadratic() {
         for index in 0..count {
             let name = cx.pool.intern_str(&format!("binding_{index}"));
             let id = scoped_binding(&mut b, name, int, 0);
-            let value = b.int_const(index as i64, int, sp());
+            let value = if index == 0 {
+                b.int_const(0, int, sp())
+            } else {
+                b.var(BindingId::from_index(0), int, sp())
+            };
             statements.push(b.var_decl(id, false, int, value, sp()));
         }
         let tir = b.with_layout_context(&cx.pool).finish(&statements);
