@@ -29,9 +29,9 @@ impl<M: Module> Codegen<M> {
             return Ok(());
         }
         // Consume (mark) every bucket entry, emitting frees only for
-        // targets not already destroyed: the ownership pass's
-        // double-anchors (consumer + return epilogue) make one
-        // same-target duplicate a no-op by design.
+        // targets not already destroyed. Production scheduling avoids
+        // the redundant same-return pair; explicitly injected duplicate
+        // entries remain no-ops.
         let mut pending: Vec<(usize, TirRef)> = Vec::new();
         for &idx in indices {
             if idx >= ctx.sidecar.drops.len() {

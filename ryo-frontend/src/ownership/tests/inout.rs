@@ -6,7 +6,7 @@ use ryo_core::declaration::DeclId;
 fn inout_same_owner_twice_rejected() {
     // swap(&c, &c) — two mutable borrows of one int owner in the same
     // call (Rule 7 case 1). The int args never enter the lattice, so
-    // this exercises the name-based inout owner resolution.
+    // this exercises parameter-index-based inout owner resolution.
     use ryo_core::span::Span;
     use ryo_core::tir::{ParamMode, TirBuilder};
     let mut pool = InternPool::new();

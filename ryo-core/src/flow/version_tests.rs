@@ -251,11 +251,14 @@ fn flow_try_build_rejects_match_token_with_wrong_field_index() {
     assert!(error.contains("field index"), "{error}");
 }
 
+#[derive(Clone, Copy)]
 enum TokenFailure {
     MatchMissing,
     MatchWrongType,
+    MatchTagDataMismatch,
     DestructureMissing,
     DestructureWrongType,
+    DestructureTagDataMismatch,
 }
 
 fn malformed_token_case(failure: TokenFailure) -> (Tir, InternPool) {
@@ -279,14 +282,19 @@ fn malformed_token_case(failure: TokenFailure) -> (Tir, InternPool) {
     ));
     let value = builder.str_const(field, str_ty, Span::EMPTY);
     let scrutinee = builder.struct_lit(pair_ty, &[(0, value)], Span::EMPTY);
-    if matches!(
-        failure,
-        TokenFailure::MatchWrongType | TokenFailure::DestructureWrongType
-    ) {
-        builder.field_access(scrutinee, 0, int, Span::EMPTY);
-    }
+    let token = match failure {
+        TokenFailure::MatchWrongType | TokenFailure::DestructureWrongType => {
+            Some(builder.field_access(scrutinee, 0, int, Span::EMPTY))
+        }
+        TokenFailure::MatchTagDataMismatch | TokenFailure::DestructureTagDataMismatch => {
+            Some(builder.field_access(scrutinee, 0, str_ty, Span::EMPTY))
+        }
+        _ => None,
+    };
     let instruction = match failure {
-        TokenFailure::MatchMissing | TokenFailure::MatchWrongType => builder.match_expr(
+        TokenFailure::MatchMissing
+        | TokenFailure::MatchWrongType
+        | TokenFailure::MatchTagDataMismatch => builder.match_expr(
             scrutinee,
             pool.void(),
             &[TypedMatchArm {
@@ -302,14 +310,21 @@ fn malformed_token_case(failure: TokenFailure) -> (Tir, InternPool) {
             }],
             Span::EMPTY,
         ),
-        TokenFailure::DestructureMissing | TokenFailure::DestructureWrongType => {
+        TokenFailure::DestructureMissing
+        | TokenFailure::DestructureWrongType
+        | TokenFailure::DestructureTagDataMismatch => {
             builder.destructure(scrutinee, &[(0, Some(binding_id), str_ty)], Span::EMPTY)
         }
     };
-    (
-        builder.with_layout_context(&pool).finish(&[instruction]),
-        pool,
-    )
+    let mut tir = builder.with_layout_context(&pool).finish(&[instruction]);
+    if matches!(
+        failure,
+        TokenFailure::MatchTagDataMismatch | TokenFailure::DestructureTagDataMismatch
+    ) {
+        let token = token.expect("tag/data mismatch fixture has a token");
+        tir.instructions[token.index()].data = crate::tir::TirData::None;
+    }
+    (tir, pool)
 }
 
 #[test]
@@ -339,4 +354,75 @@ fn flow_try_build_rejects_wrongly_typed_destructure_token_without_panic() {
     let (tir, pool) = malformed_token_case(TokenFailure::DestructureWrongType);
     let error = Flow::try_build(&tir, &pool).expect_err("wrong token type must be an error");
     assert!(error.contains("type"), "{error}");
+}
+
+#[test]
+fn flow_try_build_rejects_match_token_tag_data_mismatch_without_panic() {
+    let (tir, pool) = malformed_token_case(TokenFailure::MatchTagDataMismatch);
+    let error = Flow::try_build(&tir, &pool)
+        .expect_err("a FieldAccess tag with inconsistent data must be an ordinary error");
+    assert!(error.contains("field access"), "{error}");
+}
+
+#[test]
+fn flow_try_build_rejects_destructure_token_tag_data_mismatch_without_panic() {
+    let (tir, pool) = malformed_token_case(TokenFailure::DestructureTagDataMismatch);
+    let error = Flow::try_build(&tir, &pool)
+        .expect_err("a FieldAccess tag with inconsistent data must be an ordinary error");
+    assert!(error.contains("field access"), "{error}");
+}
+
+#[test]
+fn flow_try_build_accepts_non_copy_parameter_scrutinee_tokens() {
+    let mut pool = InternPool::new();
+    let str_ty = pool.str_();
+    let field = pool.intern_str("field");
+    let pair_ty = pool.anon_struct(&[(field, str_ty)]);
+    let main = pool.intern_str("main");
+    let param_name = pool.intern_str("input");
+    let binding_name = pool.intern_str("payload");
+    let param_id = crate::tir::BindingId::from_index(0);
+    let param = crate::tir::TirParam::new(
+        param_id,
+        param_name,
+        pair_ty,
+        crate::tir::ParamMode::Move,
+        Span::EMPTY,
+    );
+    let mut builder = TirBuilder::new(main, vec![param], pool.void(), Span::EMPTY);
+    let binding_id = builder.register_binding(BindingInfo::new(
+        binding_name,
+        str_ty,
+        BindingKind::Local {
+            mutable: false,
+            borrowed: false,
+        },
+        ScopeId::from_index(1),
+        Span::EMPTY,
+    ));
+    let scrutinee = builder.var(param_id, pair_ty, Span::EMPTY);
+    let token = builder.field_access(scrutinee, 0, str_ty, Span::EMPTY);
+    let match_ = builder.match_expr(
+        scrutinee,
+        pool.void(),
+        &[TypedMatchArm {
+            span: Span::EMPTY,
+            discriminant: Discriminant::Wildcard,
+            bindings: &[crate::tir::MatchBinding {
+                field_index: 0,
+                id: binding_id,
+                ty: str_ty,
+            }],
+            guards: &[],
+            body: TypedMatchBody::Stmts(&[]),
+        }],
+        Span::EMPTY,
+    );
+    let tir = builder.with_layout_context(&pool).finish(&[match_]);
+    let tokens = tir
+        .match_owner_tokens(match_, &pool)
+        .expect("a non-Copy parameter-scrutinee token is valid");
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].owner, token);
+    Flow::try_build(&tir, &pool).expect("parameter-scrutinee match must build Flow");
 }

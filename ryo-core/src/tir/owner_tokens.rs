@@ -16,19 +16,17 @@ fn validate_tokens(
     kind: &str,
     expected: Vec<OwnerToken>,
 ) -> Result<Vec<OwnerToken>, String> {
-    if expected.len() > instruction.index() {
+    let preceding = instruction.index().saturating_sub(1);
+    if expected.len() > preceding {
         return Err(format!(
             "{kind} has {} owner tokens but only {} preceding instructions",
             expected.len(),
-            instruction.index()
+            preceding
         ));
     }
     let start = instruction.index() - expected.len();
     let mut tokens = Vec::with_capacity(expected.len());
     for (cursor, mut token) in (start..).zip(expected) {
-        if cursor == 0 {
-            return Err(format!("{kind} owner token is missing"));
-        }
         let owner = TirRef::from_index(cursor);
         let inst = tir.inst(owner);
         if inst.tag != TirTag::FieldAccess {
@@ -43,7 +41,9 @@ fn validate_tokens(
             ));
         }
         let crate::tir::TirData::FieldAccess { field_index, .. } = inst.data else {
-            unreachable!("field access tag checked above")
+            return Err(format!(
+                "{kind} owner token {owner:?} is not a field access"
+            ));
         };
         if field_index != token.field_index {
             return Err(format!(

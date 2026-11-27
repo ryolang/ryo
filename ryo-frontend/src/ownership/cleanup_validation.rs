@@ -839,14 +839,13 @@ fn position_key(pos: DropPosition) -> (u8, u32, u32) {
 
 /// (b) No double destruction. Codegen buckets drops purely by position
 /// and, within one bucket, marks a same-target entry already freed a
-/// no-op (`codegen/frees.rs` — "the ownership pass's double-anchors
-/// (consumer + return epilogue) make one same-target duplicate a no-op
-/// by design"). So the soundness contract is about PLACE ALIASING, not
-/// target identity: two drops naming DIFFERENT target TirRefs that
-/// resolve to the SAME place at the SAME position both emit (codegen's
-/// dedup keys on the raw TirRef) — a double-free. Same target + same
-/// position is the designed double-anchor; same place at DIFFERENT
-/// positions is legal conditional destruction.
+/// no-op. Validator tests inject that duplicate explicitly; production
+/// scheduling avoids the redundant same-return pair. So the soundness
+/// contract is about PLACE ALIASING, not target identity: two drops
+/// naming DIFFERENT target TirRefs that resolve to the SAME place at the
+/// SAME position both emit (codegen's dedup keys on the raw TirRef) — a
+/// double-free. Same target + same position is a tolerated duplicate;
+/// same place at DIFFERENT positions is legal conditional destruction.
 pub(crate) fn validate_no_duplicate_destruction(
     places: &TargetPlaces,
     flow: &Flow,
@@ -866,8 +865,8 @@ pub(crate) fn validate_no_duplicate_destruction(
     keys.sort_by_key(|&(place, pos, _)| (place, pos));
     for w in keys.windows(2) {
         debug_assert!(
-            // Same (place, position) with the SAME target is the designed
-            // double-anchor (deduped by codegen); only DISTINCT targets
+            // Same (place, position) with the SAME target is a tolerated
+            // duplicate (deduped by codegen); only DISTINCT targets
             // aliasing one place at one position are double-frees.
             w[0].0 != w[1].0 || w[0].1 != w[1].1 || w[0].2 == w[1].2,
             "double destruction of place {:?} at position {:?}: two distinct targets {:?} and {:?} alias one place at one position — codegen frees both",
@@ -884,8 +883,8 @@ pub(crate) fn validate_no_duplicate_destruction(
 /// Init/Replace write (or producer step / token adoption) of any member
 /// place both fire on one path — a double-free. Sibling-arm events are
 /// mutually unreachable (no path) → legal. The identical (target,
-/// position) twin at the reached point is the designed
-/// consumer+epilogue double-anchor (one bucket, deduped by codegen) —
+/// position) twin at the reached point is a tolerated duplicate (one
+/// bucket, deduped by codegen; covered by explicitly injected fixtures) —
 /// skipped here; distinct targets at one position are check (b)'s job
 /// and also fire, so they are flagged here too (a same-point reach is a
 /// path). O(events × blocks): one DFS per event, visited-set on points —
@@ -1113,7 +1112,7 @@ fn is_path_double_destruction_candidate(flow: &Flow, first: &Event, second: &Eve
             return false;
         }
     }
-    // The identical event is the designed consumer + epilogue no-op.
+    // The identical event is a tolerated duplicate no-op.
     if second.target == first.target && second.pos == first.pos && second.kind == first.kind {
         return false;
     }
