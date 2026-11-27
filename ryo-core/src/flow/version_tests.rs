@@ -250,3 +250,93 @@ fn flow_try_build_rejects_match_token_with_wrong_field_index() {
         .expect_err("owner token field index must match its binding's canonical field");
     assert!(error.contains("field index"), "{error}");
 }
+
+enum TokenFailure {
+    MatchMissing,
+    MatchWrongType,
+    DestructureMissing,
+    DestructureWrongType,
+}
+
+fn malformed_token_case(failure: TokenFailure) -> (Tir, InternPool) {
+    let mut pool = InternPool::new();
+    let str_ty = pool.str_();
+    let int = pool.int();
+    let field = pool.intern_str("field");
+    let pair_ty = pool.anon_struct(&[(field, str_ty)]);
+    let main = pool.intern_str("main");
+    let binding_name = pool.intern_str("payload");
+    let mut builder = TirBuilder::new(main, vec![], pool.void(), Span::EMPTY);
+    let binding_id = builder.register_binding(BindingInfo::new(
+        binding_name,
+        str_ty,
+        BindingKind::Local {
+            mutable: false,
+            borrowed: false,
+        },
+        ScopeId::from_index(1),
+        Span::EMPTY,
+    ));
+    let value = builder.str_const(field, str_ty, Span::EMPTY);
+    let scrutinee = builder.struct_lit(pair_ty, &[(0, value)], Span::EMPTY);
+    if matches!(
+        failure,
+        TokenFailure::MatchWrongType | TokenFailure::DestructureWrongType
+    ) {
+        builder.field_access(scrutinee, 0, int, Span::EMPTY);
+    }
+    let instruction = match failure {
+        TokenFailure::MatchMissing | TokenFailure::MatchWrongType => builder.match_expr(
+            scrutinee,
+            pool.void(),
+            &[TypedMatchArm {
+                span: Span::EMPTY,
+                discriminant: Discriminant::Wildcard,
+                bindings: &[crate::tir::MatchBinding {
+                    field_index: 0,
+                    id: binding_id,
+                    ty: str_ty,
+                }],
+                guards: &[],
+                body: TypedMatchBody::Stmts(&[]),
+            }],
+            Span::EMPTY,
+        ),
+        TokenFailure::DestructureMissing | TokenFailure::DestructureWrongType => {
+            builder.destructure(scrutinee, &[(0, Some(binding_id), str_ty)], Span::EMPTY)
+        }
+    };
+    (
+        builder.with_layout_context(&pool).finish(&[instruction]),
+        pool,
+    )
+}
+
+#[test]
+fn flow_try_build_rejects_missing_match_token_without_panic() {
+    let (tir, pool) = malformed_token_case(TokenFailure::MatchMissing);
+    let error = Flow::try_build(&tir, &pool).expect_err("missing match token must be an error");
+    assert!(error.contains("field access"), "{error}");
+}
+
+#[test]
+fn flow_try_build_rejects_wrongly_typed_match_token_without_panic() {
+    let (tir, pool) = malformed_token_case(TokenFailure::MatchWrongType);
+    let error = Flow::try_build(&tir, &pool).expect_err("wrong token type must be an error");
+    assert!(error.contains("type"), "{error}");
+}
+
+#[test]
+fn flow_try_build_rejects_missing_destructure_token_without_panic() {
+    let (tir, pool) = malformed_token_case(TokenFailure::DestructureMissing);
+    let error =
+        Flow::try_build(&tir, &pool).expect_err("missing destructure token must be an error");
+    assert!(error.contains("field access"), "{error}");
+}
+
+#[test]
+fn flow_try_build_rejects_wrongly_typed_destructure_token_without_panic() {
+    let (tir, pool) = malformed_token_case(TokenFailure::DestructureWrongType);
+    let error = Flow::try_build(&tir, &pool).expect_err("wrong token type must be an error");
+    assert!(error.contains("type"), "{error}");
+}

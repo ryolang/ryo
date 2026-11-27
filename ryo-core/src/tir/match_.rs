@@ -561,38 +561,9 @@ impl Tir {
     /// fields; codegen's free-path redirect maps them to the bindings'
     /// slots.
     pub fn match_by_move_owner_refs(&self, r: TirRef, pool: &InternPool) -> Vec<TirRef> {
-        let view = self.match_view(r);
-        let n_moves = view
-            .arms()
-            .flat_map(|arm| arm.bindings())
-            .filter(|b| !pool.is_copy(b.ty))
-            .count();
-        debug_assert!(
-            n_moves <= r.index(),
-            "match owner tokens precede the instruction"
-        );
-        let mut cursor = r.index() - n_moves;
-        let mut out = Vec::with_capacity(n_moves);
-        for arm in view.arms() {
-            for b in arm.bindings() {
-                if pool.is_copy(b.ty) {
-                    continue;
-                }
-                let owner = TirRef::from_index(cursor);
-                cursor += 1;
-                debug_assert!(
-                    matches!(self.inst(owner).tag, TirTag::FieldAccess),
-                    "match owner token must be a FieldAccess"
-                );
-                debug_assert_eq!(
-                    self.inst(owner).ty,
-                    b.ty,
-                    "match owner token carries the binding type"
-                );
-                out.push(owner);
-            }
-        }
-        out
+        self.match_owner_tokens(r, pool)
+            .map(|tokens| tokens.iter().map(|token| token.owner).collect())
+            .expect("valid match owner tokens")
     }
 
     /// The per-body memo backing [`Tir::subtree_has_match`]: slot `i` is

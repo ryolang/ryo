@@ -496,14 +496,13 @@ impl EventCollector<'_> {
         // Inout write-backs: whatever is seated in an inout param leaves
         // through the write-back pointer at EVERY exit — a transfer at each
         // return's terminator point.
-        let param_place = |name: ryo_core::types::StringId| -> Option<PlaceId> {
-            let &idx = own.param_index.get(&name)?;
-            Some(own.param_places[idx])
-        };
-        for &name in &own.inout_str_params {
-            let Some(place) = param_place(name) else {
-                continue;
-            };
+        for (idx, _) in own
+            .inout_str_params
+            .iter()
+            .enumerate()
+            .filter(|(_, inout)| **inout)
+        {
+            let place = own.param_places[idx];
             for b in flow.forward_order() {
                 if !matches!(
                     flow.term(b),
@@ -519,7 +518,7 @@ impl EventCollector<'_> {
                     place,
                     Event {
                         point,
-                        target: TirRef::param(own.param_index[&name]),
+                        target: TirRef::param(idx),
                         kind: EventKind::TransferInoutWriteback,
                         pos: DropPosition::PreTerminator { block: b },
                         exact: true,

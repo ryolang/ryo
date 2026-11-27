@@ -256,6 +256,8 @@ fn outer_cleanup_assertion_rejects_release_before_final_read() {
 
 const SHADOWED_LITERAL_CLEANUP: &str = "fn main():\n\tvalue = \"outer\"\n\tif true:\n\t\tmut value = \"inner\"\n\t\tprint(value)\n\t\tprint(\"\\n\")\n\tprint(value)\n\tprint(\"\\n\")\n";
 const SHADOWED_HEAP_CLEANUP: &str = "fn main():\n\tvalue = \"outer_012345678901234567890123456789\" + \"!\"\n\tfor i in range(0, 1):\n\t\tmut value = \"inner_012345678901234567890123456789\" + \"?\"\n\t\tprint(value)\n\t\tprint(\"\\n\")\n\tprint(value)\n\tprint(\"\\n\")\n";
+const DUPLICATE_MOVE_PARAMS: &str = "fn dup(move x: str, x: str):\n\treturn\n\nfn main():\n\tdup(\"first_012345678901234567890123456789\" + \"!\", \"second_012345678901234567890123456789\" + \"?\")\n\tprint(\"ok\\n\")\n";
+const DUPLICATE_MOVE_INOUT_PARAMS: &str = "fn dup(move x: str, inout x: str):\n\treturn\n\nfn main():\n\tmut second = \"second_012345678901234567890123456789\" + \"?\"\n\tdup(\"first_012345678901234567890123456789\" + \"!\", &second)\n\tprint(second)\n\tprint(\"\\n\")\n";
 
 fn execute_binding_mode(source: &str, mode: &str) {
     let optimized = mode.ends_with("opt") && !mode.ends_with("unopt");
@@ -319,6 +321,8 @@ fn run_binding_execution_child(case: usize) -> bool {
         0 => SHADOWED_LITERAL_CLEANUP,
         1 => SHADOWED_HEAP_CLEANUP,
         2 => LOOP_INOUT_BINDING_CLEANUP,
+        3 => DUPLICATE_MOVE_PARAMS,
+        4 => DUPLICATE_MOVE_INOUT_PARAMS,
         _ => return false,
     };
     execute_binding_mode(source, &mode);
@@ -430,5 +434,22 @@ fn loop_exit_and_inout_writeback_preserve_binding_identity() {
         "loop_exit_and_inout_writeback_preserve_binding_identity",
         2,
         "inner_0123456789012345678901234567890\ninner_0123456789012345678901234567891\n41\n2\nouter_012345678901234567890123456789!\n",
+    );
+}
+
+#[test]
+fn duplicate_parameter_modes_preserve_cleanup_identity() {
+    if run_binding_execution_child(3) || run_binding_execution_child(4) {
+        return;
+    }
+    assert_binding_execution_matrix(
+        "duplicate_parameter_modes_preserve_cleanup_identity",
+        3,
+        "ok\n",
+    );
+    assert_binding_execution_matrix(
+        "duplicate_parameter_modes_preserve_cleanup_identity",
+        4,
+        "second_012345678901234567890123456789?\n",
     );
 }

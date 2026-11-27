@@ -149,29 +149,8 @@ impl Tir {
     /// the fresh owners of the moved-out fields; codegen's free-path
     /// redirect maps them to the bindings' slots.
     pub fn destructure_bound_owner_refs(&self, r: TirRef) -> Vec<TirRef> {
-        let view = self.destructure_view(r);
-        let n_binds = view.fields.iter().filter(|f| f.bind.is_some()).count();
-        debug_assert!(
-            n_binds <= r.index(),
-            "destructure owner tokens precede the instruction"
-        );
-        let mut cursor = r.index() - n_binds;
-        let mut out = Vec::with_capacity(n_binds);
-        for field in &view.fields {
-            let Some(_) = field.bind else { continue };
-            let owner = TirRef::from_index(cursor);
-            cursor += 1;
-            debug_assert!(
-                matches!(self.inst(owner).tag, TirTag::FieldAccess),
-                "destructure owner token must be a FieldAccess"
-            );
-            debug_assert_eq!(
-                self.inst(owner).ty,
-                field.ty,
-                "destructure owner token carries the field type"
-            );
-            out.push(owner);
-        }
-        out
+        self.destructure_owner_tokens(r)
+            .map(|tokens| tokens.iter().map(|token| token.owner).collect())
+            .expect("valid destructure owner tokens")
     }
 }

@@ -665,3 +665,79 @@ fn inout_view_does_not_schedule_callee_param_free() {
         sc.drops
     );
 }
+
+#[test]
+fn same_named_move_params_release_each_parameter_by_index() {
+    let src = "fn dup(move x: str, move x: str):\n\treturn\n";
+    let (diags, sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|diag| diag.severity != ryo_core::diag::Severity::Error),
+        "diagnostics: {diags:?}"
+    );
+    let flow = ryo_core::flow::Flow::build(&tirs[0], &pool);
+    let param_indices: Vec<_> = flow
+        .places
+        .iter()
+        .filter_map(|place| match place {
+            ryo_core::flow::Place::Param { index, .. } => Some(*index as usize),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(param_indices, vec![0, 1]);
+    assert_eq!(tirs[0].params[0].mode, ParamMode::Move);
+    assert_eq!(tirs[0].params[1].mode, ParamMode::Move);
+    let drops = &sidecar.functions[0].drops;
+    for index in [0, 1] {
+        assert_eq!(
+            drops
+                .iter()
+                .filter(|drop| drop.target == TirRef::param(index))
+                .count(),
+            1,
+            "parameter {index} must be released exactly once: {drops:?}"
+        );
+    }
+}
+
+#[test]
+fn same_named_move_and_inout_params_distinguish_cleanup_and_escape() {
+    let src = "fn dup(move x: str, inout x: str):\n\treturn\n";
+    let (diags, sidecar, tirs, pool) = check_src_full(src);
+    assert!(
+        diags
+            .iter()
+            .all(|diag| diag.severity != ryo_core::diag::Severity::Error),
+        "diagnostics: {diags:?}"
+    );
+    let flow = ryo_core::flow::Flow::build(&tirs[0], &pool);
+    let param_indices: Vec<_> = flow
+        .places
+        .iter()
+        .filter_map(|place| match place {
+            ryo_core::flow::Place::Param { index, .. } => Some(*index as usize),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(param_indices, vec![0, 1]);
+    assert_eq!(tirs[0].params[0].mode, ParamMode::Move);
+    assert_eq!(tirs[0].params[1].mode, ParamMode::Inout);
+    let drops = &sidecar.functions[0].drops;
+    assert_eq!(
+        drops
+            .iter()
+            .filter(|drop| drop.target == TirRef::param(0))
+            .count(),
+        1,
+        "move parameter 0 must be released exactly once: {drops:?}"
+    );
+    assert_eq!(
+        drops
+            .iter()
+            .filter(|drop| drop.target == TirRef::param(1))
+            .count(),
+        0,
+        "inout parameter 1 must escape through writeback: {drops:?}"
+    );
+}

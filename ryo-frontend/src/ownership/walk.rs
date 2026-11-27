@@ -806,8 +806,11 @@ impl<'a> Walk<'a> {
                     Some(OwnerState::Valid) => true,
                     Some(OwnerState::Borrowed) => {
                         // An inout param's home is its own place.
-                        matches!(self.flow.place(home), ryo_core::flow::Place::Param { .. })
-                            && own.inout_str_params.contains(&self.flow.place(home).name())
+                        matches!(
+                            self.flow.place(home),
+                            ryo_core::flow::Place::Param { index, .. }
+                                if own.inout_str_params[*index as usize]
+                        )
                     }
                     _ => false,
                 };

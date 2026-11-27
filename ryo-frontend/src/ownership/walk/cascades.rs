@@ -10,7 +10,7 @@
 use super::super::{
     BranchState, Owner, OwnerState, Ownership, RegionStop, ReseatDrop, UNTRACKED_PLACE,
     check_use_moved, collect_region, drain_dying_views, flow_owner_place, needs_tracking,
-    owner_sort_key, param_idx, prune_branch_dead_projections, walk_if_arm,
+    owner_sort_key, prune_branch_dead_projections, walk_if_arm,
 };
 use super::Walk;
 use ryo_core::diag::DiagSink;
@@ -230,12 +230,14 @@ pub(super) fn analyze_if_cascade(
     // pseudo-arm deliberately schedules nothing (the post-merge
     // last-use pass covers owners still Valid at the join).
     {
-        let is_tracked = |own: &Ownership, owner: Owner| match owner.inst_tirref(w.flow) {
+        let is_tracked = |_own: &Ownership, owner: Owner| match owner.inst_tirref(w.flow) {
             Some(_) => true,
-            None => {
-                let idx = param_idx(&own.param_index, w.flow.place(owner.0).name());
-                needs_tracking(w.tir.params[idx].ty, w.pool)
-            }
+            None => match w.flow.place(owner.0) {
+                ryo_core::flow::Place::Param { index, .. } => {
+                    needs_tracking(w.tir.params[*index as usize].ty, w.pool)
+                }
+                _ => false,
+            },
         };
         let span_of = |_: &Ownership, owner: Owner| owner.span(w.flow, w.tir);
         let mut all_keys: HashSet<Owner> = branch_results
@@ -430,8 +432,8 @@ pub(crate) fn rebind_to_init(own: &mut Ownership, home: PlaceId, init: TirRef) -
 /// parameter's home place (escapes through the write-back pointer at
 /// exit).
 pub(crate) fn inout_escape_owner(own: &Ownership, owner: Owner) -> bool {
-    own.inout_str_params.iter().any(|n| {
-        let idx = own.param_index[n];
-        own.current_owner.get(&own.param_places[idx]) == Some(&owner)
-    })
+    own.inout_str_params
+        .iter()
+        .enumerate()
+        .any(|(idx, inout)| *inout && own.current_owner.get(&own.param_places[idx]) == Some(&owner))
 }

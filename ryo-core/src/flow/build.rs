@@ -508,14 +508,14 @@ impl FlowBuilder<'_> {
             TirTag::Destructure => {
                 let v = self.tir.destructure_view(stmt);
                 self.emit_expr(v.rhs);
-                let refs = self.tir.destructure_bound_owner_refs(stmt);
-                let bindings: Vec<(u32, BindingId)> = v
-                    .fields
-                    .iter()
-                    .filter_map(|field| Some((field.field_index, field.bind?)))
-                    .collect();
-                debug_assert_eq!(refs.len(), bindings.len(), "token/binding mismatch");
-                self.register_tokens(stmt, &refs, &bindings);
+                let tokens = match self.tir.destructure_owner_tokens(stmt) {
+                    Ok(tokens) => tokens,
+                    Err(error) => {
+                        self.fail(error);
+                        return;
+                    }
+                };
+                self.register_tokens(stmt, &tokens);
                 // Destructure bindings persist in the current scope.
                 let places = self.token_places_of(stmt).to_vec();
                 for place in places {
@@ -1189,15 +1189,14 @@ impl FlowBuilder<'_> {
 
         // By-move owner tokens (arm order, binding order, non-Copy),
         // minted up front so arm scopes can bind them while building.
-        let tokens = self.tir.match_by_move_owner_refs(stmt, self.pool);
-        let bindings: Vec<(u32, BindingId)> = view
-            .arms()
-            .flat_map(|arm| arm.bindings())
-            .filter(|binding| !self.pool.is_copy(binding.ty))
-            .map(|binding| (binding.field_index, binding.id))
-            .collect();
-        debug_assert_eq!(tokens.len(), bindings.len(), "token/binding mismatch");
-        self.register_tokens(stmt, &tokens, &bindings);
+        let tokens = match self.tir.match_owner_tokens(stmt, self.pool) {
+            Ok(tokens) => tokens,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        self.register_tokens(stmt, &tokens);
 
         // Arm block ids up front (the Switch terminator references them).
         let arm_start = self.extra.len() as u32;
@@ -1300,32 +1299,18 @@ impl FlowBuilder<'_> {
     // ---------- tokens ----------
 
     /// Mint token places for a match/destructure instruction and record
-    /// the inst → places mapping. `refs`/`bindings` are in arm/binding
-    /// order, non-`Copy` only (the sema owner-token convention).
-    fn register_tokens(&mut self, inst: TirRef, refs: &[TirRef], bindings: &[(u32, BindingId)]) {
-        let places: Vec<PlaceId> = refs
+    /// the inst → places mapping in checked token order.
+    fn register_tokens(&mut self, inst: TirRef, tokens: &[crate::tir::OwnerToken]) {
+        let places: Vec<PlaceId> = tokens
             .iter()
-            .zip(bindings)
-            .map(|(&r, &(expected_field, binding))| {
-                let actual_field = match self.tir.inst(r).data {
-                    crate::tir::TirData::FieldAccess { field_index, .. } => field_index,
-                    _ => {
-                        self.fail(format!("owner token {r:?} is not a field access"));
-                        expected_field
-                    }
-                };
-                if actual_field != expected_field {
-                    self.fail(format!(
-                        "owner token field index {actual_field} does not match binding field index {expected_field}"
-                    ));
-                }
-                let name = self.tir.binding_name(binding);
-                let ty = self.tir.inst(r).ty;
+            .map(|token| {
+                let name = self.tir.binding_name(token.binding);
+                let ty = self.tir.inst(token.owner).ty;
                 self.push_binding_place(
-                    binding,
+                    token.binding,
                     Place::Token {
-                        inst: r,
-                        binding,
+                        inst: token.owner,
+                        binding: token.binding,
                         name,
                         ty,
                     },

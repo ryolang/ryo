@@ -237,15 +237,6 @@ pub(crate) struct Ownership {
     /// times). Slot 0 stays 0, so `is_empty` is a safe "not built yet"
     /// sentinel.
     pub order: Vec<u32>,
-    /// Param name → index into `tir.params`, built once per function
-    /// in `analyze_function`. Resolving a `Param` owner to its virtual
-    /// `TirRef`, type, or span happens inside per-owner loops, so a
-    /// linear scan of `tir.params` per lookup would be O(P) each time.
-    /// Every `Owner::Param` name originates from `tir.params` by
-    /// construction, so a missing key is an internal invariant
-    /// violation (`expect` at the lookup sites), not a diagnostic.
-    pub param_index: HashMap<StringId, usize>,
-
     /// SSA values that allocated heap-owned strings during the
     /// forward walk: `StrConst`, `StrConcat`, and Move-typed `Call`
     /// results. Used by the anonymous-temporary-free pass to identify
@@ -266,14 +257,13 @@ pub(crate) struct Ownership {
     /// Dense per-instruction table, sized to the arena.
     pub owner_at_read: Vec<Option<Owner>>,
 
-    /// Names of `inout` parameters whose type is Move-tracked (i.e.
-    /// `str` in v0.1). The value bound to such a param ESCAPES through
-    /// the write-back pointer at function exit, so it must not be freed
-    /// by the callee (no last-use/dead-store Free, no W0001) and must
-    /// not be moved out — but reassigning the param drops the old
-    /// pointee. Constant per function (derived from `tir.params`), so
-    /// branch merges need no per-field rule for it.
-    pub inout_str_params: HashSet<StringId>,
+    /// Dense per-parameter `inout` flags derived from `tir.params[idx].mode`.
+    /// The value bound to such a param ESCAPES through write-back, so it
+    /// must not be freed by the callee (no last-use/dead-store Free, no
+    /// W0001) and must not be moved out — but reassigning the param drops
+    /// the old pointee. Constant per function, so branch merges need no
+    /// per-field rule for it.
+    pub inout_str_params: Vec<bool>,
 
     /// Conditional reseats observed while walking if/elif/else arms:
     /// bindings that SOME arm reseated while other arms kept
@@ -440,16 +430,6 @@ impl Ownership {
 /// and every transition no-ops, mirroring the old `Owner::Inst`
 /// fallback for unregistered values.
 pub(crate) const UNTRACKED_PLACE: PlaceId = PlaceId(u32::MAX);
-
-/// Param-name → index lookup for PAYLOAD queries (param modes, param
-/// spans/types) — not an analysis-identity lookup (owner identity is
-/// the param's place, via `param_places`).
-pub(crate) fn param_idx(param_index: &HashMap<StringId, usize>, name: StringId) -> usize {
-    match param_index.get(&name) {
-        Some(idx) => *idx,
-        None => unreachable!("param {:?} missing from param_index", name),
-    }
-}
 
 /// The owner place an instruction's value IS (G2), derived from Flow
 /// facts alone: the write place for declarations/assignments, the read
@@ -640,15 +620,7 @@ fn try_check_with_optimizations(
 #[allow(clippy::too_many_lines)]
 fn initialize_function_ownership(tir: &Tir, flow: &Flow, pool: &InternPool) -> Ownership {
     let mut own = Ownership {
-        // Name → param-index map, built once so the per-owner lookups
-        // below (Param owner → TirRef / type / span) are O(1) instead
-        // of a linear scan of `tir.params` per call.
-        param_index: tir
-            .params
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.name, i))
-            .collect(),
+        inout_str_params: vec![false; tir.params.len()],
         // Dense per-instruction tables, sized to the arena (slot 0 is
         // the reserved sentinel and stays empty). `loop_nesting` /
         // `view_last_use` / `view_defer_loop` are initialized by the
@@ -730,7 +702,7 @@ fn initialize_function_ownership(tir: &Tir, flow: &Flow, pool: &InternPool) -> O
             };
             own.states.insert(owner, state);
             if param.mode == ParamMode::Inout {
-                own.inout_str_params.insert(param.name);
+                own.inout_str_params[idx] = true;
             }
         }
         own.current_owner.insert(own.param_places[idx], owner);
@@ -861,16 +833,14 @@ fn analyze_function(
     let live_binding_owners: HashSet<Owner> = own.current_owner.values().copied().collect();
     // Owners that escape through an `inout str` param's write-back
     // pointer at function exit: whatever value is CURRENTLY bound to each
-    // inout param name leaves the function alive, so neither the last-use
-    // pass nor the dead-store drain may free it (or warn about it).
+    // inout parameter index leaves the function alive, so neither the
+    // last-use pass nor the dead-store drain may free it (or warn about it).
     let inout_escape_owners: HashSet<Owner> = own
         .inout_str_params
         .iter()
-        .filter_map(|n| {
-            own.current_owner
-                .get(&own.param_places[own.param_index[n]])
-                .copied()
-        })
+        .enumerate()
+        .filter(|(_, inout)| **inout)
+        .filter_map(|(idx, _)| own.current_owner.get(&own.param_places[idx]).copied())
         .collect();
     let cleanup = CleanupContext {
         tir,

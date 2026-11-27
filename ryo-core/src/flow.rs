@@ -502,38 +502,25 @@ impl Flow {
                 );
                 match inst.tag {
                     crate::tir::TirTag::Match => {
-                        let refs = tir.match_by_move_owner_refs(r, pool);
-                        let bindings = tir
-                            .match_view(r)
-                            .arms()
-                            .flat_map(|arm| arm.bindings())
-                            .filter(|binding| !pool.is_copy(binding.ty))
-                            .map(|binding| (binding.field_index, binding.id));
-                        for ((expected_field, binding), owner) in bindings.zip(refs) {
-                            let Some(slot) = owners.get_mut(binding.index()) else {
+                        for token in tir.match_owner_tokens(r, pool)? {
+                            let Some(slot) = owners.get_mut(token.binding.index()) else {
                                 return Err(format!(
                                     "TIR references unregistered owner binding {}",
-                                    binding.raw()
+                                    token.binding.raw()
                                 ));
                             };
-                            *slot = Some((owner, expected_field));
+                            *slot = Some((token.owner, token.field_index));
                         }
                     }
                     crate::tir::TirTag::Destructure => {
-                        let refs = tir.destructure_bound_owner_refs(r);
-                        let view = tir.destructure_view(r);
-                        let bindings = view
-                            .fields
-                            .iter()
-                            .filter_map(|field| Some((field.field_index, field.bind?)));
-                        for ((expected_field, binding), owner) in bindings.zip(refs) {
-                            let Some(slot) = owners.get_mut(binding.index()) else {
+                        for token in tir.destructure_owner_tokens(r)? {
+                            let Some(slot) = owners.get_mut(token.binding.index()) else {
                                 return Err(format!(
                                     "TIR references unregistered owner binding {}",
-                                    binding.raw()
+                                    token.binding.raw()
                                 ));
                             };
-                            *slot = Some((owner, expected_field));
+                            *slot = Some((token.owner, token.field_index));
                         }
                     }
                     _ => {}
